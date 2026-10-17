@@ -749,8 +749,9 @@ fn a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump() {
 }
 
 /// MAZDOCK's shape (ING-01 c): 1day bars with o=h=l=c=0 land today. The
-/// day-rung arm refuses each by name and lands the rest; an index's zero day
-/// bar is refused the same way.
+/// day-rung arm refuses each by name and lands the rest. An index's zero day
+/// bar is NOT refused (D-4992 point 3, the test below): only a price below
+/// zero is, on an index.
 #[test]
 fn a_zero_price_day_bar_is_refused_by_name_at_landing() {
     zero_day_landing("MAZDOCK", "CASH", 2);
@@ -1192,10 +1193,30 @@ fn an_options_zero_price_is_never_refused_as_non_positive() {
     }
 }
 
-/// A day rung that will not open judges nothing: the answer lands, and the
-/// screen says so rather than refusing on a witness it could not read.
+/// Write `bytes` where `symbol`'s CASH day month 2024-01 is, so it will not
+/// open as a bar file.
+fn unreadable_day_month(root: &Path, symbol: &str, bytes: &[u8]) {
+    let path = StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol,
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month: YearMonth::new(2024, 1).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(root);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+}
+
+/// A day rung that will not open refuses nothing BY RANGE: a clean answer
+/// lands whole, and the screen says so rather than refusing on a witness it
+/// could not read.
 #[test]
-fn a_day_rung_that_will_not_open_refuses_nothing() {
+fn a_day_rung_that_will_not_open_refuses_nothing_by_range() {
     let scratch = Scratch::new("unread-day");
     let (from, to, _) = week();
     let path = StorePath::new(PathParts {
@@ -1254,6 +1275,116 @@ fn a_day_rung_that_will_not_open_refuses_nothing() {
     );
     assert!(!done.failures.is_empty());
     assert!(whys(&done, "refused for").is_empty(), "{:?}", done.failures);
+}
+
+/// R4-17 repair 1, ING-01 c: a zero-price minute is refused by name even
+/// when the day rung will not open. That rule reads no day bar, so a torn
+/// day month is no reason to store a price of zero (it was stored, with no
+/// failure, before this repair).
+#[test]
+fn a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("zero-unread-day");
+    let (from, to, _) = week();
+    unreadable_day_month(&scratch.0, "MAZDOCK", b"not a bar file");
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    rows[41] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[41]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "non_positive_price");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("1 row(s) refused"), "{}", named[0]);
+    assert_eq!(done.failures.len(), 1, "nothing else: {:?}", done.failures);
+    let stored = cash_month(&scratch.0, "MAZDOCK", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(stored.len(), sent - 1);
+    assert!(
+        stored
+            .iter()
+            .all(|b| b.open > 0 && b.high > 0 && b.low > 0 && b.close > 0),
+        "no price at or below zero stored"
+    );
+}
+
+/// R4-17 repair 1, ING-01 d: a CASH minute before its master's listing day
+/// is refused by name even when the day rung will not open: its witness is
+/// the master, which was read. IRFC's shape, listed on the third session.
+#[test]
+fn a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("listing-unread-day");
+    let (from, to, days) = week();
+    install_master(&scratch.0, &[("IRFC", Some(days[2]), None)]);
+    unreadable_day_month(&scratch.0, "IRFC", b"not a bar file");
+    let rows = answer(from, to);
+    let sent = rows.len();
+    let done = land_cash(
+        &scratch.0,
+        "IRFC",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(named.len(), 2, "one per day: {:?}", done.failures);
+    assert!(
+        named.iter().all(|why| why.contains("375 row(s) refused")),
+        "{named:?}"
+    );
+    assert_eq!(done.failures.len(), 2, "nothing else: {:?}", done.failures);
+    let stored = cash_month(&scratch.0, "IRFC", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(stored.len(), sent - 750);
+    let listed = i64::from(days[2].days_from_epoch());
+    assert!(
+        stored
+            .iter()
+            .all(|b| pull::series_identity::ist_day(b.ts_micros) >= listed),
+        "no minute before the listing stored"
+    );
+}
+
+/// R4-17 repair 1, RT-DATA-02 a: the jump rule reads no day bar either, so a
+/// block of minutes at another basis is refused whole by name when the day
+/// rung will not open, and the rest of the answer lands.
+#[test]
+fn an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("jump-unread-day");
+    let (from, to, days) = week();
+    unreadable_day_month(&scratch.0, "PIIND", b"not a bar file");
+    let mut rows = answer(from, to);
+    let honest = rows.len();
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if on == days[2] && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 8_990, 82_165);
+        }
+    }
+    let done = land_cash(
+        &scratch.0,
+        "PIIND",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "in_session_jump");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
+    assert_eq!(done.failures.len(), 1, "nothing by range: {:?}", done.failures);
+    let held = cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(held.len(), honest - 10);
+    assert!(
+        held.iter().all(|b| b.low >= LEVEL - 1_000),
+        "no foreign minute stored"
+    );
 }
 
 /// A zero-price minute of a share or an index is refused by name on the
@@ -1491,4 +1622,34 @@ fn the_screen_names_each_refused_cause_and_day_on_the_log() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("\"level\":\"info\""), "{}", lines[0]);
     assert!(lines[0].contains("\"no_day_rung\":1875"), "{}", lines[0]);
+
+    // RADICO: a day month that will not open and one zero minute (R4-17
+    // repair 1). One warn names why the rung would not open, and the zero is
+    // still refused, with its own warn; no `info` line claims the rung read.
+    unreadable_day_month(&scratch.0, "RADICO", b"not a bar file");
+    let mut rows = answer(from, to);
+    rows[9].open = 0;
+    let done = land_cash(
+        &scratch.0,
+        "RADICO",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert_eq!(whys(&done, "non_positive_price").len(), 1, "{:?}", done.failures);
+    let lines = identity_lines(sink, "RADICO");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.iter().all(|l| l.contains("\"level\":\"warn\"")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("the day rung would not open")
+            && l.contains("\"why\":")
+            && l.contains("\"no_day_rung\":1874")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("\"cause\":\"non_positive_price\"") && l.contains("\"rows\":1")),
+        "{lines:?}"
+    );
 }

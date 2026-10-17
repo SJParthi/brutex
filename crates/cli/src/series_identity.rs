@@ -5,11 +5,12 @@
 //! # Usage
 //!
 //! ```text
-//! cli series-identity INSTRUMENT [--segment INDEX|CASH] [--feed FEED]
-//! cli series-identity ALL [--segment INDEX|CASH] [--feed FEED] [--workers N]
+//! cli series-identity INSTRUMENT [--segment INDEX|CASH] [--feed FEED] [--dry-run]
+//! cli series-identity ALL [--segment INDEX|CASH] [--feed FEED] [--workers N] [--dry-run]
 //! ```
 //!
-//! `--segment` is `INDEX` unless named; `--feed` is `zerodha` unless named.
+//! `--segment` is `INDEX` unless named; `--feed` is `zerodha` unless named;
+//! `--dry-run` names the plan it would write and writes nothing.
 //! `ALL` scans the series in parallel, one series per worker at a time, on
 //! as many workers as the machine reports (`--workers` names fewer, never
 //! more than one per series); the table, the counts and the plan are the same
@@ -34,22 +35,32 @@
 //! [`WITNESS_TOLERANCE_BPS`] of GDFL's close it is `basis_mismatch` — the
 //! vendor's minute is GDFL's, and its day bar is what was adjusted apart: a
 //! label, never quarantined. Matching neither it is `foreign_level`. With no
-//! GDFL minute to compare it is `no_gdfl_witness`. A price at or below zero is
-//! `zero_price`; a bar before its listing `before_listing`.
+//! GDFL minute to compare — GDFL holds no such month, or the month holds no
+//! such minute — it is `no_gdfl_witness`. A GDFL month that is there and will
+//! not open, read or fold is NOT absence: its bars are `gdfl_unread`, the plan
+//! asks `remeasure` for them, and the month is named `NOT READ` and fails the
+//! run (Z6 repair 1). A price at or below zero is `zero_price`; a bar before
+//! its listing `before_listing`.
 //!
 //! **It writes one file**, and no bar: the QUARANTINE PLAN, under
-//! `<store>/audit/series-identity/`, naming per (key, rung, month, measured
-//! cause) the action, the count, and either the whole month or each stamp.
-//! Its name carries the BLAKE3 of its content, so a rerun over the same store
-//! finds it already there and writes nothing (`CLAUDE.md` §3 rule 5). A CASH
-//! scan also prints each share's in-session jump distribution (p50, p99,
-//! p999, max): the measurement `JUMP_BPS` is to be recorded from.
+//! `<store>/audit/series-identity/`, naming the commit that measured it and,
+//! per (key, rung, month, measured cause), the action, the count, and either
+//! the whole month or each stamp. Its name carries the BLAKE3 of its content,
+//! so a rerun of the same build over the same store finds it already there
+//! and writes nothing (`CLAUDE.md` §3 rule 5). The verb is therefore a store
+//! writer (`crate::store_write::WRITERS`): an unstamped build is refused
+//! before anything is read unless `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`, and a
+//! store whose `bars` is a link is refused by name (DB-B71, RA-298).
+//! `--dry-run` is its read-only form: the same scan and report, the plan's
+//! path named, nothing written, so a shadow can be scanned. A CASH scan also
+//! prints each share's in-session jump distribution (p50, p99, p999, max):
+//! the measurement `JUMP_BPS` is to be recorded from.
 //!
 //! # Exit
 //!
-//! [`OK`] when no stored bar would be refused and every month opened;
-//! [`FAILED`] otherwise — any in-session jump among them; [`MISUSED`] for
-//! arguments that name no series.
+//! [`OK`] when no stored bar would be refused and every month of both rungs
+//! and of the GDFL witness opened; [`FAILED`] otherwise — any in-session jump
+//! among them; [`MISUSED`] for arguments that name no series.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -66,8 +77,7 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use crate::{FAILED, MISUSED, OK};
 
 /// The verb's shape, printed with every misuse.
-pub(crate) const USAGE: &str =
-    "cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED] [--workers N]";
+pub(crate) const USAGE: &str = "cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED] [--workers N] [--dry-run]";
 
 /// How far a vendor minute's close may lie from GDFL's folded minute's close,
 /// in basis points of GDFL's, and still be GDFL's minute.
@@ -86,7 +96,11 @@ pub(crate) const WITNESS_TOLERANCE_BPS: i64 = 100;
 const PLAN_DIR: [&str; 2] = ["audit", "series-identity"];
 
 /// The plan file's first line: its format and version.
-const PLAN_HEAD: &str = "brutex series-identity quarantine plan v1";
+///
+/// `v2` (R4-17 repair 1) adds the `commit` line and the `gdfl_unread` cause
+/// with its `remeasure` action. `v1` was never on `feat/db-fix`: its plans
+/// exist only in test shadows, and a `v2` reader does not read them as `v2`.
+const PLAN_HEAD: &str = "brutex series-identity quarantine plan v2";
 
 /// What the arguments name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +111,8 @@ struct Ask {
     feed: Vendor,
     /// `--workers`: at most this many series scanned at once by `ALL`.
     workers: Option<usize>,
+    /// `--dry-run`: the plan is named, never written.
+    dry_run: bool,
 }
 
 fn ask(arguments: &[&str]) -> Result<Ask, String> {
@@ -109,9 +125,14 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
         brutex_core::symbol::Symbol::new(first).map_err(|why| format!("`{first}`: {why}"))?;
         Some((*first).to_owned())
     };
-    let (mut segment, mut feed, mut workers) = ("INDEX", Vendor::Zerodha, None);
+    let (mut segment, mut feed, mut workers, mut dry_run) =
+        ("INDEX", Vendor::Zerodha, None, false);
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
+        if *flag == "--dry-run" {
+            dry_run = true;
+            continue;
+        }
         let value = rest.next().ok_or_else(|| format!("{flag} takes a value"))?;
         match *flag {
             "--segment" => {
@@ -144,6 +165,7 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
         segment,
         feed,
         workers,
+        dry_run,
     })
 }
 
@@ -158,11 +180,15 @@ fn worker_count(asked: Option<usize>, series: usize) -> usize {
         .max(1)
 }
 
-/// Runs the verb against the store root `store` names, so every arm is driven
-/// by a test without the process environment.
+/// Runs the verb against the store root `store` names, as the build stamped
+/// `commit` (`None`: unstamped), so every arm is driven by a test without the
+/// process environment. `store` is the writer's gate: the binary hands
+/// [`crate::store_write::root_for`], which answers an unstamped writing
+/// invocation's refusal instead of the root.
 pub(crate) fn command_with(
     arguments: &[&str],
     store: &dyn Fn() -> Result<PathBuf, String>,
+    commit: Option<&str>,
     out: &mut String,
 ) -> u8 {
     let ask = match ask(arguments) {
@@ -175,19 +201,44 @@ pub(crate) fn command_with(
     let root = match store() {
         Ok(root) => root,
         Err(why) => {
-            let _ = writeln!(out, "SERIES IDENTITY REFUSED: {why}. Nothing was read.");
+            let _ = writeln!(
+                out,
+                "SERIES IDENTITY REFUSED: {why}. Nothing was read and no plan was written."
+            );
             return FAILED;
         }
     };
+    let run = Run {
+        root: &root,
+        ask: &ask,
+        commit: commit.unwrap_or(UNSTAMPED),
+    };
     match &ask.instrument {
-        Some(symbol) => one(&root, &ask, symbol, out),
-        None => all(&root, &ask, out),
+        Some(symbol) => one(&run, symbol, out),
+        None => all(&run, out),
     }
 }
 
-/// `cli series-identity`: see the module header.
+/// `cli series-identity`: see the module header. A STORE WRITER: the root
+/// comes through the writer's gate, and the plan names this build's commit.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &crate::store_root, out)
+    command_with(
+        arguments,
+        &crate::store_write::root_for("series-identity", arguments),
+        crate::commit_stamp(),
+        out,
+    )
+}
+
+/// What a plan written by a build with no commit stamp names as its commit:
+/// written only under `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`, never disguised.
+const UNSTAMPED: &str = "unstamped";
+
+/// One invocation: its root, its arguments and the commit its plan names.
+struct Run<'a> {
+    root: &'a Path,
+    ask: &'a Ask,
+    commit: &'a str,
 }
 
 /// The series' path parts in `month` and `timeframe`, on `feed`.
@@ -274,8 +325,12 @@ pub(crate) enum Measured {
     BasisMismatch,
     /// Matches neither its own served day nor GDFL's minute.
     ForeignLevel,
-    /// GDFL holds no minute to compare it with.
+    /// GDFL holds no minute to compare it with: no such month, or no such
+    /// minute in it.
     NoGdflWitness,
+    /// GDFL's month is there and would not open, read or fold: the bar was
+    /// not measured, and nothing may be decided about it until it is.
+    GdflUnread,
 }
 
 impl Measured {
@@ -288,27 +343,31 @@ impl Measured {
             Self::BasisMismatch => "basis_mismatch",
             Self::ForeignLevel => "foreign_level",
             Self::NoGdflWitness => "no_gdfl_witness",
+            Self::GdflUnread => "gdfl_unread",
         }
     }
 
     /// What the plan asks for a bar of this cause: `quarantine`, or `label`
     /// for a minute GDFL vouches for, for a suspect one nothing accuses, and
-    /// for an index's zero, which a landing holds (D-4992).
+    /// for an index's zero, which a landing holds (D-4992); `remeasure` for a
+    /// bar whose witness would not open, which is neither until it is read.
     const fn action(self, refused: bool) -> &'static str {
         match self {
+            Self::GdflUnread => "remeasure",
             Self::BasisMismatch => "label",
             Self::NoGdflWitness | Self::ZeroPrice if !refused => "label",
             _ => "quarantine",
         }
     }
 
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::ZeroPrice,
         Self::BeforeListing,
         Self::BeforeFirstDayBar,
         Self::BasisMismatch,
         Self::ForeignLevel,
         Self::NoGdflWitness,
+        Self::GdflUnread,
     ];
 }
 
@@ -317,49 +376,72 @@ struct Witness<'a> {
     root: &'a Path,
     ask: &'a Ask,
     symbol: &'a str,
-    months: BTreeMap<YearMonth, BTreeMap<i64, Bar>>,
+    /// Each month asked for: its folded minutes, or why it would not open,
+    /// read or fold.
+    months: BTreeMap<YearMonth, Result<BTreeMap<i64, Bar>, String>>,
 }
 
 impl Witness<'_> {
-    /// GDFL's folded minute stamped `ts_micros` of `month`, if GDFL holds one.
-    fn minute(&mut self, month: YearMonth, ts_micros: i64) -> Option<Bar> {
+    /// GDFL's folded minute stamped `ts_micros` of `month`: `Ok(None)` when
+    /// GDFL holds no such month or minute, `Err` when its month is there and
+    /// could not be read — never the one taken for the other.
+    fn minute(&mut self, month: YearMonth, ts_micros: i64) -> Result<Option<Bar>, ()> {
         let (root, ask, symbol) = (self.root, self.ask, self.symbol);
-        self.months
+        match self
+            .months
             .entry(month)
             .or_insert_with(|| gdfl_minutes(root, ask, symbol, month))
-            .get(&ts_micros)
-            .copied()
+        {
+            Ok(minutes) => Ok(minutes.get(&ts_micros).copied()),
+            Err(_) => Err(()),
+        }
+    }
+
+    /// Every GDFL month that was asked for and would not open, read or fold,
+    /// ascending, each with why: the scan's `NOT READ` lines.
+    fn unread(&self) -> Vec<(YearMonth, String)> {
+        self.months
+            .iter()
+            .filter_map(|(month, read)| {
+                read.as_ref()
+                    .err()
+                    .map(|why| (*month, format!("gdfl 1s witness: {why}")))
+            })
+            .collect()
     }
 }
 
 /// Every GDFL 1s bar of `symbol` in `month`, folded to minutes by
-/// `pull::fold`. A month GDFL lacks, or cannot be read or folded, witnesses
-/// nothing.
-fn gdfl_minutes(root: &Path, ask: &Ask, symbol: &str, month: YearMonth) -> BTreeMap<i64, Bar> {
+/// `pull::fold`. ONLY a month GDFL lacks (`StoreError::Missing`) witnesses
+/// nothing; a month that is there and will not open, read or fold answers
+/// why, so it is named and never measured as absence (Z6 repair 1).
+fn gdfl_minutes(
+    root: &Path,
+    ask: &Ask,
+    symbol: &str,
+    month: YearMonth,
+) -> Result<BTreeMap<i64, Bar>, String> {
     let id = pull::ingest::repair_plan::symbol_id(symbol);
-    StorePath::new(parts(ask, Vendor::Gdfl, symbol, Timeframe::SECOND_1, month))
-        .ok()
-        .and_then(|path| store::file::BarFile::open_existing(root, path, id).ok())
-        .and_then(|file| {
-            (0..file.header().n_valid)
-                .map(|i| file.read_record(i).ok())
-                .collect::<Option<Vec<Bar>>>()
-        })
-        .and_then(|seconds| {
-            pull::fold::fold_from_bars(
-                &seconds,
-                pull::fold::Bucket::MINUTE,
-                pull::fold::Bucket::SECOND,
-            )
-            .ok()
-        })
-        .map(|minutes| {
-            minutes
-                .into_iter()
-                .map(|bar| (bar.ts_micros, bar))
-                .collect()
-        })
-        .unwrap_or_default()
+    let path = StorePath::new(parts(ask, Vendor::Gdfl, symbol, Timeframe::SECOND_1, month))
+        .map_err(|why| why.to_string())?;
+    let file = match store::file::BarFile::open_existing(root, path, id) {
+        Ok(file) => file,
+        Err(store::file::StoreError::Missing { .. }) => return Ok(BTreeMap::new()),
+        Err(why) => return Err(why.to_string()),
+    };
+    let seconds = (0..file.header().n_valid)
+        .map(|i| file.read_record(i).map_err(|why| why.to_string()))
+        .collect::<Result<Vec<Bar>, String>>()?;
+    let minutes = pull::fold::fold_from_bars(
+        &seconds,
+        pull::fold::Bucket::MINUTE,
+        pull::fold::Bucket::SECOND,
+    )
+    .map_err(|why| format!("fold to minutes: {why}"))?;
+    Ok(minutes
+        .into_iter()
+        .map(|bar| (bar.ts_micros, bar))
+        .collect())
 }
 
 /// The measured cause of one flagged bar.
@@ -369,9 +451,10 @@ fn measure(flag: &FlaggedBar, witness: &mut Witness<'_>) -> Measured {
         "before_listing" => Measured::BeforeListing,
         "before_first_day_bar" => Measured::BeforeFirstDayBar,
         _ => match witness.minute(flag.month, flag.bar.ts_micros) {
-            Some(gdfl) if within(flag.bar.close, gdfl.close) => Measured::BasisMismatch,
-            Some(_) => Measured::ForeignLevel,
-            None => Measured::NoGdflWitness,
+            Ok(Some(gdfl)) if within(flag.bar.close, gdfl.close) => Measured::BasisMismatch,
+            Ok(Some(_)) => Measured::ForeignLevel,
+            Ok(None) => Measured::NoGdflWitness,
+            Err(()) => Measured::GdflUnread,
         },
     }
 }
@@ -399,13 +482,17 @@ struct Plan {
 }
 
 impl Plan {
-    /// Every flagged bar of `scan` measured and added.
+    /// Every flagged bar of `scan` measured and added. Each GDFL month that
+    /// was there and would not open, read or fold is appended to
+    /// `scan.unread` (`gdfl 1s witness: ...`), so it is printed `NOT READ`
+    /// and fails the run like a month of either rung; its bars are counted,
+    /// as `gdfl_unread`.
     fn add(
         &mut self,
         root: &Path,
         ask: &Ask,
         symbol: &str,
-        scan: &SeriesScan,
+        scan: &mut SeriesScan,
     ) -> BTreeMap<Measured, u64> {
         let key = format!("NSE-{}-{symbol}", ask.segment);
         for (rung, verdicts) in [("1day", &scan.day_verdicts), ("1min", &scan.months)] {
@@ -441,6 +528,7 @@ impl Plan {
                 .or_default()
                 .push(flag.bar.ts_micros);
         }
+        scan.unread.extend(witness.unread());
         counts
     }
 
@@ -455,11 +543,12 @@ impl Plan {
     }
 
     /// The plan's text: the head, then one tab-separated row per key.
-    fn text(&self, ask: &Ask, scope: &str) -> String {
+    fn text(&self, run: &Run<'_>, scope: &str) -> String {
         let mut text = format!(
-            "{PLAN_HEAD}\nfeed\t{}\nsegment\t{}\nscope\t{scope}\njump_bps\t{JUMP_BPS}\tmeasured 2026-10-17, docs/06-limits.md R4-17\nwitness_tolerance_bps\t{WITNESS_TOLERANCE_BPS}\nbars_written\t0\nkey\trung\tmonth\tscope\tcause\taction\tbars\ttimestamps_utc_micros\n",
-            ask.feed.as_str(),
-            ask.segment
+            "{PLAN_HEAD}\ncommit\t{}\nfeed\t{}\nsegment\t{}\nscope\t{scope}\njump_bps\t{JUMP_BPS}\tmeasured 2026-10-17, docs/06-limits.md R4-17\nwitness_tolerance_bps\t{WITNESS_TOLERANCE_BPS}\nbars_written\t0\nkey\trung\tmonth\tscope\tcause\taction\tbars\ttimestamps_utc_micros\n",
+            run.commit,
+            run.ask.feed.as_str(),
+            run.ask.segment
         );
         for ((key, rung, month, measured, action), stamps) in &self.rows {
             let held = self
@@ -491,12 +580,17 @@ impl Plan {
 
     /// Write the plan under the store's audit directory, named by its own
     /// digest, and answer its path; a plan already there is not written
-    /// again. Nothing is written when nothing was flagged.
-    fn write(&self, root: &Path, ask: &Ask, scope: &str) -> Result<Option<PathBuf>, String> {
+    /// again. Nothing is written when nothing was flagged, and nothing under
+    /// `--dry-run`, which answers the path it would have written.
+    ///
+    /// The bytes are synced before the name appears and the directory after
+    /// it does, so a reader never sees a part-written plan and a plan the
+    /// verb named survives a power cut.
+    fn write(&self, run: &Run<'_>, scope: &str) -> Result<Written, String> {
         if self.rows.is_empty() {
-            return Ok(None);
+            return Ok(Written::Nothing);
         }
-        let text = self.text(ask, scope);
+        let text = self.text(run, scope);
         let digest = brutex_core::blake3::hash(text.as_bytes());
         let hex = digest.iter().take(8).fold(String::new(), |mut hex, byte| {
             let _ = write!(hex, "{byte:02x}");
@@ -504,11 +598,18 @@ impl Plan {
         });
         let dir = PLAN_DIR
             .iter()
-            .fold(root.to_path_buf(), |dir, part| dir.join(part));
-        let name = format!("{}-{}-{scope}-{hex}.plan", ask.feed.as_str(), ask.segment);
+            .fold(run.root.to_path_buf(), |dir, part| dir.join(part));
+        let name = format!(
+            "{}-{}-{scope}-{hex}.plan",
+            run.ask.feed.as_str(),
+            run.ask.segment
+        );
         let path = dir.join(&name);
+        if run.ask.dry_run {
+            return Ok(Written::DryRun(path));
+        }
         if path.is_file() {
-            return Ok(Some(path));
+            return Ok(Written::Plan(path));
         }
         std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
         // ONE STAGING NAME PER PROCESS, the writer's own (`store::staging`).
@@ -520,8 +621,22 @@ impl Plan {
             .and_then(|()| staged.file.sync_all())
             .and_then(|()| std::fs::rename(&staging, &path))
             .map_err(|why| format!("{}: {why}", path.display()))?;
-        Ok(Some(path))
+        std::fs::File::open(&dir)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|why| format!("{}: sync after the rename: {why}", dir.display()))?;
+        Ok(Written::Plan(path))
     }
+}
+
+/// What [`Plan::write`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Written {
+    /// Nothing was flagged: no plan.
+    Nothing,
+    /// The plan is at this path: written now, or already there.
+    Plan(PathBuf),
+    /// `--dry-run`: the path the plan would have, nothing written.
+    DryRun(PathBuf),
 }
 
 /// The nearest-rank percentile `per_mille / 1000` of ascending `sorted`.
@@ -545,9 +660,9 @@ fn counts_text(counts: &BTreeMap<Measured, u64>) -> String {
         .join(", ")
 }
 
-fn plan_line(out: &mut String, written: Result<Option<PathBuf>, String>) -> bool {
+fn plan_line(out: &mut String, written: Result<Written, String>) -> bool {
     match written {
-        Ok(Some(path)) => {
+        Ok(Written::Plan(path)) => {
             let _ = writeln!(
                 out,
                 "  QUARANTINE PLAN (no bar written): {}",
@@ -555,7 +670,15 @@ fn plan_line(out: &mut String, written: Result<Option<PathBuf>, String>) -> bool
             );
             true
         }
-        Ok(None) => {
+        Ok(Written::DryRun(path)) => {
+            let _ = writeln!(
+                out,
+                "  QUARANTINE PLAN NOT WRITTEN (--dry-run; nothing written): would be {}",
+                path.display()
+            );
+            true
+        }
+        Ok(Written::Nothing) => {
             let _ = writeln!(out, "  no quarantine plan: nothing flagged");
             true
         }
@@ -629,14 +752,29 @@ fn jump_line(out: &mut String, scan: &SeriesScan, tripped: u64) {
     );
 }
 
-fn one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
-    let Some(scan) = scan(root, ask, symbol) else {
+/// What the run writes, for its heading.
+const fn writes_what(ask: &Ask) -> &'static str {
+    if ask.dry_run {
+        "--dry-run: writes nothing"
+    } else {
+        "writes only its quarantine plan"
+    }
+}
+
+fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
+    let (root, ask) = (run.root, run.ask);
+    let Some(mut scan) = scan(root, ask, symbol) else {
         return MISUSED;
     };
+    // MEASURED FIRST, so a GDFL month that would not open is among the
+    // NOT READ lines below and fails the run (Z6 repair 1).
+    let mut plan = Plan::default();
+    let counts = plan.add(root, ask, symbol, &mut scan);
     let sum = total(&scan);
     let _ = writeln!(
         out,
-        "SERIES IDENTITY (read-only of bars; writes only its quarantine plan) — {} NSE-{}-{symbol} under {}",
+        "SERIES IDENTITY (read-only of bars; {}) — {} NSE-{}-{symbol} under {}",
+        writes_what(ask),
         ask.feed.as_str(),
         ask.segment,
         root.display()
@@ -680,10 +818,8 @@ fn one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
     for (month, why) in &scan.unread {
         let _ = writeln!(out, "  {month}: NOT READ: {why}");
     }
-    let mut plan = Plan::default();
-    let counts = plan.add(root, ask, symbol, &scan);
     let _ = writeln!(out, "  measured causes: {}", counts_text(&counts));
-    let written = plan_line(out, plan.write(root, ask, symbol));
+    let written = plan_line(out, plan.write(run, symbol));
     let months = refused_months(&scan);
     let days = day_refused(&scan);
     if months.is_empty() && days == 0 && scan.unread.is_empty() && written {
@@ -770,12 +906,13 @@ struct SeriesDone {
 /// `symbol` scanned, measured and written up for the `ALL` table. Reads
 /// bars only; the plan is joined and written by the caller.
 fn series_done(root: &Path, ask: &Ask, symbol: &str) -> Option<SeriesDone> {
-    let scan = scan(root, ask, symbol)?;
+    let mut scan = scan(root, ask, symbol)?;
     let day_bad = day_refused(&scan);
     let mut plan = Plan::default();
-    let _ = plan.add(root, ask, symbol, &scan);
-    // A MONTH THAT WOULD NOT OPEN FAILS THE RUN on either rung, a series
-    // with no minute rung included: its day months were judged too.
+    let _ = plan.add(root, ask, symbol, &mut scan);
+    // A MONTH THAT WOULD NOT OPEN FAILS THE RUN on either rung or of the
+    // GDFL witness, a series with no minute rung included: its day months
+    // were judged too.
     let bad = day_bad > 0 || !scan.unread.is_empty() || !refused_months(&scan).is_empty();
     if scan.minute_months.is_empty() {
         let unread = if scan.unread.is_empty() {
@@ -842,7 +979,8 @@ fn scan_every(root: &Path, ask: &Ask, symbols: &[String], workers: usize) -> Vec
     slots.into_iter().flatten().collect()
 }
 
-fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
+fn all(run: &Run<'_>, out: &mut String) -> u8 {
+    let (root, ask) = (run.root, run.ask);
     let dir = root
         .join("bars")
         .join(ask.feed.as_str())
@@ -870,7 +1008,8 @@ fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
     let workers = worker_count(ask.workers, symbols.len());
     let _ = writeln!(
         out,
-        "SERIES IDENTITY, EVERY SERIES (read-only of bars) — {} NSE/{}: {} series under {}",
+        "SERIES IDENTITY, EVERY SERIES (read-only of bars; {}) — {} NSE/{}: {} series under {}",
+        writes_what(ask),
         ask.feed.as_str(),
         ask.segment,
         symbols.len(),
@@ -919,7 +1058,7 @@ fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
         }
     );
     let _ = writeln!(out, "  measured causes: {}", counts_text(&plan.counts));
-    bad |= !plan_line(out, plan.write(root, ask, "ALL"));
+    bad |= !plan_line(out, plan.write(run, "ALL"));
     if bad { FAILED } else { OK }
 }
 

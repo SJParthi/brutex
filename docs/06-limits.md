@@ -18864,6 +18864,15 @@ name; whether exchange price bands make that impossible is UNVERIFIED (no
 band rule is in the charter). Re-run the scan after every Zerodha re-pull
 and compare the `jump-max` column with this row.
 
+**A kept outlier close cascades to the end of its run (D-4993 point 7).** One
+minute whose close alone is far off, inside a day bar wide enough to hold it,
+becomes the run's reference, and each later minute of that continuous run
+back on the share's own level is refused `in_session_jump`, by name, to the
+next halt, gap or session. It is loud, never a silent store, and not
+re-anchored, because re-anchoring would let a foreign block that starts a run
+land whole; telling the two apart needs a later minute than the one judged.
+None is on today's store (0 in-session jumps).
+
 **An index's zero lands (D-4992 point 3).** The day arm refuses a price
 BELOW zero on an index and holds exactly zero, because every zero-valued
 Zerodha INDEX day bar on the store (153) is `NIFTY50DIVPOINT`'s, an index that
@@ -18919,7 +18928,18 @@ installed while a process runs is not seen until that process restarts. The
 direction is safe: a missing new listing refuses nothing, and a missing new
 removal leaves a 404 the failure it was. A newer master whose receipt fails
 is passed over by name. Loading is one directory listing and one master parse
-(O(rows), about 4 MB of gzip), paid once per process.
+(O(rows), about 4 MB of gzip), paid once per process **only when a master
+loads.** A store whose `session-masters/` holds no master that checks is
+loaded again on every call, so every CASH landing and every CASH series of a
+scan pays one listing of that directory and one check of each master in it,
+newest first: O(masters on disk), measured by the package's verifier on the
+Mac (18 Oct 2026) at 100 to 176 ms for 42 masters, growing by one master a
+session. Remembering the failure was considered and not done: the only cheap
+witness of a newly installed master is the directory's modification time,
+whose resolution depends on the volume's file system, and a stale "no master"
+turns the listing refusal off. Bounded, not O(1). On the 17 Oct shadow scans
+of the operator's store a master loaded (DALBHARAT's and IRFC's listings were
+read from it), so that store did not pay this then.
 
 **The store scan is O(bars held), and a scan, not a read path.** Each
 flagged minute's measured cause reads GDFL's 1s month of that share once and
@@ -18928,6 +18948,14 @@ minute. Months with nothing flagged read nothing of GDFL. Its quarantine plan
 lists every flagged stamp, so a series flagged whole (NIFTYNEXT50, 87,375
 minutes per WP-13d's measurement) writes a plan of that many stamps. A month
 whose every bar shares one cause is written as `whole_month` instead.
+
+**The scan is a store writer (repair 1, D-4994 point 5)**, so it cannot write
+its plan on a test shadow whose `bars` is a link (`linked_store_root`) or from
+an unstamped build; `--dry-run` scans either and writes nothing. A plan's
+staging name is the writing process's own (`.series-identity.<pid>.staging`):
+one left by a process that was killed between create and rename stays in
+`audit/series-identity/` until removed by hand. Nothing reads it (readers look
+for `*.plan`), and no code here deletes it (no automatic deletion, R4-06).
 
 **`WITNESS_TOLERANCE_BPS` = 100 is chosen, not measured.** It decides a label
 only (`basis_mismatch` against `foreign_level`). No landing rule reads it.

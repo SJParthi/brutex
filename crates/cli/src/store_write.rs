@@ -72,7 +72,12 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 13] = [
+///
+/// `series-identity` (R4-17) is one unless `--dry-run`: it writes no bar, but
+/// it publishes its quarantine plan under `audit/series-identity/`, and what
+/// a later generation leaves out is read from that plan, so the plan must name
+/// the code that measured it. It was listed as a reader while it wrote there.
+pub(crate) const WRITERS: [&str; 14] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -81,6 +86,7 @@ pub(crate) const WRITERS: [&str; 13] = [
     "gdfl-rekey",
     "msum-build",
     "scrub-blocks",
+    "series-identity",
     "srt-build",
     "tickstore-write",
     "tix-rebuild",
@@ -96,12 +102,15 @@ pub(crate) const WRITERS: [&str; 13] = [
 /// without `--apply`, and `zerodha-repair` without `--from-store` each state
 /// in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
-/// the one place its own parse takes it.
+/// the one place its own parse takes it; `series-identity ... --dry-run`
+/// names the plan it would write and writes none.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
-        "msum-build" | "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
+        "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
+            !arguments.contains(&"--dry-run")
+        }
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
@@ -226,10 +235,6 @@ mod tests {
             "research-plan",
             "results",
             "screen",
-            // WP-13d's verb, merged in beside this table: it judges stored
-            // minutes against stored day bars and "writes nothing" (its
-            // header); it opens no file for writing.
-            "series-identity",
             "sweep",
             "sweep-all",
             "sweep-audited-stored",
@@ -339,6 +344,10 @@ mod tests {
                 true,
             ),
             ("scrub-blocks", &["gdfl"], true),
+            ("series-identity", &["ALL", "--segment", "CASH"], true),
+            ("series-identity", &["PIIND", "--workers", "2"], true),
+            ("series-identity", &["ALL", "--dry-run"], false),
+            ("series-identity", &["PIIND", "--dry-run", "--segment", "CASH"], false),
             ("alerts", &[], false),
             ("alerts", &["--older"], false),
             ("alerts", &["--before", "5"], false),
@@ -382,7 +391,7 @@ mod tests {
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
         // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 13] = [
+        let writing: [(&str, &[&str]); 14] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -391,6 +400,7 @@ mod tests {
             ("gdfl-rekey", &["--apply"]),
             ("msum-build", &[]),
             ("scrub-blocks", &[]),
+            ("series-identity", &["ALL"]),
             ("srt-build", &[]),
             ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
@@ -419,6 +429,7 @@ mod tests {
             ("alerts", &[][..]),
             ("gdfl-rekey", &["--plan"][..]),
             ("msum-build", &["--dry-run"][..]),
+            ("series-identity", &["ALL", "--dry-run"][..]),
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-gaps", &[][..]),

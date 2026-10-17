@@ -21,6 +21,9 @@ use crate::{FAILED, MISUSED, OK};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// The commit a stamped build names in its plan: invented, forty hex digits.
+const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+
 struct Root(PathBuf);
 
 impl Root {
@@ -38,7 +41,7 @@ impl Root {
     fn run(&self, arguments: &[&str]) -> (u8, String) {
         let mut out = String::new();
         let root = self.0.clone();
-        let code = command_with(arguments, &move || Ok(root.clone()), &mut out);
+        let code = command_with(arguments, &move || Ok(root.clone()), Some(STAMP), &mut out);
         (code, out)
     }
 }
@@ -238,7 +241,7 @@ fn arguments_that_name_no_series_are_misused_before_anything_is_opened() {
         assert!(out.contains(USAGE), "{bad:?}: {out}");
     }
     let mut out = String::new();
-    let code = command_with(&[], &|| Ok(PathBuf::new()), &mut out);
+    let code = command_with(&[], &|| Ok(PathBuf::new()), Some(STAMP), &mut out);
     assert_eq!(code, MISUSED);
     assert!(out.contains("name an instrument, or ALL"), "{out}");
 }
@@ -246,7 +249,12 @@ fn arguments_that_name_no_series_are_misused_before_anything_is_opened() {
 #[test]
 fn a_store_root_that_cannot_be_named_fails_out_loud() {
     let mut out = String::new();
-    let code = command_with(&["NIFTY"], &|| Err("no store root".to_owned()), &mut out);
+    let code = command_with(
+        &["NIFTY"],
+        &|| Err("no store root".to_owned()),
+        Some(STAMP),
+        &mut out,
+    );
     assert_eq!(code, FAILED);
     assert!(
         out.contains("SERIES IDENTITY REFUSED: no store root"),
@@ -720,7 +728,12 @@ fn piind_minutes_are_named_by_cause_before_any_write() {
     let written = plans(&root.0);
     assert_eq!(written.len(), 1, "{out}");
     let plan = fs::read_to_string(&written[0].0).unwrap();
-    assert!(plan.starts_with("brutex series-identity quarantine plan v1\nfeed\tzerodha\nsegment\tCASH\nscope\tPIIND\n"), "{plan}");
+    assert!(
+        plan.starts_with(&format!(
+            "brutex series-identity quarantine plan v2\ncommit\t{STAMP}\nfeed\tzerodha\nsegment\tCASH\nscope\tPIIND\n"
+        )),
+        "{plan}"
+    );
     assert!(plan.contains("bars_written\t0\n"), "{plan}");
     let row = |cause: &str| {
         plan.lines()
@@ -1094,7 +1107,7 @@ fn a_worker_count_is_named_or_the_machines_and_never_above_one_per_series() {
         (&["ALL", "--workers"], "takes a value"),
     ] {
         let mut out = String::new();
-        let code = command_with(arguments, &|| Ok(PathBuf::new()), &mut out);
+        let code = command_with(arguments, &|| Ok(PathBuf::new()), Some(STAMP), &mut out);
         assert_eq!(code, MISUSED, "{arguments:?}: {out}");
         assert!(out.contains(says) && out.contains(USAGE), "{out}");
     }
@@ -1209,4 +1222,169 @@ fn an_index_zero_is_labelled_and_passes_where_a_share_zero_fails() {
         plan.contains("\t1min\t2024-01\ttimestamps\tzero_price\tlabel\t1\t"),
         "{plan}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R4-17 repair 1: the plan writer is a store writer, and a GDFL witness that
+// will not open is named, never measured as absence.
+// ---------------------------------------------------------------------------
+
+/// **THE PLAN WRITER IS GATED AS A STORE WRITER (DB-B71).** `series-identity`
+/// writes its plan under `audit/`, so an unstamped build is refused before
+/// anything is read and no plan appears; `--dry-run` is its read-only form and
+/// is not refused; `BRUTEX_ALLOW_UNSTAMPED_WRITE=1` lets it write a plan that
+/// says `unstamped`; a stamped build's plan names its commit.
+#[test]
+fn an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit() {
+    use crate::store_write::{root_with, writes_the_store};
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
+    let before = bars(&root.0);
+    let owned = root.0.clone();
+    let store = move || -> Result<PathBuf, String> { Ok(owned.clone()) };
+    let gated = |arguments: &[&str], allow: Option<&str>, commit: Option<&str>| {
+        let mut out = String::new();
+        let code = command_with(
+            arguments,
+            &|| {
+                root_with(
+                    "series-identity",
+                    arguments,
+                    commit,
+                    allow.map(std::ffi::OsStr::new),
+                    &store,
+                )
+            },
+            commit,
+            &mut out,
+        );
+        (code, out)
+    };
+    let writing = [symbol, "--segment", "CASH"];
+    assert!(writes_the_store("series-identity", &writing));
+    // Unstamped, not allowed: refused before a byte is read, no plan.
+    let (code, out) = gated(&writing, None, None);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("SERIES IDENTITY REFUSED: this build carries no commit stamp"),
+        "{out}"
+    );
+    assert!(out.contains("no plan was written"), "{out}");
+    assert!(!out.contains("measured causes"), "nothing was read: {out}");
+    assert!(plans(&root.0).is_empty(), "{out}");
+    assert!(!root.0.join("audit").exists(), "nothing created: {out}");
+    // `--dry-run`, unstamped: the read-only form is not refused, the scan runs
+    // and its verdict stands, and the plan is named and not written.
+    let dry = [symbol, "--segment", "CASH", "--dry-run"];
+    assert!(!writes_the_store("series-identity", &dry));
+    let (code, out) = gated(&dry, None, None);
+    assert_eq!(code, FAILED, "the same verdict: {out}");
+    assert!(out.contains("--dry-run: writes nothing"), "{out}");
+    assert!(out.contains("measured causes: zero_price 1,"), "{out}");
+    assert!(
+        out.contains("QUARANTINE PLAN NOT WRITTEN (--dry-run; nothing written): would be "),
+        "{out}"
+    );
+    assert!(!root.0.join("audit").exists(), "nothing created: {out}");
+    // Unstamped and allowed on purpose: the plan says `unstamped`.
+    let (code, out) = gated(&writing, Some("1"), None);
+    assert_eq!(code, FAILED, "{out}");
+    let written = plans(&root.0);
+    assert_eq!(written.len(), 1, "{out}");
+    let unstamped = fs::read_to_string(&written[0].0).unwrap();
+    assert!(
+        unstamped.starts_with("brutex series-identity quarantine plan v2\ncommit\tunstamped\n"),
+        "{unstamped}"
+    );
+    // Stamped: a second plan, its own content, naming the commit.
+    let (code, out) = gated(&writing, None, Some(STAMP));
+    assert_eq!(code, FAILED, "{out}");
+    let written = plans(&root.0);
+    assert_eq!(written.len(), 2, "{out}");
+    let stamped = written
+        .iter()
+        .map(|(path, _)| fs::read_to_string(path).unwrap())
+        .find(|plan| plan.contains(&format!("\ncommit\t{STAMP}\n")))
+        .expect("the stamped plan");
+    assert_eq!(
+        stamped.lines().skip(2).collect::<Vec<_>>(),
+        unstamped.lines().skip(2).collect::<Vec<_>>(),
+        "the same measurement under another commit"
+    );
+    assert_eq!(bars(&root.0), before, "no bar written");
+    // The binary's own entry point hands the writer's gate and its stamp.
+    let source = include_str!("series_identity.rs");
+    let entry = source
+        .split("pub(crate) fn command(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("fn command");
+    assert!(
+        entry.contains("crate::store_write::root_for(\"series-identity\", arguments)"),
+        "{entry}"
+    );
+    assert!(entry.contains("crate::commit_stamp()"), "{entry}");
+    assert!(!entry.contains("crate::store_root"), "{entry}");
+}
+
+/// The GDFL 1s month of `symbol` in 2024-01 under `root`.
+fn gdfl_month(root: &Path, symbol: &str) -> PathBuf {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol,
+        contract: None,
+        timeframe: store::path::Timeframe::SECOND_1,
+        month: store::path::YearMonth::new(2024, 1).unwrap(),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(root)
+}
+
+/// **A GDFL WITNESS MONTH THAT IS THERE AND WILL NOT OPEN IS NAMED, NEVER
+/// MEASURED AS ABSENCE (Z6 repair 1).** PIIND's GDFL 1s month torn to half:
+/// the minutes it would have vouched for are `gdfl_unread` with the action
+/// `remeasure` — never `no_gdfl_witness`, whose `quarantine` would have been
+/// read as a measurement — and the month is a `NOT READ` line that fails the
+/// run, on one series and in `ALL`. A month GDFL does not hold at all stays
+/// `no_gdfl_witness`.
+#[test]
+fn a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absence() {
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
+    let path = gdfl_month(&root.0, symbol);
+    let bytes = fs::read(&path).unwrap();
+    fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+    let (code, out) = root.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("measured causes: zero_price 1, before_listing 376, before_first_day_bar 0, basis_mismatch 0, foreign_level 0, no_gdfl_witness 0, gdfl_unread 385"),
+        "{out}"
+    );
+    assert!(out.contains("2024-01: NOT READ: gdfl 1s witness: "), "{out}");
+    let plan = fs::read_to_string(&plans(&root.0)[0].0).unwrap();
+    assert!(plan.contains("\tgdfl_unread\tremeasure\t"), "{plan}");
+    assert!(!plan.contains("\tno_gdfl_witness\t"), "{plan}");
+    let (code, all) = root.run(&["ALL", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{all}");
+    let line = all
+        .lines()
+        .find(|l| l.trim_start().starts_with(symbol))
+        .unwrap_or_else(|| panic!("{all}"));
+    assert!(line.ends_with("NOT READ: 1 month(s)"), "{line}");
+    assert!(all.contains("gdfl_unread 385"), "{all}");
+    // A month GDFL does not hold is absence, and only that.
+    let other = piind_store(symbol);
+    let held = gdfl_month(&other.0, symbol);
+    let aside = held.with_extension("aside");
+    fs::rename(&held, &aside).unwrap();
+    let (code, out) = other.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("no_gdfl_witness 385, gdfl_unread 0"),
+        "{out}"
+    );
+    assert!(!out.contains("NOT READ"), "{out}");
 }

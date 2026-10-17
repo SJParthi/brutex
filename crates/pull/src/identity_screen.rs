@@ -277,6 +277,9 @@ fn scan_minutes(
 /// minute before its master's listing day, a minute that is not this series on
 /// its own served day (WP-13d), and a CASH minute that jumps from the minute
 /// kept before it inside one continuous run ([`series_identity::JUMP_BPS`]).
+/// When the day rung of a touched month will not open, only the range rule
+/// is skipped (every range verdict `no_day_rung`, one warn naming why); the
+/// other three need no day bar and still refuse by name (ZI-11).
 ///
 /// Any other window — the day rung — is judged ONLY for a price at or below
 /// zero and for a CASH day before its listing, never by range: the day rung is
@@ -470,12 +473,15 @@ fn minute_arm(
     step: i64,
 ) -> (Vec<RawRow>, Refused) {
     let plan = witness.plan;
-    let book = match day_book(&kept, store_root, plan, identity) {
-        Ok(book) => book,
-        Err(why) => {
-            note(witness, &Tally::default(), book_first(None), Some(&why));
-            return (kept, Refused::default());
-        }
+    // A DAY RUNG THAT WILL NOT OPEN SKIPS THE RANGE RULES ONLY (R4-17 repair
+    // 1): every minute is judged against a book with no day bar, so each range
+    // verdict is `no_day_rung` and nothing is refused BY RANGE, while a price
+    // at or below zero, a CASH minute before its listing and a CASH
+    // in-session jump — none of which reads the day rung — are still refused
+    // by name. The warn names why the rung would not open.
+    let (book, unread) = match day_book(&kept, store_root, plan, identity) {
+        Ok(book) => (book, None),
+        Err(why) => (DayBook::new(&[], FirstDay::NoDayRung), Some(why)),
     };
     let judged = prices_judged(plan);
     let mut judge = MinuteJudge::new(&book, rules, step);
@@ -506,8 +512,8 @@ fn minute_arm(
             sentence(cause, cursor, ohlc, witness.listing)
         });
     }
-    if tally.refused() + tally.suspect_level + tally.unchecked() > 0 {
-        note(witness, &tally, book.first(), None);
+    if unread.is_some() || tally.refused() + tally.suspect_level + tally.unchecked() > 0 {
+        note(witness, &tally, book.first(), unread.as_deref());
     }
     (out, refused)
 }
@@ -557,18 +563,11 @@ fn sentence(cause: Cause, row: usize, [open, high, low, close]: [i64; 4], listin
     }
 }
 
-/// `first`, or the day rung's absence, for [`note`].
-const fn book_first(first: Option<i64>) -> FirstDay {
-    match first {
-        Some(day) => FirstDay::On(day),
-        None => FirstDay::NoDayRung,
-    }
-}
-
 /// The `pull.identity` lines of an answer that was not wholly held: one
-/// `warn` per (cause, day) refused or suspect, each naming its count; one
-/// `warn` when the day rung would not open; one `info` when minutes were only
-/// left unjudged.
+/// `warn` when the day rung would not open, naming why; one `warn` per
+/// (cause, day) refused or suspect, each naming its count — after that warn
+/// too, since a rung that would not open stops only the range rules; one
+/// `info` when minutes were only left unjudged with every day rung read.
 fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&str>) {
     let first_day = match first {
         FirstDay::On(day) => day,
@@ -585,11 +584,12 @@ fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&s
         let _dropped_when_filtered = telemetry::emit(
             &base(
                 telemetry::Level::Warn,
-                "minutes not judged against their served day: the day rung would not open",
+                "minutes not judged against their served day: the day rung would not open; \
+                 only the rules that need no day bar were applied",
             )
-            .with("why", telemetry::Value::Str(why)),
+            .with("why", telemetry::Value::Str(why))
+            .with("no_day_rung", count(tally.no_day_rung)),
         );
-        return;
     }
     for group in &tally.flagged {
         let message = if group.refused {
@@ -604,7 +604,7 @@ fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&s
                 .with("rows", count(group.minutes)),
         );
     }
-    if tally.flagged.is_empty() {
+    if tally.flagged.is_empty() && unread.is_none() {
         let _dropped_when_filtered = telemetry::emit(
             &base(
                 telemetry::Level::Info,

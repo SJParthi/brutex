@@ -71762,9 +71762,25 @@ against. Two things are refused by name, that row only:
    land as a day bar (none observed); its minutes are still judged by range.
    The store scan labels every held index zero (`zero_price`, action `label`)
    so it is never silent.
+4. **A day rung that will not open skips the range rules only (repair 1, 18
+   Oct 2026).** The minute arm returned every row of the answer untouched when
+   a touched day month would not open (a torn file, a generation-pointer
+   mismatch, a symbol-id mismatch: any `StoreError` but `Missing`), so a zero
+   minute, or another security's minutes before the master's listing day, was
+   STORED with no failure, contradicting point 1's "on every rung"; the store
+   scan flagged the same minutes, so landing and scan disagreed. Now every
+   minute is judged against a book with no day bar: each range verdict is
+   `no_day_rung` and nothing is refused by range, while `non_positive_price`,
+   `before_listing` and `in_session_jump` (D-4993), none of which reads the
+   day rung, refuse by name as on any other answer. One `pull.identity` warn
+   names why the rung would not open, and each refusal keeps its own warn.
 
 Proof: `crates/pull/tests/zerodha_identity.rs`
-(`a_zero_price_day_bar_is_refused_by_name_at_landing`,
+(`a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open`,
+`a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open`,
+`an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
+`a_day_rung_that_will_not_open_refuses_nothing_by_range`,
+`a_zero_price_day_bar_is_refused_by_name_at_landing`,
 `an_index_zero_day_bar_lands_and_a_negative_one_is_refused_by_name`,
 `pull::series_identity::tests::an_index_zero_is_held_and_a_price_below_zero_is_refused`,
 `cli::series_identity::tests::an_index_zero_is_labelled_and_passes_where_a_share_zero_fails`,
@@ -71773,7 +71789,7 @@ Proof: `crates/pull/tests/zerodha_identity.rs`
 `a_day_bar_before_listing_is_refused_by_name`,
 `the_day_rung_is_never_judged_by_range`).
 
-### D-4993 — A CASH minute whose open jumps beyond JUMP_BPS from the minute kept before it, inside one continuous run, is refused by name; JUMP_BPS is PROVISIONAL until measured on the store (R4-17; RT-DATA-02 a) — 2026-10-17
+### D-4993 — A CASH minute whose open jumps beyond JUMP_BPS from the minute kept before it, inside one continuous run, is refused by name; JUMP_BPS = 3,000, measured on the store and kept (R4-17; RT-DATA-02 a) — 2026-10-17
 
 **Decision.** `pull::series_identity::JumpRun` follows one continuous recorded
 run of CASH minutes on the 1-minute grid. A minute whose open lies more than
@@ -71798,7 +71814,7 @@ run of CASH minutes on the 1-minute grid. A minute whose open lies more than
 4. **CASH 1-minute only.** That is the population the threshold is to be
    measured over. Indices are judged by the day rung (`foreign_level`), and
    options can legitimately move more than any such band.
-5. **`JUMP_BPS` = 3,000 is PROVISIONAL.** The work package requires it measured
+5. **`JUMP_BPS` = 3,000 was PROVISIONAL (superseded by point 6).** The work package requires it measured
    first, read-only, over every stored Zerodha CASH minute, per share (p99,
    p999, max). It must show zero trips on split and bonus ex-dates, a trip on
    PIIND's interleave (the 09:15 close 821.65 against the 09:16 open 89.90 is
@@ -71826,9 +71842,21 @@ run of CASH minutes on the 1-minute grid. A minute whose open lies more than
    range cannot see (a day bar wide enough to hold both bases), which the
    store does not hold today. The margin of 1.36 over RADICO is the honest
    limit, named in `docs/06-limits.md`.
+7. **A kept outlier close is the run's reference until the run breaks (named,
+   not re-anchored; repair 1, 18 Oct 2026).** The verifier showed it: one
+   minute whose CLOSE alone is far off, inside a day bar wide enough to hold
+   it, is kept, and every later minute of that continuous run whose open is
+   back on the share's own level jumps from it and is refused by name, to the
+   next halt, gap or session. Re-anchoring on a refused minute would instead
+   let a foreign block that starts the run land whole (point 3's other edge),
+   and choosing between the two needs a minute after the one being judged,
+   which this rule never reads. The refusals are loud, never silent stores,
+   and the store scan shows none (0 in-session jumps over 153,548,887
+   minutes, point 6). Named in `docs/06-limits.md`.
 
 Proof: `crates/pull/tests/zerodha_identity.rs`
 (`a_session_interleaving_two_price_bases_is_refused_at_landing`,
+`an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
 `a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump`,
 `an_index_is_never_judged_by_the_jump_rule`);
 `pull::series_identity` unit tests of `jump_bps` and `JumpRun`.
@@ -71848,7 +71876,8 @@ a measured cause:
 | `before_first_day_bar` | before the first day bar, where no master states the listing (WP-13d) | quarantine |
 | `basis_mismatch` | accused by its day rung or its run, but within `WITNESS_TOLERANCE_BPS` (100, chosen and stated) of GDFL's 1s bars of that minute folded by `pull::fold`: the vendor's minute is GDFL's and its day bar was adjusted apart | label |
 | `foreign_level` | matches neither its own day nor GDFL's minute | quarantine |
-| `no_gdfl_witness` | GDFL holds no minute to compare | quarantine if a landing refuses it; label if it is only suspect |
+| `no_gdfl_witness` | GDFL holds no such month (`StoreError::Missing`) or no such minute in it | quarantine if a landing refuses it; label if it is only suspect |
+| `gdfl_unread` | GDFL's month is there and would not open, read or fold (point 6) | remeasure |
 
 1. **The plan is the only file written.** One tab-separated row per (key, rung,
    month, cause, action): `whole_month` when the row covers every bar of that
@@ -71895,9 +71924,37 @@ a measured cause:
    order, so the output and the plan are the same bytes for every worker
    count. A month of either rung that will not open fails the run, a series
    with no minute rung included (it was omitted from the failure before).
+5. **The verb is a store writer (repair 1, 18 Oct 2026; DB-B71).** It
+   publishes its plan under `audit/`, and a later generation acts on what the
+   plan says, so a plan must name the code that measured it. It was listed as
+   a reader in `crates/cli/src/store_write.rs` while it wrote there and
+   reached its root through `crate::store_root`, so a dirty-tree build wrote
+   an unstamped plan unrefused and the plan named no commit. Now it is in
+   `WRITERS` and reaches its root through `store_write::root_for`: an
+   unstamped build is refused before any bar is read unless
+   `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`, and a store whose `bars` is a link (a
+   test shadow) is refused by name. The plan is format `v2`: its second line
+   is `commit\t<sha>` (`unstamped` under the allowance), so two builds over
+   one store write two plans and neither is mistaken for the other. `v1` was
+   never on `feat/db-fix`; its plans exist only in test shadows. `--dry-run`
+   is the read-only form: the same scan, report and exit, the plan's path
+   named, nothing written, so a shadow can still be scanned. After the
+   rename the plan's directory is synced too.
+6. **A GDFL witness month that will not open is named, never measured as
+   absence (repair 1; Z6).** The witness read turned every failure — a torn,
+   locked or unreadable 1s month, a fold error — into "GDFL holds no
+   minute", so the minutes it would have vouched for silently flipped from
+   `basis_mismatch` (label) to `no_gdfl_witness` (quarantine) and nothing
+   named the file. Only `StoreError::Missing` is absence now. Any other open,
+   read or fold error makes each bar it would have measured `gdfl_unread`,
+   action `remeasure`, and the month a `NOT READ: gdfl 1s witness: <why>`
+   line that fails the run, on one series and in `ALL`.
 
 Proof: `cli::series_identity::tests`
-(`the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,
+(`an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
+`a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absence`,
+`cli::store_write::tests::every_command_is_classified_as_a_store_writer_or_not`,
+`the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,
 `piind_minutes_are_named_by_cause_before_any_write`,
 `a_month_refused_whole_is_planned_whole`,
 `the_scan_names_every_edge_it_cannot_judge`, `a_plan_that_cannot_be_written_fails_out_loud`,
