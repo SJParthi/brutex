@@ -5128,12 +5128,18 @@ fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequ
     if let Some(day) = about.day.as_deref() {
         event = event.with("day", telemetry::Value::Str(day));
     }
-    let noted = telemetry::emit(&event);
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
+    // A LINE THE SINK DROPS IS COUNTED THERE, AND IS NOT A PANIC HERE.
+    //
+    // This asserted `is_written()` unless no sink was installed, and an error
+    // line is above every floor, so the assertion could fail only when the
+    // sink DROPPED it: a full disk, or a sink already closed (R3-14). In a
+    // build with debug assertions, the dev profile the Run button builds, the
+    // panic came before the page heard of the member, so on a full disk,
+    // where a member dies at the store and its line cannot be written, the
+    // operator lost both. `telemetry::emit` never panics on a drop and counts
+    // it in `Sink::health`; this site now does as every other one in this
+    // file does.
+    let _noted = telemetry::emit(&event);
     site.autopilot
         .fail(&failure.instrument, &about, &failure.why);
 }
@@ -7471,7 +7477,10 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    // A dropped line is counted by the sink and never
+                    // stops the refusal, for the reason
+                    // `note_member_failure` gives.
+                    let _noted = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -7480,10 +7489,6 @@ async fn fetch_chunks(
                             .with("from", telemetry::Value::Str(&chunk.from().to_string()))
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
-                    );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
                     );
                     format!(
                         "the broker did not answer with a window. This was \
@@ -8775,11 +8780,9 @@ fn note_instrument_refusal(
     if let Some(month) = about.one_month() {
         event = event.with("month", telemetry::Value::Str(month));
     }
-    let emitted = telemetry::emit(&event);
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped line is counted by the sink and never stops the run that
+    // refused the instrument, for the reason `note_member_failure` gives.
+    let _emitted = telemetry::emit(&event);
 }
 
 /// What the page says when the breaker stops a run.
@@ -33987,9 +33990,10 @@ mod tests {
         );
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
-        // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // directly because the only other way in is through a live socket.
+        // This is the proof the line is written: the `debug_assert` that once
+        // demanded `is_written` at the site was vacuous with no sink installed
+        // and panicked on a dropped line, and is gone (see the site).
         let from = crate::emitted::mark();
         // FILED UNDER ITS OWN DAY AND MONTH (D-3341, DB-G45): the failure
         // names 2026-08-04, and the line says so rather than the window's

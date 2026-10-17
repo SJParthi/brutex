@@ -3169,11 +3169,11 @@ async fn laddered_calls_a_transport_that_never_answers_down_after_every_attempt(
 }
 
 /// **With no log installed, a window the vendor refuses is still refused
-/// with the vendor's words.** The refusal event answers `NotInstalled` and
-/// its `debug_assert` allows a process with no sink; this test installs
-/// none, so under nextest the permissive side is the one taken
-/// (server.rs:7485). Beside a test that installed the shared sink the event
-/// is written instead, and the refusal is the same.
+/// with the vendor's words.** The refusal event answers `NotInstalled`, a
+/// process with no sink; this test installs none. Beside a test that
+/// installed the shared sink the event is written instead, and the refusal
+/// is the same. A sink that DROPS the line is
+/// `a_dropped_failure_line_loses_nothing_but_the_line`.
 #[tokio::test]
 async fn with_no_log_installed_a_refused_window_is_still_refused() {
     let vendor = FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
@@ -3197,6 +3197,108 @@ async fn with_no_log_installed_a_refused_window_is_still_refused() {
         "the vendor's status is kept: {refused}"
     );
     assert_eq!(vendor.seen().len(), 1, "a refusal is asked once");
+}
+
+/// Set in a child of this binary: the test runs its child half.
+const CHILD: &str = "BRUTEX_CLOUDC_CHILD";
+
+/// **A log that drops a failure's line loses only the line: the failure
+/// still reaches its page, its run and its caller, and the sink counts the
+/// drop.** A closed sink drops every event (R3-14), as a full disk does a
+/// write; `telemetry::emit` never panics on either and says so in the
+/// sink's health. Three error events in this file asserted
+/// `is_written() || no sink installed` instead, so in any build with debug
+/// assertions, which is the dev profile the Run button builds, a dropped
+/// line PANICKED there: before the autopilot's page heard of the member
+/// that did not land, inside the run that refused an instrument, and inside
+/// the fetch that a vendor refused. On a full disk, where a member dies at
+/// the store and its line cannot be written, that is every member. Driven in
+/// a child, because the sink is the whole process's. Fails on the code
+/// before this pass's fix: the child panics at the first of the three.
+#[test]
+fn a_dropped_failure_line_loses_nothing_but_the_line() {
+    if std::env::var_os(CHILD).is_some() {
+        let logs = scratch("dropped-line-logs");
+        let _ = std::fs::remove_dir_all(&logs);
+        let sink = telemetry::install(&telemetry::Config::new(&logs)).expect("the child's sink");
+        sink.close().expect("the sink closes");
+        let dropped = || sink.health().dropped;
+
+        let fx = Fixture::new("dropped-line");
+        let site = fx.refused();
+        let asked = spot(DHAN_DAY);
+        let failure = pull::ingest::Failure {
+            instrument: "ZZDROPPED".to_owned(),
+            why: "the store refused the member".to_owned(),
+            month: None,
+            day: Day::new(2026, 8, 4).ok(),
+        };
+        let before = dropped();
+        note_member_failure(&failure, &asked, &site);
+        assert_eq!(
+            dropped(),
+            before + 1,
+            "the member's line, dropped and counted"
+        );
+        let json = site.autopilot.json();
+        assert!(json.contains("ZZDROPPED"), "{json}");
+        assert!(json.contains("the store refused the member"), "{json}");
+
+        let about = crate::autopilot::About::of(None, None, asked.window);
+        let before = dropped();
+        note_instrument_refusal("ZZDROPPED", &about, "dhan", 0, 1, "refused");
+        assert_eq!(
+            dropped(),
+            before + 1,
+            "the refusal's line, dropped and counted"
+        );
+
+        let before = dropped();
+        let refused = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                let vendor =
+                    FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
+                let (source, spec) = loopback_source(&vendor);
+                let refused = fetch_chunks(
+                    &asked,
+                    &site,
+                    &source,
+                    "990012",
+                    pull::vendor::Listing::Index,
+                    &spec,
+                )
+                .await;
+                assert_eq!(vendor.seen().len(), 1, "a refusal is asked once");
+                refused
+            });
+        let Err(refused) = refused else {
+            panic!("nothing landed before the refusal");
+        };
+        assert!(
+            refused.contains("400"),
+            "the vendor's status is kept: {refused}"
+        );
+        // The refusal's line among them; the fetch logs at Info and below as
+        // well, so the count is a floor rather than an exact figure.
+        assert!(dropped() > before, "the window's line, dropped and counted");
+        println!();
+        println!("CLOUDC-DROPPED-LINE=checked");
+        let _ = std::fs::remove_dir_all(&logs);
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_c::a_dropped_failure_line_loses_nothing_but_the_line",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDC-DROPPED-LINE=checked"),
+        "{stdout}"
+    );
 }
 
 /// **A plain 429 is recorded against the shared governor once, by the

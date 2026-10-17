@@ -550,11 +550,11 @@ fn an_instrument_refused_over_two_months_is_logged_with_no_month() {
 
 /// **With no log installed, a member that did not land still reaches the
 /// autopilot's page, and an instrument refusal is still made.** The emits
-/// answer `NotInstalled` and each `debug_assert` allows exactly that: a
-/// process with no sink. This test installs none; under nextest it is its
-/// own process, so the permissive side of both asserts is the one taken
-/// (server.rs:5133 and 8780). Run beside a test that installed the shared
-/// sink, the emits are written instead, and every assertion still holds.
+/// answer `NotInstalled`, a process with no sink. This test installs none;
+/// under nextest it is its own process. Run beside a test that installed
+/// the shared sink, the emits are written instead, and every assertion
+/// still holds. A sink that DROPS the lines is
+/// `cloud_mutant_tests_c::a_dropped_failure_line_loses_nothing_but_the_line`.
 #[test]
 fn with_no_log_installed_a_failure_still_reaches_the_page() {
     let root = fresh_dir("no-log-failure");
