@@ -149,6 +149,10 @@ test('coverage_follows_the_day_window_or_says_it_does_not (DB-046, R3-04)', () =
   );
   // Said only when the window is what emptied it.
   assert.equal(windowEmptyWhy({ matched: 3, listed: 1, window, held: null }), '');
+  assert.equal(
+    windowEmptyWhy({ matched: 3, listed: 0, window, held: null }),
+    'The From and To window, 01 Oct 2024 → 31 Oct 2024, holds no month of the 3 instrument-month(s) this selection matches. Coverage follows the window, as the Bars grid does: widen the dates to see them.'
+  );
   assert.equal(windowEmptyWhy({ matched: 0, listed: 0, window, held: null }), '');
   assert.equal(windowEmptyWhy({ matched: 3, listed: 0, window: null, held: null }), '');
   assert.doesNotMatch(windowEmptyWhy({ matched: 3, listed: 0, window, held: null }), /this selection holds/);
@@ -269,7 +273,7 @@ test('a refused front is named beside the coverage figure, and the empty grid sa
   assert.equal(front.to, '2020-01-14');
   assert.match(front.text, /^2 day\(s\) of a refused front, 13 Jan 2020 → 14 Jan 2020 \(NSE-INDEX-ZZOIL\)/);
   assert.match(front.text, /never counted as held/);
-  assert.doesNotMatch(refusedFrontOf(cells, '')?.text ?? '', /\(\)/);
+  assert.match(refusedFrontOf(cells, '')?.text ?? '', /^2 day\(s\) of a refused front, 13 Jan 2020 → 14 Jan 2020: the vendor served them/);
   assert.equal(refusedFrontOf([{ day: '2020-01-10', kinds: ['session'] }], 'X'), null);
   assert.equal(refusedFrontOf(undefined, 'X'), null);
   // From the band's own answer — no request of its own — in the box and in the empty grid.

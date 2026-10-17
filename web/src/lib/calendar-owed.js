@@ -283,7 +283,7 @@ export async function askCalendar(url, request, signal, wait = pause) {
  *   is a session. `held`, the default, is the answer every caller got before.
  * @returns {Promise<Calendar>}
  */
-export async function readCalendar(feed, request, signal, wait = pause, span = 'held') {
+export async function readCalendar(feed, request, signal, wait = pause, span) {
   try {
     const { response, body: building } = await settledCalendar(
       `/calendar.json?feed=${encodeURIComponent(feed)}${span === 'record' ? '&span=record' : ''}`,
@@ -605,7 +605,8 @@ export function owedLedger(body) {
     halted[at + 1] = halted[at] + (code === 'H' ? 1 : 0);
     unmeasured[at + 1] = unmeasured[at] + (code === 'U' ? 1 : 0);
     haltBars[at + 1] =
-      haltBars[at] + (code === 'H' && regular !== null && s !== null ? Math.max(0, regular - s) : 0);
+      // No regular count reads 0, and a halt then leaves nothing unowed.
+      haltBars[at] + (code === 'H' && s !== null ? Math.max(0, Number(regular) - s) : 0);
     heldDays[at + 1] = heldDays[at] + held;
     heldSessions[at + 1] = heldSessions[at] + (session ? held : 0);
     closedHeld[at + 1] = closedHeld[at] + (code === '.' ? held : 0);

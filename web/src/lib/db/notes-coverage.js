@@ -213,7 +213,8 @@ export function coverWindow(fromDay, toDay, narrowing) {
   let from = fromDay || '';
   let to = toDay || '';
   if (from === '' && to === '') return null;
-  if (from !== '' && to !== '') [from, to] = [from, to].sort();
+  // An empty From sorts first already; an empty To must not.
+  if (to !== '') [from, to] = [from, to].sort();
   return { from, to };
 }
 
@@ -252,7 +253,7 @@ export function windowText(window) {
  */
 export function windowEmptyWhy(o) {
   if (o.window === null || o.matched === 0 || o.listed > 0) return '';
-  const [lo, hi] = o.held ? [o.held.lo, o.held.hi].sort() : ['', ''];
+  const [lo, hi] = [o.held?.lo, o.held?.hi].sort();
   const held = lo && hi ? `; this selection holds ${dayLabel(lo)} → ${dayLabel(hi)}` : '';
   return `The From and To window, ${windowText(o.window)}, holds no month of the ${fmt(o.matched)} instrument-month(s) this selection matches${held}. Coverage follows the window, as the Bars grid does: widen the dates to see them.`;
 }

@@ -506,8 +506,9 @@ export function judgeRow(row, ctx) {
   // hole. Failing that, `sharedMissing` is the shortfall EVERY series has —
   // the month's index count less the fullest series' (2020-02: no series
   // holds the 13th's 10:32 minute) — and a row missing more owns the rest.
-  const short = cover.missing;
-  if (short !== null && short > 0) {
+  // An unknown shortfall (`null`) reads 0 and shares no hole.
+  const short = Number(cover.missing);
+  if (short > 0) {
     const peers = ctx.peers ?? null;
     const whole = ledgerSpan(ledger, first, last);
     const shared =

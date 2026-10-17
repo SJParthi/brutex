@@ -634,6 +634,8 @@ test('the reader names a calendar still building or withheld without a reason, r
   assert.equal(listed.indexOwed.get('2024-01-01'), null);
   const bare = await readCalendar('zerodha', async () => answer(200, {}), signal);
   assert.equal(bare.owed.size, 0);
+  assert.equal(bare.first, '');
+  assert.equal(bare.last, '');
   assert.equal(bare.why, 'the store holds no bars for this feed');
   // A 202 asked again at the server's hint, then answered.
   let asked = 0;
@@ -665,6 +667,12 @@ test('the wait between asks ends on an abort, with the abort\'s reason or a name
   await new Promise((resolve) => setTimeout(resolve, 5));
   reasoned.fire();
   await assert.rejects(pending, /reasoned/);
+  // The wait listens once: a listener left behind would fire on a later abort.
+  /** @type {any[]} */
+  const options = [];
+  const once = { aborted: false, reason: null, addEventListener: (/** @type {string} */ _t, /** @type {() => void} */ fn, /** @type {any} */ o) => { options.push(o); setTimeout(fn, 1); } };
+  await assert.rejects(askCalendar('/c', building, /** @type {any} */ (once)), /aborted/);
+  assert.deepEqual(options, [{ once: true }]);
   // With no signal at all the wait simply runs out and the ask repeats.
   let n = 0;
   const done = await askCalendar('/c', async () => (++n < 2 ? answer(202, { status: 'building', retry_after_ms: 50 }) : answer(200, { status: 'ok' })), /** @type {any} */ (undefined));
@@ -846,12 +854,21 @@ test('an average session where nothing sized one, and no count owed at all', () 
   assert.equal(over.heldSessions, 5 / 375);
   assert.ok(over.notes.includes('extra'));
   assert.ok(!over.notes.includes('surplus_unplaced'), 'nothing owed, so no day short to hide');
-  assert.equal(judgeRow(nifty({ rows: 0 }), { ledger: zero }).state, 'full');
+  const nothing = judgeRow(nifty({ rows: 0 }), { ledger: zero });
+  assert.equal(nothing.state, 'full');
+  assert.equal(nothing.ratio, null, 'nothing owed has no ratio, never NaN');
 });
 
 test('the per-day floor is named only where it decides, at the boundary too', () => {
   const held = MAR.split('').map((c, i) => (c === 'R' ? (i === 1 ? '0' : '1') : '0')).join('');
   const own = owedLedger(body({ from: '2021-03-01', days: MAR, regular: 375, held, series: { symbol: 'NIFTY', segment: 'INDEX' } }));
+  // A session with no bar AND a surplus on others: the floor is the shortfall, never unknown.
+  const both = judgeRow(nifty({ rows: 23 * 375 + 500 }), { ledger: MAR_L, held: own });
+  assert.equal(both.missing, 375);
+  assert.equal(both.extra, 500);
+  assert.ok(both.notes.includes('surplus_unplaced'));
+  assert.ok(both.notes.includes('unheld_sessions'));
+  assert.equal(both.state, 'gap');
   // Short by exactly the unheld session: the month total already says it.
   const exact = judgeRow(nifty({ rows: 22 * 375 }), { ledger: MAR_L, held: own });
   assert.equal(exact.missing, 375);
@@ -1026,7 +1043,8 @@ test('the reader and its helpers at their edges', async () => {
     asked.push(init);
     return ++n === 1 ? answer(202, { status: 'building', retry_after_ms: 50 }) : n === 2 ? answer(202, null) : answer(200, {});
   }, signal, async (ms) => { waits.push(ms); });
-  assert.deepEqual(asked[0], { cache: 'no-store', signal });
+  assert.equal(asked.length, 2, 'a building answer with no body ends the asking');
+  for (const init of asked) assert.deepEqual(init, { cache: 'no-store', signal }, 'every ask, the first and each again, bypasses the cache');
   assert.deepEqual(waits, [50], 'a hint of exactly 50 ms is taken as given');
   assert.equal(reply.body, null, 'a building answer with no body is answered as it came');
   const refusal = /** @type {any} */ ({ ok: false, status: 503, text: async () => '' });
