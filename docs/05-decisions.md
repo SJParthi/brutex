@@ -70887,6 +70887,139 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
 
+### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling, and the tick-store writer names the encoder it links — 2026-10-16, extended 2026-10-17
+
+**Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
+`feat/db-fix` stopped at `STEP deny rc=1` (gate 72c91a46, 14 Oct):
+`cargo deny check` failed `advisories` on **RUSTSEC-2026-0344**, "Decompression
+bomb in `ruzstd`: a tiny input can exhaust memory (OOM)",
+<https://rustsec.org/advisories/RUSTSEC-2026-0344>, against `ruzstd` 0.8.2
+(reached through `lake` and `pull`), patched `>= 0.9.1`. The advisory's cause:
+a compressed block's DECODED size was never held to RFC 8878's
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`. Re-run on 16 Oct against the
+advisory database at commit `479c888c` (2026-10-16), the same check also
+failed on four advisories dated 2026-10-14 against `rustls` 0.23.45, each
+patched `>= 0.23.46`: RUSTSEC-2026-0346 (`Debug` of client session values
+exposes TLS secrets), RUSTSEC-2026-0347 (buffered data sent to the outer
+server after ECH rejection), RUSTSEC-2026-0348 (brotli certificate
+decompression can allocate up to 1 GiB before authentication) and
+RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+connections to classical key exchange).
+
+**Decision.**
+
+1. **`ruzstd` floor 0.9.1**, in the root `[workspace.dependencies]` line and
+   `crates/lake/Cargo.toml` (0.9 is outside `"0.8"`'s semver range, so the
+   lines move, not only the lock). 0.9.1 is the newest published version.
+   Same features (`std`, `hash`); its dependency list is unchanged (`twox-hash`).
+2. **`rustls` 0.23.46 in `Cargo.lock` only**: a patch release inside every
+   manifest's existing range; its dependency list is unchanged.
+3. **Both decode call sites pass the window ceiling by name**:
+   `lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd` call
+   `StreamingDecoder::new_with_max_window_size(_, 128 MiB)`. 128 MiB is 0.9.1's
+   own `DEFAULT_MAX_WINDOW_SIZE`, so this is exactly what 0.9.1's `new` does;
+   naming it means a later `ruzstd` that moves its default cannot move ours.
+4. **What the bump refuses that 0.8.2 accepted, stated rather than hidden.**
+   (a) A block that decodes past its `Block_Maximum_Size` — the advisory's
+   class; a ten-byte frame that 0.8.2 expanded to 4,096 bytes is now refused.
+   (b) A frame declaring a window over 128 MiB: 0.8.2 checked its 100 MiB
+   `MAXIMUM_ALLOWED_WINDOW_SIZE` only when a decoder was `reset` for a second
+   frame, and both call sites build one decoder per frame, so it checked
+   nothing (measured: an 8 GiB declared window was accepted). Neither is
+   silent: each is the call site's existing refusal (`zstd frame refused` /
+   `zstd decode refused` in `lake`, `TickStoreMalformed` in `pull`).
+5. **Every frame written before still reads to the same bytes — measured, not
+   assumed.** A throwaway harness outside the repository links 0.8.2 and 0.9.1
+   side by side and drives both through the call sites' own shape (decoder,
+   `take(want + 1)`, `read_to_end`): every zstd frame of all **2,001** GDFL
+   index day files in the tick store (NIFTY spot and every other index,
+   2018–2026, special sessions included; 1,592,231 frames, 6.66 GB in,
+   329 GB out) plus six whole option and stock days — options, every
+   underlying and strike in the file (NIFTY, BANKNIFTY, stocks, illiquid
+   strikes alike): 25 and 27 Oct 2019 (the Muhurat session), 1 Feb 2020
+   (budget Saturday), 4 Jun 2024 (the largest file in the store); stocks:
+   3 Feb 2020 and 31 Aug 2026 — 337,126 more frames, 1,929,357 in all:
+   **0 frames differ, 0 refused by either**. The largest
+   declared window is 4,194,304 bytes (2^22), as the writer's settings predict
+   (`zstd` 0.13.3, level 9; libzstd 1.5.7 `clevels.h` gives level 9 window log
+   22), 1/32 of the ceiling. In the repository, six frames 0.8.2's own encoder
+   wrote (Raw with and without content, RLE across block boundaries,
+   Compressed) are frozen as hex in `crates/lake/src/zstd_v082_frames.rs` and
+   decoded byte for byte through both call sites; every truncation is refused,
+   a stated length one byte long or short is refused, and the two crafted
+   frames of point 4 are refused (both crafted tests fail under 0.8.2).
+6. **No decode timing changed.** Same harness,
+   same frames, the two versions interleaved per iteration: real tick-store
+   frames p50 301 µs vs 0.8.2's 308 µs, p99 2.56 ms vs 2.52 ms (n = 1,592,231);
+   synthetic frames n = 2,000 each, 0.9.1 equal or faster at p50 and p99 on all
+   six. Decoding stays O(frame) as before; nothing moved onto a per-request path.
+   The encoder's sizes and timing are point 8's; the memory one decode may
+   still hold inside the ceiling is point 9's, and both are in
+   `docs/06-limits.md` (L-TSW-4, L-ZST-1, L-ZST-2).
+7. **The dependency fingerprint is re-pinned** in
+   `crates/vocab/tests/workspace_is_rust.rs` after the scan it demands:
+   `ruzstd` 0.9.1 ships no `build.rs` and no C/assembly; `rustls` 0.23.46's
+   non-Rust file set equals 0.23.45's and its `build.rs` is byte-identical.
+   Package count unchanged at 195.
+8. **The third call site is the tick-store writer's ENCODER, and its output
+   bytes change; decoded-entry identity does not** (added 2026-10-17, DENY-1
+   repair round 1, after R4-08's writer reached `feat/db-fix`).
+   `pull::tickstore_write` (D-4967) writes every tick-store frame with
+   `compress_to_vec` at `Fastest`. Under 0.9.1 that encoder writes a block
+   Raw when compressing it would not make it smaller
+   (`encoding/levels/fastest.rs`: `compressed_size >= block_size`), where 0.8.2
+   kept the larger Compressed block. Measured with both versions linked side by
+   side on invented inputs: 512 noise bytes were a 529-byte frame (one
+   Compressed block of 516) and are now 525 (one Raw block of 512); a
+   132,024-byte input's short second block went from Compressed 956 to Raw 952;
+   ten other inputs (repeats, sparse zeros, text) came out byte-identical. 0.9.1
+   also corrects the extra bits of match-length code 52 (65,539..=131,074),
+   which 0.8.2's `encoding/blocks/compressed.rs` took over 32,771; `Fastest`
+   never writes a match that long (read from the source: its matcher's window
+   is one 128 KiB slice, evicted before the next block is matched, and a match
+   is no longer than its offset, so a match is at most 65,536 bytes), and no
+   input of 65,538 to 131,000 bytes changed. So a day this writer writes now is
+   at most the size 0.8.2 wrote, block by block. What does not change is
+   identity: FM-249 defines it on decoded entries (name, size, CRC-32, DOS
+   time, rebuilt bytes), never on `.bts` bytes, and point 5 shows every frame
+   of the old encoder decoding to the same bytes under 0.9.1, so a day held
+   under 0.8.2 still verifies and is never rewritten. **The label moves with
+   the encoder**: `WRITER` is `pull::tickstore_write/1 ruzstd-0.9.1 Fastest`.
+   After the merge it still said `ruzstd-0.8.2`, so every log line and event
+   would have named an encoder the build no longer links (the second agent's
+   blocking finding, `state/fix/round2/verify-DENY-1-r1.json`).
+   `the_writer_names_the_ruzstd_cargo_lock_links` now holds the label and the
+   module doc to the one `ruzstd` in `Cargo.lock`, and
+   `no_block_is_stored_larger_than_the_bytes_it_holds` holds the Raw fallback
+   (it fails under 0.8.2: run through both versions linked side by side, three
+   of its ten inputs store more than they hold under 0.8.2 — 516 bytes for
+   512, 4,100 for 4,096, 300,004 for 300,000 — and none under 0.9.1; log
+   `state/fix/deny-1-logs/no-block-larger-0.8.2-vs-0.9.1-20261017.log`).
+   D-4967's sizes were measured on 0.8.2's encoder and were taken again on
+   17 October on the same three day zips: 16,385,730, 59,143,634 and
+   253,387,791 B against 0.8.2's 16,400,878, 60,066,755 and 255,904,074 B,
+   1.0% fewer over the three days, every file verified against its zip; so
+   D-4967's "about 332 MB a trading day" is about 329 MB now and its "1.60 to
+   2.04 times" is 1.57 to 2.04 (`docs/06-limits.md` L-TSW-4, L-TSW-7).
+9. **What the ceiling does not bound, stated** (`docs/06-limits.md` L-ZST-1).
+   0.9.1's decoder keeps a frame's whole declared window before it hands a
+   byte out, so the `take(want + 1)` at both call sites bounds what is
+   RETURNED, not what is decoded: a 4,105-byte crafted frame of 1,024 RLE
+   blocks declaring a 128 MiB window, asked for 16 bytes, is refused after
+   peak RSS of 273,203,200 to 273,334,272 bytes (n = 3, `/usr/bin/time -l`,
+   17 Oct 2026, the second agent's harness; it measured 271 MB under 0.8.2).
+   Bounded where 0.8.2 was not, about twice the ceiling. A per-call ceiling
+   taken from the promised length (refusing a frame whose stated content size
+   is not the promise before decoding it) would close most of it and is NOT
+   built here: it changes what both call sites accept, and only the frames'
+   own measured windows (largest 4 MiB, point 5) say it would refuse nothing
+   real.
+
+**Supersedes** the version lines of D-2801 point 5 and of the `lake` entry
+that first named `ruzstd` 0.8, and D-4967's encoder version (its point naming
+"`ruzstd` 0.8.2 encoder" and its `WRITER` text `ruzstd-0.8.2`); the reasons
+those gave (pure Rust, no `build.rs`, no C) still hold for 0.9.1.
+
 ### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
 
 **Number** taken from above every ledger head on the local branches on
@@ -71321,3 +71454,99 @@ profile (out of memory, twice). Every number in `docs/06-limits.md` under
 this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
 one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
 gate-8 command.
+
+### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
+
+**Number** the first of the block D-5830..D-5849 assigned to BASE-GATE10;
+unused when this entry was written (`grep -n 'D-58[34][0-9]'` over `docs/`
+found none on feat/db-fix at f9cdb5840).
+
+**Finding** BASE-RED-GATE10, from the CLOUD-RUST1 merge-back of 17 Oct: gate 10
+was red on feat/db-fix itself, which blocks "all gates green". On the head
+this package started from (f9cdb5840) the gate's two steps refused fourteen
+names. The other rows the merge-back listed (MR-34, AF-23, GI-07, ...) had been
+repaired by merges in between and resolve today.
+
+**What was observed.**
+
+1. **GI-08 named a test that a later package renamed.** AF-01 (D-4977) turned
+   `an_empty_source_reports_every_day_it_does_not_hold`, which pinned an OK
+   exit for a run that read no file, into
+   `cli::gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`,
+   which pins FAILED. Its own doc comment records the rename. The row was not
+   moved with it, so `gates_ledger invariant-tests` reported it missing.
+2. **Thirteen front-end test names were refused although every one of them
+   exists.** AF06-05 and AF06-07 (D-4978) cite `web/tests/status-poll.test.js`
+   tests by their snake-case names, and R301-01 to R301-04 (D-5301) cite
+   `web/tests/db-address.test.js` and `web/tests/db-history.test.js` tests the
+   same way. D-1606 resolves a backticked bare name with three or more
+   underscores in a status row against RUST declarations only, so each was
+   refused as "declared in no tracked source file". The names did not move: the
+   gate could not see the files that declare them.
+3. **R301-05 named no proof the `✓` check accepts.** Its two tests are named by
+   their sentence names, with no file. Point 2's refusal hid it, because the
+   `✓` check runs only after the name check passes.
+
+**Decision.**
+
+1. GI-08's proof cell names `a_run_that_read_no_file_never_exits_ok`, and says
+   in prose (not in a code span, which the gate would read as a phantom) which
+   name it replaced and why. R301-05's proof cell names its file,
+   `web/tests/db-address.test.js`. No row is deleted or weakened, and no
+   allowlist entry is added.
+2. **`.github/invariant_paths.rs --web-tests FILE...`** lists `FILE<TAB>name`
+   for every test a front-end test file declares: the literal first argument
+   of each `test(` call made in CODE. The source is read by a lexer, not a
+   line pattern (D-1114's reason, for the browser's files): a `test('a_b_c_d'`
+   inside a `//` or `/* */` comment, a string, a template or a regular
+   expression lists nothing, and so do `x.test(` (a method), `test.skip(`,
+   `test.only(` (a skipped test proves nothing) and a name built at run time.
+   Only `web/tests/<name>.test.js` is read, the runner's own glob
+   (`node --test "tests/*.test.js"`); a deeper file declares no test that
+   runs. A source the lexer cannot delimit (an unterminated comment, string,
+   template or regular expression, or a `}` that closes nothing) is a refusal
+   naming the file and line, and so is a name holding a tab or line break.
+3. **Gate 10 passes that listing to the check as a fourth argument.** A bare
+   proof name resolves when a tracked Rust source declares it OR a runner-run
+   front-end file declares a test of exactly that name, and a `✓` row whose
+   proof names such a test is accepted. An undeclared name is refused by the
+   same message as before. The step refuses an empty listing
+   (`GATE 10 READ NO FRONT-END TEST.`) and the tool refuses a listing file that
+   names no test, so a glob that stops matching is red rather than a smaller
+   table. The two- and three-argument forms are unchanged, and without a
+   listing a web name is still refused, so a caller cannot lose the check by
+   omitting it.
+
+**What this does not do.** It does not resolve sentence-named web tests
+(`'a seed, a clamp and a restore ...'`) or a snake-case name under D-1606's
+three-underscore threshold (`pauses_while_hidden`): of the 1,403 names the
+tree declares, 26 have the bare-name shape and 1,377 do not,
+and a backticked phrase in a proof cell is not
+distinguishable from prose by shape. A row that cites them is accepted on its
+`.test.js` mention, as before. A web name resolves anywhere among the runner's
+files, not in the file the row names, the rule bare Rust names already follow.
+Both are in docs/06-limits.md (L-G10W-1, L-G10W-2).
+
+**Proof.** Before, on f9cdb5840: `invariant-paths` refused thirteen names
+(lines 7365, 7366, 7405 to 7408) and `invariant-tests` reported
+`1 missing` (GI-08). After, on this branch: `1920 path-qualified test
+references checked`, `0 missing`, both steps exit 0; the web listing reads
+1,403 names from 145 files, which matches the 1,393 `test('` and 10 `test("`
+declarations at line start (the one template-named test is built at run time).
+A copy of the document with one AF06-05 and one R301-04 name misspelled is
+refused by both names. Tests in `.github/invariant_paths.rs`:
+`web_test_names_are_read_from_code_and_never_from_prose`,
+`a_web_source_the_lexer_cannot_delimit_is_refused_by_its_line`,
+`only_a_file_the_runner_runs_declares_a_web_test`,
+`a_bare_proof_name_resolves_against_a_declared_front_end_test`. Fourteen hand
+mutants of the new lines (the method-call rule, the keyword rule, the comment,
+class, interpolation and template rules, the path rule both ways, the listing's
+line-break check, the stray `}`, the unclosed interpolation, the resolution
+and the `✓` union) were each killed by those tests. Invariants G10W-01 to
+G10W-04.
+
+**Cost.** Not a hot path: a CI step, linear in the bytes of the tracked web
+test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
+builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
+p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
+the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
