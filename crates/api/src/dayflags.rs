@@ -543,7 +543,6 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
     let (first, last, page, pages) = page_span(asked);
     let days = days_between(first, last);
     let inst = &asked.instrument;
-    let peer_feed = peer_of(asked.feed);
     let counted = band.rung.unwrap_or_else(|| finest(asked.feed));
     let mut notes: Vec<String> = Vec::new();
     let journal = (asked.feed == Vendor::Gdfl).then(|| journal_rows(root, inst, first, last));
@@ -613,16 +612,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
         ("feed", Value::from(asked.feed.as_str())),
         ("instrument", Value::from(inst.key())),
         ("kind", Value::from(inst.kind().as_str())),
-        (
-            "asked",
-            json!({
-                "from": asked.from.to_string(),
-                "to": asked.to.to_string(),
-                "order": if asked.newest_first { "desc" } else { "asc" },
-                "timeframe": band.rung.map(Timeframe::as_str),
-                "expiry": band.expiry.map(|expiry| expiry.to_string()),
-            }),
-        ),
+        ("asked", asked_json(asked, band)),
         ("page", Value::from(page)),
         ("pages", Value::from(pages)),
         ("page_days", Value::from(PAGE_DAYS)),
@@ -638,15 +628,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
                     .saturating_add(1),
             ),
         ),
-        (
-            "rungs",
-            json!({
-                "held": { "feed": asked.feed.as_str(), "rung": counted.as_str() },
-                "finest": { "feed": asked.feed.as_str(), "rung": finest(asked.feed).as_str() },
-                "peer": { "feed": peer_feed.as_str(), "rung": finest(peer_feed).as_str() },
-                "day_bar": day_bars.as_ref().map(|_| Timeframe::DAY_1.as_str()),
-            }),
-        ),
+        ("rungs", rungs_json(asked.feed, counted, day_bars.is_some())),
         (
             "zerodha_1day_start",
             start.map_or(Value::Null, SeriesStart::json),
@@ -658,6 +640,29 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
         ("rules", rules_json()),
         ("notes", Value::from(notes)),
     ])
+}
+
+/// The answer's `asked`: the range, its order, and the band it was counted at.
+fn asked_json(asked: &Asked, band: rules::Band) -> Value {
+    json!({
+        "from": asked.from.to_string(),
+        "to": asked.to.to_string(),
+        "order": if asked.newest_first { "desc" } else { "asc" },
+        "timeframe": band.rung.map(Timeframe::as_str),
+        "expiry": band.expiry.map(|expiry| expiry.to_string()),
+    })
+}
+
+/// The answer's `rungs`: what `held` counts, the feed's finest beside it, the
+/// peer's, and the day bar where one was read.
+fn rungs_json(feed: Vendor, counted: Timeframe, day_bar: bool) -> Value {
+    let peer = peer_of(feed);
+    json!({
+        "held": { "feed": feed.as_str(), "rung": counted.as_str() },
+        "finest": { "feed": feed.as_str(), "rung": finest(feed).as_str() },
+        "peer": { "feed": peer.as_str(), "rung": finest(peer).as_str() },
+        "day_bar": day_bar.then_some(Timeframe::DAY_1.as_str()),
+    })
 }
 
 /// WHERE THE SERIES STARTS, which decides whether a day can be a refused front
