@@ -77,7 +77,63 @@ the real `api` binary over an empty synthetic store, the speed sheet against it)
 
 ## Gates
 
-To be filled in.
+Run in this cloud container (4 cores, runs as root, node 22.22.0, rustc 1.97.1). Base = `f9cdb584`.
+
+| Gate | Base | Branch |
+|---|---|---|
+| `cargo fmt --all --check` | EXIT 0 | EXIT 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | EXIT 0 | EXIT 0 |
+| `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store` (the known slow cli test skipped, per CONTEXT) | 9,066 passed, 27 failed | 9,066 passed, the **same** 27 failed |
+| `cargo deny check` | EXIT 1: RUSTSEC-2026-0344, 0346, 0347, 0348, 0349 | EXIT 1: exactly the same five (no `Cargo.toml`, `Cargo.lock` or crate file changed) |
+| `node --test web/tests/*.test.js` | 1,400 pass, 0 fail, 5 cancelled | see below |
+| `svelte-check` (gate W3, ceiling 0) | 7 errors | the same 7 errors, none in an R3-15 file |
+| `vite build` (gates W1, W4) | builds | builds, every page inside its budget, no unused CSS selector; `web/build` NOT committed here (NEEDS THE MAC 1) |
+
+The 27 Rust failures are the same on base and branch, in crates R3-15 does not touch, and all but
+two read as permission tests a root process cannot fail (`…unreadable…`, `…cannot be written…`,
+`…read-only…`, `…cannot be unlinked…`); the other two are
+`every_commit_the_store_records_cite_is_on_main_or_says_why_not` (this clone's history) and
+`pullrun::restart_tests::the_journals_own_extremes`. The full list:
+`every_commit_the_store_records_cite_is_on_main_or_says_why_not`,
+`gdfl_import::tests::a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`,
+`gdfl_import::tests::a_journal_that_cannot_be_written_fails_the_day_by_name`,
+`gdfl_tickstore::tests::a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses`,
+`logs::tests::a_directory_that_turns_unreadable_is_never_answered_as_read`,
+`logs::tests::a_ring_file_that_stays_unreadable_is_named_once`,
+`logs::tests::logs_names_a_directory_it_may_not_search`,
+`pullrun::restart_tests::the_journals_own_extremes`,
+`pullrun::tests::an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be`,
+`pullrun::tests::an_index_that_cannot_be_read_never_leaves_the_answer_clean`,
+`scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger`,
+`server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`,
+`server::tests::a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing`,
+`server::tests::a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name`,
+`server::tests::a_run_cut_short_by_a_restart_is_logged_when_it_is_found`,
+`server::tests::a_store_that_cannot_take_a_write_is_found_by_asking_it`,
+`server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`,
+`settings::tests::a_directory_that_stops_being_readable_is_a_fault_not_nothing_new`,
+`settings::tests::a_disk_that_refuses_the_write_is_refused_with_nothing_visible`,
+`settings::tests::a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason`,
+`sink::tests::a_coverage_file_is_read_line_by_line_and_extended_where_it_stands`,
+`sink::tests::a_failed_delete_is_counted_named_and_left_for_the_next_start`,
+`sink::tests::a_rename_aside_that_cannot_happen_fails_the_roll_by_name`,
+`sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`,
+`staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`,
+`watchdog_command::tests::a_read_only_state_directory_sends_no_notice_at_all_rather_than_many`,
+`watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`.
+
+Coverage (`node --test --experimental-test-coverage`, the browser-driving and command tests
+included, child processes merged): 100% lines, 100% branches and 100% functions on all six
+touched JavaScript modules — `src/lib/speed.js`, `src/lib/page-report.js`,
+`src/lib/api-status.js`, `ci/speed-sheet.mjs`, `ci/browser-harness.mjs`, `vite.config.js`.
+`+page.svelte` files are not measured by node's coverage (no tool here instruments a Svelte
+component under `node --test`); the Speed page's logic is in `$lib/speed.js`, which is.
+
+Mutation: no JavaScript mutation tool is in `web/package.json` and adding one is a dependency
+change outside this part, so a small mutation runner (scratch, not tracked) applied 17 operators
+(`===`/`!==`, `<`/`<=`/`>`/`>=`, `&&`/`||`, `true`/`false`, `±1`, `some`/`every`, `!` removal,
+`??`→`||`, statement deletion) line by line and ran the node tests (the four browser and command
+tests left out, for time). First pass, before the tests it led to: see below.
 
 ## NEEDS THE MAC
 
