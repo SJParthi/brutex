@@ -10388,4 +10388,136 @@ mod cloud_walk_tests {
             found.guessed
         );
     }
+
+    /// A run left open at `ordinal`, opened over `20_000..20_010` by "kite".
+    fn run_at(ordinal: u64) -> Interrupted {
+        Interrupted {
+            ordinal,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "kite".to_owned(),
+            scope: Scope::Spot,
+            ask: Some(0xD),
+            window: Some((20_000, 20_010)),
+            failures: 0,
+            failures_whole: true,
+            note: "opened".to_owned(),
+            undecodable_before: 0,
+            undecodable: String::new(),
+            newer_may_be_open: false,
+            older_unread: None,
+            open_count: 1,
+            also_open: Vec::new(),
+            runs_unread: 0,
+        }
+    }
+
+    fn span(scan_first: u64) -> Span {
+        Span {
+            records: 1_000,
+            scan_first,
+            settled: false,
+            weak_close: None,
+            runs_unread: 0,
+        }
+    }
+
+    fn guessed_of(answer: Restart) -> Guessed {
+        match answer {
+            Restart::Guessed(guessed) => *guessed,
+            other => panic!("expected a guessed answer, got {other:?}"),
+        }
+    }
+
+    fn pairing_at(close: u64, runs: Vec<u64>) -> Guess {
+        Guess::Pairing { close, runs, at: 5 }
+    }
+
+    /// **A guess with no reading is NOT KNOWN with nothing sure, nothing
+    /// doubted and nothing counted.** Covers the `None` side of
+    /// `guessed_answer`'s `if let Some(run) = &reading` (pullrun.rs:2406).
+    #[test]
+    fn a_guess_with_no_reading_claims_no_run() {
+        let answer = guessed_of(guessed_answer(
+            &[pairing_at(30, vec![20, 10])],
+            None,
+            Vec::new(),
+            &[],
+            None,
+            span(0),
+        ));
+        assert!(answer.reading.is_none());
+        assert!(answer.sure.is_empty() && answer.doubted.is_empty());
+        assert_eq!((answer.unnamed, answer.at_least_open()), (0, 0));
+        assert_eq!(answer.guessed_runs, [10, 20]);
+        assert!(
+            answer
+                .why
+                .contains("Read one way, the records leave no run open"),
+            "{}",
+            answer.why
+        );
+    }
+
+    /// **The reading's run, known only through a restated head before an
+    /// index that could not be read, is doubted, never sure.** Its close may
+    /// lie before the scan, where the index would have shown it. Covers
+    /// `guessed_answer`'s `restated_unread` arm (pullrun.rs:2411-2416); the
+    /// same run at or past the scan's first record is read whole, and sure.
+    #[test]
+    fn a_reading_known_only_before_an_unread_index_is_doubted() {
+        let unread = Some("the index would not open");
+        let answer = guessed_of(guessed_answer(
+            &[pairing_at(900, vec![880, 870])],
+            Some(run_at(40)),
+            Vec::new(),
+            &[],
+            unread,
+            span(200),
+        ));
+        assert!(answer.sure.is_empty(), "{:?}", answer.sure);
+        let [doubted] = answer.doubted.as_slice() else {
+            panic!("one doubted run: {:?}", answer.doubted);
+        };
+        assert_eq!(doubted.ordinal, 40);
+        assert_eq!(doubted.doubt, Some(CLOSE_UNREAD));
+
+        let read = guessed_of(guessed_answer(
+            &[pairing_at(900, vec![880, 870])],
+            Some(run_at(300)),
+            Vec::new(),
+            &[],
+            unread,
+            span(200),
+        ));
+        assert_eq!(read.sure.len(), 1, "{:?}", read.sure);
+        assert!(read.doubted.is_empty());
+    }
+
+    /// **A counted pairing is a fact only where nothing unread could move
+    /// it.** With the index unread, a pairing whose oldest run lies before
+    /// the scan is dropped from the counts (its close may lie there), and one
+    /// whose runs all lie in the scan is kept. Covers the right side of
+    /// `guessed_answer`'s left-open filter (pullrun.rs:2450).
+    #[test]
+    fn a_count_an_unread_index_could_move_is_not_claimed() {
+        let counted = |runs: Vec<u64>| LeftOpen {
+            close: 950,
+            left_open: runs.len() as u64 - 1,
+            runs,
+            scope: Scope::Spot,
+            source: "kite".to_owned(),
+        };
+        let answer = guessed_of(guessed_answer(
+            &[pairing_at(950, vec![940, 930])],
+            None,
+            vec![counted(vec![940, 100]), counted(vec![940, 930])],
+            &[],
+            Some("the index would not open"),
+            span(200),
+        ));
+        assert_eq!(answer.left_open.len(), 1, "{:?}", answer.left_open);
+        assert_eq!(answer.left_open[0].runs, [940, 930]);
+        assert_eq!(answer.at_least_open(), 1);
+    }
 }
