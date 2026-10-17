@@ -1596,6 +1596,9 @@ mod chain;
 mod dayflags;
 #[path = "facets.rs"]
 mod facets;
+// THE COVERAGE ROLL-UP PER MONTH, read off the facet index (R3-09).
+#[path = "census_rollup.rs"]
+mod census_rollup;
 #[path = "import_journal.rs"]
 pub(crate) mod import_journal;
 #[path = "imports.rs"]
@@ -16065,6 +16068,14 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             "/census/facets.json",
             axum::routing::get(facets::facets_json),
         )
+        .route(
+            "/census/warm.json",
+            axum::routing::get(census_cache::census_warm_json),
+        )
+        .route(
+            "/census/rollup.json",
+            axum::routing::get(census_rollup::rollup_json),
+        )
         .route("/chain.json", axum::routing::get(chain::chain_json))
         .route("/imports.json", axum::routing::get(imports::imports_json))
         // FREE SPACE, STORE SIZE, WHAT THE CENSUS KEEPS AND WHETHER A COPY IS
@@ -17309,8 +17320,30 @@ impl HeadDeadline {
                     waker.wake();
                 }
             }
+            // A RESPONSE STILL BEING WRITTEN, with no byte of a next head yet,
+            // moves the next head's clock to after THIS write, so it starts
+            // when the response ends, as the deadline's own doc says. It was
+            // armed by the response's FIRST write and never moved, so a body
+            // that took longer than the deadline to write was cut mid-body:
+            // `/store.json?feed=gdfl&encoding=census-tuples-v1`, 183,715,726
+            // bytes, ended at 138 to 178 MB at 10.2 to 10.4 s with curl exit
+            // 18 on the shadow of the real store (R3-09, 17 Oct 2026). One
+            // timer reset per write.
+            HeadState::Awaiting {
+                progress,
+                partial: false,
+                ..
+            } => {
+                let deadline = tokio::time::Instant::now() + self.timeout;
+                self.state = HeadState::Awaiting {
+                    deadline,
+                    progress,
+                    partial: false,
+                };
+                self.alarm.as_mut().reset(deadline);
+            }
             // A pipelined head already under way keeps its own clock.
-            HeadState::Awaiting { .. } => {}
+            HeadState::Awaiting { partial: true, .. } => {}
         }
     }
 
@@ -17746,6 +17779,78 @@ mod head_deadline_tests {
                 }),
             )
             .route("/ignore", axum::routing::post(|| async { "ignored" }))
+            .route(
+                "/drip",
+                axum::routing::get(|| async {
+                    axum::body::Body::new(Drip {
+                        left: DRIPS,
+                        alarm: Box::pin(tokio::time::sleep(Duration::ZERO)),
+                    })
+                }),
+            )
+    }
+
+    /// How many chunks `/drip` writes, one every `T / 2`: four deadlines.
+    const DRIPS: usize = 8;
+
+    /// A body of [`DRIPS`] chunks, one every `T / 2`: a response that takes
+    /// longer than the head deadline to WRITE, as a 184 MB census body does.
+    struct Drip {
+        left: usize,
+        alarm: std::pin::Pin<Box<tokio::time::Sleep>>,
+    }
+
+    impl http_body::Body for Drip {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            let this = self.get_mut();
+            if this.left == 0 {
+                return std::task::Poll::Ready(None);
+            }
+            if this.alarm.as_mut().poll(cx).is_pending() {
+                return std::task::Poll::Pending;
+            }
+            this.left -= 1;
+            this.alarm.as_mut().reset(Instant::now() + T / 2);
+            std::task::Poll::Ready(Some(Ok(http_body::Frame::data(
+                axum::body::Bytes::from_static(b"drip\n"),
+            ))))
+        }
+    }
+
+    /// **A RESPONSE LONGER THAN THE DEADLINE TO WRITE IS DELIVERED WHOLE**
+    /// (R3-09). The next head's clock starts when the response ENDS: a body
+    /// written over four deadlines on a kept-alive connection arrives to its
+    /// last chunk, and the connection then gets its fresh clock. Before, the
+    /// clock was armed by the response's first write and cut the body one
+    /// deadline later: the 184 MB GDFL census body ended mid-row at 10.2 s.
+    #[tokio::test]
+    async fn a_response_longer_than_the_deadline_to_write_is_delivered_whole() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /drip HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let said = one_response(&mut client, "0\r\n\r\n").await;
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert_eq!(said.matches("drip\n").count(), DRIPS, "{said:?}");
+        assert!(
+            began.elapsed() >= T * 3,
+            "the body took {:?}",
+            began.elapsed()
+        );
+        // AND THEN THE FRESH CLOCK: idle, the kept-alive socket is closed.
+        let (rest, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "an idle kept-alive socket was held forever");
+        assert_eq!(rest, "");
+        let _ = stop.send(());
     }
 
     /// A server on an ephemeral port, and the sender that stops it.
@@ -19911,6 +20016,12 @@ async fn run_in_over(
                 // build at most a budget before it is answered "building".
                 if let Err(why) = calendar_route::warm_at_start(&site) {
                     warn_line!("Calendars NOT warmed at start: {why}");
+                }
+                // AND THE CENSUS, THE FACET INDEX AND THE INDEX MAP, each
+                // "warming" then "ready" by name on /census/warm.json; from
+                // here a changed census is re-read in the background (R3-09).
+                if let Err(why) = census_cache::start(&site, &calendar_route::offered_feeds()) {
+                    warn_line!("Census caches NOT warmed at start: {why}");
                 }
                 // THE ONE WRITE PATH NO REQUEST STARTS, BEHIND THE SAME GATE
                 // (DB-B79, DB-B71): a plan left in flight is resumed only by
