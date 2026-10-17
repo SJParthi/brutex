@@ -25,6 +25,52 @@ touches only test code under `crates/pull`, one test-order override in
 `.config/nextest.toml`, one gate-1d declaration in `.github/gates_tree.rs`,
 and this report.
 
+## Result
+
+On the branch head, under Gate 18's own flags and as an unprivileged user,
+**every mutant that can be killed in the ten files is killed**, and **no
+mutant times out**. What survives is 19 mutants proved equivalent (the old
+18, re-confirmed, and one on a line `feat/db-fix` added). **No real bug was
+found**; one missing test was (`stored_line`'s whole-day answer), and is
+written. Lines and branches: five files at 100% of both; every line and
+branch left in the other five is listed with why no test can reach it.
+
+| Run (Gate 18 flags, user `mut`) | Mutants | Caught | Missed | Timeout | Unviable |
+|---|---:|---:|---:|---:|---:|
+| `survivors1` — the old pass's 23 survivors, before this pass's tests | 23 | 1 | 18 | 4 | 0 |
+| `timeouts2` — the 4 timeouts and the 1 old timeout caught above, after | 5 | **5** | 0 | **0** | 0 |
+| `newcode` — every mutant on a line `feat/db-fix` changed since `c9e3472` | 58 | 53 | 2 | 0 | 3 |
+| `rmrest` — the rest of `request_minutes.rs` | 115 | 104 | 2 | 0 | 9 |
+| `fixed544` — `stored_line`'s mutant after its new test | 1 | PENDING | | | |
+
+The eight files whose production code is unchanged since `c9e3472` were not
+re-mutated whole: the old pass killed every killable mutant in them against
+a suite that is a subset of today's (no test removed, 52 added), and their
+survivors and timeouts were re-tested above.
+
+## Done (the old report's NOT DONE list, item by item)
+
+| Old NOT DONE item | Now |
+|---|---|
+| Branch coverage not measured | **Measured** (nightly `--branch`, opt-level 0, unprivileged): 818/842 branches; five files 100%; each remaining branch explained. |
+| Five timeouts remain timeouts | **All five caught** under Gate 18's flags: one already was under nextest, three by the old pass's fold watchdog run first, one by a new options-expiry watchdog run first. |
+| 18 equivalent mutants remain missed | **Re-confirmed missed under Gate 18's flags**, each still equivalent for the stated reason; one more found on new code (`gdfl_archive.rs:280:58`). 16 of the 19 sit on lines Gate 18 will plan for `feat/db-fix` → `main` (NEEDS THE MAC 1). |
+| Uncovered production lines remain | Reduced: `cash_session_cache.rs:184–188` now counted (the uid-65534 child's own run); twelve provokable refusal and host-error paths given tests (Tests added); every line still unreached listed with why. |
+| The container runs as root; three tests fail as root | `gdfl_tickstore`'s test now re-runs itself where permission binds and passes as root. The two in `gdfl_import` (not this part's files) still fail as root and pass as any ordinary user. Every run here was also made as an ordinary user. |
+| Not run: `cargo deny`, workspace clippy and tests | **Run** (Gates). |
+| CI red on the old draft PR for base-snapshot reasons | No PR is opened from this branch. Gate 1d checked locally: red on the base, this branch adds no undeclared word. |
+
+Also found and fixed in the re-applied tests: one test failed as any
+ordinary user whose temporary directory is longer than `/tmp` (the socket
+name overflowed `sun_path`; on a Mac it would always fail), and three
+undeclared gate-1d words.
+
+## Left
+
+- `fixed544`'s result (running at the time of this line).
+- Nothing else in scope. Everything that needs a decision is under NEEDS
+  THE MAC.
+
 ## Method
 
 | | |
@@ -94,6 +140,15 @@ rest request-audit, tick-store and import tests).
 
 The three unviable mutants ask `Default` of `Entry`, `ZipEntry` and `Group`,
 which do not implement it.
+
+### The rest of `request_minutes.rs`
+
+Run `rmrest`: every other mutant of the file (`-f request_minutes.rs`, the
+58 above excluded by name), the same flags with two test threads. Baseline
+62 s build, 255 s test. **115 mutants: 104 caught, 9 unviable, 2 missed** —
+the two old equivalents `333:35` and `347:22`, nothing else. Every catch is
+a behaviour test (`emit_sites::every_emit_site_in_this_crate_reaches_a_file`
+32, the request-audit tests the rest); none is a timing test.
 
 ### Equivalent mutants (18, missed by construction)
 
