@@ -1751,4 +1751,81 @@ mod cloud_mutant_tests {
         }));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A PAGE ASKED AGAIN STARTS ITS UNREAD COUNT AGAIN, AND A COUNT IS
+    /// TAKEN ONCE.** A stretch of a slot the plan does not hold is counted
+    /// unread; cleared, the ledger gives nothing; not cleared, it gives the
+    /// month once. Kills `clear_unread -> ()`, which the 16 Oct pass called
+    /// unobservable because every reader drains the ledger first: the
+    /// method's own contract is asked here.
+    #[test]
+    fn clearing_the_unread_ledger_forgets_what_a_read_left_unread() {
+        let root = scratch("clear-unread");
+        plant(&root, month(5), 2, &[555]);
+        let mut held = plan(&root, &[month(5)], Filter::default());
+        let mut faults = crate::fault_log::FaultLog::default();
+        let mut since = 0;
+        let unread = |held: &mut SeriesPlan, since: &mut u64| {
+            held.read_stretch(&root, 9, (0, 3), &Cancel::never(), since, |_, _| {})
+                .expect("a refusal is counted, not raised")
+        };
+        assert_eq!(unread(&mut held, &mut since), 3);
+        held.clear_unread();
+        assert_eq!(held.take_unread(&mut faults, |_| {}), Unread::default());
+        assert_eq!(unread(&mut held, &mut since), 3);
+        assert_eq!(
+            held.take_unread(&mut faults, |_| {}),
+            Unread { rows: 3, months: 1 }
+        );
+        assert_eq!(held.take_unread(&mut faults, |_| {}), Unread::default());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN INSTANT PAST A DAY'S WINDOW, ON THAT DAY, RANKS AT THE NEXT DAY'S
+    /// FIRST KEPT ROW**: under a 10:00–10:59 window over the 2nd and the 3rd,
+    /// noon on the 2nd has both of the 2nd's kept rows before it and stands
+    /// at the 3rd's run. Kills `run_at + 1 -> run_at * 1` in `rank`, which
+    /// the 16 Oct pass called unobservable because callers read only the
+    /// count: the position's run and row are the answer here.
+    #[test]
+    fn an_instant_past_a_days_window_ranks_at_the_next_days_first_row() {
+        let root = scratch("rank-past-window");
+        plant(&root, month(5), 2, &[600, 601]);
+        plant(&root, month(5), 3, &[600, 601]);
+        let mut held = plan(
+            &root,
+            &[month(5)],
+            Filter {
+                tod: Some((36_000, 39_599)),
+                ..Filter::default()
+            },
+        );
+        assert_eq!(held.runs.len(), 2, "one run a day");
+        let noon = month(5).ist_bounds_micros().0 + (DAY_SECS + 12 * 3_600) * MICROS;
+        assert_eq!(
+            held.rank(&root, noon),
+            Ok(Position {
+                count: 2,
+                run: 1,
+                row: 2
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A MONTH NO SLOT HOLDS HAS NO SLOT, BEFORE THE FIRST OR AFTER THE
+    /// LAST.** Kills `mid + 1 -> mid * 1` in `slot_of`, which the 16 Oct pass
+    /// called equivalent having asked only a month before every slot: past
+    /// the last slot the search would never end.
+    #[test]
+    fn a_month_outside_the_slots_has_no_slot() {
+        let root = scratch("slot-outside");
+        plant(&root, month(5), 2, &[555]);
+        let held = plan(&root, &[month(4), month(5), month(6)], Filter::default());
+        assert_eq!(held.slots.len(), 1);
+        assert_eq!(held.slot_of(month(4)), None);
+        assert_eq!(held.slot_of(month(5)), Some(0));
+        assert_eq!(held.slot_of(month(6)), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

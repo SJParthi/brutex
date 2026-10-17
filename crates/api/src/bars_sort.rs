@@ -4407,4 +4407,52 @@ mod cloud_mutant_tests {
         println!("both memos held their budgets");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **AN INDEX SET ASIDE IN THIS REQUEST IS SET ASIDE BY ITS PATH AND
+    /// ITS STAMP TOGETHER**: an entry naming the same path at another stamp
+    /// (the file was rebuilt since), or another path at the same stamp, sets
+    /// nothing aside; only both refuse it. Kills `&& with ||` in `view`'s
+    /// set-aside test, which the 16 Oct pass called unreachable within one
+    /// request: `view` is asked here with the list a request would hold.
+    #[test]
+    fn an_index_is_set_aside_only_at_its_own_path_and_stamp() {
+        let root = scratch("aside-match");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let (mut plans, _) = plans_of(&root, &query(index(), month(1), month(1), SortKey::Close));
+        let plan = plans.first_mut().expect("one plan");
+        let stamp = super::Stamp::of(&std::fs::metadata(&srt).expect("the index's stamp"));
+        let other = super::Stamp::of(
+            &std::fs::metadata(srt.with_extension("bin")).expect("the bars' stamp"),
+        );
+        assert_ne!(stamp, other);
+        let why: std::sync::Arc<str> = std::sync::Arc::from("refused by the host");
+        for (aside, refused) in [
+            (vec![(srt.clone(), other, why.clone())], false),
+            (vec![(srt.with_extension("tix"), stamp, why.clone())], false),
+            (vec![(srt.clone(), stamp, why.clone())], true),
+        ] {
+            let got = super::view(&root, plan, 0, 60, &aside);
+            assert_eq!(got.is_err(), refused, "{:?}", got.err());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A SLOT NO RUN HOLDS HAS NO RUN, PAST THE LAST AS BEFORE THE FIRST.**
+    /// Kills `< with <=` and `+ with *` in `run_of_slot`, which the 16 Oct
+    /// pass called equivalent because the slot asked is always a run's: past
+    /// the last run either search would never end.
+    #[test]
+    fn a_slot_past_every_run_has_no_run() {
+        let root = scratch("run-of-slot");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        write(&root, &index(), month(2), &rows, &rows);
+        let (plans, _) = plans_of(&root, &query(index(), month(1), month(3), SortKey::Close));
+        let plan = plans.first().expect("one plan");
+        assert_eq!(plan.runs.len(), 1);
+        assert_eq!(super::run_of_slot(plan, 0), Some(0));
+        assert_eq!(super::run_of_slot(plan, 1), None);
+        assert_eq!(super::run_of_slot(plan, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
