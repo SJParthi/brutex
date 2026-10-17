@@ -501,6 +501,95 @@ fn an_operator_prerequisite_is_never_met_silently() {
     }
 }
 
+/// **A PERSON'S DECISION IS NEVER ATTESTED BY THE STARTER.** Before this
+/// change a starter passing an approval item's exact words in
+/// `Facts::attested` met it, so S-33's "approval, and a docs/05 entry" was
+/// admitted by the program that wanted to run, with no one's yes recorded.
+#[test]
+fn a_persons_decision_is_met_only_by_a_recorded_yes() {
+    let attest = |words: &str| Facts {
+        attested: vec![words.to_owned()],
+        ..QUIET
+    };
+    for words in [
+        "approval, and a docs/05-decisions.md entry moving the window",
+        "approval of the futures pull",
+        "the full rebuild only on the operator's yes",
+        "an owner for the rebuild of capital-market months",
+        "the restore drill (it changes what the drive keeps, so no agent runs it)",
+        "a decision on the window",
+        "the operator's Sign-Off",
+    ] {
+        assert!(needs_a_person(words), "{words}");
+        let g = with_operator(&format!("[\"R9-01\", \"operator: {words}\"]"), "");
+        let refused = g.admit("tick-day-import", &attest(words)).unwrap_err();
+        assert_eq!(
+            refused,
+            Refusal::OperatorPending {
+                kind: "tick-day-import".to_owned(),
+                step: "S-90".to_owned(),
+                items: vec![words.to_owned()],
+            },
+            "{words}"
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("a person's decision: only operator_yes meets it"),
+            "{refused}"
+        );
+        // The same item with the operator's recorded yes is admitted, and
+        // handed back as recorded, never as attested.
+        let yes = format!("operator_yes = [\"{words} | operator, 17 Oct 11:00 IST: 'yes'\"]");
+        let g = with_operator(&format!("[\"R9-01\", \"operator: {words}\"]"), &yes);
+        let admitted = g.admit("tick-day-import", &attest(words)).unwrap();
+        assert_eq!(
+            admitted.operator[0].by,
+            MetBy::Recorded("operator, 17 Oct 11:00 IST: 'yes'".to_owned())
+        );
+    }
+    // THE REAL LIST: every operator item is read, and each one a starter may
+    // attest is a condition it can read for itself (a token, the writers, a
+    // drive, a file); every approval, yes, owner and no-agent item is not.
+    let items: Vec<&str> = LIST
+        .split("\"operator: ")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert!(items.len() >= 10, "{items:?}");
+    let attestable: Vec<&str> = items
+        .iter()
+        .copied()
+        .filter(|w| !needs_a_person(w))
+        .collect();
+    for w in &attestable {
+        assert!(
+            [
+                "Kite access token",
+                "every writer stopped",
+                "scratch store",
+                "second drive",
+                "symbolchange.csv"
+            ]
+            .iter()
+            .any(|c| w.contains(c)),
+            "{w:?} is attestable but names no condition a starter reads"
+        );
+    }
+    assert!(attestable.iter().any(|w| w.contains("Kite access token")));
+    assert!(
+        attestable
+            .iter()
+            .any(|w| w.contains("every writer stopped"))
+    );
+    for w in &items {
+        let l = w.to_ascii_lowercase();
+        if l.contains("approval") || l.contains("no agent") || l.contains("owner") {
+            assert!(needs_a_person(w), "{w:?}");
+        }
+    }
+}
+
 #[test]
 fn a_done_or_withdrawn_step_never_starts_by_itself() {
     for (state, says) in [

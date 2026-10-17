@@ -71016,7 +71016,15 @@ or a package declared twice as last-wins, admitted a kind on a `done` or
    words of the yes>"`, or (b) the starter attesting the item's exact words
    in `Facts::attested` at the moment of the start — for a condition it can
    read for itself (a Kite token read from Parameter Store and found valid;
-   every writer stopped). A person's approval is always (a). Anything else
+   every writer stopped). A person's approval is always (a), and the gate
+   enforces it: an item whose words name an approval, a yes, a decision, an
+   owner, a sign-off or "no agent" (`rehearsal::PERSON_ONLY`, any case) is
+   never met by an attestation, so a starter cannot approve its own run by
+   passing the approval's words (repair 1b; the attested-approval case was
+   admitted before it, `a_persons_decision_is_met_only_by_a_recorded_yes`).
+   The word list errs toward the person: an attestable condition that
+   happened to use one of those words would need a recorded yes, never the
+   reverse. Anything else
    is `operator_pending`, naming each unmet item; an admitted kind returns
    every item with how it was met (`Admitted::operator`) so the run records
    it. A yes that names no operator item of its step word for word, or says

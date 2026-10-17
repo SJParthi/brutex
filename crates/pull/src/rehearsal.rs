@@ -29,7 +29,9 @@
 //! entry `"<the item's words, exactly> | <who, when, and the words of the
 //! yes>"` — or by the caller attesting, at the moment of the start, that the
 //! condition holds ([`Facts::attested`], the item's words exactly: a Kite
-//! token read and found valid, every writer stopped). Anything less is
+//! token read and found valid, every writer stopped). An item that is a
+//! person's decision ([`PERSON_ONLY`]: an approval, a yes, an owner, an item
+//! no agent runs) is never met by an attestation. Anything less is
 //! [`Refusal::OperatorPending`] naming each unmet item, and an admitted kind
 //! hands every item back to its starter with how it was met
 //! ([`Admitted::operator`]).
@@ -97,6 +99,22 @@ pub const OPERATOR: &str = "operator: ";
 
 /// What separates an `operator_yes` entry's item words from who said yes.
 pub const YES_SEPARATOR: &str = " | ";
+
+/// Words that make an `operator: <what>` item a person's decision, read in
+/// any case: an approval, a yes, a decision, an owner, a sign-off, or an item
+/// that says no agent runs it. Such an item is met only by the step's
+/// recorded `operator_yes`; a starter attesting its words is not a person
+/// saying yes, so the attestation does not meet it.
+pub const PERSON_ONLY: [&str; 7] = [
+    "approv", "yes", "decision", "owner", "sign-off", "sign off", "no agent",
+];
+
+/// Whether the operator item `words` is a person's decision ([`PERSON_ONLY`]).
+#[must_use]
+pub fn needs_a_person(words: &str) -> bool {
+    let lower = words.to_ascii_lowercase();
+    PERSON_ONLY.iter().any(|w| lower.contains(w))
+}
 
 /// The shortest and longest commit hash a commit stamp may name.
 const COMMIT_HEX: std::ops::RangeInclusive<usize> = 7..=40;
@@ -317,8 +335,16 @@ impl fmt::Display for Refusal {
             }
             Self::OperatorPending { kind, step, items } => write!(
                 f,
-                "operator pending: {kind} ({step}) waits for the operator: {}; met only by the step's operator_yes for that item or by the starter attesting it now",
-                items.join("; ")
+                "operator pending: {kind} ({step}) waits for the operator: {}; met only by the step's operator_yes for that item or, for a condition the starter can read, by the starter attesting it now",
+                items
+                    .iter()
+                    .map(|i| if needs_a_person(i) {
+                        format!("{i} (a person's decision: only operator_yes meets it)")
+                    } else {
+                        i.clone()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
             Self::StepClosed { kind, step, state } => write!(
                 f,
@@ -748,7 +774,7 @@ impl Entry {
         {
             let by = if let Some(yes) = yes_for(&self.operator_yes, words) {
                 MetBy::Recorded(yes.to_owned())
-            } else if facts.attested.iter().any(|a| a == words) {
+            } else if !needs_a_person(words) && facts.attested.iter().any(|a| a == words) {
                 MetBy::Attested
             } else {
                 pending.push(words.to_owned());
