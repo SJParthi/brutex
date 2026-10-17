@@ -230,3 +230,171 @@ async fn a_cash_schedule_is_refused_for_any_source_but_the_exact_nse_cash_identi
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The address every lock stamp in this file names.
+fn lock_addr() -> SocketAddr {
+    "127.0.0.1:0".parse().expect("an address")
+}
+
+/// **A serve kept to the process's end keeps its store held, with no log to
+/// close.** `keep_to_exit` forgets the lock instead of releasing it, so the
+/// root stays in this process's serving set and the next take in this
+/// process is handed the in-process pass, not the file lock. Covers the
+/// no-log side of `keep_to_exit`'s `if let Some(log)` (server.rs:17618).
+#[test]
+fn a_serve_kept_to_exit_keeps_its_store_held_with_no_log_to_close() {
+    let root = fresh_dir("kept-to-exit");
+    let lock = take_serve_lock(&root, lock_addr()).expect("a free store");
+    assert!(lock.held.is_some(), "the premise: the file lock is held");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let held = Held {
+        log: None,
+        lock: Some(lock),
+        port: Some(port),
+    };
+    assert!(held.holds());
+    held.keep_to_exit();
+    let again = take_serve_lock(&root, lock_addr()).expect("this process may serve twice");
+    assert!(
+        again.held.is_none(),
+        "the store is still held by the kept lock: an in-process pass"
+    );
+}
+
+/// **A lock whose stamp and clear both fail refuses the serve, naming both
+/// errors.** `/dev/full` takes an advisory lock but refuses every write
+/// (`ENOSPC`) and every truncation (`EINVAL`, it is a character device), so
+/// the lock would be held while possibly naming a previous holder. Covers
+/// the `?` of `stamp_serve_lock` (server.rs:18787).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lock_that_can_be_neither_stamped_nor_emptied_refuses_the_serve() {
+    let root = fresh_dir("lock-dev-full");
+    let canonical = std::fs::canonicalize(&root).expect("the root resolves");
+    std::os::unix::fs::symlink("/dev/full", root.join(SERVE_LOCK))
+        .expect("the lock name points at a device that takes nothing");
+    let why = take_serve_lock(&root, lock_addr()).expect_err("unstampable and unclearable");
+    let head = format!(
+        "REFUSED: the one-server lock {} was taken, but this instance's address and pid \
+         could not be written into it — ",
+        canonical.join(SERVE_LOCK).display()
+    );
+    assert!(why.starts_with(&head), "{why}");
+    assert!(
+        why.contains("and the file could not be emptied either — "),
+        "{why}"
+    );
+    // AND THE KEY WAS GIVEN BACK: once the obstacle is gone the file lock is
+    // taken, not an in-process pass.
+    std::fs::remove_file(root.join(SERVE_LOCK)).expect("the obstacle removed");
+    let taken = take_serve_lock(&root, lock_addr()).expect("free once the obstacle is gone");
+    assert!(taken.held.is_some());
+    drop(taken);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **An override with no subsystem name is ignored by name, and the rest of
+/// the setting still applies.** `=debug` names a level and no target, so it
+/// is neither the floor nor an override. Covers the empty-target side of
+/// `log_level_from`'s `!target.is_empty()` (server.rs:19214).
+#[test]
+fn an_override_with_no_subsystem_is_ignored_by_name() {
+    let (config, note) = log_level_from(Some("=debug,pull=trace"));
+    assert_eq!(config.target_levels.len(), 1, "only pull=trace applied");
+    assert!(note.contains("; per subsystem: pull=trace"), "{note}");
+    assert!(
+        note.contains("; IGNORED as unreadable: =debug — a level is one of "),
+        "{note}"
+    );
+    assert!(
+        note.starts_with("floor info (default)"),
+        "no bare level was named: {note}"
+    );
+}
+
+/// **An empty vectored write through the head deadline moves nothing and
+/// re-arms nothing; a real one re-arms.** Covers the `n > 0` guard of
+/// `poll_write_vectored` (server.rs:17416), the twin of
+/// `a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved`.
+#[tokio::test]
+async fn a_vectored_write_through_the_head_deadline_rearms_only_when_bytes_moved() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let (server, _) = listener.accept().await.expect("accept");
+    let slots = std::sync::Arc::new(Slots {
+        live: std::sync::atomic::AtomicUsize::new(1),
+        cap: 1,
+        freed: tokio::sync::Notify::new(),
+    });
+    let slot = Slot(std::sync::Arc::clone(&slots));
+    let mut wrapped = HeadDeadline::new(server, slot, std::time::Duration::from_secs(30));
+
+    wrapped.state = HeadState::Delivered;
+    let none = wrapped
+        .write_vectored(&[std::io::IoSlice::new(b"")])
+        .await
+        .expect("an empty write");
+    assert_eq!(none, 0);
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+
+    let wrote = wrapped
+        .write_vectored(&[
+            std::io::IoSlice::new(b"HTTP/1.1 "),
+            std::io::IoSlice::new(b"200"),
+        ])
+        .await
+        .expect("a write");
+    assert!(wrote > 0, "bytes moved");
+    assert!(matches!(
+        wrapped.state,
+        HeadState::Awaiting {
+            progress: 0,
+            partial: false,
+            ..
+        }
+    ));
+    let mut got = vec![0_u8; wrote];
+    client
+        .read_exact(&mut got)
+        .await
+        .expect("the peer reads it");
+    assert_eq!(&got, &b"HTTP/1.1 200"[..wrote]);
+    drop(wrapped);
+    assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// **A publishable pass says so with no reason, bounds its failures at eight
+/// and lists every unlinked index apart, comma-separated.** Covers
+/// `universe_snapshot_json`'s `Ok` verdict (server.rs:34893) and both lists'
+/// separators (34913, 34927), which a one-element list never wrote.
+#[test]
+fn a_publishable_pass_writes_no_reason_and_separates_every_list() {
+    let failure = |n: usize| pull::resolve::IndexFailure {
+        at: format!("listing-{n}"),
+        why: "503".to_owned(),
+    };
+    let snap = pull::resolve::Snapshot {
+        day: Day::new(2026, 8, 4).expect("a day"),
+        feed: Vendor::Groww.as_str().to_owned(),
+        key: pull::universe::JoinKey::Isin,
+        resolutions: Vec::new(),
+        failures: (0..9).map(failure).collect(),
+        unlinked: vec![failure(100), failure(101)],
+    };
+    let json = universe_snapshot_json(&snap, &Ok(()));
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(doc["publishable"], true);
+    assert!(doc.get("why").is_none(), "no reason for a publishable pass");
+    assert_eq!(doc["failed"], 9, "the count is whole");
+    let shown = doc["failures"].as_array().expect("a list");
+    assert_eq!(shown.len(), 8, "the list is bounded at eight");
+    assert_eq!(shown[7]["at"], "listing-7");
+    assert_eq!(
+        doc["unlinked_at"],
+        serde_json::json!(["listing-100", "listing-101"])
+    );
+}
