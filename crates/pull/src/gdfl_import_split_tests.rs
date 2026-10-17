@@ -10,10 +10,10 @@
 //!   below were taken by this same test on the unsplit file (`feat/db-fix`
 //!   at `d7eb0ecf`, the test file and its one `mod` line added) and again on
 //!   the split, and are equal.
-//! - `the_split_moves_lines_and_changes_none` (with the split): the
-//!   non-blank lines of the six files are the unsplit file's lines as a
-//!   multiset, apart from module, use and visibility lines, and it counts
-//!   the lines that differ (zero).
+//! - [`the_split_moves_lines_and_changes_none`]: the non-blank lines of the
+//!   six files are the unsplit file's lines as a multiset, apart from
+//!   module, use and visibility lines, and it counts the lines that differ
+//!   (zero).
 //!
 //! Every fixture value is invented (D-2800): no vendor row is quoted, and
 //! the prices are made up at run time.
@@ -99,12 +99,12 @@ fn stock_file(stem: &str, d: Day) -> Vec<u8> {
 /// An invented option file: traded and untraded rows, an open interest that
 /// moves, `step` seconds apart.
 fn option_file(ticker: &str, d: Day, ltp: &str, step: u32) -> Vec<u8> {
-    let stem = format!("{ticker}.NFO");
+    let name = format!("{ticker}.NFO");
     let mut rows = Vec::new();
     for s in (0..22_500).step_by(usize::try_from(step).unwrap()) {
         let ltq = u64::from(s % 3) * 15;
         rows.push(row(
-            &stem,
+            &name,
             d,
             NINE_FIFTEEN + s,
             ltp,
@@ -671,4 +671,301 @@ fn the_split_importer_writes_the_same_bytes() {
         .map(|(rel, hex)| ((*rel).to_owned(), (*hex).to_owned()))
         .collect();
     assert_eq!(left, want, "the files the runs left, and their bytes");
+}
+
+// ── the lines: moved, none changed ──────────────────────────────────────────
+
+/// The unsplit file, `crates/pull/src/gdfl_import.rs` at `d7eb0ecf` (the head
+/// of `feat/db-fix` the split was cut from): its git blob.
+const BEFORE_BLOB: &str = "1c349b131e44b6a8551aad620311fbc46838ac78";
+
+/// The unsplit file's non-blank lines less its module and use lines, each
+/// with its visibility taken out ([`counted`]): how many, and the SHA-256 of
+/// them sorted, one per line.
+const BEFORE: (usize, &str) = (
+    7_261,
+    "30a2642ccc1a09d1aa8d2cccecc0aff369de7c33866bc6fa27204d1716ceb1c5",
+);
+
+/// What [`counted`] sets aside of the six files the split left, summed:
+/// module lines (the `mod` declarations with their `#[path]`, `#[cfg]` and
+/// doc lines, and each new file's `//!` header), use lines, and kept lines
+/// that carried a visibility (the unsplit file gives 24, 23 and 154). Every
+/// other line is one of [`BEFORE`]'s 7,261, so 0 lines differ.
+const SET_ASIDE: (usize, usize, usize) = (54, 97, 311);
+
+/// The six files as the split left them: the path under `src/`, the git
+/// blob and the SHA-256 of the bytes.
+const AFTER: [(&str, &str, &str); 6] = [
+    (
+        "gdfl_import.rs",
+        "44ee3c9254a6ede2ad9374f20f1787717778d98f",
+        "0e864f9317fb56469745034f8787e4b1c1684ad3f4bba8fe1c0a975b7d0a86cf",
+    ),
+    (
+        "gdfl_import_causes.rs",
+        "8866b39498c126c1d356dc8984560b884a5672dc",
+        "fd176295a7490ee47b20598202fd4442ad7130666c29562f01129c618e8b52b2",
+    ),
+    (
+        "gdfl_import_census.rs",
+        "1762b2a7bd9b0e0af47e597a7a0f5fec60167d6e",
+        "6bbfef351c8409306dc80beb0abe0459eb96cdab7efacf23e806a6566fad99aa",
+    ),
+    (
+        "gdfl_import_day.rs",
+        "3c28b1c296a76c3bab4860a75e5117fe436cc248",
+        "b8d2b8dad44456f94b1bd0822e25bb0d5c7561d4ea05b795fcc06166ad7a9de4",
+    ),
+    (
+        "gdfl_import_filing.rs",
+        "d8c65e047228e1cb52b3c1de487989491e23b184",
+        "cbbc783ec2b5cb7bf84c88ac57a1ad95c5b2f8cf502cba5177059cf5bd72efbe",
+    ),
+    (
+        "gdfl_import_journal.rs",
+        "d64ace8e822ab8acdcda467d43be9918113d2da2",
+        "1eb96f76e48fa860de14d8a1643575ed83c7cf15fba6fc8e7412e0d03660125a",
+    ),
+];
+
+/// What [`counted`] set aside of a file and what it kept.
+#[derive(Debug, Default)]
+struct Counted {
+    /// Every kept line, its visibility taken out, and how many times.
+    kept: BTreeMap<String, usize>,
+    /// Module lines: a `mod` declaration with its attributes and docs, and a
+    /// new file's `//!` header.
+    module: usize,
+    /// Use lines: a `use` declaration, every line of it, with its
+    /// attributes.
+    uses: usize,
+    /// Kept lines whose visibility was taken out.
+    visibility: usize,
+}
+
+impl Counted {
+    fn add(&mut self, other: Self) {
+        for (line, n) in other.kept {
+            *self.kept.entry(line).or_default() += n;
+        }
+        self.module += other.module;
+        self.uses += other.uses;
+        self.visibility += other.visibility;
+    }
+
+    fn lines(&self) -> usize {
+        self.kept.values().sum()
+    }
+
+    /// The SHA-256 of the kept lines, sorted, one per line.
+    fn digest(&self) -> String {
+        let mut hash = sha2::Sha256::new();
+        for (line, n) in &self.kept {
+            for _ in 0..*n {
+                hash.update(line.as_bytes());
+                hash.update(b"\n");
+            }
+        }
+        let mut hex = String::with_capacity(64);
+        for b in hash.finalize() {
+            let _infallible = write!(hex, "{b:02x}");
+        }
+        hex
+    }
+}
+
+/// `line` with a leading `pub`, `pub(crate)`, `pub(super)` or `pub(self)` of
+/// its first token taken out, and its trailing white space.
+fn unvisible(line: &str) -> String {
+    let body = line.trim_start();
+    let indent = &line[..line.len() - body.len()];
+    for vis in ["pub(crate) ", "pub(super) ", "pub(self) ", "pub "] {
+        if let Some(rest) = body.strip_prefix(vis) {
+            return format!("{indent}{rest}").trim_end().to_owned();
+        }
+    }
+    line.trim_end().to_owned()
+}
+
+/// The non-blank lines of `text`, less its module and use lines, each with
+/// its visibility taken out. `new_file` sets aside the `//!` header a file
+/// the split made opens with. An attribute or doc line belongs to the item
+/// after it: to a `mod` or `use` declaration's count when it precedes one.
+fn counted(text: &str, new_file: bool) -> Counted {
+    let mut out = Counted::default();
+    let mut header = new_file;
+    let mut in_use = false;
+    let mut held: Vec<&str> = Vec::new();
+    let keep = |out: &mut Counted, line: &str| {
+        let plain = unvisible(line);
+        if plain != line.trim_end() {
+            out.visibility += 1;
+        }
+        *out.kept.entry(plain).or_default() += 1;
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if header && t.starts_with("//!") {
+            out.module += 1;
+            continue;
+        }
+        header = false;
+        if in_use {
+            out.uses += 1;
+            in_use = !t.contains(';');
+            continue;
+        }
+        if t.starts_with("#[") || t.starts_with("///") {
+            held.push(line);
+            continue;
+        }
+        let plain = unvisible(t);
+        if plain.starts_with("use ") {
+            out.uses += 1 + held.len();
+            held.clear();
+            in_use = !t.contains(';');
+            continue;
+        }
+        let is_mod = plain
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .is_some_and(|name| name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric()));
+        if is_mod {
+            out.module += 1 + held.len();
+            held.clear();
+            continue;
+        }
+        for h in held.drain(..) {
+            keep(&mut out, h);
+        }
+        keep(&mut out, line);
+    }
+    for h in held {
+        keep(&mut out, h);
+    }
+    out
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(64);
+    for b in sha2::Sha256::digest(bytes) {
+        let _infallible = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+/// The blob `id` from the repository holding this crate, `None` where `git`
+/// cannot be run, the tree holds no `.git` (`cargo-mutants` copies it
+/// without one) or the history does not hold the blob.
+fn blob(id: &str) -> Option<String> {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(crate_dir)
+        .args(["cat-file", "blob", id])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).unwrap())
+}
+
+/// R3-35: THE SPLIT MOVES LINES AND CHANGES NONE. The non-blank lines of the
+/// six files the split left are the unsplit file's non-blank lines as a
+/// multiset, apart from module lines (the five `mod` declarations, their
+/// `#[path]` attributes and each new file's `//!` header), use lines and
+/// visibility (a `pub(super)` an item, field or method needs to be reached
+/// from the file beside it, taken out before comparing). It counts the lines
+/// that differ (0) and pins what it set aside ([`SET_ASIDE`]).
+///
+/// The six files are read from the tree while they are the split's own
+/// bytes, and from the history by their blobs once a later package edits
+/// one; where neither holds them (no `git`, no `.git`, a history without the
+/// split's commit) it says so and stops, as `store/tests/cited_commits.rs`
+/// does. Where the history holds the unsplit file, it is counted too and
+/// must give [`BEFORE`], so the pinned count is the file's and not a copy.
+#[test]
+fn the_split_moves_lines_and_changes_none() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut after = Counted::default();
+    for (i, (name, blob_id, sha)) in AFTER.iter().enumerate() {
+        let here = std::fs::read(src.join(name)).unwrap();
+        let text = if sha256_hex(&here) == *sha {
+            String::from_utf8(here).unwrap()
+        } else if let Some(text) = blob(blob_id) {
+            assert_eq!(sha256_hex(text.as_bytes()), *sha, "{name}: blob {blob_id}");
+            text
+        } else {
+            println!(
+                "SKIPPING: {name} is no longer the split's own bytes and its blob {blob_id} \
+                 is not in this history, so the split cannot be counted here. The commit \
+                 that made the split carries this proof."
+            );
+            return;
+        };
+        after.add(counted(&text, i > 0));
+    }
+    if let Some(before_text) = blob(BEFORE_BLOB) {
+        let before = counted(&before_text, false);
+        let mut gone: Vec<&str> = Vec::new();
+        for (line, n) in &before.kept {
+            let have = after.kept.get(line).copied().unwrap_or(0);
+            if have < *n {
+                gone.push(line);
+            }
+        }
+        let mut new: Vec<&str> = Vec::new();
+        for (line, n) in &after.kept {
+            if before.kept.get(line).copied().unwrap_or(0) < *n {
+                new.push(line);
+            }
+        }
+        assert!(
+            gone.is_empty() && new.is_empty(),
+            "lines the split lost: {gone:#?}\nlines the split added: {new:#?}"
+        );
+        assert_eq!(
+            (before.lines(), before.digest().as_str()),
+            BEFORE,
+            "the unsplit file counted from its blob"
+        );
+        assert_eq!(
+            (before.module, before.uses, before.visibility),
+            (24, 23, 154),
+            "the module, use and visibility lines of the unsplit file"
+        );
+    }
+    assert_eq!(
+        (after.module, after.uses, after.visibility),
+        SET_ASIDE,
+        "the module, use and visibility lines the split set aside"
+    );
+    assert_eq!(
+        (after.lines(), after.digest().as_str()),
+        BEFORE,
+        "the six files' lines, less module, use and visibility lines, against the \
+         unsplit file's"
+    );
+}
+
+/// The counter itself: a module line, a use line over three lines with its
+/// attribute, a header, a visibility and a changed line each land where the
+/// proof above says, so a counter that set aside everything could not pass.
+#[test]
+fn the_line_counter_sets_aside_only_module_use_and_visibility() {
+    let before = "fn a() {}\nstruct B {\n    c: u8,\n}\n\nconst D: u8 = 1;\n";
+    let after = "//! A new file.\n\n#[cfg(test)]\nuse super::{\n    a,\n};\n\
+                 #[path = \"x.rs\"]\nmod x;\npub(super) fn a() {}\nstruct B {\n    \
+                 pub(super) c: u8,\n}\nconst D: u8 = 1;\n";
+    let b = counted(before, false);
+    let a = counted(after, true);
+    assert_eq!((b.lines(), b.module, b.uses, b.visibility), (5, 0, 0, 0));
+    assert_eq!((a.lines(), a.module, a.uses, a.visibility), (5, 3, 4, 2));
+    assert_eq!(a.digest(), b.digest());
+    let changed = counted(&after.replace("const D: u8 = 1;", "const D: u8 = 2;"), true);
+    assert_ne!(changed.digest(), b.digest(), "a changed line is counted");
 }

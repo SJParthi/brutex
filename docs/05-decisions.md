@@ -70635,3 +70635,70 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 `an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
+
+### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
+
+The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
+7,613 lines at `d7eb0ecf` (6,046 when the plan was written), and the build
+order of `state/design/ingest-automation.md` §16.2 has eleven packages edit
+it in strict order: WP-16, WP-11c, WP-12d, WP-12f, then IA-1, IA-2, IA-3,
+IA-16, IA-4, IA-7 and IA-17. The first four have merged. The file is split
+before IA-1, so that each later package edits the file that holds its seam.
+
+1. **Six files, by seam.** The five new modules are private, mounted by
+   `#[path]` from `gdfl_import.rs`, and every item a caller outside the module
+   reaches keeps its path through a `pub use`
+   (`pull::gdfl_import::{Cause, ImportRefusal, Outcome, Stage, cm_cause,
+   nfo_cause, CensusRoom, drive, drive_from, BAR_DEFINITION,
+   definition_is_current, journal_path}`, and `append_lines` for the crate),
+   so no caller in `pull`, `cli` or `api` changed.
+   - `gdfl_import.rs` (3,160 lines): the run's types and entry points
+     (`ImportKind`, `SourceKind`, `Origin` and its measurement, `RunOptions`,
+     `Durability`, `Workers`, `convert`, `TickFile`, `DayRead`, `Refused`,
+     `Report`, `Run`), the CM and options readers (`run_cm`, `cm_jobs`,
+     `cm_day_with`, `run_nfo`, `option_handed`, `warm_up`, `nfo_jobs`,
+     `nfo_day_with`), `Rescan`, and the module lines.
+   - `gdfl_import_day.rs` (1,663): the day loop (`Ctx`, `admit` and the
+     done-day skip, `decisive`, `close_of`, `close_day`, `drive`,
+     `drive_from`, `drive_core`, the reach-back, `widen`, `probe`, `day_pass`,
+     `record_close`).
+   - `gdfl_import_journal.rs` (992): `journal_path`, `BAR_DEFINITION`,
+     `definition_is_current`, the journal's parse, `Journal`, `append_lines`,
+     `closing_line`, `run_line`.
+   - `gdfl_import_filing.rs` (1,093): the provenance record, `BeginGate`,
+     `on_workers`, `Filing`, `DayFiler`, `make_durable`,
+     `stop_at_durability`.
+   - `gdfl_import_census.rs` (265): `CensusRoom`, the `Census` trait,
+     `StoreCensus`, `census_room`, `census_code`, `census_refusal`,
+     `stop_at_census`.
+   - `gdfl_import_causes.rs` (567): `ImportRefusal`, `Stage`, `Cause`,
+     `cm_cause`, `nfo_cause`, `Outcome`.
+2. **Move-only.** No line was added but module lines (the five `mod`
+   declarations with their `#[path]`, and a `//!` header for each new file),
+   use lines, and visibility (`pub(super)` where the file beside needs an
+   item). `the_split_moves_lines_and_changes_none` counts the six files'
+   non-blank lines as a multiset against the unsplit file's (blob
+   `1c349b13`), less those three kinds, and finds 0 others; it pins what it
+   set aside: 54 module, 97 use and 311 visibility lines, against the unsplit
+   file's 24, 23 and 154. `the_line_counter_sets_aside_only_module_use_and_visibility`
+   proves the counter cannot pass a changed line.
+   `the_split_importer_writes_the_same_bytes` was committed first, on the
+   unsplit importer, and is unchanged since: six imports of invented NIFTY,
+   BANKNIFTY, share and option days (a special session, a weekend, a holiday,
+   a refused file, an illiquid strike and a re-run among them) leave the same
+   files with the same bytes. The pull crate's test names are the same
+   before and after, plus the two line tests.
+3. **Where a later package edits: the file that holds its seam, and a new
+   seam beside the nearest one.** The map of §16.2's rows onto these files
+   (derived from the design's text, not measured) is
+   `docs/06-limits.md` L-R335-01, with the longest chain that is left.
+4. **Rejected.** `pub mod` for the new modules: it would add public paths no
+   caller asked for, and the re-exports keep every old one. A seventh file
+   for the CM and options readers: not in this package's seams; IA-1's run
+   seams and IA-4's `option_handed` counts share `gdfl_import.rs` with them.
+   Splitting `gdfl_import_tests.rs` (5,786 lines): not this package's file,
+   and each later package puts new tests in its own test file.
+
+Limits: `docs/06-limits.md` L-R335-01 (the chain left) and L-R335-02 (where
+the line proof cannot run). Invariants: `docs/04-invariants.md` R335-01 and
+R335-02.
