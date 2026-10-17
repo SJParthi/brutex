@@ -450,7 +450,9 @@ export function judgeRow(row, ctx) {
     ? Number(/** @type {Record<string, number>} */ (/** @type {unknown} */ (ledgerSpan(/** @type {any} */ (mine), from, to)))[kind.unheld]) || 0
     : 0;
   const missing = Math.max(0, owed - row.rows, unheld);
-  if (unheld > owed - row.rows) notes.push('unheld_sessions');
+  // NAMED ONLY WHERE THE FLOOR DECIDES: a session with no bar owes more than
+  // the month total says is missing (never a surplus month with none).
+  if (unheld > 0 && unheld > owed - row.rows) notes.push('unheld_sessions');
   if (kind.unresolved && cover.owedAlt !== null && row.rows >= owed && row.rows < cover.owedAlt) {
     // HELD AT LEAST WHAT AN ELIGIBLE SHARE OWES AND LESS THAN AN INELIGIBLE
     // ONE: eligibility cannot be told from the count alone, so neither

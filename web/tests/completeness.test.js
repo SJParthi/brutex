@@ -288,6 +288,19 @@ test('a_surplus_day_never_hides_a_short_day: a session held with no bar is missi
   const span = ledgerSpan(own, epochDayOfIso('2022-03-01'), epochDayOfIso('2022-03-31'));
   assert.equal(span.unheldIndex, 22500);
   assert.equal(span.unheldShare, 22500);
+  // EVERY SESSION HELD: no floor, and nothing is named for it — a surplus
+  // month with its own days read is `over`, never "short of a session".
+  const allHeld = owedLedger(
+    body({ from: '2022-03-01', days: codes, regular: 22500, rung: '1s', held: held.replace(/^(.{6})0/, '$11'), series: { symbol: 'BANKNIFTY', segment: 'INDEX' } })
+  );
+  const surplus = judgeRow({ ...bank, rows: 21 * 22500 + 60 }, { ledger: exchange, held: allHeld });
+  assert.equal(surplus.state, 'over');
+  assert.ok(!surplus.notes.includes('unheld_sessions'), 'no session with no bar, so none is named');
+  assert.equal(surplus.heldSessions, 21);
+  // Short by the month total more than the floor: the total decides, the floor is not named.
+  const totalShort = judgeRow({ ...bank, rows: 19 * 22500 }, { ledger: exchange, held: own });
+  assert.equal(totalShort.missing, 2 * 22500);
+  assert.ok(!totalShort.notes.includes('unheld_sessions'));
   // A `-` digit (not read) owes no floor.
   const unread = owedLedger(body({ from: '2022-03-01', days: codes, regular: 22500, rung: '1s', held: held.replace(/0/g, '-'), series: { symbol: 'BANKNIFTY', segment: 'INDEX' } }));
   assert.equal(ledgerSpan(unread, unread.from, unread.to).unheldIndex, 0);
