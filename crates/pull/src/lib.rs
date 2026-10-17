@@ -239,6 +239,9 @@ pub mod totp;
 /// The step that makes a download a verification: every published name lands in
 /// exactly one bucket and the buckets sum, so a join defect is findable.
 pub mod universe;
+/// One upkeep run: a store builder over many items as a tracked run, with a
+/// run id, a journal, workers, Stop and resume (R3-17).
+pub mod upkeep;
 
 pub mod vendor;
 pub mod work;
