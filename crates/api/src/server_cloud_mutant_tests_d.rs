@@ -734,13 +734,15 @@ async fn a_day_past_the_record_is_never_filed_as_a_member_failure() {
     );
 }
 
-/// **A vendor ID that no longer matches the join made from it is refused,
-/// even with the vendor's own ISIN in place.** RELIANCE's Groww row carries
-/// the exchange ISIN, and the join built at load names its Groww ID; the
-/// entry's ID is then changed after the join, so the join's answer for that
-/// ISIN is no longer the ID asked about. Covers the first disqualifier of
-/// `spot_vendor_identity_for`'s ISIN check (server.rs:6028), which a wrong
-/// ISIN (the second) has always reached first.
+/// **A vendor ID and a vendor ISIN must each still match the join made from
+/// them, and either one moving is refused.** RELIANCE's Groww row carries
+/// the exchange ISIN, and the join built at load names its Groww ID. First
+/// the entry's ID is changed after the join, so the join's answer for that
+/// ISIN is no longer the ID asked about; then, on a fresh load, the entry's
+/// Groww ISIN is changed instead, so the join still names the ID but the
+/// entry no longer asserts the exchange's ISIN. The second is the only path
+/// to the right-hand disqualifier of `spot_vendor_identity_for`'s ISIN check:
+/// no master as loaded can make it true while the join agrees.
 #[test]
 fn a_vendor_id_that_no_longer_matches_its_join_is_refused() {
     use super::tests::{DHAN_HEAD, GROWW_HEAD};
@@ -761,6 +763,24 @@ fn a_vendor_id_that_no_longer_matches_its_join_is_refused() {
         Some(brutex_core::vendor::VendorId::new("changed-after-join").expect("an id"));
     let why = spot_vendor_identity_for(&read, &key, Vendor::Groww, ingest::CashIdentity::Isin)
         .expect_err("the join names another ID");
+    assert_eq!(
+        why,
+        "RELIANCE: selected vendor ID does not uniquely match the exchange ISIN INE002A01018"
+    );
+    // The other half: the join names the entry's own ID again, but the
+    // vendor's ISIN on the entry is no longer the exchange's.
+    let mut fresh = universe(&dir);
+    let other = (0..10)
+        .find_map(|digit| brutex_core::isin::Isin::new(&format!("INE999Z0101{digit}")).ok())
+        .expect("one check digit is valid");
+    fresh
+        .merged
+        .by_key
+        .get_mut(&key)
+        .expect("the entry")
+        .vendor_isins[Vendor::Groww as usize] = Some(other);
+    let why = spot_vendor_identity_for(&fresh, &key, Vendor::Groww, ingest::CashIdentity::Isin)
+        .expect_err("the entry asserts another ISIN");
     assert_eq!(
         why,
         "RELIANCE: selected vendor ID does not uniquely match the exchange ISIN INE002A01018"

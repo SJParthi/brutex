@@ -2848,6 +2848,74 @@ async fn the_first_attempt_is_not_charged_here_and_a_retry_is() {
     assert_eq!(busy.seen().len(), 1, "the retry was never sent");
 }
 
+/// **A named throttle the budget table cannot take is recorded nowhere, and
+/// its retry is refused on that table rather than sent.** The first attempt
+/// is the caller's and is asked with the table unreadable; Dhan names
+/// `DH-904` under a 400, which the transport does not record, so
+/// `with_retry` would. Twice it cannot: once with the table's lock poisoned,
+/// once with Dhan's slot holding no governor. Either way nothing is
+/// decreased, the rate ladder's wait is slept, and the retry stops at
+/// `await_budget` by name with one request sent. Covers the false sides of
+/// the two `let` guards on the named-throttle decrease (server.rs:8465 and
+/// 8466). Each case sleeps the rate ladder's first wait.
+#[tokio::test]
+async fn a_named_throttle_with_no_readable_budget_is_recorded_nowhere() {
+    let request = pull::fetch::BarRequest {
+        instrument_id: "990003".to_owned(),
+        listing: pull::vendor::Listing::Index,
+        window: spot(DHAN_DAY).window,
+        granularity: pull::vendor::Granularity::Day1,
+    };
+    let named = || {
+        FakeVendor::answering(|nth, _| {
+            if nth == 0 {
+                (
+                    400,
+                    "{\"errorType\":\"Data_API_Error\",\"errorCode\":\"DH-904\",\
+                     \"errorMessage\":\"Too many requests\"}"
+                        .to_owned(),
+                )
+            } else {
+                (200, dhan_bar(AUG_03))
+            }
+        })
+    };
+
+    let vendor = named().await;
+    let (source, _) = loopback_source(&vendor);
+    let fx = Fixture::new("named-throttle-poisoned");
+    let site = with_unreadable_budget(fx.refused());
+    let refused = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
+        .await
+        .expect_err("the retry is charged, and the budget cannot be read");
+    assert!(
+        refused.starts_with("the rate budget for Dhan cannot be read"),
+        "{refused}"
+    );
+    assert_eq!(vendor.seen().len(), 1, "the retry was never sent");
+    let day = site
+        .budgets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)[pull::vendor::Feed::Dhan as usize]
+        .as_ref()
+        .expect("Dhan has a budget")
+        .lock()
+        .expect("the governor")
+        .permitted(pull::rate::WindowSpan::Day);
+    assert_eq!(day, Some(100_000), "nothing was decreased");
+
+    let vendor = named().await;
+    let (source, _) = loopback_source(&vendor);
+    let fx = Fixture::new("named-throttle-no-governor");
+    let site = fx.refused();
+    site.budgets.lock().expect("budgets")[pull::vendor::Feed::Dhan as usize] = None;
+    let refused = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
+        .await
+        .expect_err("the retry is charged, and Dhan has no governor");
+    assert!(refused.starts_with("Dhan has no rate budget"), "{refused}");
+    assert_eq!(vendor.seen().len(), 1, "the retry was never sent");
+}
+
 /// One whole second is said in seconds, and the microsecond under it in
 /// milliseconds (kills `<` turned to `<=` in `render_elapsed`).
 #[test]
