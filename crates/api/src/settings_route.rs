@@ -31,6 +31,14 @@
 //! `crate::operation_audit::AUDITED`, so every attempt is on `/audit`, and
 //! the generation itself records when, who, why and which keys.
 //!
+//! A value, a `changed_by` or a `reason` with the shape of a pasted
+//! credential — a token, or a `/<org>/<env>/<vendor>/<field>` parameter path
+//! (`brutex_core::secret_shape`) — is refused `secret_shaped` BEFORE any
+//! check that might quote it and before a byte is written, naming the key,
+//! the class and the length and never the value, in the answer and in the
+//! one `api.settings` event (SEC-07). An unknown name of that shape is not
+//! repeated in a `bad_body` refusal either.
+//!
 //! # Cost
 //!
 //! A GET is one `stat` of the next generation's name (when nothing was
@@ -721,6 +729,93 @@ fn server_check(settings: &settings::Settings, change: &Change) -> Result<(), Re
     Ok(())
 }
 
+/// The credential field names a parameter path ends in, as
+/// `docs/00-charter.md` records them for the two feeds (its credential rows:
+/// `api-key`, `totp-secret`, `access-token`, `client-id`). `core` holds no
+/// field name of `pull`'s, so the route passes these, plus every feed's
+/// second field (`pull::vendor::Auth::key_field`), to the detector (SEC-07).
+const CHARTER_FIELDS: [&str; 4] = ["access-token", "api-key", "client-id", "totp-secret"];
+
+/// [`CHARTER_FIELDS`] and every offered feed's `key_field`, built once.
+fn credential_fields() -> &'static [&'static str] {
+    static FIELDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    FIELDS.get_or_init(|| {
+        let mut fields = CHARTER_FIELDS.to_vec();
+        for feed in pull::vendor::Feed::ALL {
+            if let pull::vendor::Transport::Http(spec) = &feed.descriptor().transport
+                && let Some(field) = spec.auth.key_field
+                && !fields.contains(&field)
+            {
+                fields.push(field);
+            }
+        }
+        fields
+    })
+}
+
+/// A name for a refusal's words: the name itself, quoted, unless it has a
+/// credential's shape, when only its length and class are said (SEC-07: a
+/// token pasted as a key name must not come back in the answer).
+fn said(name: &str) -> String {
+    brutex_core::secret_shape::shape_of(name, credential_fields()).map_or_else(
+        || format!("{name:?}"),
+        |shape| {
+            format!(
+                "of {} bytes, shaped like a {} and not repeated",
+                name.len(),
+                shape.class()
+            )
+        },
+    )
+}
+
+/// The first field of `change` that has a credential's shape: the key it was
+/// typed into (`changed_by` and `reason` are named as themselves), the
+/// shape, and the length. Never the value (SEC-07).
+fn secret_shaped(
+    change: &Change,
+) -> Option<(&'static str, brutex_core::secret_shape::Shape, usize)> {
+    let fields = credential_fields();
+    let shape = |text: &str| brutex_core::secret_shape::shape_of(text, fields);
+    change
+        .set
+        .iter()
+        .find_map(|(key, value)| shape(value).map(|s| (key.name(), s, value.len())))
+        .or_else(|| shape(&change.changed_by).map(|s| ("changed_by", s, change.changed_by.len())))
+        .or_else(|| shape(&change.reason).map(|s| ("reason", s, change.reason.len())))
+}
+
+/// The refusal of a credential-shaped field: `400`, `secret_shaped`, the key,
+/// the class and the length, and one `api.settings` event saying the same.
+/// Nothing is written (SEC-07).
+fn refuse_secret(
+    key: &'static str,
+    shape: brutex_core::secret_shape::Shape,
+    bytes: usize,
+) -> (StatusCode, serde_json::Value) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.settings", "secret-shaped value refused")
+            .with("key", telemetry::Value::Str(key))
+            .with("class", telemetry::Value::Str(shape.class()))
+            .with("bytes", telemetry::Value::Uint(bytes as u64)),
+    );
+    (
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({
+            "saved": false,
+            "code": "secret_shaped",
+            "key": key,
+            "class": shape.class(),
+            "bytes": bytes,
+            "refusal": format!(
+                "{key}: a value of {bytes} bytes has the shape of a credential ({}) and was not \
+                 written; a credential is read from Parameter Store and never typed here",
+                shape.class()
+            ),
+        }),
+    )
+}
+
 /// Parse a change body; `Err` is the refusal's words.
 fn parse_change(body: &str) -> Result<Change, String> {
     let value: serde_json::Value =
@@ -731,7 +826,7 @@ fn parse_change(body: &str) -> Result<Change, String> {
             name.as_str(),
             "expected" | "changed_by" | "reason" | "set" | "unset"
         ) {
-            return Err(format!("unknown field {name:?}"));
+            return Err(format!("unknown field {}", said(name)));
         }
     }
     let expected = object
@@ -751,7 +846,8 @@ fn parse_change(body: &str) -> Result<Change, String> {
             .as_object()
             .ok_or("`set` must be an object of key: value")?;
         for (name, value) in map {
-            let key = Key::of_name(name).ok_or_else(|| format!("unknown setting {name:?}"))?;
+            let key =
+                Key::of_name(name).ok_or_else(|| format!("unknown setting {}", said(name)))?;
             let value = value
                 .as_str()
                 .ok_or_else(|| format!("{name}: the value must be a string"))?;
@@ -763,7 +859,8 @@ fn parse_change(body: &str) -> Result<Change, String> {
         let list = list.as_array().ok_or("`unset` must be an array of keys")?;
         for name in list {
             let name = name.as_str().ok_or("`unset` must hold key names")?;
-            unset.push(Key::of_name(name).ok_or_else(|| format!("unknown setting {name:?}"))?);
+            unset
+                .push(Key::of_name(name).ok_or_else(|| format!("unknown setting {}", said(name)))?);
         }
     }
     if set.is_empty() && unset.is_empty() {
@@ -862,6 +959,11 @@ pub fn change(root: &Path, body: &str) -> (StatusCode, serde_json::Value) {
             );
         }
     };
+    // SEC-07: BEFORE `store::settings::check`, whose refusal may quote the
+    // value, and before the reader is taken, so nothing is written.
+    if let Some((key, shape, bytes)) = secret_shaped(&parsed) {
+        return refuse_secret(key, shape, bytes);
+    }
     with_reader(root, |reader, _| {
         // WHAT THE CHANGE IS BUILT ON, SAID: when a generation newer than
         // the one in force did not read, the change is built on the older

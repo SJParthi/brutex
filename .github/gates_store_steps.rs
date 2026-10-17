@@ -136,7 +136,7 @@ impl Entry {
 }
 
 /// The tables the file may hold, in the order the file is read.
-const TABLES: [&str; 4] = ["env", "package", "rule", "step"];
+const TABLES: [&str; 5] = ["env", "package", "rule", "step", "owed"];
 
 struct Reader<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
@@ -447,6 +447,16 @@ fn keys(kind: &str) -> &'static [(&'static str, Shape, bool)] {
             ("withdrawn_because", Text, false),
             ("replaced_by", Text, false),
             ("note", Text, false),
+            ("kind", Text, false),
+            ("rehearsed_commit", Text, false),
+            ("writer_changed", Text, false),
+            ("snapshot", Text, false),
+        ],
+        "owed" => &[
+            ("id", Text, true),
+            ("what", Text, true),
+            ("source", List, true),
+            ("note", Text, false),
         ],
         _ => &[],
     }
@@ -461,16 +471,23 @@ const FIGURES: [&str; 4] = [
 ];
 
 /// How a command line may begin: a store-writing cli verb, a request to the
-/// app's own form route, the two programs the snapshot and copy steps name,
-/// or a command a package has not built yet.
-const HEADS: [&str; 5] = ["cli ", "POST ", "tmutil ", "rsync ", "planned: "];
+/// app's own form route, or either of those that a package has not built yet
+/// (`planned: `). Nothing else: no script, no system tool, no prose (R4-06
+/// item 3, AUT-07). The snapshot and the copy are `cli` verbs too, planned
+/// until R4-09 builds `cli backup` and a package builds the snapshot verb.
+const HEADS: [&str; 4] = ["cli ", "POST ", "planned: cli ", "planned: POST "];
 
 /// The prefix that marks a prerequisite met only by the operator.
 const OPERATOR: &str = "operator: ";
 
 /// How a command that copies or snapshots the store begins: the copy is
 /// taken while nothing writes, and a restore is checked before anything does.
-const COPIES: [&str; 2] = ["tmutil ", "rsync "];
+/// `cli backup` is R4-09's verb; the snapshot verb has no package yet.
+const COPIES: [&str; 3] = [
+    "cli backup ",
+    "planned: cli backup ",
+    "planned: cli snapshot ",
+];
 
 /// The prerequisite every copy or snapshot step names, word for word (FM-221,
 /// HUMAN-078): a copy taken while a writer appends holds torn months or a
@@ -542,6 +559,9 @@ struct Evidence {
     /// The days no GDFL recount span may cover, read from D-3317 item 5 of
     /// the decision ledger, or `None` when the ledger was not read.
     excluded: Option<Vec<String>>,
+    /// The owed runs of `config/owed-runs.toml` (R4-06, AUT-07): each id, or
+    /// `None` when that list was not read.
+    owed: Option<Vec<String>>,
 }
 
 /// The tables of one kind.
@@ -891,12 +911,290 @@ fn check(entries: &[Entry], evidence: &Evidence) -> Vec<Problem> {
         copies(step, &mut out);
         recounts(step, evidence, &mut out);
         check_writes(step, evidence, &mut out);
+        forms(step, &mut out);
+        records(step, &mut out);
     }
     order(&steps, &ids, &mut out);
     leftovers(entries, &steps, evidence, &mut out);
     rules(entries, &packages, &mut out);
+    kinds(&steps, &mut out);
+    owed(entries, evidence, &mut out);
     uses(entries, &steps, &mut out);
     out
+}
+
+// ------------------------------------------------------- R4-06 (AUT-07) --
+
+/// Words a command line never holds: a loop written in prose. A store step
+/// is one line per day or a range verb, never "for each" (R4-06 item 3).
+const LOOP_WORDS: [&str; 4] = ["each", "every", "foreach", "loop"];
+
+/// What marks a script or a build path in a command line: the cli is the
+/// deployed release binary named `cli`, run with the [[env]] roots, never a
+/// wrapper script, a build folder or a binary under the work folder.
+const NOT_THE_CLI: [&str; 5] = [".sh", "tgt/", "target/", "/release/", "state/"];
+
+/// Words that make a kind one no scheduler starts: a deletion, a pruning, a
+/// retirement or a credential change (AUT-05). The same list is
+/// `pull::rehearsal::NEVER_AUTOMATIC`, which refuses them at run time.
+const NEVER_AUTOMATIC: [&str; 8] = [
+    "delete",
+    "remove",
+    "prune",
+    "retire",
+    "credential",
+    "token",
+    "secret",
+    "password",
+];
+
+/// Where a run's record is kept: a run id, or one of the store's own
+/// records (the list's header names them).
+const RECORDS: [&str; 7] = [
+    "logs/cli/",
+    "cli.lifecycle",
+    "imports/gdfl.journal",
+    "imports/gdfl.lineage",
+    "audit/",
+    "events.ndjson",
+    "run=",
+];
+
+/// `line` with each single-quoted span read as one word `Q`: the shell
+/// hands what is inside to the program as itself, so its `&` (`'GVT&D'`) or
+/// spaces are not the shell's.
+fn outside_quotes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quoted = false;
+    for c in line.chars() {
+        if c == '\'' {
+            if !quoted {
+                out.push('Q');
+            }
+            quoted = !quoted;
+        } else if !quoted {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether `text` names a run id: `run <digits>`, `runs <digits>` or
+/// `run=<id>`.
+fn names_a_run(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.windows(2).any(|pair| {
+        let head = pair[0].trim_start_matches('(');
+        (head == "run" || head == "runs")
+            && pair[1]
+                .trim_end_matches(|c: char| !c.is_ascii_digit())
+                .chars()
+                .all(|c| c.is_ascii_digit())
+            && pair[1].starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// Every command line is a bare `cli <verb>` or a `POST <route>` of the app,
+/// built or `planned:` ([`HEADS`], refused by the `commands` rule), and none
+/// is a script, a build path, an absolute path under the operator's work
+/// folder, or a loop: one line per day or a range verb (R4-06 item 3;
+/// AUT-07). A `planned:` line may explain itself in words, and a loop word
+/// is refused there too: what is planned is one command, not a recipe.
+fn forms(step: &Entry, out: &mut Vec<Problem>) {
+    let label = step.label();
+    for line in step.list("command") {
+        let body = line.strip_prefix("planned: ").unwrap_or(line);
+        let bare = outside_quotes(&outside_placeholders(body));
+        let lower = bare.to_ascii_lowercase();
+        if let Some(word) = lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|w| LOOP_WORDS.contains(w))
+        {
+            out.push(problem(
+                "forms",
+                format!("{label}: command {line:?} says {word:?}: a loop is one line per day or a range verb, never prose"),
+            ));
+        }
+        if let Some(mark) = NOT_THE_CLI.iter().find(|m| lower.contains(*m)) {
+            out.push(problem(
+                "forms",
+                format!("{label}: command {line:?} holds {mark:?}: the cli is the deployed release binary run as `cli`, never a script or a build path"),
+            ));
+        }
+        let paths: Vec<&str> = if body.starts_with("cli ") {
+            bare.split_whitespace()
+                .filter(|w| w.starts_with('/'))
+                .collect()
+        } else if body.starts_with("POST ") {
+            bare.split_whitespace()
+                .skip(2)
+                .filter(|w| w.starts_with('/'))
+                .collect()
+        } else {
+            bare.split_whitespace()
+                .filter(|w| w.contains("/brutex") || w.contains("/work-"))
+                .collect()
+        };
+        if let Some(path) = paths.first() {
+            out.push(problem(
+                "forms",
+                format!("{label}: command {line:?} names the path {path:?}: name a root by its [[env]] variable"),
+            ));
+        }
+    }
+}
+
+/// A run is recorded with its record: a done step's `ran` and a pending
+/// step's `last_run` name a run id or the store record that holds the run
+/// (R4-06: a run step carries its run id and its check; the check itself is
+/// required of every step by [`fields`]).
+fn records(step: &Entry, out: &mut Vec<Problem>) {
+    let label = step.label();
+    for key in ["ran", "last_run"] {
+        if let Some(text) = step.text(key)
+            && !names_a_run(text)
+            && !RECORDS.iter().any(|r| text.contains(r))
+        {
+            out.push(problem(
+                "records",
+                format!(
+                    "{label}: {key} names no run id and no store record it was read from ({})",
+                    RECORDS.join(", ")
+                ),
+            ));
+        }
+    }
+}
+
+/// A `kind` (the name an automatic starter asks the rehearsal gate for) is
+/// named by one step, is never a deletion or a credential change, and its
+/// stamps read as `<name> <unix seconds>` (AUT-05).
+fn kinds(steps: &[&Entry], out: &mut Vec<Problem>) {
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    for step in steps {
+        let label = step.label();
+        let Some(kind) = step.text("kind") else {
+            for key in ["rehearsed_commit", "writer_changed", "snapshot"] {
+                if step.has(key) {
+                    out.push(problem(
+                        "kinds",
+                        format!(
+                            "{label}: {key} without a kind: only an automatic kind is judged by it"
+                        ),
+                    ));
+                }
+            }
+            continue;
+        };
+        let id = step.text("id").unwrap_or("?");
+        if kind.is_empty()
+            || !kind
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            out.push(problem(
+                "kinds",
+                format!("{label}: kind {kind:?} is not lower-case words joined by -"),
+            ));
+        }
+        let lower = kind.to_ascii_lowercase();
+        if let Some(word) = NEVER_AUTOMATIC.iter().find(|w| lower.contains(*w)) {
+            out.push(problem(
+                "kinds",
+                format!("{label}: kind {kind:?} is a {word} kind: deletions and credential changes are never automatic"),
+            ));
+        }
+        if let Some(other) = seen.insert(kind, id) {
+            out.push(problem(
+                "kinds",
+                format!("kind {kind:?} is named by {other} and {id}"),
+            ));
+        }
+        for key in ["rehearsed_commit", "writer_changed", "snapshot"] {
+            if let Some(text) = step.text(key) {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let reads = words.len() == 2 && words[1].parse::<i64>().is_ok();
+                if !reads {
+                    out.push(problem(
+                        "kinds",
+                        format!("{label}: {key} {text:?} is not \"<name> <unix seconds>\""),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// The owed runs of `config/owed-runs.toml`, by id, or why not: format 1,
+/// one or more [[owed]] tables, each id `OWED-<two or more digits>` once.
+fn owed_from(text: &str) -> Result<Vec<String>, String> {
+    let entries = read(text).map_err(|why| format!("the owed runs: {why}"))?;
+    let mut problems = Vec::new();
+    shapes(&entries, &mut problems);
+    let mut ids = Vec::new();
+    for entry in &entries[1..] {
+        if entry.kind != "owed" {
+            return Err(format!(
+                "the owed runs: [[{}]] is not an [[owed]] table",
+                entry.kind
+            ));
+        }
+        let Some(id) = entry.text("id") else { continue };
+        if !is_numbered(id, "OWED-") {
+            return Err(format!(
+                "the owed runs: id {id:?} is not OWED-<two or more digits>"
+            ));
+        }
+        if ids.iter().any(|i| i == id) {
+            return Err(format!("the owed runs: {id} is given twice"));
+        }
+        ids.push(id.to_owned());
+    }
+    // The owed file's top level holds `format` alone: its schema is the
+    // owed table's, not the steps list's, so the leftovers key is not owed.
+    problems.retain(|p| !p.what.contains("no leftovers"));
+    if let Some(p) = problems.first() {
+        return Err(format!("the owed runs: {}", p.what));
+    }
+    if ids.is_empty() {
+        return Err("the owed runs: no [[owed]] table: an empty list proves nothing".to_owned());
+    }
+    Ok(ids)
+}
+
+/// Every owed run is a leftover (so exactly one step closes it, by the
+/// leftovers rule), and every `OWED-` leftover is an owed run; the steps
+/// list itself holds no [[owed]] table.
+fn owed(entries: &[Entry], evidence: &Evidence, out: &mut Vec<Problem>) {
+    for entry in of(entries, "owed") {
+        out.push(problem(
+            "owed",
+            format!(
+                "{}: owed runs live in config/owed-runs.toml, not in the steps list",
+                entry.label()
+            ),
+        ));
+    }
+    let Some(ids) = &evidence.owed else {
+        return;
+    };
+    let listed = entries[0].list("leftovers");
+    for id in ids {
+        if !listed.contains(id) {
+            out.push(problem(
+                "owed",
+                format!("owed run {id} is not a leftover, so no step is held to name it"),
+            ));
+        }
+    }
+    for row in listed.iter().filter(|r| r.starts_with("OWED-")) {
+        if !ids.contains(row) {
+            out.push(problem(
+                "owed",
+                format!("leftover {row} is no owed run of config/owed-runs.toml"),
+            ));
+        }
+    }
 }
 
 fn shapes(entries: &[Entry], out: &mut Vec<Problem>) {
@@ -1398,7 +1696,9 @@ fn commands(
         // (verify-R3-36-r3). A `POST` line is a form's body, whose `&` joins
         // fields, and a `planned:` line names no command yet.
         if line.starts_with("cli ") || COPIES.iter().any(|h| line.starts_with(h)) {
-            let bare = outside_placeholders(line);
+            // A single-quoted word is the program's own (`'GVT&D'`): the
+            // shell hands it over whole, so its `&` chains nothing (R4-06).
+            let bare = outside_quotes(&outside_placeholders(line));
             if let Some(c) = CHAINS.iter().find(|c| bare.contains(*c)) {
                 out.push(problem(
                     "commands",
@@ -2145,7 +2445,17 @@ fn report(entries: &[Entry], evidence: &Evidence, problems: &[Problem]) -> Strin
         s,
         "steps whose command a package has not built yet: {planned}"
     );
-    for rule in ["fields", "leftovers", "rehearsal", "copies", "recount"] {
+    for rule in [
+        "fields",
+        "leftovers",
+        "rehearsal",
+        "copies",
+        "recount",
+        "forms",
+        "records",
+        "kinds",
+        "owed",
+    ] {
         let n = problems.iter().filter(|p| p.rule == rule).count();
         let _ = writeln!(s, "{rule} refusals: {n}");
     }
@@ -2202,6 +2512,18 @@ fn report(entries: &[Entry], evidence: &Evidence, problems: &[Problem]) -> Strin
             evidence.marked.len()
         );
     }
+    match &evidence.owed {
+        Some(ids) => {
+            let _ = writeln!(
+                s,
+                "owed runs: {} read from config/owed-runs.toml; each is a leftover exactly one step closes",
+                ids.len()
+            );
+        }
+        None => {
+            let _ = writeln!(s, "owed runs: not given; NOT CHECKED");
+        }
+    }
     for p in problems {
         let _ = writeln!(s, "REFUSED [{}] {}", p.rule, p.what);
     }
@@ -2220,7 +2542,7 @@ fn run(text: &str, evidence: &Evidence) -> (String, bool) {
     }
 }
 
-const USAGE: &str = "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS]";
+const USAGE: &str = "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS] [--owed OWED_RUNS]";
 
 /// Each evidence flag with the file it names.
 type Flags<'a> = Vec<(&'a str, &'a str)>;
@@ -2238,7 +2560,7 @@ fn parse_arguments(args: &[String]) -> Result<(&str, Flags<'_>), String> {
     let mut seen = BTreeSet::new();
     for pair in rest.chunks(2) {
         let flag = pair[0].as_str();
-        if !["--merges", "--writers", "--decisions", "--marked"].contains(&flag)
+        if !["--merges", "--writers", "--decisions", "--marked", "--owed"].contains(&flag)
             || !seen.insert(flag)
         {
             return Err(USAGE.to_owned());
@@ -2265,6 +2587,7 @@ fn arguments(args: &[String], read_file: ReadFile<'_>) -> Result<(String, Eviden
             "--merges" => evidence.merged = Some(merged_from(&text)),
             "--writers" => evidence.writers = Some(table_from(&text)?),
             "--decisions" => evidence.excluded = Some(excluded_from(&text)?),
+            "--owed" => evidence.owed = Some(owed_from(&text)?),
             _ => evidence.marked = marked_from(&text),
         }
     }
@@ -2399,7 +2722,7 @@ title = "a waiting step"
 state = "pending"
 writes = "new month generations"
 command = [
-  "planned: the restate door", # one line per command
+  "planned: cli gdfl-restate options 2018-11-07 2018-11-07", # one line per command
 ]
 dry_run = ["the same, with BRUTEX_STORE on a private copy"]
 prerequisites = ["WP-02"]
@@ -2831,7 +3154,7 @@ disk = "unknown until rehearsed"
             "waits for operator: a Kite sign-in",
         )
         .replacen(
-            "planned: the restate door",
+            "planned: cli gdfl-restate options 2018-11-07 2018-11-07",
             "POST /pull/repair member=NIFTY",
             1,
         );
@@ -2878,8 +3201,9 @@ disk = "unknown until rehearsed"
             err("x = \"open\nmore\"").contains("line 2: a string is not closed on its own line")
         );
         assert!(
-            err("[[steps]]\n")
-                .contains("[[steps]] is not a table this file holds (env, package, rule, step)")
+            err("[[steps]]\n").contains(
+                "[[steps]] is not a table this file holds (env, package, rule, step, owed)"
+            )
         );
         assert!(err("aB = 1\n").contains("line 1: key \"aB\" is not lower_case"));
         assert!(err("[step]\n").contains("only [[table]] headers are read"));
@@ -3146,11 +3470,11 @@ disk = "unknown until rehearsed"
         let early = with(
             &with(
                 GOOD,
-                "\"planned: the restate door\", # one line per command",
+                "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\", # one line per command",
                 "\"cli gdfl-import indices zip 2018-09-03 2026-09-24\",",
             ),
             "not_rehearsed = \"waits for WP-02: the door is not built\"\ndisk = \"unknown until rehearsed\"",
-            "ran = \"13 Oct\"\nran_ms = 5",
+            "ran = \"13 Oct, run 7\"\nran_ms = 5",
         );
         let early = with(
             &early,
@@ -3291,7 +3615,7 @@ disk = "unknown until rehearsed"
         assert!(refused(
             &shell,
             "commands",
-            "begins with none of cli | POST | tmutil | rsync | planned: "
+            "begins with none of cli | POST | planned: cli | planned: POST "
         ));
         let same = problems_of(
             &with(
@@ -3673,7 +3997,7 @@ disk = "unknown until rehearsed"
         }
         assert_eq!(
             USAGE,
-            "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS]"
+            "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS] [--owed OWED_RUNS]"
         );
     }
 
@@ -3774,7 +4098,7 @@ disk = "unknown until rehearsed"
         let recount = "cli census-recount gdfl --from 2018-11-10 on the restored copy, before any writer starts (this check writes the census and the journal)";
         let scrub =
             "cli scrub-blocks gdfl on the restored copy (this check writes its log and cursor)";
-        let rsync = "rsync -a <store> <drive>";
+        let rsync = "planned: cli backup <drive>";
         let good = with_copy(rsync, STOPPED, &[recount, scrub]);
         assert_eq!(problems_of(&good, &writers()), Vec::<Problem>::new());
         // Taken while a writer appends: no stopped-writers prerequisite.
@@ -3792,7 +4116,7 @@ disk = "unknown until rehearsed"
         // per missing read-back.
         let unread = problems_of(
             &with_copy(
-                "tmutil localsnapshot",
+                "planned: cli snapshot take",
                 STOPPED,
                 &["tmutil listlocalsnapshots /Volumes/X"],
             ),
@@ -3840,7 +4164,7 @@ disk = "unknown until rehearsed"
         let partial = with(
             GOOD,
             "disk = \"unknown until rehearsed\"",
-            "disk = \"unknown until rehearsed\"\nlast_run = \"14 Oct: 10 of 13 keys moved, 3 refused by name\"",
+            "disk = \"unknown until rehearsed\"\nlast_run = \"14 Oct, run 7: 10 of 13 keys moved, 3 refused by name\"",
         );
         assert_eq!(problems_of(&partial, &writers()), Vec::<Problem>::new());
         let (report, _) = run(&partial, &writers());
@@ -3851,7 +4175,7 @@ disk = "unknown until rehearsed"
         let blank = problems_of(
             &with(
                 &partial,
-                "14 Oct: 10 of 13 keys moved, 3 refused by name",
+                "14 Oct, run 7: 10 of 13 keys moved, 3 refused by name",
                 " ",
             ),
             &writers(),
@@ -3862,11 +4186,11 @@ disk = "unknown until rehearsed"
         let early = with(
             &with(
                 GOOD,
-                "\"planned: the restate door\", # one line per command",
+                "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\", # one line per command",
                 "\"cli gdfl-import indices zip 2018-09-03 2026-09-24\",",
             ),
             "not_rehearsed = \"waits for WP-02: the door is not built\"\ndisk = \"unknown until rehearsed\"",
-            "ran = \"14 Oct\"\nran_ms = 5",
+            "ran = \"14 Oct, run 7\"\nran_ms = 5",
         );
         let early = with(
             &early,
@@ -3933,7 +4257,9 @@ disk = "unknown until rehearsed"
 
     #[test]
     fn the_real_list_passes_against_the_cli_writer_table_and_its_own_history() {
-        let (report, passed) = run(REAL, &writers());
+        let (report, passed) = run(REAL, &with_owed());
+        assert!(report.contains("owed refusals: 0"), "{report}");
+        assert!(report.contains("forms refusals: 0"), "{report}");
         assert!(passed, "{report}");
         assert!(report.contains("fields refusals: 0"));
         assert!(report.contains("leftovers refusals: 0"));
@@ -4427,11 +4753,11 @@ disk = "unknown until rehearsed"
         let early = with(
             &with(
                 GOOD,
-                "\"planned: the restate door\", # one line per command",
+                "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\", # one line per command",
                 "\"cli gdfl-import indices zip 2018-09-03 2026-09-24\",",
             ),
             "not_rehearsed = \"waits for WP-02: the door is not built\"\ndisk = \"unknown until rehearsed\"",
-            "ran = \"14 Oct\"\nran_ms = 5",
+            "ran = \"14 Oct, run 7\"\nran_ms = 5",
         );
         let early = with(
             &early,
@@ -4519,7 +4845,7 @@ id = \"S-04\"
 title = \"a step withdrawn\"
 state = \"withdrawn\"
 writes = \"nothing\"
-command = [\"planned: the old door\"]
+command = [\"planned: cli gdfl-restate stocks 2018-11-07 2018-11-07\"]
 dry_run = [\"planned: the old door's plan\"]
 prerequisites = [\"WP-02\"]
 check = [\"store imports/gdfl.journal holds nothing new\"]
@@ -4532,7 +4858,7 @@ id = \"S-05\"
 title = \"a step partly run\"
 state = \"pending\"
 writes = \"new month generations\"
-command = [\"planned: the door\", \"cli gdfl-import indices zip 2018-09-03 2026-09-24\"]
+command = [\"planned: cli gdfl-restate indices 2018-09-03 2018-09-03\", \"cli gdfl-import indices zip 2018-09-03 2026-09-24\"]
 dry_run = [\"the same with BRUTEX_STORE on a private copy\"]
 prerequisites = [\"WP-02\"]
 check = [\"store imports/gdfl.journal holds a done line\"]
@@ -4565,9 +4891,14 @@ leftovers refusals: 0
 rehearsal refusals: 0
 copies refusals: 0
 recount refusals: 0
+forms refusals: 0
+records refusals: 0
+kinds refusals: 0
+owed refusals: 0
 merge history: 2 package merges read; merged flags checked
 decision ledger: D-3317 item 5 read; no census-recount gdfl span may cover 2018-11-06, 2018-11-09
 rows marked as needing a store write: none given; board rows outside the leftovers NOT CHECKED
+owed runs: not given; NOT CHECKED
 "
         );
         assert!(passed);
@@ -4722,8 +5053,8 @@ rows marked as needing a store write: none given; board rows outside the leftove
         // A withdrawn copy is no copy; one copy among other commands is.
         let withdrawn_copy = with(
             &every_shape(),
-            "command = [\"planned: the old door\"]",
-            "command = [\"rsync -a STORE DRIVE\"]",
+            "command = [\"planned: cli gdfl-restate stocks 2018-11-07 2018-11-07\"]",
+            "command = [\"cli backup DRIVE\"]",
         );
         assert_eq!(
             by_rule(&of_text(&withdrawn_copy), "copies"),
@@ -4732,7 +5063,7 @@ rows marked as needing a store write: none given; board rows outside the leftove
         let mixed = of_text(&with(
             GOOD,
             "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\"]",
-            "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\", \"rsync -a STORE DRIVE\"]",
+            "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\", \"cli backup DRIVE\"]",
         ));
         assert!(refused(
             &mixed,
@@ -4882,7 +5213,7 @@ rows marked as needing a store write: none given; board rows outside the leftove
             &with(
                 GOOD,
                 "not_rehearsed = \"waits for WP-02: the door is not built\"\ndisk = \"unknown until rehearsed\"",
-                "ran = \"14 Oct\"\nran_ms = 5",
+                "ran = \"14 Oct, run 7\"\nran_ms = 5",
             ),
             "state = \"pending\"\nwrites = \"new month generations\"\ncommand = [\n",
             "state = \"done\"\nwrites = \"new month generations\"\ncommand = [\n",
@@ -4892,14 +5223,14 @@ rows marked as needing a store write: none given; board rows outside the leftove
             refused(
                 &p,
                 "commands",
-                "S-02: a done step ran its command, but \"planned: the restate door\" is still planned"
+                "S-02: a done step ran its command, but \"planned: cli gdfl-restate options 2018-11-07 2018-11-07\" is still planned"
             ),
             "{p:?}"
         );
         // The same step with the command that ran earns no such refusal.
         let ran = with(
             &done,
-            "\"planned: the restate door\", # one line per command",
+            "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\", # one line per command",
             "\"cli gdfl-import indices zip 2018-09-03 2026-09-24\",",
         );
         assert!(!refused(
@@ -5291,8 +5622,8 @@ rows marked as needing a store write: none given; board rows outside the leftove
             ),
             ("cli gdfl-import options zip <a b> 2018-11-07", ">"),
             ("cli gdfl-import options zip <> 2018-11-07", ">"),
-            ("tmutil localsnapshot && cli gdfl-rekey --apply", "&"),
-            ("rsync -a A B | tee x", "|"),
+            ("planned: cli snapshot take && cli gdfl-rekey --apply", "&"),
+            ("planned: cli backup A B | tee x", "|"),
             ("cli gdfl-import options zip $(date) 2018-11-07", "$("),
             (
                 "cli gdfl-import options zip 2018-11-07\ncli gdfl-rekey --apply",
@@ -5325,15 +5656,16 @@ rows marked as needing a store write: none given; board rows outside the leftove
             ]
         );
         assert_eq!(
-            command("tmutil localsnapshot $"),
+            command("planned: cli snapshot take $"),
             [
-                "step S-01: command \"tmutil localsnapshot $\" uses $, which the step's env does not declare"
+                "step S-01: command \"planned: cli snapshot take $\" uses $, which the step's env does not declare",
+                "step S-01: every prerequisite is met, but the command is still planned: write the real one"
             ]
         );
         // A form's body joins its fields with `&`, and a planned line runs
         // nothing yet.
         assert!(
-            !command("planned: the door; then the check")
+            !command("planned: cli gdfl-restate options 2018-11-07 2018-11-07; then the check")
                 .iter()
                 .any(|w| w.contains("chains"))
         );
@@ -5351,13 +5683,23 @@ rows marked as needing a store write: none given; board rows outside the leftove
         ] {
             assert_eq!(
                 command(&format!("rsync -a {o} A B")),
-                [format!(
-                    "step S-01: command \"rsync -a {o} A B\": rsync {o} removes files, and a copy of an append-only store removes none"
-                )]
+                [
+                    format!(
+                        "step S-01: command \"rsync -a {o} A B\" begins with none of cli | POST | planned: cli | planned: POST "
+                    ),
+                    format!(
+                        "step S-01: command \"rsync -a {o} A B\": rsync {o} removes files, and a copy of an append-only store removes none"
+                    ),
+                ]
             );
         }
         // After `--`, a word is a file name.
-        assert_eq!(command("rsync -a A B -- --delete"), Vec::<String>::new());
+        assert_eq!(
+            command("rsync -a A B -- --delete"),
+            [
+                "step S-01: command \"rsync -a A B -- --delete\" begins with none of cli | POST | planned: cli | planned: POST "
+            ]
+        );
 
         assert_eq!(outside_placeholders("a <B|C> d"), "a NAME d");
         assert_eq!(outside_placeholders("<A><B>"), "NAMENAME");
@@ -5443,5 +5785,374 @@ rows marked as needing a store write: none given; board rows outside the leftove
             "it isn\u{2019}t so that this ran before S-01",
             "S-01"
         ));
+    }
+
+    // ------------------------------------------------- R4-06 (AUT-07) --
+
+    /// The owed runs CI hands the tool with `--owed`.
+    const OWED: &str = include_str!("../config/owed-runs.toml");
+
+    /// [`writers`] with the tracked owed runs.
+    fn with_owed() -> Evidence {
+        Evidence {
+            owed: Some(owed_from(OWED).expect("config/owed-runs.toml reads")),
+            ..writers()
+        }
+    }
+
+    /// An owed-runs file holding `ids`.
+    fn owed_file(ids: &[&str]) -> String {
+        let mut s = String::from("format = 1\n");
+        for id in ids {
+            s.push_str(&format!(
+                "\n[[owed]]\nid = {id:?}\nwhat = \"a run\"\nsource = [\"census\"]\n"
+            ));
+        }
+        s
+    }
+
+    /// **EVERY OWED CENSUS RUN IS NAMED BY ONE STEP** (AUT-07): the tracked
+    /// list names each of the tracked owed runs by exactly one step; an owed
+    /// run that is no leftover, an `OWED-` leftover no owed run holds, one no
+    /// step closes and one two steps close are each refused by name; and an
+    /// owed file that is empty, renumbered twice or of another table is
+    /// refused whole.
+    #[test]
+    fn every_owed_census_run_is_named_by_one_step() {
+        let ids = owed_from(OWED).expect("reads");
+        assert!(ids.len() >= 31, "{ids:?}");
+        let entries = read(REAL).expect("reads");
+        let mut closers: BTreeMap<&str, usize> = BTreeMap::new();
+        for step in of(&entries, "step") {
+            if step.text("state") == Some("withdrawn") {
+                continue;
+            }
+            for row in step.list("closes") {
+                *closers.entry(row.as_str()).or_default() += 1;
+            }
+        }
+        for id in &ids {
+            assert_eq!(
+                closers.get(id.as_str()),
+                Some(&1),
+                "{id}: closed by one step"
+            );
+        }
+        let (report, passed) = run(REAL, &with_owed());
+        assert!(passed, "{report}");
+        assert!(report.contains(&format!(
+            "owed runs: {} read from config/owed-runs.toml",
+            ids.len()
+        )));
+        // A FIXTURE: GOOD's two leftovers, plus owed runs.
+        let owed = |ids: &[&str]| Evidence {
+            owed: Some(owed_from(&owed_file(ids)).expect("reads")),
+            ..writers()
+        };
+        let listed = with(
+            GOOD,
+            "leftovers = [\"DB-A01\", \"DB-A02\"]",
+            "leftovers = [\"DB-A01\", \"DB-A02\", \"OWED-01\"]",
+        );
+        let closed = with(
+            &listed,
+            "closes = [\"DB-A01\"]",
+            "closes = [\"DB-A01\", \"OWED-01\"]",
+        );
+        assert_eq!(
+            problems_of(&closed, &owed(&["OWED-01"])),
+            Vec::<Problem>::new()
+        );
+        // An owed run that is no leftover.
+        let p = problems_of(&closed, &owed(&["OWED-01", "OWED-02"]));
+        assert!(
+            refused(&p, "owed", "owed run OWED-02 is not a leftover"),
+            "{p:?}"
+        );
+        // No owed list given: not checked, and the report says so.
+        assert!(by_rule(&problems_of(&closed, &writers()), "owed").is_empty());
+        // An OWED- leftover that no owed run holds.
+        let p = problems_of(
+            &with(&closed, "\"OWED-01\"]", "\"OWED-01\", \"OWED-03\"]"),
+            &owed(&["OWED-01"]),
+        );
+        assert!(
+            refused(&p, "owed", "leftover OWED-03 is no owed run"),
+            "{p:?}"
+        );
+        // No step closes it, or two do.
+        let p = problems_of(&listed, &owed(&["OWED-01"]));
+        assert!(refused(&p, "leftovers", "OWED-01"), "{p:?}");
+        let twice = with(
+            &closed,
+            "closes = [\"DB-A02\"]",
+            "closes = [\"DB-A02\", \"OWED-01\"]",
+        );
+        let p = problems_of(&twice, &owed(&["OWED-01"]));
+        assert!(refused(&p, "leftovers", "OWED-01"), "{p:?}");
+        // The steps list holds no [[owed]] table of its own.
+        let inside =
+            format!("{closed}\n[[owed]]\nid = \"OWED-01\"\nwhat = \"x\"\nsource = [\"y\"]\n");
+        assert!(refused(
+            &problems_of(&inside, &owed(&["OWED-01"])),
+            "owed",
+            "owed runs live in config/owed-runs.toml"
+        ));
+        // The owed file itself.
+        assert!(
+            owed_from("format = 1\n")
+                .unwrap_err()
+                .contains("an empty list proves nothing")
+        );
+        assert!(
+            owed_from(&owed_file(&["OWED-01", "OWED-01"]))
+                .unwrap_err()
+                .contains("OWED-01 is given twice")
+        );
+        assert!(
+            owed_from(&owed_file(&["OWED-1"]))
+                .unwrap_err()
+                .contains("is not OWED-<two or more digits>")
+        );
+        assert!(owed_from("format = 1\n\n[[step]]\nid = \"S-01\"\n").is_err());
+        let (report, _) = run(&closed, &owed(&["OWED-01"]));
+        assert!(
+            report.contains("owed runs: 1 read from config/owed-runs.toml"),
+            "{report}"
+        );
+    }
+
+    /// **EVERY STORE STEP COMMAND IS A CLI VERB OR A POST** (AUT-07): a bare
+    /// `cli <verb>` or `POST <route>`, built or planned; never a script, a
+    /// system tool, prose, a build path, an absolute path under the work
+    /// folder, or a loop written in words. The tracked list holds none.
+    #[test]
+    fn every_store_step_command_is_a_cli_verb_or_a_post() {
+        let entries = read(REAL).expect("reads");
+        for step in of(&entries, "step") {
+            for line in step.list("command") {
+                assert!(
+                    HEADS.iter().any(|h| line.starts_with(h)),
+                    "{}: {line:?}",
+                    step.label()
+                );
+            }
+        }
+        let p = problems_of(REAL, &with_owed());
+        assert!(by_rule(&p, "forms").is_empty(), "{p:?}");
+        assert!(by_rule(&p, "commands").is_empty(), "{p:?}");
+        let at =
+            "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\"]";
+        let one = |line: &str| {
+            problems_of(
+                &with(GOOD, at, &format!("command = [{line:?}]")),
+                &writers(),
+            )
+        };
+        for (line, rule, says) in [
+            (
+                "bash state/data-census-20261013/cli.sh gdfl-import",
+                "commands",
+                "begins with none of",
+            ),
+            (
+                "state/data-census-20261013/cli.sh gdfl-import options zip",
+                "forms",
+                "holds \".sh\"",
+            ),
+            (
+                "cli gdfl-import options zip 2018-11-07 2018-11-07 --scratch state/x",
+                "forms",
+                "holds \"state/\"",
+            ),
+            ("tmutil localsnapshot", "commands", "begins with none of"),
+            (
+                "planned: the restate door",
+                "commands",
+                "begins with none of",
+            ),
+            (
+                "planned: R3-22's restate door for option months",
+                "commands",
+                "begins with none of",
+            ),
+            (
+                "cli gdfl-import options zip <DAY> <DAY>, once for each of 2018-11-07 2019-10-27",
+                "forms",
+                "says \"each\"",
+            ),
+            (
+                "cli gdfl-import options zip 2018-11-07 2018-11-07 for every underlying",
+                "forms",
+                "says \"every\"",
+            ),
+            (
+                "tgt/app18/release/cli gdfl-import options zip 2018-11-07 2018-11-07",
+                "forms",
+                "holds \"tgt/\"",
+            ),
+            (
+                "cli gdfl-import options zip 2018-11-07 2018-11-07 --from /Volumes/WD_BLACK/brutex/work-20260925/x",
+                "forms",
+                "names the path",
+            ),
+            (
+                "POST /pull/repair target=indices /Volumes/WD_BLACK/x",
+                "forms",
+                "names the path",
+            ),
+        ] {
+            let p = one(line);
+            assert!(refused(&p, rule, says), "{line}: {p:?}");
+        }
+        // The forms the list is written in pass: a range verb, one line a
+        // day, a POST of the app's route, a quoted '&' or 'each' that is the
+        // program's own word, a planned cli verb (WP-02 is unmerged).
+        for line in [
+            "cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY 'GVT&D'",
+            "cli zerodha-repair NIFTY 2021-02-24 2021-02-24 --from-store $BRUTEX_STORE --reason 'refold each rung'",
+            "POST /pull/repair target=indices&vendor=zerodha&member=NIFTY&from=2019-04-01&to=2019-04-30",
+        ] {
+            let p = one(line);
+            assert!(
+                by_rule(&p, "forms").is_empty() && !refused(&p, "commands", "begins with none of"),
+                "{line}: {p:?}"
+            );
+        }
+        let planned = with(
+            GOOD,
+            "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\",",
+            "\"planned: POST /restate days=2018-11-07\",",
+        );
+        assert!(by_rule(&problems_of(&planned, &writers()), "forms").is_empty());
+        assert!(!refused(
+            &problems_of(&planned, &writers()),
+            "commands",
+            "begins with none of"
+        ));
+    }
+
+    /// **A RUN STEP CARRIES ITS RUN ID AND ITS CHECK** (AUT-07): a done
+    /// step's `ran` and a pending step's `last_run` name the run id or the
+    /// store record the run was read from; a step without a check is
+    /// refused; and the tracked list's every run record passes.
+    #[test]
+    fn a_run_step_carries_its_run_id_and_check() {
+        let p = problems_of(REAL, &with_owed());
+        assert!(by_rule(&p, "records").is_empty(), "{p:?}");
+        let done = with(
+            GOOD,
+            "not_rehearsed = \"waits for WP-02: the door is not built\"\ndisk = \"unknown until rehearsed\"",
+            "ran = \"14 Oct, run 1791943060\"\nran_ms = 5",
+        );
+        let done = with(
+            &done,
+            "state = \"pending\"\nwrites = \"new month generations\"\ncommand = [\n",
+            "state = \"done\"\nwrites = \"new month generations\"\ncommand = [\n",
+        );
+        let done = with(
+            &done,
+            "\"planned: cli gdfl-restate options 2018-11-07 2018-11-07\",",
+            "\"cli gdfl-import options zip 2018-11-08 2018-11-08\",",
+        );
+        let done = with(
+            &done,
+            "prerequisites = [\"WP-02\"]",
+            "prerequisites = [\"WP-01\"]",
+        );
+        assert!(by_rule(&problems_of(&done, &writers()), "records").is_empty());
+        for ran in ["14 Oct, by the main session", "run of 14 Oct", "runs many"] {
+            let p = problems_of(&with(&done, "14 Oct, run 1791943060", ran), &writers());
+            assert!(
+                refused(&p, "records", "ran names no run id and no store record"),
+                "{ran}: {p:?}"
+            );
+        }
+        for ran in [
+            "imports/gdfl.journal lines 1 to 9",
+            "logs/cli/audit.ndjson 'run finished'",
+            "runs 7 and 8",
+            "(run 12)",
+        ] {
+            let p = problems_of(&with(&done, "14 Oct, run 1791943060", ran), &writers());
+            assert!(by_rule(&p, "records").is_empty(), "{ran}: {p:?}");
+        }
+        let partly = with(
+            GOOD,
+            "disk = \"unknown until rehearsed\"",
+            "disk = \"unknown until rehearsed\"\nlast_run = \"14 Oct: 10 of 13 keys moved\"",
+        );
+        assert!(refused(
+            &problems_of(&partly, &writers()),
+            "records",
+            "last_run names no run id"
+        ));
+        // NO CHECK, NO STEP: the key is required and an empty one is refused.
+        let unchecked = with(GOOD, "check = [\"GET /x (0 today)\"]\n", "");
+        assert!(read(&unchecked).is_err() || !problems_of(&unchecked, &writers()).is_empty());
+        let blank = with(GOOD, "check = [\"GET /x (0 today)\"]", "check = [\" \"]");
+        assert!(refused(
+            &problems_of(&blank, &writers()),
+            "fields",
+            "check names nothing"
+        ));
+    }
+
+    /// **A KIND IS NAMED ONCE AND NEVER A DELETION** (AUT-05): the gate's
+    /// own copy of `pull::rehearsal`'s rule.
+    #[test]
+    fn a_kind_is_named_once_never_a_deletion_and_its_stamps_read() {
+        let kinded = with(
+            GOOD,
+            "disk = \"4 KiB\"",
+            "disk = \"4 KiB\"\nkind = \"gdfl-options-day\"\nrehearsed_commit = \"abc 10\"\nwriter_changed = \"def 9\"\nsnapshot = \"s 11\"",
+        );
+        assert!(by_rule(&problems_of(&kinded, &writers()), "kinds").is_empty());
+        for (from, to, says) in [
+            (
+                "kind = \"gdfl-options-day\"",
+                "kind = \"prune-logs\"",
+                "is a prune kind",
+            ),
+            (
+                "kind = \"gdfl-options-day\"",
+                "kind = \"token-refresh\"",
+                "is a token kind",
+            ),
+            (
+                "kind = \"gdfl-options-day\"",
+                "kind = \"Gdfl_Day\"",
+                "is not lower-case words",
+            ),
+            (
+                "writer_changed = \"def 9\"",
+                "writer_changed = \"def\"",
+                "is not \"<name> <unix seconds>\"",
+            ),
+        ] {
+            let p = problems_of(&with(&kinded, from, to), &writers());
+            assert!(refused(&p, "kinds", says), "{to}: {p:?}");
+        }
+        let twice = with(
+            &kinded,
+            "disk = \"unknown until rehearsed\"",
+            "disk = \"unknown until rehearsed\"\nkind = \"gdfl-options-day\"",
+        );
+        assert!(refused(
+            &problems_of(&twice, &writers()),
+            "kinds",
+            "is named by S-01 and S-02"
+        ));
+        let stray = with(
+            GOOD,
+            "disk = \"4 KiB\"",
+            "disk = \"4 KiB\"\nsnapshot = \"s 11\"",
+        );
+        assert!(refused(
+            &problems_of(&stray, &writers()),
+            "kinds",
+            "snapshot without a kind"
+        ));
+        assert_eq!(NEVER_AUTOMATIC.len(), 8);
     }
 }

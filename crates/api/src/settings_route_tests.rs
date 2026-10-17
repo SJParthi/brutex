@@ -852,3 +852,187 @@ fn under_a_successor_race_a_landed_post_is_answered_saved() {
         assert_eq!(b_answer["generation"]["generation"], 3, "trial {trial}");
     }
 }
+
+// ------------------------------------------------- SEC-07: credential shapes --
+
+/// Every file under `dir`, recursively, as bytes.
+fn every_file(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.map(Result::unwrap) {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(every_file(&path));
+        } else {
+            out.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    out
+}
+
+/// The byte scan: no file under `root` holds `needle`.
+fn holds_nowhere(root: &Path, needle: &str) {
+    for (path, bytes) in every_file(root) {
+        assert!(
+            !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "{} holds the refused value",
+            path.display()
+        );
+    }
+}
+
+/// A body that sets `key` to `value`, with `changed_by` and `reason`.
+fn setting(key: &str, value: &str, by: &str, reason: &str) -> String {
+    serde_json::json!({
+        "expected": 0,
+        "changed_by": by,
+        "reason": reason,
+        "set": {key: value},
+    })
+    .to_string()
+}
+
+/// A 32-character token of invented letters and digits: the length of the
+/// access tokens this system reads, and no real one.
+const TOKEN: &str = "q7Zt0invented0token0value0x9K2mW";
+
+/// **A TOKEN-SHAPED VALUE IS REFUSED BY NAME AND NEVER WRITTEN**: in every
+/// key, in `changed_by` and in `reason`, the answer is `400 secret_shaped`
+/// naming the key, the class and the length; the answer never holds the
+/// value; no generation is written; and a byte scan of the whole store root
+/// finds it nowhere. An unknown key NAME of that shape is not repeated in the
+/// `bad_body` refusal.
+#[test]
+fn a_token_shaped_value_is_refused_and_never_written() {
+    let root = root("sec07-token");
+    for key in Key::ALL {
+        let (status, answer) = change(&root, &setting(key.name(), TOKEN, "operator", "r"));
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key:?}: {answer}");
+        assert_eq!(answer["code"], "secret_shaped", "{answer}");
+        assert_eq!(answer["key"], key.name(), "{answer}");
+        assert_eq!(answer["class"], "token", "{answer}");
+        assert_eq!(answer["bytes"], TOKEN.len(), "{answer}");
+        assert_eq!(answer["saved"], false);
+        assert!(!answer.to_string().contains(TOKEN), "{answer}");
+    }
+    for (by, reason, named) in [
+        (TOKEN, "r", "changed_by"),
+        (
+            "operator",
+            "pasted it here: q7Zt0invented0token0value0x9K2mW",
+            "reason",
+        ),
+    ] {
+        let (status, answer) = change(&root, &setting("open.order", "oldest", by, reason));
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(answer["key"], named, "{answer}");
+        assert!(!answer.to_string().contains(TOKEN), "{answer}");
+    }
+    for body in [
+        format!(r#"{{"expected":0,"changed_by":"a","reason":"b","set":{{"{TOKEN}":"x"}}}}"#),
+        format!(r#"{{"expected":0,"changed_by":"a","reason":"b","unset":["{TOKEN}"]}}"#),
+        format!(r#"{{"expected":0,"changed_by":"a","reason":"b","{TOKEN}":1}}"#),
+    ] {
+        let (status, answer) = change(&root, &body);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(answer["code"], "bad_body", "{answer}");
+        assert!(!answer.to_string().contains(TOKEN), "{answer}");
+    }
+    assert!(!settings::path_of(&root, 1).exists());
+    holds_nowhere(&root, TOKEN);
+    // EXACTLY TWENTY IS REFUSED AND NINETEEN SAVED, at the route.
+    let twenty = &TOKEN[..20];
+    let (status, answer) = change(&root, &setting("open.order", "oldest", twenty, "r"));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("secret_shaped"))
+    );
+    assert_eq!(answer["bytes"], 20);
+    let (status, answer) = change(&root, &setting("open.order", "oldest", &TOKEN[..19], "r"));
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    holds_nowhere(&root, twenty);
+}
+
+/// **A PARAMETER-PATH-SHAPED VALUE IS REFUSED BY NAME AND NEVER WRITTEN**,
+/// for every credential field the charter names; a long legitimate folder,
+/// with spaces and a long segment, is saved.
+#[test]
+fn a_parameter_path_shaped_value_is_refused_and_never_written() {
+    let root = root("sec07-path");
+    for field in CHARTER_FIELDS {
+        let path = format!("/inventedorg/inventedenv/inventedvendor/{field}");
+        let (status, answer) = change(&root, &setting("source.gdfl", &path, "operator", "r"));
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {answer}");
+        assert_eq!(answer["code"], "secret_shaped", "{answer}");
+        assert_eq!(answer["key"], "source.gdfl");
+        assert_eq!(answer["class"], "parameter_path", "{answer}");
+        assert_eq!(answer["bytes"], path.len());
+        assert!(!answer.to_string().contains("inventedorg"), "{answer}");
+    }
+    assert!(!settings::path_of(&root, 1).exists());
+    holds_nowhere(&root, "inventedorg");
+    // A LONG LEGITIMATE PATH SETTING IS ALLOWED.
+    let long = root.join("NSE (Stock+Indices) an archive folder with a twentyfivecharactername");
+    std::fs::create_dir_all(&long).unwrap();
+    let long = long.to_str().unwrap().to_owned();
+    let (status, answer) = change(&root, &setting("source.gdfl", &long, "operator", "r"));
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["saved"], true);
+}
+
+/// **A CONCURRENT SAVE**: a credential-shaped change and an ordinary one at
+/// the same moment. The refusal takes no reader and writes nothing, so the
+/// ordinary save is generation 1 alone, and the store holds no trace of the
+/// refused value.
+#[test]
+fn a_concurrent_secret_save_writes_nothing_and_the_ordinary_one_lands() {
+    for trial in 0..10 {
+        let root = root("sec07-concurrent");
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let (other, other_gate) = (root.clone(), Arc::clone(&gate));
+        let refused = std::thread::spawn(move || {
+            other_gate.wait();
+            change(&other, &setting("open.order", TOKEN, "operator", "r"))
+        });
+        gate.wait();
+        let (status, answer) = change(&root, &setting("open.order", "oldest", "operator", "r"));
+        let (r_status, r_answer) = refused.join().unwrap();
+        assert_eq!(status, StatusCode::OK, "trial {trial}: {answer}");
+        assert_eq!(answer["generation"]["generation"], 1, "trial {trial}");
+        assert_eq!(r_status, StatusCode::BAD_REQUEST, "trial {trial}");
+        assert_eq!(r_answer["code"], "secret_shaped");
+        assert!(!settings::path_of(&root, 2).exists(), "trial {trial}");
+        holds_nowhere(&root, TOKEN);
+    }
+}
+
+/// **THE DETECTOR'S COST, MEASURED**: n = 400 checks of a 4,096-byte value
+/// (the cap) and of a 4,097-byte one (refused unread). Printed, not
+/// asserted as a time: a timing is a measurement, and the bound asserted is
+/// the cap itself.
+#[test]
+fn the_check_is_bounded_by_the_value_cap() {
+    let at_cap = "a ".repeat(brutex_core::secret_shape::MAX_VALUE_BYTES / 2);
+    let over = format!("{at_cap}b");
+    for (name, value, expect) in [
+        ("at_cap", &at_cap, None),
+        ("over_cap", &over, Some("over_cap")),
+    ] {
+        let mut times: Vec<u128> = (0..400)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let shape = brutex_core::secret_shape::shape_of(value, credential_fields());
+                let took = started.elapsed().as_nanos();
+                assert_eq!(shape.map(brutex_core::secret_shape::Shape::class), expect);
+                took
+            })
+            .collect();
+        times.sort_unstable();
+        println!(
+            "secret_shape {name}: n=400 p50={}ns p99={}ns max={}ns",
+            times[200], times[396], times[399]
+        );
+    }
+}

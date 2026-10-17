@@ -2639,7 +2639,7 @@ jobs:
           "${gs}-tests"
           rustc --edition=2024 -D warnings .github/gates_store_steps.rs -o "$gs"
           git log --format=%s --merges > "${gs}-merges"
-          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md
+          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu

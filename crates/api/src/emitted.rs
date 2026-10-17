@@ -234,7 +234,9 @@ struct Case {
 /// holding January and March only.
 /// 38 -> 39 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, the hand
 /// runs' own stop generation moving on the operator's Stop.
-const ROWS: usize = 39;
+/// 39 -> 40 at R4-06 (SEC-07): `api.settings secret-shaped value refused`, a
+/// credential-shaped setting refused by key, class and length.
+const ROWS: usize = 40;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -824,6 +826,30 @@ fn cases() -> Vec<Case> {
         }),
         mine: Box::new(|record| counts(record, "hand_epoch", 1)),
     });
+    // R4-06 (SEC-07): a credential-shaped setting refused, naming the key,
+    // the class and the length, never the value.
+    {
+        let root = fixture("emit-settings-secret");
+        cases.push(Case {
+            site: "settings_route.rs secret-shaped value refused",
+            target: "api.settings",
+            message: "secret-shaped value refused",
+            level: telemetry::Level::Warn,
+            drive: Box::new(move || {
+                let (status, answer) = crate::server::settings_route::change(
+                    &root,
+                    r#"{"expected":0,"changed_by":"a","reason":"b","set":{"open.order":"q7Zt0invented0token0value0x9K2mW"}}"#,
+                );
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{answer}");
+                assert_eq!(answer["code"], "secret_shaped", "{answer}");
+            }),
+            mine: Box::new(|record| {
+                says(record, "key", "open.order")
+                    && says(record, "class", "token")
+                    && counts(record, "bytes", 32)
+            }),
+        });
+    }
 
     // crates/api/src/audit_json.rs — two refusals a status code cannot carry.
     {
@@ -2029,9 +2055,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
     // `api.recovery recovery not resumed`, reached in recovery tests. (That
     // branch counted 73 -> 74; the two packages' sites are added here.)
+    // 78 -> 79 at R4-06 (SEC-07): `api.settings secret-shaped value refused`,
+    // driven in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 78,
+        lib_sites, 79,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
