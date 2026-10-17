@@ -297,11 +297,30 @@
     display: flex;
   }
   .seg button {
-    border-radius: 0;
+    font: inherit;
+    font-size: var(--fs-sm);
+    padding: 3px var(--s3);
+    border: 1px solid var(--n4, #ccc);
+    background: transparent;
+    color: var(--n9);
+    cursor: pointer;
+  }
+  .seg button + button {
+    border-left: none;
+  }
+  .seg button:first-child {
+    border-radius: 4px 0 0 4px;
+  }
+  .seg button:last-child {
+    border-radius: 0 4px 4px 0;
   }
   .seg button.on {
     background: var(--acc-soft);
     color: var(--n11);
+  }
+  .seg button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .scroll {
     overflow-x: auto;
