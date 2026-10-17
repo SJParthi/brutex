@@ -70726,6 +70726,8 @@ against. Two things are refused by name, that row only:
 
 Proof: `crates/pull/tests/zerodha_identity.rs`
 (`a_zero_price_day_bar_is_refused_by_name_at_landing`,
+`a_zero_price_minute_is_refused_by_name`,
+`an_options_zero_price_is_never_refused_as_non_positive`,
 `a_day_bar_before_listing_is_refused_by_name`,
 `the_day_rung_is_never_judged_by_range`).
 
@@ -70768,7 +70770,8 @@ run of CASH minutes on the 1-minute grid. A minute whose open lies more than
 
 Proof: `crates/pull/tests/zerodha_identity.rs`
 (`a_session_interleaving_two_price_bases_is_refused_at_landing`,
-`a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump`);
+`a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump`,
+`an_index_is_never_judged_by_the_jump_rule`);
 `pull::series_identity` unit tests of `jump_bps` and `JumpRun`.
 
 ### D-4994 — `cli series-identity` gives every flagged stored bar a measured cause and writes a quarantine PLAN under `<store>/audit/series-identity/`, and writes no bar (R4-17; RT-DATA-02 b, Z6) — 2026-10-17
@@ -70805,7 +70808,11 @@ a measured cause:
 Proof: `cli::series_identity::tests`
 (`the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,
 `piind_minutes_are_named_by_cause_before_any_write`,
-`a_month_refused_whole_is_planned_whole`, and the WP-13d tests kept).
+`a_month_refused_whole_is_planned_whole`,
+`the_scan_names_every_edge_it_cannot_judge`, `a_plan_that_cannot_be_written_fails_out_loud`,
+`a_day_bar_alone_fails_and_a_suspect_minute_alone_passes_unless_its_plan_fails`,
+`a_witness_vouches_within_its_tolerance_and_no_further`, `a_percentile_is_the_nearest_rank`,
+and the WP-13d tests kept).
 
 ### D-4995 — No store path and no census key is built from a vendor's instrument token, checked from the source (R4-17; CON-13) — 2026-10-17
 
