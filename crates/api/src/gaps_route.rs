@@ -3966,3 +3966,758 @@ mod tests {
         }
     }
 }
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use brutex_core::vendor::Vendor;
+    use store::path::YearMonth;
+
+    fn month(year: u16, month: u8) -> YearMonth {
+        YearMonth::new(year, month).expect("a real month")
+    }
+
+    fn epoch_day(year: u16, month: u8, day: u8) -> i64 {
+        i64::from(
+            Day::new(year, month, day)
+                .expect("a real day")
+                .days_from_epoch(),
+        )
+    }
+
+    /// The `calendar` member of one `/gaps.json` body over `span`, audited
+    /// against a denominator from `source` vouching for `bounds`.
+    fn calendar_of(
+        source: &'static str,
+        bounds: (i64, i64),
+        span: &[YearMonth],
+    ) -> serde_json::Value {
+        let denominator = Denominator {
+            calendar: None,
+            source,
+            bounds,
+            from: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        let identity = Identity {
+            json: r#""identity":{}"#.to_owned(),
+            one_second: false,
+        };
+        let body = gaps_body(&[], span, &denominator, false, &identity);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+        parsed["calendar"].clone()
+    }
+
+    /// **A PEER VOTE NOBODY CAST STILL NAMES WHO VOTED AND WHO COULD NOT BE
+    /// READ.** With no calendar agreed the denominator is the typed table, and
+    /// the readings and the unreadable peers ride on it to the answer. Kills
+    /// `delete field from` and `delete field unreadable` in
+    /// `Denominator::peers`: either would answer `voted_by: []` or
+    /// `unreadable: []`, the same answer as a store with no peers.
+    #[test]
+    fn a_vote_with_no_calendar_keeps_its_readings_and_its_unreadable_peers() {
+        let denominator = Denominator::peers(PeerCalendar {
+            calendar: None,
+            from: vec!["dhan:NIFTY".to_owned()],
+            unreadable: vec!["groww".to_owned()],
+        });
+        assert_eq!(denominator.source, "table");
+        assert!(denominator.calendar.is_none());
+        assert_eq!(denominator.from, vec!["dhan:NIFTY".to_owned()]);
+        assert_eq!(denominator.unreadable, vec!["groww".to_owned()]);
+    }
+
+    /// **A HALT THAT RUNS TO THE CLOSE LEAVES ONE WINDOW, AND ONE WINDOW IS A
+    /// SESSION.** 2021-02-24's outage halts minutes 700..=944, past the 15:29
+    /// close, so carving it out of a regular session leaves 09:15..=11:39 —
+    /// one run. `> with <` in `carved` refused every carving with fewer runs
+    /// than a session can hold, so that day's owed minutes read unmeasured.
+    #[test]
+    fn a_halt_that_runs_to_the_close_carves_a_one_window_session() {
+        let day = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let carved = carved(day, pull::calendar::Session::full()).expect("one window is a session");
+        assert_eq!(carved.count, 1);
+        assert!(carved.expects(555), "09:15 is owed");
+        assert!(carved.expects(699), "11:39 is owed");
+        assert!(!carved.expects(700), "the halt is carved out");
+        // A day with no recorded halt is handed back untouched.
+        let plain = epoch_day(2025, 5, 2);
+        assert_eq!(carved_or_none(plain), Some(pull::calendar::Session::full()));
+    }
+
+    fn carved_or_none(day: i64) -> Option<pull::calendar::Session> {
+        carved(day, pull::calendar::Session::full())
+    }
+
+    /// **`stale` IS TODAY PAST THE SOURCE'S LAST DAY, AND NEVER FOR A PEER
+    /// VOTE.** A record whose last day is yesterday is stale; one ending today
+    /// or later is not; a peer vote is never stale, whatever its bounds. Kills
+    /// `!= with ==` and `&& with ||` at 670-671 and the three mutants of the
+    /// `>` that compares today with the last day.
+    #[test]
+    fn stale_is_today_past_the_last_day_and_never_a_peer_vote() {
+        let today = i64::from(crate::ingest::today_ist().expect("today").days_from_epoch());
+        let span = [month(2025, 5)];
+        let first = epoch_day(2025, 5, 1);
+        for (source, last, stale) in [
+            ("record", today - 1, true),
+            ("record", today, false),
+            ("record", today + 1, false),
+            ("table", today - 1, true),
+            ("peers", today - 1, false),
+            ("peers", today + 1, false),
+        ] {
+            let calendar = calendar_of(source, (first, last), &span);
+            assert_eq!(
+                calendar["stale"], stale,
+                "{source} ending {last} (today {today})"
+            );
+        }
+    }
+
+    /// **`covers_span` IS THE WHOLE SPAN INSIDE WHAT THE SOURCE VOUCHES FOR**:
+    /// its first month's first day on or after the source's first day, AND its
+    /// last month's last day on or before the source's last. Kills `>= with <`
+    /// at 679 and `&& with ||` at 680.
+    #[test]
+    fn a_span_is_covered_only_when_both_its_ends_are_inside_the_source() {
+        let (may_first, may_last) = (epoch_day(2025, 5, 1), epoch_day(2025, 5, 31));
+        let span = [month(2025, 5)];
+        for (bounds, covered) in [
+            ((may_first, may_last), true),
+            ((may_first - 10, may_last + 10), true),
+            ((may_first + 1, may_last), false),
+            ((may_first, may_last - 1), false),
+            ((may_first + 1, may_last - 1), false),
+        ] {
+            assert_eq!(
+                calendar_of("record", bounds, &span)["covers_span"],
+                covered,
+                "{bounds:?}"
+            );
+        }
+    }
+
+    /// **A VOTE THAT WAITS ON THE START-UP CENSUS SAYS SO**, not that it is
+    /// walking the census. Kills `delete match arm "census"` in
+    /// `vote_building`: the answer then fell through to the "walking every
+    /// feed's census" sentence of a build with nothing owed yet.
+    #[test]
+    fn a_vote_held_by_the_start_up_census_names_that_wait() {
+        let asked = Addressed {
+            vendor: Vendor::Dhan,
+            month: month(2025, 5),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            contract: None,
+            exchange: "NSE".to_owned(),
+            segment: "INDEX".to_owned(),
+            symbol: "NIFTY".to_owned(),
+        };
+        let (status, _, body) = vote_building(
+            &asked,
+            "census",
+            "start-up",
+            std::time::Duration::from_millis(5),
+            None,
+            0,
+            0,
+        );
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let reason = body["reason"].as_str().expect("a reason");
+        assert!(reason.contains("reading its census at start"), "{reason}");
+        assert!(!reason.contains("walking"), "{reason}");
+    }
+
+    /// **2021-02-24 OWES NO SECOND** (D-0420): the index's publication window
+    /// that day is unproved, so a one-second audit counts its rows as outside
+    /// and audits no second of it. Kills the match guard
+    /// `day != SYSTEMS_OUTAGE_DAY -> true` in `second_audit`, which audited
+    /// the day against its carved session.
+    #[test]
+    fn the_outage_day_owes_no_second() {
+        let day = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let at = |second: i64| store::format::Bar {
+            ts_micros: (day * 86_400 - 19_800 + second) * 1_000_000,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        };
+        // 09:15:00 and 09:15:01 IST, against the calendar of record, which
+        // opens the day with its halt carved out (one window, 09:15..=11:39).
+        let rows = [at(33_300), at(33_301)];
+        let record = record_calendar(day, day);
+        assert!(
+            matches!(
+                record.kind_of(day),
+                pull::calendar::DayKind::Open(session) if session.expects(555)
+            ),
+            "the record opens the day, so only the outage rule can owe it nothing"
+        );
+        let audit = second_audit(&rows, day, day, Some(&record), 1);
+        assert_eq!(audit.expected, 0, "no second of the day is owed");
+        assert_eq!(audit.held, 0);
+        assert_eq!(
+            audit.outside, 2,
+            "both rows are held outside any owed second"
+        );
+        assert!(audit.days.is_empty(), "the day is not audited at all");
+    }
+
+    /// **A DAY'S LONGEST RUN IS THE FIRST OF EQUAL LENGTH.** Two missing runs
+    /// of three seconds each: the day names the earlier. Kills `> with >=` in
+    /// `close_run`, which let the later of two equal runs replace it.
+    #[test]
+    fn of_two_equally_long_runs_the_earlier_is_the_longest() {
+        let mut audit = SecondAudit::default();
+        let mut day = SecondDay {
+            day: 1,
+            expected: 0,
+            held: 0,
+            missing: 0,
+            longest: None,
+        };
+        for run in [(100, 102), (200, 202)] {
+            let mut open = Some(run);
+            close_run(&mut audit, &mut day, &mut open, 1);
+            assert_eq!(open, None, "a closed run is taken");
+        }
+        assert_eq!(day.longest, Some((100, 3)));
+        assert_eq!(audit.run_count, 2);
+        // A strictly longer run still replaces it.
+        let mut open = Some((300, 310));
+        close_run(&mut audit, &mut day, &mut open, 1);
+        assert_eq!(day.longest, Some((300, 11)));
+    }
+
+    fn subject(
+        segment: &str,
+        contract: Option<&str>,
+        timeframe: store::path::Timeframe,
+    ) -> Addressed {
+        Addressed {
+            vendor: Vendor::Gdfl,
+            month: month(2026, 8),
+            timeframe,
+            contract: contract
+                .map(|text| brutex_core::instrument::Contract::parse(text).expect("a contract")),
+            exchange: "NSE".to_owned(),
+            segment: segment.to_owned(),
+            symbol: "NIFTY".to_owned(),
+        }
+    }
+
+    /// **A VOTE THAT COULD NOT READ EVERY CENSUS IS ANSWERED AND NEVER KEPT**
+    /// (DB-N19): it names the unreadable feed, and the next audit reads again.
+    /// With every census readable the same vote may be kept. Kills `&& with
+    /// ||` in `peer_vote_reading`'s `keep`, which kept a vote that named an
+    /// unreadable feed for as long as the stamps did not move.
+    #[test]
+    fn a_vote_that_could_not_read_every_census_is_never_kept() {
+        let root = crate::server::tests::store_root("cloud-gaps-unkept");
+        let masters = crate::server::tests::masters("cloud-gaps-unkept", None, None);
+        let manifest = pull::manifest::manifest_path(&root, Vendor::Groww);
+        std::fs::create_dir_all(manifest.parent().expect("a manifest directory"))
+            .expect("the manifest directory");
+        std::fs::write(&manifest, b"these bytes are no census").expect("a refused manifest");
+        let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+        let site = Site::load(&masters, &root);
+        let (keep, vote) = peer_vote_reading(&site, &asked, census_now_stamped);
+        assert_eq!(vote.unreadable, vec!["groww".to_owned()], "named");
+        assert!(
+            keep.is_none(),
+            "a vote naming an unreadable feed is not kept"
+        );
+
+        std::fs::remove_file(&manifest).expect("the refused manifest goes");
+        let site = Site::load(&masters, &root);
+        let (keep, vote) = peer_vote_reading(&site, &asked, census_now_stamped);
+        assert!(vote.unreadable.is_empty(), "{:?}", vote.unreadable);
+        assert!(keep.is_some(), "a whole read may be kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A ONE-SECOND OPTION IS AUDITED ON THE DERIVATIVES VENUE'S HOURS**
+    /// (hunt-pull-1, D-1529): from 2026-08-03 its session runs to 15:39, so a
+    /// day it printed only at the open owes nothing it lacks and lists a
+    /// `no-print` run to minute 939. `== with !=` in `audit_one` sent every
+    /// trade-driven series that is NOT cash to the cash calendar instead, and
+    /// its runs stopped at 15:29 (minute 929): no test audited an option on
+    /// a day those hours differ.
+    #[tokio::test]
+    async fn a_one_second_option_is_audited_on_the_derivatives_hours() {
+        let root = crate::server::tests::store_root("cloud-gaps-option-hours");
+        let contract = "2026-08-27-2500000-CE";
+        let tuesday = epoch_day(2026, 8, 4);
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: brutex_core::instrument::Contract::parse(contract),
+            timeframe: store::path::Timeframe::SECOND_1,
+            month: month(2026, 8),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(&root, path, id).expect("a file");
+        let print = store::format::Bar {
+            ts_micros: (tuesday * 86_400 - 19_800 + 33_300) * 1_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        file.append(&[print]).expect("one print at 09:15:00");
+        drop(file);
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-option-hours", None, None),
+            &root,
+        ));
+        let uri: axum::http::Uri = format!(
+            "/gaps.json?feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract={contract}\
+             &timeframe=1s&month=2026-08"
+        )
+        .parse()
+        .expect("a URI");
+        let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], true, "{audited}");
+        let runs = audited["gaps"].as_array().expect("runs");
+        let tuesday_runs: Vec<(i64, &str)> = runs
+            .iter()
+            .filter(|run| run["day"] == tuesday)
+            .map(|run| {
+                (
+                    run["to"].as_i64().expect("a minute"),
+                    run["reason"].as_str().expect("a word"),
+                )
+            })
+            .collect();
+        assert!(
+            tuesday_runs.contains(&(939, "no-print")),
+            "the derivatives session runs to 15:39: {tuesday_runs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- lines no test ran (coverage) ------------------------------------
+
+    /// **A RANGE PAST ITS CEILING STOPS AND SAYS SO, AND DECEMBER ROLLS INTO
+    /// THE NEXT YEAR.** Runs `span_of`'s truncation return and `next_month`'s
+    /// December arm.
+    #[test]
+    fn a_span_rolls_december_and_stops_at_its_ceiling_by_name() {
+        let (span, truncated) = span_of(month(2024, 12), month(2025, 2), 240);
+        assert_eq!(span, vec![month(2024, 12), month(2025, 1), month(2025, 2)]);
+        assert!(!truncated);
+        let (span, truncated) = span_of(month(2000, 1), month(2030, 12), 12);
+        assert_eq!(span.len(), 12);
+        assert_eq!(span.last(), Some(&month(2000, 12)));
+        assert!(truncated, "the ceiling is said, never a silent take");
+    }
+
+    /// **THE RECORD'S CALENDAR KEEPS A SESSION OF UNKNOWN LENGTH UNKNOWN, AND
+    /// A DAY PAST WHAT IT SOURCES UNMEASURED.** A session the record says
+    /// traded with a length it does not know owes nothing and loses nothing;
+    /// a day after `SOURCED_LAST_DAY` is not called closed. Runs
+    /// `record_calendar`'s `OpenLengthUnmeasured` and `Unmeasured` arms.
+    #[test]
+    fn the_record_keeps_unknown_lengths_and_unsourced_days_unmeasured() {
+        use pull::calendar::DayKind;
+        // THE FIRST SUCH DAY THE RECORD HOLDS, found rather than named: a
+        // special session sourced later moves it, and the arm stays covered.
+        let muhurat = (pull::calendar::SOURCED_FIRST_DAY..=pull::calendar::SOURCED_LAST_DAY)
+            .find(|day| pull::calendar::exchange_kind_of(*day) == DayKind::OpenLengthUnmeasured)
+            .expect("the record holds a session of unmeasured length");
+        let record = record_calendar(muhurat - 3, muhurat + 3);
+        assert_eq!(record.kind_of(muhurat), DayKind::OpenLengthUnmeasured);
+
+        let past = pull::calendar::SOURCED_LAST_DAY + 3;
+        assert_eq!(pull::calendar::exchange_kind_of(past), DayKind::Unmeasured);
+        let record = record_calendar(pull::calendar::SOURCED_LAST_DAY - 5, past);
+        assert_eq!(record.kind_of(past), DayKind::Unmeasured);
+    }
+
+    /// **A CARVING THAT WOULD NEED MORE WINDOWS THAN A SESSION HOLDS IS A
+    /// SESSION OF UNKNOWN LENGTH**: 2020-03-13's halt cutting the first of two
+    /// windows leaves three runs. Runs `carved`'s `None`.
+    #[test]
+    fn a_carving_past_the_window_limit_is_a_session_of_unknown_length() {
+        let two_windows = pull::calendar::Observed::from_runs(18_334, &[(555, 700), (800, 929)])
+            .session
+            .expect("two windows are a session");
+        assert_eq!(carved(18_334, two_windows), None);
+    }
+
+    /// **A SOURCED HALT'S MINUTES ARE `halted`, A SUSPECTED ONE'S
+    /// `halt-suspected`, AND A CONTRACT'S MINUTES PAST EXPIRY `expired`.**
+    /// Runs `run_word`'s sourced-halt arm, which no fixture reached.
+    #[test]
+    fn a_minute_inside_a_sourced_halt_is_halted() {
+        use pull::gaps::{Gap, Reason};
+        let gap = |day: i64, from: u16, to: u16, reason: Reason| Gap {
+            day,
+            from,
+            to,
+            reason,
+        };
+        let outage = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        assert_eq!(
+            run_word(&gap(outage, 700, 710, Reason::OutsideWindow), false, None),
+            "halted"
+        );
+        assert_eq!(
+            run_word(&gap(18_334, 570, 580, Reason::OutsideWindow), false, None),
+            "halt-suspected"
+        );
+        assert_eq!(
+            run_word(
+                &gap(outage, 700, 710, Reason::OutsideWindow),
+                false,
+                Some(outage - 1)
+            ),
+            "expired"
+        );
+    }
+
+    /// **AN ABSENT OR SHORT BOUND IS NAMED `null`, NOT A DATE.** Runs
+    /// `gaps_body`'s `day_text` refusal for a day no calendar can name.
+    #[test]
+    fn a_bound_no_calendar_can_name_is_null() {
+        let calendar = calendar_of(
+            "record",
+            (epoch_day(2025, 5, 1), i64::MAX),
+            &[month(2025, 5)],
+        );
+        assert!(calendar["last"].is_null(), "{calendar}");
+        assert_eq!(calendar["first"], "2025-05-01");
+    }
+
+    /// **A FULL VOTE MAP IS A NAMED `429`, AND A FINISHED BUILD'S REFUSAL IS
+    /// ANSWERED WITH ITS OWN STATUS** — or `500` for a status no answer can
+    /// carry. Runs `votes_full` and `vote_of`'s refusal arm.
+    #[test]
+    fn a_full_vote_map_and_a_refused_build_answer_by_name() {
+        let (status, headers, body) = votes_full();
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(
+            body.contains(&crate::calendar_of::build::MAX_BUILDS.to_string())
+                && body.contains("calendar=record"),
+            "{body}"
+        );
+        let refused = vote_of(Err((503, "the pool said no".to_owned()))).expect_err("refused");
+        assert_eq!(refused.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.2, "the pool said no");
+        let nonsense = vote_of(Err((1_000, String::new()))).expect_err("refused");
+        assert_eq!(nonsense.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// One one-second bar `second` seconds past IST midnight of `day`.
+    fn second_bar(day: i64, second: i64) -> store::format::Bar {
+        store::format::Bar {
+            ts_micros: (day * 86_400 - 19_800 + second) * 1_000_000,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        }
+    }
+
+    /// **WITH NO CALENDAR GIVEN THE TYPED TABLE DECIDES, A HELD SECOND NO
+    /// SESSION OWES IS OUTSIDE, AND A DAY HOLDING EVERY OWED SECOND HAS NO
+    /// LONGEST RUN.** Runs `second_audit`'s table fallback and its in-session
+    /// outside count, `trade_days`' table fallback, and the `null` longest run
+    /// `one_second_members` draws for a whole day.
+    #[test]
+    fn a_whole_day_by_the_table_has_no_missing_second() {
+        let day = epoch_day(2025, 5, 2);
+        let mut rows: Vec<store::format::Bar> = (33_300..55_800)
+            .map(|second| second_bar(day, second))
+            .collect();
+        rows.insert(0, second_bar(day, 30_000));
+        let audit = second_audit(&rows, day, day, None, 1);
+        assert_eq!(
+            (audit.expected, audit.held, audit.missing),
+            (22_500, 22_500, 0)
+        );
+        assert_eq!(audit.outside, 1, "08:20:00 is held and owed by no session");
+        assert_eq!(audit.days.len(), 1);
+        assert_eq!(audit.days[0].longest, None);
+        let members = one_second_members(&rows, day, day, None, false, None, 1, None, (0, 0));
+        assert!(members.contains(r#""longest_run":null"#), "{members}");
+
+        let days = trade_days(&rows, day, day, None, None);
+        assert_eq!((days.sessions, days.held), (1, 1));
+        assert!(days.without.is_empty());
+    }
+
+    /// **PAST `MAX_GAPS` LISTED RUNS THE LIST STOPS AND SAYS SO**, while every
+    /// run is still counted. Runs `close_run`'s truncation.
+    #[test]
+    fn past_max_gaps_listed_runs_the_list_is_truncated_by_name() {
+        let mut audit = SecondAudit::default();
+        let mut day = SecondDay {
+            day: 1,
+            expected: 0,
+            held: 0,
+            missing: 0,
+            longest: None,
+        };
+        let runs = u32::try_from(pull::gaps::MAX_GAPS).expect("small") + 3;
+        for at in 0..runs {
+            let mut open = Some((at * 10, at * 10 + 4));
+            close_run(&mut audit, &mut day, &mut open, 1);
+        }
+        assert_eq!(audit.runs.len(), pull::gaps::MAX_GAPS);
+        assert!(audit.truncated);
+        assert_eq!(audit.run_count, u64::from(runs));
+    }
+
+    /// **A MALFORMED AUDIT IS A `400` NAMING WHAT IS WRONG**, and so is a
+    /// symbol the store cannot name when the census is asked to find it.
+    /// Runs `gaps_json`'s parse refusal and `identity_in_census`'s symbol
+    /// refusal.
+    #[tokio::test]
+    async fn a_malformed_audit_and_an_unnamable_symbol_are_refused_by_name() {
+        let root = crate::server::tests::store_root("cloud-gaps-malformed");
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-malformed", None, None),
+            &root,
+        ));
+        for (query, word) in [
+            (
+                "feed=nobody&symbol=NIFTY&timeframe=1min&month=2025-05",
+                "feed",
+            ),
+            (
+                "feed=gdfl&symbol=not%20a%20symbol&timeframe=1s&month=2025-05",
+                "is not a symbol the store can name",
+            ),
+        ] {
+            let uri: axum::http::Uri = format!("/gaps.json?{query}").parse().expect("a URI");
+            let (code, _, body) = gaps_json(axum::extract::State(Loaded::clone(&site)), uri).await;
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert!(body.contains(word), "{query}: {body}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A ONE-SECOND SHARE IS TRADE-DRIVEN AND AUDITED ON THE EXCHANGE
+    /// CALENDAR, NOT THE CASH SCHEDULE** (D-3336 §2): it owes no count. Runs
+    /// `audit_one`'s trade-driven cash arm.
+    #[tokio::test]
+    async fn a_one_second_share_owes_no_count() {
+        let root = crate::server::tests::store_root("cloud-gaps-second-share");
+        let day = epoch_day(2025, 5, 2);
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "RELIANCE",
+            contract: None,
+            timeframe: store::path::Timeframe::SECOND_1,
+            month: month(2025, 5),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("RELIANCE") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(&root, path, id).expect("a file");
+        file.append(&[second_bar(day, 33_300)]).expect("one print");
+        drop(file);
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-second-share", None, None),
+            &root,
+        ));
+        let uri: axum::http::Uri =
+            "/gaps.json?feed=gdfl&exchange=NSE&segment=CASH&symbol=RELIANCE&timeframe=1s&month=2025-05"
+                .parse()
+                .expect("a URI");
+        let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], true, "{audited}");
+        assert_eq!(audited["expected"], 0);
+        assert_eq!(audited["lost_minutes"], 0);
+        assert_eq!(audited["days_held"], 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **EVERY WAY A VOTE JOIN CAN END IS ANSWERED BY NAME.** On one served
+    /// site with no store: while the census is read at start the vote says it
+    /// waits on that (`202`); a build queued for the series and never begun
+    /// is followed and waited out, and says it is queued (`202`); finished
+    /// under the stamp the request reads, its answer is parked and handed to
+    /// the next request as it is; and with `MAX_BUILDS` other builds in
+    /// flight a new one is not admitted (`429`). Runs `voted`'s parked,
+    /// start-up, full and queued arms, which no test reached.
+    #[tokio::test]
+    async fn every_way_a_vote_join_ends_is_answered_by_name() {
+        use crate::calendar_of::build::{Joined, MAX_BUILDS};
+        let root = crate::scratch::path("cloud-vote-joins");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+        let reason = |answer: Result<PeerCalendar, GapsAnswer>| {
+            let Err((status, _, body)) = answer else {
+                panic!("a vote with no build behind it answered");
+            };
+            let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            (
+                status,
+                body["reason"].as_str().unwrap_or_default().to_owned(),
+            )
+        };
+        let builds = &site.calendars.builds;
+        {
+            let _reading = builds.reading_census_at_start();
+            let (status, why) = reason(voted(&site, &asked).await);
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+            assert!(why.contains("reading its census at start"), "{why}");
+        }
+        builds.bound_waits(std::time::Duration::from_millis(1));
+        let now = crate::server::census_cache::manifest_stamps(&site.store_root);
+        let key = vote_key(&asked);
+        let Joined::Lead(queued) = builds.votes.join(&key, Some(&now), None) else {
+            panic!("the first join leads");
+        };
+        let (status, why) = reason(voted(&site, &asked).await);
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert!(why.contains("it is queued"), "{why}");
+        drop(queued.enter(Some(now.clone())));
+        builds
+            .votes
+            .flights
+            .finish(&key, &queued, Err((418, "parked".to_owned())));
+        let Err((status, _, body)) = voted(&site, &asked).await else {
+            panic!("a parked refusal is handed out as it is");
+        };
+        assert_eq!((status.as_u16(), body.as_str()), (418, "parked"));
+        let mut held = Vec::with_capacity(MAX_BUILDS);
+        for other in 0..MAX_BUILDS {
+            let mut key = key.clone();
+            key.3 = format!("OTHER{other}");
+            let Joined::Lead(build) = builds.votes.join(&key, Some(&now), None) else {
+                panic!("room for build {other}");
+            };
+            held.push(build);
+        }
+        let Err((status, _, body)) = voted(&site, &asked).await else {
+            panic!("a full build map admits no vote");
+        };
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.contains("builds are queued or running"), "{body}");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Set in the child [`a_full_calendar_pool_refuses_the_census_and_the_audit`]
+    /// runs itself in, where the pool it fills is that process's alone.
+    const FULL_POOL_CHILD: &str = "BRUTEX_CLOUD_MUTANT_FULL_CALENDAR_POOL_CHILD";
+
+    /// **A FULL CALENDAR POOL REFUSES BY NAME, BOTH WHERE THE SERIES IS FOUND
+    /// IN THE CENSUS AND WHERE ITS MONTHS ARE AUDITED** — `429`, never an
+    /// audit that did not happen. Every slot of the pool is held; then a
+    /// request that names no exchange or segment must read the census to
+    /// find them, and a request that names both must audit its span, and
+    /// each is refused. So is a peer vote led while the pool is full: its
+    /// build is finished with the refusal. Runs `gaps_json`'s two admission
+    /// refusals and `lead_vote`'s, which no test reached. The pool is
+    /// process-wide, so the test runs itself in a child process where
+    /// nothing else needs it.
+    #[test]
+    fn a_full_calendar_pool_refuses_the_census_and_the_audit() {
+        if std::env::var_os(FULL_POOL_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+                .args([
+                    "--exact",
+                    "server::gaps_route::cloud_mutant_tests::\
+                     a_full_calendar_pool_refuses_the_census_and_the_audit",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FULL_POOL_CHILD, "1")
+                .output()
+                .expect("the child test process starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child failed or ran no test:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let root = crate::scratch::path("cloud-full-calendar-pool");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("a scratch root");
+            let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(
+                crate::detail::MAX_CALENDAR_CONCURRENT + 1,
+            ));
+            let holders: Vec<_> = (0..crate::detail::MAX_CALENDAR_CONCURRENT)
+                .map(|_| {
+                    let gate = std::sync::Arc::clone(&gate);
+                    tokio::spawn(crate::detail::run_calendar(move || {
+                        gate.wait();
+                    }))
+                })
+                .collect();
+            while crate::detail::run_calendar(|| ()).await != Err(crate::detail::RunError::Saturated)
+            {
+                tokio::task::yield_now().await;
+            }
+            for query in [
+                "/gaps.json?feed=dhan&symbol=NIFTY&timeframe=1min&month=2025-05",
+                "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2025-05",
+            ] {
+                let uri: axum::http::Uri = query.parse().expect("a URI");
+                let (status, _, body) = gaps_json(axum::extract::State(site.clone()), uri).await;
+                assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{query}: {body}");
+                assert!(body.contains("calendar derivation not admitted"), "{query}: {body}");
+            }
+            // A PEER VOTE LED NOW is refused where its reading is spawned, and
+            // the build is finished with that refusal, never left unanswered.
+            let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+            let Err((status, _, body)) = voted(&site, &asked).await else {
+                panic!("a vote whose reading was not admitted answered");
+            };
+            assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert!(body.contains("calendar derivation not admitted"), "{body}");
+            gate.wait();
+            for holder in holders {
+                holder.await.expect("a holder").expect("admitted");
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+}

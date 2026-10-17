@@ -782,3 +782,259 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "tests fail immediately when fixture setup fails"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+
+    /// A root no test writes to: the rules read nothing from it but the
+    /// session masters, and those are absent.
+    fn nowhere() -> PathBuf {
+        PathBuf::from("/nonexistent-cloud-mutant-root")
+    }
+
+    fn rules(segment: &str, symbol: &str, timeframe: Timeframe) -> Rules {
+        let root = nowhere();
+        Rules::of(
+            &root,
+            timeframe,
+            &SeriesKey::new("NSE", segment, symbol, None),
+            &Lineage::read(&root, Vendor::Dhan),
+        )
+    }
+
+    fn bar_at(ts_micros: i64) -> Bar {
+        Bar {
+            ts_micros,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: 10,
+        }
+    }
+
+    /// 2020-03-13, the first recorded (suspected) halt, and the seconds the
+    /// index spent in it.
+    fn index_halt() -> (i64, pull::calendar::HaltSeconds) {
+        let halt = pull::calendar::halt_on(18_334).expect("the 2020-03-13 halt");
+        (halt.day, halt.seconds(Venue::NseIndex))
+    }
+
+    /// **A BAR STAMPED AT THE EX-DATE'S OWN MIDNIGHT IS ALREADY POST-EX**:
+    /// the change from it to the next bar crosses no ex-date and is measured.
+    /// Kills `< with <=` in `judge`'s lineage test, which called that pair
+    /// `contract_adjusted`. A day bar may be stamped at 00:00 IST.
+    #[test]
+    fn a_bar_at_the_ex_dates_midnight_is_already_post_ex() {
+        let mut daily = rules("FNO", "NIFTY", Timeframe::DAY_1);
+        let ex_start = day_start(20_000);
+        daily.lineage = vec![LineageEvent {
+            ex_start,
+            oi_until: 0,
+        }];
+        let on_ex = bar_at(ex_start);
+        let next = bar_at(ex_start + 86_400 * MICROS);
+        assert_ne!(daily.judge(&on_ex, &next), Some("contract_adjusted"));
+        // And a pair that does cross it is refused, so the event is live.
+        let before_ex = bar_at(ex_start - 86_400 * MICROS);
+        assert_eq!(daily.judge(&before_ex, &on_ex), Some("contract_adjusted"));
+    }
+
+    /// **AN EVENT THAT CARRIED NO UNSCALED OPEN INTEREST (`oi_until == 0`)
+    /// LABELS NO BAR, EVEN ONE STAMPED AT OR BEFORE THE EPOCH.** Kills
+    /// `> with >=` in `oi_unadjusted`, which read `0` as "unscaled up to the epoch"
+    /// and labelled a January-1970 bar (the store's months start at
+    /// 1970-01-01 00:00 IST, before the epoch).
+    #[test]
+    fn an_event_with_no_unscaled_window_labels_no_bar() {
+        let mut option = rules("FNO", "NIFTY", Timeframe::MINUTE_1);
+        let ex_start = day_start(0);
+        option.lineage = vec![LineageEvent {
+            ex_start,
+            oi_until: 0,
+        }];
+        assert!(!option.oi_unadjusted(&bar_at(-1)));
+        assert!(!option.oi_unadjusted(&bar_at(ex_start)));
+        // An event that names a window labels the bars inside it.
+        option.lineage = vec![LineageEvent {
+            ex_start,
+            oi_until: 5 * MICROS,
+        }];
+        assert!(option.oi_unadjusted(&bar_at(-1)));
+        assert!(!option.oi_unadjusted(&bar_at(6 * MICROS)));
+    }
+
+    /// **A BAR'S CLOSE IS THE LAST MICROSECOND OF ITS BUCKET**: on one-second
+    /// index bars, the bar one second before the resume closes inside the
+    /// halt, so the bar after it is refused `halt_suspected`. Kills `- with +`
+    /// and `- with /` in `halted_between`'s `rung_micros - 1`, which pushed
+    /// that close one or two microseconds past the resume.
+    #[test]
+    fn the_bar_before_the_resume_closes_inside_the_halt() {
+        let (day, seconds) = index_halt();
+        let second = |s: u32| day_start(day) + i64::from(s) * MICROS;
+        let index = rules("INDEX", "NIFTY", Timeframe::SECOND_1);
+        let before = bar_at(second(seconds.resume - 1));
+        let at = bar_at(second(seconds.resume));
+        assert_eq!(index.judge(&before, &at), Some("halt_suspected"));
+    }
+
+    /// **TWO BARS BEFORE THE HALT BEGAN ARE MEASURED**: nothing halted lies
+    /// between 09:17:00 and 09:17:01 on 2020-03-13. Kills `+ with -`, `* with
+    /// +` and `* with /` in `halted_between`'s `from`, each of which moved the
+    /// halt's start to (or before) midnight.
+    #[test]
+    fn two_bars_before_the_halt_began_are_measured() {
+        let (day, seconds) = index_halt();
+        let second = |s: u32| day_start(day) + i64::from(s) * MICROS;
+        assert!(
+            9 * 3_600 + 17 * 60 + 1 < seconds.from,
+            "both before the halt"
+        );
+        let index = rules("INDEX", "NIFTY", Timeframe::SECOND_1);
+        let before = bar_at(second(9 * 3_600 + 17 * 60));
+        let at = bar_at(second(9 * 3_600 + 17 * 60 + 1));
+        assert_eq!(index.judge(&before, &at), None);
+    }
+
+    /// **A SHARE'S MASTER IS READ ONLY FROM THE CLOSING AUCTION'S FIRST
+    /// MINUTE ON**: a 10:00 bar on a day whose phases need the master reads
+    /// none, so no refusal is kept for it. Kills `&& with ||` in `phase_at`,
+    /// which read (and here refused) the master for every minute of a share.
+    #[test]
+    fn a_shares_morning_bar_reads_no_master() {
+        let share = rules("CASH", "RELIANCE", Timeframe::MINUTE_1);
+        let on = pull::session::Day::new(2026, 8, 3).expect("a CAS day");
+        let days = on.days_from_epoch();
+        let ten = day_start(i64::from(days)) + 10 * 3_600 * MICROS;
+        assert_eq!(share.phase_word(&bar_at(ten)), Some("continuous"));
+        assert_eq!(share.refusal(days), None, "nothing was read");
+        // The auction minute does read it, and keeps the refusal.
+        let auction = day_start(i64::from(days)) + (15 * 3_600 + 20 * 60) * MICROS;
+        assert_eq!(share.phase_word(&bar_at(auction)), Some("unverified"));
+        assert!(share.refusal(days).is_some());
+    }
+
+    /// **THE SESSION BEFORE A DAY IS THE CALENDAR'S PREVIOUS OPEN DAY, NEVER
+    /// THE DAY ITSELF**: Tuesday's is Monday, Monday's is the Friday before.
+    /// Kills `- with /` in `session_before`, which started the walk at the day
+    /// itself and answered it.
+    #[test]
+    fn the_session_before_a_day_is_the_previous_open_day() {
+        let day = |d: u8| {
+            i64::from(
+                pull::session::Day::new(2025, 5, d)
+                    .expect("a day")
+                    .days_from_epoch(),
+            )
+        };
+        // 2025-05-06 is a Tuesday, 05-05 a Monday, 05-02 a Friday.
+        assert_eq!(session_before(day(6)), Some(day(5)));
+        assert_eq!(session_before(day(5)), Some(day(2)));
+    }
+
+    /// **TWO DAY BARS OF ADJACENT SESSIONS ARE MEASURED**: a day bar spans its
+    /// session, so the intraday rules (halt, phase, bucket) do not apply to
+    /// it. Runs `judge`'s day-rung return, which no test reached.
+    #[test]
+    fn two_day_bars_of_adjacent_sessions_are_measured() {
+        let daily = rules("INDEX", "NIFTY", Timeframe::DAY_1);
+        let midnight = |d: u8| {
+            day_start(i64::from(
+                pull::session::Day::new(2025, 5, d)
+                    .expect("a day")
+                    .days_from_epoch(),
+            ))
+        };
+        assert_eq!(
+            daily.judge(&bar_at(midnight(5)), &bar_at(midnight(6))),
+            None
+        );
+        assert_eq!(
+            daily.phase_word(&bar_at(midnight(6))),
+            None,
+            "no phase on a day rung"
+        );
+    }
+
+    /// **A SERIES ON NO NSE VENUE HAS NO HALT AND NO PHASE BETWEEN ANY TWO
+    /// BARS.** `judge` stops before asking for such a series; these are the
+    /// helpers' own answers, which no test reached.
+    #[test]
+    fn a_series_on_no_venue_has_no_halt_and_no_phase() {
+        let other = rules("TESTSEG", "WINDOWTEST", Timeframe::SECOND_1);
+        let (day, seconds) = index_halt();
+        let second = |s: u32| day_start(day) + i64::from(s) * MICROS;
+        assert!(!other.halted_between(second(seconds.from), second(seconds.resume)));
+        assert!(!other.phases_differ(day, second(33_300), second(seconds.from)));
+        assert_eq!(other.phase_word(&bar_at(second(33_300))), None);
+    }
+
+    /// **A SHARE THE UNIVERSE NAMES NO ISIN FOR HAS NO CLOSING-AUCTION FLAG**,
+    /// and neither does a day before the epoch: both are `Unknown`, never
+    /// `NotEligible`. Runs `eligibility`'s two early returns.
+    #[test]
+    fn eligibility_is_unknown_without_an_identity_or_a_day() {
+        let unknown = rules("CASH", "NOSUCHSHARE", Timeframe::MINUTE_1);
+        assert!(unknown.cash_identity.is_none());
+        assert_eq!(unknown.eligibility(20_000), CasEligibility::Unknown);
+        let known = rules("CASH", "RELIANCE", Timeframe::MINUTE_1);
+        assert!(known.cash_identity.is_some());
+        assert_eq!(known.eligibility(-1), CasEligibility::Unknown);
+    }
+
+    /// **EVERY PHASE HAS ITS OWN WIRE WORD.** Runs the four arms of
+    /// `phase_word` no stored fixture reached.
+    #[test]
+    fn every_phase_has_its_own_wire_word() {
+        let words = [
+            (Phase::Closed, "closed"),
+            (Phase::BeforeOpen, "before_open"),
+            (Phase::PreOpen, "pre_open"),
+            (Phase::Continuous, "continuous"),
+            (Phase::Halted, "halted"),
+            (Phase::ReopeningAuction, "reopening_auction"),
+            (Phase::Break, "break"),
+            (Phase::ClosingAuction, "cas"),
+            (Phase::PostClose, "post_close"),
+            (Phase::Unverified, "unverified"),
+        ];
+        for (phase, word) in words {
+            assert_eq!(phase_word(phase), word, "{phase:?}");
+        }
+    }
+
+    /// **A LEDGER THAT EXISTS AND WILL NOT READ IS SAID, NOT READ AS EMPTY.**
+    /// A directory where `imports/gdfl.lineage` should be passes the `stat`
+    /// and refuses the read: the fault names the path and says no lineage was
+    /// applied. Runs `Lineage::read`'s read-refusal arm.
+    #[test]
+    fn a_ledger_that_will_not_read_is_said_and_applies_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-cloud-ledger-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(pull::gdfl_lineage::lineage_path(&root))
+            .expect("a directory where the ledger should be");
+        let lineage = Lineage::read(&root, Vendor::Gdfl);
+        let _ = std::fs::remove_dir_all(&root);
+        let fault = lineage.fault.clone().expect("the refusal is said");
+        assert!(
+            fault.starts_with("cannot read ") && fault.ends_with("no lineage was applied"),
+            "{fault}"
+        );
+        assert!(fault.contains("gdfl.lineage"), "{fault}");
+        assert!(lineage.ledger.is_none());
+        assert_eq!(lineage.status_of("NSE-FNO-NIFTY"), None);
+    }
+}
