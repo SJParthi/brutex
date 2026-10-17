@@ -195,6 +195,11 @@ struct Expiry {
     agg: Agg,
     months: BTreeMap<YearMonth, Agg>,
     contracts: BTreeMap<ContractId, Agg>,
+    /// Distinct option strikes among `contracts`, counted by `apply` as each
+    /// is first seen, so the underlying's expiries answer reads a counter
+    /// rather than collecting every contract of every expiry into a set per
+    /// request (`cloud/attack-o1-20261016`).
+    strikes: u64,
 }
 
 /// One underlying: its months and, in FNO, its expiries.
@@ -205,6 +210,11 @@ pub(crate) struct Underlying {
     expiries: BTreeMap<Day, Expiry>,
     /// Keys whose contract text is not one this index can read.
     unread_contracts: u64,
+    /// Distinct contracts across every expiry, counted by `apply` as each is
+    /// first seen: the underlyings answer read it by walking every expiry of
+    /// every underlying on every request (`cloud/attack-o1-20261016`). A key
+    /// only ever grows under `apply`, so a counter never has to come down.
+    contracts: u64,
 }
 
 /// The index for one (feed, segment), as of one census read. See the module
@@ -307,7 +317,22 @@ impl Index {
         let chain = under.expiries.entry(expiry).or_default();
         chain.agg.apply(old, new);
         chain.months.entry(key.month).or_default().apply(old, new);
+        // THE TWO COUNTS THE ANSWERS READ, KEPT WHERE A CONTRACT IS FIRST
+        // SEEN: a strike is new when neither side of it was held before.
+        let fresh = !chain.contracts.contains_key(&id);
+        if fresh
+            && let ContractId::Option { strike, call } = id
+            && !chain.contracts.contains_key(&ContractId::Option {
+                strike,
+                call: !call,
+            })
+        {
+            chain.strikes = chain.strikes.saturating_add(1);
+        }
         chain.contracts.entry(id).or_default().apply(old, new);
+        if fresh {
+            under.contracts = under.contracts.saturating_add(1);
+        }
     }
 }
 
@@ -1281,11 +1306,7 @@ fn render_answer(
         if n > 0 {
             out.push(',');
         }
-        let contracts: usize = under
-            .expiries
-            .values()
-            .map(|chain| chain.contracts.len())
-            .sum();
+        let contracts = under.contracts;
         let _ = write!(
             out,
             r#"{{"exchange":{},"symbol":{},"months":{},"expiries":{},"contracts":{contracts},"unread_contracts":{},"#,
@@ -1351,21 +1372,13 @@ fn render_answer(
                 if n > 0 {
                     expiries_json.push(',');
                 }
-                let strikes: BTreeSet<i64> = chain
-                    .contracts
-                    .keys()
-                    .filter_map(|id| match *id {
-                        ContractId::Option { strike, .. } => Some(strike),
-                        ContractId::Future => None,
-                    })
-                    .collect();
                 let _ = write!(
                     expiries_json,
                     r#"{{"expiry":{},"weekday":{},"contracts":{},"strikes":{},"future":{},"#,
                     render::json_string(&expiry.to_string()),
                     render::json_string(weekday(*expiry)),
                     chain.contracts.len(),
-                    strikes.len(),
+                    chain.strikes,
                     chain.contracts.contains_key(&ContractId::Future),
                 );
                 agg_json(&mut expiries_json, &chain.agg, false);
