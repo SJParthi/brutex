@@ -445,7 +445,27 @@ fn classify_with_subject(
                 push(&mut ledger, &mut run, day, 0, 1_439, Reason::Closed);
             }
             DayKind::Open(session) => {
-                ledger.expected = ledger.expected.saturating_add(u32::from(session.bars()));
+                // A RECORDED HALT IS NOT OWED, whatever calendar sized the
+                // day (R3-06, DB-G47): the record carves it already, but the
+                // typed table a cash stock reads, the derivatives venue's
+                // hours and a peer vote did not, so the same halted minutes
+                // were owed and lost on those doors and not on the record's,
+                // while `/calendar.json` and `/dayflags.json` owe none of
+                // them. One rule here, in the one classifier every door
+                // calls. A carved session expects none of them, so nothing is
+                // taken twice. A suspected halt (UNVERIFIED, D-3320) is
+                // excluded the same way and named apart by the caller.
+                let halt = calendar::halt_on(day).map(|halt| halt.halted);
+                let halted = |minute: u16| halt.is_some_and(|window| window.holds(minute));
+                let carved = halt.map_or(0_u16, |window| {
+                    let held = (window.from..=window.to)
+                        .filter(|minute| session.expects(*minute))
+                        .count();
+                    u16::try_from(held).unwrap_or(u16::MAX)
+                });
+                ledger.expected = ledger
+                    .expected
+                    .saturating_add(u32::from(session.bars().saturating_sub(carved)));
                 let mut minute = 0_u16;
                 while minute <= 1_439 {
                     let held = stored
@@ -455,7 +475,7 @@ fn classify_with_subject(
                         .is_some_and(|(d, m)| d == day && m == minute);
                     if held {
                         cursor = cursor.saturating_add(1);
-                    } else if session.expects(minute) {
+                    } else if session.expects(minute) && !halted(minute) {
                         push(
                             &mut ledger,
                             &mut run,
@@ -625,6 +645,52 @@ mod tests {
         (calendar::OPEN_MINUTE..=calendar::LAST_MINUTE)
             .map(|m| at(day, m))
             .collect()
+    }
+
+    /// R3-06, DB-G47: the 2020-03-13 market-wide halt's minutes are owed by
+    /// no door. Before, the record carved them and the table (an NSE cash
+    /// stock), the derivatives venue's hours and the spot-index door counted
+    /// 59 of them lost from a series that held every other minute.
+    #[test]
+    fn a_recorded_halt_is_not_owed_by_any_classifier_door() {
+        let day = 18_334; // 2020-03-13
+        let halt = calendar::halt_on(day).expect("2020-03-13 is a recorded halt");
+        let held: Vec<i64> = full_day(day)
+            .into_iter()
+            .filter(|stamp| !halt.halted.holds(ist(*stamp).1))
+            .collect();
+        let doors: [(&str, Ledger); 4] = [
+            ("table", classify(&held, day, day)),
+            (
+                "spot index",
+                classify_spot_index_against(&held, day, day, None),
+            ),
+            (
+                "derivatives",
+                classify_derivative_against(&held, day, day, None),
+            ),
+            ("cash", classify_cash(&held, day, day, None)),
+        ];
+        let owed = 375 - u32::from(halt.halted.bars());
+        for (door, ledger) in doors {
+            assert_eq!(ledger.lost_minutes(), 0, "{door}: {:?}", ledger.gaps);
+            assert_eq!(ledger.expected, owed, "{door}");
+            assert!(
+                ledger
+                    .gaps
+                    .iter()
+                    .any(|gap| gap.reason == Reason::OutsideWindow
+                        && gap.from == halt.halted.from
+                        && gap.to == halt.halted.to),
+                "{door}: the halt is one run outside the window: {:?}",
+                ledger.gaps
+            );
+        }
+        // A minute lost OUTSIDE the halt is still lost, on every door.
+        let short: Vec<i64> = held.iter().copied().filter(|s| ist(*s).1 != 900).collect();
+        assert_eq!(classify(&short, day, day).lost_minutes(), 1);
+        // And a day with no halt owes its whole session as before.
+        assert_eq!(classify(&full_day(day - 1), day - 1, day - 1).expected, 375);
     }
 
     /// audit-20261003 hunt-pull-1 (D-1529). An NSE derivatives series is
