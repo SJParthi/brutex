@@ -126,7 +126,7 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 47] = [
+const NOT_ON_MAIN: [(&str, Off); 53] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -177,6 +177,18 @@ const NOT_ON_MAIN: [(&str, Off); 47] = [
     ("ff636f58", Off::Squashed),
     ("9cb9de51", Off::Squashed),
     ("867771784f", Off::Squashed),
+    // AH-02's and AG-04's measured feat/db-fix builds and AH-02's branch
+    // head, merged after this test first went green: `bf84e1f3` (the AG-03
+    // merge), `94320a4e` (the AF-06 merge), `62396df0` (the AF-07 merge) and
+    // `1ff03397` (AH-02's last merge of feat/db-fix).
+    ("bf84e1f3", Off::Squashed),
+    ("94320a4e", Off::Squashed),
+    ("62396df0", Off::Squashed),
+    ("1ff03397", Off::Squashed),
+    // AG-04's two measured branch builds, which no branch holds: AG-04 was
+    // squashed into one commit before it merged.
+    ("54f547be", Off::Neither),
+    ("fef92d53", Off::Neither),
     ("08a4258", Off::MainsOwnText),
     ("0d4fef13", Off::MainsOwnText),
     ("11feb080", Off::MainsOwnText),

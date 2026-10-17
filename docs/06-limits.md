@@ -18309,7 +18309,8 @@ restate when its page is re-measured.
 
 **Measured 16 October 2026** on release builds over two fresh shadows of the
 real store (`state/fix/shadow.sh AH-02` on port 8904 serving this change's
-build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, whose
+build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, which
+`main`'s squash merge does not keep, whose
 `HeadDeadline` is the one this change replaces), load average 22-51 from other
 agents' builds, `curl` with `--noproxy`, GET only. The full-speed rows
 alternate one before and one after request, so both builds saw the same load.
@@ -18338,7 +18339,8 @@ construction (the body over the rate), which is why n is 20 and not 200:
 **Re-measured on the merged build**, 16 October 2026 from 22:17 IST: this
 change merged onto feat/db-fix at `bf84e1f3` (`AH-02` on 8904, telemetry
 beneath the shadow) against feat/db-fix at `bf84e1f3` itself (`AH-02-before`
-on 8905), two fresh shadows, load average 31-87, the same method. The slow
+on 8905), a commit `main`'s squash merge does not keep, two fresh shadows,
+load average 31-87, the same method. The slow
 reads ran five at a time, four rounds, so the `/bars.json` admission cap
 refused none of them; ten at a time it answered some `429` (105 bytes,
 `Retry-After: 1`) on both builds, which is that cap and not this change:
@@ -18375,7 +18377,8 @@ RELIANCE cash 1 s 2026-09 and the Zerodha census were all cut (exit 18 at
 they fit in the kernel's buffers. After: all eight arrived whole (exit 0,
 size = `Content-Length`). The run on the pre-merge build at 17:23 gave the
 same split. After this run the branch was merged once more onto feat/db-fix at
-`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll); neither touches
+`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll), which `main`'s
+squash merge does not keep; neither touches
 `HeadDeadline`, `exchange_watch` or `logs`, so these rows were not re-taken
 on that merge, and the `/bars.json` rows are AF-05's to re-measure.
 
@@ -18383,7 +18386,8 @@ on that merge, and the `/bars.json` rows are AF-05's to re-measure.
 this change merged onto feat/db-fix at `62396df0` (branch head `1ff03397`,
 `AH-02` on 8901) against the release build of feat/db-fix at `bf84e1f3`
 (`AH-02-before` on 8902; its `HeadDeadline`, `serve_limited` and `logs` are the
-same as `62396df0`'s), two fresh shadows, load average 23-41, the same method
+same as `62396df0`'s), three commits `main`'s squash merge does not keep, two
+fresh shadows, load average 23-41, the same method
 and scripts (`tgt/ah02-final-logs/`). The branch's later merge of R3-32 touches
 only `cli`'s watchdog verbs and the ledgers.
 
@@ -18996,12 +19000,16 @@ here unless a table above says so, and each is UNVERIFIED as a latency.
 
 Measured 17 October 2026 in two rounds, each with release builds of
 `feat/db-fix` (before) and `fix/db-AG-04` (after). Round 1 (the figures in
-the rows below): before `feat/db-fix` 94320a4e, after the change at 54f547be;
+the rows below): before `feat/db-fix` 94320a4e, which `main`'s squash merge
+does not keep, after the change at 54f547be, which is in neither `main`'s
+history nor this row's branch, because AG-04 was squashed before it merged;
 `sources.rs`, `gdfl_cm_auction.rs`, `calendar.rs` and `cash_session_cache.rs`
 of that before build are those this change starts from. Round 2, after the
 branch took `feat/db-fix` 62396df0 (AF-02's `dayflags.rs`, which this route
-calls, among it): before 62396df0, after the branch at fef92d53 (the change
-merged with 62396df0); its figures are the last sentence of L-AG04-01 and
+calls, among it): before 62396df0, which `main`'s squash merge does not keep,
+after the branch at fef92d53 (the change merged with 62396df0), which is in
+neither `main`'s history nor this row's branch, because AG-04 was squashed
+before it merged; its figures are the last sentence of L-AG04-01 and
 L-AG04-02. The branch's later merge of R3-32 changed only `cli`'s watchdog
 verbs, none of which this route reaches, and was not timed again. Each build served its own
 fresh shadow of the real store (bars linked read-only through
