@@ -81,8 +81,10 @@ fn site_text(path: &str) -> &'static str {
         .iter()
         .chain(std::iter::once(&GDFL_TARGET_AT))
         .find(|(named, _)| *named == path)
-        .map(|(_, text)| *text)
-        .unwrap_or_else(|| panic!("{path} is named by a row and not read by this test"))
+        .map_or_else(
+            || panic!("{path} is named by a row and not read by this test"),
+            |(_, text)| *text,
+        )
 }
 
 /// THE TABLE TEST: every row, at every level its site emits it at, reaches

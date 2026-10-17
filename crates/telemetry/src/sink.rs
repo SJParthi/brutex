@@ -957,6 +957,80 @@ impl Counters {
 }
 
 impl Inner {
+    /// The durable copies of the line just rendered from `own_from` in
+    /// `buf`, stamped `at` under `run`, whatever the ring said; the first
+    /// failure, if one failed.
+    ///
+    /// THE AUDIT COPY: a refusal kept only when the ring could take it would
+    /// be lost exactly when the disk is in trouble, which is when it matters
+    /// most. The same bytes, less the newline led with for a torn ring
+    /// fragment, which is the ring's and not this stream's. Only an audited
+    /// event reaches this; any other pays one `Option` test and nothing else.
+    /// D-3341 item 3.
+    ///
+    /// AND THE STATE STREAM'S, for a who-did-what line (R3-24): the same
+    /// bytes again, in a stream that never rolls. Every other event pays the
+    /// `audited` test it already paid.
+    fn keep_durable(
+        &mut self,
+        audited: bool,
+        own_from: usize,
+        (at, run): (i64, u64),
+        event: &Event<'_>,
+    ) -> Option<String> {
+        if !audited {
+            return None;
+        }
+        let own = self.buf.get(own_from..).unwrap_or(&[]);
+        let keys = EventKeys(event, run);
+        let audit_failure = self
+            .audit
+            .as_mut()
+            .and_then(|audit| audit.append(own, self.seq, event.level(), at, &keys));
+        let state_failure = self
+            .state
+            .as_mut()
+            .filter(|_| {
+                crate::run_dirs::state_events::is_state_change(
+                    event.level(),
+                    event.target(),
+                    event.message(),
+                )
+            })
+            .and_then(|state| state.append(own, self.seq, event.level(), at, &keys));
+        audit_failure.or(state_failure)
+    }
+
+    /// THE PICTURE AND THE LIVE COPY (R3-24): each line just written, counted
+    /// and copied as it lands: the flood's own line first when one `led` the
+    /// write (`(torn newline led, flood line led)`), then the event's.
+    fn count_written(
+        &mut self,
+        (torn, flood): (bool, bool),
+        own_from: usize,
+        at: i64,
+        event: &Event<'_>,
+    ) {
+        if flood {
+            let held_line = self
+                .buf
+                .get(usize::from(torn)..own_from.saturating_sub(1))
+                .unwrap_or(&[]);
+            self.counters.count(at, Level::Warn, None, held_line);
+        }
+        let own = self.buf.get(own_from..).unwrap_or(&[]);
+        let own = own.strip_suffix(b"\n").unwrap_or(own);
+        let field = |key: &str| {
+            event
+                .fields()
+                .iter()
+                .find(|(name, _)| *name == key)
+                .and_then(|&(_, value)| value.as_str())
+        };
+        let code = field("code").or_else(|| field("reason"));
+        self.counters.count(at, event.level(), code, own);
+    }
+
     /// The timestamp for the next line: never earlier than the last one's.
     ///
     /// Split out of [`Sink::emit`] so that a clock which STEPS BACKWARDS can be
@@ -1682,60 +1756,12 @@ impl Sink {
             roll_failure = Some(why);
         }
         let landed = inner.target.append(&inner.buf);
-        // THE AUDIT COPY, whatever the ring said: a refusal kept only when the
-        // ring could take it would be lost exactly when the disk is in trouble,
-        // which is when it matters most. The same bytes, less the newline led
-        // with for a torn ring fragment, which is the ring's and not this
-        // stream's. Only an audited event reaches this; any other pays one
-        // `Option` test and nothing else. D-3341 item 3.
-        let audit_failure = match inner.audit {
-            Some(ref mut audit) if audited => {
-                let own = inner.buf.get(own_from..).unwrap_or(&[]);
-                audit.append(own, inner.seq, event.level(), at, &EventKeys(event, run))
-            }
-            _ => None,
-        };
-        // AND THE STATE STREAM'S, for a who-did-what line (R3-24): the same
-        // bytes again, in a stream that never rolls. Every other event pays
-        // the `audited` test it already paid.
-        let state_failure = match inner.state {
-            Some(ref mut state)
-                if audited
-                    && crate::run_dirs::state_events::is_state_change(
-                        event.level(),
-                        event.target(),
-                        event.message(),
-                    ) =>
-            {
-                let own = inner.buf.get(own_from..).unwrap_or(&[]);
-                state.append(own, inner.seq, event.level(), at, &EventKeys(event, run))
-            }
-            _ => None,
-        };
-        let audit_failure = audit_failure.or(state_failure);
+        let audit_failure = inner.keep_durable(audited, own_from, (at, run), event);
         match landed {
             Ok(()) => {
                 inner.bytes = inner.bytes.saturating_add(span);
                 inner.torn = false;
-                // THE PICTURE AND THE LIVE COPY (R3-24): each line written
-                // counted and copied, the flood's own line too, as it lands.
-                let led_by = usize::from(led);
-                if held_before > 0 {
-                    let held_line = inner
-                        .buf
-                        .get(led_by..own_from.saturating_sub(1))
-                        .unwrap_or(&[]);
-                    inner.counters.count(at, Level::Warn, None, held_line);
-                }
-                let own = inner.buf.get(own_from..).unwrap_or(&[]);
-                let own = own.strip_suffix(b"\n").unwrap_or(own);
-                let code = event
-                    .fields()
-                    .iter()
-                    .find(|(name, _)| *name == "code")
-                    .or_else(|| event.fields().iter().find(|(name, _)| *name == "reason"))
-                    .and_then(|&(_, value)| value.as_str());
-                inner.counters.count(at, event.level(), code, own);
+                inner.count_written((led, held_before > 0), own_from, at, event);
                 drop(guard);
                 if let Some(why) = roll_failure {
                     self.report(&why);
@@ -8830,7 +8856,7 @@ mod state_tests {
                 after.current_bytes - before.current_bytes
             };
             n += 1;
-            if n % 997 == 0 {
+            if n.is_multiple_of(997) {
                 state(&sink, n, &mut wanted);
             }
         }
@@ -9090,8 +9116,8 @@ mod state_tests {
     #[test]
     fn the_state_stream_is_loud_only_past_its_size() {
         let at = |never_rolls: bool, current_bytes: u64| AuditHealth {
-            never_rolls,
             current_bytes,
+            never_rolls,
             ..AuditHealth::default()
         };
         assert!(!at(true, STATE_LOUD_BYTES).is_loud());

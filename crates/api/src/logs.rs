@@ -978,13 +978,15 @@ const LEVEL_FILL: [&str; 5] = ["#cbd5e1", "#94a3b8", "#4f46e5", "#d97706", "#dc2
 /// the ring's oldest line. Plain HTML and one inline SVG, no script. `None`
 /// draws the one line that says this process keeps no counters.
 fn picture_note(picture: Option<&telemetry::run_dirs::Picture>) -> String {
+    /// One minute's bar, wide, in the picture's own units.
+    const BAR: usize = 8;
+    /// The tallest bar.
+    const HIGH: u64 = 64;
     let Some(p) = picture else {
         return "<p class=\"lead\">No picture: this process writes no log, so it counted \
                 nothing.</p>"
             .to_owned();
     };
-    const BAR: usize = 8;
-    const HIGH: u64 = 64;
     let width = BAR * p.minutes.len();
     let most = p
         .minutes
@@ -1340,15 +1342,16 @@ fn contradicted(
                 })
                 .as_ref()?;
             let mut rows = parsed.range(day, day).filter(|row| row.kind == kind);
-            let row = match text_of(record, "key") {
-                Some(key) => rows.find(|row| key.ends_with(&format!(" {}", row.filter))),
-                None => {
-                    let rows: Vec<_> = rows.collect();
-                    rows.iter()
-                        .find(|row| row.filter == "*")
-                        .or_else(|| rows.first())
-                        .copied()
-                }
+            // A MEMBER KEY'S CLOSE names its key; a day's does not, and its
+            // key is the whole tree's (`*`) when the journal holds one.
+            let row = if let Some(key) = text_of(record, "key") {
+                rows.find(|row| key.ends_with(&format!(" {}", row.filter)))
+            } else {
+                let rows: Vec<_> = rows.collect();
+                rows.iter()
+                    .find(|row| row.filter == "*")
+                    .or_else(|| rows.first())
+                    .copied()
             };
             match row {
                 Some(row) if row.outcome.is_done() => None,
@@ -2338,19 +2341,18 @@ fn page_shell(asked: &Asked, body: &str) -> String {
         reason = render::escape(asked.keys.reason.as_deref().unwrap_or("")),
         month = render::escape(asked.keys.month.as_deref().unwrap_or("")),
         kind = render::escape(asked.keys.kind.as_deref().unwrap_or("")),
-        from = asked
-            .keys
-            .span
-            .map(|(from, _)| from)
-            .filter(|from| *from != i64::MIN)
-            .map_or_else(String::new, |from| from.to_string()),
-        to = asked
-            .keys
-            .span
-            .map(|(_, to)| to)
-            .filter(|to| *to != i64::MAX)
-            .map_or_else(String::new, |to| to.to_string()),
+        from = span_end(&asked.keys, false),
+        to = span_end(&asked.keys, true),
     )
+}
+
+/// One end of a request's span as its form field holds it: the epoch
+/// milliseconds, or nothing for an end left open.
+fn span_end(keys: &Keys, to: bool) -> String {
+    keys.span
+        .map(|(from, until)| if to { until } else { from })
+        .filter(|at| *at != i64::MIN && *at != i64::MAX)
+        .map_or_else(String::new, |at| at.to_string())
 }
 
 /// Every HTTP request, once, with what it did and how long it took.
@@ -9181,7 +9183,7 @@ mod r3_24_follow_tests {
                 break now;
             }
             assert!(
-                started.elapsed() < std::time::Duration::from_secs(60),
+                started.elapsed() < std::time::Duration::from_mins(1),
                 "the follower did not catch up: {:?}",
                 now.unread("options")
             );
@@ -9202,6 +9204,11 @@ mod r3_24_follow_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
 mod r3_24_follower_start_tests {
     //! The follower's start, stated as failing, which no test can cause.
 

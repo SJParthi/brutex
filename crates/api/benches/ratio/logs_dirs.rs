@@ -438,43 +438,11 @@ fn r3_24_searches_are_flat(id: &str) -> bool {
         .iter()
         .map(|&lines| (lines, logs_store(lines)))
         .collect();
-    let mut ok = true;
     let mut costs: Vec<Vec<u128>> = vec![Vec::new(); SEARCHES.len()];
     for (lines, root) in &stores {
-        let served = root.join("logs");
-        let ts = newest_stamp(&served, root);
-        for (n, (name, query)) in SEARCHES.iter().enumerate() {
-            let query = query.replace("{ts}", &ts);
-            let cold = Instant::now();
-            let body = api::logs::logs_json_over(Some(&served), root, &query);
-            let cold = cold.elapsed().as_nanos();
-            if !body.contains("\"keyed\":{") || body.contains("\"ignored\":[{") {
-                refuse(&format!(
-                    "the {name} search ({query}) is not a keyed answer"
-                ));
-            }
-            if !body.contains("\"records\":[{") {
-                refuse(&format!("the {name} search ({query}) found nothing"));
-            }
-            println!(
-                "  {:<46} cold {cold:>9} ns",
-                format!("{id} {name}, {lines}/dir")
-            );
-            let mut warm: Vec<u128> = (0..200)
-                .map(|_| {
-                    let start = Instant::now();
-                    std::hint::black_box(api::logs::logs_json_over(Some(&served), root, &query));
-                    start.elapsed().as_nanos()
-                })
-                .collect();
-            print_row(&format!("{id} {name}, {lines}/dir, warm"), &mut warm);
-            if let Some(row) = costs.get_mut(n) {
-                row.push(cost_ps(20, || {
-                    api::logs::logs_json_over(Some(&served), root, &query).len()
-                }));
-            }
-        }
+        searches_at_one_size(id, *lines, root, &mut costs);
     }
+    let mut ok = true;
     for ((name, _), row) in SEARCHES.iter().zip(&costs) {
         let (Some(&base), Some(&big)) = (row.first(), row.get(1)) else {
             refuse("two sizes measured");
@@ -486,62 +454,110 @@ fn r3_24_searches_are_flat(id: &str) -> bool {
             RATIO_CEILING_PERMILLE,
         );
     }
-    // AT 10x: 60 CLIENTS AT ONCE, then ONE CLIENT WHILE AN IMPORT WRITES.
     if let Some((lines, root)) = stores.last() {
-        let served = root.join("logs");
-        let ts = newest_stamp(&served, root);
+        searches_under_load(id, *lines, root);
+    }
+    live_tail_from_memory(id);
+    for (_, root) in stores {
+        let _ignored = std::fs::remove_dir_all(root);
+    }
+    ok
+}
+
+/// Every search over one store: refused unless it is a keyed answer that
+/// found something, then its cold call, its warm spread and its cost for the
+/// ratio, pushed onto `costs` in [`SEARCHES`] order.
+fn searches_at_one_size(id: &str, lines: usize, root: &Path, costs: &mut [Vec<u128>]) {
+    let served = root.join("logs");
+    let ts = newest_stamp(&served, root);
+    for (n, (name, query)) in SEARCHES.iter().enumerate() {
+        let query = query.replace("{ts}", &ts);
+        let cold = Instant::now();
+        let body = api::logs::logs_json_over(Some(&served), root, &query);
+        let cold = cold.elapsed().as_nanos();
+        if !body.contains("\"keyed\":{") || body.contains("\"ignored\":[{") {
+            refuse(&format!(
+                "the {name} search ({query}) is not a keyed answer"
+            ));
+        }
+        if !body.contains("\"records\":[{") {
+            refuse(&format!("the {name} search ({query}) found nothing"));
+        }
+        println!(
+            "  {:<46} cold {cold:>9} ns",
+            format!("{id} {name}, {lines}/dir")
+        );
+        let mut warm: Vec<u128> = (0..200)
+            .map(|_| {
+                let start = Instant::now();
+                std::hint::black_box(api::logs::logs_json_over(Some(&served), root, &query));
+                start.elapsed().as_nanos()
+            })
+            .collect();
+        print_row(&format!("{id} {name}, {lines}/dir, warm"), &mut warm);
+        if let Some(row) = costs.get_mut(n) {
+            row.push(cost_ps(20, || {
+                api::logs::logs_json_over(Some(&served), root, &query).len()
+            }));
+        }
+    }
+}
+
+/// Every search over one store with 60 clients at once, then with one client
+/// while an import writes refusals into `logs/cli` as fast as it can.
+fn searches_under_load(id: &str, lines: usize, root: &Path) {
+    let served = root.join("logs");
+    let ts = newest_stamp(&served, root);
+    for (name, query) in SEARCHES {
+        let query = query.replace("{ts}", &ts);
+        let mut many = clients_at_once(60, 4, || {
+            api::logs::logs_json_over(Some(&served), root, &query).len()
+        });
+        print_row(&format!("{id} {name}, {lines}/dir, 60 clients"), &mut many);
+    }
+    let writing = std::sync::atomic::AtomicBool::new(true);
+    let cli = served.join(telemetry::run_dirs::CLI);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let Ok(sink) = telemetry::Sink::open(&telemetry::Config::new(&cli)) else {
+                refuse("the import's sink would not open");
+            };
+            let mut written = 0u64;
+            while writing.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sink.emit(
+                    &telemetry::Event::error("gdfl.import", "refused")
+                        .with("kind", "options")
+                        .with("day", "2021-06-01")
+                        .with("code", "malformed_row")
+                        .with("reason", "row_refused"),
+                );
+                written += 1;
+            }
+            written
+        });
         for (name, query) in SEARCHES {
             let query = query.replace("{ts}", &ts);
-            let mut many = clients_at_once(60, 4, || {
-                api::logs::logs_json_over(Some(&served), root, &query).len()
-            });
-            print_row(&format!("{id} {name}, {lines}/dir, 60 clients"), &mut many);
+            let mut during: Vec<u128> = (0..200)
+                .map(|_| {
+                    let start = Instant::now();
+                    std::hint::black_box(api::logs::logs_json_over(Some(&served), root, &query));
+                    start.elapsed().as_nanos()
+                })
+                .collect();
+            print_row(
+                &format!("{id} {name}, {lines}/dir, import writing"),
+                &mut during,
+            );
         }
-        let writing = std::sync::atomic::AtomicBool::new(true);
-        let cli = served.join(telemetry::run_dirs::CLI);
-        std::thread::scope(|scope| {
-            let writer = scope.spawn(|| {
-                let Ok(sink) = telemetry::Sink::open(&telemetry::Config::new(&cli)) else {
-                    refuse("the import's sink would not open");
-                };
-                let mut written = 0u64;
-                while writing.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = sink.emit(
-                        &telemetry::Event::error("gdfl.import", "refused")
-                            .with("kind", "options")
-                            .with("day", "2021-06-01")
-                            .with("code", "malformed_row")
-                            .with("reason", "row_refused"),
-                    );
-                    written += 1;
-                }
-                written
-            });
-            for (name, query) in SEARCHES {
-                let query = query.replace("{ts}", &ts);
-                let mut during: Vec<u128> = (0..200)
-                    .map(|_| {
-                        let start = Instant::now();
-                        std::hint::black_box(api::logs::logs_json_over(
-                            Some(&served),
-                            root,
-                            &query,
-                        ));
-                        start.elapsed().as_nanos()
-                    })
-                    .collect();
-                print_row(
-                    &format!("{id} {name}, {lines}/dir, import writing"),
-                    &mut during,
-                );
-            }
-            writing.store(false, std::sync::atomic::Ordering::Relaxed);
-            let written = writer.join().unwrap_or(0);
-            println!("  {id} the import wrote {written} refusal(s) while those rows ran");
-        });
-    }
-    // THE LIVE TAIL: the installed sink's copy in memory, beside the same
-    // request over a directory no installed sink writes (its files).
+        writing.store(false, std::sync::atomic::Ordering::Relaxed);
+        let written = writer.join().unwrap_or(0);
+        println!("  {id} the import wrote {written} refusal(s) while those rows ran");
+    });
+}
+
+/// The live tail: an installed sink's copy in memory, beside the same request
+/// over a directory no installed sink writes (its files).
+fn live_tail_from_memory(id: &str) {
     let live = root_of("live");
     let Ok(sink) = telemetry::install(&telemetry::Config::new(&live)) else {
         refuse("the bench's sink would not install");
@@ -552,13 +568,13 @@ fn r3_24_searches_are_flat(id: &str) -> bool {
     let files = root_of("live-files");
     fill(&files.join("logs"), "served", POSTING_SIZES[1]);
     for (label, dir) in [
-        ("live tail from memory", &live),
-        ("tail from files", &files.join("logs")),
+        ("live tail from memory", live.clone()),
+        ("tail from files", files.join("logs")),
     ] {
         let mut ns: Vec<u128> = (0..200)
             .map(|_| {
                 let start = Instant::now();
-                std::hint::black_box(api::logs::logs_json_over(Some(dir), &files, "limit=50"));
+                std::hint::black_box(api::logs::logs_json_over(Some(&dir), &files, "limit=50"));
                 start.elapsed().as_nanos()
             })
             .collect();
@@ -567,9 +583,5 @@ fn r3_24_searches_are_flat(id: &str) -> bool {
             &mut ns,
         );
     }
-    for (_, root) in stores {
-        let _ignored = std::fs::remove_dir_all(root);
-    }
     let _ignored = std::fs::remove_dir_all(files);
-    ok
 }
