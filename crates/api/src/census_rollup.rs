@@ -142,7 +142,9 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
         ));
     };
     let segment_word = param(query, "segment");
-    let segment = Segment::parse(&segment_word).map_err(|why| {
+    // CASE-FOLDED, as the feed and the underlying are: `fno` is `FNO`
+    // (R3-09 repair 1; it was refused while `nifty` was NIFTY).
+    let segment = Segment::parse(&segment_word.to_ascii_uppercase()).map_err(|why| {
         bad(format!(
             "segment {:?}: {}; one of {} is required",
             echo(&segment_word),

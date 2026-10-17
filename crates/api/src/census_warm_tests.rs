@@ -1408,3 +1408,429 @@ fn a_rebuild_is_answered_from_the_previous_index_saying_so() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// Replaces `path` by rename with `bytes`: a new inode, as a compaction or a
+/// new epoch leaves the file, so no index can be moved forward by a tail.
+fn replace_by_rename(path: &Path, bytes: &[u8]) {
+    let aside = path.with_extension("renamed");
+    std::fs::write(&aside, bytes).expect("written");
+    std::fs::rename(&aside, path).expect("renamed over");
+}
+
+/// Waits until `vendor_census` hands GDFL's FNO part at `generation`, the
+/// census on disk: the background re-read has published its read.
+fn until_published(site: &Site, generation: u64) -> VendorCensusNow {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let (at, freshness) = fno_generation(site);
+        if freshness == Freshness::Current && at == generation {
+            return vendor_census(site, Vendor::Gdfl).1;
+        }
+        assert!(Instant::now() < deadline, "never published: {at}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Waits until the roll-up of NIFTY's options answers current at
+/// `generation`: the rebuild landed.
+fn until_rebuilt(site: &Site, generation: u64) {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let (code, headers, body) = rollup_get(site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+        if code == 200
+            && body["generation"] == generation
+            && header(&headers, CENSUS_REFRESHING_HEADER) == "0"
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "never rebuilt: {code} {body}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// **A REQUEST BETWEEN THE CENSUS LANDING AND ITS INDEX BUILD NEVER WAITS**
+/// (R3-09 repair 1, blocking item 1). The background re-read publishes the
+/// new read, then counts the journal and warms the index map (283 to 1,657 ms
+/// on the shadow of the real store) before it builds the FNO facet index.
+/// The build was marked pending only once it began, so a request handed the
+/// new read inside that window found nothing pending and built the whole
+/// index itself, or waited for the re-read's build: 7.55 s and 12.21 s
+/// measured. Here the window is held open a second and a half and the
+/// build takes as long: every list and roll-up asked inside it answers at
+/// once, from the previous index, said to be previous, and
+/// `/census/warm.json` lists the facet index `refreshing`, not `ready`.
+#[test]
+fn a_request_between_the_census_landing_and_its_index_build_never_waits() {
+    let mut store = Store::new("landing-window", 64);
+    let site = store.site();
+    start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+    let _ready = wait_ready(&site);
+    let (was, _) = fno_generation(&site);
+    slow_read::set(&store.root.join(SLOW_DERIVED_KEY), 1_500);
+    slow_read::set(
+        &store.root.join(crate::server::facets::SLOW_BUILD_KEY),
+        1_500,
+    );
+    store.append(&[row(option_key(778), 2)]);
+    replace_by_rename(
+        &store.fno_path,
+        &std::fs::read(&store.fno_path).expect("the epoch"),
+    );
+    let _now = until_published(&site, was + 1);
+    for query in [
+        "feed=gdfl&segment=FNO&underlying=NIFTY",
+        "feed=gdfl&segment=FNO",
+        "feed=gdfl",
+    ] {
+        let began = Instant::now();
+        let (code, headers, body) = facets_get(&site, query);
+        assert!(
+            began.elapsed() < Duration::from_millis(500),
+            "{query} waited {:?}",
+            began.elapsed()
+        );
+        assert_eq!(code, 200, "{query}: {body}");
+        assert_eq!(header(&headers, CENSUS_REFRESHING_HEADER), "1", "{query}");
+        let stale: u64 = header(&headers, CENSUS_STALE_HEADER)
+            .parse()
+            .expect("a count");
+        let age: u64 = header(&headers, CENSUS_AGE_HEADER)
+            .parse()
+            .expect("a count");
+        assert!(stale <= age, "{query}: stale {stale} ms, age {age} ms");
+    }
+    let began = Instant::now();
+    let (code, headers, body) = rollup_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "the roll-up waited {:?}",
+        began.elapsed()
+    );
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["generation"], was, "the previous index");
+    assert_eq!(header(&headers, CENSUS_REFRESHING_HEADER), "1");
+    // THE ROWS ARE NAMED WARMING, never built on the request's thread.
+    let began = Instant::now();
+    let (code, _headers, body) = facets_get(
+        &site,
+        "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1",
+    );
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "the rows waited"
+    );
+    assert_eq!(code, 503, "{body}");
+    assert_eq!(body["error"], "index_warming", "{body}");
+    // AND THE PAGE SAYS SO while the rebuild runs.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while row_of(&warmth(&site), FACETS, Vendor::Gdfl).state != WarmState::Refreshing {
+        assert!(Instant::now() < deadline, "{:?}", warmth(&site));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    slow_read::set(&store.root.join(SLOW_DERIVED_KEY), 0);
+    slow_read::set(&store.root.join(crate::server::facets::SLOW_BUILD_KEY), 0);
+    until_rebuilt(&site, was + 1);
+    let rows = wait_ready(&site);
+    assert_eq!(row_of(&rows, FACETS, Vendor::Gdfl).state, WarmState::Ready);
+}
+
+/// **THE OLD INDEX IS DROPPED OFF THE LOCK: NO READER STALLS AT THE SWAP**
+/// (R3-09 repair 1, blocking item 2). Dropping GDFL's 2.07 M-entry FNO index
+/// takes 0.8 to 1.9 s, and the rebuild dropped it under the write lock while
+/// every reader of the segment queued on the read lock. Here every index the
+/// warm builds takes a second to drop; readers looping on the option lists
+/// across a rebuild never wait more than a fraction of that.
+#[test]
+fn the_old_index_is_dropped_off_the_lock_and_no_reader_stalls_at_the_swap() {
+    let mut store = Store::new("swap-drop", 64);
+    let site = store.site();
+    slow_read::set(
+        &store.root.join(crate::server::facets::SLOW_DROP_KEY),
+        1_000,
+    );
+    start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+    let _ready = wait_ready(&site);
+    slow_read::set(&store.root.join(crate::server::facets::SLOW_DROP_KEY), 0);
+    let (was, _) = fno_generation(&site);
+    store.append(&[row(option_key(779), 2)]);
+    replace_by_rename(
+        &store.fno_path,
+        &std::fs::read(&store.fno_path).expect("the epoch"),
+    );
+    let readers: Vec<_> = (0..3)
+        .map(|n| {
+            let site = Loaded::clone(&site);
+            std::thread::spawn(move || {
+                let query = if n == 0 {
+                    "feed=gdfl&segment=FNO"
+                } else {
+                    "feed=gdfl&segment=FNO&underlying=NIFTY"
+                };
+                let deadline = Instant::now() + Duration::from_mins(1);
+                let mut worst = Duration::ZERO;
+                loop {
+                    let began = Instant::now();
+                    let (code, headers, body) = facets_get(&site, query);
+                    worst = worst.max(began.elapsed());
+                    if code == 200
+                        && body["generation"] == was + 1
+                        && header(&headers, CENSUS_REFRESHING_HEADER) == "0"
+                    {
+                        return worst;
+                    }
+                    assert!(Instant::now() < deadline, "never rebuilt: {code} {body}");
+                }
+            })
+        })
+        .collect();
+    for reader in readers {
+        let worst = reader.join().expect("a reader");
+        assert!(
+            worst < Duration::from_millis(400),
+            "a reader stalled {worst:?} at the swap"
+        );
+    }
+}
+
+/// **AN INDEX OVER A REFUSED CENSUS IS NEVER THE PREVIOUS ANSWER** (R3-09
+/// repair 1, blocking item 3). The census file truncated: refused, named
+/// `census_unreadable`. The re-read moved the facet index to the EMPTY index
+/// over the refused read, and once the file was restored that empty index
+/// answered for the recovered census while it was rebuilt: 404 `not_held`
+/// for NIFTY, `0 underlyings` for the segment, for 3 to 5 s on the shadow of
+/// the real store. Now a refused census moves no index: while the recovered
+/// read is rebuilt, the lists answer from the last read that loaded, said
+/// to be previous, and never "not held".
+#[test]
+fn after_a_refused_census_recovers_the_lists_answer_from_the_last_read_that_loaded() {
+    let store = Store::new("refused-recovers", 64);
+    let site = store.site();
+    start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+    let _ready = wait_ready(&site);
+    let (was, _) = fno_generation(&site);
+    let whole = std::fs::read(&store.fno_path).expect("the epoch");
+    replace_by_rename(&store.fno_path, &whole[..whole.len() / 2]);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let (code, _headers, body) = rollup_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+        let facets = row_of(&warmth(&site), FACETS, Vendor::Gdfl).state;
+        if code == 503 && body["error"] == "census_unreadable" && facets == WarmState::Failed {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never refused: {code} {body}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let rows = warmth(&site);
+    // THE LISTS' REFUSAL SAYS HOW CURRENT IT IS, as the roll-up's does: it
+    // carried no freshness header at all.
+    let (code, headers, body) = facets_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert_eq!(code, 503, "{body}");
+    assert_eq!(body["error"], "census_unreadable", "{body}");
+    assert!(matches!(
+        header(&headers, CENSUS_REFRESHING_HEADER).as_str(),
+        "0" | "1"
+    ));
+    let _stale: u64 = header(&headers, CENSUS_STALE_HEADER)
+        .parse()
+        .expect("a count");
+    let refused = row_of(&rows, CENSUS, Vendor::Gdfl);
+    assert_eq!(refused.state, WarmState::Failed, "{refused:?}");
+    let stayed = row_of(&rows, FACETS, Vendor::Gdfl).clone();
+    slow_read::set(
+        &store.root.join(crate::server::facets::SLOW_BUILD_KEY),
+        1_500,
+    );
+    replace_by_rename(&store.fno_path, &whole);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let (_stamps, now) = vendor_census(&site, Vendor::Gdfl);
+        let held = now
+            .census()
+            .is_some_and(|census| matches!(census.state, census::Census::Held { .. }));
+        if held && now.freshness() == Freshness::Current {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never read again");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..3 {
+        let began = Instant::now();
+        let (code, headers, body) = rollup_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+        assert!(began.elapsed() < Duration::from_millis(500), "waited");
+        assert_eq!(
+            code, 200,
+            "never 'not held' over a census that holds it: {body}"
+        );
+        assert_eq!(body["generation"], was, "the last read that loaded: {body}");
+        assert_eq!(header(&headers, CENSUS_REFRESHING_HEADER), "1");
+        let (code, headers, body) = facets_get(&site, "feed=gdfl&segment=FNO");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            body["underlyings"].as_array().map(Vec::len),
+            Some(1),
+            "never 0 underlyings over a census that holds NIFTY: {body}"
+        );
+        assert_eq!(header(&headers, CENSUS_REFRESHING_HEADER), "1");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    slow_read::set(&store.root.join(crate::server::facets::SLOW_BUILD_KEY), 0);
+    until_rebuilt(&site, was);
+    // AND THE PAGE SAID SO while the census was refused.
+    assert!(
+        stayed
+            .reason
+            .as_deref()
+            .is_some_and(|why| why.contains("last read that loaded")),
+        "the page says the index stayed: {stayed:?}"
+    );
+}
+
+/// **A REQUEST THAT FINDS THE INDEX BEHIND STARTS ITS BUILD, NEVER WAITS FOR
+/// IT** (R3-09 repair 1). An index left behind the read the cell keeps with
+/// nothing building it -- a re-read that died before its build, a read made
+/// on a request's thread -- was built whole by the first request that met
+/// it, on that request's thread. Now that request starts the build on a
+/// thread of its own and answers from the previous index at once; the next
+/// request after the build is current.
+#[test]
+fn a_request_that_finds_the_index_behind_starts_its_build_and_never_waits() {
+    let store = Store::new("kick", 64);
+    let twin = Store::new("kick-twin", 128);
+    let site = store.site();
+    start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+    let _ready = wait_ready(&site);
+    let (generation, _) = fno_generation(&site);
+    // LEFT BEHIND: the index built over another file's read, which no tail
+    // continues and the cell does not keep (of a higher generation, so the
+    // index is not taken to reflect a later read than it, `later`).
+    let other = Slot::detached(census::read_vendor(&twin.root, Vendor::Gdfl));
+    crate::server::facets::index(&site, Vendor::Gdfl, Segment::Fno, &other, |_| ());
+    slow_read::set(
+        &store.root.join(crate::server::facets::SLOW_BUILD_KEY),
+        1_500,
+    );
+    let _shared = crate::emitted::sink();
+    let from = crate::emitted::mark();
+    let began = Instant::now();
+    let (code, headers, body) = rollup_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "the request built it: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(header(&headers, CENSUS_REFRESHING_HEADER), "1");
+    // THE START IS A LINE IN THE LOG, naming the feed and the segment.
+    let started = crate::emitted::landed(
+        from,
+        "api.census",
+        "facet index rebuild started by a request",
+    );
+    assert!(
+        started.iter().any(|record| {
+            crate::emitted::says(record, "feed", "gdfl")
+                && crate::emitted::says(record, "segment", "FNO")
+        }),
+        "the request's build is not in the log: {started:?}"
+    );
+    // ONE BUILD, STARTED BY THAT REQUEST: the next asks are told it runs.
+    let began = Instant::now();
+    let (code, _headers, body) = facets_get(
+        &site,
+        "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1",
+    );
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "the rows waited"
+    );
+    assert_eq!(code, 503, "{body}");
+    slow_read::set(&store.root.join(crate::server::facets::SLOW_BUILD_KEY), 0);
+    until_rebuilt(&site, generation);
+}
+
+/// A value that takes `pause` to drop, and says which thread dropped it.
+struct SlowToFree {
+    pause: Duration,
+    freed_on: std::sync::mpsc::Sender<Option<String>>,
+}
+
+impl Drop for SlowToFree {
+    fn drop(&mut self) {
+        std::thread::sleep(self.pause);
+        let _sent = self
+            .freed_on
+            .send(std::thread::current().name().map(str::to_owned));
+    }
+}
+
+/// **WHAT A READER LETS GO OF IS FREED OFF ITS THREAD AND OFF EVERY LOCK**
+/// (R3-09 repair 1, blocking items 2 and 4). A replaced census read, its
+/// sorted entries and a replaced facet index (two million entries at GDFL's
+/// size, 0.8 to 1.9 s to free on the shadow of the real store) are handed to
+/// [`retire`], which must return at once and free them on `brutex-retire`,
+/// in order, never on the thread that let go.
+#[test]
+fn a_retired_value_is_freed_on_the_retire_thread_never_on_the_caller() {
+    let (sender, freed) = std::sync::mpsc::channel();
+    let began = Instant::now();
+    for _ in 0..2 {
+        retire(SlowToFree {
+            pause: Duration::from_millis(400),
+            freed_on: sender.clone(),
+        });
+    }
+    retire_any(Some(SlowToFree {
+        pause: Duration::ZERO,
+        freed_on: sender.clone(),
+    }));
+    retire_any::<SlowToFree>(None);
+    assert!(
+        began.elapsed() < Duration::from_millis(200),
+        "the caller paid for the free: {:?}",
+        began.elapsed()
+    );
+    for _ in 0..3 {
+        let on = freed
+            .recv_timeout(Duration::from_secs(30))
+            .expect("every retired value is freed");
+        assert_eq!(on.as_deref(), Some("brutex-retire"));
+    }
+    assert!(
+        freed.recv_timeout(Duration::from_millis(100)).is_err(),
+        "None retires nothing"
+    );
+}
+
+/// **THE SEGMENT IS CASE-FOLDED, AS THE FEED AND THE UNDERLYING ARE** (R3-09
+/// repair 1, a follow-up of its check): `segment=fno` was refused with a 400
+/// while `feed=GDFL` and `underlying=nifty` were read as `gdfl` and `NIFTY`.
+/// A word that is no segment in any case is still refused, by name.
+#[test]
+fn the_segment_is_case_folded_as_the_feed_and_the_underlying_are() {
+    let store = Store::new("segment-case", 5);
+    let site = store.site();
+    start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+    let _ready = wait_ready(&site);
+    let (code, _headers, upper) = rollup_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert_eq!(code, 200, "{upper}");
+    let (code, _headers, lower) = rollup_get(&site, "feed=GDFL&segment=fno&underlying=nifty");
+    assert_eq!(code, 200, "{lower}");
+    assert_eq!(lower, upper);
+    let (code, _headers, upper) = facets_get(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert_eq!(code, 200, "{upper}");
+    let (code, _headers, lower) = facets_get(&site, "feed=gdfl&segment=Fno&underlying=nifty");
+    assert_eq!(code, 200, "{lower}");
+    assert_eq!(lower, upper);
+    for query in ["feed=gdfl&segment=fnox", "feed=gdfl&segment=f%20no"] {
+        let (code, _headers, body) = rollup_get(&site, query);
+        assert_eq!(code, 400, "{query}: {body}");
+        let (code, _headers, body) = facets_get(&site, query);
+        assert_eq!(code, 400, "{query}: {body}");
+    }
+    // NO SEGMENT: the roll-up needs one; the lists answer their root.
+    let (code, _headers, body) = rollup_get(&site, "feed=gdfl&segment=");
+    assert_eq!(code, 400, "{body}");
+    let (code, _headers, body) = facets_get(&site, "feed=gdfl&segment=");
+    assert_eq!(code, 200, "{body}");
+    assert!(body["segments"].is_array(), "{body}");
+}

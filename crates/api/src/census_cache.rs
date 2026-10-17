@@ -157,6 +157,10 @@ struct Cell {
     /// Set while a background re-read of this vendor is queued or running,
     /// so a burst of readers that all see the moved stamp starts ONE.
     refreshing: std::sync::atomic::AtomicBool,
+    /// When the running background re-read began: since when readers have
+    /// been answered from the kept read ([`Freshness::Stale`]'s
+    /// `stale_since`). `None` while none runs.
+    noticed: Mutex<Option<std::time::SystemTime>>,
 }
 
 /// A kept read: the slot, and the stamp it is kept under.
@@ -194,7 +198,15 @@ pub(crate) enum Freshness {
     /// answered from it while a background re-read runs. `read_at` is when
     /// that read began; the stamp it was read under travels beside it
     /// ([`vendor_slot_fresh`]), so this stays a small `Copy` value.
-    Stale { read_at: std::time::SystemTime },
+    /// `stale_since` is when this server found the census had moved past
+    /// that read (the background re-read began, or the index rebuild over
+    /// the new read was first pending): how long answers have been standing
+    /// in, which `read_at` cannot say -- a read kept for a quiet week is a
+    /// week old one second after the next change (R3-09 repair 1).
+    Stale {
+        read_at: std::time::SystemTime,
+        stale_since: std::time::SystemTime,
+    },
 }
 
 impl Freshness {
@@ -207,6 +219,24 @@ impl Freshness {
             Self::Stale { read_at, .. } => {
                 u64::try_from(read_at.elapsed().unwrap_or_default().as_millis()).unwrap_or(u64::MAX)
             }
+        }
+    }
+
+    /// How long answers have stood in for a newer census, in milliseconds:
+    /// zero for a current census, else the time since this server found the
+    /// census had moved ([`Self::Stale`]'s `stale_since`).
+    pub(crate) fn stale_ms(self) -> u64 {
+        self.stale_since().map_or(0, |at| {
+            u64::try_from(at.elapsed().unwrap_or_default().as_millis()).unwrap_or(u64::MAX)
+        })
+    }
+
+    /// When this server found the census had moved past the served read,
+    /// for a stale answer.
+    pub(crate) const fn stale_since(self) -> Option<std::time::SystemTime> {
+        match self {
+            Self::Current => None,
+            Self::Stale { stale_since, .. } => Some(stale_since),
         }
     }
 
@@ -223,6 +253,14 @@ impl Cell {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// When the running background re-read began, or now when none runs.
+    fn noticed(&self) -> std::time::SystemTime {
+        self.noticed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(std::time::SystemTime::now)
     }
 }
 
@@ -452,6 +490,7 @@ fn vendor_slot_fresh(
             kept.slot,
             Freshness::Stale {
                 read_at: kept.read_at,
+                stale_since: cell.noticed(),
             },
             Some(kept.stamp),
         );
@@ -515,13 +554,21 @@ fn rebuild(
         }),
     };
     if stamp_could_read(stamp, root_is_dir, &slot.census.state) {
-        *cell.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Kept {
-            stamp,
-            root_is_dir,
-            slot: Arc::clone(&slot),
-            read_at,
-            read_ms,
-        });
+        // THE KEPT READ IT REPLACES IS DROPPED AFTER THE LOCK IS LET GO, and
+        // off this thread: every reader of the vendor takes this lock, and
+        // the last reference to a two-million-entry census may be in it.
+        let replaced = cell
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Kept {
+                stamp,
+                root_is_dir,
+                slot: Arc::clone(&slot),
+                read_at,
+                read_ms,
+            });
+        retire_any(replaced);
     }
     slot
 }
@@ -534,11 +581,18 @@ fn kept_read_ms(cell: &Cell) -> u64 {
 /// Clears a cell's `refreshing` flag when the background re-read ends, by
 /// return or by panic, so a re-read that died never leaves the vendor served
 /// stale for the life of the process: the next reader starts another.
-struct Refreshing<'a>(&'a std::sync::atomic::AtomicBool);
+struct Refreshing<'a>(&'a Cell);
 
 impl Drop for Refreshing<'_> {
     fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
+        *self
+            .0
+            .noticed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.0
+            .refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -564,6 +618,8 @@ fn refresh_in_background(vendors: &Arc<Vendors>, vendor: Vendor) -> bool {
     if cell.refreshing.swap(true, Ordering::AcqRel) {
         return true;
     }
+    *cell.noticed.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(std::time::SystemTime::now());
     let mine = Arc::clone(vendors);
     let spawned = std::thread::Builder::new()
         .name(format!("brutex-census-{}", vendor.as_str()))
@@ -571,7 +627,7 @@ fn refresh_in_background(vendors: &Arc<Vendors>, vendor: Vendor) -> bool {
             let Some(cell) = mine.cells.get(vendor as usize) else {
                 return;
             };
-            let _clear = Refreshing(&cell.refreshing);
+            let _clear = Refreshing(cell);
             note_warmth(&mine, CENSUS, vendor, WarmState::Refreshing, None);
             loop {
                 let (stamp, root_is_dir) = read_census(&site, &mine, cell, vendor);
@@ -652,6 +708,15 @@ impl VendorCensusNow {
 /// has to infer currency from a missing header (R3-09).
 pub(crate) const CENSUS_AGE_HEADER: &str = "x-brutex-census-age-ms";
 
+/// `x-brutex-census-stale-ms`: how long, in milliseconds, answers have stood
+/// in for a newer census -- since this server found the manifest had moved
+/// past the read the answer was built from (the background re-read began),
+/// or the index rebuild over the newer read was first pending; `0` when the
+/// answer is current. Beside [`CENSUS_AGE_HEADER`], which counts from when
+/// the served read BEGAN and so reads a quiet week's age one second after a
+/// change (R3-09 repair 1).
+pub(crate) const CENSUS_STALE_HEADER: &str = "x-brutex-census-stale-ms";
+
 /// `x-brutex-census-refreshing`: `1` when the answer was built from the
 /// previous read while a background re-read runs, `0` otherwise.
 pub(crate) const CENSUS_REFRESHING_HEADER: &str = "x-brutex-census-refreshing";
@@ -661,6 +726,10 @@ pub(crate) fn freshness_headers(headers: &mut axum::http::HeaderMap, freshness: 
     let _age = headers.insert(
         axum::http::HeaderName::from_static(CENSUS_AGE_HEADER),
         axum::http::HeaderValue::from(freshness.age_ms()),
+    );
+    let _stale = headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_STALE_HEADER),
+        axum::http::HeaderValue::from(freshness.stale_ms()),
     );
     let _refreshing = headers.insert(
         axum::http::HeaderName::from_static(CENSUS_REFRESHING_HEADER),
@@ -1001,10 +1070,103 @@ fn read_census(
         .get(vendor as usize)
         .copied()
         .unwrap_or(ManifestStamp::Missing);
+    // THE FACET INDEXES ARE PENDING BEFORE THE READ IS PUBLISHED, and until
+    // they are brought to it (R3-09 repair 1): a request handed the new read
+    // in between answers from the previous index or `503 index_warming`. It
+    // built the whole index itself, or waited for this thread's build (7.55
+    // and 12.21 s on the shadow of the real store), when they were marked
+    // pending only once their build began, after the journal count and the
+    // index map.
+    let _pending = derived_feeds(vendors)
+        .contains(&vendor)
+        .then(|| super::facets::hold_pending(site, vendor));
     let slot = rebuild(&site.store_root, cell, vendor, stamp, stamps.root_is_dir);
     note_ready(vendors, CENSUS, vendor, kept_read_ms(cell), &slot);
-    warm_derived(site, vendors, vendor, &slot);
+    // ONLY A READ THE CELL KEPT HAS ITS ANSWERS DERIVED: one it handed back
+    // without keeping (its stamps contradicted it) is no reader's census,
+    // and an index moved to it would answer no request.
+    if keeps(site, vendor, &slot) {
+        warm_derived(site, vendors, vendor, &slot);
+    } else if derived_feeds(vendors).contains(&vendor) {
+        for name in [JOURNAL, INDEX_MAP, FACETS] {
+            note_warmth(
+                vendors,
+                name,
+                vendor,
+                WarmState::Failed,
+                Some(format!(
+                    "not built: the census read was not kept, because the manifest's stamps \
+                     contradict it ({}); the first request that needs it builds it",
+                    slot.census.note()
+                )),
+            );
+        }
+    }
     (stamp, stamps.root_is_dir)
+}
+
+/// Drops `value` on a thread of its own, so whoever lets go of a large read
+/// -- a census of two million entries, a facet index of as many, their
+/// sorted lists -- never pays for freeing it under a lock every reader takes
+/// or on a request's thread (R3-09 repair 1: the FNO index dropped under its
+/// write lock stalled every reader of the segment 0.8 to 1.9 s on the
+/// shadow of the real store).
+///
+/// One sending of a pointer: the thread `brutex-retire` frees what it is
+/// sent, in order. Dropped here instead, and said so in the log, when that
+/// thread cannot be started or has ended: slower, never wrong.
+pub(crate) fn retire<T: Send + 'static>(value: T) {
+    type Retired = Box<dyn Send>;
+    static RETIRE: OnceLock<Option<std::sync::mpsc::Sender<Retired>>> = OnceLock::new();
+    let sender = RETIRE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<Retired>();
+        let spawned = std::thread::Builder::new()
+            .name("brutex-retire".to_owned())
+            .spawn(move || {
+                for retired in receiver {
+                    drop(retired);
+                }
+            });
+        match spawned {
+            Ok(_detached) => Some(sender),
+            Err(why) => {
+                warn_line!(
+                    "the thread that frees replaced census reads could not be started ({why}); \
+                     each is freed where it is replaced"
+                );
+                None
+            }
+        }
+    });
+    if let Some(sender) = sender {
+        // A SEND THAT FAILS hands the value back: dropped here.
+        let _sent_or_dropped_here = sender.send(Box::new(value));
+    }
+}
+
+/// [`retire`] of what `value` holds, when it holds anything.
+pub(crate) fn retire_any<T: Send + 'static>(value: Option<T>) {
+    if let Some(value) = value {
+        retire(value);
+    }
+}
+
+/// The site the census runs in the background for, once [`start`] has run:
+/// what a thread that builds a derived answer for a request is given.
+pub(crate) fn background_site(site: &Site) -> Option<super::Loaded> {
+    vendors_of(site)
+        .background
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+}
+
+/// The read `vendor`'s cell keeps now, if it keeps one.
+pub(crate) fn kept_slot(site: &Site, vendor: Vendor) -> Option<Arc<Slot>> {
+    vendors_of(site)
+        .cells
+        .get(vendor as usize)
+        .and_then(Cell::current)
+        .map(|kept| kept.slot)
 }
 
 /// Whether `slot` is the read `vendor`'s cell keeps NOW: one lock and a
@@ -1079,23 +1241,90 @@ fn warm_derived(site: &Site, vendors: &Vendors, vendor: Vendor, slot: &Arc<Slot>
     if !derived_feeds(vendors).contains(&vendor) {
         return;
     }
+    #[cfg(test)]
+    slow_read::pause(&site.store_root.join(SLOW_DERIVED_KEY));
+    note_rebuilding(vendors, JOURNAL, vendor);
     let began = std::time::Instant::now();
     let behind = super::store_route::behind(site, vendor);
     match behind.unread {
         Some(why) => note_warmth(vendors, JOURNAL, vendor, WarmState::Failed, Some(why)),
         None => note_ready(vendors, JOURNAL, vendor, ms_since(began), slot),
     }
+    note_rebuilding(vendors, INDEX_MAP, vendor);
     let began = std::time::Instant::now();
     match crate::indexmap::warm(site, vendor) {
         Ok(()) => note_ready(vendors, INDEX_MAP, vendor, ms_since(began), slot),
         Err(why) => note_warmth(vendors, INDEX_MAP, vendor, WarmState::Failed, Some(why)),
     }
-    let began = std::time::Instant::now();
-    for segment in super::facets::SEGMENTS {
-        super::facets::index(site, vendor, segment, slot, |_| ());
+    // A REFUSED CENSUS MOVES NO FACET INDEX (R3-09 repair 1): every route
+    // refuses it before it reaches one, and an index moved to it is EMPTY --
+    // what the routes then served, for 3 to 5 s after the census recovered,
+    // as the previous answer: "not held" and "0 underlyings" over a census
+    // of 347 underlyings. The index stays on the last read that loaded, and
+    // answers for the recovered read while it is rebuilt, said to be
+    // previous.
+    if let census::Census::Unreadable { .. } = slot.census.state {
+        note_warmth(
+            vendors,
+            FACETS,
+            vendor,
+            WarmState::Failed,
+            Some(format!(
+                "not moved: the census is unreadable ({}); the facet index stays on the last \
+                 read that loaded until the census reads again",
+                slot.census.note()
+            )),
+        );
+        return;
     }
-    note_ready(vendors, FACETS, vendor, ms_since(began), slot);
+    note_rebuilding(vendors, FACETS, vendor);
+    let began = std::time::Instant::now();
+    let behind: Vec<&str> = super::facets::SEGMENTS
+        .into_iter()
+        .filter(|&segment| !super::facets::bring(site, vendor, segment, slot))
+        .map(brutex_core::instrument::Segment::as_str)
+        .collect();
+    if behind.is_empty() {
+        note_ready(vendors, FACETS, vendor, ms_since(began), slot);
+    } else {
+        // NOT "READY" OVER A READ IT DOES NOT ANSWER: an index another
+        // thread moved meanwhile to a read this one cannot stand for.
+        note_warmth(
+            vendors,
+            FACETS,
+            vendor,
+            WarmState::Failed,
+            Some(format!(
+                "the {} index does not answer the census read it was built for; the next \
+                 request that needs it starts its build",
+                behind.join(", ")
+            )),
+        );
+    }
 }
+
+/// Lists `name` of `vendor` as `refreshing` while it is rebuilt over a new
+/// read, unless it is still warming for the first time: `/census/warm.json`
+/// said "ready", with the last build's time, through a 10 to 12 s rebuild
+/// of GDFL's FNO index (R3-09 repair 1).
+fn note_rebuilding(vendors: &Vendors, name: &'static str, vendor: Vendor) {
+    let warming = vendors
+        .warmth
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming);
+    if !warming {
+        note_warmth(vendors, name, vendor, WarmState::Refreshing, None);
+    }
+}
+
+/// The key under a store root whose `slow_read` pause holds every
+/// background pass between publishing a census read and deriving its
+/// answers: what a test opens the window a request fell into with (R3-09
+/// repair 1). Not a path anything reads or writes.
+#[cfg(test)]
+pub(crate) const SLOW_DERIVED_KEY: &str = "census-derived-pause";
 
 /// `/census/warm.json`'s body: every warmed cache by name and feed, its
 /// state, how long it has been in it, its last build's time, and the census
@@ -1188,14 +1417,20 @@ pub(crate) mod slow_read {
         }
     }
 
-    /// Pauses, if a test asked for it under `root`.
-    pub(crate) fn pause(root: &Path) {
-        let ms = PAUSES
+    /// The milliseconds a test asked reads under `root` to pause; zero when
+    /// none.
+    pub(crate) fn ms(root: &Path) -> u64 {
+        PAUSES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|(at, _)| at == root)
-            .map_or(0, |(_, ms)| *ms);
+            .map_or(0, |(_, ms)| *ms)
+    }
+
+    /// Pauses, if a test asked for it under `root`.
+    pub(crate) fn pause(root: &Path) {
+        let ms = ms(root);
         if ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
@@ -1437,11 +1672,15 @@ fn census_now_kept(
                 ),
             );
         }
-        cached.every = Some((
+        // THE READ IT REPLACES IS DROPPED OFF THIS LOCK AND THIS THREAD:
+        // every census reader takes the lock, and the replaced read can hold
+        // the last reference to a two-million-entry census or its sorted
+        // entries (R3-09 repair 1).
+        retire_any(cached.every.replace((
             stamps.clone(),
             std::sync::Arc::clone(&censuses),
             std::sync::Arc::clone(&entries),
-        ));
+        )));
     }
     (stamps, (censuses, entries))
 }
