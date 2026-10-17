@@ -146,6 +146,89 @@ those outside every top-level `#[cfg(test)]` item of the file.
 `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`,
 new on `feat/db-fix`. Each needs mode bits that bind the process.
 
+## Coverage
+
+Measured with the checked-in profile, line and branch, production lines
+only (see *Method*). The first measurement is before this session's
+coverage tests, the second after most of them; the final one, and the
+check that the classified list below equals the unrun list, are taken at
+the end.
+
+| File | Lines | Unrun, first (`9d85bcd6`) | Unrun, second (`a0b59017`) | Branches | Untaken, first | Untaken, second |
+|---|---:|---:|---:|---:|---:|---:|
+| `bars.rs` | 1,222 → 1,223 ¹ | 19 | 14 | 266 → 268 ¹ | 23 | 17 |
+| `bars_change.rs` | 347 | 1 | 1 | 94 | 5 | 1 |
+| `bars_series.rs` | 751 | 13 | 4 | 186 | 15 | 4 |
+| `bars_sort.rs` | 1,695 | 50 | 35 | 412 | 51 | 40 |
+| `gaps_route.rs` | 1,165 → 1,175 ² | 21 | 14 | 196 | 15 | 2 |
+| `spot.rs` | 324 | 0 | 0 | 50 | 1 | 0 |
+| `render.rs` | 1,240 | 1 | 1 | 194 | 1 | 1 |
+| `ladder.rs` | 249 | 1 | 1 | 62 | 4 | 2 |
+| **eight files** | **6,993 → 7,004** | **106** | **70** | **1,420 → 1,422** | **118** | **67** |
+
+¹ The D-5423 fix split the scan's candidate into two statements.
+² `gaps_answer` had no caller in the first run, and an `async fn`'s body is
+instrumented only once something instantiates it, so only its first line
+was counted then. The production code is the same.
+
+### Every production line and branch still unrun, and why
+
+Each was read in place and the path a test would need traced to its
+caller. Four classes. Line numbers are this branch's.
+
+**A1. A conversion that cannot fail.**
+
+| File | Lines (branches) | Why |
+|---|---|---|
+| `bars.rs` | 659 (658) | `u64::try_from(usize)` on a 64-bit target. |
+| `bars.rs` | 2292 (2290) | `u32::try_from` of a series index (at most `MAX_SERIES`, 1,024) and of a plan's run count (one a month or one a day of at most 120 months). |
+| `bars_sort.rs` | 2102 (2101), 2172 (2171) | `u32::try_from` of a series index, as above. |
+| `gaps_route.rs` | 1335–1351, 1354–1357 (1353) | `audit_one`'s answer for a month whose first day the calendar cannot name, and the `empty` closure only it calls. `YearMonth` and `pull::session::Day` share the range 1970..=9999, so every month has a first day. |
+| `ladder.rs` | (455) | `Day::year_month` fails only outside `YearMonth`'s range, which is `Day`'s. |
+
+**A2. A lookup by an index the same function took from the list it now
+reads.** A `for slot in 0..len` over the list it indexes, a series taken
+from the request's own plans, a run taken from the plan that holds it, an
+entry pushed one line before.
+
+| File | Lines (branches) |
+|---|---|
+| `bars.rs` | 1993 (1992), 2036 (2035), 2060 (2059), 2063 (2062), (2070), (2073), (2084), (2195), 2285 (2284), 2296 (2295), 2347 (2346), 2350 (2349), 2384 (2382) |
+| `bars_series.rs` | 776 (775), 829 (828), 991 (984) |
+| `bars_sort.rs` | 555 (554), 1328 (1327), (1370), 1498 (1497), (1529), (1596), (1599), (1602), 1605, (1756), (1935), 1997 (1983), 2097 (2096), 2112 (2111), (2178), 2247, 2323 (2322), 2401 (2400), 2404 (2403), 2427 (2426), 2476 (2475), 2550 (2549), 2582 (2581), (2609) |
+
+**A3. An arm whose only caller has already decided it.**
+
+| File | Lines (branches) | Why |
+|---|---|---|
+| `bars.rs` | 2185 (2184), 2188 (2187) | The merge pops `want` rows from heads that hold at least `[a, b)` of the total, so a head is never missing before the page is full. |
+| `bars_change.rs` | 439 (432) | `session_before` after ten closed days in a row; the sourced calendar has no such run, and outside its span the walk meets an unmeasured day first. |
+| `bars_series.rs` | 740 (739) | `admit` addresses a key `build` has already addressed for the first month, and refused by name if it could not; only the month differs, and a `YearMonth` is valid by type. |
+| `bars_sort.rs` | (619) | An index run that overlaps the kept run is never cut empty: the runs chain from row 0, so `from` is the run's start or the kept run's start, below `until`. |
+| `bars_sort.rs` | 1091–1092 (1090), 1101 (1100), 1107 (1106), 1136 (1135) | `select_in` over an empty slice: `value_slices` and `null_slices` push a slice only when it holds a row, and the sum check returns first. |
+| `bars_sort.rs` | (1384) | A null series' time array is one of its kept runs, never empty. |
+| `bars_sort.rs` | 1438 (1437) | No value domain while `k < valued`: a valued row gives the domain its ends. |
+| `bars_sort.rs` | 2199 (2198), 2202 (2201), 2205 (2204), 2243, (2534) | An indexed or cut piece whose view, walk or run is missing, or a cut run left unloaded: `cut` makes those pieces only from a walked view, and only a null series' cut runs are left unloaded, which never reach that arm. |
+| `bars_sort.rs` | (2335) | The extremes are `Some` inside the `extremes.is_some()` block. |
+| `bars_sort.rs` | 2430–2431 (2429) | `run_of_slot` is asked only for the slot a run produced (its own edges are tested directly: `a_slot_past_every_run_has_no_run`). |
+| `gaps_route.rs` | 459 (458) | `next_month` is `None` only at 9999-12, where `cursor >= last` has returned. |
+| `ladder.rs` | 464 (462) | `Day::from_days` past 9999-12-31: the loop has returned at the window's last day, which is a `Day`. |
+
+**B. The store changing, or a client leaving, between two steps of one
+request, where no seam reaches.**
+
+| File | Lines (branches) | The step that fails between |
+|---|---|---|
+| `bars.rs` | 2362 | A row the time-of-day scan read, refused when it is read again for the page. |
+| `bars_sort.rs` | 2408–2410 | A read row the request kept, refused when it is read again for the page. |
+| `render.rs` | 3284 (3283) | `DirEntry::file_type` for an entry just listed: on Linux it fails only when the filesystem reports no type and the entry vanishes before the `lstat`. |
+
+**D. An index that disagrees with itself after passing its checksums.**
+
+| File | Lines (branches) | Why |
+|---|---|---|
+| `bars_sort.rs` | 1459–1461 (1458) | The value bisection found a value no row holds. Fences and blocks are both checked, and a fixture that passes every checksum and still contradicts itself would need a hand-built `.srt`; the planting helper builds an index only from rows. |
+
 ## Gates (so far)
 
 | Gate | Result |
