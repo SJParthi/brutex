@@ -241,8 +241,11 @@ request, where no seam reaches.**
 
 ## Left
 
-- The mutation run (2,218 mutants of the eight files) is still running;
-  then every survivor against the final suite.
+- The mutation run (2,218 mutants of the eight files) is still running. At
+  20:05 UTC: spot 123 of its mutants have a stage-1 outcome (107 caught, 0 timed out, 13 unviable, 3 left for stage 2); bars_change 146 of its mutants have a stage-1 outcome (133 caught, 1 timed out, 8 unviable, 4 left for stage 2); ladder 112 of its mutants have a stage-1 outcome (76 caught, 0 timed out, 24 unviable, 12 left for stage 2); render 222 of its mutants have a stage-1 outcome (208 caught, 0 timed out, 2 unviable, 12 left for stage 2); bars_sort 290 of its mutants have a stage-1 outcome (223 caught, 28 timed out, 21 unviable, 18 left for stage 2); bars 333 of its mutants have a stage-1 outcome (289 caught, 2 timed out, 20 unviable, 22 left for stage 2); gaps_route 20 of its mutants have a stage-1 outcome (13 caught, 2 timed out, 5 unviable, 0 left for stage 2); bars_series not yet started. Then every survivor
+  against the final suite. Stage 2 so far: `spot.rs` 3 of 3 caught (by
+  `tests/cloud_mutants_bars.rs`); `bars_change.rs` 1 of 4 caught, 3 left
+  (`301:59`, `333:34`, `432:21`, equivalent for the 16 Oct reasons).
 - The coverage re-measurement after the new tests, and the reason for
   every line and branch still unrun.
 - `cargo test --workspace --locked`, and the final clippy.
