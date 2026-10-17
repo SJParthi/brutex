@@ -56,6 +56,11 @@ use std::time::Instant;
 #[path = "ratio/tickstore_write.rs"]
 mod tickstore_write;
 
+/// C-DP-01 and C-DP-02: one projected unit and the Dropbox status read,
+/// flat at 1x, 10x and 100x (R4-07, PERF-13, E2E-01).
+#[path = "ratio/disk_projection.rs"]
+mod disk_projection;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1115,6 +1120,7 @@ fn main() {
     ok &= alert_put_is_flat(&alert_stores);
     ok &= alert_window_is_flat(&alert_stores);
     ok &= tickstore_write::tickstore_write_is_flat_per_member();
+    ok &= disk_projection::disk_projection_is_flat();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
     if ok {
         println!("all ratios within the ceiling");

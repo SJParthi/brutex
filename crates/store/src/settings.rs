@@ -119,10 +119,14 @@ pub enum Key {
     SourceGdfl,
     /// Where the exchange masters are kept: an absolute directory.
     SourceMasters,
+    /// The free space every disk-writing step keeps: `<n>%` of the store's
+    /// filesystem or a byte amount (`<n>`, `<n>GiB`, `<n>TiB`, `<n>GB`, `<n>TB`).
+    /// Read through [`disk_floor`] (R4-07, PERF-13).
+    DiskFloor,
 }
 
 /// How many keys exist.
-pub const KEYS: usize = 10;
+pub const KEYS: usize = 11;
 
 impl Key {
     /// Every key, in the order a file lists them.
@@ -137,6 +141,7 @@ impl Key {
         Self::AlwaysShown,
         Self::SourceGdfl,
         Self::SourceMasters,
+        Self::DiskFloor,
     ];
 
     /// The key's name in a file and on the wire.
@@ -153,6 +158,7 @@ impl Key {
             Self::AlwaysShown => "always.shown",
             Self::SourceGdfl => "source.gdfl",
             Self::SourceMasters => "source.masters",
+            Self::DiskFloor => "disk.floor",
         }
     }
 
@@ -187,6 +193,7 @@ impl Key {
             Self::AlwaysShown => 7,
             Self::SourceGdfl => 8,
             Self::SourceMasters => 9,
+            Self::DiskFloor => 10,
         }
     }
 }
@@ -567,8 +574,104 @@ pub fn check(key: Key, value: &str) -> Result<String, Refusal> {
             return Ok(seen.join(","));
         }
         Key::SourceGdfl | Key::SourceMasters => directory(value).map_err(invalid)?,
+        Key::DiskFloor => {
+            let floor = disk_floor(value).map_err(invalid)?;
+            return Ok(floor.to_string());
+        }
     }
     Ok(value.to_owned())
+}
+
+/// The free space a disk-writing step must leave: the value of
+/// [`Key::DiskFloor`] (R4-07, PERF-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Floor {
+    /// This many percent of the filesystem's total size, 1 to 95.
+    Percent(u8),
+    /// This many bytes.
+    Bytes(u64),
+}
+
+impl Floor {
+    /// The floor in bytes on a filesystem of `total` bytes. O(1), integer
+    /// only (`CLAUDE.md` §7): a percent floor rounds up, so it never
+    /// promises less than it says.
+    #[must_use]
+    pub fn bytes_of(self, total: u64) -> u64 {
+        match self {
+            Self::Percent(percent) => {
+                let percent = u64::from(percent);
+                let whole = total / 100;
+                let part = total % 100;
+                // (whole * 100 + part) * p / 100, rounded up, without overflow.
+                whole
+                    .saturating_mul(percent)
+                    .saturating_add((part * percent).div_ceil(100))
+            }
+            Self::Bytes(bytes) => bytes,
+        }
+    }
+}
+
+impl fmt::Display for Floor {
+    /// The value exactly as a save writes it: `15%` or a byte count.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Percent(percent) => write!(f, "{percent}%"),
+            Self::Bytes(bytes) => write!(f, "{bytes}"),
+        }
+    }
+}
+
+/// The one reader of a `disk.floor` value: `<n>%` (1 to 95), a byte count,
+/// or a whole number of `GiB`, `TiB`, `GB` or `TB`. O(length).
+///
+/// # Errors
+///
+/// The sentence naming why `text` is not a floor: a percent outside 1 to
+/// 95, zero bytes, an unknown unit, or an amount that overflows 64 bits.
+pub fn disk_floor(text: &str) -> Result<Floor, String> {
+    let text = text.trim();
+    if let Some(number) = text.strip_suffix('%') {
+        let percent: u8 = number
+            .parse()
+            .map_err(|_| format!("{text:?} is not a whole percent"))?;
+        if !(1..=95).contains(&percent) || number.starts_with('+') || number.starts_with('0') {
+            return Err(format!("{text:?} is not a percent from 1% to 95%"));
+        }
+        return Ok(Floor::Percent(percent));
+    }
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let scale: u64 = match unit {
+        "" => 1,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        "GB" => 1_000_000_000,
+        "TB" => 1_000_000_000_000,
+        _ => {
+            return Err(format!(
+                "{text:?} is not a floor: write <n>%, a byte count, or <n>GiB, TiB, GB or TB"
+            ));
+        }
+    };
+    if number.is_empty() || (number.len() > 1 && number.starts_with('0')) {
+        return Err(format!("{text:?} has no whole amount"));
+    }
+    let amount: u64 = number
+        .parse()
+        .map_err(|_| format!("{text:?} is past 64 bits"))?;
+    let bytes = amount
+        .checked_mul(scale)
+        .ok_or_else(|| format!("{text:?} is past 64 bits"))?;
+    if bytes == 0 {
+        return Err(format!(
+            "{text:?} is no floor at all; a floor of nothing would let a step fill the disk"
+        ));
+    }
+    Ok(Floor::Bytes(bytes))
 }
 
 /// The checks that span keys: a window's first day is not after its last.

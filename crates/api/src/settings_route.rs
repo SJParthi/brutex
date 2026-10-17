@@ -223,6 +223,10 @@ fn default_of(key: Key) -> (Option<String>, String) {
             None,
             "not set: the server derives the masters folder from HOME".to_owned(),
         ),
+        Key::DiskFloor => (
+            Some(pull::disk_projection::DEFAULT_FLOOR.to_string()),
+            pull::disk_projection::DEFAULT_FLOOR_SOURCE.to_owned(),
+        ),
     }
 }
 
@@ -403,6 +407,10 @@ pub const fn reader_of(key: Key) -> Result<&'static str, &'static str> {
         Key::SourceMasters => Err(
             "nothing reads a saved value yet: the server reads BRUTEX_MASTERS, else HOME, once \
              at start; owner: the masters loader",
+        ),
+        Key::DiskFloor => Err(
+            "nothing reads a saved value yet: pull::gdfl_dropbox checks the floor its caller \
+             passes before every file; owner: the ingest chain (R4-11), R4-23, R4-29",
         ),
     }
 }

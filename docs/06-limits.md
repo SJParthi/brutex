@@ -18403,3 +18403,23 @@ under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
 `incomplete` close counts 94 refusals in its own window, equal to its
 `failures=94`, where it counted 151 (57 move to `later_count`); neither
 sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
+
+## The GDFL Dropbox fetch and the shared disk projection — D-4986, D-4987, 17 October 2026
+
+`pull::gdfl_dropbox` (E2E-01) and `pull::disk_projection` (PERF-13), R4-07.
+Bench `cargo bench -p pull --bench ratio` (release, C-DP-01 and C-DP-02,
+n = 200 sequential calls per size, one client, on a machine other agents were
+loading; invented inputs). The real-data figures were read only from the
+operator's drive on 17 October 2026.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R407-1 | A projection | none per unit: one hash probe or one cached median | O(plan units) after `Totals::seal`, which sorts each class's bytes a day once, O(u log u). C-DP-01, two units: p50 209 ns, p99 334 / 250 / 250 ns, max 3.7 / 1.0 / 0.75 µs at 100, 1,000 and 10,000 underlyings; ratio 1.02x at 10x and 100x | R4-07 |
+| L-R407-2 | The fetch's status read | none: one seek to the journal's last 64 KiB | C-DP-02: p50 26.1 / 26.0 / 25.8 µs, p99 59.5 / 59.9 / 76.8 µs, max 89 / 183 / 142 µs at 1,000, 10,000 and 100,000 journal lines; ratio 1.05x and 1.04x | R4-07 |
+| L-R407-3 | A press reads its whole journal once | it must know every earlier run's verified files, parts, link print and complete listing count, and no sidecar remembers them yet | O(journal lines) once a press, never once a file: about eight lines a file and three files a trading day, about 50,000 lines for 2,000 days (EXTRAPOLATION). NOT MEASURED at that size | R4-07 |
+| L-R407-4 | A press lists the whole shared folder | whether a shared-link cursor survives between presses is UNVERIFIED (FM-037), so a daily press cannot ask for "only what is new" | O(listed entries) a press, every page followed; refused `listing_incomplete` past 200,000 files, 4,096 folders or depth 8. NOT MEASURED against Dropbox (fixture only: 2,501 entries over 4 pages) | R4-07 |
+| L-R407-5 | Verifying a downloaded zip reads it whole, twice | a member's CRC-32 is known only by inflating it, and the SHA-256 that refuses a renamed duplicate is a second pass | O(the file's bytes); every member's stated length is refused past 64 MiB before it is inflated. NOT MEASURED on a real 280 MB options day zip (fixture zips only) | R4-07 |
+| L-R407-6 | The free space is measured by running `/bin/df -Pk` | `std` has no `statvfs`, and `libc` is not taken for it (L-TSW-7) | one process a check: one for the plan and one before each file | R4-07 |
+| L-R407-7 | An unstored option underlying is its class's MEDIAN, which can be far off | the median is of other underlyings, not of this one | over-projects a small index: the median of NIFTY's and BANKNIFTY's stored bytes a day (167.3 and 145.2 MB, 1s bars, 1,786 held options days) is 156.3 MB, 4.9x FINNIFTY's own 31.7 MB a day (44.97 GB over at most 1,419 days since 2021-01-11; its exact held days NOT PROVED). Labelled EXTRAPOLATION and named on every line; safe for the floor (it refuses early, never late); the ±20% tolerance holds for measured units only | R4-07 |
+| L-R407-8 | A yearly container (`Options/<YYYY>.zip`) is refused, not read | fetching only a grown container's new members by `Range` over its central directory is not built (FM-237) | refused by name `not_a_day_zip`, and a listing of nothing else is `link_holds_no_gdfl_day_zip`; the drive's own delivery is in that shape (`Options/2025.zip`, 70.2 GB, 250 inner day zips). **NOT DONE** | follow-on |
+| L-R407-9 | Disk use of a press | the bytes are the vendor's day zips | measured from the drive's delivery: options 289.8 MB a day zip (the 2025 and 2026 containers, 125.18 GB over 432 inner day zips), capital market 32.3 MB a file (128.92 GB over 3,995); a daily press about 354 MB in three files and three `.part` names, passing the 15% floor with 1.77 TB free of 8.00 TB; a from-scratch fetch of 2,000 options days and 3,995 market files is 708.5 GB and is refused `disk_floor`, 137.6 GB short (`df -Pk`, 17 October 2026) | R4-07 |

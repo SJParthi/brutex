@@ -1158,3 +1158,46 @@ fn under_a_real_successor_race_no_landed_save_is_answered_refused() {
         );
     }
 }
+
+/// `disk.floor` (R4-07, PERF-13, D-4987): one grammar, stored in one
+/// canonical spelling, refused by name otherwise.
+#[test]
+fn the_disk_floor_is_checked_and_stored_canonically() {
+    use super::{Floor, disk_floor};
+    assert_eq!(Key::of_name("disk.floor"), Some(Key::DiskFloor));
+    assert_eq!(Key::DiskFloor.slot(), 10);
+    assert_eq!(super::check(Key::DiskFloor, " 15% ").unwrap(), "15%");
+    assert_eq!(
+        super::check(Key::DiskFloor, "1TB").unwrap(),
+        "1000000000000"
+    );
+    assert_eq!(super::check(Key::DiskFloor, "2GiB").unwrap(), "2147483648");
+    assert!(super::check(Key::DiskFloor, "0%").is_err());
+    assert!(super::check(Key::DiskFloor, "lots").is_err());
+    assert!(super::check_stored(Key::DiskFloor, "15%").is_ok());
+    assert!(
+        super::check_stored(Key::DiskFloor, "1TB").is_err(),
+        "stored as a save writes it"
+    );
+    assert_eq!(
+        disk_floor("96%"),
+        Err("\"96%\" is not a percent from 1% to 95%".to_owned())
+    );
+    assert_eq!(Floor::Percent(15).bytes_of(1_000), 150);
+    assert_eq!(Floor::Bytes(5).bytes_of(1), 5);
+    assert_eq!(Floor::Percent(10).to_string(), "10%");
+    for bad in [
+        "",
+        "%",
+        "+5%",
+        "05%",
+        "0",
+        "007",
+        "GiB",
+        "9XB",
+        "99999999999999999999",
+        "20000000TiB",
+    ] {
+        assert!(disk_floor(bad).is_err(), "{bad:?}");
+    }
+}

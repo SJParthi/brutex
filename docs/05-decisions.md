@@ -70635,3 +70635,113 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 `an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
+
+### D-4986 — The GDFL Dropbox fetch runs inside the app: one press lists, picks, downloads, verifies and hands on, never overwriting and never deleting (R4-07, E2E-01) — 2026-10-16
+
+Step 1 of the one-click chain is `pull::gdfl_dropbox::run`. The shared link
+lives in `~/.brutex/gdfl-dropbox.toml` (mode 600; group- or world-readable is
+the wait `dropbox_config_too_open`), read only there; a missing or malformed
+file is a journalled wait, never a default. The link never reaches a journal,
+log or page: a run names it by its print (the first 16 bytes of its SHA-256),
+and a link whose print differs from the journal's last is the wait
+`link_changed` until the operator writes `accept_link_print`.
+
+The listing is read to its end, every page of every folder (the shared-link
+listing is non-recursive, `docs/00-charter.md`); a cut listing is
+`listing_incomplete`, a renamed field `listing_shape_unknown`, a listing
+smaller than the last complete one for the same link `listing_shrank`, and a
+listing with no canonical GDFL day zip `link_holds_no_gdfl_day_zip`. A file is
+wanted when its name is a canonical day zip (`tickstore_write::DayIdentity`)
+the tick store does not hold and the import journal has not closed `done` for
+the whole scope; every other name is refused by name before any byte:
+`not_a_day_zip` (conflict copies, renames, case variants), `name_unsafe`,
+`names_collide`, `two_files_for_one_day`, `out_of_scope_exchange` (BSE, MCX,
+`CLAUDE.md` §1) and `content_duplicate` (a listed content hash or a verified
+SHA-256 another name already holds).
+
+Each run has its own staging folder `<store>/staging/gdfl-dropbox/<run>/`
+under one staging lock (`run_busy` names the holder). A download is a
+`create_new` part; a cut resumes by `Range` in the same run and on the next
+press (the part is found by its journal line and its length on disk), and
+appends only on a `206` that starts at the part's length and states the listed
+size; anything else starts a new part beside the old, so two versions are never
+stitched. A finished part is verified (size equal to the listing, the central
+directory read whole through `gdfl_archive`, every member's stated length
+under 64 MiB before it is inflated, every CRC-32) and only then renamed onto a
+name that does not exist, then handed to the tick-store writer (R4-08). A
+refused part stays where it is. `429` and `5xx` back off by name, honouring
+`Retry-After` up to a cap, at most five attempts, then refuse `throttled` or
+`server_error`; a `401` re-reads the token once and a second `401` is the wait
+`dropbox_token_dead`. The download client has connect and idle-read timeouts
+and no total timeout, no automatic decompression, and follows redirects only to
+Dropbox's hosts (`redirect_refused` otherwise). The journal
+`<store>/journal/gdfl-dropbox.journal` is append-only, one line per state
+change; its last line is the O(1) status read.
+
+Four more refusals, each with its own failing-first test (revised
+2026-10-17). The operator's Stop (`Fetch::stop`) is read before each file and
+between body chunks: the run ends `stopped`, the journal says
+`stopped stage=download` with the part's bytes, and the next press resumes
+that part by `Range`. A part write that fails with a full disk is `disk_full`
+(any other failure `staging_write_failed`); the part is kept and resumed. A
+held day (tick store or import `done`) whose listed content hash differs from
+the one this journal verified under its name is `redelivered`, named and never
+fetched over what is held: importing a correction is a new generation, the
+writer's step (FM-007's S1 half). The config's folder may not be writable by
+group or world, and the file must be the folder owner's
+(`dropbox_config_too_open`); a folder others can only read (the usual 0755
+`~/.brutex`) is kept, because the file's own 600 keeps the link unreadable and
+FM-242's stricter 0700 would refuse the operator's present setup for no gain in
+secrecy. A transport failure through a proxy names it by host only
+(`via_proxy=<host:port>`, never its credentials).
+
+The number: D-4979 and D-4980, the first draft's numbers, are taken by AG-04
+and R3-06 on their branches; D-4981..D-4985 by AH-01. D-4986 and D-4987 were
+free on every local branch on 2026-10-17; the main session renumbers at landing
+if that has changed.
+
+Rejected: listing the folder by scraping the shared page's HTML (a page shape
+nobody documents), and a total request timeout (a day zip is hundreds of
+megabytes). Tests: `crates/pull/src/gdfl_dropbox_tests.rs`.
+
+### D-4987 — One disk projection and one free-space floor for every disk-writing step; the floor refuses before any byte (R4-07, PERF-13) — 2026-10-16
+
+`pull::disk_projection` is the shared answer to "how many bytes will this plan
+write, and may it start?" for the Dropbox fetch, the ingest chain (R4-11), the
+Zerodha plan (R4-23) and the GDFL preflight and `/disk.json` (R4-29). Bytes a
+day are measured, `bytes / held instrument-days` rounded up, from totals the
+caller fills from the census and the stored months; an option underlying with
+no stored month is projected from the median of the held underlyings of its
+class (index or stock options), and its line is labelled EXTRAPOLATION and
+named; a unit nothing measures is NOT KNOWN and refuses the plan
+(`projection_unknown`), never read as zero.
+
+The floor is the new setting `disk.floor` (`store::settings::Key::DiskFloor`,
+one reader `store::settings::disk_floor`: `<n>%` from 1 to 95, or a byte
+amount). Unset it is 15%, decided by measurement: `df -Pk` on the store's
+drive on 16 Oct 2026 read 7,813,821,744 KiB with 1,770,133,020 KiB free
+(22.6%), so 15% keeps 1.09 TiB free and leaves 0.56 TiB to write; the
+operator's 1 TB rule for the equities scope is the byte floor `1TB`.
+`floor_check` refuses `disk_floor` when the free bytes less the projection
+would fall below the floor, and every caller runs it BEFORE any file is read or
+written. **This supersedes, for the floor only, the design's "an extrapolation
+never refuses"** (`state/design/ingest-automation.md`, free space against the
+projected growth): a projection may be wrong by its tolerance, but a disk
+filled mid-write is the failure the append-only store cannot take back.
+
+Tolerance: a fixture projection must land within 10% of what is then written
+(`thirty_fixture_days_land_within_the_stated_tolerance`); the real options
+resume's first 30 days are compared with their projection within 20% by the
+store-steps check after the first real press (`RESUME_TOLERANCE_PERCENT`), and
+recorded there. The free space is measured with `/bin/df -Pk`, the method
+`/disk.json` uses (`std` has no `statvfs`, and `libc` is not taken for it,
+L-TSW-7).
+
+Re-measured 17 Oct 2026 07:53 IST: 1,740,640,996 KiB free of 7,813,821,744
+(22.3%), so the 15% floor leaves 0.53 TiB to write. Through this module, on
+sizes read only from the drive's own GDFL delivery (L-R407-9): a daily press
+(one options day zip, two capital-market files) projects 354 MB and passes;
+a from-scratch fetch of 2,000 options days and 3,995 market files projects
+708.5 GB and is refused `disk_floor`, 137.6 GB short. The median rule
+over-projects a small index on real data (L-R407-7: 4.9x for FINNIFTY), which
+the floor can afford and the label says.
