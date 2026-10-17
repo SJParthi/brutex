@@ -134,7 +134,7 @@ struct Asked {
 
 /// Every parameter `/logs.json` and `/logs` read. Any other is named under
 /// `ignored` and logged once, never dropped in silence (WP-33c, DB-A45).
-pub(crate) const PARAMS: [&str; 12] = [
+pub(crate) const PARAMS: [&str; 17] = [
     "limit",
     "level",
     "target",
@@ -147,7 +147,63 @@ pub(crate) const PARAMS: [&str; 12] = [
     "ring",
     "before",
     "durable",
+    "month",
+    "reason",
+    "kind",
+    "from",
+    "to",
 ];
+
+/// IST's offset from UTC, in milliseconds: a `from` or `to` without a zone is
+/// read as IST, the clock every page of this application shows
+/// (`crate::server::ist_stamp`).
+const IST_OFFSET_MS: i64 = 19_800_000;
+
+/// The instant `text` names, in epoch milliseconds (R3-24): a whole number of
+/// milliseconds; a day `YYYY-MM-DD` (its first millisecond, or its last when
+/// `end`); or `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS`, whose first (or,
+/// when `end`, last) millisecond is meant. A day or time is IST unless it
+/// ends in `Z`, which is UTC. `None` for anything else, which the caller
+/// names as ignored.
+fn instant_of(text: &str, end: bool) -> Option<i64> {
+    if !text.is_empty() && text.len() <= 16 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.parse::<i64>().ok();
+    }
+    let (body, utc) = text
+        .strip_suffix('Z')
+        .map_or((text, false), |body| (body, true));
+    let (day, clock) = body.split_once('T').unwrap_or((body, ""));
+    let day = crate::server::import_journal::parse_day(day)?;
+    let number = |part: &str, most: i64| -> Option<i64> {
+        (part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<i64>().ok())
+            .flatten()
+            .filter(|n| *n <= most)
+    };
+    let (from_ms, width_ms) = if clock.is_empty() {
+        (0, 86_400_000)
+    } else {
+        let mut parts = clock.split(':');
+        let hours = number(parts.next()?, 23)?;
+        let minutes = number(parts.next()?, 59)?;
+        let (seconds, width) = match parts.next() {
+            Some(seconds) => (number(seconds, 59)?, 1_000),
+            None => (0, 60_000),
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        (((hours * 60 + minutes) * 60 + seconds) * 1_000, width)
+    };
+    let midnight = i64::from(day.days_from_epoch()) * 86_400_000;
+    let start = midnight + from_ms - if utc { 0 } else { IST_OFFSET_MS };
+    Some(if end { start + width_ms - 1 } else { start })
+}
+
+/// A month as a request names it: `YYYY-MM`, the month a real calendar has.
+fn is_month(text: &str) -> bool {
+    text.len() == 7 && crate::server::import_journal::parse_day(&format!("{text}-01")).is_some()
+}
 
 /// The names `query` carries that `known` does not hold, in the order sent,
 /// each once. A name is the text before its `=`, as [`crate::server::param`]
@@ -218,7 +274,7 @@ fn asked(raw: &str) -> Asked {
             }
         }
     };
-    let ring = flag("ring", &mut ignored);
+    let mut ring = flag("ring", &mut ignored);
     // `durable=1` ASKS THE INDEX FOR A RUN OR A TARGET ALONE. `run=` without
     // it stays the ring's filter it always was, because a page polls it for a
     // live sweep and the durable stream does not hold progress lines.
@@ -233,6 +289,15 @@ fn asked(raw: &str) -> Asked {
                 "1 with no run, target or key to probe the index by".to_owned(),
             ));
         }
+    }
+    // A TARGET ALONE IS A KEY (R3-24, DB-023): it is answered from the index
+    // of every half, all of its history, and on a first page from the newest
+    // bytes of each ring too, for its lines no stream audits. It used to read
+    // the newest 4 MiB of each ring and stop. `run=` stays the ring's filter
+    // for the reason `durable=1` gives above.
+    if keys.is_empty() && run == 0 && !target.is_empty() {
+        keys.target = Some(target.clone());
+        ring = true;
     }
     let before_word = crate::server::param(raw, "before");
     let before = if before_word.is_empty() {
@@ -329,6 +394,55 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
             keys.code = Some(code);
         } else {
             ignored.push(("code", code));
+        }
+    }
+    // A MONTH, A REASON AND AN IMPORT KIND (R3-24): each one posting of the
+    // index, read exactly as a day or a code is.
+    let month = crate::server::param(raw, "month");
+    if !month.is_empty() {
+        if is_month(&month) {
+            keys.month = Some(month);
+        } else {
+            ignored.push(("month", month));
+        }
+    }
+    let reason = crate::server::param(raw, "reason");
+    if !reason.is_empty() {
+        if reason.len() <= MAX_CONTRACT_ASKED && !reason.contains(['/', '\\']) {
+            keys.reason = Some(reason);
+        } else {
+            ignored.push(("reason", reason));
+        }
+    }
+    let kind = crate::server::param(raw, "kind");
+    if !kind.is_empty() {
+        match pull::gdfl_import::ImportKind::parse(&kind) {
+            Ok(parsed) => keys.kind = Some(parsed.as_str().to_owned()),
+            Err(_) => ignored.push(("kind", kind)),
+        }
+    }
+    // A TIME SPAN (R3-24): either end may be left open; one that does not
+    // read, or a span that ends before it starts, is named and not applied.
+    let (from_word, to_word) = (
+        crate::server::param(raw, "from"),
+        crate::server::param(raw, "to"),
+    );
+    let from = (!from_word.is_empty()).then(|| instant_of(&from_word, false));
+    let to = (!to_word.is_empty()).then(|| instant_of(&to_word, true));
+    match (from, to) {
+        (None, None) => {}
+        (Some(None), _) => ignored.push(("from", from_word)),
+        (_, Some(None)) => ignored.push(("to", to_word)),
+        (from, to) => {
+            let (from, to) = (
+                from.flatten().unwrap_or(i64::MIN),
+                to.flatten().unwrap_or(i64::MAX),
+            );
+            if from <= to {
+                keys.span = Some((from, to));
+            } else {
+                ignored.push(("from", format!("{from_word} is after to={to_word}")));
+            }
         }
     }
     keys
@@ -629,12 +743,136 @@ fn dirs_json(halves: &[Half]) -> String {
     out
 }
 
-/// `body`, a JSON object, with [`dirs_json`] as its last member.
+/// `body`, a JSON object, with [`dirs_json`] and [`reach_json`] as its last
+/// members.
 fn with_dirs(body: &str, halves: &[Half]) -> String {
     let mut out = body.strip_suffix('}').unwrap_or(body).to_owned();
     out.push(',');
     out.push_str(&dirs_json(halves));
+    out.push(',');
+    out.push_str(&reach_json(halves, telemetry::now_millis()));
     out.push('}');
+    out
+}
+
+/// An audit history younger than this many days raises the one alert every
+/// log answer carries (R3-24, DB-G88): the operator's evidence for a month
+/// ago is then simply not kept.
+pub const YOUNG_AUDIT_DAYS: i64 = 30;
+
+/// What every log answer says of how far back it reaches (R3-24): each
+/// directory's three streams, the oldest audited line any of them keeps, and
+/// one alert when that is younger than [`YOUNG_AUDIT_DAYS`] or there is none.
+struct Reached {
+    /// Per directory read, its reach.
+    halves: Vec<(&'static str, telemetry::run_dirs::Reach)>,
+    /// The oldest line either durable stream of any directory keeps.
+    audited_from: Option<i64>,
+    /// Whole days from it to `now`.
+    days: Option<i64>,
+    /// The one alert, in words, or `None`.
+    alert: Option<String>,
+}
+
+/// How far back `halves` reach at `now` (epoch ms). Per directory, what
+/// `telemetry::run_dirs::reach_of` reads: a few small reads, never a walk.
+fn reached(halves: &[Half], now: i64) -> Reached {
+    let halves: Vec<(&'static str, telemetry::run_dirs::Reach)> = halves
+        .iter()
+        .map(|half| {
+            (
+                half.name,
+                telemetry::run_dirs::reach_of(&half.path, telemetry::DEFAULT_KEEP_FILES),
+            )
+        })
+        .collect();
+    let audited_from = halves
+        .iter()
+        .filter_map(|(_, reach)| reach.audited_from())
+        .min();
+    let days = audited_from.map(|from| now.saturating_sub(from).div_euclid(86_400_000));
+    let alert = match (audited_from, days) {
+        (Some(from), Some(days)) if days < YOUNG_AUDIT_DAYS => Some(format!(
+            "the audit history reaches back {days} day(s), to {}: younger than \
+             {YOUNG_AUDIT_DAYS} days, so nothing audited before then can be answered",
+            crate::server::ist_stamp(from.div_euclid(1_000))
+        )),
+        (Some(_), _) => None,
+        _ => Some(
+            "no directory read keeps an audit history: nothing audited can be answered for any \
+             time"
+                .to_owned(),
+        ),
+    };
+    Reached {
+        halves,
+        audited_from,
+        days,
+        alert,
+    }
+}
+
+/// `"reach":{...}`: [`reached`] as JSON, each time in epoch milliseconds or
+/// `null` for a stream with no line.
+fn reach_json(halves: &[Half], now: i64) -> String {
+    let reach = reached(halves, now);
+    let at = |ms: Option<i64>| ms.map_or_else(|| "null".to_owned(), |ms| ms.to_string());
+    let mut out = String::from("\"reach\":{\"halves\":[");
+    for (n, (half, one)) in reach.halves.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"half":{},"ring_from":{},"audit_from":{},"state_from":{}}}"#,
+            render::json_string(half),
+            at(one.ring_from),
+            at(one.audit_from),
+            at(one.state_from),
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"audited_from":{},"days":{},"young_below_days":{YOUNG_AUDIT_DAYS},"alert":{}}}"#,
+        at(reach.audited_from),
+        at(reach.days),
+        reach
+            .alert
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+    );
+    out
+}
+
+/// The page's reach line, and its one alert when there is one.
+fn reach_note(halves: &[Half], now: i64) -> String {
+    let reach = reached(halves, now);
+    let mut out = String::new();
+    if let Some(ref alert) = reach.alert {
+        let _ = write!(
+            out,
+            "<p class=\"halt\"><b>Audit history is short</b>{}.</p>",
+            render::escape(alert)
+        );
+    }
+    out.push_str("<p class=\"lead\">Reaches back:");
+    for (half, one) in &reach.halves {
+        let when = |ms: Option<i64>| {
+            ms.map_or_else(
+                || "nothing".to_owned(),
+                |ms| crate::server::ist_stamp(ms.div_euclid(1_000)),
+            )
+        };
+        let _ = write!(
+            out,
+            " <code>{}</code> ring {}, audit {}, state {};",
+            render::escape(half),
+            render::escape(&when(one.ring_from)),
+            render::escape(&when(one.audit_from)),
+            render::escape(&when(one.state_from)),
+        );
+    }
+    out.push_str("</p>");
     out
 }
 
@@ -679,7 +917,137 @@ fn json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
         return NO_LOG_JSON.to_owned();
     };
     let tail = all_halves(halves, &asked.query);
-    with_dirs(&json_of(&tail, asked, health, pair), halves)
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    with_dirs(&json_of_marked(&tail, asked, health, pair, &marks), halves)
+}
+
+/// The message the GDFL importer closes a day `done` with (its
+/// `summary_words`): the line the import journal can contradict.
+pub(crate) const DAY_IMPORTED: &str = "day imported";
+
+/// A "day imported" line the import journal contradicts (DB-A48, R3-24).
+///
+/// # Why a log line can be wrong about its own day
+///
+/// Before the importer's fix of 10 Oct (`3cd0623c`), a day the census refused
+/// still closed in the log as "day imported" at `info`: 212 options days the
+/// journal closed `incomplete`, and two days the journal holds no line for at
+/// all. The journal is the record (`pull::gdfl_import`'s closing lines); the
+/// log is what a run said as it went. So a reader that shows such a line
+/// shows the journal's outcome beside it and never lets the line stand alone
+/// as the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Contradicted {
+    /// The journal's outcome for the day's key, as `/imports.json` spells it,
+    /// or `no journal line` when the journal holds none for it.
+    pub(crate) journal: &'static str,
+    /// The journal's deciding line, from 1; `None` with no line.
+    pub(crate) line: Option<u64>,
+}
+
+impl Contradicted {
+    /// As a record's `conflict` member.
+    fn json(&self) -> String {
+        format!(
+            r#"{{"with":"import journal","journal_outcome":{},"journal_line":{},"note":{}}}"#,
+            render::json_string(self.journal),
+            self.line
+                .map_or_else(|| "null".to_owned(), |line| line.to_string()),
+            render::json_string(&self.words()),
+        )
+    }
+
+    /// In the operator's words.
+    fn words(&self) -> String {
+        match self.line {
+            Some(line) => format!(
+                "the import journal closed this day {} (line {line}): it was not imported, \
+                 whatever this line says",
+                self.journal
+            ),
+            None => "the import journal holds no line for this day: it was not imported, \
+                     whatever this line says"
+                .to_owned(),
+        }
+    }
+}
+
+/// The store root a set of halves was resolved under: the directory two
+/// levels (or three, for `gdfl/<kind>`) above any run directory. `None` when
+/// only the server's own directory was read.
+fn store_of(halves: &[Half]) -> Option<std::path::PathBuf> {
+    halves
+        .iter()
+        .find(|half| half.name != "served")
+        .and_then(|half| {
+            let depth = std::path::Path::new(telemetry::run_dirs::LOGS)
+                .join(half.name)
+                .components()
+                .count();
+            half.path
+                .ancestors()
+                .nth(depth)
+                .map(std::path::Path::to_path_buf)
+        })
+}
+
+/// Per record of `records`, what the import journal under `store` says
+/// against it: `Some` for a "day imported" line whose day's key the journal
+/// closed other than `done` or holds no line for, `None` for every other
+/// record (and for every record when there is no journal to compare with).
+///
+/// # Cost
+///
+/// One [`crate::server::import_journal::snapshot`] (a tail: only the bytes
+/// appended since its last read), taken only when a record is a "day
+/// imported" line, and one range probe of one day per such record:
+/// O(log days) each, at most the page's limit of them.
+fn contradicted(
+    records: &[telemetry::Record],
+    store: Option<&std::path::Path>,
+) -> Vec<Option<Contradicted>> {
+    use crate::server::import_journal::{parse_day, snapshot};
+    let mut journal: Option<Option<std::sync::Arc<crate::server::import_journal::Parsed>>> = None;
+    records
+        .iter()
+        .map(|record| {
+            if record.target != pull::gdfl_import::TARGET || record.message != DAY_IMPORTED {
+                return None;
+            }
+            let kind = pull::gdfl_import::ImportKind::parse(text_of(record, "kind")?).ok()?;
+            let day = parse_day(text_of(record, "day")?)?;
+            let parsed = journal
+                .get_or_insert_with(|| {
+                    store
+                        .and_then(|root| snapshot(root).ok())
+                        .filter(|read| read.present)
+                        .map(|read| read.parsed)
+                })
+                .as_ref()?;
+            let mut rows = parsed.range(day, day).filter(|row| row.kind == kind);
+            let row = match text_of(record, "key") {
+                Some(key) => rows.find(|row| key.ends_with(&format!(" {}", row.filter))),
+                None => {
+                    let rows: Vec<_> = rows.collect();
+                    rows.iter()
+                        .find(|row| row.filter == "*")
+                        .or_else(|| rows.first())
+                        .copied()
+                }
+            };
+            match row {
+                Some(row) if row.outcome.is_done() => None,
+                Some(row) => Some(Contradicted {
+                    journal: row.outcome.as_str(),
+                    line: Some(row.line),
+                }),
+                None => Some(Contradicted {
+                    journal: "no journal line",
+                    line: None,
+                }),
+            }
+        })
+        .collect()
 }
 
 /// What a request answers when no directory resolved at all.
@@ -811,11 +1179,26 @@ fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> teleme
 /// and `errors` needs an unreadable file — none of them reachable from a unit
 /// test, so every branch that reports one would otherwise render for the first
 /// time in production. `Tail`'s fields are `pub`; the state can be stated.
+#[cfg(test)]
 fn json_of(
     tail: &telemetry::Tail,
     asked: &Asked,
     health: Option<&telemetry::Health>,
     read: (&std::path::Path, Option<&std::path::Path>),
+) -> String {
+    json_of_marked(tail, asked, health, read, &[])
+}
+
+/// [`json_of`], with each record the import journal contradicts carrying its
+/// `conflict` beside it (`marks[n]` for `tail.records[n]`, DB-A48). A record
+/// with no mark carries no `conflict` member, so every other answer is
+/// byte for byte what it was.
+fn json_of_marked(
+    tail: &telemetry::Tail,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+    read: (&std::path::Path, Option<&std::path::Path>),
+    marks: &[Option<Contradicted>],
 ) -> String {
     let mut out = String::from("{\"records\":[");
     for (n, record) in tail.records.iter().enumerate() {
@@ -835,6 +1218,9 @@ fn json_of(
             record.cut,
             record.dropped_fields,
         );
+        if let Some(Some(mark)) = marks.get(n) {
+            let _ = write!(out, r#","conflict":{}"#, mark.json());
+        }
         out.push_str(",\"fields\":{");
         // The durable invocation namespace exceeds JavaScript's safe integer
         // range. Derive aliases from typed Rust values, before JSON can round
@@ -1061,29 +1447,38 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
              read.</p>",
         );
     };
+    let now = telemetry::now_millis();
     if asked.keys.is_empty() {
         let tail = all_halves(halves, &asked.query);
-        let mut page = page_of(&tail, asked, health, pair);
+        let marks = contradicted(&tail.records, store_of(halves).as_deref());
+        let mut page = page_of_marked(&tail, asked, health, pair, &marks);
         page.push_str(&dirs_note(halves));
+        page.push_str(&reach_note(halves, now));
         return page;
     }
-    let (tail, _keyed, next) = keyed_walk(halves, asked);
-    let mut page = page_of(&tail, asked, health, pair);
+    let (tail, _keyed, next, said) = keyed_walk_said(halves, asked);
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    let mut page = page_of_marked(&tail, asked, health, pair, &marks);
     page.push_str(&dirs_note(halves));
+    page.push_str(&reach_note(halves, now));
     match next {
         Some(cursor) => {
             let _ = write!(
                 page,
-                "<p class=\"lead\">Read from the durable audit index, newest first. \
+                "<p class=\"lead\">Read from the durable audit index, newest first: {}. \
                  <a href=\"/logs{}&amp;before={}\">Older matches</a></p>",
+                render::escape(&said),
                 json_query(asked),
                 render::query_value(&cursor),
             );
         }
-        None => page.push_str(
-            "<p class=\"lead\">Read from the durable audit index: every match it holds is \
-             above.</p>",
-        ),
+        None => {
+            let _ = write!(
+                page,
+                "<p class=\"lead\">Read from the durable audit index: {}.</p>",
+                render::escape(&said),
+            );
+        }
     }
     page
 }
@@ -1096,11 +1491,24 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
 /// `read` is the pair of directories the walk covered, in [`json_of`]'s order
 /// and for its reason: a page that names one of two directories invites the
 /// reader to conclude the other was empty.
+#[cfg(test)]
 fn page_of(
     tail: &telemetry::Tail,
     asked: &Asked,
     health: Option<&telemetry::Health>,
     read: (&std::path::Path, Option<&std::path::Path>),
+) -> String {
+    page_of_marked(tail, asked, health, read, &[])
+}
+
+/// [`page_of`], each row the import journal contradicts marked beside it
+/// (DB-A48), exactly as [`json_of_marked`] marks the JSON.
+fn page_of_marked(
+    tail: &telemetry::Tail,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+    read: (&std::path::Path, Option<&std::path::Path>),
+    marks: &[Option<Contradicted>],
 ) -> String {
     let mut body = String::new();
     let _ = write!(
@@ -1198,7 +1606,7 @@ fn page_of(
         return page_shell(asked, &body);
     }
 
-    body.push_str(&rows_table(tail));
+    body.push_str(&rows_table(tail, marks));
     page_shell(asked, &body)
 }
 
@@ -1369,14 +1777,17 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
 }
 
 /// The events themselves, newest first.
-fn rows_table(tail: &telemetry::Tail) -> String {
+fn rows_table(tail: &telemetry::Tail, marks: &[Option<Contradicted>]) -> String {
     let mut out = String::from(
         "<div class=\"hscroll\"><table><thead><tr>\
          <th>When (IST)</th><th>Level</th><th>Target</th><th>Message</th>\
          <th>Fields</th></tr></thead><tbody>",
     );
-    for record in &tail.records {
-        let loud = record.level.at_least(telemetry::Level::Warn);
+    for (n, record) in tail.records.iter().enumerate() {
+        let mark = marks.get(n).and_then(Option::as_ref);
+        // A CONTRADICTED LINE IS SHOWN AS A FAULT, whatever its level: it
+        // says a day was imported that was not (DB-A48).
+        let loud = record.level.at_least(telemetry::Level::Warn) || mark.is_some();
         let mut fields = String::new();
         for (n, (key, value)) in record.fields.iter().enumerate() {
             if n > 0 {
@@ -1401,6 +1812,13 @@ fn rows_table(tail: &telemetry::Tail) -> String {
                 fields,
                 " <i>({} field(s) counted, not kept)</i>",
                 record.dropped_fields
+            );
+        }
+        if let Some(mark) = mark {
+            let _ = write!(
+                fields,
+                " <b>CONFLICT</b> <i>({})</i>",
+                render::escape(&mark.words())
             );
         }
         let _ = write!(
@@ -1478,6 +1896,23 @@ fn json_query(asked: &Asked) -> String {
         ("day", keys.day.map(|d| d.to_string())),
         ("contract", keys.contract.clone()),
         ("code", keys.code.clone()),
+        ("month", keys.month.clone()),
+        ("reason", keys.reason.clone()),
+        ("kind", keys.kind.clone()),
+        (
+            "from",
+            keys.span
+                .map(|(from, _)| from)
+                .filter(|from| *from != i64::MIN)
+                .map(|from| from.to_string()),
+        ),
+        (
+            "to",
+            keys.span
+                .map(|(_, to)| to)
+                .filter(|to| *to != i64::MAX)
+                .map(|to| to.to_string()),
+        ),
     ] {
         if let Some(value) = value {
             let _ = write!(q, "&{name}={}", render::query_value(&value));
@@ -1545,6 +1980,11 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Day<input type=\"text\" name=\"day\" value=\"{day}\" placeholder=\"YYYY-MM-DD\"></label>\
          <label>Contract<input type=\"text\" name=\"contract\" value=\"{contract}\"></label>\
          <label>Code<input type=\"text\" name=\"code\" value=\"{code}\" placeholder=\"too_many_entries\"></label>\
+         <label>Reason<input type=\"text\" name=\"reason\" value=\"{reason}\"></label>\
+         <label>Month<input type=\"text\" name=\"month\" value=\"{month}\" placeholder=\"YYYY-MM\"></label>\
+         <label>Import kind<input type=\"text\" name=\"kind\" value=\"{kind}\" placeholder=\"indices, stocks, options\"></label>\
+         <label>From<input type=\"text\" name=\"from\" value=\"{from}\" placeholder=\"YYYY-MM-DD[THH:MM] IST\"></label>\
+         <label>To<input type=\"text\" name=\"to\" value=\"{to}\" placeholder=\"YYYY-MM-DD[THH:MM] IST\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -1574,6 +2014,21 @@ fn page_shell(asked: &Asked, body: &str) -> String {
             .map_or_else(String::new, |day| day.to_string()),
         contract = render::escape(asked.keys.contract.as_deref().unwrap_or("")),
         code = render::escape(asked.keys.code.as_deref().unwrap_or("")),
+        reason = render::escape(asked.keys.reason.as_deref().unwrap_or("")),
+        month = render::escape(asked.keys.month.as_deref().unwrap_or("")),
+        kind = render::escape(asked.keys.kind.as_deref().unwrap_or("")),
+        from = asked
+            .keys
+            .span
+            .map(|(from, _)| from)
+            .filter(|from| *from != i64::MIN)
+            .map_or_else(String::new, |from| from.to_string()),
+        to = asked
+            .keys
+            .span
+            .map(|(_, to)| to)
+            .filter(|to| *to != i64::MAX)
+            .map_or_else(String::new, |to| to.to_string()),
     )
 }
 
@@ -2159,8 +2614,19 @@ pub(crate) struct Keys {
     /// A run, probed in the index's `run` posting: set by `durable=1`.
     pub(crate) run: Option<u64>,
     /// A target, probed in the index's `target` posting: set by `durable=1`
-    /// with no run.
+    /// with no run, and by a `target=` that names no other key (R3-24).
     pub(crate) target: Option<String>,
+    /// A month, `YYYY-MM`: a line's own `month`, or its `day`'s (R3-24).
+    pub(crate) month: Option<String>,
+    /// A line's own `reason` (R3-24).
+    pub(crate) reason: Option<String>,
+    /// An import kind, as `pull::gdfl_import::ImportKind` spells it (R3-24).
+    pub(crate) kind: Option<String>,
+    /// A time span, `from..=to` in epoch milliseconds, either end open as
+    /// `i64::MIN` or `i64::MAX` (R3-24). Alone it is read through the audit
+    /// files whose time span meets it ([`span_page`]); beside another key it
+    /// narrows that key's answer and passes over every file outside it.
+    pub(crate) span: Option<(i64, i64)>,
 }
 
 impl Keys {
@@ -2173,6 +2639,10 @@ impl Keys {
             && self.code.is_none()
             && self.run.is_none()
             && self.target.is_none()
+            && self.month.is_none()
+            && self.reason.is_none()
+            && self.kind.is_none()
+            && self.span.is_none()
     }
 }
 
@@ -2370,6 +2840,30 @@ pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
     {
         return None;
     }
+    // R3-24's KEYS: each a field the line itself carries, or its time.
+    if let Some(ref month) = keys.month {
+        let held = text_of(record, "month")
+            .filter(|held| is_month(held))
+            .or_else(|| text_of(record, "day").and_then(|day| day.get(..7)));
+        if held != Some(month.as_str()) {
+            return None;
+        }
+    }
+    if let Some(ref reason) = keys.reason
+        && text_of(record, "reason") != Some(reason.as_str())
+    {
+        return None;
+    }
+    if let Some(ref kind) = keys.kind
+        && text_of(record, "kind") != Some(kind.as_str())
+    {
+        return None;
+    }
+    if let Some((from, to)) = keys.span
+        && !(from..=to).contains(&record.at_unix_millis)
+    {
+        return None;
+    }
     Some(scope)
 }
 
@@ -2457,6 +2951,12 @@ fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
         }
     } else if let Some(ref code) = keys.code {
         out.push(("code", code.clone()));
+    } else if let Some(ref reason) = keys.reason {
+        out.push(("reason", reason.clone()));
+    } else if let Some(ref month) = keys.month {
+        out.push(("month", month.clone()));
+    } else if let Some(ref kind) = keys.kind {
+        out.push(("kind", kind.clone()));
     } else if let Some(run) = keys.run {
         out.push(("run", run.to_string()));
     } else if let Some(ref feed) = keys.feed {
@@ -2466,14 +2966,249 @@ fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
         }
     } else if let Some(ref target) = keys.target {
         out.push(("target", target.clone()));
+    } else if let Some((from, to)) = keys.span {
+        // A SPAN ALONE names no posting: its stream reads the audit files
+        // whose time span meets it ([`span_page`]).
+        out.push((SPAN_PROBE, format!("{from}..{to}")));
     }
     out
+}
+
+/// The probe a span alone is read by, in place of a posting's dimension.
+const SPAN_PROBE: &str = "span";
+
+/// How many bytes a span stream reads from one audit file per request, at
+/// most, beside its binary search: a fixed slice, so a span over a busy
+/// hour costs what one over a quiet one does, and the cursor reaches the
+/// rest.
+pub const SPAN_SLICE_BYTES: u64 = 1024 * 1024;
+
+/// One line of an audit file found by [`line_after`]: where it starts, its
+/// length with its newline, and the record.
+struct Placed {
+    start: u64,
+    len: u64,
+    record: telemetry::Record,
+}
+
+/// The first whole line of `path` starting at or after `at` and before `end`,
+/// or `None` when no line starts there. One read of at most two lines'
+/// ceiling ([`telemetry::MAX_LINE_BYTES`]).
+fn line_after(path: &std::path::Path, at: u64, end: u64) -> Option<Placed> {
+    use std::io::{Read as _, Seek as _};
+    let from = at.saturating_sub(1);
+    let ceiling = u64::try_from(telemetry::MAX_LINE_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(2);
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(from))?;
+            file.take(ceiling.min(end.saturating_sub(from)))
+                .read_to_end(&mut bytes)
+        })
+        .ok()?;
+    // AT 0 THE FIRST LINE STARTS THERE; else after the first newline from
+    // the byte before `at`, so a line starting exactly at `at` is found.
+    let skip = if at == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|&byte| byte == b'\n')?
+            .saturating_add(1)
+    };
+    let rest = bytes.get(skip..)?;
+    let len = rest.iter().position(|&byte| byte == b'\n')?;
+    let record = telemetry::Record::decode(rest.get(..len)?).ok()?;
+    Some(Placed {
+        start: from.saturating_add(u64::try_from(skip).ok()?),
+        len: u64::try_from(len).ok()?.saturating_add(1),
+        record,
+    })
+}
+
+/// The offset in `path` where the first line stamped after `to` starts, below
+/// `end`: every line before it is stamped at or before `to`. A binary search
+/// over byte offsets, each step one [`line_after`] read, so O(log(file size))
+/// reads whatever the file holds. Lines are in time order: the sink stamps
+/// them under its lock and clamps its clock, so `ms` order is file order
+/// (`telemetry` `Inner::stamp`).
+fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> u64 {
+    let (mut low, mut high) = (0u64, end);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match line_after(path, middle, high) {
+            Some(line) if line.start < high && line.record.at_unix_millis > to => {
+                high = line.start;
+            }
+            Some(line) if line.start < high => low = line.start.saturating_add(line.len),
+            _ => high = middle,
+        }
+    }
+    low
+}
+
+/// One page of a span read alone (R3-24): the lines of the kept audit files
+/// stamped `from..=to`, newest first, strictly older than `before`, at most
+/// `take`, as places and pointers a [`Stream`] reads exactly as it reads a
+/// posting's. A place is `(serial, the line's byte offset)`.
+///
+/// # Cost
+///
+/// Per kept generation, newest first: one [`telemetry::run_dirs::audit_span`]
+/// probe (a file whose span misses `from..=to` is never opened), one binary
+/// search ([`end_of_span`]) and backward reads of at most
+/// [`SPAN_SLICE_BYTES`] in all. The walk stops at the first line older than
+/// `from`: every older line is older still.
+///
+/// Answers the page and whether older lines in the span may remain: `true`
+/// when it stopped at `take` lines or at its byte slice, never a guess.
+///
+/// # Errors
+///
+/// The serial, or a file that is there and cannot be read.
+fn span_page(
+    dir: &std::path::Path,
+    (from, to): (i64, i64),
+    take: usize,
+    before: Option<telemetry::PostingAt>,
+) -> Result<(telemetry::PostingsPage, bool), String> {
+    let current = telemetry::audit_serial(dir)?;
+    let oldest = current.saturating_sub(u64::from(telemetry::AUDIT_KEEP_FILES.saturating_sub(1)));
+    let mut out = telemetry::PostingsPage::default();
+    let mut budget = SPAN_SLICE_BYTES;
+    for serial in (oldest..=current).rev() {
+        if before.is_some_and(|at| serial > at.serial) {
+            continue;
+        }
+        let (Some(path), Some(span)) = (
+            telemetry::audit_path_for(dir, current, serial),
+            telemetry::run_dirs::audit_span(dir, current, serial),
+        ) else {
+            continue;
+        };
+        if span.last_ms.is_some_and(|last| last < from) {
+            // EVERY OLDER FILE IS OLDER STILL.
+            return Ok((out, false));
+        }
+        if !span.overlaps(from, to) {
+            continue;
+        }
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let end = before
+            .filter(|at| at.serial == serial)
+            .map_or(len, |at| at.index.min(len));
+        let cut = end_of_span(&path, end, to);
+        match span_backwards(&path, serial, (cut, from), take, &mut budget, &mut out)? {
+            Walked::Older => return Ok((out, false)),
+            Walked::Stopped => return Ok((out, true)),
+            Walked::FileStart => {}
+        }
+    }
+    Ok((out, false))
+}
+
+/// How a backward walk of one audit file ended.
+enum Walked {
+    /// It reached a line older than the span: every older line is older.
+    Older,
+    /// It took `take` lines or spent its slice: older lines may remain.
+    Stopped,
+    /// It reached the file's first line.
+    FileStart,
+}
+
+/// Reads `path` backwards from `cut`, one slice at a time and whole lines
+/// only, pushing every line stamped at or after `from` until `take`, the
+/// slice `budget` or a line older than `from`.
+fn span_backwards(
+    path: &std::path::Path,
+    serial: u64,
+    (mut cut, from): (u64, i64),
+    take: usize,
+    budget: &mut u64,
+    out: &mut telemetry::PostingsPage,
+) -> Result<Walked, String> {
+    use std::io::{Read as _, Seek as _};
+    while cut > 0 {
+        if *budget == 0 || out.pointers.len() >= take {
+            return Ok(Walked::Stopped);
+        }
+        let slice = (*budget).min(cut);
+        let start = cut.saturating_sub(slice);
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|mut file| {
+                file.seek(std::io::SeekFrom::Start(start))?;
+                file.take(slice).read_to_end(&mut bytes)
+            })
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        *budget = budget.saturating_sub(slice);
+        // A SLICE THAT DOES NOT START THE FILE starts mid-line: what is
+        // before its first newline belongs to the next slice. A slice with
+        // no newline at all is a slice spent on part of one line.
+        let first = if start == 0 {
+            0
+        } else {
+            match bytes.iter().position(|&byte| byte == b'\n') {
+                Some(at) => at.saturating_add(1),
+                None => return Ok(Walked::Stopped),
+            }
+        };
+        let whole = bytes.get(first..).unwrap_or_default();
+        let base = start.saturating_add(u64::try_from(first).unwrap_or(u64::MAX));
+        let mut lines: Vec<(u64, &[u8])> = Vec::new();
+        let mut offset = base;
+        for line in whole.split_inclusive(|&byte| byte == b'\n') {
+            lines.push((offset, line));
+            offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
+        }
+        for (at, line) in lines.into_iter().rev() {
+            if out.pointers.len() >= take {
+                return Ok(Walked::Stopped);
+            }
+            let Ok(record) = telemetry::Record::decode(line.strip_suffix(b"\n").unwrap_or(line))
+            else {
+                out.malformed = out.malformed.saturating_add(1);
+                continue;
+            };
+            if record.at_unix_millis < from {
+                return Ok(Walked::Older);
+            }
+            out.total = out.total.saturating_add(1);
+            out.pointers.push((
+                telemetry::PostingAt { serial, index: at },
+                telemetry::AuditPointer {
+                    serial,
+                    offset: at,
+                    seq: record.seq,
+                    len: u32::try_from(line.len()).unwrap_or(u32::MAX),
+                    level: record.level,
+                },
+            ));
+        }
+        cut = base;
+    }
+    Ok(Walked::FileStart)
 }
 
 /// One posting of one half, read newest first from a place (WP-33c, DB-A44).
 struct Stream<'d> {
     half: &'static str,
+    /// Which of the half's two durable streams this reads: `audit`, the
+    /// rolling one, or `state`, the never-rolling one (R3-24).
+    source: &'static str,
     dir: &'d std::path::Path,
+    /// A span the request narrows to, beside a key: a pointer into a file
+    /// whose time span misses it is passed over unread (R3-24).
+    prune: Option<(i64, i64)>,
+    /// The spans looked up so far, by serial: one small read per file.
+    spans: std::collections::HashMap<u64, Option<telemetry::run_dirs::AuditSpan>>,
     /// The half's current serial, as the pointers were read.
     serial: u64,
     dimension: &'static str,
@@ -2555,6 +3290,18 @@ impl Stream<'_> {
             let Some(&(at, pointer)) = self.page.pointers.get(self.next) else {
                 return;
             };
+            // A FILE OUTSIDE THE SPAN ASKED FOR is passed over unread: its
+            // pointers cost a lookup, never a line read (R3-24).
+            if let Some((from, to)) = self.prune {
+                let (dir, current) = (self.dir, self.serial);
+                let span = *self.spans.entry(pointer.serial).or_insert_with(|| {
+                    telemetry::run_dirs::audit_span(dir, current, pointer.serial)
+                });
+                if span.is_some_and(|span| !span.overlaps(from, to)) {
+                    self.consume(at);
+                    continue;
+                }
+            }
             *budget = budget.saturating_sub(1);
             match telemetry::audit_read(self.dir, self.serial, &pointer) {
                 telemetry::AuditLine::Found(record) => self.head = Some((pointer, record)),
@@ -2598,8 +3345,9 @@ impl Stream<'_> {
 /// read them.
 #[derive(Debug, Default)]
 struct Indexed {
-    /// `(half, scope, record)`, newest first.
-    rows: Vec<(&'static str, Scope, telemetry::Record)>,
+    /// `(half, source, scope, record)`, newest first: `source` is the stream
+    /// the line was read from, `audit` or `state` (R3-24).
+    rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)>,
     /// The postings JSON, one object per (half, posting).
     postings: Vec<String>,
     /// The cursor for the next page, or `None` when every stream is done.
@@ -2614,7 +3362,19 @@ struct Indexed {
     cursor_refused: Option<String>,
     /// Failures, in their own words.
     errors: Vec<String>,
+    /// Pointers the probed postings hold in all, every stream together: the
+    /// `N` of "the first 2,000 of N" a capped answer says (R3-24). A line
+    /// held in two postings, or in both of a half's streams, is counted in
+    /// each, so it is an upper bound on the lines, never a count of matches.
+    of: u64,
+    /// Whether a span stream's count is open: it reads a span's lines a slice
+    /// at a time, so it knows how many it found and not how many there are.
+    of_open: bool,
 }
+
+/// One durable stream a keyed answer reads: the half it belongs to, which of
+/// the half's two streams it is (`audit` or `state`, R3-24), and where.
+type IndexDir<'d> = (&'static str, &'static str, &'d std::path::Path);
 
 /// The index half of a keyed answer: every (half, posting) stream merged
 /// newest first, read from the cursor, a line in two postings of one half
@@ -2631,14 +3391,22 @@ struct Indexed {
 /// starts where the last one stopped, so every match can be reached and none
 /// is shown twice. Lines appended later are newer than every place already
 /// handed out, so they never shift a later page.
-fn index_rows(halves: &[(&'static str, &std::path::Path)], asked: &Asked) -> Indexed {
+fn index_rows(halves: &[IndexDir<'_>], asked: &Asked) -> Indexed {
     let mut out = Indexed::default();
     let probes = probes(&asked.keys);
     let wanted = halves.len().saturating_mul(probes.len());
     let Some(slots) = cursor_slots(asked.before.as_deref(), wanted, &mut out) else {
         return out;
     };
-    let mut opened = open_streams(halves, &probes, &slots, &mut out);
+    let mut opened = open_streams(halves, &probes, &slots, &asked.keys, &mut out);
+    out.of = opened
+        .streams
+        .iter()
+        .fold(0u64, |sum, stream| sum.saturating_add(stream.page.total));
+    out.of_open = opened
+        .streams
+        .iter()
+        .any(|stream| stream.dimension == SPAN_PROBE && stream.more);
     let budget = merge_streams(&mut opened.streams, asked, &mut out);
     out.reads = MAX_KEYED_READS.saturating_sub(budget);
     let cursor: Vec<Slot> = opened
@@ -2689,9 +3457,10 @@ struct Opened<'d> {
 /// [`telemetry::audit_postings_before`] each. A half with no audit stream is
 /// named in `out` (DB-A46), never read as one holding nothing.
 fn open_streams<'d>(
-    halves: &[(&'static str, &'d std::path::Path)],
+    halves: &[IndexDir<'d>],
     probes: &[(&'static str, String)],
     slots: &[Slot],
+    keys: &Keys,
     out: &mut Indexed,
 ) -> Opened<'d> {
     let mut opened = Opened {
@@ -2699,7 +3468,7 @@ fn open_streams<'d>(
         slot_of: Vec::new(),
         fixed: Vec::new(),
     };
-    for (h, &(half, dir)) in halves.iter().enumerate() {
+    for (h, &(half, source, dir)) in halves.iter().enumerate() {
         let state = telemetry::audit_state(dir);
         for (p, (dimension, value)) in probes.iter().enumerate() {
             let from = slots
@@ -2711,8 +3480,9 @@ fn open_streams<'d>(
                 // never `total: 0`.
                 Ok(None) => {
                     out.postings.push(format!(
-                        r#"{{"half":{},"dimension":{},"value":{},"state":"no audit stream","total":null,"read":0}}"#,
+                        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"no {source} stream","total":null,"read":0}}"#,
                         render::json_string(half),
+                        render::json_string(source),
                         render::json_string(dimension),
                         render::json_string(value),
                     ));
@@ -2737,14 +3507,30 @@ fn open_streams<'d>(
                     continue;
                 }
             };
-            match telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before) {
-                Ok(page) => {
-                    let more = page.pointers.len() >= MAX_KEYED_READS;
+            // A SPAN ALONE is read from the files its time meets; every other
+            // probe is a posting (R3-24).
+            let fetched = match keys.span {
+                Some(span) if *dimension == SPAN_PROBE => {
+                    span_page(dir, span, MAX_KEYED_READS, before)
+                }
+                _ => {
+                    telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before)
+                        .map(|page| {
+                            let more = page.pointers.len() >= MAX_KEYED_READS;
+                            (page, more)
+                        })
+                }
+            };
+            match fetched {
+                Ok((page, more)) => {
                     opened.slot_of.push(Some(opened.streams.len()));
                     opened.fixed.push(from);
                     opened.streams.push(Stream {
                         half,
+                        source,
                         dir,
+                        prune: keys.span.filter(|_| *dimension != SPAN_PROBE),
+                        spans: std::collections::HashMap::new(),
                         serial,
                         dimension,
                         value: value.clone(),
@@ -2806,10 +3592,17 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
         chosen.consume(at);
         // THE SAME LINE IN ANOTHER POSTING OF THIS HALF is the same line: it
         // stands at every such stream's head now, and is consumed there too.
+        // So is its copy in the half's other stream: a state change is in
+        // both the rolling audit stream and the state stream, at different
+        // places, as the same line with the same `seq` and time (R3-24).
+        let source = chosen.source;
         for other in streams.iter_mut() {
             if other.half == half
-                && other.head.as_ref().is_some_and(|(held, _)| {
-                    held.serial == pointer.serial && held.offset == pointer.offset
+                && other.head.as_ref().is_some_and(|(held, line)| {
+                    (other.source == source
+                        && held.serial == pointer.serial
+                        && held.offset == pointer.offset)
+                        || (line.seq == record.seq && line.at_unix_millis == record.at_unix_millis)
                 })
                 && let Some(at) = other.head_at()
             {
@@ -2819,7 +3612,7 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
         if let Some(scope) = bears(&record, &asked.keys)
             && admitted(&record, asked)
         {
-            out.rows.push((half, scope, record));
+            out.rows.push((half, source, scope, record));
         }
     }
     budget
@@ -2839,8 +3632,9 @@ fn posting_json(stream: &Stream<'_>) -> String {
         })
         .collect();
     format!(
-        r#"{{"half":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
+        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
         render::json_string(stream.half),
+        render::json_string(stream.source),
         render::json_string(stream.dimension),
         render::json_string(&stream.value),
         stream.page.total,
@@ -2954,11 +3748,14 @@ fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::
         return NO_LOG_JSON.to_owned();
     };
     let (tail, keyed, _next) = keyed_walk(halves, asked);
-    let body = json_of(&tail, asked, health, pair);
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    let body = json_of_marked(&tail, asked, health, pair, &marks);
     let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
     out.push_str(&keyed);
     out.push(',');
     out.push_str(&dirs_json(halves));
+    out.push(',');
+    out.push_str(&reach_json(halves, telemetry::now_millis()));
     let _ = write!(
         out,
         r#","audit_stream":{}}}"#,
@@ -2974,16 +3771,39 @@ fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::
 /// A keyed answer's records as a [`telemetry::Tail`] and its `keyed` object,
 /// shared by `/logs.json` and the `/logs` page.
 fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option<String>) {
+    let (tail, keyed, next, _said) = keyed_walk_said(named, asked);
+    (tail, keyed, next)
+}
+
+/// [`keyed_walk`], with what it read in words ([`read_note`]).
+fn keyed_walk_said(
+    named: &[Half],
+    asked: &Asked,
+) -> (telemetry::Tail, String, Option<String>, String) {
     let halves: Vec<(&'static str, &std::path::Path)> = named
         .iter()
         .map(|half| (half.name, half.path.as_path()))
         .collect();
-    let indexed = index_rows(&halves, asked);
-    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = indexed
-        .rows
+    // EACH HALF'S TWO DURABLE STREAMS (R3-24): the rolling audit stream and
+    // the never-rolling state stream beside it, so a who-did-what line the
+    // refusals rolled out of the first is still found in the second.
+    let state_dirs: Vec<std::path::PathBuf> = named
         .iter()
-        .map(|(half, scope, record)| (*half, "audit", *scope, record.clone()))
+        .map(|half| telemetry::run_dirs::state_stream_of(&half.path))
         .collect();
+    let streams: Vec<IndexDir<'_>> = named
+        .iter()
+        .zip(&state_dirs)
+        .flat_map(|(half, state)| {
+            [
+                (half.name, "audit", half.path.as_path()),
+                (half.name, "state", state.as_path()),
+            ]
+        })
+        .collect();
+    let indexed = index_rows(&streams, asked);
+    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> =
+        indexed.rows.clone();
     // THE RING, ONLY WHEN ASKED, ONLY ON A FIRST PAGE: its rows move as the
     // ring moves and cannot be paged, so they are never mixed in unasked.
     let scan_ring = asked.ring && asked.before.is_none();
@@ -3039,7 +3859,8 @@ fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option
     };
     let mut keyed = String::new();
     keyed_object(&mut keyed, asked, &rows, &indexed, scan_ring);
-    (tail, keyed, indexed.next)
+    let said = read_note(&indexed);
+    (tail, keyed, indexed.next, said)
 }
 
 /// The `keyed` object a keyed answer carries: the keys, the rows' half, source
@@ -3056,7 +3877,7 @@ fn keyed_object(
     let text = |value: Option<&str>| value.map_or_else(|| "null".to_owned(), render::json_string);
     let _ = write!(
         out,
-        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"matched":{},"rows":["#,
+        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"month":{},"reason":{},"kind":{},"span":{},"matched":{},"rows":["#,
         text(keys.feed.as_deref()),
         text(keys.instrument.as_ref().map(|i| i.asked.as_str())),
         keys.day.map_or_else(
@@ -3068,6 +3889,25 @@ fn keyed_object(
         keys.run
             .map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
         text(keys.target.as_deref()),
+        text(keys.month.as_deref()),
+        text(keys.reason.as_deref()),
+        text(keys.kind.as_deref()),
+        keys.span.map_or_else(
+            || "null".to_owned(),
+            |(from, to)| format!(
+                r#"{{"from":{},"to":{}}}"#,
+                if from == i64::MIN {
+                    "null".to_owned()
+                } else {
+                    from.to_string()
+                },
+                if to == i64::MAX {
+                    "null".to_owned()
+                } else {
+                    to.to_string()
+                }
+            )
+        ),
         rows.len(),
     );
     for (n, (half, source, scope, record)) in rows.iter().enumerate() {
@@ -3085,11 +3925,14 @@ fn keyed_object(
     }
     let _ = write!(
         out,
-        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
+        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{},"of":{},"of_open":{},"said":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
         indexed.postings.join(","),
         indexed.reads,
         indexed.capped,
         indexed.rolled_off,
+        indexed.of,
+        indexed.of_open,
+        render::json_string(&read_note(indexed)),
         indexed
             .next
             .as_deref()
@@ -3108,6 +3951,36 @@ fn keyed_object(
              page for the newest unaudited lines of each ring (warn and info detail)"
         }),
     );
+}
+
+/// What a keyed answer read, in words (R3-24): a capped answer says it read
+/// "the first 2,000 of N" and that `next` continues it, so a page that
+/// stopped at its read budget is never taken for every match there is.
+fn read_note(indexed: &Indexed) -> String {
+    let of = if indexed.of_open {
+        format!("at least {}", indexed.of)
+    } else {
+        indexed.of.to_string()
+    };
+    if indexed.capped {
+        format!(
+            "capped: the first {} of {of} indexed line(s) were read, newest first; ask again with \
+             before=<next> to continue from where this page stopped",
+            indexed.reads
+        )
+    } else if indexed.next.is_some() {
+        format!(
+            "{} of {of} indexed line(s) read for this page; ask again with before=<next> for \
+             older matches",
+            indexed.reads
+        )
+    } else {
+        format!(
+            "{} of {of} indexed line(s) read: every match the streams hold is on this page or an \
+             earlier one",
+            indexed.reads
+        )
+    }
 }
 
 /// The served sink's audit stream, as JSON; `null` when it keeps none.
@@ -4116,35 +4989,48 @@ fn audited_in(
     let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len());
     for half in halves {
         let dir = store_root.join("logs").join(half);
-        let serial = match telemetry::audit_state(&dir) {
-            Ok(Some(serial)) => serial,
-            Ok(None) => continue,
-            Err(why) => {
-                out.unread.push(format!("logs/{half} audit stream: {why}"));
-                continue;
-            }
-        };
-        let postings = match telemetry::audit_postings(&dir, dimension, value, MAX_KEYED_READS) {
-            Ok(postings) => postings,
-            Err(why) => {
-                out.unread.push(format!("logs/{half} audit stream: {why}"));
-                continue;
-            }
-        };
-        out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
-        let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
-        for pointer in &postings.pointers {
-            match telemetry::audit_read(&dir, serial, pointer) {
-                telemetry::AuditLine::Found(record) if keep(&record) => found.push(record),
-                telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
-                telemetry::AuditLine::Unreadable(why) => {
-                    out.unread.push(format!("logs/{half} audit stream: {why}"));
+        // BOTH DURABLE STREAMS OF THE DIRECTORY (R3-24): a run's lifecycle
+        // the refusals rolled out of the audit stream is still in the state
+        // stream. A line in both is one line: same `seq`, same time.
+        let mut found: Vec<telemetry::Record> = Vec::new();
+        let mut seen: std::collections::HashSet<(u64, i64)> = std::collections::HashSet::new();
+        for (stream, at) in [
+            ("audit stream", dir.clone()),
+            ("state stream", telemetry::run_dirs::state_stream_of(&dir)),
+        ] {
+            let serial = match telemetry::audit_state(&at) {
+                Ok(Some(serial)) => serial,
+                Ok(None) => continue,
+                Err(why) => {
+                    out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    continue;
+                }
+            };
+            let postings = match telemetry::audit_postings(&at, dimension, value, MAX_KEYED_READS) {
+                Ok(postings) => postings,
+                Err(why) => {
+                    out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    continue;
+                }
+            };
+            out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
+            for pointer in &postings.pointers {
+                match telemetry::audit_read(&at, serial, pointer) {
+                    telemetry::AuditLine::Found(record)
+                        if keep(&record) && seen.insert((record.seq, record.at_unix_millis)) =>
+                    {
+                        found.push(record);
+                    }
+                    telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
+                    telemetry::AuditLine::Unreadable(why) => {
+                        out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    }
                 }
             }
         }
         if !found.is_empty() {
-            // NEWEST FIRST AS READ; oldest first as answered.
-            found.reverse();
+            // OLDEST FIRST AS ANSWERED, whichever stream each came from.
+            found.sort_by_key(|record| (record.at_unix_millis, record.seq));
             out.from.push(format!("logs/{half}"));
             lists.push(found);
         }
@@ -5402,14 +6288,17 @@ mod tests {
             telemetry::Level::Error,
             &[("bars", 806), ("gaps", 2)],
         )]);
-        let html = rows_table(&two);
+        let html = rows_table(&two, &[]);
         assert!(
             html.contains("<b>bars</b>=806 <b>gaps</b>=2"),
             "exactly one space between fields, none leading: {html}"
         );
         assert!(
-            rows_table(&walk(vec![rec(1, telemetry::Level::Info, &[("bars", 1)])]))
-                .contains("<td class=\"wide\"><b>bars</b>=1<"),
+            rows_table(
+                &walk(vec![rec(1, telemetry::Level::Info, &[("bars", 1)])]),
+                &[]
+            )
+            .contains("<td class=\"wide\"><b>bars</b>=1<"),
             "and no leading space when there is only one"
         );
 
@@ -5418,14 +6307,14 @@ mod tests {
         let mut marked = rec(1, telemetry::Level::Warn, &[("bars", 1)]);
         marked.dropped_fields = 4;
         marked.cut = true;
-        let html = rows_table(&walk(vec![marked]));
+        let html = rows_table(&walk(vec![marked]), &[]);
         assert!(html.contains("4 field(s) counted, not kept"), "{html}");
         assert!(html.contains("a value was cut at its ceiling"), "{html}");
         assert!(
-            !rows_table(&two).contains("counted, not kept"),
+            !rows_table(&two, &[]).contains("counted, not kept"),
             "no mark when nothing was dropped"
         );
-        assert!(!rows_table(&two).contains("cut at its ceiling"));
+        assert!(!rows_table(&two, &[]).contains("cut at its ceiling"));
     }
 
     /// The level `<select>` marks the level that was asked for, and only it.
