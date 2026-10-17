@@ -28,6 +28,7 @@ fn dir(tag: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _absent_is_fine = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -350,5 +351,52 @@ fn a_writer_refuses_a_linked_bars_directory() {
     .unwrap();
     drop(BarFile::open_or_create(&real, path, 7).expect("its own bars are written"));
     assert_eq!(fs::read_dir(real.join(BARS_DIR)).unwrap().count(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+thread_local! {
+    /// The `lstat`s `name_the_refusal` made on this thread.
+    static LOOKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one look of `name_the_refusal` on this thread.
+pub(super) fn count_look() {
+    LOOKS.with(|looks| looks.set(looks.get() + 1));
+}
+
+/// The looks counted on this thread since the last call, and the count
+/// cleared.
+fn looks() -> u32 {
+    LOOKS.with(|looks| looks.replace(0))
+}
+
+/// **AN ABSENT NAME IS REFUSED WITHOUT A LOOK; ONLY A NAME THE HOST WOULD
+/// NOT OPEN IS LOOKED AT, ONCE.**
+///
+/// Kills `replace match guard why.kind() == ErrorKind::NotFound with false`
+/// in `open_regular`: `ENOENT` would go through `name_the_refusal`, whose
+/// `lstat` sees the same absence and says the same `io` refusal, so the
+/// answer cannot tell them apart; the cost can, and the module states it (one
+/// `lstat`, on the path of a refusal other than an absent name). Asked of an
+/// absent name (no look), a final symbolic link (`ELOOP`: one look, which
+/// names it), and a regular file opened (no look).
+#[test]
+fn an_absent_name_is_refused_without_a_look_and_a_link_with_one() {
+    let dir = dir("looks");
+    let _ = looks();
+    let absent = open_read(&dir.join("absent")).unwrap_err();
+    assert!(
+        matches!(&absent, ReadRefusal::Io { action: "open", source, .. } if source.kind() == std::io::ErrorKind::NotFound),
+        "{absent}"
+    );
+    assert_eq!(looks(), 0, "an absent name costs no look");
+    let file = dir.join("file");
+    fs::write(&file, b"x").unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    let linked = open_read(&link).unwrap_err();
+    assert_eq!(linked.found(), Some(Found::Symlink), "{linked}");
+    assert_eq!(looks(), 1, "a refused open costs one look");
+    open_read(&file).unwrap();
+    assert_eq!(looks(), 0, "an open costs none");
     let _ = fs::remove_dir_all(&dir);
 }

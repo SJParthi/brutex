@@ -106,7 +106,19 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     ///
     /// `TryLockError::WouldBlock` while another description holds the lock, or
     /// the host's refusal, exactly as `File::try_lock` returns them.
+    ///
+    /// Under `cfg(test)` a one-shot, per-thread refusal of a chosen kind can
+    /// be armed first, as for [`unlock`], because no lock file refuses a
+    /// `flock` other than `EWOULDBLOCK` on request, and the callers' arms for
+    /// it must still be driven.
     pub fn try_lock(file: F, path: P) -> Result<Self, TryLockError> {
+        #[cfg(test)]
+        if let Some(kind) = tests::take_lock_refusal() {
+            return Err(TryLockError::Error(io::Error::new(
+                kind,
+                "lock refused by the flock test seam",
+            )));
+        }
         file.borrow().try_lock()?;
         Ok(Self::taken(file, path))
     }

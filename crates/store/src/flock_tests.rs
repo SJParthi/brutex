@@ -25,6 +25,30 @@ thread_local! {
     static UNLOCKS: Cell<u64> = const { Cell::new(0) };
 }
 
+thread_local! {
+    /// Armed by [`refuse_next_lock`]: the kind the next `Flock::try_lock` on
+    /// this thread is refused with, once.
+    static REFUSE_LOCK: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
+}
+
+/// Makes the next `Flock::try_lock` on this thread fail, once, with an
+/// `io::Error` of `kind` (never `WouldBlock`: that answer is the lock's,
+/// and a real holder gives it).
+pub(crate) fn refuse_next_lock(kind: io::ErrorKind) {
+    REFUSE_LOCK.with(|armed| armed.set(Some(kind)));
+}
+
+/// Whether a refusal armed by [`refuse_next_lock`] is still waiting.
+pub(crate) fn lock_refusal_armed() -> bool {
+    REFUSE_LOCK.with(Cell::get).is_some()
+}
+
+/// The seam `Flock::try_lock` asks before it locks: the armed refusal's
+/// kind, taken.
+pub(super) fn take_lock_refusal() -> Option<io::ErrorKind> {
+    REFUSE_LOCK.with(Cell::take)
+}
+
 /// Makes the next `Flock` unlock on this thread fail, once, with kind
 /// `Other`.
 ///

@@ -737,3 +737,71 @@ fn an_image_link_refused_otherwise_than_exists_is_never_stepped_past() {
     let held = reader.lookup(&series, day(), &key).unwrap();
     assert_eq!(held.answer.unwrap().code(), Some(Code::Match));
 }
+
+/// **A LOCK THE HOST REFUSES OTHER THAN "HELD" IS THE LOCK'S REFUSAL, AT
+/// ONCE, AND NOTHING IS WRITTEN.**
+///
+/// Covers `lock_within`'s arm for a `flock` refused other than
+/// `EWOULDBLOCK`, which no lock file gives on request: the flock test seam
+/// refuses the commit's one try (`EACCES` standing in for `ENOLCK`). The
+/// refusal is `io` with the action `lock`, naming the year's lock file, and
+/// it is not waited on (a held lock is waited on, and only it). No index
+/// and no image is made.
+#[test]
+fn a_lock_the_host_refuses_is_the_locks_refusal_and_nothing_is_written() {
+    let root = Root::new();
+    let series = root.series();
+    crate::flock::tests::refuse_next_lock(ErrorKind::PermissionDenied);
+    let refused = commit(
+        &series,
+        &generation(71, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap_err();
+    assert!(!crate::flock::tests::lock_refusal_armed());
+    let (action, kind, path) = io_refusal(&refused);
+    assert_eq!((action, kind), ("lock", ErrorKind::PermissionDenied));
+    assert_eq!(path.file_name().unwrap(), "2031.vdi.lock");
+    assert!(!series.year_index(2031).exists(), "no index");
+    assert_eq!(names(&series.dir().join("2031")), Vec::<String>::new());
+}
+
+/// **A YEAR INDEX BORN BETWEEN A READER'S TWO LOOKS IS READ, NEVER CALLED
+/// LOST.**
+///
+/// Covers `index_handle`'s second look succeeding: the reader finds no
+/// index, finds a day image in the year directory (so the index would be
+/// lost), and looks once more before saying so; the index is there by
+/// then. Staged here by moving a committed index aside and back between the
+/// two looks. The lookup answers the committed code at the cost of the
+/// extra look: the index opened on the second try, the directory listed,
+/// the image opened.
+#[test]
+fn a_year_index_born_between_a_readers_two_looks_is_read() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    commit(
+        &series,
+        &generation(81, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap();
+    let index = series.year_index(2031);
+    let aside = index.with_extension("vdi.aside");
+    fs::rename(&index, &aside).unwrap();
+    arm_interference("index looked for again", |path, _| {
+        fs::rename(path.with_extension("vdi.aside"), path).unwrap();
+    });
+    let mut reader = Reader::new();
+    let found = reader.lookup(&series, day(), &key).unwrap();
+    assert!(!interference_armed());
+    assert_eq!(found.answer.unwrap().code(), Some(Code::Match));
+    assert_eq!(found.cost.opens, 3, "the index, the directory, the image");
+
+    // The same, with no index coming: the lost index's refusal.
+    fs::rename(&index, &aside).unwrap();
+    let mut reader = Reader::new();
+    assert_eq!(
+        reader.lookup(&series, day(), &key).unwrap_err().word(),
+        "index_missing"
+    );
+}

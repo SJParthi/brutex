@@ -3975,6 +3975,8 @@ impl Reader {
             let Err(lost) = lost_index(series, year, cost) else {
                 return Ok(None);
             };
+            #[cfg(test)]
+            tests::interfere("index looked for again", path, path);
             if self.handle(path, cost)?.is_none() {
                 return Err(lost);
             }
@@ -5078,5 +5080,27 @@ mod cloud_mutant_tests {
             crashed.to_string(),
             "crashed: the writer stopped at image linked"
         );
+    }
+
+    /// **A REFUSAL `fmt_asked` DOES NOT NAME IS SAID BY ITS WORD ALONE.**
+    ///
+    /// Covers `fmt_asked`'s last arm. `Display` hands it only the four
+    /// refusals of a year index and an ordinal it names, so through
+    /// `Display` the arm is never reached; its contract, for any other
+    /// refusal it is handed, is the word it is given and nothing invented.
+    #[test]
+    fn a_refusal_fmt_asked_does_not_name_is_its_word_alone() {
+        struct Asked<'e>(&'e VerdictError);
+        impl std::fmt::Display for Asked<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt_asked(f, "the_word")
+            }
+        }
+        for other in [
+            VerdictError::KeyInvalid,
+            VerdictError::Crashed { at: "index linked" },
+        ] {
+            assert_eq!(Asked(&other).to_string(), "the_word", "{other:?}");
+        }
     }
 }
