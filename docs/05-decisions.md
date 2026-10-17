@@ -71161,6 +71161,245 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
 
+### D-4997 — The `.auc` closing-auction sidecar gains format version 2, checksummed per record and bound to the ordinal; `/sources/day.json` says what the sidecar can prove, names an auction print also stored as a second and an eligible day's seconds in the auction band, and labels a restart-carried volume (AG-04; store-3, bars-1, stocks-2) — 2026-10-16
+
+**Context** (AG-04, assurance findings store-3, bars-1 and stocks-2, each
+confirmed by two skeptics on 14 October 2026). store-3: the `.auc` sidecar of
+D-3320 item 3 carried no checksum. Its header, its length and each record's
+reserved field were checked, but a flipped bit in a price, a quantity, a row
+count, or a time that stayed inside the day was served silently by
+`/sources/day.json`; a time flipped out of the day made the print vanish from
+its day, because the reader filtered records by the day's bounds; and a new
+file's directory was never synced. On 14 October the store held 227 sidecars
+and 1,213 records; for 793 of them the sidecar is the store's only GDFL copy.
+bars-1: definition-2 months 2026-08 and 2026-09 hold the closing-auction print
+as an ordinary one-second bar until restated (D-3320 item 4, D-4878 item 10,
+CMP-07). The skeptics measured 8,790 eligible share-days, 7,471 with a second
+in `[15:16, 15:30)` and 6,489 by D-3320's own row test, plus 420 records that
+are both a sidecar print and a bar. Nothing said so. stocks-2: after a session
+restart the vendor's first print carries the earlier session's quantity. On
+2020-03-23 the excess equals the pre-restart volume exactly for 188 of 275
+shares, and the first post-reopen print is at least that volume for all 275.
+Nothing swept reads GDFL one-second volume today, so the harm is a silently
+wrong, unlabelled stored record.
+
+**Decision.**
+
+1. **Format version 2** (`pull::gdfl_cm::auction`, byte authority until
+   WP-99 transcribes it into `docs/02-store-format.md` §8). Same magic and
+   record length. The header's last four bytes are the CRC-32C of its first
+   twelve. Each record's last four bytes are the CRC-32C of its first 28
+   followed by its zero-based ordinal as a little-endian `u64`, as `.prv`
+   binds its records. A flipped bit anywhere, two records swapped, or one
+   moved is refused by name with the ordinal. Every NEW file is version 2.
+2. **Version 1 is read, labelled, and never rewritten.** `parse` reads both
+   versions and returns the version. A version-1 file is served with
+   `checked: false` and the reason. An append to it writes version-1 records,
+   so no file mixes versions and no held byte changes. A month remade as a new
+   generation (WP-80) is a new file, so version 2.
+3. **Every refusal is named.** Both versions refuse a truncated header, a
+   foreign magic or version, a torn tail (named by the torn record's
+   ordinal), a version-1 reserved field, a version-2 checksum, and a record
+   whose IST day goes back (out of order, by ordinal). An empty file is
+   refused as an interrupted first append. Nothing is repaired: that is IA-16's
+   job (FM-099).
+4. **An append is all or nothing, and a new file's directory is synced.** The
+   append writes the day's records in one call under the exclusive lock. On a
+   failed write (a full disk) it cuts the file back to the length it had when
+   the lock was taken, then names the failure. Readers take the shared lock
+   (`auction::read`), so no reader sees the cut bytes. When an append creates
+   the file, the file's directory, and the parent of every directory it made,
+   are synced. Because readers now lock, the writer waits up to `LOCK_WAIT`
+   (2 s) for one instead of refusing at once.
+5. **`/sources/day.json` says what the sidecar can prove.** The auction fact
+   carries `version`, `checked` and `unchecked_why`. A refused or unreadable
+   sidecar is `unreadable`, with the `file`, the `ordinal` and why. A record
+   whose IST day is outside the file's month is named in `outside_month` on
+   every day, never filtered away. Each print carries its `ordinal`, whether
+   it is `in_band`, and whether it is `also_in_bars`. The day key now holds
+   the sidecar's stamp, so a sidecar filed after a day was cached is read.
+6. **A print also inside a one-second bar is named** (bars-1, visibility
+   half). The test is: a stored second at the print's second, with close equal
+   to the price and volume equal to the quantity. The fact `also_in_bars`
+   gives `count` and `seconds`, the day carries the flag
+   `auction_print_also_in_bars`, and the page summary counts the days.
+7. **An eligible day's seconds inside the auction band are counted.** The band
+   is `[CAS_CONTINUOUS_CLOSE, AUCTION_BAND_END)` = `[15:15:00, 15:35:00)`,
+   WP-12f's constants. `auction_band_bars` gives `count`, `volume` and
+   `eligibility` on every share day from 2026-08-03. Eligibility is read per
+   request through `pull::cash_session_cache::read_local_lifecycle` and
+   `pull::calendar::phases_of`, never kept in the day memo, and only a
+   successful load is kept (AF-03's rule). It is one of `eligible`,
+   `not_eligible`, `no_closing_auction` (a session the calendar gives no
+   auction phase, such as the 2026-11-08 Muhurat) or `unverified`, which
+   carries the reason and is never read as flag 0. A day with no stored
+   second inside the band is `not_read`: there is nothing to label, so no
+   master is loaded for it (the load is `docs/06-limits.md` L-AG04-02). On an
+   eligible day with a count, the day carries the flag `auction_band_bars`. A
+   definition-2 month still holds the print there.
+8. **Restart-carried volume is a label** (stocks-2). The calendar names a
+   restart on a day with a halt (`pull::calendar::halt_on`, the cash segment's
+   resume second) or a special session of two windows
+   (`pull::calendar::special_session`, the second window's open). On such a
+   CASH day the stored seconds give the pre-restart volume P and the first
+   post-reopen second's volume F. When F >= P > 0, `restart.carry` is true,
+   the day carries the flag `restart_carry`, and its volume carries
+   `gdfl_sum_verified: false` and an `UNVERIFIED` reason. The field is never
+   `true`: nothing in the route verifies GDFL's sum (that reconciliation is
+   IA-6p's), so a day with no carry says `null`, and a restart day of a
+   derivative, whose carry is not measured, says so in `gdfl_sum_why` (an
+   index has no volume and keeps saying `index_no_volume`). There is no day
+   list in `sources.rs`.
+9. **Label, never subtract.** No sum, close or bar changes. Subtracting the
+   carry is UNVERIFIED: it needs a charter source for the vendor's restatement
+   and an operator decision, and this repository has neither. Whether a
+   derivative's first post-restart print carries the same way is unmeasured,
+   so the label is given for the cash segment only (`docs/06-limits.md`
+   L-AG04-08).
+
+**Not in this decision** (`docs/06-limits.md` L-AG04-03 to L-AG04-07):
+restating the definition-2 months (WP-12f, then WP-80's remake), the S7
+auction-band check (IA-6), the `.auc` repair and torn-tail rule (IA-16,
+FM-099), and the per-share-day volume reconciliation against Zerodha and the
+bhavcopy (IA-6p, FM-078, FM-286).
+
+**Proof.** `pull::gdfl_cm::auction::v2_tests` (sixteen tests) and
+`api::sources::day_truth_tests` (thirteen tests). `docs/04-invariants.md`
+AG04-01 to AG04-14.
+
+### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling, and the tick-store writer names the encoder it links — 2026-10-16, extended 2026-10-17
+
+**Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
+`feat/db-fix` stopped at `STEP deny rc=1` (gate 72c91a46, 14 Oct):
+`cargo deny check` failed `advisories` on **RUSTSEC-2026-0344**, "Decompression
+bomb in `ruzstd`: a tiny input can exhaust memory (OOM)",
+<https://rustsec.org/advisories/RUSTSEC-2026-0344>, against `ruzstd` 0.8.2
+(reached through `lake` and `pull`), patched `>= 0.9.1`. The advisory's cause:
+a compressed block's DECODED size was never held to RFC 8878's
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`. Re-run on 16 Oct against the
+advisory database at commit `479c888c` (2026-10-16), the same check also
+failed on four advisories dated 2026-10-14 against `rustls` 0.23.45, each
+patched `>= 0.23.46`: RUSTSEC-2026-0346 (`Debug` of client session values
+exposes TLS secrets), RUSTSEC-2026-0347 (buffered data sent to the outer
+server after ECH rejection), RUSTSEC-2026-0348 (brotli certificate
+decompression can allocate up to 1 GiB before authentication) and
+RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+connections to classical key exchange).
+
+**Decision.**
+
+1. **`ruzstd` floor 0.9.1**, in the root `[workspace.dependencies]` line and
+   `crates/lake/Cargo.toml` (0.9 is outside `"0.8"`'s semver range, so the
+   lines move, not only the lock). 0.9.1 is the newest published version.
+   Same features (`std`, `hash`); its dependency list is unchanged (`twox-hash`).
+2. **`rustls` 0.23.46 in `Cargo.lock` only**: a patch release inside every
+   manifest's existing range; its dependency list is unchanged.
+3. **Both decode call sites pass the window ceiling by name**:
+   `lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd` call
+   `StreamingDecoder::new_with_max_window_size(_, 128 MiB)`. 128 MiB is 0.9.1's
+   own `DEFAULT_MAX_WINDOW_SIZE`, so this is exactly what 0.9.1's `new` does;
+   naming it means a later `ruzstd` that moves its default cannot move ours.
+4. **What the bump refuses that 0.8.2 accepted, stated rather than hidden.**
+   (a) A block that decodes past its `Block_Maximum_Size` — the advisory's
+   class; a ten-byte frame that 0.8.2 expanded to 4,096 bytes is now refused.
+   (b) A frame declaring a window over 128 MiB: 0.8.2 checked its 100 MiB
+   `MAXIMUM_ALLOWED_WINDOW_SIZE` only when a decoder was `reset` for a second
+   frame, and both call sites build one decoder per frame, so it checked
+   nothing (measured: an 8 GiB declared window was accepted). Neither is
+   silent: each is the call site's existing refusal (`zstd frame refused` /
+   `zstd decode refused` in `lake`, `TickStoreMalformed` in `pull`).
+5. **Every frame written before still reads to the same bytes — measured, not
+   assumed.** A throwaway harness outside the repository links 0.8.2 and 0.9.1
+   side by side and drives both through the call sites' own shape (decoder,
+   `take(want + 1)`, `read_to_end`): every zstd frame of all **2,001** GDFL
+   index day files in the tick store (NIFTY spot and every other index,
+   2018–2026, special sessions included; 1,592,231 frames, 6.66 GB in,
+   329 GB out) plus six whole option and stock days — options, every
+   underlying and strike in the file (NIFTY, BANKNIFTY, stocks, illiquid
+   strikes alike): 25 and 27 Oct 2019 (the Muhurat session), 1 Feb 2020
+   (budget Saturday), 4 Jun 2024 (the largest file in the store); stocks:
+   3 Feb 2020 and 31 Aug 2026 — 337,126 more frames, 1,929,357 in all:
+   **0 frames differ, 0 refused by either**. The largest
+   declared window is 4,194,304 bytes (2^22), as the writer's settings predict
+   (`zstd` 0.13.3, level 9; libzstd 1.5.7 `clevels.h` gives level 9 window log
+   22), 1/32 of the ceiling. In the repository, six frames 0.8.2's own encoder
+   wrote (Raw with and without content, RLE across block boundaries,
+   Compressed) are frozen as hex in `crates/lake/src/zstd_v082_frames.rs` and
+   decoded byte for byte through both call sites; every truncation is refused,
+   a stated length one byte long or short is refused, and the two crafted
+   frames of point 4 are refused (both crafted tests fail under 0.8.2).
+6. **No decode timing changed.** Same harness,
+   same frames, the two versions interleaved per iteration: real tick-store
+   frames p50 301 µs vs 0.8.2's 308 µs, p99 2.56 ms vs 2.52 ms (n = 1,592,231);
+   synthetic frames n = 2,000 each, 0.9.1 equal or faster at p50 and p99 on all
+   six. Decoding stays O(frame) as before; nothing moved onto a per-request path.
+   The encoder's sizes and timing are point 8's; the memory one decode may
+   still hold inside the ceiling is point 9's, and both are in
+   `docs/06-limits.md` (L-TSW-4, L-ZST-1, L-ZST-2).
+7. **The dependency fingerprint is re-pinned** in
+   `crates/vocab/tests/workspace_is_rust.rs` after the scan it demands:
+   `ruzstd` 0.9.1 ships no `build.rs` and no C/assembly; `rustls` 0.23.46's
+   non-Rust file set equals 0.23.45's and its `build.rs` is byte-identical.
+   Package count unchanged at 195.
+8. **The third call site is the tick-store writer's ENCODER, and its output
+   bytes change; decoded-entry identity does not** (added 2026-10-17, DENY-1
+   repair round 1, after R4-08's writer reached `feat/db-fix`).
+   `pull::tickstore_write` (D-4967) writes every tick-store frame with
+   `compress_to_vec` at `Fastest`. Under 0.9.1 that encoder writes a block
+   Raw when compressing it would not make it smaller
+   (`encoding/levels/fastest.rs`: `compressed_size >= block_size`), where 0.8.2
+   kept the larger Compressed block. Measured with both versions linked side by
+   side on invented inputs: 512 noise bytes were a 529-byte frame (one
+   Compressed block of 516) and are now 525 (one Raw block of 512); a
+   132,024-byte input's short second block went from Compressed 956 to Raw 952;
+   ten other inputs (repeats, sparse zeros, text) came out byte-identical. 0.9.1
+   also corrects the extra bits of match-length code 52 (65,539..=131,074),
+   which 0.8.2's `encoding/blocks/compressed.rs` took over 32,771; `Fastest`
+   never writes a match that long (read from the source: its matcher's window
+   is one 128 KiB slice, evicted before the next block is matched, and a match
+   is no longer than its offset, so a match is at most 65,536 bytes), and no
+   input of 65,538 to 131,000 bytes changed. So a day this writer writes now is
+   at most the size 0.8.2 wrote, block by block. What does not change is
+   identity: FM-249 defines it on decoded entries (name, size, CRC-32, DOS
+   time, rebuilt bytes), never on `.bts` bytes, and point 5 shows every frame
+   of the old encoder decoding to the same bytes under 0.9.1, so a day held
+   under 0.8.2 still verifies and is never rewritten. **The label moves with
+   the encoder**: `WRITER` is `pull::tickstore_write/1 ruzstd-0.9.1 Fastest`.
+   After the merge it still said `ruzstd-0.8.2`, so every log line and event
+   would have named an encoder the build no longer links (the second agent's
+   blocking finding, `state/fix/round2/verify-DENY-1-r1.json`).
+   `the_writer_names_the_ruzstd_cargo_lock_links` now holds the label and the
+   module doc to the one `ruzstd` in `Cargo.lock`, and
+   `no_block_is_stored_larger_than_the_bytes_it_holds` holds the Raw fallback
+   (it fails under 0.8.2: run through both versions linked side by side, three
+   of its ten inputs store more than they hold under 0.8.2 — 516 bytes for
+   512, 4,100 for 4,096, 300,004 for 300,000 — and none under 0.9.1; log
+   `state/fix/deny-1-logs/no-block-larger-0.8.2-vs-0.9.1-20261017.log`).
+   D-4967's sizes were measured on 0.8.2's encoder and were taken again on
+   17 October on the same three day zips: 16,385,730, 59,143,634 and
+   253,387,791 B against 0.8.2's 16,400,878, 60,066,755 and 255,904,074 B,
+   1.0% fewer over the three days, every file verified against its zip; so
+   D-4967's "about 332 MB a trading day" is about 329 MB now and its "1.60 to
+   2.04 times" is 1.57 to 2.04 (`docs/06-limits.md` L-TSW-4, L-TSW-7).
+9. **What the ceiling does not bound, stated** (`docs/06-limits.md` L-ZST-1).
+   0.9.1's decoder keeps a frame's whole declared window before it hands a
+   byte out, so the `take(want + 1)` at both call sites bounds what is
+   RETURNED, not what is decoded: a 4,105-byte crafted frame of 1,024 RLE
+   blocks declaring a 128 MiB window, asked for 16 bytes, is refused after
+   peak RSS of 273,203,200 to 273,334,272 bytes (n = 3, `/usr/bin/time -l`,
+   17 Oct 2026, the second agent's harness; it measured 271 MB under 0.8.2).
+   Bounded where 0.8.2 was not, about twice the ceiling. A per-call ceiling
+   taken from the promised length (refusing a frame whose stated content size
+   is not the promise before decoding it) would close most of it and is NOT
+   built here: it changes what both call sites accept, and only the frames'
+   own measured windows (largest 4 MiB, point 5) say it would refuse nothing
+   real.
+
+**Supersedes** the version lines of D-2801 point 5 and of the `lake` entry
+that first named `ruzstd` 0.8, and D-4967's encoder version (its point naming
+"`ruzstd` 0.8.2 encoder" and its `WRITER` text `ruzstd-0.8.2`); the reasons
+those gave (pure Rust, no `build.rs`, no C) still hold for 0.9.1.
+
 ### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
 
 **Number** taken from above every ledger head on the local branches on
@@ -71260,6 +71499,170 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
+
+**Number** taken above every ledger head on the local branches on 17 Oct
+(feat/db-fix's highest is D-5301; D-5800..D-5804 are named by an unmerged
+branch). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R4-06 (repair 1). **Findings** AUT-05, and the second
+agent's re-check of 16 Oct (`verify-R4-06-r1.json`, blocking 1 and the
+follow-ups on `rehearsal.rs`).
+
+**What was observed.** `pull::rehearsal::Gate::admit` filtered every
+`operator: <what>` prerequisite out before judging readiness, so a kind
+whose step waits for the operator's approval (S-33's window past
+2026-09-30, S-35, S-48) or for "every writer stopped" (S-01) was admitted
+to start by itself, and the starter was never told those items existed.
+The same gate admitted `rehearsed_ms = -5`, `rehearsed_bytes = 0`, a stamp
+at `i64::MIN`, a snapshot at unix 99999999999 (always newer than any bulk
+write) and `rehearsed_commit = "not-a-commit 200"`, read a key written twice
+or a package declared twice as last-wins, admitted a kind on a `done` or
+`withdrawn` step, and wrote check lines whose run id could forge fields.
+
+**Decision.**
+
+1. **An operator item is never met silently.** Each `operator: <what>`
+   prerequisite of a kind's step is met only by (a) the step's own
+   `operator_yes` entry `"<the item's words, exactly> | <who, when, and the
+   words of the yes>"`, or (b) the starter attesting the item's exact words
+   in `Facts::attested` at the moment of the start — for a condition it can
+   read for itself (a Kite token read from Parameter Store and found valid;
+   every writer stopped). A person's approval is always (a), and the gate
+   enforces it: an item whose words name an approval, a yes, a decision, an
+   owner, a sign-off or "no agent" (`rehearsal::PERSON_ONLY`, any case) is
+   never met by an attestation, so a starter cannot approve its own run by
+   passing the approval's words (repair 1b; the attested-approval case was
+   admitted before it, `a_persons_decision_is_met_only_by_a_recorded_yes`).
+   The word list errs toward the person: an attestable condition that
+   happened to use one of those words would need a recorded yes, never the
+   reverse. Anything else
+   is `operator_pending`, naming each unmet item; an admitted kind returns
+   every item with how it was met (`Admitted::operator`) so the run records
+   it. A yes that names no operator item of its step word for word, or says
+   no one's yes, makes the whole list unreadable (every kind refused
+   `list_unreadable`), and gate 30 refuses it in CI. This supersedes the
+   builder's first choice ("an operator item is the person's and does not
+   hold an automatic start"), which was the defect.
+2. **Only a `pending` step's kind starts by itself** (`step_closed`
+   otherwise): a `done` step's run is not done twice and a `withdrawn` one
+   never runs. A recurring kind stays `pending`.
+3. **Figures above 0; stamps in 1970..now; commit stamps name a commit.**
+   `rehearsed_ms` and `rehearsed_bytes` must both be above 0 (a dry run that
+   took no time or wrote nothing rehearsed no write); every stamp's unix
+   seconds must be above 0 and not after `Facts::now`, the caller's clock;
+   `rehearsed_commit` and `writer_changed` must name 7 to 40 lower-case hex
+   digits. Gate 30 holds the same in CI.
+4. **Commits are compared by time, not ancestry.** The running app has no
+   repository to ask, and asking `git` would put a process launch on every
+   start. So a rehearsal on a commit later in time that does not contain the
+   writer's change reads as current; the commit stamps are written at
+   landing, from the branch that lands. `docs/06-limits.md` L-R406-03.
+5. **The list is compiled in** (`include_str!` of `config/store-steps.toml`):
+   the build that starts a kind is the build whose list it obeys, read once
+   per process. The price is that every edit of the list rebuilds `pull`
+   and every crate above it (`api`, `cli`), and a recorded rehearsal reaches
+   a running starter only through a new build. Reading the file once per
+   file stamp instead would let an edit under a running app change what it
+   starts, which is the edit this gate exists to stop. L-R406-02.
+6. **The list reader refuses a key written twice in one table and a package
+   declared twice**, as gate 30 already did; a kind longer than 64 bytes is
+   refused before it is read, so the never-automatic scan is bounded.
+7. **A check line escapes `%`, space, `=`, tab and line breaks** in `run`,
+   `kind` and `step` (`%25 %20 %3D %09 %0A %0D`); `why` comes last and keeps
+   spaces. The ledger's folder is fsynced when an append creates the file.
+   No caller writes this ledger yet (R3-23 owns the runs ledger), so the v=1
+. **Every built `POST /pull/spot` and `POST /pull/fno` line of the list is a
+   body the route's own parser accepts** (`api/tests/store_step_forms.rs`).
+   Reading them found S-48's line refused three ways: no `underlying=` (the
+   route takes one a request), `series=futures` (the slug is `fut`), and, with
+   an underlying named, `ExpiredSeriesIsOneMinuteOnly`: the operator's rule
+   of 2026-08-19 in `parse_fno` stores an expired contract at 1min or not at
+   all, and S-48 asks for 1day. S-48 is therefore `planned:` and names the
+   conflict; R4-28 (its prerequisite) reconciles the step with the rule or
+   brings the operator's answer. The four `/pull/spot` lines (S-33, S-34)
+   parse.
+
+**Proof.** `pull::rehearsal::tests::an_operator_prerequisite_is_never_met_silently`
+(the second agent's own case among them), `a_done_or_withdrawn_step_never_starts_by_itself`,
+`garbage_figures_and_impossible_stamps_are_refused`,
+`a_key_twice_or_a_package_twice_does_not_read`,
+`a_kind_longer_than_the_bound_is_refused_unread`,
+`a_check_line_field_cannot_forge_another`; gate 30
+`a_kind_is_named_once_never_a_deletion_and_its_stamps_read`. Invariants
+R406-02, R406-03, R406-06 to R406-08 in docs/04-invariants.md.
+
+### D-5321 — R4-06: the secret-shape detector reads a path's later words, full-width and zero-width characters and loosely written parameter paths; `-` and `_` still break a token run; a refusal says a value's length, never the value — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+SEC-07, and the second agent's attacks of 16 Oct (`verify-R4-06-r1.json`).
+
+**What was observed.** `brutex_core::secret_shape` let through `/x
+<token>` (a value opening with `/` skipped the token test whole), a token
+split by U+200B or typed in full width, and a parameter path with a
+trailing `/`, a doubled `/`, a `./` segment or an upper-case field. And
+`GET /settings.json?open.order=<token>` answered `bad_parameter` quoting the
+pair back.
+
+**Decision.**
+
+1. **In a value that opens with a separator, every word is still read**;
+   a word without a separator is a token when its run of twenty or more
+   letters and digits mixes letters and digits. A long all-letter folder
+   word stays a folder word (a false refusal there would block a real
+   archive path); a pasted token almost always mixes the two.
+2. **A full-width ASCII form reads as its ASCII character, and a zero-width
+   or soft-hyphen character as nothing**, in both shapes.
+3. **A parameter path is read from a word's first `/`**: empty and `.`
+   segments are no segments, the field matches in any letter case, and a
+   quote or stop after it is not part of it.
+4. **`-` and `_` break a token run although they are base64url's**: the
+   store symbols the operator types are upper-case words joined by `-`
+   (`NSE-INDEX-NIFTYNXT50`), and counting the `-` would refuse them. A
+   base64url token whose every run is broken that way is missed, and so is
+   a token pasted as a path segment; both are pinned by a test and stated
+   in the module docs (`CLAUDE.md` §3 rule 6).
+5. **A query refusal names a parameter by `said` and its value by length
+   only.** `store::settings`'s own `Invalid` refusals (R3-05's file) still
+   quote a value that evades the detector; that is R3-05's to change and is
+   listed as NOT DONE in R4-06's report.
+
+**Proof.** `brutex_core::secret_shape::tests::every_evasion_the_second_agent_tried_is_refused`,
+`a_full_width_or_zero_width_character_reads_as_the_shape_tests_say`, and the
+four earlier tests unchanged; `api::settings_route::tests::garbage_is_refused_by_name`
+(the token-in-query cases). Invariant R406-01; limit L-R406-01.
+
+### D-5322 — R4-06: a listed scheduler module may not delete, cut, rename, empty or spawn, except at a named, counted site — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+AUT-05 item 2, and the second agent's mutations of `autopilot.rs` (16 Oct).
+
+**What was observed.** `pull/tests/no_scheduler_delete.rs` caught
+`remove_file`, `remove_dir`, `remove_dir_all` and a same-line `rename(`, and
+missed `Command::new("rm")`, `libc::unlink`, a turbofish
+`rename::<_, _>(..)`, a `rename` whose `(` is on the next line and
+`OpenOptions::truncate(true)`.
+
+**Decision.** The scan reads the whole stripped text (comments, literals
+and top-level `#[cfg(test)]` items blanked) and refuses: `remove_file`,
+`remove_dir`, `remove_dir_all`, `unlink`, `unlinkat`, `rmdir`, `set_len`,
+`ftruncate` anywhere; `rename` called (the `(` on any later line),
+turbofished, reached as `fs::rename` or imported; `truncate(true)` and
+`libc::truncate`; `File::create` (it empties an existing file);
+`libc::remove`; and `Command`, because a spawned process can delete anything
+and its program name is a string the scan blanks. A scheduler module that
+must spawn (a chain that runs a `cli` verb) adds a named, counted `ALLOWED`
+row with its reason in the change that needs it. `autopilot.rs` holds two:
+the store-writable probe's `File::create` and its `remove_file` of the
+dot-file it created (R4-12 owns making the probe overwrite instead).
+
+**Proof.** `every_evasion_the_second_agent_tried_is_refused`,
+`no_scheduler_path_deletes_a_file`,
+`a_fixture_deletion_is_refused_and_a_comment_or_string_is_not`,
+`every_declared_module_that_exists_is_listed`. Invariant R406-04; limit
+L-R406-04.
+
 ### D-5800 — The GDFL options reader splits a row into a fixed ten-field array, refuses the eleventh field where it is seen, and reserves its rows once from the body (CLOUD-ATTACKO1, F1) — 2026-10-17
 
 `pull::gdfl_nfo::decode_capped` collected a `Vec<&str>` of every comma-split
