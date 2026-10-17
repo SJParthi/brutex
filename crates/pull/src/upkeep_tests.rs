@@ -275,6 +275,11 @@ fn reasons_words_and_keys_keep_a_line_whole() {
     );
     assert_eq!(one_word("not built"), "not_built");
     assert_eq!(one_word("a\tb"), "a_b");
+    assert_eq!(
+        one_word("a\u{7}b"),
+        "a_b",
+        "a control character that is no space"
+    );
     assert_eq!(one_word(""), "-");
     assert_eq!(one_word(&"w".repeat(40)).len(), 32);
     assert!(key_refused("bars/gdfl/x.bin").is_none());
@@ -680,6 +685,7 @@ fn a_resume_of_no_such_run_is_refused() {
         "run 1 v1 vendor=gdfl kind=rekey commit=x workers=1 asked=1 items=2 skipped=0 \
          plan=0 resume=2 at=1\n\
          item 1 n=1 ok=1 of=2 t=0 clean=1 word=built key=bars/gdfl/item-000.bin why=w\n\
+         a line no run of this module wrote\n\
          run 2 v1 vendor=gdfl kind=rekey commit=x workers=1 asked=1 items=2 skipped=0 \
          plan=0 resume=1 at=2\n",
     )
@@ -1238,6 +1244,7 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
     std::os::unix::fs::symlink(base.join("INDEX/NIFTY"), base.join("INDEX/LINKED")).unwrap();
     fs::write(base.join("INDEX/NIFTY/1s/2019-13.bin"), "").unwrap();
     fs::write(base.join("INDEX/NIFTY/1s/notes.txt"), "").unwrap();
+    fs::write(base.join("INDEX/NIFTY/1s/2019-3.bin"), "").unwrap();
     fs::create_dir_all(base.join("INDEX/NIFTY/2s")).unwrap();
     fs::create_dir_all(base.join("FNO/NIFTY/2019-03-28-1150000-CE/7m")).unwrap();
     std::os::unix::fs::symlink(
@@ -1286,8 +1293,8 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
         ]
     );
     assert_eq!(walked.links, 4, "{walked:?}");
-    assert_eq!(walked.strays, 10, "{walked:?}");
-    assert_eq!(walked.strays_named.len(), 10);
+    assert_eq!(walked.strays, 11, "{walked:?}");
+    assert_eq!(walked.strays_named.len(), 11);
     let first = &walked.months[2];
     assert_eq!(first.path(Vendor::Gdfl).unwrap(), big);
     assert_eq!(
@@ -1365,6 +1372,30 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
     assert_eq!(
         months(&root.0, Vendor::Gdfl, &march).unwrap().months.len(),
         2
+    );
+    // A symbol the scope does not name, and a contract under a symbol that
+    // holds only spot rungs: nothing.
+    let other_symbol = Scope {
+        prefix: ["NSE", "INDEX", "BANKNIFTY"].map(str::to_owned).to_vec(),
+        ..Scope::default()
+    };
+    assert!(
+        months(&root.0, Vendor::Gdfl, &other_symbol)
+            .unwrap()
+            .months
+            .is_empty()
+    );
+    let spot_contract = Scope {
+        prefix: ["NSE", "INDEX", "NIFTY", "2019-03-28-1150000-CE"]
+            .map(str::to_owned)
+            .to_vec(),
+        ..Scope::default()
+    };
+    assert!(
+        months(&root.0, Vendor::Gdfl, &spot_contract)
+            .unwrap()
+            .months
+            .is_empty()
     );
     let none = Scope {
         prefix: vec!["BSE".to_owned()],
@@ -1564,4 +1595,16 @@ fn a_flush_refused_after_the_run_line_builds_nothing() {
     let why = drive(&mut lines, &root.0, &asked, begun(90, &plan), &counting).unwrap_err();
     assert!(why.contains("flush refused at the run line"), "{why}");
     assert_eq!(built.load(Ordering::Relaxed), 0);
+}
+
+/// A month whose served generation cannot be told — its pointer's name held
+/// by a directory — refuses the walk by name: what it lacks cannot be said.
+#[test]
+fn a_month_whose_generation_cannot_be_told_refuses_the_walk() {
+    let root = Root::new();
+    let at = store_path("INDEX", "NIFTY", None, Timeframe::SECOND_1, ym(2020, 2));
+    put(&root.0, at, "NIFTY", 10, false);
+    fs::create_dir_all(store::generation::pointer_path(&root.0, at)).unwrap();
+    let why = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap_err();
+    assert!(why.contains("2020-02.bin"), "{why}");
 }

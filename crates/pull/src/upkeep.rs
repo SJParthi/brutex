@@ -582,14 +582,8 @@ impl Journal {
     /// opened must be a regular file with one name. Anything else is refused
     /// by name and nothing is written.
     fn open(root: &Path, vendor: Vendor, kind: Kind) -> Result<Self, String> {
+        audit_dir(root)?;
         let path = root.join(journal_name(vendor, kind));
-        if let Some(dir) = path.parent() {
-            match fs::create_dir(dir) {
-                Ok(()) => {}
-                Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
-                Err(why) => return Err(format!("{}: {why}; nothing was written", dir.display())),
-            }
-        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -688,6 +682,18 @@ impl Journal {
     }
 }
 
+/// `<root>/audit`, made when absent — never the root above it: a root that
+/// is not there is refused, never born again empty.
+fn audit_dir(root: &Path) -> Result<(), String> {
+    let dir = root.join(DIR);
+    match fs::create_dir(&dir) {
+        Err(why) if why.kind() != ErrorKind::AlreadyExists => {
+            Err(format!("{}: {why}; nothing was written", dir.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Why `path` did not open, by its cause.
 fn refusal(path: &Path, why: &std::io::Error) -> String {
     let link = fs::symlink_metadata(path).is_ok_and(|at| at.file_type().is_symlink());
@@ -777,14 +783,8 @@ fn stop_asked_for(path: &Path, id: u64) -> bool {
 /// The staging file's refusal (`store::staging::create`), or the host's
 /// refusal to write, flush or rename it.
 pub fn request_stop(root: &Path, vendor: Vendor, kind: Kind, id: u64) -> Result<PathBuf, String> {
+    audit_dir(root)?;
     let path = root.join(stop_name(vendor, kind));
-    if let Some(dir) = path.parent() {
-        match fs::create_dir(dir) {
-            Ok(()) => {}
-            Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
-            Err(why) => return Err(format!("{}: {why}", dir.display())),
-        }
-    }
     let staging = path.with_extension("stop.new");
     let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
     let named = |why: std::io::Error| format!("{}: {why}", staging.display());

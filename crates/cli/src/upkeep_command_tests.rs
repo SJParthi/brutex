@@ -33,7 +33,7 @@ use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::sort_index::{Shape, SortIndex};
 
-use super::{Host, USAGE, command_with, outcome, rate, run_locks, spans};
+use super::{Host, USAGE, all_released, command_with, outcome, rate, run_locks, spans};
 use crate::gdfl_import_command::{Holder, RunLock};
 use crate::{FAILED, MISUSED, OK};
 
@@ -1271,4 +1271,192 @@ fn an_outcome_is_the_receipt_line_and_a_rate_is_a_tenth() {
     assert_eq!(rate(7, 2_000), "3.5 item(s) a second (7 in 2000 ms)");
     assert_eq!(rate(1, 3), "333.3 item(s) a second (1 in 3 ms)");
     assert_eq!(State::Ended(How::Done), State::Ended(How::Done));
+}
+
+// ═══ every arm the receipt and the builders have ════════════════════════════
+
+/// The binary hands `upkeep` and its arguments to this verb.
+#[test]
+fn the_binary_dispatches_upkeep_with_its_arguments() {
+    let mut out = String::new();
+    let code = crate::dispatch(&["upkeep".to_owned(), "walk".to_owned()], &mut out);
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(
+        out.contains("upkeep takes plan, run, resume, stop or status"),
+        "{out}"
+    );
+}
+
+/// Locks that would not be released are each named; none refused is none.
+#[test]
+fn every_lock_that_would_not_be_released_is_named() {
+    assert_eq!(all_released([Ok(()), Ok(())]), Ok(()));
+    assert_eq!(
+        all_released([Ok(()), Err("a".to_owned()), Ok(()), Err("b".to_owned())]),
+        Err("a; b".to_owned())
+    );
+}
+
+/// A torn journal tail is said in the receipt; a run with nothing to build
+/// says `none` and is whole; a plan of a store with no options directory says
+/// why it cannot count underlyings.
+#[test]
+fn a_torn_tail_an_empty_run_and_a_store_with_no_options_are_said() {
+    let root = Root::new();
+    spot_months(&root.0, 1);
+    let journal = root
+        .0
+        .join(upkeep::journal_name(Vendor::Gdfl, Kind::SortIndex));
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    fs::write(&journal, "item 5 n=1 ok=1 of=2 t=0 cle").unwrap();
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("torn tail           28 byte(s) a killed run left were ended as a void line"),
+        "{out}"
+    );
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("0 item(s) given"), "{out}");
+    assert!(out.contains("outcomes            none"), "{out}");
+    assert!(!out.contains("resume with"), "{out}");
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("rekey: cannot list"), "{out}");
+}
+
+/// A recount that cannot read a file in its span is not clean.
+#[test]
+fn a_recount_that_cannot_read_a_file_is_not_clean() {
+    let root = Root::new();
+    let path = store_path(
+        "FNO",
+        "NIFTY",
+        Some("2019-12-26-1200000-CE"),
+        ym(2019, 11),
+        FileKind::Bars,
+    );
+    fs::create_dir_all(path.to_path_buf(&root.0).parent().unwrap()).unwrap();
+    fs::write(path.to_path_buf(&root.0), b"not a bar file").unwrap();
+    let (code, out) = plain(
+        &root.0,
+        &[
+            "run",
+            "recount",
+            "gdfl",
+            "--from",
+            "2019-11-01",
+            "--to",
+            "2019-11-30",
+        ],
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOT_CLEAN 1"), "{out}");
+    assert!(root.journal(Kind::Recount).contains("1 unreadable"));
+}
+
+const STATED: &str = "2023-06-29-1000000-PE";
+const SETTLED: &str = "2023-06-28-1000000-PE";
+
+/// Writes `rows` as epoch 1 of the GDFL FNO census (version 4).
+fn census_of(root: &Path, rows: Vec<Held>) {
+    let mut census = Manifest::partition_genesis(Vendor::Gdfl, Segment::Fno, 64).unwrap();
+    for row in rows {
+        census.record_held(row).unwrap();
+    }
+    let path = epoch_path(root, Vendor::Gdfl, Segment::Fno, 1);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, census.image()).unwrap();
+}
+
+/// The re-key's every outcome as an upkeep item: a key filed under its
+/// stated expiry MOVED (a new month file written), the same move REFUSED
+/// where its target holds other bars, a key with days refused and days
+/// admitted NOT APPLIED, a ledger that cannot be read REFUSED, and a census
+/// that is not partitioned STOPPED — none of the last four writes a byte.
+#[test]
+fn every_rekey_outcome_is_an_item() {
+    let moved_day = Day::new(2020, 6, 15).unwrap();
+    // MOVED.
+    let root = Root::new();
+    census_of(&root.0, vec![option(&root.0, STATED, moved_day, 34_000)]);
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("outcomes            applied 1"), "{out}");
+    assert!(
+        root.journal(Kind::Rekey)
+            .contains("1 moved (1 month file(s) written, 0 already held exactly)"),
+        "{}",
+        root.journal(Kind::Rekey)
+    );
+    assert!(
+        store_path("FNO", "NIFTY", Some(SETTLED), ym(2020, 6), FileKind::Bars)
+            .to_path_buf(&root.0)
+            .exists()
+    );
+    // REFUSED: the target month already holds other bars.
+    let root = Root::new();
+    let stated = option(&root.0, STATED, moved_day, 34_000);
+    let other = option(&root.0, SETTLED, Day::new(2020, 6, 16).unwrap(), 34_500);
+    census_of(&root.0, vec![stated, other]);
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED 1"), "{out}");
+    assert!(
+        root.journal(Kind::Rekey).contains("move(s) refused: "),
+        "{}",
+        root.journal(Kind::Rekey)
+    );
+    // NOT APPLIED: refused on a day with a ladder, admitted on a day alone.
+    let root = Root::new();
+    let on = Day::new(2019, 5, 30).unwrap();
+    let mut rows = Vec::new();
+    for (at, contract) in [
+        "2019-05-30-1150000-CE",
+        "2019-05-30-1170000-PE",
+        "2019-05-30-1180000-CE",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rows.push(option(
+            &root.0,
+            contract,
+            on,
+            37_845 + u32::try_from(at).unwrap(),
+        ));
+    }
+    rows.push(option(&root.0, IMPOSSIBLE[0], on, 37_900));
+    rows.push(option(
+        &root.0,
+        IMPOSSIBLE[0],
+        Day::new(2019, 6, 3).unwrap(),
+        37_900,
+    ));
+    census_of(&root.0, rows);
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOT_APPLIED 1"), "{out}");
+    assert!(
+        out.contains("0 file(s) unreadable and 1 key(s) unresolved"),
+        "{out}"
+    );
+    assert!(
+        !pull::gdfl_lineage::lineage_path(&root.0).exists(),
+        "nothing written"
+    );
+    // REFUSED: a lineage ledger that cannot be read.
+    let root = Root::new();
+    census_of(&root.0, vec![option(&root.0, STATED, moved_day, 34_000)]);
+    fs::create_dir_all(pull::gdfl_lineage::lineage_path(&root.0)).unwrap();
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED 1"), "{out}");
+    assert!(root.journal(Kind::Rekey).contains("nothing was written"));
+    // STOPPED: a census that is not partitioned.
+    let root = Root::new();
+    let _ = option(&root.0, STATED, moved_day, 34_000);
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("STOPPED 1"), "{out}");
 }

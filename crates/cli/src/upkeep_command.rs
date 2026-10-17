@@ -81,7 +81,7 @@ use brutex_core::vendor::Vendor;
 use pull::gdfl_import::ImportKind;
 use pull::ingest::census_store::Span;
 use pull::session::Day;
-use pull::upkeep::{self, Ask, How, Kind, Month, Outcome, Ran, Scope, State, Status};
+use pull::upkeep::{self, Ask, Kind, Month, Outcome, Ran, Scope, State, Status};
 use store::path::YearMonth;
 use telemetry::run_dirs::GdflLayout;
 
@@ -512,13 +512,9 @@ pub(crate) fn run_locks(
     Ok(held)
 }
 
-/// Releases the locks, naming any that would not be.
-fn release(held: Vec<RunLock>) -> Result<(), String> {
-    let refused: Vec<String> = held
-        .into_iter()
-        .filter_map(|lock| lock.release().err())
-        .map(|found| format!("{}: {}", found.code, found.words))
-        .collect();
+/// What releasing the locks came to: every refusal named, or none.
+fn all_released(results: impl IntoIterator<Item = Result<(), String>>) -> Result<(), String> {
+    let refused: Vec<String> = results.into_iter().filter_map(Result::err).collect();
     if refused.is_empty() {
         Ok(())
     } else {
@@ -897,7 +893,10 @@ fn run(
         outcome
     };
     let ran = upkeep::run(root, &ask, &plan, &build);
-    let released = release(held);
+    let released = all_released(held.into_iter().map(|lock| {
+        lock.release()
+            .map_err(|found| format!("{}: {}", found.code, found.words))
+    }));
     let ran = match ran {
         Ok(ran) => ran,
         Err(why) => {
@@ -910,18 +909,7 @@ fn run(
         let _ = writeln!(out, "  LOCKS NOT RELEASED: {why}");
         return FAILED;
     }
-    if ran.whole() && ran.how == How::Done {
-        OK
-    } else {
-        FAILED
-    }
-}
-
-/// UNIX seconds now.
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
+    if ran.whole() { OK } else { FAILED }
 }
 
 /// `cli upkeep`, against the CLI's store root (`BRUTEX_STORE`), stamped with
@@ -934,7 +922,11 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     let host = Host {
         store: &store,
         commit: crate::commit_stamp(),
-        now: &now_secs,
+        now: &|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs())
+        },
         stop: &stop,
         after_item: &|_, _| {},
     };
