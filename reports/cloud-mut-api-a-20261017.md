@@ -248,7 +248,9 @@ request, where no seam reaches.**
   (`301:59`, `333:34`, `432:21`, equivalent for the 16 Oct reasons);
   `ladder.rs` 8 of 12 caught, the four 16 Oct equivalents left; `render.rs`
   11 of 12 caught, `page_peak` left; `gaps_route.rs` one survivor, a dead
-  store (see *Survivors*).
+  store (see *Survivors*); `bars.rs` 25 of 32 caught (`note_refused` and
+  `retired_refusal` by library tests outside the stage-1 filter, the rest
+  by the integration file), 16 Oct's seven equivalents left.
 - The coverage re-measurement after the new tests, and the reason for
   every line and branch still unrun.
 - `cargo test --workspace --locked`, and the final clippy.
