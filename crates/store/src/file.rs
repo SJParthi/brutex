@@ -10031,6 +10031,7 @@ mod cloud_mutant_tests {
     /// "skipped" at bar 10, by the last check.
     #[test]
     fn an_overlap_that_agrees_with_everything_it_meets_has_no_diagnosis() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
         let root =
             std::env::temp_dir().join(format!("brutex-file-cloud-diagnose-{}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&root);

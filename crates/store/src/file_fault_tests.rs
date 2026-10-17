@@ -117,6 +117,7 @@ fn held(root: &Root) -> Vec<Bar> {
 /// empty one of the full region.
 #[test]
 fn a_torn_genesis_whose_repair_is_refused_is_the_writes_refusal_and_is_repaired_later() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("genesis");
     let bars = root.at(FileKind::Bars);
     fs::create_dir_all(bars.parent().unwrap()).unwrap();
@@ -157,6 +158,7 @@ fn a_torn_genesis_whose_repair_is_refused_is_the_writes_refusal_and_is_repaired_
 /// commits all five.
 #[test]
 fn a_refused_checksum_write_names_the_sidecar_and_commits_nothing() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("crc-write");
     let crc = root.at(FileKind::Checksums);
     let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
@@ -198,6 +200,7 @@ fn a_refused_checksum_write_names_the_sidecar_and_commits_nothing() {
 /// sidecar either.
 #[test]
 fn a_month_born_without_checksums_appends_past_a_partial_tail_unverified() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("flagless");
     let bars_path = root.at(FileKind::Bars);
     fs::create_dir_all(bars_path.parent().unwrap()).unwrap();
@@ -237,6 +240,7 @@ fn a_month_born_without_checksums_appends_past_a_partial_tail_unverified() {
 /// say. Past the last read the index is decided `Indexed`.
 #[test]
 fn every_refused_read_of_a_readers_index_is_an_unreadable_index() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("tix-reader");
     let tix = root.at(FileKind::TimeIndex);
     let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
@@ -285,6 +289,7 @@ fn every_refused_read_of_a_readers_index_is_an_unreadable_index() {
 /// describes it.
 #[test]
 fn every_refused_read_of_an_appends_index_is_routed_around_or_refuses_it() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let (mut routed, mut refused) = (0u32, 0u32);
     for skip in 0.. {
         let root = Root::new("tix-writer");
@@ -344,6 +349,7 @@ fn every_refused_read_of_an_appends_index_is_routed_around_or_refuses_it() {
 /// the diagnosis. Nothing is committed either way.
 #[test]
 fn every_refused_read_of_an_overlap_diagnosis_is_that_reads_refusal() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("overlap");
     let bars_path = root.at(FileKind::Bars);
     let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
@@ -389,6 +395,7 @@ fn every_refused_read_of_an_overlap_diagnosis_is_that_reads_refusal() {
 /// refusal returned.
 #[test]
 fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("skipped");
     let bars_path = root.at(FileKind::Bars);
     let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
@@ -435,6 +442,7 @@ fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
 /// and passes a file, a directory and an absent name.
 #[test]
 fn refuse_link_refuses_a_link_and_passes_everything_else() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("refuse-link");
     let file = root.0.join("file");
     fs::write(&file, b"x").unwrap();
@@ -460,6 +468,7 @@ fn refuse_link_refuses_a_link_and_passes_everything_else() {
 /// swapped in between `refuse_link`'s look and the open reaches.
 #[test]
 fn a_writer_open_refused_eloop_is_a_symbolic_link() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let path = Path::new("/brutex/never/opened.bin");
     let eloop = io::Error::from_raw_os_error(crate::open_flags::ELOOP);
     assert_eq!(
@@ -485,6 +494,7 @@ fn a_writer_open_refused_eloop_is_a_symbolic_link() {
 /// it, so a link outside is not its to refuse.
 #[test]
 fn a_leaf_outside_the_root_has_nothing_below_it_to_refuse() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = Root::new("below");
     let outside = Root::new("outside");
     let link = outside.0.join("link");
@@ -509,6 +519,7 @@ fn a_leaf_outside_the_root_has_nothing_below_it_to_refuse() {
 /// finished gathering's drop changes nothing more.
 #[test]
 fn a_gathering_dropped_unfinished_restores_the_state_before_it() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let outer = Gathering::begin();
     GATHERED_DIRECTORIES.with(|cell| {
         cell.borrow_mut()
@@ -574,6 +585,7 @@ fn sort(root: &Root) -> Result<super::SortIndexed, StoreError> {
 /// is byte for byte what it was.
 #[test]
 fn every_refused_read_of_a_whole_sort_index_rebuilds_or_refuses_by_name() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = sorted_month("srt-reads");
     let srt = root.at(FileKind::SortIndex);
     let (mut built, mut refused) = (0u32, 0u32);
@@ -632,6 +644,7 @@ fn every_refused_read_of_a_whole_sort_index_rebuilds_or_refuses_by_name() {
 /// refuses it (`EACCES`).
 #[test]
 fn a_refused_look_at_the_sort_index_or_its_staging_name_refuses_the_door() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = sorted_month("srt-looks");
     let srt = root.at(FileKind::SortIndex);
     let staging = srt.with_extension("new.srt");
@@ -675,6 +688,7 @@ fn a_refused_look_at_the_sort_index_or_its_staging_name_refuses_the_door() {
 /// whole seconds). Nothing is written in its place.
 #[test]
 fn a_month_with_a_bar_off_its_grid_is_unsortable_and_nothing_is_written() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
     let root = sorted_month("srt-off-grid");
     let bars_path = root.at(FileKind::Bars);
     let crc_path = root.at(FileKind::Checksums);
