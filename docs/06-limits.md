@@ -891,20 +891,33 @@ credential and the pull would spend its retries on the wrong problem" — and
 nothing in `crates/pull/src` ever constructed it. A doc comment describing a
 protection nobody wrote is worse than no protection, so the variant is gone.
 
-**What that leaves.** If a `ParameterStore` implementation ever returns
-ciphertext, `read` wraps it in a `Secret`, the vendor rejects it,
-`reread_after_rejection` reads the same ciphertext again, and the pull halts
-with `CredentialHalt::DeadToken` — "the vendor rejected this credential and the
-re-read returned the same value; it is dead and nothing here mints one". That is
-loud, and it names the wrong cause. `CLAUDE.md` §4 is about not failing
-silently; this fails noisily with a wrong diagnosis, which is a smaller fault
-and is written down rather than left to be discovered.
+**Restated for the path that ships (AH-02, g-zerodha-universe-census-6).** The
+port above (`SecretSource`, `CredentialReader::reread_after_rejection`) still
+has no caller outside `cfg(test)`. The live credential is read by
+`crates/api/src/server.rs`'s `read_credential` through
+`pull::ssm::get_parameter`, whose request body is `pull::ssm::body(name, true)`
+— `WithDecryption` true — once per field (the `access-token`, and Zerodha's
+`api-key` as well). The live re-read is `crates/api/src/credential_law.rs`'s
+`Watch::reread` (D-0948), called by `broker_run_by`, `fno_land` and
+`roll_every`. The limit is the same on that path: nothing checks that the value
+is not ciphertext.
+
+**What that leaves.** If Parameter Store ever returned ciphertext, the vendor
+would reject it, `Watch::reread` would read the same ciphertext again, compare
+the fingerprints, find them equal, and stop the run with
+`CredentialStop::SameValue` — "the vendor rejected the access-token and the one
+re-read returned the same value". That is loud, and it names the wrong cause.
+The masters refresh (`mastersrun::credentialed_zerodha`) does no re-read at all
+(D-0948, "Not changed"): there the vendor's refusal is reported as it came.
+`CLAUDE.md` §4 is about not failing silently; this fails noisily with a wrong
+diagnosis, which is a smaller fault and is written down rather than left to be
+discovered.
 
 **Why it is not fixed instead.** Recognising a KMS blob means knowing its
 prefix and its length, which is an external fact about a vendor's format, and
 `CLAUDE.md` §3 rule 1 permits no claim about a vendor that is not traceable to a
-source recorded in `docs/00-charter.md`. There is no such source. The change
-that first makes a live call is the change that can record one, and until then
+source recorded in `docs/00-charter.md`. There is no such source, and the live
+call that could have recorded one arrived without it. Until one is recorded
 this is a limit rather than an invention.
 
 ---
@@ -13325,19 +13338,22 @@ not:
   attacksweep-1b). Leading blank lines before a request line used to be read
   as a complete head and held a slot the same way; since D-1580 they are
   skipped and the deadline keeps running (attacksweep-1).
-- **A pipelined second request can be cut.** The deadline restarts after a
-  response is written. If a client pipelined a complete second head in the
-  same read as the first, it was already buffered by hyper when the clock
-  restarted, so a handler for that second request that takes longer than the
-  deadline may see its connection closed before it answers. Browsers do not
-  pipeline. Not measured.
+- **A pipelined second request can be cut.** *Restated by D-4975 (AH-02):
+  no longer true.* The deadline used to restart at a response's first written
+  byte, so a head hyper had already buffered could have its slow handler cut.
+  The service now counts every request it takes, a pipelined one included, and
+  no head clock runs while one is in flight; `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`
+  sends a second head mid-body to a handler taking three deadlines and both
+  responses arrive whole. What is left is in the D-4975 section below.
 - **HTTP/2 is not compiled in** (`axum`'s `http2` feature is off and `h2` is
   not in `Cargo.lock`). If it is enabled, the head scan does not understand
   HTTP/2 frames and this guard must be revisited.
 - **Cost.** Taking and giving back a slot is one atomic compare-and-swap and
   one `Notify`. The head scan is O(1) per byte read, one match on a two-state
-  counter. Re-arming the deadline after a write is one timer reset. Not timed:
-  no bench row covers these paths.
+  counter. *Restated by D-4975:* the deadline is no longer re-armed by a
+  write; a write that moves bytes touches no timer, a write that waits resets
+  it once per stall, and the head clock is reset once per completed response.
+  Those per-write costs are now counted and timed: see the D-4975 section.
 - **The `408` is best effort.** It is one non-blocking `try_write` of 188
   bytes into the socket; a client that is not reading may never see it. The
   connection closes either way.
@@ -18264,6 +18280,156 @@ These are store-level
 calls, not routes: the end-to-end figures of the design's §5.4 need the read
 door (SC-3) and are not measured here.
 
+## Responses are never cut mid-body: the head clock against write progress — D-4975, 16 October 2026
+
+`api::server::HeadDeadline` and `exchange_watch` (AH-02, g-ui-dom-vs-json-1).
+The head clock runs only while no request is in flight and restarts when a
+response is complete; a response in flight is bounded by a write-stall clock
+of the same duration (`HEAD_READ_TIMEOUT`, 10 s served). What that leaves:
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AH02-01 | A reader that keeps taking bytes is never cut, however slow | that is the decision: a slow reader is a reader, and cutting it was the finding | a reader must let one write make progress at least once a timeout; it holds its slot for as long as it reads, bounded only by `MAX_CONNECTIONS` (256), which still queues the next client (`slow_readers_at_the_cap_are_served_whole_and_the_next_waits`) | AH-02 |
+| L-AH02-02 | A stopped reader is cut one timeout after the kernel last took a byte, not one timeout after it stopped reading | the stall clock starts at the first write that returns `Pending`, which is when the client's receive buffer and the server's send buffer are both full; the kernel can still grow a full send buffer, and a write it then takes is progress | measured on the shadow (below): the reader stopped about 5 s into the census and the cut came 15.7 s after that (±1 s, a one-second client clock), with 41,821,788 of 183,715,726 bytes written; one `api.serve` "response cut" line, `delivered` false | AH-02 |
+| L-AH02-03 | A handler that pauses between body chunks is not bounded by the stall clock | nothing is waiting to be written, so no write returns `Pending` | no route in this build streams such a body; a future one needs its own bound | AH-02 |
+| L-AH02-04 | A pipelined head whose first bytes arrived while the previous body was still being written, and which never completes, is closed silently at the deadline rather than answered `408` | the wrapper does not scan bytes read while a request is in flight; hyper holds them | the close comes one deadline after the previous response completed, as for an idle socket | AH-02 |
+| L-AH02-05 | A cut `/db` read is taken out of `served` only while the access window that counted it is still open | `logs::note_access` counts at handler return, before a byte of the body goes; a window closed in between (a window is 60 s, a cut is at least a timeout after the answer) has already said its `served`, and the window's one sampled `read served` line is not taken back | the cut is counted in the `cut` of the window it happened in, said by that window's `reads counted` line; the "response cut" line, at `warn`, carries `access_counted`; `a_cut_db_read_is_taken_back_out_of_its_served_count`, `a_cut_read_leaves_served_for_cut_in_the_window_that_counted_it` | AH-02 |
+| L-AH02-06 | A graceful stop while a slow body is in flight | R3-14's drain bound; not merged when this landed | not exercised here | R3-14 |
+
+L-R401-05 (the GDFL census never reaching a browser on the shadow) named this
+cut as its cause; that cause is removed by D-4975, and the row is R4-01's to
+restate when its page is re-measured.
+
+**Measured 16 October 2026** on release builds over two fresh shadows of the
+real store (`state/fix/shadow.sh AH-02` on port 8904 serving this change's
+build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, whose
+`HeadDeadline` is the one this change replaces), load average 22-51 from other
+agents' builds, `curl` with `--noproxy`, GET only. The full-speed rows
+alternate one before and one after request, so both builds saw the same load.
+Times are curl's `time_total`.
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` (56,031 bytes) | 200 each | 0.56 / 2.52 / 3.53 ms | 0.47 / 1.96 / 3.62 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 (1,086,751 bytes) | 200 each | 3.10 / 15.60 / 43.54 ms | 3.03 / 9.85 / 11.01 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` (183,715,726 bytes) | 200 each | 26.59 / 62.83 / 5,610 ms | 26.19 / 121.28 / 4,703 ms |
+
+Each census max is the first request, which builds the census body; the
+others are served from its cache. At full speed nothing reaches the head
+deadline, so the two builds are the same there, which is the point: the change
+costs a request two atomic adds, two uncontended locks and one boxed body, and
+nothing per byte.
+
+Slow readers, n = 20 each, ten at a time. Each read takes at least 20 s by
+construction (the body over the rate), which is why n is 20 and not 200:
+
+| Read | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: curl exit 18, 85,254,653-86,871,405 of 183,715,726 bytes, 10.2-10.4 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.9 s each |
+| GDFL NIFTY 1 s 2026-09 `/bars.json`, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,304,327-35,066,723 of 65,204,449 bytes, 10.6-11.2 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.7 s each |
+
+**Re-measured on the merged build**, 16 October 2026 from 22:17 IST: this
+change merged onto feat/db-fix at `bf84e1f3` (`AH-02` on 8904, telemetry
+beneath the shadow) against feat/db-fix at `bf84e1f3` itself (`AH-02-before`
+on 8905), two fresh shadows, load average 31-87, the same method. The slow
+reads ran five at a time, four rounds, so the `/bars.json` admission cap
+refused none of them; ten at a time it answered some `429` (105 bytes,
+`Retry-After: 1`) on both builds, which is that cap and not this change:
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` | 200 each | 0.85 / 8.21 / 9.67 ms | 0.70 / 10.18 / 13.99 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 | 200 each | 3.71 / 10.67 / 20.28 ms | 3.78 / 13.24 / 44.83 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` | 200 each | 30.13 / 247.49 / 16,561 ms | 30.59 / 254.36 / 18,398 ms |
+
+| Slow read, n = 20 each | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: exit 18, 85,327,705-86,449,497 of 183,715,726 bytes, 10.17-10.30 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.89-21.92 s |
+| GDFL NIFTY 1 s 2026-09, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,213,435-35,043,179 of 65,204,449 bytes, 10.57-11.14 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.71-20.75 s |
+
+A reader at `--limit-rate 100` on the GDFL census (`&probe=ah02-stop`), the
+after build first and then the before build: the after build wrote one
+`api.serve` "response cut" line 15 s after the request (`bytes_written`
+1,569,132, `status` 200, `declared_length` 183,715,726, `access_counted`
+true), and the next `/store.json` read closed that access window as `served`
+2, `refused` 0, `cut` 1; the before build wrote no line at all. The client
+cannot see the cut within its 45 s: the kernel still holds more than a
+megabyte it has not read at 100 bytes a second. Over the whole run the after
+shadow's telemetry holds exactly that one "response cut" line and no
+"response closed by the client" line; the before shadow's holds none, though
+it cut 45 reads.
+
+NIFTY first, then the shared path: each selection read once on both builds at
+once, at its size over 18 s (at least 1 KiB/s). Before: GDFL NIFTY 1 s
+2026-09, GDFL NIFTY 2020-09-24 11500 CE 1 s, GDFL BANKNIFTY 1 s 2026-09, GDFL
+RELIANCE cash 1 s 2026-09 and the Zerodha census were all cut (exit 18 at
+10.7-12.9 s, 10,371,519-38,957,155 bytes); Zerodha NIFTY 1min and 1day
+2026-09 and the illiquid NIFTY 2020-09-24 9950 PE 1 s arrived whole, because
+they fit in the kernel's buffers. After: all eight arrived whole (exit 0,
+size = `Content-Length`). The run on the pre-merge build at 17:23 gave the
+same split. After this run the branch was merged once more onto feat/db-fix at
+`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll); neither touches
+`HeadDeadline`, `exchange_watch` or `logs`, so these rows were not re-taken
+on that merge, and the `/bars.json` rows are AF-05's to re-measure.
+
+**Re-measured on the final merged build**, 17 October 2026 from 09:31 IST:
+this change merged onto feat/db-fix at `62396df0` (branch head `1ff03397`,
+`AH-02` on 8901) against the release build of feat/db-fix at `bf84e1f3`
+(`AH-02-before` on 8902; its `HeadDeadline`, `serve_limited` and `logs` are the
+same as `62396df0`'s), two fresh shadows, load average 23-41, the same method
+and scripts (`tgt/ah02-final-logs/`). The branch's later merge of R3-32 touches
+only `cli`'s watchdog verbs and the ledgers.
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` | 200 each | 0.48 / 1.25 / 1.35 ms | 0.41 / 0.85 / 1.54 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 | 200 each | 2.19 / 4.88 / 7.79 ms | 2.07 / 3.80 / 5.42 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` | 200 each | 18.32 / 27.19 / 3,563.87 ms | 18.16 / 29.36 / 33.34 ms |
+
+The before census max is its first request building the body; the after
+build's body had been built by the stop probe below before this row ran.
+
+| Slow read, n = 20 each, five at a time | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: exit 18, 85,148,053-86,870,229 of 183,715,726 bytes, 10.15-10.36 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.90-21.92 s |
+| GDFL NIFTY 1 s 2026-09, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,165,219-34,956,875 of 65,204,449 bytes, 10.57-11.13 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.73-20.76 s |
+
+A stopped reader (`--limit-rate 100`, `&probe=ah02-final-stop`, curl's own
+45 s limit) on the after build: one `api.serve` "response cut" line
+(`bytes_written` 1,561,056, `status` 200, `declared_length` 183,715,726,
+`access_counted` true), and the route's next window closed as `served` 205,
+`refused` 0, `cut` 1. NIFTY first, then the shared path, each selection once on
+both builds at once at its size over 18 s: before, GDFL NIFTY 1 s 2026-09
+(38,322,811 of 65,204,449 bytes), NIFTY 2020-09-24 11500 CE 1 s (9,955,883 of
+14,673,427), BANKNIFTY 1 s 2026-09 (39,040,663 of 65,204,449), RELIANCE cash
+1 s 2026-09 (17,998,843 of 28,406,128) and the Zerodha census (11,502,489 of
+16,141,798) were cut, exit 18; Zerodha NIFTY 1day and 1min 2026-09 and the
+illiquid NIFTY 2020-09-24 9950 PE 1 s (4,321 bytes) arrived whole. After: all
+eight whole, exit 0, size = `Content-Length`. The per-write test on this head:
+a write that moves 1 KiB, n = 400, p50 1.166 µs, p99 30.958 µs, max 66.25 µs
+(4 waits, 4 timer resets); a write that waits, n = 200, p50 42 ns, p99 916 ns,
+max 2.417 µs.
+
+**Per write, counted and timed** by
+`head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
+(the test profile, which is opt-level 3 here; `--nocapture`; `Instant` around
+each `poll_write` of 1 KiB on a real loopback socket, so each time includes
+the `write` system call), measured 16 October 2026 at load average 30-60 from
+other agents' builds:
+
+| Write | n | p50 | p99 | max |
+|---|---|---|---|---|
+| moves 1 KiB (no clock read, no timer touched) | 400 | 1.375 µs | 304.75 µs | 941.458 µs |
+| waits (the stall clock already running: one compare, one timer poll) | 200 | 42 ns | 3 µs | 8.125 µs |
+
+The moving write's p99 and max are the socket's own `write` under that load,
+not this wrapper: the wrapper adds a compare, an add and a store to it. In
+the waiting row tokio answers `Pending` from its readiness flag with no system
+call, so that row is the wrapper's own cost. The same run saw 4 waits and 4 timer resets among the 400 moving
+writes, one per stall. The counts are the
+assertions: no moving write touches the timer or starts a stall, the first
+waiting write resets it once, and 200 more waiting polls move neither.
+
 ## The stored-month gap ledger and the repair plan's short sessions (R3-18)
 
 | ID | Limit | Why it is not closed | Bound | Package |
@@ -18669,6 +18835,16 @@ operator's drive on 17 October 2026.
 | L-R407-9 | Disk use of a press | the bytes are the vendor's day zips | measured from the drive's delivery: options 289.8 MB a day zip (the 2025 and 2026 containers, 125.18 GB over 432 inner day zips), capital market 32.3 MB a file (128.92 GB over 3,995); a daily press about 354 MB in three files and three `.part` names, passing the 15% floor with 1.77 TB free of 8.00 TB; a from-scratch fetch of 2,000 options days and 3,995 market files is 708.5 GB and is refused `disk_floor`, 137.6 GB short (`df -Pk`, 17 October 2026) | R4-07 |
 | L-R407-10 | Stop is polled, not an event | a request in flight and a back-off sleep are raced against a 50 ms poll of the Stop flag (`STOP_POLL`); verifying a zip already downloaded and a journal sync are not interrupted | a Stop ends a wait within one poll (50 ms) and a press at the next check after a running verification or sync; one press waits on `429` and `5xx` at most `Backoff::max_total` (30 minutes) in all, then is refused `throttled` or `server_error` by name. Fixture-measured by `stop_ends_a_press_during_a_back_off_sleep` and `stop_ends_a_press_whose_request_is_never_answered`; not measured on a real zip | R4-07 |
 | L-R407-11 | Constant-time steps that no bench times on their own | each is constant by construction, and gate 12 refuses a cost claim that names no proof: `Totals::add_kind` and `Totals::add_underlying` (one hash insert each), `floor_check` and `Floor::bytes_of` (integer arithmetic), `check_plan` (one `floor_check` after the caller's measurement) and `Names::verdict` (two hash probes and a fixed-width parse) | O(1) each, UNVERIFIED by a timing: C-DP-01 times `project` (and so `per_day`) and C-DP-02 times `status`, both in `crates/pull/benches/ratio.rs`; nothing times these six alone. Repair round 1, gate 12 | R4-07 |
+## Automation guards: what R4-06 bounds and what it leaves open (R4-06, D-5320..D-5322)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R406-01 | The secret-shape detector is O(value length), not O(1) | it must read every word of a value to know none is a token or a parameter path; the parameter-path test collects each word through `read_as` | **capped at `MAX_VALUE_BYTES` = 4,096 bytes**; a longer value is `over_cap` unread. Measured 17 Oct on this Mac at load average 36 to 50, n = 400 each, a standalone `rustc -C opt-level=3` probe (the workspace dev and test profile's level) of `crates/core/src/secret_shape.rs` calling `shape_of` with three fields: 4,096 bytes of path words `/a/b/c/d` p50 44.4 µs, p99 393 µs, max 591 µs; one 4,096-byte value of `-`-broken letter runs p50 20.5 µs, p99 106 µs, max 3.97 ms (one outlier under load); 1,365 full-width letters (4,095 bytes) p50 8.9 µs, p99 93.9 µs, max 270 µs; 4,097 bytes p50 0 ns, p99 42 ns; a 10-byte date p50 125 ns, p99 209 ns. Unoptimised (opt-level 0) the path words take 471 µs, 2.51 ms and 38.1 ms (p50, p99, max). Run once per settings save, never per bar | R4-06 |
+| L-R406-02 | Every edit of `config/store-steps.toml` rebuilds `pull` and every crate above it | `pull::rehearsal::LIST` is the list compiled in (`include_str!`), so the build that starts a kind obeys the list it was built with and an edit under a running app changes nothing it starts (D-5320 item 5) | a recorded rehearsal reaches a running starter only through a new build and a redeploy; the rebuild is `pull`, `api`, `cli` (not measured here) | R4-06 |
+| L-R406-03 | A rehearsal is judged current by commit TIME, not ancestry | the running app has no repository to ask, and a `git merge-base` per start would be a process launch per start (D-5320 item 4) | a rehearsal on a commit later in time that does not contain the writer's change reads as current. The stamps are written at landing from the branch that lands; a commit stamp must name 7 to 40 lower-case hex digits and lie in 1970..now, so a forged or future stamp is refused, but a real commit on another branch is not | R4-06 |
+| L-R406-04 | `no_scheduler_delete` is a text scan of the listed modules only | a deletion reached through a helper in an unlisted module, a macro that expands to one, or a function pointer to one is not text the scan reads | the listed modules are the plan's declared scheduler modules that exist (two at this head, `autopilot.rs` and `tickstore_write.rs`); `Command` is refused outright, so the commonest indirect deletion, a spawned `rm`, is caught; a scheduler that must spawn names its site in `ALLOWED` | R4-06 |
+| L-R406-05 | An attested operator item is matched by its exact words, item by item | the attested items are the starter's and the operator items the step's; neither is indexed | O(operator items × attested items) per start, both a property of the list and the starter, not of the data (the largest step holds three operator items). An item with no recorded yes is lower-cased once and read against `PERSON_ONLY` (seven words) before any attestation is compared, O(item length), also a property of the list. Measured 17 Oct (repair 1b) at load average 9 to 18, n = 1,000, three runs of a standalone `rustc --test -C opt-level=3` build of `rehearsal.rs` with a telemetry stub and a timing loop over `admit` on the real list's longest items: the Kite-token item attested and admitted p50 500 ns, p99 1,541 to 1,834 ns, max 4.7 to 37 µs; the S-33 approval item attested and refused `operator_pending` p50 333 ns, p99 375 to 458 ns, max 2.8 to 25 µs | R4-06 |
+| L-R406-06 | The gate's own cost | one hash lookup, a fixed number of comparisons, the step's operator items, three stamp reads | measured 17 Oct at load average 36 to 50, n = 1,000, three runs of a standalone `rustc --test -C opt-level=3` build of `rehearsal.rs` with a telemetry stub (`the_gate_is_one_lookup_per_start`): 1 kind (one operator item met by a recorded yes) p50 458 to 500 ns, p99 625 to 667 ns, max 3.5 to 28 µs; 10,001 kinds p50 291 to 292 ns, p99 333 to 375 ns, max 541 to 625 ns; a 1 MiB kind refused unread in 500, 709 and 750 ns over three runs (n = 1 each; before this change the same kind took 29 ms, the second agent's figure, O(kind length)) | R4-06 |
 
 ## The O(1) attack merged back: what is now flat, what is bounded, and what is still named — D-5800 to D-5804, 17 October 2026
 
@@ -18815,3 +18991,36 @@ here unless a table above says so, and each is UNVERIFIED as a latency.
 | L-G10W-1 | Only a front-end test name of the bare-name shape is resolved: snake case with three or more underscores, backticked in the cell before a status glyph | a sentence-named test (`'a seed, a clamp and a restore ...'`) cannot be told from a backticked prose phrase by its shape, so a rule reading every backticked phrase would refuse prose all over this file | of the 1,403 literal names the tree declares on 17 Oct (145 files), 26 have the shape and are checked; the other 1,377, and `pauses_while_hidden` (two underscores), are not. A `✓` row citing them is accepted on its `.test.js` mention and can go stale with the gate green, as before D-5830 | BASE-GATE10 |
 | L-G10W-2 | A front-end name resolves anywhere among the runner's files, not in the file the row names; the listing does not check that `test` is `node:test`'s binding | the bare-name rule binds a Rust name the same way (D-1606), and the rows cite files as `` `web/tests/x.test.js`: `name` ``, a form no reference rule reads | a name declared in two files satisfies a row naming either; a file that rebinds `test` to something else would still list its calls | BASE-GATE10 |
 | L-G10W-3 | The listing is linear in the bytes of the tracked front-end test files, and the lexer's regex-or-division choice after `}` is a heuristic | a CI step reads every file it lists once; after `}` a `/` is taken to open a regular expression (a block ends there far more often than an object literal is divided) | measured 17 Oct 2026, n = 200 sequential runs, built as CI builds it, a loaded machine: listing 1,627,386 bytes p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the whole check p50 192.4 ms, p99 229.3 ms, max 250.2 ms. A misread `/` reads to the end of its line and is refused there by line number (`unterminated regular expression`), so the failure is loud; a misread that closes on the same line is not detected | BASE-GATE10 |
+
+## The `.auc` sidecar's version 2 and `/sources/day.json`'s auction, band and restart labels (AG-04, D-4997)
+
+Measured 17 October 2026 in two rounds, each with release builds of
+`feat/db-fix` (before) and `fix/db-AG-04` (after). Round 1 (the figures in
+the rows below): before `feat/db-fix` 94320a4e, after the change at 54f547be;
+`sources.rs`, `gdfl_cm_auction.rs`, `calendar.rs` and `cash_session_cache.rs`
+of that before build are those this change starts from. Round 2, after the
+branch took `feat/db-fix` 62396df0 (AF-02's `dayflags.rs`, which this route
+calls, among it): before 62396df0, after the branch at fef92d53 (the change
+merged with 62396df0); its figures are the last sentence of L-AG04-01 and
+L-AG04-02. The branch's later merge of R3-32 changed only `cli`'s watchdog
+verbs, none of which this route reaches, and was not timed again. Each build served its own
+fresh shadow of the real store (bars linked read-only through
+`state/fix/shadow.sh` and `serve.sh`, under the kernel write lock), and only
+GET requests were sent. Timing used n = 200 requests per side per case,
+interleaved: one request to before, then one to after, each a fresh `curl`,
+reading `%{time_total}`. The shared machine's load average was 12 to 25.
+Figures are p50 / p99 / max in ms. Scripts and raw times are in the AG-04
+report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG04-01 | One `/sources/day.json` share day reads the month's `.auc` whole on a miss | the sidecar is one small file a month, and its records are in day order but carry no index | a handful of records a day, at most a month of them (the largest real sidecar is 656 bytes, 20 records: ZYDUSLIFE 2026-08). It is read once per (generations, sidecar stamp, day) under the shared lock, and a warm day costs one more `stat`. One binary search of the day's seconds per print. The band count and the restart measure are one pass over the seconds the day facts already read; the route read them before this change, so no new read was added. **Warm, interleaved** (one warm-up request per side first): 360ONE 2026-09-01 (a print also in a bar) before 1.181 / 3.548 / 17.085, after 1.181 / 2.330 / 2.917. RELIANCE 2020-03-23 (halt, carry) before 1.177 / 1.540 / 2.021, after 1.198 / 1.734 / 2.598. ABBOTINDIA 2024-05-18 (drill, carry) before 1.041 / 1.721 / 1.921, after 1.061 / 1.602 / 1.842. ABBOTINDIA 2024-03-02 (drill) before 1.099 / 2.113 / 3.448, after 1.098 / 2.396 / 3.806. RELIANCE 2026-09-22 (ordinary auction-era day) before 1.148 / 1.384 / 1.429, after 1.174 / 1.444 / 1.483. NIFTY spot 2020-03-23 before 1.126 / 2.623 / 3.934, after 1.122 / 2.258 / 7.022. NIFTY 26 Mar 2020 8500 CE on 2020-03-23 before 1.153 / 2.216 / 4.034, after 1.201 / 2.809 / 4.141. NIFTY 26 Mar 2020 10000 PE, month 2020-03 (an illiquid strike) before 2.796 / 4.888 / 5.240, after 2.869 / 4.497 / 5.613. NIFTY spot month 2026-09 before 2.916 / 3.506 / 3.833, after 2.946 / 3.302 / 5.540. BANKNIFTY spot 2020-03-23 before 1.061 / 1.634 / 2.103, after 1.067 / 1.639 / 1.771. 360ONE month page 2026-09 (30 days) before 3.320 / 4.086 / 4.687, after 3.612 / 4.125 / 4.294; the body grew from about 90 kB to about 120 kB. The NIFTY and BANKNIFTY bodies are byte-identical before and after once the new labels are removed. **First touch, 200 distinct share-days** (10 shares x 20 days of 2026-09, one request each, interleaved on fresh servers): all 200 before 2.528 / 11.509 / 269.321, after 1.989 / 74.816 / 304.320; the 180 after each day's master was loaded before 2.522 / 11.509 / 11.943, after 1.941 / 3.681 / 73.004 (L-AG04-02 is the difference). **Round 2, warm** (load average 17 to 24): 360ONE 2026-09-01 before 1.070 / 1.704 / 1.857, after 1.093 / 1.515 / 1.554; RELIANCE 2020-03-23 before 1.111 / 1.581 / 1.701, after 1.128 / 1.590 / 3.181; ABBOTINDIA 2024-05-18 before 1.080 / 4.638 / 7.167, after 1.067 / 4.047 / 7.815; RELIANCE 2026-09-22 before 1.135 / 1.687 / 4.066, after 1.150 / 1.809 / 2.424; RELIANCE 2024-05-17 (an ordinary day) before 1.097 / 2.001 / 2.996, after 1.095 / 1.855 / 2.025; NIFTY spot 2020-03-23 before 1.114 / 2.040 / 2.628, after 1.125 / 1.808 / 4.444; NIFTY 26 Mar 2020 8500 CE on 2020-03-23 before 1.131 / 2.121 / 2.753, after 1.153 / 2.124 / 13.284; NIFTY 26 Mar 2020 10000 PE, month 2020-03 before 2.837 / 3.368 / 3.464, after 2.842 / 3.402 / 4.043; BANKNIFTY spot 2020-03-23 before 1.052 / 1.742 / 1.753, after 1.054 / 1.640 / 2.059; 360ONE month 2026-09 before 3.471 / 4.043 / 4.148, after 3.739 / 4.465 / 5.044. The bodies are identical before and after once the new labels and the cache counters are removed. **Round 2, first touch** (the same 200 share-days, fresh servers): before 3.088 / 15.492 / 262.873, after 2.476 / 77.841 / 325.873; the 180 after the first share's 20 days before 3.208 / 15.492 / 15.725, after 2.289 / 6.102 / 77.722 | AG-04 |
+| L-AG04-02 | The first request that needs a day's closing-auction eligibility loads that day's NSE master | eligibility is the dated master's flag (charter §9), read through `pull::cash_session_cache::read_local_lifecycle`. One load decodes about 1.2 MB of gzip | it happens once per IST day per process, and only on a share-day with a stored second inside the band (a day with none is `not_read` and asks no master, `a_day_with_no_second_inside_the_band_loads_no_master`): a load that succeeds is kept, and a refusal is read again next time (AF-03's rule). It is bounded by the masters on disk: 42 on 16 October, one more each trading day. **Measured** (17 October, final build): a first-touch request that loads its day's master takes about 70 to 100 ms more than one that does not; over the 200 first-touch share-days of L-AG04-01 that is p99 74.816 ms after against 11.509 before (max 304.320 against 269.321, both the process's first request). Once each day's master is loaded the same route measures 1.941 / 3.681 p50 / p99. Round 2 (the merged branch): first touch p99 77.841 ms after against 15.492 before, and 2.289 / 6.102 p50 / p99 once the masters were loaded. `bars_change.rs` keeps its own memo of the same masters, so a process can load a day twice, once per route. One shared memo is a follow-on for the owner of `bars_change.rs` (AF-03). **NOT DONE** | AG-04 → AF-03 follow-on |
+| L-AG04-03 | Every sidecar on the real store is version 1, unchecked | version 1 files are append-only and never rewritten; only a new file is version 2 | 227 files, 1,213 records (16 October): every one is served with `checked: false` and the reason. They become version 2 only as new generations (WP-80's remake). **NOT DONE**, a store step | WP-80 |
+| L-AG04-04 | The definition-2 months still hold the auction print as a bar | restating them is WP-12f's CMP-07 path (D-4878 item 10) and WP-80's remake, which is NOT READY in this build | labelled, never subtracted. On the shadow of 16 October, 616 GDFL CASH share-months of 2026-08 and 2026-09 showed 8,790 eligible share-days (the masters' own count), 8,463 with stored seconds inside `[15:15:00, 15:35:00)` (15,996 seconds, 2,475,795,628 shares, 211 shares), and 420 sidecar prints also stored as a bar (235 in August, 185 in September). Acceptance after the remake: `also_in_bars` 0 and `auction_band_bars.count` 0 on every eligible share-day. **NOT DONE** | WP-12f → WP-80 |
+| L-AG04-05 | No S7 check refuses an eligible share's second inside the auction band | the import-side check is IA-6's | `/sources/day.json` names every such day (`auction_band_bars`). **NOT DONE** | IA-6 |
+| L-AG04-06 | A torn `.auc` tail from a killed process is refused but not repaired | repair, and the torn-tail rule, are IA-16's (FM-099) | every reader and the next append refuse it by name with the torn record's ordinal. A failed write the appender sees is cut back under its lock (AG04-06). **NOT DONE** | IA-16 |
+| L-AG04-07 | No per-share-day volume reconciliation against Zerodha and the bhavcopy | IA-6p (FM-078, FM-286) | `also_in_bars`, `auction_band_bars` and `restart_carry` are the labels it will read. **NOT DONE** | IA-6p |
+| L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
+| L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
+| L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
