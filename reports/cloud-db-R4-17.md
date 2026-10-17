@@ -47,7 +47,27 @@ in `token_identity.rs`.
 
 ## Left
 
-- Mutants on the touched modules: running now.
+- cli mutants: running now.
+
+## Mutants (cargo-mutants 27.1.0, `--in-diff` against `origin/feat/db-fix`, nextest)
+
+Builds for the mutant runs only used `CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_PROFILE_DEV_DEBUG=0
+CARGO_PROFILE_DEV_INCREMENTAL=true` (environment, no repository change).
+
+- **pull** (`listing.rs`, `series_identity.rs`, `identity_screen.rs`, `fetch.rs`): 189 mutants in the changed
+  lines, tested against `--lib` (`listing::`, `series_identity::`, `fetch::`), `--test zerodha_identity` and
+  `--test pipeline`. Pass 1: 145 caught, 25 unviable, 1 timeout, 18 missed. Each of the 18 was answered with a
+  test, then re-run:
+  - `master_day`: two name cases added (nine digits; a sign).
+  - `MinuteJudge::judge` `>`→`>=`: a jump of exactly `JUMP_BPS` lands.
+  - `screen`/`cash_listing` `&&`→`||`: an index never judged by the jump rule.
+  - `day_arm`/`minute_arm`/`note`: the `pull.identity` log lines are asserted.
+  - `position`: each refusal names its own row.
+  - `scan_series`/`scan_minutes`/`scan_days`: tested against `cli`'s `series_identity::` tests.
+
+  Re-runs: 2a 15 caught, 6 unviable; 2b 5 caught (its one "missed" was a `fetch.rs` mutant the regex took in by
+  mistake, already caught in pass 1); 3 20 caught, 1 timeout (`cursor *= 1` loops for ever: detected).
+  **No pull mutant survives.**
 
 ## Coverage (nightly `cargo +nightly llvm-cov --branch`, the three runs unioned)
 
