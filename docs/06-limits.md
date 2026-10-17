@@ -14499,6 +14499,20 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     finds nothing new and never on a GET.
 ~~~~
 
+~~~~text
+  pull/gdfl_dropbox.rs 1 -- R4-07 repair 2 (D-4986). `pick` orders one
+    press's listing by path before it picks, so two presses over one
+    listing name, hold and refuse in one order. O(f log f) for the f
+    listed files, at most MAX_LISTED (200,000; a larger listing is
+    refused `listing_incomplete` before this point), once a press and
+    never on a lookup or a request (L-R407-4).
+  pull/disk_projection.rs 1 -- R4-07 repair 2 (D-4987).
+    `Totals::seal` sorts each option class's measured bytes a day once
+    to take its median: O(u log u) over the held underlyings of the
+    class, once per sealed projection. A projection afterwards reads the
+    cached median (L-R407-1); no lookup sorts.
+~~~~
+
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
 
 ~~~~text
@@ -14942,6 +14956,22 @@ remove at a cost worth paying, so none was rewritten.
     and census_cache.rs entries above.
 ~~~~
 
+~~~~text
+  pull/gdfl_dropbox.rs 3 -- R4-07 repair 2 (D-4986). Three
+    `iter().rposition` calls, all backward byte searches and none a
+    membership search. `torn_shape` trims the NUL tail of ONE journal
+    line, bounded by that line. `Memory::load` finds the end of the last
+    whole line of the journal it has just read whole, once a press (the
+    read itself is L-R407-3; the search stops at the first newline from
+    the end). `status` finds the end of the last whole line inside its
+    tail window, which starts at 64 KiB and never passes
+    MAX_STATUS_WINDOW (4 MiB) (L-R407-2).
+  pull/disk_projection.rs 1 -- R4-07 repair 2 (D-4987). `parse_df`
+    finds the capacity column, the last word ending in `%`, among the
+    words of ONE `df -Pk` line: six columns plus the words of a mount
+    point, read once per free-space check by the caller.
+~~~~
+
 ### Gate 11 — rule 7: the ambiguous membership test
 
 ~~~~text
@@ -15105,6 +15135,18 @@ bounds are all nonzero.
     in `underlying_segment` is the FIXED `const` ARRAY case: five `&str`,
     the same array `core::instrument::is_sweepable` walks. Asked once per
     `/spot.json` request, never per instant.
+~~~~
+
+~~~~text
+  pull/gdfl_dropbox.rs 3 -- R4-07 repair 2 (D-4986). Three `HashSet`
+    probes, one per listed file, expected O(1): `pick` asks the import
+    journal's `done_whole_days` set (a `HashSet<String>` read once a
+    press) whether a day is done, and `record_picks` asks the press's
+    `Memory` whether a held name (`HashSet<String>`) or a refusal
+    (`HashSet<(name, rev, code)>`) was already journalled. Three
+    `Range::contains` status tests in the same file were written as
+    `matches!` instead, and the two in `store/settings.rs` likewise, so
+    no entry here covers them.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
@@ -18835,6 +18877,10 @@ operator's drive on 17 October 2026.
 | L-R407-9 | Disk use of a press | the bytes are the vendor's day zips | measured from the drive's delivery: options 289.8 MB a day zip (the 2025 and 2026 containers, 125.18 GB over 432 inner day zips), capital market 32.3 MB a file (128.92 GB over 3,995); a daily press about 354 MB in three files and three `.part` names, passing the 15% floor with 1.77 TB free of 8.00 TB; a from-scratch fetch of 2,000 options days and 3,995 market files is 708.5 GB and is refused `disk_floor`, 137.6 GB short (`df -Pk`, 17 October 2026) | R4-07 |
 | L-R407-10 | Stop is polled, not an event | a request in flight and a back-off sleep are raced against a 50 ms poll of the Stop flag (`STOP_POLL`); verifying a zip already downloaded and a journal sync are not interrupted | a Stop ends a wait within one poll (50 ms) and a press at the next check after a running verification or sync; one press waits on `429` and `5xx` at most `Backoff::max_total` (30 minutes) in all, then is refused `throttled` or `server_error` by name. Fixture-measured by `stop_ends_a_press_during_a_back_off_sleep` and `stop_ends_a_press_whose_request_is_never_answered`; not measured on a real zip | R4-07 |
 | L-R407-11 | Constant-time steps that no bench times on their own | each is constant by construction, and gate 12 refuses a cost claim that names no proof: `Totals::add_kind` and `Totals::add_underlying` (one hash insert each), `floor_check` and `Floor::bytes_of` (integer arithmetic), `check_plan` (one `floor_check` after the caller's measurement) and `Names::verdict` (two hash probes and a fixed-width parse) | O(1) each, UNVERIFIED by a timing: C-DP-01 times `project` (and so `per_day`) and C-DP-02 times `status`, both in `crates/pull/benches/ratio.rs`; nothing times these six alone. Repair round 1, gate 12 | R4-07 |
+| L-R407-12 | A press reads the GDFL IMPORT journal whole, once | `pick` asks `gdfl_import::done_whole_days` which days the importer has finished, and that journal has no index or checkpoint sidecar | O(lines of the import journal) once a press, never per file or per lookup; the second agent's r2 check read a 14 MB real journal in about 36 ms in a debug build (its measurement, not re-taken here). A checkpoint sidecar is the import journal owner's (R4-08/R4-22) and is NOT DONE. Repair round 2 | R4-07 |
+| L-R407-13 | Verified day zips stay in staging after the hand-off | the fetch deletes nothing (D-4986, R4-06's no-automatic-deletion rule), and nothing reclaims staging yet | UNVERIFIED extrapolation from the second agent's figure of about 354 MB a daily press: about 90-130 GB a year if every trading day is pressed. A staged copy that fails re-verification is kept beside its re-fetched copy (R407-26), so each such failure adds one file of staging bytes until the same reclaiming step. Reclaiming verified, handed-off staging is an operator step with an owner still to be named (the R4-11 wiring shows staging bytes); NOT DONE here. Repair round 2 | R4-07 |
+| L-R407-14 | `listing_shrank` is accepted by an exact count, by hand | which files a vendor rotates out is not knowable from the listing, so the fetch never decides that a smaller folder is fine | one config line (`accept_listing_count`) per shrink; until it is written every press, the daily timer's too, is refused by name with the count to write (R407-25). Repair round 2 | R4-07 |
+
 ## Automation guards: what R4-06 bounds and what it leaves open (R4-06, D-5320..D-5322)
 
 | ID | Limit | Why it is not closed | Bound | Package |

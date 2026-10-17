@@ -1252,7 +1252,10 @@ fn a_listing_whose_entries_field_is_renamed_is_refused_not_empty_and_a_listing_s
         panic!("{shrank:#?}")
     };
     assert_eq!(refusal.code, "listing_shrank");
-    assert_eq!(refusal.detail, "was=2 now=1");
+    assert_eq!(
+        refusal.detail,
+        "was=2 now=1; to accept it, set accept_listing_count to 1 in the config"
+    );
 }
 
 #[test]
@@ -2131,6 +2134,15 @@ fn s1_a_stop_mid_download_keeps_the_part_and_the_next_press_resumes_it() {
     assert_eq!(resumed.outcome, Outcome::Complete, "{resumed:#?}");
     assert_eq!(resumed.resumed, 1);
     assert_eq!(std::fs::read(&resumed.verified[0].path).unwrap(), a);
+    // R4-06's no-deletion law (AUT-05): a part is promoted to its own sibling
+    // final name, in the earlier run folder that holds it, never moved into
+    // this press's folder. Failed before: the parent was this press's folder.
+    assert_eq!(
+        resumed.verified[0].path.parent(),
+        stopped.staging.as_deref(),
+        "{resumed:#?}"
+    );
+    assert_ne!(stopped.staging, resumed.staging);
     let last_ranges: Vec<String> = server.downloads()[before..]
         .iter()
         .filter_map(|r| r.headers.get("range").cloned())
@@ -2347,7 +2359,9 @@ mod repair_r1 {
         assert_eq!(verified, 1, "verified once, never read again:\n{text}");
     }
 
-    /// The memory keeps the FIRST name a hash was verified under.
+    /// The memory keeps the FIRST name a hash was verified under and the
+    /// writer took (a name owns its hashes from its `handed ok=true` line,
+    /// R407-27).
     #[test]
     fn the_memory_keeps_the_first_name_of_a_hash() {
         let mut memory = Memory::default();
@@ -2356,6 +2370,17 @@ mod repair_r1 {
                 &parse_line(&format!(
                     "v=1 verified run=r at_ms=1 name=\"{name}\" rev=\"1\" hash=\"\" \
                      path=\"/p/{name}\" bytes=1 entries=1 sha256=abc how=downloaded"
+                ))
+                .unwrap(),
+            );
+            assert_eq!(
+                memory.hashes.get("abc").map(String::as_str),
+                (name == "B.zip").then_some("A.zip"),
+                "verified but not yet handed owns nothing"
+            );
+            memory.read(
+                &parse_line(&format!(
+                    "v=1 handed run=r at_ms=1 name=\"{name}\" ok=true verdict=\"written\""
                 ))
                 .unwrap(),
             );
@@ -3045,4 +3070,292 @@ mod repair_r1 {
             report.refused[0]
         );
     }
+}
+
+/// R4-07 repair 2 (second agent's follow-up): the host is what a URL reader
+/// takes as the host. `#` and `\` ended the host for a reader but not for
+/// `check_link`, so `https://evil.example#.dropbox.com/...` passed as a
+/// dropbox.com link. A host is now letters, digits, `.` and `-` only.
+#[test]
+fn a_link_whose_host_hides_another_host_is_refused() {
+    for link in [
+        "https://evil.example#.dropbox.com/sh/a",
+        "https://evil.example\\.dropbox.com/sh/a",
+        "https://evil.example%2F.dropbox.com/sh/a",
+        "https://user@www.dropbox.com/sh/a",
+        "https://www.dropbox.com:8443/sh/a",
+        "https://.dropbox.com/sh/a",
+        "https://www..dropbox.com/sh/a",
+        "https:///sh/a",
+    ] {
+        let why = check_link(link).unwrap_err();
+        assert!(why.contains("host"), "{link}: {why}");
+        assert!(
+            !why.contains("evil"),
+            "a refusal never quotes the link: {why}"
+        );
+    }
+    for link in [
+        "https://www.dropbox.com/sh/a",
+        "https://dropbox.com/sh/a?dl=0",
+        "https://dl.dropbox.com/sh/a#frag",
+    ] {
+        assert_eq!(check_link(link), Ok(()), "{link}");
+    }
+}
+
+/// R4-07 repair 2 (second agent's follow-up): a vendor that rotates old
+/// files out of the folder shrinks the listing for good, and
+/// `listing_shrank` had no override, so every later press (the daily
+/// timer's too) was refused. `accept_listing_count` accepts exactly the
+/// count the operator records; the accepted listing is journalled complete,
+/// so the next press compares against it, and a further shrink is refused
+/// again even with the old acceptance still in the config.
+#[test]
+fn a_shrunk_listing_is_accepted_only_at_the_count_the_operator_records() {
+    let server = Server::start(fake_with(&[
+        ("/GFDLNFO_TICK_01082019.zip", day_zip(1, 1, 100)),
+        ("/GFDLNFO_TICK_02082019.zip", day_zip(2, 1, 100)),
+        ("/GFDLNFO_TICK_05082019.zip", day_zip(5, 1, 100)),
+    ]));
+    let roots = roots("shrink-accept");
+    let run = |config: Config| {
+        press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config),
+            &mut Recorder::default(),
+        )
+    };
+    let with_count = |count: &str| {
+        Config::parse(&format!(
+            "link = \"{LINK}\"\naccept_listing_count = \"{count}\"\n"
+        ))
+        .unwrap()
+    };
+    let code = |report: &Report| match &report.outcome {
+        Outcome::Refused(refusal) => (refusal.code, refusal.detail.clone()),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(run(config()).outcome, Outcome::Complete);
+    server.fake.lock().unwrap().files.pop();
+    let (shrank, detail) = code(&run(config()));
+    assert_eq!(shrank, "listing_shrank");
+    assert!(detail.starts_with("was=3 now=2;"), "{detail}");
+    assert!(detail.contains("accept_listing_count to 2"), "{detail}");
+    // A different count accepts nothing.
+    assert_eq!(code(&run(with_count("1"))).0, "listing_shrank");
+    assert_eq!(code(&run(with_count("3"))).0, "listing_shrank");
+    // The recorded count accepts this listing once, and the next press
+    // without it compares against 2, not 3.
+    assert_eq!(run(with_count("2")).outcome, Outcome::Complete);
+    assert_eq!(run(config()).outcome, Outcome::Complete);
+    // A further shrink is refused again, even with the old acceptance.
+    server.fake.lock().unwrap().files.pop();
+    let (again, detail) = code(&run(with_count("2")));
+    assert_eq!(again, "listing_shrank");
+    assert!(detail.starts_with("was=2 now=1;"), "{detail}");
+    // The count is a whole number or the config is refused.
+    for bad in ["", "two", "-1", "+2", "2.0", " 2", "99999999999999999999"] {
+        let why = Config::parse(&format!(
+            "link = \"{LINK}\"\naccept_listing_count = \"{bad}\"\n"
+        ))
+        .unwrap_err();
+        assert!(why.contains("accept_listing_count"), "{bad:?}: {why}");
+    }
+}
+
+/// R4-07 repair 2 (second agent's follow-up): a zip an earlier press
+/// verified and staged, that no longer verifies (a bad block, a hand edit),
+/// was refused on every later press and never fetched again. It is now
+/// named once (`reverify_failed`), kept where it is (the fetch deletes
+/// nothing), and this press fetches the file again into a new part of its
+/// own run; the next press uses the new copy.
+#[test]
+fn a_staged_zip_that_no_longer_verifies_is_named_kept_and_fetched_again() {
+    let server = Server::start(fake_with(&[(
+        "/GFDLNFO_TICK_01082019.zip",
+        day_zip(1, 1, 100),
+    )]));
+    let roots = roots("reverify");
+    let run = |handoff: &mut Recorder| {
+        press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            handoff,
+        )
+    };
+    let one = run(&mut Recorder::default());
+    assert_eq!(one.outcome, Outcome::Complete, "{one:#?}");
+    let staged = one.verified[0].path.clone();
+    // A bad block in the staged copy: the same length, other bytes.
+    let mut bytes = std::fs::read(&staged).unwrap();
+    let len = bytes.len();
+    for b in bytes.iter_mut().skip(len / 4).take(len / 2) {
+        *b ^= 0x5a;
+    }
+    std::fs::write(&staged, &bytes).unwrap();
+    let mut second = Recorder::default();
+    let two = run(&mut second);
+    assert_eq!(two.outcome, Outcome::Complete, "{two:#?}");
+    assert_eq!(second.got, vec!["GFDLNFO_TICK_01082019.zip".to_owned()]);
+    assert!(two.refused.is_empty(), "{:?}", two.refused);
+    assert_ne!(two.verified[0].path, staged);
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        bytes,
+        "the bad copy is kept, never deleted or overwritten"
+    );
+    let failures = || {
+        std::fs::read_to_string(journal_path(&roots.store))
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("v=1 reverify_failed "))
+            .count()
+    };
+    assert_eq!(failures(), 1);
+    let mut third = Recorder::default();
+    let three = run(&mut third);
+    assert_eq!(three.outcome, Outcome::Complete, "{three:#?}");
+    assert_eq!(third.got, vec!["GFDLNFO_TICK_01082019.zip".to_owned()]);
+    assert_eq!(three.verified[0].path, two.verified[0].path);
+    assert_eq!(failures(), 1, "the new copy verifies; no second line");
+}
+
+/// A writer that refuses the names it is given and takes every other.
+#[derive(Default)]
+struct Picky {
+    refuse: Vec<&'static str>,
+    got: Vec<String>,
+}
+
+impl Handoff for Picky {
+    fn hand(&mut self, file: &Verified) -> Handed {
+        self.got.push(file.name.clone());
+        let no = self.refuse.iter().any(|name| *name == file.name);
+        Handed {
+            ok: !no,
+            verdict: if no {
+                "refused_for_the_test"
+            } else {
+                "written"
+            }
+            .into(),
+        }
+    }
+}
+
+fn press_picky(server: &Server, roots: &Roots, writer: &mut Picky) -> Report {
+    press(
+        server,
+        roots,
+        &Tokens::new(&["tok-one"]),
+        &Meter::roomy(),
+        Ok(config()),
+        writer,
+    )
+}
+
+/// R4-07 repair 2, R407-27 (second agent's follow-up): the first name
+/// verified with a SHA-256 owned it even when the writer refused that file,
+/// so the true day with the same bytes was refused `content_duplicate` in
+/// the same press and on every later one. A name owns its bytes only once
+/// the writer takes them. Failed before: the writer got only the first name.
+#[test]
+fn a_name_the_writer_refused_owns_no_bytes_and_the_same_bytes_day_is_handed() {
+    let same = day_zip(41, 2, 3_000);
+    let mut fake = fake_with(&[
+        ("/GFDLNFO_TICK_03072019.zip", same.clone()),
+        ("/GFDLNFO_TICK_04072019.zip", same),
+    ]);
+    for file in &mut fake.files {
+        file.hash = String::new();
+    }
+    let server = Server::start(fake);
+    let roots = roots("r2-writer-sha");
+    let mut writer = Picky {
+        refuse: vec!["GFDLNFO_TICK_03072019.zip"],
+        ..Picky::default()
+    };
+    let one = press_picky(&server, &roots, &mut writer);
+    assert_eq!(
+        writer.got,
+        vec![
+            "GFDLNFO_TICK_03072019.zip".to_owned(),
+            "GFDLNFO_TICK_04072019.zip".to_owned()
+        ],
+        "{one:#?}"
+    );
+    assert!(codes(&one).is_empty(), "{:?}", codes(&one));
+    assert_eq!(
+        one.not_handed,
+        vec![(
+            "GFDLNFO_TICK_03072019.zip".to_owned(),
+            "refused_for_the_test".to_owned()
+        )]
+    );
+}
+
+/// R407-27, the listed content hash: a pick refuses the second of two names
+/// with one listed hash before either is fetched. When the writer then
+/// refuses the first, the next press fetches and hands the second instead of
+/// refusing it `content_duplicate` for ever. Failed before: press two
+/// refused `GFDLNFO_TICK_04072019.zip` again and handed it nothing.
+#[test]
+fn a_listed_hash_held_by_a_writer_refused_name_lets_the_next_press_fetch_the_other() {
+    let same = day_zip(42, 2, 3_000);
+    let server = Server::start(fake_with(&[
+        ("/GFDLNFO_TICK_03072019.zip", same.clone()),
+        ("/GFDLNFO_TICK_04072019.zip", same),
+    ]));
+    let roots = roots("r2-writer-hash");
+    let mut first = Picky {
+        refuse: vec!["GFDLNFO_TICK_03072019.zip"],
+        ..Picky::default()
+    };
+    let one = press_picky(&server, &roots, &mut first);
+    assert_eq!(first.got, vec!["GFDLNFO_TICK_03072019.zip".to_owned()]);
+    assert_eq!(
+        codes(&one),
+        vec![("GFDLNFO_TICK_04072019.zip".to_owned(), "content_duplicate")],
+        "one listing, the first name is wanted and the second waits on it"
+    );
+    let mut second = Picky {
+        refuse: vec!["GFDLNFO_TICK_03072019.zip"],
+        ..Picky::default()
+    };
+    let two = press_picky(&server, &roots, &mut second);
+    assert!(
+        second.got.contains(&"GFDLNFO_TICK_04072019.zip".to_owned()),
+        "{two:#?}"
+    );
+    assert!(
+        !codes(&two)
+            .iter()
+            .any(|(_, code)| *code == "content_duplicate"),
+        "{:?}",
+        codes(&two)
+    );
+    // The memory agrees: the refused name owns nothing, the taken one owns
+    // the bytes.
+    let memory = Memory::load(&journal_path(&roots.store)).unwrap();
+    assert!(
+        memory
+            .writer_refused
+            .contains_key("GFDLNFO_TICK_03072019.zip")
+    );
+    assert!(
+        memory
+            .hashes
+            .values()
+            .all(|name| name == "GFDLNFO_TICK_04072019.zip"),
+        "{:?}",
+        memory.hashes
+    );
+    assert!(!memory.hashes.is_empty());
 }

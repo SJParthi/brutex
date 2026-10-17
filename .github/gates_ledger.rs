@@ -1551,6 +1551,15 @@ const ALLOW_SORT: Allow = &[
     // directories in name order so two runs print the same receipt. Never on
     // a request path.
     ("crates/cli/src/srt_builder.rs", 1),
+    // R4-07 repair 2 (D-4986, D-4987). `gdfl_dropbox::pick` orders one
+    // press's listing by path, at most MAX_LISTED (200,000) files, once a
+    // press, so two presses over one listing pick in one order; and
+    // `disk_projection::Totals::seal` sorts each option class's measured
+    // bytes a day once to take its median, O(u log u) over the held
+    // underlyings, once per sealed projection and never per lookup. Reasons
+    // in docs/06-limits.md, gate 11 rule 4 and L-R407-1, L-R407-4.
+    ("crates/pull/src/gdfl_dropbox.rs", 1),
+    ("crates/pull/src/disk_projection.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1649,6 +1658,14 @@ const ALLOW_SCAN: Allow = &[
     ("crates/runner/src/validate.rs", 5),
     ("crates/telemetry/src/record.rs", 1),
     ("crates/telemetry/src/sink.rs", 1),
+    // R4-07 repair 2. Three backward byte searches in `gdfl_dropbox`, none a
+    // membership search: `torn_shape` trims one journal line's NUL tail,
+    // `Memory::load` finds the end of the last whole line once a press, and
+    // `status` finds it inside its window, at most MAX_STATUS_WINDOW bytes.
+    // `disk_projection::parse_df` finds the capacity column among the words
+    // of one df line. Reasons in docs/06-limits.md, gate 11 rules 6 and 7.
+    ("crates/pull/src/gdfl_dropbox.rs", 3),
+    ("crates/pull/src/disk_projection.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1745,6 +1762,11 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/engine/src/resume.rs", 1),
     ("crates/cli/src/index_stop_store.rs", 1),
     ("crates/indicators/src/column.rs", 1),
+    // R4-07 repair 2: three `HashSet` probes in `gdfl_dropbox` (the import
+    // journal's done days, the remembered held names and the remembered
+    // refusals), one per listed file. Reason in docs/06-limits.md, gate 11
+    // rule 7.
+    ("crates/pull/src/gdfl_dropbox.rs", 3),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

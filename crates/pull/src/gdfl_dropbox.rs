@@ -10,7 +10,8 @@
 //! 2. Lists the shared folder to its end, page after page and folder after
 //!    folder ([`list`]). A listing cut part way is `listing_incomplete` and no
 //!    "up to date" claim is made; a listing smaller than the last complete
-//!    one for the same link is `listing_shrank`; a listing holding no GDFL
+//!    one for the same link is `listing_shrank` until the operator records
+//!    the new count as `accept_listing_count`; a listing holding no GDFL
 //!    day zip is `link_holds_no_gdfl_day_zip`.
 //! 3. Wants every canonical GDFL day zip ([`DayIdentity::of_zip_name`]) the
 //!    store does not hold: not in the tick store's day table
@@ -270,6 +271,7 @@ impl core::fmt::Display for Wait {
 pub struct Config {
     link: String,
     accept_link_print: Option<String>,
+    accept_listing_count: Option<u64>,
 }
 
 impl core::fmt::Debug for Config {
@@ -321,7 +323,8 @@ impl Config {
     }
 
     /// Parses `key = "value"` lines; `#` starts a comment. Keys: `link`
-    /// (required) and `accept_link_print`.
+    /// (required), `accept_link_print` and `accept_listing_count` (a whole
+    /// number: the one smaller listing count the operator accepts).
     ///
     /// # Errors
     ///
@@ -330,6 +333,7 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut link = None;
         let mut accept = None;
+        let mut accept_count = None;
         for (number, raw) in text.lines().enumerate() {
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -348,6 +352,7 @@ impl Config {
             let slot = match key.trim() {
                 "link" => &mut link,
                 "accept_link_print" => &mut accept,
+                "accept_listing_count" => &mut accept_count,
                 other => return Err(format!("line {at}: unknown key {other:?}")),
             };
             if slot.replace(value.to_owned()).is_some() {
@@ -356,9 +361,21 @@ impl Config {
         }
         let link = link.ok_or_else(|| "no `link` line".to_owned())?;
         check_link(&link)?;
+        let accept_listing_count = match accept_count {
+            None => None,
+            Some(text) => Some(
+                text.parse::<u64>()
+                    .ok()
+                    .filter(|_| text.bytes().all(|b| b.is_ascii_digit()))
+                    .ok_or_else(|| {
+                        format!("accept_listing_count {text:?} is not a whole number")
+                    })?,
+            ),
+        };
         Ok(Self {
             link,
             accept_link_print: accept,
+            accept_listing_count,
         })
     }
 
@@ -412,8 +429,16 @@ fn check_link(link: &str) -> Result<(), String> {
     let rest = link
         .strip_prefix("https://")
         .ok_or_else(|| "the link is not an https:// link".to_owned())?;
-    let host = rest.split(['/', '?']).next().unwrap_or_default();
-    let dropbox = host == "dropbox.com" || host.ends_with(".dropbox.com");
+    // The host runs to the first byte a URL reader ends it at. Anything but
+    // letters, digits, `.` and `-` in it (a `#`, a `\`, a `%`, a `@`
+    // userinfo, a `:` port) is refused, so the host this function checks is
+    // the host a reader connects to; an empty label is refused too.
+    let host = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
+    let plain = host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && host.split('.').all(|label| !label.is_empty());
+    let dropbox = plain && (host == "dropbox.com" || host.ends_with(".dropbox.com"));
     if !dropbox {
         return Err("the link's host is not dropbox.com".to_owned());
     }
@@ -753,7 +778,7 @@ impl Wire<'_> {
             if status == 401 {
                 return Err(Wait::TokenDead.into());
             }
-            if status == 429 || (500..600).contains(&status) {
+            if status == 429 || matches!(status, 500..=599) {
                 attempt += 1;
                 let retry_after = response
                     .headers()
@@ -1123,7 +1148,7 @@ async fn list_page(
         })
         .await
         .map_err(|stop| incomplete_unless_first(stop, first && folder.is_empty(), pages))?;
-    if !(200..300).contains(&answer.status) {
+    if !matches!(answer.status, 200..=299) {
         if first && folder.is_empty() {
             return Err(refused_listing(answer).await.into());
         }
@@ -1408,10 +1433,21 @@ struct Memory {
     complete: HashMap<String, u64>,
     /// `(name, rev)` to the verified file's path.
     verified: HashMap<(String, String), PathBuf>,
-    /// Listed or computed content hashes of verified files, to the FIRST
-    /// name verified with them: a later name with the same bytes is the
-    /// duplicate on every press, never the original (R407-01).
+    /// Listed or computed content hashes of verified files THE WRITER TOOK,
+    /// to the FIRST such name: a later name with the same bytes is the
+    /// duplicate on every press, never the original (R407-01). A name owns
+    /// its hashes from its `handed ok=true` line, not its `verified` line,
+    /// so a file the writer refused never makes the true day with the same
+    /// bytes a `content_duplicate` (R4-07 repair 2, R407-27).
     hashes: HashMap<String, String>,
+    /// A name to the hashes its newest `verified` line named, until that
+    /// copy is handed: moved into `hashes` on `handed ok=true`, dropped on
+    /// `handed ok=false`.
+    unhanded: HashMap<String, Vec<String>>,
+    /// Names whose newest hand-off the writer refused, to its verdict: such
+    /// a name owns no hash, in this memory or in a listing's pick, until the
+    /// writer takes it.
+    writer_refused: HashMap<String, String>,
     /// `(name, rev)` of a file refused `content_duplicate` by its SHA-256,
     /// to the name it duplicates: refused again at the pick, never fetched
     /// or verified again while its revision is unchanged.
@@ -1498,16 +1534,13 @@ impl Memory {
             "verified" => {
                 let key = key();
                 self.parts.remove(&key);
-                for hash in [fields.get("hash"), fields.get("sha256")]
+                let stash = [fields.get("hash"), fields.get("sha256")]
                     .into_iter()
                     .flatten()
-                {
-                    if !hash.is_empty() {
-                        self.hashes
-                            .entry(hash.to_owned())
-                            .or_insert_with(|| key.0.clone());
-                    }
-                }
+                    .filter(|hash| !hash.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                self.unhanded.insert(key.0.clone(), stash);
                 if let Some(hash) = fields.get("hash").filter(|hash| !hash.is_empty()) {
                     self.delivered
                         .insert(key.0.clone(), (key.1.clone(), hash.to_owned()));
@@ -1518,6 +1551,17 @@ impl Memory {
             }
             "refused" if fields.get("part").is_some() => {
                 self.parts.remove(&key());
+            }
+            // The staged copy no longer verifies: it is not offered again.
+            // A later `verified` line of the same name and revision (the
+            // copy fetched again) names the copy to use.
+            "reverify_failed" => {
+                let key = key();
+                if self.verified.get(&key).map(PathBuf::as_path)
+                    == fields.get("path").map(Path::new)
+                {
+                    self.verified.remove(&key);
+                }
             }
             "refused" if fields.get("name").is_some() => {
                 let (name, rev) = key();
@@ -1531,6 +1575,27 @@ impl Memory {
             "held" => {
                 if let Some(name) = fields.get("name") {
                     self.held.insert(name.to_owned());
+                }
+            }
+            "handed" => {
+                if let Some(name) = fields.get("name") {
+                    let stash = self.unhanded.remove(name).unwrap_or_default();
+                    if fields.get("ok") == Some("true") {
+                        self.writer_refused.remove(name);
+                        for hash in stash {
+                            self.hashes.entry(hash).or_insert_with(|| name.to_owned());
+                        }
+                    } else {
+                        for hash in stash {
+                            if self.hashes.get(&hash).map(String::as_str) == Some(name) {
+                                self.hashes.remove(&hash);
+                            }
+                        }
+                        self.writer_refused.insert(
+                            name.to_owned(),
+                            fields.get("verdict").unwrap_or_default().to_owned(),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -1915,7 +1980,7 @@ async fn press(
         via: fetch.endpoints.proxy_in_use(),
         stop: fetch.stop,
     };
-    let picked = listing(fetch, &mut wire, &config.link, &memory, journal, report).await?;
+    let picked = listing(fetch, &mut wire, &config, &memory, journal, report).await?;
     journal.ok()?;
     plan_floor(fetch, &staging, &picked, &memory, journal)?;
     journal.ok()?;
@@ -1995,11 +2060,12 @@ fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<std::fs:
 async fn listing(
     fetch: &Fetch<'_>,
     wire: &mut Wire<'_>,
-    link: &str,
+    config: &Config,
     memory: &Memory,
     journal: &mut Journal,
     report: &mut Report,
 ) -> Result<Picked, Stop> {
+    let link = config.link.as_str();
     let print = print_of(link);
     let listed = list(wire, fetch.endpoints, link).await;
     report.waited = wire.waited;
@@ -2022,10 +2088,22 @@ async fn listing(
     report.listed = files.len();
     report.pages = pages;
     let count = u64::try_from(files.len()).unwrap_or(u64::MAX);
+    // A vendor that rotates old files out shrinks the listing for good; the
+    // operator accepts exactly the new count once, and the accepted listing
+    // is journalled complete, so the next press compares against it and a
+    // further shrink is refused again.
     if let Some(&was) = memory.complete.get(&print)
         && count < was
+        && config.accept_listing_count != Some(count)
     {
-        return Err(RunRefusal::new("listing_shrank", format!("was={was} now={count}")).into());
+        return Err(RunRefusal::new(
+            "listing_shrank",
+            format!(
+                "was={was} now={count}; to accept it, set accept_listing_count to {count} in \
+                 the config"
+            ),
+        )
+        .into());
     }
     let picked = pick(&files, fetch, memory)?;
     journal.line(
@@ -2134,12 +2212,16 @@ async fn fetch_all(
                 });
                 continue;
             }
-            seen_sha
-                .entry(verified.sha256.clone())
-                .or_insert_with(|| verified.name.clone());
             // The `verified` line is durable before anything is handed on.
             journal.ok()?;
-            hand(handoff, &verified, journal, report);
+            // The bytes are this name's only once the writer took them: a
+            // name it refused leaves the next name with the same bytes to be
+            // handed and judged (R407-27).
+            if hand(handoff, &verified, journal, report) {
+                seen_sha
+                    .entry(verified.sha256.clone())
+                    .or_insert_with(|| verified.name.clone());
+            }
             report.verified.push(verified);
         }
     }
@@ -2224,7 +2306,7 @@ fn pick(files: &[Listed], fetch: &Fetch<'_>, memory: &Memory) -> Result<Picked, 
         refused: Vec::new(),
         ignored: 0,
     };
-    let mut hashes: HashMap<&str, &str> = HashMap::new();
+    let mut hashes: HashMap<&str, &str> = HashMap::with_capacity(sorted.len());
     let mut gdfl = 0_usize;
     for file in sorted {
         let identity = match names.verdict(file) {
@@ -2259,6 +2341,9 @@ fn pick(files: &[Listed], fetch: &Fetch<'_>, memory: &Memory) -> Result<Picked, 
             .duplicates
             .get(&(file.name.clone(), file.rev.clone()))
             .filter(|_| !file.rev.is_empty())
+            // The name it duplicates must still hold the bytes: one the
+            // writer refused since owns nothing (R407-27).
+            .filter(|of| !memory.writer_refused.contains_key(of.as_str()))
         {
             let detail = format!(
                 "the same bytes as {of}, found by an earlier press's SHA-256; rev {} is unchanged",
@@ -2288,7 +2373,12 @@ fn pick(files: &[Listed], fetch: &Fetch<'_>, memory: &Memory) -> Result<Picked, 
                 ));
                 continue;
             }
-            hashes.insert(file.hash.as_str(), file.name.as_str());
+            // A name the writer refused last owns no hash in this listing
+            // either: the next name with the same bytes is fetched and
+            // judged by the writer, not refused for it (R407-27).
+            if !memory.writer_refused.contains_key(&file.name) {
+                hashes.insert(file.hash.as_str(), file.name.as_str());
+            }
         }
         picked.wanted.push(file.clone());
     }
@@ -2525,13 +2615,14 @@ fn emit_file(run: &str, file: &Listed, verdict: &str) {
     );
 }
 
-/// Hands one verified file on and journals the answer.
+/// Hands one verified file on and journals the answer; `true` when the
+/// writer took it.
 fn hand(
     handoff: &mut dyn Handoff,
     verified: &Verified,
     journal: &mut Journal,
     report: &mut Report,
-) {
+) -> bool {
     let handed = handoff.hand(verified);
     journal.line(
         "handed",
@@ -2546,6 +2637,7 @@ fn hand(
             .not_handed
             .push((verified.name.clone(), handed.verdict));
     }
+    handed.ok
 }
 
 /// What one file's download reads.
@@ -2574,17 +2666,32 @@ async fn fetch_one(
     store_there(ctx)?;
     let key = (file.name.clone(), file.rev.clone());
     if let Some(path) = ctx.memory.verified.get(&key).filter(|p| p.is_file()) {
-        return match verify(path, file) {
+        match verify(path, file) {
             Ok(verified) => {
                 journal.line("verified", &verified_pairs(&verified, file, "earlier"));
                 emit_file(&journal.run, file, "verified");
-                Ok(Some(verified))
+                return Ok(Some(verified));
             }
+            // A copy an earlier press verified that no longer verifies (a
+            // bad block, a hand edit) is named once, kept where it is (the
+            // fetch deletes and overwrites nothing), forgotten by the next
+            // press's memory, and the file is fetched again into a new part
+            // of THIS run below, under the same floor as any download. It
+            // was refused on every press and never fetched again before.
             Err((code, detail)) => {
-                refuse_file(journal, report, file, code, detail);
-                Ok(None)
+                journal.line(
+                    "reverify_failed",
+                    &[
+                        ("name", quoted(&file.name)),
+                        ("rev", quoted(&file.rev)),
+                        ("path", quoted(&path.display().to_string())),
+                        ("reason", code.to_owned()),
+                        ("detail", quoted(&detail)),
+                    ],
+                );
+                emit_file(&journal.run, file, "reverify_failed");
             }
-        };
+        }
     }
     // THE FLOOR BEFORE THIS FILE'S FIRST BYTE, and before its part exists:
     // the whole listed size, so a restart into a new part is covered too.
@@ -2627,7 +2734,11 @@ async fn fetch_one(
             return Ok(None);
         }
     };
-    let target = ctx.run_dir.join(&file.name);
+    // The day's name in the PART'S OWN folder: a part resumed from an earlier
+    // press's run folder is promoted there, so the one rename is to its
+    // sibling final name, never a move between folders (R4-06, AUT-05,
+    // `crates/pull/tests/no_scheduler_delete.rs`).
+    let target = part.parent().unwrap_or(ctx.run_dir).join(&file.name);
     if std::fs::symlink_metadata(&target).is_ok() {
         refuse_file(
             journal,
@@ -2909,7 +3020,7 @@ async fn download(
 /// its body.
 fn judge(answer: &Answer, file: &Listed, from: u64) -> Option<Got> {
     let headers = answer.response.headers();
-    if (300..400).contains(&answer.status) {
+    if matches!(answer.status, 300..=399) {
         let location = headers
             .get(reqwest::header::LOCATION)
             .and_then(|v| v.to_str().ok());

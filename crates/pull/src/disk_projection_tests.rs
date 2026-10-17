@@ -480,3 +480,46 @@ fn real_delivery_sizes_project_through_the_module_and_meet_the_floor() {
         "the verdict is the arithmetic, both ways"
     );
 }
+
+/// R4-07 repair 2 (second agent's follow-up): a meter answer with no total,
+/// or with more free than total, is no filesystem's. It made the floor 0
+/// (15% of 0) and passed; it is now `free_space_unknown`, never a pass.
+#[test]
+fn a_meter_answer_with_no_total_or_more_free_than_total_is_refused_not_a_zero_floor() {
+    for space in [
+        Space { total: 0, free: 0 },
+        Space {
+            total: 0,
+            free: 5_000_000_000,
+        },
+        Space {
+            total: 1_000,
+            free: 1_001,
+        },
+        Space {
+            total: 1,
+            free: u64::MAX,
+        },
+    ] {
+        for floor in [Floor::Percent(15), Floor::Bytes(1_000_000_000)] {
+            let refused = floor_check(space, 1, floor).unwrap_err();
+            assert_eq!(refused.code(), "free_space_unknown", "{space:?} {floor:?}");
+            assert!(refused.to_string().contains("no filesystem"), "{refused}");
+        }
+    }
+    // The edges stay answers: an empty disk (free equals total) and a full
+    // one (free 0) are real filesystems.
+    let empty = Space {
+        total: 10_000,
+        free: 10_000,
+    };
+    assert!(floor_check(empty, 1, Floor::Percent(15)).is_ok());
+    let full = Space {
+        total: 10_000,
+        free: 0,
+    };
+    assert_eq!(
+        floor_check(full, 0, Floor::Percent(15)).unwrap_err().code(),
+        "disk_floor"
+    );
+}

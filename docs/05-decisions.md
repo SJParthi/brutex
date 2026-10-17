@@ -71483,6 +71483,7 @@ byte count (the defect) and guessing that a bare small number means percent
 (a fallback that would hide which reading was taken). Test:
 `crates/store/src/settings_tests.rs::a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named`
 (R407-22).
+
 ### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
 
 **Number** taken above every ledger head on the local branches on 17 Oct
@@ -71922,3 +71923,59 @@ wraps when it calls the fetch. The real-data check reads `df -Pk` text the
 operator passes (`BRUTEX_REAL_DF`). Every cost claim in this package's files
 names its proof (C-DP-01 and C-DP-02 by `crates/pull/benches/ratio.rs`) or
 says UNVERIFIED, recorded as docs/06 L-R407-11.
+
+### D-5831 — R4-07 repair 2: a shrunk listing is accepted by an exact count the operator writes; a link's host is what a URL reader connects to; a free-space answer no filesystem gives is refused; the package's gate 11 and gate 1d accounts are settled — 2026-10-18
+
+The second agent's r2 check failed R4-07 on two gate regressions it added on
+a base already red elsewhere: gate 11 (15 new refusals) and gate 1d (194 new
+undeclared literals). Gate 11: the five `Range::contains` status and percent
+tests (`gdfl_dropbox.rs` three, `store/settings.rs` two) are written as
+`matches!` with the same range, the listing-pick map is pre-sized with
+`HashMap::with_capacity`, and the nine constructs left are each allowlisted
+in `.github/gates_ledger.rs` with the reason in docs/06's gate 11 sections:
+two bounded sorts (the listing, once a press, at most MAX_LISTED; a class
+median, once per sealed projection), four backward byte searches (one
+journal line, the journal's last line once a press, the status window, one
+df line) and three `HashSet` probes. Gate 1d: the words this package adds
+are declared in `.github/gates_tree.rs` as `R4_07_LITERAL` with what each
+kind is (journal verbs and fields, refusal codes, Dropbox HTTP API words,
+projection units, test words); none is a parameter-path segment.
+
+Three of the second agent's follow-ups are taken because they are in this
+package's files. `listing_shrank` names the count to accept, and the config
+key `accept_listing_count` accepts exactly that count once (the accepted
+listing is journalled complete, so the next press compares against it; any
+other count, a later shrink, or a value that is not a whole number is
+refused) — the operator decides that a smaller folder is fine, never the
+fetch (docs/06 L-R407-14). `check_link` ends the host where a URL reader
+does (`/`, `?`, `#`, `\`) and refuses a host that holds anything but
+letters, digits, `.` and `-` or an empty label, so `#`, `\`, `%`, `@` and
+`:` cannot hide another host. `floor_check` refuses a free-space answer
+with a total of 0 or more free than total as `free_space_unknown` before it
+computes a floor, for every caller. The rest of the follow-ups are named in
+docs/06 (L-R407-12, L-R407-13) or left to their owners. Invariants
+R407-23..R407-25.
+
+Two more follow-ups are taken in the same files. A zip an earlier press
+verified and staged that no longer verifies is no longer refused on every
+press: it is journalled `reverify_failed` once, kept in place (the fetch
+deletes and overwrites nothing; its bytes count in L-R407-13's staging), and
+fetched again into a new part of the running press under the same floor
+(R407-26). And a name owns its content hash and SHA-256 only once the writer
+has taken the file (`handed ok=true`), so a file the writer refused never
+makes the true day with the same bytes a `content_duplicate` (R407-27); the
+writer, not the fetch, judges the second name. Not taken, and why: fetching
+newest-first up to the floor when the whole plan does not fit (the second
+agent's options-backlog follow-up) would change D-4987's "the floor refuses
+before any byte" for a whole plan into a partial one, which is a decision for
+the R4-11 wiring with the operator's backlog in view, not a repair; the
+press keeps refusing `disk_floor` by name with the plan's bytes. Invariants
+R407-26, R407-27.
+
+The merge of R4-06 brought its no-deletion guard
+(`crates/pull/tests/no_scheduler_delete.rs`), whose DECLARED list names
+`gdfl_dropbox.rs` and requires it in LISTED once it exists. It is listed now,
+with its one `rename` site justified in ALLOWED, and that site is made what
+AUT-05 allows: a verified part is promoted to the day's name in the part's own
+folder (a part resumed from an earlier press's run folder is published there),
+never moved into the running press's folder (R407-28).

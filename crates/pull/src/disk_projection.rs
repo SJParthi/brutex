@@ -624,6 +624,16 @@ impl core::fmt::Display for FloorRefusal {
 ///
 /// [`FloorRefusal::DiskFloor`] when it would not.
 pub fn floor_check(space: Space, projected: u64, floor: Floor) -> Result<Headroom, FloorRefusal> {
+    // A meter answer no filesystem gives would make the floor 0 (a percent
+    // of a 0 total) and pass: refused by name, never checked against.
+    if space.total == 0 || space.free > space.total {
+        return Err(FloorRefusal::SpaceUnknown {
+            why: format!(
+                "the free-space meter answered {} bytes free of {} total, which no filesystem has",
+                space.free, space.total
+            ),
+        });
+    }
     let floor_bytes = floor.bytes_of(space.total);
     let need = projected.saturating_add(floor_bytes);
     if space.free < need {

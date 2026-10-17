@@ -646,7 +646,7 @@ pub fn disk_floor(text: &str) -> Result<Floor, String> {
         let percent: u8 = number
             .parse()
             .map_err(|_| format!("{text:?} is not a whole percent"))?;
-        if !(1..=95).contains(&percent) || number.starts_with('+') || number.starts_with('0') {
+        if !matches!(percent, 1..=95) || number.starts_with('+') || number.starts_with('0') {
             return Err(format!("{text:?} is not a percent from 1% to 95%"));
         }
         return Ok(Floor::Percent(percent));
@@ -682,7 +682,7 @@ pub fn disk_floor(text: &str) -> Result<Floor, String> {
         ));
     }
     if bytes < MIN_FLOOR_BYTES {
-        let percent_too = if unit.is_empty() && (1..=95).contains(&amount) {
+        let percent_too = if unit.is_empty() && matches!(amount, 1..=95) {
             format!("; for {amount} percent write {amount}%")
         } else {
             String::new()
