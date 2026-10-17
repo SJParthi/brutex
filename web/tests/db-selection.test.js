@@ -245,6 +245,14 @@ test("each feed's era comes from its own descriptor", () => {
   assert.deepEqual(eraOf(null), { from: '', to: '', kind: 'none', label: '' });
 });
 
+test('R3-05 repair 3: a window the server refused is said, never an era of none', () => {
+  const refused = { wire: 'zerodha', archive: null, window: { why: 'the operator\'s settings cannot be read (no checksum line)', degraded: 'no checksum line' } };
+  const era = eraOf(refused);
+  assert.equal(era.kind, 'refused');
+  assert.equal(era.from, '');
+  assert.match(era.label, /refused your window: the operator's settings cannot be read/);
+});
+
 test('a month outside the operator window is named so, inside it is not (D-3338)', () => {
   const zerodha = { window: { from: '2018-01-01', to: '2026-09-30' } };
   assert.equal(outsideWindow('2017-12', zerodha), true);

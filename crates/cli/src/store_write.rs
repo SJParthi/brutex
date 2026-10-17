@@ -212,6 +212,8 @@ mod tests {
             "expression-search-stored",
             "expression-stored",
             "fold-audit",
+            // R3-32 (D-4996): prints a launchd agent; writes no file at all.
+            "launch-agent",
             "ledger-all",
             "ledger-v6",
             "ledger-v6-replay",
@@ -233,6 +235,9 @@ mod tests {
             "sweep-stored",
             "top",
             "verify",
+            // R3-32 (D-4996): one /health probe; it writes only its own state
+            // folder, which it refuses to place under the store root.
+            "watchdog",
         ];
         for verb in crate::COMMANDS {
             assert_ne!(

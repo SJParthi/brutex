@@ -287,5 +287,19 @@ test("a day past the vendor archive's end is outside it: never a store gap, neve
   assert.equal(inside.kind, 'session');
   const band = bandOf({ days: [rec({ day: '2026-09-25', held: { bars: 0 } }), rec({ day: '2026-09-24' })] }, { archive });
   assert.deepEqual(band.cells.map((c) => c.kind), ['session', 'outside_archive']);
-  assert.equal(emptyWindowWhy([after], '2026-09-25', '2026-09-25', label), "No bar on [2026-09-25]: outside the vendor's archive.");
+  assert.equal(emptyWindowWhy([after], '2026-09-25', '2026-09-25', label), 'No bar on [2026-09-25]: not imported.');
+});
+
+test("R3-05 repair 3: a day before a binding archive start is outside the vendor's archive, never 'not imported'", () => {
+  const archive = { from: '2018-09-03', to: '2026-09-24', from_binds: true, to_binds: false };
+  const early = cellOf(rec({ day: '2018-08-31', import: { outcome: 'none', reached: false }, held: { feed: 'gdfl', rung: '1s', bars: 0, why: null } }), { archive });
+  assert.deepEqual(early.kinds, ['before_archive']);
+  assert.equal(early.flagged, false);
+  assert.equal(emptyWindowWhy([early], '2018-08-31', '2018-08-31', label), "No bar on [2018-08-31]: before the vendor's archive.");
+  // PAST THE MEASURED LAST DAY (a lower bound) it is still not imported.
+  const late = cellOf(rec({ day: '2026-09-25', import: { outcome: 'none', reached: false }, held: { bars: 0 } }), { archive });
+  assert.deepEqual(late.kinds, ['outside_archive']);
+  // A FIRST DAY THE SERVER SAYS DOES NOT BIND is not imported, not outside.
+  const loose = cellOf(rec({ day: '2018-08-31', import: { outcome: 'none', reached: false }, held: { bars: 0 } }), { archive: { ...archive, from_binds: false } });
+  assert.deepEqual(loose.kinds, ['outside_archive']);
 });

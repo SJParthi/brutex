@@ -1813,6 +1813,14 @@ jobs:
           #     apart, whose ratio the test bounds.
           declared="$declared pull/src/gdfl_cm_admission_tests.rs:println!:1
           pull/src/gdfl_scope_tests.rs:println!:3"
+          # ONE MORE, a test's skip notice, declared by R3-35 (17 Oct 2026),
+          # which ran this gate: `pull/src/gdfl_import_split_tests.rs`
+          # println! 1 says the importer split's line count was not taken,
+          # and why, when the tree holds neither the split's own bytes nor
+          # their blobs (a `cargo-mutants` copy has no `.git`), as
+          # `store/tests/cited_commits.rs` says its own. Inside a
+          # `#[cfg(test)]`-mounted module; no production path reaches it.
+          declared="$declared pull/src/gdfl_import_split_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

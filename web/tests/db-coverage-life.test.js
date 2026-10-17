@@ -31,7 +31,12 @@ test('a life that starts on the archive\'s first day began before it (DB-G68)', 
 test('a contract settling on or after today is not expired; one past the archive end names the archive (DB-G67)', () => {
   const unexpired = contractLife({ firstDay: '2026-06-01', lastDay: '2026-09-24', expiry: '2026-12-29' }, { ...base, importedTo: '2026-09-24', sessionsAfter: 60 });
   assert.deepEqual(codes(unexpired), ['unexpired', 'archive_ended']);
-  assert.match(unexpired[1].text, /archive ends 2026-09-24/);
+  // `/feeds.json` `archive` is the vendor's archive AS MEASURED, its last day
+  // a dated lower bound (R3-05 repair 2, SC-CLOSE-2): past it the sessions
+  // are not imported, never "not in the vendor's archive".
+  assert.match(unexpired[1].text, /archive as measured reaches 2026-09-24/);
+  assert.match(unexpired[1].text, /not imported/);
+  assert.doesNotMatch(unexpired[1].text, /vendor archive/);
   // Settled after the archive's last day but before today: cut by the archive, and expired.
   const pastArchive = contractLife({ firstDay: '2026-08-01', lastDay: '2026-09-24', expiry: '2026-09-29' }, { ...base, importedTo: '2026-09-24', sessionsAfter: 3 });
   assert.deepEqual(codes(pastArchive), ['archive_ended']);
