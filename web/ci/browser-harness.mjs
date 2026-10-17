@@ -277,6 +277,8 @@ export async function openTab(cdp, context) {
   const done = [];
   /** @type {string[]} */
   const errors = [];
+  /** The status the page's own document was answered with, per load. */
+  const doc = { status: 0 };
   let lastActivity = Date.now();
   const off = cdp.on((m) => {
     if (m.sessionId !== sessionId) return;
@@ -287,6 +289,7 @@ export async function openTab(cdp, context) {
     } else if (m.method === 'Network.responseReceived') {
       const r = inflight.get(p.requestId);
       if (r) r.status = p.response.status;
+      if (p.type === 'Document') doc.status = p.response.status;
     } else if (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed') {
       const r = inflight.get(p.requestId);
       inflight.delete(p.requestId);
@@ -301,6 +304,7 @@ export async function openTab(cdp, context) {
   return {
     targetId,
     sessionId,
+    doc,
     done,
     errors,
     /** @param {string} expression */
@@ -329,6 +333,7 @@ export async function openTab(cdp, context) {
  */
 export async function loadOnce(tab, cdp, url, settleMs) {
   tab.done.length = 0;
+  tab.doc.status = 0;
   const loaded = new Promise((resolve) => {
     const off = cdp.on((m) => {
       if (m.sessionId === tab.sessionId && m.method === 'Page.loadEventFired') {
@@ -348,6 +353,7 @@ export async function loadOnce(tab, cdp, url, settleMs) {
     heap: Number(heap.usedSize),
     wire: tab.done.reduce((s, r) => s + r.bytes, 0),
     settled,
+    status: tab.doc.status,
     requests: tab.done.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed }))
   };
 }
@@ -358,7 +364,7 @@ export async function loadOnce(tab, cdp, url, settleMs) {
  *
  * @param {string} page
  * @param {string} phase
- * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean}[]} loads
+ * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean, status: number}[]} loads
  */
 export function judge(page, phase, loads) {
   const fcp = summary(loads.map((l) => l.fcp).filter((v) => v !== null).map(Number));
@@ -367,6 +373,10 @@ export function judge(page, phase, loads) {
   const wire = summary(loads.map((l) => l.wire));
   /** @type {string[]} */
   const failures = [];
+  // A LOAD THAT WAS NOT THE PAGE IS NOT TIMED AS ONE: a 503 "front end not
+  // built" answers fast and paints, and was read as a fast page.
+  const refused = loads.filter((l) => l.status < 200 || l.status >= 300);
+  if (refused.length > 0) failures.push(`${page} ${phase}: ${refused.length} of ${loads.length} loads were not the page (HTTP ${[...new Set(refused.map((l) => l.status))].join(', ')})`);
   const unpainted = loads.filter((l) => l.fcp === null).length;
   if (unpainted > 0) failures.push(`${page} ${phase}: ${unpainted} of ${loads.length} loads painted no first content`);
   if (fcp.n > 0 && fcp.p99 >= PAGE_TARGETS.firstContentP99Ms) failures.push(`${page} ${phase}: first content p99 ${fcp.p99.toFixed(1)} ms, not under ${PAGE_TARGETS.firstContentP99Ms} ms`);

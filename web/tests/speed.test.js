@@ -734,12 +734,13 @@ test('the harness\'s command line is read and every misuse is named', () => {
 });
 
 test('a page is judged against the four targets, each miss by name and figure', () => {
-  const load = (/** @type {object} */ o) => ({ fcp: 100, longest: 10, heap: 10e6, wire: 300e3, settled: true, ...o });
+  const load = (/** @type {object} */ o) => ({ fcp: 100, longest: 10, heap: 10e6, wire: 300e3, settled: true, status: 200, ...o });
   const ok = harness.judge('/gaps', 'cold', [load({}), load({ fcp: 120 })]);
   assert.deepEqual(ok.failures, []);
   assert.match(ok.row, /^\| \/gaps \| cold \| 2 \| 100\.0 \/ 120\.0 \/ 120\.0 \| 10\.0 \/ 10\.0 \/ 10\.0 \| 10\.0 \/ 10\.0 \/ 10\.0 \| 300\.0 \/ 300\.0 \/ 300\.0 \| holds \|$/);
-  const bad = harness.judge('/db', 'warm', [load({ fcp: 300, longest: 51, heap: 100e6, wire: 400e3, settled: false }), load({ fcp: null })]);
+  const bad = harness.judge('/db', 'warm', [load({ fcp: 300, longest: 51, heap: 100e6, wire: 400e3, settled: false, status: 503 }), load({ fcp: null, status: 0 })]);
   assert.deepEqual(bad.failures, [
+    '/db warm: 2 of 2 loads were not the page (HTTP 503, 0)',
     '/db warm: 1 of 2 loads painted no first content',
     '/db warm: first content p99 300.0 ms, not under 300 ms',
     '/db warm: a pause of 51.0 ms, over 50 ms',
@@ -864,7 +865,7 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
   writeFileSync(silent, 'export default async () => undefined;\n');
   const capture = join(dir, 'capture.json');
   try {
-    const args = harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/db,/gaps,/blank', '--idle-tabs', '1,2', '--idle-ms', '1000', '--settle-ms', '100', '--hook', hook, '--hook', silent, '--capture', capture, ...root]);
+    const args = harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/db,/gaps,/blank,/missing', '--idle-tabs', '1,2', '--idle-ms', '1000', '--settle-ms', '100', '--hook', hook, '--hook', silent, '--capture', capture, ...root]);
     const r = await harness.runHarness(args);
     const text = r.lines.join('\n');
     assert.match(text, /^\| \/db \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m);
@@ -880,6 +881,7 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     assert.ok(r.failures.some((f) => f.startsWith('/gaps: an uncaught error: Uncaught')), 'a thrown string is named by its text');
     assert.ok(r.failures.some((f) => f.startsWith('/blank cold: 2 of 2 loads painted no first content')));
     assert.ok(r.failures.includes('hook failure'));
+    assert.ok(r.failures.includes('/missing cold: 2 of 2 loads were not the page (HTTP 404)'), 'a page the server does not serve is not timed as one');
     assert.deepEqual(r.notes, ['feed switch: NOT MEASURED — the selector [aria-controls="feed-listbox"] was not found on /db']);
     assert.equal(r.ok, false);
     const saved = JSON.parse(readFileSync(capture, 'utf8'));
