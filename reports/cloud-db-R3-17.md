@@ -100,7 +100,20 @@ builder is NOT MEASURED (it needs timing inside the store's doors, not R3-17's f
 
 ## Left
 
-- The last workspace test run on the final code (running), then this report's final gate lines.
+**Nothing in R3-17's files.** The first line stays `STATUS: IN PROGRESS` only because two gates are
+red on this branch, and each failure is red in the same way on the base `f8c22b1b` itself, in code
+this part does not own and may not edit (see "Gate results"):
+
+- **clippy**: `crates/api/src/logs.rs:1606` `note_request` is 104 lines against `too_many_lines`' 100
+  (AH-02's, merged in `297996d9`). Every other crate is clean.
+- **test**: five of AH-02's `api::server::head_deadline_body_tests` (a 16 MiB body to a paced reader
+  is cut, e.g. after 5,374,637 bytes at 1.32 s); the same five fail on `f8c22b1b`. Also one `store`
+  test that fails on this container's ext4 (below), and 25 that fail only because the container runs
+  as root.
+
+The task's rule excepts only deny's base failures, and deny is now green on the base and the
+branch, so `STATUS: DONE` is the operator's call: either these base failures are excepted as deny's
+were, or their owners fix them first.
 
 ### Coverage: 100% of the changed lines and branches
 
@@ -184,36 +197,61 @@ Each survivor of the full pass, fixed and checked by hand (the test fails under 
 | `render_run`'s `ran.torn > 0` → `>=` | no test said a run with nothing torn prints no torn line | `an_upkeep_run_stops_and_resumes_where_it_stopped`: no `torn tail` line |
 | `render_run`'s and `plan`'s shown/hidden bounds: `shown < SHOWN` → `<=`, `shown > SHOWN` → `>=`, `at < SHOWN` → `<=`, `groups.len() > SHOWN` → `>=` | the tests past the cap checked the "… and N more" line, not how many were shown, and none said a short list hides nothing | the hidden count is one `saturating_sub` tested `> 0`; the tests count exactly 200 shown lines, and a short run and a short plan print no "more" line (each checked by hand) |
 
-## Gate results (so far)
+## Gate results (final: branch `c5b36047`, base `f8c22b1b`)
 
-- `cargo fmt --all --check`: clean.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean, on `20653571`.
-- `cargo test -p pull --lib upkeep`: 29 passed. `cargo test -p cli --lib upkeep_command`: 21 passed.
+The base was checked out as a worktree at `f8c22b1b` and the same commands run there.
+
+- `cargo fmt --all --check`: **clean**.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: **FAILED, the base's one error
+  only**: `crates/api/src/logs.rs:1606: this function has too many lines (104/100)`, the same error
+  on `f8c22b1b` (exit 101). `crates/api` is byte for byte the base's. `cargo clippy --workspace
+  --exclude api --all-targets --locked -- -D warnings`: clean.
 - `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
-  (the one test CONTEXT.md says to skip; it reads nothing R3-17 touches), on `3704e6bd`'s
-  predecessor `fb05b8b9`: every failure but one is the base's or root-only, and the one was R3-17's and
-  is fixed:
-  - **R3-17's, fixed in `2e19520b`**: `cli::sweep_wiring_tests::only_actual_computation_verbs_can_establish_sweep_status`
-    (the new `upkeep` verb was on neither side of its list); `upkeep` is now a store verb there and
-    the test passes.
-  - **Root-only** (this container runs as root, which ignores file modes): api 12 (`logs::tests` ×3,
-    `pullrun` ×3, `server::feeds_route` ×1, `server::tests` ×5), cli 3
+  (the one test CONTEXT.md says to skip; it reads nothing R3-17 touches), on `73a06089` (the merge):
+  **9,233 passed, 32 failed**. One was R3-17's and is fixed; none of the other 31 is R3-17's:
+  - **R3-17's, fixed in `c5b36047`**: `pull` `no_scheduler_delete::every_declared_module_that_exists_is_listed`
+    (R4-06's, arrived with the merge: `pull::upkeep` was not in `LISTED`). It now passes, 5 of 5.
+  - **The base's, 5**: `api` `server::head_deadline_body_tests::{a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole,
+    a_chunked_body_reaches_a_slow_reader_whole, a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole,
+    slow_readers_at_the_cap_are_served_whole_and_the_next_waits, pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is}`
+    (AH-02's). They fail alone, as root and as `nobody`, and **the same five fail on `f8c22b1b`**
+    (`cargo test -p api --lib -- server::head_deadline_body_tests::` there: 7 passed, 5 failed).
+  - **Root-only, 25** (this container runs as root, which ignores file modes): api 12 (`logs::tests`
+    ×3, `pullrun` ×3, `server::feeds_route` ×1, `server::tests` ×5), cli 3
     (`scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger`,
     `watchdog_command::tests` ×2), pull 3 (`gdfl_import::tests` ×2, `gdfl_tickstore::tests` ×1),
-    store 4 (`settings::tests` ×3, `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`),
-    telemetry 4 (`sink::tests`). **Every one passes when the same test binary is run as `nobody`**
-    (`runuser -u nobody -- <binary> --exact <names>`: 12, 3, 3, 4 and 4 passed).
-  - **The base's**: `store::cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not`
-    — nine `feat/db-fix` commits cited by other packages' rows of `docs/06-limits.md` are not on
-    `main`; none is R3-17's.
-- `cargo deny check`: **advisories FAILED; bans, licenses and sources ok** — exactly the base's five
-  (RUSTSEC-2026-0344 ruzstd 0.8.2; RUSTSEC-2026-0346/0347/0348/0349 rustls 0.23.45), on the base
-  (`f9cdb584`, a worktree) and on this branch alike. `Cargo.toml`, `Cargo.lock` and `deny.toml` are
-  unchanged by this branch (DENY-1 owns the bumps).
-- CI gates run locally with the repo's own tools: gate 27 (invariant ids) and 27b (decision numbers)
-  OK. Gate 10 fails on the base and on this branch alike, on rows that are not R3-17's (R3-01's web
-  rows at lines 7365–7408, GI-08's missing test); every UK row resolves. Gate 11 fails on the base
-  and on this branch with the same 106 refusals; none is in an R3-17 file.
+    store 3 (`settings::tests`), telemetry 4 (`sink::tests`). **Every one passes when the same test
+    binary is run as `nobody`** (`runuser -u nobody -- <binary> --exact <names>`: 12, 3, 3, 3 and 4
+    passed).
+  - **This container's filesystem, 1**: `store` `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+    asserts that a file created after an unlink has a new inode number; this host's ext4 hands the
+    freed number straight back, as root and as `nobody`. With `TMPDIR` on tmpfs it passes (3 of 3).
+    `crates/store` is untouched by this branch.
+  - `store::cited_commits` is green now (BASE-CITED). This branch adds no commit hash to
+    `docs/06-limits.md`.
+- `cargo deny check`: **advisories ok, bans ok, licenses ok, sources ok**, on the branch and on
+  `f8c22b1b` alike: DENY-1 landed the bumps. `Cargo.toml`, `Cargo.lock` and `deny.toml` are the base's
+  (`git diff origin/feat/db-fix -- Cargo.toml Cargo.lock deny.toml` is empty).
+- Coverage: 100% of changed lines and branch sides (above). Mutation: no surviving mutant (above).
+  Both were measured on `07dfa8a6`; since then R3-17's production lines changed only in the
+  `D-4997` → `D-5831` doc comments.
+- CI gates run locally with the repo's own tools, on the merged tree: **gate 10** (with the web-test
+  list, as `ci.yml` runs it) **OK**; **gate 10b OK**; **gate 27 OK**; **gate 27b OK** (1,508
+  headings, D-5831 heads one entry); **gate 30** (store steps) **OK**. **Gate 11 fails on the base and
+  on this branch alike**: 238 refused lines in the same files with the same counts, only line numbers
+  shifted by the lines R3-17 adds above them; none is in an R3-17 file.
+
+### What this session deleted
+
+The task says delete nothing; this session did, to recover a full disk (this host's writable
+allowance ran out mid-mutation run, killing both runs). Everything removed was scratch this session
+had made itself, and none of it is tracked, a store or a branch:
+
+- the 18 synthetic store copies made for the throughput measurement (`bench/run-*` in the session's
+  scratch directory, about 5.7 GiB; the measured rates are in this report);
+- the session's scratch build directory (`tgt-quick`), and later its `incremental/` cache;
+- `target/release`, the release `cli` built for that measurement;
+- four stale `cargo-mutants` copies under `/tmp` left by the mutation runs this session stopped.
 
 ## NEEDS THE MAC
 
@@ -247,3 +285,12 @@ Each survivor of the full pass, fixed and checked by hand (the test fails under 
 5. **DB-027 on the real store**: `cli upkeep run rekey gdfl --underlying NIFTY` on a private copy
    first, then the store on the operator's yes; check `/db`'s strike list for the 2020-06-25 NIFTY
    expiry no longer shows 19,12,500 / 19,12,700 / 19,13,000 CE.
+6. **The workspace tests as the operator, not root** (this container runs as root on ext4, so 25 tests
+   fail here for file modes and one for inode reuse):
+   ```
+   git fetch origin cloud/db-R3-17-20261017 && git checkout cloud/db-R3-17-20261017
+   cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store
+   ```
+   Expected failures: only the base's (`api` `server::head_deadline_body_tests` ×5, if they fail on
+   the Mac as here, and the base's `clippy` error in `crates/api/src/logs.rs`, which is clippy's, not a
+   test).
