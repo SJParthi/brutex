@@ -146,6 +146,7 @@ The fresh pass on `20653571` found one more, and it is fixed:
 |---|---|---|
 | `tail_of`'s `from > 0` → `from < 0` (a cut tail read as uncut) | a cut-off first piece never parsed as a line in any test | `a_line_the_tail_cuts_is_never_read_as_one`: the cut lands on a reason that spells `item 999 …`; the next run id must be 6, not 1000 (checked by hand: 1000 under the mutant) |
 | `Lacks::of`'s `\|` → `^` (a kind named twice toggled off) | no test named a kind twice | `a_sidecar_name_held_by_anything_is_not_lacking`: `Lacks::of([SortIndex, SortIndex])` lacks `SortIndex` (checked by hand: fails under the mutant) |
+| `Scope::holds`'s `month >= from` → `<` (and, found by reading, `month <= to` → `>`) | the span tests counted months, and March and April hold two each | `the_walk_lists_every_month_and_what_it_lacks`: the April and March scopes name their months (checked by hand: both mutants fail it) |
 
 The pass on the final code is still running for both crates.
 

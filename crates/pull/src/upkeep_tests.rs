@@ -1415,17 +1415,34 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
         to: Some(ym(2019, 4)),
         ..Scope::default()
     };
+    // Named, not counted: March holds two months as well.
     assert_eq!(
-        months(&root.0, Vendor::Gdfl, &april).unwrap().months.len(),
-        2
+        months(&root.0, Vendor::Gdfl, &april)
+            .unwrap()
+            .months
+            .into_iter()
+            .map(|month| month.key)
+            .collect::<Vec<_>>(),
+        [
+            "bars/gdfl/NSE/INDEX/NIFTY/1min/2019-04.bin",
+            "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-04.bin"
+        ]
     );
     let march = Scope {
         to: Some(ym(2019, 3)),
         ..Scope::default()
     };
     assert_eq!(
-        months(&root.0, Vendor::Gdfl, &march).unwrap().months.len(),
-        2
+        months(&root.0, Vendor::Gdfl, &march)
+            .unwrap()
+            .months
+            .into_iter()
+            .map(|month| month.key)
+            .collect::<Vec<_>>(),
+        [
+            "bars/gdfl/NSE/FNO/NIFTY/2019-03-28-1150000-CE/1s/2019-03.bin",
+            "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"
+        ]
     );
     // A symbol the scope does not name, and a contract under a symbol that
     // holds only spot rungs: nothing.
