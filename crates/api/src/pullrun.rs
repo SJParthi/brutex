@@ -10687,6 +10687,90 @@ mod cloud_walk_tests {
         ));
         assert_eq!(read.sure.len(), 1, "{:?}", read.sure);
         assert!(read.doubted.is_empty());
+
+        // OPENED AT THE SCAN'S FIRST RECORD: read in the scan, so its close
+        // would be too, and no unread index can hold it. Sure. Kills `<`
+        // turned to `<=` at `run.ordinal < span.scan_first`
+        // (pullrun.rs:2411).
+        let first = guessed_of(guessed_answer(
+            &[pairing_at(900, vec![880, 870])],
+            Some(run_at(200)),
+            Vec::new(),
+            &[],
+            unread,
+            span(200),
+        ));
+        assert_eq!(
+            first.sure.iter().map(|run| run.ordinal).collect::<Vec<_>>(),
+            [200],
+            "{:?}",
+            first.doubted
+        );
+        assert!(first.doubted.is_empty(), "{:?}", first.doubted);
+    }
+
+    /// Another run left open at `ordinal`, its failure count whole or not.
+    fn also(ordinal: u64, failures_whole: bool) -> AlsoOpen {
+        AlsoOpen {
+            ordinal,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "kite".to_owned(),
+            scope: Scope::Spot,
+            ask: None,
+            window: None,
+            failures: 2,
+            failures_whole,
+            doubt: None,
+        }
+    }
+
+    /// **Every other run a reading carries is judged by its own place
+    /// against the scan.** Three runs are carried: one opened before the
+    /// scan's first record, one at it, one inside the scan. A failure count
+    /// is whole only for a run whose opening record the scan read AND whose
+    /// count was whole. A close that may lie before the scan is a doubt only
+    /// for a run opened before it, and only when the index could not be
+    /// read. Kills, in `decorate`, `&&` turned to `||` in the carried run's
+    /// `failures_whole` (pullrun.rs:2370), and `&&` turned to `||` and `<`
+    /// turned to `<=` in its unread-close doubt (pullrun.rs:2373).
+    #[test]
+    fn every_other_run_a_reading_carries_is_judged_by_its_own_place() {
+        let carrying = || Interrupted {
+            also_open: vec![also(5, true), also(200, false), also(250, true)],
+            ..run_at(300)
+        };
+        let judged = |run: &Interrupted| {
+            run.also_open
+                .iter()
+                .map(|other| (other.ordinal, other.failures_whole, other.doubt))
+                .collect::<Vec<_>>()
+        };
+
+        let mut read = carrying();
+        decorate(&mut read, &[], None, span(200));
+        assert_eq!(
+            judged(&read),
+            [(5, false, None), (200, false, None), (250, true, None)],
+            "with the index read, nothing is doubted"
+        );
+
+        let mut unread = carrying();
+        decorate(
+            &mut unread,
+            &[],
+            Some("the index would not open".to_owned()),
+            span(200),
+        );
+        assert_eq!(
+            judged(&unread),
+            [
+                (5, false, Some(CLOSE_UNREAD)),
+                (200, false, None),
+                (250, true, None)
+            ],
+            "with the index unread, only the run opened before the scan is doubted"
+        );
     }
 
     /// **A counted pairing is a fact only where nothing unread could move
