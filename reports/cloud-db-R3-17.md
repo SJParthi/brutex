@@ -155,12 +155,16 @@ unviable, the 4 missed above. A pass on the final code over the four functions t
 production line of `upkeep.rs` changed after `20653571` is in `month_named`, which that pass covers.
 **No surviving mutant in `pull`.**
 
-**`cli`:** running on the final code, with the test filter narrowed to the modules whose tests reach
-R3-17's lines (`upkeep_command:: srt_builder:: tix_rebuilder:: msum_builder:: census_recount::
-gdfl_rekey:: store_write:: tests::a_known_command_with_the_wrong_arity_is_not_called_unknown
-tests::every_command`). `sweep_wiring_tests::` (114 s a run) is left out: its R3-17 line is the
-`upkeep` row of a test table, which has no mutant. Survivors so far, each fixed and checked by hand
-(the test fails under the mutant):
+**`cli`, final:** the full pass on `63b66b07` tested all 179 mutants in 47 minutes: 149 caught, 20
+unviable, 8 missed and 2 timeouts, the ten in the table below. The test filter is narrowed to the
+modules whose tests reach R3-17's lines (`upkeep_command:: srt_builder:: tix_rebuilder::
+msum_builder:: census_recount:: gdfl_rekey:: store_write::
+tests::a_known_command_with_the_wrong_arity_is_not_called_unknown tests::every_command`).
+`sweep_wiring_tests::` (114 s a run) is left out: its R3-17 line is the `upkeep` row of a test
+table, which has no mutant. A pass on the final code over the five functions the fixes touched
+(`--re ' in (prefix|flags|spans|render_run|plan)$'`, every production line changed after
+`63b66b07` among them): **71 mutants, 70 caught, 1 unviable.** **No surviving mutant in `cli`.**
+Each survivor of the full pass, fixed and checked by hand (the test fails under the mutant):
 
 | Mutant (`crates/cli/src/upkeep_command.rs`) | Why it lived | Fixed by |
 |---|---|---|
