@@ -2510,4 +2510,45 @@ mod cloud_mutant_tests {
         // are not counted.
         assert_eq!(owed_buckets(full, 0, 0, 930 * width, 15 * width), 25);
     }
+
+    /// A bucket's IST day and that day's midnight in UTC micros, and an
+    /// overflow at either end of the i64 line named by the bucket's start,
+    /// never wrapped into another day.
+    #[test]
+    fn a_buckets_ist_day_is_checked_at_both_ends_of_the_line() {
+        // 1970-01-01 00:00 UTC is 05:30 IST on day 0, whose midnight is
+        // 18:30 UTC the evening before.
+        assert_eq!(super::ist_day_of(0), Ok((0, -19_800_000_000)));
+        assert_eq!(
+            super::ist_day_of(86_400_000_000 - 19_800_000_000),
+            Ok((1, 86_400_000_000 - 19_800_000_000))
+        );
+        for start in [i64::MAX, i64::MIN] {
+            assert_eq!(
+                super::ist_day_of(start),
+                Err(super::FoldError::AnchorOverflow { ts_micros: start })
+            );
+        }
+    }
+
+    /// A day the session type cannot hold is refused by the conversion's
+    /// own words when the calendar calls it a regular session: before the
+    /// epoch, and past the last year a `Day` holds.
+    #[test]
+    fn a_regular_session_on_a_day_no_day_can_name_is_refused() {
+        let regular = DayKind::Open(Session::full());
+        for day in [-1, 3_000_000] {
+            let why = super::minute_session(day, regular, crate::vendor::Venue::NseIndex, None)
+                .unwrap_err();
+            assert!(!why.is_empty());
+            assert!(
+                !why.contains("session hours"),
+                "refused for the day, not its hours: {why}"
+            );
+        }
+        // The premise: a day inside the record is answered.
+        assert!(
+            super::minute_session(19_000, regular, crate::vendor::Venue::NseIndex, None).is_ok()
+        );
+    }
 }

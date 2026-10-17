@@ -2226,4 +2226,102 @@ mod cloud_mutant_tests {
         assert!(why.ends_with("exceeds 4194304 compressed bytes"), "{why}");
         server.join().unwrap();
     }
+
+    /// One invented eligible share: a master `decode` accepts.
+    const ONE_SHARE: &[u8] =
+        b"FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n1363,HINDALCO,EQ,INE038A01020,1\n";
+
+    /// A cache root whose name a regular file holds cannot become a
+    /// directory: the lock refuses by the root's name and the file is left
+    /// as it was.
+    #[test]
+    fn a_cache_root_that_cannot_be_a_directory_refuses_by_name() {
+        let base = scratch("CloudCashRootFile");
+        let root = base.join("Cache");
+        fs::write(&root, b"x").unwrap();
+        let why = open_lock(&root, Day::new(2026, 8, 3).unwrap()).unwrap_err();
+        assert!(
+            why.starts_with(&format!(
+                "cannot create cash-session cache {}: ",
+                root.display()
+            )),
+            "{why}"
+        );
+        assert_eq!(fs::read(&root).unwrap(), b"x");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A lock file that exists and cannot be opened for writing refuses
+    /// the lock by the lock's own name, run where permission bits bind
+    /// (D-0995).
+    #[test]
+    fn a_lock_that_cannot_be_reopened_for_writing_refuses_by_name() {
+        crate::support::where_permission_binds(
+            "cash_session_cache::cloud_mutant_tests::a_lock_that_cannot_be_reopened_for_writing_refuses_by_name",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("CloudCashLockMode");
+                let day = Day::new(2026, 8, 3).unwrap();
+                drop(open_lock(&root, day).unwrap());
+                let lock = lock_path(&root, day);
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o400)).unwrap();
+                let why = open_lock(&root, day).unwrap_err();
+                assert!(
+                    why.starts_with(&format!("cannot open cache lock {}: ", lock.display())),
+                    "{why}"
+                );
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
+
+    /// A cache directory that can be written but not opened (mode 0o300)
+    /// still publishes the day, payload and receipt, and then refuses
+    /// naming the directory sync that did not happen: the evidence stays,
+    /// its crash durability is UNVERIFIED. Run where permission bits bind
+    /// (D-0995).
+    #[test]
+    fn a_cache_directory_that_cannot_be_synced_names_the_unsynced_publication() {
+        crate::support::where_permission_binds(
+            "cash_session_cache::cloud_mutant_tests::a_cache_directory_that_cannot_be_synced_names_the_unsynced_publication",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("CloudCashNoSync");
+                let day = Day::new(2026, 8, 3).unwrap();
+                let bytes = gz(ONE_SHARE);
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
+                let why = install_and_read(&root, day, &bytes).unwrap_err();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+                assert!(
+                    why.starts_with(&format!(
+                        "cache for {day} is visible but directory sync failed: "
+                    )) && why.ends_with("; crash durability UNVERIFIED"),
+                    "{why}"
+                );
+                let (payload, receipt_path) = paths(&root, day);
+                assert_eq!(fs::read(&payload).unwrap(), bytes);
+                assert_eq!(
+                    fs::read(&receipt_path).unwrap(),
+                    receipt(day, &bytes).as_bytes()
+                );
+                fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
+
+    /// A server that hangs up without answering is refused naming the URL;
+    /// one that hangs up inside the body it declared is refused naming the
+    /// body. Neither is read as an answer.
+    #[test]
+    fn a_hang_up_before_the_head_or_inside_the_body_is_refused_by_name() {
+        let (url, server) = serve(Vec::new());
+        let why = fetch(url.clone()).unwrap_err();
+        assert!(why.starts_with(&format!("{url}: ")), "{why}");
+        server.join().unwrap();
+        let (url, server) = serve(sized("200 OK", 10, b"abc"));
+        let why = fetch(url.clone()).unwrap_err();
+        assert!(why.starts_with(&format!("{url} body: ")), "{why}");
+        server.join().unwrap();
+    }
 }

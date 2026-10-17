@@ -469,4 +469,38 @@ mod cloud_mutant_tests {
         assert_eq!(prints[0].rows, u32::MAX);
         assert_eq!(prints.len(), 1);
     }
+
+    /// A directory where the month's sidecar belongs is refused by the
+    /// sidecar's own name, and nothing is written inside it. Invented share.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_directory_at_the_sidecar_name_is_refused_by_name() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarDir");
+        let key = super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+            .unwrap();
+        let day = super::Day::new(2026, 8, 4).unwrap();
+        let sidecar = super::path(&root, &key, day).unwrap();
+        std::fs::create_dir_all(&sidecar).unwrap();
+        let print = Print {
+            sod: 55_687,
+            price: 140_150,
+            quantity: 400,
+            rows: 1,
+            line: 3,
+        };
+        let why = match super::append(&root, &key, day, &[print]) {
+            Err(super::CmRefusal::AuctionSidecar { why }) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            why.starts_with(&format!("{}: ", sidecar.display())),
+            "{why}"
+        );
+        assert!(std::fs::read_dir(&sidecar).unwrap().next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

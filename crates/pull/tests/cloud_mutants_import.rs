@@ -1142,6 +1142,10 @@ mod cm_scope_and_auction {
             scope.member_of(CmKind::Stocks, &stem),
             Some(format!("NSE-CASH-{name}"))
         );
+        // One byte past the capacity is no symbol: no slot and no member.
+        let longer = format!("{name}W.NSE");
+        assert_eq!(scope.extra_slot(CmKind::Stocks, &longer), None);
+        assert_eq!(scope.member_of(CmKind::Stocks, &longer), None);
     }
 
     /// A swept index's stem is its own member under either scope, named by
@@ -1598,6 +1602,45 @@ mod cm_extremes {
             file.auction.iter().map(|p| p.sod).collect::<Vec<_>>(),
             [55_687]
         );
+        std::fs::remove_dir_all(masters).unwrap();
+    }
+
+    /// An eligible share's zero-book print after the continuous close and
+    /// BEFORE the match band (15:20) is diverted as a print but never decides
+    /// the band's price: the band holds the one price of 15:28:07 and the
+    /// booked 15:30 row at it, so that row is taken as the auction's too and
+    /// nothing is left unattributed. Read as a band price, 1399.00 would make
+    /// the band two prices and keep the booked row a row.
+    #[test]
+    fn a_zero_book_print_before_the_match_band_never_prices_the_band() {
+        let d = day(2026, 8, 4);
+        let date = "04/08/2026";
+        let stem = "RELIANCE.NSE";
+        let rows = [
+            row(stem, date, "15:00:00", "1400.00", "1399.95", "1400.05", 9),
+            row(stem, date, "15:20:00", "1399.00", "0", "0", 300),
+            row(stem, date, "15:28:07", "1401.50", "0", "0", 400),
+            row(stem, date, "15:30:00", "1401.50", "1401.45", "1401.55", 5),
+            row(stem, date, "15:40:00", "1401.50", "1401.45", "1401.55", 1),
+        ];
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{}\r\n", rows.join("\r\n"));
+        let masters = eligible_masters("CmBeforeBand", d);
+        let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
+        let scope = Arc::new(CmScope::swept().with_masters(masters.clone()));
+        let archive = stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]).with_scope(scope);
+        let file = read_day(&archive, &key, d).unwrap().unwrap().file;
+        assert_eq!(
+            file.rows.iter().map(|r| r.sod).collect::<Vec<_>>(),
+            [54_000, 56_400]
+        );
+        assert_eq!(
+            file.auction
+                .iter()
+                .map(|p| (p.sod, p.price))
+                .collect::<Vec<_>>(),
+            [(55_200, 139_900), (55_687, 140_150), (55_800, 140_150)]
+        );
+        assert_eq!(file.auction_band_unattributed, 0);
         std::fs::remove_dir_all(masters).unwrap();
     }
 

@@ -2181,4 +2181,40 @@ mod cloud_mutant_tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// A pipe at the ledger's name opens at once (`O_NONBLOCK`) and is
+    /// refused by the handle's own status, by name: nothing is appended
+    /// and the append never waits for a reader. `mkfifo` is the external
+    /// program, run from a test only.
+    #[test]
+    fn a_pipe_at_the_ledger_name_is_refused_and_never_waited_on() {
+        let root = crate::gdfl_fixtures::scratch("CloudLedgerPipe");
+        let audit = root.join("audit");
+        std::fs::create_dir_all(&audit).unwrap();
+        let pipe = audit.join("zerodha.gaps");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo made {}", pipe.display());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = root.clone();
+        std::thread::spawn(move || {
+            let vendor = brutex_core::vendor::Vendor::Zerodha;
+            let _gone_when_the_test_ended =
+                tx.send(append_ledger(&at, vendor, &["gap A".to_owned()]));
+        });
+        let why = rx
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .expect("refused at once, never waited on")
+            .unwrap_err();
+        assert_eq!(
+            why,
+            format!(
+                "{}: not a regular file, so no line is appended to it",
+                pipe.display()
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

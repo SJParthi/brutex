@@ -1619,6 +1619,21 @@ mod cloud_mutant_tests {
         );
     }
 
+    /// A header longer than the stated size is refused before any column is
+    /// read, though the rows fit; a header of exactly the size goes on to
+    /// its columns. The size test's second half, which the row count alone
+    /// never reaches.
+    #[test]
+    fn a_header_longer_than_the_size_refuses_before_any_column_is_read() {
+        let broken = body(b"ABCDE", 1, &[(7, 0, 0, b"")]);
+        assert_eq!(columnar(&broken, 1, 4).unwrap_err(), bad(PAST_SIZE));
+        assert_eq!(
+            columnar(&broken, 1, 5).unwrap_err(),
+            bad(COLUMNAR),
+            "the premise"
+        );
+    }
+
     /// Exactly as many rows as the stated size is admitted: four empty
     /// fields rebuild to four terminators, four bytes. Kills the size test's
     /// `>` read as `>=`.
