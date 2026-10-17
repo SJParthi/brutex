@@ -162,6 +162,27 @@ the two old equivalents `333:35` and `347:22`, nothing else. Every catch is
 a behaviour test (`emit_sites::every_emit_site_in_this_crate_reaches_a_file`
 32, the request-audit tests the rest); none is a timing test.
 
+### The code `feat/db-fix` moved during the pass
+
+Run `moved`: every mutant on a line `git diff f9cdb584 HEAD` changes in
+`gdfl_cm_auction.rs`, `gdfl_tickstore.rs` and `gdfl_nfo.rs` after the merge
+(92 mutants: 85, 4 and 3; the same 92 by name as the diff `f9cdb584
+297996d9` lists on `feat/db-fix` itself), same flags, two test threads.
+Baseline 62 s build, 204 s test, every test passing as the unprivileged user.
+
+The run filled the session's disk allowance at mutant 91 (each job copies
+the tree and builds its own target). Four outcomes it reported were the full
+disk, not the mutant, and are discarded: three "unviable" were build
+failures writing the incremental cache (`234:21` `+` → `-` and `*` in
+`take`, `242:5` `record_crc` → 0), and one "caught" (`233:5` `take` →
+`[1; N]`) was `alerts::tests::the_older_walk_names_every_record_it_cannot_read`
+failing on `ENOSPC`. No other log of this or any earlier run holds a disk
+error. Build outputs this session made were removed to free space (the
+first coverage build, the workspace-test target, test scratch directories);
+nothing tracked.
+
+MOVED_RESULT
+
 ### Equivalent mutants (18, missed by construction)
 
 Re-confirmed missed under Gate 18's flags (run `survivors1`). Line numbers
