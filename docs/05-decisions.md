@@ -70887,6 +70887,112 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
 
+### D-4997 — The `.auc` closing-auction sidecar gains format version 2, checksummed per record and bound to the ordinal; `/sources/day.json` says what the sidecar can prove, names an auction print also stored as a second and an eligible day's seconds in the auction band, and labels a restart-carried volume (AG-04; store-3, bars-1, stocks-2) — 2026-10-16
+
+**Context** (AG-04, assurance findings store-3, bars-1 and stocks-2, each
+confirmed by two skeptics on 14 October 2026). store-3: the `.auc` sidecar of
+D-3320 item 3 carried no checksum. Its header, its length and each record's
+reserved field were checked, but a flipped bit in a price, a quantity, a row
+count, or a time that stayed inside the day was served silently by
+`/sources/day.json`; a time flipped out of the day made the print vanish from
+its day, because the reader filtered records by the day's bounds; and a new
+file's directory was never synced. On 14 October the store held 227 sidecars
+and 1,213 records; for 793 of them the sidecar is the store's only GDFL copy.
+bars-1: definition-2 months 2026-08 and 2026-09 hold the closing-auction print
+as an ordinary one-second bar until restated (D-3320 item 4, D-4878 item 10,
+CMP-07). The skeptics measured 8,790 eligible share-days, 7,471 with a second
+in `[15:16, 15:30)` and 6,489 by D-3320's own row test, plus 420 records that
+are both a sidecar print and a bar. Nothing said so. stocks-2: after a session
+restart the vendor's first print carries the earlier session's quantity. On
+2020-03-23 the excess equals the pre-restart volume exactly for 188 of 275
+shares, and the first post-reopen print is at least that volume for all 275.
+Nothing swept reads GDFL one-second volume today, so the harm is a silently
+wrong, unlabelled stored record.
+
+**Decision.**
+
+1. **Format version 2** (`pull::gdfl_cm::auction`, byte authority until
+   WP-99 transcribes it into `docs/02-store-format.md` §8). Same magic and
+   record length. The header's last four bytes are the CRC-32C of its first
+   twelve. Each record's last four bytes are the CRC-32C of its first 28
+   followed by its zero-based ordinal as a little-endian `u64`, as `.prv`
+   binds its records. A flipped bit anywhere, two records swapped, or one
+   moved is refused by name with the ordinal. Every NEW file is version 2.
+2. **Version 1 is read, labelled, and never rewritten.** `parse` reads both
+   versions and returns the version. A version-1 file is served with
+   `checked: false` and the reason. An append to it writes version-1 records,
+   so no file mixes versions and no held byte changes. A month remade as a new
+   generation (WP-80) is a new file, so version 2.
+3. **Every refusal is named.** Both versions refuse a truncated header, a
+   foreign magic or version, a torn tail (named by the torn record's
+   ordinal), a version-1 reserved field, a version-2 checksum, and a record
+   whose IST day goes back (out of order, by ordinal). An empty file is
+   refused as an interrupted first append. Nothing is repaired: that is IA-16's
+   job (FM-099).
+4. **An append is all or nothing, and a new file's directory is synced.** The
+   append writes the day's records in one call under the exclusive lock. On a
+   failed write (a full disk) it cuts the file back to the length it had when
+   the lock was taken, then names the failure. Readers take the shared lock
+   (`auction::read`), so no reader sees the cut bytes. When an append creates
+   the file, the file's directory, and the parent of every directory it made,
+   are synced. Because readers now lock, the writer waits up to `LOCK_WAIT`
+   (2 s) for one instead of refusing at once.
+5. **`/sources/day.json` says what the sidecar can prove.** The auction fact
+   carries `version`, `checked` and `unchecked_why`. A refused or unreadable
+   sidecar is `unreadable`, with the `file`, the `ordinal` and why. A record
+   whose IST day is outside the file's month is named in `outside_month` on
+   every day, never filtered away. Each print carries its `ordinal`, whether
+   it is `in_band`, and whether it is `also_in_bars`. The day key now holds
+   the sidecar's stamp, so a sidecar filed after a day was cached is read.
+6. **A print also inside a one-second bar is named** (bars-1, visibility
+   half). The test is: a stored second at the print's second, with close equal
+   to the price and volume equal to the quantity. The fact `also_in_bars`
+   gives `count` and `seconds`, the day carries the flag
+   `auction_print_also_in_bars`, and the page summary counts the days.
+7. **An eligible day's seconds inside the auction band are counted.** The band
+   is `[CAS_CONTINUOUS_CLOSE, AUCTION_BAND_END)` = `[15:15:00, 15:35:00)`,
+   WP-12f's constants. `auction_band_bars` gives `count`, `volume` and
+   `eligibility` on every share day from 2026-08-03. Eligibility is read per
+   request through `pull::cash_session_cache::read_local_lifecycle` and
+   `pull::calendar::phases_of`, never kept in the day memo, and only a
+   successful load is kept (AF-03's rule). It is one of `eligible`,
+   `not_eligible`, `no_closing_auction` (a session the calendar gives no
+   auction phase, such as the 2026-11-08 Muhurat) or `unverified`, which
+   carries the reason and is never read as flag 0. A day with no stored
+   second inside the band is `not_read`: there is nothing to label, so no
+   master is loaded for it (the load is `docs/06-limits.md` L-AG04-02). On an
+   eligible day with a count, the day carries the flag `auction_band_bars`. A
+   definition-2 month still holds the print there.
+8. **Restart-carried volume is a label** (stocks-2). The calendar names a
+   restart on a day with a halt (`pull::calendar::halt_on`, the cash segment's
+   resume second) or a special session of two windows
+   (`pull::calendar::special_session`, the second window's open). On such a
+   CASH day the stored seconds give the pre-restart volume P and the first
+   post-reopen second's volume F. When F >= P > 0, `restart.carry` is true,
+   the day carries the flag `restart_carry`, and its volume carries
+   `gdfl_sum_verified: false` and an `UNVERIFIED` reason. The field is never
+   `true`: nothing in the route verifies GDFL's sum (that reconciliation is
+   IA-6p's), so a day with no carry says `null`, and a restart day of a
+   derivative, whose carry is not measured, says so in `gdfl_sum_why` (an
+   index has no volume and keeps saying `index_no_volume`). There is no day
+   list in `sources.rs`.
+9. **Label, never subtract.** No sum, close or bar changes. Subtracting the
+   carry is UNVERIFIED: it needs a charter source for the vendor's restatement
+   and an operator decision, and this repository has neither. Whether a
+   derivative's first post-restart print carries the same way is unmeasured,
+   so the label is given for the cash segment only (`docs/06-limits.md`
+   L-AG04-08).
+
+**Not in this decision** (`docs/06-limits.md` L-AG04-03 to L-AG04-07):
+restating the definition-2 months (WP-12f, then WP-80's remake), the S7
+auction-band check (IA-6), the `.auc` repair and torn-tail rule (IA-16,
+FM-099), and the per-share-day volume reconciliation against Zerodha and the
+bhavcopy (IA-6p, FM-078, FM-286).
+
+**Proof.** `pull::gdfl_cm::auction::v2_tests` (sixteen tests) and
+`api::sources::day_truth_tests` (thirteen tests). `docs/04-invariants.md`
+AG04-01 to AG04-14.
+
 ### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling, and the tick-store writer names the encoder it links — 2026-10-16, extended 2026-10-17
 
 **Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
