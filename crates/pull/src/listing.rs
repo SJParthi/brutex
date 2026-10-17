@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use crate::cash_auction::{LifecycleDate, LifecycleQuality};
+use crate::cash_auction::{LifecycleDate, LifecycleIssue};
 use crate::cash_session_cache::{VerifiedLifecycleMaster, read_local_lifecycle};
 use crate::session::Day;
 
@@ -265,7 +265,17 @@ impl Listing {
             };
             let metadata = evidence.identity.metadata;
             let master_day = evidence.provenance.master_day;
-            if evidence.assessment.quality == LifecycleQuality::Contradictory {
+            // A CHRONOLOGY THE MASTER CONTRADICTS states neither end. A cell two
+            // rows disagree on is that cell's own `Conflicting`, below.
+            let contradicted = evidence.assessment.issues.iter().any(|issue| {
+                matches!(
+                    issue,
+                    LifecycleIssue::RemovalBeforeListing
+                        | LifecycleIssue::ReadmissionBeforeListing
+                        | LifecycleIssue::ReadmissionNotAfterRemoval
+                )
+            });
+            if contradicted {
                 return Some(Span {
                     first: Err(Unknown::Contradictory),
                     last: None,
@@ -311,8 +321,9 @@ fn listing_day(field: &LifecycleDate, master_day: Day) -> Result<Day, Unknown> {
 
 /// The removal day, when the master states one on or before its own day and
 /// no readmission. A readmission on or before the removal is a contradiction
-/// [`Listing::span`] has already answered, so any readmission here came after
-/// it: the history did not end.
+/// [`Listing::span`] has already answered, so any readmission date here came
+/// after it: the history did not end. A removal two rows disagree on states no
+/// day, so it ends nothing.
 fn removal_day(
     removal: &LifecycleDate,
     readmission: &LifecycleDate,
