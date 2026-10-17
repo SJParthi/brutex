@@ -4818,6 +4818,11 @@ struct RefusalTail {
     /// ring read afresh is read a slice at a time from here, by a request
     /// and by the follower, never whole inside one request.
     queue: std::collections::VecDeque<Queued>,
+    /// The current file's length when a read reached its end and what was
+    /// left unparsed was a line not yet whole (a writer mid-line, or one
+    /// killed there): not behind, so never "not read yet" for ever. A file
+    /// that grows past it is read on.
+    fragment_end: u64,
 }
 
 /// One rolled ring file still to be read: where, how long it was when the
@@ -4834,6 +4839,11 @@ struct Queued {
 /// the follower reads the rest ([`follow_refusals`]). Twice the widest line
 /// at least, so every slice makes progress.
 pub const REQUEST_SLICE_BYTES: u64 = 256 * 1024;
+
+/// A read of a ring this wide with no newline in it holds no line the writer
+/// could have made (its widest is under [`telemetry::MAX_LINE_BYTES`]): it is
+/// counted as malformed and stepped over, never waited on for ever.
+const NO_LINE_BYTES: usize = 2 * telemetry::MAX_LINE_BYTES;
 
 /// The most ring bytes the follower reads of one directory per turn, and how
 /// long it waits between turns: one directory's lock is held for one slice at
@@ -5285,7 +5295,7 @@ fn refusals_in(dir: &std::path::Path, slice: u64) -> (std::sync::Arc<DirRefusals
         *tail = RefusalTail::queue_ring(&rolled, current, now);
     }
     let left = tail.read_queued(slice);
-    if len > tail.parsed && left > 0 {
+    if len > tail.parsed && left > 0 && len != tail.fragment_end {
         tail.read_appended(current, len, left);
     }
     let behind = tail.behind(len);
@@ -5395,6 +5405,7 @@ impl RefusalTail {
             read_error: None,
             built: std::sync::Arc::default(),
             queue: std::collections::VecDeque::new(),
+            fragment_end: 0,
         }
     }
 
@@ -5432,16 +5443,20 @@ impl RefusalTail {
             read_error: None,
             built: std::sync::Arc::new(built),
             queue,
+            fragment_end: 0,
         }
     }
 
     /// Bytes of the ring not read yet, the current file being `len` long.
     fn behind(&self, len: u64) -> u64 {
-        self.queue
-            .iter()
-            .fold(len.saturating_sub(self.parsed), |sum, file| {
-                sum.saturating_add(file.len.saturating_sub(file.at))
-            })
+        let current = if len == self.fragment_end {
+            0
+        } else {
+            len.saturating_sub(self.parsed)
+        };
+        self.queue.iter().fold(current, |sum, file| {
+            sum.saturating_add(file.len.saturating_sub(file.at))
+        })
     }
 
     /// Reads the queued rolled files, oldest first, at most `slice` bytes in
@@ -5488,6 +5503,20 @@ impl RefusalTail {
             } else {
                 match bytes.iter().rposition(|&byte| byte == b'\n') {
                     Some(last) => last.saturating_add(1),
+                    // WIDER THAN ANY LINE AND NO NEWLINE: not a line the
+                    // writer could have made. Counted and stepped over,
+                    // or the ring would never be read past it.
+                    None if bytes.len() >= NO_LINE_BYTES => {
+                        built.malformed = built.malformed.saturating_add(1);
+                        file.at = file
+                            .at
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        built.bytes = built
+                            .bytes
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        left = left.saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        continue;
+                    }
                     None => break,
                 }
             };
@@ -5540,6 +5569,15 @@ impl RefusalTail {
             return;
         }
         let mut used = 0usize;
+        // WIDER THAN ANY LINE AND NO NEWLINE: stepped over and counted, as
+        // [`Self::read_queued`] steps over one.
+        if bytes.len() >= NO_LINE_BYTES && !bytes.contains(&b'\n') {
+            built.malformed = built.malformed.saturating_add(1);
+            used = bytes.len();
+            self.parsed = self
+                .parsed
+                .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
+        }
         if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
             for line in bytes
                 .get(..last)
@@ -5563,6 +5601,15 @@ impl RefusalTail {
         built.bytes = built
             .bytes
             .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
+        // A READ THAT REACHED THE END and left bytes unparsed left a line not
+        // yet whole: the file is read, not behind, until it grows.
+        let reached_end = len.saturating_sub(self.parsed)
+            <= u64::try_from(bytes.len().saturating_sub(used)).unwrap_or(u64::MAX);
+        self.fragment_end = if reached_end && self.parsed < len {
+            len
+        } else {
+            0
+        };
     }
 }
 
@@ -9329,5 +9376,91 @@ mod r3_24_follower_start_tests {
         let behind = super::behind_words_with(7, Some(&words));
         assert!(behind.starts_with("7 byte(s) of its ring are not read yet, and the follower"));
         assert!(super::behind_words_with(7, None).contains("off every request"));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_ring_edge_tests {
+    //! R3-24: a ring the follower reads a slice at a time never stalls on
+    //! bytes that hold no line, and never reads a line not yet whole as one
+    //! still to read.
+
+    use super::{REQUEST_SLICE_BYTES, refusals_in};
+
+    /// **A REGION WIDER THAN ANY LINE, WITH NO NEWLINE, IS STEPPED OVER AND
+    /// COUNTED**, in a rolled file and in the current one, so the ring is read
+    /// to its end and the refusal after it is found; and the current file's
+    /// last bytes, a line not yet whole, leave the directory read, not
+    /// behind.
+    #[test]
+    fn a_region_with_no_line_in_it_never_stalls_the_ring() {
+        let root = crate::scratch::path("logs-r324e-noline");
+        let _ignored = std::fs::remove_dir_all(&root);
+        // ONE REAL REFUSAL LINE, as the sink writes it.
+        let source = root.join("source");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&source).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(
+                &telemetry::Event::error("gdfl.import", "refused")
+                    .with("kind", "options")
+                    .with("day", "2020-02-03"),
+            );
+        }
+        let line = std::fs::read(telemetry::current_path(&source)).expect("the line");
+        let dir = root.join("logs").join("cli");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let mut rolled = vec![b'x'; 600 * 1024];
+        rolled.push(b'\n');
+        rolled.extend_from_slice(&line);
+        std::fs::write(telemetry::rotated_path(&dir, 1), &rolled).expect("a rolled file");
+        let mut current = vec![b'y'; 300 * 1024];
+        current.push(b'\n');
+        current.extend_from_slice(&line);
+        current.extend_from_slice(b"{\"seq\":9,\"a line not yet wh");
+        std::fs::write(telemetry::current_path(&dir), &current).expect("the current file");
+        let mut calls = 0;
+        let held = loop {
+            let (held, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+            calls += 1;
+            assert!(calls < 20, "the ring stalled: {behind} byte(s) behind");
+            if behind == 0 {
+                break held;
+            }
+        };
+        assert_eq!(held.of("options", "2020-02-03").len(), 2, "{held:?}");
+        assert!(
+            held.malformed >= 2,
+            "each wide region counted: {}",
+            held.malformed
+        );
+        // ASKED AGAIN with nothing new: the fragment is not read again.
+        let (again, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+        assert_eq!(behind, 0);
+        assert!(std::sync::Arc::ptr_eq(&held, &again));
+        // THE LINE COMPLETED: read on.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current file");
+            file.write_all(b"ole\"}\n").expect("append");
+        }
+        let (grown, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+        assert_eq!(behind, 0);
+        assert!(
+            !std::sync::Arc::ptr_eq(&held, &grown),
+            "the grown file was read"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
