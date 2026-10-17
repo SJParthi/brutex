@@ -2559,6 +2559,9 @@ impl BarFile {
         // past it by name rather than truncating. The bytes read and the CRC
         // sealed are unchanged; only where they are held moved.
         let mut room = [0u8; MAX_BLOCK_LEN];
+        // A REFUSED WRITE OF THE SIDECAR NAMES THE SIDECAR. It named the bar
+        // file, which the host had not refused (cloud pass 2026-10-17).
+        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
             // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
@@ -2586,14 +2589,8 @@ impl BarFile {
             // FOUR BYTES AT `block * 4`. The sidecar is addressed by arithmetic
             // exactly as the bar file is — one checksum per block, in order, so
             // a reader seeks rather than scans.
-            write_fully(
-                crc,
-                &self.bars_path,
-                block.saturating_mul(4),
-                &sum.to_le_bytes(),
-            )?;
+            write_fully(crc, crc_path, block.saturating_mul(4), &sum.to_le_bytes())?;
         }
-        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
         barrier_in(self.batch.as_ref(), crc, crc_path, &self.bars_path)
     }
 
@@ -5630,12 +5627,23 @@ trait Positional {
     fn get(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 }
 
+/// Under `cfg(test)` each call can be refused by the same per-thread
+/// injector as [`fault`], BEFORE the host is asked, so a refused write
+/// writes nothing.
 impl Positional for File {
     fn put(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(refusal) = tests::host_fault_on(Action::Write, self) {
+            return Err(refusal);
+        }
         FileExt::write_at(self, buf, offset)
     }
 
     fn get(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(refusal) = tests::host_fault_on(Action::Read, self) {
+            return Err(refusal);
+        }
         FileExt::read_at(self, buf, offset)
     }
 }
@@ -5919,7 +5927,16 @@ fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
 }
 
 /// Lifts an [`io::Result`] into this module's errors.
+///
+/// Under `cfg(test)` a refusal armed for `action` on this thread replaces
+/// the host's answer, once, AFTER the call has run: the shape of
+/// [`sync_hooked`], for the host calls whose refusal no test can stage on a
+/// file this process has just opened, measured or written (a flush, an
+/// `fstat`, a read of a file the writer holds). The injector adds a branch
+/// under test, so the lift that ships is the lift every test runs.
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
+    #[cfg(test)]
+    let result = tests::host_fault(action, path).map_or(result, Err);
     match result {
         Ok(value) => Ok(value),
         Err(refusal) => Err(classify(path, action, &refusal)),
@@ -5971,6 +5988,83 @@ mod tests {
         /// Whether the next threshold write on this thread is refused
         /// (D-4933).
         static THRESHOLD_FAULT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// A host refusal armed on this thread for [`super::fault`] and for the
+    /// reads and writes of a `File`.
+    struct HostFault {
+        /// The action it refuses.
+        action: Action,
+        /// The one file it refuses on: a path for [`super::fault`], and the
+        /// file at that path, by device and inode, for an open handle.
+        path: PathBuf,
+        /// How many matching calls pass first.
+        skip: u32,
+        /// The kind it answers with.
+        kind: ErrorKind,
+    }
+
+    thread_local! {
+        static HOST_FAULT: RefCell<Option<HostFault>> = const { RefCell::new(None) };
+    }
+
+    /// Arms the host refusal: `skip` calls of `action` on `path` pass on
+    /// this thread, the next one is refused with `kind`, once.
+    pub(super) fn arm_host_fault(action: Action, path: &Path, skip: u32, kind: ErrorKind) {
+        HOST_FAULT.with(|armed| {
+            *armed.borrow_mut() = Some(HostFault {
+                action,
+                path: path.to_path_buf(),
+                skip,
+                kind,
+            });
+        });
+    }
+
+    /// Disarms the host refusal, fired or not.
+    pub(super) fn disarm_host_fault() {
+        HOST_FAULT.with(|armed| *armed.borrow_mut() = None);
+    }
+
+    /// Whether the armed host refusal is still waiting to fire.
+    pub(super) fn host_fault_armed() -> bool {
+        HOST_FAULT.with(|armed| armed.borrow().is_some())
+    }
+
+    /// The armed host refusal, when it fires now for `action` on `path`.
+    pub(super) fn host_fault(action: Action, path: &Path) -> Option<io::Error> {
+        fires(action, |armed| armed == path)
+    }
+
+    /// The armed host refusal, when it fires now for `action` on the open
+    /// `file`: the armed path names it when both are the same device and
+    /// inode, so a handle is matched without its name.
+    pub(super) fn host_fault_on(action: Action, file: &std::fs::File) -> Option<io::Error> {
+        use std::os::unix::fs::MetadataExt as _;
+        fires(action, |armed| {
+            match (std::fs::metadata(armed), file.metadata()) {
+                (Ok(want), Ok(this)) => want.dev() == this.dev() && want.ino() == this.ino(),
+                _ => false,
+            }
+        })
+    }
+
+    /// The one decision of both: fires once, after `skip` matching calls.
+    fn fires(action: Action, names: impl Fn(&Path) -> bool) -> Option<io::Error> {
+        HOST_FAULT.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            let fault = armed.as_mut()?;
+            if fault.action != action || !names(&fault.path) {
+                return None;
+            }
+            if fault.skip > 0 {
+                fault.skip -= 1;
+                return None;
+            }
+            let kind = fault.kind;
+            *armed = None;
+            Some(io::Error::new(kind, "refused by the file test seam"))
+        })
     }
 
     /// Arms the threshold write's fault for the next one on this thread.
@@ -9869,6 +9963,10 @@ mod sidecar_checksum_tests;
 #[cfg(test)]
 #[path = "small_month_tests.rs"]
 mod small_month_tests;
+
+#[cfg(test)]
+#[path = "file_fault_tests.rs"]
+mod file_fault_tests;
 
 /// Mutation-survivor tests for this module's private items (cloud session
 /// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
