@@ -8969,6 +8969,9 @@ mod cloud_mutant_tests {
             undecodable: "record 1 (bad)".to_owned(),
             newer_may_be_open: false,
             older_unread: Some("no index".to_owned()),
+            open_count: 1,
+            also_open: Vec::new(),
+            runs_unread: 0,
         };
         let mut out = String::new();
         run.json(&mut out);
