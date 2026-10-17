@@ -2049,9 +2049,8 @@ fn a_provenance_image_that_packs_past_its_length_is_sealed_and_read() {
 /// (D-3326: the earlier bar keeps a tie). Four one-second bars: the first two
 /// equal, the last two equal and more extreme in every column but the
 /// smallest close. Each extreme must name the first bar of its tie: the
-/// smallest close bar 0, every other one bar 2. (The function's doc comment
-/// cites `sealed::the_head_extremes_are_the_sort_runs` as the test holding
-/// the rule; no test of that name exists in this tree.)
+/// smallest close bar 0, every other one bar 2. That the sort index keeps
+/// the same rule is `the_head_extremes_are_the_sort_runs`, below.
 #[test]
 fn a_sealed_heads_extremes_name_the_earliest_bar_of_each_tie() {
     use store::format::{Bar, OI_NULL};
@@ -3256,4 +3255,62 @@ fn each_commits_line_says_what_it_left_the_time_index_as() {
         ]
     );
     let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A SEALED HEAD'S EXTREMES ARE THE SORT INDEX'S: THE SAME BARS GIVE THE
+/// SAME SIX VALUES AND THE SAME EARLIEST STAMP FOR EACH.**
+///
+/// The test `sealed::fold_extremes`' doc comment names. The sealed month
+/// repeats the sort index's private fold (D-3326: the earlier bar keeps a
+/// tie) rather than calling it, so the two can drift apart only through this
+/// test. The bars are a seeded walk with every price rounded to 25 paisa
+/// and volumes of a few values, so each column has many ties, at three
+/// sizes: one bar, a block, and several blocks. Each set is sealed as a
+/// month and built as one sort run, and the head's extremes must equal the
+/// run's, field for field.
+#[test]
+fn the_head_extremes_are_the_sort_runs() {
+    use store::sealed::{SealedMonth, build};
+    use store::sort_index::{HEADER_LEN, Shape, build_run, walk};
+    let path = sealed_path();
+    let shape = Shape::of(store::path::YearMonth::new(2024, 6).unwrap(), 1, 4_242);
+    for n in [1_i64, 256, 1_000] {
+        let bars: Vec<store::format::Bar> = sealed_bars(n)
+            .into_iter()
+            .map(|mut bar| {
+                let round = |v: i64| v - v.rem_euclid(25);
+                bar.open = round(bar.open);
+                bar.close = round(bar.close);
+                bar.high = round(bar.high).max(bar.open).max(bar.close);
+                bar.low = round(bar.low).min(bar.open).min(bar.close);
+                bar.volume = bar.volume.rem_euclid(4);
+                bar
+            })
+            .collect();
+        let mut header = empty_month_header();
+        header.n_valid = u64::try_from(n).unwrap();
+        header.first_ts_micros = bars[0].ts_micros;
+        header.last_ts_micros = bars[bars.len() - 1].ts_micros;
+        let built = build(path, &header, &bars, None, None).unwrap();
+        let month = SealedMonth::open(built.to_bytes(), path, 4_242).unwrap();
+        let mut file = shape.encode().to_vec();
+        assert_eq!(file.len(), usize::try_from(HEADER_LEN).unwrap());
+        file.extend(build_run(&shape, 0, &bars).unwrap());
+        let walked = walk(
+            |at, buf| {
+                let at = usize::try_from(at).unwrap();
+                buf.copy_from_slice(&file[at..at + buf.len()]);
+                Ok(())
+            },
+            u64::try_from(file.len()).unwrap(),
+            &shape,
+        )
+        .unwrap();
+        assert_eq!(walked.runs.len(), 1, "{n} bars: one run");
+        assert_eq!(
+            month.head().extremes,
+            walked.runs[0].extremes,
+            "{n} bars: the head's extremes are the run's"
+        );
+    }
 }

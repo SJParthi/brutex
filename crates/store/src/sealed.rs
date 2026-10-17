@@ -1544,8 +1544,8 @@ fn widen(range: &mut Option<(i64, i64)>, value: i64) {
 
 /// Folds one bar into the extremes; the earlier bar keeps a tie. The rule
 /// `sort_index`'s run header keeps (D-3326), repeated because that fold is
-/// private to the sort index; `sealed::the_head_extremes_are_the_sort_runs`
-/// holds the two equal.
+/// private to the sort index; `the_head_extremes_are_the_sort_runs`
+/// (`crates/store/tests/cloud_mutants_store.rs`) holds the two equal.
 fn fold_extremes(held: &mut Option<RunExtremes>, bar: &Bar) {
     let at = |v: i64| Extreme {
         v,
