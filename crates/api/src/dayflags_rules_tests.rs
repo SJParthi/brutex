@@ -1115,6 +1115,17 @@ fn a_frozen_index_run_is_flagged_on_both_feeds() {
     let short = super::super::tests::index_flags("2022-03-08", "NIFTY", &[])
         .replace('\n', " flat_max_s=120 flat_max_at=11:00:00\n");
     write(&super::super::quality_path(&root), &(line + &short));
+    // A few unchanged seconds held: GDFL's day is still judged by its ledger,
+    // never by a scan of its seconds.
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        (0..5)
+            .map(|s| bar("2022-03-07", 9 * 3_600 + 57 * 60 + s, [1_600_000; 4], 0))
+            .collect(),
+    );
     let gdfl = answer(
         &root,
         &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2022-03-07&to=2022-03-08"),
@@ -2245,4 +2256,89 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
     assert_eq!(scan_month(&file, identity, &shorter, quiet), 1);
     assert_eq!(scan_month(&file, identity, &shorter, quiet), 0);
     assert_eq!(scan_month(&file, identity, &spans[..1], quiet), 1);
+}
+
+/// **A SCALE SWITCH AGAINST THE MONTH JUST BEFORE THE PAGE** (DB-031): the
+/// previous close is that month's LAST bar, so a re-scale at the month's turn
+/// is `impossible_jump` on the page's first day.
+#[test]
+fn a_scale_switch_is_found_against_the_month_just_before() {
+    let root = root_of("r3-13-near-month");
+    let key = "NSE-INDEX-NIFTYGSCOMPSITE";
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::DAY_1,
+        vec![
+            bar("2017-12-28", 0, [250_000; 4], 0),
+            bar("2017-12-29", 0, [3_000_000; 4], 0),
+            bar("2018-01-01", 0, [250_000; 4], 0),
+        ],
+    );
+    let inst = super::super::instrument_of(key, "").expect("a key");
+    let (before, none_before) = super::super::bar_before(&root, &inst, day("2018-01-01"));
+    assert_eq!(
+        before.map(|bar| bar.close),
+        Some(3_000_000),
+        "the month's last bar"
+    );
+    assert!(!none_before);
+    let got = answer(
+        &root,
+        &ask(&format!(
+            "feed=zerodha&instrument={key}&from=2018-01-01&to=2018-01-01"
+        )),
+    );
+    assert_eq!(
+        record(&got, "2018-01-01")["junk"],
+        serde_json::json!(["impossible_jump"]),
+        "{got:#}"
+    );
+}
+
+/// **A MONTH FILE THAT HOLDS NO BAR IS STILL A HELD MONTH** for the series'
+/// start, as it was before R3-13: `bar_before` finds no bar in it and does
+/// not call the history empty, so the series' start probes back, finds the
+/// file, and no day of the page is called the series' front.
+#[test]
+fn an_empty_month_before_the_page_is_not_an_empty_history() {
+    let root = root_of("r3-13-empty-month");
+    let key = "NSE-INDEX-NIFTYGSCOMPSITE";
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::DAY_1,
+        vec![bar("2018-01-01", 0, [250_000; 4], 0)],
+    );
+    let inst = super::super::instrument_of(key, "").expect("a key");
+    let month = YearMonth::new(2017, 12).expect("a month");
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: inst.exchange.as_str(),
+        segment: inst.segment.as_str(),
+        symbol: &inst.symbol,
+        contract: inst.contract,
+        timeframe: Timeframe::DAY_1,
+        month,
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    let empty =
+        store::file::BarFile::open_or_create(&root, path, super::super::symbol_id(&inst.symbol))
+            .expect("an empty month file");
+    assert_eq!(empty.records(), 0);
+    drop(empty);
+    assert_eq!(
+        super::super::bar_before(&root, &inst, day("2018-01-01")),
+        (None, false)
+    );
+    let got = answer(
+        &root,
+        &ask(&format!(
+            "feed=zerodha&instrument={key}&from=2018-01-01&to=2018-01-01"
+        )),
+    );
+    assert_eq!(got["zerodha_1day_start"]["state"], "held_before", "{got:#}");
 }

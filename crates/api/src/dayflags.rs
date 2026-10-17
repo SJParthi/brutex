@@ -3986,12 +3986,26 @@ impl PageHeld {
     ) -> Self {
         let (inst, own) = (&asked.instrument, finest(asked.feed));
         let peer_feed = peer_of(asked.feed);
-        let reads = Reads {
-            fills,
-            // AN INDEX'S MINUTES ARE SCANNED for a frozen run and the day's
-            // extremes (DB-B20); its seconds are the day ledger's measure.
-            scan: inst.segment == Segment::Index && own == Timeframe::MINUTE_1,
-            first: asked.feed == Vendor::Gdfl && inst.segment == Segment::Cash,
+        // ONE ARM A PAGE THAT READS PAST ITS COUNTS: a Zerodha index's minutes
+        // are scanned for a frozen run and the day's extremes (DB-B20; GDFL's
+        // seconds are the day ledger's measure), and a GDFL share's first
+        // second is read for its sampled day (CMP-06). No other page shows
+        // either, so no other page reads them.
+        let reads = match (asked.feed, inst.segment) {
+            (Vendor::Zerodha, Segment::Index) => Reads {
+                fills,
+                scan: true,
+                first: false,
+            },
+            (Vendor::Gdfl, Segment::Cash) => Reads {
+                fills,
+                scan: false,
+                first: true,
+            },
+            _ => Reads {
+                fills,
+                ..Reads::default()
+            },
         };
         let none = Reads::default();
         let mut peer = counts(root, peer_feed, inst, finest(peer_feed), days, none);
@@ -3999,8 +4013,14 @@ impl PageHeld {
         // A RENAMED SHARE'S PEER IS LOOKED UP UNDER ITS OTHER NAMES (R3-13
         // goal 2, DB-031), only where its own name holds no month: one more
         // open a month per name the symbol table gives it.
-        if inst.segment == Segment::Cash && peer.per_day.contains(&Held::NoFile) {
-            for name in rules::other_names(&inst.symbol) {
+        if peer.per_day.contains(&Held::NoFile) {
+            // A SHARE'S NAMES ONLY: the lineage table renames shares.
+            let names = if inst.segment == Segment::Cash {
+                rules::other_names(&inst.symbol)
+            } else {
+                Vec::new()
+            };
+            for name in names {
                 let named = Instrument {
                     symbol: name.to_owned(),
                     ..inst.clone()
