@@ -2799,12 +2799,17 @@ impl Journal {
             .ok_or_else(|| format!("{}: not a cover this build wrote", cover.display()))
     }
 
-    /// The journal file's identity and whole records now.
-    fn measured(&self) -> Result<((u64, u64), u64), String> {
+    /// The journal file's identity now: its device and inode.
+    ///
+    /// It also answered the file's whole records, which its one caller
+    /// discarded (`read_index` is handed the count it trusts); a value no
+    /// reader takes is a computation no test can tell from any other, so it
+    /// is not computed.
+    fn identity(&self) -> Result<(u64, u64), String> {
         use std::os::unix::fs::MetadataExt as _;
         let meta =
             std::fs::metadata(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
-        Ok(((meta.dev(), meta.ino()), meta.len() / RECORD_LEN_U64))
+        Ok((meta.dev(), meta.ino()))
     }
 
     /// What the index says about the journal's first `total` records, read
@@ -2817,7 +2822,7 @@ impl Journal {
     /// shorter than its index), or a file that is there and cannot be read,
     /// each by name. A reader then walks the journal and says so.
     pub(crate) fn read_index(&self, total: u64) -> Result<Indexed, String> {
-        let (identity, _) = self.measured()?;
+        let identity = self.identity()?;
         let dir = self.index_dir();
         let covered = Self::cover_of(&dir, identity)?;
         if covered > total {
