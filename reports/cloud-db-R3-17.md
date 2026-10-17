@@ -91,8 +91,7 @@ builder is NOT MEASURED (it needs timing inside the store's doors, not R3-17's f
 
 ## Left
 
-- Mutation testing of the changed lines on the final code (running), then this report's final gate
-  lines and a last workspace test run.
+- The last workspace test run on the final code (running), then this report's final gate lines.
 
 ### Coverage: 100% of the changed lines and branches
 
@@ -100,15 +99,16 @@ Measured with `cargo-llvm-cov` 0.9.1 `--branch` on a nightly toolchain (branch c
 nightly; the repository's pinned 1.97.1 is untouched), opt-level 0, over the tests that drive the
 changed code (`pull --lib upkeep::`; `cli --lib upkeep_command:: srt_builder:: tix_rebuilder::
 msum_builder:: census_recount:: gdfl_rekey:: store_write:: sweep_wiring_tests::
-tests::a_known_command_with_the_wrong_arity_is_not_called_unknown`), on `57c6ff9b`. Every line this
+tests::a_known_command_with_the_wrong_arity_is_not_called_unknown`), on the final code (`07dfa8a6`;
+first measured on `57c6ff9b`, re-measured after the mutation fixes). Every line this
 branch adds or changes in a production file (the diff against `origin/feat/db-fix`) that the
 compiler counts, and every branch on those lines, each side unioned across the two builds of `pull`
 (its own test binary and the one inside `cli`'s):
 
 | File | Changed lines counted | Not run | Branches | A side never taken |
 |---|---|---|---|---|
-| `crates/pull/src/upkeep.rs` | 822 | 0 | 64 | 0 |
-| `crates/cli/src/upkeep_command.rs` | 556 | 0 | 47 | 0 |
+| `crates/pull/src/upkeep.rs` | 826 | 0 | 61 | 0 |
+| `crates/cli/src/upkeep_command.rs` | 558 | 0 | 47 | 0 |
 | `crates/cli/src/census_recount.rs` | 25 | 0 | 1 | 0 |
 | `crates/cli/src/gdfl_rekey.rs` | 60 | 0 | 8 | 0 |
 | `crates/cli/src/srt_builder.rs` | 18 | 0 | 0 | 0 |
