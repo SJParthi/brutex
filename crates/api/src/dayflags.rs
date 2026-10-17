@@ -145,6 +145,19 @@ const IST_OFFSET_BACK_S: u64 = pull::session::IST_OFFSET_SECS.unsigned_abs();
 /// Microseconds in a day.
 const DAY_MICROS: i64 = 86_400 * 1_000_000;
 
+/// An object of `fields`, each value MOVED in. `json!` serializes every
+/// `Value` it is handed into a fresh one — a deep copy — so an answer built
+/// of nested objects with it copied each of them once per level: measured on
+/// R3-13's synthetic store, 43% of `/dayflags.json`'s instructions.
+fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
 /// The content type every answer here carries.
 fn json_header() -> [(axum::http::HeaderName, &'static str); 1] {
     [(
@@ -551,20 +564,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
     let zerodha_spot = asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno;
     let pull = zerodha_spot.then(|| read_pull_journal(root, inst.symbol.as_str()));
     let pull_ok = pull.as_ref().and_then(|p| p.as_ref().ok());
-    // WHERE THE SERIES STARTS decides whether a day can be a refused front
-    // (D-3315). A `1day` bar before the page, which `day_bars` already found,
-    // settles it with no probe; otherwise `series_start` probes months.
-    let start = zerodha_spot.then(|| {
-        let held_before = day_bars
-            .as_ref()
-            .and_then(|bars| bars.prev_close.first().copied().flatten())
-            .is_some();
-        match days.first() {
-            _ if held_before => SeriesStart::HeldBefore,
-            Some(first) => series_start(root, inst, *first),
-            None => SeriesStart::NoneHeld,
-        }
-    });
+    let start = zerodha_spot.then(|| start_of_page(root, inst, &days, day_bars.as_ref()));
     let ctx = Context {
         asked,
         rung: counted,
@@ -600,7 +600,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
         &gaps,
     ));
     notes.extend(pull_notes(pull.as_ref()));
-    json!({
+    let mut envelope = json!({
         "feed": asked.feed.as_str(),
         "instrument": inst.key(),
         "kind": inst.kind().as_str(),
@@ -624,13 +624,44 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
             "day_bar": day_bars.as_ref().map(|_| Timeframe::DAY_1.as_str()),
         },
         "zerodha_1day_start": start.map(SeriesStart::json),
-        "days": records,
-        "sources": sources_json(journal.as_ref(), quality.as_ref(), &gaps, pull.as_ref()),
-        "derive": derive_json(gaps.as_ref().ok(), inst, first, last),
-        "lineage": lineage_json(root, asked.feed, inst),
-        "rules": rules_json(),
-        "notes": notes,
-    })
+    });
+    // THE DAYS AND THE SOURCES ARE MOVED IN, NEVER COPIED (see [`object`]).
+    let sources = sources_json(journal.as_ref(), quality.as_ref(), &gaps, pull.as_ref());
+    if let Some(fields) = envelope.as_object_mut() {
+        for (key, value) in [
+            ("days", Value::Array(records)),
+            ("sources", sources),
+            ("derive", derive_json(gaps.as_ref().ok(), inst, first, last)),
+            ("lineage", lineage_json(root, asked.feed, inst)),
+            ("rules", rules_json()),
+            ("notes", Value::from(notes)),
+        ] {
+            let _was = fields.insert(key.to_owned(), value);
+        }
+    }
+    envelope
+}
+
+/// WHERE THE SERIES STARTS, which decides whether a day can be a refused front
+/// (D-3315). A `1day` bar before the page, which [`day_bars`] already found,
+/// settles it with no probe; a history `day_bars` already found empty is not
+/// probed back again, since its months cover every month [`series_start`]
+/// would look back at; otherwise `series_start` probes months.
+fn start_of_page(
+    root: &Path,
+    inst: &Instrument,
+    days: &[Day],
+    day_bars: Option<&DayBars>,
+) -> SeriesStart {
+    let held_before = day_bars
+        .and_then(|bars| bars.prev_close.first().copied().flatten())
+        .is_some();
+    let none_before = day_bars.is_some_and(|bars| bars.none_before);
+    match days.first() {
+        _ if held_before => SeriesStart::HeldBefore,
+        Some(first) => series_start(root, inst, *first, none_before),
+        None => SeriesStart::NoneHeld,
+    }
 }
 
 /// Each day's closing-auction flag and auction sidecar, oldest first, and the
@@ -3222,16 +3253,18 @@ impl SeriesStart {
 
 /// Where `inst`'s Zerodha `1day` series starts, seen from `page_first`'s
 /// month: at most [`FRONT_PROBE_MONTHS`] `metadata` calls back, as many
-/// forward, and one month opened for its first bar. Called only when a
-/// whole-window refusal covers a day of the page.
-fn series_start(root: &Path, inst: &Instrument, page_first: Day) -> SeriesStart {
+/// forward, and one month opened for its first bar. With `none_before`, the
+/// months back are already known empty ([`bar_before`] looked at more of
+/// them) and are not probed again.
+fn series_start(root: &Path, inst: &Instrument, page_first: Day, none_before: bool) -> SeriesStart {
     let Ok(month) = page_first.year_month() else {
         return SeriesStart::NoneHeld;
     };
     let held = |probe: &YearMonth| day_month_held(root, inst, *probe);
-    if (1..=FRONT_PROBE_MONTHS)
-        .map_while(|steps| step_month(month, steps, false))
-        .any(|probe| held(&probe))
+    if !none_before
+        && (1..=FRONT_PROBE_MONTHS)
+            .map_while(|steps| step_month(month, steps, false))
+            .any(|probe| held(&probe))
     {
         return SeriesStart::HeldBefore;
     }
@@ -3461,6 +3494,8 @@ fn counts(
             }
             Opened::File(file) => {
                 let mut lower: Option<u64> = None;
+                // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
+                let identity = reads.scan.then(|| rules::file_identity(&file)).flatten();
                 for day in month_days {
                     let start = ist_midnight_micros(*day);
                     let counted = lower
@@ -3475,7 +3510,7 @@ fn counts(
                             per_day.push(Held::Bars(held));
                             halted.push(halted_of(&file, (feed, inst, rung), *day, &mut notes));
                             let (fills, scan, first) = day_reads(
-                                &file,
+                                (&file, identity),
                                 (feed, inst, rung),
                                 (*day, lo, hi),
                                 reads,
@@ -3527,7 +3562,7 @@ fn counts(
 /// ([`rules::scan_day`]) and its first bar's stamp. A read that fails is
 /// named in `notes` and answered `None`: never a count the store did not give.
 fn day_reads(
-    file: &BarFile,
+    (file, identity): (&BarFile, Option<(u64, u64)>),
     (feed, inst, rung): (Vendor, &Instrument, Timeframe),
     (day, lo, hi): (Day, u64, u64),
     reads: Reads,
@@ -3557,7 +3592,7 @@ fn day_reads(
     let scan = (reads.scan && held > 0)
         .then(|| {
             let in_halt = |ts: i64| in_recorded_halt(inst.venue(), day, ts);
-            rules::scan_day(file, (lo, hi), in_halt)
+            rules::scan_day(file, identity, (lo, hi), in_halt)
                 .map_err(|why| said("the day could not be scanned", &why))
                 .ok()
                 .flatten()
@@ -3661,6 +3696,10 @@ struct DayBars {
     /// The previous held bar's close for each day: the last bar before it,
     /// in the page or, for the page's first bars, before the page.
     prev_close: Vec<Option<i64>>,
+    /// Whether [`bar_before`] found NO month of the series held in every month
+    /// it looked at before the page: [`series_start`] then skips its own probe
+    /// back, which covers fewer months.
+    none_before: bool,
     notes: Vec<String>,
 }
 
@@ -3692,43 +3731,60 @@ fn month_day_bars(file: &BarFile) -> Result<Vec<(Day, DayBar)>, String> {
     Ok(out)
 }
 
-/// The last `1day` bar before `day`, in the months before it, at most
-/// [`LOOKBACK_MONTHS`] opens back.
-fn bar_before(root: &Path, inst: &Instrument, day: Day) -> Option<DayBar> {
+/// The last `1day` bar before `day`, in the months before it: at most
+/// [`LOOKBACK_MONTHS`] opens back, then [`rules::held_month_before`]'s `stat`s
+/// and one open. Also whether NO month of the series is held in all those
+/// months, so [`series_start`] need not probe them again.
+fn bar_before(root: &Path, inst: &Instrument, day: Day) -> (Option<DayBar>, bool) {
     let mut probe = day;
+    let mut any_file = false;
     for _ in 0..LOOKBACK_MONTHS {
-        probe = Day::from_days(
-            probe
-                .days_from_epoch()
-                .checked_sub(u32::from(probe.day()))?,
-        )
-        .ok()?;
-        let month = probe.year_month().ok()?;
+        let Some(back) = probe
+            .days_from_epoch()
+            .checked_sub(u32::from(probe.day()))
+            .and_then(|days| Day::from_days(days).ok())
+        else {
+            return (None, false);
+        };
+        probe = back;
+        let Ok(month) = probe.year_month() else {
+            return (None, false);
+        };
         match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, month) {
             Opened::Absent => {}
-            Opened::Refused(_) => return None,
+            Opened::Refused(_) => return (None, false),
             Opened::File(file) => {
+                any_file = true;
                 let n = file.records();
                 if n == 0 {
                     continue;
                 }
-                return file.read_record(n - 1).ok().map(|bar| DayBar::of(&bar));
+                return (
+                    file.read_record(n - 1).ok().map(|bar| DayBar::of(&bar)),
+                    false,
+                );
             }
         }
     }
     // A SCALE SWITCH ACROSS A LONG HOLE (R3-13 goal 2, DB-031): the twelve
     // opens above found nothing, so the newest held month further back is
     // found by `stat`s alone ([`rules::held_month_before`]) and opened once.
-    let month = probe.year_month().ok()?;
-    let held = rules::held_month_before(month, |probe| day_month_held(root, inst, probe))?;
-    match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, held) {
+    let Ok(month) = probe.year_month() else {
+        return (None, false);
+    };
+    let Some(held) = rules::held_month_before(month, |probe| day_month_held(root, inst, probe))
+    else {
+        return (None, !any_file);
+    };
+    let bar = match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, held) {
         Opened::File(file) => file
             .records()
             .checked_sub(1)
             .and_then(|last| file.read_record(last).ok())
             .map(|bar| DayBar::of(&bar)),
         Opened::Absent | Opened::Refused(_) => None,
-    }
+    };
+    (bar, false)
 }
 
 /// The page's Zerodha `1day` bars, one month file read whole at a time.
@@ -3776,10 +3832,11 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
         }
         at = at.saturating_add(run);
     }
+    let mut none_before = false;
     if before_page.is_none()
         && let Some(first) = days.first()
     {
-        before_page = bar_before(root, inst, *first);
+        (before_page, none_before) = bar_before(root, inst, *first);
     }
     let mut prev = before_page.map(|bar| bar.close);
     let prev_close = per_day
@@ -3795,6 +3852,7 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
     DayBars {
         per_day,
         prev_close,
+        none_before,
         notes,
     }
 }
@@ -4241,7 +4299,13 @@ fn calendar_json_with(
             })
         })
         .collect();
-    (calendar, json!({ "halt": halt, "phases": bands }))
+    (
+        calendar,
+        object([
+            ("halt", halt.unwrap_or(Value::Null)),
+            ("phases", Value::Array(bands)),
+        ]),
+    )
 }
 
 /// The sentence of a `sampled` that is one, or `None`.
@@ -4583,33 +4647,40 @@ impl Context<'_> {
         }
         .phrases();
         let (held_json, finest_json, peer_json) = held_json(asked.feed, self.rung, held);
-        json!({
-            "feed": asked.feed.as_str(),
-            "instrument": inst.key(),
-            "day": day.to_string(),
-            "calendar": calendar,
-            "events": events,
-            "import": import,
-            "quality": quality,
-            "degraded": degraded,
-            "sampled": sampled,
-            "gaps": gap.map(GapLine::json),
-            "junk": junk,
-            "day_bar": day_bar,
-            "refused_front": front.refused,
-            "pull": front.json,
-            "held": held_json,
-            "finest": finest_json,
-            "auction_sidecar": sidecar,
-            "bar_definition": bar_definition,
-            "index": index,
-            "contract": self.expiry.map(|expiry| json!({
-                "expiry": expiry.to_string(),
-                "expired": expired,
-            })),
-            "peer": peer_json,
-            "says": says,
-        })
+        // MOVED IN, NEVER COPIED: `json!` serializes every `Value` it is given
+        // into a new one, a deep copy of each nested object a day (R3-13's
+        // measurement: 43% of an answer's instructions).
+        let or_null = |value: Option<Value>| value.unwrap_or(Value::Null);
+        object([
+            ("feed", Value::from(asked.feed.as_str())),
+            ("instrument", Value::from(inst.key())),
+            ("day", Value::from(day.to_string())),
+            ("calendar", calendar),
+            ("events", events),
+            ("import", or_null(import)),
+            ("quality", or_null(quality)),
+            ("degraded", Value::Array(degraded)),
+            ("sampled", sampled),
+            ("gaps", or_null(gap.map(GapLine::json))),
+            ("junk", or_null(junk.map(Value::from))),
+            ("day_bar", or_null(day_bar)),
+            ("refused_front", or_null(front.refused.map(Value::from))),
+            ("pull", or_null(front.json)),
+            ("held", held_json),
+            ("finest", or_null(finest_json)),
+            ("auction_sidecar", or_null(sidecar.map(Value::from))),
+            ("bar_definition", or_null(bar_definition)),
+            ("index", index),
+            (
+                "contract",
+                or_null(
+                    self.expiry
+                        .map(|expiry| json!({ "expiry": expiry.to_string(), "expired": expired })),
+                ),
+            ),
+            ("peer", peer_json),
+            ("says", Value::from(says)),
+        ])
     }
 
     /// THE BAR DEFINITION THAT BUILT THE DAY (R3-13 goal 3), and its phrase:

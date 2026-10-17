@@ -491,16 +491,18 @@ pub(super) struct DayScan {
     pub(super) longest: Option<(i64, u64)>,
 }
 
-/// Each CLOSED day's scan — a day the month holds a later bar after — by month
-/// file, the file's inode and the day's `[lo, hi)` rows. The store appends in
-/// time order, so a closed day's rows never change under the same file; a new
-/// generation is a new file and a new inode, read afresh. The day still
-/// being written is never kept, so a month that grows adds no entry: the memo
-/// holds at most one entry per closed index day the process has shown.
+/// Each day's scan by month file, the file's inode and the day's first row,
+/// with the day's end row it was read up to. The store appends in time order,
+/// so the rows `[lo, hi)` of a file never change: a day whose end row is the
+/// one kept is one probe, a day that grew since is read again and REPLACES its
+/// entry, and a new generation is a new inode, read afresh. So the memo holds
+/// at most one entry per (month file, day) the process has shown, however
+/// often a month being written grows.
 static SCANS: OnceLock<Mutex<ScanMemo>> = OnceLock::new();
 
-/// Scans by month file, inode and `[lo, hi)`.
-type ScanMemo = HashMap<(PathBuf, u64, u64, u64), DayScan>;
+/// Scans by the month file's device and inode and the day's first row:
+/// `(end row, scan)`. No path is hashed or allocated per day.
+type ScanMemo = HashMap<(u64, u64, u64), (u64, DayScan)>;
 
 /// Folds one day's one-minute bars, oldest first: the extremes, and the runs
 /// of consecutive minutes (no minute missing between them) each printing one
@@ -552,31 +554,43 @@ pub(super) fn fold_minutes(
     scan
 }
 
+/// A month file's device and inode, the scan memo's key: one `stat` per
+/// month a page opens, never per day. `None` where the host will not say.
+pub(super) fn file_identity(file: &store::file::BarFile) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(file.path())
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
 /// One day's scan of `file`'s rows `[lo, hi)`: at most [`MAX_SCAN_BARS`]
-/// record reads, `None` past that. A closed day is read once and kept
-/// ([`SCANS`]); the day still being written is read each time.
+/// record reads, `None` past that. Read once per (file, day, end row) and kept
+/// ([`SCANS`]) under the file's `identity` ([`file_identity`], one `stat` a
+/// month); a day that grew is read again, and with no identity nothing is kept.
 ///
 /// # Errors
 ///
 /// A record the store would not read, in its own words.
 pub(super) fn scan_day(
     file: &store::file::BarFile,
+    identity: Option<(u64, u64)>,
     (lo, hi): (u64, u64),
     in_halt: impl Fn(i64) -> bool,
 ) -> Result<Option<DayScan>, String> {
-    use std::os::unix::fs::MetadataExt as _;
     if hi.saturating_sub(lo) > MAX_SCAN_BARS {
         return Ok(None);
     }
-    let key = (hi < file.records())
-        .then(|| std::fs::metadata(file.path()).ok())
-        .flatten()
-        .map(|meta| (file.path().to_path_buf(), meta.ino(), lo, hi));
+    let key = identity.map(|(dev, ino)| (dev, ino, lo));
     let memo = SCANS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(key) = &key
-        && let Some(kept) = memo.lock().unwrap_or_else(PoisonError::into_inner).get(key)
+        && let Some((end, kept)) = memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .copied()
+        && end == hi
     {
-        return Ok(Some(*kept));
+        return Ok(Some(kept));
     }
     let bars = (lo..hi)
         .map(|at| file.read_record(at).map_err(|why| why.to_string()))
@@ -586,7 +600,7 @@ pub(super) fn scan_day(
         let _was = memo
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, scan);
+            .insert(key, (hi, scan));
     }
     Ok(Some(scan))
 }

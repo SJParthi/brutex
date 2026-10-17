@@ -1415,6 +1415,21 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
             cold.push(started.elapsed().as_micros());
         }
         let _ = timed(&root, 1);
+        for query in TIMED {
+            let asked = ask(query);
+            let one: Vec<u128> = (0..200)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    let _ = answer(&root, &asked);
+                    started.elapsed().as_micros()
+                })
+                .collect();
+            let page = spread(one);
+            eprintln!(
+                "R3-13 timing history={history}x warm page {query}: p50 {} us, p99 {} us, max {} us, n {}",
+                page.0, page.1, page.2, page.3
+            );
+        }
         let warm = spread(timed(&root, 200));
         warm_p50.push(warm.0);
         eprintln!(
@@ -1499,12 +1514,13 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// **A CLOSED DAY'S SCAN IS KEPT, THE DAY BEING WRITTEN IS NOT** (DB-B20's
-/// cost): the memo holds a day once a later bar follows it, by the file's
-/// inode, so a month that grows adds no entry and a day read before its last
-/// minute landed is read again with it.
+/// **A DAY'S SCAN IS KEPT ONCE, AND A DAY THAT GREW REPLACES ITS ENTRY**
+/// (DB-B20's cost): the memo holds one entry per (month file, inode, day),
+/// with the end row it was read up to, so a month being written adds no
+/// entry per append, and a day read before its last minute landed is read
+/// again with it.
 #[test]
-fn a_closed_days_scan_is_kept_and_the_open_day_is_read_again() {
+fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
     let root = root_of("r3-13-scan-memo");
     let key = "NSE-INDEX-NIFTY";
     let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
@@ -1535,29 +1551,36 @@ fn a_closed_days_scan_is_kept_and_the_open_day_is_read_again() {
         }
     };
     let file = open();
-    let kept = |lo: u64, hi: u64| {
-        SCANS.get().is_some_and(|memo| {
+    let id = file_identity(&file).expect("the host says");
+    // The entries of one day (by its first row), and the end row each holds.
+    let kept_of = |id: (u64, u64), lo: u64| -> Vec<u64> {
+        SCANS.get().map_or_else(Vec::new, |memo| {
             memo.lock()
                 .unwrap()
-                .keys()
-                .any(|k| k.0 == file.path() && (k.2, k.3) == (lo, hi))
+                .iter()
+                .filter(|(k, _)| (k.0, k.1, k.2) == (id.0, id.1, lo))
+                .map(|(_, (end, _))| *end)
+                .collect()
         })
     };
-    let closed = scan_day(&file, (0, 4), |_| false)
+    let kept = |lo: u64| kept_of(id, lo);
+    let closed = scan_day(&file, Some(id), (0, 4), |_| false)
         .expect("a scan")
         .expect("in bound");
     assert_eq!(closed.frozen_runs, 1);
-    assert!(kept(0, 4), "a closed day is kept");
-    // The open day — its month holds nothing after it — is read, not kept.
-    let open_day = scan_day(&file, (4, 6), |_| false)
+    assert_eq!(kept(0), vec![4], "a day is kept, with its end row");
+    let last = scan_day(&file, Some(id), (4, 6), |_| false)
         .expect("a scan")
         .expect("in bound");
-    assert_eq!(open_day.bars, 2);
-    assert!(!kept(4, 6), "the day being written is never kept");
+    assert_eq!(last.bars, 2);
+    assert_eq!(kept(4), vec![6], "the month's last day is kept too");
     // Past the bound, nothing is read and nothing is said.
-    assert_eq!(scan_day(&file, (0, MAX_SCAN_BARS + 1), |_| false), Ok(None));
+    assert_eq!(
+        scan_day(&file, Some(id), (0, MAX_SCAN_BARS + 1), |_| false),
+        Ok(None)
+    );
     // The day grows (the writer needs the month: the reader lets it go):
-    // read again, it carries the new minute.
+    // read again, it carries the new minute and REPLACES its one entry.
     drop(file);
     file_bars(
         &root,
@@ -1566,15 +1589,48 @@ fn a_closed_days_scan_is_kept_and_the_open_day_is_read_again() {
         Timeframe::MINUTE_1,
         vec![bar("2024-10-03", at(2), [600; 4], 0)],
     );
-    let grown = scan_day(&open(), (4, 7), |_| false)
+    let reopened = open();
+    let now = file_identity(&reopened).expect("the host says");
+    let grown = scan_day(&reopened, Some(now), (4, 7), |_| false)
         .expect("a scan")
         .expect("in bound");
     assert_eq!((grown.bars, grown.frozen_runs), (3, 1));
-    // The kept day answers from the memo, unchanged.
     assert_eq!(
-        scan_day(&open(), (0, 4), |_| false).expect("a scan"),
+        kept_of(now, 4),
+        vec![7],
+        "one entry for the day, never one per append"
+    );
+    // The kept day answers from the memo, unchanged; with no identity the
+    // host would give, the day is read and nothing is kept.
+    assert_eq!(
+        scan_day(&reopened, Some(now), (0, 4), |_| false).expect("a scan"),
         Some(closed)
     );
-    // Past the bound, nothing is read and nothing is said.
-    assert_eq!(scan_day(&file, (0, MAX_SCAN_BARS + 1), |_| false), Ok(None));
+    let before = SCANS.get().map_or(0, |memo| memo.lock().unwrap().len());
+    assert_eq!(
+        scan_day(&reopened, None, (1, 4), |_| false)
+            .expect("a scan")
+            .map(|s| s.bars),
+        Some(3)
+    );
+    assert_eq!(
+        SCANS.get().map_or(0, |memo| memo.lock().unwrap().len()),
+        before
+    );
+}
+
+/// The timing's pages, answered ten times each over the 1x store, and nothing
+/// timed: a target for a profiler (`valgrind --tool=callgrind`). IGNORED.
+#[test]
+#[ignore = "a profiler's target: run with --ignored under valgrind"]
+fn the_day_band_pages_for_a_profiler() {
+    let root = root_of("r3-13-profile");
+    timing_store(&root, 1);
+    for query in TIMED {
+        let asked = ask(query);
+        for _ in 0..10 {
+            let body = answer(&root, &asked);
+            assert_eq!(body["days"].as_array().map(Vec::len), Some(92));
+        }
+    }
 }
