@@ -4899,17 +4899,30 @@ fn sync_index(index: &File, path: &Path, batch: Option<&DurableBatch>) -> Result
 /// An append's durability barrier on `file` (the records, the checksum
 /// sidecar or the header slot of the month at `month`), or its deferral to
 /// `batch` while the batch is open. A failed barrier is remembered for
-/// `month` ([`barrier`]).
+/// `month` ([`barrier`]), and so is a deferral the batch refused: the file
+/// is then in no flush the batch will make, so the commit it was guarding
+/// is no more durable than one whose sync failed, and no later append may
+/// confirm it either (D-1907). It was returned unremembered, and the same
+/// process then reopened and appended past a commit its caller had been
+/// told failed (cloud pass 2026-10-17, D-6017).
 fn barrier_in(
     batch: Option<&DurableBatch>,
     file: &File,
     path: &Path,
     month: &Path,
 ) -> Result<(), StoreError> {
-    if let Some(batch) = batch
-        && batch.defer_file(file, path)?
-    {
-        return Ok(());
+    if let Some(batch) = batch {
+        match batch.defer_file(file, path) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(refusal) => {
+                FAILED_BARRIERS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(month.to_path_buf());
+                return Err(refusal);
+            }
+        }
     }
     barrier(file, month)
 }

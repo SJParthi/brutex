@@ -70987,7 +70987,7 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
 
-### D-6017 — The store's host refusals a disk cannot stage are driven by `#[cfg(test)]` seams; a look that catches a staging file mid-unlink is a free name; a refused checksum write names the sidecar — 2026-10-17
+### D-6017 — The store's host refusals a disk cannot stage are driven by `#[cfg(test)]` seams; a look that catches a staging file mid-unlink is a free name; a refused checksum write names the sidecar; a durable batch's refused barrier deferral is remembered as a failed barrier — 2026-10-17
 
 **Implemented by** the store mutation and coverage pass of 17 October 2026
 (`reports/cloud-mut-store-20261017.md`, branch `cloud/mut-store-20261017`),
@@ -71002,7 +71002,7 @@ pass left 34 mutants and about 110 production lines in `crates/store` and
 the mutants, and most of the lines, sit on arms that only a host refusal
 reaches, on a file the same function has just opened, measured or written,
 or only a race between two calls of one function. No test can stage those
-on a real disk. Two of the arms answered wrongly when they were driven:
+on a real disk. Three of the arms answered wrongly when they were driven:
 
 1. `store::staging::create` refused a file whose last name went between
    the host's lookup of the name and its read of the file's status as
@@ -71010,6 +71010,14 @@ on a real disk. Two of the arms answered wrongly when they were driven:
    to protect. The 16 October pass observed this under a real race.
 2. `BarFile::seal_committed` named the BAR file when the host refused the
    write of the checksum sidecar. The bar file had not been refused.
+3. **Inside a `DurableBatch`, a refused append barrier was forgotten.** A
+   plain writer remembers a failed barrier for the month, so no later
+   append in the process confirms the commit it guarded (D-1907). Under a
+   batch, `barrier_in` defers the flush instead, and when the deferral was
+   refused (the device's `fstat`) it returned the refusal without
+   remembering it. The same process then reopened the month and appended
+   past the refused commit: 1,100 bars the caller was told were refused
+   became the first 1,100 rows of a month confirmed at 1,101.
 
 **Decided.**
 
@@ -71044,6 +71052,12 @@ on a real disk. Two of the arms answered wrongly when they were driven:
 4. **`sort_index_writer::write_whole` loses its `n_valid == 0` guard.** Its
    only route (`keep_sort_index`) returns first for an empty month, so no
    input reached the guard. It now returns `()`.
+5. **A refused deferral is a failed barrier.** `barrier_in` remembers the
+   month when the batch refuses to defer its flush, exactly as `barrier`
+   remembers a failed sync, so the next append in the process is refused
+   `barrier_failed`. The deferral was refused, so the file is in no flush
+   the batch will make; the commit it guarded is no more durable than one
+   whose sync failed.
 
 **Rejected.**
 - *Restructuring production paths so a test could reach these arms from
@@ -71058,4 +71072,4 @@ Defensive re-borrows (`let Some(tix) = self.tix.as_ref() else`) after a
 caller has checked the same value. And `cfg` arms for targets that are not
 built here (`safe_open`'s and `file`'s unverified-flag arms).
 
-Invariants: `docs/04-invariants.md` CMS-01 to CMS-07.
+Invariants: `docs/04-invariants.md` CMS-01 to CMS-08.

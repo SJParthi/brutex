@@ -763,3 +763,122 @@ fn the_missing_directories_are_strictly_below_the_root() {
     );
     assert_eq!(super::missing_below(&root, &root), Vec::<PathBuf>::new());
 }
+
+/// **INSIDE A DURABLE BATCH, A REFUSED MEASURE OF A FILE THE BATCH DEFERS
+/// REFUSES THE STEP THAT DEFERRED IT, BY THAT FILE'S NAME, AND A REFUSED
+/// APPEND IS NEVER CONFIRMED AFTERWARDS.**
+///
+/// Covers the `?` on `DurableBatch::defer_file` in `initialise`, in
+/// `sync_index`, in the sort index's sync and in `barrier_in`: under
+/// `OncePerDevice` a deferred file is measured for its device first, and the
+/// host refusing that `fstat` of a file it has just opened is not
+/// stageable, so the file seam refuses it (`EACCES`). Every measure of the
+/// bar file, the checksum sidecar, the time index and the sort index that a
+/// first open and a 1,100-bar append inside one batch make is refused in
+/// turn, on a fresh store each time. Each answer is either the open's or the
+/// append's refusal, naming the file and `measuring`, or a commit (the sort
+/// index's step never refuses its caller, and some measures are of steps
+/// that route around them). After a refused append, this process opens the
+/// month again only to be refused `barrier_failed` (when the refusal was a
+/// barrier's: the header slot may be on disk, and D-1907 forbids confirming
+/// it) or to find nothing committed; never to find the 1,100 bars it was
+/// told were refused, which is what a batch's refused barrier did before
+/// this pass. After a commit, all 1,100 are there.
+#[test]
+fn a_refused_measure_of_a_deferred_file_refuses_the_step_that_deferred_it() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::TimeIndex,
+        FileKind::SortIndex,
+    ] {
+        let (mut refused, mut barred) = (0u32, 0u32);
+        for skip in 0.. {
+            let root = Root::new("batch-measure");
+            let target = root.at(kind);
+            let batch = super::DurableBatch::new(super::BatchFlush::OncePerDevice);
+            let answer = {
+                let _in = batch.enter();
+                arm_host_fault(Action::Measure, &target, skip, ErrorKind::PermissionDenied);
+                BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL)
+                    .and_then(|mut writer| writer.append(&bars(0, 1_100)))
+            };
+            let fired = !host_fault_armed();
+            super::tests::disarm_host_fault();
+            let _durable = batch.make_durable(1);
+            let reopened = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL);
+            match answer {
+                Ok(Appended::Committed { n_valid: 1_100, .. }) => {
+                    assert_eq!(reopened.map(|month| month.records()), Ok(1_100));
+                }
+                Err(StoreError::Denied { path, action }) if fired => {
+                    assert_eq!((path, action), (target.clone(), Action::Measure));
+                    refused += 1;
+                    let mut month = reopened
+                        .unwrap_or_else(|why| panic!("{kind:?} measure {skip}, reopened: {why}"));
+                    let on_disk = month.records();
+                    match month.append(&bars(1_100, 1_101)) {
+                        Err(StoreError::BarrierFailed { path }) => {
+                            assert_eq!(path, root.at(FileKind::Bars), "{kind:?} {skip}");
+                            barred += 1;
+                        }
+                        next => assert_eq!(
+                            (on_disk, next),
+                            (
+                                0,
+                                Ok(Appended::Committed {
+                                    first_index: 0,
+                                    n_valid: 1,
+                                })
+                            ),
+                            "{kind:?} measure {skip}: a refused commit is never confirmed"
+                        ),
+                    }
+                }
+                other => panic!("{kind:?} measure {skip}: {other:?}"),
+            }
+            if !fired {
+                break;
+            }
+        }
+        match kind {
+            FileKind::SortIndex => assert_eq!(refused, 0, "the sort step never refuses"),
+            FileKind::Bars => assert!(barred >= 2, "both bar-file barriers: {barred}"),
+            FileKind::Checksums => assert_eq!((refused, barred), (1, 1)),
+            _ => assert!(refused >= 1 && barred == 0, "{kind:?}: {refused}, {barred}"),
+        }
+    }
+}
+
+/// **A SEALED BATCH DEFERS NOTHING: A WRITER INSIDE IT FLUSHES ITS OWN
+/// FILES, AND THE BATCH HAS NOTHING LEFT TO MAKE DURABLE.**
+///
+/// Covers the `false` answer of `DurableBatch::defer_file` at each of its
+/// writer call sites (the genesis, the time index's sync at the threshold,
+/// the sort index's sync): a batch already made durable is sealed, so a
+/// month first opened and filled past the threshold inside it is made
+/// durable by its own writer, and a second `make_durable` flushes nothing.
+#[test]
+fn a_sealed_batch_defers_nothing_and_the_writer_flushes_its_own() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("sealed-batch");
+    let batch = super::DurableBatch::new(super::BatchFlush::OncePerDevice);
+    let first = batch.make_durable(1).unwrap();
+    assert_eq!((first.files, first.directories), (0, 0));
+    {
+        let _in = batch.enter();
+        let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+        assert_eq!(
+            writer.append(&bars(0, 1_100)),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 1_100,
+            })
+        );
+    }
+    let again = batch.make_durable(1).unwrap();
+    assert_eq!((again.files, again.directories), (0, 0), "nothing deferred");
+    assert!(root.at(FileKind::TimeIndex).exists() && root.at(FileKind::SortIndex).exists());
+    assert_eq!(held(&root), bars(0, 1_100));
+}
