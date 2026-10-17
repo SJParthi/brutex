@@ -24934,6 +24934,54 @@ mod tests {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// A stop asked once a serve of `root` has finished its start-up load.
+    ///
+    /// R3-14 repair 5 races the load against the stop and polls the stop
+    /// first (`loaded_or_stopped`), so [`fired`] ends a serve BEFORE its load:
+    /// the universe's verdict, the banner after the load, the first event, the
+    /// recovery at start and the stop's exit code are never reached. The
+    /// `listening` event is written after the load and before `serve`, so this
+    /// stop waits for one naming `root` that was written after the stop was
+    /// made, on whichever sink the process has installed, and then answers
+    /// inside `serve`, as a pressed stop would.
+    ///
+    /// A root that does not resolve is named as given: such a serve is refused
+    /// before it listens, so the stop is never polled to its end.
+    pub(super) fn after_the_load(root: &Path) -> Shutdown {
+        let store = std::fs::canonicalize(root)
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        let from = telemetry::global().map_or(0, |sink| sink.health().next_seq);
+        Box::pin(async move {
+            while !listening_since(from, &store) {
+                tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether the installed sink holds a `listening` event at or after
+    /// `from` whose store is `store`.
+    fn listening_since(from: u64, store: &str) -> bool {
+        telemetry::global().is_some_and(|sink| {
+            let dir = sink
+                .path()
+                .parent()
+                .expect("the sink writes a file inside a directory")
+                .to_path_buf();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.serve");
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .iter()
+                .any(|record| {
+                    record.seq >= from
+                        && record.message == "listening"
+                        && crate::emitted::says(record, "store", store)
+                })
+        })
+    }
+
     /// One command line, owned.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
@@ -27898,8 +27946,13 @@ mod tests {
 
         let expected =
             masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+        // STOPPED AFTER THE LOAD, NOT BEFORE IT. Since R3-14 repair 5 a stop
+        // that has already fired wins the race with the start-up load and the
+        // serve exits OK before it reads the universe, so on a host whose
+        // store is on disk and free this read `left: 0, right: 3` and the
+        // `listening` event below was never written.
         assert_eq!(
-            run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+            run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
             expected,
             "a serve exits on the verdict of the universe it served"
         );

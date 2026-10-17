@@ -20,13 +20,45 @@
     reason = "a failed fixture or socket must fail the test by name"
 )]
 
-use super::tests::{DHAN_HEAD, GROWW_HEAD, agreeing, body_of, get, masters, served_over};
+use super::tests::{
+    DHAN_HEAD, GROWW_HEAD, after_the_load, agreeing, body_of, get, masters, served_over,
+};
 use super::*;
 use std::io::Write as _;
 
 /// A signal that has already fired: the serve stops as soon as it starts.
 fn fired() -> Shutdown {
     Box::pin(std::future::ready(Ok(())))
+}
+
+/// A stop asked once the serve at `addr` has answered one request: the twin
+/// of [`after_the_load`] for a serve whose log could not open, where no
+/// event can say the load is done. The listener is bound before the load,
+/// so the connection is taken at once, and the answer comes only from
+/// `serve`, which begins after it. A failure to connect, write or read is
+/// the stop's own failure, which the serve exits `FAILED` on: never a hang.
+fn once_answering(addr: SocketAddr) -> Shutdown {
+    Box::pin(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        stream
+            .write_all(
+                format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await?;
+        Ok(())
+    })
+}
+
+/// A port the kernel just handed out and this process let go of.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|probe| probe.local_addr())
+        .expect("a free port")
+        .port()
 }
 
 /// One command line, owned.
@@ -745,7 +777,7 @@ async fn a_serve_over_a_real_store_root_runs_the_whole_start_and_exits_ok() {
         &dir,
         Ok(root.clone()),
         &argv(&["serve", "127.0.0.1:0"]),
-        fired(),
+        after_the_load(&root),
         &mut Held::default(),
     )
     .await;
@@ -810,7 +842,7 @@ async fn a_degraded_serve_exits_degraded_and_refuses_an_unreadable_recovery() {
         &dir,
         Ok(root.clone()),
         &argv(&["serve", "127.0.0.1:0"]),
-        fired(),
+        after_the_load(&root),
         &mut Held::default(),
     )
     .await;
@@ -1058,8 +1090,13 @@ fn has_line(text: &str, line: &str) -> bool {
 }
 
 /// One serve of `dir` over `root` at `addr` on a runtime of its own, as a
-/// child runs it.
+/// child runs it, stopped once its start-up load is done ([`after_the_load`]).
 fn serve_once(dir: &Path, root: &Path, addr: &str) -> u8 {
+    serve_once_until(dir, root, addr, after_the_load(root))
+}
+
+/// [`serve_once`], stopped by `stop`.
+fn serve_once_until(dir: &Path, root: &Path, addr: &str, stop: Shutdown) -> u8 {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1068,7 +1105,7 @@ fn serve_once(dir: &Path, root: &Path, addr: &str) -> u8 {
             dir,
             Ok(root.to_path_buf()),
             &argv(&["serve", addr]),
-            fired(),
+            stop,
             &mut Held::default(),
         ))
 }
@@ -1167,10 +1204,7 @@ fn banner_child() {
     let root = handed(CHILD_STORE);
     let logs = handed(LOG_DIR_ENV);
     assert_eq!(serve_once(&dir, &root, "127.0.0.1:0"), OK);
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|probe| probe.local_addr())
-        .expect("a free port")
-        .port();
+    let port = free_port();
     println!("CLOUDA-PORT={port}");
     assert_eq!(serve_once(&dir, &root, &format!("127.0.0.1:{port}")), OK);
     assert_eq!(
@@ -1471,8 +1505,16 @@ fn a_lock_name_that_cannot_be_opened_refuses_and_gives_the_key_back() {
 fn a_log_that_cannot_open_is_said_and_the_serve_goes_on() {
     if in_child() {
         end_harness_line();
+        // NO SINK, SO NO EVENT CAN SAY THE LOAD IS DONE: a real port, and a
+        // stop asked once it answers (see `once_answering`).
+        let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
         assert_eq!(
-            serve_once(&handed(CHILD_MASTERS), &handed(CHILD_STORE), "127.0.0.1:0"),
+            serve_once_until(
+                &handed(CHILD_MASTERS),
+                &handed(CHILD_STORE),
+                &addr.to_string(),
+                once_answering(addr),
+            ),
             OK
         );
         assert!(telemetry::global().is_none(), "no sink was installed");
