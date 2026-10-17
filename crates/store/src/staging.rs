@@ -24,6 +24,7 @@
 //! | nothing | the new file |
 //! | a regular file with exactly one name | a dead writer's leftover: the NAME is removed (`unlink`, which changes no byte) and the create is tried once more; [`Staged::cleared`] says how many bytes it held |
 //! | a regular file with more than one name | refused `staging_linked`; nothing is removed, truncated or written |
+//! | nothing by the look, or a file with no name left (the look caught its last name going) | the name is free: the create is tried once more and nothing is cleared |
 //! | anything else (a symbolic link, a directory, a pipe, a socket, a device) | refused `staging_not_regular`, naming what it found ([`crate::safe_open::Found`]); left as it is |
 //! | a file again after the one removal | refused `staging_contended`: another writer is using this name |
 //!
@@ -194,12 +195,56 @@ impl std::error::Error for StagingError {
 }
 
 /// `O_CREAT | O_EXCL`, read and write: the new file, or the host's refusal.
+///
+/// Under `cfg(test)` a one-shot, per-thread refusal of a chosen kind can be
+/// armed for the Nth open of this thread, because no host refuses the
+/// second create of [`create`] other than `EEXIST` short of a change to the
+/// directory between two calls, and that arm must still be driven. The
+/// injector ADDS a branch under test, so the open that ships is the open
+/// every test runs.
 fn open_new(path: &Path) -> io::Result<File> {
+    #[cfg(test)]
+    if let Some(kind) = tests::open_refusal_fires() {
+        return Err(io::Error::new(
+            kind,
+            "open refused by the staging test seam",
+        ));
+    }
     File::options()
         .read(true)
         .write(true)
         .create_new(true)
         .open(path)
+}
+
+/// What one `lstat` of an existing staging name saw.
+struct Seen {
+    /// What is there when it is not a regular file; `None` for one.
+    found: Option<Found>,
+    /// How many names the file has. 0 when its last name went between the
+    /// host's lookup of the name and its read of the file's status.
+    links: u64,
+    /// How many bytes it holds.
+    len: u64,
+}
+
+/// One `lstat` of `path`, never following a final link.
+///
+/// Under `cfg(test)` the look can be answered by an armed stand-in on this
+/// thread, once, because the two answers a race between [`create`]'s open
+/// and this look produces (a refusal other than `ENOENT`, and a file whose
+/// last name is going) cannot be staged on request.
+fn look(path: &Path) -> io::Result<Seen> {
+    #[cfg(test)]
+    if let Some(stand_in) = tests::look_stand_in() {
+        return stand_in(path);
+    }
+    let meta = fs::symlink_metadata(path)?;
+    Ok(Seen {
+        found: Found::of(meta.file_type()),
+        links: meta.nlink(),
+        len: meta.len(),
+    })
 }
 
 /// Creates the staging file `path`, never opening anything that is already
@@ -229,26 +274,32 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
     }
     // Calls so far: the refused `open` and the look below.
     let mut calls = 2u8;
-    let cleared = match fs::symlink_metadata(path) {
-        Ok(meta) if !meta.is_file() => {
+    let cleared = match look(path) {
+        Ok(Seen {
+            found: Some(found), ..
+        }) => {
             return Err(StagingError::NotRegular {
                 path: path.to_path_buf(),
-                found: Found::of(meta.file_type()).unwrap_or(Found::Unknown),
+                found,
             });
         }
-        Ok(meta) if meta.nlink() != 1 => {
+        // Its last name went between the host's lookup and its status: the
+        // look caught the file mid-unlink, and the name is free now. Not
+        // `staging_linked`: a file with no name has none to protect.
+        Ok(Seen { links: 0, .. }) => None,
+        Ok(Seen { links, .. }) if links != 1 => {
             return Err(StagingError::Linked {
                 path: path.to_path_buf(),
-                links: meta.nlink(),
+                links,
             });
         }
-        Ok(meta) => {
+        Ok(Seen { len, .. }) => {
             calls += 1;
             match fs::remove_file(path) {
                 Err(why) if why.kind() != ErrorKind::NotFound => return Err(io("remove", why)),
                 _ => {}
             }
-            Some(meta.len())
+            Some(len)
         }
         // It went between the open and the look: the name is free now.
         Err(why) if why.kind() == ErrorKind::NotFound => None,

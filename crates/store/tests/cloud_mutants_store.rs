@@ -117,8 +117,11 @@ fn every_found_kind_has_its_own_word_in_the_refusal() {
 /// `staging_contended`). One thread makes and removes a file at the name as
 /// fast as it can while this one creates at it, until the vanish branch
 /// (three host calls, nothing cleared) and `staging_contended` have each been
-/// seen twenty times. Every answer on the way must be a new file,
-/// `staging_contended`, or the zero-link refusal a look mid-unlink sees.
+/// seen twenty times. Every answer on the way must be a new file or
+/// `staging_contended`: a look that lands while the racer's unlink is in
+/// flight sees the file with no name left (`nlink` 0), and that name is free
+/// too (it was refused `staging_linked`, "one of 0 names of a file", until
+/// the 17 Oct pass).
 #[test]
 fn a_leftover_that_vanishes_before_the_look_leaves_the_create_free() {
     use std::sync::Arc;
@@ -147,11 +150,6 @@ fn a_leftover_that_vanishes_before_the_look_leaves_the_create_free() {
                 drop(made);
                 let _gone = fs::remove_file(&path);
             }
-            // A look that lands while the racer's unlink is in flight sees
-            // the file with no name left (`nlink` 0): refused as linked,
-            // nothing removed. Safe, and recorded in the report as a
-            // misnamed refusal; it is not this test's mutant's answer.
-            Err(store::staging::StagingError::Linked { links: 0, .. }) => {}
             Err(refusal) => {
                 assert_eq!(refusal.word(), "staging_contended", "{refusal}");
                 contended += 1;
