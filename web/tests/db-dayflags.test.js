@@ -17,6 +17,7 @@ import {
   bandSpan,
   bandInstrument,
   bandExpiry,
+  casCounts,
   cellOf,
   definitionOf,
   unknownFieldsOf,
@@ -450,4 +451,50 @@ test('SC-CLOSE-9: the auction line claims "kept apart" only where a sidecar keep
   const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
   assert.doesNotMatch(svelte, /at 15:15 and the auction print is kept apart from trades \(charter/);
   assert.match(svelte, /no month holds an auction sidecar, so the print is an ordinary bar here/);
+});
+
+test('R3-13 review: a share on a coarser grid is trade-driven by its finest rung, and its fills are the finest rung\'s', () => {
+  // A GDFL share asked at 1min: `held` counts the grid's rung, `finest` the feed's 1s.
+  const coarse = rec({
+    instrument: 'NSE-CASH-ZZSHR',
+    held: { feed: 'gdfl', rung: '1min', bars: 0, why: null },
+    finest: { feed: 'gdfl', rung: '1s', bars: 0, why: null }
+  });
+  assert.deepEqual(kindsOf(coarse), ['no_trade'], 'a share that holds nothing at one second traded nothing: never a store gap');
+  // A Zerodha share at 1day: the finest rung is its minutes, which are not trade-driven.
+  const day = rec({
+    instrument: 'NSE-CASH-ZZSHR',
+    feed: 'zerodha',
+    held: { feed: 'zerodha', rung: '1day', bars: 0, why: null },
+    finest: { feed: 'zerodha', rung: '1min', bars: 0, why: null }
+  });
+  assert.deepEqual(kindsOf(day), ['store_gap']);
+  // Zero-volume minutes ride on `finest` when the grid counts the day bar.
+  const fills = cellOf(
+    rec({
+      instrument: 'NSE-CASH-ZZFILL',
+      feed: 'zerodha',
+      import: null,
+      held: { feed: 'zerodha', rung: '1day', bars: 1, why: null, zero_volume: 0 },
+      finest: { feed: 'zerodha', rung: '1min', bars: 375, why: null, zero_volume: 300 }
+    })
+  );
+  assert.deepEqual(fills.kinds, ['fills']);
+  assert.equal(fills.fills, 300);
+  // At the finest rung itself, `held` is still read.
+  assert.equal(cellOf(rec({ instrument: 'NSE-CASH-ZZFILL', held: { feed: 'zerodha', rung: '1min', bars: 375, zero_volume: 300 } })).fills, 300);
+});
+
+test('R3-13 review: a closing-auction day whose flag no master holds is never counted as kept apart', () => {
+  const day = (/** @type {boolean | undefined} */ eligible, /** @type {boolean} */ sidecar) =>
+    cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: eligible === undefined ? undefined : { eligible } }, auction_sidecar: sidecar }));
+  const cells = [day(true, true), day(true, false), day(undefined, true), day(false, true)];
+  assert.deepEqual(cells.map((c) => c.kind), ['cas', 'cas', 'cas', 'session'], 'flag 0 is an ordinary session');
+  assert.deepEqual(casCounts(cells), { days: 2, unheld: 1, apart: 1 });
+  // A day with another fault beside the auction is listed with its fault, not counted here.
+  const both = cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: true } }, auction_sidecar: true, degraded: ['x'] }));
+  assert.deepEqual(casCounts([both]), { days: 0, unheld: 0, apart: 0 });
+  // The component counts with the function.
+  const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
+  assert.match(svelte, /const cas = \$derived\(casCounts\(flagged\)\);/);
 });

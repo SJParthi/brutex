@@ -30,6 +30,7 @@
     bandSpan,
     bandInstrument,
     bandExpiry,
+    casCounts,
     dayflagsUrl,
     emptyWindowWhy,
     tally,
@@ -182,14 +183,12 @@
     flagged.filter((/** @type {any} */ c) => !(c.kind === 'cas' && c.kinds.length === 1))
   );
   /** The lone closing-auction days, split by whether the share's dated flag
-      is 1 or no master holds it (SC-CLOSE-8, SC-CLOSE-9). */
-  const casLone = $derived(flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1));
-  const casDays = $derived(casLone.filter((/** @type {any} */ c) => c.cas === true).length);
-  const casUnheld = $derived(casLone.length - casDays);
-  /** Of those, the days whose month keeps the auction print apart (SC-CLOSE-9). */
-  const casApart = $derived(
-    flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1 && c.cas === true && c.auctionSidecar === true).length
-  );
+      is 1 or no master holds it, and of the first, the days whose month keeps
+      the auction print apart (SC-CLOSE-8, SC-CLOSE-9). */
+  const cas = $derived(casCounts(flagged));
+  const casDays = $derived(cas.days);
+  const casUnheld = $derived(cas.unheld);
+  const casApart = $derived(cas.apart);
   const sessions = $derived(
     db.dayBandCells.filter((/** @type {any} */ c) => c.kind !== 'closed' && c.kind !== 'outside').length
   );

@@ -488,6 +488,26 @@ export function tally(cells) {
 }
 
 /**
+ * The band's closing-auction line, counted (SC-CLOSE-8, SC-CLOSE-9): of the
+ * cells whose only kind is `cas`, the days the share's dated flag is 1
+ * (`days`), the rest, whose flag no master holds (`unheld`), and of the
+ * first only, the days whose month keeps the print apart in its sidecar
+ * (`apart`). An unheld day is never counted apart: the line says "kept
+ * apart" of a closing-auction day, and that day is not known to be one.
+ *
+ * @param {ReturnType<typeof cellOf>[]} cells
+ */
+export function casCounts(cells) {
+  const lone = cells.filter((c) => c.kind === 'cas' && c.kinds.length === 1);
+  const flagged = lone.filter((c) => c.cas === true);
+  return {
+    days: flagged.length,
+    unheld: lone.length - flagged.length,
+    apart: flagged.filter((c) => c.auctionSidecar === true).length
+  };
+}
+
+/**
  * WHY A DAY WINDOW HOLDS NO BAR (DB-016).
  *
  * The empty grid used to accuse the store — "a disagreement between the

@@ -321,6 +321,74 @@ fn no_flag_is_read_where_none_applies() {
     assert_eq!(again.basis, flag.basis);
 }
 
+/// **A PAGE READS A FLAG ONLY ON AN OPEN SESSION UP TO TODAY** (the R3-13
+/// review): a closed day has no closing auction, so nothing is read or
+/// refused for it; a session after today has no master dated it yet, and is
+/// said so rather than refused.
+#[test]
+fn a_flag_is_read_only_on_an_open_session_up_to_today() {
+    let root = root_of("r3-13-cas-session");
+    install_flag(&root, "2026-08-04", "RELIANCE", 1);
+    let mut flags = CasFlags::of(&root, "RELIANCE", true);
+    // A closed day: not required, nothing read.
+    let closed = flags.on_session(day("2026-08-08"), false, false);
+    assert_eq!(closed.basis, CasBasis::NotRequired);
+    assert_eq!(closed.json(), Value::Null);
+    // A session after today: not yet, never a refusal.
+    let future = flags.on_session(day("2026-08-10"), true, true);
+    assert_eq!(future.eligibility, CasEligibility::Unknown);
+    assert_eq!(future.basis, CasBasis::NotYet);
+    assert_eq!(
+        future.json(),
+        serde_json::json!({
+            "eligible": null, "basis": "not_yet",
+            "why": "a session after today: no master is dated it yet",
+        })
+    );
+    assert!(flags.refusals().is_empty(), "nothing was refused");
+    // An open session up to today reads its master.
+    let open = flags.on_session(day("2026-08-04"), true, false);
+    assert_eq!(open.eligibility, CasEligibility::Eligible);
+    assert_eq!(open.basis, CasBasis::DatedMaster);
+    // An index, or a day before the auction began, needs no flag, open or not.
+    let mut index = CasFlags::of(&root, "NIFTY", false);
+    assert_eq!(
+        index.on_session(day("2026-08-04"), true, false).basis,
+        CasBasis::NotRequired
+    );
+    assert_eq!(
+        flags.on_session(day("2026-07-31"), true, true).basis,
+        CasBasis::NotRequired
+    );
+    // The route passes today: a session after it reads not_yet, with no note.
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-CASH-RELIANCE&from=2099-01-01&to=2099-01-07"),
+    );
+    let sessions: Vec<&Value> = got["days"]
+        .as_array()
+        .expect("days")
+        .iter()
+        .filter(|rec| rec["calendar"]["cas"] != Value::Null)
+        .collect();
+    assert!(!sessions.is_empty(), "{got:#}");
+    for rec in sessions {
+        assert_eq!(rec["calendar"]["cas"]["basis"], "not_yet", "{rec:#}");
+    }
+    assert!(
+        got["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .all(|note| !note
+                .as_str()
+                .unwrap_or("")
+                .contains("closing-auction flag could not be read")),
+        "{:#?}",
+        got["notes"]
+    );
+}
+
 /// **A REFUSED LOAD IS READ AGAIN BY THE NEXT REQUEST** (AF-03's rule, kept):
 /// a master that lands after a request refused it is read by the next one.
 #[test]
@@ -592,6 +660,43 @@ fn a_recounted_day_keeps_its_late_rows() {
     says_has(
         record(&got, "2019-11-13"),
         "7 late row(s) over all of the day's options files deferred to a later second, at most 3 s back",
+    );
+}
+
+/// **A FILTERED RUN'S LATE ROWS ARE OVER THE FILES IT READ** (the R3-13
+/// review): a close written by a run given a filter counted the files that
+/// filter names, not every file of the kind-day.
+#[test]
+fn a_filtered_runs_late_rows_are_over_the_files_it_read() {
+    let root = root_of("r3-13-filtered-late");
+    write(
+        &pull::gdfl_import::journal_path(&root),
+        "begin indices 2021-05-21 BANKNIFTY,NIFTY\n\
+         done indices 2021-05-21 BANKNIFTY,NIFTY definition=4 files=2 seconds=44000 failures=0 late=12 late_unresolved=0 max_back_s=9\n",
+    );
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2021-05-21&to=2021-05-21"),
+    );
+    let rec = record(&got, "2021-05-21");
+    let import = &rec["import"];
+    assert_eq!(import["late"], 12, "{import:#}");
+    assert_eq!(import["filter"], "BANKNIFTY,NIFTY");
+    assert_eq!(
+        import["late_scope"],
+        "the files the closing run's filter names"
+    );
+    says_has(
+        rec,
+        "12 late row(s) over the day's indices files its run read (BANKNIFTY,NIFTY) deferred to a \
+         later second, at most 9 s back",
+    );
+    assert!(
+        says(rec)
+            .iter()
+            .all(|say| !say.contains("all of the day's indices files")),
+        "{:#?}",
+        says(rec)
     );
 }
 
@@ -1010,6 +1115,47 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
         ..inside
     };
     assert_eq!(outside.json().0["frozen"]["flagged"], true);
+    // 2020-03-13'S RUN STARTS A SECOND BEFORE THE HALT (the R3-13 review): its
+    // stamp is 09:21:09 and the halt's 09:21:10, so one second of it is
+    // outside the halt, and that is not a frozen index.
+    let span = u64::from(halt.resume - halt.from);
+    let before = IndexDay {
+        ledger: Some((span + 1, Some(halt.from - 1), 4)),
+        ..inside
+    };
+    let (json, says) = before.json();
+    assert_eq!(json["frozen"]["flagged"], false, "{json:#}");
+    assert_eq!(json["frozen"]["outside_halt_s"], 1);
+    assert!(says.is_empty(), "{says:?}");
+    // A run that reaches 200 s before the halt is frozen for those 200 s.
+    let partial = IndexDay {
+        ledger: Some((span + 200, Some(halt.from - 200), 4)),
+        ..inside
+    };
+    let (json, says) = partial.json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(json["frozen"]["outside_halt_s"], 200);
+    assert_eq!(says.len(), 1);
+    assert!(
+        says[0].ends_with(", 200 s of it outside the recorded halt"),
+        "{says:?}"
+    );
+    // A run past the halt's resumption counts only its seconds after it.
+    let after = IndexDay {
+        ledger: Some((span + 179, Some(halt.from), 4)),
+        ..inside
+    };
+    assert_eq!(after.json().0["frozen"]["flagged"], false);
+    assert_eq!(after.json().0["frozen"]["outside_halt_s"], 179);
+    // On a halt day, a run with no stamp cannot be placed, so it is not flagged.
+    let unplaced = IndexDay {
+        ledger: Some((5_000, None, 4)),
+        ..inside
+    };
+    let (json, says) = unplaced.json();
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert_eq!(json["frozen"]["outside_halt_s"], Value::Null);
+    assert!(says.is_empty());
     let unknown = IndexDay {
         feed: Vendor::Gdfl,
         midnight: 0,
@@ -1224,6 +1370,27 @@ fn an_option_family_narrowed_to_an_expiry_is_expired_after_it() {
         band_of("", "28-03-2019", &asked.instrument),
         Err("expiry=\"28-03-2019\" is not a day as YYYY-MM-DD".to_owned())
     );
+    // ONE PARSE FOR EVERY CALLER: the route's query reads both parameters.
+    let (parsed, band) = super::super::query_of(
+        "feed=gdfl&instrument=NSE-FNO-NIFTY&from=2024-10-01&to=2024-10-01&timeframe=1min&expiry=2019-03-28",
+    )
+    .expect("a band query");
+    assert_eq!(parsed.instrument, asked.instrument);
+    assert_eq!(
+        band,
+        Band {
+            rung: Some(Timeframe::MINUTE_1),
+            expiry: Some(day("2019-03-28"))
+        }
+    );
+    assert_eq!(
+        super::super::query_of(
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-10-01&expiry=2019-03-28"
+        )
+        .map(|(_, band)| band),
+        Err("expiry=2019-03-28 names an expiry, and NSE-INDEX-NIFTY has none".to_owned())
+    );
+    assert!(super::super::query_of("feed=gdfl&from=2024-10-01").is_err());
     assert!(band_of("7min", "", &asked.instrument).is_err());
     assert_eq!(
         band_of("1day", "", &asked.instrument),

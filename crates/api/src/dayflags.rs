@@ -446,17 +446,7 @@ pub(super) async fn dayflags_json(
     String,
 ) {
     let query = uri.query().unwrap_or("").to_owned();
-    // THE GRID'S RUNG, beside `Asked` and never inside it (R3-13 goal 1): a
-    // band counts what the grid shows, and `sources.rs` builds `Asked` by
-    // name for a GDFL read at the finest rung.
-    let asked = match asked(&query).and_then(|asked| {
-        let band = rules::band_of(
-            &param(&query, "timeframe"),
-            &param(&query, "expiry"),
-            &asked.instrument,
-        )?;
-        Ok((asked, band))
-    }) {
+    let asked = match query_of(&query) {
         Ok(asked) => asked,
         // THE REFUSAL IS THE BODY'S, and `logs::note_request` records the path
         // and the 400. No event of its own: this crate counts its emit sites.
@@ -481,6 +471,22 @@ pub(super) async fn dayflags_json(
             (status, json_header(), body)
         }
     }
+}
+
+/// The day band's request: what [`asked`] reads, and the band [`answer_at`]
+/// counts at. THE GRID'S RUNG, beside `Asked` and never inside it (R3-13 goal
+/// 1): a band counts what the grid shows, and `sources.rs` builds `Asked` by
+/// name for a GDFL read at the finest rung. One parse for every caller of the
+/// band, so a caller handed the page's query reads its `timeframe=` and
+/// `expiry=` as the route does.
+pub(crate) fn query_of(query: &str) -> Result<(Asked, rules::Band), String> {
+    let asked = asked(query)?;
+    let band = rules::band_of(
+        &param(query, "timeframe"),
+        &param(query, "expiry"),
+        &asked.instrument,
+    )?;
+    Ok((asked, band))
 }
 
 /// The page's days: `(first, last)` of page `page` (clamped), and the count

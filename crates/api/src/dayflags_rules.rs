@@ -714,9 +714,8 @@ impl IndexDay {
                     (_, None) => Some(seconds),
                 };
                 let flagged = outside_s.is_some_and(|outside| outside >= FROZEN_MIN_S);
-                let clock = |at: u32| {
-                    format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)
-                };
+                let clock =
+                    |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
                 if let Some(outside) = outside_s.filter(|_| flagged) {
                     let part = if outside < seconds {
                         format!(", {outside} s of it outside the recorded halt")

@@ -717,8 +717,10 @@ test('DB-A40: the drawer and the badge are no longer placeholders that render no
 
 /* ── R3-13 goal 4: a Zerodha share's adjusted or quantised run, by its days ── */
 
-/** One `/sources/day.json` day with an invented `share_basis`. */
-const basisDay = (/** @type {string} */ day, /** @type {Record<string, any> | null} */ b) => ({ day, share_basis: b });
+/** One `/sources/day.json` day with an invented `basis` (`sources.rs` serves it under that key). */
+const basisDay = (/** @type {string} */ day, /** @type {Record<string, any> | null} */ b) => ({ day, basis: b });
+/** A day `/sources/day.json` names and neither feed measured: a weekend, a holiday. */
+const unmeasured = (/** @type {string} */ day) => basisDay(day, { factor: null, basis_differs: false, quantised: false, grid_paisa: { zerodha_minutes: null, gdfl_seconds: null } });
 
 test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named with its first and last day', () => {
   assert.equal(
@@ -731,10 +733,15 @@ test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named 
     days: [
       basisDay('2019-06-05', { basis_differs: true, quantised: false, factor: 4.1, grid_paisa: { zerodha_minutes: 5, gdfl_seconds: 5 } }),
       basisDay('2019-06-03', { basis_differs: true, quantised: false, factor: 4, grid_paisa: { zerodha_minutes: 5, gdfl_seconds: 5 } }),
-      basisDay('2019-06-04', null), // neither feed measured it: joins and breaks nothing
+      unmeasured('2019-06-01'), // a Saturday before the first measured day: the run's edge stays open
+      unmeasured('2019-06-04'), // inside a run: joins and breaks nothing
+      basisDay('2019-06-02', null),
+      unmeasured('2019-06-08'), // a weekend inside the second run
+      unmeasured('2019-06-09'),
       basisDay('2019-06-06', { basis_differs: false, quantised: false, factor: 1 }),
       basisDay('2019-06-07', { basis_differs: false, quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: 5 } }),
-      basisDay('2019-06-10', { basis_differs: true, quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: 5 } })
+      basisDay('2019-06-10', { basis_differs: true, quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: 5 } }),
+      unmeasured('2019-06-15') // after the last measured day: the edge stays open
     ]
   };
   const runs = basisRunsOf(body);
@@ -755,9 +762,14 @@ test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named 
   assert.equal(basisRunLabel(runs, '2019-06-06'), null, 'a day on the raw basis carries none');
   assert.equal(basisRunLabel(runs, ''), null);
   assert.deepEqual(basisRunsOf(null), []);
-  // A quantised run with no factor served says so.
-  const bare = basisRunsOf({ days: [basisDay('2019-07-01', { quantised: true })] });
-  assert.match(basisRunLabel(bare, '2019-07-01')?.text ?? '', /quantised against GDFL's raw prints: .* no factor served \(the run may go on both ways the days read\)/);
+  // The key the route serves, not a name of its own: a day under any other key is not read.
+  assert.deepEqual(basisRunsOf({ days: [{ day: '2019-07-01', share_basis: { basis_differs: true, factor: 4 } }] }), []);
+  // A day with no factor served is not measured, whatever else it says.
+  assert.deepEqual(basisRunsOf({ days: [basisDay('2019-07-01', { quantised: true, basis_differs: true, factor: null })] }), []);
+  // One measured day alone is a run open both ways.
+  const lone = basisRunsOf({ days: [unmeasured('2019-07-01'), basisDay('2019-07-02', { quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: null } }), unmeasured('2019-07-03')] });
+  assert.match(basisRunLabel(lone, '2019-07-02')?.text ?? '', /quantised against GDFL's raw prints: 2019-07-02 to 2019-07-02, 1 day\(s\) measured, factor ×1\.0254; Zerodha's prices sit on a 50-paisa grid, coarser than an exact adjustment leaves \(the run may go on both ways the days read\)/);
+  assert.equal(basisRunLabel(lone, '2019-07-03'), null, 'an unmeasured day past the run is not in it');
   // The drawer names the run of its row's day.
   const row = bar('NSE-CASH-ACME', '1min', '2019-06-04', '10:00:00');
   const facts = drawerFacts({ feed: ZERODHA, row, answer: null, basis: runs });
