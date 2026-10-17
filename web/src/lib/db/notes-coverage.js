@@ -277,7 +277,8 @@ export function coverTotals(rows) {
   for (const r of rows ?? []) {
     const c = r.cover;
     t.n += 1;
-    t.bars += r.absent ? 0 : r.rows;
+    // An absent month's row holds 0 bars (`absentRow`), so every row adds its own.
+    t.bars += r.rows;
     if (r.absent) {
       if (c.basis === 'trade') t.noTrade += 1;
       else t.absent += 1;
@@ -330,9 +331,10 @@ export function missingText(m) {
  * @param {unknown} nonce the page's re-read stamp
  */
 export function barsQueryKey(feed, plan, bounds, nonce) {
+  // `join` writes an absent field (`undefined`, `null`) as nothing.
   return [
-    feed, plan?.timeframe ?? '', plan?.from ?? '', plan?.to ?? '', (plan?.keys ?? []).join(','),
-    bounds?.fromDay ?? '', bounds?.toDay ?? '', bounds?.fromTime ?? '', bounds?.toTime ?? '', String(nonce ?? '')
+    feed, plan?.timeframe, plan?.from, plan?.to, (plan?.keys ?? []).join(','),
+    bounds?.fromDay, bounds?.toDay, bounds?.fromTime, bounds?.toTime, nonce
   ].join('|');
 }
 

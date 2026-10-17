@@ -212,7 +212,7 @@ function septemberRows() {
     { ...base, month: '2026-09', rows: 21 * 375 - 40 },
     { ...base, month: '2026-09', rows: 0, absent: true },
     { ...base, month: '2026-09', rows: 21 * 375 + 9 },
-    { ...base, instrument: 'NSE-FNO-NIFTY-2026-09-29-2500000-CE', month: '2026-09', timeframe: '1min', rows: 12, strike: 2500000, absent: true }
+    { ...base, instrument: 'NSE-FNO-NIFTY-2026-09-29-2500000-CE', month: '2026-09', timeframe: '1min', rows: 0, strike: 2500000, absent: true }
   ];
   return rows.map((r) => ({ ...r, cover: judgeRow(r, { ledger: L }) }));
 }
