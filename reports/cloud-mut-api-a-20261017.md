@@ -146,6 +146,41 @@ those outside every top-level `#[cfg(test)]` item of the file.
 `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`,
 new on `feat/db-fix`. Each needs mode bits that bind the process.
 
+## Mutation
+
+`cargo-mutants 27.1.0` found **2,218 mutants** in the eight files (16 Oct:
+2,145; `feat/db-fix` added code under them). Every one has an outcome.
+
+**Stage 1**: each file's mutants against the library tests its 16 Oct
+filter names. Stage 1 finished at 23:08 UTC.
+
+| File | Mutants | Caught | Timed out | Unviable | Left for stage 2 |
+|---|---:|---:|---:|---:|---:|
+| `spot.rs` | 123 | 107 | 0 | 13 | 3 |
+| `bars_change.rs` | 146 | 133 | 1 | 8 | 4 |
+| `ladder.rs` | 112 | 76 | 0 | 24 | 12 |
+| `render.rs` | 222 | 208 | 0 | 2 | 12 |
+| `gaps_route.rs` | 225 | 178 | 7 | 39 | 1 |
+| `bars.rs` | 415 | 346 | 7 | 30 | 32 |
+| `bars_sort.rs` | 645 | 507 | 62 | 44 | 32 |
+| `bars_series.rs` | 330 | 257 | 17 | 29 | 27 |
+| **eight files** | **2,218** | **1,812** | **94** | **189** | **123** |
+
+**Stage 2**: every stage-1 survivor against the final suite, meaning the
+whole `api` library (less the twelve root-only tests) and
+`tests/cloud_mutants_bars.rs`, with a 300 s timeout.
+
+| File | Stage-1 survivors | Caught in stage 2 | Left |
+|---|---:|---:|---:|
+| `spot.rs` | 3 | 3 | 0 |
+| `bars_change.rs` | 4 | 1 | 3 |
+| `ladder.rs` | 12 | 8 | 4 |
+| `render.rs` | 12 | 11 | 1 |
+| `gaps_route.rs` | 1 | 0 | 1 |
+| `bars.rs` | 32 | 25 | 7 |
+| `bars_sort.rs` | 32 | 12 so far (library); 20 running against both | — |
+| `bars_series.rs` | 27 | running | — |
+
 ## Coverage
 
 Measured with the checked-in profile, line and branch, production lines
@@ -241,18 +276,10 @@ request, where no seam reaches.**
 
 ## Left
 
-- The mutation run (2,218 mutants of the eight files) is still running. At
-  21:17 UTC: spot 123 of its mutants have a stage-1 outcome (107 caught, 0 timed out, 13 unviable, 3 left for stage 2); bars_change 146 of its mutants have a stage-1 outcome (133 caught, 1 timed out, 8 unviable, 4 left for stage 2); ladder 112 of its mutants have a stage-1 outcome (76 caught, 0 timed out, 24 unviable, 12 left for stage 2); render 222 of its mutants have a stage-1 outcome (208 caught, 0 timed out, 2 unviable, 12 left for stage 2); bars_sort 417 of its mutants have a stage-1 outcome (315 caught, 47 timed out, 30 unviable, 25 left for stage 2); bars 415 of its mutants have a stage-1 outcome (346 caught, 7 timed out, 30 unviable, 32 left for stage 2); gaps_route 188 of its mutants have a stage-1 outcome (142 caught, 7 timed out, 38 unviable, 1 left for stage 2); bars_series 82 of its mutants have a stage-1 outcome (53 caught, 0 timed out, 21 unviable, 8 left for stage 2); bars_series started at 20:47. Then every survivor
-  against the final suite. Stage 2 so far: `spot.rs` 3 of 3 caught (by
-  `tests/cloud_mutants_bars.rs`); `bars_change.rs` 1 of 4 caught, 3 left
-  (`301:59`, `333:34`, `432:21`, equivalent for the 16 Oct reasons);
-  `ladder.rs` 8 of 12 caught, the four 16 Oct equivalents left; `render.rs`
-  11 of 12 caught, `page_peak` left; `gaps_route.rs` one survivor, a dead
-  store (see *Survivors*); `bars.rs` 25 of 32 caught (`note_refused` and
-  `retired_refusal` by library tests outside the stage-1 filter, the rest
-  by the integration file), 16 Oct's seven equivalents left. Stage 1 is
-  complete for all eight files (23:08 UTC); stage 2 for `bars_sort.rs` (32)
-  and `bars_series.rs` (27) is running.
+- Stage 2 for `bars_sort.rs` (20) and `bars_series.rs` (27), and the reason
+  for every mutant that survives it (see *Mutation*).
+- Re-running the six `gaps_route.rs` timeouts against the fixed pool test
+  (a failed assertion in it used to hang; it now fails in about a second).
 - The coverage re-measurement after the new tests, and the reason for
   every line and branch still unrun.
 - `cargo test --workspace --locked`, and the final clippy.

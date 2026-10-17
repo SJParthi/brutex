@@ -4688,6 +4688,16 @@ mod cloud_mutant_tests {
     /// runs itself in, where the pool it fills is that process's alone.
     const FULL_POOL_CHILD: &str = "BRUTEX_CLOUD_MUTANT_FULL_CALENDAR_POOL_CHILD";
 
+    /// The pool test's last party to its holders' barrier, which waits when
+    /// it is dropped: at the test's end, or while a failure unwinds.
+    struct Release(std::sync::Arc<std::sync::Barrier>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
+
     /// **A FULL CALENDAR POOL REFUSES BY NAME, BOTH WHERE THE SERIES IS FOUND
     /// IN THE CENSUS AND WHERE ITS MONTHS ARE AUDITED** — `429`, never an
     /// audit that did not happen. Every slot of the pool is held; then a
@@ -4733,6 +4743,10 @@ mod cloud_mutant_tests {
             let gate = std::sync::Arc::new(std::sync::Barrier::new(
                 crate::detail::MAX_CALENDAR_CONCURRENT + 1,
             ));
+            // THE HOLDERS ARE RELEASED HOWEVER THIS BODY ENDS. A failed
+            // assertion unwinds through `release`, so the child exits failed
+            // rather than hanging on a barrier its last party never reaches.
+            let release = Release(std::sync::Arc::clone(&gate));
             let holders: Vec<_> = (0..crate::detail::MAX_CALENDAR_CONCURRENT)
                 .map(|_| {
                     let gate = std::sync::Arc::clone(&gate);
@@ -4762,7 +4776,7 @@ mod cloud_mutant_tests {
             };
             assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
             assert!(body.contains("calendar derivation not admitted"), "{body}");
-            gate.wait();
+            drop(release);
             for holder in holders {
                 holder.await.expect("a holder").expect("admitted");
             }
