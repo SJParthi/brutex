@@ -289,6 +289,11 @@ fn an_upkeep_run_stops_and_resumes_where_it_stopped() {
     // AS ONE UNINTERRUPTED RUN WOULD HAVE LEFT IT.
     let (code, out) = plain(&whole.0, &["run", "srt", "gdfl"]);
     assert_eq!(code, OK, "{out}");
+    let text = whole.journal(Kind::SortIndex);
+    assert!(
+        text.contains(" workers=1 asked=1 "),
+        "a run that names no --workers asks for one: {text}"
+    );
     for &month in &months {
         assert_eq!(
             fs::read(srt(&root.0, month)).unwrap(),
@@ -945,6 +950,18 @@ fn the_plan_lists_what_each_series_lacks_and_writes_nothing() {
     );
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("(the whole feed)"), "{out}");
+    assert!(out.contains("NSE/FNO/NIFTY/* 1s"), "{out}");
+    // Four segments, down to one contract, is a scope; a fifth is refused
+    // (`a_misuse_is_refused_before_anything_is_opened`).
+    let (code, out) = plain(
+        &root.0,
+        &["plan", "gdfl", "NSE/FNO/NIFTY/2019-03-28-1150000-CE"],
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("UPKEEP PLAN — gdfl NSE/FNO/NIFTY/2019-03-28-1150000-CE under"),
+        "{out}"
+    );
     assert!(out.contains("NSE/FNO/NIFTY/* 1s"), "{out}");
     assert!(!root.0.join("audit").exists(), "the plan writes nothing");
     // Many series: past the shown ones they are counted.

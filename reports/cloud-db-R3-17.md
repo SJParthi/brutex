@@ -159,7 +159,13 @@ production line of `upkeep.rs` changed after `20653571` is in `month_named`, whi
 R3-17's lines (`upkeep_command:: srt_builder:: tix_rebuilder:: msum_builder:: census_recount::
 gdfl_rekey:: store_write:: tests::a_known_command_with_the_wrong_arity_is_not_called_unknown
 tests::every_command`). `sweep_wiring_tests::` (114 s a run) is left out: its R3-17 line is the
-`upkeep` row of a test table, which has no mutant.
+`upkeep` row of a test table, which has no mutant. Survivors so far, each fixed and checked by hand
+(the test fails under the mutant):
+
+| Mutant (`crates/cli/src/upkeep_command.rs`) | Why it lived | Fixed by |
+|---|---|---|
+| `prefix`'s `parts.len() > 4` → `>=` | no test gave a four-segment scope | `the_plan_lists_what_each_series_lacks_and_writes_nothing`: a plan scoped to one contract |
+| `flags`: `workers: 1` deleted (0 asked; the runner's clamp still starts one) | no test read `asked=` on a run without `--workers` | `an_upkeep_run_stops_and_resumes_where_it_stopped`: its uninterrupted run's journal says `workers=1 asked=1` |
 
 ## Gate results (so far)
 
