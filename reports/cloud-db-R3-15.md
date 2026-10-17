@@ -72,8 +72,87 @@ after R3-15, so they rebase on this.
 
 ## Measured
 
-To be filled in from the runs in progress (bundle per page, the browser harness at n = 200 against
-the real `api` binary over an empty synthetic store, the speed sheet against it).
+All on this cloud container (4 cores, a VM much slower than the operator's Mac), with the real
+`api` binary (`target/debug/api`, the workspace's `dev` profile, which is optimised, stamped
+`30283a95…`) serving this branch's own `vite build` over an EMPTY synthetic store (no market data
+exists here). A page over an empty store draws its empty state, so these are not the operator's
+figures: the bytes are exact for this build, the times are this machine's. The real-data run is
+NEEDS THE MAC 3.
+
+### What each page ships on its first load (the build's own budget lines)
+
+| page | script + style, raw | budget | gzip-6 | brotli |
+|---|---:|---:|---:|---:|
+| `/` | 221,299 B | 400 KB | 80,537 | 72,223 |
+| `/audit` | 314,735 B | 400 KB | 110,304 | 98,437 |
+| `/autopilot` | 288,874 B | 400 KB | 99,998 | 89,194 |
+| `/backtest` | 1,096,161 B | 1,100 KB, OVER TARGET | 309,389 | 252,071 |
+| `/db` | 731,132 B | 750 KB, OVER TARGET | 238,652 | 206,299 |
+| `/gaps` | 257,051 B | 400 KB | 93,366 | 83,485 |
+| `/ingest` | 486,772 B | 500 KB, OVER TARGET | 166,862 | 146,423 |
+| `/mapping` | 252,383 B | 400 KB | 89,756 | 80,179 |
+| `/markets` | 325,334 B | 400 KB | 109,219 | 97,304 |
+| `/selection` | 231,921 B | 400 KB | 84,682 | 75,777 |
+| `/sources` | 309,783 B | 400 KB | 109,592 | 97,879 |
+| `/speed` | 237,246 B | 400 KB | 86,526 | 77,495 |
+| `/terminal` | 325,644 B | 400 KB | 115,933 | 103,578 |
+
+Every page is about 4.2 KB larger than on the base: the shared reporter and the up check are in
+the shared shell. The server sends every byte raw (`crates/api/src/assets.rs` compresses nothing),
+so the raw column is what crosses the wire.
+
+### The browser harness, n = 200 cold and 200 warm, quiet machine (load ≈ 2)
+
+`node web/ci/browser-harness.mjs --base http://127.0.0.1:18317 --n 200 --idle-tabs 1,10,20 --idle-ms 60000 --no-sandbox`
+(Chromium 1194, headless). p50 / p99 / max:
+
+| page | phase | first content ms | longest pause ms | heap MB | wire KB | targets |
+|---|---|---|---|---|---|---|
+| /db | cold | 156 / 204 / 268 | 52 / 80 / 235 | 3.1 / 3.1 / 3.1 | 815.2 / 815.2 / 815.2 | FAILS: pause, wire |
+| /db | warm | 64 / 84 / 84 | 0 / 0 / 51 | 22.1 / 44.8 / 49.3 | 70.5 / 70.5 / 70.5 | FAILS: one pause of 51 ms |
+| /ingest | cold | 156 / 192 / 212 | 53 / 74 / 114 | 2.8 / 2.9 / 2.9 | 560.0 / 560.0 / 560.0 | FAILS: pause, wire |
+| /ingest | warm | 76 / 100 / 100 | 0 / 0 / 0 | 24.7 / 52.7 / 54.5 | 54.6 | holds |
+| /gaps | cold | 140 / 172 / 180 | 0 / 59 / 65 | 2.4 | 314.2 | FAILS: pause |
+| /gaps | warm | 56 / 80 / 84 | 0 / 0 / 0 | 20.2 / 54.8 / 56.0 | 45.6 | holds |
+| /audit | cold | 140 / 176 / 180 | 0 / 57 / 60 | 2.7 / 2.8 / 2.8 | 372.5 | FAILS: pause |
+| /audit | warm | 56 / 80 / 84 | 0 / 0 / 0 | 19.8 / 35.3 / 35.3 | 46.4 | holds |
+| /markets | cold | 168 / 228 / 296 | 63 / 90 / 125 | 3.1 | 576.6 | FAILS: pause, wire |
+| /markets | warm | 68 / 100 / 116 | 0 / 0 / 0 | 20.2 / 51.4 / 53.9 | 45.6 | holds |
+| /sources | cold | 148 / 188 / 252 | 0 / 62 / 84 | 2.2 | 368.8 | FAILS: pause |
+| /sources | warm | 56 / 72 / 76 | 0 / 0 / 0 | 21.2 / 52.4 / 53.6 | 47.3 | holds |
+| /speed | cold | 136 / 172 / 184 | 0 / 62 / 66 | 2.3 | 300.9 | FAILS: pause |
+| /speed | warm | 56 / 72 / 84 | 0 / 0 / 0 | 15.5 / 39.9 / 40.3 | 52.9 | holds |
+
+What this says, plainly:
+
+* **First content p99 under 300 ms holds on every page**, cold and warm (worst: `/markets` cold
+  228 ms). **Heap under 100 MB holds on every page** (worst 56 MB, warm, after 200 reloads in one
+  tab).
+* **Wire under 400 KB fails on three pages cold**: `/db` 815 KB, `/markets` 577 KB, `/ingest`
+  560 KB. `/markets` ships 325 KB of code, so about 250 KB of its cold load is data it reads.
+  Compression in `assets.rs` would bring `/db`'s code to 239 KB (gzip); that is not an R3-15 file.
+* **No pause over 50 ms fails on every cold load**, by 7 to 185 ms at the max: the first load
+  evaluates the shared shell's script (about 190 KB on every page) in one task. The Speed page's
+  own code is small; its 62 ms p99 is the shell's. Warm loads hold on every page except one 51 ms
+  pause on `/db`. On the Mac's faster cores these figures will be lower; whether they pass is the
+  Mac's run.
+* **The four interactions are NOT MEASURED here**: on an empty store `/db` draws none of the four
+  controls (the search, the feed picker and the grid all wait for data). The selectors are named
+  in each row, and the Mac's real-data run measures them.
+* **Idle tabs** (60 s here; an hour is the Mac's run): every idle tab in its own window, all
+  visible. The header now asks only `HEAD /inspection.json`, but other pages' own polls also run
+  on an idle tab and the harness fails on them, by name: `HEAD /store.json?feed=zerodha` (`/db`'s
+  census generation watch), `GET /ingest/status.json` and `GET /pull/run.json` (`/ingest`),
+  `GET /audit.json?feed=zerodha` (`/audit`). 1 tab: 19 requests a minute; 10 tabs: 119; 20 tabs:
+  238. None of those polls is an R3-15 file; each owner's page has to move to the header-only
+  check, or the operator has to allow it, before goal 4's idle rule holds.
+* **The shared reporter end to end, against the real server**: a fetch failed at the network on a
+  page was posted to `/page-report`, answered `202`, and found in `/logs.json?target=api.page.access`.
+  It also reported, unprompted, the real empty-store fault `/db` hit on every load:
+  `{"target":"api.page.access","msg":"page reported a failure","fields":{"page":"/db","what":"request: GET /instruments.json?feed=zerodha answered HTTP 503"}}`.
+
+An earlier run of the same command on a loaded machine (load ≈ 10, two other jobs) gave first
+content p99 up to 496 ms and pauses up to 316 ms; it is not the measurement and is not used.
 
 ## Gates
 
