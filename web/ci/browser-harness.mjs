@@ -576,21 +576,33 @@ export async function runHarness(args) {
       }
     }
     if (args.idle) {
-      lines.push('', '| idle tabs | for | requests | other than the up check |', '|---:|---:|---:|---|');
+      lines.push('', '| idle tabs | visible | for | requests | other than the up check |', '|---:|---:|---:|---:|---|');
       for (const count of args.idleTabs) {
         const tabs = [];
+        /** @type {string[]} */
+        const contexts = [];
         for (let i = 0; i < count; i += 1) {
-          const tab = await openTab(cdp, undefined);
+          // EACH IN A BROWSER CONTEXT, SO A WINDOW, OF ITS OWN: a background
+          // tab is hidden and a hidden page polls nothing, so N tabs in one
+          // window measured one.
+          const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+          contexts.push(browserContextId);
+          const tab = await openTab(cdp, browserContextId);
           await loadOnce(tab, cdp, `${args.base}${args.pages[i % args.pages.length]}`, args.settleMs);
           tab.reset();
           tabs.push(tab);
         }
+        /** @type {unknown[]} */
+        const states = [];
+        for (const t of tabs) states.push(await t.evaluate('document.visibilityState'));
+        const visible = states.filter((s) => s === 'visible').length;
         await new Promise((r) => setTimeout(r, args.idleMs));
         const requests = tabs.flatMap((t) => t.seen());
         const v = idleVerdict(requests, args.base);
-        lines.push(`| ${count} | ${(args.idleMs / 1_000).toFixed(0)} s | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
+        lines.push(`| ${count} | ${visible} | ${(args.idleMs / 1_000).toFixed(0)} s | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
         if (v.other.length > 0) failures.push(`${count} idle tabs asked for more than the header-only up check: ${v.other.join('; ')}`);
         for (const t of tabs) await t.close();
+        for (const c of contexts) await cdp.send('Target.disposeBrowserContext', { browserContextId: c });
       }
     }
     if (args.reportCheck) {

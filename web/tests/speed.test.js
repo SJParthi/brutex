@@ -929,8 +929,8 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     assert.match(text, /^\| \/db \| warm \| 2 \|.*\| holds \|$/m);
     assert.match(text, /^\| picker click \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \| [\d.]+ \|$/m);
     assert.match(text, /^\| feed switch \| 0 \| NOT MEASURED: \[aria-controls="feed-listbox"\] is not on \/db \| — \|$/m);
-    assert.match(text, /^\| 1 \| 1 s \| \d+ \| none \|$/m);
-    assert.match(text, /^\| 2 \| 1 s \| \d+ \| GET \/feeds\.json \|$/m);
+    assert.match(text, /^\| 1 \| 1 \| 1 s \| \d+ \| none \|$/m);
+    assert.match(text, /^\| 2 \| 2 \| 1 s \| \d+ \| GET \/feeds\.json \|$/m, 'two idle tabs, each in its own window, both visible');
     assert.match(text, /Shared reporter: a failed \/feeds\.json\?harness=\d+ was reported \(202\) and found in \/logs\.json\./);
     assert.match(text, /hook saw http:\/\/127\.0\.0\.1:\d+/);
     assert.ok(r.failures.includes('2 idle tabs asked for more than the header-only up check: GET /feeds.json'), r.failures.join('\n'));
