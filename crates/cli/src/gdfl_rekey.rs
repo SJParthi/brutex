@@ -177,7 +177,7 @@ fn render_survey(
 }
 
 /// The plan's half of the receipt.
-fn render_plan(out: &mut String, plan: &Plan) {
+fn render_plan(out: &mut String, plan: &Plan, only: Option<&BTreeSet<Symbol>>) {
     let _ = writeln!(
         out,
         "  PLAN: {} key(s) judged; {} kept, {} to move, {} to retire, {} unresolved; {} moved \
@@ -193,7 +193,19 @@ fn render_plan(out: &mut String, plan: &Plan) {
     // FM-273'S STEP 4 (AG-02 repair r1e): whether the census still lists a
     // key the ledger withdraws. A run stopped after its ledger lines leaves
     // every key recorded and this step pending, and the receipt says so.
-    let _ = writeln!(out, "  {}", plan.census.describe());
+    // The census step reads the whole FNO epoch against the whole ledger,
+    // so under `--underlying` the receipt says it is not narrowed (AG-02
+    // repair r2): its count may name another underlying's keys.
+    let _ = writeln!(
+        out,
+        "  {}{}",
+        plan.census.describe(),
+        if only.is_some() {
+            " (counted over the whole ledger and census; --underlying does not narrow it)"
+        } else {
+            ""
+        }
+    );
     // THE ONE NUMBER A GATE READS (AG-02, finding rekey-3): what is still to
     // do or to answer. Recorded moves and retirements are done and are not
     // in it, so a store whose re-key has run reads `pending 0` however long
@@ -347,7 +359,7 @@ pub(crate) fn command_with(
     };
     render_survey(out, &root, &found, &ledger, asked.only.as_ref());
     let plan = gdfl_rekey::plan(&found, &ledger);
-    render_plan(out, &plan);
+    render_plan(out, &plan, asked.only.as_ref());
     // A census that was not read or would not read leaves step 4 unknown: that
     // is a failure to answer, not pending work (AG-02 repair r1e).
     let clean = found.unreadable == 0

@@ -69452,3 +69452,71 @@ a_census_that_will_not_read_is_named_and_fails_the_plan}`,
 a_process_with_no_attempt_writes_run_0,
 two_invocations_in_one_process_each_name_their_own_run,
 a_run_claim_takes_only_a_free_key_and_releases_only_its_own}`.
+
+**Repair r2 (17 October 2026; a second agent's check of repair r1e).** One
+blocking defect, reproduced first: two `--apply` runs planned from one
+ledger. `apply` checked `admits` and filtered `has_line` against the
+`Withdrawn` its caller read before the survey, and appended with no lock and
+no re-read. When anything on the surveyed days changed between two surveys
+(another strike on a retired key's day moves its recorded median; a bar on
+the moved key changes `bars=`), the second run appended a second account of
+the same retirement or move, and `Withdrawn::parse` then refused the WHOLE
+ledger, stopping `gdfl-rekey`, `census-recount` and the import's rename
+check, with no lawful repair of an append-only file. Decided:
+
+1. **One writer, under one lock, from the ledger it planned from.** `apply`
+   takes `<store>/imports/gdfl.lineage.lock` (`ledger_lock_path`; created
+   when absent, never truncated, a non-regular file refused) with
+   `try_lock` after its pure checks and before its first write, and holds it
+   to the epoch. Another apply holding it is refused by the lock's name,
+   never waited on. Under the lock the ledger is re-read; when its re-key
+   lines are not exactly the ones the plan's ledger held, the apply refuses
+   with "the ledger changed since this plan; re-plan", naming a differing
+   line, and writes nothing. The append's torn-tail mark and line filter use
+   the fresh read. Lines of the ledger's other kinds are not compared: no
+   re-key verdict reads them.
+2. **A source counted by the plan is the source moved.** Before a group is
+   written, each source key's months and bars are read again (`source_now`:
+   one listing and one header per month file) and the bars actually read are
+   counted; a source holding other bars or months than the plan counted is a
+   refused move by name ("bars landed under it after the survey; re-plan"),
+   never moved with the plan's stale `bars=` beside this read's digest.
+3. **The reader's last two rules, and the writer never breaks them.**
+   `Withdrawn::parse` refuses, once the whole ledger is read, a `superseded`
+   line into a key the ledger retires and a cycle of `superseded` lines,
+   naming the lines; a chain (A by B, B by C) is lawful history and reads.
+   The plan leaves by name a key bars were moved into instead of retiring
+   it, and `admits` refuses a hand-built plan that retires one, moves into a
+   key the ledger withdraws, or moves into a key it also moves away.
+4. **One rule for both recorded kinds.** A retired key that gained bars or
+   days after its retirement is unresolved by name, exactly as a moved key
+   that did; a retirement whose day merely gained other strikes (its median
+   moved) stays recorded, because the median is the day's, not the key's.
+5. The `--underlying` receipt says the census step is counted over the whole
+   ledger and census.
+
+**Rejected (r2).** A blocking lock: an apply that waited would then find the
+ledger changed and refuse anyway, after an unbounded wait. Comparing the
+ledger's whole bytes: an import appending an `alias` line between plan and
+apply would refuse a re-key no verdict of which changed. Re-surveying under
+the lock: about 470 s on NIFTY with the lock held. Writing the bars count the
+apply read instead of refusing: the plan's verdicts (ladder, held months,
+second names) were judged on the plan's bars, so a grown source needs a new
+plan, not a new count. Refusing chains: a decoder change can lawfully move a
+target on, and the reader resolves a chain.
+
+**What remains (r2)** (`docs/06-limits.md`, L-AG02-10 and L-AG02-11): an
+import writing under a source key during that key's own move, after its
+read and before the epoch, is not excluded by this lock (the GDFL import's
+run lock is the cli's, AF-01); the next plan names it unresolved, never
+recorded. Everything listed under repair r1e's "What remains" stands.
+
+**Proved by (r2)** `pull::gdfl_rekey::tests::{two_applies_planned_from_one_ledger_never_append_two_accounts,
+an_apply_while_another_holds_the_lock_writes_nothing,
+two_applies_at_once_leave_a_ledger_that_reads,
+a_source_that_grew_after_the_survey_is_refused_not_moved_with_a_stale_count,
+a_superseded_line_into_a_retired_key_or_a_cycle_is_refused_by_line,
+the_writer_never_retires_a_target_or_closes_a_cycle,
+a_retired_key_that_grew_is_unresolved_like_a_moved_one}`,
+`cli::gdfl_rekey::tests::{an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing,
+the_plan_receipt_prints_recorded_apart_from_pending}`.

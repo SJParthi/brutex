@@ -336,11 +336,19 @@ fn the_plan_receipt_prints_recorded_apart_from_pending() {
         "{after}"
     );
     assert!(after.contains("(and would change nothing)"), "{after}");
+    assert!(
+        after.contains("census: lists no key the ledger withdraws (step 4 done) (counted over the whole ledger and census; --underlying does not narrow it)"),
+        "{after}"
+    );
     assert!(!after.contains("    move    "), "{after}");
     let mut whole = String::new();
     let _ = command_with(&["--plan"], &|| Ok(root.clone()), &mut whole);
     assert!(
         whole.contains("1 superseded and 1 retired key(s) already recorded (the whole ledger)"),
+        "{whole}"
+    );
+    assert!(
+        !whole.contains("--underlying does not narrow it"),
         "{whole}"
     );
 }
@@ -469,4 +477,38 @@ fn a_store_that_cannot_be_read_refuses() {
         out.contains("GDFL RE-KEY REFUSED: no store; nothing was written"),
         "{out}"
     );
+}
+
+/// AG-02 repair r2: `--apply` while another apply holds the re-key's lock
+/// stops by the lock's name, writes no month and no ledger line, and fails;
+/// once the lock is free the same command applies.
+#[test]
+fn an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing() {
+    let scratch = store("lockheld");
+    let root = scratch.0.clone();
+    let at = pull::gdfl_rekey::ledger_lock_path(&root);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let file = std::fs::File::create(&at).unwrap();
+    let held = store::flock::Flock::try_lock(&file, at.as_path()).unwrap();
+    let mut out = String::new();
+    assert_eq!(
+        command_with(&["--apply"], &|| Ok(root.clone()), &mut out),
+        FAILED,
+        "{out}"
+    );
+    assert!(
+        out.contains("GDFL RE-KEY STOPPED:")
+            && out
+                .contains("gdfl.lineage.lock is held by another re-key apply; nothing was written"),
+        "{out}"
+    );
+    assert!(!pull::gdfl_lineage::lineage_path(&root).exists(), "{out}");
+    held.release().unwrap();
+    let mut again = String::new();
+    assert_eq!(
+        command_with(&["--apply"], &|| Ok(root.clone()), &mut again),
+        OK,
+        "{again}"
+    );
+    assert!(pull::gdfl_lineage::lineage_path(&root).exists(), "{again}");
 }

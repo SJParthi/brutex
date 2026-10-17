@@ -68,6 +68,14 @@
 //! before it, the target already holds each move's copy and the next apply
 //! finds those months exactly held and writes the lines (AG-02).
 //!
+//! One apply writes at a time: it holds `<store>/imports/gdfl.lineage.lock`
+//! from its re-read of the ledger to its epoch, refuses when another holds
+//! it, and refuses a ledger whose re-key lines changed after its plan read
+//! them ("the ledger changed since this plan; re-plan"), so two applies
+//! planned from one ledger never append two accounts of one key. A source
+//! key that gained bars or a month after the survey is refused by name, not
+//! moved with a stale count (AG-02 repair r2).
+//!
 //! # Cost
 //!
 //! [`survey`] is O(files · days per month): one header read per month file
@@ -84,7 +92,7 @@
 //! not a distribution.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -93,6 +101,7 @@ use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use store::file::{Appended, BarFile, StoreError};
+use store::flock::Flock;
 use store::format::{Bar, Row as _};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
@@ -199,6 +208,10 @@ pub struct Withdrawn {
     /// The 1-based line each key's first `superseded` or `retired` line is
     /// on: what a refusal and an unresolved verdict name.
     line_of: HashMap<(Symbol, Contract), usize>,
+    /// Each key a `superseded` line moves bars INTO: the first key moved
+    /// there and its line (AG-02 repair r2). What refuses a retired target
+    /// and what keeps the writer from retiring one.
+    into: HashMap<(Symbol, Contract), (Contract, usize)>,
     lines: HashSet<String>,
     /// Whether the file's last line has no newline: a torn append.
     torn_tail: bool,
@@ -228,6 +241,7 @@ impl Withdrawn {
             superseded: HashMap::with_capacity(64),
             retired: HashMap::with_capacity(16),
             line_of: HashMap::with_capacity(80),
+            into: HashMap::with_capacity(64),
             lines: HashSet::with_capacity(80),
             torn_tail,
         };
@@ -252,7 +266,134 @@ impl Withdrawn {
             }
             let _ = out.lines.insert(line.to_owned());
         }
+        out.targets_continue()?;
         Ok(out)
+    }
+
+    /// The two refusals no single line shows, asked once the whole ledger is
+    /// read, so they do not depend on line order (AG-02 repair r2): a key
+    /// bars were moved INTO that the ledger retires (its bars, and the moved
+    /// ones with them, would be served by no reader), and a cycle of
+    /// `superseded` lines (A by B, B by A: no key holds the bars). A chain
+    /// (A by B, B by C) is lawful history and reads. Of several, the one on
+    /// the earliest line is named, whatever the hash order.
+    ///
+    /// O(superseded records), no sort: one probe per record for a retired
+    /// target, and each key stepped onto once by the cycle walk (one walk id
+    /// per key, so a key reached again in the same walk is a cycle and one
+    /// reached from an earlier walk ends it).
+    fn targets_continue(&self) -> Result<(), String> {
+        let line = |key: &(Symbol, Contract)| self.line_of.get(key).copied().unwrap_or(0);
+        let retired_target = self
+            .superseded
+            .iter()
+            .filter(|(_, record)| self.retired.contains_key(&(record.underlying, record.new)))
+            .min_by_key(|(key, _)| line(key));
+        if let Some((key, record)) = retired_target {
+            return Err(format!(
+                "line {} supersedes {} by {} and line {} retires {}; bars move only into a \
+                 key that continues",
+                line(key),
+                option_key(record.underlying, record.old),
+                option_key(record.underlying, record.new),
+                line(&(record.underlying, record.new)),
+                option_key(record.underlying, record.new),
+            ));
+        }
+        // Each key has at most one successor, so a walk either ends at a key
+        // that continues, reaches a key an earlier walk stepped onto, or
+        // reaches a key this walk stepped onto: a cycle.
+        let mut walk_of: HashMap<(Symbol, Contract), usize> =
+            HashMap::with_capacity(self.superseded.len());
+        let mut earliest: Option<Vec<(usize, (Symbol, Contract))>> = None;
+        for (walk, start) in self.superseded.keys().enumerate() {
+            let mut at = *start;
+            loop {
+                match walk_of.get(&at) {
+                    Some(&seen) if seen == walk => {
+                        let mut cycle: Vec<(usize, (Symbol, Contract))> = Vec::with_capacity(4);
+                        let mut on = at;
+                        while let Some(next) = self.superseded.get(&on) {
+                            cycle.push((line(&on), on));
+                            on = (next.underlying, next.new);
+                            if on == at {
+                                break;
+                            }
+                        }
+                        let first = cycle
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, (at_line, _))| *at_line)
+                            .map_or(0, |(index, _)| index);
+                        cycle.rotate_left(first);
+                        let lower = |of: &[(usize, (Symbol, Contract))]| {
+                            of.first().map_or(usize::MAX, |(at_line, _)| *at_line)
+                        };
+                        if earliest
+                            .as_deref()
+                            .is_none_or(|held| lower(&cycle) < lower(held))
+                        {
+                            earliest = Some(cycle);
+                        }
+                        break;
+                    }
+                    Some(_) => break,
+                    None => {}
+                }
+                let _ = walk_of.insert(at, walk);
+                let Some(next) = self.superseded.get(&at) else {
+                    break;
+                };
+                at = (next.underlying, next.new);
+            }
+        }
+        if let Some(cycle) = earliest {
+            let lines: Vec<String> = cycle
+                .iter()
+                .map(|(at_line, _)| at_line.to_string())
+                .collect();
+            let named = cycle
+                .first()
+                .map_or_else(String::new, |(_, (under, contract))| {
+                    option_key(*under, *contract)
+                });
+            return Err(format!(
+                "lines {} supersede {named} in a cycle back to itself; no key holds its bars",
+                lines.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `fresh` (the ledger re-read under the re-key's lock) holds
+    /// exactly the re-key lines this ledger held: `Err` names how they
+    /// differ. Lines of the ledger's other kinds are not compared — no re-key
+    /// verdict reads them. O(lines).
+    fn same_records(&self, fresh: &Self) -> Result<(), String> {
+        if self.lines == fresh.lines {
+            return Ok(());
+        }
+        let first = |of: &Self, not_in: &Self| {
+            of.lines
+                .iter()
+                .filter(|line| !not_in.lines.contains(*line))
+                .min()
+                .cloned()
+        };
+        let detail = first(fresh, self).map_or_else(
+            || {
+                first(self, fresh).map_or_else(String::new, |gone| {
+                    format!("; the plan read {gone:?}, which the ledger no longer holds")
+                })
+            },
+            |new| format!("; the ledger now holds {new:?}, which the plan did not read"),
+        );
+        Err(format!(
+            "the ledger changed since this plan; re-plan ({} re-key line(s) when the plan read \
+             it, {} now{detail})",
+            self.lines.len(),
+            fresh.lines.len()
+        ))
     }
 
     /// One `superseded` line on line `at`, refused if it re-targets a key or
@@ -300,6 +441,10 @@ impl Withdrawn {
             return Ok(());
         }
         let _ = self.line_of.insert(key, at);
+        let _ = self
+            .into
+            .entry((record.underlying, record.new))
+            .or_insert((record.old, at));
         let _ = self.superseded.insert(key, record);
         Ok(())
     }
@@ -368,6 +513,13 @@ impl Withdrawn {
         self.line_of.get(&(underlying, contract)).copied()
     }
 
+    /// The first key a `superseded` line moves into `underlying`'s
+    /// `contract`, and that line, if the ledger moves any there.
+    #[must_use]
+    pub fn moved_into(&self, underlying: Symbol, contract: Contract) -> Option<(Contract, usize)> {
+        self.into.get(&(underlying, contract)).copied()
+    }
+
     /// Every `superseded` record, one per key, in no order: what a reader
     /// that maps a target to its predecessors walks once.
     pub fn superseded_records(&self) -> impl Iterator<Item = &SupersededRecord> {
@@ -412,9 +564,15 @@ impl Withdrawn {
     /// The lines [`apply`] would append for `plan`, checked against this
     /// ledger by [`Self::parse`]'s own rules, and against each other: `Err`
     /// names the first key one of them would re-target, both supersede and
-    /// retire, move again once recorded, or retire with another account. O(moves + retirements): one or two probes each.
+    /// retire, move again once recorded, or retire with another account;
+    /// and, so the ledger never gains a retired target or a cycle (AG-02
+    /// repair r2), a move into a key the ledger or the plan withdraws, and a
+    /// retirement of a key bars were or are being moved into.
+    /// O(moves + retirements): a few probes each.
     fn admits(&self, plan: &Plan) -> Result<(), String> {
         let mut planned: HashMap<(Symbol, Contract), Contract> =
+            HashMap::with_capacity(plan.moves.len());
+        let mut targets: HashMap<(Symbol, Contract), Contract> =
             HashMap::with_capacity(plan.moves.len());
         for one in &plan.moves {
             let key = (one.underlying, one.from);
@@ -445,6 +603,23 @@ impl Withdrawn {
             if planned.insert(key, one.to).is_some_and(|to| to != one.to) {
                 return Err(format!("the plan moves {name} to two keys"));
             }
+            let into = (one.underlying, one.to);
+            if let Some(line) = self.line_of.get(&into) {
+                return Err(format!(
+                    "the plan moves {name} into {}, which ledger line {line} withdraws",
+                    option_key(one.underlying, one.to)
+                ));
+            }
+            let _ = targets.entry(into).or_insert(one.from);
+        }
+        for one in &plan.moves {
+            if planned.contains_key(&(one.underlying, one.to)) {
+                return Err(format!(
+                    "the plan moves {} into {}, which it also moves away",
+                    option_key(one.underlying, one.from),
+                    option_key(one.underlying, one.to)
+                ));
+            }
         }
         for record in &plan.retired {
             let key = (record.underlying, record.key);
@@ -456,6 +631,18 @@ impl Withdrawn {
             }
             if planned.contains_key(&key) {
                 return Err(format!("the plan both moves and retires {name}"));
+            }
+            if let Some((from, line)) = self.into.get(&key) {
+                return Err(format!(
+                    "the plan retires {name}, which ledger line {line} moved {} into",
+                    option_key(record.underlying, *from)
+                ));
+            }
+            if let Some(from) = targets.get(&key) {
+                return Err(format!(
+                    "the plan retires {name}, which it also moves {} into",
+                    option_key(record.underlying, *from)
+                ));
             }
             if let Some(held) = self.retired.get(&key)
                 && held != record
@@ -1251,7 +1438,20 @@ fn against_ledger(out: &mut Plan, key: &Stored, verdict: Verdict, ledger: &Withd
             months: key.months.iter().map(|month| month.month).collect(),
             bars: key.bars(),
         }),
-        (Verdict::Retire(record), None, None) => out.retired.push(record),
+        (Verdict::Retire(record), None, None) => {
+            // A KEY BARS WERE MOVED INTO is not retired (AG-02 repair r2):
+            // its retirement would withdraw the moved bars with it, and the
+            // ledger's reader refuses a retired target.
+            if let Some((from, into)) = ledger.moved_into(key.underlying, key.contract) {
+                left(format!(
+                    "the decoder now refuses every day of it, and ledger line {into} moved {} \
+                     into it: retiring it would withdraw those bars with it, so it is left",
+                    option_key(key.underlying, from)
+                ));
+            } else {
+                out.retired.push(record);
+            }
+        }
         (Verdict::Move(to, kind), Some(done), _) if done.new == to => {
             if done.bars == key.bars() && done.months == months {
                 out.recorded_moves.push(Move {
@@ -1287,7 +1487,23 @@ fn against_ledger(out: &mut Plan, key: &Stored, verdict: Verdict, ledger: &Withd
              retires it: a retired key is not moved",
             option_key(key.underlying, to)
         )),
-        (Verdict::Retire(_), None, Some(done)) => out.recorded_retired.push(*done),
+        (Verdict::Retire(now), None, Some(done)) => {
+            // ONE RULE FOR BOTH RECORDED KINDS (AG-02 repair r2): a retired
+            // key that gained bars after its retirement is no more done than
+            // a moved key that did. The median is the day's, not the key's,
+            // and is not compared.
+            if done.bars == now.bars && done.days == now.days {
+                out.recorded_retired.push(*done);
+            } else {
+                left(format!(
+                    "ledger line {line} retires it with {} bar(s) on {} day(s), and it holds \
+                     {} bar(s) on {} day(s) now: bars landed under the retired name after \
+                     it was retired, and a retirement has one account, so this needs the \
+                     repair-door publish (R4-21 item 1)",
+                    done.bars, done.days, now.bars, now.days
+                ));
+            }
+        }
         (Verdict::Retire(_), Some(done), _) => left(format!(
             "the decoder now refuses every day of it, and ledger line {line} supersedes it by \
              {}: a key is superseded or retired, never both",
@@ -1576,6 +1792,50 @@ fn read_month(
     Ok(bars)
 }
 
+/// The months of one stored key holding at least one bar, oldest first, and
+/// their bars, read now from the same directory and headers [`survey`]
+/// reads (AG-02 repair r2): what [`apply`] compares with the plan's count
+/// before it moves a key. One listing and one header read per month file.
+///
+/// # Errors
+///
+/// A directory that exists and cannot be listed, or a month file that will
+/// not open, named.
+fn source_now(
+    root: &Path,
+    underlying: Symbol,
+    contract: Contract,
+) -> Result<(Vec<YearMonth>, u64), String> {
+    let dir = root
+        .join(store::path::STORE_ROOT)
+        .join(Vendor::Gdfl.as_str())
+        .join(Exchange::Nse.as_str())
+        .join(Segment::Fno.as_str())
+        .join(underlying.as_str())
+        .join(contract.as_str())
+        .join(RUNG.as_str());
+    let mut months = Vec::with_capacity(4);
+    let mut bars: u64 = 0;
+    for name in listed(&dir)?.keys() {
+        let Some(month) = name
+            .strip_suffix(FileKind::Bars.extension())
+            .and_then(month_named)
+        else {
+            continue;
+        };
+        let at = StorePath::new(month_parts(&underlying, contract, month))
+            .map_err(|why| format!("{} {month}: {why}", option_key(underlying, contract)))?;
+        let file = BarFile::open_existing(root, at, symbol_id(underlying))
+            .map_err(|why| format!("{} {month}: {why}", option_key(underlying, contract)))?;
+        let rows = file.header().n_valid;
+        if rows > 0 {
+            months.push(month);
+            bars = bars.saturating_add(rows);
+        }
+    }
+    Ok((months, bars))
+}
+
 /// What the target month already holds decides how `bars` go there: an
 /// absent or empty month, or one whose last bar precedes them, is appended
 /// to; one holding exactly them at their place is left; anything else is
@@ -1706,8 +1966,11 @@ impl Group<'_> {
         let mut digests: Vec<[u8; 32]> = Vec::with_capacity(self.sources.len());
         for (from, one) in &self.sources {
             let mut hasher = brutex_core::blake3::Hasher::new();
+            let (months_now, bars_now) = source_now(root, self.underlying, *from)?;
+            let mut read: u64 = 0;
             for &month in &one.months {
                 let bars = read_month(root, self.underlying, *from, month)?;
+                read = read.saturating_add(u64::try_from(bars.len()).unwrap_or(u64::MAX));
                 let mut image = Vec::with_capacity(bars.len().saturating_mul(Bar::LEN));
                 for bar in &bars {
                     bar.write_into(&mut image);
@@ -1721,6 +1984,23 @@ impl Group<'_> {
                         "{target} {month}: two of the keys moving here start on one second"
                     ));
                 }
+            }
+            // THE SOURCE AS THE PLAN SAW IT (AG-02 repair r2): a key that
+            // gained bars or a month since the survey is moved by no plan
+            // that counted it, because its `superseded` line would carry
+            // the plan's count beside this read's digest and the bars left
+            // behind would be withdrawn with the key.
+            if read != one.bars || bars_now != one.bars || months_now != one.months {
+                return Err(format!(
+                    "{}: the plan counted {} bar(s) in {} month(s), and it holds {} bar(s) in \
+                     {} month(s) now ({read} read): bars landed under it after the survey; \
+                     re-plan",
+                    option_key(self.underlying, *from),
+                    one.bars,
+                    one.months.len(),
+                    bars_now,
+                    months_now.len()
+                ));
             }
             digests.push(hasher.finalize());
         }
@@ -1845,11 +2125,16 @@ fn append_lines(path: &Path, lines: &[String], torn_tail: bool) -> Result<(), St
 /// file; a plan that would append a line [`Withdrawn::parse`] refuses (a
 /// key re-targeted, superseded and retired, or moved twice — [`plan`] never
 /// makes one, a plan built by hand or against another ledger can; AG-02);
-/// and a GDFL census that is not partitioned. After that, a census
+/// a GDFL census that is not partitioned; the re-key's lock
+/// ([`ledger_lock_path`]) held by another apply; and a ledger whose re-key
+/// lines, re-read under that lock, are not the ones `ledger` holds — "the
+/// ledger changed since this plan; re-plan" (AG-02 repair r2: two applies
+/// planned from one ledger never append two accounts). After that, a census
 /// cycle, the ledger or the withdrawal that refuses, naming what was already
 /// done — every step is idempotent, so a re-run finishes it. A MOVE whose
-/// target refuses is not an error: it is named in [`Applied::refused`] and
-/// nothing of it is written.
+/// target refuses, or whose source holds other bars or months than the plan
+/// counted, is not an error: it is named in [`Applied::refused`] and nothing
+/// of it is written.
 pub fn apply(
     root: &Path,
     survey: &Survey,
@@ -1860,6 +2145,33 @@ pub fn apply(
         format!("{why}: the ledger's own reader would refuse that line; nothing was written")
     })?;
     preflight(root, survey)?;
+    // ONE WRITER, AND THE LEDGER IT PLANNED FROM (AG-02 repair r2): the
+    // lock is held from this re-read to the epoch, so no other apply
+    // appends between them, and a ledger another apply changed after this
+    // plan read it is refused here, before a byte, rather than answered
+    // with a second account the reader refuses whole.
+    let lock_at = ledger_lock_path(root);
+    let lock_file = open_ledger_lock(&lock_at)?;
+    let lock = match Flock::try_lock(&lock_file, lock_at.as_path()) {
+        Ok(lock) => lock,
+        Err(TryLockError::WouldBlock) => {
+            return Err(format!(
+                "{} is held by another re-key apply; nothing was written. Run again once \
+                 it has finished: its plan will be read afresh",
+                lock_at.display()
+            ));
+        }
+        Err(TryLockError::Error(why)) => {
+            return Err(format!(
+                "{} could not be locked: {why}; nothing was written",
+                lock_at.display()
+            ));
+        }
+    };
+    let fresh = withdrawn(root)?;
+    ledger
+        .same_records(&fresh)
+        .map_err(|why| format!("{why}: nothing was written"))?;
     let mut out = Applied::default();
     let rows = move_all(root, plan, &mut out);
     if !rows.is_empty() {
@@ -1876,20 +2188,64 @@ pub fn apply(
         .iter()
         .map(SupersededRecord::line)
         .chain(plan.retired.iter().map(RetiredRecord::line))
-        .filter(|line| !ledger.has_line(line))
+        .filter(|line| !fresh.has_line(line))
         .collect();
-    append_lines(&lineage_path(root), &lines, ledger.torn_tail).map_err(|why| {
+    append_lines(&lineage_path(root), &lines, fresh.torn_tail).map_err(|why| {
         format!("{why} (the moved months are written and counted; run again to finish)")
     })?;
     out.lines_written = u64::try_from(lines.len()).unwrap_or(u64::MAX);
-    out.withdrawal = withdraw_all(root, &out, plan, ledger).map_err(|why| {
+    out.withdrawal = withdraw_all(root, &out, plan, &fresh).map_err(|why| {
         format!(
             "{why} (the moved months are written and counted and the ledger holds every \
              line; run again to finish)"
         )
     })?;
     note_applied(&out, plan);
+    // Released here, by `Flock`'s unlock; a refused unlock is logged by
+    // its drop, never silent.
+    drop(lock);
     Ok(out)
+}
+
+/// The re-key's writer lock, `<store>/imports/gdfl.lineage.lock`, beside
+/// the ledger it guards: every [`apply`] holds it from its re-read of the
+/// ledger to its epoch (AG-02 repair r2). The ledger's bytes stay records
+/// only; this file holds none.
+#[must_use]
+pub fn ledger_lock_path(root: &Path) -> PathBuf {
+    lineage_path(root).with_extension("lineage.lock")
+}
+
+/// The lock file, created when absent and never truncated; anything but a
+/// regular file at its path is refused by name.
+fn open_ledger_lock(path: &Path) -> Result<fs::File, String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|why| format!("{}: {why}; nothing was written", dir.display()))?;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(format!(
+                "{} is not a regular file; nothing was written",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(absent) if absent.kind() == ErrorKind::NotFound => {}
+        Err(why) => return Err(format!("{}: {why}; nothing was written", path.display())),
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|why| {
+            format!(
+                "{} could not be opened: {why}; nothing was written",
+                path.display()
+            )
+        })
 }
 
 /// The refusals [`apply`] makes before anything is written: a survey that
