@@ -9,6 +9,9 @@ DB-B72, DB-B73, DB-B74, DB-B75 and DB-B79 (`state/board/audit-result.json`).
 
 Nothing here names a credential, a vendor row or a parameter path.
 
+Section 9 (R3-32) is the app under launchd: the agent that starts it at login
+and again when it exits, and the watchdog that says when it does not answer.
+
 ---
 
 ## 1. What the code now says, and where to read it
@@ -382,3 +385,200 @@ line; `/disk.json` and the `/ingest` disk line show the count). They gain a
 `.prv` when they are re-imported as a new generation (WP-80). One extra
 `open` per month opened; a month with no sidecar costs the one `open` that
 answers `ENOENT`.
+
+## 9. The app under launchd: started at login, started again when it exits, and a watchdog (R3-32, FM-196, FM-088)
+
+Until this section the app on :8080 ran only when a session started it
+(`state/fix/deploy-8080.sh`); after a reboot, a crash or a drive that mounted
+late, nothing started it again and nothing said it was down. Two launchd
+agents now do both. **Nothing here has been installed by any session**:
+loading an agent changes the operator's machine, so the operator does it from
+this section, and the kill drill (§9.4) is his.
+
+**Why there are no agent files in the repository.** `CLAUDE.md` §2 allows no
+`.plist` (gate 1). The agents are printed at install time by
+`cli launch-agent app|watchdog` (`crates/cli/src/watchdog_command.rs`), from
+arguments the operator gives, and written by the shell into
+`~/Library/LaunchAgents/`. The verb writes and installs nothing (D-4996).
+
+| Agent | What it runs | What keeps it going |
+|---|---|---|
+| `in.brutex.app` | `api serve ADDR` (or `/usr/bin/caffeinate -i api serve ADDR` with `--keep-awake`, as the deploy script runs it today) with `BRUTEX_STORE` = the store root, `BRUTEX_NO_OPEN=1` and every `--env` given | `KeepAlive` → `PathState` on the store root: launchd keeps the job alive *"as long as the path exists"* (`man launchd.plist`, `KeepAlive`), so it starts the app when the drive mounts, starts it again when it exits, and leaves it stopped while the drive is away. `ThrottleInterval` (10 s unless `--throttle-seconds`): *"jobs will not be spawned more than once every 10 seconds"* by default (ibid.), so an app that refuses at start (`serve.lock` held, the store unreadable) is retried at most once a throttle interval, never in a tight loop |
+| `in.brutex.watchdog` | `cli watchdog URL --state-dir DIR [--store ROOT] --interval-seconds N`, once | `StartInterval` 60 (`--interval-seconds`, which the agent also passes to the verb) and `RunAtLoad`. Each run is one probe; its memory is `DIR/watchdog.state` |
+
+Three keys the app agent also sets, each for a measured reason:
+
+- `ProcessType Interactive`. Unset, *"the system will apply light resource
+  limits to the job, throttling its CPU usage and I/O bandwidth"*;
+  `Interactive` jobs *"run with the same resource limitations as apps, that is
+  to say, none"* (`man launchd.plist`, `ProcessType`). An import must not run
+  slower because launchd started the server.
+- `SoftResourceLimits NumberOfFiles` 65,536 (`--max-files`). FM-088:
+  `launchctl limit maxfiles` printed `256 unlimited` on this Mac, against
+  1,048,576 in an interactive shell; the kernel's per-process ceiling read
+  184,320 (`sysctl kern.maxfilesperproc`, 14 Oct 2026). A server started by
+  launchd with 256 descriptors would meet `EMFILE` under an import. The api's
+  own start-time check of its limit (FM-088's test) is E2E-04's, not this
+  section's.
+- `WorkingDirectory`, `StandardOutPath`, `StandardErrorPath`: the `--log-dir`
+  folder and its `app.log`, on the Mac's own disk (the verb refuses a folder
+  on the store drive, where launchd could not say why the app stopped while
+  the drive is away: by name under the store root, and by DEVICE whenever the
+  store root can be looked at, so a sibling folder, a `..` or a link into the
+  drive is refused too).
+
+### 9.1 Install (the operator)
+
+`<work>` is the work folder, `<runtime>` the folder holding `store/` and
+`masters/`, `<target>` the deployed `tgt/<name>/` (§3 step 2). Stop the server
+`deploy-8080.sh` started first: two servers over one store is the
+`serve.lock` refusal, and launchd would retry it once a throttle interval.
+
+```
+mkdir -p ~/Library/Logs/brutex/app ~/Library/Logs/brutex/watchdog
+<target>/release/cli launch-agent app <target>/release/api 127.0.0.1:8080 \
+  --store <runtime>/store --log-dir ~/Library/Logs/brutex/app \
+  --env BRUTEX_MASTERS=<runtime>/masters --env BRUTEX_WEB=<target>/web \
+  --env BRUTEX_TBILL91_SERIES=<work>/state/rates/rbi-91d-tbill.tsv \
+  --keep-awake > ~/Library/LaunchAgents/in.brutex.app.plist
+<target>/release/cli launch-agent watchdog <target>/release/cli \
+  http://127.0.0.1:8080/health --state-dir ~/Library/Logs/brutex/watchdog \
+  --store <runtime>/store > ~/Library/LaunchAgents/in.brutex.watchdog.plist
+plutil -lint ~/Library/LaunchAgents/in.brutex.app.plist ~/Library/LaunchAgents/in.brutex.watchdog.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/in.brutex.app.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/in.brutex.watchdog.plist
+```
+
+A refused argument prints `refused: …` and the verb's usage and exits 2 with
+nothing on stdout, so the redirect leaves an empty file that `plutil -lint`
+refuses: render again before loading. Every path must be absolute; `api` and
+`cli` must exist; an `--env` may not set `BRUTEX_STORE` (that is `--store`) or
+`BRUTEX_NO_OPEN` (a restart must not open a browser); the watchdog's
+`--state-dir` may not lie on the store drive. That is checked by DEVICE (the
+store root's `st_dev` against the folder's nearest existing ancestor's), so
+**render with the drive mounted**: rendered with it away, only the by-name
+check can be made and the agent file says so in a `<!-- NOT CHECKED: … -->`
+comment at its top, which `plutil -lint` accepts. Render again once the drive
+is mounted.
+
+**macOS privacy (UNVERIFIED for a launchd job).** On 29 September macOS
+blocked this Mac's access to the drive for programs that had it before. A
+program started by launchd may be asked, or refused silently, for "files on a
+removable volume". If `app.log` shows `Operation not permitted` on the store
+root, grant `api` (and `cli`, for the watchdog's `--store` look) in System
+Settings → Privacy & Security, then `launchctl kickstart -k gui/$(id -u)/in.brutex.app`.
+
+### 9.2 Check
+
+```
+launchctl print gui/$(id -u)/in.brutex.app | grep -E 'state =|pid =|last exit'
+curl -s -m 5 http://127.0.0.1:8080/health | tail -1          # build <commit>
+tail -3 ~/Library/Logs/brutex/watchdog/watchdog.log           # a `watching` line within a minute
+```
+
+### 9.3 Stop, change, remove
+
+- **Stop the app for a while**: `launchctl bootout gui/$(id -u)/in.brutex.app`.
+  The watchdog notices within two probes (this is §9.4's second drill). Put it
+  back with `launchctl bootstrap` as in §9.1.
+- **Deploy (§3) under launchd.** Step 5 becomes: bootout the app agent, move
+  its file aside as `~/Library/Logs/brutex/app/in.brutex.app.<previous name>.plist`,
+  render the new target's file (`API` and `BRUTEX_WEB` change), bootstrap,
+  probe. A rollback is the same with the kept file put back.
+- **launchd stops a job with SIGTERM** (`man launchd.plist`, `ExitTimeOut`).
+  `api` listens for Ctrl-C (SIGINT) only (`crates/api/src/main.rs` passes
+  `tokio::signal::ctrl_c()`), so a bootout or `kickstart -k` ends it the way a
+  kill does: press Stop on `/ingest` and wait for the run to end before either.
+  Handling SIGTERM as a graceful stop is `api`'s change, not this section's.
+- **Remove**: bootout both agents and move their files out of
+  `~/Library/LaunchAgents/` (never delete: they are the record of what ran).
+
+### 9.4 The drills: `kill_the_app_and_it_is_back_within_a_minute`, and the notice
+
+**Restart.** In one terminal, from a worktree of the deployed commit:
+
+```
+BRUTEX_DRILL_URL=http://127.0.0.1:8080/health cargo test -p cli --release --locked \
+  -- --ignored --nocapture kill_the_app_and_it_is_back_within_a_minute
+```
+
+When it prints `round N of 5: kill the app now`, kill the server in another
+terminal: `kill -9 $(pgrep -f 'release/api serve 127.0.0.1:8080')`. The test
+waits for `/health` to stop answering, measures how long until it answers
+again, fails a round over 60 s, and prints each round's seconds. Copy them
+here:
+
+| Round | Seconds until /health answered again | Date, build |
+|---|---|---|
+| 1 | NOT RUN (the operator's drill) | |
+| 2 | NOT RUN | |
+| 3 | NOT RUN | |
+| 4 | NOT RUN | |
+| 5 | NOT RUN | |
+
+A killed app that ran for more than the throttle interval is started again at
+once; one that dies inside it waits out the rest of the interval. The seconds
+are dominated by the api's own start (its census load).
+
+**Notice.** `launchctl bootout gui/$(id -u)/in.brutex.app`: within two probes
+(at most 120 s at the default interval) the browser opens
+`~/Library/Logs/brutex/watchdog/notices/<UTC>-down.html`, and `watchdog.log`
+has `suspect`, `down`, `notified`. Bootstrap the agent again: at the next
+answered probe a `-back.html` page and `back … down_seconds=<n>`. Nothing more
+for the same outage. On 14 October the same sequence ran against a test server
+on :8501 (stopped and started by `state/fix/stop.sh` and `serve.sh`, not by
+launchd): `watching`, `suspect`, `down … missed=2 … store=mounted`,
+`notified notice=down`, then `back … missed=3 down_seconds=10` and
+`notified notice=back`, one page each (`--notify record`). The rule is tested
+with a fake clock and a counting
+notifier (`the_watchdog_notifies_once_when_health_does_not_answer`,
+`the_watchdog_says_when_the_app_is_back`,
+`a_single_missed_probe_is_a_blip_and_sends_no_notice`).
+
+### 9.5 What the watchdog writes, for a reader (the health page's last-restart tile, R3-33)
+
+Everything is under `--state-dir`, on the Mac's own disk:
+
+| File | What | Grows |
+|---|---|---|
+| `watchdog.log` | one line per change, appended, never rewritten: `<UTC> <word> url=<url> …` with `word` one of `watching`, `suspect`, `blip`, `down`, `down-again`, `back`, `back-unnotified`, `notified`, `notify-failed`, `notice-withheld` (the state could not be saved, so the notice was not sent), `notify-unknown` (the run that sent a notice ended before it recorded the answer; counted as sent), `suspect-expired` (a miss older than two intervals is not counted), `suspect-kept` (it is older, but the probes since ran and could not save, so none was skipped), `attempt-stamp-unreadable`, `state-unreadable`, `state-tmp-cleared`, `clock-back`; an unanswered probe carries `why="…"` and, with `--store`, `store=mounted|absent|denied|not-a-directory|unreadable(…)`; `back` carries `missed=` and `down_seconds=` | one line per change, about 200 bytes |
+| `watchdog.state` | one line, `watchdog-state v2 phase=… since=… missed=… last_answer=… last_probe=… down_notified=0|1 pending=-|down|back`, replaced by rename each run (a v1 line, without `pending=`, still reads). A notice is saved as `pending` BEFORE it is sent, so it goes out at most once per outage. A damaged one (torn, binary, over 512 bytes, a directory, a link) is kept as `watchdog.state.unreadable-<unix>` and named in the log | fixed |
+| `watchdog.lock` | the lock every run takes (`flock`, waited for at most 1 s). A run that probed and could not save its state writes one 41-byte line at the file's start, `watchdog-attempt v1 <unix, 20 digits>`, so the next run knows that probe ran; anything else there is named once (`attempt-stamp-unreadable`) and rewritten as the zero stamp | fixed, 41 bytes |
+| `notices/<UTC>-down.html`, `-back.html` | the notice pages, each a new file | one per notice |
+| `launchd.log` | the verb's stdout and stderr: one report line a run (`watchdog: <url> answered 200 in 0 ms`, or why not); no `events ->` banner, which this section already gives | about 60 bytes a run, about 86 KB a day (`docs/06-limits.md` L-WD-4) |
+| `events/` | the run's telemetry (`BRUTEX_LOG_DIR`), including one `cli.watchdog` event per change | as the telemetry sink rotates |
+
+An answer is any HTTP status line, so a 503 from `/health` (data not clean)
+is the app answering; the health page says the rest. Exit codes: 0 answered,
+1 not answered or not recorded, 2 a misuse.
+
+### 9.6 Limits, stated
+
+- **No Notification Center banner.** A banner from a program needs
+  `osascript` (an AppleScript interpreter, refused by gate 0) or an
+  Objective-C binding; `CLAUDE.md` §2 forbids both. The notice is a page
+  handed to `open`, the platform handler `api` already uses (D-1202, D-4996).
+- **A first start at login with the drive away.** The manual says `KeepAlive`
+  *"implicitly implies RunAtLoad, causing launchd to speculatively launch the
+  job"*. If it does, the api refuses the missing root by name and exits, and
+  `PathState` does not start it again until the root exists. UNVERIFIED on
+  this Mac until a login with the drive unplugged.
+- **`PathState` is lossy.** The manual: *"Filesystem monitoring mechanisms are
+  inherently race-prone and lossy."* If launchd misses a mount, the watchdog
+  says `down … store=mounted`; `launchctl kickstart gui/$(id -u)/in.brutex.app`
+  starts it.
+- **Sleep.** *"If the system is asleep during the time of the next scheduled
+  interval firing, that interval will be missed"* (`StartInterval`). A miss
+  older than two intervals is not counted (`suspect-expired`), so a miss at
+  shutdown and one at the next login are not an outage; an outage already
+  notified stays one across the gap. A probe that ran but could not save its
+  state is no gap: it stamps `watchdog.lock`, and the miss still counts
+  (`suspect-kept`).
+- **A watchdog that cannot write its own folder is silent.** A full Mac disk
+  or a read-only folder withholds every notice (one `notice-withheld` line a
+  minute while the log can be appended to, the refusal in `launchd.log`, exit
+  1 in `launchctl print gui/$(id -u)/in.brutex.watchdog`) rather than sending
+  the same notice every minute. `docs/06-limits.md` L-WD-6.
+- **A distinct exit code per refusal class** (FM-196's first half) is the
+  api's (`crates/api/src/main.rs`, `server.rs`); launchd's throttle bounds the
+  loop meanwhile.

@@ -1659,6 +1659,8 @@ use census_cache::{
 pub use census_cache::{CensusCache, CensusNow, CensusStamps};
 pub(crate) use census_cache::{Slot as CensusSlot, census_now, census_now_stamped, vendor_census};
 use feeds_route::feeds_json;
+/// `/gaps.json` through its own handler, for gate 8 (R3-06).
+pub use gaps_route::gaps_answer;
 use gaps_route::gaps_json;
 #[cfg(test)]
 use gaps_route::{peer_calendar, peer_calendar_reading};
