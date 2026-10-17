@@ -10051,6 +10051,14 @@ mod cloud_mutant_tests {
 /// that reaches each arm through the walk is not needed to prove what each
 /// arm writes.
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
 mod cloud_render_tests {
     use super::*;
     use crate::audit::Scope;
@@ -10225,6 +10233,14 @@ mod cloud_render_tests {
 /// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
 /// for the restart walk's own predicates and words, driven by value.
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
 mod cloud_walk_tests {
     use super::*;
     use crate::audit::{Outcome, Record, Scope};

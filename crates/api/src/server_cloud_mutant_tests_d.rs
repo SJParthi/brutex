@@ -145,7 +145,7 @@ fn a_contract_key_is_not_a_spot_instrument() {
         }],
     );
     assert!(
-        read.merged.by_key.get(&key).is_some(),
+        read.merged.by_key.contains_key(&key),
         "the premise: the key is in the universe"
     );
     let why = spot_vendor_identity_for(&read, &key, Vendor::Dhan, ingest::CashIdentity::Isin)
