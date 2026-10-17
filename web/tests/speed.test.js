@@ -215,6 +215,7 @@ test('a speed report is read field by field and a missing figure is refused by n
     [{ ...good, resolution: '' }, /resolution sentence/],
     [{ ...good, rows: {} }, /rows list/],
     [report([null]), /row 0 has no route name/],
+    [report([['/a']]), /row 0 has no route name/],
     [report([row('')]), /row 0 has no route name/],
     [report([row('/a', { kind: 'Route' })]), /kind "Route", not route or stage/],
     [report([row('/a', { last_minute: null })]), /\/a has no last_minute window/],
@@ -229,8 +230,13 @@ test('a time is printed in its unit, and a window that holds nothing is a dash, 
   assert.equal(microsText(0, 0), '—');
   assert.equal(microsText(Number.NaN), '—');
   assert.equal(microsText(999), '999 µs');
+  assert.equal(microsText(1_000), '1.00 ms', 'a millisecond is said in ms');
   assert.equal(microsText(1_234), '1.23 ms');
+  assert.equal(microsText(9_999), '10.00 ms');
+  assert.equal(microsText(10_000), '10.0 ms', 'from ten ms, one decimal');
   assert.equal(microsText(45_678), '45.7 ms');
+  assert.equal(microsText(999_999), '1000.0 ms');
+  assert.equal(microsText(1_000_000), '1.00 s', 'a second is said in s');
   assert.equal(microsText(2_500_000), '2.50 s');
 });
 
@@ -239,8 +245,11 @@ test('the table keeps the server\'s order, filters by kind, marks a p99 past the
     row('/a', { last_hour: figures({ n: 2, failed: 1, p50_micros: 5, p99_micros: 400_000, max_micros: 500_000 }), last_hour_minutes: 12 }),
     row('stage:vendor scrub', { kind: 'stage', last_hour: figures({ n: 9, p99_micros: 10 }) }),
     row('/b', { last_hour: figures({ n: 9, p99_micros: 300_000 }) }),
-    row('/c')
+    row('/c'),
+    row('/d', { last_hour: figures({ n: 0, p99_micros: 400_000 }) })
   ]);
+  assert.equal(speedRows(r, 'last_hour').at(-1)?.slow, false, 'a window with no request is never slow, whatever its figures');
+  r.rows.pop();
   const all = speedRows(r, 'last_hour');
   assert.deepEqual(all.map((x) => x.route), ['/a', 'stage:vendor scrub', '/b', '/c']);
   assert.deepEqual(all.map((x) => x.slow), [true, false, false, false], 'past 300 ms only; exactly 300 ms is inside, an empty window is never slow');
@@ -251,6 +260,8 @@ test('the table keeps the server\'s order, filters by kind, marks a p99 past the
   assert.deepEqual(sortRows(all, 'p99').map((x) => x.route), ['/a', '/b', 'stage:vendor scrub', '/c']);
   assert.deepEqual(sortRows(all, 'n').map((x) => x.route), ['stage:vendor scrub', '/b', '/a', '/c']);
   assert.deepEqual(sortRows([all[2], all[0], all[3], all[0]], 'route').map((x) => x.route), ['/a', '/a', '/b', '/c']);
+  const twins = [{ ...all[0], order: 7 }, { ...all[0], order: 3 }, { ...all[0], order: 5 }];
+  assert.deepEqual(sortRows(twins, 'route').map((x) => x.order), [3, 5, 7], 'equal names keep the order first asked');
   assert.deepEqual(sortRows(all, 'order').map((x) => x.route), all.map((x) => x.route));
   assert.deepEqual(SORTS.map((s) => s.key), ['order', 'p99', 'n', 'route']);
 });
@@ -265,6 +276,9 @@ test('the speed tile names the slowest route and every failure, over the last ho
   const slow = speedTile(report([row('/a', { last_hour: figures({ n: 4, p99_micros: 2_000 }) }), row('/b', { last_hour: figures({ n: 1, p99_micros: 301_000 }) }), row('stage:x', { kind: 'stage', last_hour: figures({ n: 1, p99_micros: 9_000_000 }) })]));
   assert.equal(slow.state, 'slow');
   assert.deepEqual(slow.worst, { route: '/b', p99: 301_000 }, 'a stage is not a page\'s wait');
+  const mixed = speedTile(report([row('/a', { last_hour: figures({ n: 4, p99_micros: 10 }) }), row('/b', { since_start: figures({ n: 9, p99_micros: 99 }) })]));
+  assert.equal(mixed.window, 'last_hour', 'one route asked in the last hour is enough for the hour');
+  assert.equal(mixed.routes, 1);
   const failing = speedTile(report([row('/a', { last_hour: figures({ n: 4, failed: 2, p99_micros: 10 }) })]));
   assert.equal(failing.state, 'failing');
   assert.match(failing.line, /; 2 failed$/);
@@ -287,6 +301,11 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
   assert.deepEqual(ignoredFields({ ...base, garbled: { a: { status: 400, body: 'no' }, b: { status: 200, body: '{"rows":[]}' } } }).map((i) => [i.field, i.how]), [['b', 'garbled']]);
   assert.deepEqual(ignoredFields({ ...base, garbled: { b: { status: 200, body: '{"rows":[1]}' } } }), [], 'a different answer read the field');
   assert.deepEqual(ignoredFields({ ...base, status: 404, garbled: { b: { status: 404, body: '{"rows":[]}' } } }), [], 'a refused original says nothing about a field');
+  assert.deepEqual(ignoredFields({ ...base, status: 404, garbled: { b: { status: 200, body: '{"rows":[]}' } } }), [], 'nor does a refused original beside an answered probe');
+  assert.deepEqual(ignoredFields({ ...base, status: 300, garbled: { b: { status: 300, body: '{"rows":[]}' } } }), [], 'a 300 is not an answer');
+  assert.deepEqual(ignoredFields({ ...base, garbled: { b: { status: 300, body: '{"rows":[]}' } } }), [], 'nor is a probe answered 300');
+  assert.deepEqual(ignoredFields({ ...base, status: 299, garbled: { b: { status: 299, body: '{"rows":[]}' } } }).map((i) => i.how), ['garbled'], '299 is 2xx');
+  assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 400, body: '{"error":7,"why":"a is not a parameter"}' }).map((i) => i.how), ['refused'], 'an error that is not a sentence leaves the body to read');
   assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 200, body: 'not json' }), []);
   assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 200, body: '{"ignored":["a",{"field":"b"},{}]}' }).map((i) => i.field), ['a', 'b', '?']);
   assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 400, body: 'a is not a parameter here' }).map((i) => i.how), ['refused']);
@@ -296,8 +315,8 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
 test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(budgetOf('/gaps'), 400_000);
   assert.equal(budgetOf('/db'), 750_000);
-  const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }]);
-  assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true]]);
+  const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }, { route: '/audit', node: 3, js: 1, css: 1, bytes: 400_000, files: [] }]);
+  assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true], [false, false]], 'exactly the budget, and exactly the target, are inside');
   assert.match(v[1].line, /— OVER ITS BUDGET — over the 400\.0 KB wire target/);
 });
 
@@ -330,10 +349,11 @@ test('a page reads its own load from the performance timeline, and says null for
   /** @param {Record<string, any[]>} by @param {any} [memory] */
   const perf = (by, memory) => ({ getEntriesByType: (/** @type {string} */ t) => by[t] ?? [], memory });
   assert.deepEqual(
-    pageSelf(perf({ paint: [{ name: 'first-paint', startTime: 1 }, { name: 'first-contentful-paint', startTime: 120.4 }], navigation: [{ transferSize: 1_000 }], resource: [{ transferSize: 500 }, { transferSize: undefined }] }, { usedJSHeapSize: 4_000_000 })),
-    { firstContentMs: 120, wireBytes: 1_500, resources: 3, heapBytes: 4_000_000 }
+    pageSelf(perf({ paint: [{ name: 'first-paint', startTime: 1 }, { name: 'first-contentful-paint', startTime: 120.4 }], navigation: [{ transferSize: 1_000 }], resource: [{ transferSize: 500 }, { transferSize: undefined }, { transferSize: Number.NaN }] }, { usedJSHeapSize: 4_000_000 })),
+    { firstContentMs: 120, wireBytes: 1_500, resources: 4, heapBytes: 4_000_000 }
   );
   assert.deepEqual(pageSelf(perf({ paint: [{ name: 'first-contentful-paint', startTime: Number.NaN }] })), { firstContentMs: null, wireBytes: null, resources: 0, heapBytes: null });
+  assert.equal(pageSelf(perf({}, { usedJSHeapSize: Number.NaN })).heapBytes, null, 'a heap that is not a number is not reported');
 });
 
 // ---------------------------------------------------------------------------
@@ -350,12 +370,20 @@ test('a report body fits the server\'s 1 KiB, is cut at a character, and a repor
   assert.equal(reportBody('/db', '   '), null, 'nothing said');
   assert.equal(reportBody('/d\u0000b', 'a\tb\nc\u0007d\u0085e'), `page=${encodeURIComponent('/d b')}&what=${encodeURIComponent('a\tb\nc d e')}`);
   assert.equal(reportBody(/** @type {any} */ (null), /** @type {any} */ (undefined)), null);
+  assert.equal(reportBody('/d\nb', 'a\u007fb\u00a0c'), `page=${encodeURIComponent('/d b')}&what=${encodeURIComponent('a b\u00a0c')}`, 'DEL is a control character, a no-break space is not, and a page keeps no newline');
+  const edge = `/${'a'.repeat(MAX_PAGE_BYTES - 1)}`;
+  assert.ok(reportBody(edge, 'x') !== null, 'a page of exactly 256 bytes is a page');
+  const room = MAX_REPORT_BYTES - 'page=%2Fdb&what='.length;
+  assert.equal(reportBody('/db', 'a'.repeat(room)), `page=%2Fdb&what=${'a'.repeat(room)}`, 'a report that fits exactly is sent whole');
+  assert.equal(decodeURIComponent(String(reportBody('/db', 'a'.repeat(2_000))).split('what=')[1]), `${'a'.repeat(room - 9)}…`, 'the longest prefix whose ellipsis fits exactly');
 });
 
 test('an outcome is the server\'s word for it', () => {
   assert.equal(outcomeOf({ status: 200 }), 'answered');
   assert.equal(outcomeOf({ status: 304 }), 'answered');
   assert.equal(outcomeOf({ status: 404 }), 'refused');
+  assert.equal(outcomeOf({ status: 399 }), 'answered');
+  assert.equal(outcomeOf({ status: 400 }), 'refused');
   assert.equal(outcomeOf({ status: 429 }), 'busy');
   assert.equal(outcomeOf({ status: 503, retryAfter: true }), 'busy');
   assert.equal(outcomeOf({ status: 503 }), 'failed');
@@ -381,6 +409,22 @@ test('one report per distinct failure a minute, at most ten a minute, and what w
   assert.equal(r.report('error', 'boom'), true, 'a new minute, the same failure is said again');
   await flush();
   assert.match(decodeURIComponent(sent.at(-1) ?? ''), /error: boom \[4 more held back by this tab's ration before this one\]/);
+  // An entry kept at a roll is one minute old at the next report, exactly: it is said again.
+  let t = 0;
+  /** @type {string[]} */
+  const again = [];
+  const edgeR = createPageReporter({ send: async (b) => void again.push(b), page: () => '/db', now: () => t });
+  edgeR.report('error', 'x');
+  t = 30_000;
+  edgeR.report('error', 'y');
+  t = 60_000;
+  edgeR.report('error', 'z');
+  t = 90_000;
+  assert.equal(edgeR.report('error', 'y'), true, 'y, sent at 30 s, is a minute old at 90 s');
+  t = 90_001;
+  assert.equal(edgeR.report('error', 'y'), false);
+  const none = createPageReporter({ send: async () => {}, page: () => '/db', perMinute: 0 });
+  assert.equal(none.report('error', 'x'), false, 'a ration of nothing sends nothing');
   const pathless = createPageReporter({ send: async (b) => void sent.push(b), page: () => 'no-slash', now: () => now });
   assert.equal(pathless.report('error', 'x'), false, 'a report the server would refuse is not sent');
   assert.equal(pathless.counts().sent, 0);
@@ -407,11 +451,13 @@ test('a report that cannot be sent is said on the console once a minute, never l
   console.error = (/** @type {string} */ l) => void consoled.push(l);
   try {
     createPageReporter({ send: async () => { throw 'down'; }, page: () => '/db' }).report('error', 'z');
+    createPageReporter({ send: async () => { throw new Error(''); }, page: () => '/db' }).report('error', 'e');
     await flush();
   } finally {
     console.error = quiet;
   }
   assert.match(consoled[0], /\(down\)/);
+  assert.ok(consoled[1].includes('"error: e" ()'), 'an error with an empty message is said as empty, not as its type');
 });
 
 test('installed, fetch reports a failure and no ordinary answer, never itself, and uninstalls cleanly', async () => {
@@ -427,6 +473,7 @@ test('installed, fetch reports a failure and no ordinary answer, never itself, a
     if (url.includes('gone')) return response(404);
     if (url.includes('abort')) throw new DOMException('the page left', 'AbortError');
     if (url.includes('net')) throw new TypeError('Failed to fetch');
+    if (url.includes('blank')) throw new Error('');
     return response(200);
   };
   const win = fakeWindow(network);
@@ -442,6 +489,7 @@ test('installed, fetch reports a failure and no ordinary answer, never itself, a
   await win.fetch(/** @type {any} */ ({ url: '/fail-request.json', method: 'PUT' }));
   await win.fetch(new URL('http://localhost/fail-url.json'));
   await assert.rejects(win.fetch('/net.json'), /Failed to fetch/);
+  await assert.rejects(win.fetch('/blank.json'));
   await win.fetch(REPORT_ROUTE, { method: 'POST', body: 'page=/x&what=y' });
   await flush();
   const reports = calls.filter((c) => c.url === REPORT_ROUTE && c.init?.keepalive === true).map((c) => new URLSearchParams(c.init.body).get('what'));
@@ -449,23 +497,30 @@ test('installed, fetch reports a failure and no ordinary answer, never itself, a
     'request: POST /fail.json answered HTTP 500',
     'request: PUT /fail-request.json answered HTTP 500',
     'request: GET http://localhost/fail-url.json answered HTTP 500',
-    'request: GET /net.json got no answer: Failed to fetch'
+    'request: GET /net.json got no answer: Failed to fetch',
+    'request: GET /blank.json got no answer:'
   ]);
   win.emit('error', { message: 'x is undefined', filename: '/_app/a.js', lineno: 3, colno: 9 });
   win.emit('error', { error: 'bare' });
   win.emit('error', {});
   win.emit('unhandledrejection', { reason: new Error('lost') });
   win.emit('unhandledrejection', { reason: 'plain' });
+  win.emit('unhandledrejection', { reason: new Error('') });
+  win.emit('error', { message: 'at zero', filename: '/z.js', lineno: 0, colno: 0 });
+  win.emit(FALLBACK_EVENT, { detail: '' });
   win.emit(FALLBACK_EVENT, { detail: 'the census answered from its prefix sums' });
   win.emit(FALLBACK_EVENT, {});
   await flush();
-  const more = calls.filter((c) => c.url === REPORT_ROUTE && c.init?.keepalive === true).map((c) => new URLSearchParams(c.init.body).get('what')).slice(4);
+  const more = calls.filter((c) => c.url === REPORT_ROUTE && c.init?.keepalive === true).map((c) => new URLSearchParams(c.init.body).get('what')).slice(5);
   assert.deepEqual(more, [
     'error: x is undefined at /_app/a.js:3:9',
     'error: bare',
     'error: an uncaught error',
     'error: unhandled rejection: lost',
     'error: unhandled rejection: plain',
+    'error: unhandled rejection:',
+    'error: at zero at /z.js:0:0',
+    'fallback:',
     'fallback: the census answered from its prefix sums',
     'fallback: a fallback with no description'
   ]);
@@ -504,6 +559,7 @@ test('a report the server did not keep is a console line, and a 429 is the serve
 test('a fallback is reported through the event, and only where a reporter listens', () => {
   assert.equal(reportFallback('x'), false, 'no window under node');
   assert.equal(reportFallback('x', { dispatchEvent: () => true }), false, 'no reporter installed');
+  assert.equal(reportFallback('x', { [Symbol.for('brutex.page-report')]: {}, dispatchEvent: 1 }), false, 'a window that cannot dispatch is not asked to');
   const win = fakeWindow(async () => response(200));
   installPageReport(win);
   assert.equal(reportFallback('the grid fell back to the census', win), true);

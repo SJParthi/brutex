@@ -307,13 +307,7 @@ export function ignoredFields(answer) {
   const sent = [...new URL(answer.url, 'http://speed.sheet').searchParams.keys()];
   /** @type {{field: string, how: 'named' | 'refused' | 'garbled', said: string}[]} */
   const out = [];
-  /** @type {any} */
-  let json = null;
-  try {
-    json = JSON.parse(answer.body);
-  } catch {
-    json = null;
-  }
+  const json = jsonOf(answer.body);
   if (json && typeof json === 'object' && Array.isArray(json.ignored)) {
     for (const entry of json.ignored) {
       const field = typeof entry === 'string' ? entry : String(entry?.param ?? entry?.field ?? '?');
@@ -321,7 +315,7 @@ export function ignoredFields(answer) {
     }
   }
   if (answer.status === 400) {
-    const said = String(json?.error ?? answer.body);
+    const said = typeof json?.error === 'string' ? json.error : answer.body;
     if (/does not read|is not a parameter|unknown parameter/i.test(said)) {
       for (const field of new Set(sent)) {
         if (said.includes(field)) out.push({ field, how: 'refused', said });
@@ -335,6 +329,21 @@ export function ignoredFields(answer) {
     }
   }
   return out;
+}
+
+/**
+ * A body read as JSON, or `null` for a body that is not JSON (it then names
+ * no field, and the other signals still apply).
+ *
+ * @param {string} text
+ * @returns {any}
+ */
+function jsonOf(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 /**
