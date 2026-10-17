@@ -201,7 +201,11 @@ fn the_tail_names_what_was_appended_after_each_generation() {
     disk.append(&[row(pe, 2, 20), row(ce, 3, 30)]);
     let after = read_vendor_after(&dir, Vendor::Gdfl, Some(&first));
     let part = held(&after).parts().first().expect("one part");
-    assert_eq!(part.since_floor(), base);
+    // THE FLOOR IS THE FILE'S LINEAGE NOW, not the base (R3-09, RA-008): a
+    // generation before the census was read whole is read back from the
+    // file by position.
+    let lineage = base - 1;
+    assert_eq!(part.since_floor(), lineage);
     let keys = |since| {
         part.changed_since(since)
             .map(|changes| changes.iter().map(|(_, key)| *key).collect::<Vec<_>>())
@@ -210,7 +214,172 @@ fn the_tail_names_what_was_appended_after_each_generation() {
     assert_eq!(keys(base + 1), Some(vec![ce]), "only the second");
     assert_eq!(keys(base + 2), Some(Vec::new()), "already current");
     assert_eq!(keys(base + 3), None, "a generation never published");
-    assert_eq!(keys(base - 1), None, "before the census was read whole");
+    let read_backs = manifest_reads::read_backs_of(&disk.path).len();
+    assert_eq!(
+        keys(base - 1),
+        Some(vec![ce, pe, ce]),
+        "before the census was read whole: the base's own entry, read back, then the tail"
+    );
+    assert_eq!(
+        manifest_reads::read_backs_of(&disk.path).len(),
+        read_backs + 1,
+        "one read-back, of the one entry below the base"
+    );
+}
+
+/// **A REFRESH AFTER A RESTART OR A TAIL READ WHOLE AGAIN IS ANSWERED FROM
+/// THE FILE BY POSITION, AND EXACTLY AS A TAIL WOULD HAVE ANSWERED IT**
+/// (R3-09, RA-008): the generations and keys a read-back names equal the
+/// ones the tail named for the same appends, only the entries after the
+/// asked generation are decoded, and nothing is read whole.
+#[test]
+fn a_since_below_the_base_is_read_back_and_equals_the_tail() {
+    let dir = root("read-back");
+    let contract = |n: u64| format!("2019-03-28-{}-CE", 1_000_000 + n * 5_000);
+    let key_n = |n: u64| key(Segment::Fno, Some(&contract(n)), 3);
+    let mut disk = Disk::partition(&dir, Segment::Fno, 1, 1_048_576, &[row(key_n(0), 1, 10)]);
+    let first = read_vendor(&dir, Vendor::Gdfl);
+    let since = held(&first).parts()[2].header().generation;
+    let appended: Vec<Held> = (1..=40)
+        .map(|n| row(key_n(n), n, 10 + i64::try_from(n).expect("small")))
+        .collect();
+    disk.append(&appended);
+    // THE TAIL'S ANSWER, from a reader that kept the census across the appends.
+    let tailed = read_vendor_after(&dir, Vendor::Gdfl, Some(&first));
+    let tail_part = &held(&tailed).parts()[2];
+    let by_tail: Vec<(u64, EntryKey)> = tail_part
+        .changed_since(since)
+        .expect("the tail holds it")
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(by_tail.len(), 40);
+    // A RESTART: the census read whole, so `since` is below its base.
+    let whole_reads = manifest_reads::of(&disk.path);
+    let restarted = read_vendor(&dir, Vendor::Gdfl);
+    assert_eq!(manifest_reads::of(&disk.path), whole_reads + 1);
+    let part = &held(&restarted).parts()[2];
+    assert!(since < part.header().generation, "below the base");
+    let whole_after_restart = manifest_reads::of(&disk.path);
+    let read_back: Vec<(u64, EntryKey)> = part
+        .changed_since(since)
+        .expect("read back from the file")
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        read_back, by_tail,
+        "the same generations and keys, in order"
+    );
+    assert_eq!(
+        manifest_reads::of(&disk.path),
+        whole_after_restart,
+        "nothing read whole to answer it"
+    );
+    assert_eq!(
+        manifest_reads::read_backs_of(&disk.path).last(),
+        Some(&40),
+        "the forty entries after the asked generation, and no more"
+    );
+    let mid = since + 25;
+    assert_eq!(
+        part.changed_since(mid).expect("read back").len(),
+        15,
+        "a later generation reads back fewer"
+    );
+    assert_eq!(manifest_reads::read_backs_of(&disk.path).last(), Some(&15));
+    // THE BOUND: exactly `most` entries are read back, one more is refused,
+    // and the floor says where the refusal starts.
+    assert_eq!(
+        part.changed_since_within(since, 40).map(|c| c.len()),
+        Some(40)
+    );
+    assert!(
+        part.changed_since_within(since, 39).is_none(),
+        "past the bound"
+    );
+    assert_eq!(part.since_floor_within(39), since + 1);
+    // A GENERATION PAST THE NEWEST is still never answered.
+    assert!(part.changed_since(part.header().generation + 1).is_none());
+}
+
+/// **A READ-BACK IS REFUSED, NEVER GUESSED, WHEN THE FILE IS NOT THE ONE THE
+/// BASE WAS READ FROM**: a file replaced by rename (another inode) and a
+/// file whose first entry was rewritten in place each answer `None`, which
+/// the routes serve as `410 since_too_old` and a reader loads afresh. So is a
+/// generation at the lineage of an epoch a compaction began: the reader of
+/// that generation read the epoch before it.
+#[test]
+fn a_read_back_from_another_file_or_a_compaction_is_refused() {
+    let dir = root("read-back-refused");
+    let ce = key(Segment::Fno, Some("2019-03-28-1150000-CE"), 3);
+    let pe = key(Segment::Fno, Some("2019-03-28-1150000-PE"), 3);
+    let mut disk = Disk::partition(&dir, Segment::Fno, 1, 1_048_576, &[row(ce, 1, 10)]);
+    let first = read_vendor(&dir, Vendor::Gdfl);
+    let since = held(&first).parts()[2].header().generation;
+    disk.append(&[row(pe, 2, 20)]);
+    let whole = read_vendor(&dir, Vendor::Gdfl);
+    let part = &held(&whole).parts()[2];
+    assert!(
+        part.changed_since(since).is_some(),
+        "the same file reads back"
+    );
+
+    // THE FIRST ENTRY REWRITTEN IN PLACE (same inode): refused.
+    {
+        use std::os::unix::fs::FileExt as _;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&disk.path)
+            .expect("open");
+        let other = row(pe, 9, 90).image();
+        file.write_all_at(&other, pull::manifest::HEADER_LEN)
+            .expect("rewritten");
+    }
+    assert!(
+        part.changed_since(since).is_none(),
+        "a first entry that changed is another file"
+    );
+
+    // REPLACED BY RENAME (another inode): refused.
+    let dir2 = root("read-back-renamed");
+    let mut disk2 = Disk::partition(&dir2, Segment::Fno, 1, 1_048_576, &[row(ce, 1, 10)]);
+    let first2 = read_vendor(&dir2, Vendor::Gdfl);
+    let since2 = held(&first2).parts()[2].header().generation;
+    disk2.append(&[row(pe, 2, 20)]);
+    let whole2 = read_vendor(&dir2, Vendor::Gdfl);
+    let part2 = &held(&whole2).parts()[2];
+    let bytes = std::fs::read(&disk2.path).expect("read");
+    let tmp = disk2.path.with_extension("man.writing");
+    std::fs::write(&tmp, &bytes).expect("written");
+    std::fs::rename(&tmp, &disk2.path).expect("renamed");
+    assert!(
+        part2.changed_since(since2).is_none(),
+        "the same bytes under another inode are not the file the base was read from"
+    );
+
+    // A COMPACTION'S EPOCH: its lineage is the generation the epoch before
+    // ended on, which this file never published.
+    let dir3 = root("read-back-compacted");
+    let before = Disk::partition(
+        &dir3,
+        Segment::Fno,
+        1,
+        1_048_576,
+        &[row(ce, 1, 10), row(pe, 2, 20)],
+    );
+    let ended_on = before.manifest.header().generation;
+    let compacted = before.manifest.compacted().expect("compacts");
+    let epoch2 = pull::manifest::epoch_path(&dir3, Vendor::Gdfl, Segment::Fno, 2);
+    std::fs::write(&epoch2, compacted.image()).expect("installed");
+    let read3 = read_vendor(&dir3, Vendor::Gdfl);
+    let part3 = &held(&read3).parts()[2];
+    assert_eq!(part3.epoch(), Some(2));
+    assert!(
+        part3.changed_since(ended_on).is_none(),
+        "the epoch before's last generation is not this file's"
+    );
+    assert_eq!(part3.since_floor(), ended_on + 1);
 }
 
 /// **A FILE REPLACED BY RENAME, OR ONE WHOSE COUNTERS WENT BACKWARDS, IS READ
