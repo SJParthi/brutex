@@ -106,6 +106,8 @@ pub(crate) fn probes_are_flat() -> bool {
     ok &= tails_are_flat();
     // THE REFRESH'S ROW (WP-56): a delta costs what was appended.
     ok &= deltas_are_flat();
+    // AND ACROSS A RESTART (R3-09, RA-008): read back from the file.
+    ok &= read_backs_are_flat();
     ok
 }
 
@@ -276,4 +278,147 @@ fn deltas_are_flat() -> bool {
         RATIO_CEILING_PERMILLE,
     );
     ok
+}
+
+/// One real day's change of the operator's options import (RA-011: about
+/// 10,428 census entries a day), the read-back size printed beside the
+/// asserted rows.
+const DAY: usize = 10_428;
+
+/// A `since` held across a RESTART is answered from the file by position
+/// (R3-09; RA-008, RA-042): its cost is the entries appended after it,
+/// whatever the census holds.
+///
+/// Over the same three censuses on disk as [`tails_are_flat`], each read
+/// whole once, appended [`APPENDED`] entries in place and then read whole
+/// AGAIN -- what a restart, or a tail past its floor, does -- the timed call
+/// is `api::server::census_delta` since the FIRST read's generation, which
+/// is below the second read's base: the entries after it are read back by
+/// position. Checked before timing: 200, [`APPENDED`] rows. Printed beside
+/// it, unasserted: the same delta after one real day's change ([`DAY`]
+/// entries) and the whole read at 1x, 4x and 20x that day, so the difference
+/// the read-back makes is on the record.
+fn read_backs_are_flat() -> bool {
+    let built: Vec<(std::path::PathBuf, VendorCensus)> =
+        SIZES.iter().map(|&n| on_disk(n)).collect();
+    let mut costs = Vec::with_capacity(built.len());
+    for (root, first) in &built {
+        let restarted = api::census::read_vendor(root, Vendor::Gdfl);
+        let Some(since) = first.generation().map(|generation| generation.to_string()) else {
+            refuse("the first read holds a generation");
+        };
+        if restarted.generation() <= first.generation() {
+            refuse("the second read is past the first");
+        }
+        let (code, body) = api::server::census_delta(&restarted, &since, "");
+        let Ok(answer) = serde_json::from_str::<serde_json::Value>(&body) else {
+            refuse("the delta is JSON");
+        };
+        let rows = answer
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len);
+        if code != 200 || rows != Some(APPENDED) {
+            refuse("a since below the base is not the appended entries, read back");
+        }
+        costs.push(cost_ps(50, || {
+            api::server::census_delta(black_box(&restarted), black_box(&since), "")
+        }));
+    }
+    for (root, _) in &built {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    day_and_whole_unasserted();
+    let (Some(&base), Some(&mid), Some(&big)) = (costs.first(), costs.get(1), costs.get(2)) else {
+        refuse("three sizes measured");
+    };
+    let mut ok = ratio(
+        &format!("census read-back of {APPENDED} {}->{}", SIZES[0], SIZES[1]),
+        base,
+        mid,
+        RATIO_CEILING_PERMILLE,
+    );
+    ok &= ratio(
+        &format!("census read-back of {APPENDED} {}->{}", SIZES[0], SIZES[2]),
+        base,
+        big,
+        RATIO_CEILING_PERMILLE,
+    );
+    ok
+}
+
+/// [`read_backs_are_flat`]'s printed rows: a read-back of one real day's
+/// change ([`DAY`] entries) after a restart, and the whole read at 1x, 4x and
+/// 20x a day's entries. Unasserted: the record of what a restart costs a
+/// refresh with the read-back and what the whole reload it replaces costs.
+fn day_and_whole_unasserted() {
+    use std::os::unix::fs::FileExt as _;
+    for times in [1_usize, 4, 20] {
+        let n = DAY * times;
+        let root = std::env::temp_dir().join(format!(
+            "brutex-bench-census-day-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        if std::fs::create_dir_all(root.join("manifest")).is_err() {
+            refuse("a scratch store root");
+        }
+        let Ok(mut manifest) = Manifest::open(Vendor::Gdfl, &[], &[]) else {
+            refuse("a genesis census");
+        };
+        let entry = |i: usize| Entry {
+            key: key(i),
+            rows: 375,
+            first_ts_micros: 1_788_926_700_000_000,
+            last_ts_micros: 1_788_949_140_000_000,
+        };
+        for i in 0..n {
+            if manifest.record(entry(i)).is_err() {
+                refuse("a census entry");
+            }
+        }
+        let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
+        if std::fs::write(&path, manifest.image()).is_err() {
+            refuse("a census on disk");
+        }
+        let whole_ps = cost_ps(3, || {
+            api::census::read_vendor(black_box(&root), Vendor::Gdfl)
+        });
+        println!(
+            "  census whole read at {n:>7} entries ({times:>2}x a day, unasserted) {whole_ps:>14} ps"
+        );
+        if times == 1 {
+            let first = api::census::read_vendor(&root, Vendor::Gdfl);
+            let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+                refuse("the census opened for appending");
+            };
+            for i in n..n + DAY {
+                let Ok(append) = manifest.record(entry(i)) else {
+                    refuse("an appended entry");
+                };
+                if file.write_all_at(&append.bytes, append.offset).is_err()
+                    || file
+                        .write_all_at(&append.commit.bytes, append.commit.offset)
+                        .is_err()
+                {
+                    refuse("an append written in place");
+                }
+            }
+            let restarted = api::census::read_vendor(&root, Vendor::Gdfl);
+            let Some(since) = first.generation().map(|generation| generation.to_string()) else {
+                refuse("the first read holds a generation");
+            };
+            let (code, _) = api::server::census_delta(&restarted, &since, "");
+            if code != 200 {
+                refuse("a day's change after a restart is answered");
+            }
+            let day_ps = cost_ps(5, || {
+                api::server::census_delta(black_box(&restarted), black_box(&since), "")
+            });
+            println!(
+                "  census read-back of one day ({DAY} entries) after a restart (unasserted) {day_ps:>14} ps"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

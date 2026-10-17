@@ -124,11 +124,26 @@ const fn bad(what: &'static str) -> CmRefusal {
     CmRefusal::TickStoreMalformed { what }
 }
 
+/// The largest window a tick-store frame may declare: 128 MiB, `ruzstd`
+/// 0.9.1's own `DEFAULT_MAX_WINDOW_SIZE`, passed explicitly so a later version
+/// that moves its default cannot move this reader's (D-5090).
+///
+/// The `take` cap in [`unzstd`] bounds what a frame may decode TO; this bounds
+/// what the decoder may hold before any byte is collectable, which the cap
+/// cannot touch. Under 0.8.2 that window was unbounded here, measured: its
+/// 100 MiB ceiling was checked only on a decoder's reset for a second frame,
+/// and this reader builds one per frame.
+const MAX_ZSTD_WINDOW: u64 = 128 << 20;
+
 /// One zstd frame, decoded to exactly `want` bytes or refused: the decoder is
 /// stopped one byte past `want`, so a frame with more to give fails rather
-/// than filling the buffer.
+/// than filling the buffer. A frame declaring a window past
+/// [`MAX_ZSTD_WINDOW`], or a block wider than its window (RUSTSEC-2026-0344's
+/// class, refused by `ruzstd` 0.9.1), is the same refusal.
 fn unzstd(frame: &[u8], want: u64) -> Result<Vec<u8>, CmRefusal> {
-    let decoder = ruzstd::decoding::StreamingDecoder::new(frame).map_err(|_| bad(FRAME))?;
+    let decoder =
+        ruzstd::decoding::StreamingDecoder::new_with_max_window_size(frame, MAX_ZSTD_WINDOW)
+            .map_err(|_| bad(FRAME))?;
     let mut out = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(decoder, want.saturating_add(1)),
@@ -649,6 +664,13 @@ impl CmSource for TickStore {
         rebuild(&*at.file, &entry)
     }
 }
+
+/// Frames `ruzstd` 0.8.2 wrote, frozen before the 0.9.1 bump (D-5090): the
+/// one fixture file `lake`'s page path is held to as well, read from there
+/// rather than copied, so the two decode call sites cannot drift apart.
+#[cfg(test)]
+#[path = "../../lake/src/zstd_v082_frames.rs"]
+mod zstd_v082_frames;
 
 #[cfg(test)]
 #[expect(
@@ -1509,6 +1531,100 @@ mod tests {
             Ok(None)
         ));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── the `ruzstd` 0.8.2 -> 0.9.1 bump (RUSTSEC-2026-0344, D-5090) ─────────
+
+    use super::zstd_v082_frames as v082;
+
+    /// The refusal `unzstd` gives for every frame it will not read.
+    fn refused(answer: &Result<Vec<u8>, CmRefusal>) -> bool {
+        matches!(answer, Err(CmRefusal::TickStoreMalformed { what }) if *what == FRAME)
+    }
+
+    /// **EVERY FRAME 0.8.2 WROTE DECODES THROUGH `unzstd` TO THE BYTES IT WAS
+    /// WRITTEN FROM**, and a stated length one byte more or one less is still
+    /// refused. Every tick-store frame — the index, a raw block, each column —
+    /// reaches the decoder through this one function.
+    #[test]
+    fn frames_ruzstd_0_8_2_wrote_decode_to_their_input_through_unzstd() {
+        for case in &v082::CASES {
+            let input = v082::input(case.name);
+            let frame = v082::frame(case);
+            let want = u64::try_from(input.len()).unwrap();
+            assert_eq!(
+                unzstd(&frame, want).unwrap(),
+                input,
+                "{}: byte for byte",
+                case.name
+            );
+            assert!(
+                refused(&unzstd(&frame, want + 1)),
+                "{}: one long",
+                case.name
+            );
+            if let Some(short) = want.checked_sub(1) {
+                assert!(refused(&unzstd(&frame, short)), "{}: one short", case.name);
+            }
+        }
+    }
+
+    /// **THE FROZEN FRAMES HOLD ALL THREE BLOCK TYPES**, read from their
+    /// headers, so the round trip is not one block type proved six times.
+    #[test]
+    fn the_old_frames_cover_every_block_type() {
+        let mut seen = [0_usize; 3];
+        for case in &v082::CASES {
+            for block in v082::block_types(&v082::frame(case)) {
+                seen[usize::from(block)] += 1;
+            }
+        }
+        assert!(
+            seen.iter().all(|n| *n > 0),
+            "Raw, RLE, Compressed: {seen:?}"
+        );
+    }
+
+    /// **A TORN FRAME IS REFUSED AT EVERY LENGTH**: every proper prefix of every
+    /// frozen frame, asked for the whole input.
+    #[test]
+    fn every_truncation_of_an_old_frame_is_refused() {
+        for case in &v082::CASES {
+            let want = u64::try_from(v082::input(case.name).len()).unwrap();
+            let frame = v082::frame(case);
+            for cut in 0..frame.len() {
+                assert!(
+                    refused(&unzstd(&frame[..cut], want)),
+                    "{}: the first {cut} of {} bytes were accepted",
+                    case.name,
+                    frame.len()
+                );
+            }
+        }
+    }
+
+    /// **A BLOCK WIDER THAN ITS WINDOW IS REFUSED — RUSTSEC-2026-0344'S CLASS.**
+    /// 0.8.2 decoded this ten-byte frame to 4,096 bytes and `unzstd` accepted
+    /// it for a stated length of 4,096 (measured): nothing held a block's
+    /// decoded size to RFC 8878's `Block_Maximum_Size`, so a small frame could
+    /// expand inside the decoder where the `take` cap cannot reach.
+    #[test]
+    fn a_block_wider_than_its_window_is_refused() {
+        let want = u64::try_from(v082::RLE_WIDER_THAN_WINDOW_BYTES).unwrap();
+        assert!(refused(&unzstd(&v082::RLE_WIDER_THAN_WINDOW, want)));
+    }
+
+    /// **THE WINDOW CEILING IS 128 MiB, EXACTLY**: read at the ceiling, refused
+    /// one byte past it. 0.8.2 accepted the byte-past frame here (measured),
+    /// because it checked its ceiling only on a reused decoder.
+    #[test]
+    fn the_declared_window_ceiling_is_128_mib_exactly() {
+        assert_eq!(MAX_ZSTD_WINDOW, v082::WINDOW_CEILING);
+        assert_eq!(
+            unzstd(&v082::WINDOW_AT_CEILING, 0).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert!(refused(&unzstd(&v082::WINDOW_PAST_CEILING, 0)));
     }
 }
 

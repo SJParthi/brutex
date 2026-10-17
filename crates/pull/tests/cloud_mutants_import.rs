@@ -174,7 +174,8 @@ mod auction_sidecar {
         assert_eq!((again.offered, again.written), (1, 0));
         let records =
             auction::parse(&std::fs::read(auction::path(&root, &key, d1).unwrap()).unwrap())
-                .unwrap();
+                .unwrap()
+                .records;
         assert_eq!(
             records,
             vec![Record::of(d1, &late[0]), Record::of(d2, &midnight[0])]
