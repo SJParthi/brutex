@@ -821,9 +821,105 @@ fn reached(halves: &[Half], now: i64) -> Reached {
 /// `"reach":{...}`: [`reached`] as JSON, each time in epoch milliseconds or
 /// `null` for a stream with no line.
 fn reach_json(halves: &[Half], now: i64) -> String {
+    format!("\"reach\":{}", reach_object(halves, now))
+}
+
+/// The log directories of a store an `/audit.json` answer reads (R3-24): the
+/// store's own `logs` (where a server started on it logs) as `served`, then
+/// every run directory.
+pub(crate) fn store_halves(store_root: &std::path::Path) -> Vec<Half> {
+    halves_of(
+        Some(store_root.join(telemetry::run_dirs::LOGS)),
+        Some(store_root),
+    )
+}
+
+/// The most state-change lines `/audit.json` names (R3-24).
+pub const STATE_CHANGES_SHOWN: usize = 20;
+
+/// The bytes read from the end of one state stream for `/audit.json`'s
+/// state changes: a fixed slice, whatever the stream holds.
+const STATE_TAIL_BYTES: u64 = 64 * 1024;
+
+/// The newest state-change lines of every directory in `halves`, newest
+/// first, at most `limit`, each with its class (R3-24): what `/audit.json`
+/// shows of who did what. Per directory one read of at most
+/// [`STATE_TAIL_BYTES`] at the end of its state stream, which never rolls,
+/// so the newest lines are always there; a stream that is not there is
+/// passed over, one that cannot be read is named in `unread`.
+pub(crate) fn state_changes_json(halves: &[Half], limit: usize) -> String {
+    use std::io::{Read as _, Seek as _};
+    let mut found: Vec<(&'static str, telemetry::Record)> = Vec::new();
+    let mut unread: Vec<String> = Vec::new();
+    for half in halves {
+        let path = telemetry::audit_current_path(&telemetry::run_dirs::state_stream_of(&half.path));
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unread.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let from = len.saturating_sub(STATE_TAIL_BYTES);
+        let mut bytes = Vec::new();
+        if let Err(e) = std::fs::File::open(&path).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(from))?;
+            file.take(STATE_TAIL_BYTES).read_to_end(&mut bytes)
+        }) {
+            unread.push(format!("{}: {e}", path.display()));
+            continue;
+        }
+        // A READ THAT BEGAN MID-FILE begins mid-line: its first piece is not
+        // a line.
+        let lines = bytes
+            .split(|&byte| byte == b'\n')
+            .skip(usize::from(from > 0));
+        found.extend(
+            lines
+                .filter_map(|line| telemetry::Record::decode(line).ok())
+                .map(|record| (half.name, record)),
+        );
+    }
+    found.sort_by(|left, right| {
+        right
+            .1
+            .at_unix_millis
+            .cmp(&left.1.at_unix_millis)
+            .then_with(|| right.1.seq.cmp(&left.1.seq))
+    });
+    found.truncate(limit);
+    let rows: Vec<String> = found
+        .iter()
+        .map(|(half, record)| {
+            let class =
+                telemetry::run_dirs::state_events::class_of(&record.target, &record.message)
+                    .unwrap_or(telemetry::run_dirs::state_events::Class::Run);
+            format!(
+                r#"{{"half":{},"ts":{},"level":{},"target":{},"message":{},"class":{},"run":{}}}"#,
+                render::json_string(half),
+                record.at_unix_millis,
+                render::json_string(record.level.label()),
+                render::json_string(&record.target),
+                render::json_string(&record.message),
+                render::json_string(class.as_str()),
+                run_of(record).map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
+            )
+        })
+        .collect();
+    let unread: Vec<String> = unread.iter().map(|why| render::json_string(why)).collect();
+    format!(
+        r#"{{"rows":[{}],"limit":{limit},"unread":[{}],"from":"the never-rolling state stream of each log directory"}}"#,
+        rows.join(","),
+        unread.join(","),
+    )
+}
+
+/// [`reached`] as one JSON object.
+pub(crate) fn reach_object(halves: &[Half], now: i64) -> String {
     let reach = reached(halves, now);
     let at = |ms: Option<i64>| ms.map_or_else(|| "null".to_owned(), |ms| ms.to_string());
-    let mut out = String::from("\"reach\":{\"halves\":[");
+    let mut out = String::from("{\"halves\":[");
     for (n, (half, one)) in reach.halves.iter().enumerate() {
         if n > 0 {
             out.push(',');
