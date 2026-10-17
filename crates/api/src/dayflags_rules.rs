@@ -272,6 +272,63 @@ impl CasFlags {
     }
 }
 
+// ══ The closing auction's sidecar ═══════════════════════════════════════════
+
+/// Whether a GDFL share month keeps its closing-auction prints apart, in the
+/// `.auc` sidecar beside the one-second month (D-3320): a claim the band makes
+/// only where the file is there (SC-CLOSE-9). One `stat` per month a request
+/// touches, kept for the request.
+pub(super) struct AuctionSidecars {
+    /// The share's store key, for a GDFL share; `None` otherwise.
+    key: Option<brutex_core::instrument::InstrumentKey>,
+    /// `<store>`.
+    root: PathBuf,
+    /// Each month asked, by `YYYY * 12 + MM`, and whether its sidecar is there.
+    seen: HashMap<u32, Option<bool>>,
+}
+
+impl AuctionSidecars {
+    /// The sidecars of `symbol` on `feed`; none are looked for unless the
+    /// feed is GDFL and the segment `CASH` (`share`).
+    pub(super) fn of(root: &Path, feed: Vendor, symbol: &str, share: bool) -> Self {
+        let key = (feed == Vendor::Gdfl && share)
+            .then(|| brutex_core::symbol::Symbol::new(symbol).ok())
+            .flatten()
+            .map(|underlying| brutex_core::instrument::InstrumentKey {
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Cash,
+                underlying,
+                kind: brutex_core::instrument::Kind::Equity,
+            });
+        Self {
+            key,
+            root: root.to_path_buf(),
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Whether `day`'s month holds a sidecar: `None` where none could exist
+    /// (not a GDFL share, or a day before the closing auction began) or the
+    /// path cannot be built.
+    pub(super) fn on(&mut self, day: Day) -> Option<bool> {
+        let key = self.key.as_ref()?;
+        if !pull::vendor::cash_auction_eligibility_required(day) {
+            return None;
+        }
+        let month = u32::from(day.year())
+            .saturating_mul(12)
+            .saturating_add(u32::from(day.month()));
+        if let Some(held) = self.seen.get(&month) {
+            return *held;
+        }
+        let held = pull::gdfl_cm::auction::path(&self.root, key, day)
+            .ok()
+            .map(|path| path.is_file());
+        let _was = self.seen.insert(month, held);
+        held
+    }
+}
+
 // ══ A contract's expiry ═════════════════════════════════════════════════════
 
 /// A contract's last session: the expiry date its segment opens with

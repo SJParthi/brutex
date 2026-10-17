@@ -98,6 +98,11 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 use super::{Loaded, param};
 
+/// The day band's read-time rules (R3-13), in their own file so a rule changes
+/// there and this route not at all.
+#[path = "dayflags_rules.rs"]
+mod rules;
+
 /// The most days one page holds: a quarter, so a month is one page and a
 /// coverage calendar of a quarter is one request.
 pub(crate) const PAGE_DAYS: u32 = 92;
@@ -424,7 +429,12 @@ pub(super) async fn dayflags_json(
     String,
 ) {
     let query = uri.query().unwrap_or("").to_owned();
-    let asked = match asked(&query) {
+    // THE GRID'S RUNG, beside `Asked` and never inside it (R3-13 goal 1): a
+    // band counts what the grid shows, and `sources.rs` builds `Asked` by
+    // name for a GDFL read at the finest rung.
+    let asked = match asked(&query)
+        .and_then(|asked| Ok((asked, rules::asked_rung(&param(&query, "timeframe"))?)))
+    {
         Ok(asked) => asked,
         // THE REFUSAL IS THE BODY'S, and `logs::note_request` records the path
         // and the 400. No event of its own: this crate counts its emit sites.
@@ -437,7 +447,8 @@ pub(super) async fn dayflags_json(
         }
     };
     let root = site.store_root.clone();
-    match crate::detail::run_store_read(move || answer(&root, &asked)).await {
+    let (asked, rung) = asked;
+    match crate::detail::run_store_read(move || answer_at(&root, &asked, rung)).await {
         Ok(body) => (axum::http::StatusCode::OK, json_header(), body.to_string()),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
@@ -475,30 +486,36 @@ fn page_span(asked: &Asked) -> (Day, Day, u32, u32) {
     (day(first, asked.from), day(last, asked.to), page, pages)
 }
 
-/// The other feed: the one a record counts beside its own.
+/// The other feed: the one a record counts beside its own, as
+/// [`rules::feed_rungs`] decides it (R3-13 goal 5).
 const fn peer_of(feed: Vendor) -> Vendor {
-    match feed {
-        Vendor::Gdfl => Vendor::Zerodha,
-        _ => Vendor::Gdfl,
-    }
+    rules::feed_rungs(feed).peer
 }
 
-/// A feed's finest rung: GDFL's one-second bars, Zerodha's one-minute bars.
+/// A feed's finest rung, as [`rules::feed_rungs`] decides it: GDFL's
+/// one-second bars, Zerodha's one-minute bars.
 const fn finest(feed: Vendor) -> Timeframe {
-    match feed {
-        Vendor::Gdfl => Timeframe::SECOND_1,
-        _ => Timeframe::MINUTE_1,
-    }
+    rules::feed_rungs(feed).finest
 }
 
 /// The whole answer over the store at `root`. Never an error: every source
 /// that cannot be read is named under `sources` and in `notes`, and the
 /// other sources still answer.
 pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
+    answer_at(root, asked, None)
+}
+
+/// [`answer`], with each day's bars counted at `rung` (the grid's, from
+/// `timeframe=`) where it is not the feed's finest (R3-13 goal 1). The finest
+/// rung is still counted beside it, so a Zerodha `1day` page names a session
+/// that holds minutes and no day bar, and never says "no Zerodha bar" above a
+/// day bar the grid shows.
+pub(crate) fn answer_at(root: &Path, asked: &Asked, rung: Option<Timeframe>) -> Value {
     let (first, last, page, pages) = page_span(asked);
     let days = days_between(first, last);
     let inst = &asked.instrument;
     let peer_feed = peer_of(asked.feed);
+    let counted = rung.unwrap_or_else(|| finest(asked.feed));
     let mut notes: Vec<String> = Vec::new();
     let journal = (asked.feed == Vendor::Gdfl).then(|| journal_rows(root, inst, first, last));
     let quality =
@@ -509,8 +526,22 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     // volume at all (D-3322), and GDFL holds no bar for a second with no trade.
     let fills = asked.feed == Vendor::Zerodha && inst.segment == Segment::Cash;
     let underlying = sampled_series(asked.feed, inst);
-    let held = PageHeld::count(root, asked, &days, (fills, underlying.as_ref()));
+    let held = PageHeld::count(root, asked, &days, (fills, underlying.as_ref()), counted);
     notes.extend(held.notes());
+    // A SHARE'S DATED CLOSING-AUCTION FLAG, A DAY AT A TIME (SC-CLOSE-8): the
+    // phases `/bars/window.json` labels the same minutes with.
+    let mut cas = rules::CasFlags::of(root, &inst.symbol, inst.segment == Segment::Cash);
+    let flags: Vec<rules::CasFlag> = days.iter().map(|day| cas.on(*day)).collect();
+    notes.extend(cas_notes(&cas));
+    // WHETHER A GDFL SHARE MONTH KEEPS ITS AUCTION PRINTS APART (SC-CLOSE-9):
+    // one `stat` a month, so "kept apart" is said only where it is so.
+    let mut sidecars = rules::AuctionSidecars::of(
+        root,
+        asked.feed,
+        &inst.symbol,
+        inst.segment == Segment::Cash,
+    );
+    let sidecar: Vec<Option<bool>> = days.iter().map(|day| sidecars.on(*day)).collect();
     let day_bars = (asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno)
         .then(|| day_bars(root, inst, &days));
     if let Some(bars) = &day_bars {
@@ -539,6 +570,8 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     });
     let ctx = Context {
         asked,
+        rung: counted,
+        expiry: rules::expiry_of(inst.contract),
         sampled_of: underlying.as_ref(),
         journal: journal.as_ref().and_then(|j| j.as_ref().ok()),
         quality: quality.as_ref().and_then(|q| q.as_ref().ok()),
@@ -551,7 +584,13 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         .enumerate()
         .map(|(at, day)| {
             let bar = day_bars.as_ref().map(|bars| bars.at(at));
-            ctx.record(*day, &held.day(at), bar)
+            let unflagged = rules::CasFlag {
+                eligibility: CasEligibility::Unknown,
+                basis: rules::CasBasis::NotRequired,
+            };
+            let flag = flags.get(at).unwrap_or(&unflagged);
+            let auc = sidecar.get(at).copied().flatten();
+            ctx.record(*day, &held.day(at), bar, (flag, auc))
         })
         .collect();
     if asked.newest_first {
@@ -580,7 +619,8 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         "page_to": last.to_string(),
         "days_in_range": asked.to.days_from_epoch().saturating_sub(asked.from.days_from_epoch()).saturating_add(1),
         "rungs": {
-            "held": { "feed": asked.feed.as_str(), "rung": finest(asked.feed).as_str() },
+            "held": { "feed": asked.feed.as_str(), "rung": counted.as_str() },
+            "finest": { "feed": asked.feed.as_str(), "rung": finest(asked.feed).as_str() },
             "peer": { "feed": peer_feed.as_str(), "rung": finest(peer_feed).as_str() },
             "day_bar": day_bars.as_ref().map(|_| Timeframe::DAY_1.as_str()),
         },
@@ -3420,7 +3460,19 @@ fn bar_before(root: &Path, inst: &Instrument, day: Day) -> Option<DayBar> {
             }
         }
     }
-    None
+    // A SCALE SWITCH ACROSS A LONG HOLE (R3-13 goal 2, DB-031): the twelve
+    // opens above found nothing, so the newest held month further back is
+    // found by `stat`s alone ([`rules::held_month_before`]) and opened once.
+    let month = probe.year_month().ok()?;
+    let held = rules::held_month_before(month, |probe| day_month_held(root, inst, probe))?;
+    match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, held) {
+        Opened::File(file) => file
+            .records()
+            .checked_sub(1)
+            .and_then(|last| file.read_record(last).ok())
+            .map(|bar| DayBar::of(&bar)),
+        Opened::Absent | Opened::Refused(_) => None,
+    }
 }
 
 /// The page's Zerodha `1day` bars, one month file read whole at a time.
@@ -3496,6 +3548,11 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
 /// What every record of one answer reads from.
 struct Context<'a> {
     asked: &'a Asked,
+    /// The rung `held` counts: the grid's, or the feed's finest.
+    rung: Timeframe,
+    /// A contract's last session ([`rules::expiry_of`]): a day after it is
+    /// `expired` and owes nothing (SC-CLOSE-12).
+    expiry: Option<Day>,
     /// The index whose sampling a record names ([`sampled_series`]): the
     /// instrument itself, an option's underlying, or none.
     sampled_of: Option<&'a Instrument>,
@@ -3520,41 +3577,54 @@ struct PageHeld {
     /// index month and answers `not_held`. One open a month and one lookup a
     /// day boundary, only where the rung can show sampling at all.
     under: Option<Counts>,
+    /// THE GRID'S RUNG, where it is not the feed's finest (R3-13 goal 1):
+    /// the record's `held` is this count, so the band counts what the grid
+    /// shows. One more open a month and one lookup a day boundary.
+    grid: Option<Counts>,
 }
 
 impl PageHeld {
     /// Counts `days` for `asked`; `fills` also counts the zero-volume bars,
-    /// and `series` is the page's sampled series ([`sampled_series`]).
+    /// `series` is the page's sampled series ([`sampled_series`]), and
+    /// `rung` is the rung the grid shows.
     fn count(
         root: &Path,
         asked: &Asked,
         days: &[Day],
         (fills, series): (bool, Option<&Instrument>),
+        rung: Timeframe,
     ) -> Self {
-        let (inst, rung) = (&asked.instrument, finest(asked.feed));
+        let (inst, own) = (&asked.instrument, finest(asked.feed));
         let peer_feed = peer_of(asked.feed);
         Self {
-            own: counts(root, asked.feed, inst, rung, days, fills),
+            own: counts(root, asked.feed, inst, own, days, fills),
             peer: counts(root, peer_feed, inst, finest(peer_feed), days, false),
             under: series
                 .filter(|index| index.segment != inst.segment)
-                .map(|index| counts(root, asked.feed, index, rung, days, false)),
+                .map(|index| counts(root, asked.feed, index, own, days, false)),
+            grid: (rung != own).then(|| counts(root, asked.feed, inst, rung, days, false)),
         }
     }
 
-    /// What could not be read, of all three.
+    /// What could not be read, of all four.
     fn notes(&self) -> impl Iterator<Item = String> + '_ {
-        [Some(&self.own), Some(&self.peer), self.under.as_ref()]
-            .into_iter()
-            .flatten()
-            .flat_map(|counts| counts.notes.iter().cloned())
+        [
+            Some(&self.own),
+            Some(&self.peer),
+            self.under.as_ref(),
+            self.grid.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|counts| counts.notes.iter().cloned())
     }
 
     /// The page's day `at`.
     fn day(&self, at: usize) -> DayHeld {
         let held = |counts: &Counts| counts.per_day.get(at).copied().unwrap_or(Held::NoFile);
         DayHeld {
-            own: held(&self.own),
+            own: held(self.grid.as_ref().unwrap_or(&self.own)),
+            finest: self.grid.as_ref().map(|_| held(&self.own)),
             fills: self.own.fills.get(at).copied().flatten(),
             halted: self.own.halted.get(at).copied().flatten(),
             peer: held(&self.peer),
@@ -3566,8 +3636,12 @@ impl PageHeld {
 /// What the store holds of one day, counted before its record is made.
 #[derive(Debug, Clone, Copy)]
 struct DayHeld {
-    /// This feed's bars at its finest rung.
+    /// This feed's bars at the grid's rung: its finest where the grid asked
+    /// for none.
     own: Held,
+    /// This feed's bars at its finest rung, where the grid's rung is another
+    /// one; `None` where `own` is already the finest count.
+    finest: Option<Held>,
     /// Of them, the zero-volume ones, where counted (DB-B16).
     fills: Option<u64>,
     /// Of them, those inside the day's halt, on a halt day (DB-A07).
@@ -3751,14 +3825,39 @@ const fn phase_word(phase: Phase) -> &'static str {
 
 /// The record's `calendar` and `events`; `halted` is the feed's bars inside
 /// the day's halt, where counted (`events.halt.held`).
+#[cfg(test)]
 fn calendar_json(
     record: &DayRecord,
     venue: Venue,
     (feed, halted): (Vendor, Option<u64>),
 ) -> (Value, Value) {
+    let none = rules::CasFlag {
+        eligibility: CasEligibility::Unknown,
+        basis: rules::CasBasis::NotRequired,
+    };
+    calendar_json_with(record, venue, (feed, halted), (&none, false))
+}
+
+/// [`calendar_json`], with the day's closing-auction flag and whether the
+/// day is after the contract's expiry.
+///
+/// THE PHASES ARE BUILT WITH THE SHARE'S DATED FLAG (SC-CLOSE-8): flag 1 ends
+/// continuous trading at 15:15 and owes 360 minutes, flag 0 runs it to 15:29
+/// and owes 375, as `/bars/window.json` labels the same minutes. A flag no
+/// master holds stays `Unknown`, and `calendar.cas.why` says why.
+///
+/// A DAY AFTER EXPIRY OWES NOTHING (SC-CLOSE-12): its `owed_minutes` and
+/// `unverified_minutes` are 0, as `/gaps.json` calls such a minute expired.
+fn calendar_json_with(
+    record: &DayRecord,
+    venue: Venue,
+    (feed, halted): (Vendor, Option<u64>),
+    (cas, expired): (&rules::CasFlag, bool),
+) -> (Value, Value) {
     let (code, kind) = day_code(record.day);
-    let phases = pull::calendar::phases_of(venue, record.day, CasEligibility::Unknown);
+    let phases = pull::calendar::phases_of(venue, record.day, cas.eligibility);
     let open = matches!(record.kind, DayKind::Open(_));
+    let owed = |phase: Phase| if expired { 0 } else { phases.minutes(phase) };
     let special = record.special.map(|special| {
         let windows: Vec<Value> = special
             .session
@@ -3781,9 +3880,11 @@ fn calendar_json(
         "weekday": pull::calendar::weekday_of(record.day).short(),
         "special": special,
         "holiday": record.holiday.map(|h| json!({ "name": h.name, "circular": h.circular })),
-        "owed_minutes": open.then(|| phases.minutes(Phase::Continuous)),
+        "owed_minutes": open.then(|| owed(Phase::Continuous)),
         "halted_minutes": phases.minutes(Phase::Halted).saturating_add(phases.minutes(Phase::ReopeningAuction)),
-        "unverified_minutes": open.then(|| phases.minutes(Phase::Unverified)),
+        "unverified_minutes": open.then(|| owed(Phase::Unverified)),
+        "cas": cas.json(),
+        "expired": expired,
         // A MEASURED, UNEXPLAINED SHORT DAY (WP-62 repair 3; DB-G47): the
         // vendors' own answers lack minutes the session owes. It classifies
         // nothing -- `owed_minutes` is unchanged -- and says what was read.
@@ -4098,12 +4199,27 @@ impl Context<'_> {
     }
 
     /// One day's record.
-    fn record(&self, day: Day, held: &DayHeld, bar: Option<(DayBarAt, Option<i64>)>) -> Value {
+    fn record(
+        &self,
+        day: Day,
+        held: &DayHeld,
+        bar: Option<(DayBarAt, Option<i64>)>,
+        (cas, sidecar): (&rules::CasFlag, Option<bool>),
+    ) -> Value {
         let (own, fills, peer) = (&held.own, held.fills, &held.peer);
+        // THE FINEST RUNG'S COUNT, which the zero-volume and junk rules read
+        // whatever rung the grid shows.
+        let finest_held = held.finest.unwrap_or(*own);
         let asked = self.asked;
         let inst = &asked.instrument;
         let record = pull::calendar::record_of(i64::from(day.days_from_epoch()));
-        let (calendar, events) = calendar_json(&record, inst.venue(), (asked.feed, held.halted));
+        let expired = self.expiry.is_some_and(|expiry| day > expiry);
+        let (calendar, events) = calendar_json_with(
+            &record,
+            inst.venue(),
+            (asked.feed, held.halted),
+            (cas, expired),
+        );
         let import = self.journal.map(|rows| import_json(rows, inst, day));
         let quality_lines = self.quality_lines(day);
         let quality = self.quality.map(|_| {
@@ -4126,7 +4242,7 @@ impl Context<'_> {
         let front = self.front(day, gap);
         let (junk, day_bar) = match bar {
             Some((at, prev)) => {
-                let codes = junk_codes(&record, at, prev, *own, *peer, inst.segment);
+                let codes = junk_codes(&record, at, prev, finest_held, *peer, inst.segment);
                 (Some(codes), Some(day_bar_json(at)))
             }
             None => (None, None),
@@ -4146,17 +4262,34 @@ impl Context<'_> {
             day,
             segment: inst.segment,
             own: *own,
+            rung: self.rung,
+            finest: held.finest,
             fills,
             halted: held.halted,
             peer: *peer,
             feed: asked.feed,
+            expired: expired.then_some(self.expiry).flatten(),
+            sidecar,
         }
         .phrases();
-        let mut held = own.json(asked.feed, finest(asked.feed));
+        let finest_json = held.finest.map(|at| {
+            let mut out = at.json(asked.feed, finest(asked.feed));
+            if let Some(fields) = out.as_object_mut() {
+                let _was = fields.insert(
+                    "zero_volume".to_owned(),
+                    fills.map_or(Value::Null, Value::from),
+                );
+            }
+            out
+        });
+        let mut held = own.json(asked.feed, self.rung);
         if let Some(fields) = held.as_object_mut() {
-            fields.insert(
+            // ZERO-VOLUME BARS ARE THE FINEST RUNG'S MINUTES, so they sit
+            // beside `held` only where `held` IS that count.
+            let zero = if finest_json.is_some() { None } else { fills };
+            let _was = fields.insert(
                 "zero_volume".to_owned(),
-                fills.map_or(Value::Null, Value::from),
+                zero.map_or(Value::Null, Value::from),
             );
         }
         json!({
@@ -4175,6 +4308,12 @@ impl Context<'_> {
             "refused_front": front.refused,
             "pull": front.json,
             "held": held,
+            "finest": finest_json,
+            "auction_sidecar": sidecar,
+            "contract": self.expiry.map(|expiry| json!({
+                "expiry": expiry.to_string(),
+                "expired": expired,
+            })),
             "peer": peer.json(peer_of(asked.feed), finest(peer_of(asked.feed))),
             "says": says,
         })
@@ -4212,13 +4351,23 @@ struct Says<'a> {
     start: Option<SeriesStart>,
     day: Day,
     segment: Segment,
+    /// The own feed's bars at `rung`.
     own: Held,
+    /// The rung `own` counts: the grid's, or the feed's finest.
+    rung: Timeframe,
+    /// The own feed's bars at its finest rung, where `rung` is another one.
+    finest: Option<Held>,
     /// The own feed's zero-volume bars that day, where counted (DB-B16).
     fills: Option<u64>,
     /// The own feed's bars inside the day's halt, where counted (DB-A07).
     halted: Option<u64>,
     peer: Held,
     feed: Vendor,
+    /// The contract's last session, on a day after it (SC-CLOSE-12).
+    expired: Option<Day>,
+    /// Whether the day's GDFL share month holds an auction sidecar, where one
+    /// could exist (SC-CLOSE-9).
+    sidecar: Option<bool>,
 }
 
 /// The longest phrase a refusal's own words are cut to.
@@ -4475,6 +4624,11 @@ impl Says<'_> {
             ));
             self.halt_phrases(halt, out);
         }
+        if let Some(expiry) = self.expired {
+            out.push(format!(
+                "expired: the contract's last session was {expiry}, so this day owes nothing"
+            ));
+        }
     }
 
     /// What is held inside the day's halt (WP-11c, DB-A07): the feed's bars
@@ -4703,11 +4857,21 @@ impl Says<'_> {
                     line.clock("shared_hole_max_at").map_or_else(|| "-".to_owned(), hms)
                 ));
             }
+            // "KEPT APART" ONLY WHERE A SIDECAR KEEPS THEM (SC-CLOSE-9): a month
+            // imported before D-3320 holds the print as an ordinary bar.
             if n("auction_prints") > 0 {
-                out.push(format!(
-                    "{} closing-auction print(s), kept apart from trades",
-                    n("auction_prints")
-                ));
+                out.push(match self.sidecar {
+                    Some(true) => format!(
+                        "{} closing-auction print(s), kept apart from trades in the month's \
+                         auction sidecar",
+                        n("auction_prints")
+                    ),
+                    _ => format!(
+                        "{} closing-auction print(s) counted by the import; this month holds no \
+                         auction sidecar, so no print is kept apart from trades",
+                        n("auction_prints")
+                    ),
+                });
             }
         }
         for (kind, line) in self.quality {
@@ -4851,24 +5015,41 @@ impl Says<'_> {
             .and_then(Value::as_str)
             .is_some_and(|outcome| !matches!(outcome, "refused" | "none" | "open"));
         let trade_driven = self.feed == Vendor::Gdfl && self.segment != Segment::Index && imported;
+        // THE GRID'S RUNG IS NAMED where it is not the feed's finest (R3-13
+        // goal 1): "no Zerodha 1day bar" over a session the minutes hold is
+        // the day bar missing, and a day bar held is never "no bar".
+        let rung = if self.finest.is_some() {
+            format!(" {}", self.rung.as_str())
+        } else {
+            String::new()
+        };
+        let feed = name(self.feed);
         match self.own {
+            // A DAY AFTER EXPIRY OWES NOTHING (SC-CLOSE-12): said once, by
+            // the calendar's phrases, never as a missing bar.
+            _ if self.expired.is_some() => {}
             Held::Bars(0) if session && trade_driven => out.push(
                 "no GDFL bar on this session: a one-second option or share bar exists only for \
                  a traded second (D-3336 §2)"
                     .to_owned(),
             ),
-            Held::Bars(0) if session => {
-                out.push(format!("no {} bar on this session", name(self.feed)));
-            }
+            Held::Bars(0) if session => out.push(match self.finest {
+                Some(Held::Bars(minutes)) if minutes > 0 => format!(
+                    "no {feed}{rung} bar on this session, while {feed} holds {minutes} {} \
+                     bar(s) that day: the{rung} bar is missing",
+                    finest(self.feed).as_str()
+                ),
+                _ => format!("no {feed}{rung} bar on this session"),
+            }),
             Held::NoFile if session => {
-                out.push(format!("{} holds no file for this month", name(self.feed)));
+                out.push(format!("{feed} holds no{rung} file for this month"));
             }
-            Held::Unreadable => out.push(format!("{}'s month could not be read", name(self.feed))),
+            Held::Unreadable => out.push(format!("{feed}'s{rung} month could not be read")),
             _ => {}
         }
         // HELD IS NOT TRADED (DB-B16): a zero-volume candle is a minute
         // nobody traded in, and a day of them reads complete by count alone.
-        if let (Held::Bars(held), Some(zero)) = (self.own, self.fills)
+        if let (Held::Bars(held), Some(zero)) = (self.finest.unwrap_or(self.own), self.fills)
             && zero > 0
         {
             out.push(format!(
@@ -5035,15 +5216,22 @@ fn source_notes(
                 .to_owned(),
         );
     }
-    if asked.instrument.segment == Segment::Cash {
-        notes.push(
-            "A share's 15:15-15:29 reads unverified from 2026-08-03: this route does not read the \
-             dated security master's closing-auction flag. /bars/window.json labels each bar's \
-             phase (D-3320)."
-                .to_owned(),
-        );
-    }
     notes
+}
+
+/// The days whose closing-auction flag could not be read, said once each
+/// (SC-CLOSE-8): such a day's 15:15-15:29 stays `unverified`, never guessed
+/// either way. Bounded by the page's days.
+fn cas_notes(cas: &rules::CasFlags) -> Vec<String> {
+    cas.refusals()
+        .into_iter()
+        .map(|why| {
+            format!(
+                "The closing-auction flag could not be read, so the day's 15:15-15:29 stays \
+                 unverified: {why}"
+            )
+        })
+        .collect()
 }
 
 /// The display rules a page names beside what they flag.
@@ -5156,23 +5344,23 @@ mod tests {
     }
 
     /// A store root of its own.
-    fn root_of(name: &str) -> PathBuf {
+    pub(super) fn root_of(name: &str) -> PathBuf {
         let root = crate::scratch::path(&format!("dayflags-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch root");
         root
     }
 
-    fn day(text: &str) -> Day {
+    pub(super) fn day(text: &str) -> Day {
         super::super::import_journal::parse_day(text).expect("a day")
     }
 
-    fn write(path: &Path, text: &str) {
+    pub(super) fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
         std::fs::write(path, text).expect("write");
     }
 
-    fn append(path: &Path, text: &str) {
+    pub(super) fn append(path: &Path, text: &str) {
         use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -5197,7 +5385,7 @@ mod tests {
     }
 
     /// One bar at `second` of the IST day `on`.
-    fn bar(on: &str, second: i64, ohlc: [i64; 4], volume: i64) -> Bar {
+    pub(super) fn bar(on: &str, second: i64, ohlc: [i64; 4], volume: i64) -> Bar {
         Bar {
             ts_micros: ist_midnight_micros(day(on)) + second * 1_000_000,
             open: ohlc[0],
@@ -5210,7 +5398,7 @@ mod tests {
     }
 
     /// `n` unchanged-price one-minute bars from 09:15 IST on `on`.
-    fn minutes(on: &str, n: i64) -> Vec<Bar> {
+    pub(super) fn minutes(on: &str, n: i64) -> Vec<Bar> {
         (0..n)
             .map(|i| bar(on, 9 * 3_600 + 15 * 60 + i * 60, [500; 4], 0))
             .collect()
@@ -5218,7 +5406,13 @@ mod tests {
 
     /// Files `bars` for `key` on `feed` at `rung`, one month file per month,
     /// oldest first.
-    fn file_bars(root: &Path, feed: Vendor, key: &str, rung: Timeframe, mut bars: Vec<Bar>) {
+    pub(super) fn file_bars(
+        root: &Path,
+        feed: Vendor,
+        key: &str,
+        rung: Timeframe,
+        mut bars: Vec<Bar>,
+    ) {
         let inst = instrument_of(key, "").expect("a key");
         bars.sort_by_key(|bar| bar.ts_micros);
         let mut at = 0;
@@ -5256,12 +5450,12 @@ mod tests {
         }
     }
 
-    fn ask(query: &str) -> Asked {
+    pub(super) fn ask(query: &str) -> Asked {
         asked(query).unwrap_or_else(|why| panic!("{query}: {why}"))
     }
 
     /// The record of `on` in an answer.
-    fn record<'a>(got: &'a Value, on: &str) -> &'a Value {
+    pub(super) fn record<'a>(got: &'a Value, on: &str) -> &'a Value {
         got["days"]
             .as_array()
             .expect("days")
@@ -5270,7 +5464,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{on} in {got:#}"))
     }
 
-    fn says(record: &Value) -> Vec<String> {
+    pub(super) fn says(record: &Value) -> Vec<String> {
         record["says"]
             .as_array()
             .expect("says")
@@ -5279,7 +5473,7 @@ mod tests {
             .collect()
     }
 
-    fn says_has(record: &Value, phrase: &str) {
+    pub(super) fn says_has(record: &Value, phrase: &str) {
         let said = says(record);
         assert!(
             said.iter().any(|s| s == phrase),
@@ -5288,11 +5482,11 @@ mod tests {
     }
 
     /// One complete `indices` line of the GDFL day ledger.
-    fn index_flags(on: &str, symbol: &str, set: &[(&str, &str)]) -> String {
+    pub(super) fn index_flags(on: &str, symbol: &str, set: &[(&str, &str)]) -> String {
         flags_line("indices", on, symbol, &INDICES_FIELDS, set)
     }
 
-    fn flags_line(
+    pub(super) fn flags_line(
         kind: &str,
         on: &str,
         scope: &str,
@@ -7335,7 +7529,7 @@ mod tests {
     // ── WP-11c: the sampled day and the bars inside a halt (DB-A04, DB-A07) ─
 
     /// `n` one-second bars on `on`, one a minute at second :59 from 09:15.
-    fn minute_stamped(on: &str, n: i64) -> Vec<Bar> {
+    pub(super) fn minute_stamped(on: &str, n: i64) -> Vec<Bar> {
         (0..n)
             .map(|m| bar(on, 9 * 3_600 + 15 * 60 + m * 60 + 59, [700 + m; 4], 0))
             .collect()
