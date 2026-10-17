@@ -1955,6 +1955,13 @@ fn a_page_in_the_first_month_looks_back_nowhere() {
         super::super::bar_before(&root, &inst, day("1970-01-02")),
         (None, false)
     );
+    // The page itself: no month back to probe, none forward held, so the
+    // series' start is none held and no day is a front.
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=1970-01-01&to=1970-01-02"),
+    );
+    assert_eq!(got["zerodha_1day_start"]["state"], "none_held", "{got:#}");
 }
 
 /// **A READ THAT FAILS IS NAMED, NEVER COUNTED** (R3-13): a month cut short
