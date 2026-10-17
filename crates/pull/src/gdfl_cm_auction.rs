@@ -1023,6 +1023,59 @@ mod cloud_mutant_tests {
         holder.unlock().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// A fresh sidecar whose directory can be written but not opened (mode
+    /// 0o300) is written and synced, and then the append refuses naming the
+    /// directory that was not synced: the record is on disk, its entry's
+    /// durability is not vouched for. Run where permission bits bind
+    /// (D-0995).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_sidecar_directory_that_cannot_be_synced_is_named() {
+        crate::support::where_permission_binds(
+            "gdfl_cm::auction::cloud_mutant_tests::a_sidecar_directory_that_cannot_be_synced_is_named",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = crate::gdfl_fixtures::scratch("CloudSidecarNoSync");
+                let key =
+                    super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+                        .unwrap();
+                let day = super::Day::new(2026, 8, 4).unwrap();
+                let path = super::path(&root, &key, day).unwrap();
+                let dir = path.parent().unwrap().to_path_buf();
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+                let print = Print {
+                    sod: 55_687,
+                    price: 140_150,
+                    quantity: 400,
+                    rows: 1,
+                    line: 3,
+                };
+                let refused = super::append(&root, &key, day, &[print]);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let why = match refused {
+                    Err(super::CmRefusal::AuctionSidecar { why }) => why,
+                    other => panic!("{other:?}"),
+                };
+                assert!(
+                    why.starts_with(&format!(
+                        "{}: written and synced, but its directory {} was not synced: ",
+                        path.display(),
+                        dir.display()
+                    )),
+                    "{why}"
+                );
+                let held = super::parse(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(held.records.len(), 1, "the record is on disk");
+                std::fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
 }
 
 #[cfg(test)]
