@@ -4460,3 +4460,54 @@ that grows only when the operator saves (`docs/06-limits.md` L-R305-6).
 
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
 line above is a `v2` directory beside this one, never a rewrite of `v1`.
+
+## §43 — The upkeep journal and its stop request, format v1 (R3-17, D-4997)
+
+Two files per vendor and kind under `<store>/audit/`, where `<kind>` is `tix`,
+`srt`, `msum`, `recount` or `rekey`. Written by `pull::upkeep` alone; read by
+`pull::upkeep::status` and by a resume. (The section number is the next free
+one on 17 October 2026; the merge renumbers it if another lands first.)
+
+### `audit/upkeep.<vendor>.<kind>.log`
+
+Append-only text, one line per event, each written by one `write` with its
+newline, flushed after the `run` line, every 64 `item` lines (`SYNC_EVERY`)
+and after the `end` line. A regular file of one name, opened with
+`O_NOFOLLOW | O_NONBLOCK`; a link, a directory, a pipe or a second name at the
+name is refused and nothing is written. The run holds an exclusive `flock` on
+it for its whole life (one run of a vendor's kind at a time). Fields are
+separated by one space; a key holds no space or control character and is at
+most 512 bytes; `why=` runs to the end of the line, one line, at most 1,024
+bytes with a cut said `...(+<n> bytes)`.
+
+```text
+run <id> v1 vendor=<v> kind=<k> commit=<sha|unstamped> workers=<n> asked=<n> items=<n> skipped=<n> plan=<16 hex> resume=<id|-> at=<unix s>
+item <id> n=<done> ok=<clean> of=<items> t=<s> clean=<0|1> word=<word> key=<key> why=<sentence>
+end <id> how=<done|stopped|failed> n=<done> ok=<clean> of=<items> t=<s> why=<sentence>
+```
+
+| Field | Meaning |
+|---|---|
+| `<id>` | the run's id: UNIX seconds at its start, or one more than the newest id among the tail's whole lines when that is not earlier |
+| `workers`, `asked` | the workers started; the workers asked for |
+| `items`, `skipped` | items given to this run; items of the plan skipped because a run of the resumed chain closed them clean |
+| `plan` | FNV-1a of the plan's keys, each followed by a newline, in hex |
+| `resume` | the run this one resumes, or `-` |
+| `n`, `ok`, `of` | items built so far by the run (this one included), of those the clean ones, and `items` |
+| `t` | whole seconds since the run's items began |
+| `clean`, `word`, `key` | whether this item ended clean; its builder's word (`built`, `kept`, `small`, `REFUSED`, `recounted`, `applied`, ...); the item: a month's `.bin` relative to the store root, `<from>..<to>` days of a recount, or an underlying of a re-key |
+
+A line counts once its newline is written. A tail no newline ends — a run
+killed, or out of disk, mid-write — is ended by the next run before it appends
+anything, as the fragment followed by ` #void` and a newline, and no reader
+reads a line that ends ` #void` (a written line whose reason ends so gains a
+`.`). Readers read the three shapes strictly, word by word in this order; any
+other line is no entry. A run with no `end` line whose lock is free DIED.
+
+### `audit/upkeep.<vendor>.<kind>.stop`
+
+`stop <id>` and a newline, at most 64 bytes read: a request that run `<id>`
+take no further item. Written whole to `<name>.new` (`store::staging::create`,
+`O_CREAT | O_EXCL`), flushed and renamed over the name. A run reads it between
+items; a request naming another id stops nothing, so the file is never
+removed.

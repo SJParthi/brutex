@@ -70986,3 +70986,112 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-4997 — One upkeep runner: the store's catch-up builders run as tracked runs on workers, with a run id, a journal, Stop and resume, under the import's own run locks — 2026-10-17
+
+**Implemented by** R3-17: `pull::upkeep` (`crates/pull/src/upkeep.rs`: `run`,
+`status`, `request_stop`, `months`, `parse`) and `cli upkeep`
+(`crates/cli/src/upkeep_command.rs`), which builds each item with the step the
+verb that owns it takes — `srt_builder::upkeep_month`,
+`tix_rebuilder::upkeep_month`, `msum_builder::upkeep_month`,
+`census_recount::upkeep_span` and `gdfl_rekey::upkeep_underlying` — under the
+import guard's `RunLock`, re-exported from `gdfl_import_command`.
+**Closes** the store half of DB-N14 (no step could give a whole feed its sort
+index; it is now one run) and the store half of DB-027 (the three impossible
+NIFTY `25JUN20` strikes leave the census through the re-key, run as an upkeep
+step; their refusal at decode is D-3331's `StrikeImplausible`, already in
+`pull::gdfl_nfo`). **Number**: the ledger's head was D-4996 on 17 October 2026
+and D-4990 to D-4995 are taken on an open branch (R4-17); the merge renumbers
+this if another lands first (amendment A6). **Bytes**:
+`docs/02-store-format.md` §43.
+
+**Decision.**
+
+1. **One runner, the builders unchanged.** An item is built by the very
+   function its verb runs for it, and the receipt line that verb prints is the
+   item's reason: there is one way to build a `.tix`, a `.srt`, a `.sum`, a
+   recount and a re-key, and the runner adds none. What the runner owns is the
+   run: the plan, the journal, the workers, Stop, resume and the locks.
+2. **One journal per vendor and kind**, `audit/upkeep.<vendor>.<kind>.log`,
+   append-only, three line shapes (`run`, `item`, `end`, §43). **Every `item`
+   line carries the run's running totals** (`n`, `ok`, `of`, `t`), so where
+   the newest run stands is the journal's last whole line: one bounded tail
+   read, whatever the run has written (`status`). A tail a kill or a full disk
+   left is ended as a void line before anything is appended, exactly as
+   `cli scrub-blocks` ends its own. Per kind, not one file for all, because
+   two kinds run side by side under their own locks and a page reads one
+   kind's tail.
+3. **The run id** is the clock's UNIX seconds, or one more than the newest id
+   the journal's tail holds when that is not earlier, so no two runs of one
+   journal share an id whatever the clock says.
+4. **Locks: the import's own, and one run of a kind.** The run holds its
+   journal's `flock` for its whole life: a second run of the same vendor and
+   kind is refused by name. A GDFL run first takes the import's run lock of
+   EVERY kind (`imports/gdfl.<kind>.lock` on the version-4 census, the one
+   `imports/gdfl.lock` on version 3; `RunLock::take`, no waiting), its holder
+   record naming the upkeep verb: an import of any kind refuses it `run_busy`
+   and it refuses every import. Every kind, because a recount writes every
+   segment's census and the import journal, a capital-market import files
+   more than one segment, and an import that met a recount's census lock
+   stopped its whole run (`census_refused`). Under them each month is opened
+   under its own exclusive store lock, which the builders already take: a
+   month an import's writer holds is refused by name and left for a resume.
+   Zerodha has no import run lock; its upkeep meets a pull on month locks
+   alone.
+5. **Stop between items, never inside one**: the caller's flag (an app that
+   runs the library itself) or a request file, `audit/upkeep.<vendor>.<kind>.stop`,
+   that NAMES the run (`stop <id>`), written whole and renamed into place. A
+   request for another id is not this run's, so a stale request never stops a
+   later run and nothing ever removes the file. Each worker finishes the item
+   it holds and takes no other; the run ends `stopped` with the count left.
+6. **Resume along a chain.** A resume is a new run whose `run` line names the
+   run it resumes; every key a run of that chain (the run named, the one it
+   resumed, and so on) closed CLEAN is skipped, and every other key of the
+   plan the resume makes NOW is built: what a Stop or a kill left, what was
+   refused (a held month, a name held by a directory), and what the store
+   gained since. A failure is never remembered as done.
+7. **Workers.** The three indexes take up to 64 (`MAX_WORKERS`), each item one
+   month file and nothing else; the recount and the re-key take ONE, because
+   they write one census, one import journal and one lineage ledger a second
+   worker would race. Workers take the next item from one counter, so no item
+   is built twice; the outcomes come back in plan order, and what a builder
+   writes for one month is that month's alone, so the store's bytes do not
+   depend on the count. `cli upkeep` starts one unless `--workers N` is given.
+8. **The items.** For an index, the month files in the scope whose sidecar of
+   that kind is ABSENT beside the generation a reader opens (one `lstat`,
+   no read), or with `--all` every month in scope (a done month is kept after
+   its checks). A month under 1,024 bars is listed and the run says `small`
+   for it (D-4933). For the recount, one calendar month of the days asked an
+   item, both ends required (the span decides which import days are closed,
+   D-3317). For the re-key, one option underlying an item, GDFL's alone, and
+   **stricter than `gdfl-rekey --apply` on one point**: nothing is written for
+   an underlying whose survey left a file unread or whose plan left a key
+   unresolved — the rule the one-press chain applies (R4-11) — so an
+   unattended run never moves half of a ladder it could not read whole.
+9. **The unstamped-build rule** (DB-B71): `upkeep run` and `upkeep resume` are
+   store writers in `store_write::WRITERS`; `plan` and `status` read; `stop`
+   writes a request naming a run, which carries no store data a commit would
+   answer for, and is not refused.
+10. **It never starts by itself.** No timer, autopilot or route starts a run;
+    each kind is run on the operator's yes, from the store-step list. Its
+    steps are added to `config/store-steps.toml` when this package lands, with
+    the rehearsal figures gate 30 asks of a merged package (R3-36).
+
+**Refused.** A stop asked by a line another process appends to the journal
+(two writers' bytes join lines; the journal has one writer, the run). Removing
+the stop file at the end of a run (nothing here deletes; a request names its
+run instead). `rayon` in `pull` (`pull` has no `rayon`; `std::thread::scope`
+over one counter, as `gdfl_import_filing::on_workers` does). Inferring that a
+present sidecar is current from its name alone in the run (`--all` re-checks
+it, and the plan says it reads names, not bodies).
+
+**Proof.** `crates/pull/src/upkeep_tests.rs` (21 tests) and
+`crates/cli/src/upkeep_command_tests.rs`: `an_upkeep_run_stops_and_resumes_where_it_stopped`,
+`upkeep_and_an_import_exclude_each_other_on_a_month`,
+`the_sort_index_is_the_same_bytes_at_1_and_8_workers`,
+`a_failed_index_open_is_retried`,
+`the_three_impossible_strikes_are_retired_by_an_upkeep_rekey_run`,
+`a_whole_feed_gets_its_sort_index_in_one_run`,
+`a_recount_runs_one_month_of_days_an_item_and_resumes`. Invariants UK-01 to
+UK-14 in `docs/04-invariants.md`; limits L-R317-01 to L-R317-09 in
+`docs/06-limits.md`.

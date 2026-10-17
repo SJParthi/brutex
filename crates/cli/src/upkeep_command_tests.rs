@@ -454,10 +454,7 @@ fn the_sort_index_is_the_same_bytes_at_1_and_8_workers() {
         let (code, out) = plain(&eight.0, &["run", kind, "gdfl", "--workers", "8"]);
         assert_eq!(code, OK, "{kind}: {out}");
         assert!(out.contains("8 worker(s), 14 item(s) given"), "{out}");
-        assert!(
-            out.contains("outcomes            built 14"),
-            "{out}"
-        );
+        assert!(out.contains("outcomes            built 14"), "{out}");
     }
     let files = |root: &Path| -> BTreeMap<PathBuf, Vec<u8>> {
         let mut found = BTreeMap::new();
