@@ -3393,3 +3393,41 @@ fn a_time_index_without_the_months_last_bar_is_stale_and_rebuilt() {
     let _ignored = fs::remove_dir_all(&shorter);
     let _ignored = fs::remove_dir_all(&longer);
 }
+
+/// **A SMALL MONTH WITH A FILE AT ITS INDEX NAME KEEPS THAT INDEX IN STEP.**
+///
+/// Covers the small-month rule's second test in `index_on_open`: only a
+/// name that is not there gives a month under the threshold no index. A
+/// month of 100 bars with an empty file where its `.tix` belongs is not
+/// given the rule: the file is read as an index shorter than its header and
+/// written whole, and the next run keeps it.
+#[test]
+fn a_small_month_with_a_file_at_its_index_name_keeps_it_in_step() {
+    use store::file::{BarFile, Reindexed};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 41;
+    let root = scratch("small-tix");
+    let bars = second_month(FileKind::Bars);
+    BarFile::open_or_create(&root, bars, SYMBOL)
+        .unwrap()
+        .append(&second_bars(0, 100))
+        .unwrap();
+    let tix = bars.with_file(FileKind::TimeIndex).to_path_buf(&root);
+    assert!(!tix.exists(), "the rule gave it none");
+    fs::write(&tix, b"").unwrap();
+    let built = BarFile::index_existing(&root, bars, SYMBOL).unwrap();
+    assert_eq!(built.n_valid, 100);
+    assert!(
+        matches!(built.outcome, Reindexed::Built(_)),
+        "{:?}",
+        built.outcome
+    );
+    assert!(fs::metadata(&tix).unwrap().len() > 0, "written whole");
+    assert_eq!(
+        BarFile::index_existing(&root, bars, SYMBOL)
+            .unwrap()
+            .outcome,
+        Reindexed::Kept
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}

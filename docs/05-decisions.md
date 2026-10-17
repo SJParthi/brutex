@@ -71024,12 +71024,16 @@ on a real disk. Three of the arms answered wrongly when they were driven:
 1. **Seams, `#[cfg(test)]` only, in the codebase's existing shape.** Each
    seam adds a branch under test, so the call that ships is the call every
    test runs (`file::sync_hooked`, D-2740; `flock::unlock`'s refusal; the
-   verdict crash seam, D-4865). There are seven:
+   verdict crash seam, D-4865). There are eight:
    - `file::fault` and `impl Positional for File`: one per-thread host
      refusal, armed for one `Action` on one file. The file is matched by
      path, or by device and inode for an open handle. `fault` replaces the
      answer after the call; a read or write is refused before it, so a
      refused write writes nothing.
+   - `file::initialise`: an actor before the genesis' flush. It is the one
+     place a batch can be sealed between an open's capture of it and that
+     open's first deferral, so `defer_file`'s sealed answer is reached at
+     every writer call site.
    - `staging`: a stand-in for the look, and an open refusal, so the Nth
      open can be refused.
    - `sort_index_writer`: the index's looks and positional reads go through

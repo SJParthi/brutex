@@ -8714,6 +8714,24 @@ mod cloud_mutant_tests {
                 .is_some_and(|why| why.contains("cannot append an audited line")),
             "{audit:?}"
         );
+        // The same destination refuses a sync, which its caller is told in
+        // words, and the next file, which is a failed roll and not a
+        // rotation.
+        assert!(
+            sink.sync().is_err_and(|why| why.contains("not synced")),
+            "a refused sync is the caller's error"
+        );
+        sink.inner.lock().expect("unpoisoned").bytes = u64::MAX;
+        assert_eq!(
+            sink.emit(&Event::error("cloud.sink", "past the bound")),
+            Emitted::Dropped
+        );
+        let health = sink.health();
+        assert_eq!(
+            (health.rotation_failures, health.rotations, health.dropped),
+            (1, 0, 2),
+            "{health:?}"
+        );
         drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
@@ -8860,6 +8878,14 @@ mod cloud_mutant_tests {
             "{sink:?}"
         );
         drop(sink);
+        // A sink on a destination of its own takes no lock, so it holds no
+        // directory, open or not: the first half of the same `&&`.
+        let targeted = Sink::with_target(&Config::new(&dir), Box::new(Refusing)).expect("opens");
+        assert!(
+            format!("{targeted:?}").contains("holds_directory: false"),
+            "{targeted:?}"
+        );
+        drop(targeted);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

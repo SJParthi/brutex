@@ -4576,6 +4576,11 @@ fn initialise(
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
     write_fully(dst, path, commit.offset, &commit.bytes)?;
+    // Under `cfg(test)` an actor can run here, between the open's capture of
+    // its batch and the genesis' flush: the one place a batch sealed under an
+    // opening writer can be staged.
+    #[cfg(test)]
+    tests::before_genesis_flush();
     if let Some(batch) = batch
         && batch.defer_file(dst, path)?
     {
@@ -6121,8 +6126,27 @@ mod tests {
     }
 
     /// The time-index flushes on this thread since the last call.
-    fn index_flushes() -> usize {
+    pub(super) fn index_flushes() -> usize {
         INDEX_FLUSHES.with(|flushed| flushed.replace(0))
+    }
+
+    thread_local! {
+        /// What runs before this thread's next genesis flush, once.
+        static BEFORE_GENESIS_FLUSH: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Arms `actor` to run before this thread's next genesis flush.
+    pub(super) fn arm_before_genesis_flush(actor: impl FnOnce() + 'static) {
+        BEFORE_GENESIS_FLUSH.with(|armed| *armed.borrow_mut() = Some(Box::new(actor)));
+    }
+
+    /// Runs the armed actor once, taken out first so it may open files.
+    pub(super) fn before_genesis_flush() {
+        let actor = BEFORE_GENESIS_FLUSH.with(|armed| armed.borrow_mut().take());
+        if let Some(actor) = actor {
+            actor();
+        }
     }
 
     /// The directories flushed on this thread since the last call.

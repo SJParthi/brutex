@@ -1207,6 +1207,12 @@ mod tests {
         };
         assert_eq!(confirm(&g, grown, read), Err(Why::Stale));
         assert_eq!(resume(&g, grown, read), Err(Why::Stale));
+        // An entry with nothing in the last bar's slot is stale before its
+        // rank is asked.
+        assert_eq!(
+            resume(&g, held(&committed), |_| Ok(Entry::EMPTY)),
+            Err(Why::Stale)
+        );
         // A month whose first bar moved.
         assert_eq!(confirm(&g, held(&committed[1..]), read), Err(Why::Stale));
         // A header stamp outside the month.

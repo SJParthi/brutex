@@ -25,7 +25,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::tests::{arm_host_fault, host_fault_armed};
+use super::tests::{arm_host_fault, host_fault_armed, host_fault_on};
 use super::{
     Action, Appended, BarFile, GATHERED_DIRECTORIES, Gathering, StoreError, TimeLookup,
     refuse_link, refuse_links_below, writer_open,
@@ -883,11 +883,11 @@ fn a_refused_measure_of_a_deferred_file_refuses_the_step_that_deferred_it() {
 /// **A SEALED BATCH DEFERS NOTHING: A WRITER INSIDE IT FLUSHES ITS OWN
 /// FILES, AND THE BATCH HAS NOTHING LEFT TO MAKE DURABLE.**
 ///
-/// Covers the `false` answer of `DurableBatch::defer_file` at each of its
-/// writer call sites (the genesis, the time index's sync at the threshold,
-/// the sort index's sync): a batch already made durable is sealed, so a
-/// month first opened and filled past the threshold inside it is made
-/// durable by its own writer, and a second `make_durable` flushes nothing.
+/// A batch already made durable is sealed, and `DurableBatch::current`
+/// answers no batch for it, so a month first opened and filled past the
+/// threshold inside it is made durable by its own writer, and a second
+/// `make_durable` flushes nothing. The sealed answer of `defer_file` itself
+/// needs a batch sealed while a writer holds it: the test below.
 #[test]
 fn a_sealed_batch_defers_nothing_and_the_writer_flushes_its_own() {
     let _sink_is_mine = crate::emits::hold_the_sink();
@@ -906,6 +906,43 @@ fn a_sealed_batch_defers_nothing_and_the_writer_flushes_its_own() {
             })
         );
     }
+    let again = batch.make_durable(1).unwrap();
+    assert_eq!((again.files, again.directories), (0, 0), "nothing deferred");
+    assert!(root.at(FileKind::TimeIndex).exists() && root.at(FileKind::SortIndex).exists());
+    assert_eq!(held(&root), bars(0, 1_100));
+}
+
+/// **A BATCH SEALED UNDER A WRITER TAKES NO MORE OF ITS FLUSHES: THE
+/// WRITER FLUSHES EACH ONE ITSELF.**
+///
+/// Covers the `false` answer of `DurableBatch::defer_file` at each writer
+/// call site. The batch is sealed by an actor between the open's capture of
+/// it and the genesis' flush, so the genesis, the time index's sync at the
+/// threshold, the sort index's sync and the append's barrier all meet a
+/// sealed batch. Each is flushed by the writer, so the batch's second
+/// `make_durable` has nothing left, and the time index counts its own flush.
+#[test]
+fn a_batch_sealed_under_a_writer_leaves_every_flush_to_it() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("sealed-under");
+    let batch = super::DurableBatch::new(super::BatchFlush::OncePerDevice);
+    let sealer = batch.clone();
+    super::tests::arm_before_genesis_flush(move || {
+        let _made = sealer.make_durable(1).expect("sealed");
+    });
+    let _ = super::tests::index_flushes();
+    {
+        let _in = batch.enter();
+        let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+        assert_eq!(
+            writer.append(&bars(0, 1_100)),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 1_100,
+            })
+        );
+    }
+    assert!(super::tests::index_flushes() > 0, "the writer's own flush");
     let again = batch.make_durable(1).unwrap();
     assert_eq!((again.files, again.directories), (0, 0), "nothing deferred");
     assert!(root.at(FileKind::TimeIndex).exists() && root.at(FileKind::SortIndex).exists());
@@ -938,4 +975,32 @@ fn a_resumed_overlap_appends_only_its_suffix_and_returns() {
     );
     drop(writer);
     assert_eq!(held(&root), bars(0, 130));
+}
+
+/// **A REFUSAL ARMED FOR A NAME THAT IS NOT THERE FIRES ON NO HANDLE.**
+///
+/// Covers the seam's own arm for a name it cannot measure: a handle is
+/// matched by device and inode, and a missing name has neither, so the
+/// handle's read goes through and the refusal keeps waiting. Armed by the
+/// handle's own name, the same read is refused.
+#[test]
+fn a_refusal_armed_for_a_missing_name_fires_on_no_handle() {
+    let root = Root::new("missing-name");
+    let real = root.0.join("real");
+    fs::write(&real, b"bytes").unwrap();
+    let file = fs::File::open(&real).unwrap();
+    arm_host_fault(
+        Action::Read,
+        &root.0.join("never-made"),
+        0,
+        ErrorKind::Other,
+    );
+    assert!(host_fault_on(Action::Read, &file).is_none());
+    assert!(host_fault_armed(), "still waiting");
+    arm_host_fault(Action::Read, &real, 0, ErrorKind::Other);
+    assert_eq!(
+        host_fault_on(Action::Read, &file).map(|refused| refused.kind()),
+        Some(ErrorKind::Other)
+    );
+    assert!(!host_fault_armed(), "fired once");
 }
