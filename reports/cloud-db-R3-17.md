@@ -123,7 +123,7 @@ No line is declared unreachable: every host refusal goes through one path a test
 constructed refusal. The whole-module figure of the existing builder modules is not claimed: only
 their changed lines are measured.
 
-### Mutation testing (running)
+### Mutation testing
 
 `cargo-mutants` 27.1.0 over the lines this branch changes (`--in-diff` against `origin/feat/db-fix`),
 opt-level 0 by environment (the workspace's `profile.dev` is untouched), the same test filters as
@@ -149,7 +149,17 @@ The fresh pass on `20653571` found one more, and it is fixed:
 | `Scope::holds`'s `month >= from` → `<` (and, found by reading, `month <= to` → `>`) | the span tests counted months, and March and April hold two each | `the_walk_lists_every_month_and_what_it_lacks`: the April and March scopes name their months (checked by hand: both mutants fail it) |
 | `month_named`'s `\|\|` → `&&` in its length check | the check was dead: a month must print back as its stem, and `YearMonth` (1970 to 9999, `{:04}-{:02}`) already holds it to four digits and two | the check is gone; the round trip is the one rule |
 
-The pass on the final code is still running for both crates.
+**`pull`, final:** the full pass on `20653571` tested all 234 mutants in 53 minutes: 210 caught, 20
+unviable, the 4 missed above. A pass on the final code over the four functions those lived in
+(`--re ' in (tail_of|Lacks::of|Scope::holds|month_named)$'`): **11 mutants, 11 caught**. Every
+production line of `upkeep.rs` changed after `20653571` is in `month_named`, which that pass covers.
+**No surviving mutant in `pull`.**
+
+**`cli`:** running on the final code, with the test filter narrowed to the modules whose tests reach
+R3-17's lines (`upkeep_command:: srt_builder:: tix_rebuilder:: msum_builder:: census_recount::
+gdfl_rekey:: store_write:: tests::a_known_command_with_the_wrong_arity_is_not_called_unknown
+tests::every_command`). `sweep_wiring_tests::` (114 s a run) is left out: its R3-17 line is the
+`upkeep` row of a test table, which has no mutant.
 
 ## Gate results (so far)
 
