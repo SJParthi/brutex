@@ -68808,6 +68808,222 @@ path that answered the underlying.
 `…::a_store_contract_row_links_to_its_contract_and_the_link_opens`
 (docs/04 AF4-01..AF4-06); costs in docs/06 L-AF4-01..L-AF4-02.
 
+### D-4977 — `cli gdfl-import` has a door: a wrong source root and a second run of a kind are refused before any day, a run that read no file is never OK, a lost root is named at the end of every run, and a changed zip is never accepted by running again — 2026-10-14, repaired 2026-10-15
+
+**Implemented by** AF-01 (`crates/cli/src/gdfl_import_guard.rs`, declared from
+`crates/cli/src/gdfl_import_command.rs`). **Findings** ingest-7 (FM-060),
+ingest-4 (FM-064's door half), ingest-14 (FM-086's door half) and ingest-1
+(FM-290/FM-007's door half), from the 14 October attack run, each confirmed
+by two skeptics whose corrections are applied here, and the three blocking
+items of the second agent's check of 15 October (verify-AF-01-r1). **Number**
+taken above every number in use (amendment A6): on 16 October the ledger's
+head on `feat/db-fix` was D-4965 and unmerged branches already held D-4966
+to D-4976, so this entry is D-4977. The first draft used D-4952 (R4-01 also
+took it) and the repair of 15 October used D-4963, which AF-03 landed first.
+
+**What was observed.** A tick-store root with no `FORMAT.md`, an options
+folder holding no `<yyyy>.zip` and an existing capital-market zip holding no
+day zip all read as "every day not held" and exited 0, and
+`an_empty_source_reports_every_day_it_does_not_hold` pinned that exit as
+intended for all four source and kind pairs. Three `gdfl-import` processes
+wrote one journal on 14 October with no run lock. After an unplug the run
+ended `FAILED` on per-day "Permission denied (os error 13)" journal failures
+(`/Volumes` is root's, so the mount cannot be recreated), naming no lost
+volume. A run that skips every day writes no journal `run` line, so a
+re-delivered archive with every day done exited 0 and nothing compared its
+digest. The check of the first repair found two more ways out: a source root
+moved aside after 11 files were read closed the remaining 234 days "not in
+source" and exited 0 with outcome `ok`, because the roots were probed only
+after a run that had already failed; and one run of the key over a range with
+no done day (a weekend) on a changed archive exited 0 with outcome `ok`, so
+its line became the baseline and the done day's next run said "the same".
+
+**Decided.**
+
+1. **The source root is checked before any day** (`source_root_unknown`): a
+   tick store has `FORMAT.md` at its root; a directory of options archives
+   holds at least one regular file named `<yyyy>.zip`; a capital-market
+   archive is a regular file, a readable zip (`pull::gdfl_archive::zip_entries`)
+   holding at least one member that `day_zip_name` names for the run's tree.
+   The refusal names the variable, the path, what was found, what was
+   expected and `Origin::fault` when the origin measured one.
+2. **One run of a kind at a time.** Before the importer can write a journal
+   line the run takes, without waiting, the lock `telemetry::run_dirs::for_gdfl`
+   names on the census layout `census_store::locate` answers
+   (`imports/gdfl.<kind>.lock` on v4, `imports/gdfl.lock` on v3), opened
+   with `O_NOFOLLOW | O_NONBLOCK` and refused unless a regular file with
+   exactly one name: a hard link at the lock's name is refused before a
+   byte is truncated or written through it. Only `imports/` is made, never
+   the store root above it. Its holder record (`docs/02-store-format.md`
+   §41) names the pid, the run's start, the moment the lock was taken, the
+   kind, the layout and the verb. A second run of the kind is refused
+   `run_busy`, naming the holder's kind, pid and start from its record "as
+   last written" (std gives no liveness test without `unsafe`, so a record
+   read in the moment after a new holder took a dead one's lock can still be
+   the dead one's); a run of another kind on v4 runs beside it. A record
+   found under a free lock is a holder that died, and the receipt says so.
+   Every record and path the door prints is escaped (`\n`, `\t`, `\xNN`), and
+   every word it did not write itself (an origin's fault, the census's
+   refusal, a host error naming a path) is printed `plain` (item 10), so
+   bytes left at the lock's name or in a path cannot forge a receipt line.
+3. **A run that read no instrument file while it owed days** (`files == 0`
+   and days imported or days not in the source) ends `FAILED` with
+   `no_file_read`. The pinned test is inverted
+   (`a_run_that_read_no_file_never_exits_ok`).
+4. **Every run probes the store root and the source root once at its end**,
+   whatever it found and however it ended (two `stat` calls, L-AF01-3). A
+   root that is absent (`NotFound`, and only that) is named `store_lost` or
+   `source_lost`, the words `pull::alerts::KINDS` and
+   `store::verdict::DayState::SourceLost` already write, and the run is
+   `FAILED` with that code in its ledger outcome. This is what catches a
+   source whose volume goes after files were read: its remaining days close
+   "not in source" with no failure of their own. A refused look is not
+   called lost, so FM-086's planned `volume_access_revoked` keeps its own
+   meaning. A root that goes and comes back before the run ends is not seen
+   here; stopping at the first failing file is IA-16's.
+5. **`imports/gdfl.sources` v1**, append-only, one line per run that took the
+   lock, read from its tail (at most 1 MiB) through `store::safe_open`
+   (R3-16, D-4951). A `zip` run whose digest differs from the key's
+   baseline, with days skipped unread, ends `FAILED` with
+   `source_changed_since_last_run`, both digests and the count. "Skipped
+   unread" counts the days skipped as done and the done days whose listing
+   alone WP-12f read again for a wider scope (`days_widened`, D-4878): neither
+   had its done members read again. A run on a
+   changed archive that skipped no day hid none and is not failed for it,
+   but its outcome carries `source_changed_unchecked` and the receipt says
+   the change is unresolved. **The baseline is the newest measured line of
+   the key whose outcome names neither word**: so running again on the same
+   changed archive, over the same range or any other, names the change again
+   rather than accepting it (a re-run that turned the change into OK would be
+   the fallback that hides a failure §4 bans). The change is resolved only by
+   the original archive restored at the path, which compares equal, or by the
+   accept and restate doors that are not built (below). The digest covers
+   the whole archive (every member's size and CRC-32), so a grown archive at
+   the same path, and for options a new `<yyyy>.zip` in the folder, is
+   named too; which skipped days changed is IA-6's per-file comparison. **That
+   is a wedge, said out loud** (docs/06 L-AF01-5): after GDFL grows or
+   re-delivers an archive, every run of the key that skips a done day fails
+   until IA-6 or R3-22/R4-21 land. A `tickstore` run says its identity is
+   not comparable (its digest is `FORMAT.md`'s; FM-007).
+6. **`run_busy` names the holder's kind from its record**, since on v3 one
+   lock serialises every kind and the holder need not be the asking kind.
+7. **Garbage is a misuse, exit `MISUSED` (2), before the lock**: a garbage
+   kind, day or source as before, and now a range that runs backwards
+   (`range_backwards`, which exited 1 in the first draft) and an empty
+   SYMBOL word (which was read as a filter matching no file).
+8. **One archive is one key, however it is spelt** (verify-AF-01-r1 X7):
+   the ledger key's path is the source root as the host resolves it
+   (`realpath`, one call per run after the root check), not the variable's
+   raw string, so a symbolic link, a doubled `/` or a `..` to the same
+   archive compares with the one baseline. A root that went between its check
+   and the lock is `source_lost`; one that cannot be resolved is
+   `source_root_unknown`. A re-delivery at a NEW path (a fresh download
+   folder) is a different archive and a first run of its key; telling that
+   it holds the same days is IA-6's per-file comparison.
+9. **The sources ledger, like the lock, is written through no second name**:
+   a ledger file with more than one name (a hard link) is refused
+   `sources_ledger_unwritten` before the run's line is appended, and the run
+   ends `FAILED` with its lock released.
+10. **Words from elsewhere are printed `plain`** (verify-AF-01-r2 blocking
+    item 2, 16 October 2026). The first draft escaped paths and the holder
+    record but printed the origin's fault as it came, and the fault carries
+    the source root through `display()`: a root named with a newline, the
+    words `GDFL IMPORT OK forged` and ESC `[2J` printed a line of its own and
+    cleared the screen. `plain` escapes every control character (C0, DEL,
+    C1), the bidirectional controls and the line and paragraph separators,
+    and keeps every other character, `\` included, so it is idempotent over
+    a `shown` path and readable over prose. It runs at `Finding::new`, the
+    one place every door refusal is made (the census's refusal in
+    `layout_of` and every host error included), on the fault the door
+    keeps, and at every line of the verb that prints words it did not write
+    (`refused:`, `GDFL IMPORT REFUSED:`, the scope words, the importer's
+    failures); the receipt's store root is printed `shown`. Chosen over
+    `escape` for prose because `escape` turns every non-ASCII byte into
+    `\xNN` and the importer's refusals are prose. The cost is an ambiguity,
+    never a forgery: in words that passed only through `plain`, a literal
+    `\n` and an escaped newline read alike; a path's exact spelling is the
+    `shown` one beside it.
+    Not covered: the `events -> <dir>` banner `cli::install_log` prints
+    above every verb's report (`crates/cli/src/main.rs`, outside this
+    verb's files) carries the store root through `display()`, and a store
+    root named with a newline or ESC still prints them raw there; it is
+    every verb's, and named for the cli's owner, not escaped here.
+11. **Whether the ledger ends torn is read at the append**
+    (verify-AF-01-r2 follow-ups, 16 October 2026): one `fstat` and a
+    one-byte read of the last byte of the open ledger, not the open-time
+    tail, which a run of another kind (v4 runs kinds side by side under
+    their own locks, all appending to the one ledger) or a killed append
+    can make stale. A tail window of 1 MiB with no newline is one torn line,
+    named with its length, where the first draft read it as a clean empty
+    tail and glued the next line onto it. A ledger that was empty at the
+    append (it created the file, or the file held nothing) has its
+    directory entry made durable (one `fsync` of `imports/`). The ledger is
+    opened to read as well as to append, for that one byte: a descriptor
+    opened to append alone refuses the read with `EBADF`, which in this
+    repair's first draft ended every run on a non-empty ledger
+    `sources_ledger_unwritten`. Two
+    appends of different kinds at the same instant can still both read a
+    clean end and then race a killed third; each append is one `write` with
+    `O_APPEND`, so lines never interleave, and the window between the
+    one-byte read and the write is the only one left.
+12. **A run that read no file is not accepted by running it again**
+    (verify-AF-01-r2 follow-up, 16 October 2026). The importer journals a
+    held day whose files the filter did not want as done with no file, so
+    the identical next run skipped the day, owed nothing and exited `OK`
+    with ledger outcome `ok` (TATAMOTORS on 2019-06-03 on the real tick
+    store). A run that read no file and skipped a done day unread, when the
+    last line of its key ended `no_file_read`, is now `FAILED`
+    `no_file_read` and writes that outcome again, so it stays named on every
+    rerun until a run of the key reads a file. The ledger line holds no
+    range, so a later run of the same key over other days an earlier run
+    did import, which reads no file, is named too, and its words say so: a
+    loud false alarm in that one case was chosen over passing a run that read
+    nothing. Not journalling such a day as done is the importer's (R3-35,
+    IA-1), and it is not edited here.
+
+**Not decided here.** The journal append lock, run ids chosen under a lock
+(FM-126) and the census verbs taking the same lock (FM-058) are IA-2's.
+Stopping at the first failing file after a lost root is IA-16's. A per-file
+comparison against `.prv`'s `source_crc32` is IA-6's (flag 7,
+`source_changed_since_import`, IA-GV-24), and landing a corrected day as a
+new generation, or accepting a grown archive, is R3-22's restate door
+(R4-21); the receipt names both.
+
+**Proved by** `cli::gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`,
+`cli::gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`
+(R3-16's, adapted to the door),
+`cli::gdfl_import_command::guard::tests::a_second_run_of_the_same_kind_is_refused_naming_the_holder`,
+`…::a_run_of_another_kind_runs_beside_it`,
+`…::a_killed_holders_lock_is_freed_and_its_death_named`,
+`…::a_dead_holders_lock_is_taken_and_its_death_named`,
+`…::a_lock_path_that_is_a_link_or_a_directory_is_refused_by_name`,
+`…::a_hard_link_at_the_lock_name_is_refused_and_its_file_left_whole`,
+`…::a_hard_link_at_the_ledger_name_is_refused_and_its_file_left_whole`,
+`…::one_archive_reached_by_another_spelling_is_the_same_key`,
+`…::a_root_that_cannot_be_resolved_is_named`,
+`…::a_wrong_source_root_is_refused_before_any_day_is_journalled`,
+`…::a_vanished_store_root_is_named_store_lost`,
+`…::a_vanished_source_root_is_named_source_lost`,
+`…::a_source_root_that_vanishes_after_files_were_read_is_named_source_lost`,
+`…::every_day_already_refused_identically_still_fails_when_the_root_is_gone`,
+`…::a_changed_archive_with_every_day_done_is_named_not_ok`,
+`…::a_change_is_never_accepted_by_a_run_that_skipped_no_day`,
+`…::a_widened_done_day_counts_as_skipped_unread`,
+`…::a_line_that_named_a_change_is_never_the_baseline`,
+`…::a_tickstore_source_says_its_identity_is_not_comparable`,
+`…::garbage_kind_or_dates_are_refused_before_the_lock`,
+`…::a_holder_record_of_foreign_bytes_is_printed_escaped`,
+`…::nothing_a_roots_name_carries_forges_a_receipt_line`,
+`…::the_census_refusal_naming_a_forged_store_root_forges_nothing`,
+`…::words_from_elsewhere_are_printed_plain`,
+`…::a_torn_line_longer_than_the_window_is_named_and_ended`,
+`…::whether_the_ledger_ends_torn_is_decided_at_the_append`,
+`…::a_run_that_read_no_file_is_not_accepted_by_running_it_again`,
+`…::only_a_rerun_of_a_run_that_read_nothing_is_named`,
+and the extremes beside them in `crates/cli/src/gdfl_import_guard_tests.rs`.
+Invariants GD-01 to GD-13 in `docs/04-invariants.md`; the door's measured
+costs (n = 200 each, release, the real source roots read-only) are limits
+L-AF01-1 to L-AF01-4 in `docs/06-limits.md`, and the wedge is L-AF01-5.
 ### D-4963 — Readers of a dated NSE cash master share the day's lock and wait a named bound for an installer; a refused master load is kept only by the request that met it — 2026-10-14
 
 **Context** (AF-03, assurance finding p99-2, confirmed by two skeptics on 14

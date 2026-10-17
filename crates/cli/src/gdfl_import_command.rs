@@ -29,6 +29,17 @@
 //! stamps this binary's commit on it, so "run started" and the journal's `run`
 //! line say where the bars came from (D-3317 item 4; DB-G56).
 //!
+//! # The door (AF-01, D-4977)
+//!
+//! Before the importer may write a journal line, [`guard`] refuses a range
+//! that runs backwards, a source root that is not what its source needs
+//! (`source_root_unknown`) and a second run of the same kind (`run_busy`,
+//! the kind's lock beneath `imports/`), and reads what the last run of the
+//! same key read from `imports/gdfl.sources`. After it returns, a run that
+//! read no file while it owed days (`no_file_read`), a changed zip with days
+//! skipped unread (`source_changed_since_last_run`) and a root that is gone
+//! (`store_lost`, `source_lost`) each end it `FAILED`, one exit line each.
+//!
 //! `--retry-refused`, anywhere after `TO`, reads again every day of the range
 //! closed done with refusals (D-3317 item 2); it is never a symbol.
 //!
@@ -60,14 +71,18 @@ use std::sync::Arc;
 use pull::gdfl_archive::Archive;
 use pull::gdfl_cm::CmScope;
 use pull::gdfl_import::{
-    Durability, ImportKind, Origin, Report, Run, RunOptions, SourceKind, Workers, run_cm_from,
-    run_nfo_from,
+    Durability, ImportKind, ImportRefusal, Origin, Report, Run, RunOptions, SourceKind, Workers,
+    run_cm_from, run_nfo_from,
 };
 use pull::gdfl_nfo::{NfoTickStore, NfoZips};
 use pull::gdfl_tickstore::TickStore;
 use pull::session::Day;
 
 use crate::{FAILED, MISUSED, OK};
+
+/// The door around the importer (AF-01).
+#[path = "gdfl_import_guard.rs"]
+mod guard;
 
 /// The tick store's root.
 pub(crate) const TICKSTORE_VAR: &str = "BRUTEX_GDFL_TICKSTORE";
@@ -321,6 +336,56 @@ fn stamped_root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Pat
     root(var, env)
 }
 
+/// The run's days read from `data` as its source and kind read them. `Err`
+/// only for a capital-market archive that cannot be opened, named with its
+/// path; every other end is the importer's own report or refusal. Called
+/// after the door opened (AF-01), so the door closes behind every arm.
+fn import_from(
+    (source, kind): (&str, ImportKind),
+    data: &Path,
+    scope: &Arc<CmScope>,
+    run: &Run<'_>,
+    options: RunOptions<'_>,
+) -> Result<Result<Report, ImportRefusal>, String> {
+    match (source, kind) {
+        ("tickstore", ImportKind::Options) => {
+            Ok(run_nfo_from(&NfoTickStore::new(data), run, options))
+        }
+        ("tickstore", _) => Ok(run_cm_from(
+            &TickStore::new(data).with_scope(Arc::clone(scope)),
+            run,
+            options,
+        )),
+        ("zip", ImportKind::Options) => Ok(run_nfo_from(&NfoZips::new(data), run, options)),
+        _ => Archive::open(data)
+            .map_err(|w| format!("{}: {w}", data.display()))
+            .map(|archive| run_cm_from(&archive.with_scope(Arc::clone(scope)), run, options)),
+    }
+}
+
+/// A misuse the verb refuses before the lock (AF-01, GD-09): `--stored` on an
+/// options run, a range that runs backwards, or an empty SYMBOL word, which
+/// names nothing and would be read as a filter that matches no file and ends
+/// the run `no_file_read`.
+fn misuse(
+    kind: ImportKind,
+    (from, to): (Day, Day),
+    stored_only: bool,
+    only: &[String],
+) -> Option<String> {
+    if stored_only && kind == ImportKind::Options {
+        return Some(format!(
+            "{STORED} narrows a capital-market run; an options run files no stored series"
+        ));
+    }
+    if let Err(why) = guard::range(from, to) {
+        return Some(why.to_string());
+    }
+    only.iter()
+        .any(|name| name.trim().is_empty())
+        .then(|| "an empty SYMBOL names no instrument; give names or none".to_owned())
+}
+
 /// The verb, with its environment and store root passed in so every arm is
 /// driven by a test without touching the process environment.
 pub(crate) fn command_with(
@@ -339,7 +404,7 @@ pub(crate) fn command_with(
     let (kind, from, to, workers) = match asked((kind, from, to), env) {
         Ok(four) => four,
         Err(why) => {
-            let _ = writeln!(out, "refused: {why}");
+            let _ = writeln!(out, "refused: {}", guard::plain(&why));
             return MISUSED;
         }
     };
@@ -350,17 +415,17 @@ pub(crate) fn command_with(
         (other, _) => {
             let _ = writeln!(
                 out,
-                "refused: {other:?} is not a source; the sources are tickstore and zip"
+                "refused: {} is not a source; the sources are tickstore and zip",
+                guard::plain(&format!("{other:?}"))
             );
             return MISUSED;
         }
     };
     let (retry_refused, stored_only, mut only) = flags_of(only);
-    if stored_only && kind == ImportKind::Options {
-        let _ = writeln!(
-            out,
-            "refused: {STORED} narrows a capital-market run; an options run files no stored series"
-        );
+    // A RANGE THAT RUNS BACKWARDS, OR AN EMPTY SYMBOL, IS A MISUSE (AF-01,
+    // GD-09): refused with the other garbage, before the lock and any root.
+    if let Some(why) = misuse(kind, (from, to), stored_only, &only) {
+        let _ = writeln!(out, "refused: {}", guard::plain(&why));
         return MISUSED;
     }
     // A STORE WHOSE `bars` IS A LINK IS NOT WRITTEN (R3-16, RA-298): asked
@@ -388,51 +453,55 @@ pub(crate) fn command_with(
             SourceKind::Zip
         };
         let origin = Origin::measure(origin_kind, &data, crate::commit_stamp());
+        // THE DOOR (AF-01, D-4977; FM-060, FM-064, FM-086, FM-290): refused
+        // here, before the importer writes a journal line, or held until the
+        // run returns.
+        let door = guard::Door::open(guard::Opening {
+            kind,
+            var,
+            store: &store,
+            origin: &origin,
+            only: &only,
+            args,
+        })
+        .map_err(|why| why.to_string())?;
         let options = options_of(&origin, retry_refused, workers);
-        let report = match (*source, kind) {
-            ("tickstore", ImportKind::Options) => {
-                run_nfo_from(&NfoTickStore::new(&data), &run, options)
-            }
-            ("tickstore", _) => run_cm_from(
-                &TickStore::new(&data).with_scope(Arc::clone(&scope)),
-                &run,
-                options,
-            ),
-            ("zip", ImportKind::Options) => run_nfo_from(&NfoZips::new(&data), &run, options),
-            _ => {
-                let archive = Archive::open(&data)
-                    .map_err(|w| format!("{}: {w}", data.display()))?
-                    .with_scope(Arc::clone(&scope));
-                run_cm_from(&archive, &run, options)
-            }
-        };
-        Ok((report, store, scope_words))
+        let report = import_from((source, kind), &data, &scope, &run, options);
+        Ok((report, store, scope_words, door))
     });
     match result {
-        Ok((Ok(report), store, scope_words)) => {
+        Ok((Ok(Ok(report)), store, scope_words, door)) => {
             render(out, kind, source, &store, &report);
             render_how(out, workers);
             if let Some(words) = scope_words {
-                let _ = writeln!(out, "  scope               {words}");
+                let _ = writeln!(out, "  scope               {}", guard::plain(&words));
             }
-            if report.failures.is_empty() {
-                OK
-            } else {
-                FAILED
-            }
+            let failed = !report.failures.is_empty();
+            let door_failed = door.close(Some(&report), failed.then_some("failed"), out);
+            if failed || door_failed { FAILED } else { OK }
         }
-        Ok((Err(refusal), store, _)) => {
+        Ok((Ok(Err(refusal)), store, _, door)) => {
             // A census refusal stopped the run part way (D-3317 item 7): what
             // it did before the refused day is on disk, so it is printed too.
             if let Some(done) = refusal.report() {
                 render(out, kind, source, &store, done);
                 render_how(out, workers);
             }
-            let _ = writeln!(out, "GDFL IMPORT REFUSED: {refusal}");
+            let _ = writeln!(
+                out,
+                "GDFL IMPORT REFUSED: {}",
+                guard::plain(&refusal.to_string())
+            );
+            let _ = door.close(refusal.report(), Some("refused"), out);
+            FAILED
+        }
+        Ok((Err(why), _, _, door)) => {
+            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&why));
+            let _ = door.close(None, Some("refused"), out);
             FAILED
         }
         Err(why) => {
-            let _ = writeln!(out, "GDFL IMPORT REFUSED: {why}");
+            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&why));
             FAILED
         }
     }
@@ -470,7 +539,7 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
         out,
         "GDFL IMPORT -- {} from {source} into {}",
         kind.as_str(),
-        store.display()
+        guard::shown(store)
     );
     let _ = writeln!(
         out,
@@ -544,7 +613,12 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     let _ = writeln!(out, "  outside session     {}", report.outside_session);
     let _ = writeln!(out, "  failures            {}", report.failures.len());
     for failure in &report.failures {
-        let _ = writeln!(out, "    {}: {}", failure.instrument, failure.why);
+        let _ = writeln!(
+            out,
+            "    {}: {}",
+            guard::plain(&failure.instrument),
+            guard::plain(&failure.why)
+        );
     }
 }
 
