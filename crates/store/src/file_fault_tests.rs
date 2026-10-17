@@ -389,10 +389,11 @@ fn every_refused_read_of_an_overlap_diagnosis_is_that_reads_refusal() {
 /// REFUSAL.**
 ///
 /// Covers `diagnose_overlap`'s last read: a batch that restates the first
-/// two held bars, skips the third and every one after, and runs past the
-/// held range. The overlap matches as far as it goes, so the diagnosis reads
-/// the next held bar to name it as skipped; that read refused is the
-/// refusal returned.
+/// block of held bars (rows 0 to 72), skips row 73 and every one after, and
+/// runs past the held range. The overlap matches as far as it goes, so the
+/// diagnosis reads the next held bar to name it as skipped. That bar is the
+/// first of the next block, so its read is a read of the disk, not of the
+/// block the handle verified last; refused, it is the refusal returned.
 #[test]
 fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
     let _sink_is_mine = crate::emits::hold_the_sink();
@@ -401,7 +402,7 @@ fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
     let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
     writer.append(&bars(0, 400)).unwrap();
     drop(writer);
-    let mut offered = bars(0, 2);
+    let mut offered = bars(0, 73);
     offered.extend(bars(500, 510));
     let mut outcomes = Vec::new();
     for skip in 0.. {
@@ -411,7 +412,7 @@ fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
         if host_fault_armed() {
             super::tests::disarm_host_fault();
             assert!(
-                matches!(appended, Err(StoreError::OverlapDisagrees { at: 2, .. })),
+                matches!(appended, Err(StoreError::OverlapDisagrees { at: 73, .. })),
                 "past every read: {appended:?}"
             );
             break;
