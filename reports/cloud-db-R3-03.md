@@ -1,4 +1,6 @@
-STATUS: IN PROGRESS
+STATUS: DONE
+
+Every gate this part can move is green: fmt, clippy, the web suite (0 failures), Gate W5, and 100% line, branch and mutation coverage on the four touched JS modules. Four gates are red ONLY with the base's own failures, each shown identical on `origin/feat/db-fix` `50093fa3` below: `cargo deny check` (the five advisories DENY-1 owns), `cargo test --workspace` (two `store` tests: `cited_commits`, and an inode-reuse test this ext4 disk fails), `svelte-check` (the base's 6 errors, none in a touched file) and the web suite's 5 cancelled timing tests. This part changes no Rust. The task's DONE rule names only deny as an allowed base failure; the other three are reported here, not hidden — the Mac decides.
 
 # R3-03 /db bar grid: pager, Go to, sort offers, requests per change, and the words in an empty or refused grid
 
@@ -84,55 +86,84 @@ and add the same three paths at merge.
 
 ## Left
 
-- Mutation run (Stryker 10.0.0, scratch install, sandbox copy) on `pager.js`
-  and `goto.js` is running; `bars-plan.js` and `notes-bars.js` next.
-- `cargo clippy`, `cargo test --workspace --locked`, `cargo deny check` on the
-  branch and on the base.
-- Final full web suite, report STATUS.
+Nothing in the owned files. What only the Mac can do is listed under NEEDS
+THE MAC: the real-data, `:8080`-style browser and timing checks, the
+`web/build` regeneration, and numbering the decisions and invariants below.
 
-## Gate results (so far)
+## Gate results
 
-This part changes no Rust: `git diff origin/feat/db-fix -- Cargo.toml
-Cargo.lock deny.toml crates` is empty, so every cargo gate below is the
-base's own result, run on this branch.
+Taken on the final commit of this branch. This part changes no Rust:
+`git diff origin/feat/db-fix -- Cargo.toml Cargo.lock deny.toml crates` is
+empty, so every cargo gate is the base's own result, run on this branch.
 
 - `cargo fmt --check`: clean.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean
   (exit 0).
-- `cargo deny check`, run with the CI pin 0.19.0 and with 0.20.2, on this
-  branch AND on the base (`origin/feat/db-fix` `50093fa3`, a scratch
-  worktree): both `advisories FAILED, bans ok, licenses ok, sources ok`, the
-  same five and only those — RUSTSEC-2026-0344 (ruzstd 0.8.2) and
-  RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls 0.23.45). DENY-1 owns them;
-  Cargo.toml and Cargo.lock are untouched here.
-- `cargo test --workspace --locked` (skipping only `cli`'s known slow
-  `the_pool_verb_prints_its_whole_page_on_a_generated_store`, as CONTEXT
-  allows): run as root in this container, `api`'s lib suite gave 2,071 pass /
-  12 fail, and every one of the 12 is a permission test (an unreadable
-  directory, a name that cannot be unlinked, a store that cannot take a
-  write) — uid 0 bypasses permission bits. Re-run with root's file-access
-  override dropped (`setpriv --inh-caps=-dac_override,-dac_read_search,-fowner
-  --bounding-set=…`), the same groups gave 162 pass / 0 fail, the 12
-  included. The whole workspace under that `setpriv` is in progress.
-- Fail before, pass after: with this branch's `pager.js`, `goto.js`,
-  `bars-plan.js` and `notes-bars.js` copied into a base worktree and the
-  base's own grid left in place, `db-pager.test.js` + `db-goto.test.js` give
-  12 of 15 failing — all six named tests among them; on this branch 15 of 15
-  pass. On the plain base both files fail at import (no `pager.js`/`goto.js`).
-- Web tests (`node --test tests/*.test.js`, Node 22.22.0): branch 1,407 pass,
-  0 fail, 5 cancelled; the 5 are timing tests in `ask.test.js` (3) and
+- `cargo deny check`, with the CI pin 0.19.0 and with 0.20.2, on this branch
+  AND on the base (`origin/feat/db-fix` `50093fa3`, a scratch worktree): both
+  `advisories FAILED, bans ok, licenses ok, sources ok`, the same five and only
+  those — RUSTSEC-2026-0344 (ruzstd 0.8.2) and RUSTSEC-2026-0346, -0347,
+  -0348, -0349 (rustls 0.23.45). DENY-1 owns them; Cargo.toml and Cargo.lock
+  are untouched here.
+- `cargo test --workspace --locked --no-fail-fast` (skipping only `cli`'s
+  known slow `the_pool_verb_prints_its_whole_page_on_a_generated_store`, as
+  CONTEXT allows), run with root's file-access override dropped
+  (`setpriv --inh-caps=-dac_override,-dac_read_search,-fowner
+  --bounding-set=-dac_override,-dac_read_search,-fowner cargo test …`):
+  220 suites, **9,034 passed, 2 failed**, 47 ignored. Both failures are in
+  `store` and both fail identically on the base:
+  - `store::staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+    — asserts the recreated file has a NEW inode; this container's disk is
+    ext4, which hands back the inode just freed (failed 3 of 3 runs here, and
+    on the base). APFS on the Mac does not reuse it at once.
+  - `store --test cited_commits` — `docs/06-limits.md` on `feat/db-fix`
+    cites nine commits (023d6ab8, 079ad4af, 4756cce0, 521066e6, 72c91a46,
+    91ef0094, 9cb9de51, cde73992, ff636f58) that are not on `origin/main`;
+    a property of the base branch's docs, not of this part.
+  Run as plain root first, `api`'s lib suite also failed 12 permission tests
+  (unreadable directory, unlinkable name, unwritable store): uid 0 bypasses
+  permission bits; with the override dropped all 12 pass (162/162 in those
+  groups), and the whole-workspace figure above is with it dropped.
+- Web tests (`node --test tests/*.test.js`, Node 22.22.0): **1,415 pass, 0
+  fail, 5 cancelled**; the 5 are timing tests in `ask.test.js` (3) and
   `census-worker.test.js` (2), cancelled identically on the base (1,393 pass,
   0 fail, 5 cancelled) — files this part does not own.
-- `svelte-check` (Gate W3): 6 errors, 0 warnings — the same 6 as the base,
-  all in files this part does not own (`ingest-months.js` `openEnd` ×4 sites,
-  `settings-ceilings.test.js` implicit any ×2). None in a touched file.
-- Gate W5 (`node web/ci/css-comments.mjs` on the three touched components):
-  clean.
-- `vite build` in a scratch copy: succeeds (only the existing chunk-size
-  warning).
+- Fail before, pass after: with this branch's `pager.js`, `goto.js`,
+  `bars-plan.js` and `notes-bars.js` copied into a base worktree and the
+  base's own grid, pager and extremes left in place, `db-pager.test.js` +
+  `db-goto.test.js` give **12 of 18 failing — all six named tests among
+  them**; on this branch 18 of 18 pass. On the plain base both files fail at
+  import (no `pager.js`, no `goto.js`).
+- `svelte-check` (Gate W3): 6 errors, 0 warnings — the same 6 as the base, all
+  in files this part does not own (`ingest-months.js` / `ingest/+page.svelte`
+  / `ingest-months.test.js` `openEnd` ×4, `settings-ceilings.test.js` implicit
+  any ×2). None in a touched file. (Gate W3's ceiling is 0, so W3 is red on the
+  base already.)
+- Gate W5 (`node web/ci/css-comments.mjs` on `DbBarsGrid.svelte`,
+  `DbPager.svelte`, `DbExtremes.svelte`): clean.
+- Gate W1: not run here — `web/build` is tracked and not owned; see NEEDS THE
+  MAC 1. `vite build` of the final sources in a scratch copy succeeds (only the
+  existing chunk-size warning).
 - Coverage (`node --test --experimental-test-coverage`, whole web suite):
-  `pager.js`, `goto.js`, `bars-plan.js`, `notes-bars.js` 100% lines and 100%
-  branches. Svelte components are not measured by any tool in this setup.
+  `pager.js` 303/303 lines, 115/115 branches; `goto.js` 144/144, 65/65;
+  `bars-plan.js` 583/583, 139/139; `notes-bars.js` 460/460, 46/46 —
+  **100% lines and branches on every touched JS module**. No tool here
+  measures coverage of a `.svelte` file; the three touched components are
+  held by source-shape tests in `db-pager.test.js`, `db-goto.test.js` and
+  `db-bars-plan.test.js`, the way `db-address.test.js` holds R3-01's.
+- Mutation (Stryker 10.0.0, installed in the scratchpad, not in
+  `package.json`; command runner over the 11 test files that drive these
+  modules; run on a sandbox copy): **1,245 mutants over the four touched
+  modules, 1,243 killed, 2 timeouts (both a loop increment turned into a
+  decrement, i.e. an endless loop), 0 survived — 100%**. The first runs left
+  83 and 264 survivors; each was killed by an exact test or the code was
+  rewritten where both sides of a mutation gave the same answer (ties in
+  min/max, `?? ''` defaults, boundary-redundant conditions). One real bug was
+  found that way and fixed: `landing` read an `at_index` of `null` as row 0.
+  `greeks.test.js` and `moneyness.test.js` read `notes-bars.js` as TEXT and
+  cannot run against Stryker's instrumented copy, so they were left out of the
+  mutation command (they pass on the branch). Svelte components are not
+  mutation-tested by any tool here.
 
 ## NEEDS THE MAC
 
@@ -221,3 +252,45 @@ every package's check (never `:8080`, never the real store). Below,
    the wire per page (< 400 KB). Write p50, p99, max and n for each. "Shown
    on: the Speed page" — no Speed page exists in this tree; its owner shows
    these numbers.
+
+8. **cargo test on the Mac** (not root, APFS): `cargo test --workspace
+   --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
+   — expect only `store --test cited_commits` red, as on the base; the ext4
+   inode test and the 12 root-only permission tests should pass there.
+
+9. **Ledger entries at landing** (`docs/` is not owned here; numbers are
+   taken from the ledger's head at landing, per amendment A6). Proposed text:
+   - *Decision — one request per change.* The bar read asks page one itself
+     when the order or row set changes, asks a question once (`askOnce`), waits
+     for the selection's reconcile (`db.reconciling`) and a Go to's landing, and
+     stops a read for a row set that has moved on; the newest close comes from
+     the extremes read or page one newest first, and is asked alone only when a
+     bound narrows or neither carries it. Target per change: 1 page read + 1
+     extremes read.
+   - *Decision — the pager offers only served pages.* `pager.js` mirrors
+     `bars::MAX_SORT_DEPTH` (100,000) and `bars_sort::MAX_READ_HELD`
+     (1,000,000) and the answer's `sort_index`; pages past them are not drawn,
+     stepped to or accepted, and the stretch is named.
+   - *Decision — Go to asks ascending.* `at=` is sent with `dir=asc` whatever
+     the grid's direction; the landing is `total − 1 − at_index` newest first;
+     a minute lands on its first bar.
+   - *Decision — Fit measures the heading; the notes strip is one fixed line.*
+     `FIT_SLACK` 24 → 8; the strip is always in the box; more notes open over
+     the grid on a press.
+   - *Decision — failure words by who refused* (`readFailure`): page / server
+     (4xx) / failed; Try again only for failed, and it re-asks the page.
+   - *Invariants* (`docs/04-invariants.md`, each beside its test in
+     `web/tests/db-pager.test.js` or `db-goto.test.js`): one request per change
+     (`a_sort_change_at_a_deep_page_sends_one_request`); no page past the served
+     depth is offered (`the_pager_offers_no_page_past_the_served_depth`); Go to a
+     minute lands on its first bar in both directions
+     (`go_to_a_minute_lands_on_its_first_bar_in_both_directions`); no sort on a
+     column without values (`no_sort_is_offered_on_a_column_without_values`); a
+     page-made refusal is not called the server's
+     (`a_page_made_refusal_is_not_called_the_servers`); a store that grows
+     between two pages repeats no row
+     (`the_store_growing_between_two_pages_repeats_no_row`).
+   - `docs/06-limits.md`: nothing new is unbounded. `joinSlices` is O(rows) once
+     per local-sort read (≤ 20,000, the existing budget); `acrossDay` is O(rows
+     log rows) once per read; `pageItems` draws at most 16 items at any page
+     count.
