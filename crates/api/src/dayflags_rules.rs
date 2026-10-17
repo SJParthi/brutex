@@ -560,7 +560,10 @@ pub(super) fn fold_minutes(
         if scan.low.is_none_or(|(low, _)| bar.low < low) {
             scan.low = Some((bar.low, bar.ts_micros));
         }
-        let flat = bar.open == bar.high && bar.high == bar.low && bar.low == bar.close;
+        // O = H = L = C IS `high == low` FOR A STORED BAR: the store refuses,
+        // on every append, a bar whose open or close lies outside its high and
+        // low (`store::file` `survey`, `Bar::ohlc_is_sane`).
+        let flat = bar.high == bar.low;
         let halted = in_halt(bar.ts_micros);
         run = match run {
             Some((first, last, value))
@@ -695,50 +698,7 @@ impl IndexDay {
                     "line": null,
                 })
             }
-            (None, Some((seconds, at, line))) => {
-                // ONLY THE RUN'S SECONDS OUTSIDE THE RECORDED HALT COUNT (the
-                // R3-13 review): 2020-03-13's run starts at 09:21:09, a second
-                // before the index halt's 09:21:10, and is the halt itself. A
-                // run with no stamp on a halt day cannot be placed, so it is
-                // not flagged.
-                let outside_s = match (at, self.halt) {
-                    (Some(at), Some((from, resume))) => {
-                        let start = u64::from(at);
-                        let end = start.saturating_add(seconds);
-                        let overlap = end
-                            .min(u64::from(resume))
-                            .saturating_sub(start.max(u64::from(from)));
-                        Some(seconds.saturating_sub(overlap))
-                    }
-                    (None, Some(_)) => None,
-                    (_, None) => Some(seconds),
-                };
-                let flagged = outside_s.is_some_and(|outside| outside >= FROZEN_MIN_S);
-                let clock =
-                    |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
-                if let Some(outside) = outside_s.filter(|_| flagged) {
-                    let part = if outside < seconds {
-                        format!(", {outside} s of it outside the recorded halt")
-                    } else {
-                        ", outside any recorded halt".to_owned()
-                    };
-                    says.push(format!(
-                        "index value frozen in session: unchanged for {seconds} s from {} (the \
-                         import's measure of the vendor's rows){part}",
-                        at.map_or_else(|| "-".to_owned(), clock)
-                    ));
-                }
-                serde_json::json!({
-                    "basis": "day_ledger",
-                    "rung": rung,
-                    "flagged": flagged,
-                    "runs": null,
-                    "longest_s": seconds,
-                    "outside_halt_s": outside_s,
-                    "longest_from": at.map(clock),
-                    "line": line,
-                })
-            }
+            (None, Some(ledger)) => self.ledger_frozen(ledger, &mut says),
             (None, None) => serde_json::Value::Null,
         };
         let outside = match (self.scan, self.day_bar) {
@@ -776,6 +736,57 @@ impl IndexDay {
             serde_json::json!({ "frozen": frozen, "outside_day_range": outside }),
             says,
         )
+    }
+
+    /// The ledger's frozen run (GDFL): the record's `frozen` from the day
+    /// ledger's `flat_max_s` and its stamp, and the phrase it says.
+    fn ledger_frozen(
+        &self,
+        (seconds, at, line): (u64, Option<u32>, u64),
+        says: &mut Vec<String>,
+    ) -> serde_json::Value {
+        let rung = finest_of(self.feed).as_str();
+        // ONLY THE RUN'S SECONDS OUTSIDE THE RECORDED HALT COUNT (the
+        // R3-13 review): 2020-03-13's run starts at 09:21:09, a second
+        // before the index halt's 09:21:10, and is the halt itself. A
+        // run with no stamp on a halt day cannot be placed, so it is
+        // not flagged.
+        let outside_s = match (at, self.halt) {
+            (Some(at), Some((from, resume))) => {
+                let start = u64::from(at);
+                let end = start.saturating_add(seconds);
+                let overlap = end
+                    .min(u64::from(resume))
+                    .saturating_sub(start.max(u64::from(from)));
+                Some(seconds.saturating_sub(overlap))
+            }
+            (None, Some(_)) => None,
+            (_, None) => Some(seconds),
+        };
+        let flagged = outside_s.is_some_and(|outside| outside >= FROZEN_MIN_S);
+        let clock = |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
+        if let Some(outside) = outside_s.filter(|_| flagged) {
+            let part = if outside < seconds {
+                format!(", {outside} s of it outside the recorded halt")
+            } else {
+                ", outside any recorded halt".to_owned()
+            };
+            says.push(format!(
+                "index value frozen in session: unchanged for {seconds} s from {} (the \
+                 import's measure of the vendor's rows){part}",
+                at.map_or_else(|| "-".to_owned(), clock)
+            ));
+        }
+        serde_json::json!({
+            "basis": "day_ledger",
+            "rung": rung,
+            "flagged": flagged,
+            "runs": null,
+            "longest_s": seconds,
+            "outside_halt_s": outside_s,
+            "longest_from": at.map(clock),
+            "line": line,
+        })
     }
 }
 

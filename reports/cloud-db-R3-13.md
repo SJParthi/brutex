@@ -151,6 +151,11 @@ cargo test --workspace --locked
 
 # cargo deny: the five advisories in the gate results fail on the base too; Cargo.lock is not R3-13's.
 cargo deny check
+
+# Gate W1 (web/build matches web/src): web/build is not an R3-13 file, so this branch leaves the
+# bundle as feat/db-fix built it, and W1 fails until it is rebuilt from the merged tree. The cloud
+# built it from a copy of this tree (`npm run build`, exit 0); the Mac rebuilds and commits it:
+npm --prefix web ci && npm --prefix web run build && git add web/build
 ```
 
 ### 2. Real-store tests and the measured target

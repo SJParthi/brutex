@@ -607,46 +607,57 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
         &gaps,
     ));
     notes.extend(pull_notes(pull.as_ref()));
-    let mut envelope = json!({
-        "feed": asked.feed.as_str(),
-        "instrument": inst.key(),
-        "kind": inst.kind().as_str(),
-        "asked": {
-            "from": asked.from.to_string(),
-            "to": asked.to.to_string(),
-            "order": if asked.newest_first { "desc" } else { "asc" },
-            "timeframe": band.rung.map(Timeframe::as_str),
-            "expiry": band.expiry.map(|expiry| expiry.to_string()),
-        },
-        "page": page,
-        "pages": pages,
-        "page_days": PAGE_DAYS,
-        "page_from": first.to_string(),
-        "page_to": last.to_string(),
-        "days_in_range": asked.to.days_from_epoch().saturating_sub(asked.from.days_from_epoch()).saturating_add(1),
-        "rungs": {
-            "held": { "feed": asked.feed.as_str(), "rung": counted.as_str() },
-            "finest": { "feed": asked.feed.as_str(), "rung": finest(asked.feed).as_str() },
-            "peer": { "feed": peer_feed.as_str(), "rung": finest(peer_feed).as_str() },
-            "day_bar": day_bars.as_ref().map(|_| Timeframe::DAY_1.as_str()),
-        },
-        "zerodha_1day_start": start.map(SeriesStart::json),
-    });
     // THE DAYS AND THE SOURCES ARE MOVED IN, NEVER COPIED (see [`object`]).
     let sources = sources_json(journal.as_ref(), quality.as_ref(), &gaps, pull.as_ref());
-    if let Some(fields) = envelope.as_object_mut() {
-        for (key, value) in [
-            ("days", Value::Array(records)),
-            ("sources", sources),
-            ("derive", derive_json(gaps.as_ref().ok(), inst, first, last)),
-            ("lineage", lineage_json(root, asked.feed, inst)),
-            ("rules", rules_json()),
-            ("notes", Value::from(notes)),
-        ] {
-            let _was = fields.insert(key.to_owned(), value);
-        }
-    }
-    envelope
+    object([
+        ("feed", Value::from(asked.feed.as_str())),
+        ("instrument", Value::from(inst.key())),
+        ("kind", Value::from(inst.kind().as_str())),
+        (
+            "asked",
+            json!({
+                "from": asked.from.to_string(),
+                "to": asked.to.to_string(),
+                "order": if asked.newest_first { "desc" } else { "asc" },
+                "timeframe": band.rung.map(Timeframe::as_str),
+                "expiry": band.expiry.map(|expiry| expiry.to_string()),
+            }),
+        ),
+        ("page", Value::from(page)),
+        ("pages", Value::from(pages)),
+        ("page_days", Value::from(PAGE_DAYS)),
+        ("page_from", Value::from(first.to_string())),
+        ("page_to", Value::from(last.to_string())),
+        (
+            "days_in_range",
+            Value::from(
+                asked
+                    .to
+                    .days_from_epoch()
+                    .saturating_sub(asked.from.days_from_epoch())
+                    .saturating_add(1),
+            ),
+        ),
+        (
+            "rungs",
+            json!({
+                "held": { "feed": asked.feed.as_str(), "rung": counted.as_str() },
+                "finest": { "feed": asked.feed.as_str(), "rung": finest(asked.feed).as_str() },
+                "peer": { "feed": peer_feed.as_str(), "rung": finest(peer_feed).as_str() },
+                "day_bar": day_bars.as_ref().map(|_| Timeframe::DAY_1.as_str()),
+            }),
+        ),
+        (
+            "zerodha_1day_start",
+            start.map_or(Value::Null, SeriesStart::json),
+        ),
+        ("days", Value::Array(records)),
+        ("sources", sources),
+        ("derive", derive_json(gaps.as_ref().ok(), inst, first, last)),
+        ("lineage", lineage_json(root, asked.feed, inst)),
+        ("rules", rules_json()),
+        ("notes", Value::from(notes)),
+    ])
 }
 
 /// WHERE THE SERIES STARTS, which decides whether a day can be a refused front
@@ -664,11 +675,12 @@ fn start_of_page(
         .and_then(|bars| bars.prev_close.first().copied().flatten())
         .is_some();
     let none_before = day_bars.is_some_and(|bars| bars.none_before);
-    match days.first() {
-        _ if held_before => SeriesStart::HeldBefore,
-        Some(first) => series_start(root, inst, *first, none_before),
-        None => SeriesStart::NoneHeld,
+    if held_before {
+        return SeriesStart::HeldBefore;
     }
+    days.first().map_or(SeriesStart::NoneHeld, |first| {
+        series_start(root, inst, *first, none_before)
+    })
 }
 
 /// Each day's closing-auction flag and auction sidecar, oldest first, and the
@@ -3321,14 +3333,22 @@ enum Held {
 }
 
 impl Held {
-    fn json(self, feed: Vendor, rung: Timeframe) -> Value {
+    /// The count on the wire, with the one field its place in the record adds
+    /// (`zero_volume`, or a peer's `as`).
+    fn json(self, feed: Vendor, rung: Timeframe, (key, value): (&str, Value)) -> Value {
         let (bars, why) = match self {
             Self::Bars(n) => (Value::from(n), Value::Null),
             Self::NoFile => (Value::Null, Value::from("not_held")),
             Self::Unreadable => (Value::Null, Value::from("unreadable")),
             Self::NoContract => (Value::Null, Value::from("no_contract")),
         };
-        json!({ "feed": feed.as_str(), "rung": rung.as_str(), "bars": bars, "why": why })
+        object([
+            ("feed", Value::from(feed.as_str())),
+            ("rung", Value::from(rung.as_str())),
+            ("bars", bars),
+            ("why", why),
+            (key, value),
+        ])
     }
 
     const fn bars(self) -> Option<u64> {
@@ -3750,26 +3770,32 @@ fn month_day_bars(file: &BarFile) -> Result<Vec<(Day, DayBar)>, String> {
     Ok(out)
 }
 
+/// The last day of the month before `day`'s, with that month; `None` in the
+/// first month a [`Day`] can name. A validated `Day` always has a month
+/// (`Day::year_month` documents its refusal unreachable), so the one `None`
+/// that can happen is 1970-01.
+fn month_before(day: Day) -> Option<(Day, YearMonth)> {
+    let back = day.days_from_epoch().checked_sub(u32::from(day.day()))?;
+    let back = Day::from_days(back).ok()?;
+    Some((back, back.year_month().ok()?))
+}
+
 /// The last `1day` bar before `day`, in the months before it: at most
 /// [`LOOKBACK_MONTHS`] opens back, then [`rules::held_month_before`]'s `stat`s
 /// and one open. Also whether NO month of the series is held in all those
 /// months, so [`series_start`] need not probe them again.
 fn bar_before(root: &Path, inst: &Instrument, day: Day) -> (Option<DayBar>, bool) {
     let mut probe = day;
+    let mut month = None;
     let mut any_file = false;
     for _ in 0..LOOKBACK_MONTHS {
-        let Some(back) = probe
-            .days_from_epoch()
-            .checked_sub(u32::from(probe.day()))
-            .and_then(|days| Day::from_days(days).ok())
-        else {
+        // NONE BEFORE THE FIRST MONTH A DAY CAN NAME (1970-01): nothing is
+        // held before it, and nothing is said of a history no store can hold.
+        let Some((back, back_month)) = month_before(probe) else {
             return (None, false);
         };
-        probe = back;
-        let Ok(month) = probe.year_month() else {
-            return (None, false);
-        };
-        match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, month) {
+        (probe, month) = (back, Some(back_month));
+        match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, back_month) {
             Opened::Absent => {}
             Opened::Refused(_) => return (None, false),
             Opened::File(file) => {
@@ -3788,11 +3814,9 @@ fn bar_before(root: &Path, inst: &Instrument, day: Day) -> (Option<DayBar>, bool
     // A SCALE SWITCH ACROSS A LONG HOLE (R3-13 goal 2, DB-031): the twelve
     // opens above found nothing, so the newest held month further back is
     // found by `stat`s alone ([`rules::held_month_before`]) and opened once.
-    let Ok(month) = probe.year_month() else {
-        return (None, false);
-    };
-    let Some(held) = rules::held_month_before(month, |probe| day_month_held(root, inst, probe))
-    else {
+    let Some(held) = month.and_then(|month| {
+        rules::held_month_before(month, |probe| day_month_held(root, inst, probe))
+    }) else {
         return (None, !any_file);
     };
     let bar = match open_month(root, Vendor::Zerodha, inst, Timeframe::DAY_1, held) {
@@ -3952,14 +3976,11 @@ impl PageHeld {
                     ..inst.clone()
                 };
                 let alt = counts(root, peer_feed, &named, finest(peer_feed), days, none);
-                for (at, held) in alt.per_day.iter().enumerate() {
-                    if let (Some(slot), Held::Bars(_)) = (peer.per_day.get_mut(at), held)
-                        && *slot == Held::NoFile
-                    {
+                let slots = peer.per_day.iter_mut().zip(peer_as.iter_mut());
+                for ((slot, as_name), held) in slots.zip(&alt.per_day) {
+                    if *slot == Held::NoFile && matches!(held, Held::Bars(_)) {
                         *slot = *held;
-                        if let Some(as_name) = peer_as.get_mut(at) {
-                            *as_name = Some(name);
-                        }
+                        *as_name = Some(name);
                     }
                 }
                 peer.notes.extend(alt.notes);
@@ -4817,16 +4838,10 @@ fn quality_json(lines: &[(ImportKind, Option<&QualityLine>)]) -> Value {
 /// ZERO-VOLUME BARS ARE THE FINEST RUNG'S MINUTES, so they sit beside `held`
 /// only where `held` IS that count, and beside `finest` otherwise.
 fn held_json(feed: Vendor, rung: Timeframe, held: &DayHeld) -> (Value, Option<Value>, Value) {
-    let with = |mut out: Value, key: &str, value: Value| {
-        if let Some(fields) = out.as_object_mut() {
-            let _was = fields.insert(key.to_owned(), value);
-        }
-        out
-    };
     let zero = held.fills.map_or(Value::Null, Value::from);
     let finest_json = held
         .finest
-        .map(|at| with(at.json(feed, finest(feed)), "zero_volume", zero.clone()));
+        .map(|at| at.json(feed, finest(feed), ("zero_volume", zero.clone())));
     let own_zero = if finest_json.is_some() {
         Value::Null
     } else {
@@ -4834,12 +4849,12 @@ fn held_json(feed: Vendor, rung: Timeframe, held: &DayHeld) -> (Value, Option<Va
     };
     let peer = peer_of(feed);
     (
-        with(held.own.json(feed, rung), "zero_volume", own_zero),
+        held.own.json(feed, rung, ("zero_volume", own_zero)),
         finest_json,
-        with(
-            held.peer.json(peer, finest(peer)),
-            "as",
-            held.peer_as.map_or(Value::Null, Value::from),
+        held.peer.json(
+            peer,
+            finest(peer),
+            ("as", held.peer_as.map_or(Value::Null, Value::from)),
         ),
     )
 }

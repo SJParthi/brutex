@@ -350,12 +350,15 @@ fn a_flag_is_read_only_on_an_open_session_up_to_today() {
     let open = flags.on_session(day("2026-08-04"), true, false);
     assert_eq!(open.eligibility, CasEligibility::Eligible);
     assert_eq!(open.basis, CasBasis::DatedMaster);
-    // An index, or a day before the auction began, needs no flag, open or not.
+    // An index, or a day before the auction began, needs no flag, open or not,
+    // and asked directly reads none either.
     let mut index = CasFlags::of(&root, "NIFTY", false);
     assert_eq!(
         index.on_session(day("2026-08-04"), true, false).basis,
         CasBasis::NotRequired
     );
+    assert_eq!(index.on(day("2026-08-04")).basis, CasBasis::NotRequired);
+    assert_eq!(flags.on(day("2026-07-31")).basis, CasBasis::NotRequired);
     assert_eq!(
         flags.on_session(day("2026-07-31"), true, true).basis,
         CasBasis::NotRequired
@@ -488,6 +491,11 @@ fn an_auction_print_is_said_kept_apart_only_where_a_sidecar_is() {
     );
     let mut none = AuctionSidecars::of(&root, Vendor::Gdfl, "NIFTY", false);
     assert_eq!(none.on(day("2026-08-04")), None);
+    // ONE STAT A MONTH: the month's second day is answered from the first's.
+    let mut held = AuctionSidecars::of(&root, Vendor::Gdfl, "RELIANCE", true);
+    assert_eq!(held.on(day("2026-08-04")), Some(true));
+    assert_eq!(held.on(day("2026-08-05")), Some(true));
+    assert_eq!(held.seen.len(), 1, "one month, stated once");
 }
 
 // ══ A contract's expiry ═════════════════════════════════════════════════════
@@ -1256,6 +1264,36 @@ fn a_zero_volume_peer_is_found_under_the_shares_other_name() {
     assert_eq!(other_names("ZOMATO"), vec!["ETERNAL"]);
     assert_eq!(other_names("ETERNAL"), vec!["ZOMATO"]);
     assert!(other_names("RELIANCE").is_empty());
+
+    // A page across three months: the share's own name holds August, its
+    // other name October, neither September. Only a day its own name holds no
+    // month for is looked up under the other, and a month neither holds stays
+    // not held, under no name.
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-CASH-ZOMATO",
+        Timeframe::SECOND_1,
+        vec![bar("2024-08-30", 10 * 3_600, [24_000; 4], 10)],
+    );
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-CASH-ZOMATO&from=2024-08-30&to=2024-10-01"),
+    );
+    let own = &record(&got, "2024-08-30")["peer"];
+    assert_eq!(
+        (&own["bars"], &own["as"]),
+        (&Value::from(1), &Value::Null),
+        "{own:#}"
+    );
+    let neither = &record(&got, "2024-09-02")["peer"];
+    assert_eq!(neither["why"], "not_held", "{neither:#}");
+    assert_eq!(neither["as"], Value::Null);
+    let other = &record(&got, "2024-10-01")["peer"];
+    assert_eq!(
+        (&other["bars"], &other["as"]),
+        (&Value::from(2), &Value::from("ETERNAL"))
+    );
 }
 
 // ══ A share's sampled day, and a closed day the peer traded ══════════════════
@@ -1824,4 +1862,236 @@ fn the_day_band_pages_for_a_profiler() {
         }
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ══ Reads that fail, and months that will not open ═══════════════════════════
+
+/// The path of `key`'s `rung` month file on `feed`.
+fn month_path(
+    root: &Path,
+    feed: Vendor,
+    key: &str,
+    rung: Timeframe,
+    month: YearMonth,
+) -> std::path::PathBuf {
+    let inst = super::super::instrument_of(key, "").expect("a key");
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: feed,
+        exchange: inst.exchange.as_str(),
+        segment: inst.segment.as_str(),
+        symbol: &inst.symbol,
+        contract: inst.contract,
+        timeframe: rung,
+        month,
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path")
+    .to_path_buf(root)
+}
+
+/// **A MONTH BEFORE THE PAGE THAT WILL NOT OPEN SETTLES NOTHING** (DB-031):
+/// no previous close is claimed from it, so no day is a jump from one, and
+/// the series' start still finds the month held, so no day of the page is
+/// called the series' front. Both for the month just before the page and for
+/// one found 22 months back by `stat`.
+#[test]
+fn a_month_before_that_will_not_open_settles_nothing() {
+    let month = |y: u16, m: u8| YearMonth::new(y, m).expect("a month");
+    for (name, before) in [("near", month(2017, 12)), ("far", month(2016, 3))] {
+        let root = root_of(&format!("r3-13-refused-before-{name}"));
+        let key = "NSE-INDEX-NIFTYGSCOMPSITE";
+        file_bars(
+            &root,
+            Vendor::Zerodha,
+            key,
+            Timeframe::DAY_1,
+            vec![bar("2018-01-01", 0, [250_000; 4], 0)],
+        );
+        write(
+            &month_path(&root, Vendor::Zerodha, key, Timeframe::DAY_1, before),
+            "not a bar file",
+        );
+        let inst = super::super::instrument_of(key, "").expect("a key");
+        assert_eq!(
+            super::super::bar_before(&root, &inst, day("2018-01-01")),
+            (None, false),
+            "{name}: nothing read, and the history is not called empty"
+        );
+        let got = answer(
+            &root,
+            &ask(&format!(
+                "feed=zerodha&instrument={key}&from=2018-01-01&to=2018-01-01"
+            )),
+        );
+        assert_eq!(
+            got["zerodha_1day_start"]["state"], "held_before",
+            "{name}: {got:#}"
+        );
+        assert_eq!(
+            record(&got, "2018-01-01")["junk"],
+            serde_json::json!([]),
+            "{name}"
+        );
+    }
+}
+
+/// **NOTHING IS BEFORE THE FIRST MONTH A DAY CAN NAME**: a page in 1970-01
+/// looks back nowhere and says no history is held before it.
+#[test]
+fn a_page_in_the_first_month_looks_back_nowhere() {
+    let root = root_of("r3-13-epoch");
+    let month = |y: u16, m: u8| YearMonth::new(y, m).expect("a month");
+    assert_eq!(super::super::month_before(day("1970-01-31")), None);
+    assert_eq!(
+        super::super::month_before(day("1970-02-01")),
+        Some((day("1970-01-31"), month(1970, 1)))
+    );
+    assert_eq!(
+        super::super::month_before(day("2024-03-15")),
+        Some((day("2024-02-29"), month(2024, 2)))
+    );
+    let inst = super::super::instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
+    assert_eq!(
+        super::super::bar_before(&root, &inst, day("1970-01-02")),
+        (None, false)
+    );
+}
+
+/// **A READ THAT FAILS IS NAMED, NEVER COUNTED** (R3-13): a month cut short
+/// under an open handle answers no zero-volume count, no scan and no first
+/// bar, and each says why in the page's notes.
+#[test]
+fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
+    let root = root_of("r3-13-cut-short");
+    let key = "NSE-INDEX-NIFTY";
+    let open = 9 * 3_600 + 15 * 60;
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::MINUTE_1,
+        vec![
+            bar("2022-03-07", open, [1_600_000; 4], 0),
+            bar("2022-03-07", open + 60, [1_600_000; 4], 0),
+        ],
+    );
+    let inst = super::super::instrument_of(key, "").expect("a key");
+    let month = YearMonth::new(2022, 3).expect("a month");
+    let super::super::Opened::File(file) =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
+    else {
+        panic!("the month opens");
+    };
+    let path = month_path(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, month);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("the month file")
+        .set_len(0)
+        .expect("cut short");
+    let mut notes = Vec::new();
+    let reads = super::super::Reads {
+        fills: true,
+        scan: true,
+        first: true,
+    };
+    let got = super::super::day_reads(
+        (&file, None),
+        (Vendor::Zerodha, &inst, Timeframe::MINUTE_1),
+        (day("2022-03-07"), 0, 2),
+        reads,
+        &mut notes,
+    );
+    assert_eq!(got, (None, None, None));
+    assert_eq!(notes.len(), 3, "{notes:#?}");
+    for (note, what) in notes.iter().zip([
+        "zero-volume bars could not be counted",
+        "the day could not be scanned",
+        "the first bar could not be read",
+    ]) {
+        assert!(
+            note.starts_with(&format!(
+                "zerodha NSE-INDEX-NIFTY 1min 2022-03-07: {what}: "
+            )),
+            "{note}"
+        );
+    }
+    // Nothing is read where nothing is asked, or where the day holds no bar.
+    let mut quiet = Vec::new();
+    let none = super::super::day_reads(
+        (&file, None),
+        (Vendor::Zerodha, &inst, Timeframe::MINUTE_1),
+        (day("2022-03-07"), 2, 2),
+        reads,
+        &mut quiet,
+    );
+    assert_eq!(none, (Some(0), None, None));
+    assert!(quiet.is_empty(), "{quiet:#?}");
+}
+
+/// **A LATE LEDGER THAT WILL NOT READ IS SAID** (DB-029): a recounted day's
+/// late rows are then null, and the notes say why, never zero.
+#[test]
+fn a_late_ledger_that_will_not_read_is_said() {
+    let rows = super::super::JournalRows {
+        by_day: HashMap::new(),
+        last_day: None,
+        journal: Value::Null,
+        runs: Vec::new(),
+        closers: HashMap::new(),
+        late: Err("imports/gdfl.journal: denied".to_owned()),
+    };
+    let asked = ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2021-05-21&to=2021-05-21");
+    let notes = super::super::source_notes(&asked, Some(&Ok(rows)), None, &Err("x".to_owned()));
+    assert!(
+        notes.iter().any(|note| note
+            == "The import journal's late-row counts could not be read, so a recounted day's late \
+                rows are null, not zero: imports/gdfl.journal: denied"),
+        "{notes:#?}"
+    );
+}
+
+/// A Zerodha `1day` session with neither a day bar nor a minute that day,
+/// though both months are held, is "no Zerodha 1day bar": never a day bar
+/// missing beside minutes the day does not hold.
+#[test]
+fn a_day_bar_session_without_minutes_says_only_no_bar() {
+    let root = root_of("r3-13-no-minutes");
+    let key = "NSE-INDEX-NIFTY";
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::DAY_1,
+        vec![bar("2024-10-01", 0, [2_500_000; 4], 0)],
+    );
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::MINUTE_1,
+        vec![bar("2024-10-01", 9 * 3_600 + 15 * 60, [2_500_000; 4], 0)],
+    );
+    let got = answer_at(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-10-03&to=2024-10-03"),
+        Band {
+            rung: Some(Timeframe::DAY_1),
+            expiry: None,
+        },
+    );
+    let rec = record(&got, "2024-10-03");
+    assert_eq!(
+        (&rec["held"]["bars"], &rec["finest"]["bars"]),
+        (&Value::from(0), &Value::from(0)),
+        "{rec:#}"
+    );
+    says_has(rec, "no Zerodha 1day bar on this session");
+    assert!(
+        says(rec)
+            .iter()
+            .all(|say| !say.contains("the 1day bar is missing")),
+        "{:#?}",
+        says(rec)
+    );
 }
