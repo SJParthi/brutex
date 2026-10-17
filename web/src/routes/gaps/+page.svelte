@@ -65,7 +65,7 @@
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
   import { dbHref } from '$lib/urlstate.js';
-  import { monthVerdict, isWholeAudit, unreadablePeers, auditRung } from '$lib/gap-verdict.js';
+  import { monthVerdict, isWholeAudit, unreadablePeers, auditRung, readFrom } from '$lib/gap-verdict.js';
 
   /* A MONTH ROW OPENS THAT MONTH ON /db (D-3337 item 4): the same feed, the
      series' own key and rung, and the month as the day window. */
@@ -85,10 +85,13 @@
    *   lost_minutes: number,
    *   absent_minutes: number,
    *   truncated: boolean,
-   *   unreadable_records: number,
+   *   unreadable_records: number | null,
    *   invalid_timestamps?: number,
    *   absent_file: string | null,
    *   evidence_error?: string | null,
+   *   summary?: 'kept' | 'built' | 'absent_file',
+   *   summary_fallback?: string | null,
+   *   bar_records_read?: number,
    *   unmeasured_minutes: number,
    *   gaps: Run[]
    * }} MonthVerdict
@@ -101,6 +104,7 @@
    *   unmeasured_minutes: number,
    *   months: number,
    *   months_absent: number,
+   *   summaries?: { kept: number, built: number, bar_records_read: number },
    *   truncated: boolean,
    *   calendar: {
    *     first: string | null,
@@ -427,6 +431,15 @@
         <span class="k">bars held</span>
         <span class="s">against {fmt(b.expected)} expected from available evidence</span>
       </div>
+      <div class="cell {b.summaries && b.summaries.built > 0 ? 'x' : 'i'}">
+        <span class="n">{fmt(b.summaries?.kept)}</span>
+        <span class="k">months read off their summary</span>
+        <span class="s">
+          {b.summaries
+            ? `${fmt(b.summaries.built)} read from their bars (${fmt(b.summaries.bar_records_read)} records)`
+            : 'this server does not say how months were read'}
+        </span>
+      </div>
     </div>
 
     <p class="whence">
@@ -514,11 +527,13 @@
           <th class="num">Missing</th>
           <th>Verdict</th>
           <th>Where</th>
+          <th>Read from</th>
         </tr>
       </thead>
       <tbody>
         {#each b.month as m (m.month)}
           {@const v = monthVerdict(m)}
+          {@const r = readFrom(m)}
           <tr class={v.kind}>
             <td class="mono">
               <a href={monthLink(m.month)} title="Open this month of this series on /db">{m.month}</a>
@@ -565,6 +580,7 @@
                 <span class="run bad">this month's run list hit its ceiling and is not complete</span>
               {/if}
             </td>
+            <td class="read {r.kind}" title={r.why}>{r.word}</td>
           </tr>
         {/each}
       </tbody>
@@ -789,6 +805,22 @@
     white-space: normal;
   }
   .dim {
+    color: var(--n8);
+  }
+  /* How the month was read (R3-06): off its summary, or from its bars. */
+  .read {
+    font-family: var(--mono);
+    font-size: var(--fs-xs, 11px);
+    white-space: nowrap;
+  }
+  .read.kept {
+    color: var(--up);
+  }
+  .read.built,
+  .read.unknown {
+    color: var(--warn);
+  }
+  .read.none {
     color: var(--n8);
   }
 </style>

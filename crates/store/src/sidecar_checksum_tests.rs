@@ -399,6 +399,7 @@ fn record_families_keep_independent_checksums_in_every_write_order_and_exact_rep
                         | FileKind::TimeIndex
                         | FileKind::SortIndex
                         | FileKind::SealedBars
+                        | FileKind::MonthSummary
                 )
             })
             .map(|kind| {
