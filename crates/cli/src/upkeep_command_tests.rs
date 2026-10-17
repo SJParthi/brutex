@@ -33,7 +33,10 @@ use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::sort_index::{Shape, SortIndex};
 
-use super::{Host, USAGE, all_released, command_with, outcome, rate, run_locks, spans};
+use super::{
+    Host, Item, USAGE, all_released, build_item, command_with, exit_of, no_progress, outcome, rate,
+    run_locks, sentence, spans, unix_now,
+};
 use crate::gdfl_import_command::{Holder, RunLock};
 use crate::{FAILED, MISUSED, OK};
 
@@ -1540,5 +1543,49 @@ fn a_zerodha_plan_names_no_rekey() {
     assert!(
         out.contains("cli upkeep run recount zerodha --from DAY --to DAY"),
         "{out}"
+    );
+}
+
+/// The exit of a run, the binary's clock and progress, a finding's sentence,
+/// and an item whose month the store cannot name: each said, none assumed.
+#[test]
+fn the_exit_the_clock_and_a_nameless_month_are_each_said() {
+    let mut out = String::new();
+    assert_eq!(exit_of(&mut out, true, Ok(())), OK);
+    assert_eq!(exit_of(&mut out, false, Ok(())), FAILED);
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(
+        exit_of(&mut out, true, Err("imports/gdfl.lock: refused".to_owned())),
+        FAILED
+    );
+    assert_eq!(out, "  LOCKS NOT RELEASED: imports/gdfl.lock: refused\n");
+    assert!(unix_now() > 1_790_000_000, "a clock past 2026-09");
+    no_progress("k", &Outcome::clean("built", "w"));
+    let found = crate::gdfl_import_command::Finding::new("run_busy", "held".to_owned());
+    assert_eq!(sentence(found), "run_busy: held");
+    let nameless = upkeep::Month {
+        exchange: String::new(),
+        segment: "INDEX".to_owned(),
+        symbol: "NIFTY".to_owned(),
+        contract: None,
+        rung: Timeframe::SECOND_1,
+        month: ym(2020, 1),
+        key: "bars/gdfl//INDEX/NIFTY/1s/2020-01.bin".to_owned(),
+        lacks: upkeep::Lacks::default(),
+    };
+    let root = Root::new();
+    let outcome = build_item(
+        &root.0,
+        Kind::SortIndex,
+        Vendor::Gdfl,
+        &Item::Month(nameless),
+        None,
+    );
+    assert!(!outcome.clean);
+    assert_eq!(outcome.word, "REFUSED");
+    assert!(
+        outcome.why.contains("is not a store path"),
+        "{}",
+        outcome.why
     );
 }

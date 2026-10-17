@@ -592,29 +592,9 @@ impl Journal {
             .open(&path)
             .map_err(|why| refusal(&path, &why))?;
         plain(&file, &path)?;
-        let flock = match Flock::try_lock(file, path.clone()) {
-            Ok(flock) => flock,
-            Err(TryLockError::WouldBlock) => {
-                return Err(format!(
-                    "another {} upkeep run of {} holds {}: one run of a kind at a time; \
-                     nothing was written",
-                    kind.word(),
-                    vendor.as_str(),
-                    path.display()
-                ));
-            }
-            Err(TryLockError::Error(why)) => {
-                return Err(format!(
-                    "{}: flock: {why}; nothing was written",
-                    path.display()
-                ));
-            }
-        };
+        let flock = Flock::try_lock(file, path.clone())
+            .map_err(|why| not_locked(&path, vendor, kind, why))?;
         Ok(Self { flock, path })
-    }
-
-    fn named(&self, why: &std::io::Error) -> String {
-        format!("{}: {why}", self.path.display())
     }
 
     /// Ends a tail no newline ends, as a void line, and returns the bytes of
@@ -633,10 +613,8 @@ impl Journal {
         let mut end = Vec::with_capacity(VOID.len() + 1);
         end.extend_from_slice(VOID.as_bytes());
         end.push(b'\n');
-        self.flock
-            .write_all(&end)
-            .and_then(|()| self.flock.sync_data())
-            .map_err(|why| self.named(&why))?;
+        let written = self.flock.write_all(&end);
+        io(&self.path, written.and_then(|()| self.flock.sync_data()))?;
         Ok(u64::try_from(torn).unwrap_or(u64::MAX))
     }
 
@@ -652,12 +630,10 @@ impl Journal {
 
     /// Every entry of the file, in order: one pass, for a resume.
     fn entries(&mut self) -> Result<Vec<Entry>, String> {
-        self.flock
-            .seek(SeekFrom::Start(0))
-            .map_err(|why| self.named(&why))?;
+        io(&self.path, self.flock.seek(SeekFrom::Start(0)))?;
         let mut out = Vec::new();
         for line in BufReader::new(&*self.flock).split(b'\n') {
-            let line = line.map_err(|why| self.named(&why))?;
+            let line = io(&self.path, line)?;
             if let Some(entry) = std::str::from_utf8(&line).ok().and_then(parse) {
                 out.push(entry);
             }
@@ -674,12 +650,58 @@ impl Journal {
             bytes.push(b'.');
         }
         bytes.push(b'\n');
-        self.flock.write_all(&bytes).map_err(|why| self.named(&why))
+        io(&self.path, self.flock.write_all(&bytes))
     }
 
     fn sync(&self) -> Result<(), String> {
-        self.flock.sync_data().map_err(|why| self.named(&why))
+        io(&self.path, self.flock.sync_data())
     }
+}
+
+/// `result`, or the host's refusal said beside the `path` it was about: the
+/// one way this module names a refused host call.
+fn io<T>(path: &Path, result: std::io::Result<T>) -> Result<T, String> {
+    result.map_err(|why| format!("{}: {why}", path.display()))
+}
+
+/// Why the journal's lock was not taken: another run holds it, or the host
+/// refused the `flock` itself.
+fn not_locked(path: &Path, vendor: Vendor, kind: Kind, why: TryLockError) -> String {
+    match why {
+        TryLockError::WouldBlock => format!(
+            "another {} upkeep run of {} holds {}: one run of a kind at a time; nothing was \
+             written",
+            kind.word(),
+            vendor.as_str(),
+            path.display()
+        ),
+        TryLockError::Error(why) => {
+            format!("{}: flock: {why}; nothing was written", path.display())
+        }
+    }
+}
+
+/// Whether a run holds a journal, from a shared probe of its lock: a probe
+/// that took it (and holds it until its file is closed) found no run.
+fn held_by_a_run(probe: Result<(), TryLockError>) -> std::io::Result<bool> {
+    match probe {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(why)) => Err(why),
+    }
+}
+
+/// The run as it ended, with a journal lock the host would not release said:
+/// the run is then `failed`, never a success that left its lock behind.
+fn released(mut ran: Ran, unlocked: Result<(), store::flock::Unreleased>) -> Ran {
+    if let Err(why) = unlocked {
+        ran.how = How::Failed;
+        ran.why = format!(
+            "{} — and the journal's lock was not released: {why}",
+            ran.why
+        );
+    }
+    ran
 }
 
 /// `<root>/audit`, made when absent — never the root above it: a root that
@@ -710,9 +732,7 @@ fn refusal(path: &Path, why: &std::io::Error) -> String {
 /// Refuses what was opened at `path` unless it is a regular file of one name:
 /// a second name (a hard link) would carry every line into another file.
 fn plain(file: &File, path: &Path) -> Result<(), String> {
-    let meta = file
-        .metadata()
-        .map_err(|why| format!("{}: {why}", path.display()))?;
+    let meta = io(path, file.metadata())?;
     if !meta.is_file() {
         return Err(format!(
             "{} is not a regular file; nothing was written",
@@ -732,14 +752,11 @@ fn plain(file: &File, path: &Path) -> Result<(), String> {
 /// The last [`TAIL_BYTES`] of `file`, and whether that cut off an earlier
 /// part of it.
 fn tail_of(file: &mut File, path: &Path) -> Result<(Vec<u8>, bool), String> {
-    let named = |why: std::io::Error| format!("{}: {why}", path.display());
-    let len = file.metadata().map_err(named)?.len();
+    let len = io(path, file.metadata())?.len();
     let from = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(from)).map_err(named)?;
+    io(path, file.seek(SeekFrom::Start(from)))?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(named)?;
+    io(path, file.take(TAIL_BYTES).read_to_end(&mut bytes))?;
     Ok((bytes, from > 0))
 }
 
@@ -787,13 +804,9 @@ pub fn request_stop(root: &Path, vendor: Vendor, kind: Kind, id: u64) -> Result<
     let path = root.join(stop_name(vendor, kind));
     let staging = path.with_extension("stop.new");
     let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
-    let named = |why: std::io::Error| format!("{}: {why}", staging.display());
-    staged
-        .file
-        .write_all(format!("stop {id}\n").as_bytes())
-        .and_then(|()| staged.file.sync_all())
-        .map_err(named)?;
-    fs::rename(&staging, &path).map_err(|why| format!("{}: {why}", path.display()))?;
+    let written = staged.file.write_all(format!("stop {id}\n").as_bytes());
+    io(&staging, written.and_then(|()| staged.file.sync_all()))?;
+    io(&path, fs::rename(&staging, &path))?;
     Ok(path)
 }
 
@@ -857,14 +870,9 @@ pub fn status(root: &Path, vendor: Vendor, kind: Kind) -> Result<Option<Status>,
     let Some(last) = whole_lines(&tail, cut).filter_map(parse).last() else {
         return Ok(None);
     };
-    let running = match file.try_lock_shared() {
-        Ok(()) => {
-            let _ = file.unlock();
-            false
-        }
-        Err(TryLockError::WouldBlock) => true,
-        Err(TryLockError::Error(why)) => return Err(format!("{}: flock: {why}", path.display())),
-    };
+    // A probe that takes the lock holds it until `file` closes, at the end
+    // of this function.
+    let running = io(&path, held_by_a_run(file.try_lock_shared()))?;
     let (id, n, ok, of, t, ended) = match last {
         Entry::Run { id, items, .. } => (id, 0, 0, items, 0, None),
         Entry::Item {
@@ -1091,15 +1099,8 @@ pub fn run<T: Sync>(
         done,
         torn,
     };
-    let mut ran = drive(&mut journal, root, ask, begun, build)?;
-    if let Err(why) = journal.flock.release() {
-        ran.how = How::Failed;
-        ran.why = format!(
-            "{} — and the journal's lock was not released: {why}",
-            ran.why
-        );
-    }
-    Ok(ran)
+    let ran = drive(&mut journal, root, ask, begun, build)?;
+    Ok(released(ran, journal.flock.release()))
 }
 
 /// The run itself, once its id is settled: the `run` line, the workers, the
@@ -1368,13 +1369,13 @@ impl Walked {
 /// The entries of `dir` in name order, each with whether it is a directory
 /// (never through a link) or a link.
 fn listed(dir: &Path) -> Result<Vec<(PathBuf, String, Listed)>, String> {
-    let named = |why: std::io::Error| format!("cannot list {}: {why}", dir.display());
+    let named = |why: String| format!("cannot list {why}");
     // IN NAME ORDER, so two walks of one store list it alike (§3 rule 5): an
     // ordered map of one directory's entries, never on a request path.
     let mut out = BTreeMap::new();
-    for entry in fs::read_dir(dir).map_err(named)? {
-        let entry = entry.map_err(named)?;
-        let kind = entry.file_type().map_err(named)?;
+    for entry in io(dir, fs::read_dir(dir)).map_err(named)? {
+        let entry = io(dir, entry).map_err(named)?;
+        let kind = io(dir, entry.file_type()).map_err(named)?;
         let what = if kind.is_symlink() {
             Listed::Link
         } else if kind.is_dir() {

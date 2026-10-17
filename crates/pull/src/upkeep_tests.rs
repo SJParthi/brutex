@@ -1608,3 +1608,114 @@ fn a_month_whose_generation_cannot_be_told_refuses_the_walk() {
     let why = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap_err();
     assert!(why.contains("2020-02.bin"), "{why}");
 }
+
+/// The tail a status reads holds the longest line a run can write — a key
+/// of [`KEY_CAP`] bytes and a reason cut at [`WHY_CAP`] — several times over.
+#[test]
+fn a_status_reads_the_longest_line_a_run_can_write() {
+    let root = Root::new();
+    let key = "k".repeat(KEY_CAP);
+    let why = one_line(&"w".repeat(WHY_CAP + 500));
+    let item = format!("item 3 n=1 ok=1 of=2 t=9 clean=1 word=built key={key} why={why}");
+    assert!(item.len() > 1_500, "{}", item.len());
+    assert!(
+        u64::try_from(item.len() * 8).unwrap() < TAIL_BYTES,
+        "eight of the longest lines fit the tail"
+    );
+    let path = root.0.join(journal_name(Vendor::Gdfl, Kind::SortIndex));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "run 3 v1 vendor=gdfl kind=srt commit=x workers=1 asked=1 items=2 skipped=0 \
+             plan=0 resume=- at=3\n{item}\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(parse(&item).map(|entry| entry.id()), Some(3));
+    let found = status(&root.0, Vendor::Gdfl, Kind::SortIndex)
+        .unwrap()
+        .unwrap();
+    assert_eq!((found.id, found.n, found.of, found.t), (3, 1, 2, 9));
+    assert_eq!(found.state, State::Died);
+}
+
+/// The host's own refusals, each said by name: a `flock` refused outright
+/// (not held by another run), a lock probe refused, a lock the host would not
+/// release — which fails a run that was otherwise done — and a month whose
+/// parts the store cannot name.
+#[test]
+fn the_hosts_own_refusals_are_said_by_name() {
+    let path = PathBuf::from("/store/audit/upkeep.gdfl.srt.log");
+    let refused = std::io::Error::other("the host refused");
+    let said = super::not_locked(
+        &path,
+        Vendor::Gdfl,
+        Kind::SortIndex,
+        std::fs::TryLockError::Error(refused),
+    );
+    assert_eq!(
+        said,
+        "/store/audit/upkeep.gdfl.srt.log: flock: the host refused; nothing was written"
+    );
+    let busy = super::not_locked(
+        &path,
+        Vendor::Gdfl,
+        Kind::SortIndex,
+        std::fs::TryLockError::WouldBlock,
+    );
+    assert!(
+        busy.starts_with("another srt upkeep run of gdfl holds"),
+        "{busy}"
+    );
+    assert!(!super::held_by_a_run(Ok(())).unwrap());
+    assert!(super::held_by_a_run(Err(std::fs::TryLockError::WouldBlock)).unwrap());
+    let probe = super::held_by_a_run(Err(std::fs::TryLockError::Error(std::io::Error::other(
+        "probe refused",
+    ))));
+    assert_eq!(probe.unwrap_err().to_string(), "probe refused");
+    let ran = |how: How| super::Ran {
+        id: 1,
+        resumed: None,
+        workers: 1,
+        skipped: 0,
+        outcomes: vec![Some(Outcome::clean("built", "w"))],
+        how,
+        why: "every item of the run was built".to_owned(),
+        torn: 0,
+        millis: 0,
+    };
+    assert_eq!(super::released(ran(How::Done), Ok(())), ran(How::Done));
+    let left = super::released(
+        ran(How::Done),
+        Err(store::flock::Unreleased {
+            path: path.clone(),
+            why: std::io::Error::other("unlock refused"),
+        }),
+    );
+    assert_eq!(left.how, How::Failed);
+    assert!(
+        left.why.starts_with(
+            "every item of the run was built — and the journal's lock was not released: "
+        ),
+        "{}",
+        left.why
+    );
+    assert!(left.why.contains("unlock refused"), "{}", left.why);
+    assert!(!left.whole());
+    let nameless = Month {
+        exchange: String::new(),
+        segment: "INDEX".to_owned(),
+        symbol: "NIFTY".to_owned(),
+        contract: None,
+        rung: Timeframe::SECOND_1,
+        month: ym(2020, 1),
+        key: "bars/gdfl//INDEX/NIFTY/1s/2020-01.bin".to_owned(),
+        lacks: Lacks::default(),
+    };
+    let why = nameless.path(Vendor::Gdfl).unwrap_err();
+    assert!(
+        why.starts_with("bars/gdfl//INDEX/NIFTY/1s/2020-01.bin is not a store path: "),
+        "{why}"
+    );
+}

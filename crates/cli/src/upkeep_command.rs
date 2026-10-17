@@ -85,7 +85,7 @@ use pull::upkeep::{self, Ask, Kind, Month, Outcome, Ran, Scope, State, Status};
 use store::path::YearMonth;
 use telemetry::run_dirs::GdflLayout;
 
-use crate::gdfl_import_command::{Holder, RunLock, escape};
+use crate::gdfl_import_command::{Finding, Holder, RunLock, escape};
 use crate::{FAILED, MISUSED, OK};
 
 /// The verb's shape, printed with every misuse.
@@ -501,8 +501,7 @@ pub(crate) fn run_locks(
             kind,
             verb: escape(verb.as_bytes()),
         };
-        let lock = RunLock::take(root, &holder)
-            .map_err(|found| format!("{}: {}", found.code, found.words))?;
+        let lock = RunLock::take(root, &holder).map_err(sentence)?;
         let single = lock.layout == GdflLayout::V3;
         held.push(lock);
         if single {
@@ -511,6 +510,23 @@ pub(crate) fn run_locks(
     }
     Ok(held)
 }
+
+/// The import door's finding as one sentence: its code, then its words.
+fn sentence(found: Finding) -> String {
+    let Finding { code, words } = found;
+    format!("{code}: {words}")
+}
+
+/// UNIX seconds now: the binary's clock.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// What the binary tells once an item is built: nothing, beside the journal
+/// line the run writes for it.
+const fn no_progress(_: &str, _: &Outcome) {}
 
 /// What releasing the locks came to: every refusal named, or none.
 fn all_released(results: impl IntoIterator<Item = Result<(), String>>) -> Result<(), String> {
@@ -893,10 +909,10 @@ fn run(
         outcome
     };
     let ran = upkeep::run(root, &ask, &plan, &build);
-    let released = all_released(held.into_iter().map(|lock| {
-        lock.release()
-            .map_err(|found| format!("{}: {}", found.code, found.words))
-    }));
+    let released = all_released(
+        held.into_iter()
+            .map(|lock| lock.release().map_err(sentence)),
+    );
     let ran = match ran {
         Ok(ran) => ran,
         Err(why) => {
@@ -905,11 +921,20 @@ fn run(
         }
     };
     render_run(out, (kind, vendor), &said, &ran, &plan);
-    if let Err(why) = released {
-        let _ = writeln!(out, "  LOCKS NOT RELEASED: {why}");
-        return FAILED;
+    exit_of(out, ran.whole(), released)
+}
+
+/// The exit of a run: [`OK`] only when it was whole and every lock it took
+/// was released; a lock left held is named.
+fn exit_of(out: &mut String, whole: bool, released: Result<(), String>) -> u8 {
+    match released {
+        Err(why) => {
+            let _ = writeln!(out, "  LOCKS NOT RELEASED: {why}");
+            FAILED
+        }
+        Ok(()) if whole => OK,
+        Ok(()) => FAILED,
     }
-    if ran.whole() { OK } else { FAILED }
 }
 
 /// `cli upkeep`, against the CLI's store root (`BRUTEX_STORE`), stamped with
@@ -922,13 +947,9 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     let host = Host {
         store: &store,
         commit: crate::commit_stamp(),
-        now: &|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_secs())
-        },
+        now: &unix_now,
         stop: &stop,
-        after_item: &|_, _| {},
+        after_item: &no_progress,
     };
     command_with(arguments, &host, out)
 }
