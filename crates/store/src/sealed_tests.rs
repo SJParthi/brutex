@@ -292,8 +292,15 @@ fn check_reads(month: &SealedMonth<Vec<u8>>, bars: &[Bar]) {
 #[test]
 fn an_empty_month_is_a_head_alone() {
     // Every refusal below is one `store.sealed` line: held off the sink
-    // `crate::emits` reads, so its count is its own.
+    // `crate::emits` reads, so its count is its own. Held on this thread,
+    // so a body that never returns lets go of it at the deadline.
     let _sink = crate::emits::hold_the_sink();
+    within_a_minute(empty_month_body);
+}
+
+/// The test above, on a worker with a deadline: an audit of an empty month
+/// that never ends (`audited`'s `chunk < n_blocks` made `==`) fails it.
+fn empty_month_body() {
     let path = nifty(Timeframe::SECOND_1, june());
     let built = sealed(path, &[]);
     let bytes = built.to_bytes();
