@@ -2997,3 +2997,105 @@ async fn a_held_store_page_past_the_last_is_the_last_page() {
     assert!(first.contains("BANKNIFTY"), "{first}");
     assert_eq!(past, first, "a page past the last renders as the last");
 }
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+
+/// A base URL on a loopback port nothing listens on: every request is
+/// refused by the kernel, so no status is ever answered.
+fn nothing_listening() -> &'static str {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|probe| probe.local_addr())
+        .expect("a free port")
+        .port();
+    Box::leak(format!("http://127.0.0.1:{port}").into_boxed_str())
+}
+
+/// **A transport that never answers is down after every attempt, and says
+/// so.** No status is answered, so each failure takes the blip ladder (250 ms
+/// times the attempt squared) and the sixth is spent: the refusal is the last
+/// transport error, then that it failed six times, never a vendor's or a
+/// token's verdict. Covers `with_retry`'s `Step::Exhausted` arm and its
+/// closing refusal (server.rs:8476-8485). Sleeps the whole ladder, 13.75 s,
+/// because tokio's paused clock is not enabled in this crate.
+#[tokio::test]
+async fn a_transport_that_never_answers_is_down_after_every_attempt() {
+    let spec = pull::vendor::HttpSpec {
+        base_url: nothing_listening(),
+        ..dhan_spec()
+    };
+    let source =
+        pull::http::HttpSource::new(spec, pull::http::Credential::token("cloudc".to_owned()))
+            .expect("a client");
+    let request = pull::fetch::BarRequest {
+        instrument_id: "990013".to_owned(),
+        listing: pull::vendor::Listing::Index,
+        window: spot(DHAN_DAY).window,
+        granularity: pull::vendor::Granularity::Day1,
+    };
+    let fx = Fixture::new("transport-down");
+    let site = fx.refused();
+    let started = std::time::Instant::now();
+    let refused = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
+        .await
+        .expect_err("nothing ever answers");
+    assert!(
+        refused.ends_with(&format!(
+            " — and it failed {THROTTLE_ATTEMPTS} times, so the transport is not \
+             blipping, it is down"
+        )),
+        "{refused}"
+    );
+    assert!(
+        !refused.starts_with(VENDOR_DOWN),
+        "not the vendor's own side: {refused}"
+    );
+    assert!(
+        !refused.starts_with(CREDENTIAL_DEAD),
+        "not a dead token: {refused}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(13_750),
+        "the whole blip ladder was waited: {:?}",
+        started.elapsed()
+    );
+}
+
+/// **The discovery ladder calls a transport that never answers down after
+/// every attempt.** The F&O twin of
+/// `a_transport_that_never_answers_is_down_after_every_attempt`: six asks,
+/// the blip ladder between them, and a refusal that is neither a dead token
+/// nor a status. Covers `laddered`'s `Step::Exhausted` arm and its closing
+/// refusal (server.rs:7083-7096).
+#[tokio::test]
+async fn laddered_calls_a_transport_that_never_answers_down_after_every_attempt() {
+    let fx = Fixture::new("laddered-transport-down");
+    let site = fx.refused();
+    let asked = Arc::new(Mutex::new(0_u32));
+    let counter = Arc::clone(&asked);
+    let refused = laddered(
+        pull::vendor::Feed::Dhan,
+        &site,
+        "an expiry list",
+        move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                *counter.lock().expect("the counter") += 1;
+                Err(pull::chain::Refusal::transport(
+                    "connection refused".to_owned(),
+                ))
+            }
+        },
+    )
+    .await
+    .expect_err("nothing ever answers");
+    assert_eq!(*asked.lock().expect("the counter"), THROTTLE_ATTEMPTS);
+    assert_eq!(refused.status, None);
+    assert!(!refused.credential_dead);
+    assert_eq!(
+        refused.detail,
+        format!(
+            "connection refused — and it failed {THROTTLE_ATTEMPTS} times, so the transport \
+             is not blipping, it is down"
+        )
+    );
+}
