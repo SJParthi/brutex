@@ -336,36 +336,23 @@ pub(crate) fn outcome(clean: bool, label: &str, receipt: &str) -> Outcome {
     }
 }
 
-/// The items of one run, in order, and how each is built.
-enum Items {
-    /// Month files of the scope.
-    Months(Vec<Month>),
-    /// Day spans of a recount, one calendar month each.
-    Spans(Vec<Span>),
-    /// Underlyings of a re-key.
-    Underlyings(Vec<Symbol>),
+/// One item of a run: what its builder is handed.
+enum Item {
+    /// A month file of the scope.
+    Month(Month),
+    /// One calendar month of a recount's days.
+    Span(Span),
+    /// One underlying of a re-key.
+    Underlying(Symbol),
 }
 
-impl Items {
-    fn keys(&self) -> Vec<String> {
-        match self {
-            Self::Months(months) => months.iter().map(|month| month.key.clone()).collect(),
-            Self::Spans(spans) => spans
-                .iter()
-                .map(|span| {
-                    format!(
-                        "{}..{}",
-                        span.from,
-                        span.to.map_or_else(String::new, |to| to.to_string())
-                    )
-                })
-                .collect(),
-            Self::Underlyings(symbols) => symbols
-                .iter()
-                .map(|symbol| symbol.as_str().to_owned())
-                .collect(),
-        }
-    }
+/// A recount span's key: `<from>..<to>`.
+fn span_key(span: Span) -> String {
+    format!(
+        "{}..{}",
+        span.from,
+        span.to.map_or_else(String::new, |to| to.to_string())
+    )
 }
 
 /// The day spans of `from..=to`, one per calendar month.
@@ -419,32 +406,37 @@ fn underlyings_held(root: &Path, only: Option<&BTreeSet<Symbol>>) -> Result<Vec<
     }
 }
 
-/// The items `kind` builds under `root`.
+/// The items `kind` builds under `root`, each with its key, and what they
+/// are in words.
 fn items(
     root: &Path,
     kind: Kind,
     vendor: Vendor,
     flags: &Flags,
-) -> Result<(Items, String), String> {
+) -> Result<(Vec<(String, Item)>, String), String> {
     match (kind, flags.days) {
         (Kind::Recount, Some((from, to))) => Ok((
-            Items::Spans(spans(from, to)),
+            spans(from, to)
+                .into_iter()
+                .map(|span| (span_key(span), Item::Span(span)))
+                .collect(),
             format!("the days {from} .. {to}, one calendar month an item"),
         )),
-        (Kind::Rekey, _) => {
-            let symbols = underlyings_held(root, flags.underlyings.as_ref())?;
-            Ok((
-                Items::Underlyings(symbols),
-                "the option underlyings under bars/gdfl/NSE/FNO, one an item".to_owned(),
-            ))
-        }
+        (Kind::Rekey, _) => Ok((
+            underlyings_held(root, flags.underlyings.as_ref())?
+                .into_iter()
+                .map(|symbol| (symbol.as_str().to_owned(), Item::Underlying(symbol)))
+                .collect(),
+            "the option underlyings under bars/gdfl/NSE/FNO, one an item".to_owned(),
+        )),
         _ => {
             let walked = upkeep::months(root, vendor, &flags.scope)?;
             let total = walked.months.len();
-            let months: Vec<Month> = walked
+            let months: Vec<(String, Item)> = walked
                 .months
                 .into_iter()
                 .filter(|month| flags.all || month.lacks.has(kind))
+                .map(|month| (month.key.clone(), Item::Month(month)))
                 .collect();
             let said = format!(
                 "{} of the {total} month file(s) in scope{}; {} link(s) never followed, {} stray \
@@ -458,44 +450,35 @@ fn items(
                 walked.links,
                 walked.strays
             );
-            Ok((Items::Months(months), said))
+            Ok((months, said))
         }
     }
 }
 
-/// Builds one item.
+/// Builds one item, by the step of the verb that owns it.
 fn build_item(
     root: &Path,
     kind: Kind,
     vendor: Vendor,
-    items: &Items,
-    at: usize,
+    item: &Item,
     commit: Option<&str>,
 ) -> Outcome {
-    match items {
-        Items::Months(months) => {
-            let Some(month) = months.get(at) else {
-                return Outcome::failed("REFUSED", "no such item");
-            };
-            let path = match month.path(vendor) {
-                Ok(path) => path,
-                Err(why) => return Outcome::failed("REFUSED", why),
-            };
-            let id = crate::srt_builder::symbol_id(&month.symbol);
-            match kind {
-                Kind::DayIndex => crate::tix_rebuilder::upkeep_month(root, path, id),
-                Kind::SortIndex => crate::srt_builder::upkeep_month(root, path, id),
-                _ => crate::msum_builder::upkeep_month(root, path, id),
+    match item {
+        Item::Month(month) => match month.path(vendor) {
+            Ok(path) => {
+                let id = crate::srt_builder::symbol_id(&month.symbol);
+                match kind {
+                    Kind::DayIndex => crate::tix_rebuilder::upkeep_month(root, path, id),
+                    Kind::SortIndex => crate::srt_builder::upkeep_month(root, path, id),
+                    _ => crate::msum_builder::upkeep_month(root, path, id),
+                }
             }
-        }
-        Items::Spans(spans) => spans.get(at).map_or_else(
-            || Outcome::failed("REFUSED", "no such item"),
-            |span| crate::census_recount::upkeep_span(root, vendor, *span, commit),
-        ),
-        Items::Underlyings(symbols) => symbols.get(at).map_or_else(
-            || Outcome::failed("REFUSED", "no such item"),
-            |symbol| crate::gdfl_rekey::upkeep_underlying(root, *symbol),
-        ),
+            // UNREACHABLE: the walk proved the month's path when it found it
+            // (`pull::upkeep::months`); said, never assumed.
+            Err(why) => Outcome::failed("REFUSED", why),
+        },
+        Item::Span(span) => crate::census_recount::upkeep_span(root, vendor, *span, commit),
+        Item::Underlying(symbol) => crate::gdfl_rekey::upkeep_underlying(root, *symbol),
     }
 }
 
@@ -560,11 +543,10 @@ fn rate(items: usize, millis: u64) -> String {
 /// The receipt of one run.
 fn render_run(
     out: &mut String,
-    kind: Kind,
-    vendor: Vendor,
+    (kind, vendor): (Kind, Vendor),
     said: &str,
     ran: &Ran,
-    keys: &[String],
+    plan: &[(String, Item)],
 ) {
     let _ = writeln!(
         out,
@@ -574,7 +556,7 @@ fn render_run(
         ran.resumed
             .map_or_else(String::new, |resumed| format!(" (resumes run {resumed})")),
         ran.workers,
-        keys.len() - ran.skipped,
+        plan.len() - ran.skipped,
         ran.skipped
     );
     let _ = writeln!(out, "  items               {said}");
@@ -603,7 +585,7 @@ fn render_run(
         }
     );
     let mut shown = 0;
-    for (key, outcome) in keys.iter().zip(&ran.outcomes) {
+    for ((key, _), outcome) in plan.iter().zip(&ran.outcomes) {
         if let Some(outcome) = outcome.as_ref().filter(|outcome| !outcome.clean) {
             if shown < SHOWN {
                 let _ = writeln!(out, "    NOT CLEAN {key}: {}", outcome.why);
@@ -778,7 +760,7 @@ pub(crate) struct Host<'a> {
     pub(crate) commit: Option<&'a str>,
     pub(crate) now: &'a (dyn Fn() -> u64 + Sync),
     pub(crate) stop: &'a AtomicBool,
-    pub(crate) after_item: &'a (dyn Fn(usize, &Outcome) + Sync),
+    pub(crate) after_item: &'a (dyn Fn(&str, &Outcome) + Sync),
 }
 
 /// `cli upkeep`, against what `host` names, so every arm is driven by a test
@@ -883,14 +865,13 @@ fn run(
         kind.word(),
         vendor.as_str()
     );
-    let (items, said) = match items(root, kind, vendor, flags) {
+    let (plan, said) = match items(root, kind, vendor, flags) {
         Ok(found) => found,
         Err(why) => {
             let _ = writeln!(out, "{heading} REFUSED: {why}. Nothing was written.");
             return FAILED;
         }
     };
-    let keys = items.keys();
     let verb_line = format!("upkeep {}", arguments.join(" "));
     let held = match run_locks(root, vendor, &verb_line, (host.now)()) {
         Ok(held) => held,
@@ -910,12 +891,12 @@ fn run(
         now: host.now,
     };
     let (commit, after_item) = (host.commit, host.after_item);
-    let build = |at: usize, _: &str| {
-        let outcome = build_item(root, kind, vendor, &items, at, commit);
-        after_item(at, &outcome);
+    let build = |key: &str, item: &Item| {
+        let outcome = build_item(root, kind, vendor, item, commit);
+        after_item(key, &outcome);
         outcome
     };
-    let ran = upkeep::run(root, &ask, &keys, &build);
+    let ran = upkeep::run(root, &ask, &plan, &build);
     let released = release(held);
     let ran = match ran {
         Ok(ran) => ran,
@@ -924,7 +905,7 @@ fn run(
             return FAILED;
         }
     };
-    render_run(out, kind, vendor, &said, &ran, &keys);
+    render_run(out, (kind, vendor), &said, &ran, &plan);
     if let Err(why) = released {
         let _ = writeln!(out, "  LOCKS NOT RELEASED: {why}");
         return FAILED;

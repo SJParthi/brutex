@@ -10,7 +10,8 @@
     clippy::indexing_slicing,
     clippy::panic,
     clippy::too_many_lines,
-    reason = "a test that cannot panic cannot fail"
+    clippy::trivially_copy_pass_by_ref,
+    reason = "a test that cannot panic cannot fail; a builder is handed its item by reference"
 )]
 
 use std::fs;
@@ -59,13 +60,24 @@ impl Drop for Root {
     }
 }
 
-fn keys(n: usize) -> Vec<String> {
+/// A plan of `n` invented items, each its key and its index.
+fn keys(n: usize) -> Vec<(String, usize)> {
     (0..n)
-        .map(|k| format!("bars/gdfl/item-{k:03}.bin"))
+        .map(|k| (format!("bars/gdfl/item-{k:03}.bin"), k))
         .collect()
 }
 
-fn clean(_: usize, key: &str) -> Outcome {
+/// The keys of a plan, in order.
+fn names(plan: &[(String, usize)]) -> Vec<String> {
+    plan.iter().map(|(key, _)| key.clone()).collect()
+}
+
+/// A plan's digest, as its `run` line states it.
+fn digest(plan: &[(String, usize)]) -> u64 {
+    plan_digest(plan.iter().map(|(key, _)| key.as_str()))
+}
+
+fn clean(key: &str, _: &usize) -> Outcome {
     Outcome::clean("built", format!("{key} built"))
 }
 
@@ -279,11 +291,11 @@ fn reasons_words_and_keys_keep_a_line_whole() {
     let plan = keys(3);
     let mut swapped = plan.clone();
     swapped.swap(0, 1);
-    assert_eq!(plan_digest(&plan), plan_digest(&keys(3)));
-    assert_ne!(plan_digest(&plan), plan_digest(&swapped));
-    assert_ne!(plan_digest(&plan), plan_digest(&keys(2)));
+    assert_eq!(digest(&plan), digest(&keys(3)));
+    assert_ne!(digest(&plan), digest(&swapped));
+    assert_ne!(digest(&plan), digest(&keys(2)));
     assert_eq!(
-        plan_digest(&[]),
+        digest(&[]),
         brutex_core::universe::fnv1a(""),
         "the empty plan digests the empty text"
     );
@@ -313,11 +325,11 @@ fn a_run_builds_every_item_once_and_says_so_line_by_line() {
     let stop = AtomicBool::new(false);
     let now = || 1_000;
     let plan = keys(5);
-    let failing = |at: usize, key: &str| {
+    let failing = |key: &str, &at: &usize| {
         if at == 3 {
             Outcome::failed("REFUSED", "held by a writer")
         } else {
-            clean(at, key)
+            clean(key, &at)
         }
     };
     let ran = run(
@@ -340,7 +352,7 @@ fn a_run_builds_every_item_once_and_says_so_line_by_line() {
     assert_eq!(ran.outcomes[3].as_ref().unwrap().word, "REFUSED");
     assert_eq!(
         ran.outcomes[0].as_ref().unwrap().why,
-        format!("{} built", plan[0])
+        format!("{} built", plan[0].0)
     );
     let text = root.journal(Kind::SortIndex);
     let lines: Vec<&str> = text.lines().collect();
@@ -354,8 +366,8 @@ fn a_run_builds_every_item_once_and_says_so_line_by_line() {
         lines[0]
     );
     assert!(lines[0].ends_with(" resume=- at=1000"), "{}", lines[0]);
-    assert!(lines[0].contains(&format!("plan={:016x}", plan_digest(&plan))));
-    assert_eq!(items_of(&text, 1_000), plan);
+    assert!(lines[0].contains(&format!("plan={:016x}", digest(&plan))));
+    assert_eq!(items_of(&text, 1_000), names(&plan));
     assert!(
         lines[4].starts_with("item 1000 n=4 ok=3 of=5 t="),
         "{}",
@@ -429,11 +441,11 @@ fn a_plan_the_journal_cannot_hold_is_refused_before_anything_is_written() {
     let stop = AtomicBool::new(false);
     let now = || 1;
     let built = AtomicUsize::new(0);
-    let counting = |at: usize, key: &str| {
+    let counting = |key: &str, &at: &usize| {
         built.fetch_add(1, Ordering::Relaxed);
-        clean(at, key)
+        clean(key, &at)
     };
-    let spaced = vec!["bars/a.bin".to_owned(), "bars/b c.bin".to_owned()];
+    let spaced = vec![("bars/a.bin".to_owned(), 0), ("bars/b c.bin".to_owned(), 1)];
     let why = run(
         &root.0,
         &ask(Kind::SortIndex, 1, &stop, &now),
@@ -445,7 +457,7 @@ fn a_plan_the_journal_cannot_hold_is_refused_before_anything_is_written() {
         why.contains("space") && why.contains("nothing was written"),
         "{why}"
     );
-    let twice = vec!["bars/a.bin".to_owned(), "bars/a.bin".to_owned()];
+    let twice = vec![("bars/a.bin".to_owned(), 0), ("bars/a.bin".to_owned(), 1)];
     let why = run(
         &root.0,
         &ask(Kind::SortIndex, 1, &stop, &now),
@@ -555,11 +567,11 @@ fn a_stopped_run_resumes_along_its_chain() {
     let now = || 100;
     let plan = keys(10);
     let built = AtomicUsize::new(0);
-    let stopping = |at: usize, key: &str| {
+    let stopping = |key: &str, &at: &usize| {
         if built.fetch_add(1, Ordering::Relaxed) + 1 == 3 {
             stop.store(true, Ordering::Release);
         }
-        clean(at, key)
+        clean(key, &at)
     };
     let first = run(
         &root.0,
@@ -588,14 +600,14 @@ fn a_stopped_run_resumes_along_its_chain() {
     // The resume: two of the remaining seven, then a stop again.
     stop.store(false, Ordering::Release);
     built.store(0, Ordering::Relaxed);
-    let stopping_at_two = |at: usize, key: &str| {
+    let stopping_at_two = |key: &str, &at: &usize| {
         if built.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
             stop.store(true, Ordering::Release);
         }
         if at == 4 {
             Outcome::failed("REFUSED", "held")
         } else {
-            clean(at, key)
+            clean(key, &at)
         }
     };
     let mut resume = ask(Kind::SortIndex, 1, &stop, &now);
@@ -607,7 +619,7 @@ fn a_stopped_run_resumes_along_its_chain() {
     assert_eq!((second.built(), second.clean()), (2, 1));
     assert_eq!(second.how, How::Stopped);
     let text = root.journal(Kind::SortIndex);
-    assert_eq!(items_of(&text, 101), plan[3..5]);
+    assert_eq!(items_of(&text, 101), names(&plan[3..5]));
     assert!(text.contains(" items=7 skipped=3 "), "{text}");
     assert!(text.contains(" resume=100 at=100"), "{text}");
     // The resume of the resume: the failed item 4 and the five never reached.
@@ -622,7 +634,7 @@ fn a_stopped_run_resumes_along_its_chain() {
     assert_eq!(third.how, How::Done);
     assert!(third.whole());
     let text = root.journal(Kind::SortIndex);
-    assert_eq!(items_of(&text, 102), plan[4..]);
+    assert_eq!(items_of(&text, 102), names(&plan[4..]));
     // EVERY ITEM OF THE PLAN WAS CLOSED CLEAN EXACTLY ONCE across the chain.
     let mut closed: Vec<String> = entries(&text)
         .into_iter()
@@ -634,7 +646,7 @@ fn a_stopped_run_resumes_along_its_chain() {
         })
         .collect();
     closed.sort();
-    assert_eq!(closed, plan);
+    assert_eq!(closed, names(&plan));
     // A fourth resume of the whole chain has nothing left.
     resume.resume = Some(102);
     let nothing = run(&root.0, &resume, &plan, &clean).unwrap();
@@ -689,12 +701,12 @@ fn a_stop_request_names_its_run_and_a_stale_one_stops_nothing() {
     let plan = keys(6);
     // A STALE REQUEST, for a run long gone.
     request_stop(&root.0, Vendor::Gdfl, Kind::DayIndex, 699).unwrap();
-    let asking = |at: usize, key: &str| {
+    let asking = |key: &str, &at: &usize| {
         if at == 1 {
             let path = request_stop(&root.0, Vendor::Gdfl, Kind::DayIndex, 700).unwrap();
             assert_eq!(path, root.0.join(stop_name(Vendor::Gdfl, Kind::DayIndex)));
         }
-        clean(at, key)
+        clean(key, &at)
     };
     let ran = run(
         &root.0,
@@ -749,13 +761,13 @@ fn eight_workers_build_every_item_once_and_the_totals_rise_by_one() {
     let now = || 3;
     let plan = keys(200);
     let counts: Vec<AtomicUsize> = (0..plan.len()).map(|_| AtomicUsize::new(0)).collect();
-    let counting = |at: usize, key: &str| {
+    let counting = |key: &str, &at: &usize| {
         counts[at].fetch_add(1, Ordering::Relaxed);
-        assert_eq!(key, plan[at]);
+        assert_eq!(key, plan[at].0);
         if at.is_multiple_of(7) {
             Outcome::failed("REFUSED", "seventh")
         } else {
-            clean(at, key)
+            clean(key, &at)
         }
     };
     let ran = run(
@@ -795,7 +807,7 @@ fn eight_workers_build_every_item_once_and_the_totals_rise_by_one() {
     assert_eq!(n, 200);
     let mut seen = items_of(&text, 3);
     seen.sort();
-    assert_eq!(seen, plan);
+    assert_eq!(seen, names(&plan));
     // NEVER MORE WORKERS THAN ITEMS.
     let few = run(
         &root.0,
@@ -848,7 +860,7 @@ fn a_torn_tail_is_ended_as_a_void_line() {
     .unwrap();
     assert_eq!(again.torn, 0);
     // A reason that ends like a void line is written so it does not read as one.
-    let voidish = |_: usize, _: &str| Outcome::clean("built", format!("ends{VOID}"));
+    let voidish = |_: &str, _: &usize| Outcome::clean("built", format!("ends{VOID}"));
     run(
         &root.0,
         &ask(Kind::SortIndex, 1, &stop, &now),
@@ -875,7 +887,7 @@ fn the_status_of_a_long_run_comes_from_its_last_line() {
     let root = Root::new();
     let stop = AtomicBool::new(false);
     let now = || 40;
-    let long = |_: usize, _: &str| Outcome::clean("built", "w".repeat(900));
+    let long = |_: &str, _: &usize| Outcome::clean("built", "w".repeat(900));
     let plan = keys(usize::try_from(TAIL_BYTES / 900).unwrap() * 3);
     run(&root.0, &ask(Kind::SortIndex, 2, &stop, &now), &plan, &long).unwrap();
     let length = fs::metadata(root.0.join(journal_name(Vendor::Gdfl, Kind::SortIndex)))
@@ -994,7 +1006,7 @@ impl Lines for Failing {
 }
 
 /// What `run` settles before `drive`, for a fresh run.
-fn begun(id: u64, plan: &[String]) -> Begun<'_> {
+fn begun(id: u64, plan: &[(String, usize)]) -> Begun<'_, usize> {
     Begun {
         id,
         plan,
@@ -1021,9 +1033,9 @@ fn a_journal_that_stops_taking_lines_fails_the_run_and_counts_only_what_it_recor
     let asked = ask(Kind::SortIndex, 1, &stop, &now);
     // The `run` line refused: an error, nothing built.
     let built = AtomicUsize::new(0);
-    let counting = |at: usize, key: &str| {
+    let counting = |key: &str, &at: &usize| {
         built.fetch_add(1, Ordering::Relaxed);
-        clean(at, key)
+        clean(key, &at)
     };
     let mut lines = failing(0, false);
     let why = drive(&mut lines, &root.0, &asked, begun(60, &plan), &counting).unwrap_err();
@@ -1235,6 +1247,17 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
     .unwrap();
     fs::create_dir_all(root.0.join("bars/gdfl/XYZ")).unwrap();
     fs::create_dir_all(base.join("NOTASEG")).unwrap();
+    // A file named like a rung, under a symbol and under a contract: strays.
+    fs::write(base.join("INDEX/NIFTY/1day"), "").unwrap();
+    fs::write(base.join("FNO/NIFTY/2019-03-28-1150000-CE/1day"), "").unwrap();
+    // A link beside a month that is not a month, and a link named like a
+    // contract: never followed.
+    std::os::unix::fs::symlink("nowhere", base.join("INDEX/NIFTY/1s/link.tix")).unwrap();
+    std::os::unix::fs::symlink(
+        base.join("FNO/NIFTY/2019-03-28-1150000-CE"),
+        base.join("FNO/NIFTY/2019-03-28-1170000-CE"),
+    )
+    .unwrap();
     let walked = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap();
     let listed: Vec<(&str, Vec<Kind>)> = walked
         .months
@@ -1262,9 +1285,9 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
             ),
         ]
     );
-    assert_eq!(walked.links, 2, "{walked:?}");
-    assert_eq!(walked.strays, 8, "{walked:?}");
-    assert_eq!(walked.strays_named.len(), 8);
+    assert_eq!(walked.links, 4, "{walked:?}");
+    assert_eq!(walked.strays, 10, "{walked:?}");
+    assert_eq!(walked.strays_named.len(), 10);
     let first = &walked.months[2];
     assert_eq!(first.path(Vendor::Gdfl).unwrap(), big);
     assert_eq!(
@@ -1424,4 +1447,121 @@ fn a_directory_that_cannot_be_listed_refuses_the_walk() {
     assert_eq!(walked.strays, 1);
     let why = super::listed(&base.join("NIFTY")).unwrap_err();
     assert!(why.contains("cannot list"), "{why}");
+}
+
+/// Spins until `flag` is set, failing the test after ten seconds.
+fn wait_for(flag: &AtomicBool) {
+    let started = std::time::Instant::now();
+    while !flag.load(Ordering::Acquire) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a rendezvous of the test never came"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Lines whose first `item` line is refused, saying so through `refused`.
+struct RefuseFirstItem<'a> {
+    inner: Journal,
+    refused: &'a AtomicBool,
+}
+
+impl Lines for RefuseFirstItem<'_> {
+    fn line(&mut self, text: &str) -> Result<(), String> {
+        if text.starts_with("item ") && !self.refused.load(Ordering::Acquire) {
+            self.refused.store(true, Ordering::Release);
+            return Err("no space left on device (first item)".to_owned());
+        }
+        self.inner.line(text)
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        Lines::sync(&mut self.inner)
+    }
+}
+
+/// **AN ITEM BUILT WHILE ANOTHER WORKER'S LINE IS REFUSED IS NOT COUNTED.**
+/// Two workers each hold an item; the first's line is refused while the
+/// second is still building; the second then finds the refusal and records
+/// nothing, so neither item is counted and a resume builds both.
+#[test]
+fn an_item_built_while_another_line_is_refused_is_not_counted() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 70;
+    let plan = keys(3);
+    let (second_started, refused) = (AtomicBool::new(false), AtomicBool::new(false));
+    let racing = |key: &str, &at: &usize| {
+        if at == 0 {
+            wait_for(&second_started);
+        } else {
+            second_started.store(true, Ordering::Release);
+            wait_for(&refused);
+        }
+        clean(key, &at)
+    };
+    let mut lines = RefuseFirstItem {
+        inner: Journal::open(&root.0, Vendor::Gdfl, Kind::SortIndex).unwrap(),
+        refused: &refused,
+    };
+    let asked = ask(Kind::SortIndex, 2, &stop, &now);
+    let ran = drive(&mut lines, &root.0, &asked, begun(70, &plan), &racing).unwrap();
+    assert_eq!(ran.how, How::Failed);
+    assert_eq!(ran.workers, 2);
+    assert_eq!(ran.built(), 0, "{:?}", ran.outcomes);
+    assert_eq!(ran.left(), 3);
+    assert!(ran.why.contains("first item"), "{}", ran.why);
+}
+
+/// A Stop seen once the last item was taken leaves nothing: the run is done,
+/// and whole.
+#[test]
+fn a_stop_seen_after_the_last_item_leaves_the_run_done() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 80;
+    let plan = keys(3);
+    let last = |key: &str, &at: &usize| {
+        if at == 2 {
+            stop.store(true, Ordering::Release);
+        }
+        clean(key, &at)
+    };
+    let ran = run(&root.0, &ask(Kind::SortIndex, 1, &stop, &now), &plan, &last).unwrap();
+    assert_eq!((ran.how, ran.built(), ran.left()), (How::Done, 3, 0));
+    assert!(ran.whole());
+}
+
+/// A flush refused right after the `run` line builds nothing and is an
+/// error.
+#[test]
+fn a_flush_refused_after_the_run_line_builds_nothing() {
+    struct FirstSync {
+        inner: Journal,
+    }
+    impl Lines for FirstSync {
+        fn line(&mut self, text: &str) -> Result<(), String> {
+            self.inner.line(text)
+        }
+        fn sync(&mut self) -> Result<(), String> {
+            Err("flush refused at the run line".to_owned())
+        }
+    }
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 90;
+    let built = AtomicUsize::new(0);
+    let counting = |key: &str, &at: &usize| {
+        built.fetch_add(1, Ordering::Relaxed);
+        clean(key, &at)
+    };
+    let mut lines = FirstSync {
+        inner: Journal::open(&root.0, Vendor::Gdfl, Kind::SortIndex).unwrap(),
+    };
+    let plan = keys(2);
+    let asked = ask(Kind::SortIndex, 1, &stop, &now);
+    let why = drive(&mut lines, &root.0, &asked, begun(90, &plan), &counting).unwrap_err();
+    assert!(why.contains("flush refused at the run line"), "{why}");
+    assert_eq!(built.load(Ordering::Relaxed), 0);
 }

@@ -558,8 +558,8 @@ pub fn key_refused(key: &str) -> Option<String> {
 
 /// The plan's digest on the `run` line: FNV-1a of its keys, one per line.
 #[must_use]
-pub fn plan_digest(keys: &[String]) -> u64 {
-    let mut joined = String::with_capacity(keys.iter().map(|key| key.len() + 1).sum());
+pub fn plan_digest<'a>(keys: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut joined = String::new();
     for key in keys {
         joined.push_str(key);
         joined.push('\n');
@@ -1004,17 +1004,16 @@ impl Shared<'_> {
 fn run_line(
     id: u64,
     ask: &Ask<'_>,
-    plan: &[String],
+    digest: u64,
     (workers, of, skipped): (usize, u64, usize),
 ) -> String {
     format!(
         "run {id} {FORMAT} vendor={} kind={} commit={} workers={workers} asked={} items={of} \
-         skipped={skipped} plan={:016x} resume={} at={}",
+         skipped={skipped} plan={digest:016x} resume={} at={}",
         ask.vendor.as_str(),
         ask.kind.word(),
         ask.commit.unwrap_or("unstamped"),
         ask.workers,
-        plan_digest(plan),
         ask.resume
             .map_or_else(|| "-".to_owned(), |resumed| resumed.to_string()),
         (ask.now)()
@@ -1022,14 +1021,15 @@ fn run_line(
 }
 
 /// How a run ended and why, from what the workers left: a refused line, the
-/// items left, and whether a Stop was seen.
+/// items left, and whether a Stop was seen. A Stop seen once the last item
+/// was taken left nothing: the run is done.
 fn ending(fault: Option<&str>, left: u64, stopped: bool, id: u64) -> (How, String) {
     match fault {
         Some(why) => (
             How::Failed,
             format!("the journal stopped taking lines: {why}"),
         ),
-        None if left > 0 && stopped => (
+        None if stopped && left > 0 => (
             How::Stopped,
             format!("a Stop was asked; {left} item(s) left for a resume of run {id}"),
         ),
@@ -1039,18 +1039,19 @@ fn ending(fault: Option<&str>, left: u64, stopped: bool, id: u64) -> (How, Strin
 
 /// What [`run`] settled before the first line: the id, the plan, the keys
 /// the resumed chain closed clean, and the torn bytes it ended.
-struct Begun<'a> {
+struct Begun<'a, T> {
     id: u64,
-    plan: &'a [String],
+    plan: &'a [(String, T)],
     /// `None` for a fresh run: nothing is skipped.
     done: Option<HashSet<String>>,
     torn: u64,
 }
 
-/// Runs `build` over every key of `plan` the resumed chain did not close
+/// Runs `build` over every item of `plan` the resumed chain did not close
 /// clean, on [`Kind::workers`] workers, as one tracked run of `ask.kind` for
-/// `ask.vendor` under `root`. `build` is handed the item's index in `plan` and
-/// its key.
+/// `ask.vendor` under `root`. Each item of the plan is its key, the word the
+/// journal names it by, and what the caller builds from; `build` is handed
+/// both.
 ///
 /// # Errors
 ///
@@ -1060,14 +1061,14 @@ struct Begun<'a> {
 /// that cannot be written. Nothing is built then. Once items are built, a
 /// journal that stops taking lines ends the run [`How::Failed`] instead, with
 /// what was built; so does a lock the host will not release.
-pub fn run(
+pub fn run<T: Sync>(
     root: &Path,
     ask: &Ask<'_>,
-    plan: &[String],
-    build: &(dyn Fn(usize, &str) -> Outcome + Sync),
+    plan: &[(String, T)],
+    build: &(dyn Fn(&str, &T) -> Outcome + Sync),
 ) -> Result<Ran, String> {
     let mut seen = HashSet::with_capacity(plan.len());
-    for key in plan {
+    for (key, _) in plan {
         if let Some(why) = key_refused(key) {
             return Err(format!("{why}; nothing was written"));
         }
@@ -1103,12 +1104,12 @@ pub fn run(
 
 /// The run itself, once its id is settled: the `run` line, the workers, the
 /// `end` line.
-fn drive(
+fn drive<T: Sync>(
     lines: &mut dyn Lines,
     root: &Path,
     ask: &Ask<'_>,
-    begun: Begun<'_>,
-    build: &(dyn Fn(usize, &str) -> Outcome + Sync),
+    begun: Begun<'_, T>,
+    build: &(dyn Fn(&str, &T) -> Outcome + Sync),
 ) -> Result<Ran, String> {
     let Begun {
         id,
@@ -1116,16 +1117,16 @@ fn drive(
         done,
         torn,
     } = begun;
-    let todo: Vec<usize> = (0..plan.len())
-        .filter(|&at| {
-            plan.get(at)
-                .is_some_and(|key| done.as_ref().is_none_or(|done| !done.contains(key)))
-        })
+    let todo: Vec<(usize, &(String, T))> = plan
+        .iter()
+        .enumerate()
+        .filter(|(_, (key, _))| done.as_ref().is_none_or(|done| !done.contains(key)))
         .collect();
     let skipped = plan.len() - todo.len();
     let workers = ask.kind.workers(ask.workers).min(todo.len().max(1));
     let of = u64::try_from(todo.len()).unwrap_or(u64::MAX);
-    lines.line(&run_line(id, ask, plan, (workers, of, skipped)))?;
+    let digest = plan_digest(plan.iter().map(|(key, _)| key.as_str()));
+    lines.line(&run_line(id, ask, digest, (workers, of, skipped)))?;
     lines.sync()?;
     let stop_file = root.join(stop_name(ask.vendor, ask.kind));
     let started = Instant::now();
@@ -1150,11 +1151,10 @@ fn drive(
                 stopped.store(true, Ordering::Release);
                 return;
             }
-            let Some(&at) = todo.get(next.fetch_add(1, Ordering::AcqRel)) else {
+            let Some(&(at, (key, item))) = todo.get(next.fetch_add(1, Ordering::AcqRel)) else {
                 return;
             };
-            let key = plan.get(at).map_or("", String::as_str);
-            let outcome = build(at, key);
+            let outcome = build(key, item);
             let line = |n: u64, ok: u64, outcome: &Outcome| {
                 format!(
                     "item {id} n={n} ok={ok} of={of} t={} clean={} word={} key={key} why={}",

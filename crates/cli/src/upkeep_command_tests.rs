@@ -174,14 +174,14 @@ fn indexed(root: &Path, at: StorePath<'_>, symbol: &str) -> bool {
         .is_ok_and(|index| index.runs().len() == 1 && index.coverage() == header.n_valid)
 }
 
-fn noop(_: usize, _: &Outcome) {}
+fn noop(_: &str, _: &Outcome) {}
 
 /// Runs the verb on `root` with a fixed clock, the given Stop and hook.
 fn call(
     root: &Path,
     arguments: &[&str],
     stop: &AtomicBool,
-    after: &(dyn Fn(usize, &Outcome) + Sync),
+    after: &(dyn Fn(&str, &Outcome) + Sync),
 ) -> (u8, String) {
     let owned = root.to_path_buf();
     let store = move || Ok(owned.clone());
@@ -232,7 +232,7 @@ fn an_upkeep_run_stops_and_resumes_where_it_stopped() {
     let whole = root.twin();
     let stop = AtomicBool::new(false);
     let built = AtomicUsize::new(0);
-    let stopping = |_: usize, _: &Outcome| {
+    let stopping = |_: &str, _: &Outcome| {
         if built.fetch_add(1, Ordering::Relaxed) + 1 == 3 {
             stop.store(true, Ordering::Release);
         }
@@ -705,6 +705,10 @@ fn a_rekey_that_cannot_read_every_file_writes_nothing() {
         FileKind::Bars,
     );
     fs::write(damaged.to_path_buf(&root.0), b"not a bar file").unwrap();
+    // Beside the underlyings: a file and a name no symbol spells. Neither is
+    // an item.
+    fs::write(root.0.join("bars/gdfl/NSE/FNO/README"), "").unwrap();
+    fs::create_dir_all(root.0.join("bars/gdfl/NSE/FNO/nifty")).unwrap();
     let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("NOT_APPLIED 1"), "{out}");
@@ -814,7 +818,7 @@ fn a_recount_runs_one_month_of_days_an_item_and_resumes() {
         month(&root.0, path, "NIFTY", 30, false);
     }
     let stop = AtomicBool::new(false);
-    let once = |_: usize, _: &Outcome| stop.store(true, Ordering::Release);
+    let once = |_: &str, _: &Outcome| stop.store(true, Ordering::Release);
     let arguments = [
         "run",
         "recount",
