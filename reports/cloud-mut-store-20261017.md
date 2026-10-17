@@ -309,8 +309,13 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
     - The 2 timeouts are the `first_at_or_after` pair above.
     - The other 715 of the 1,245 were caught or unviable in its earlier
       legs.
-    - The 8, with the 6 that met the full disk, are being re-tested with
-      the full suite.
+    - **Re-tested with the full suite** (no skip but `cited_commits`, on
+      `1f102a94`): 16 mutants matched, 8 caught and 8 missed.
+      - Caught: all 6 that met the full disk (3 of them had been recorded
+        unviable), and 2 more of `DayBlock` that the patterns also
+        matched.
+      - Missed: exactly the 8 argued equivalents, so no skipped test
+        catches any of them.
   - **`last_before`'s widened bisection** (run C, timeouts): `a < b` → `<=`
     never ends, and the midpoint's `+` → `*`, `/` → `%` and `-` → `+` end
     late or not at all. Two base tests in `sealed_tests.rs` had no bound:
@@ -319,6 +324,20 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
     run on a worker given a minute (each takes 0.4 s), so the lib suite
     fails in 64 to 128 s under those mutants (`1f102a94`). Run C was
     restarted on that tree.
+  - **`audited`'s loop `while chunk < n_blocks`** (run C, timeouts):
+    - Made `==`, an empty month's audit never ends: `count` is 0, so
+      `chunk` never moves. Run alone, only `an_empty_month_is_a_head_alone`
+      loops, and it held the sink. Its body now runs on a worker given a
+      minute, with the sink held on the test's own thread, so the lib
+      suite ends in 70 s with 18 tests red (`349a8a34`).
+    - Made `<=`, every audit of a non-empty month loops at its end, so
+      each of the 14 audits in `sealed_tests.rs` hangs. That is
+      **detected, not survived**. These lines are unchanged on this branch
+      (gate 18 does not mutate them), and bounding every audit of the base
+      tests is beyond this pass. Measuring every hanging test one by one
+      under this mutant ended in the container's restart.
+  - **The container restarted at about 23:30.** Run C stopped part way and
+    resumed with `--iterate`. Nothing committed was lost.
   - **Run C** (`sealed.rs`, `sealed_codec.rs`, 910 mutants): 412 done, 392
     caught, 17 unviable, 3 missed.
     - `Head::check` → `Ok(())` and its `||` → `&&`: run C skips
