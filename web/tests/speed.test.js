@@ -108,6 +108,7 @@ test('the_speed_sheet_uses_the_pages_own_requests', async () => {
   assert.throws(() => sheet.readCapture(JSON.stringify({ requests: [{ url: '/x' }] })), /method-less/);
   assert.throws(() => sheet.readCapture('{}'), /no requests list/);
   assert.equal(sheet.readCapture(JSON.stringify({ requests: [{ method: 'head', url: '/x' }] }))[0].page, '?');
+  assert.equal(sheet.readCapture(JSON.stringify({ requests: [{ page: '', method: 'GET', url: '/x' }] }))[0].page, '', 'a page named empty is kept as named');
   // A builder that answers null for a selection is said, never dropped in silence.
   const none = sheet.requestsFor({ ...CTX, instrument: 'not a key' });
   assert.ok(none.skipped.some((s) => s.includes('rungsUrl built no request')), none.skipped.join('\n'));
@@ -633,10 +634,13 @@ test('the sheet\'s command line is read and every misuse is named', () => {
     [['--base', 'http://h:1', '--clients', '1,0'], /--clients is a comma list/],
     [['--base', 'http://h:1', '--clients', '513'], /--clients is a comma list/],
     [['--base', 'http://h:1', '--day', '30-09-2026'], /--day is YYYY-MM-DD/],
-    [['--base', 'http://h:1', '--month', '2026-9'], /--month is YYYY-MM/]
+    [['--base', 'http://h:1', '--month', '2026-9'], /--month is YYYY-MM/],
+    [['--base', 'http://h:1', '--clients', ''], /--clients is a comma list/],
+    [['--base', ''], /--base must be an origin/]
   ];
   for (const [argv, why] of bad) assert.throws(() => sheet.parseArgs(argv), why);
   assert.deepEqual(sheet.parseArgs(['--base', 'http://h:1', '--clients', '1,512']).clients, [1, 512], '512 clients is the largest allowed');
+  assert.equal(sheet.parseArgs(['--base', 'http://h:1', '--instrument', '']).instrument, '', 'an empty instrument is kept as given, and refused where it is asked about, never defaulted');
   assert.deepEqual(sheet.monthDays('2024-02'), { from: '2024-02-01', to: '2024-02-29' });
 });
 
@@ -805,7 +809,10 @@ test('the harness\'s command line is read and every misuse is named', () => {
     [['--base', 'http://h:1', '--pages', '/db,gaps'], /--pages is a comma list of paths/],
     [['--base', 'http://h:1', '--idle-tabs', '65'], /--idle-tabs is a comma list/],
     [['--base', 'http://h:1', '--idle-tabs', '1,0'], /--idle-tabs is a comma list/],
-    [['--base', 'http://h:1', '--idle-tabs', '1.5'], /--idle-tabs is a comma list/]
+    [['--base', 'http://h:1', '--idle-tabs', '1.5'], /--idle-tabs is a comma list/],
+    [['--base', 'http://h:1', '--idle-tabs', ''], /--idle-tabs is a comma list/],
+    [['--base', 'http://h:1', '--pages', ''], /--pages is a comma list of paths/],
+    [['--base', ''], /--base must be an origin/]
   ];
   for (const [argv, why] of bad) assert.throws(() => harness.parseArgs(argv), why);
   assert.deepEqual(harness.parseArgs(['--base', 'http://h:1', '--idle-tabs', '64']).idleTabs, [64], '64 idle tabs is the most allowed');
@@ -1093,6 +1100,12 @@ test('the last edges: which browser, how an exception is named, odd captures, od
   const base = sheet.parseArgs(['--base', 'http://stand.in', '--n', '1', '--clients', '1']);
   const found = await sheet.runSheet({ ...base, feed: 'zerodha' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.deepEqual([found.ctx?.timeframe, found.ctx?.month, found.ctx?.day], ['1min', '2026-09', '2026-09-30']);
+  for (const bad of ['', '{"requests":[{"method":"POST","url":"/pull"}]}']) {
+    const unread = await sheet.runSheet({ ...base, feed: 'zerodha' }, { send: standIn({ ignore: new Set() }).send, log: () => {}, capture: bad });
+    assert.equal(unread.ok, false);
+    assert.equal(unread.rows.length, 0, 'nothing is timed from a capture that cannot be read');
+    assert.match(unread.failures[0], /^the capture of the pages' own requests could not be read: /);
+  }
   const lost = await sheet.runSheet(base, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.deepEqual(lost.failures, ['discovering the selection: /feeds.json named no feed; pass --feed']);
   assert.equal(lost.ok, false);

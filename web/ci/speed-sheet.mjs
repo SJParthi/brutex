@@ -455,7 +455,16 @@ export async function runSheet(args, deps = {}) {
     return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit };
   }
   const captureText = deps.capture ?? (args.fromPages ? readFileSync(args.fromPages, 'utf8') : null);
-  const { requests, skipped } = requestsFor(ctx, captureText === null ? [] : readCapture(captureText));
+  /** @type {{page: string, method: string, url: string}[]} */
+  let captured = [];
+  try {
+    captured = captureText === null ? [] : readCapture(captureText);
+  } catch (why) {
+    // A CAPTURE THAT CANNOT BE READ IS A FAILED RUN, NAMED: replaying part
+    // of it, or none of it in silence, would time fewer pages than asked.
+    return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx, commit };
+  }
+  const { requests, skipped } = requestsFor(ctx, captured);
   if (captureText === null) notMeasured.push('the requests /gaps, /audit, /markets and the other pages build inline: no --from-pages capture was given');
   log(`speed sheet: ${requests.length} requests for ${ctx.feed} ${ctx.instrument} ${ctx.timeframe} ${ctx.month}, build ${commit ?? 'not named'}`);
 
