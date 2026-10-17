@@ -2560,7 +2560,7 @@ impl BarFile {
         // sealed are unchanged; only where they are held moved.
         let mut room = [0u8; MAX_BLOCK_LEN];
         // A REFUSED WRITE OF THE SIDECAR NAMES THE SIDECAR. It named the bar
-        // file, which the host had not refused (cloud pass 2026-10-17).
+        // file, which the host had not refused (cloud pass 2026-10-17, D-6017).
         let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them

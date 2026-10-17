@@ -326,10 +326,9 @@ impl BarFile {
     ///
     /// Only for a month that commits rows: it is reached only through
     /// [`Self::keep_sort_index`], which returns first for one that commits
-    /// none. A guard here that
-    /// answered "no run" for an empty month was reached by no input (cloud
-    /// pass 2026-10-17); an empty month now reaches the build, which refuses
-    /// it as [`Why::Empty`].
+    /// none. A guard here that answered "no run" for an empty month was
+    /// reached by no input (cloud pass 2026-10-17, D-6017); an empty month
+    /// would now reach the build, which refuses it as [`Why::Empty`].
     ///
     /// # Errors
     ///
