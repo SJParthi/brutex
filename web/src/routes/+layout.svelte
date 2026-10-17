@@ -50,7 +50,8 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { watchVisible } from '$lib/page-requests.js';
-  import { firstCheck, apiTitle } from '$lib/api-status.js';
+  import { firstCheck, apiTitle, upCheck, UP_CHECKING } from '$lib/api-status.js';
+  import '$lib/page-report.js'; // R3-15: every page reports a failed request, an uncaught error, a fallback
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
   import { buildLabel } from '$lib/runtime-inspection.js';
   import CopyAlert from '$lib/CopyAlert.svelte';
@@ -118,6 +119,7 @@
       why: 'Whether a stored series is complete against the exchange calendar — only a minute inside a window the exchange actually traded counts as a loss.'
     },
     { href: '/audit', label: 'Audit' },
+    { href: '/speed', label: 'Speed', why: 'How fast this server has answered: p50, p99 and the max per route, since the start, over the last minute and the last hour, with the build that answered (R3-15, /speed.json).' },
     // WHAT THE EXCHANGE SAYS ABOUT THE FEED'S OWN SYMBOLS.
     //
     // Every tab above is about BARS -- what was pulled, what is stored, what a
@@ -647,7 +649,8 @@
   /* ====================================================================
      THE STATUS STRIP — reachability
      --------------------------------------------------------------------
-     Probed against `/feeds.json` and NOT against `/health`, for a reason
+     Probed against `/inspection.json`, headers only (R3-15; it was a whole
+     `GET /feeds.json` until then), and NOT against `/health`, for a reason
      worth writing down: in development the Vite proxy forwards a fixed list
      of routes and `/health` is not on it, so the request never reaches Rust.
      A probe that treats "the dev server answered instead" as "the API is up"
@@ -671,44 +674,16 @@
    * interchangeable and are kept apart for that reason. `at` is 0 before the
    * first probe returns, and nothing renders it while the state is `checking`.
    */
-  /** @type {{ state: 'checking' | 'up' | 'down', ms: number, why: string | null, at: number }} */
-  let api = $state({ state: 'checking', ms: 0, why: null, at: 0 });
+  /** @type {import('$lib/api-status.js').ApiState} */
+  let api = $state({ ...UP_CHECKING });
   let refreshProbe = () => {};
 
+  /* HEADERS ONLY (R3-15): `HEAD /inspection.json`, a constant answer, in
+     place of the whole `/feeds.json` body every 8 s. See `$lib/api-status.js`. */
   /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
   async function probe(ticket) {
-    const t0 = performance.now();
-    try {
-      const r = await ask('/feeds.json', { cache: 'no-store', signal: ticket.signal });
-      if (!ticket.current()) return;
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const ct = r.headers.get('content-type') ?? '';
-      if (!ct.includes('json')) {
-        throw new Error(`answered ${ct || 'no content-type'}, not JSON — the API is not behind this route`);
-      }
-      await r.json();
-      if (!ticket.current()) return;
-      api = { state: 'up', ms: Math.round(performance.now() - t0), why: null, at: Date.now() };
-    } catch (why) {
-      if (!ticket.current()) return;
-      /* A CAUGHT VALUE IS `unknown`, AND THAT IS THE TRUTH ABOUT `throw`.
-         Anything can be thrown, so nothing about `.message` is guaranteed —
-         which is precisely why this line reads it defensively and falls back
-         to the value itself. The cast states the shape the read assumes and
-         leaves the runtime expression untouched: a `TypeError` from a refused
-         connection has a message, a `DOMException` from an aborted fetch has
-         one too, and a bare string thrown by anything else has none and is
-         printed whole. Narrowing with `instanceof Error` instead would be a
-         behaviour change — `DOMException` does not inherit from `Error` in the
-         browser, so the abort case would lose its message and print
-         `[object DOMException]`. */
-      api = {
-        state: 'down',
-        ms: Math.round(performance.now() - t0),
-        why: String(/** @type {{ message?: unknown }} */ (why)?.message ?? why),
-        at: Date.now()
-      };
-    }
+    const next = await upCheck(ask, { signal: ticket.signal, current: () => ticket.current() });
+    if (next) api = next;
   }
 
   /* THE FIRST CHECK RUNS AT LOAD EVEN IN A TAB THAT IS NOT YET VISIBLE

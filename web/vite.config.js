@@ -1,4 +1,7 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { builtPages, budgetVerdict } from './src/lib/speed.js';
 
 /**
  * `/api` proxies to the Rust server in development so the browser talks to one
@@ -316,11 +319,70 @@ const ROUTES = [
 	// Both EXACTLY, for the reason above: `/sources` itself is the All sources
 	// page and must stay with the dev server.
 	'/sources.json',
-	'/sources/bars.json'
+	'/sources/bars.json',
+	// THE SERVER'S OWN SPEED AND A PAGE'S OWN FAILURE (R3-14 serves both; R3-15
+	// reads them): the Speed page draws `/speed.json`, and `$lib/page-report.js`
+	// posts a failed request, an uncaught error or a fallback to
+	// `/page-report`. Without them `npm run dev` answers the HTML fallback: the
+	// Speed page refuses it on the content type, and a report is lost in
+	// silence. `/speed` itself is a Svelte route and stays with the dev server.
+	'/speed.json',
+	'/page-report'
 ];
 
+/**
+ * THE PAGE BUDGET — what each page ships on its first load, and a build that
+ * fails when one is past its budget (R3-15).
+ *
+ * Nothing stopped a page's code from growing: `/db` reached 727 KB of script
+ * and style on its first load, every byte of it on the wire (the server
+ * compresses nothing), against a 400 KB target nobody checked. The rule is
+ * `$lib/speed.js` (`builtPages`, `budgetVerdict`, `BUNDLE_BUDGETS`), read over
+ * the client build's own output once it is written, so the build and
+ * `web/tests/speed.test.js` (over the committed `web/build`) apply one rule.
+ *
+ * Only the client build is weighed: it is the one whose output carries
+ * `_app/immutable/entry`, which is what a browser loads. A build the rule
+ * cannot read is an error naming what was missing, never a pass.
+ */
+function pageBudget() {
+	return {
+		name: 'brutex-page-budget',
+		apply: /** @type {'build'} */ ('build'),
+		/** @this {{error: (message: string) => never, warn: (message: string) => void}} @param {{dir?: string}} options */
+		writeBundle(options) {
+			const dir = options.dir;
+			if (!dir || !existsSync(join(dir, '_app/immutable/entry'))) return;
+			/** @type {Map<string, {size: number, text?: string}>} */
+			const files = new Map();
+			/** @param {string} at */
+			const walk = (at) => {
+				for (const name of readdirSync(at)) {
+					const full = join(at, name);
+					const stat = statSync(full);
+					if (stat.isDirectory()) walk(full);
+					else if (!name.endsWith('.map')) {
+						const path = relative(dir, full).split(sep).join('/');
+						files.set(path, { size: stat.size, text: name.endsWith('.js') ? readFileSync(full, 'utf8') : undefined });
+					}
+				}
+			};
+			walk(dir);
+			const verdict = budgetVerdict(builtPages(files));
+			for (const v of verdict) console.log(`page budget  ${v.line}`);
+			const over = verdict.filter((v) => v.over);
+			if (over.length > 0) {
+				this.error(
+					`${over.length} page(s) past their budget in $lib/speed.js BUNDLE_BUDGETS: ` +
+						over.map((v) => v.line).join('; ')
+				);
+			}
+		}
+	};
+}
+
 export default {
-	plugins: [sveltekit()],
+	plugins: [sveltekit(), pageBudget()],
 	// SOURCE MAPS ARE BUILT AND NOT COMMITTED, AND `hidden` IS WHY THAT WORKS.
 	//
 	// The bundle is minified and `web/build` is committed, so the artifact in
