@@ -44,7 +44,11 @@ fn main() -> std::process::ExitCode {
     // canonicalize-or-fallback. A removed external volume, a dangling symlink,
     // or a regular file therefore stops here: no log sink is installed and no
     // command is dispatched against a different directory.
-    if let Err(why) = cli::preflight_store_root() {
+    // THE WATCHDOG RUNS WHEN THE STORE IS AWAY (R3-32): an unmounted drive is
+    // one of the outages it reports, so its verbs skip the store preflight.
+    let verb = std::env::args_os().nth(1);
+    let store_free = cli::watchdog_command::needs_no_store(verb.as_deref());
+    if !store_free && let Err(why) = cli::preflight_store_root() {
         let refused = format!("refused: {why}\n");
         let code = cli::deliver(cli::FAILED, &refused, &mut stdout, &mut stderr);
         return std::process::ExitCode::from(code);
@@ -75,6 +79,20 @@ fn main() -> std::process::ExitCode {
     // failure, so a run whose events landed somewhere `/logs` does not read
     // looked exactly like a run that was fully observable. `install_log`'s doc
     // carries the measurement.
-    let shown = format!("{where_events_went}\n{out}");
+    // WHERE THE BANNER GOES (R3-32). `launch-agent`'s stdout is the agent file
+    // the operator's shell writes into ~/Library/LaunchAgents, where one banner
+    // line would make it no plist, so it is said on stderr; the once-a-minute
+    // `watchdog` says it not at all (`banner_on_stderr`). An UNLOGGED banner
+    // was already said on stderr by `announce_unlogged`.
+    let banner = cli::watchdog_command::banner_on_stderr(verb.as_deref());
+    let shown = match banner {
+        Some(false) => format!("{where_events_went}\n{out}"),
+        Some(true) if !where_events_went.starts_with(cli::UNLOGGED) => {
+            let _told =
+                std::io::Write::write_all(&mut stderr, format!("{where_events_went}\n").as_bytes());
+            out
+        }
+        Some(true) | None => out,
+    };
     std::process::ExitCode::from(cli::deliver(code, &shown, &mut stdout, &mut stderr))
 }
