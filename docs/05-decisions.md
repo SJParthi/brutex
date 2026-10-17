@@ -70986,3 +70986,99 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
+
+**Number** the first of the block D-5830..D-5849 assigned to BASE-GATE10;
+unused when this entry was written (`grep -n 'D-58[34][0-9]'` over `docs/`
+found none on feat/db-fix at f9cdb5840).
+
+**Finding** BASE-RED-GATE10, from the CLOUD-RUST1 merge-back of 17 Oct: gate 10
+was red on feat/db-fix itself, which blocks "all gates green". On the head
+this package started from (f9cdb5840) the gate's two steps refused fourteen
+names. The other rows the merge-back listed (MR-34, AF-23, GI-07, ...) had been
+repaired by merges in between and resolve today.
+
+**What was observed.**
+
+1. **GI-08 named a test that a later package renamed.** AF-01 (D-4977) turned
+   `an_empty_source_reports_every_day_it_does_not_hold`, which pinned an OK
+   exit for a run that read no file, into
+   `cli::gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`,
+   which pins FAILED. Its own doc comment records the rename. The row was not
+   moved with it, so `gates_ledger invariant-tests` reported it missing.
+2. **Thirteen front-end test names were refused although every one of them
+   exists.** AF06-05 and AF06-07 (D-4978) cite `web/tests/status-poll.test.js`
+   tests by their snake-case names, and R301-01 to R301-04 (D-5301) cite
+   `web/tests/db-address.test.js` and `web/tests/db-history.test.js` tests the
+   same way. D-1606 resolves a backticked bare name with three or more
+   underscores in a status row against RUST declarations only, so each was
+   refused as "declared in no tracked source file". The names did not move: the
+   gate could not see the files that declare them.
+3. **R301-05 named no proof the `✓` check accepts.** Its two tests are named by
+   their sentence names, with no file. Point 2's refusal hid it, because the
+   `✓` check runs only after the name check passes.
+
+**Decision.**
+
+1. GI-08's proof cell names `a_run_that_read_no_file_never_exits_ok`, and says
+   in prose (not in a code span, which the gate would read as a phantom) which
+   name it replaced and why. R301-05's proof cell names its file,
+   `web/tests/db-address.test.js`. No row is deleted or weakened, and no
+   allowlist entry is added.
+2. **`.github/invariant_paths.rs --web-tests FILE...`** lists `FILE<TAB>name`
+   for every test a front-end test file declares: the literal first argument
+   of each `test(` call made in CODE. The source is read by a lexer, not a
+   line pattern (D-1114's reason, for the browser's files): a `test('a_b_c_d'`
+   inside a `//` or `/* */` comment, a string, a template or a regular
+   expression lists nothing, and so do `x.test(` (a method), `test.skip(`,
+   `test.only(` (a skipped test proves nothing) and a name built at run time.
+   Only `web/tests/<name>.test.js` is read, the runner's own glob
+   (`node --test "tests/*.test.js"`); a deeper file declares no test that
+   runs. A source the lexer cannot delimit (an unterminated comment, string,
+   template or regular expression, or a `}` that closes nothing) is a refusal
+   naming the file and line, and so is a name holding a tab or line break.
+3. **Gate 10 passes that listing to the check as a fourth argument.** A bare
+   proof name resolves when a tracked Rust source declares it OR a runner-run
+   front-end file declares a test of exactly that name, and a `✓` row whose
+   proof names such a test is accepted. An undeclared name is refused by the
+   same message as before. The step refuses an empty listing
+   (`GATE 10 READ NO FRONT-END TEST.`) and the tool refuses a listing file that
+   names no test, so a glob that stops matching is red rather than a smaller
+   table. The two- and three-argument forms are unchanged, and without a
+   listing a web name is still refused, so a caller cannot lose the check by
+   omitting it.
+
+**What this does not do.** It does not resolve sentence-named web tests
+(`'a seed, a clamp and a restore ...'`) or a snake-case name under D-1606's
+three-underscore threshold (`pauses_while_hidden`): of the 1,403 names the
+tree declares, 26 have the bare-name shape and 1,377 do not,
+and a backticked phrase in a proof cell is not
+distinguishable from prose by shape. A row that cites them is accepted on its
+`.test.js` mention, as before. A web name resolves anywhere among the runner's
+files, not in the file the row names, the rule bare Rust names already follow.
+Both are in docs/06-limits.md (L-G10W-1, L-G10W-2).
+
+**Proof.** Before, on f9cdb5840: `invariant-paths` refused thirteen names
+(lines 7365, 7366, 7405 to 7408) and `invariant-tests` reported
+`1 missing` (GI-08). After, on this branch: `1920 path-qualified test
+references checked`, `0 missing`, both steps exit 0; the web listing reads
+1,403 names from 145 files, which matches the 1,393 `test('` and 10 `test("`
+declarations at line start (the one template-named test is built at run time).
+A copy of the document with one AF06-05 and one R301-04 name misspelled is
+refused by both names. Tests in `.github/invariant_paths.rs`:
+`web_test_names_are_read_from_code_and_never_from_prose`,
+`a_web_source_the_lexer_cannot_delimit_is_refused_by_its_line`,
+`only_a_file_the_runner_runs_declares_a_web_test`,
+`a_bare_proof_name_resolves_against_a_declared_front_end_test`. Fourteen hand
+mutants of the new lines (the method-call rule, the keyword rule, the comment,
+class, interpolation and template rules, the path rule both ways, the listing's
+line-break check, the stray `}`, the unclosed interpolation, the resolution
+and the `✓` union) were each killed by those tests. Invariants G10W-01 to
+G10W-04.
+
+**Cost.** Not a hot path: a CI step, linear in the bytes of the tracked web
+test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
+builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
+p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
+the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
