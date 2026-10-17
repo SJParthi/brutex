@@ -746,6 +746,7 @@ async fn a_serve_over_a_real_store_root_runs_the_whole_start_and_exits_ok() {
         Ok(root.clone()),
         &argv(&["serve", "127.0.0.1:0"]),
         fired(),
+        &mut Held::default(),
     )
     .await;
     assert_eq!(code, OK, "a clean universe served and stopped is OK");
@@ -810,6 +811,7 @@ async fn a_degraded_serve_exits_degraded_and_refuses_an_unreadable_recovery() {
         Ok(root.clone()),
         &argv(&["serve", "127.0.0.1:0"]),
         fired(),
+        &mut Held::default(),
     )
     .await;
     assert_eq!(code, DEGRADED);
@@ -914,6 +916,7 @@ async fn a_store_root_that_will_not_resolve_is_refused_and_nothing_is_served() {
         Ok(root.clone()),
         &argv(&["serve", "127.0.0.1:0"]),
         fired(),
+        &mut Held::default(),
     )
     .await;
     assert_eq!(code, FAILED);
@@ -1066,6 +1069,7 @@ fn serve_once(dir: &Path, root: &Path, addr: &str) -> u8 {
             Ok(root.to_path_buf()),
             &argv(&["serve", addr]),
             fired(),
+            &mut Held::default(),
         ))
 }
 
