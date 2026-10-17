@@ -5124,4 +5124,36 @@ mod cloud_mutant_tests {
         assert_eq!(super::take::<2>(&out, 9), [0u8; 2], "past the end");
         assert_eq!(super::take::<3>(&out, 5), [1, 2, 3], "a take that fits");
     }
+
+    /// **A SERIES' FEED BYTE IS ITS VENDOR'S OWN, FOR EVERY VENDOR.**
+    ///
+    /// Kills `replace Series::feed_byte -> Result<u8, VerdictError> with
+    /// Ok(0)` and `with Ok(1)`: both callers use the answer only to refuse a
+    /// feed the table does not hold, so through the commit and the reader
+    /// the two are invisible; the function's own contract is the byte the
+    /// image header files the feed under, which is `feed_code`'s, distinct
+    /// for each vendor and never 0.
+    #[test]
+    fn a_series_feed_byte_is_its_vendors_own() {
+        let root = Path::new("/nonexistent/cloud");
+        let mut seen = Vec::new();
+        for feed in Vendor::ALL {
+            let series = Series {
+                root,
+                feed,
+                exchange: Exchange::Nse,
+                segment: Segment::Fno,
+                timeframe: Timeframe::SECOND_1,
+            };
+            let byte = series.feed_byte().unwrap();
+            assert_eq!(Some(byte), super::feed_code(feed), "{feed:?}");
+            assert_ne!(byte, 0, "{feed:?}");
+            assert!(!seen.contains(&byte), "{feed:?}: {byte} twice");
+            seen.push(byte);
+        }
+        assert!(
+            seen.len() >= 2,
+            "more than one vendor, so 0 and 1 are not every answer"
+        );
+    }
 }
