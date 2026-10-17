@@ -1038,7 +1038,7 @@ async function browserStandIn(o) {
   const pages = {
     '/db': page('db', `<input aria-controls="db-search-list"><div id="db-search-list"></div><table><tr><th aria-sort="none"><button>ts</button></th></tr></table><button aria-label="Next page">next</button><script>document.querySelector('input').addEventListener('input', () => { document.querySelector('#db-search-list').innerHTML = '<div role="option" onclick="fetch(\\'/feeds.json\\')">NIFTY</div>'; }); setInterval(() => fetch('/inspection.json', { method: 'HEAD' }), 300);</script>`),
     '/gaps': page('gaps', `<script>fetch('/feeds.json'); fetch('/broken').catch(() => null); setInterval(() => fetch('/feeds.json'), 300); setTimeout(() => { throw new Error('boom'); }, 0); setTimeout(() => { throw 'plain'; }, 0);</script>`),
-    '/speed': page('speed'),
+    '/speed': page('speed', `<script>new Worker('/lib/worker.js');</script>`),
     '/blank': `<!doctype html><title>blank</title><body>${script}`
   };
   const server = http.createServer((req, res) => {
@@ -1049,6 +1049,7 @@ async function browserStandIn(o) {
       res.end(body);
     };
     if (u.pathname === '/lib/page-report.js') return send(200, 'text/javascript', reporter);
+    if (u.pathname === '/lib/worker.js') return send(200, 'text/javascript', 'self.onmessage = () => {};', { 'cache-control': 'max-age=3600' });
     if (u.pathname === UP_ROUTE) return send(200, 'application/json', req.method === 'HEAD' ? '' : '{}', { 'x-brutex-build': 'f'.repeat(40) });
     if (u.pathname === REPORT_ROUTE && req.method === 'POST') {
       let body = '';

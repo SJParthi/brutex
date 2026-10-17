@@ -271,7 +271,7 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000) {
 export async function openTab(cdp, context) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', ...(context ? { browserContextId: context } : {}) });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  /** @type {Map<string, {method: string, url: string, status: number}>} */
+  /** @type {Map<string, {method: string, url: string, status: number, answered: boolean, bytes: number}>} */
   const inflight = new Map();
   /** @type {{method: string, url: string, bytes: number, status: number, failed: string | null}[]} */
   const done = [];
@@ -284,12 +284,24 @@ export async function openTab(cdp, context) {
     if (m.sessionId !== sessionId) return;
     const p = m.params;
     if (m.method === 'Network.requestWillBeSent') {
-      inflight.set(p.requestId, { method: p.request.method, url: p.request.url, status: 0 });
+      inflight.set(p.requestId, { method: p.request.method, url: p.request.url, status: 0, answered: false, bytes: 0 });
       lastActivity = Date.now();
-    } else if (m.method === 'Network.responseReceived') {
+    } else if (m.method === 'Network.responseReceived' || m.method === 'Network.responseReceivedExtraInfo') {
+      // ANSWERED: its headers are here. A request whose body then ends
+      // elsewhere (a worker's own script, a keepalive report the browser
+      // finishes for the page) never reports its end in this session, and
+      // is not one the page waits on: it no longer holds `settle` open.
       const r = inflight.get(p.requestId);
-      if (r) r.status = p.response.status;
+      lastActivity = Date.now();
+      if (r) {
+        r.answered = true;
+        r.status = m.method === 'Network.responseReceived' ? p.response.status : r.status || Number(p.statusCode);
+      }
       if (p.type === 'Document') doc.status = p.response.status;
+    } else if (m.method === 'Network.dataReceived') {
+      const r = inflight.get(p.requestId);
+      lastActivity = Date.now();
+      if (r) r.bytes += Number(p.encodedDataLength);
     } else if (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed') {
       const r = inflight.get(p.requestId);
       inflight.delete(p.requestId);
@@ -297,9 +309,15 @@ export async function openTab(cdp, context) {
       if (r) done.push({ method: r.method, url: r.url, bytes: Number(p.encodedDataLength ?? 0), status: r.status, failed: m.method === 'Network.loadingFailed' ? String(p.errorText) : null });
     } else if (m.method === 'Runtime.exceptionThrown') {
       errors.push(exceptionText(p.exceptionDetails));
+    } else if (m.method === 'Target.attachedToTarget') {
+      // A WORKER THAT STARTED HAS ITS SCRIPT: the page session sees the
+      // request and never its end, which the worker's own target reports.
+      lastActivity = Date.now();
+      for (const r of inflight.values()) if (r.url === p.targetInfo.url) r.answered = true;
     }
   });
   for (const domain of ['Page', 'Network', 'Runtime']) await cdp.send(`${domain}.enable`, {}, sessionId);
+  await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER }, sessionId);
   return {
     targetId,
@@ -309,12 +327,21 @@ export async function openTab(cdp, context) {
     errors,
     /** @param {string} expression */
     evaluate: async (expression) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)).result?.value,
-    /** Settled: nothing in flight for `quietMs`, then two frames drawn; at most `capMs`. */
+    /** Every request this tab made since its last `reset`, ended or not, with its bytes. */
+    seen: () => [...done, ...[...inflight.values()].map((r) => ({ method: r.method, url: r.url, bytes: r.bytes, status: r.status, failed: null }))],
+    /** A clean slate for the next load: a navigation ends the last page's requests. */
+    reset: () => {
+      inflight.clear();
+      done.length = 0;
+      doc.status = 0;
+    },
+    /** Settled: no network event for `quietMs` and no request still waiting for its answer, then two frames drawn; at most `capMs`. */
     settle: async (quietMs = 500, capMs = 30_000) => {
       const end = Date.now() + capMs;
-      while (Date.now() < end && (inflight.size > 0 || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
+      const waiting = () => [...inflight.values()].some((r) => !r.answered);
+      while (Date.now() < end && (waiting() || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
       await cdp.send('Runtime.evaluate', { expression: 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))', awaitPromise: true }, sessionId);
-      return inflight.size === 0;
+      return !waiting();
     },
     close: async () => {
       off();
@@ -332,8 +359,7 @@ export async function openTab(cdp, context) {
  * @param {number} settleMs
  */
 export async function loadOnce(tab, cdp, url, settleMs) {
-  tab.done.length = 0;
-  tab.doc.status = 0;
+  tab.reset();
   const loaded = new Promise((resolve) => {
     const off = cdp.on((m) => {
       if (m.sessionId === tab.sessionId && m.method === 'Page.loadEventFired') {
@@ -347,14 +373,15 @@ export async function loadOnce(tab, cdp, url, settleMs) {
   const settled = await tab.settle(settleMs);
   const h = await tab.evaluate('window.__harness');
   const heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
+  const seen = tab.seen();
   return {
     fcp: typeof h.fcp === 'number' ? h.fcp : null,
     longest: Number(h.longest),
     heap: Number(heap.usedSize),
-    wire: tab.done.reduce((s, r) => s + r.bytes, 0),
+    wire: seen.reduce((s, r) => s + r.bytes, 0),
     settled,
     status: tab.doc.status,
-    requests: tab.done.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed }))
+    requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed }))
   };
 }
 
@@ -452,7 +479,7 @@ async function reportCheck(cdp, base, settleMs) {
     await tab.settle(settleMs);
     off();
     await cdp.send('Fetch.disable', {}, tab.sessionId);
-    const sent = tab.done.find((r) => r.method === 'POST' && new URL(r.url).pathname === REPORT_ROUTE);
+    const sent = tab.seen().find((r) => r.method === 'POST' && new URL(r.url).pathname === REPORT_ROUTE);
     if (!sent) return { row: 'the failed request sent no report', failures: [`the shared reporter sent no ${REPORT_ROUTE} for a failed ${marker}`] };
     if (sent.status !== 202) return { row: `${REPORT_ROUTE} answered ${sent.status}`, failures: [`${REPORT_ROUTE} answered ${sent.status} for the report of ${marker}, not 202 written`] };
     const logs = await tab.evaluate(`fetch('/logs.json?target=api.page.access&limit=50', { cache: 'no-store' }).then((r) => r.text())`);
@@ -555,11 +582,11 @@ export async function runHarness(args) {
         for (let i = 0; i < count; i += 1) {
           const tab = await openTab(cdp, undefined);
           await loadOnce(tab, cdp, `${args.base}${args.pages[i % args.pages.length]}`, args.settleMs);
-          tab.done.length = 0;
+          tab.reset();
           tabs.push(tab);
         }
         await new Promise((r) => setTimeout(r, args.idleMs));
-        const requests = tabs.flatMap((t) => t.done);
+        const requests = tabs.flatMap((t) => t.seen());
         const v = idleVerdict(requests, args.base);
         lines.push(`| ${count} | ${(args.idleMs / 1_000).toFixed(0)} s | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
         if (v.other.length > 0) failures.push(`${count} idle tabs asked for more than the header-only up check: ${v.other.join('; ')}`);
