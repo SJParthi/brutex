@@ -245,7 +245,10 @@ request, where no seam reaches.**
   21:17 UTC: spot 123 of its mutants have a stage-1 outcome (107 caught, 0 timed out, 13 unviable, 3 left for stage 2); bars_change 146 of its mutants have a stage-1 outcome (133 caught, 1 timed out, 8 unviable, 4 left for stage 2); ladder 112 of its mutants have a stage-1 outcome (76 caught, 0 timed out, 24 unviable, 12 left for stage 2); render 222 of its mutants have a stage-1 outcome (208 caught, 0 timed out, 2 unviable, 12 left for stage 2); bars_sort 417 of its mutants have a stage-1 outcome (315 caught, 47 timed out, 30 unviable, 25 left for stage 2); bars 415 of its mutants have a stage-1 outcome (346 caught, 7 timed out, 30 unviable, 32 left for stage 2); gaps_route 188 of its mutants have a stage-1 outcome (142 caught, 7 timed out, 38 unviable, 1 left for stage 2); bars_series 82 of its mutants have a stage-1 outcome (53 caught, 0 timed out, 21 unviable, 8 left for stage 2); bars_series started at 20:47. Then every survivor
   against the final suite. Stage 2 so far: `spot.rs` 3 of 3 caught (by
   `tests/cloud_mutants_bars.rs`); `bars_change.rs` 1 of 4 caught, 3 left
-  (`301:59`, `333:34`, `432:21`, equivalent for the 16 Oct reasons).
+  (`301:59`, `333:34`, `432:21`, equivalent for the 16 Oct reasons);
+  `ladder.rs` 8 of 12 caught, the four 16 Oct equivalents left; `render.rs`
+  11 of 12 caught, `page_peak` left; `gaps_route.rs` one survivor, a dead
+  store (see *Survivors*).
 - The coverage re-measurement after the new tests, and the reason for
   every line and branch still unrun.
 - `cargo test --workspace --locked`, and the final clippy.
