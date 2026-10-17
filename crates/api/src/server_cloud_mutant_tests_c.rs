@@ -3130,3 +3130,55 @@ async fn with_no_log_installed_a_refused_window_is_still_refused() {
     );
     assert_eq!(vendor.seen().len(), 1, "a refusal is asked once");
 }
+
+/// **A plain 429 is recorded against the shared governor once, by the
+/// transport, and `with_retry` does not record it again.** The twin of
+/// `a_named_throttle_under_a_400_halves_the_shared_governor_once`: the
+/// transport reads a 429 itself, so the named-throttle decrease must stand
+/// aside, or the allowance is halved twice per refusal (CE-30). Covers the
+/// false side of `transport_missed_throttle(status)` (server.rs:8464).
+#[tokio::test]
+async fn a_plain_429_is_recorded_against_the_shared_governor_once() {
+    let vendor = FakeVendor::answering(|nth, _| {
+        if nth == 0 {
+            (429, "Too many requests".to_owned())
+        } else {
+            (200, dhan_bar(AUG_03))
+        }
+    })
+    .await;
+    let script = live(&vendor, "live");
+    let fx = Fixture::new("plain-429");
+    let site = fx.serving(&script);
+    let day = |site: &Site| {
+        site.budgets.lock().expect("budgets")[pull::vendor::Feed::Dhan as usize]
+            .as_ref()
+            .expect("Dhan has a budget")
+            .lock()
+            .expect("the governor")
+            .permitted(pull::rate::WindowSpan::Day)
+    };
+    assert_eq!(
+        day(&site),
+        Some(100_000),
+        "the premise: a full day allowance"
+    );
+
+    let run = broker_run(&spot(&format!("{DHAN_DAY}&member=NIFTY")), &site, &[]).await;
+
+    assert_eq!(vendor.seen().len(), 2, "throttled once, then answered");
+    assert_eq!(run.reached, 1, "{run:?}");
+    let expected = {
+        let fresh = feed_budgets();
+        let mut governor = fresh[pull::vendor::Feed::Dhan as usize]
+            .as_ref()
+            .expect("Dhan has a budget")
+            .lock()
+            .expect("the governor");
+        governor.record_throttled();
+        governor.record_success();
+        governor.permitted(pull::rate::WindowSpan::Day)
+    };
+    assert_ne!(expected, Some(100_000), "the premise: a decrease shows");
+    assert_eq!(day(&site), expected, "one decrease, the transport's");
+}
