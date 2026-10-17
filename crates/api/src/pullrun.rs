@@ -10144,6 +10144,87 @@ mod cloud_mutant_tests {
             "{counted:?}"
         );
     }
+
+    /// **A dead credential named on a failed page outranks a fixed refusal,
+    /// and a leg that landed is stored whatever its page quotes.** A 404 or a
+    /// 422 receipt is otherwise permanent; one naming a dead session halts
+    /// the feed as a credential fault, because the credential is what to
+    /// fix. A STORED receipt quoting a vendor's "access token expired" landed,
+    /// and its badge decides. Kills deleting the `!` of `!status.is_success()`
+    /// in `leg_outcome` (pullrun.rs:3442), which read the first as permanent
+    /// and the second as a dead credential.
+    #[test]
+    fn a_dead_credential_outranks_a_fixed_refusal_and_a_stored_leg_stays_stored() {
+        for code in [404, 422] {
+            let (status, html) = receipt_wrote(code, "NOT STARTED", 0);
+            assert_eq!(leg_outcome(status, &html), LegOutcome::Permanent, "{code}");
+            assert_eq!(
+                leg_outcome(status, &format!("{html}<p>access token expired</p>")),
+                LegOutcome::Credential,
+                "{code}"
+            );
+        }
+        let (status, stored) = receipt_wrote(200, "STORED", 1);
+        assert_eq!(
+            leg_outcome(
+                status,
+                &format!("{stored}<p>one member's vendor said: access token expired</p>")
+            ),
+            LegOutcome::Stored
+        );
+    }
+
+    /// **A leg refused at the door that may be asked again says it remains
+    /// owed.** A seat-busy refusal on a feed with no error yet is named with
+    /// the receipt's own reason, as a leg eligible for another pass, never as
+    /// a halted feed. Kills deleting the `LegOutcome::Retry` arm of
+    /// `note_leg_failure`'s kind (pullrun.rs:3528), under which the leg read
+    /// as halting its feed.
+    #[test]
+    fn a_door_refusal_that_may_be_retried_says_the_leg_remains_owed() {
+        let site = site("receipt-refusal-retry");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                ..FeedReport::default()
+            }];
+        });
+        let facts = vec![("Refused because", "a seat is held".to_owned())];
+        let html = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "REFUSED",
+            reason: "synthetic",
+            good: false,
+            facts: &facts,
+            footnote: "No vendor was contacted.",
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1min".to_owned(),
+            label: "dhan · 1min".to_owned(),
+            body: String::new(),
+        };
+        note_leg_failure(
+            &site,
+            run,
+            0,
+            &leg,
+            (axum::http::StatusCode::CONFLICT, &html),
+            LegOutcome::Retry,
+        );
+        let said = observed(&site).feeds[0]
+            .last_error
+            .clone()
+            .expect("the refusal is named");
+        assert!(said.contains("a seat is held"), "{said}");
+        assert!(
+            said.contains("this leg remains owed and is eligible for another pass"),
+            "{said}"
+        );
+        assert!(!said.contains("halted"), "{said}");
+    }
 }
 
 /// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
