@@ -1413,12 +1413,11 @@ enum Listed {
     Other,
 }
 
-/// A `YYYY-MM` stem in the store's own spelling.
+/// A `YYYY-MM` stem in the store's own spelling: the month must print back
+/// as the stem, which also holds it to four digits and two (`YearMonth`
+/// takes 1970 to 9999 and prints `{:04}-{:02}`).
 fn month_named(stem: &str) -> Option<YearMonth> {
     let (year, month) = stem.split_once('-')?;
-    if year.len() != 4 || month.len() != 2 {
-        return None;
-    }
     let month = YearMonth::new(year.parse().ok()?, month.parse().ok()?).ok()?;
     (month.to_string() == stem).then_some(month)
 }
