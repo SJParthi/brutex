@@ -84,7 +84,7 @@
 //! O(directory entries) under the scope, with one pointer open and three
 //! `lstat`s per month file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
@@ -627,10 +627,12 @@ impl Journal {
     /// the fragment it ended (zero when the file is empty or ends whole).
     fn end_torn_tail(&mut self) -> Result<u64, String> {
         let (tail, _) = tail_of(&mut self.flock, &self.path)?;
+        // THE FRAGMENT IS WHAT FOLLOWS THE LAST NEWLINE (all of a tail with
+        // none): empty when the file ends whole.
         let torn = tail
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(tail.len(), |newline| tail.len() - newline - 1);
+            .rsplit(|byte| *byte == b'\n')
+            .next()
+            .map_or(0, <[u8]>::len);
         if torn == 0 {
             return Ok(0);
         }
@@ -911,7 +913,7 @@ fn done_by_chain(entries: &[Entry], id: u64) -> Result<HashSet<String>, String> 
             "no run {id} in this journal: nothing to resume, and nothing was written"
         ));
     }
-    let mut chain = HashSet::new();
+    let mut chain = HashSet::with_capacity(parents.len());
     let mut at = Some(id);
     // A run already in the chain ends it: a hand-edited cycle cannot loop.
     while let Some(run) = at.filter(|run| chain.insert(*run)) {
@@ -1040,7 +1042,8 @@ fn ending(fault: Option<&str>, left: u64, stopped: bool, id: u64) -> (How, Strin
 struct Begun<'a> {
     id: u64,
     plan: &'a [String],
-    done: HashSet<String>,
+    /// `None` for a fresh run: nothing is skipped.
+    done: Option<HashSet<String>>,
     torn: u64,
 }
 
@@ -1077,8 +1080,8 @@ pub fn run(
     let mut journal = Journal::open(root, ask.vendor, ask.kind)?;
     let torn = journal.end_torn_tail()?;
     let done = match ask.resume {
-        Some(resumed) => done_by_chain(&journal.entries()?, resumed)?,
-        None => HashSet::new(),
+        Some(resumed) => Some(done_by_chain(&journal.entries()?, resumed)?),
+        None => None,
     };
     let id = (ask.now)().max(journal.newest_id()?.saturating_add(1));
     let begun = Begun {
@@ -1114,7 +1117,10 @@ fn drive(
         torn,
     } = begun;
     let todo: Vec<usize> = (0..plan.len())
-        .filter(|&at| plan.get(at).is_some_and(|key| !done.contains(key)))
+        .filter(|&at| {
+            plan.get(at)
+                .is_some_and(|key| done.as_ref().is_none_or(|done| !done.contains(key)))
+        })
         .collect();
     let skipped = plan.len() - todo.len();
     let workers = ask.kind.workers(ask.workers).min(todo.len().max(1));
@@ -1246,8 +1252,8 @@ pub struct Month {
     /// Its `.bin`, relative to the store root: the item key.
     pub key: String,
     /// The sidecars the month has none of, beside the generation every
-    /// reader opens: a subset of the per-month kinds.
-    pub lacks: Vec<Kind>,
+    /// reader opens.
+    pub lacks: Lacks,
 }
 
 impl Month {
@@ -1268,6 +1274,44 @@ impl Month {
             file: FileKind::Bars,
         })
         .map_err(|why| format!("{} is not a store path: {why}", self.key))
+    }
+}
+
+/// The per-month kinds a month has no sidecar of: one bit each, so asking is
+/// one mask, never a scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lacks(u8);
+
+impl Lacks {
+    /// The bit of `kind`, or none for a kind that keeps no sidecar.
+    const fn bit(kind: Kind) -> u8 {
+        match kind {
+            Kind::DayIndex => 1,
+            Kind::SortIndex => 2,
+            Kind::MonthSummary => 4,
+            Kind::Recount | Kind::Rekey => 0,
+        }
+    }
+
+    /// The set of `kinds`.
+    #[must_use]
+    pub fn of(kinds: impl IntoIterator<Item = Kind>) -> Self {
+        Self(
+            kinds
+                .into_iter()
+                .fold(0, |bits, kind| bits | Self::bit(kind)),
+        )
+    }
+
+    /// Whether the month lacks `kind`'s sidecar.
+    #[must_use]
+    pub const fn has(self, kind: Kind) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    /// The kinds lacked, in [`Kind::ALL`] order.
+    pub fn kinds(self) -> impl Iterator<Item = Kind> {
+        Kind::ALL.into_iter().filter(move |kind| self.has(*kind))
     }
 }
 
@@ -1325,7 +1369,9 @@ impl Walked {
 /// (never through a link) or a link.
 fn listed(dir: &Path) -> Result<Vec<(PathBuf, String, Listed)>, String> {
     let named = |why: std::io::Error| format!("cannot list {}: {why}", dir.display());
-    let mut out = Vec::new();
+    // IN NAME ORDER, so two walks of one store list it alike (§3 rule 5): an
+    // ordered map of one directory's entries, never on a request path.
+    let mut out = BTreeMap::new();
     for entry in fs::read_dir(dir).map_err(named)? {
         let entry = entry.map_err(named)?;
         let kind = entry.file_type().map_err(named)?;
@@ -1336,14 +1382,15 @@ fn listed(dir: &Path) -> Result<Vec<(PathBuf, String, Listed)>, String> {
         } else {
             Listed::Other
         };
-        out.push((
-            entry.path(),
+        let _ = out.insert(
             entry.file_name().to_string_lossy().into_owned(),
-            what,
-        ));
+            (entry.path(), what),
+        );
     }
-    out.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .map(|(name, (path, what))| (path, name, what))
+        .collect())
 }
 
 /// What a listed entry is.
@@ -1553,15 +1600,12 @@ fn walk_rung(
         let served = store::generation::served(at.root, store_path)
             .map_err(|why| format!("{}: {why}", path.display()))?
             .root(at.root);
-        let lacks = Kind::ALL
-            .into_iter()
-            .filter(|kind| {
-                kind.sidecar().is_some_and(|file| {
-                    fs::symlink_metadata(store_path.with_file(file).to_path_buf(&served))
-                        .is_err_and(|why| why.kind() == ErrorKind::NotFound)
-                })
+        let lacks = Lacks::of(Kind::ALL.into_iter().filter(|kind| {
+            kind.sidecar().is_some_and(|file| {
+                fs::symlink_metadata(store_path.with_file(file).to_path_buf(&served))
+                    .is_err_and(|why| why.kind() == ErrorKind::NotFound)
             })
-            .collect();
+        }));
         let key = path
             .strip_prefix(at.root)
             .map_or_else(|_| path.clone(), Path::to_path_buf)

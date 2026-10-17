@@ -25,9 +25,10 @@ use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 use super::{
-    Ask, Begun, Entry, How, Journal, KEY_CAP, Kind, Lines, MAX_WORKERS, Month, Outcome, SYNC_EVERY,
-    Scope, State, Status, TAIL_BYTES, VOID, WHY_CAP, drive, journal_name, key_refused, months,
-    one_line, one_word, parse, plan_digest, request_stop, run, status, stop_name, whole_lines,
+    Ask, Begun, Entry, How, Journal, KEY_CAP, Kind, Lacks, Lines, MAX_WORKERS, Month, Outcome,
+    SYNC_EVERY, Scope, State, Status, TAIL_BYTES, VOID, WHY_CAP, drive, journal_name, key_refused,
+    months, one_line, one_word, parse, plan_digest, request_stop, run, status, stop_name,
+    whole_lines,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -997,7 +998,7 @@ fn begun(id: u64, plan: &[String]) -> Begun<'_> {
     Begun {
         id,
         plan,
-        done: std::collections::HashSet::new(),
+        done: None,
         torn: 0,
     }
 }
@@ -1235,29 +1236,29 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
     fs::create_dir_all(root.0.join("bars/gdfl/XYZ")).unwrap();
     fs::create_dir_all(base.join("NOTASEG")).unwrap();
     let walked = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap();
-    let listed: Vec<(&str, &[Kind])> = walked
+    let listed: Vec<(&str, Vec<Kind>)> = walked
         .months
         .iter()
-        .map(|month| (month.key.as_str(), month.lacks.as_slice()))
+        .map(|month| (month.key.as_str(), month.lacks.kinds().collect()))
         .collect();
     assert_eq!(
         listed,
         [
             (
                 "bars/gdfl/NSE/FNO/NIFTY/2019-03-28-1150000-CE/1s/2019-03.bin",
-                &[Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary][..]
+                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1min/2019-04.bin",
-                &[Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary][..]
+                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin",
-                &[Kind::SortIndex][..]
+                vec![Kind::SortIndex]
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-04.bin",
-                &[Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary][..]
+                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
             ),
         ]
     );
@@ -1372,7 +1373,14 @@ fn a_sidecar_name_held_by_anything_is_not_lacking() {
     .unwrap();
     let walked = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap();
     assert_eq!(walked.months.len(), 1);
-    assert_eq!(walked.months[0].lacks, [Kind::MonthSummary]);
+    let lacks = walked.months[0].lacks;
+    assert_eq!(lacks.kinds().collect::<Vec<_>>(), [Kind::MonthSummary]);
+    assert!(
+        lacks.has(Kind::MonthSummary) && !lacks.has(Kind::DayIndex) && !lacks.has(Kind::SortIndex)
+    );
+    assert!(!Lacks::of(Kind::ALL).has(Kind::Recount) && !Lacks::of(Kind::ALL).has(Kind::Rekey));
+    assert_eq!(Lacks::of([Kind::Recount, Kind::Rekey]), Lacks::default());
+    assert_eq!(Lacks::of(Kind::ALL).kinds().count(), 3);
     let month: &Month = &walked.months[0];
     assert_eq!(month.symbol, "NIFTY");
     assert_eq!(

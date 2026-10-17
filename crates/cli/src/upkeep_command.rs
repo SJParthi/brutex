@@ -405,12 +405,14 @@ fn underlyings_held(root: &Path, only: Option<&BTreeSet<Symbol>>) -> Result<Vec<
     match only {
         None => Ok(held.into_iter().collect()),
         Some(only) => {
-            if let Some(missing) = only.iter().find(|symbol| !held.contains(symbol)) {
-                return Err(format!(
-                    "{} holds no option directory for {}",
-                    dir.display(),
-                    missing.as_str()
-                ));
+            for symbol in only {
+                if !held.contains(symbol) {
+                    return Err(format!(
+                        "{} holds no option directory for {}",
+                        dir.display(),
+                        symbol.as_str()
+                    ));
+                }
             }
             Ok(only.iter().copied().collect())
         }
@@ -442,7 +444,7 @@ fn items(
             let months: Vec<Month> = walked
                 .months
                 .into_iter()
-                .filter(|month| flags.all || month.lacks.contains(&kind))
+                .filter(|month| flags.all || month.lacks.has(kind))
                 .collect();
             let said = format!(
                 "{} of the {total} month file(s) in scope{}; {} link(s) never followed, {} stray \
@@ -699,7 +701,7 @@ fn plan(out: &mut String, root: &Path, vendor: Vendor, scope: &Scope) -> u8 {
         row[0] += 1;
         let kinds = [Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary];
         for (count, kind) in row.iter_mut().skip(1).zip(kinds) {
-            *count += usize::from(month.lacks.contains(&kind));
+            *count += usize::from(month.lacks.has(kind));
         }
     }
     let mut totals = [0_usize; 4];
