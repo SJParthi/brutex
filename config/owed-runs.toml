@@ -1,0 +1,193 @@
+# config/owed-runs.toml — every store run still owed, as one tracked list
+# (R4-06 item 3, AUT-07).
+#
+# WRITTEN ONCE BY HAND on 17 Oct 2026 from three sources, so that CI never
+# reads an untracked path: the data census of 13 Oct (the operator's state
+# folder data-census-20261013, analysis.json `totals` and each row's `owed`
+# and `*_runs` fields), the rows of the round-3 fix plan whose package lists a
+# store write (round3-packages.json `store_writes`), and its `not_packaged`
+# items whose verdict is store_write_only. A run that writes nothing to the
+# operator's store (a read-only measurement, a read-only plan, a proof in a
+# NEW empty folder) is not owed here, and each one left out is named at the
+# end of this file with why.
+#
+# THE RULE (gate 30, `.github/gates_store_steps.rs --owed`): every [[owed]]
+# id below is a leftover of config/store-steps.toml, and so is closed by
+# exactly one step there; every OWED- leftover there is an id here. An owed
+# run no step names, or one two steps name, is a red build.
+#
+# Each entry: `id` (OWED-<nn>, never renumbered or reused), `what` (the run,
+# in words), `source` (the census field or plan row it comes from), `note`.
+
+format = 1
+
+[[owed]]
+id = "OWED-01"
+what = "The GDFL options import resume, 2020-09-16 to 2026-09-24, for every underlying including FINNIFTY, MIDCPNIFTY and NIFTYNXT50. Its first run is batch O1, 2026-10-14T01:57:40Z (277 stock-option underlyings, run 1791943060); the 13 renamed underlyings wait for R4-21."
+source = ["AUT-07", "WP-12d", "R4-21"]
+
+[[owed]]
+id = "OWED-02"
+what = "The tick-store days 2026-09-25 to 2026-09-30 of the options kind for the stock-option underlyings. Stocks and indices were done 2026-10-14T02:28Z (S-09), and NIFTY and BANKNIFTY options with them."
+source = ["AUT-07", "G5"]
+
+[[owed]]
+id = "OWED-03"
+what = "The GAP-16 Zerodha index minute pulls: BANKNIFTY and the other indices with the same holes as NIFTY (FORCEMOT and MAZDOCK were closed by Z1 and Z2)."
+source = ["AUT-07", "GAP-16", "RT-DATA-01"]
+
+[[owed]]
+id = "OWED-04"
+what = "Zerodha bars from 2026-10-01 onward. The operator's window stays 2018-01-01 to 2026-09-30 (WIN-2026END cancelled), so this waits for the operator's approval and a docs/05-decisions.md entry moving the window."
+source = ["AUT-07", "DLY-01", "WIN-2026END"]
+
+[[owed]]
+id = "OWED-05"
+what = "Zerodha non-F&O equities (NIFTY Total Market), 2018-01-01 to 2026-09-30, 1day then 1min, on the operator's approval."
+source = ["AUT-07", "DATA-14", "R4-23"]
+
+[[owed]]
+id = "OWED-06"
+what = "GDFL non-F&O equities, 2018-09-03 to 2026-09-24, after the options import and a 40-name sample on a private copy, on the operator's approval."
+source = ["AUT-07", "DATA-15", "R4-29"]
+
+[[owed]]
+id = "OWED-07"
+what = "NSE's symbolchange.csv, fetched by the operator and installed under the masters root, so every renamed share is sourced."
+source = ["AUT-07", "G2"]
+
+[[owed]]
+id = "OWED-08"
+what = "The five shares G2 sources as renamed (ANGELONE, NAM-INDIA, UNOMINDA, GVT&D, PATANJALI) imported over the whole archive under their newest symbol."
+source = ["G2", "R4-22"]
+
+[[owed]]
+id = "OWED-09"
+what = "The refold of every Zerodha month the fold-audit marks large: 2026-08 and 2026-09 after R4-20, and 2024-03, 2024-05, 2021-02, 2020-03 and 2019. The census of 13 Oct counts fold_large per share (360ONE: 347 of 595 rung-months)."
+source = ["AUT-07", "Z7", "R4-20", "census z_derived.fold_large"]
+
+[[owed]]
+id = "OWED-10"
+what = "The coarse rungs of NIFTY and BANKNIFTY refolded for their special sessions (2021-02, 2024-03, 2024-05, 2025-10) under D-3319."
+source = ["ING-03"]
+
+[[owed]]
+id = "OWED-11"
+what = "The option special sessions 2018-11-07 and 2019-10-27 for every underlying, unfiltered, after the renamed underlyings move."
+source = ["ING-12"]
+
+[[owed]]
+id = "OWED-12"
+what = "The NIFTY and BANKNIFTY option days of the ten later special sessions: 2020-11-14, 2021-02-24, 2021-11-04, 2022-03-07, 2022-10-24, 2023-11-12, 2024-03-02, 2024-05-18, 2024-11-01, 2025-10-21."
+source = ["IMPORT-SPECIAL-SESSIONS-FNO-INDEX", "ING-12"]
+
+[[owed]]
+id = "OWED-13"
+what = "The twelve GDFL special share days read again one day a run with the whole receipt kept: the 13 Oct batch kept only three receipt lines, and its exit 0 does not prove a landing."
+source = ["G6"]
+
+[[owed]]
+id = "OWED-14"
+what = "The Zerodha daily half of batch Z4 (special-session and front-of-month 1day bars from the 13 Oct scratch pull), and one of its 639 refused months run again once receipts name every failure."
+source = ["Z4", "R4-20"]
+
+[[owed]]
+id = "OWED-15"
+what = "The two BANKNIFTY option days closed done with refusals (2018-11-06, 2018-11-09) read again with --retry-refused after IA-4, and the 2022-03-07 index day if it is still refused."
+source = ["IMPORT-BAD-ROW", "R4-22"]
+
+[[owed]]
+id = "OWED-16"
+what = "Every F&O underlying's capital-market series stored after the options import (--stored), renamed old symbols under the newest, BE-only spells after WP-12f. The census of 13 Oct counts 1,960 plain-series share days not stored, 2,402 BE-series days and 3,531 old-name days without a recorded source."
+source = ["DATA-STOCKS-STORED-AFTER-OPTIONS", "census g_plain_not_stored", "census g_series_be", "census g_oldname_unsourced"]
+
+[[owed]]
+id = "OWED-17"
+what = "WP-12f's capital-market re-read, unfiltered, 2018-09-03 to 2026-07-31 (auction-era days are refused restated_auction_band until restated)."
+source = ["G3", "WP-12f"]
+
+[[owed]]
+id = "OWED-18"
+what = "The re-key apply after batch A1: the NIFTY 2023-06-29 keys whose settled month already holds later bars, moved as new generations."
+source = ["R4-21", "A1"]
+
+[[owed]]
+id = "OWED-19"
+what = "The 13 renamed option underlyings re-keyed under their newest symbol (IDFCFIRSTB, COFORGE, INDUSTOWER, ZYDUSLIFE, MOTHERSON, SHRIRAMFIN, PVRINOX, ARE&M, LTF, UNITDSPR, SAMMAANCAP, GMRAIRPORT, TMPV)."
+source = ["R4-21", "D-3354"]
+
+[[owed]]
+id = "OWED-20"
+what = "Options 2020-09-16, half-filed by the run the operator stopped on 6 Oct 2026, restated complete."
+source = ["R4-21", "R3-22"]
+
+[[owed]]
+id = "OWED-21"
+what = "The first full copy of the store and the raw archives on a second drive by the backup verb, and its restore drill."
+source = ["R4-09"]
+
+[[owed]]
+id = "OWED-22"
+what = "The one-month slice of every kind built into a NEW separate store root by the chain and compared month by month with the production store; the full rebuild only on the operator's yes."
+source = ["R4-16", "E2E-07"]
+
+[[owed]]
+id = "OWED-23"
+what = "The Zerodha quarantine of the pre-listing and zero-price months (IRFC, KFINTECH, MAZDOCK) and of PIIND's foreign-level spell after a scratch re-pull compare."
+source = ["R4-18"]
+
+[[owed]]
+id = "OWED-24"
+what = "FORCEMOT 1min 2023-09-01 to 2024-03-31 through the request ladder in one window, and the restate plan of every share classed vendor restated."
+source = ["R4-23"]
+
+[[owed]]
+id = "OWED-25"
+what = "The options day-ledger v=3 lines recomputed for the past days 2018-09-03 to 2026-09-24 (bars untouched)."
+source = ["R4-25"]
+
+[[owed]]
+id = "OWED-26"
+what = "The reference tables: corporate actions installed with its receipt, F&O membership inferred, basis runs recorded."
+source = ["R4-26"]
+
+[[owed]]
+id = "OWED-27"
+what = "The derived months the padded-minute decision changes, refolded as new generations, and whatever AUT-10's decisions choose."
+source = ["R4-27", "AUT-10"]
+
+[[owed]]
+id = "OWED-28"
+what = "The Zerodha futures 1day pull for the F&O underlyings inside the window, on the operator's approval."
+source = ["R4-28"]
+
+[[owed]]
+id = "OWED-29"
+what = "The widened GDFL index files over the tick store, 2026-09-25 to 2026-09-30, after WP-12f's index re-read; then each VIX month still absent named vendor-absent."
+source = ["R4-29", "WP-12f"]
+
+[[owed]]
+id = "OWED-30"
+what = "The Zerodha holes of the census of 13 Oct: 262 daily sessions missing (90 the series' own), 77 own minute sessions, 8,136 market-wide minute sessions."
+source = ["census z_day_missing", "census z_day_missing_own", "census z_min_missing_own", "census z_min_missing_market"]
+
+[[owed]]
+id = "OWED-31"
+what = "The GDFL share days beyond the zip's end, 2026-09-25 to 2026-09-30 (832 share-days in the census of 13 Oct), from the tick store."
+source = ["census g_beyond"]
+note = "Run on 14 Oct by S-09, after the census was taken."
+
+# NOT OWED HERE, and why (each writes nothing to the operator's store):
+#   R4-07, R4-11, R4-12  none by code; their first real runs are the
+#                        operator's press, and an automatic kind adds its own
+#                        step with `kind` when its starter lands (AUT-05).
+#   R4-08, R4-10         read-only measurements on copies.
+#   R4-14 shares, R4-17  read-only plans (zerodha-repair without
+#                        --from-store, series-identity).
+#   R4-16 E2E-09         a proof in a NEW empty folder; the operator's store
+#                        is not opened.
+#   R4-16 CLAUDE.md row  a document edit, the main session's.
+#   R4-20 Z7 diagnosis   read-only, on a private copy.
+#   R4-29 DATA-15 sample the dry run of OWED-06's step, on a private copy.
+#   census g_none        77 share days the archive holds nothing for: a
+#                        vendor absence to show, not a run to make.

@@ -209,6 +209,9 @@ pub mod rate;
 /// one is fixed by tomorrow's credential and the other is not fixed by
 /// anything this repository can do. Generic over feeds; `kite` is a row.
 pub mod refusal;
+/// The rehearse-then-run gate: a store-writing kind starts by itself only when
+/// its `config/store-steps.toml` step holds a current rehearsal (AUT-05).
+pub mod rehearsal;
 /// One pass over the exchange's directory, and the dated snapshot it produces.
 ///
 /// Every file in a pass is the same age, and a snapshot is published whole or

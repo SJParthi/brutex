@@ -497,12 +497,284 @@ fn bare_proof_names(line: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Is `path` a front-end test file the runner runs? `web/package.json` runs
+/// `node --test "tests/*.test.js"`: one level under `web/tests/`, no deeper,
+/// so a file in a subdirectory declares no test that runs. D-5830.
+fn is_web_test_path(path: &str) -> bool {
+    path.strip_prefix("web/tests/")
+        .and_then(|name| name.strip_suffix(".test.js"))
+        .is_some_and(|stem| !stem.is_empty() && !stem.contains('/'))
+}
+
+/// May a `/` here open a regular expression rather than divide? It may after
+/// punctuation, at the start, and after a keyword that takes an expression;
+/// it divides after a value: a name, a number, a literal, `)` or `]`.
+const REGEX_AFTER_KEYWORD: [&str; 14] = [
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "case",
+    "do",
+    "else",
+    "yield",
+    "await",
+];
+
+/// The literal names of the tests one `web/tests/*.test.js` source declares:
+/// the first argument of every `test(` call made in CODE, when that argument is
+/// one quoted literal (`'..'`, `".."`, or a template with no `${`). D-5830.
+///
+/// Gate 10 resolved a bare proof name (three or more underscores, D-1606)
+/// against Rust declarations alone, so a row naming a front-end test that
+/// exists -- `backs_off_while_unchanged` in `web/tests/status-poll.test.js` --
+/// was refused as "declared in no tracked source file", and thirteen were. The
+/// names are read by a lexer, not a line pattern, for the reason D-1114 gave
+/// for Rust: a `test('a_b_c_d'` written in a `//` or `/* */` comment, inside a
+/// string, a template or a regular expression is prose and must prove nothing.
+///
+/// Not a declaration: `x.test(` (a method, such as `RegExp.prototype.test`),
+/// `test.skip(` and `test.only(` (the next token is `.`, not `(`; a skipped
+/// test proves nothing), and a name built at run time (a template with `${`,
+/// a concatenation), which no document can cite by its text.
+///
+/// A source this lexer cannot delimit -- an unterminated comment, string,
+/// template or regular expression, or a `}` closing nothing -- is a refusal
+/// naming the line, never a shorter list.
+fn web_test_names(source: &str) -> Result<Vec<String>, String> {
+    let bytes = source.as_bytes();
+    let line_of = |at: usize| bytes[..at].iter().filter(|b| **b == b'\n').count() + 1;
+    let ident = |b: u8| b == b'_' || b == b'$' || b.is_ascii_alphanumeric() || b >= 0x80;
+    let mut names = Vec::new();
+    // Brace depth in code, and the depth each open `${` returns to.
+    let mut depth = 0usize;
+    let mut templates: Vec<usize> = Vec::new();
+    // What the last significant token was: may a `/` open a regex, and was it `.`?
+    let mut regex_ok = true;
+    let mut after_dot = false;
+    let mut at = 0;
+    // Scan a template body from `at` (just past its opening backtick or the
+    // `}` closing a `${`): returns where it stopped and whether a `${` opened.
+    let template = |mut at: usize| -> Result<(usize, bool), String> {
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'`' => return Ok((at + 1, false)),
+                b'$' if bytes.get(at + 1) == Some(&b'{') => return Ok((at + 2, true)),
+                _ => at += 1,
+            }
+        }
+        Err("unterminated template literal".to_owned())
+    };
+    // Scan a quoted string from just past its quote: returns the index past
+    // its closing quote. A raw line break before it is a refusal.
+    let quoted = |mut at: usize, quote: u8| -> Result<usize, String> {
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'\n' | b'\r' => break,
+                b if b == quote => return Ok(at + 1),
+                _ => at += 1,
+            }
+        }
+        Err("unterminated string literal".to_owned())
+    };
+    while at < bytes.len() {
+        let start = at;
+        let byte = bytes[at];
+        let refused = |why: String| format!("{why} at line {}", line_of(start));
+        match byte {
+            b' ' | b'\t' | b'\n' | b'\r' => at += 1,
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at = source[at + 2..]
+                    .find("*/")
+                    .map(|end| at + 2 + end + 2)
+                    .ok_or_else(|| refused("unterminated block comment".to_owned()))?;
+            }
+            b'/' if regex_ok => {
+                at += 1;
+                let mut class = false;
+                loop {
+                    match bytes.get(at) {
+                        None | Some(b'\n' | b'\r') => {
+                            return Err(refused("unterminated regular expression".to_owned()));
+                        }
+                        Some(b'\\') => at += 2,
+                        Some(b'[') => (class, at) = (true, at + 1),
+                        Some(b']') => (class, at) = (false, at + 1),
+                        Some(b'/') if !class => break,
+                        Some(_) => at += 1,
+                    }
+                }
+                at += 1;
+                (regex_ok, after_dot) = (false, false);
+            }
+            b'\'' | b'"' => {
+                at = quoted(at + 1, byte).map_err(refused)?;
+                (regex_ok, after_dot) = (false, false);
+            }
+            b'`' => {
+                let (end, opened) = template(at + 1).map_err(refused)?;
+                at = end;
+                if opened {
+                    templates.push(depth);
+                    (regex_ok, after_dot) = (true, false);
+                } else {
+                    (regex_ok, after_dot) = (false, false);
+                }
+            }
+            b'{' => {
+                depth += 1;
+                at += 1;
+                (regex_ok, after_dot) = (true, false);
+            }
+            b'}' => {
+                if templates.last() == Some(&depth) {
+                    templates.pop();
+                    let (end, opened) = template(at + 1).map_err(refused)?;
+                    at = end;
+                    if opened {
+                        templates.push(depth);
+                        (regex_ok, after_dot) = (true, false);
+                    } else {
+                        (regex_ok, after_dot) = (false, false);
+                    }
+                } else {
+                    depth = depth
+                        .checked_sub(1)
+                        .ok_or_else(|| refused("a `}` that closes nothing".to_owned()))?;
+                    at += 1;
+                    (regex_ok, after_dot) = (true, false);
+                }
+            }
+            b if ident(b) => {
+                while at < bytes.len() && ident(bytes[at]) {
+                    at += 1;
+                }
+                let word = source
+                    .get(start..at)
+                    .ok_or_else(|| refused("a name that splits a character".to_owned()))?;
+                if word == "test" && !after_dot {
+                    let mut next = at;
+                    while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                        next += 1;
+                    }
+                    if bytes.get(next) == Some(&b'(') {
+                        next += 1;
+                        while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                            next += 1;
+                        }
+                        match bytes.get(next) {
+                            Some(&quote @ (b'\'' | b'"')) => {
+                                let end = quoted(next + 1, quote).map_err(refused)?;
+                                names.push(source[next + 1..end - 1].to_owned());
+                            }
+                            Some(b'`') => {
+                                let (end, opened) = template(next + 1).map_err(refused)?;
+                                if !opened {
+                                    names.push(source[next + 1..end - 1].to_owned());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // After a keyword that takes an expression a `/` opens a
+                // regular expression; after any other name or a number it divides.
+                (regex_ok, after_dot) = (REGEX_AFTER_KEYWORD.contains(&word), false);
+            }
+            b')' | b']' => {
+                at += 1;
+                (regex_ok, after_dot) = (false, false);
+            }
+            b'.' => {
+                at += 1;
+                (regex_ok, after_dot) = (true, true);
+            }
+            _ => {
+                at += 1;
+                (regex_ok, after_dot) = (true, false);
+            }
+        }
+    }
+    if !templates.is_empty() {
+        return Err("a template's `${` is never closed".to_owned());
+    }
+    Ok(names)
+}
+
+/// `FILE<TAB>name` for every test [`web_test_names`] reads in each file, the
+/// `PATH_DECLARATIONS` shape. A path that is not a file the runner runs, a
+/// file that cannot be read or lexed, and a name holding a tab or a line
+/// break (which would forge a second field or row) are refused. D-5830.
+fn web_test_listing(paths: &[String]) -> Result<String, String> {
+    let mut out = String::new();
+    for path in paths {
+        let source = std::fs::read_to_string(path).map_err(|why| format!("{path}: {why}"))?;
+        web_test_lines(path, &source, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// One file's lines of the [`web_test_listing`], appended to `out`.
+fn web_test_lines(path: &str, source: &str, out: &mut String) -> Result<(), String> {
+    if !is_web_test_path(path) {
+        return Err(format!(
+            "{path} is not a front-end test file the runner runs (web/tests/<name>.test.js)"
+        ));
+    }
+    for name in web_test_names(source).map_err(|why| format!("{path}: {why}"))? {
+        if name.contains(['\t', '\n', '\r']) {
+            return Err(format!("{path}: a test name holds a tab or a line break"));
+        }
+        out.push_str(path);
+        out.push('\t');
+        out.push_str(&name);
+        out.push('\n');
+    }
+    Ok(())
+}
+
+/// The names a `--web-tests` listing declares, each once.
+fn web_names(web: &str) -> HashSet<&str> {
+    web.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(_, name)| name)
+        .collect()
+}
+
 #[cfg(test)]
 fn verify(document: &str, declarations: &str) -> Result<usize, String> {
     verify_with(document, declarations, "")
 }
 
+#[cfg(test)]
 fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usize, String> {
+    verify_all(document, declarations, modules, "")
+}
+
+/// Gate 10's checks over the document. `web` is the `--web-tests` listing: a
+/// bare proof name resolves when a tracked Rust source declares it OR a
+/// front-end test file the runner runs declares a test of exactly that name
+/// (D-5830). It is never a reason to skip a name: an undeclared one is still
+/// refused, by the same message.
+fn verify_all(
+    document: &str,
+    declarations: &str,
+    modules: &str,
+    web: &str,
+) -> Result<usize, String> {
+    let web = web_names(web);
     let modules: Vec<(&str, &str)> = modules
         .lines()
         .filter_map(|line| line.split_once('\t'))
@@ -552,7 +824,7 @@ fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usiz
             }
             for name in bare_proof_names(line) {
                 checked += 1;
-                if !names.anywhere.contains(name) {
+                if !names.anywhere.contains(name) && !web.contains(name) {
                     refusals.push(format!(
                         "line {}: proof `{name}` is declared in no tracked source file",
                         index + 1
@@ -630,12 +902,20 @@ fn names_a_proof(proof: &str, functions: &HashSet<&str>) -> bool {
 
 /// Every `✓` row whose proof cell names nothing [`names_a_proof`] accepts.
 /// A header row (the line after it is the `|---` separator) is not a row.
+#[cfg(test)]
 fn unproven_ticks(document: &str, declarations: &str) -> Vec<String> {
-    let functions: HashSet<&str> = declarations
+    unproven_ticks_with(document, declarations, "")
+}
+
+/// [`unproven_ticks`] with the `--web-tests` listing: a front-end test a
+/// runner-run file declares is a proof name too (D-5830).
+fn unproven_ticks_with(document: &str, declarations: &str, web: &str) -> Vec<String> {
+    let mut functions: HashSet<&str> = declarations
         .lines()
         .filter_map(|line| line.split_once('\t'))
         .map(|(_, function)| function)
         .collect();
+    functions.extend(web_names(web));
     let lines: Vec<&str> = document.lines().collect();
     let mut refused = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -660,10 +940,19 @@ fn unproven_ticks(document: &str, declarations: &str) -> Vec<String> {
     refused
 }
 
-/// `Some(checked)` for a verification, `None` for a `--middles` or `--resolve`
+/// `Some(checked)` for a verification, `None` for a `--web-tests`, `--middles` or `--resolve`
 /// listing.
 fn run() -> Result<Option<usize>, String> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if let [mode, files @ ..] = arguments.as_slice()
+        && mode == "--web-tests"
+    {
+        if files.is_empty() {
+            return Err("--web-tests was given no file".to_owned());
+        }
+        print!("{}", web_test_listing(files)?);
+        return Ok(None);
+    }
     if let [mode, document, declarations, modules, inline] = arguments.as_slice()
         && mode == "--middles"
     {
@@ -695,12 +984,15 @@ fn run() -> Result<Option<usize>, String> {
         }
         return Ok(None);
     }
-    let (document, declarations, modules) = match arguments.as_slice() {
-        [document, declarations] => (document, declarations, None),
-        [document, declarations, modules] => (document, declarations, Some(modules)),
+    let (document, declarations, modules, web) = match arguments.as_slice() {
+        [document, declarations] => (document, declarations, None, None),
+        [document, declarations, modules] => (document, declarations, Some(modules), None),
+        [document, declarations, modules, web] => {
+            (document, declarations, Some(modules), Some(web))
+        }
         _ => {
             return Err(
-                "usage: invariant-paths DOCUMENT PATH_DECLARATIONS [MODULE_PATHS], invariant-paths --middles DOCUMENT PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES, or invariant-paths --resolve PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES < TOKENS".to_owned(),
+                "usage: invariant-paths DOCUMENT PATH_DECLARATIONS [MODULE_PATHS [WEB_TESTS]], invariant-paths --web-tests FILE..., invariant-paths --middles DOCUMENT PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES, or invariant-paths --resolve PATH_DECLARATIONS MODULE_PATHS INLINE_MODULES < TOKENS".to_owned(),
             );
         }
     };
@@ -710,8 +1002,20 @@ fn run() -> Result<Option<usize>, String> {
         Some(path) => std::fs::read_to_string(path).map_err(|why| why.to_string())?,
         None => String::new(),
     };
-    let checked = verify_with(&document, &declarations, &modules)?;
-    let unproven = unproven_ticks(&document, &declarations);
+    // A listing that names no test is a scan that read nothing, the failure
+    // mode gate 8 shipped with: a refusal, not an empty table (D-5830).
+    let web = match web {
+        Some(path) => {
+            let web = std::fs::read_to_string(path).map_err(|why| why.to_string())?;
+            if web_names(&web).is_empty() {
+                return Err(format!("{path} lists no front-end test"));
+            }
+            web
+        }
+        None => String::new(),
+    };
+    let checked = verify_all(&document, &declarations, &modules, &web)?;
+    let unproven = unproven_ticks_with(&document, &declarations, &web);
     if !unproven.is_empty() {
         return Err(unproven.join("\n"));
     }
@@ -1081,5 +1385,146 @@ mod tests {
             MIDDLE_INLINE,
         );
         assert_eq!(got, [("store::read".to_owned(), "store read".to_owned())]);
+    }
+
+    /// D-5830: the front-end test file AF06-05 and R301-01 cite, in miniature.
+    /// Every name below is invented for this test.
+    const WEB_SOURCE: &str = r#"import {test} from 'node:test';
+// test('a_name_in_a_line_comment', () => {});
+/* test('a_name_in_a_block_comment', () => {});
+   still the comment */
+const s = "test('a_name_in_a_double_string')";
+const q = 'test("a_name_in_a_single_string")';
+const t = `test('a_name_in_a_template') ${ '}' } test('still_the_template_text')`;
+const r = /test\('a_name_in_a_regex[/]'\)/g;
+const ratio = width / height / 2; test('the_name_after_a_division', () => {});
+if (/x/.test('a_method_call_argument_name')) {}
+test.skip('a_skipped_test_name', () => {});
+test.only('an_only_test_name', () => {});
+test('the_first_declared_test', () => {
+  assert.ok(true);
+});
+test( "the_second_declared_test" , () => {});
+test(`the_third_declared_test`, () => {});
+test(`a_built_${kind}_name`, () => {});
+  test('an_indented_declared_test', async () => {});
+"#;
+
+    #[test]
+    fn web_test_names_are_read_from_code_and_never_from_prose() {
+        assert_eq!(
+            web_test_names(WEB_SOURCE),
+            Ok(vec![
+                "the_name_after_a_division".to_owned(),
+                "the_first_declared_test".to_owned(),
+                "the_second_declared_test".to_owned(),
+                "the_third_declared_test".to_owned(),
+                "an_indented_declared_test".to_owned(),
+            ])
+        );
+        // A `return` takes an expression: the `/` after it opens a regex
+        // whose quote opens nothing, and a test after it is still read.
+        let after_return =
+            "function f(){ return /'/.test(s) }\ntest('a_test_after_the_return', () => {});";
+        assert_eq!(
+            web_test_names(after_return),
+            Ok(vec!["a_test_after_the_return".to_owned()])
+        );
+        // A test declared inside an interpolation is code, and is read.
+        let interpolated =
+            "const x = `${ (() => { test('a_test_in_an_interpolation', f); return 1 })() }`;";
+        assert_eq!(
+            web_test_names(interpolated),
+            Ok(vec!["a_test_in_an_interpolation".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_web_source_the_lexer_cannot_delimit_is_refused_by_its_line() {
+        for (source, line, why) in [
+            ("test('a_b_c_d', f);\n/* never closed", 2, "block comment"),
+            (
+                "x;\nconst s = 'never closed\ntest('a_b_c_d', f);",
+                2,
+                "string",
+            ),
+            ("x;\n\nconst t = `never closed", 3, "template"),
+            ("const r = /never closed\n", 1, "regular expression"),
+            ("f();\n}\n", 2, "closes nothing"),
+        ] {
+            let refusal = web_test_names(source).expect_err(source);
+            assert!(refusal.contains(why), "{source}: {refusal}");
+            assert!(
+                refusal.contains(&format!("line {line}")),
+                "{source}: {refusal}"
+            );
+        }
+        let open = "const t = `${ f(";
+        assert!(
+            web_test_names(open).is_err(),
+            "an interpolation never closed"
+        );
+    }
+
+    #[test]
+    fn only_a_file_the_runner_runs_declares_a_web_test() {
+        for path in ["web/tests/status-poll.test.js", "web/tests/a.test.js"] {
+            assert!(is_web_test_path(path), "{path}");
+        }
+        for path in [
+            "web/tests/deeper/status-poll.test.js",
+            "web/tests/.test.js",
+            "web/tests/fixture.js",
+            "web/src/lib/status-poll.test.js",
+            "crates/api/tests/a.test.js",
+        ] {
+            assert!(!is_web_test_path(path), "{path}");
+            let mut out = String::new();
+            let refusal = web_test_lines(path, "test('a_b_c_d', f);", &mut out).unwrap_err();
+            assert!(refusal.contains(path), "{refusal}");
+            assert!(out.is_empty(), "{path}: nothing is listed");
+        }
+        let mut out = String::new();
+        web_test_lines("web/tests/a.test.js", WEB_SOURCE, &mut out).unwrap();
+        assert_eq!(out.lines().count(), 5, "{out}");
+        assert!(
+            out.contains("web/tests/a.test.js\tthe_first_declared_test\n"),
+            "{out}"
+        );
+        // A template name with a line break would forge a row of the listing.
+        let forged = "test(`a_b\nweb/tests/a.test.js\tc_d_e_f`, f);";
+        let mut out = String::new();
+        let refusal = web_test_lines("web/tests/a.test.js", forged, &mut out).unwrap_err();
+        assert!(refusal.contains("line break"), "{refusal}");
+    }
+
+    /// D-5830: AF06-05 and R301-01..04 cite front-end tests by their snake-case
+    /// names; a name a runner-run file declares resolves, any other is refused
+    /// by the same message as before, and a listing never excuses a Rust name.
+    #[test]
+    fn a_bare_proof_name_resolves_against_a_declared_front_end_test() {
+        let web = "web/tests/status-poll.test.js\tbacks_off_while_unchanged\n";
+        let row = "| AF06-05 | a property | `web/tests/status-poll.test.js`: `backs_off_while_unchanged` | ✓ |";
+        assert_eq!(verify_all(row, LONG, "", web), Ok(1));
+        let refusal = verify_all(row, LONG, "", "").unwrap_err();
+        assert!(refusal.contains("backs_off_while_unchanged"), "{refusal}");
+        let renamed = "| AF06-05 | a property | `backs_off_while_unchanged`, `stops_after_n_unknown_and_says_why` | ✓ |";
+        let refusal = verify_all(renamed, LONG, "", web).unwrap_err();
+        assert!(
+            refusal.contains("stops_after_n_unknown_and_says_why"),
+            "{refusal}"
+        );
+        assert!(
+            !refusal.contains("`backs_off_while_unchanged`"),
+            "{refusal}"
+        );
+        // A Rust name that no source declares is refused with a listing too.
+        let rust = "| X-01 | a property | `a_long_test_name_here`; `the_renamed_test_name` | ✓ |";
+        assert!(verify_all(rust, LONG, "", web).is_err());
+        // A ✓ row that names a front-end test only by its name is proven by it,
+        // and by nothing when no runner-run file declares it.
+        let bare = "| R301-01 | a property | `backs_off_while_unchanged` | ✓ |";
+        assert!(unproven_ticks_with(bare, LONG, web).is_empty());
+        assert_eq!(unproven_ticks_with(bare, LONG, "").len(), 1);
     }
 }
