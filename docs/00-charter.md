@@ -1287,3 +1287,31 @@ BEL, GAIL, TATACHEM, CENTURYTEX and the others the sweep lists): each `event`
 record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
+
+## NSE Masters Data v1.6 — read 17 Oct 2026 (R4-17: the listing rule)
+
+`CLAUDE.md` §3 rule 1 requires the listing rule `pull::listing` applies to
+trace to a source recorded here. The specification below was fetched over
+HTTPS on 17 Oct 2026 (HTTP 200, `application/pdf`, 817,499 bytes, 39 pages)
+by the R4-17 cloud session and read from the bytes fetched. The digest is of
+those bytes; the exchange may serve other bytes later.
+
+| Document | Date | URL | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|---|---|
+| NSE – Masters Data, CM, F&O, CD and COM Segments, Version 1.6 (NSE Data & Analytics) | 05 May 2025 | `https://nsearchives.nseindia.com/web/sites/default/files/inline-files/NSE-Masters%20Data-v1.6.pdf` | `a1e45b6de312ebf05298fac8a1c4fbe337b8339b7eb110ac75705925bd05487e` | §2.3 Units (p7): "All time fields are number of seconds from midnight January 1, 1980, unless specified otherwise." §3.1.1 `security.txt` (p9): "Listing Date LONG Numeric Date of listing.", "Expulsion Date LONG Numeric Date of expulsion.", "Re-Admission Date LONG Numeric Date of readmission." | `pull::cash_auction`'s lifecycle decode (unchanged), and `pull::listing`: a CASH bar dated before its exact symbol+ISIN's listing date is not that security's bar; a window after its expulsion date is the end of its history (D-4990, D-4991) |
+
+**What the document does NOT say, and so is labelled in the code.** v1.6
+describes `security.txt`; it does not name the MII CSV's abbreviated columns.
+That `ListgDt`, `RmvlDt` and `RadmssnDt` of the dated
+`NSE_CM_security_ddmmyyyy.csv.gz` (charter §9) are its Listing, Expulsion and
+Re-Admission dates is read from their names and order (`docs/13-pull-reconciliation-20260906.md`,
+columns 35–37), not from this document. One observation corroborates the
+epoch: IRFC's `ListgDt` 1,296,345,600 seconds decodes to 2021-01-29 from
+1980-01-01 — the day of its first Zerodha day bar measured on the operator's
+store (`pull::series_identity`'s header) — and to 2011-01-30 from 1970. A
+`ListgDt` of `0` names no date: a security whose master row carries `0`
+(TATACONSUM and TMPV on the operator's masters, per the R4-17 work package)
+has an UNKNOWN listing day, and nothing is refused on it. Whether the
+expulsion date is the last day traded or the first day not traded is
+UNVERIFIED: `pull::listing` treats only days strictly AFTER it as past the
+end of history, so the expulsion day itself is never refused.

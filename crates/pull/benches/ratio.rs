@@ -56,6 +56,11 @@ use std::time::Instant;
 #[path = "ratio/tickstore_write.rs"]
 mod tickstore_write;
 
+/// C-ZI-01 and C-ZI-02: the listing probe and the identity judge per minute,
+/// flat (R4-17).
+#[path = "ratio/identity.rs"]
+mod identity;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1271,6 +1276,7 @@ fn main() {
     ok &= alert_put_is_flat(&alert_stores);
     ok &= alert_window_is_flat(&alert_stores);
     ok &= tickstore_write::tickstore_write_is_flat_per_member();
+    ok &= identity::identity_is_flat();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
     ok &= fold_is_flat_per_bar();
     ok &= nfo_read_is_flat_per_row();

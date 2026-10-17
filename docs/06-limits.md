@@ -18837,3 +18837,101 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
 | L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
+
+
+## R4-17: Zerodha series identity (D-4990 to D-4995)
+
+**`JUMP_BPS` = 3,000 was chosen first and MEASURED on the Mac, 17 Oct
+2026.** `cli series-identity ALL --segment CASH --feed zerodha --workers 4`
+over a private shadow of the operator's store (bars read through the link,
+the process under the kernel write lock, nothing written outside the shadow):
+208 shares, 153,548,887 minutes, 25.8 s wall (16.3 s user, 15.7 s system),
+505 MB peak resident.
+
+| Measure of `jump_bps` across continuous minutes | Value |
+|---|---|
+| per-share p99 | at most 188 bps; median share 11 |
+| per-share p999 | at most 270 bps outside PIIND (PIIND 90,079) |
+| largest max of a share nothing else accuses | 2,203 bps (RADICO) |
+| larger maxima | PIIND 270,496 and VBL 10,003, both on minutes the day rung refuses as `foreign_level` first |
+| minutes refused as `in_session_jump` | **0**, so 0 on any split or bonus ex-date |
+
+**The limit this names:** 3,000 is 1.36 times the largest clean jump, not a
+wide margin, and on today's store the rule refuses nothing the day rung's
+range does not already refuse. A share with a genuine one-minute move
+beyond 30% of the smaller price inside a continuous run would be refused by
+name; whether exchange price bands make that impossible is UNVERIFIED (no
+band rule is in the charter). Re-run the scan after every Zerodha re-pull
+and compare the `jump-max` column with this row.
+
+**An index's zero lands (D-4992 point 3).** The day arm refuses a price
+BELOW zero on an index and holds exactly zero, because every zero-valued
+Zerodha INDEX day bar on the store (153) is `NIFTY50DIVPOINT`'s, an index that
+restarts from zero. The residual risk: a level index served at zero by a
+vendor fault would land as a day bar. None is observed (0 of 135 series); its
+minutes are still judged by range, and the scan labels every held zero.
+
+**Store scan, measured on the Mac (17 Oct 2026, read-only of bars, kernel
+write lock, private shadow):**
+
+| Run | Series | Bars judged | Wall | Workers |
+|---|---|---|---|---|
+| `NIFTY --segment INDEX` | 1 | 796,027 minutes + 141 day months | 0.81 s | 1 |
+| `ALL --segment INDEX` | 135 | 47,967,058 minutes | 6.86 s | 4 |
+| `ALL --segment CASH` | 208 | 153,548,887 minutes | 25.8 s | 4 |
+| `<SYMBOL> --segment CASH`, each share once, sequential, warm | 208 runs | about 740,000 minutes each | p50 0.297 s, p99 0.375 s, max 0.390 s (PIIND); 55.3 s in all | 1 |
+
+That is about 0.17 µs of wall clock per minute judged on 4 workers, the GDFL witness reads included. It
+is O(bars held), a scan, never a read path; `ALL` spreads the series over
+the workers (`--workers`, default every core the machine reports).
+
+**Measured in the R4-17 cloud container, 17 Oct 2026** (4 vCPU, shared, not
+the operator's machine; `cargo bench -p pull --bench ratio`, release build):
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-01 listing probe (`Listing::span`), master of 300 → 3,000 rows | 80,501 ps | 80,418 ps (0.998x) | — | 125 / 210 / 31,583 ns at 300 rows; 96 / 113 / 3,520 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute (`MinuteJudge::judge`), answer of 1 → 10 → 100 sessions | 24,974 ps | 29,785 ps (1.192x) | 37,798 ps (1.513x) | 74 / 77 / 3,475 ns at 100 sessions (n=20,000) |
+
+**The same rows on the operator's Mac, 17 Oct 2026** (M4 Pro, shared with the
+other build agents, load about 17; `cargo bench --locked -p pull --bench ratio`,
+release; every gate-8 ratio within its ceiling):
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-01 listing probe, master of 300 → 3,000 rows | 57,985 ps | 58,127 ps (1.002x) | — | 42 / 84 / 209 ns at 300 rows; 42 / 84 / 250 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute, 1 → 10 → 100 sessions | 13,705 ps | 17,064 ps (1.245x) | 21,638 ps (1.578x) | 41 / 42 / 209 ns at 100 sessions (n=20,000) |
+
+**C-ZI-02 is not O(1): the per-minute judgement is one binary search over the
+day bars of the months the answer touches, O(log days).** That is
+1.513x at 100 sessions, inside the 3.0x ceiling and above the 1.4x line past
+which a shared-host ratio is re-run on dedicated hardware before it is believed. A
+landing's book holds only the months its answer touches (a 60-day Zerodha
+window touches at most three: about 63 day bars), so the 100x row, about five
+months in one answer, is past what a landing meets. The scan
+(`identity_screen::scan_series`) builds one book of the series' whole day
+rung, so its per-minute cost grows as O(log days held), about 2,000 for
+2018..2026.
+
+**The listing table is loaded once per store root per process**
+(`listing::for_store`), and only after a master loads. A newer master
+installed while a process runs is not seen until that process restarts. The
+direction is safe: a missing new listing refuses nothing, and a missing new
+removal leaves a 404 the failure it was. A newer master whose receipt fails
+is passed over by name. Loading is one directory listing and one master parse
+(O(rows), about 4 MB of gzip), paid once per process.
+
+**The store scan is O(bars held), and a scan, not a read path.** Each
+flagged minute's measured cause reads GDFL's 1s month of that share once and
+folds it (`pull::fold`): about 470,000 records per month that holds a flagged
+minute. Months with nothing flagged read nothing of GDFL. Its quarantine plan
+lists every flagged stamp, so a series flagged whole (NIFTYNEXT50, 87,375
+minutes per WP-13d's measurement) writes a plan of that many stamps. A month
+whose every bar shares one cause is written as `whole_month` instead.
+
+**`WITNESS_TOLERANCE_BPS` = 100 is chosen, not measured.** It decides a label
+only (`basis_mismatch` against `foreign_level`). No landing rule reads it.
+
+**History ends is not yet on the live pull.** `fetch::fetch_and_land_listed`
+returns it; the Zerodha broker run (`broker_run`, R4-14's) must call it with
+the share's span. Until then a window after delisting is reported as it was.

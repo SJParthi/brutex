@@ -610,14 +610,19 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
-       cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED]
-                                   read-only: every stored 1min bar of a series
-                                   judged against its own stored 1day bars; the
-                                   minutes a landing refuses today (before the
-                                   first served day bar, or wholly outside
-                                   their own day's range) and the months that
-                                   hold them. ALL prints one line per series
-                                   and names each with no minute rung (WP-13d).
+       cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED] [--workers N]
+                                   writes no bar: every stored bar of a series
+                                   judged as a landing judges it today (a price
+                                   at or below zero, a CASH bar before its
+                                   master's listing day, a minute before the
+                                   first served day bar or outside its own
+                                   day's range, a CASH in-session jump), each
+                                   flagged bar given a cause measured against
+                                   GDFL, and the months that hold them. Writes
+                                   one quarantine plan under audit/. ALL scans
+                                   the series in parallel, prints one line per
+                                   series and names each with no minute rung
+                                   (WP-13d, D-4994).
        cli zerodha-gaps INSTRUMENT|ALL FROM TO [--segment INDEX|CASH] [--apply]
                                    the gap ledger for stored Zerodha 1min months
                                    (FROM, TO are YYYY-MM-DD), from the store and
