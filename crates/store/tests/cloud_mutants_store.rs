@@ -3353,3 +3353,43 @@ fn on_one_thread_a_later_failure_never_replaces_the_earliest() {
     assert_eq!(*refused.lock().unwrap(), vec![month_dir, checksums]);
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **A TIME INDEX THAT DOES NOT HOLD THE MONTH'S LAST BAR IS STALE, AND IS
+/// REBUILT.**
+///
+/// Covers the first half of `time_index::resume`'s check, the half
+/// `a_time_index_occupied_at_another_rank_is_stale_and_rebuilt` does not
+/// reach: the entry of the last bar's bucket is whole (its checksum holds)
+/// but the last bar's slot in it is empty. The `.tix` of a month of 1,100
+/// one-second bars is laid beside a month of 1,101, whose last bar shares
+/// the bucket of the shorter month's last (bucket 537); the index door names
+/// it stale, writes it from the bars, and keeps it on the next run.
+#[test]
+fn a_time_index_without_the_months_last_bar_is_stale_and_rebuilt() {
+    use store::file::{BarFile, Reindexed};
+    use store::path::FileKind;
+    use store::time_index::Why;
+    const SYMBOL: u32 = 11;
+    let shorter = scratch("tix-last-shorter");
+    let longer = scratch("tix-last-longer");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&shorter, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    drop(writer);
+    let mut writer = BarFile::open_or_create(&longer, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_101)).unwrap();
+    drop(writer);
+    let tix = second_month(FileKind::TimeIndex);
+    fs::copy(tix.to_path_buf(&shorter), tix.to_path_buf(&longer)).unwrap();
+    let indexed = BarFile::index_existing(&longer, bars, SYMBOL).unwrap();
+    assert_eq!(indexed.n_valid, 1_101);
+    assert_eq!(indexed.outcome, Reindexed::Built(Why::Stale));
+    assert_eq!(
+        BarFile::index_existing(&longer, bars, SYMBOL)
+            .unwrap()
+            .outcome,
+        Reindexed::Kept
+    );
+    let _ignored = fs::remove_dir_all(&shorter);
+    let _ignored = fs::remove_dir_all(&longer);
+}

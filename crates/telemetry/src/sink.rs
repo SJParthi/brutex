@@ -8797,4 +8797,92 @@ mod cloud_mutant_tests {
         drop(audit);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
+
+    /// **A CLOSED SINK DOES NOT SAY IT HOLDS ITS DIRECTORY.**
+    ///
+    /// Covers the second half of `Debug`'s `holds_directory`
+    /// (`held_lock.is_some() && !closed`): an open sink holds its directory
+    /// and says so; once closed it does not, though its lock field is still
+    /// there.
+    #[test]
+    fn a_closed_sink_does_not_say_it_holds_its_directory() {
+        let dir = scratch("debug-closed");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert!(
+            format!("{sink:?}").contains("holds_directory: true"),
+            "{sink:?}"
+        );
+        sink.close().expect("closes");
+        assert!(
+            format!("{sink:?}").contains("holds_directory: false"),
+            "{sink:?}"
+        );
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A MORE GENERAL TARGET REGISTERED LATER DOES NOT OVERRIDE A MORE
+    /// SPECIFIC ONE.**
+    ///
+    /// Covers `level_for`'s choice when a covering prefix is SHORTER than the
+    /// one already chosen: the longest prefix wins, whatever the order of
+    /// registration (only a repeat of the same prefix takes the last word,
+    /// `a_repeated_target_takes_its_last_registration`).
+    #[test]
+    fn a_general_target_registered_later_does_not_override_a_specific_one() {
+        let dir = scratch("target-order");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_min_level(Level::Error)
+                .with_target_level("store.tix", Level::Debug)
+                .with_target_level("store", Level::Warn),
+        )
+        .expect("opens");
+        assert_eq!(sink.level_for("store.tix.rebuild"), Level::Debug);
+        assert_eq!(sink.level_for("store.srt"), Level::Warn);
+        assert_eq!(sink.level_for("pull"), Level::Error);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STREAM WITH A SERIAL AND NO CURRENT FILE IS ONE THAT WAS WRITTEN.**
+    ///
+    /// Covers `audit_state`'s second look: no current file, but a serial on
+    /// disk (a roll that renamed the current file away and died before the
+    /// next one was made), is a stream at that serial, not "never written".
+    #[test]
+    fn a_stream_with_a_serial_and_no_current_file_was_written() {
+        let dir = scratch("audit-state-serial");
+        assert_eq!(super::audit_state(&dir), Ok(None), "nothing at all");
+        let serial = audit_serial_path(&dir);
+        std::fs::create_dir_all(serial.parent().expect("a parent")).expect("the index");
+        std::fs::write(&serial, 7u64.to_le_bytes()).expect("the serial");
+        assert!(!audit_current_path(&dir).exists(), "the premise");
+        assert_eq!(super::audit_state(&dir), Ok(Some(7)));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A POINTER AT BYTES THAT ARE NOT A RECORD HAS ROLLED OFF.**
+    ///
+    /// Covers `audit_read`'s answer when the line it reads does not decode:
+    /// the file at the pointer's place holds something else now, so the line
+    /// is not there (`RolledOff`), never a decoded guess and never a panic.
+    #[test]
+    fn a_pointer_at_bytes_that_are_not_a_record_has_rolled_off() {
+        let dir = scratch("audit-read-garbage");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        std::fs::write(audit_current_path(&dir), b"not a record at all\n").expect("garbage");
+        let pointer = super::AuditPointer {
+            serial: 2,
+            offset: 0,
+            seq: 1,
+            len: 20,
+            level: Level::Error,
+        };
+        assert_eq!(
+            super::audit_read(&dir, 2, &pointer),
+            super::AuditLine::RolledOff
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 }
