@@ -8893,4 +8893,40 @@ mod cloud_mutant_tests {
         );
         let _ignored = std::fs::remove_dir_all(&dir);
     }
+
+    /// **A RING LINE THE AUDIT FILE REFUSES WHILE SEEDING IS DROPPED AND NOT
+    /// COUNTED AS SEEDED.**
+    ///
+    /// Covers `Audit::seed`'s arm for an append that is refused: the ring
+    /// holds one audited line, a new stream seeds it (counted once), and the
+    /// same seed run again over a file that will not take a write counts
+    /// nothing more as seeded and drops the line, by count and by name.
+    #[test]
+    fn a_ring_line_the_audit_file_refuses_while_seeding_is_not_seeded() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-seed-refused");
+        {
+            let ring = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
+            assert!(
+                ring.emit(&Event::error("cloud.seed", "a refusal"))
+                    .is_written()
+            );
+        }
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        assert_eq!((audit.health().seeded, audit.health().dropped), (1, 0));
+        audit.file = Some(std::fs::File::open(audit_current_path(&dir)).expect("read-only"));
+        audit.seed(8);
+        let health = audit.health();
+        assert_eq!((health.seeded, health.dropped), (1, 1));
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot append an audited line")),
+            "{health:?}"
+        );
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 }
