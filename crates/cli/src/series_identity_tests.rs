@@ -778,3 +778,135 @@ fn a_month_refused_whole_is_planned_whole() {
         "{plan}"
     );
 }
+
+/// What the scan meets at the edges: a suspect minute nothing vouches for
+/// (labelled, not quarantined), a GDFL minute whose close is zero (no witness
+/// to match: `foreign_level`), a share with one minute (nothing judged, so an
+/// empty distribution), and a month that will not open (named, and the verb
+/// fails).
+#[test]
+fn the_scan_names_every_edge_it_cannot_judge() {
+    let root = Root::new();
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let (days, _) = week_minutes(|_, _| (1, 1));
+    let day_bars: Vec<_> = days
+        .iter()
+        .map(|on| day_bar(*on, LEVEL - 1_000, LEVEL + 2_000))
+        .collect();
+    // MAZDOCK: the first session's 10:00 at 105% (suspect), the second's
+    // 10:00 at twice the level, whose GDFL second closes at zero.
+    let (_, minutes) = week_minutes(|on, m| match (on, m) {
+        (on, 600) if on == days[0] => (105, 100),
+        (on, 600) if on == days[1] => (2, 1),
+        _ => (1, 1),
+    });
+    seed(
+        &root.0,
+        vendor,
+        "MAZDOCK",
+        store::path::Timeframe::DAY_1,
+        &day_bars,
+    );
+    seed(
+        &root.0,
+        vendor,
+        "MAZDOCK",
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    let zero_close = store::format::Bar {
+        low: 0,
+        close: 0,
+        ..minutes[375 + 600 - 555]
+    };
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Gdfl,
+        "MAZDOCK",
+        store::path::Timeframe::SECOND_1,
+        &[zero_close],
+    );
+    let (code, out) = root.run(&["MAZDOCK", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("measured causes: zero_price 0, before_listing 0, before_first_day_bar 0, basis_mismatch 0, foreign_level 1, no_gdfl_witness 1"),
+        "{out}"
+    );
+    let plan = fs::read_to_string(&plans(&root.0)[0].0).unwrap();
+    assert!(plan.contains("\tno_gdfl_witness\tlabel\t1\t"), "{plan}");
+    assert!(plan.contains("\tforeign_level\tquarantine\t1\t"), "{plan}");
+
+    // IRFC: one stored minute, so no run and nothing judged.
+    seed(
+        &root.0,
+        vendor,
+        "IRFC",
+        store::path::Timeframe::MINUTE_1,
+        &minutes[..1],
+    );
+    let (_, out) = root.run(&["IRFC", "--segment", "CASH"]);
+    assert!(
+        out.contains("in-session jumps: 0 judged; p50 0 p99 0 p999 0 max 0 bps"),
+        "{out}"
+    );
+
+    // KFINTECH: a minute month that is not a bar file.
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol: "KFINTECH",
+        contract: None,
+        timeframe: store::path::Timeframe::MINUTE_1,
+        month: store::path::YearMonth::new(2024, 1).unwrap(),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(&root.0);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"not a bar file").unwrap();
+    let (code, out) = root.run(&["KFINTECH", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("2024-01: NOT READ: 1min:"), "{out}");
+    let (code, out) = root.run(&["ALL", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOT READ: 1 month(s)"), "{out}");
+}
+
+/// A plan that cannot be written is said, and the verb fails: its directory
+/// is a file, its staging name is taken by a directory, or its final name is.
+#[test]
+fn a_plan_that_cannot_be_written_fails_out_loud() {
+    let (blocked, _) = store();
+    fs::create_dir_all(blocked.0.join("audit")).unwrap();
+    fs::write(blocked.0.join("audit").join("series-identity"), b"a file").unwrap();
+    for arguments in [&["NIFTY"][..], &["ALL"]] {
+        let (code, out) = blocked.run(arguments);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains("QUARANTINE PLAN NOT WRITTEN: "), "{out}");
+    }
+
+    let (staging, _) = store();
+    let dir = staging.0.join("audit").join("series-identity");
+    fs::create_dir_all(dir.join(format!(".series-identity.{}.staging", std::process::id())))
+        .unwrap();
+    let (code, out) = staging.run(&["NIFTY"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("QUARANTINE PLAN NOT WRITTEN: staging_not_regular"),
+        "{out}"
+    );
+
+    // The final name taken by a directory: the rename is refused by name.
+    let (first, _) = store();
+    let (_, out) = first.run(&["NIFTY"]);
+    let name = plans(&first.0)[0].0.file_name().unwrap().to_owned();
+    let (taken, _) = store();
+    fs::create_dir_all(taken.0.join("audit").join("series-identity").join(&name)).unwrap();
+    let (code, again) = taken.run(&["NIFTY"]);
+    assert_eq!(code, FAILED, "{again}");
+    assert!(
+        again.contains("QUARANTINE PLAN NOT WRITTEN: "),
+        "{out}\n{again}"
+    );
+}

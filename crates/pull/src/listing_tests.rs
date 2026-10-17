@@ -333,3 +333,73 @@ fn a_store_table_is_remembered_only_once_a_master_loads() {
     let third = for_store(&root.0);
     assert!(std::sync::Arc::ptr_eq(&second, &third), "loaded once");
 }
+
+#[test]
+fn a_master_without_the_lifecycle_columns_and_two_rows_that_disagree_state_no_listing() {
+    let root = Root::new("columns");
+    let csv =
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n9000,ALPHA,EQ,INE000A01001,1\n";
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(csv.as_bytes()).unwrap();
+    crate::cash_session_cache::install(
+        &root.masters(),
+        day(2026, 8, 3),
+        &encoder.finish().unwrap(),
+    )
+    .unwrap();
+    let table = Listing::load(&root.masters());
+    let span = table.span("NSE", "ALPHA", Some(ALPHA)).unwrap();
+    assert_eq!(span.first, Err(Unknown::ColumnAbsent));
+    assert_eq!(span.last, None);
+
+    let root = Root::new("conflicting");
+    let first = row("ALPHA", ALPHA, Some(day(2021, 3, 4)));
+    let second = row("ALPHA", ALPHA, Some(day(2021, 3, 5)));
+    let mut csv = String::from(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n",
+    );
+    for listed in [&first.listed, &second.listed] {
+        writeln!(csv, "9000,ALPHA,EQ,{ALPHA},1,{listed},0,0").unwrap();
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(csv.as_bytes()).unwrap();
+    crate::cash_session_cache::install(
+        &root.masters(),
+        day(2026, 8, 3),
+        &encoder.finish().unwrap(),
+    )
+    .unwrap();
+    let table = Listing::load(&root.masters());
+    let span = table.span("NSE", "ALPHA", Some(ALPHA)).unwrap();
+    assert_eq!(span.first, Err(Unknown::Conflicting));
+    assert!(!span.before_listing(day(1990, 1, 1)));
+}
+
+#[test]
+fn a_removal_after_the_masters_own_day_ends_nothing() {
+    let root = Root::new("late-removal");
+    let mut late = row("LATE", "INE000J01009", Some(day(2010, 1, 4)));
+    late.removed = nse_seconds(day(2026, 9, 1)).to_string();
+    install(&root.0, day(2026, 8, 3), &[late]);
+    let table = Listing::load(&root.masters());
+    let span = table.span("NSE", "LATE", Some("INE000J01009")).unwrap();
+    assert_eq!(span.first, Ok(day(2010, 1, 4)));
+    assert_eq!(span.last, None);
+    assert_eq!(span.history_ended(day(2026, 10, 1)), None);
+}
+
+#[test]
+fn a_name_that_is_not_text_is_not_a_master() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let root = Root::new("not-text");
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
+    let odd = std::ffi::OsStr::from_bytes(b"NSE_CM_security_\xff.csv.gz");
+    std::fs::write(root.masters().join(odd), b"x").expect("an odd name");
+    let table = Listing::load(&root.masters());
+    assert_eq!(table.master().map(|(_, on)| on), Some(day(2026, 8, 3)));
+    assert!(table.passed_over().is_empty());
+}

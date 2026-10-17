@@ -1118,3 +1118,135 @@ fn a_404_after_delisting_is_history_ending_not_a_failure() {
     assert_eq!(landed.history_ends, None);
     assert_eq!(landed.bars.len(), 1);
 }
+
+/// An option's price of zero is not this rule's (D-4992): a zero day bar and a
+/// zero minute of an option contract land, on either arm.
+#[test]
+fn an_options_zero_price_is_never_refused_as_non_positive() {
+    let scratch = Scratch::new("option-zero");
+    let (from, to, days) = week();
+    let contract = brutex_core::instrument::Contract::parse("2024-01-25-2150000-CE").unwrap();
+    let option = |granularity| pull::fetch::BarRequest {
+        listing: pull::vendor::Listing::Derivative,
+        ..request(from, to, granularity)
+    };
+    let zero = |row: RawRow| RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..row
+    };
+    for (granularity, rows) in [
+        (
+            pull::vendor::Granularity::Day1,
+            days.iter()
+                .copied()
+                .map(day_candle)
+                .map(zero)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            pull::vendor::Granularity::Minute1,
+            answer(days[0], days[0]).into_iter().map(zero).collect(),
+        ),
+    ] {
+        let req = option(granularity);
+        let done = pull::ingest::from_window(
+            &RawWindow { rows },
+            "NIFTY",
+            "IDENTITY TEST",
+            &scratch.0,
+            pull::ingest::Plan {
+                segment: "FNO",
+                contract: Some(contract),
+                ..plan(&req)
+            },
+        );
+        assert!(
+            whys(&done, "non_positive_price").is_empty(),
+            "{:?}",
+            done.failures
+        );
+    }
+}
+
+/// A day rung that will not open judges nothing: the answer lands, and the
+/// screen says so rather than refusing on a witness it could not read.
+#[test]
+fn a_day_rung_that_will_not_open_refuses_nothing() {
+    let scratch = Scratch::new("unread-day");
+    let (from, to, _) = week();
+    let path = StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol: "PIIND",
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month: YearMonth::new(2024, 1).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(&scratch.0);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"not a bar file").unwrap();
+    let rows = answer(from, to);
+    let sent = rows.len();
+    let done = land_cash(
+        &scratch.0,
+        "PIIND",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(
+        cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent
+    );
+}
+
+/// A price the landing cannot hold (a rupee price that overflows paisa) is
+/// not judged here, on either arm: the landing refuses it in its own words.
+#[test]
+fn a_price_the_landing_cannot_hold_is_left_to_the_landing() {
+    let scratch = Scratch::new("overflow");
+    let (from, to, days) = week();
+    for (granularity, mut rows) in [
+        (
+            pull::vendor::Granularity::Day1,
+            days.iter().copied().map(day_candle).collect::<Vec<_>>(),
+        ),
+        (pull::vendor::Granularity::Minute1, answer(days[0], days[0])),
+    ] {
+        for row in &mut rows {
+            *row = RawRow {
+                open: row.open / 100,
+                high: row.high / 100,
+                low: row.low / 100,
+                close: row.close / 100,
+                ..*row
+            };
+        }
+        rows[1].high = i64::MAX / 10;
+        let req = cash_request(from, to, granularity);
+        let done = pull::ingest::from_window(
+            &RawWindow { rows },
+            "PIIND",
+            "IDENTITY TEST",
+            &scratch.0,
+            pull::ingest::Plan {
+                scale: pull::vendor::PriceScale::Rupees,
+                ..cash_plan(&req)
+            },
+        );
+        assert_eq!(
+            whys(&done, "price_off_grid").len(),
+            1,
+            "{:?}",
+            done.failures
+        );
+        assert!(whys(&done, "non_positive_price").is_empty());
+    }
+}

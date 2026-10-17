@@ -310,17 +310,17 @@ fn listing_day(field: &LifecycleDate, master_day: Day) -> Result<Day, Unknown> {
 }
 
 /// The removal day, when the master states one on or before its own day and
-/// no readmission after it.
+/// no readmission. A readmission on or before the removal is a contradiction
+/// [`Listing::span`] has already answered, so any readmission here came after
+/// it: the history did not end.
 fn removal_day(
     removal: &LifecycleDate,
     readmission: &LifecycleDate,
     master_day: Day,
 ) -> Option<Day> {
-    let removed = removal.date().filter(|day| *day <= master_day)?;
-    match readmission.date() {
-        Some(back) if back > removed => None,
-        _ => Some(removed),
-    }
+    removal
+        .date()
+        .filter(|day| *day <= master_day && readmission.date().is_none())
 }
 
 /// The listing table of the store at `store_root`, loaded once per process

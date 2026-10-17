@@ -473,7 +473,8 @@ impl Plan {
             return Ok(Some(path));
         }
         std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-        let staging = dir.join(format!(".{name}.{}.staging", std::process::id()));
+        // ONE STAGING NAME PER PROCESS, the writer's own (`store::staging`).
+        let staging = dir.join(format!(".series-identity.{}.staging", std::process::id()));
         let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
         staged
             .file
