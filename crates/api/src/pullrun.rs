@@ -10589,4 +10589,55 @@ mod cloud_walk_tests {
         assert_eq!(answer.left_open[0].runs, [940, 930]);
         assert_eq!(answer.at_least_open(), 1);
     }
+
+    /// **A guessed answer says a count only when there is one to say.** With
+    /// a reading that read every run record the index names and no run
+    /// counted unnamed, neither the unread-records sentence nor the
+    /// unnamed-runs sentence is written. With one of each, each is written,
+    /// and with its count. Kills `>` turned to `>=` at both counts in
+    /// `Guessed::words` (pullrun.rs:1232, `self.unnamed > 0`; 1246,
+    /// `.filter(|n| *n > 0)`), each of which wrote a sentence about zero.
+    #[test]
+    fn a_guessed_answer_says_a_count_only_when_there_is_one() {
+        let none = Guessed {
+            why: "a guess decides it".to_owned(),
+            reading: Some(run_at(40)),
+            guessed_runs: vec![40],
+            sure: Vec::new(),
+            doubted: Vec::new(),
+            unnamed: 0,
+            left_open: Vec::new(),
+        };
+        let words = none.words();
+        assert!(
+            words.contains(" A guess names the run(s) opened at records 40:"),
+            "the premise: the answer is rendered: {words}"
+        );
+        assert!(!words.contains("older run record(s)"), "{words}");
+        assert!(
+            !words.contains("more run(s) of the walk's reading"),
+            "{words}"
+        );
+
+        let one_each = Guessed {
+            reading: Some(Interrupted {
+                runs_unread: 1,
+                ..run_at(40)
+            }),
+            unnamed: 1,
+            ..none
+        };
+        let words = one_each.words();
+        assert!(
+            words.contains(" 1 older run record(s) that the journal's index names lie before the"),
+            "{words}"
+        );
+        assert!(
+            words.contains(
+                " 1 more run(s) of the walk's reading have no closing record and are counted, \
+                 not named"
+            ),
+            "{words}"
+        );
+    }
 }
