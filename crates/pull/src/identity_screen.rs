@@ -47,17 +47,20 @@ use crate::series_identity::{
     self, Cause, DayBook, FirstDay, MinuteJudge, Rules, Tally, Verdict, ist_day, prices,
 };
 
-/// One refused stored bar, for the quarantine plan a scan writes.
+/// One stored bar a landing would refuse, or a suspect minute it would land
+/// and name: the rows a quarantine plan is made from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RefusedBar {
+pub struct FlaggedBar {
     /// Its rung.
     pub timeframe: Timeframe,
     /// Its month.
     pub month: YearMonth,
     /// The bar as stored.
     pub bar: Bar,
-    /// Why a landing refuses it.
-    pub cause: Cause,
+    /// [`Cause::code`], or [`series_identity::SUSPECT_CODE`].
+    pub code: &'static str,
+    /// Whether a landing refuses it: false for a suspect minute.
+    pub refused: bool,
 }
 
 /// One stored series judged the way the landing door judges an answer:
@@ -80,8 +83,9 @@ pub struct SeriesScan {
     pub months: Vec<(YearMonth, Tally)>,
     /// Each day month's verdicts under the day-rung arm, ascending by month.
     pub day_verdicts: Vec<(YearMonth, Tally)>,
-    /// Every bar a landing would refuse, day bars first, each rung ascending.
-    pub refused: Vec<RefusedBar>,
+    /// Every bar a landing would refuse and every suspect minute, day bars
+    /// first, each rung ascending.
+    pub flagged: Vec<FlaggedBar>,
     /// Every judged in-session jump of a CASH share, in basis points of the
     /// smaller price: the distribution [`series_identity::JUMP_BPS`] is
     /// measured against. Empty for every other series.
@@ -138,7 +142,7 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
         listed_on,
         months: Vec::new(),
         day_verdicts: Vec::new(),
-        refused: Vec::new(),
+        flagged: Vec::new(),
         jumps: Vec::new(),
         unread: Vec::new(),
     };
@@ -160,11 +164,12 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
                         bar.ts_micros,
                     );
                     if let Some(cause) = cause {
-                        scan.refused.push(RefusedBar {
+                        scan.flagged.push(FlaggedBar {
                             timeframe: Timeframe::DAY_1,
                             month,
                             bar: *bar,
-                            cause,
+                            code: cause.code(),
+                            refused: true,
                         });
                     }
                 }
@@ -194,12 +199,18 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
                 judge.judge(bar.ts_micros.div_euclid(1_000_000), day, prices(bar));
             scan.jumps.extend(jump);
             tally.count(verdict, day, bar.ts_micros);
-            if let Verdict::Refused(cause) = verdict {
-                scan.refused.push(RefusedBar {
+            let code = match verdict {
+                Verdict::Refused(cause) => Some((cause.code(), true)),
+                Verdict::Suspect { .. } => Some((series_identity::SUSPECT_CODE, false)),
+                Verdict::Held | Verdict::Unchecked(_) => None,
+            };
+            if let Some((code, refused)) = code {
+                scan.flagged.push(FlaggedBar {
                     timeframe: Timeframe::MINUTE_1,
                     month,
                     bar: *bar,
-                    cause,
+                    code,
+                    refused,
                 });
             }
         }
