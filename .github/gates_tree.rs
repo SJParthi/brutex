@@ -2516,9 +2516,13 @@ const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
 // `proc` and `self` are the two directories of the Linux path
 // `/proc/self/status`, which `cash_session_cache`'s `read_limited` test reads
 // because procfs states a length of 0 for a file that yields more, the one
-// regular file that reaches the read's own length recheck. None names an
-// account, an environment, a vendor credential or a field of a parameter path.
-const CLOUD_MUT_PULL_LITERAL: &str = "proc self";
+// regular file that reaches the read's own length recheck. `08` is the month
+// field of the invented GDFL row date `04/08/2026` the closing-auction tests
+// of `pull/tests/cloud_mutants_import.rs` write, a `DD/MM/YYYY` the slash
+// splits; `msg` is the key of the telemetry JSON line one of them reads back.
+// None names an account, an environment, a vendor credential or a field of a
+// parameter path.
+const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg";
 
 /// Every declared group, in the order the step joined them.
 const DECLARED: [&str; 63] = [
