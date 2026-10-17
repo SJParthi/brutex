@@ -33,7 +33,9 @@ import {
   hiddenMonths,
   hiddenText,
   strandedEffect,
-  wholeTitle
+  wholeTitle,
+  tokensOf,
+  censusKeyOf
 } from '../src/lib/db/notes-controls.js';
 import { sessionGrid, SESSION_OPEN_MINUTE, calendarOf } from '../src/lib/db/selection-model.js';
 import { bandOf } from '../src/lib/db/dayflags.js';
@@ -75,6 +77,16 @@ test('the_time_lists_offer_every_traded_minute_of_the_days_in_view', () => {
   assert.deepEqual(specials[0].windows, [{ from: 555, to: 699 }, { from: 945, to: 1019 }]);
   assert.deepEqual(specialsOf({}), []);
   assert.deepEqual(specialsOf({ special: [{ date: '2024-11-05', windows: [{ from: '18:00', to: '18:59' }] }] })[0].kind, 'special session');
+  // Out of order and repeated, the list comes back by day; a window with a missing end is left out.
+  const unordered = specialsOf({
+    special: [
+      { date: '2024-11-05', kind: 'b', windows: [{ from: '18:00', to: '18:59' }] },
+      { date: '2023-11-12', kind: 'a', windows: [{ from: '18:15', to: '19:14' }, { to: '18:00' }] },
+      { date: '2024-11-05', kind: 'c', windows: [{ from: '18:00', to: '18:59' }] }
+    ]
+  });
+  assert.deepEqual(unordered.map((d) => d.kind), ['a', 'b', 'c']);
+  assert.equal(unordered[0].windows.length, 1);
   const cal = /** @type {{from: number, days: string}} */ (calendarOf({ from: CALENDAR.from, days: dayString('2024-11-08') }));
 
   /** The three lists for a window, built exactly as `selection.svelte.js` builds them. @param {string} lo @param {string} hi @param {number} secs @param {string[]} [loaded] */
@@ -174,6 +186,7 @@ test('the_calendar_marks_refused_days_outside_the_window', () => {
   assert.equal(monthDays('2024-13'), null);
   assert.equal(monthDays('2024-00'), null);
   assert.equal(monthDays('March'), null);
+  assert.equal(monthDays(/** @type {any} */ (undefined)), null);
   const band = { from: '2019-03-15', to: '2019-03-15', clipped: false };
   assert.equal(monthNeedsRead('2019-03', band), true, 'a window of one day leaves the rest of its month unread');
   assert.equal(monthNeedsRead('2019-02', band), true, 'a month outside the window is read');
@@ -246,6 +259,15 @@ test('no_master_wording_on_a_feed_without_a_master', () => {
   assert.match(state, /const leftOut = \$derived\(tierLeavesOut\(heldUnderlyings, universeNames\)\);/);
   assert.match(state, /\? `\$\{feedDisplay\(feeds\.active\)\} has no instrument master: its list is its census/);
   assert.doesNotMatch(state, /no count on this page is built from another feed's master/);
+});
+
+test('the census key and the membership tokens are read off a master row as before', () => {
+  // Pre-existing readers in the touched module, driven so the module is covered whole.
+  assert.deepEqual(tokensOf({ universes: ['index', 'fno'] }), ['index', 'fno']);
+  assert.deepEqual(tokensOf({ universe: 'index+fno' }), ['index', 'fno']);
+  assert.deepEqual(tokensOf({}), []);
+  assert.deepEqual(tokensOf(null), []);
+  assert.equal(censusKeyOf(/** @type {any} */ ({ exchange: 'NSE', segment: 'INDEX', symbol: 'NIFTY-50' })), 'NSE-INDEX-NIFTY-50');
 });
 
 test('the shortfall is per rung, against the same segment, and never said of a trade-driven series (DB-G63)', () => {

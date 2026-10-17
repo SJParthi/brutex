@@ -535,7 +535,11 @@
              open on, 09:15 to 15:29 (charter §3, pull::session), plus any
              pre-open or closing-auction minute the loaded rows hold. On the
              1s rung a bound carries its second (HH:MM:SS): the minute picks
-             :00 for From and :59 for To, and the second beside it narrows. -->
+             :00 for From and :59 for To, and the second beside it narrows.
+             AND EVERY MINUTE THE DAYS IN VIEW TRADED (R3-02): a special
+             session's windows (a Muhurat hour, a DR Saturday) come from the
+             calendar of record's own list, and a window of special days only
+             lists no regular minute — `sessionRows` in selection.svelte.js. -->
         <div class="times">
           <div class="tcell">
             <span class="tlbl" id="lab-tfrom">From time</span>

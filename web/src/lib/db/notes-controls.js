@@ -358,8 +358,9 @@ export const SEARCH_TEXT_MAX = MAX_TEXT;
 export function cutText(raw, max, label) {
   const s = String(raw ?? '');
   if (s.length <= max) return { text: s, why: '' };
-  const long = checkText(s, { label, max });
-  return { text: s.slice(0, max), why: long.ok ? '' : long.why };
+  /* Refused by construction: `s` is longer than `max`. */
+  const long = /** @type {{ok: false, why: string}} */ (checkText(s, { label, max }));
+  return { text: s.slice(0, max), why: long.why };
 }
 
 /**
@@ -737,7 +738,8 @@ export function tierLeavesOut(held, members, most = 8) {
   if (members === null) return null;
   const out = [];
   for (const u of held) if (!members.has(u)) out.push(u);
-  out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  /* Names out of a Set are distinct, so the default code-unit order is the whole comparison. */
+  out.sort();
   return { count: out.length, names: out.slice(0, most) };
 }
 

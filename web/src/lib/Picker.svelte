@@ -726,6 +726,13 @@
   }
 
   .plist label {
+    /* A ROW OFF THE LIST'S SCREEN IS NOT LAID OUT OR PAINTED UNTIL IT SCROLLS
+       IN (R3-02). Opening the 375-minute time list laid out and painted every
+       row although about nine show: the measured open ran past 50 ms. Each
+       row keeps its measured height once drawn (`auto`), so the scroll bar
+       does not jump; 44px is a one-line row before any is measured. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 44px;
     display: flex;
     /* So a row's own reason can take a line of its own beneath the two
        columns. A row without one never wraps: the name flexes and ellipses
