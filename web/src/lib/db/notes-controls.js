@@ -55,6 +55,8 @@
    because a master row served by an older API binary carries only the
    second, and the type has to admit the row this page is built to survive.
    ====================================================================== */
+import { MAX_TEXT, checkText, checkDay, parseDay, dayBoundWhy, dayText, windowWhy } from './input-check.js';
+
 /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
 /** @typedef {import('$lib/feeds.svelte.js').Feed} Feed */
 /**
@@ -321,3 +323,590 @@ export const VIEWS = [
       'Inspect saved candle prices and volume for your selected instrument and dates. Each page reads only the requested rows, and prices come from the saved data.'
   }
 ];
+
+/* ======================================================================
+   R3-02 — THE CONTROLS' OWN WORDS, LISTS AND LIMITS
+   ----------------------------------------------------------------------
+   Pure functions the day boxes, the time lists, the search boxes and the
+   rung notes are built from, so `node --test` proves each sentence and each
+   list with no compiler (`web/tests/db-controls.test.js`,
+   `web/tests/dayfield.test.js`). Nothing here knows a vendor, an hour or an
+   instrument: the session grid, the calendar of record's special windows and
+   the bounds are handed in by the caller.
+   ====================================================================== */
+
+/** The longest text a day box keeps — what `checkDay` reads (32). */
+export const DAY_TEXT_MAX = 32;
+/** The longest text a list's search box keeps — `MAX_TEXT`, the instrument bound. */
+export const SEARCH_TEXT_MAX = MAX_TEXT;
+
+/**
+ * TEXT LONGER THAN A BOX READS IS CUT, AND SAID IN ONE SENTENCE (R3-02).
+ *
+ * 6,000 pasted characters were kept whole: the day box echoed all of them
+ * back inside its own refusal and a list's search box quoted them in "Nothing
+ * matches “…”", a paragraph wider than the page. The box now keeps the first
+ * `max` and the sentence names the length once — the words `checkText` says
+ * for the same value carried by a link. Reads `max + 1` characters' worth of
+ * work at most: the cut is one `slice`.
+ *
+ * @param {unknown} raw
+ * @param {number} max
+ * @param {string} label what the box is, for the sentence ("To date", "this search")
+ * @returns {{ text: string, why: string }} `why` is `''` when nothing was cut
+ */
+export function cutText(raw, max, label) {
+  const s = String(raw ?? '');
+  if (s.length <= max) return { text: s, why: '' };
+  const long = checkText(s, { label, max });
+  return { text: s.slice(0, max), why: long.ok ? '' : long.why };
+}
+
+/**
+ * WHAT A DAY BOX SAYS UNDER ITSELF (R3-02; DB-045 and the absurd-input
+ * probes), as one string, or `null` when the day it holds is fine.
+ *
+ * Four refusals, each naming what was actually crossed:
+ *
+ * - CUT: more than `DAY_TEXT_MAX` characters arrived (a paste). One sentence,
+ *   the length named once, never the text echoed.
+ * - SHAPE: not a day (`parseDay`, the parser a link's `from=` is read with),
+ *   quoted at most 40 characters long (`quote`).
+ * - HELD: a day outside what the selection holds (`min`/`max`), in the bound
+ *   sentence a linked day gets (`dayBoundWhy`), after the box and the day are
+ *   named: "To date 01 Jan 1969: Outside 03 Sep 2018 to 30 Sep 2026 — …".
+ * - ORDER: inside the held span but on the wrong side of the OTHER box
+ *   (`after` for a To box, `before` for a From box): the window's order is
+ *   named in the sentence a backwards link gets (`windowWhy`) — never the held
+ *   range, which the day is inside (the 01 Aug 2026 probe read "Outside 01 Sep
+ *   2026 to 30 Sep 2026 — This selection holds …").
+ *
+ * The box itself adds "Not applied: the field still holds …" while the
+ * reader's text is unapplied — except after a cut, whose one sentence already
+ * says it.
+ *
+ * @param {{
+ *   typed: string | null,
+ *   value: string,
+ *   label?: string,
+ *   min?: string,
+ *   max?: string,
+ *   after?: string,
+ *   before?: string,
+ *   reason?: string,
+ *   cut?: string
+ * }} o `typed` is the box's unapplied text, `null` when it shows `value`;
+ *   `cut` the sentence `cutText` gave for the last paste
+ * @returns {string | null}
+ */
+export function dayFieldWhy(o) {
+  const label = o.label ?? 'Date';
+  if (o.cut) return `${o.cut} — cut, not applied: the field still holds ${o.value ? dayText(o.value) : 'no bound'}.`;
+  const text = o.typed ?? o.value;
+  if (o.typed !== null && o.typed.trim() === '') return null;
+  const iso = parseDay(text);
+  if (iso === '') {
+    const shape = /** @type {{ok: false, why: string}} */ (checkDay(text, { label, lo: o.min, hi: o.max }));
+    return `${shape.why}.`;
+  }
+  const held = dayBoundWhy(iso, { lo: o.min, hi: o.max, reason: o.reason });
+  if (held) return `${label} ${dayText(iso)}: ${held}`;
+  const order = o.after && iso < o.after ? windowWhy(o.after, iso) : o.before && iso > o.before ? windowWhy(iso, o.before) : null;
+  if (order) return `${order}.`;
+  return null;
+}
+
+/**
+ * Whether a day may be taken: inside `[min, max]` and on the right side of the
+ * other box. The same predicate the box's grid strikes by and its typing
+ * applies by, so a struck day and a refused typed day are one rule.
+ *
+ * @param {string} iso
+ * @param {{min?: string, max?: string, after?: string, before?: string}} o
+ */
+export function dayTakes(iso, o) {
+  return (!o.min || iso >= o.min) && (!o.max || iso <= o.max) && (!o.after || iso >= o.after) && (!o.before || iso <= o.before);
+}
+
+/**
+ * WHY ONE STRUCK CELL IS STRUCK, for its title: the held span's reason, or
+ * the other box's day. `null` for a day the box takes.
+ *
+ * @param {string} iso
+ * @param {{min?: string, max?: string, after?: string, afterLabel?: string, before?: string, beforeLabel?: string, reason?: string}} o
+ * @returns {string | null}
+ */
+export function dayStruckWhy(iso, o) {
+  if ((o.min && iso < o.min) || (o.max && iso > o.max)) return o.reason || 'Outside what this field may take.';
+  if (o.after && iso < o.after) return `Before the ${o.afterLabel ?? 'From date'}, ${dayText(o.after)}: a window ends on or after the day it starts.`;
+  if (o.before && iso > o.before) return `After the ${o.beforeLabel ?? 'To date'}, ${dayText(o.before)}: a window starts on or before the day it ends.`;
+  return null;
+}
+
+/**
+ * THE SENTENCE UNDER THE CALENDAR'S GRID, NAMING EVERY KIND OF DAY IT STRIKES
+ * (DB-045). It said "can be picked" over `min` and `max` and the caller's
+ * held-span reason, while `min` was the OTHER box's day: with From and To on
+ * 30 May 2019 the From grid struck 31 May, a stored day, under a sentence that
+ * said only days outside the held span were struck. The order bound is now
+ * its own clause, drawn only when it strikes a day the held span does not.
+ *
+ * @param {{min?: string, max?: string, after?: string, afterLabel?: string, before?: string, beforeLabel?: string, reason?: string}} o
+ * @returns {string} `''` when nothing is struck
+ */
+export function calendarNote(o) {
+  const parts = [];
+  if (o.min || o.max) {
+    parts.push(`${o.min ? dayText(o.min) : 'any earlier day'} – ${o.max ? dayText(o.max) : 'any later day'} can be picked.${o.reason ? ` ${o.reason}` : ''}`);
+  }
+  if (o.after && (!o.min || o.after > o.min)) {
+    parts.push(`Days before the ${o.afterLabel ?? 'From date'}, ${dayText(o.after)}, are struck too: a window ends on or after the day it starts.`);
+  }
+  if (o.before && (!o.max || o.before < o.max)) {
+    parts.push(`Days after the ${o.beforeLabel ?? 'To date'}, ${dayText(o.before)}, are struck too: a window starts on or before the day it ends.`);
+  }
+  return parts.join(' ');
+}
+
+/* ---- the time lists (DB-074) ---------------------------------------- */
+
+/** @param {number} m minutes since IST midnight */
+const clockOf = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+/** @param {unknown} t `HH:MM` @returns {number | null} */
+const minuteOf = (t) => {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(t ?? ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+/**
+ * @typedef {{date: string, kind: string, windows: Array<{from: number, to: number}>}} SpecialDay
+ */
+
+/**
+ * THE SPECIAL SESSIONS OUT OF A `/calendar.json` ANSWER (D-3319; DB-074): its
+ * `special` list, one entry per recorded day with the windows that traded —
+ * a Muhurat hour, a disaster-recovery Saturday's two windows, the 24 Feb 2021
+ * outage's two — each window's `from` and `to` the first and last minute a
+ * bar opens (`pull::calendar::Window`, inclusive). The answer the page already
+ * reads for the closed days, so the time lists cost no request of their own.
+ * An entry this reader cannot read is left out, never guessed.
+ *
+ * @param {any} body
+ * @returns {SpecialDay[]}
+ */
+export function specialsOf(body) {
+  if (!Array.isArray(body?.special)) return [];
+  /** @type {SpecialDay[]} */
+  const out = [];
+  for (const s of body.special) {
+    if (typeof s?.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s.date) || !Array.isArray(s.windows)) continue;
+    const windows = [];
+    for (const w of s.windows) {
+      const from = minuteOf(w?.from);
+      const to = minuteOf(w?.to);
+      if (from !== null && to !== null && from <= to) windows.push({ from, to });
+    }
+    if (windows.length) out.push({ date: s.date, kind: typeof s.kind === 'string' && s.kind ? s.kind : 'special session', windows });
+  }
+  return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+/** Codes of the calendar of record that are a regular-length session. */
+const REGULAR = new Set(['R', 'X', 'U', 'H']);
+/** @type {WeakMap<object, {regular: Int32Array, unknown: Int32Array}>} */
+const PREFIX = new WeakMap();
+
+/** `YYYY-MM-DD` to days since 1970-01-01, on the calendar. @param {string} iso */
+const epochOf = (iso) => Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))) / 86_400_000);
+
+/**
+ * HOW MANY REGULAR SESSIONS THE DAYS IN VIEW HOLD, by the calendar of record:
+ * `R`, `X`, `U` and `H` days in `[lo, hi]` (`P`, a special session, is
+ * counted by its windows instead; `.` is closed). `null` when the calendar is
+ * missing or does not reach every day in view — unknown, never zero.
+ *
+ * O(1) per question: the two prefix sums are built once per calendar object
+ * (one pass over its day string) and kept in a `WeakMap`, so the time lists
+ * re-asking on every change of the window cost two subtractions.
+ *
+ * @param {{from: number, days: string} | null} cal
+ * @param {string} lo `YYYY-MM-DD`, or `''` for the calendar's first day
+ * @param {string} hi `YYYY-MM-DD`, or `''` for its last
+ * @returns {number | null}
+ */
+export function regularDaysIn(cal, lo, hi) {
+  if (!cal || typeof cal.days !== 'string' || cal.days.length === 0) return null;
+  let p = PREFIX.get(cal);
+  if (!p) {
+    const n = cal.days.length;
+    p = { regular: new Int32Array(n + 1), unknown: new Int32Array(n + 1) };
+    for (let i = 0; i < n; i += 1) {
+      const c = cal.days[i];
+      p.regular[i + 1] = p.regular[i] + (REGULAR.has(c) ? 1 : 0);
+      p.unknown[i + 1] = p.unknown[i] + (c === '-' ? 1 : 0);
+    }
+    PREFIX.set(cal, p);
+  }
+  const first = /^\d{4}-\d{2}-\d{2}$/.test(lo) ? epochOf(lo) - cal.from : 0;
+  const last = /^\d{4}-\d{2}-\d{2}$/.test(hi) ? epochOf(hi) - cal.from : cal.days.length - 1;
+  if (first > last) return 0;
+  if (first < 0 || last >= cal.days.length) return null;
+  if (p.unknown[last + 1] - p.unknown[first] > 0) return null;
+  return p.regular[last + 1] - p.regular[first];
+}
+
+/**
+ * THE TIME LISTS: EVERY MINUTE THE DAYS IN VIEW REALLY TRADED (R3-02; DB-074).
+ *
+ * `grid` is the rung's session grid (`sessionGrid`: the regular session with
+ * its dated close, plus any minute the loaded rows hold) built with the
+ * special windows' minutes already passed in as held; this relabels and trims
+ * it against the days in view:
+ *
+ * - a special session's minute that is not a regular-session minute (an
+ *   evening Muhurat hour, the 24 Feb 2021 15:45–16:59 resumption) says which
+ *   recorded day it belongs to and why it is listed — it read "listed because a
+ *   loaded bar opens here, such as a closing-auction print", and was listed
+ *   only when one of the fifty rows on screen happened to open there;
+ * - when the days in view hold NO regular session (a window of Muhurat days
+ *   only), the regular minutes go: nothing traded at 09:15 on 01 Nov 2024, and
+ *   a list offering it would land a bound on nothing. Held minutes stay.
+ *
+ * O(rows + special minutes): the list is at most the 375–385 regular minutes
+ * plus the windows of the special days in view.
+ *
+ * @param {Array<{key: string, name: string, detail: string, why?: string}>} grid
+ * @param {{specials: SpecialDay[], regular: number | null, held: Iterable<string>, step: number, open: number}} o
+ *   `specials` the special days in view, `regular` how many regular sessions
+ *   are in view (`null` unknown), `held` the loaded rows' minutes, `step` the
+ *   rung's minutes, `open` the session's first minute (the grid's anchor)
+ */
+export function timeListRows(grid, o) {
+  /** @type {Map<string, SpecialDay[]>} */
+  const by = new Map();
+  for (const t of specialMinutes(o.specials, o.step, o.open)) by.set(t.key, t.days);
+  const held = new Set(o.held);
+  const none = o.regular === 0;
+  /** @type {Array<{key: string, name: string, detail: string, why?: string}>} */
+  const out = [];
+  for (const row of grid) {
+    const days = by.get(row.key);
+    if (none && !days && !held.has(row.key)) continue;
+    if (!days || (!none && row.detail === 'regular session' && !row.why)) {
+      out.push(row);
+      continue;
+    }
+    const first = days[0];
+    const span = (/** @type {SpecialDay} */ d) => d.windows.map((w) => `${clockOf(w.from)}–${clockOf(w.to)}`).join(' and ');
+    out.push({
+      key: row.key,
+      name: row.name,
+      detail: days.length === 1 ? `special session · ${dayText(first.date)}` : `special session · ${days.length} days in view`,
+      why: `${days
+        .slice(0, 3)
+        .map((d) => `${d.kind}, ${dayText(d.date)}: bars open ${span(d)}`)
+        .join('; ')}${days.length > 3 ? `; and ${days.length - 3} more` : ''} (the exchange calendar of record, /calendar.json). Listed because a day in view traded at this minute.`
+    });
+  }
+  return out;
+}
+
+/**
+ * Every minute a special day's windows open a bar on, on the rung's grid
+ * (`open` + k·`step`, the anchor `pull::fold` folds every intraday rung to),
+ * each with the days that traded it.
+ *
+ * @param {SpecialDay[]} specials
+ * @param {number} step minutes per bar (1 on 1s and 1min)
+ * @param {number} open the session's first minute
+ * @returns {Array<{key: string, days: SpecialDay[]}>}
+ */
+export function specialMinutes(specials, step, open) {
+  const st = Math.max(1, Math.round(step));
+  /** @type {Map<string, SpecialDay[]>} */
+  const by = new Map();
+  for (const d of specials) {
+    for (const w of d.windows) {
+      const lead = (((w.from - open) % st) + st) % st;
+      for (let m = lead === 0 ? w.from : w.from + (st - lead); m <= w.to; m += st) {
+        const k = clockOf(m);
+        const list = by.get(k);
+        if (!list) by.set(k, [d]);
+        else if (list[list.length - 1] !== d) list.push(d);
+      }
+    }
+  }
+  return [...by.entries()].map(([key, days]) => ({ key, days })).sort((a, b) => (a.key < b.key ? -1 : 1));
+}
+
+/**
+ * The special days of `specials` inside `[lo, hi]` (either end `''` for
+ * open). O(specials): the calendar records a few dozen.
+ *
+ * @param {SpecialDay[]} specials
+ * @param {string} lo
+ * @param {string} hi
+ */
+export function specialsIn(specials, lo, hi) {
+  return specials.filter((d) => (!lo || d.date >= lo) && (!hi || d.date <= hi));
+}
+
+/* ---- the calendar's month flags (DB-025) ----------------------------- */
+
+/**
+ * The first and last ISO day of a `YYYY-MM` month, or `null`.
+ *
+ * @param {string} ym
+ */
+export function monthDays(ym) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym ?? ''));
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  if (mo < 1 || mo > 12) return null;
+  const last = [31, (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  return { from: `${m[1]}-${m[2]}-01`, to: `${m[1]}-${m[2]}-${String(last).padStart(2, '0')}` };
+}
+
+/**
+ * WHETHER A MONTH THE CALENDAR SHOWS MUST BE ASKED FOR (DB-025): not when the
+ * day band's own answer covers every day of it, so opening the calendar on
+ * the window's month costs no request at all, and any other month costs one.
+ *
+ * @param {string} ym
+ * @param {{from: string, to: string, clipped?: boolean} | null} band the span the day band read, or `null`
+ */
+export function monthNeedsRead(ym, band) {
+  const days = monthDays(ym);
+  if (!days) return false;
+  return !(band && band.from <= days.from && band.to >= days.to);
+}
+
+/** The most months of day flags the calendar keeps before the oldest goes. */
+export const MONTH_FLAGS_KEPT = 48;
+
+/**
+ * One flagged cell as the calendar's title says it — the band's own words.
+ *
+ * @param {{word: string, says: string[]}} c
+ */
+export const flagText = (c) => `${c.word}${c.says.length ? ` — ${c.says.join('; ')}` : ''}`;
+
+/* ---- the rung notes (DB-041, DB-G63, DB-020, D-3338) ----------------- */
+
+/**
+ * WHAT THE INSTRUMENT LIST IS, IN WORDS THAT ARE TRUE OF THIS FEED (DB-041).
+ * "Every name this feed's master lists" was printed over GDFL, which has no
+ * master: its list is its census, with membership from core::universe.
+ *
+ * @param {boolean} noMaster
+ * @param {string} feedName
+ */
+export function instrumentListWhy(noMaster, feedName) {
+  return noMaster
+    ? `Every name ${feedName} stores — it publishes no instrument master, so this list is its census (stored, no master), narrowed by core::universe's own membership lists for the chosen universe. A name with nothing stored is drawn with a zero rather than omitted.`
+    : `Every name ${feedName}'s instrument master lists for the chosen universe. One the store does not hold is drawn with a zero rather than omitted — a rung that can only name what you already have cannot tell you what you are missing.`;
+}
+
+/**
+ * Why Everything is the one universe that reaches every stored row (DB-041).
+ *
+ * @param {boolean} noMaster
+ * @param {string} feedName
+ */
+export function everythingWhy(noMaster, feedName) {
+  return noMaster
+    ? `No membership join at all: every name ${feedName} stores, including the ones no core::universe tier lists (option-only and renamed underlyings).`
+    : `No membership join at all: the only setting that reaches stored data whose instrument ${feedName}'s master no longer lists.`;
+}
+
+/**
+ * THE STORED NAMES A CHOSEN TIER LEAVES OUT, named (DB-041). "F&O
+ * underlyings" on GDFL reaches 208 names and leaves out the option-only and
+ * renamed underlyings the census holds (ALBK, DHFL, …); the note counted
+ * nothing of them. Up to `most` names, sorted, then a count.
+ *
+ * O(held names): one probe per name the census holds.
+ *
+ * @param {Iterable<string>} held every underlying the census holds
+ * @param {Set<string> | null} members the tier's members, `null` for no join
+ * @param {number} [most]
+ * @returns {{ count: number, names: string[] } | null} `null` with no join
+ */
+export function tierLeavesOut(held, members, most = 8) {
+  if (members === null) return null;
+  const out = [];
+  for (const u of held) if (!members.has(u)) out.push(u);
+  out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return { count: out.length, names: out.slice(0, most) };
+}
+
+/**
+ * The sentence for `tierLeavesOut`, or `''` when it leaves nothing out.
+ *
+ * @param {string} tier the universe's label
+ * @param {{ count: number, names: string[] } | null} left
+ * @param {(n: number) => string} fmt
+ */
+export function tierLeavesOutText(tier, left, fmt) {
+  if (!left || left.count === 0) return '';
+  const rest = left.count - left.names.length;
+  return `${tier} leaves out ${fmt(left.count)} stored name(s): ${left.names.join(', ')}${rest > 0 ? ` and ${fmt(rest)} more` : ''} — held, outside this tier, and listed under Everything.`;
+}
+
+/**
+ * Whether a census row's series is TRADE-DRIVEN: a bar exists only where a
+ * trade printed (D-3336 §2) — a contract, or a share at one second. Its bar
+ * count has no fixed denominator, so no "short" is said of it (DB-G63). The
+ * rule `dayflags.js` `kindsOf` applies to a day, applied to a month.
+ *
+ * @param {{segment?: string, kind?: string, timeframe: string, expiry?: string | null}} r
+ */
+export function tradeDriven(r) {
+  const seg = r.kind ?? r.segment ?? '';
+  return (r.expiry !== null && r.expiry !== undefined) || seg === 'FNO' || (seg === 'CASH' && r.timeframe === '1s');
+}
+
+/**
+ * SPOT SHORTFALLS AGAINST THE FULLEST SERIES OF THE SAME SEGMENT, PER RUNG
+ * (DB-G63). The census's `short` is the fullest series at (month, rung) less
+ * this one — every segment in one pool, so a share was short of an index's
+ * second-by-second count and an index of a share that printed a pre-open
+ * minute, and the instrument list summed 1s and 1min shortfalls into one
+ * figure of "bars". Here the fullest is keyed (month, rung, segment), a
+ * trade-driven series (a share at 1s) is counted apart and never short, and
+ * the result is per rung.
+ *
+ * Two passes over the census, once per census or universe change: the
+ * fullest by (month, rung, segment), then each spot row's shortfall into its
+ * underlying's rung.
+ *
+ * @param {Iterable<any>} all every census row (the fullest is the store's)
+ * @param {Iterable<any>} rows the rows to fold (the universe's)
+ * @returns {Map<string, Map<string, {months: number, short: number, trade: boolean}>>}
+ */
+export function spotShortfalls(all, rows) {
+  /** @type {Map<string, number>} */
+  const fullest = new Map();
+  for (const r of all) {
+    if (r.expiry !== null && r.expiry !== undefined) continue;
+    const k = `${r.month}|${r.timeframe}|${r.kind}`;
+    const seen = fullest.get(k);
+    if (seen === undefined || r.rows > seen) fullest.set(k, r.rows);
+  }
+  /** @type {Map<string, Map<string, {months: number, short: number, trade: boolean}>>} */
+  const out = new Map();
+  for (const r of rows) {
+    if (r.expiry !== null && r.expiry !== undefined) continue;
+    let by = out.get(r.underlying);
+    if (!by) out.set(r.underlying, (by = new Map()));
+    let a = by.get(r.timeframe);
+    if (!a) by.set(r.timeframe, (a = { months: 0, short: 0, trade: tradeDriven(r) }));
+    a.months += 1;
+    if (!a.trade) a.short += Math.max(0, (fullest.get(`${r.month}|${r.timeframe}|${r.kind}`) ?? r.rows) - r.rows);
+  }
+  return out;
+}
+
+/**
+ * The shortfall clause of one instrument's title: per rung, in ladder order,
+ * "1min 1,234 bar(s) short of the fullest INDEX series of each month", a
+ * trade-driven rung said as that. `''` when nothing is short and nothing is
+ * trade-driven.
+ *
+ * @param {Map<string, {months: number, short: number, trade: boolean}> | undefined} by
+ * @param {string} segment the instrument's segment word (INDEX, CASH)
+ * @param {(a: string, b: string) => number} order the rung ladder's comparator
+ * @param {(n: number) => string} fmt
+ */
+export function shortfallText(by, segment, order, fmt) {
+  if (!by) return '';
+  const parts = [];
+  for (const tf of [...by.keys()].sort(order)) {
+    const a = /** @type {{months: number, short: number, trade: boolean}} */ (by.get(tf));
+    if (a.trade) parts.push(`${tf}: trade-driven, a bar only where a trade printed, so no fixed bar count`);
+    else if (a.short > 0) parts.push(`${tf}: ${fmt(a.short)} bar(s) short of the fullest ${segment} series of each month`);
+  }
+  return parts.length ? ` (${parts.join('; ')})` : '';
+}
+
+/**
+ * MONTHS OUTSIDE THE OPERATOR'S WINDOW, COUNTED PER LIST ROW (D-3338; R3-02).
+ * The Timeframe and Segment lists counted only the months inside the window,
+ * so NIFTY 1day on Zerodha read "105 held" with 36 months of 2015–2017 held
+ * and hidden, and a rung held only outside the window was not listed at all.
+ *
+ * O(out-of-window rows): the rows the window already split off.
+ *
+ * @param {Iterable<any>} out the census rows outside the window
+ * @param {string} underlying the picked instrument
+ * @param {(r: any) => string} segOf the row's segment key
+ * @param {string} kind the picked segment, `''` for none
+ * @returns {{ bySegment: Map<string, number>, byRung: Map<string, number> }}
+ */
+export function hiddenMonths(out, underlying, segOf, kind) {
+  const bySegment = new Map();
+  const byRung = new Map();
+  if (!underlying) return { bySegment, byRung };
+  for (const r of out) {
+    if (r.underlying !== underlying) continue;
+    const s = segOf(r);
+    bySegment.set(s, (bySegment.get(s) ?? 0) + 1);
+    if (kind && s !== kind) continue;
+    byRung.set(r.timeframe, (byRung.get(r.timeframe) ?? 0) + 1);
+  }
+  return { bySegment, byRung };
+}
+
+/**
+ * The clause a list row adds for its hidden months, `''` for none.
+ *
+ * @param {number} n
+ * @param {{from?: string, to?: string} | null | undefined} window
+ * @param {(n: number) => string} fmt
+ */
+export function hiddenText(n, window, fmt) {
+  if (!n) return '';
+  return ` ${fmt(n)} more month(s) are held outside your window${window?.from && window?.to ? ` (${window.from} to ${window.to})` : ''} and hidden — "Show them, labelled" under the dates brings them in.`;
+}
+
+/**
+ * WHAT A STRANDED RUNG DOES TO THE TABLE, IN WORDS THAT ARE TRUE OF IT
+ * (DB-020). Every stranded rung said "so no row can match", including over a
+ * grid of 4,39,42,544 rows (a stale expiry under Spot, where no row carries
+ * an expiry and the gate passes every one) and over a strike pick whose other
+ * strikes still matched. The claim is now made only when the table IS empty.
+ *
+ * @param {number} rows rows the selection matches now
+ * @param {number} [kept] for a multi-value rung, how many of its values still match
+ * @param {(n: number) => string} [fmt]
+ */
+export function strandedEffect(rows, kept = 0, fmt = String) {
+  if (rows === 0) return 'so no row can match.';
+  if (kept > 0) return `so it matches nothing; the table shows the ${fmt(kept)} other value(s) still chosen on this rung.`;
+  return `so it narrows nothing on screen: the table's ${fmt(rows)} row(s) do not carry this rung.`;
+}
+
+/* ---- the whole sentence on a clipped note ----------------------------- */
+
+/**
+ * A NOTE CUT TO TWO LINES CARRIES ITS WHOLE SENTENCE AS HOVER TEXT (R3-02).
+ * The strip's `.note` clips at two lines (`line-clamp: 2`), and six of its
+ * notes carried no `title`, so the clipped half of a refusal was unreadable
+ * at 1600 × 1000. A Svelte action: the node's own text, whitespace folded, is
+ * its title, kept current as the text changes — one rule for every note, so
+ * the hover text cannot drift from what is drawn.
+ *
+ * @param {{textContent: string | null, title: string}} node
+ * @returns {{destroy: () => void}}
+ */
+export function wholeTitle(node) {
+  const set = () => {
+    node.title = String(node.textContent ?? '').replace(/\s+/g, ' ').trim();
+  };
+  set();
+  const Observer = /** @type {any} */ (globalThis).MutationObserver;
+  const watch = Observer ? new Observer(set) : null;
+  watch?.observe(node, { childList: true, characterData: true, subtree: true });
+  return { destroy: () => watch?.disconnect() };
+}

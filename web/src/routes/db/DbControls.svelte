@@ -19,8 +19,16 @@
    * Owner after WP-00: WP-50 (selection model, controls and URL state).
    */
   import Picker from '$lib/Picker.svelte';
-  import { UNIVERSES, SEG_VIEW } from '$lib/db/notes-controls.js';
-  import { fmt, tfNote } from '$lib/db/notes-labels.js';
+  import {
+    UNIVERSES,
+    SEG_VIEW,
+    everythingWhy,
+    instrumentListWhy,
+    tierLeavesOutText,
+    shortfallText,
+    wholeTitle
+  } from '$lib/db/notes-controls.js';
+  import { fmt, tfNote, tfCmp } from '$lib/db/notes-labels.js';
   import DayField from '$lib/DayField.svelte';
   import { dayLabel } from '$lib/dates.js';
   import { strikeText } from '$lib/db/decoration.js';
@@ -37,6 +45,15 @@
 <script>
   /** @type {{ db: any }} */
   let { db } = $props();
+
+  /**
+   * A DAY'S FLAG FOR THE DAY FIELDS' GRID (DB-025): the day band's, inside the
+   * window it read, else the month's own `/dayflags.json` read when a grid
+   * showed that month — so a refused or incomplete day is marked in any month
+   * the calendar shows, not only inside the chosen window.
+   * @param {string} iso
+   */
+  const dayMark = (iso) => db.dayFlagged?.(iso) ?? db.monthFlagged(iso);
 </script>
 
 <!-- ==================================================================
@@ -115,7 +132,8 @@
             db.heldNames === null
             ? `${fmt(db.deco.length)} instrument-month(s); names not yet counted`
             : `${fmt(db.heldNames)} held · ${fmt(db.deco.length)} instrument-month(s)`,
-        why: u.key ? undefined : 'The only setting that reaches stored data whose instrument this feed\u2019s master no longer lists.'
+        /* TRUE OF THIS FEED (DB-041): GDFL has no master to "no longer list" a name. */
+        why: u.key ? undefined : everythingWhy(db.noMaster, db.feedName)
       }))}
       selected={new Set([db.universe])}
       onchange={(/** @type {Set<string>} */ sel) => (db.universe = [...sel][0] ?? '')}
@@ -140,8 +158,10 @@
          THE `{#if}` IS OUTSIDE THE SPAN, not inside it. A `.note` carries
          its marker as `::before`, so an emptied one is not invisible — it is
          a bare `·` under a control. /ingest learned this the hard way. -->
-    {#if db.universeRefusal || db.noMaster || (db.outsideMaster && db.outsideMaster.months > 0)}
-      <span class="note" class:warn={Boolean(db.universeRefusal)}>
+    <!-- THE STORED NAMES A TIER LEAVES OUT ARE NAMED (DB-041), and the whole
+         note is its own hover text (`wholeTitle`): it clips at two lines. -->
+    {#if db.universeRefusal || db.noMaster || (db.outsideMaster && db.outsideMaster.months > 0) || db.leftOut?.count > 0}
+      <span class="note" class:warn={Boolean(db.universeRefusal)} use:wholeTitle>
         {#if db.universeRefusal}
           {db.chosenUniverse.label} is not narrowing this table — {db.universeRefusal}
         {/if}
@@ -157,6 +177,9 @@
             db.outsideMaster.instruments
           )} underlying(s) are not listed by {db.feedName}'s instrument list — they are held, no
           membership universe can reach them, and Everything is where they show.
+        {/if}
+        {#if db.leftOut?.count > 0}
+          {tierLeavesOutText(db.chosenUniverse.label, db.leftOut, fmt)}
         {/if}
       </span>
     {/if}
@@ -196,7 +219,7 @@
     <div class="field">
       <span
         class="lab"
-        title="Every name this feed's master lists for the chosen universe. One the store does not hold is drawn with a zero rather than omitted — a rung that can only name what you already have cannot tell you what you are missing."
+        title={instrumentListWhy(db.noMaster, db.feedName)}
         >Instrument</span
       >
       <Picker
@@ -236,7 +259,7 @@
             title:
               r.months === 0
                 ? `${r.sym} — ${r.key}. Nothing stored for it at this selection.`
-                : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot month(s)${r.short > 0 ? ` (${fmt(r.short)} bar(s) short of the fullest series)` : ''} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
+                : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot month(s)${shortfallText(r.shortBy, r.seg, tfCmp, fmt)} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
           }))
         ]}
         selected={new Set([db.filter])}
@@ -370,12 +393,9 @@
            change-% that belonged to no rung in particular. Exactly one rung
            is selected at all times — seeded from the store by the effect
            beside `stranded`. */
-        ...db.tfAll.map((/** @type {any} */ [tf, n]) => ({
-          key: tf,
-          name: tf,
-          detail: `${fmt(n)} held`,
-          title: tfNote(tf)
-        }))
+        /* WITH THE MONTHS HELD OUTSIDE THE WINDOW SAID ON EACH ROW (D-3338;
+           R3-02), and a rung held only outside it listed and refused. */
+        ...db.timeframeRows
       ]}
       selected={new Set([db.timeframe])}
       onchange={(/** @type {Set<string>} */ sel) => (db.timeframe = [...sel][0] ?? '')}
@@ -390,7 +410,7 @@
          the span, because a `.note` carries its marker as `::before` and an
          emptied one paints a bare `·` under the control. -->
     {#if db.tfRefusal}
-      <span class="note warn">No bar length — {db.tfRefusal}</span>
+      <span class="note warn" use:wholeTitle>No bar length — {db.tfRefusal}</span>
     {/if}
   </div>
   <!-- ==================================================================
@@ -442,23 +462,39 @@
       class="dates"
       title={`The window in days, IST. It narrows a spot series and a contract alike: a contract shows only its bars on the chosen days, within its life. ${db.dayReason}`}
     >
+      <!-- THE HELD SPAN IS THE BOUND AND THE OTHER BOX IS THE ORDER (DB-045).
+           `min`/`max` were the other box's day, so a To before From was
+           refused in the held span's words, and the grid struck days its
+           sentence never named. Each is now its own bound with its own words;
+           an emptied box takes the held span's end, so a To box always holds
+           a day; each month a grid shows is read for its flags. -->
       <DayField
         label="From date"
         value={db.fromDay}
         min={db.dayBounds2.lo}
-        max={db.toDay || db.dayBounds2.hi}
+        max={db.dayBounds2.hi}
+        before={db.toDay}
+        beforeLabel="To date"
+        empty={db.dayBounds2.lo}
         closed={db.dayClosed}
-        flagged={db.dayFlagged}
+        flagged={dayMark}
+        onshow={db.showMonth}
+        flagWhy={db.monthFlagWhy}
         onchange={(/** @type {string} */ d) => (db.fromDay = d)}
         boundsReason={`${db.dayReason} Only bars on or after this day.`}
       />
       <DayField
         label="To date"
         value={db.toDay}
-        min={db.fromDay || db.dayBounds2.lo}
+        min={db.dayBounds2.lo}
         max={db.dayBounds2.hi}
+        after={db.fromDay}
+        afterLabel="From date"
+        empty={db.dayBounds2.hi}
         closed={db.dayClosed}
-        flagged={db.dayFlagged}
+        flagged={dayMark}
+        onshow={db.showMonth}
+        flagWhy={db.monthFlagWhy}
         onchange={(/** @type {string} */ d) => (db.toDay = d)}
         boundsReason={`${db.dayReason} Only bars on or before this day.`}
       />
@@ -889,7 +925,7 @@
         selected={new Set(db.expiry ? [db.expiry] : [])}
         onchange={(/** @type {Set<string>} */ sel) => (db.expiry = [...sel][0] ?? '')}
       />
-      <span class="note" class:warn={Boolean(db.expiryRefusal) || db.expiryHeld > 0}>
+      <span class="note" class:warn={Boolean(db.expiryRefusal) || db.expiryHeld > 0} use:wholeTitle>
         {#if db.expiryRefusal}
           No contract — {db.expiryRefusal}
         {:else if db.expiry}
@@ -933,7 +969,7 @@
         selected={db.strikePick}
         onchange={(/** @type {Set<string>} */ sel) => (db.strikePick = new Set(sel))}
       />
-      <span class="note" class:warn={Boolean(db.strikeRefusal)}>
+      <span class="note" class:warn={Boolean(db.strikeRefusal)} use:wholeTitle>
         {#if db.strikeRefusal}
           No strike chain — {db.strikeRefusal}
         {:else if db.strikesHere.list.length === 0}
@@ -1005,7 +1041,7 @@
         selected={new Set([db.side])}
         onchange={(/** @type {Set<string>} */ sel) => (db.side = [...sel][0] ?? '')}
       />
-      <span class="note" class:warn={Boolean(db.sideRefusal || db.sideEmpty)}>
+      <span class="note" class:warn={Boolean(db.sideRefusal || db.sideEmpty)} use:wholeTitle>
         {#if db.sideRefusal}
           No side — {db.sideRefusal}
         {:else if db.sideEmpty}
@@ -1039,8 +1075,10 @@
     <p class="stranded" role="status">
       {#each db.stranded as st (st.rung)}
         <span class="sitem">
+          <!-- WHAT IT DOES TO THE TABLE, TRULY (DB-020): "no row can match"
+               only when none does — never over a full grid. -->
           <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
-          so no row can match.
+          {st.effect}
           <button class="btn ghost sm" type="button" onclick={st.clear}>Clear {st.rung}</button>
         </span>
       {/each}
@@ -1153,7 +1191,7 @@
       <span class="note" title={excludedSentence(feeds.all)}>{excludedSentence(feeds.all)}</span>
     {/if}
     {#if feeds.error || db.error || !feeds.active || (db.loading && db.rows.length === 0)}
-      <span class="note" class:warn={Boolean(db.error) || Boolean(feeds.error) || !feeds.active}>
+      <span class="note" class:warn={Boolean(db.error) || Boolean(feeds.error) || !feeds.active} use:wholeTitle>
         {#if feeds.error}
           the feed list could not be read, so nothing below is scoped to anything
         {:else if db.error}
