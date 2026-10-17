@@ -2241,6 +2241,10 @@ fn a_day_bar_session_without_minutes_says_only_no_bar() {
 /// page scans none; a day read to another end row is cold again; a day with
 /// no bar is never cold. Each day's own scan then answers from the memo.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one two-month fixture, the page's parallel scan and the month's cold days, read together"
+)]
 fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
     let root = root_of("r3-13-scan-months");
     let key = "NSE-INDEX-NIFTY";
@@ -2272,30 +2276,47 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
         scan: true,
         ..super::super::Reads::default()
     };
-    let count = || {
-        super::super::counts(
+    let venue = pull::vendor::Venue::NseIndex;
+    let page = |reads| {
+        super::super::open_months(
             &root,
-            Vendor::Zerodha,
-            &inst,
-            Timeframe::MINUTE_1,
+            (Vendor::Zerodha, &inst, Timeframe::MINUTE_1),
             &days,
-            scan,
+            reads,
         )
     };
-    let first = count();
-    assert_eq!(first.scanned, 14, "every held day, on two months' threads");
-    assert_eq!(first.scans.iter().flatten().count(), 14);
-    assert_eq!(count().scanned, 0, "every day is kept");
-    // A page that scans nothing counts nothing scanned.
-    let plain = super::super::counts(
+    let months = page(scan);
+    assert_eq!(months.len(), 2);
+    assert_eq!(
+        super::super::scan_months(&months, venue),
+        14,
+        "every held day, on two months' threads"
+    );
+    assert_eq!(
+        super::super::scan_months(&page(scan), venue),
+        0,
+        "every day is kept"
+    );
+    // A page that scans nothing has no memo key, so nothing is cold.
+    assert!(
+        page(super::super::Reads::default())
+            .iter()
+            .all(|month| month.identity.is_none())
+    );
+    assert_eq!(
+        super::super::scan_months(&page(super::super::Reads::default()), venue),
+        0
+    );
+    // The whole count then reads each day's scan from the memo.
+    let counted = super::super::counts(
         &root,
         Vendor::Zerodha,
         &inst,
         Timeframe::MINUTE_1,
         &days,
-        super::super::Reads::default(),
+        scan,
     );
-    assert_eq!(plain.scanned, 0);
+    assert_eq!(counted.scans.iter().flatten().count(), 14);
 
     // The month's cold days, directly: a day with no bar is never cold, a kept
     // day is not, and a day read to another end row is cold again.

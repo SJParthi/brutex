@@ -3381,9 +3381,6 @@ struct Counts {
     scans: Vec<Option<rules::DayScan>>,
     /// Per day, the first held bar's stamp (CMP-06), where asked and read.
     first_at: Vec<Option<i64>>,
-    /// How many days this count scanned on a month's own thread before
-    /// counting them ([`scan_months`]): none where the memo held them.
-    scanned: usize,
     notes: Vec<String>,
 }
 
@@ -3516,7 +3513,6 @@ fn counts(
             halted: vec![None; per_day.len()],
             scans: vec![None; per_day.len()],
             first_at: vec![None; per_day.len()],
-            scanned: 0,
             per_day,
             notes,
         };
@@ -3524,33 +3520,8 @@ fn counts(
     // THE PAGE'S MONTHS, EACH OPENED ONCE AND ITS DAYS' ROWS LOOKED UP, before
     // any is counted: a Zerodha index page then scans its months in parallel,
     // a thread a month on that month's own handle ([`scan_months`]).
-    let mut months = Vec::new();
-    let mut at = 0usize;
-    while let Some(first) = days.get(at) {
-        let run = month_run(days, at).max(1);
-        let month_days = days.get(at..at.saturating_add(run)).unwrap_or_default();
-        let opened = match first.year_month() {
-            Ok(month) => open_month(root, feed, inst, rung, month),
-            Err(why) => Opened::Refused(why.to_string()),
-        };
-        let (rows, identity) = match &opened {
-            // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
-            Opened::File(file) => (
-                day_spans(file, month_days),
-                reads.scan.then(|| rules::file_identity(file)).flatten(),
-            ),
-            Opened::Absent | Opened::Refused(_) => (Vec::new(), None),
-        };
-        months.push(Month {
-            first: *first,
-            days: month_days,
-            opened,
-            rows,
-            identity,
-        });
-        at = at.saturating_add(run);
-    }
-    let scanned = scan_months(&months, inst.venue());
+    let months = open_months(root, (feed, inst, rung), days, reads);
+    let _scanned = scan_months(&months, inst.venue());
     for Month {
         first,
         days: month_days,
@@ -3618,9 +3589,45 @@ fn counts(
         halted,
         scans,
         first_at,
-        scanned,
         notes,
     }
+}
+
+/// The page's months, each opened once, with each day's rows and, where the
+/// page scans, the scan memo's key.
+fn open_months<'a>(
+    root: &Path,
+    (feed, inst, rung): (Vendor, &Instrument, Timeframe),
+    days: &'a [Day],
+    reads: Reads,
+) -> Vec<Month<'a>> {
+    let mut months = Vec::new();
+    let mut at = 0usize;
+    while let Some(first) = days.get(at) {
+        let run = month_run(days, at).max(1);
+        let month_days = days.get(at..at.saturating_add(run)).unwrap_or_default();
+        let opened = match first.year_month() {
+            Ok(month) => open_month(root, feed, inst, rung, month),
+            Err(why) => Opened::Refused(why.to_string()),
+        };
+        let (rows, identity) = match &opened {
+            // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
+            Opened::File(file) => (
+                day_spans(file, month_days),
+                reads.scan.then(|| rules::file_identity(file)).flatten(),
+            ),
+            Opened::Absent | Opened::Refused(_) => (Vec::new(), None),
+        };
+        months.push(Month {
+            first: *first,
+            days: month_days,
+            opened,
+            rows,
+            identity,
+        });
+        at = at.saturating_add(run);
+    }
+    months
 }
 
 /// One month of a page, opened once: its days, the file or why not, each
@@ -3634,6 +3641,10 @@ struct Month<'a> {
     identity: Option<(u64, u64)>,
 }
 
+/// A month [`scan_months`] has still to read: its handle, the memo's key, and
+/// its cold days.
+type ColdMonth<'a> = (&'a BarFile, (u64, u64), Vec<(Day, u64, u64)>);
+
 /// **A PAGE'S FIRST SCANS RUN A MONTH A THREAD** (DB-B20's cold cost; R3-13's
 /// measured target, "no slower than today's figure"): each month the page
 /// scans whose days the memo does not all hold ([`rules::cold_days`]) is read
@@ -3643,7 +3654,7 @@ struct Month<'a> {
 /// shared one would evict each other's block on every read. A page the memo
 /// holds spawns nothing. Returns how many days were scanned here.
 fn scan_months(months: &[Month<'_>], venue: Venue) -> usize {
-    let cold: Vec<(&BarFile, (u64, u64), Vec<(Day, u64, u64)>)> = months
+    let cold: Vec<ColdMonth<'_>> = months
         .iter()
         .filter_map(|month| {
             let (Opened::File(file), Some(identity)) = (&month.opened, month.identity) else {
