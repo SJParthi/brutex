@@ -18403,3 +18403,57 @@ under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
 `incomplete` close counts 94 refusals in its own window, equal to its
 `failures=94`, where it counted 151 (57 move to `later_count`); neither
 sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
+
+## R4-17: Zerodha series identity (D-4990 to D-4995)
+
+**`JUMP_BPS` is NOT MEASURED.** `pull::series_identity::JUMP_BPS` = 3,000
+basis points of the smaller price is a chosen, PROVISIONAL value. The work
+package requires it measured first, read-only, over every stored Zerodha CASH
+minute (per-share p99, p999, max), with zero trips on split and bonus ex-dates.
+The cloud session that wrote it had no store. `cli series-identity ALL
+--segment CASH --feed zerodha` prints that distribution per share (`jump-p99`,
+`jump-p999`, `jump-max`), and the operator's run of it is the measurement, to
+be recorded here and beside the constant. It is UNVERIFIED until then
+(`CLAUDE.md` §3 rule 6).
+
+**Measured in the R4-17 cloud container, 17 Oct 2026** (4 vCPU, shared, not
+the operator's machine; `cargo bench -p pull --bench ratio`, release build):
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-01 listing probe (`Listing::span`), master of 300 → 3,000 rows | 76,811 ps | 77,851 ps (1.013x) | — | 86 / 118 / 6,058 ns at 300 rows; 98 / 101 / 13,881 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute (`MinuteJudge::judge`), answer of 1 → 10 → 100 sessions | 24,977 ps | 29,397 ps (1.176x) | 37,108 ps (1.485x) | 75 / 85 / 21,242 ns at 100 sessions (n=20,000) |
+
+**C-ZI-02 is not O(1): the per-minute judgement is one binary search over the
+day bars of the months the answer touches, O(log days).** That is
+1.485x at 100 sessions, inside the 3.0x ceiling and above the 1.4x line past
+which a shared-host ratio is re-run on dedicated hardware before it is believed. A
+landing's book holds only the months its answer touches (a 60-day Zerodha
+window touches at most three: about 63 day bars), so the 100x row, about five
+months in one answer, is past what a landing meets. The scan
+(`identity_screen::scan_series`) builds one book of the series' whole day
+rung, so its per-minute cost grows as O(log days held), about 2,000 for
+2018..2026.
+
+**The listing table is loaded once per store root per process**
+(`listing::for_store`), and only after a master loads. A newer master
+installed while a process runs is not seen until that process restarts. The
+direction is safe: a missing new listing refuses nothing, and a missing new
+removal leaves a 404 the failure it was. A newer master whose receipt fails
+is passed over by name. Loading is one directory listing and one master parse
+(O(rows), about 4 MB of gzip), paid once per process.
+
+**The store scan is O(bars held), and a scan, not a read path.** Each
+flagged minute's measured cause reads GDFL's 1s month of that share once and
+folds it (`pull::fold`): about 470,000 records per month that holds a flagged
+minute. Months with nothing flagged read nothing of GDFL. Its quarantine plan
+lists every flagged stamp, so a series flagged whole (NIFTYNEXT50, 87,375
+minutes per WP-13d's measurement) writes a plan of that many stamps. A month
+whose every bar shares one cause is written as `whole_month` instead.
+
+**`WITNESS_TOLERANCE_BPS` = 100 is chosen, not measured.** It decides a label
+only (`basis_mismatch` against `foreign_level`). No landing rule reads it.
+
+**History ends is not yet on the live pull.** `fetch::fetch_and_land_listed`
+returns it; the Zerodha broker run (`broker_run`, R4-14's) must call it with
+the share's span. Until then a window after delisting is reported as it was.
