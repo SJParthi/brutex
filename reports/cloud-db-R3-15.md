@@ -133,7 +133,19 @@ Mutation: no JavaScript mutation tool is in `web/package.json` and adding one is
 change outside this part, so a small mutation runner (scratch, not tracked) applied 17 operators
 (`===`/`!==`, `<`/`<=`/`>`/`>=`, `&&`/`||`, `true`/`false`, `±1`, `some`/`every`, `!` removal,
 `??`→`||`, statement deletion) line by line and ran the node tests (the four browser and command
-tests left out, for time). First pass, before the tests it led to: see below.
+tests left out, for time). First pass, before the tests it led to:
+
+| Module | Mutants | Killed | Survived | Of the survivors |
+|---|---:|---:|---:|---|
+| `src/lib/speed.js` | 122 | 94 | 28 | 11 equivalent (6 inside JSDoc casts, 5 `??`→`||` on values never falsy); 17 real: tests added (exact 1 ms / 10 ms / 1 s edges, n = 0 never slow, tie order, `some`/`every`, NaN sizes and heaps, status 299 / 300, exactly-at-budget), and one redundant assignment removed |
+| `src/lib/page-report.js` | 106 | 80 | 26 | 9 equivalent (`??`→`||` on functions and never-empty strings, space→space); 17 real: tests added (DEL and no-break space, a newline in a page, exactly 256 bytes, exactly 1,024 bytes, the longest prefix that fits, HTTP 400, an entry exactly a minute old, a ration of 0, empty error messages, line 0, an empty fallback detail, a window without `dispatchEvent`) |
+| `src/lib/api-status.js` | 14 | 9 | 5 | 4 equivalent; 1 real: test added (an empty error message) |
+| `ci/speed-sheet.mjs` | 180 | 136 | 44 | about 30 equivalent (`??`→`||` where the left side is a function, an object, a non-empty string or a count ≥ 1); the rest real: tests added (the extremes URL exactly, a duplicated capture entry, 512 and `1,0` clients, Retry-After on a 400, the largest answer's bytes, no sentence on a clean row, an offered feed chosen, a month or a day discovered alone, exactly 10 ms, the blank line), and the warm agent made one named factory so a test can count its connections |
+| `ci/browser-harness.mjs` (its rules: `parseArgs`, `chromeOf`, `exceptionText`, `judge`, `idleVerdict`, `captured`, `renderHarness`) | 79 | 66 | 13 | 4 equivalent; 9 real: tests added (a mixed page list, 64 / `1,0` / 1.5 idle tabs, `--no-sandbox` read, HTTP 300, a pause of exactly 50 ms) |
+
+The browser-driving functions of the harness (`launch`, `openTab`, `loadOnce`, the report check,
+`runHarness`) are covered 100% by the real-browser tests but were not mutated (each run needs
+Chromium, about 40 s). Second pass after the added tests: below.
 
 ## NEEDS THE MAC
 
