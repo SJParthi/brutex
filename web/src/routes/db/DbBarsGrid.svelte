@@ -830,12 +830,16 @@
       /* A READ FOR ANOTHER ROW SET IS STOPPED AT ONCE, settled or not: its
          rows must not land under a selection that has moved on. */
       if (inFlight && inFlightSet !== set) stopRead();
-      /* AND NOTHING WHILE THE SELECTION IS STILL SETTLING (R3-03). A change
-         of Side or Segment moves several rungs one after another, and each
-         intermediate selection was a request — for a contract or a month the
-         final selection does not hold. A Go to finding its page reads
-         nothing either: its landing is the page. */
-      if (!ready || !db.settled || jumping) return;
+      /* AND NOTHING WHILE THE SELECTION IS STILL RECONCILING (R3-03). A
+         change of instrument, Segment or feed is applied rung by rung over
+         several passes (`db.reconciling`, selection.svelte.js), and each pass
+         in between was a request — for a contract or a month the final
+         selection does not hold. `db.settled` would also wait for the day
+         window's seed, which never comes for census rows with no first or
+         last stamp, and a grid waiting on it would read nothing and say
+         nothing: so the gate is the reconcile alone. A Go to finding its page
+         reads nothing either: its landing is the page. */
+      if (!ready || db.reconciling || jumping) return;
       /* ONE REQUEST A CHANGE (R3-03): a change of order reads page one now,
          rather than the old page first and page one after the reset. */
       const order = `${base}|${key}|${desc}`;
@@ -925,11 +929,11 @@
     });
     /**
      * WHETHER A READ NOW IS FOR THE SELECTION AND PAGE SIZE THE READER WILL
-     * SEE: the read effect's own `ready` and `db.settled`, published so the
-     * extremes read waits on exactly the same (R3-03).
+     * SEE: the read effect's own `ready` and no reconcile in progress,
+     * published so the extremes read waits on exactly the same (R3-03).
      */
     const barsReady = $derived(
-      !db.linkDaysPending && (db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit)) && Boolean(db.settled)
+      !db.linkDaysPending && (db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit)) && !db.reconciling
     );
 
     /* THE READ IN FLIGHT IS STOPPED WHEN THE GRID'S STATE GOES, and only then:
@@ -1322,7 +1326,7 @@
       const feed = feeds.active;
       const p = planAll;
       const key = allKey;
-      if (db.view !== 'bars' || !feed || p.keys.length === 0 || p.why || !db.settled) return;
+      if (db.view !== 'bars' || !feed || p.keys.length === 0 || p.why || db.reconciling) return;
       if (newestClose !== null) return;
       /* THE READS THAT MAY CARRY IT GO FIRST; this asks only when neither did. */
       if (barState.loading || (!barState.answer && !barState.error) || db.extremesRead?.loading) return;

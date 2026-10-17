@@ -33,7 +33,7 @@ Branch `cloud/db-R3-03-20261017`, cut from `origin/feat/db-fix` at `50093fa3`
 - `web/src/routes/db/DbBarsGrid.svelte`:
   - one request per change: the read effect asks page one itself on a change
     of order (no old-offset request first), dedupes by question, waits for the
-    selection to settle (`db.settled`) and for a Go to's landing, is not
+    selection's reconcile to finish (`db.reconciling`, not `db.settled`, which never settles for census rows with no first or last stamp) and for a Go to's landing, is not
     cancelled by a re-run that asks nothing new, and stops a read for a row set
     that has moved on;
   - newest close taken from the extremes read or page one newest first; asked
@@ -56,7 +56,7 @@ Branch `cloud/db-R3-03-20261017`, cut from `origin/feat/db-fix` at `50093fa3`
     grid on a press), so no notice cuts a row;
   - Go to scrolls to and marks the landed row, again on a second Go to to the
     same minute, only on the rows of the page it names.
-- `web/src/routes/db/DbExtremes.svelte`: the fold waits on `db.barsReady`,
+- `web/src/routes/db/DbExtremes.svelte`: the fold waits on `db.barsReady` (Fit applied, no reconcile),
   asks a set once, is not cancelled by a no-op re-run, and carries the newest
   bar for the grid.
 - `web/src/lib/db/bars-plan.js`: `acrossDay`; `parseGoto`, `minuteOf`,

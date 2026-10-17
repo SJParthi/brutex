@@ -101,7 +101,7 @@ test('a_sort_change_at_a_deep_page_sends_one_request', () => {
   const script = gridScript();
   assert.match(script, /const asked = pageToRead\(\{ page, order, lastOrder, held \}\);/);
   assert.match(script, /if \(!reads\.fresh\(`\$\{query\}\|\$\{set\}\|\$\{again\}`\)\) return;/);
-  assert.match(script, /if \(!ready \|\| !db\.settled \|\| jumping\) return;/);
+  assert.match(script, /if \(!ready \|\| db\.reconciling \|\| jumping\) return;/);
   assert.match(script, /const held = Boolean\(db\.linkPending\?\.page\) \|\| pinned;/);
   assert.match(script, /\$effect\(\(\) => \(\) => inFlight\?\.abort\(\)\);/);
   assert.match(script, /if \(inFlight && inFlightSet !== set\) stopRead\(\);\s*if \(!ready/, 'a read for another row set never lands under the next');
@@ -122,7 +122,7 @@ test('one change of the selection sends one page read and one extremes read, and
   assert.match(extremes, /if \(!db\.barsReady\) return;/);
   assert.match(extremes, /if \(!asks\.fresh\(key\)\) return;/);
   assert.doesNotMatch(extremes, /return \(\) => controller\.abort\(\);/);
-  assert.match(script, /const barsReady = \$derived\(\s*!db\.linkDaysPending && \(db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\) && Boolean\(db\.settled\)\s*\);/);
+  assert.match(script, /const barsReady = \$derived\(\s*!db\.linkDaysPending && \(db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\) && !db\.reconciling\s*\);/);
 });
 
 test('the_pager_offers_no_page_past_the_served_depth', () => {
