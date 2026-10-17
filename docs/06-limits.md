@@ -18318,6 +18318,44 @@ same split. After this run the branch was merged once more onto feat/db-fix at
 `HeadDeadline`, `exchange_watch` or `logs`, so these rows were not re-taken
 on that merge, and the `/bars.json` rows are AF-05's to re-measure.
 
+**Re-measured on the final merged build**, 17 October 2026 from 09:31 IST:
+this change merged onto feat/db-fix at `62396df0` (branch head `1ff03397`,
+`AH-02` on 8901) against the release build of feat/db-fix at `bf84e1f3`
+(`AH-02-before` on 8902; its `HeadDeadline`, `serve_limited` and `logs` are the
+same as `62396df0`'s), two fresh shadows, load average 23-41, the same method
+and scripts (`tgt/ah02-final-logs/`). The branch's later merge of R3-32 touches
+only `cli`'s watchdog verbs and the ledgers.
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` | 200 each | 0.48 / 1.25 / 1.35 ms | 0.41 / 0.85 / 1.54 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 | 200 each | 2.19 / 4.88 / 7.79 ms | 2.07 / 3.80 / 5.42 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` | 200 each | 18.32 / 27.19 / 3,563.87 ms | 18.16 / 29.36 / 33.34 ms |
+
+The before census max is its first request building the body; the after
+build's body had been built by the stop probe below before this row ran.
+
+| Slow read, n = 20 each, five at a time | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: exit 18, 85,148,053-86,870,229 of 183,715,726 bytes, 10.15-10.36 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.90-21.92 s |
+| GDFL NIFTY 1 s 2026-09, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,165,219-34,956,875 of 65,204,449 bytes, 10.57-11.13 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.73-20.76 s |
+
+A stopped reader (`--limit-rate 100`, `&probe=ah02-final-stop`, curl's own
+45 s limit) on the after build: one `api.serve` "response cut" line
+(`bytes_written` 1,561,056, `status` 200, `declared_length` 183,715,726,
+`access_counted` true), and the route's next window closed as `served` 205,
+`refused` 0, `cut` 1. NIFTY first, then the shared path, each selection once on
+both builds at once at its size over 18 s: before, GDFL NIFTY 1 s 2026-09
+(38,322,811 of 65,204,449 bytes), NIFTY 2020-09-24 11500 CE 1 s (9,955,883 of
+14,673,427), BANKNIFTY 1 s 2026-09 (39,040,663 of 65,204,449), RELIANCE cash
+1 s 2026-09 (17,998,843 of 28,406,128) and the Zerodha census (11,502,489 of
+16,141,798) were cut, exit 18; Zerodha NIFTY 1day and 1min 2026-09 and the
+illiquid NIFTY 2020-09-24 9950 PE 1 s (4,321 bytes) arrived whole. After: all
+eight whole, exit 0, size = `Content-Length`. The per-write test on this head:
+a write that moves 1 KiB, n = 400, p50 1.166 µs, p99 30.958 µs, max 66.25 µs
+(4 waits, 4 timer resets); a write that waits, n = 200, p50 42 ns, p99 916 ns,
+max 2.417 µs.
+
 **Per write, counted and timed** by
 `head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
 (the test profile, which is opt-level 3 here; `--nocapture`; `Instant` around
