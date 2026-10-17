@@ -61,6 +61,10 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     // The routes the WP-01 seam registers ahead of their packages: store,
     // import and census reads, answered `501 not built` until each lands.
     ("/census/facets.json", DATA),
+    // The warm-at-start list and the coverage roll-up (R3-09): census
+    // reads from memory, no state change.
+    ("/census/warm.json", DATA),
+    ("/census/rollup.json", DATA),
     ("/chain.json", DATA),
     ("/imports.json", DATA),
     ("/disk.json", DATA),
