@@ -3396,6 +3396,16 @@ enum Opened {
     Refused(String),
 }
 
+impl Opened {
+    /// The file, where one opened.
+    fn file(self) -> Option<Box<BarFile>> {
+        match self {
+            Self::File(file) => Some(file),
+            Self::Absent | Self::Refused(_) => None,
+        }
+    }
+}
+
 /// The symbol id `pull::ingest` stamps into a month's header, which the store
 /// verifies on every open.
 fn symbol_id(symbol: &str) -> u32 {
@@ -3549,7 +3559,11 @@ fn counts(
                         })
                         .collect();
                     let venue = inst.venue();
-                    let _scanned = rules::scan_month(&file, identity, &held, |day, ts| {
+                    let open_lane = || {
+                        let month = first.year_month().ok()?;
+                        open_month(root, feed, inst, rung, month).file()
+                    };
+                    let _scanned = rules::scan_month(open_lane, identity, &held, |day, ts| {
                         in_recorded_halt(venue, day, ts)
                     });
                 }

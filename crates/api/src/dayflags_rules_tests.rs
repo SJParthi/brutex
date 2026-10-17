@@ -2244,7 +2244,7 @@ fn a_day_bar_session_without_minutes_says_only_no_bar() {
 fn a_months_first_scans_run_in_parallel_and_are_kept() {
     let root = root_of("r3-13-scan-month");
     let key = "NSE-INDEX-NIFTY";
-    let open = 9 * 3_600 + 15 * 60;
+    let open_at = 9 * 3_600 + 15 * 60;
     let held: Vec<Day> = [2, 3, 4, 7, 8, 9, 10, 11, 14, 15]
         .iter()
         .map(|d| day(&format!("2022-03-{d:02}")))
@@ -2254,8 +2254,8 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
         .flat_map(|on| {
             let on = on.to_string();
             [
-                bar(&on, open, [1_600_000; 4], 0),
-                bar(&on, open + 60, [1_600_100; 4], 0),
+                bar(&on, open_at, [1_600_000; 4], 0),
+                bar(&on, open_at + 60, [1_600_100; 4], 0),
             ]
         })
         .collect();
@@ -2284,13 +2284,35 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
         "the 16th holds no bar"
     );
     let quiet = |_: Day, _: i64| false;
+    let open = || {
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month).file()
+    };
+    // A lane whose month will not open, or opens as another file, keeps nothing.
     assert_eq!(
-        scan_month(&file, identity, &spans, quiet),
+        scan_month(|| None, identity, &spans, quiet),
+        10,
+        "handed to lanes"
+    );
+    let other = super::super::instrument_of("NSE-INDEX-BANKNIFTY", "").expect("a key");
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-INDEX-BANKNIFTY",
+        Timeframe::MINUTE_1,
+        vec![bar("2022-03-02", open_at, [3_400_000; 4], 0)],
+    );
+    let elsewhere = || {
+        super::super::open_month(&root, Vendor::Zerodha, &other, Timeframe::MINUTE_1, month).file()
+    };
+    assert_eq!(scan_month(elsewhere, identity, &spans, quiet), 10);
+    // Each lane on a handle of its own: every day is scanned and kept.
+    assert_eq!(
+        scan_month(open, identity, &spans, quiet),
         10,
         "ten days, two lanes"
     );
     assert_eq!(
-        scan_month(&file, identity, &spans, quiet),
+        scan_month(open, identity, &spans, quiet),
         0,
         "every day is kept"
     );
@@ -2301,9 +2323,17 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
     // A day read to another end row is scanned again, once.
     let (on, lo, hi) = spans[0];
     let shorter = [(on, lo, hi - 1)];
-    assert_eq!(scan_month(&file, identity, &shorter, quiet), 1);
-    assert_eq!(scan_month(&file, identity, &shorter, quiet), 0);
-    assert_eq!(scan_month(&file, identity, &spans[..1], quiet), 1);
+    assert_eq!(scan_month(open, identity, &shorter, quiet), 1);
+    assert_eq!(scan_month(open, identity, &shorter, quiet), 0);
+    assert_eq!(scan_month(open, identity, &spans[..1], quiet), 1);
+    // A month that opens is its file; one that does not is none.
+    assert!(open().is_some());
+    let absent = YearMonth::new(2022, 4).expect("a month");
+    assert!(
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, absent)
+            .file()
+            .is_none()
+    );
 }
 
 /// **A SCALE SWITCH AGAINST THE MONTH JUST BEFORE THE PAGE** (DB-031): the

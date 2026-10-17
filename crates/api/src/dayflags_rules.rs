@@ -647,9 +647,16 @@ const SCAN_LANE_DAYS: usize = 8;
 /// once, [`SCAN_LANE_DAYS`] days a scoped thread, and kept; each day's own
 /// [`scan_day`] then answers from the memo. A month the memo holds spawns
 /// nothing. A day that will not read is left for [`scan_day`] to read again
-/// and name. Returns how many days were scanned here.
+/// and name.
+///
+/// A HANDLE A LANE, from `open_lane`: a handle verifies a sealed month's reads
+/// through ONE cached block behind one lock, so lanes sharing a handle would
+/// evict each other's block on every read and wait on each other's verify.
+/// A lane whose month will not open, or opens as another file than
+/// `(dev, ino)`, scans nothing, and its days' own [`scan_day`] read them.
+/// Returns how many days were handed to lanes.
 pub(super) fn scan_month(
-    file: &store::file::BarFile,
+    open_lane: impl Fn() -> Option<Box<store::file::BarFile>> + Sync,
     (dev, ino): (u64, u64),
     spans: &[(Day, u64, u64)],
     in_halt: impl Fn(Day, i64) -> bool + Sync,
@@ -664,13 +671,17 @@ pub(super) fn scan_month(
             .copied()
             .collect()
     };
-    let in_halt = &in_halt;
+    let (open_lane, in_halt) = (&open_lane, &in_halt);
     std::thread::scope(|scope| {
         for lane in cold.chunks(SCAN_LANE_DAYS) {
             let _lane = scope.spawn(move || {
+                let Some(file) = open_lane().filter(|file| file_identity(file) == Some((dev, ino)))
+                else {
+                    return;
+                };
                 for &(day, lo, hi) in lane {
                     let _scanned =
-                        scan_day(file, Some((dev, ino)), (lo, hi), |ts| in_halt(day, ts));
+                        scan_day(&file, Some((dev, ino)), (lo, hi), |ts| in_halt(day, ts));
                 }
             });
         }
