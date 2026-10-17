@@ -329,6 +329,367 @@ impl AuctionSidecars {
     }
 }
 
+// ══ The bar definition that built a day ═════════════════════════════════════
+
+/// What one bar definition changed, in a sentence, from the import's own
+/// definition list (`pull::gdfl_import::BAR_DEFINITION`'s documentation).
+pub(super) const fn definition_means(definition: u64) -> &'static str {
+    match definition {
+        1 => "placement over traded rows only (D-2802 as first written)",
+        2 => {
+            "placement over every row; an option second's open interest is its last traded row's (D-2812)"
+        }
+        3 => {
+            "an option second's open interest is the last row placed in it, traded or not (D-3342)"
+        }
+        4 => {
+            "from 2026-08-03 an eligible share's closing-auction band goes to the .auc sidecar, not the fold; every other day holds the bars of 3 (D-4878 item 10)"
+        }
+        _ => "a definition this build does not name",
+    }
+}
+
+/// Where a day's definition was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DefinitionFrom {
+    /// The import journal's deciding line (`definition=`).
+    Journal,
+    /// The GDFL day ledger's line (`definition=`), where the journal names
+    /// none.
+    DayLedger,
+}
+
+/// THE BAR DEFINITION THAT BUILT A DAY (R3-13 goal 3): its number, what it
+/// means, where it was read, and whether this build would build the same bars
+/// (`pull::gdfl_import::definition_is_current`, the importer's one rule). A
+/// definition-2 option day is labelled until it is restated. `null` where no
+/// source names one.
+pub(super) fn definition_json(
+    kind: pull::gdfl_import::ImportKind,
+    day: Day,
+    read: Option<(u64, DefinitionFrom)>,
+) -> serde_json::Value {
+    let Some((definition, from)) = read else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "value": definition,
+        "means": definition_means(definition),
+        "from": match from {
+            DefinitionFrom::Journal => "import_journal",
+            DefinitionFrom::DayLedger => "day_ledger",
+        },
+        "current": pull::gdfl_import::definition_is_current(kind, day, definition),
+        "this_build": pull::gdfl_import::BAR_DEFINITION,
+    })
+}
+
+/// The phrase of a day's definition: always for an option day (the band names
+/// which definition built it), and for any other day only where the
+/// definition is not current.
+pub(super) fn definition_says(
+    kind: pull::gdfl_import::ImportKind,
+    definition: &serde_json::Value,
+) -> Option<String> {
+    let value = definition.get("value")?.as_u64()?;
+    let current = definition.get("current")?.as_bool()?;
+    let this = pull::gdfl_import::BAR_DEFINITION;
+    if current && kind != pull::gdfl_import::ImportKind::Options {
+        return None;
+    }
+    let tail = if !current {
+        format!(
+            "; this build builds definition {this}, so the day is labelled until it is restated"
+        )
+    } else if value == u64::from(this) {
+        String::new()
+    } else {
+        format!("; it holds the bars definition {this} builds")
+    };
+    Some(format!(
+        "bar definition {value} built this day: {}{tail}",
+        definition_means(value)
+    ))
+}
+
+// ══ A frozen index, and a value outside the day's range ═════════════════════
+
+/// The shortest unchanged run of an index in session that is flagged: three
+/// minutes (DB-B20's detector). Chosen, not sourced: an index moves every few
+/// seconds in session, and 2022-03-07's dissemination stood still for runs of
+/// 5 to 25 minutes while options traded.
+pub(super) const FROZEN_MIN_S: u64 = 180;
+
+/// The most one-minute bars one day's scan reads: a whole session is 375, so
+/// a day holding more is not a one-minute index's day and is not scanned.
+pub(super) const MAX_SCAN_BARS: u64 = 1_440;
+
+/// What one scan of an index day's one-minute bars found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct DayScan {
+    /// Bars read.
+    pub(super) bars: u64,
+    /// The highest high and the lowest low of the day's bars, paisa, with the
+    /// stamp (epoch microseconds) of the bar that printed each.
+    pub(super) high: Option<(i64, i64)>,
+    pub(super) low: Option<(i64, i64)>,
+    /// Runs of [`FROZEN_MIN_S`] or more with no change, outside any recorded
+    /// halt.
+    pub(super) frozen_runs: u32,
+    /// The longest such run: its first bar's stamp and its length in seconds.
+    pub(super) longest: Option<(i64, u64)>,
+}
+
+/// Each closed day's scan, by month file and the day's `[lo, hi)` rows and the
+/// file's committed count: a month that grows is scanned again, a month that
+/// does not is one probe a day.
+static SCANS: OnceLock<Mutex<HashMap<(PathBuf, u64, u64, u64), DayScan>>> = OnceLock::new();
+
+/// Folds one day's one-minute bars, oldest first: the extremes, and the runs
+/// of consecutive minutes (no minute missing between them) each printing one
+/// unchanged value, `O = H = L = C`, the same as the minute before. A run is
+/// measured as its minutes times 60 s. `in_halt` says whether a bar's stamp is
+/// inside the calendar's recorded halt, where an unchanged value is the halt's
+/// and not a frozen feed.
+pub(super) fn fold_minutes(
+    bars: impl Iterator<Item = store::format::Bar>,
+    in_halt: impl Fn(i64) -> bool,
+) -> DayScan {
+    const MINUTE: i64 = 60_000_000;
+    let mut scan = DayScan::default();
+    // The run in progress: its first stamp, its last stamp, its value.
+    let mut run: Option<(i64, i64, i64)> = None;
+    let close_run = |run: Option<(i64, i64, i64)>, scan: &mut DayScan| {
+        let Some((first, last, _)) = run else { return };
+        let seconds = u64::try_from((last - first) / 1_000_000 + 60).unwrap_or(0);
+        if seconds >= FROZEN_MIN_S {
+            scan.frozen_runs = scan.frozen_runs.saturating_add(1);
+            if scan.longest.is_none_or(|(_, longest)| seconds > longest) {
+                scan.longest = Some((first, seconds));
+            }
+        }
+    };
+    for bar in bars {
+        scan.bars = scan.bars.saturating_add(1);
+        if scan.high.is_none_or(|(high, _)| bar.high > high) {
+            scan.high = Some((bar.high, bar.ts_micros));
+        }
+        if scan.low.is_none_or(|(low, _)| bar.low < low) {
+            scan.low = Some((bar.low, bar.ts_micros));
+        }
+        let flat = bar.open == bar.high && bar.high == bar.low && bar.low == bar.close;
+        let halted = in_halt(bar.ts_micros);
+        run = match run {
+            Some((first, last, value))
+                if flat && !halted && value == bar.close && bar.ts_micros - last == MINUTE =>
+            {
+                Some((first, bar.ts_micros, value))
+            }
+            other => {
+                close_run(other, &mut scan);
+                (flat && !halted).then_some((bar.ts_micros, bar.ts_micros, bar.close))
+            }
+        };
+    }
+    close_run(run, &mut scan);
+    scan
+}
+
+/// One closed day's scan of `file`'s rows `[lo, hi)`, read once a day and
+/// kept: at most [`MAX_SCAN_BARS`] record reads, `None` past that or where a
+/// read fails (the caller names it).
+///
+/// # Errors
+///
+/// A record the store would not read, in its own words.
+pub(super) fn scan_day(
+    file: &store::file::BarFile,
+    (lo, hi): (u64, u64),
+    in_halt: impl Fn(i64) -> bool,
+) -> Result<Option<DayScan>, String> {
+    if hi.saturating_sub(lo) > MAX_SCAN_BARS {
+        return Ok(None);
+    }
+    let key = (file.path().to_path_buf(), file.records(), lo, hi);
+    let memo = SCANS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(kept) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(Some(*kept));
+    }
+    let bars = (lo..hi)
+        .map(|at| file.read_record(at).map_err(|why| why.to_string()))
+        .collect::<Result<Vec<_>, String>>()?;
+    let scan = fold_minutes(bars.into_iter(), in_halt);
+    let _was = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, scan);
+    Ok(Some(scan))
+}
+
+/// What an index day's rules read: the feed, the day's scan of its minutes
+/// (Zerodha), the day bar's high and low, and the day ledger's longest
+/// unchanged run (GDFL: `flat_max_s`, `flat_max_at`, its line).
+pub(super) struct IndexDay {
+    /// The feed whose bars these are.
+    pub(super) feed: Vendor,
+    /// IST midnight of the day, epoch microseconds.
+    pub(super) midnight: i64,
+    /// The minutes' scan, where one was read.
+    pub(super) scan: Option<DayScan>,
+    /// The day bar's `(high, low)`, paisa, where one is held.
+    pub(super) day_bar: Option<(i64, i64)>,
+    /// The day ledger's `(flat_max_s, flat_max_at, line)`, where it has them.
+    pub(super) ledger: Option<(u64, Option<u32>, u64)>,
+    /// The recorded halt's `[from, resume)` seconds of the day, where one is.
+    pub(super) halt: Option<(u32, u32)>,
+}
+
+/// `HH:MM` of an epoch-microsecond stamp on the day opening at `midnight`.
+fn clock_of(midnight: i64, ts: i64) -> String {
+    let minutes = ts.saturating_sub(midnight).div_euclid(60_000_000);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+impl IndexDay {
+    /// The record's `index` (DB-B20): `frozen` and `outside_day_range`, each
+    /// `null` where nothing measured it, and the phrases they say.
+    ///
+    /// A FROZEN RUN is [`FROZEN_MIN_S`] or more of an unchanged value outside
+    /// any recorded halt: from Zerodha's minutes, `O = H = L = C` and equal
+    /// minute to minute; from GDFL's day ledger, the import's measure of the
+    /// vendor's rows. AN INTRADAY VALUE OUTSIDE THE DAY'S RANGE is a minute's
+    /// high above the day bar's high, or its low below the day bar's low:
+    /// 2022-03-07 10:07 is 229.85 points above. Both are flags; the bars are
+    /// served unchanged.
+    pub(super) fn json(&self) -> (serde_json::Value, Vec<String>) {
+        let mut says = Vec::new();
+        let rung = finest_of(self.feed).as_str();
+        let frozen = match (self.scan, self.ledger) {
+            (Some(scan), _) => {
+                let longest = scan.longest;
+                if let Some((from, seconds)) = longest {
+                    let to = from.saturating_add(
+                        i64::try_from(seconds).unwrap_or(0) * 1_000_000 - 60_000_000,
+                    );
+                    says.push(format!(
+                        "index value frozen in session: {} run(s) of {} minutes or more with no \
+                         change, the longest {} minute(s) from {} to {} ({rung}), outside any \
+                         recorded halt",
+                        scan.frozen_runs,
+                        FROZEN_MIN_S / 60,
+                        seconds / 60,
+                        clock_of(self.midnight, from),
+                        clock_of(self.midnight, to),
+                    ));
+                }
+                serde_json::json!({
+                    "basis": "minutes_scanned",
+                    "rung": rung,
+                    "flagged": scan.frozen_runs > 0,
+                    "runs": scan.frozen_runs,
+                    "longest_s": longest.map(|(_, s)| s),
+                    "longest_from": longest.map(|(from, _)| clock_of(self.midnight, from)),
+                    "line": null,
+                })
+            }
+            (None, Some((seconds, at, line))) => {
+                let in_halt = matches!((at, self.halt), (Some(at), Some((from, resume))) if at >= from && at < resume);
+                let flagged = seconds >= FROZEN_MIN_S && !in_halt;
+                if flagged {
+                    says.push(format!(
+                        "index value frozen in session: unchanged for {seconds} s from {} (the \
+                         import's measure of the vendor's rows), outside any recorded halt",
+                        at.map_or_else(
+                            || "-".to_owned(),
+                            |at| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)
+                        )
+                    ));
+                }
+                serde_json::json!({
+                    "basis": "day_ledger",
+                    "rung": rung,
+                    "flagged": flagged,
+                    "runs": null,
+                    "longest_s": seconds,
+                    "longest_from": at.map(|at| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)),
+                    "line": line,
+                })
+            }
+            (None, None) => serde_json::Value::Null,
+        };
+        let outside = match (self.scan, self.day_bar) {
+            (Some(scan), Some((day_high, day_low))) => {
+                let above = scan.high.filter(|(high, _)| *high > day_high);
+                let below = scan.low.filter(|(low, _)| *low < day_low);
+                if let Some((high, at)) = above {
+                    says.push(format!(
+                        "intraday high {} points above the day bar's high, at {} ({rung})",
+                        points(high - day_high),
+                        clock_of(self.midnight, at)
+                    ));
+                }
+                if let Some((low, at)) = below {
+                    says.push(format!(
+                        "intraday low {} points below the day bar's low, at {} ({rung})",
+                        points(day_low - low),
+                        clock_of(self.midnight, at)
+                    ));
+                }
+                serde_json::json!({
+                    "rung": rung,
+                    "flagged": above.is_some() || below.is_some(),
+                    "day_high": day_high,
+                    "day_low": day_low,
+                    "above_by": above.map(|(high, _)| high - day_high),
+                    "above_at": above.map(|(_, at)| clock_of(self.midnight, at)),
+                    "below_by": below.map(|(low, _)| day_low - low),
+                    "below_at": below.map(|(_, at)| clock_of(self.midnight, at)),
+                })
+            }
+            _ => serde_json::Value::Null,
+        };
+        (
+            serde_json::json!({ "frozen": frozen, "outside_day_range": outside }),
+            says,
+        )
+    }
+}
+
+/// Paisa as index points, two decimals: `22985` is `229.85`.
+pub(super) fn points(paisa: i64) -> String {
+    let sign = if paisa < 0 { "-" } else { "" };
+    let whole = paisa.unsigned_abs();
+    format!("{sign}{}.{:02}", whole / 100, whole % 100)
+}
+
+// ══ The market's index ══════════════════════════════════════════════════════
+
+/// The index a share's day is judged sampled by (CMP-06): NIFTY, the index
+/// the calendar of record already measures market-wide short days on
+/// (`calendar.short_day.observed_on`). A share's own one-second bars are
+/// trades and cannot show sampling.
+pub(super) const MARKET_INDEX: &str = "NIFTY";
+
+// ══ A share's other names ═══════════════════════════════════════════════════
+
+/// Every other symbol a share has been filed under, from the sourced symbol
+/// changes (`brutex_core::alias::LINEAGE`, D-3333): newer names first, then
+/// older ones. A peer feed files a renamed share's months under ITS name for
+/// them, so a zero-volume day is checked against the peer under each (R3-13
+/// goal 2, DB-031). At most the table's rows, one probe each.
+pub(super) fn other_names(symbol: &str) -> Vec<&'static str> {
+    let lineage = &brutex_core::alias::LINEAGE;
+    lineage
+        .forward(symbol)
+        .map(|hop| hop.new)
+        .chain(lineage.backward(symbol).map(|hop| hop.old))
+        .collect()
+}
+
 // ══ A contract's expiry ═════════════════════════════════════════════════════
 
 /// A contract's last session: the expiry date its segment opens with

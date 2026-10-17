@@ -861,6 +861,84 @@ struct JournalRows {
     /// close's only before the next of these started (AF-02 repair 2): a later
     /// list close's refusal is never an earlier close's.
     closers: HashMap<String, Vec<u64>>,
+    /// Each kind-day-filter's last close that counted its late rows
+    /// ([`LateLedger`]): what a `recounted` close, which counts none, leaves
+    /// standing (DB-029). `Err` names why the journal would not read.
+    late: Result<Arc<LateLedger>, String>,
+}
+
+/// THE LATE ROWS A RECOUNT LEAVES STANDING (R3-13 goal 2; DB-029). A census
+/// recount closes a day with `recounted <key> definition= months=` and reads no
+/// vendor row, so the rows the import deferred are still the day's; but the
+/// journal reader keeps the deciding line's counts only, and a recounted day
+/// read as having no late row at all. This keeps, per kind, day and filter,
+/// the last `done`, `incomplete` or `refused` line that carried `late=`: one
+/// tail read of the journal per request ([`read_ledger`]), one probe a day.
+#[derive(Debug, Clone, Default)]
+struct LateLedger {
+    rows: HashMap<(u32, u8, String), LateClose>,
+}
+
+/// One close's late-row counts: over every file of its kind-day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LateClose {
+    /// `late=`: rows placed late, over all the kind-day's files.
+    late: u64,
+    /// `max_back_s=`: the furthest one stepped back, where the line says.
+    max_back_s: Option<u64>,
+    /// The line, from 1.
+    line: u64,
+}
+
+impl LateLedger {
+    /// The last counting close of one kind, day and filter. O(1).
+    fn get(&self, day: Day, kind: ImportKind, filter: &str) -> Option<LateClose> {
+        self.rows
+            .get(&(day.days_from_epoch(), kind_slot(kind), filter.to_owned()))
+            .copied()
+    }
+}
+
+impl Ledger for LateLedger {
+    fn line(&mut self, number: u64, text: &str) {
+        let mut words = text.split(' ');
+        if !matches!(words.next(), Some("done" | "incomplete" | "refused")) {
+            return;
+        }
+        let (Some(kind), Some(day), Some(filter)) = (
+            words.next().and_then(|word| ImportKind::parse(word).ok()),
+            words.next().and_then(super::import_journal::parse_day),
+            words.next(),
+        ) else {
+            return;
+        };
+        let (mut late, mut max_back_s) = (None, None);
+        for word in words {
+            match word.split_once('=') {
+                Some(("late", value)) => late = canonical_count(value),
+                Some(("max_back_s", value)) => max_back_s = canonical_count(value),
+                _ => {}
+            }
+        }
+        // A CLOSE THAT COUNTS NO LATE ROW SAYS NOTHING ABOUT THEM: the journal's
+        // own reader names its faults; this keeps what it can read.
+        if let Some(late) = late {
+            let _was = self.rows.insert(
+                (day.days_from_epoch(), kind_slot(kind), filter.to_owned()),
+                LateClose {
+                    late,
+                    max_back_s,
+                    line: number,
+                },
+            );
+        }
+    }
+}
+
+/// The import journals read for their late rows so far.
+fn late_tails() -> &'static Tails<LateLedger> {
+    static TAILS: OnceLock<Tails<LateLedger>> = OnceLock::new();
+    TAILS.get_or_init(|| Mutex::new(HashMap::with_capacity(4)))
 }
 
 /// One `run` line of the import journal, as a refusal's attribution needs it.
@@ -992,12 +1070,15 @@ fn journal_rows(
             break;
         }
     }
+    let late =
+        read_ledger(late_tails(), &pull::gdfl_import::journal_path(root)).map(|read| read.parsed);
     Ok(JournalRows {
         by_day,
         last_day,
         journal,
         runs,
         closers,
+        late,
     })
 }
 
@@ -1272,10 +1353,12 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
     let Some(row) = rows.by_day.get(&day.to_string()) else {
         let reached = rows.last_day.is_some_and(|last| day <= last);
         return json!({
+            "kind": inst.kind().as_str(),
             "outcome": "none",
             "reached": reached,
             "stage": null, "reason": null, "files": null, "failures": null, "run": null,
             "from": null, "line": null, "late": null, "max_back_s": null,
+            "late_line": null, "late_from": null, "late_scope": null, "definition": null,
             "refusals": {
                 "this": [], "this_count": 0, "other_count": 0, "other_first": null,
                 "superseded": [], "superseded_count": 0, "later_count": 0,
@@ -1315,7 +1398,30 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
     let unless_others_only = |key: &str| {
         if others_only { Value::Null } else { field(key) }
     };
+    // A RECOUNTED DAY KEEPS ITS LATE ROWS (DB-029): the recount read no row,
+    // so the counts of the close before it stand, from that close's line.
+    let filter = row.get("filter").and_then(Value::as_str).unwrap_or("*");
+    let earlier = recounted
+        .then(|| rows.late.as_ref().ok()?.get(day, inst.kind(), filter))
+        .flatten();
+    let (late, max_back_s, late_line) = match earlier {
+        Some(close) => (
+            Value::from(close.late),
+            close.max_back_s.map_or(Value::Null, Value::from),
+            Value::from(close.line),
+        ),
+        None => (
+            field("late"),
+            field("max_back_s"),
+            if field("late").is_null() {
+                Value::Null
+            } else {
+                field("line")
+            },
+        ),
+    };
     json!({
+        "kind": inst.kind().as_str(),
         "outcome": outcome,
         "reached": true,
         "stage": unless_others_only("stage"),
@@ -1325,8 +1431,14 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
         "run": field("run"),
         "from": field("outcome_from"),
         "line": field("line"),
-        "late": field("late"),
-        "max_back_s": field("max_back_s"),
+        "late": late,
+        "max_back_s": max_back_s,
+        // WHERE THE LATE COUNT IS FROM, AND OVER WHAT: the closing line that
+        // counted it, every file of the kind-day (DB-029).
+        "late_line": late_line,
+        "late_from": if earlier.is_some() { Value::from("close_before_recount") } else if late_line.is_null() { Value::Null } else { Value::from("closing_line") },
+        "late_scope": if late_line.is_null() { Value::Null } else { Value::from("all files of the kind-day") },
+        "definition": field("definition"),
         "refusals": {
             "this": refusals.this.iter().map(pair).collect::<Vec<_>>(),
             "this_count": refusals.this_count,
@@ -1701,10 +1813,16 @@ struct QualityLine {
     /// The kind's later fields ([`later_fields`]), `None` where the line was
     /// written before them.
     later: Vec<(&'static str, Option<FieldValue>)>,
+    /// Fields this reader has no name for, in the line's order, each as
+    /// written: served under its own name (R3-13 goal 5).
+    unknown: Vec<(String, String)>,
     line: u64,
 }
 
 impl QualityLine {
+    /// The keys a line's object carries for itself, which no field may take.
+    const SERVED: [&'static str; 3] = ["scope", "line", "unknown"];
+
     /// Every field the line carries, the later ones it has among them.
     fn carried(&self) -> impl Iterator<Item = (&'static str, FieldValue)> + '_ {
         self.fields.iter().copied().chain(
@@ -1747,6 +1865,23 @@ impl QualityLine {
                 value.map_or(Value::Null, FieldValue::json),
             );
         }
+        // A FIELD THIS READER HAS NO NAME FOR, under the name it was written
+        // under: a count as a number, anything else as the text it is.
+        for (name, value) in &self.unknown {
+            let _was = fields.insert(
+                name.clone(),
+                canonical_count(value).map_or_else(|| Value::from(value.clone()), Value::from),
+            );
+        }
+        let _was = fields.insert(
+            "unknown".to_owned(),
+            Value::from(
+                self.unknown
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        );
         Value::Object(fields)
     }
 }
@@ -1813,6 +1948,7 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
     let later_spec = later_fields(kind);
     let mut later: Vec<Option<FieldValue>> = vec![None; later_spec.len()];
     let (mut version, mut src, mut definition) = (None, None, None);
+    let mut unknown: Vec<(String, String)> = Vec::new();
     for word in words {
         let (name, value) = word
             .split_once('=')
@@ -1828,10 +1964,12 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
             }
             _ => {
                 let slots = found.iter_mut().chain(later.iter_mut());
+                let mut named = false;
                 for ((field, shape), slot) in spec.iter().chain(&later_spec).zip(slots) {
                     if *field != name {
                         continue;
                     }
+                    named = true;
                     let read = match shape {
                         Shape::Count => canonical_count(value).map(FieldValue::Count),
                         Shape::Clock => clock(value, true).ok().map(FieldValue::Clock),
@@ -1841,9 +1979,22 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
                         return Err(format!("{name} appears twice"));
                     }
                 }
-                // A FIELD A LATER WRITER ADDS IS KEPT OUT OF THE RECORD, not a
-                // reason to drop the line: the version says what this reader
-                // reads, and every field it needs is checked below.
+                // A FIELD A LATER WRITER ADDS IS SERVED UNDER ITS OWN NAME
+                // (R3-13 goal 5), never dropped and never a reason to drop the
+                // line: the version says what this reader checks, and a page
+                // draws the field it does not know by the name it was written
+                // under, so R3-26's new day fields appear with no change here.
+                if !named {
+                    if QualityLine::SERVED.contains(&name) {
+                        return Err(format!(
+                            "{name} is a key this reader serves for itself, not a field"
+                        ));
+                    }
+                    if unknown.iter().any(|(seen, _)| seen == name) {
+                        return Err(format!("{name} appears twice"));
+                    }
+                    unknown.push((name.to_owned(), value.to_owned()));
+                }
             }
         }
     }
@@ -1873,6 +2024,7 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
             .map(|(name, _)| *name)
             .zip(later)
             .collect(),
+        unknown,
         line: number,
     })
 }
@@ -3125,6 +3277,11 @@ struct Counts {
     /// DB-A07): `None` on a day with no recorded halt, or where the day's
     /// bars were not counted.
     halted: Vec<Option<u64>>,
+    /// Per day, an index day's scan for a frozen run and its extremes
+    /// (DB-B20), where asked and read.
+    scans: Vec<Option<rules::DayScan>>,
+    /// Per day, the first held bar's stamp (CMP-06), where asked and read.
+    first_at: Vec<Option<i64>>,
     notes: Vec<String>,
 }
 
@@ -3212,33 +3369,52 @@ fn month_run(days: &[Day], at: usize) -> usize {
         .count()
 }
 
+/// What a count reads past its day boundaries, each only where asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Reads {
+    /// Count the zero-volume bars (DB-B16): a Zerodha share's minutes.
+    fills: bool,
+    /// Scan the day for a frozen run and its extremes (DB-B20): an index's
+    /// one-minute bars ([`rules::scan_day`]).
+    scan: bool,
+    /// Read the day's first bar, for its stamp (CMP-06): a GDFL share's
+    /// seconds. One record read a day.
+    first: bool,
+}
+
 /// The bars `feed` holds for `inst` at `rung` on each of `days` (oldest
 /// first, consecutive): one open per month and one lookup per day boundary.
 ///
-/// With `fills`, each day's bars are also read once to count those with zero
-/// volume (DB-B16): at most [`MAX_FILL_SCAN`] records a day, so a page costs
-/// at most 92 x 1,440 record reads — a Zerodha share's one-minute session is
-/// 375. Every other series is not read past its day boundaries.
+/// With `reads.fills`, each day's bars are also read once to count those
+/// with zero volume (DB-B16): at most [`MAX_FILL_SCAN`] records a day, so a
+/// page costs at most 92 x 1,440 record reads — a Zerodha share's one-minute
+/// session is 375. With `reads.scan`, an index day's minutes are read once
+/// and the day's scan is kept while its month does not grow
+/// ([`rules::scan_day`], at most [`rules::MAX_SCAN_BARS`] reads a day, one
+/// probe a day after). With `reads.first`, one record a day. Every other
+/// series is not read past its day boundaries.
 fn counts(
     root: &Path,
     feed: Vendor,
     inst: &Instrument,
     rung: Timeframe,
     days: &[Day],
-    fills: bool,
+    reads: Reads,
 ) -> Counts {
     let mut per_day = Vec::with_capacity(days.len());
     let mut zero = Vec::with_capacity(days.len());
     let mut halted = Vec::with_capacity(days.len());
+    let mut scans = Vec::with_capacity(days.len());
+    let mut first_at = Vec::with_capacity(days.len());
     let mut notes = Vec::new();
     if inst.segment == Segment::Fno && inst.contract.is_none() {
         per_day.extend(days.iter().map(|_| Held::NoContract));
-        zero.extend(days.iter().map(|_| None));
-        halted.extend(days.iter().map(|_| None));
         return Counts {
+            fills: vec![None; per_day.len()],
+            halted: vec![None; per_day.len()],
+            scans: vec![None; per_day.len()],
+            first_at: vec![None; per_day.len()],
             per_day,
-            fills: zero,
-            halted,
             notes,
         };
     }
@@ -3276,8 +3452,16 @@ fn counts(
                             let held = hi.saturating_sub(lo);
                             per_day.push(Held::Bars(held));
                             halted.push(halted_of(&file, (feed, inst, rung), *day, &mut notes));
+                            let said = |what: &str, why: &dyn std::fmt::Display| {
+                                format!(
+                                    "{} {} {} {day}: {what}: {why}",
+                                    feed.as_str(),
+                                    inst.key(),
+                                    rung.as_str()
+                                )
+                            };
                             zero.push(
-                                (fills && held <= MAX_FILL_SCAN)
+                                (reads.fills && held <= MAX_FILL_SCAN)
                                     .then(|| {
                                         (lo..hi).try_fold(0_u64, |n, at| {
                                             file.read_record(at)
@@ -3287,16 +3471,37 @@ fn counts(
                                     .and_then(|counted| match counted {
                                         Ok(n) => Some(n),
                                         Err(why) => {
-                                            notes.push(format!(
-                                                "{} {} {} {day}: zero-volume bars could not be counted: {why}",
-                                                feed.as_str(),
-                                                inst.key(),
-                                                rung.as_str()
+                                            notes.push(said(
+                                                "zero-volume bars could not be counted",
+                                                &why,
                                             ));
                                             None
                                         }
                                     }),
                             );
+                            scans.push(if reads.scan && held > 0 {
+                                let in_halt = |ts: i64| in_recorded_halt(inst.venue(), *day, ts);
+                                match rules::scan_day(&file, (lo, hi), in_halt) {
+                                    Ok(scan) => scan,
+                                    Err(why) => {
+                                        notes.push(said("the day could not be scanned", &why));
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            });
+                            first_at.push(if reads.first && held > 0 {
+                                match file.read_record(lo) {
+                                    Ok(bar) => Some(bar.ts_micros),
+                                    Err(why) => {
+                                        notes.push(said("the first bar could not be read", &why));
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            });
                             lower = Some(hi);
                         }
                         Err(why) => {
@@ -3306,11 +3511,13 @@ fn counts(
                                 inst.key(),
                                 rung.as_str()
                             ));
-                            // ALL THREE ANSWERS, or every later day of the
-                            // month reads the next day's halt count.
+                            // EVERY ANSWER OF THE DAY, or every later day of
+                            // the month reads the next day's counts.
                             per_day.push(Held::Unreadable);
                             zero.push(None);
                             halted.push(None);
+                            scans.push(None);
+                            first_at.push(None);
                             lower = None;
                         }
                     }
@@ -3319,14 +3526,29 @@ fn counts(
         }
         zero.resize(per_day.len(), None);
         halted.resize(per_day.len(), None);
+        scans.resize(per_day.len(), None);
+        first_at.resize(per_day.len(), None);
         at = at.saturating_add(run);
     }
     Counts {
         per_day,
         fills: zero,
         halted,
+        scans,
+        first_at,
         notes,
     }
+}
+
+/// Whether epoch microsecond `ts` of IST day `day` is inside the halt the
+/// calendar of record holds for that day and `venue`: an unchanged value
+/// there is the halt's, never a frozen feed's (DB-B20).
+fn in_recorded_halt(venue: Venue, day: Day, ts: i64) -> bool {
+    pull::calendar::halt_on(i64::from(day.days_from_epoch())).is_some_and(|halt| {
+        let seconds = halt.seconds(venue);
+        let since = ts.saturating_sub(ist_midnight_micros(day)) / 1_000_000;
+        since >= i64::from(seconds.from) && since < i64::from(seconds.resume)
+    })
 }
 
 /// [`bars_in_halt`] for one day of `inst`, a failed lookup named in `notes`
@@ -3581,6 +3803,9 @@ struct PageHeld {
     /// the record's `held` is this count, so the band counts what the grid
     /// shows. One more open a month and one lookup a day boundary.
     grid: Option<Counts>,
+    /// Per day, the other name the peer's count was found under, where its
+    /// own name holds no month (R3-13 goal 2).
+    peer_as: Vec<Option<&'static str>>,
 }
 
 impl PageHeld {
@@ -3596,13 +3821,47 @@ impl PageHeld {
     ) -> Self {
         let (inst, own) = (&asked.instrument, finest(asked.feed));
         let peer_feed = peer_of(asked.feed);
+        let reads = Reads {
+            fills,
+            // AN INDEX'S MINUTES ARE SCANNED for a frozen run and the day's
+            // extremes (DB-B20); its seconds are the day ledger's measure.
+            scan: inst.segment == Segment::Index && own == Timeframe::MINUTE_1,
+            first: asked.feed == Vendor::Gdfl && inst.segment == Segment::Cash,
+        };
+        let none = Reads::default();
+        let mut peer = counts(root, peer_feed, inst, finest(peer_feed), days, none);
+        let mut peer_as = vec![None; peer.per_day.len()];
+        // A RENAMED SHARE'S PEER IS LOOKED UP UNDER ITS OTHER NAMES (R3-13
+        // goal 2, DB-031), only where its own name holds no month: one more
+        // open a month per name the symbol table gives it.
+        if inst.segment == Segment::Cash && peer.per_day.contains(&Held::NoFile) {
+            for name in rules::other_names(&inst.symbol) {
+                let named = Instrument {
+                    symbol: name.to_owned(),
+                    ..inst.clone()
+                };
+                let alt = counts(root, peer_feed, &named, finest(peer_feed), days, none);
+                for (at, held) in alt.per_day.iter().enumerate() {
+                    if let (Some(slot), Held::Bars(_)) = (peer.per_day.get_mut(at), held)
+                        && *slot == Held::NoFile
+                    {
+                        *slot = *held;
+                        if let Some(as_name) = peer_as.get_mut(at) {
+                            *as_name = Some(name);
+                        }
+                    }
+                }
+                peer.notes.extend(alt.notes);
+            }
+        }
         Self {
-            own: counts(root, asked.feed, inst, own, days, fills),
-            peer: counts(root, peer_feed, inst, finest(peer_feed), days, false),
+            own: counts(root, asked.feed, inst, own, days, reads),
+            peer,
+            peer_as,
             under: series
                 .filter(|index| index.segment != inst.segment)
-                .map(|index| counts(root, asked.feed, index, own, days, false)),
-            grid: (rung != own).then(|| counts(root, asked.feed, inst, rung, days, false)),
+                .map(|index| counts(root, asked.feed, index, own, days, none)),
+            grid: (rung != own).then(|| counts(root, asked.feed, inst, rung, days, none)),
         }
     }
 
@@ -3627,7 +3886,10 @@ impl PageHeld {
             finest: self.grid.as_ref().map(|_| held(&self.own)),
             fills: self.own.fills.get(at).copied().flatten(),
             halted: self.own.halted.get(at).copied().flatten(),
+            scan: self.own.scans.get(at).copied().flatten(),
+            first_at: self.own.first_at.get(at).copied().flatten(),
             peer: held(&self.peer),
+            peer_as: self.peer_as.get(at).copied().flatten(),
             series: held(self.under.as_ref().unwrap_or(&self.own)),
         }
     }
@@ -3646,8 +3908,14 @@ struct DayHeld {
     fills: Option<u64>,
     /// Of them, those inside the day's halt, on a halt day (DB-A07).
     halted: Option<u64>,
+    /// An index day's scan of its minutes (DB-B20), where read.
+    scan: Option<rules::DayScan>,
+    /// The day's first held bar's stamp (CMP-06), where read.
+    first_at: Option<i64>,
     /// The other feed's bars at its finest rung.
     peer: Held,
+    /// The share's other name the peer's bars were found under (R3-13 goal 2).
+    peer_as: Option<&'static str>,
     /// The bars of the series whose sampling the record names
     /// ([`sampled_series`]): `own` for an index, the underlying's for an
     /// option.
@@ -3686,7 +3954,16 @@ fn sampled_series(feed: Vendor, inst: &Instrument) -> Option<Instrument> {
                 contract: None,
             })
         }
-        Segment::Cash => None,
+        // A SHARE NAMES THE MARKET'S INDEX (CMP-06): its own seconds are
+        // trades and sparse by nature, so they cannot say a day was sampled;
+        // the market index can, and a vendor's missing morning (2019-05-30)
+        // shows on it. The share's own first held second is said beside it.
+        Segment::Cash => Some(Instrument {
+            exchange: inst.exchange,
+            segment: Segment::Index,
+            symbol: rules::MARKET_INDEX.to_owned(),
+            contract: None,
+        }),
     }
 }
 
@@ -3731,10 +4008,10 @@ fn sampled_json(
     let Some(series) = series else {
         return Value::Null;
     };
-    let of = if series.segment == own.segment {
-        "own"
-    } else {
-        "underlying"
+    let of = match own.segment {
+        _ if series.segment == own.segment => "own",
+        Segment::Cash => "market",
+        _ => "underlying",
     };
     if let Some(line) = line {
         let (rows, distinct) = (
@@ -3940,10 +4217,16 @@ fn sampled_says(sampled: &Value) -> Option<String> {
     }
     let text = |key: &str| sampled.get(key).and_then(Value::as_str).unwrap_or_default();
     let count = |key: &str| sampled.get(key).and_then(Value::as_u64);
-    let who = if text("of") == "underlying" {
-        format!("underlying index {}", text("series"))
-    } else {
-        "index".to_owned()
+    let who = match text("of") {
+        "underlying" => format!("underlying index {}", text("series")),
+        "market" => format!("market-wide, the index {}", text("series")),
+        _ => "index".to_owned(),
+    };
+    // A SHARE'S OWN FIRST HELD SECOND closes the sentence (CMP-06).
+    let first = match sampled.get("first_held").and_then(Value::as_str) {
+        Some(at) => format!("; this share's first held second is {at}"),
+        None if text("of") == "market" => "; this share holds no second that day".to_owned(),
+        None => String::new(),
     };
     let held = match (count("held_s"), count("session_s")) {
         (Some(held), Some(of)) => percent(held, of).map_or_else(String::new, |p| {
@@ -3953,13 +4236,13 @@ fn sampled_says(sampled: &Value) -> Option<String> {
     };
     Some(if text("basis") == "day_ledger" {
         format!(
-            "{who}: minute-sampled{held}, its rows on {} distinct second(s) of the minute",
+            "{who}: minute-sampled{held}, its rows on {} distinct second(s) of the minute{first}",
             count("ss_distinct").unwrap_or(0)
         )
     } else {
         format!(
             "{who}: minute-sampled or mostly missing (suspected){held}, at most {} a minute; \
-             no day-ledger line measures its rows yet",
+             no day-ledger line measures its rows yet{first}",
             pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
         )
     })
@@ -4236,8 +4519,77 @@ impl Context<'_> {
                 "options": line(ImportKind::Options),
             })
         });
-        let sampled = self.sampled(day, held.series);
+        // THE BAR DEFINITION THAT BUILT THE DAY (R3-13 goal 3): the journal's
+        // deciding line, else the day ledger's line of the instrument's kind.
+        let own_kind = inst.kind();
+        let definition_read = import
+            .as_ref()
+            .and_then(|import| import.get("definition"))
+            .and_then(Value::as_u64)
+            .map(|n| (n, rules::DefinitionFrom::Journal))
+            .or_else(|| {
+                quality_lines
+                    .iter()
+                    .find_map(|(kind, line)| (*kind == own_kind).then_some(*line))
+                    .flatten()
+                    .map(|line| (line.definition, rules::DefinitionFrom::DayLedger))
+            });
+        let bar_definition = (asked.feed == Vendor::Gdfl)
+            .then(|| rules::definition_json(own_kind, day, definition_read));
+        let definition_says = bar_definition
+            .as_ref()
+            .and_then(|definition| rules::definition_says(own_kind, definition));
+        let mut sampled = self.sampled(day, held.series);
+        // A SHARE'S OWN FIRST HELD SECOND, beside the market's sampling
+        // (CMP-06): 11:57:47 on 2019-05-30, the vendor's missing morning.
+        if inst.segment == Segment::Cash
+            && let Some(fields) = sampled.as_object_mut()
+        {
+            let first = held.first_at.map(|ts| {
+                let since = ts.saturating_sub(ist_midnight_micros(day)) / 1_000_000;
+                hms(u32::try_from(since).unwrap_or(0))
+            });
+            let _was = fields.insert(
+                "first_held".to_owned(),
+                first.map_or(Value::Null, Value::from),
+            );
+        }
         let degraded = degraded_json(&quality_lines, &sampled);
+        // AN INDEX THAT STOPPED CHANGING, OR PRINTED OUTSIDE ITS DAY'S RANGE
+        // (DB-B20): Zerodha's minutes as scanned, GDFL's day ledger measure.
+        let (index, index_says) = if inst.segment == Segment::Index {
+            let ledger = quality_lines
+                .iter()
+                .find_map(|(kind, line)| (*kind == ImportKind::Indices).then_some(*line))
+                .flatten()
+                .and_then(|line| {
+                    Some((
+                        line.count("flat_max_s")?,
+                        line.clock("flat_max_at"),
+                        line.line,
+                    ))
+                });
+            let day_bar = bar.and_then(|(at, _)| match at {
+                DayBarAt::Bar(day_bar) => Some((day_bar.high, day_bar.low)),
+                _ => None,
+            });
+            let halt = pull::calendar::halt_on(i64::from(day.days_from_epoch())).map(|halt| {
+                let seconds = halt.seconds(inst.venue());
+                (seconds.from, seconds.resume)
+            });
+            let (json, says) = rules::IndexDay {
+                feed: asked.feed,
+                midnight: ist_midnight_micros(day),
+                scan: held.scan,
+                day_bar,
+                ledger,
+                halt,
+            }
+            .json();
+            (json, says)
+        } else {
+            (Value::Null, Vec::new())
+        };
         let gap = self.gaps.and_then(|g| g.parsed.get(&inst.key(), day));
         let front = self.front(day, gap);
         let (junk, day_bar) = match bar {
@@ -4270,6 +4622,9 @@ impl Context<'_> {
             feed: asked.feed,
             expired: expired.then_some(self.expiry).flatten(),
             sidecar,
+            definition: definition_says,
+            index: index_says,
+            peer_as: held.peer_as,
         }
         .phrases();
         let finest_json = held.finest.map(|at| {
@@ -4310,6 +4665,8 @@ impl Context<'_> {
             "held": held,
             "finest": finest_json,
             "auction_sidecar": sidecar,
+            "bar_definition": bar_definition,
+            "index": index,
             "contract": self.expiry.map(|expiry| json!({
                 "expiry": expiry.to_string(),
                 "expired": expired,
@@ -4368,6 +4725,12 @@ struct Says<'a> {
     /// Whether the day's GDFL share month holds an auction sidecar, where one
     /// could exist (SC-CLOSE-9).
     sidecar: Option<bool>,
+    /// The phrase of the bar definition that built the day (R3-13 goal 3).
+    definition: Option<String>,
+    /// An index day's frozen-run and day-range phrases (DB-B20).
+    index: Vec<String>,
+    /// The share's other name the peer's bars were found under (goal 2).
+    peer_as: Option<&'static str>,
 }
 
 /// The longest phrase a refusal's own words are cut to.
@@ -4549,7 +4912,9 @@ impl Says<'_> {
         let mut out = Vec::new();
         self.calendar_phrases(&mut out);
         self.import_phrases(&mut out);
+        out.extend(self.definition.clone());
         self.quality_phrases(&mut out);
+        out.extend(self.index.iter().cloned());
         for degraded in self.degraded {
             if let Some(says) = degraded.get("says").and_then(Value::as_str) {
                 out.push(format!("degraded vendor day -- {says}"));
@@ -4813,8 +5178,25 @@ impl Says<'_> {
             } else {
                 ""
             };
+            // THE COUNT IS THE DAY'S TOTAL OVER ALL ITS FILES (DB-029): a
+            // closing line counts the whole kind-day, never this file alone;
+            // and a recounted day's count is the close before the recount's.
+            let kind = import
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("import");
+            let source = match (
+                import.get("late_from").and_then(Value::as_str),
+                count("late_line"),
+            ) {
+                (Some("close_before_recount"), Some(line)) => format!(
+                    " (journal line {line}, the close before the census recount, which reads no row)"
+                ),
+                _ => String::new(),
+            };
             out.push(format!(
-                "{late} late row(s) deferred to a later second, at most {back} s back{offset}"
+                "{late} late row(s) over all of the day's {kind} files deferred to a later second, \
+                 at most {back} s back{offset}{source}"
             ));
         }
     }
@@ -5058,9 +5440,21 @@ impl Says<'_> {
             ));
         }
         let peer = peer_of(self.feed);
+        let under = self.peer_as.map_or_else(String::new, |other| {
+            format!(", filed under {other}, this share's other name")
+        });
         match self.peer {
+            // A CLOSED DAY THE OTHER FEED TRADED (DB-A15): the calendar's
+            // measured window comes from Zerodha's own day bars, so it cannot
+            // by itself reveal a day Zerodha is missing; GDFL's bars can.
+            Held::Bars(n) if n > 0 && self.record.kind == DayKind::Closed => out.push(format!(
+                "{} holds {n} bar(s){under} on a day the calendar of record calls closed: \
+                 evidence independent of {}'s own series",
+                name(peer),
+                name(self.feed)
+            )),
             Held::Bars(n) if n > 0 || session => {
-                out.push(format!("{} holds {n} bar(s)", name(peer)));
+                out.push(format!("{} holds {n} bar(s){under}", name(peer)));
             }
             Held::Unreadable => out.push(format!("{}'s month could not be read", name(peer))),
             _ => {}
@@ -5156,6 +5550,14 @@ fn source_notes(
     if let Some(Err(why)) = journal {
         notes.push(format!(
             "The import journal could not be read, so every record's import is null: {why}"
+        ));
+    }
+    if let Some(Ok(rows)) = journal
+        && let Err(why) = &rows.late
+    {
+        notes.push(format!(
+            "The import journal's late-row counts could not be read, so a recounted day's late \
+             rows are null, not zero: {why}"
         ));
     }
     match quality {
@@ -6396,7 +6798,7 @@ mod tests {
         assert_eq!(late["import"]["late"], 703);
         says_has(
             late,
-            "703 late row(s) deferred to a later second, at most 126 s back",
+            "703 late row(s) over all of the day's indices files deferred to a later second, at most 126 s back",
         );
         let got = answer(
             &root,
@@ -6404,7 +6806,7 @@ mod tests {
         );
         says_has(
             record(&got, "2021-05-24"),
-            "63 late row(s) deferred to a later second, at most 19800 s back; 19800 s is exactly \
+            "63 late row(s) over all of the day's indices files deferred to a later second, at most 19800 s back; 19800 s is exactly \
              IST's offset from UTC",
         );
     }
@@ -7614,9 +8016,15 @@ mod tests {
         let zerodha = page("zerodha", "NSE-INDEX-NIFTY");
         assert_eq!(record(&zerodha, "2019-05-30")["sampled"], Value::Null);
         assert_eq!(record(&zerodha, "2019-05-30")["degraded"], json!([]));
-        // A SHARE'S OWN SECONDS ARE TRADES: none is named.
+        // A SHARE'S OWN SECONDS ARE TRADES, so it names the MARKET'S index
+        // (CMP-06): the day is sampled market-wide, and the share holds no
+        // second of its own here.
         let share = page("gdfl", "NSE-CASH-RELIANCE");
-        assert_eq!(record(&share, "2019-05-30")["sampled"], Value::Null);
+        let rec = record(&share, "2019-05-30");
+        assert_eq!(rec["sampled"]["is"], true, "{rec:#}");
+        assert_eq!(rec["sampled"]["of"], "market");
+        assert_eq!(rec["sampled"]["series"], "NSE-INDEX-NIFTY");
+        assert_eq!(rec["sampled"]["first_held"], Value::Null);
         // AN OPTION NAMES ITS UNDERLYING INDEX, a contract and the kind alike.
         for instrument in ["NSE-FNO-NIFTY-2019-05-30-1190000-CE", "NSE-FNO-NIFTY"] {
             let option = page("gdfl", instrument);

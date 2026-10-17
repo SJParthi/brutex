@@ -515,3 +515,256 @@ fn the_month_before_is_found_by_stats_within_its_bound() {
     );
     assert_eq!(calls, MONTHS_BACK);
 }
+
+// ══ Late rows on a recounted day ═════════════════════════════════════════════
+
+/// **A RECOUNTED DAY KEEPS ITS LATE ROWS** (R3-13 goal 2; DB-029). The census
+/// recount closes 2019-11-14 with a line that counts no late row and reads no
+/// vendor row, so the import's close before it still says how many rows were
+/// deferred and how far back: those counts stand, named by their journal line,
+/// and the phrase says they are the day's total over all its files. Before,
+/// the recounted day's `late` was null and the band said nothing.
+#[test]
+fn a_recounted_day_keeps_its_late_rows() {
+    let root = root_of("r3-13-recount-late");
+    write(
+        &pull::gdfl_import::journal_path(&root),
+        "begin options 2019-11-14 *\n\
+         incomplete options 2019-11-14 * definition=2 files=12 seconds=333 failures=1 late=4210 late_unresolved=0 max_back_s=118\n\
+         recounted options 2019-11-14 * definition=2 months=3 run=1791300001\n\
+         begin options 2019-11-13 *\n\
+         done options 2019-11-13 * definition=2 files=11 seconds=222 failures=0 late=7 late_unresolved=0 max_back_s=3\n",
+    );
+    let got = answer(
+        &root,
+        &ask(
+            "feed=gdfl&instrument=NSE-FNO-NIFTY-2019-11-28-1180000-CE&from=2019-11-13&to=2019-11-14",
+        ),
+    );
+    let recounted = &record(&got, "2019-11-14")["import"];
+    assert_eq!(recounted["outcome"], "recounted", "{recounted:#}");
+    assert_eq!(recounted["late"], 4210);
+    assert_eq!(recounted["max_back_s"], 118);
+    assert_eq!(recounted["late_line"], 2);
+    assert_eq!(recounted["late_from"], "close_before_recount");
+    assert_eq!(recounted["late_scope"], "all files of the kind-day");
+    says_has(
+        record(&got, "2019-11-14"),
+        "4210 late row(s) over all of the day's options files deferred to a later second, at \
+         most 118 s back (journal line 2, the close before the census recount, which reads no row)",
+    );
+    // A day its own close counted reads that close, named as such.
+    let done = &record(&got, "2019-11-13")["import"];
+    assert_eq!(done["late"], 7);
+    assert_eq!(done["late_line"], 5);
+    assert_eq!(done["late_from"], "closing_line");
+    says_has(
+        record(&got, "2019-11-13"),
+        "7 late row(s) over all of the day's options files deferred to a later second, at most 3 s back",
+    );
+}
+
+/// The late ledger keeps, per kind, day and filter, the LAST close that counted
+/// late rows, and ignores every other line.
+#[test]
+fn the_late_ledger_keeps_the_last_counting_close() {
+    use super::super::{LateClose, LateLedger, Ledger as _};
+    let mut ledger = LateLedger::default();
+    ledger.line(1, "begin options 2019-11-14 *");
+    ledger.line(2, "done options 2019-11-14 * late=5 max_back_s=2");
+    ledger.line(3, "refused options 2019-11-14 * late=9");
+    ledger.line(4, "recounted options 2019-11-14 * definition=2 months=3");
+    ledger.line(5, "done options 2019-11-14 NIFTY late=1 max_back_s=1");
+    ledger.line(6, "done options 2019-11-15 * files=3");
+    ledger.line(7, "done bogus 2019-11-15 * late=3");
+    ledger.line(8, "done options 2019-13-15 * late=3");
+    ledger.line(9, "done options 2019-11-16");
+    ledger.line(10, "incomplete stocks 2019-11-16 * late=05 max_back_s=4");
+    let kind = pull::gdfl_import::ImportKind::Options;
+    assert_eq!(
+        ledger.get(day("2019-11-14"), kind, "*"),
+        Some(LateClose {
+            late: 9,
+            max_back_s: None,
+            line: 3
+        })
+    );
+    assert_eq!(
+        ledger.get(day("2019-11-14"), kind, "NIFTY"),
+        Some(LateClose {
+            late: 1,
+            max_back_s: Some(1),
+            line: 5
+        })
+    );
+    assert_eq!(ledger.get(day("2019-11-15"), kind, "*"), None);
+    assert_eq!(ledger.get(day("2019-11-16"), kind, "*"), None);
+    // A count not written the canonical way is no count.
+    assert_eq!(
+        ledger.get(
+            day("2019-11-16"),
+            pull::gdfl_import::ImportKind::Stocks,
+            "*"
+        ),
+        None
+    );
+}
+
+// ══ The bar definition that built a day ═════════════════════════════════════
+
+/// **AN OPTION DAY NAMES ITS BAR DEFINITION** (R3-13 goal 3). The journal's
+/// deciding line names 2 for one day and 4 for the next: the first is labelled
+/// until it is restated, the second holds this build's bars. Where the journal
+/// names none, the day ledger's line does, and says so.
+#[test]
+fn an_option_day_names_its_bar_definition() {
+    let root = root_of("r3-13-definition");
+    write(
+        &pull::gdfl_import::journal_path(&root),
+        "done options 2024-10-01 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+         done options 2024-10-03 * definition=4 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+         done options 2024-10-04 * definition=3 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+    );
+    let ledger = super::super::tests::flags_line(
+        "options",
+        "2024-10-07",
+        "*",
+        &super::super::OPTIONS_FIELDS,
+        &[],
+    )
+    .replace("definition=2", "definition=3");
+    write(&super::super::quality_path(&root), &ledger);
+    let got = answer(
+        &root,
+        &ask(
+            "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-10-31-2500000-CE&from=2024-10-01&to=2024-10-07",
+        ),
+    );
+    let old = &record(&got, "2024-10-01")["bar_definition"];
+    assert_eq!(old["value"], 2, "{old:#}");
+    assert_eq!(old["from"], "import_journal");
+    assert_eq!(old["current"], false);
+    assert_eq!(old["this_build"], 4);
+    says_has(
+        record(&got, "2024-10-01"),
+        "bar definition 2 built this day: placement over every row; an option second's open \
+         interest is its last traded row's (D-2812); this build builds definition 4, so the day \
+         is labelled until it is restated",
+    );
+    let new = &record(&got, "2024-10-03")["bar_definition"];
+    assert_eq!(new["value"], 4);
+    assert_eq!(new["current"], true);
+    assert!(
+        says(record(&got, "2024-10-03")).iter().any(|said| said
+            .starts_with("bar definition 4 built this day: from 2026-08-03")
+            && said.ends_with("(D-4878 item 10)")),
+        "{:#?}",
+        says(record(&got, "2024-10-03"))
+    );
+    says_has(
+        record(&got, "2024-10-04"),
+        "bar definition 3 built this day: an option second's open interest is the last row \
+         placed in it, traded or not (D-3342); it holds the bars definition 4 builds",
+    );
+    let ledgered = &record(&got, "2024-10-07")["bar_definition"];
+    assert_eq!(ledgered["value"], 3);
+    assert_eq!(ledgered["from"], "day_ledger");
+    // A day neither source names has none, and a Zerodha record carries none.
+    assert_eq!(record(&got, "2024-10-02")["bar_definition"], Value::Null);
+    let zerodha = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-10-01&to=2024-10-01"),
+    );
+    assert_eq!(
+        record(&zerodha, "2024-10-01")["bar_definition"],
+        Value::Null
+    );
+}
+
+/// A day of another kind is named only where its definition is not current;
+/// every definition has its sentence.
+#[test]
+fn a_spot_day_names_its_definition_only_when_it_is_not_current() {
+    use pull::gdfl_import::ImportKind;
+    let index = definition_json(
+        ImportKind::Indices,
+        day("2024-10-01"),
+        Some((2, DefinitionFrom::Journal)),
+    );
+    assert_eq!(index["current"], true);
+    assert_eq!(definition_says(ImportKind::Indices, &index), None);
+    let share = definition_json(
+        ImportKind::Stocks,
+        day("2026-08-04"),
+        Some((3, DefinitionFrom::DayLedger)),
+    );
+    assert_eq!(share["current"], false);
+    assert!(
+        definition_says(ImportKind::Stocks, &share)
+            .is_some_and(|said| said.ends_with("so the day is labelled until it is restated"))
+    );
+    assert_eq!(
+        definition_json(ImportKind::Options, day("2024-10-01"), None),
+        Value::Null
+    );
+    assert_eq!(definition_says(ImportKind::Options, &Value::Null), None);
+    for definition in 1..=4 {
+        assert_ne!(definition_means(definition), definition_means(9));
+    }
+    assert_eq!(definition_means(9), "a definition this build does not name");
+}
+
+// ══ A day field the reader has never seen ════════════════════════════════════
+
+/// **A DAY FIELD THE READER HAS NEVER SEEN IS SERVED** (R3-13 goal 5): a later
+/// writer's field rides on the line's object under its own name — a count as a
+/// number, anything else as its text — and `unknown` lists it, so the band
+/// draws it with no change here. A name the object keeps for itself, or one
+/// written twice, refuses the line by name. Before, the field was dropped.
+#[test]
+fn a_day_field_the_reader_has_never_seen_is_served_and_drawn() {
+    let root = root_of("r3-13-unknown-field");
+    let line = super::super::tests::index_flags("2024-10-01", "NIFTY", &[])
+        .replace('\n', " frozen_runs=2 frozen_note=vendor_flat\n");
+    write(&super::super::quality_path(&root), &line);
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-10-01&to=2024-10-01"),
+    );
+    let indices = &record(&got, "2024-10-01")["quality"]["indices"];
+    assert_eq!(indices["frozen_runs"], 2, "{indices:#}");
+    assert_eq!(indices["frozen_note"], "vendor_flat");
+    assert_eq!(
+        indices["unknown"],
+        serde_json::json!(["frozen_runs", "frozen_note"])
+    );
+    assert_eq!(indices["holes_5s"], 0);
+    // A known line with no new field lists none.
+    let plain = super::super::parse_quality(
+        1,
+        super::super::tests::index_flags("2024-10-01", "NIFTY", &[]).trim_end(),
+    )
+    .expect("a line");
+    assert_eq!(plain.json()["unknown"], serde_json::json!([]));
+    for (bad, why) in [
+        (
+            " line=4",
+            "line is a key this reader serves for itself, not a field",
+        ),
+        (
+            " scope=x",
+            "scope is a key this reader serves for itself, not a field",
+        ),
+        (" z=1 z=2", "z appears twice"),
+    ] {
+        let text = super::super::tests::index_flags("2024-10-01", "NIFTY", &[])
+            .trim_end()
+            .to_owned()
+            + bad;
+        assert_eq!(
+            super::super::parse_quality(1, &text).err().as_deref(),
+            Some(why),
+            "{text}"
+        );
+    }
+}
