@@ -18634,3 +18634,140 @@ runs each, on the shared machine with other builds running.
 |---|---|---|---|---|
 | L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
 | L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
+## The O(1) attack merged back: what is now flat, what is bounded, and what is still named — D-5800 to D-5804, 17 October 2026
+
+Every number in this section was taken on the operator's Mac (M4 Pro, 14
+cores). The host was shared with other builds the whole time, with a load
+average between 17 and 43 on 14 cores. Every p99 here is therefore an upper
+figure for this host, not a quiet-machine figure. Bench rows ran under
+`[profile.bench]` (fat LTO, one codegen unit) by `cargo bench -p <crate>
+--locked --bench ratio`. All three crates printed "all ratios within the
+ceiling", with no BREACH. Single-call spreads are p50 / p99 / max.
+
+### Measured flat (asserted)
+
+| Row | 1x | 10x | 100x | min-of-trials ratio |
+|---|---|---|---|---|
+| C-NFO-01 `gdfl_nfo::read_file` per file, 1k / 10k / 100k rows (D-5800) | 0.172 / 0.567 / 1.447 ms | 1.706 / 3.303 / 4.942 ms | 17.594 / 20.980 / 25.033 ms | 162.1 ns per row; 1.002x, 1.021x |
+| C-FD-01 `fold_from_snapshots` to 1min, 1k / 10k / 100k snapshots | 2.04 / 2.13 / 2.17 µs | 19.67 / 20.50 / 21.96 µs | 207.2 / 864.9 / 940.8 µs | 2,014 ps per bar; 0.947x, 0.971x |
+| C-MO-01 open + read + `.tix` beside 1 / 10 / 100 months | 91.2 / 124.6 / 140.3 µs | 85.8 / 153.8 / 203.0 µs | 98.0 / 280.4 / 584.0 µs | 0.797x, 0.729x |
+| `/spot.json` at the last month, 1 / 10 / 100 held months | 62.1 / 121.9 / 1,278.6 µs | 65.5 / 288.5 / 872.8 µs | 61.5 / 102.0 / 375.0 µs | 1.050x, 1.013x |
+| warm `/store` page, 1k / 10k / 100k census entries | 179.0 / 547.0 / 688.4 µs | 177.3 / 1,163.5 / 20,420.3 µs | 178.5 / 2,771.5 / 7,099.7 µs | 1.072x, 1.077x |
+
+C-MO-02 (reader handle, strided rows, at 1,024 / 10,240 / 102,400 bars):
+`read_record` 5.29 / 6.08 / 7.79, 6.46 / 37.42 / 68.13 and 4.58 / 5.54 /
+7.42 µs; the `.tix` lookup 0.67 / 1.04 / 66.5, 0.63 / 0.96 / 52.0 and 0.50 /
+0.88 / 65.8 µs. The 10,240-bar `read_record` p99 is the high one here, as it
+was on the cloud host (`cloud/attack-o1-20261016`). It is not explained:
+UNVERIFIED.
+
+**The warm `/store` page's p50 and its asserted ratio are flat, but its p99
+is not**: 0.55, 1.16 and 2.77 ms at 1k, 10k and 100k entries. On this loaded
+host that may be scheduling noise, or a cost that grows with the census. It
+is UNVERIFIED which, and it is named here rather than called O(1) at p99.
+Owner: whoever next touches `store_html`; the check is the same row on a
+quiet host.
+
+### Measured on the shadow, before and after, on real data
+
+Release builds, served over private shadows of the real store
+(`state/fix/shadow.sh`): this branch on :9303, and `feat/db-fix` at the AF-07
+merge (this package's base) on :9304. Each round sent one GET to each server in turn,
+n = 200 rounds, curl `time_total`. Every body was byte-identical between the
+two servers (equal SHA-256): F3 and F4 change no answer.
+
+| Selection | after (this branch) | before (the base, `feat/db-fix` at the AF-07 merge) |
+|---|---|---|
+| `/bars.json` NIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.64 / 10.16 / 15.56 ms | 9.60 / 11.18 / 12.02 ms |
+| `/bars.json` NIFTY INDEX Zerodha 1min, 2024-01 whole month (1,138,501 B) | 2.18 / 2.84 / 15.35 ms | 2.32 / 3.02 / 3.29 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1010000-CE` 1s, 2018-09 (17,043 B) | 0.65 / 1.02 / 2.42 ms | 0.64 / 0.96 / 1.61 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1000000-PE` 1s, 2018-09 (1,189,571 B) | 3.42 / 4.61 / 5.33 ms | 3.61 / 4.71 / 4.89 ms |
+| `/bars.json` BANKNIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.56 / 11.18 / 13.40 ms | 9.42 / 11.63 / 12.46 ms |
+| `/bars.json` RELIANCE CASH GDFL 1s, 2026-09-01 (3,197,131 B) | 5.72 / 7.83 / 10.78 ms | 6.36 / 7.63 / 9.00 ms |
+| `/census/facets.json?feed=gdfl&segment=FNO` (underlyings) | 0.92 / 2.38 / 4.18 ms | 1.28 / 1.85 / 3.21 ms |
+| `…&underlying=NIFTY` (422 expiries) | 1.25 / 3.29 / 5.01 ms | 2.92 / 8.85 / 24.37 ms |
+| `…&underlying=BANKNIFTY` | 1.15 / 2.94 / 5.07 ms | 2.59 / 5.68 / 8.86 ms |
+| `…&underlying=RELIANCE` | 0.98 / 3.86 / 10.27 ms | 1.24 / 3.87 / 13.03 ms |
+| `/live.json` (the real store holds no live file) | 5.06 / 18.79 / 72.58 ms | 4.88 / 29.18 / 63.44 ms |
+
+On the shadow, the NIFTY underlyings row says `contracts` 70,445, and the
+NIFTY expiries answer's `contracts` sum to 70,445. The 2018-09-27,
+2020-09-24 and 2026-09-29 expiries answer `contracts` / `strikes` 151 / 86,
+200 / 115 and 251 / 144. Those equal the contract directories on disk and
+their distinct strikes. `/live.json`'s cost on an empty census is the
+per-request invocation journal (D-1445, D-4978), not the encoding. Its
+refusal past the ceiling is proved by the unit test only. The real store
+has no `results/live` directory, so no shadow can reach it without writing
+live files.
+
+### Bounded, not constant, and named
+
+- **D-5800, the options reader.** The newline count that sizes the row
+  vector is one more pass over each file's bytes (O(bytes) per file, O(1)
+  per row; C-NFO-01 is flat per row with it). The reservation is at most
+  `fetch::MAX_ROWS` × 32 B = 32 MB. A body of blank lines can ask that much
+  for rows it never fills, and the cap is the bound. On real days, read-only
+  from the tick store, in a debug build (not a production figure), the
+  NIFTY, BANKNIFTY and RELIANCE option files decoded in these times, against
+  the field vector's: 913 ms against 1,200 ms on 2018-09-03 (3,751,736 rows),
+  339 against 446 ms on 2023-11-12 (1,281,196 rows), and 2,278 against
+  2,968 ms on 2026-08-03 (8,867,328 rows). The rows were equal on every file
+  (AO1-06).
+- **D-5801, `/live.json`.** Encoding is cut at `MAX_RESPONSE_BYTES` plus one
+  run (at most 256 rows). The census `refresh` still reads the live
+  directory on every poll (O(live files), at most `LIVE_ENTRY_LIMIT`
+  4,096) and clones each run twice (`cli/src/live.rs`, the two `run.clone()`
+  calls). Not fixed here.
+- **D-5802, `/bars.json`.** The cost is O(bars in the window), by design. A
+  request with no `from`/`to` reads and encodes the whole month, which is
+  about 2.7 M rows for a one-second month. That is neither refused nor
+  paged: named, not fixed.
+- **D-5803, `/census/facets.json`.** The underlyings answer is
+  O(underlyings of the segment) and the expiries answer is O(expiries of
+  one underlying), 422 for NIFTY. Each row is now O(1). The rebuild on a
+  census move is unchanged.
+
+### Printed, never asserted: O(months) and O(entries) by the route's own doc (D-5804)
+
+| Row | 1 month | 10 months | 100 months | per extra month (min-of-trials) |
+|---|---|---|---|---|
+| `/bars/window.json` seek, first page | 60.0 / 170.5 / 314.5 µs | 90.6 / 337.6 / 590.2 µs | 410.0 / 5,117.3 / 7,502.6 µs | 3.46 µs |
+| `/bars/window.json` seek, last page | 59.5 / 3,316.0 / 8,535.0 µs | 88.3 / 331.0 / 1,938.2 µs | 395.6 / 2,108.2 / 4,549.8 µs | 3.77 µs |
+| `/bars/window.json` `sort=c`, first page | 120.3 / 283.1 / 687.8 µs | 330.4 / 1,746.5 / 3,267.4 µs | 2,934.6 / 16,413.8 / 24,560.0 µs | 31.86 µs |
+| `/bars/window.json` `at=` | 78.4 / 131.3 / 387.0 µs | 100.8 / 540.9 / 789.5 µs | 418.3 / 3,186.3 / 12,514.9 µs | 3.55 µs |
+| `/verify.json` scrub (one entry per month) | 48.0 / 140.4 / 166.1 µs | 506.5 / 5,304.2 / 14,573.5 µs | 7,399.6 / 39,275.3 / 54,500.8 µs | 93.9 µs per entry |
+| `/store` page (rows drawn = months) | 22.7 / 80.5 / 393.1 µs | 30.9 / 94.2 / 233.4 µs | 100.0 / 347.7 / 459.3 µs | 0.79 µs per row |
+
+The window rows are capped by `MAX_WINDOW_MONTHS` (240). At the cap, the
+`sort=c` first page is about 7.6 ms at p50 by the per-month figure. That is
+an EXTRAPOLATION, not a measurement. The scrub over GDFL's 246,147 held
+entries at 93.9 µs each would be about 23 s, also an EXTRAPOLATION, and
+`/verify.json` has no cap on entries. C-MO-03 (96 one-bar commits a month):
+p50 40.9 / 48.1 / 43.0 ms, p99 158.5 / 179.8 / 90.5 ms and max 287.8 /
+554.7 / 96.8 ms at 1,024 / 10,240 / 102,400 bars. The slowest commits were
+#64, #65, #31; #17, #18, #93; and #31, #62, #72. The `.srt` compaction
+cadence (#31, #62, #93) stands out from the device's flush time only at
+102,400 bars, where #31 and #62 cost 96.8 and 90.5 ms against a 43.0 ms
+p50. The cloud host saw it at every size. The compaction grows with the
+month: named, not fixed.
+
+### The attack's other HIGH rows: NOT fixed by this package
+
+These are the rows of `cloud/attack-o1-20261016`'s report marked HIGH and
+not fixed there. Each is named here with what grows; none was re-measured
+here unless a table above says so, and each is UNVERIFIED as a latency.
+
+| Row | Where (as read on the cloud's base) | What grows |
+|---|---|---|
+| R11 | `/bars.json` with no `from`/`to` | the whole month per request |
+| R13 | `/gaps.json` NSE CASH, `audit_cash_schedule` per month | every CAS day's master decoded per month per request |
+| R25 | `provenance.rs` `read_runs` | the first call walks the whole pull journal under one lock |
+| R27 | `/verify.json` | one open per held entry (measured above: 93.9 µs per entry) |
+| R28 | `/bars` page with no `exchange`/`segment` | `held_entries` per vendor, inline on the async worker |
+| C1 | `census_cache.rs` `manifest_stamps` → `current_epoch` | one `read_dir` of a segment's epoch files per census-backed request; epochs are never deleted |
+| C6 | `store_route.rs` `behind_in` | every GDFL journal row on any journal change |
+| C24 | `ingest_refusals.rs` | the run and fault index read again for every symbol |
+| E1 | `/backtest.json` | up to `limit` ledger runs read inline on a Tokio worker |
+| E4 | every audited route | one invocation-journal file per request, with no rotation |
+| H9 | `.srt` compaction inside `append` | O(n log n) in the month on one commit in about 31 (C-MO-03 above) |
+| H20 | `runner/src/trade.rs` trade walk | unreserved pushes in the per-candidate loop, under a doc that says "no allocation" |
