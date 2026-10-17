@@ -336,6 +336,49 @@ fn every_refused_read_of_an_appends_index_is_routed_around_or_refuses_it() {
     );
 }
 
+/// Runs `body` on a worker with a deadline of `secs`, and answers what it
+/// answered. A body that does not return in time fails the test there,
+/// rather than hanging the suite with every other test that holds the sink:
+/// a mutant of the overlap's partition makes an append call itself for
+/// ever. The file seam is per thread, so a body that arms it arms it on the
+/// worker that makes the calls.
+fn within<T: Send + 'static>(secs: u64, body: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, answered) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _gone = done.send(body());
+    });
+    answered
+        .recv_timeout(std::time::Duration::from_secs(secs))
+        .expect("the body returns within its deadline")
+}
+
+/// Every append of `offered` to the month at `root` with one of its
+/// bar-file reads refused, the first read, then the second, and so on until
+/// a refusal no longer fires: each answer, and whether its refusal fired.
+/// One worker and one deadline for the whole walk.
+fn appends_with_each_read_refused(
+    root: &Path,
+    offered: Vec<Bar>,
+) -> Vec<(Result<Appended, StoreError>, bool)> {
+    let root = root.to_path_buf();
+    within(30, move || {
+        let bars_path = month(FileKind::Bars).to_path_buf(&root);
+        let mut answers = Vec::new();
+        for skip in 0.. {
+            let mut writer = BarFile::open_or_create(&root, month(FileKind::Bars), SYMBOL).unwrap();
+            arm_host_fault(Action::Read, &bars_path, skip, ErrorKind::PermissionDenied);
+            let appended = writer.append(&offered);
+            let fired = !host_fault_armed();
+            super::tests::disarm_host_fault();
+            answers.push((appended, fired));
+            if !fired {
+                break;
+            }
+        }
+        answers
+    })
+}
+
 /// **A DISAGREEING OVERLAP WHOSE READ THE HOST REFUSES IS REFUSED BY THAT
 /// READ, NEVER DIAGNOSED FROM BARS NOT READ.**
 ///
@@ -358,20 +401,15 @@ fn every_refused_read_of_an_overlap_diagnosis_is_that_reads_refusal() {
     let mut offered = bars(0, 650);
     offered[300].close += 1;
     offered[300].high += 1;
-    let mut denied = 0u32;
-    for skip in 0.. {
-        let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
-        arm_host_fault(Action::Read, &bars_path, skip, ErrorKind::PermissionDenied);
-        let appended = writer.append(&offered);
-        if host_fault_armed() {
-            super::tests::disarm_host_fault();
-            assert!(
-                matches!(appended, Err(StoreError::OverlapDisagrees { at: 300, .. })),
-                "past every read: {appended:?}"
-            );
-            break;
-        }
-        denied += 1;
+    let mut answers = appends_with_each_read_refused(&root.0, offered);
+    let (last, fired) = answers.pop().unwrap();
+    assert!(!fired, "the walk ends past every read");
+    assert!(
+        matches!(last, Err(StoreError::OverlapDisagrees { at: 300, .. })),
+        "past every read: {last:?}"
+    );
+    assert!(answers.len() >= 3, "the diagnosis read across blocks");
+    for (skip, (appended, _)) in answers.into_iter().enumerate() {
         assert_eq!(
             appended,
             Err(StoreError::Denied {
@@ -381,7 +419,6 @@ fn every_refused_read_of_an_overlap_diagnosis_is_that_reads_refusal() {
             "read {skip}"
         );
     }
-    assert!(denied >= 3, "the diagnosis read across blocks: {denied}");
     assert_eq!(held(&root), bars(0, 600));
 }
 
@@ -404,23 +441,15 @@ fn a_refused_read_of_the_skipped_held_bar_is_that_reads_refusal() {
     drop(writer);
     let mut offered = bars(0, 73);
     offered.extend(bars(500, 510));
-    let mut outcomes = Vec::new();
-    for skip in 0.. {
-        let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
-        arm_host_fault(Action::Read, &bars_path, skip, ErrorKind::PermissionDenied);
-        let appended = writer.append(&offered);
-        if host_fault_armed() {
-            super::tests::disarm_host_fault();
-            assert!(
-                matches!(appended, Err(StoreError::OverlapDisagrees { at: 73, .. })),
-                "past every read: {appended:?}"
-            );
-            break;
-        }
-        outcomes.push(appended);
-    }
-    assert!(!outcomes.is_empty());
-    for (skip, appended) in outcomes.into_iter().enumerate() {
+    let mut answers = appends_with_each_read_refused(&root.0, offered);
+    let (last, fired) = answers.pop().unwrap();
+    assert!(!fired, "the walk ends past every read");
+    assert!(
+        matches!(last, Err(StoreError::OverlapDisagrees { at: 73, .. })),
+        "past every read: {last:?}"
+    );
+    assert!(!answers.is_empty());
+    for (skip, (appended, _)) in answers.into_iter().enumerate() {
         assert_eq!(
             appended,
             Err(StoreError::Denied {
@@ -881,4 +910,32 @@ fn a_sealed_batch_defers_nothing_and_the_writer_flushes_its_own() {
     assert_eq!((again.files, again.directories), (0, 0), "nothing deferred");
     assert!(root.at(FileKind::TimeIndex).exists() && root.at(FileKind::SortIndex).exists());
     assert_eq!(held(&root), bars(0, 1_100));
+}
+
+/// **A RESUMED BATCH THAT OVERLAPS THE HELD TAIL APPENDS ONLY ITS SUFFIX,
+/// AND RETURNS.**
+///
+/// Kills `replace <= with > in BarFile::suffix_that_follows`' partition
+/// (caught before only by a timeout): with it, the whole batch is taken for
+/// the suffix, and the append that follows meets the same overlap and calls
+/// itself for ever. The append runs on a worker with a deadline, so the
+/// mutant fails here at once rather than hanging the suite. A month of 100
+/// bars is offered bars 90 to 129: the ten held bars are verified and
+/// dropped, and only the thirty new ones are committed.
+#[test]
+fn a_resumed_overlap_appends_only_its_suffix_and_returns() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("resume-suffix");
+    let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    writer.append(&bars(0, 100)).unwrap();
+    let (appended, writer) = within(10, move || (writer.append(&bars(90, 130)), writer));
+    assert_eq!(
+        appended,
+        Ok(Appended::Committed {
+            first_index: 100,
+            n_valid: 130,
+        })
+    );
+    drop(writer);
+    assert_eq!(held(&root), bars(0, 130));
 }
