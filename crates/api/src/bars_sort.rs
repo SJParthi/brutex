@@ -4555,4 +4555,52 @@ mod cloud_mutant_tests {
         assert!(read[1] > 0 && read[1] < 110, "{read:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A PAGE THAT STARTS AMONG THE INDEXED VALUES ABOVE EVERY READ ONE
+    /// PASSES THE READ NULLS OVER.** January's 1,000 indexed rows hold open
+    /// interest 500 and up; February's 360 read rows hold 0 to 96, every
+    /// seventh null. Ascending pages that start past 360 rows start among
+    /// January's values, so the bisection over the read rows held runs into
+    /// their nulls; every page, both ways, is the brute force. Takes the
+    /// false branches of `!kept.key.null` in `value_slices`.
+    #[test]
+    fn a_page_among_values_above_every_read_one_passes_the_read_nulls_over() {
+        let root = scratch("oi-above-read");
+        let jan: Vec<Bar> = (0..1_000)
+            .map(|i| bar(month(1), i, 500 + (i * 104_729) % 1_009))
+            .collect();
+        let feb: Vec<Bar> = (0..360)
+            .map(|i| bar(month(2), i, if i % 7 == 3 { OI_NULL } else { (i * 7) % 97 }))
+            .collect();
+        write(&root, &option(), month(1), &jan, &jan);
+        let feb_srt = write(&root, &option(), month(2), &feb, &feb);
+        std::fs::remove_file(feb_srt).expect("February is left with no index");
+        for desc in [false, true] {
+            let key = |bar: &Bar| {
+                let null = bar.open_interest == OI_NULL;
+                let value = if null {
+                    0
+                } else if desc {
+                    -bar.open_interest
+                } else {
+                    bar.open_interest
+                };
+                (null, value, bar.ts_micros)
+            };
+            let mut want: Vec<(bool, i64, i64)> = jan.iter().chain(&feb).map(key).collect();
+            want.sort_unstable();
+            for offset in [0, 340, 400, 700, 1_100, 1_320] {
+                let mut asked = query(option(), month(1), month(2), SortKey::OpenInterest);
+                asked.desc = desc;
+                asked.offset = Some(offset);
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<(bool, i64, i64)> =
+                    got.bars.iter().map(|row| key(&row.bar)).collect();
+                let page: Vec<(bool, i64, i64)> =
+                    want.iter().skip(offset).take(37).copied().collect();
+                assert_eq!(served, page, "desc {desc} offset {offset}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
