@@ -701,8 +701,29 @@ fn off_grid_and_equal_stamps_round_trip_and_are_found() {
     assert_eq!(month.first_at_or_after(daily[4].ts_micros).unwrap(), 4);
 }
 
+/// Runs `body` on a worker and fails if it has not returned in a minute,
+/// where it takes under a second: a bisection that never ends under a
+/// mutant (`last_before`'s `a < b` or its midpoint) fails the test instead
+/// of holding up the binary. A panic in `body` fails it too, its message
+/// printed by the worker.
+fn within_a_minute(body: fn()) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        body();
+        let _receiver_gone = done.send(());
+    });
+    finished
+        .recv_timeout(std::time::Duration::from_mins(1))
+        .expect("returned within a minute");
+}
+
 #[test]
 fn a_widened_superblock_bisects_in_a_bounded_number_of_reads() {
+    within_a_minute(widened_superblock_body);
+}
+
+/// The test above, on a worker with a deadline.
+fn widened_superblock_body() {
     // Twenty thousand bars on one second (a month written before D-0915), so
     // one superblock spans every block and the lookup bisects.
     let path = nifty(Timeframe::SECOND_1, june());
@@ -736,6 +757,11 @@ fn a_widened_superblock_bisects_in_a_bounded_number_of_reads() {
 
 #[test]
 fn a_lookup_at_the_edge_of_a_superblock_and_a_block_is_exact() {
+    within_a_minute(superblock_edge_body);
+}
+
+/// The test above, on a worker with a deadline.
+fn superblock_edge_body() {
     let path = nifty(Timeframe::SECOND_1, june());
     let superblock = |s: i64| origin(june()) + s * 4_096 * SECOND;
     let probe = |bars: &[Bar], ts: i64| {
