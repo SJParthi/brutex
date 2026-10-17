@@ -244,19 +244,61 @@ pub fn largest_overnight_move(
     bars: &[indicators::Candle],
     before: Option<&indicators::Candle>,
 ) -> Option<OvernightMove> {
+    largest_move(bars, before, false)
+}
+
+/// The largest move into a session measured to that session's FIRST TRADED
+/// bar's open, or `None` when no session after a prior close traded at all.
+///
+/// [`largest_overnight_move`] can name a move whose open bar traded nothing:
+/// on Zerodha's TMPV 2025-10-14 it named +22.85% off an untraded open, where
+/// the session's first trade was 12.72% BELOW the prior close. The line marks
+/// that move; this names the move a trade could have met beside it, so a level
+/// nobody traded never hides it (AH-01 repair round 1, D-4984). A session
+/// whose open bar traded is measured to that open, so on traded bars this is
+/// [`largest_overnight_move`]. Same pass, same tie rule; the prior close is the
+/// previous held session's last close, as on the line above it.
+#[must_use]
+pub fn largest_traded_overnight_move(
+    bars: &[indicators::Candle],
+    before: Option<&indicators::Candle>,
+) -> Option<OvernightMove> {
+    largest_move(bars, before, true)
+}
+
+/// One pass, O(bars). At each session boundary the previous session's last bar
+/// is held; the move is measured to the first bar of the new session, or with
+/// `traded_only` to its first bar that traded volume (a session that never
+/// traded is dropped at the next boundary).
+fn largest_move(
+    bars: &[indicators::Candle],
+    before: Option<&indicators::Candle>,
+    traded_only: bool,
+) -> Option<OvernightMove> {
     let mut best: Option<OvernightMove> = None;
     let mut previous = before.filter(|prior| {
         bars.first().is_some_and(|first| {
             indicators::ist_day(prior.ts_micros) < indicators::ist_day(first.ts_micros)
         })
     });
+    // The previous session's last bar, while the session after it waits for
+    // the bar its move is measured to.
+    let mut waiting: Option<&indicators::Candle> = None;
     for after in bars {
-        let Some(prior) = previous.replace(after) else {
+        let day = indicators::ist_day(after.ts_micros);
+        if let Some(prior) = previous.replace(after)
+            && indicators::ist_day(prior.ts_micros) != day
+        {
+            waiting = Some(prior);
+        }
+        let Some(prior) = waiting else {
             continue;
         };
-        let day = indicators::ist_day(after.ts_micros);
-        let prior_day = indicators::ist_day(prior.ts_micros);
-        if day == prior_day || prior.close <= 0 {
+        if traded_only && after.volume == 0 {
+            continue;
+        }
+        waiting = None;
+        if prior.close <= 0 {
             continue;
         }
         let ratio = i128::from(after.open.saturating_sub(prior.close)) * 1_000_000
@@ -265,7 +307,7 @@ pub fn largest_overnight_move(
         if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
             best = Some(OvernightMove {
                 day,
-                prior_day,
+                prior_day: indicators::ist_day(prior.ts_micros),
                 prior_close: prior.close,
                 open: after.open,
                 ppm,
@@ -326,6 +368,30 @@ pub fn overnight_line(found: &OvernightMove, date: &str, prior_date: &str) -> St
         rupees(found.open),
     )
 }
+
+/// What a stock's report adds under an [`overnight_line`] whose move opened on
+/// a bar that traded no volume: the [`largest_traded_overnight_move`], so the
+/// largest move a trade could have met is named beside the marked one rather
+/// than hidden by it (AH-01 repair round 1, D-4984).
+#[must_use]
+pub fn traded_overnight_line(found: &OvernightMove, date: &str, prior_date: &str) -> String {
+    let sign = if found.ppm < 0 { "-" } else { "+" };
+    let size = found.ppm.unsigned_abs();
+    format!(
+        "  THE LARGEST MOVE TO A TRADED OPEN: {sign}{}.{:02}% into the {date}\n  \
+         session (close {} on {prior_date} to the session's first traded open, {}).\n\n",
+        size / 10_000,
+        (size % 10_000) / 100,
+        rupees(found.prior_close),
+        rupees(found.open),
+    )
+}
+
+/// What a stock's report adds under an [`overnight_line`] whose move opened on
+/// an untraded bar when no session after a prior close traded at all. Said
+/// rather than omitted, so the marked move is never read as the only kind.
+pub const NO_TRADED_OVERNIGHT: &str = "  THE LARGEST MOVE TO A TRADED OPEN: none; no session in these bars traded\n  \
+     after a prior close.\n\n";
 
 /// The charge statement for an index-spot run, byte-identical to the header
 /// every run printed before D-0681.
@@ -3498,7 +3564,10 @@ mod tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod overnight_tests {
-    use super::{OvernightMove, first_session_unmeasured, largest_overnight_move, overnight_line};
+    use super::{
+        NO_TRADED_OVERNIGHT, OvernightMove, first_session_unmeasured, largest_overnight_move,
+        largest_traded_overnight_move, overnight_line, traded_overnight_line,
+    };
     use indicators::Candle;
 
     /// Thirty generated sessions with every price halved from session 20 on:
@@ -3691,5 +3760,102 @@ mod overnight_tests {
         let traded = largest_overnight_move(&bars, None).expect("two sessions");
         assert!(!traded.untraded_open, "{traded:?}");
         assert!(!overnight_line(&traded, "2024-06-14", "2024-06-13").contains("traded no volume"));
+    }
+
+    /// A bar whose four prices are `price`.
+    fn flat_bar(ts_micros: i64, price: i64, volume: i64) -> Candle {
+        Candle::new(ts_micros, price, price, price, price, volume, i64::MIN)
+    }
+
+    /// Three sessions in TMPV 2025-10-14's shape: session 2's open bar is
+    /// untraded at twice session 1's close, its first TRADE is 10% below that
+    /// close, and session 3 opens 5% above session 2's close. Returns the bars,
+    /// session 1's close, the phantom open and the first traded price.
+    fn tmpv_shape() -> (Vec<Candle>, i64, i64, i64) {
+        let mut bars = crate::synthetic::sessions(3);
+        let close = bars[374].close / 10 * 10;
+        bars[374] = flat_bar(bars[374].ts_micros, close, 10);
+        let phantom = close * 2;
+        bars[375] = flat_bar(bars[375].ts_micros, phantom, 0);
+        let traded_at = close - close / 10;
+        for bar in &mut bars[376..750] {
+            *bar = flat_bar(bar.ts_micros, traded_at, 10);
+        }
+        let higher = traded_at + traded_at / 20;
+        for bar in &mut bars[750..] {
+            *bar = flat_bar(bar.ts_micros, higher, 10);
+        }
+        (bars, close, phantom, traded_at)
+    }
+
+    /// THE LARGEST MOVE TO A TRADED OPEN IS NAMED BESIDE AN UNTRADED ONE.
+    /// AH-01 repair round 1, TMPV's shape ([`tmpv_shape`]): the headline is
+    /// the marked +100% move; the traded measure names session 2's -10% at its
+    /// first traded bar, not session 3's smaller move.
+    #[test]
+    fn the_largest_traded_move_is_named_beside_an_untraded_one() {
+        let (bars, close, _, traded_at) = tmpv_shape();
+        let largest = largest_overnight_move(&bars, None).expect("three sessions");
+        assert!(largest.untraded_open, "premise: {largest:?}");
+        assert_eq!(largest.ppm, 1_000_000, "{largest:?}");
+        let traded = largest_traded_overnight_move(&bars, None).expect("a traded open");
+        assert!(!traded.untraded_open, "{traded:?}");
+        assert_eq!(
+            traded.day,
+            indicators::ist_day(bars[375].ts_micros),
+            "session 2"
+        );
+        assert_eq!(traded.prior_day, indicators::ist_day(bars[374].ts_micros));
+        assert_eq!(
+            (traded.prior_close, traded.open, traded.ppm),
+            (close, traded_at, -100_000)
+        );
+        let line = traded_overnight_line(&traded, "2024-06-14", "2024-06-13");
+        let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("THE LARGEST MOVE TO A TRADED OPEN: -10.00% into the 2024-06-14"),
+            "{line}"
+        );
+        assert!(
+            flat.contains("on 2024-06-13 to the session's first traded open"),
+            "{line}"
+        );
+        for each in line.lines().filter(|each| !each.is_empty()) {
+            assert!(each.starts_with("  "), "indented like the note: {each:?}");
+        }
+    }
+
+    /// THE TRADED MEASURE DROPS A SESSION THAT NEVER TRADED, says none when
+    /// nothing traded after a prior close, and equals the headline measure on
+    /// traded bars, with or without a prior session.
+    #[test]
+    fn the_traded_measure_drops_a_session_that_never_traded() {
+        let (bars, _, phantom, _) = tmpv_shape();
+        let mut dark = bars.clone();
+        for bar in &mut dark[375..750] {
+            *bar = flat_bar(bar.ts_micros, phantom, 0);
+        }
+        let after_dark = largest_traded_overnight_move(&dark, None).expect("session 3 trades");
+        assert_eq!(after_dark.day, indicators::ist_day(dark[750].ts_micros));
+        assert_eq!(
+            after_dark.prior_close, phantom,
+            "measured from the dark session's close"
+        );
+        let mut silent = bars;
+        for bar in &mut silent[375..] {
+            *bar = flat_bar(bar.ts_micros, bar.close, 0);
+        }
+        assert_eq!(largest_traded_overnight_move(&silent, None), None);
+        assert!(NO_TRADED_OVERNIGHT.starts_with("  THE LARGEST MOVE TO A TRADED OPEN: none"));
+        let raw = crate::synthetic::sessions(3);
+        assert_eq!(
+            largest_traded_overnight_move(&raw, None),
+            largest_overnight_move(&raw, None)
+        );
+        let prior = raw[374];
+        assert_eq!(
+            largest_traded_overnight_move(&raw[375..], Some(&prior)),
+            largest_overnight_move(&raw[375..], Some(&prior))
+        );
     }
 }

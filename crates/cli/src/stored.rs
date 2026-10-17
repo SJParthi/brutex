@@ -2439,14 +2439,28 @@ pub(crate) fn overnight_note(
     let prior = bars
         .first()
         .map(|first| prior_session_bar(root, vendor, key, rung_name, first.ts_micros));
-    let mut note = runner::audit::largest_overnight_move(
-        bars,
-        prior.as_ref().and_then(|prior| prior.as_ref().ok()),
-    )
-    .map_or_else(
+    let before = prior.as_ref().and_then(|prior| prior.as_ref().ok());
+    let found = runner::audit::largest_overnight_move(bars, before);
+    let mut note = found.map_or_else(
         || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
         |found| runner::audit::overnight_line(&found, &name(found.day), &name(found.prior_day)),
     );
+    // A marked move off an untraded open is named beside the largest move a
+    // trade could have met (AH-01 repair round 1, D-4984).
+    if found.is_some_and(|found| found.untraded_open) {
+        note.push_str(
+            &runner::audit::largest_traded_overnight_move(bars, before).map_or_else(
+                || runner::audit::NO_TRADED_OVERNIGHT.to_owned(),
+                |traded| {
+                    runner::audit::traded_overnight_line(
+                        &traded,
+                        &name(traded.day),
+                        &name(traded.prior_day),
+                    )
+                },
+            ),
+        );
+    }
     if let (Some(Err(why)), Some(first)) = (prior, bars.first()) {
         note.push_str(&runner::audit::first_session_unmeasured(
             &name(indicators::ist_day(first.ts_micros)),

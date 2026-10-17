@@ -70861,6 +70861,23 @@ own reasons. One NIFTY run writes 231 files and 1,044 kB of evidence and logs
 into its store; at that rate the 26,736-month whole-store run would write
 about 58,800 files and 266 MB (an extrapolation, not run).
 
+**The batch's exit code, stated (AH-01 repair round 1, the re-check's
+follow-up).** `sweep-stored` exits `FAILED` for one month that is not a whole
+answer (D-4982), and `sweep-all` exits `OK` when some of its months stopped on
+the candidate ceiling or short of a whole answer. That asymmetry is kept and
+is now a decision, not an accident. `sweep-stored`'s page IS one answer, so an
+untrustworthy one fails it; `sweep-all`'s page is a census of many, each row
+carries its own `CEILING`, `INCOMPLETE` or budget word, its ledger row says
+`done NO`, its evidence finishes `Halted`, and the summary names the count
+("N month(s) stopped on the candidate ceiling", "stopped short of a whole
+answer") -- the loud degrade `CLAUDE.md` §4 allows. Failing the whole batch for
+one ceiling month would make every fine-rung whole-store run exit `FAILED` and
+hide which months answered. A caller that needs every month whole reads the
+summary's counts or the ledger's `done` column, never the exit code alone.
+The batch exits `FAILED` when its page carries a refusal (`carries_refusal`,
+P8-03), which D-0696's refusal of a run with no month swept and filed is. A store holding no month of the feed and rung stays a report (exit 0),
+as D-0696 states: a fresh clone has pulled nothing, and that is not a fault.
+
 ### D-4984 — The overnight line measures the move into the slice's first session and marks a zero-volume open (AH-01; corp-8, corp-2's line half; amends D-1540 by addition) — 2026-10-16
 
 **Observed.** `runner::audit::largest_overnight_move` looped
@@ -70888,6 +70905,26 @@ MEASURED: <why>`. A move whose open bar traded no volume carries `Its open bar
 traded no volume: the price may never have traded.` The line still names the
 single largest move (D-1540's design); doors that withhold rows pass the whole
 folded series, so a session's last bar is its last held bar.
+
+**Added in repair round 1 (the re-check's follow-up).** On TMPV 2025-10-14 the
+marked untraded +22.85% displaced the -11.84% move the base build had named,
+and the session's first trade -- the move a trade could have met -- was named
+nowhere. When the largest move's open bar traded no volume, the line now adds
+`THE LARGEST MOVE TO A TRADED OPEN: <move> into the <date> session (close X on
+<prior> to the session's first traded open, Y).`, or says none did
+(`runner::audit::largest_traded_overnight_move`: the same pass, each session
+measured to its first bar that traded volume, a session that never traded
+dropped and the next measured from its last close, the same tie rule).
+Measured on a private shadow (release cli of this change, `ro.sh env
+BRUTEX_STORE=<shadow> cli sweep-stored zerodha TMPV 1min 2025 10 2000`, exit
+0): the line names +22.85% into 2025-10-14 (close 457.15 on 2025-10-13 to the
+untraded open 561.65), marked, and beside it -12.72% into the same session (to
+its first traded open, 399.00); the corp-2 skeptics put that move at about
+-12.5% on Zerodha's back-adjusted basis. The headline stays the single largest
+move, so D-1540 is amended by addition only; a report whose largest move traded
+prints no second line, and on traded bars the two measures are equal. One more
+O(bars) pass, at the once-per-report boundary, only when the first move was
+untraded.
 
 ### D-4985 — `cli results` names the run on every line (AH-01; repro-5) — 2026-10-16
 

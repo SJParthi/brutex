@@ -160,3 +160,62 @@ fn a_zero_volume_open_is_marked_never_traded() {
         "{note}"
     );
 }
+
+/// THE LARGEST MOVE TO A TRADED OPEN IS NAMED BESIDE A MARKED ONE (AH-01
+/// repair round 1). TMPV 2025-10-14 on Zerodha: the line named +22.85% off an
+/// untraded open, and the session's first trade, 12.72% below the prior close,
+/// was named nowhere. An invented share in that shape -- 2 May's open bar
+/// untraded at +22.85%, its first trade at an invented -11.84%, 5 May 5% higher -- names
+/// both, the marked one first; with nothing traded after the prior close the
+/// line says none; a traded largest move carries no second line.
+#[test]
+fn the_largest_traded_move_is_named_beside_an_untraded_one() {
+    let root = scratch("traded-beside");
+    write(&root, "RELIANCE", 4, &session(4, 30, 100_000, 10));
+    let mut may = session(5, 2, 88_160, 10);
+    if let Some(first) = may.first_mut() {
+        *first = Bar {
+            open: 122_850,
+            high: 122_850,
+            low: 122_850,
+            close: 122_850,
+            volume: 0,
+            ..*first
+        };
+    }
+    let later = session(5, 5, 92_568, 10);
+    assert!(!later.is_empty(), "premise: 2025-05-05 is a session");
+    may.extend(later);
+    write(&root, "RELIANCE", 5, &may);
+    let key = swept_index("RELIANCE").expect("key");
+    let note = overnight_note(&root, Vendor::Zerodha, &key, "5min", &candles(&may));
+    let flat = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    let marked = flat
+        .find("+22.85% into the 2025-05-02")
+        .expect("the marked move");
+    let named = "THE LARGEST MOVE TO A TRADED OPEN: -11.84% into the 2025-05-02 session \
+                 (close 1000.00 on 2025-04-30 to the session's first traded open, 881.60).";
+    assert!(flat.contains(named), "the traded move is named: {note}");
+    let traded = flat.find(named).expect("the traded move");
+    assert!(marked < traded, "the marked move first: {note}");
+
+    // Nothing traded after the prior month's close: the line says none.
+    let root = scratch("traded-none");
+    write(&root, "RELIANCE", 4, &session(4, 30, 100_000, 10));
+    let lone = session(5, 2, 122_850, 0);
+    write(&root, "RELIANCE", 5, &lone);
+    let note = overnight_note(&root, Vendor::Zerodha, &key, "5min", &candles(&lone));
+    assert!(note.contains("traded no volume"), "premise: {note}");
+    assert!(note.contains(runner::audit::NO_TRADED_OVERNIGHT), "{note}");
+
+    // A traded largest move carries no second line.
+    let root = scratch("traded-only");
+    write(&root, "RELIANCE", 4, &session(4, 30, 100_000, 10));
+    let open = session(5, 2, 122_850, 10);
+    write(&root, "RELIANCE", 5, &open);
+    let note = overnight_note(&root, Vendor::Zerodha, &key, "5min", &candles(&open));
+    assert!(
+        !note.contains("THE LARGEST MOVE TO A TRADED OPEN"),
+        "{note}"
+    );
+}

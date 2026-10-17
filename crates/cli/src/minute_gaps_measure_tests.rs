@@ -302,8 +302,14 @@ fn rows_and_move_rates_both_ways() {
                         minute_of_day(session[0].ts_micros)
                     ));
                 }
-                if leading && !cut_days.contains(&day) {
-                    lead_admitted += session.len() as u64;
+                // Every admitted row of such a day counts, on a day with a later
+                // cut as well as on an uncut one: the re-check found the rows
+                // BEFORE a later cut admitted after the leading hole.
+                if leading {
+                    lead_admitted += session
+                        .iter()
+                        .filter(|bar| admission.admits(bar.ts_micros))
+                        .count() as u64;
                 }
                 if cut_days.contains(&day) {
                     holed_days += 1;
