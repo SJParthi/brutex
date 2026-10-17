@@ -154,6 +154,35 @@ What this says, plainly:
 An earlier run of the same command on a loaded machine (load ≈ 10, two other jobs) gave first
 content p99 up to 496 ms and pauses up to 316 ms; it is not the measurement and is not used.
 
+### The speed sheet against the same server, with 20 real restarts
+
+`node web/ci/speed-sheet.mjs --base http://127.0.0.1:18317 --n 200 --clients 1,10,60 --feed zerodha --timeframe 1min --month 2026-09 --day 2026-09-30 --from-pages <the harness's capture> --restart <a scratch script that stops and starts this session's own api> --restarts 20`.
+Every row is stamped `12c02093d79e` (the binary the branch's test run rebuilt). 24 requests: the
+14 of the catalogue and 10 captured from the pages by the harness. ms from sent to last byte,
+p50 / p99 / max, n = 200 (n = 20 after restart):
+
+| request | cold (new connection) | warm, 1 client | warm, 10 | warm, 60 | first after restart | body bytes |
+|---|---|---|---|---|---|---:|
+| `HEAD /inspection.json` (the header's up check now) | 0.94 / 3.12 / 3.41 | 0.25 / 0.92 / 1.41 | 1.40 / 4.53 / 4.74 | 7.60 / 28.3 / 28.4 | 1.09 / 1.88 / 1.88 | 0 |
+| `GET /feeds.json` (what it asked before) | 1.58 / 3.18 / 3.94 | 1.13 / 2.56 / 12.7 | 3.84 / 9.74 / 10.4 | 15.7 / 50.5 / 53.5 | 1.88 / 4.34 / 4.34 | 34,668 |
+| `GET /speed.json` (the Speed page's read) | 0.92 / 1.81 / 4.01 | 0.31 / 1.18 / 1.67 | 1.71 / 4.92 / 5.28 | 12.1 / 36.0 / 36.9 | 0.97 / 1.92 / 1.92 | 11,416–11,450 |
+
+So the header's probe went from 34,668 bytes and a census read per probe per tab to no body at
+all, and is about 2× to 4.5× faster at p50 on this machine (on the real store `/feeds.json`'s
+body and its census walk are larger).
+
+The run FAILED, as it must on an empty store: `/bars/window.json` (both reads) refused `400`,
+`/provenance.json` `404`, `/instruments.json` `503` (the universe is degraded with no masters),
+each named per phase and per restart. No `--writer` was given (no import or pull can run here),
+so `warm+writer` is NOT MEASURED. **No field was ignored**: eleven query routes answered 2xx
+(`/census/facets.json`, `/dayflags.json`, `/calendar.json` twice, `/scrub.json`, `/sources.json`,
+`/sources/day.json`, `/sources/bars.json`, `/store.json` three ways, `/audit.json`), and each
+garbled field of each was refused or answered differently. The routes that refused could not be
+judged; the real-data run is NEEDS THE MAC 4.
+
+A defect this run found in the sheet itself, fixed and tested: the restart rows printed "0
+answered" for twenty answers, because their classes were not counted.
+
 ## Gates
 
 Run in this cloud container (4 cores, runs as root, node 22.22.0, rustc 1.97.1). Base = `f9cdb584`.
