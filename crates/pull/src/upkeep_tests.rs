@@ -1,4 +1,4 @@
-//! Tests of the upkeep run (R3-17, D-4997): the journal's lines read back
+//! Tests of the upkeep run (R3-17, D-5831): the journal's lines read back
 //! strictly, one run of a kind at a time, Stop by flag and by request, resume
 //! from a chain, the torn tail, a journal that stops taking lines, workers
 //! that build every item once, the status a page reads, and the months a

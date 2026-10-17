@@ -290,7 +290,7 @@ pub(crate) fn command_with(
     }
 }
 
-/// One underlying re-keyed as an item of an upkeep run (R3-17, D-4997): the
+/// One underlying re-keyed as an item of an upkeep run (R3-17, D-5831): the
 /// survey, plan and apply this verb runs, narrowed to `underlying` (a day's
 /// strike ladder is one underlying's, so its plan is the same narrowed or
 /// not).

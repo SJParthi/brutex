@@ -1,4 +1,4 @@
-//! `cli upkeep` on invented stores (R3-17, D-4997): a run that stops and
+//! `cli upkeep` on invented stores (R3-17, D-5831): a run that stops and
 //! resumes where it stopped, an upkeep and an import shutting each other out
 //! of a month and of the store, the sort index at one and eight workers, a
 //! failed index open retried, the three impossible strikes retired (DB-027),

@@ -105,7 +105,7 @@ mod tickstore_command;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuilder;
 /// `cli upkeep`: the store's catch-up steps as tracked runs, with a run id,
-/// progress, Stop and resume, under the import's locks (R3-17, D-4997).
+/// progress, Stop and resume, under the import's locks (R3-17, D-5831).
 mod upkeep_command;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
 /// the store and the calendar with no vendor call (R3-18).

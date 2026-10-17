@@ -1,6 +1,6 @@
 //! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
 //! month lacks, and each builder run over it on N workers with a run id,
-//! progress, Stop and resume, under the import's own locks. R3-17, D-4997;
+//! progress, Stop and resume, under the import's own locks. R3-17, D-5831;
 //! DB-027, DB-N14.
 //!
 //! # Usage

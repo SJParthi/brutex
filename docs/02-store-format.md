@@ -4461,7 +4461,7 @@ that grows only when the operator saves (`docs/06-limits.md` L-R305-6).
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
 line above is a `v2` directory beside this one, never a rewrite of `v1`.
 
-## §43 — The upkeep journal and its stop request, format v1 (R3-17, D-4997)
+## §43 — The upkeep journal and its stop request, format v1 (R3-17, D-5831)
 
 Two files per vendor and kind under `<store>/audit/`, where `<kind>` is `tix`,
 `srt`, `msum`, `recount` or `rekey`. Written by `pull::upkeep` alone; read by

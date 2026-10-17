@@ -833,6 +833,13 @@ static SITES: &[Site] = &[
         drive: drive_totp,
     },
     Site {
+        at: "crates/pull/src/rehearsal.rs note_refused",
+        target: "pull.rehearsal",
+        message: "kind refused to start by itself",
+        says: ("part", Says::Holds("entry")),
+        drive: drive_rehearsal,
+    },
+    Site {
         at: "crates/pull/src/work.rs:193",
         target: "pull.work",
         message: "selection narrowed before it ran",
@@ -1252,6 +1259,20 @@ fn drive_totp(_scratch: &Scratch) {
         crate::totp::base32_decode(&over).is_err(),
         "one past the bound is refused rather than truncated"
     );
+}
+
+/// An automatic start of a kind no store step names (AUT-05).
+fn drive_rehearsal(_scratch: &Scratch) {
+    let refused = crate::rehearsal::may_start_by_itself(
+        "emit-site-fixture-kind",
+        &crate::rehearsal::Facts {
+            last_bulk_write: crate::rehearsal::LastBulkWrite::NoneRecorded,
+            now: 1_800_000_000,
+            attested: Vec::new(),
+        },
+    )
+    .expect_err("no step names this kind");
+    assert_eq!(refused.code(), "not_rehearsed");
 }
 
 /// A selection carrying one blank name and one repeat.

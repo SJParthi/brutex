@@ -155,7 +155,7 @@ pub(crate) fn recount(arguments: &[&str], out: &mut String) -> u8 {
     recount_with(arguments, &store, crate::commit_stamp(), out)
 }
 
-/// One span recounted as an item of an upkeep run (R3-17, D-4997): the same
+/// One span recounted as an item of an upkeep run (R3-17, D-5831): the same
 /// `census_store::recount` this verb runs, clean exactly when this verb's
 /// exit would be [`OK`], and its counts as the run's reason.
 pub(crate) fn upkeep_span(

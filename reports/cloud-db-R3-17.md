@@ -2,8 +2,11 @@ STATUS: IN PROGRESS
 
 # R3-17 — one upkeep runner (cloud build report)
 
-Branch `cloud/db-R3-17-20261017`, cut from `origin/feat/db-fix` at `50093fa3`; the newest
-`origin/feat/db-fix`, `f9cdb584` (`Merge R3-14: …`), merged in on 17 Oct 2026 once R3-06 landed.
+Branch `cloud/db-R3-17-20261017`, cut from `origin/feat/db-fix` at `50093fa3`; the newer
+`origin/feat/db-fix` merged in twice: `f9cdb584` (`Merge R3-14: …`) once R3-06 landed, and `f8c22b1b`
+(`Merge fix-up BASE-CITED: …`, the newest on 17 Oct 2026) at the end. The second merge renumbered
+this part's decision D-4997 to **D-5831**: AG-04 landed D-4997 first, and amendment A6 takes the
+number from the ledger's head (D-5830).
 
 ## Prerequisites
 
@@ -39,7 +42,7 @@ Owned files, as the tree spells them (the spec's names drifted; the operator's d
   (`run` and `resume` write), the doc sentence, and the row in the test table of every writer.
 - `crates/cli/src/gdfl_import_command.rs`: one re-export line, `pub(crate) use guard::{Holder, RunLock, escape};`,
   so the upkeep takes the import's own run lock (no other change to the import).
-- `docs/05-decisions.md` (D-4997, appended), `docs/04-invariants.md` (UK-01 to UK-14, appended),
+- `docs/05-decisions.md` (D-5831, appended), `docs/04-invariants.md` (UK-01 to UK-14, appended),
   `docs/06-limits.md` (L-R317-01 to -09, appended), `docs/02-store-format.md` (§43, appended).
 
 `crates/pull/src/gdfl_nfo.rs` is NOT touched.
@@ -71,7 +74,7 @@ Owned files, as the tree spells them (the spec's names drifted; the operator's d
   `upkeep_and_an_import_exclude_each_other_on_a_month`,
   `the_sort_index_is_the_same_bytes_at_1_and_8_workers`, `a_failed_index_open_is_retried`
   (the reader half of the last is already `api::bars_sort_tests::a_host_refusal_of_an_index_is_not_remembered`).
-- **Docs**: D-4997, UK-01 to UK-14, L-R317-01 to -09, store format §43.
+- **Docs**: D-5831, UK-01 to UK-14, L-R317-01 to -09, store format §43.
 
 ### Measured (cloud host, synthetic store — not the operator's private copy)
 
@@ -208,8 +211,12 @@ Each survivor of the full pass, fixed and checked by hand (the test fails under 
 
 ## NEEDS THE MAC
 
-1. **Decision and section numbers at landing**: D-4997 (head was D-4996; D-4990..D-4995 are on
-   R4-17's branch) and store format §43 — renumber if taken (amendment A6).
+1. **Decision and section numbers at landing**: D-5831 (the head of `f8c22b1b`'s ledger was D-5830)
+   and store format §43 (its head was §42) — renumber if another landing takes either first
+   (amendment A6): the heading in `docs/05-decisions.md`, the `D-5831` mentions in this part's
+   appended blocks of `docs/04-invariants.md` and `docs/06-limits.md`, `docs/02-store-format.md` §43,
+   and the `R3-17, D-5831` doc comments under `crates/`
+   (`git grep -n D-5831 -- crates docs`).
 2. **Store steps** (`config/store-steps.toml`, R3-36's gate 30): add R3-17 as a `[[package]]` and
    one `[[step]]` per kind the operator wants run, with the rehearsal figures gate 30 asks of a
    merged package, from a private copy (`BRUTEX_STORE=<private copy>`):

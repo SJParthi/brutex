@@ -732,7 +732,7 @@ fn summed(out: &mut String, receipt: &[Line], dry_run: bool) -> u8 {
     if clean { OK } else { FAILED }
 }
 
-/// One month built as an item of an upkeep run (R3-17, D-4997): the step
+/// One month built as an item of an upkeep run (R3-17, D-5831): the step
 /// this verb takes for it, and the receipt line this verb prints for it as the
 /// run's outcome, so the two never say different things.
 pub(crate) fn upkeep_month(
