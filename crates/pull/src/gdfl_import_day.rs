@@ -36,6 +36,15 @@ pub(super) struct Staged {
     pub(super) failure: Failure,
 }
 
+/// Names every one of a day's failures in the run's report, each with its
+/// cause (D-4839, [`Report::name`]): the one door a failure enters a report
+/// by.
+pub(super) fn name_staged(report: &mut Report, failures: Vec<Staged>) {
+    for Staged { cause, failure } in failures {
+        report.name(cause, failure);
+    }
+}
+
 /// A day's failure about `about`, refused by `refusal` (an import refusal
 /// that names its own code), at `stage`, logged.
 pub(super) fn note_staged(
@@ -149,7 +158,7 @@ impl Mark {
             seconds_committed: report.seconds_committed,
             late_rows: report.late_rows,
             late_unresolved: report.late_unresolved,
-            failures: report.failures.len(),
+            failures: report.failures_total,
         }
     }
 }
@@ -521,9 +530,7 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
                 ..Counts::default()
             };
             let _refused = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
-            report
-                .failures
-                .extend(failures.into_iter().map(|one| one.failure));
+            name_staged(report, failures);
             return false;
         }
     }
@@ -557,9 +564,7 @@ fn refuse_restated(ctx: &Ctx<'_>, (key, day): (&str, Day), report: &mut Report) 
         ..Counts::default()
     };
     let outcome = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
-    report
-        .failures
-        .extend(failures.into_iter().map(|one| one.failure));
+    name_staged(report, failures);
     outcome
 }
 
@@ -811,7 +816,7 @@ fn note_day(
             "committed",
             report.seconds_committed - before.seconds_committed,
         )
-        .with("failures", report.failures.len() - before.failures);
+        .with("failures", report.failures_total - before.failures);
     let event = match closed {
         Closed::Day => event,
         Closed::Member { member, key } => event.with("member", member).with("key", key),
@@ -861,9 +866,7 @@ fn close_missing(
         ..Counts::default()
     };
     let _refused = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
-    report
-        .failures
-        .extend(failures.into_iter().map(|one| one.failure));
+    name_staged(report, failures);
 }
 
 /// The UNIX second now; 0 for a clock set before 1970, which no run line can
@@ -963,6 +966,64 @@ fn write_flags(
 pub(super) fn drive_core<F>(
     run: &Run<'_>,
     options: RunOptions<'_>,
+    census_scoped: (&mut dyn Census, Option<(&scope::Record, &scope::Record)>),
+    read_day: F,
+) -> Result<Report, ImportRefusal>
+where
+    F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
+{
+    // THE RUN'S LAST WORD, WHATEVER ENDED IT (IA-1): a whole report is cut
+    // to the failures it keeps by name (D-4839) before anyone reads it, and
+    // the observer is told the end, refusal or report, exactly once.
+    let mut end = drive_days(run, options, census_scoped, read_day);
+    if let Ok(report) = &mut end {
+        report.seal();
+    }
+    if let Some(observer) = options.observer {
+        observer.finished(run.kind, end.as_ref());
+    }
+    end
+}
+
+/// The run's key in the process's event sink, held while the run's days are
+/// read (the leftover DB-A41 of round 3): every event any thread of the run
+/// writes in that time carries the run's journal id as its record's `run`,
+/// so `/logs.json?run=<id>` answers the run's per-day and per-refusal lines,
+/// not only its start and finish. One `compare_exchange` to take it and one
+/// to give it back (`telemetry::Sink::claim_run`); a key another run of this
+/// process holds is left alone and the run says so once, by name.
+struct RunKey(Option<u64>);
+
+impl RunKey {
+    /// Takes the key for `id` when a sink is installed and no run holds it.
+    fn claim(id: u64) -> Self {
+        let Some(sink) = telemetry::global() else {
+            return Self(None);
+        };
+        if sink.claim_run(id) {
+            return Self(Some(id));
+        }
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(TARGET, "run key held by another run")
+                .with("run", id)
+                .with("holder", sink.run()),
+        );
+        Self(None)
+    }
+}
+
+impl Drop for RunKey {
+    fn drop(&mut self) {
+        if let (Some(id), Some(sink)) = (self.0, telemetry::global()) {
+            sink.release_run(id);
+        }
+    }
+}
+
+/// [`drive_core`]'s days, before the report is sealed and the end told.
+fn drive_days<F>(
+    run: &Run<'_>,
+    options: RunOptions<'_>,
     (census, scoped): (&mut dyn Census, Option<(&scope::Record, &scope::Record)>),
     mut read_day: F,
 ) -> Result<Report, ImportRefusal>
@@ -1017,34 +1078,48 @@ where
         announced: std::cell::Cell::new(false),
         scoped,
     };
+    let _key = RunKey::claim(ctx.id);
+    if let Some(observer) = options.observer {
+        observer.begun(run.kind, ctx.id);
+    }
     note_started(&ctx, &filter);
     note_torn(&ctx);
     let mut report = Report::default();
     let state = (&mut report, &mut flags);
     reach_back(&ctx, &filter, state, &mut *census, &mut read_day)?;
-    for day in days(run.from, run.to) {
-        let key = format!("{} {day} {filter}", run.kind.as_str());
-        let state = (&mut report, &mut flags);
-        let asked = Asked {
-            key: &key,
-            day,
-            remembered: &key,
-            names: None,
-            early: false,
-        };
-        if widen(&ctx, &request, &asked, state, &mut *census, &mut read_day)? {
-            continue;
+    let range = days(run.from, run.to);
+    let total = range.len();
+    for (index, day) in range.into_iter().enumerate() {
+        if let Some(observer) = options.observer {
+            observer.day_begun(run.kind, day, (index, total));
         }
-        if !admit(&ctx, &key, day, &mut report) {
-            continue;
+        'day: {
+            let key = format!("{} {day} {filter}", run.kind.as_str());
+            let state = (&mut report, &mut flags);
+            let asked = Asked {
+                key: &key,
+                day,
+                remembered: &key,
+                names: None,
+                early: false,
+            };
+            if widen(&ctx, &request, &asked, state, &mut *census, &mut read_day)? {
+                break 'day;
+            }
+            if !admit(&ctx, &key, day, &mut report) {
+                break 'day;
+            }
+            let pass = Pass {
+                key: &key,
+                day,
+                member: None,
+            };
+            let state = (&mut report, &mut flags);
+            day_pass(&ctx, &request, &pass, state, &mut *census, &mut read_day)?;
         }
-        let pass = Pass {
-            key: &key,
-            day,
-            member: None,
-        };
-        let state = (&mut report, &mut flags);
-        day_pass(&ctx, &request, &pass, state, &mut *census, &mut read_day)?;
+        if let Some(observer) = options.observer {
+            observer.day_passed(run.kind, day, &report);
+        }
     }
     note_finished(&ctx, &report);
     Ok(report)
@@ -1426,9 +1501,10 @@ where
             |refused| refused.why.clone(),
         );
         let cause = Cause::open(Stage::Vendor, "scope_reopen_unreadable");
-        report
-            .failures
-            .push(note_failure(ctx.run.kind, day, "listing", &why, cause));
+        report.name(
+            cause,
+            note_failure(ctx.run.kind, day, "listing", &why, cause),
+        );
         return None;
     }
     Some(
@@ -1479,9 +1555,10 @@ fn note_examined(ctx: &Ctx<'_>, asked: &Asked<'_>, opened: usize, report: &mut R
         }
         Err(why) => {
             let cause = Cause::open(Stage::Journal, "scope_ledger");
-            report
-                .failures
-                .push(note_failure(ctx.run.kind, day, "scope ledger", &why, cause));
+            report.name(
+                cause,
+                note_failure(ctx.run.kind, day, "scope ledger", &why, cause),
+            );
         }
     }
 }
@@ -1628,9 +1705,7 @@ fn record_close(
         Outcome::Incomplete => named(&mut report.closed_incomplete),
         Outcome::Refused => named(&mut report.closed_refused),
     }
-    report
-        .failures
-        .extend(failures.into_iter().map(|one| one.failure));
+    name_staged(report, failures);
     note_day(kind, day, (outcome, closed), (before, report));
 }
 
@@ -1648,7 +1723,7 @@ fn note_finished(ctx: &Ctx<'_>, report: &Report) {
             .with("refused", report.closed_refused.len() + report.days_refused)
             .with("files", report.files)
             .with("seconds", report.seconds)
-            .with("failures", report.failures.len()),
+            .with("failures", report.failures_total),
     );
 }
 

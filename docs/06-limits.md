@@ -16941,6 +16941,49 @@ above did not change:
 The design's quoted cold p99 of 74 to 109 µs (its §6.6) was an estimate; the
 figures above and the 10 October ones are the measured ones (RA-097), and
 IA-13 re-measures on a quiet machine.
+
+### The run core (IA-1; D-4800, D-4839, D-4904, D-5302)
+
+`pull::gdfl_run` and its seams in `pull::gdfl_import*`. What a run adds per
+file and per day is O(1) and is not a limit here: one counters-only `Mark`
+(a `Copy` of seven numbers, WP-16's seam 3) a day, one `Report::name` per
+failure (O(1) amortised: the kept list grows to twice `FAILURES_KEPT` =
+1,024 and then drops its older half in one move, so no failure moves the
+whole list), one `Option` test a day when nothing observes, and one 4 KiB
+positional write of the progress record per closed day and at most one a
+second otherwise. Their figures are C-GR-02 and C-GR-06 below.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-1 | Importing a day | reads every byte of the day's files | O(entries + bytes) a day. **Measured by WP-16, quoted with its method** (its report `state/fix/round2/fix-WP-16.json`, outside the repository): the options day 2020-09-15 (5,641 files, 2,129,159 seconds) into an empty scratch store, `/usr/bin/time`, machine load 10 to 17: before WP-16 138.01 s wall (n = 1); after, 8 workers a day, 9.97 s and 9.36 s (n = 2); 1 worker with `each-write` durability 149.93 s (n = 1). Five options days 2020-09-14..18 (29,823 files) in one run 20.63 s wall; a day after the first min 2.54 s, median 2.83 s, max 3.20 s (n = 4). The indices day 2020-09-15 (7 files) 0.08 s (n = 1). The critic's round 7 quoted an earlier run of the same day (144.7 s to 9.8 s, load 6 to 12); the figures above are WP-16's last. IA-1 adds no step per file | IA-1 (the row), WP-16 (the figures) |
+| L-IA-2 | Journal load | a run process reads the whole journal once at its start; the api's reader once per start, then only the bytes appended (`Journal::refresh`) | O(lines) once, O(new bytes) per refresh. The real journal on 14 Oct 2026: 14,027,805 bytes in 23,270 lines (about 600 bytes a line; a stocks `done` line carries its filter of up to 170 names). **Measured** (17 Oct 2026, release, `journal_load_and_refresh_costs` in `pull/src/gdfl_run_tests.rs`, scratch files on WD_BLACK, a machine shared with other agents building, load average 14 to 23; p50 / p99 / max): 9,180 short lines (431,587 B) 5.26 / 15.7 / 21.8 ms (n = 200); 91,800 (4.3 MB) 67.8 / 90.6 / 98.7 ms (n = 200); 918,000 (43.1 MB) 851 / 916 / 916 ms (n = 20); at the real line length 23,270 lines (15.0 MB) 53.5 / 59.2 / 67.4 ms (n = 200) and 232,700 (150 MB) 651 / 687 / 687 ms (n = 20); a copy of the real journal of 14 Oct (14,027,805 B) 36.0 / 38.9 / 38.9 ms (n = 50). Linear: 10x the lines is 12x to 13x the time, 100x short lines 162x. A one-line refresh is flat whatever the length: p50 73 to 84 µs, p99 0.21 to 1.02 ms, max 0.25 to 1.65 ms (n = 200 each). 100x the real length (1.5 GB) was not measured; by the slope above about 6.5 s, an extrapolation. Past `JOURNAL_LOAD_WARN_BYTES` = 64 MiB every whole load is one named `warn` ("journal past its stated load size", with the bytes, the lines, the bound and this row), never a silent slowdown (IA1-14) | IA-1 |
+
+**C-GR-02 and C-GR-06, measured** in the same run (`progress_and_failure_costs`,
+p50 / p99 / max): the progress write, 4 KiB at offset 0, 2.9 µs / 5.7 µs /
+19.9 ms (n = 1,000; the max is one write that waited on the drive);
+`Report::name` with 1,024, 10,240 and 102,400 failures already named
+42 / 84 / 2,333 ns, 42 / 84 / 84 ns and 42 / 84 / 84 ns (n = 1,000 each):
+flat in what the run already named (D-4839).
+
+**IA-1's own check on real data** (17 Oct 2026, release, a scratch store
+outside the repository, the cli under the kernel write lock `rolock.sb` so
+nothing could write the real store, `/usr/bin/time`, n = 1 each): NIFTY's
+index day 2020-09-15 (indices, 7 files, 157,336 seconds) 1.45 s wall, peak
+memory 69 MB; the Muhurat session 2020-11-14 (7 files, 25,199 seconds)
+0.49 s; NIFTY's options of 2020-09-15 (filter NIFTY, 440 files, 545,100
+seconds) 1.87 s; indices and stocks (RELIANCE) of 2020-09-16 started
+together, each in its own log directory. The scratch store held 122 MB in
+2,157 files after these runs.
+
+**Not met, found by that check: two kinds started in one second share a run
+id.** Both runs of 2020-09-16 wrote `run 1792252663`: each process chose its
+id from the journal as it loaded it (`Journal::fresh_run` raises the start
+past the ids it has read), and neither had read the other's line. Each
+logged to its own directory, but `/logs.json?run=1792252663` answers both
+runs' lines (4 indices, 4 stocks). Choosing the id under a store-wide lock
+is IA-2's (the runs ledger and its ids, D-4847); until it lands, start one
+kind at a time, or the kinds at least a second apart.
+
 ## Ingest automation: what a month repair reads, holds and keeps — D-4875, D-4898, 12 October 2026
 
 Row L-IA-26 of the ingest automation design (its §10.2), landed by IA-17's

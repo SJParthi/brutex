@@ -1821,6 +1821,14 @@ jobs:
           # `store/tests/cited_commits.rs` says its own. Inside a
           # `#[cfg(test)]`-mounted module; no production path reaches it.
           declared="$declared pull/src/gdfl_import_split_tests.rs:println!:1"
+          # FOUR MORE, one kind, declared by IA-1 (17 Oct 2026): the p50, p99
+          # and max of on-demand `#[ignore]` timings in
+          # `pull/src/gdfl_run_tests.rs`: the journal load and a one-line
+          # refresh at 1x, 10x and 100x (L-IA-2), a copy of a real journal
+          # when one is named (L-IA-2), the progress write (C-GR-02)
+          # and naming a failure at 1x, 10x and 100x (C-GR-06). Inside a
+          # `#[cfg(test)]`-mounted module; no production path reaches them.
+          declared="$declared pull/src/gdfl_run_tests.rs:println!:4"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -1836,7 +1844,13 @@ jobs:
           # cli/src/main.rs names `stdout()` and `stderr()` once each (v53-2,
           # D-1484): its three prints became one `cli::deliver` write, which
           # says a failed stdout on stderr and emits `cli.output`.
+          # ONE MORE (IA-1, 17 Oct 2026): `cli/src/gdfl_import_command.rs`
+          # names `stderr()` once, in `say_on_stderr`, the cli's ONE declared
+          # stderr writer of a run (design round 5, SF-7): a line a day of a
+          # `gdfl-import` run, ignoring its own failure, never `eprintln!`.
+          # Every line it says is also in the run's events and progress record.
           declared_handles='api/src/server.rs:handle:3
+          cli/src/gdfl_import_command.rs:handle:1
           cli/src/main.rs:handle:2'
           # Both sides are compared as sorted lists of non-empty words, so an
           # empty declaration and an empty measurement are equal on the healthy

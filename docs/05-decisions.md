@@ -71226,6 +71226,296 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
 
+### D-4800 — One GDFL run authority, `pull::gdfl_run`, shared by the cli and the api; the cli keeps only argument and environment parsing (IA-1) — 2026-10-17
+
+**Number** the ingest automation design's own (§15), free at this head
+(feat/db-fix 50093fa3); amendment A6: the landing may renumber from the
+head it lands on, and then renumbers every citation below with it.
+
+**Implemented by** IA-1. **Findings** design gaps F22, F23, F24 and F44;
+rules-audit RA-173, RA-245 (the kind half), RA-100; critic round 7 IA-1.
+
+**What was observed.** The setup of a GDFL import (which variable names a
+source, which reader opens it, what the run files under D-3333, the
+`--stored`-with-options refusal, the measure of the archive) was
+`cli gdfl-import`'s alone (`gdfl_import_command.rs:94`-`:298` at 50093fa3).
+The api's import (IA-10a) would have had to copy all of it, and a refusal
+the cli says by one code the api would have said by another.
+
+**Decision.**
+
+1. `crates/pull/src/gdfl_run.rs` is the one authority: a `Request` (mode,
+   kinds, source word, range, filter, `--stored`, `--retry-refused`,
+   workers, durability, who, snapshot), `plan` (every refusal before any
+   lock, in one order: the request's misuse, the log, the build's stamp,
+   then per kind the source root and the scope), `execute` (this process's
+   kinds in `ImportKind::ALL` order, on the calling thread, no thread per
+   kind: round 4, BL-A), the `Observer` a run is handed, the progress
+   record (D-4904), `JournalReader` (the journal read once, then only its
+   new bytes) and `run_dir` (D-4862's directory for a kind on the store's
+   census layout).
+2. Moved from `cli` with their tests, the cli keeping only argument and
+   environment parsing: `stored_option_underlyings` →
+   `gdfl_run::scope::option_underlyings`, `scope_of` → `scope::of` (the two
+   lines of `cli/src/gdfl_dayflags.rs` follow), `scope_for` →
+   `scope::for_request`, `stored_filter` → `scope::stored_filter`, the
+   `--stored`-with-options refusal → `RunRefusal::StoredWithOptions`
+   (`stored_with_options`, a misuse: the cli exits `MISUSED`), the
+   `(source word, kind)` → variable mapping → `resolve_source` and
+   `SourceId::var`, the source opening → `execute_kind`, the
+   `Origin::measure` call → `SourceCache` (once per root identity), and
+   WP-81's unstamped refusal → `RunRefusal::Unstamped` from
+   `cli::store_write`'s answer (D-4894). The range check moved too
+   (`range_backwards`, the same words) and the cli door's own copy was
+   removed: one rule, one place.
+3. Every refusal before a lock has one code: `request_line_invalid`,
+   `stored_with_options`, `range_backwards`, `symbol_empty`,
+   `filter_too_long` (more than 256 names, D-4801), `snapshot_invalid`,
+   `log_unavailable` (D-4903), `unstamped_write`, `source_unset`,
+   `scope_unreadable`, `source_unopened`. Codes are never renamed or reused.
+4. Not here: locks, claims, runs ledger, stop, resume point (IA-2), the
+   `dayzips` source (IA-3), verification modes (IA-6, IA-7). A request line
+   naming a mode other than `import` is refused, never read as one.
+
+**Proof.** `pull::gdfl_run::tests` (`stored_with_options_is_refused_by_one_authority`,
+`the_plan_refuses_in_one_order_before_any_lock`,
+`every_run_refusal_has_its_own_code`, `a_source_word_resolves_per_kind`,
+`the_kinds_run_in_order_on_the_calling_thread`,
+`an_unopened_source_stops_the_run_before_the_next_kind`,
+`the_source_cache_measures_again_only_when_the_root_changed`); the cli's
+`gdfl_import_command` tests run the same refusals through the verb.
+Invariants IA1-01 to IA1-12 in `docs/04-invariants.md`.
+
+### D-4801 — Sources are named by configuration, resolved per kind; a filter holds at most 256 names (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**Decision.** A request names a kind-agnostic source word, `zip` or
+`tickstore`, resolved per kind by `gdfl_run::resolve_source`: `zip` is
+`cm_zip` (the capital-market outer zip, `BRUTEX_GDFL_CM_ARCHIVE`) for
+indices and stocks and `nfo_zips` (the yearly options zips,
+`BRUTEX_GDFL_NFO_ARCHIVES`) for options; `tickstore` is
+`BRUTEX_GDFL_TICKSTORE` for every kind. A variable unset or empty is
+`source_unset`, named, never defaulted (`CLAUDE.md` §8). The resolved id is
+what the progress record shows. A browser never sends a path. A filter holds
+at most 256 names (`filter_too_long`). **Not built here**: the `dayzips`
+word and `BRUTEX_GDFL_DAYZIPS` (IA-3), `BRUTEX_GDFL_V3_LEDGER` (D-4867,
+IA-3), the claim's filter digest and the request sidecar (IA-2, §5.3); the
+whole filter crosses to an api child on its request line (D-4902).
+
+### D-4839 — The day loop's delta is a counters-only snapshot; a report keeps the newest 1,024 failures by name and counts every one by stage and code (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**What was observed.** WP-16 had already replaced the per-day `Report`
+clone with `Mark`, a `Copy` of seven counters (critic round 7 IA-1: seam 3
+is WP-16's), but `Report.failures` was unbounded and `Mark.failures` was its
+length: a systematic refusal (26,820 files of a day) was held whole in
+memory and printed whole by the receipt.
+
+**Decision.** Every failure enters a report through one door,
+`Report::name(cause, failure)`: it counts `failures_total` and
+`failures_by_cause[(stage, code)]`, keeps the failure among the newest
+`FAILURES_KEPT` = 1,024 by name and among the newest `RECENT_KEPT` = 8 with
+its cause (the progress record's slots). The list grows to twice the bound
+and then drops its older half in one move, and `Report::seal` cuts it to the
+bound at the run's end, so naming is O(1) amortised. `Mark.failures` and the
+day and run summaries count `failures_total`. The cli exits `FAILED` when
+`failures_total > 0`, and its receipt prints the count, "N more not listed",
+each stage and code's count, and the newest 1,024. Every failure is still in
+the journal's closing line (counts, the decisive stage and reason) and in
+the audit stream.
+
+**Proof.** `a_failure_past_the_kept_bound_is_counted_and_never_listed`
+(pull), `the_receipt_says_how_many_failures_it_does_not_list` (cli).
+
+### D-4874 — The GDFL repair trigger: WP-12d defined none, so IA-1 moves no flag and the field is IA-16's (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**What was observed.** D-4874 (design §15) gave IA-1 the move of WP-12d's
+`--repair-reason` flag into `Request` "if WP-12d defines one". At this head
+no GDFL verb takes a repair reason: `repair_reason` appears only in the
+Zerodha repair path (`cli/src/zerodha_repair.rs`, `api/src/repair_route.rs`)
+and `pull::gdfl_import` lands an append-refused day through WP-12d's filing
+path without a reason (D-3350).
+
+**Decision.** IA-1 adds no `repair_reason` to `Request` and no flag; it is
+not coded around. As the design's round-4 text says, IA-16 adds the field,
+the flag and the `admit` row that reads it in one change (D-4885), and the
+request line (D-4902) then gains `repair_reason=` as its thirteenth field
+under a new line version. Until then a GDFL run has no repair door of its
+own beyond WP-12d's.
+
+### D-4894 — The unstamped-write check stays in `cli::store_write`; the plan takes its answer (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7), free at this head (A6 as
+D-4800).
+
+**Decision.** WP-81's `unstamped_write_refusal` (DB-B71) stays the one rule,
+in `cli::store_write`. `gdfl_run::Process.unstamped` carries its answer and
+`plan` refuses `unstamped_write` with it, after the misuse and log checks
+and before any root, scope or lock, for the cli and (IA-10a) an api child
+alike. Who adds a writing verb to `WRITERS`, and `gdfl-stop`'s exemption,
+are IA-2's.
+
+### D-4900 — The waits on WP-11c, WP-12e, WP-12f, WP-13d and WP-62 are file order only; every one has merged (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, X-7), free at this head (A6 as
+D-4800).
+
+**Decision.** Critic round 7 resolved that a wait on a fix-round package
+that is only a file order is dropped, and a wait on a rule (WP-12f's scope
+record, D-4878) is an inert named seam until it lands. At this head WP-11c,
+WP-12d, WP-12e, WP-12f, WP-13d, WP-16, WP-62, WP-81, IA-11r and R3-35 have
+all merged (`git log --grep='^Merge ' feat/db-fix`), so case (c) holds: the
+design's order stands unchanged and no seam is inert. `scope::for_request`
+builds the scope a run hands its source; the scope RECORD each close
+carries and the per-member reopening stay WP-12f's (`gdfl_import::scope`).
+
+### D-4901 — A run process reads no run parameter from its environment; the durability travels in the request (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-1), free at this head (A6
+as D-4800).
+
+**Decision.** `Request` carries `workers` and `durability` (WP-16's
+`Durability`, default `day`). The cli maps `BRUTEX_GDFL_WORKERS` and
+`BRUTEX_GDFL_DURABILITY` into it, refusing a bad value by name as before; an
+api child takes both from its request line only (D-4902), so the bytes an
+api child and a cli run leave never rest on the api's own environment. The
+progress record names a run stopped by a day that could not be made durable
+(`ImportRefusal::Durability`) as state `durability` (10). `POST
+/gdfl/import`'s lack of a durability field and `import_cause`'s arm are
+IA-10a's and IA-2's.
+
+### D-4902 — An api child's request is one line on stdin, at most 8 KiB, with the whole filter and the snapshot name (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-2), free at this head (A6
+as D-4800). Amends the design's D-4846 and D-4801 (not landed).
+
+**Decision.** `Request::to_line` and `Request::from_line` are the one codec
+of the request line: `gdfl-request v1` and twelve fields in one fixed
+order, `mode= kinds= source= from= to= only= stored= retry_refused=
+workers= durability= by= snapshot=`, each value percent-encoded outside
+letters, digits, `.`, `-` and `_` (upper-case hex; a raw byte that should
+have been encoded, a bad escape or non-UTF-8 is refused), lists
+comma-joined. At most 8,192 bytes (`REQUEST_LINE_MAX`) both ways: a request
+that cannot fit is refused writing, never cut. A line over the bound, of
+another head or version, with a field missing, out of order, repeated,
+unknown or not one is `request_line_invalid`, refused before any lock; a
+well-formed line asking a misuse earns that misuse's code. `snapshot` is at
+most 64 bytes of letters, digits, `.`, `-` and `_` (`snapshot_invalid`);
+the cli gains `--snapshot NAME`. The claim and the request sidecar derived
+from it are IA-2's.
+
+**Proof.** `the_request_line_carries_a_256_name_filter_and_a_snapshot_intact`
+(256 names, among them `M&M`, `x,y`, `A B`, `100%` and `café`, cross
+intact), `a_request_line_that_is_not_one_is_refused_before_any_lock` (31
+lines, each refused by its code).
+
+### D-4903 — A run whose event sink was refused refuses `log_unavailable` before any lock; a run logs only to its run directory (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-3), free at this head (A6
+as D-4800). Amends D-4862 (its "until IA-1 every run still logs to
+`logs/cli`" is now past).
+
+**What was observed.** FM-065 (CONC-005, INFRA-056, CONC-070), RA-118: every
+cli run logged to `logs/cli`, whose `events.lock` admits one writer; a
+second run (two kinds by hand, an import beside a recount) was refused the
+sink, printed "events are NOT being recorded" and ran for hours unlogged,
+so /logs, /imports.json's evidence and the pace data held nothing of it.
+
+**Decision.**
+
+1. `cli gdfl-import KIND` installs its sink in its own directory before any
+   command runs (`gdfl_import_command::install_run_log`, called by `main`):
+   `logs/gdfl/<kind>` on a version-4 census, `logs/gdfl/store` on version 3
+   (`gdfl_run::run_dir`, D-4862's table). A store whose census layout
+   cannot be read logs to `logs/cli`, and the run's door refuses it by name;
+   no layout is guessed. Every other verb keeps `install_log`.
+2. A `BRUTEX_LOG_DIR` naming any directory but the run's own is not
+   followed: the sink is not installed and the answer says "Unset
+   BRUTEX_LOG_DIR" (the run's evidence would sit where no reader looks).
+   One naming the run's own directory is that directory.
+3. `plan` refuses `log_unavailable` when `Process.log` is `Refused`, after
+   the request's misuse and before the build's stamp, any root, scope,
+   lock or journal line. The cli's state is the process sink's
+   (`LogState::of_process`). IA-10b's Zerodha runs take the same rule.
+4. While a run reads its days it holds the sink's run key (one
+   `compare_exchange` to take, one to give back), so every importer line of
+   the run, per day and per refusal, carries the journal's run id as its
+   record's `run` and `/logs.json?run=<id>` finds them (the leftover DB-A41
+   of round 3). A key another run of the process holds is left alone and
+   said once (`run key held by another run`).
+
+**Operational consequence, named.** A script that runs `cli gdfl-import`
+with `BRUTEX_LOG_DIR` set (for instance to `logs/cli-batch`) is refused at
+start and must drop the variable.
+
+**Proof.** `two_cli_kinds_at_once_both_log`,
+`a_run_whose_sink_is_held_refuses_before_any_lock`,
+`a_log_directory_outside_the_run_directories_is_refused_at_start` (the
+binary, `crates/cli/tests/gdfl_run_logs.rs`);
+`a_run_whose_sink_was_refused_refuses_before_any_lock` (pull and cli),
+`a_run_logs_to_its_own_directory_or_says_why_not` (cli).
+
+### D-4904 — The progress record's byte layout, format v1, is IA-1's (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-4), free at this head (A6
+as D-4800).
+
+**Decision.** Each run writes one 4,096-byte record, `BRUTEXPG` version 1,
+whose offsets are the definition (`docs/02-store-format.md` §37): fixed
+fields, 22 little-endian u64 counters, 8 refusal slots of 352 bytes (stage
+≤ 8, code ≤ 32, about ≤ 64, why ≤ 240 bytes, each cut on a whole
+character: the design's 96-byte about is cut to fit the critic's slot), and
+a CRC-32C over the first 4,092 bytes in the last 4. It is written by the
+run's own process with one positional write at offset 0: at the run's
+begin, at every day whose day counts changed, otherwise at most once a
+second, and at the end. A reader that meets another version says
+`progress: format <n> unknown` and never guesses; a bad CRC is read once
+more (a torn read during a write). Elapsed time is the monotonic clock's and
+every difference saturates; the wall clock is only written down (IA-GR-28).
+The path is `imports/gdfl.<kind>.progress` (v4) or `imports/gdfl.progress`
+(v3). A write that fails is named once in a `warn`, said on the cli's
+stderr, and does not stop the run: the journal is the run's record, the
+progress a view. IA-2 adds the claim, sidecar, stop file and ledger
+subsections under §37 and `lock_state`, the reader of these records.
+
+**Proof.** `the_progress_record_is_v1_byte_for_byte` (IA-GR-45),
+`the_progress_slots_keep_the_newest_eight_cut_on_whole_characters`,
+`a_clock_step_back_never_aborts_a_run` (IA-GR-28),
+`the_progress_file_writes_each_closed_day_and_at_most_one_a_second_otherwise`,
+`a_progress_file_that_cannot_be_written_is_named_and_the_run_goes_on`.
+
+### D-5302 — A journal past 64 MiB is said on every whole load; the progress record's two spare counters carry the sink's lost lines (IA-1; RA-091, RA-202) — 2026-10-17
+
+**Number** the ledger's head plus one at this head (A6); re-checked at
+landing.
+
+**What was observed.** The rules audit of 11 Oct (RA-091) found the journal
+load never timed and with no size at which it warns; the real journal was
+14,027,805 bytes in 23,270 lines on 14 Oct 2026, about 600 bytes a line
+(L-IA-2 assumed 9,180 short lines). RA-202 found that a run whose log starts
+dropping lines half-way finishes looking fully logged: D-4903 refuses a run
+with no sink at its start, and nothing says a sink lost lines after it.
+
+**Decision.** (1) `pull::gdfl_import::JOURNAL_LOAD_WARN_BYTES` = 64 MiB,
+about 4.8 times the real journal: every whole load past it (a run's start,
+the api reader's open) is one `warn` "journal past its stated load size"
+naming the journal, its bytes and lines, the bound and `L-IA-2`; the load
+goes on, since refusing a run for a long history would trade an import for
+a figure (IA1-14). L-IA-2 carries the measured load at 1x and 10x of the
+real line length and at 1x, 10x and 100x of the short one. (2) The progress
+record's counters 20 and 21 (offsets 216 and 224), written as zero by D-4904
+as first built and read by no one yet, are the sink's dropped events
+(`telemetry::Health::dropped`) and failed rolls
+(`telemetry::Health::rotation_failures`) since the sink opened, copied at
+each write beside `clock_held`. The format stays version 1: no record with
+other meanings at those offsets was ever written outside a test. A
+`log_lost` run state and the alert at release stay with IA-2 and IA-11a
+(the run's outcome and the alert kind are theirs).
+
 ### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
 
 **Number** taken above every ledger head on the local branches on 17 Oct

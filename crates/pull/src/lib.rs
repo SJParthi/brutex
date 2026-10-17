@@ -171,6 +171,10 @@ pub mod gdfl_nfo;
 /// another key (moved, as new files, the old key pointing at the new) or
 /// refuses (retired, by name). D-3331, D-3316; WP-12c.
 pub mod gdfl_rekey;
+/// The one GDFL run authority the cli and the api share: the request and its
+/// line, the plan and every refusal before a lock, the kinds run in order, the
+/// progress record and where a run logs. IA-1, D-4800.
+pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;

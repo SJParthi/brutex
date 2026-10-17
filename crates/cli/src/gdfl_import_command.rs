@@ -62,20 +62,30 @@
 //! surface are read again for those series only (WP-80 step 4). It is never
 //! a symbol.
 
-use std::collections::BTreeSet;
+//!
+//! # One authority (IA-1, D-4800)
+//!
+//! This verb keeps only its argument and environment parsing. What a run
+//! files, which reader opens which source, every refusal before the lock and
+//! the kinds run in order are `pull::gdfl_run`'s, which the api's import
+//! shares (IA-10a): a refusal here and there is one code. The run logs to
+//! its own directory, `logs/gdfl/<kind>` on a version-4 census and
+//! `logs/gdfl/store` on version 3 ([`install_run_log`], D-4862), and refuses
+//! `log_unavailable` before any lock when that sink could not be installed
+//! (D-4903): a store-writing run never works unlogged. It writes the
+//! progress record `imports/gdfl.<kind>.progress` (D-4904) and says a line a
+//! day on stderr through [`say_on_stderr`], the one declared writer.
+
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex;
 
-use pull::gdfl_archive::Archive;
-use pull::gdfl_cm::CmScope;
-use pull::gdfl_import::{
-    Durability, ImportKind, ImportRefusal, Origin, Report, Run, RunOptions, SourceKind, Workers,
-    run_cm_from, run_nfo_from,
+use pull::gdfl_import::{Durability, ImportKind, ImportRefusal, Observer, Report, Workers};
+use pull::gdfl_run::{
+    self, KindEnd, KindPlan, Kinds, LogState, Plan, Process, ProgressFile, Request, RunRefusal,
+    SourceCache, SourceWord,
 };
-use pull::gdfl_nfo::{NfoTickStore, NfoZips};
-use pull::gdfl_tickstore::TickStore;
 use pull::session::Day;
 
 use crate::{FAILED, MISUSED, OK};
@@ -84,16 +94,13 @@ use crate::{FAILED, MISUSED, OK};
 #[path = "gdfl_import_guard.rs"]
 mod guard;
 
-/// The tick store's root.
-pub(crate) const TICKSTORE_VAR: &str = "BRUTEX_GDFL_TICKSTORE";
-/// The vendor's capital-market outer zip.
-pub(crate) const CM_ARCHIVE_VAR: &str = "BRUTEX_GDFL_CM_ARCHIVE";
-/// The directory of the vendor's yearly options zips.
-pub(crate) const NFO_ARCHIVES_VAR: &str = "BRUTEX_GDFL_NFO_ARCHIVES";
+pub(crate) use pull::gdfl_run::{CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR, TICKSTORE_VAR};
 /// The flag that reads again the days closed done with refusals (D-3317).
 pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
 /// The flag that narrows a capital-market run to what D-3333 adds.
 pub(crate) const STORED: &str = "--stored";
+/// The flag that names the run's snapshot (D-4902): `--snapshot NAME`.
+pub(crate) const SNAPSHOT: &str = "--snapshot";
 /// How many workers read and file one day's files (WP-16): optional, 1 to
 /// `pull::gdfl_import::Workers::MAX`; absent is the import's default for
 /// this host's cores (`Workers::for_host`). The bytes a run leaves do not
@@ -104,125 +111,31 @@ pub(crate) const WORKERS_VAR: &str = "BRUTEX_GDFL_WORKERS";
 /// leaves do not depend on it.
 pub(crate) const DURABILITY_VAR: &str = "BRUTEX_GDFL_DURABILITY";
 
-/// The store's GDFL options tree, whose underlyings a share run files.
-fn options_tree(store: &Path) -> PathBuf {
-    store.join("bars").join("gdfl").join("NSE").join("FNO")
-}
-
-/// Every underlying the options store holds, sorted: one read of the options
-/// tree's directory, O(underlyings). A tree that does not exist yet holds
-/// none.
-///
-/// # Errors
-///
-/// A tree that cannot be listed, or an entry whose name is not text, named.
-fn stored_option_underlyings(store: &Path) -> Result<Vec<String>, String> {
-    let tree = options_tree(store);
-    let entries = match std::fs::read_dir(&tree) {
-        Ok(entries) => entries,
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(why) => return Err(format!("{}: {why}", tree.display())),
-    };
-    let mut names = BTreeSet::new();
-    for entry in entries {
-        let entry = entry.map_err(|why| format!("{}: {why}", tree.display()))?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|name| format!("{}: {} is not a symbol", tree.display(), name.display()))?;
-        names.insert(name);
-    }
-    Ok(names.into_iter().collect())
-}
-
-/// The scope of a capital-market run of `kind` (D-3333), and how many
-/// option underlyings it read.
-///
-/// # Errors
-///
-/// What [`stored_option_underlyings`] and `CmScope::stored` refuse.
-pub(crate) fn scope_of(kind: ImportKind, store: &Path) -> Result<(CmScope, usize), String> {
-    match kind {
-        ImportKind::Stocks => {
-            let underlyings = stored_option_underlyings(store)?;
-            let scope = CmScope::stored(&underlyings)?.with_masters(store.join("session-masters"));
-            Ok((scope, underlyings.len()))
-        }
-        _ => Ok((CmScope::stored(std::iter::empty::<&str>())?, 0)),
-    }
-}
-
-/// The filter `--stored` stands for: every store symbol the scope files that
-/// the swept surface alone does not, sorted. An index row's store key; a
-/// stored share's own symbol, and the newest symbol its chain of changes
-/// reaches, which is where its old name's days are filed.
-fn stored_filter(kind: ImportKind, scope: &CmScope) -> Vec<String> {
-    let mut names = BTreeSet::new();
-    match kind {
-        ImportKind::Indices => {
-            for row in scope.indices() {
-                names.insert(row.store_key.to_owned());
-            }
-        }
-        _ => {
-            for share in scope.shares() {
-                names.insert(share.to_string());
-                names.insert(brutex_core::alias::LINEAGE.current(share).to_owned());
-            }
-        }
-    }
-    names.into_iter().collect()
-}
-
-/// WHAT A RUN FILES (D-3333), and the receipt's sentence saying so: the
-/// swept surface alone for an options run; for a capital-market run the
-/// stored scope (the other index rows, the old names and every share
-/// underlying the options store holds), `--stored` narrowing `only` to what
-/// it adds, under a filter of its own.
-///
-/// # Errors
-///
-/// What [`scope_of`] refuses.
-fn scope_for(
-    kind: ImportKind,
-    store: &Path,
-    stored_only: bool,
-    only: &mut Vec<String>,
-) -> Result<(Arc<CmScope>, Option<String>), String> {
-    if kind == ImportKind::Options {
-        return Ok((Arc::new(CmScope::swept()), None));
-    }
-    let (scope, underlyings) = scope_of(kind, store)?;
-    if stored_only {
-        only.extend(stored_filter(kind, &scope));
-    }
-    let words = format!(
-        "stored (D-3333): {} index rows and {} shares beyond the F&O list; {} option \
-         underlyings read from {}",
-        scope.indices().len(),
-        scope.shares().len(),
-        underlyings,
-        options_tree(store).display()
-    );
-    Ok((Arc::new(scope), Some(words)))
-}
-
 /// The words after `TO`: whether `--retry-refused` and `--stored` were
-/// given (each a flag anywhere among them, never a symbol), and the symbols.
-fn flags_of(words: &[&str]) -> (bool, bool, Vec<String>) {
-    let symbols = words
-        .iter()
-        .filter(|word| **word != RETRY_REFUSED && **word != STORED)
-        .map(|word| (*word).to_owned())
-        .collect();
-    (
-        words.contains(&RETRY_REFUSED),
-        words.contains(&STORED),
-        symbols,
-    )
+/// given (each a flag anywhere among them, never a symbol), the snapshot
+/// `--snapshot` names, and the symbols.
+///
+/// # Errors
+///
+/// A `--snapshot` with no name after it.
+fn flags_of(words: &[&str]) -> Result<(bool, bool, Option<String>, Vec<String>), String> {
+    let mut symbols = Vec::with_capacity(words.len());
+    let (mut retry, mut stored, mut snapshot) = (false, false, None);
+    let mut rest = words.iter();
+    while let Some(word) = rest.next() {
+        match *word {
+            RETRY_REFUSED => retry = true,
+            STORED => stored = true,
+            SNAPSHOT => {
+                let name = rest
+                    .next()
+                    .ok_or_else(|| format!("{SNAPSHOT} takes a NAME after it"))?;
+                snapshot = Some((*name).to_owned());
+            }
+            symbol => symbols.push(symbol.to_owned()),
+        }
+    }
+    Ok((retry, stored, snapshot, symbols))
 }
 
 /// `YYYY-MM-DD` as a day, or why not.
@@ -276,216 +189,276 @@ pub(crate) fn durability_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Du
         .map_err(|why| format!("{DURABILITY_VAR}: {why}"))
 }
 
-/// The run's options: the origin it measured, whether it reads again the
-/// days done with refusals, its workers and when a day is made durable
-/// (WP-16).
-const fn options_of(
-    origin: &Origin,
-    retry_refused: bool,
-    (workers, durability): (Workers, Durability),
-) -> RunOptions<'_> {
-    RunOptions {
-        origin: Some(origin),
-        retry_refused,
-        workers,
-        durability,
-    }
-}
-
-/// The root a variable names, or the refusal naming the variable.
+/// The root a variable names, or the refusal naming the variable
+/// (`pull::gdfl_run::source_root`'s words, one authority).
 pub(crate) fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
-    match env(var) {
-        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
-        _ => Err(format!(
-            "{var} is not set; it names where the GDFL data is read from and has no default"
-        )),
-    }
+    let known = [TICKSTORE_VAR, CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR]
+        .into_iter()
+        .find(|known| *known == var)
+        .ok_or_else(|| format!("{var} is not a GDFL source variable"))?;
+    gdfl_run::source_root(known, env).map_err(|why| {
+        why.to_string()
+            .strip_prefix("source_unset: ")
+            .map_or_else(|| why.to_string(), str::to_owned)
+    })
 }
 
-/// What the verb's first words and the environment ask for: the kind, the
-/// first and last day, and how the run files its days (WP-16).
+/// The request the verb's words and the environment ask for (the cli's
+/// whole share of a run: argument and environment parsing). The workers and
+/// the durability are read from the environment HERE and travel in the
+/// request; the run reads no run parameter from the environment (D-4901).
 ///
 /// # Errors
 ///
-/// The words a refusal shows, for a kind, a day, a worker count or a
-/// durability that is not one.
+/// The words a misuse shows, for a kind, a day, a source, a worker count, a
+/// durability or a flag that is not one.
 fn asked(
-    (kind, from, to): (&str, &str, &str),
+    (kind, source, from, to, rest): (&str, &str, &str, &str, &[&str]),
     env: &dyn Fn(&str) -> Option<OsString>,
-) -> Result<(ImportKind, Day, Day, (Workers, Durability)), String> {
+) -> Result<Request, String> {
     let kind = ImportKind::parse(kind).map_err(|why| why.to_string())?;
-    Ok((
-        kind,
-        day(from)?,
-        day(to)?,
-        (workers_of(env)?, durability_of(env)?),
-    ))
+    let (from, to) = (day(from)?, day(to)?);
+    let source = SourceWord::parse(source).ok_or_else(|| {
+        format!(
+            "{} is not a source; the sources are tickstore and zip",
+            guard::plain(&format!("{source:?}"))
+        )
+    })?;
+    let (workers, durability) = (workers_of(env)?, durability_of(env)?);
+    let (retry_refused, stored, snapshot, only) = flags_of(rest)?;
+    Ok(Request {
+        only,
+        stored,
+        retry_refused,
+        workers,
+        durability,
+        snapshot,
+        ..Request::new(Kinds::one(kind), source, (from, to))
+    })
 }
 
 pub(crate) use crate::store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 
-/// The data root `var` names, once this binary may write at all: an
-/// unstamped build is refused by [`unstamped_write_refusal`] before any root
-/// is read (DB-B71).
-fn stamped_root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
-    if let Some(why) =
-        unstamped_write_refusal(crate::commit_stamp(), env(ALLOW_UNSTAMPED_VAR).as_deref())
-    {
-        return Err(why);
-    }
-    root(var, env)
+/// What a run of this process says as it goes: a line a day on the declared
+/// stderr writer, and the progress record (D-4904), both told by the one
+/// run on its coordinating thread.
+struct Told<'a> {
+    say: &'a (dyn Fn(&str) + Sync),
+    progress: Option<ProgressFile>,
+    run: Mutex<u64>,
 }
 
-/// The run's days read from `data` as its source and kind read them. `Err`
-/// only for a capital-market archive that cannot be opened, named with its
-/// path; every other end is the importer's own report or refusal. Called
-/// after the door opened (AF-01), so the door closes behind every arm.
-fn import_from(
-    (source, kind): (&str, ImportKind),
-    data: &Path,
-    scope: &Arc<CmScope>,
-    run: &Run<'_>,
-    options: RunOptions<'_>,
-) -> Result<Result<Report, ImportRefusal>, String> {
-    match (source, kind) {
-        ("tickstore", ImportKind::Options) => {
-            Ok(run_nfo_from(&NfoTickStore::new(data), run, options))
+impl std::fmt::Debug for Told<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Told")
+            .field("progress", &self.progress)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Observer for Told<'_> {
+    fn begun(&self, kind: ImportKind, run: u64) {
+        *self
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = run;
+        (self.say)(&format!("gdfl-import {}: run {run} begun", kind.as_str()));
+        if let Some(progress) = &self.progress {
+            progress.begun(kind, run);
         }
-        ("tickstore", _) => Ok(run_cm_from(
-            &TickStore::new(data).with_scope(Arc::clone(scope)),
-            run,
-            options,
-        )),
-        ("zip", ImportKind::Options) => Ok(run_nfo_from(&NfoZips::new(data), run, options)),
-        _ => Archive::open(data)
-            .map_err(|w| format!("{}: {w}", data.display()))
-            .map(|archive| run_cm_from(&archive.with_scope(Arc::clone(scope)), run, options)),
     }
-}
 
-/// A misuse the verb refuses before the lock (AF-01, GD-09): `--stored` on an
-/// options run, a range that runs backwards, or an empty SYMBOL word, which
-/// names nothing and would be read as a filter that matches no file and ends
-/// the run `no_file_read`.
-fn misuse(
-    kind: ImportKind,
-    (from, to): (Day, Day),
-    stored_only: bool,
-    only: &[String],
-) -> Option<String> {
-    if stored_only && kind == ImportKind::Options {
-        return Some(format!(
-            "{STORED} narrows a capital-market run; an options run files no stored series"
+    fn day_begun(&self, kind: ImportKind, day: Day, at: (usize, usize)) {
+        if let Some(progress) = &self.progress {
+            progress.day_begun(kind, day, at);
+        }
+    }
+
+    fn day_passed(&self, kind: ImportKind, day: Day, report: &Report) {
+        (self.say)(&format!(
+            "gdfl-import {} {day}: imported {} done before {} not held {} closed {} refused {}; \
+             files {} failures {}",
+            kind.as_str(),
+            report.days_imported,
+            report.days_skipped,
+            report.days_missing.len(),
+            report.days_closed,
+            report.days_refused + report.closed_refused.len(),
+            report.files,
+            report.failures_total,
         ));
+        if let Some(progress) = &self.progress {
+            progress.day_passed(kind, day, report);
+        }
     }
-    if let Err(why) = guard::range(from, to) {
-        return Some(why.to_string());
+
+    fn finished(&self, kind: ImportKind, end: Result<&Report, &ImportRefusal>) {
+        let run = *self
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let how = end.map_or_else(
+            |refusal| format!("refused {}", refusal.code()),
+            |_| "finished".to_owned(),
+        );
+        (self.say)(&format!("gdfl-import {}: run {run} {how}", kind.as_str()));
+        if let Some(progress) = &self.progress {
+            progress.finished(kind, end);
+            if let Some(fault) = progress.fault() {
+                (self.say)(&format!(
+                    "gdfl-import {}: the progress record was not written: {fault}",
+                    kind.as_str()
+                ));
+            }
+        }
     }
-    only.iter()
-        .any(|name| name.trim().is_empty())
-        .then(|| "an empty SYMBOL names no instrument; give names or none".to_owned())
 }
 
-/// The verb, with its environment and store root passed in so every arm is
-/// driven by a test without touching the process environment.
-pub(crate) fn command_with(
+/// The progress file a run of `kind` writes on `store`, when the store's
+/// census layout can be read (else the door refuses the run by name).
+fn progress_of(store: &Path, plan: &Plan, kind: &KindPlan) -> Option<ProgressFile> {
+    let layout = gdfl_run::layout_of(store).ok()?;
+    let byte = match layout {
+        telemetry::run_dirs::GdflLayout::V3 => 3,
+        telemetry::run_dirs::GdflLayout::V4 => 4,
+    };
+    Some(ProgressFile::new(
+        gdfl_run::progress_path(store, kind.kind, layout),
+        plan,
+        kind,
+        byte,
+    ))
+}
+
+/// Where a run reads its environment: a variable's value, or `None`.
+type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+/// Where a run finds its store root, proved, or why not.
+type StoreRoot<'a> = &'a dyn Fn() -> Result<PathBuf, String>;
+
+/// The verb, with its environment, store root, event sink and stderr passed
+/// in so every arm is driven by a test without touching the process.
+pub(crate) fn command_in(
     args: &[&str],
-    env: &dyn Fn(&str) -> Option<OsString>,
-    store: &dyn Fn() -> Result<PathBuf, String>,
+    (env, store): (Env<'_>, StoreRoot<'_>),
+    (log, say): (&LogState, &(dyn Fn(&str) + Sync)),
     out: &mut String,
 ) -> u8 {
-    let [kind, source, from, to, only @ ..] = args else {
+    let [kind, source, from, to, rest @ ..] = args else {
         let _ = writeln!(
             out,
             "refused: gdfl-import takes KIND SOURCE FROM TO [SYMBOL ...]"
         );
         return MISUSED;
     };
-    let (kind, from, to, workers) = match asked((kind, from, to), env) {
-        Ok(four) => four,
+    let request = match asked((kind, source, from, to, rest), env) {
+        Ok(request) => request,
         Err(why) => {
             let _ = writeln!(out, "refused: {}", guard::plain(&why));
             return MISUSED;
         }
     };
-    let var = match (*source, kind) {
-        ("tickstore", _) => TICKSTORE_VAR,
-        ("zip", ImportKind::Options) => NFO_ARCHIVES_VAR,
-        ("zip", _) => CM_ARCHIVE_VAR,
-        (other, _) => {
-            let _ = writeln!(
-                out,
-                "refused: {} is not a source; the sources are tickstore and zip",
-                guard::plain(&format!("{other:?}"))
-            );
-            return MISUSED;
-        }
-    };
-    let (retry_refused, stored_only, mut only) = flags_of(only);
-    // A RANGE THAT RUNS BACKWARDS, OR AN EMPTY SYMBOL, IS A MISUSE (AF-01,
-    // GD-09): refused with the other garbage, before the lock and any root.
-    if let Some(why) = misuse(kind, (from, to), stored_only, &only) {
-        let _ = writeln!(out, "refused: {}", guard::plain(&why));
+    // A MISUSE IS REFUSED BEFORE THE LOCK AND ANY ROOT (AF-01, GD-09), by the
+    // one authority's code (IA-GR-13): `--stored` with options, a range that
+    // runs backwards, an empty SYMBOL, an oversized filter, a bad snapshot.
+    if let Some(misuse) = request.misuse() {
+        let _ = writeln!(out, "refused: {}", guard::plain(&misuse.to_string()));
         return MISUSED;
     }
     // A STORE WHOSE `bars` IS A LINK IS NOT WRITTEN (R3-16, RA-298): asked
     // once, by name, before the run reads a day (`store_write::writable`).
-    let roots = stamped_root(var, env).and_then(|data| {
-        let store = store()?;
+    let store = match store().and_then(|store| {
         crate::store_write::writable(&store)?;
-        Ok((data, store))
-    });
-    let result = roots.and_then(|(data, store)| {
-        let (scope, scope_words) = scope_for(kind, &store, stored_only, &mut only)?;
-        let run = Run {
-            kind,
-            from,
-            to,
-            only: &only,
-            store_root: &store,
-        };
-        // WHERE THE DATA CAME FROM AND WHAT BUILT IT (D-3317 item 4; DB-G56):
-        // the source, the archive's path, bytes and identity, and this
-        // binary's commit, in "run started" and the journal's `run` line.
-        let origin_kind = if *source == "tickstore" {
-            SourceKind::TickStore
-        } else {
-            SourceKind::Zip
-        };
-        let origin = Origin::measure(origin_kind, &data, crate::commit_stamp());
-        // THE DOOR (AF-01, D-4977; FM-060, FM-064, FM-086, FM-290): refused
-        // here, before the importer writes a journal line, or held until the
-        // run returns.
-        let door = guard::Door::open(guard::Opening {
-            kind,
-            var,
-            store: &store,
-            origin: &origin,
-            only: &only,
-            args,
-        })
-        .map_err(|why| why.to_string())?;
-        let options = options_of(&origin, retry_refused, workers);
-        let report = import_from((source, kind), &data, &scope, &run, options);
-        Ok((report, store, scope_words, door))
-    });
-    match result {
-        Ok((Ok(Ok(report)), store, scope_words, door)) => {
-            render(out, kind, source, &store, &report);
-            render_how(out, workers);
-            if let Some(words) = scope_words {
-                let _ = writeln!(out, "  scope               {}", guard::plain(&words));
+        Ok(store)
+    }) {
+        Ok(store) => store,
+        Err(why) => {
+            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&why));
+            return FAILED;
+        }
+    };
+    // EVERY REFUSAL BEFORE THE LOCK, IN THE AUTHORITY'S ORDER (IA-1): the
+    // sink (D-4903), the build's stamp (DB-B71, D-4894), the source root and
+    // the scope (D-3333).
+    let unstamped =
+        unstamped_write_refusal(crate::commit_stamp(), env(ALLOW_UNSTAMPED_VAR).as_deref());
+    let process = Process {
+        store_root: &store,
+        commit: crate::commit_stamp(),
+        log,
+        unstamped: unstamped.as_deref(),
+    };
+    let plan = match gdfl_run::plan(request, &process, env, &mut SourceCache::default()) {
+        Ok(plan) => plan,
+        Err(refused) => {
+            let code = if refused.misuse() { MISUSED } else { FAILED };
+            let _ = writeln!(
+                out,
+                "GDFL IMPORT REFUSED: {}",
+                guard::plain(&refused.to_string())
+            );
+            return code;
+        }
+    };
+    let Some(kind) = plan.kinds.first() else {
+        let _ = writeln!(out, "GDFL IMPORT REFUSED: the plan holds no kind");
+        return FAILED;
+    };
+    // THE DOOR (AF-01, D-4977; FM-060, FM-064, FM-086, FM-290): refused
+    // here, before the importer writes a journal line, or held until the
+    // run returns.
+    let door = match guard::Door::open(guard::Opening {
+        kind: kind.kind,
+        var: kind.source.var(),
+        store: &store,
+        origin: &kind.origin,
+        only: &kind.only,
+        args,
+    }) {
+        Ok(door) => door,
+        Err(why) => {
+            let _ = writeln!(
+                out,
+                "GDFL IMPORT REFUSED: {}",
+                guard::plain(&why.to_string())
+            );
+            return FAILED;
+        }
+    };
+    let told = Told {
+        say,
+        progress: progress_of(&store, &plan, kind),
+        run: Mutex::new(0),
+    };
+    let end = gdfl_run::execute_kind(&plan, kind, Some(&told));
+    receipt((kind, source, &store, &plan.request), end, door, out)
+}
+
+/// The run's receipt and the door's close, by how the run ended.
+fn receipt(
+    (kind, source, store, request): (&KindPlan, &str, &Path, &Request),
+    end: KindEnd,
+    door: guard::Door,
+    out: &mut String,
+) -> u8 {
+    let how = (request.workers, request.durability);
+    match end {
+        KindEnd::Report(report) => {
+            let report: Report = *report;
+            render(out, kind.kind, source, store, &report);
+            render_how(out, how);
+            if let Some(words) = &kind.scope_words {
+                let _ = writeln!(out, "  scope               {}", guard::plain(words));
             }
-            let failed = !report.failures.is_empty();
+            let failed = report.failures_total > 0;
             let door_failed = door.close(Some(&report), failed.then_some("failed"), out);
             if failed || door_failed { FAILED } else { OK }
         }
-        Ok((Ok(Err(refusal)), store, _, door)) => {
+        KindEnd::Refused(refusal) => {
             // A census refusal stopped the run part way (D-3317 item 7): what
             // it did before the refused day is on disk, so it is printed too.
             if let Some(done) = refusal.report() {
-                render(out, kind, source, &store, done);
-                render_how(out, workers);
+                render(out, kind.kind, source, store, done);
+                render_how(out, how);
             }
             let _ = writeln!(
                 out,
@@ -495,14 +468,125 @@ pub(crate) fn command_with(
             let _ = door.close(refusal.report(), Some("refused"), out);
             FAILED
         }
-        Ok((Err(why), _, _, door)) => {
-            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&why));
+        KindEnd::Unopened(refused) => {
+            let _ = writeln!(
+                out,
+                "GDFL IMPORT REFUSED: {}",
+                guard::plain(&refused_words(&refused))
+            );
             let _ = door.close(None, Some("refused"), out);
             FAILED
         }
-        Err(why) => {
-            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&why));
-            FAILED
+    }
+}
+
+/// An unopened source's words, as the receipt said them before IA-1: the
+/// path and why, without a code in front.
+fn refused_words(refused: &RunRefusal) -> String {
+    match refused {
+        RunRefusal::SourceUnopened { path, why } => format!("{}: {why}", path.display()),
+        other => other.to_string(),
+    }
+}
+
+/// THE CLI'S ONE DECLARED STDERR WRITER (round 5, SF-7; CI gate 23 clause
+/// A2): a run's line a day, and nothing else of this verb, reaches stderr
+/// here. A failed write is ignored by design and never panics: Rust ignores
+/// `SIGPIPE`, so a print to a closed pipe would panic and a release build
+/// abort (`eprintln!` is never used). Each line is also in the run's events
+/// and its progress record, so a stderr that goes nowhere loses nothing.
+pub(crate) fn say_on_stderr(line: &str) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _closed = err
+        .write_all(line.as_bytes())
+        .and_then(|()| err.write_all(b"\n"))
+        .and_then(|()| err.flush());
+}
+
+/// WHERE A RUN PROCESS LOGS (D-4862, D-4903; IA-1): for `gdfl-import KIND`,
+/// installs this process's one event sink in the run's own directory,
+/// `<store>/logs/gdfl/<kind>` on a version-4 census and `logs/gdfl/store` on
+/// version 3, which the kind's lock makes it alone in, and answers the line
+/// `main` prints. `None` for every other verb, for a word that is not a
+/// kind (the verb refuses it as a misuse, logged where every verb logs), and
+/// for a store whose census layout cannot be read (logged to `logs/cli`; the
+/// run's door then refuses it by name, never a guessed layout): those keep
+/// [`crate::install_log`].
+///
+/// A `BRUTEX_LOG_DIR` naming any other directory is not followed: the run
+/// would log where no reader of its evidence looks (`/imports.json`, the day
+/// band and `/logs` read the run directories, IA-11r), so the sink is not
+/// installed, the answer says why, and the run then refuses
+/// `log_unavailable` before any lock (D-4903).
+#[must_use]
+pub fn install_run_log(args: &[OsString]) -> Option<String> {
+    let [verb, kind, ..] = args else {
+        return None;
+    };
+    if verb.to_str() != Some("gdfl-import") {
+        return None;
+    }
+    let kind = ImportKind::parse(kind.to_str()?).ok()?;
+    let store = crate::store_root().ok()?;
+    let dir = gdfl_run::run_dir(&store, kind).ok()?.beneath(&store);
+    Some(run_log_answer(
+        std::env::var_os("BRUTEX_LOG_DIR"),
+        &dir,
+        &|dir| telemetry::install(&telemetry::Config::new(dir)).map(|_| ()),
+    ))
+}
+
+/// [`install_run_log`]'s answer for a run whose directory is `dir`, with the
+/// sink installed by `install`.
+fn run_log_answer(
+    explicit: Option<OsString>,
+    dir: &Path,
+    install: &dyn Fn(&Path) -> Result<(), String>,
+) -> String {
+    if let Some(named) = explicit
+        && resolved(Path::new(&named)) != resolved(dir)
+    {
+        return format!(
+            "{}: BRUTEX_LOG_DIR names \"{}\", but a gdfl-import run logs only to {}, the \
+             directory its kind's lock makes it alone in and every reader of its evidence \
+             reads (D-4862). Unset BRUTEX_LOG_DIR.",
+            crate::UNLOGGED,
+            named.display(),
+            dir.display()
+        );
+    }
+    match install(dir) {
+        Ok(()) => format!(
+            "events -> {}\n  This run logs to its own directory (D-4862); /logs, /imports.json \
+             and the day band read it.",
+            dir.display()
+        ),
+        Err(why) => format!("{}: {why}", crate::UNLOGGED),
+    }
+}
+
+/// `path` with its longest existing ancestor made canonical and the rest
+/// appended as written, so two spellings of one directory compare equal
+/// even before it exists: the store root is canonical
+/// (`cli::existing_store_root`), and `/var` is `/private/var` on macOS, as
+/// is a volume reached through a link. A path with no existing ancestor, or
+/// a `..` past the last existing one, stays as written, so it can only
+/// compare unequal and be refused by name, never be taken for the run's
+/// directory. One `canonicalize` per component at most.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return rest.iter().rev().fold(real, |whole, part| whole.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
         }
     }
 }
@@ -611,7 +695,21 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     let _ = writeln!(out, "  lineage records     {}", report.lineage_lines);
     let _ = writeln!(out, "  lot records         {}", report.lot_lines);
     let _ = writeln!(out, "  outside session     {}", report.outside_session);
-    let _ = writeln!(out, "  failures            {}", report.failures.len());
+    // EVERY FAILURE COUNTED, THE NEWEST 1,024 LISTED (D-4839): the count is
+    // the run's; what is not listed is said, with each stage and code's count.
+    let _ = writeln!(out, "  failures            {}", report.failures_total);
+    if report.failures_unlisted() > 0 {
+        let _ = writeln!(
+            out,
+            "    ({} more not listed; the newest {} are; every one is in the journal and the \
+             audit stream)",
+            report.failures_unlisted(),
+            report.failures.len()
+        );
+        for ((stage, code), count) in &report.failures_by_cause {
+            let _ = writeln!(out, "    {stage}/{code}: {count}");
+        }
+    }
     for failure in &report.failures {
         let _ = writeln!(
             out,
@@ -622,9 +720,31 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     }
 }
 
-/// The verb as dispatched: the process environment and the CLI's store root.
+/// The verb as dispatched: the process environment, the CLI's store root,
+/// this process's event sink and the declared stderr writer.
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    command_with(args, &process_env, &cli_store, out)
+    let log = LogState::of_process(
+        "no event sink is installed in this process; the line above the report says why",
+    );
+    command_in(
+        args,
+        (&process_env, &cli_store),
+        (&log, &say_on_stderr),
+        out,
+    )
+}
+
+/// [`command_in`] with a sink that is installed and a stderr that hears
+/// nothing: the tests' door to every arm after the log.
+#[cfg(test)]
+pub(crate) fn command_with(
+    args: &[&str],
+    env: &dyn Fn(&str) -> Option<OsString>,
+    store: &dyn Fn() -> Result<PathBuf, String>,
+    out: &mut String,
+) -> u8 {
+    let log = LogState::Installed(PathBuf::from("logs/test"));
+    command_in(args, (env, store), (&log, &|_| {}), out)
 }
 
 #[cfg(test)]
