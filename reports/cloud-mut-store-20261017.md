@@ -179,7 +179,8 @@ How it was run, and how the catches were checked:
 | `cargo clippy -p store -p telemetry --all-targets -- -D warnings` | clean at every commit since `2e6cf25c`. Commit `a84f53b5` carried one clippy error, fixed in the next commit |
 | `cargo test -p store -p telemetry --lib` | pass at every commit since `0b04e863` |
 | `cargo deny check` | `advisories FAILED` on RUSTSEC-2026-0344 (`ruzstd`) and RUSTSEC-2026-0346 to 0349 (`rustls`), and nothing else (bans, licenses and sources ok). This is the base's set. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` |
-| `cargo test --workspace --locked` | not yet run |
+| `cargo test --workspace --locked` | running |
+| CI job `language-purity`, every `run:` step but 1e and 14, run locally through `.github/checks_all.rs`'s plan | 24 green. 8 red: gates 0, 1d, 10, 11, 12, 19, 23 and 30. **All eight are red identically on the base**, run the same way in a worktree of `origin/feat/db-fix`. Their violation lines, sorted and stripped of line numbers, are the same set, so this branch adds none; only the file and function counts differ. The causes are in `api`, `pull`, `web/` tests, `config/store-steps.toml` (R3-18 merged), and the base's `sealed.rs`, `sink.rs` and `settings.rs` lines |
 
 ## NEEDS THE MAC
 
