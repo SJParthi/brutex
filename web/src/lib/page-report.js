@@ -79,7 +79,7 @@ const encodedBytes = (s) => encoder.encode(encodeURIComponent(s)).length;
 function clean(s, keepLines) {
   let out = '';
   for (const c of s) {
-    const code = c.codePointAt(0) ?? 0;
+    const code = /** @type {number} */ (c.codePointAt(0));
     const control = code < 0x20 || (code >= 0x7f && code < 0xa0);
     out += control && !(keepLines && (c === '\n' || c === '\t')) ? ' ' : c;
   }

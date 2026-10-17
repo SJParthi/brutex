@@ -221,7 +221,7 @@ export function speedTile(report) {
   const failed = asked.reduce((sum, r) => sum + r.failed, 0);
   const worstRow = sortRows(asked, 'p99')[0] ?? null;
   const worst = worstRow ? { route: worstRow.route, p99: worstRow.p99 } : null;
-  const label = WINDOWS.find((w) => w.key === window)?.label.toLowerCase() ?? window;
+  const label = window === 'last_hour' ? 'last hour' : 'since the start';
   if (!worst) return { state: 'empty', window, routes: 0, requests: 0, failed: 0, worst: null, line: 'No route has been asked since this server started.' };
   const state = failed > 0 ? 'failing' : asked.some((r) => r.slow) ? 'slow' : 'ok';
   const line =
@@ -434,7 +434,8 @@ export function builtPages(files) {
   for (const m of appText.matchAll(/import\([`"']\.\.\/nodes\/(\d+)\.[^`"']*\.js[`"']\),__vite__mapDeps\(\[([\d,]*)\]\)/g)) {
     nodes.set(Number(m[1]), m[2] === '' ? [] : m[2].split(',').map((i) => list[Number(i)]));
   }
-  if (!nodes.has(0)) throw new Error(`the page budget found no root layout node (nodes/0) in ${app}`);
+  const layout = nodes.get(0);
+  if (!layout) throw new Error(`the page budget found no root layout node (nodes/0) in ${app}`);
   /** @type {[string, number][]} */
   const routes = [...appText.matchAll(/"(\/[^"]*)":\[~?(\d+)/g)].map((m) => [m[1], Number(m[2])]);
   if (routes.length === 0) throw new Error(`the page budget found no route table in ${app}`);
@@ -447,7 +448,7 @@ export function builtPages(files) {
   /** @type {Set<string>} */
   const base = new Set();
   for (const entry of entries) walk(entry, base);
-  for (const p of nodes.get(0) ?? []) base.add(p);
+  for (const p of layout) base.add(p);
   return routes.map(([route, node]) => {
     const own = nodes.get(node);
     if (!own) throw new Error(`the page budget found no preload list for ${route} (nodes/${node}) in ${app}`);

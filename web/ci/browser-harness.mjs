@@ -47,7 +47,7 @@
  *
  *   node web/ci/browser-harness.mjs --base http://127.0.0.1:8080 \
  *     [--chrome <path to Chrome or Chromium>] [--n 200] [--pages /db,/ingest] \
- *     [--idle-tabs 1,10,20] [--idle-ms 3600000] [--no-interactions] [--no-idle] \
+ *     [--idle-tabs 1,10,20] [--idle-ms 3600000] [--no-interactions] [--no-idle] [--no-sandbox] \
  *     [--no-report-check] [--hook <module.mjs>]... [--capture <file>] [--out <sheet.md>]
  *
  * No npm dependency: it drives the browser over the DevTools protocol on
@@ -105,7 +105,7 @@ const OBSERVER = `(() => {
 export function parseArgs(argv) {
   /** @type {Record<string, string | boolean | string[]>} */
   const o = { hook: [] };
-  const flags = new Set(['no-interactions', 'no-idle', 'no-report-check']);
+  const flags = new Set(['no-interactions', 'no-idle', 'no-report-check', 'no-sandbox']);
   const valued = new Set(['base', 'chrome', 'n', 'pages', 'idle-tabs', 'idle-ms', 'capture', 'out', 'settle-ms']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -143,6 +143,7 @@ export function parseArgs(argv) {
     interactions: o['no-interactions'] !== true,
     idle: o['no-idle'] !== true,
     reportCheck: o['no-report-check'] !== true,
+    noSandbox: o['no-sandbox'] === true,
     hooks: /** @type {string[]} */ (o.hook),
     capture: o.capture === undefined ? null : String(o.capture),
     out: o.out === undefined ? null : String(o.out)
@@ -165,10 +166,10 @@ export class Cdp {
     ws.addEventListener('message', (ev) => {
       const m = JSON.parse(String(ev.data));
       if (m.id !== undefined) {
-        const w = this.waiting.get(m.id);
+        const w = /** @type {{resolve: (v: any) => void, reject: (e: Error) => void}} */ (this.waiting.get(m.id));
         this.waiting.delete(m.id);
-        if (m.error) w?.reject(new Error(`${m.error.message} (${m.error.code})`));
-        else w?.resolve(m.result);
+        if (m.error) w.reject(new Error(`${m.error.message} (${m.error.code})`));
+        else w.resolve(m.result);
       } else for (const l of this.listeners) l(m);
     });
   }
@@ -192,14 +193,22 @@ export class Cdp {
  * profile directory, and connects.
  *
  * @param {string} chrome
+ * @param {boolean} [noSandbox]
+ * @param {number} [waitMs] how long the browser has to print its DevTools address
  */
-export async function launch(chrome) {
+export async function launch(chrome, noSandbox = false, waitMs = 30_000) {
   if (!chrome || !existsSync(chrome)) throw new Error(`no browser at ${JSON.stringify(chrome)}: pass --chrome or set BRUTEX_CHROME`);
   const profile = mkdtempSync(join(tmpdir(), 'brutex-harness-'));
-  const child = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // `--no-sandbox` only when the operator asks (a browser run as root, in a
+  // container, refuses to start without it): never chosen here on its own.
+  const flags = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'];
+  const child = spawn(chrome, flags, { stdio: ['ignore', 'ignore', 'pipe'] });
   const url = await new Promise((resolve, reject) => {
     let text = '';
-    const timer = setTimeout(() => reject(new Error(`the browser printed no DevTools address in 30 s: ${text.slice(-400)}`)), 30_000);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`the browser printed no DevTools address in ${waitMs} ms: ${text.slice(-400)}`));
+    }, waitMs);
     child.stderr.on('data', (c) => {
       text += c;
       const m = /DevTools listening on (ws:\/\/\S+)/.exec(text);
@@ -208,12 +217,18 @@ export async function launch(chrome) {
         resolve(m[1]);
       }
     });
-    child.on('exit', (code) => reject(new Error(`the browser exited ${code} before it listened: ${text.slice(-400)}`)));
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`the browser exited ${code} before it listened: ${text.slice(-400)}`));
+    });
   });
   const ws = new WebSocket(String(url));
   await new Promise((resolve, reject) => {
     ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', () => reject(new Error(`could not connect to ${url}`)), { once: true });
+    ws.addEventListener('error', () => {
+      child.kill('SIGKILL');
+      reject(new Error(`could not connect to ${url}`));
+    }, { once: true });
   });
   return { cdp: new Cdp(ws), close: () => { ws.close(); child.kill('SIGTERM'); }, profile };
 }
@@ -227,7 +242,7 @@ export async function launch(chrome) {
 export async function openTab(cdp, context) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', ...(context ? { browserContextId: context } : {}) });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  /** @type {Map<string, {method: string, url: string}>} */
+  /** @type {Map<string, {method: string, url: string, status: number}>} */
   const inflight = new Map();
   /** @type {{method: string, url: string, bytes: number, status: number, failed: string | null}[]} */
   const done = [];
@@ -247,7 +262,7 @@ export async function openTab(cdp, context) {
       const r = inflight.get(p.requestId);
       inflight.delete(p.requestId);
       lastActivity = Date.now();
-      if (r) done.push({ method: r.method, url: r.url, bytes: Number(p.encodedDataLength ?? 0), status: r.status ?? 0, failed: m.method === 'Network.loadingFailed' ? String(p.errorText) : null });
+      if (r) done.push({ method: r.method, url: r.url, bytes: Number(p.encodedDataLength ?? 0), status: r.status, failed: m.method === 'Network.loadingFailed' ? String(p.errorText) : null });
     } else if (m.method === 'Runtime.exceptionThrown') {
       errors.push(String(p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text ?? 'an exception'));
     }
@@ -296,12 +311,12 @@ export async function loadOnce(tab, cdp, url, settleMs) {
   await cdp.send('Page.navigate', { url }, tab.sessionId);
   await loaded;
   const settled = await tab.settle(settleMs);
-  const h = (await tab.evaluate('window.__harness')) ?? {};
+  const h = await tab.evaluate('window.__harness');
   const heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
   return {
     fcp: typeof h.fcp === 'number' ? h.fcp : null,
-    longest: Number(h.longest ?? 0),
-    heap: Number(heap.usedSize ?? 0),
+    longest: Number(h.longest),
+    heap: Number(heap.usedSize),
     wire: tab.done.reduce((s, r) => s + r.bytes, 0),
     settled,
     requests: tab.done.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed }))
@@ -417,7 +432,7 @@ async function reportCheck(cdp, base, settleMs) {
 
 /** @param {ReturnType<typeof parseArgs>} args */
 export async function runHarness(args) {
-  const browser = await launch(args.chrome);
+  const browser = await launch(args.chrome, args.noSandbox);
   const { cdp } = browser;
   /** @type {string[]} */
   const lines = ['| page | phase | n | first content p50 / p99 / max ms | longest pause p50 / p99 / max ms | heap p50 / p99 / max MB | wire p50 / p99 / max KB | targets |', '|---|---|---:|---|---|---|---|---|'];
@@ -438,7 +453,7 @@ export async function runHarness(args) {
         await tab.close();
         await cdp.send('Target.disposeBrowserContext', { browserContextId });
       }
-      capture.push(...captured(page, cold[0]?.requests ?? [], args.base));
+      capture.push(...captured(page, cold[0].requests, args.base));
       const tab = await openTab(cdp, undefined);
       await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs);
       /** @type {Awaited<ReturnType<typeof loadOnce>>[]} */
@@ -507,7 +522,7 @@ export async function runHarness(args) {
         await new Promise((r) => setTimeout(r, args.idleMs));
         const requests = tabs.flatMap((t) => t.done);
         const v = idleVerdict(requests, args.base);
-        lines.push(`| ${count} | ${(args.idleMs / 60_000).toFixed(1)} min | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
+        lines.push(`| ${count} | ${(args.idleMs / 1_000).toFixed(0)} s | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
         if (v.other.length > 0) failures.push(`${count} idle tabs asked for more than the header-only up check: ${v.other.join('; ')}`);
         for (const t of tabs) await t.close();
       }

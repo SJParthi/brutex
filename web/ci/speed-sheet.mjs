@@ -44,7 +44,8 @@
  *     [--n 200] [--clients 1,10,60] [--writer '<command>'] \
  *     [--restart '<command>' --restarts 20] [--from-pages <capture.json>] \
  *     [--feed <wire>] [--instrument NSE-INDEX-NIFTY] [--timeframe <rung>] \
- *     [--month YYYY-MM] [--day YYYY-MM-DD] [--out <sheet.md>] [--allow-unstamped]
+ *     [--month YYYY-MM] [--day YYYY-MM-DD] [--out <sheet.md>] [--allow-unstamped] \
+ *     [--timeout-ms 60000] [--up-wait-ms 120000]
  *
  * Exit 0 when every row was answered, stamped by one build and no field was
  * ignored; 1 with every reason printed otherwise; 2 for a misused command.
@@ -133,7 +134,8 @@ export function requestsFor(ctx, captured = []) {
     const url = e.make(ctx);
     const label = e.label ?? '';
     if (url === null) {
-      skipped.push(`${e.page} ${e.route}${label ? ` (${label})` : ''}: ${e.builder?.name ?? 'its builder'} built no request for this selection`);
+      // Only a builder answers null: a bare route is always asked.
+      skipped.push(`${e.page} ${e.route}: ${/** @type {Function} */ (e.builder).name} built no request for this selection`);
       continue;
     }
     requests.push({ page: e.page, route: e.route, label, method: e.method ?? 'GET', url, builder: e.builder?.name ?? '(no query)' });
@@ -177,7 +179,7 @@ export function parseArgs(argv) {
   /** @type {Record<string, string | boolean>} */
   const o = {};
   const flags = new Set(['allow-unstamped', 'help']);
-  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms']);
+  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms', 'up-wait-ms']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
@@ -218,7 +220,8 @@ export function parseArgs(argv) {
     day,
     out: o.out === undefined ? null : String(o.out),
     allowUnstamped: o['allow-unstamped'] === true,
-    timeoutMs: whole('timeout-ms', 60_000, 1)
+    timeoutMs: whole('timeout-ms', 60_000, 1),
+    upWaitMs: whole('up-wait-ms', 120_000, 1)
   };
 }
 
@@ -243,6 +246,7 @@ export function timed(base, path, o = {}) {
   const lib = url.protocol === 'https:' ? https : http;
   const t0 = process.hrtime.bigint();
   const ms = () => Number(process.hrtime.bigint() - t0) / 1e6;
+  const limit = o.timeoutMs ?? 60_000;
   return new Promise((resolve) => {
     const req = lib.request(url, { method: o.method ?? 'GET', agent: o.agent ?? false, headers: { accept: 'application/json' } }, (res) => {
       /** @type {Buffer[]} */
@@ -251,11 +255,12 @@ export function timed(base, path, o = {}) {
       res.on('end', () => {
         const body = Buffer.concat(parts);
         const raw = res.headers[BUILD_HEADER];
-        resolve({ status: res.statusCode ?? 0, headers: res.headers, body: body.toString('utf8'), ms: ms(), bytes: body.length, build: typeof raw === 'string' ? raw : null });
+        resolve({ status: Number(res.statusCode), headers: res.headers, body: body.toString('utf8'), ms: ms(), bytes: body.length, build: typeof raw === 'string' ? raw : null });
       });
-      res.on('error', (e) => resolve({ status: 0, error: e.message, ms: ms(), build: null, body: '', bytes: 0, headers: {} }));
+      // A body cut off mid-answer is no answer: the headers alone are not one.
+      res.on('error', (e) => resolve({ status: 0, error: `the answer was cut off: ${e.message}`, ms: ms(), build: null, body: '', bytes: 0, headers: {} }));
     });
-    req.setTimeout(o.timeoutMs ?? 60_000, () => req.destroy(new Error(`no answer within ${o.timeoutMs ?? 60_000} ms`)));
+    req.setTimeout(limit, () => req.destroy(new Error(`no answer within ${limit} ms`)));
     req.on('error', (e) => resolve({ status: 0, error: e.message, ms: ms(), build: null, body: '', bytes: 0, headers: {} }));
     req.end();
   });
@@ -468,10 +473,10 @@ export async function runSheet(args, deps = {}) {
         failures.push(`restart ${i + 1}: the --restart command exited ${code}`);
         break;
       }
-      const deadline = Date.now() + 120_000;
+      const deadline = Date.now() + args.upWaitMs;
       while ((await send(UP_ROUTE, { method: UP_METHOD })).status !== 200) {
         if (Date.now() > deadline) {
-          failures.push(`restart ${i + 1}: the server was not up 120 s after the restart`);
+          failures.push(`restart ${i + 1}: the server was not up ${args.upWaitMs} ms after the restart`);
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 250));

@@ -581,6 +581,12 @@ test('the sheet times over the network, and a request with no answer is said, ne
   const server = http.createServer((req, res) => {
     if (req.url === '/slow') return void setTimeout(() => res.end('late'), 200);
     if (req.url === '/broken') return void res.socket?.destroy();
+    if (req.url === '/partial') {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '100' });
+      res.write('{"cut');
+      return void setTimeout(() => res.socket?.destroy(), 20);
+    }
+    if (req.url === '/plain') return void res.end('{}');
     res.writeHead(200, { 'content-type': 'application/json', 'x-brutex-build': 'b'.repeat(40) });
     res.end('{"ok":true}');
   });
@@ -595,6 +601,10 @@ test('the sheet times over the network, and a request with no answer is said, ne
     assert.equal(late.status, 0);
     assert.match(/** @type {any} */ (late).error, /no answer within 20 ms/);
     assert.equal((await sheet.timed(base, '/broken')).status, 0);
+    const cut = await sheet.timed(base, '/partial');
+    assert.equal(cut.status, 0, 'headers with a body cut off are no answer');
+    assert.match(/** @type {any} */ (cut).error, /the answer was cut off/);
+    assert.equal((await sheet.timed(base, '/plain')).build, null, 'a server that names no build is said as null');
     const agent = new http.Agent({ keepAlive: true });
     const row = await sheet.measure((p, o) => sheet.timed(base, p, o), { page: '/p', route: '/x', label: '', method: 'GET', url: '/x', builder: 'b' }, { n: 6, clients: 2, phase: 'warm', agentOf: () => agent, timeoutMs: 1_000 });
     assert.deepEqual([row.n, row.classes.answered, row.builds], [6, 6, ['b'.repeat(40)]]);
@@ -780,9 +790,218 @@ test('the Speed page reads /speed.json once, through the checked reader, and nev
   assert.match(page, /microsText\(r\.p99, r\.n\)/);
 });
 
+test('the sheet\'s own edges: a capture file, a request with no first answer, a server that never comes back, an unstamped restart, slow rows', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'r315-sheet-'));
+  const capture = join(dir, 'capture.json');
+  writeFileSync(capture, JSON.stringify({ requests: [{ page: '/gaps', method: 'GET', url: '/gaps.json?feed=zerodha' }] }));
+  const fromFile = await sheet.runSheet({ ...argsFor(), fromPages: capture }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.ok(fromFile.rows.some((r) => r.url === '/gaps.json?feed=zerodha'), 'the capture file is read and replayed');
+  const dropped = await sheet.runSheet(argsFor(), { send: standIn({ ignore: new Set(), drop: '/dayflags.json' }).send, log: () => {} });
+  assert.ok(dropped.failures.some((f) => f.includes('/dayflags.json') && f.includes('no answer')), 'a read with no answer is failed where it is timed, not in the field check');
+  assert.ok(!dropped.failures.some((f) => f.includes('field') && f.includes('/dayflags.json')));
+  const never = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1, upWaitMs: 1 }, { send: standIn({ ignore: new Set(), up: (() => { let first = true; return () => (first ? ((first = false), true) : false); })() }).send, log: () => {}, restart: async () => 0 });
+  assert.ok(never.failures.includes('restart 1: the server was not up 1 ms after the restart'), never.failures.join('\n'));
+  const gone = standIn({ ignore: new Set(), drop: '/aliases.json' });
+  const blank = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1, allowUnstamped: true }, { send: standIn({ ignore: new Set(), build: null, drop: '/aliases.json' }).send, log: () => {}, restart: async () => 0 });
+  assert.ok(blank.failures.includes('restart 1: the first /aliases.json answered dropped'), blank.failures.join('\n'));
+  assert.deepEqual(blank.rows.filter((r) => r.phase === 'first after restart')[0].builds, [], 'an unstamped server stamps no build on a restart row');
+  void gone;
+  const slow = sheet.renderSheet({ ...blank, rows: [{ ...blank.rows[0], p50: 12.345, p99: 9.5, max: 100 }] }, argsFor());
+  assert.match(slow, /\| 12\.3 \| 9\.50 \| 100\.0 \|/);
+  // A writer killed at the end of its pass, by a signal, is said as ended by its signal.
+  const killed = await sheet.runSheet({ ...argsFor(), writer: 'sleep 5' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.ok(!killed.failures.some((f) => f.includes('--writer')), killed.failures.join('\n'));
+});
+
+test('the sheet runs over the real network against a server, by default, and as a command', async () => {
+  const strict = standIn({ ignore: new Set() });
+  const server = http.createServer(async (req, res) => {
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  const dir = mkdtempSync(join(tmpdir(), 'r315-cli-'));
+  try {
+    const args = { ...sheet.parseArgs(['--base', base, '--n', '2', '--clients', '1,3']), feed: CTX.feed, timeframe: CTX.timeframe, month: CTX.month, day: CTX.day };
+    const quiet = console.error;
+    console.error = () => {};
+    let real;
+    try {
+      real = await sheet.runSheet(args);
+    } finally {
+      console.error = quiet;
+    }
+    assert.deepEqual(real.failures, []);
+    assert.ok(real.rows.every((r) => r.classes.answered === r.n), 'every timed request was answered over the network');
+    const { spawnSync } = await import('node:child_process');
+    const script = new URL('ci/speed-sheet.mjs', web).pathname;
+    const misuse = spawnSync(process.execPath, [script, '--bogus'], { encoding: 'utf8' });
+    assert.equal(misuse.status, 2);
+    assert.match(misuse.stderr, /speed-sheet: unknown option --bogus/);
+    const out = join(dir, 'sheet.md');
+    const { execFile } = await import('node:child_process');
+    const ran = await new Promise((resolve) => execFile(process.execPath, [script, '--base', base, '--n', '1', '--clients', '1', '--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day, '--out', out], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
+    assert.equal(/** @type {any} */ (ran).code, 0, String(/** @type {any} */ (ran).stdout));
+    assert.match(readFileSync(out, 'utf8'), /^# Speed sheet — PASS/);
+  } finally {
+    server.close();
+  }
+});
+
+test('the harness in a real browser: the four figures, the interactions, idle tabs, the reporter end to end, hooks and the capture', { timeout: 300_000 }, async () => {
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'the browser harness test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+  const site = await browserStandIn({});
+  const dir = mkdtempSync(join(tmpdir(), 'r315-harness-'));
+  const hook = join(dir, 'hook.mjs');
+  writeFileSync(hook, 'export default async (h) => ({ rows: [`hook saw ${h.base}`], failures: [`hook failure`] });\n');
+  const silent = join(dir, 'silent.mjs');
+  writeFileSync(silent, 'export default async () => undefined;\n');
+  const capture = join(dir, 'capture.json');
+  try {
+    const args = harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/db,/gaps,/blank', '--idle-tabs', '1,2', '--idle-ms', '1000', '--settle-ms', '100', '--hook', hook, '--hook', silent, '--capture', capture, ...root]);
+    const r = await harness.runHarness(args);
+    const text = r.lines.join('\n');
+    assert.match(text, /^\| \/db \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m);
+    assert.match(text, /^\| \/db \| warm \| 2 \|.*\| holds \|$/m);
+    assert.match(text, /^\| picker click \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \| [\d.]+ \|$/m);
+    assert.match(text, /^\| feed switch \| 0 \| NOT MEASURED: \[aria-controls="feed-listbox"\] is not on \/db \| — \|$/m);
+    assert.match(text, /^\| 1 \| 1 s \| \d+ \| none \|$/m);
+    assert.match(text, /^\| 2 \| 1 s \| \d+ \| GET \/feeds\.json \|$/m);
+    assert.match(text, /Shared reporter: a failed \/feeds\.json\?harness=\d+ was reported \(202\) and found in \/logs\.json\./);
+    assert.match(text, /hook saw http:\/\/127\.0\.0\.1:\d+/);
+    assert.ok(r.failures.includes('2 idle tabs asked for more than the header-only up check: GET /feeds.json'), r.failures.join('\n'));
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps: an uncaught error: Error: boom')), r.failures.join('\n'));
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps: an uncaught error: Uncaught')), 'a thrown string is named by its text');
+    assert.ok(r.failures.some((f) => f.startsWith('/blank cold: 2 of 2 loads painted no first content')));
+    assert.ok(r.failures.includes('hook failure'));
+    assert.deepEqual(r.notes, ['feed switch: NOT MEASURED — the selector [aria-controls="feed-listbox"] was not found on /db']);
+    assert.equal(r.ok, false);
+    const saved = JSON.parse(readFileSync(capture, 'utf8'));
+    assert.ok(saved.requests.some((/** @type {any} */ q) => q.page === '/gaps' && q.url === '/feeds.json'));
+    assert.doesNotThrow(() => sheet.readCapture(readFileSync(capture, 'utf8')));
+    // The reporter's three ways to fail the check, each by name.
+    for (const [o, why] of /** @type {[object, RegExp][]} */ ([
+      [{ noReporter: true }, /sent no \/page-report for a failed/],
+      [{ reportStatus: 503 }, /\/page-report answered 503 for the report of/],
+      [{ forget: true }, /was answered 202 and is not in \/logs\.json/]
+    ])) {
+      const s = await browserStandIn(o);
+      try {
+        const one = await harness.runHarness(harness.parseArgs(['--base', s.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--settle-ms', '100', ...root]));
+        assert.ok(one.failures.some((f) => why.test(f)), one.failures.join('\n'));
+      } finally {
+        s.server.close();
+      }
+    }
+    // The protocol's own refusal reaches the caller.
+    const b = await harness.launch(chrome, root.length > 0);
+    try {
+      await assert.rejects(b.cdp.send('Bogus.method'), /Bogus\.method/);
+    } finally {
+      b.close();
+    }
+  } finally {
+    site.server.close();
+  }
+});
+
+test('the harness refuses a browser it cannot start or reach, by name, and as a command', async () => {
+  await assert.rejects(harness.launch('/nonexistent/chrome'), /no browser at "\/nonexistent\/chrome"/);
+  await assert.rejects(harness.launch(''), /no browser at ""/);
+  await assert.rejects(harness.launch('/bin/false'), /the browser exited 1 before it listened/);
+  const dir = mkdtempSync(join(tmpdir(), 'r315-fake-chrome-'));
+  const mute = join(dir, 'mute');
+  writeFileSync(mute, '#!/bin/sh\nexec sleep 5\n', { mode: 0o755 });
+  await assert.rejects(harness.launch(mute, false, 200), /printed no DevTools address in 200 ms/);
+  const liar = join(dir, 'liar');
+  writeFileSync(liar, '#!/bin/sh\necho "DevTools listening on ws://127.0.0.1:1/devtools/browser/x" >&2\nexec sleep 5\n', { mode: 0o755 });
+  await assert.rejects(harness.launch(liar), /could not connect to ws:\/\/127\.0\.0\.1:1/);
+  const { spawnSync } = await import('node:child_process');
+  const script = new URL('ci/browser-harness.mjs', web).pathname;
+  const misuse = spawnSync(process.execPath, [script, '--bogus'], { encoding: 'utf8' });
+  assert.equal(misuse.status, 2);
+  assert.match(misuse.stderr, /browser-harness: unknown option --bogus/);
+  const nobrowser = spawnSync(process.execPath, [script, '--base', 'http://127.0.0.1:1', '--chrome', '/nonexistent/chrome'], { encoding: 'utf8' });
+  assert.equal(nobrowser.status, 2);
+  assert.match(nobrowser.stderr, /browser-harness: no browser at/);
+});
+
+test('the harness as a command writes its sheet and exits by its verdict', { timeout: 120_000 }, async () => {
+  const site = await browserStandIn({});
+  const dir = mkdtempSync(join(tmpdir(), 'r315-harness-cli-'));
+  const out = join(dir, 'harness.md');
+  try {
+    const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+    const { execFile } = await import('node:child_process');
+    const script = new URL('ci/browser-harness.mjs', web).pathname;
+    for (const [pages, code] of /** @type {const} */ ([['/speed', 0], ['/blank', 1]])) {
+      const ran = await new Promise((resolve) => execFile(process.execPath, [script, '--base', site.base, '--n', '1', '--pages', pages, '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--out', out, ...root], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
+      assert.equal(/** @type {any} */ (ran).code, code, String(/** @type {any} */ (ran).stdout));
+      assert.match(readFileSync(out, 'utf8'), code === 0 ? /^# Browser harness — PASS/ : /^# Browser harness — FAIL[\s\S]*- FAILED: \/blank cold: 1 of 1 loads painted no first content/);
+    }
+  } finally {
+    site.server.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for the app in a browser: pages that load the REAL
+ * `$lib/page-report.js`, a `/page-report` that keeps what it is sent, and a
+ * `/logs.json` that serves it back.
+ *
+ * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean}} o
+ */
+async function browserStandIn(o) {
+  const reporter = source('src/lib/page-report.js');
+  /** @type {object[]} */
+  const log = [];
+  const script = o.noReporter ? '' : `<script type="module">import '/lib/page-report.js';</script>`;
+  /** @param {string} title @param {string} [extra] */
+  const page = (title, extra = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title><body><h1>${title}</h1>${extra}${script}`;
+  /** @type {Record<string, string>} */
+  const pages = {
+    '/db': page('db', `<input aria-controls="db-search-list"><div id="db-search-list"></div><table><tr><th aria-sort="none"><button>ts</button></th></tr></table><button aria-label="Next page">next</button><script>document.querySelector('input').addEventListener('input', () => { document.querySelector('#db-search-list').innerHTML = '<div role="option" onclick="fetch(\\'/feeds.json\\')">NIFTY</div>'; }); setInterval(() => fetch('/inspection.json', { method: 'HEAD' }), 300);</script>`),
+    '/gaps': page('gaps', `<script>fetch('/feeds.json'); fetch('/broken').catch(() => null); setInterval(() => fetch('/feeds.json'), 300); setTimeout(() => { throw new Error('boom'); }, 0); setTimeout(() => { throw 'plain'; }, 0);</script>`),
+    '/speed': page('speed'),
+    '/blank': `<!doctype html><title>blank</title><body>${script}`
+  };
+  const server = http.createServer((req, res) => {
+    const u = new URL(String(req.url), 'http://x');
+    /** @param {number} status @param {string} type @param {string} body @param {Record<string, string>} [extra] */
+    const send = (status, type, body, extra = {}) => {
+      res.writeHead(status, { 'content-type': type, ...extra });
+      res.end(body);
+    };
+    if (u.pathname === '/lib/page-report.js') return send(200, 'text/javascript', reporter);
+    if (u.pathname === UP_ROUTE) return send(200, 'application/json', req.method === 'HEAD' ? '' : '{}', { 'x-brutex-build': 'f'.repeat(40) });
+    if (u.pathname === REPORT_ROUTE && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const f = new URLSearchParams(body);
+        if (!o.forget) log.push({ target: 'api.page.access', page: f.get('page'), what: f.get('what') });
+        send(o.reportStatus ?? 202, 'application/json', '{"written":true}');
+      });
+      return;
+    }
+    if (u.pathname === '/logs.json') return send(200, 'application/json', JSON.stringify({ lines: log }));
+    if (u.pathname === '/feeds.json') return send(200, 'application/json', '[]');
+    if (u.pathname === '/broken') return void res.socket?.destroy();
+    if (u.pathname in pages) return send(200, 'text/html; charset=utf-8', pages[u.pathname]);
+    send(404, 'text/plain', 'no');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  return { server, log, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
+}
 
 /** @param {number} status @param {string} [body] @param {Record<string, string>} [headers] */
 function response(status, body = '', headers = {}) {
