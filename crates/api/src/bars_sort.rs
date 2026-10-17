@@ -2682,6 +2682,7 @@ mod tests;
               must fail loudly"
 )]
 mod cloud_mutant_tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use brutex_core::instrument::Contract;
@@ -3940,6 +3941,400 @@ mod cloud_mutant_tests {
         );
         assert_eq!(ask(120), (Some(index_extremes(&rows[120..240])), None, 120));
         assert_eq!(ask(0), (Some(index_extremes(&rows[120..240])), None, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The plans and rules a window builds for `asked`, as `window` builds
+    /// them, for a test that calls one of this module's steps directly.
+    fn plans_of(
+        root: &std::path::Path,
+        asked: &WindowQuery,
+    ) -> (Vec<super::SeriesPlan>, Vec<super::change::Rules>) {
+        let months = super::super::months_of(asked.from, asked.to).expect("a month range");
+        let lineage = super::change::Lineage::read(root, asked.vendor);
+        let mut plans = Vec::new();
+        let mut rules = Vec::new();
+        for key in &asked.series {
+            rules.push(super::change::Rules::of(
+                root,
+                asked.timeframe,
+                key,
+                &lineage,
+            ));
+            plans.push(
+                super::SeriesPlan::build(
+                    root,
+                    asked.vendor,
+                    asked.timeframe,
+                    key.clone(),
+                    &months,
+                    asked.filter,
+                    &super::Cancel::never(),
+                )
+                .expect("a plan"),
+            );
+        }
+        (plans, rules)
+    }
+
+    /// **A SLOT THE PLAN DOES NOT HOLD HAS NO VIEW**, refused by name. The
+    /// edge of `view` no caller asks: every slot it is given is a run's.
+    #[test]
+    fn a_view_of_a_slot_the_plan_does_not_hold_is_refused() {
+        let root = scratch("view-slot");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let (mut plans, _) = plans_of(&root, &query(index(), month(1), month(1), SortKey::Close));
+        let plan = plans.first_mut().expect("one plan");
+        let past = plan.slots.len();
+        let refused = super::view(&root, plan, past, 60, &super::Aside::new())
+            .map(|_| ())
+            .expect_err("no such slot");
+        assert_eq!(
+            refused,
+            format!("slot {past} is not a month of this window")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN INDEX THE HOST CANNOT EVEN STAT IS NAMED WITH ITS PATH AND THE
+    /// HOST'S WORDS, NEVER TAKEN AS ABSENT.** The plan was made, then the
+    /// month's rung directory became a file (the store changed during the
+    /// request): asking for the `.srt` beside the bars is `Not a directory`,
+    /// which is neither "no index" nor "a small month". Takes the false
+    /// branches of both not-found guards in `view` and runs its last arm.
+    #[test]
+    fn an_index_the_host_cannot_stat_is_named_with_its_path() {
+        let root = scratch("view-stat");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let (mut plans, _) = plans_of(&root, &query(index(), month(1), month(1), SortKey::Close));
+        let rung = srt.parent().expect("the rung directory").to_path_buf();
+        std::fs::remove_dir_all(&rung).expect("the rung directory goes");
+        std::fs::write(&rung, b"a file where the rung directory was").expect("a file");
+        let plan = plans.first_mut().expect("one plan");
+        let refused = super::view(&root, plan, 0, 60, &super::Aside::new())
+            .map(|_| ())
+            .expect_err("the index cannot be asked about");
+        assert!(
+            refused.starts_with(&format!("{}: ", srt.display())),
+            "{refused}"
+        );
+        assert!(refused.contains("Not a directory"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **WITHIN ONE REQUEST A MONTH'S INDEX IS WALKED ONCE**: a second cut
+    /// over the request's views uses the view it holds, even after the
+    /// `.srt` is gone, while a cut with fresh views reads the month. Takes
+    /// the true branch of the request's view lookup in `cut`.
+    #[test]
+    fn a_view_walked_once_in_a_request_is_reused() {
+        let root = scratch("view-reused");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let asked = query(index(), month(1), month(1), SortKey::Close);
+        let (mut plans, _) = plans_of(&root, &asked);
+        let indexed = |cuts: &[super::Cut]| {
+            cuts.iter()
+                .flat_map(|cut| &cut.pieces)
+                .filter(|piece| matches!(piece, super::Piece::Indexed { .. }))
+                .count()
+        };
+        let mut views = HashMap::new();
+        let first = super::cut(&root, &mut plans, &asked, &mut views, &super::Aside::new());
+        assert_eq!(indexed(&first), 3, "three runs of 130 over 360 rows");
+        std::fs::remove_file(&srt).expect("the index goes");
+        let again = super::cut(&root, &mut plans, &asked, &mut views, &super::Aside::new());
+        assert_eq!(indexed(&again), 3, "the request's view is used");
+        let fresh = super::cut(
+            &root,
+            &mut plans,
+            &asked,
+            &mut HashMap::new(),
+            &super::Aside::new(),
+        );
+        assert_eq!(indexed(&fresh), 0, "a new request reads the month");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAY BOUND THAT STARTS AFTER A WHOLE INDEX RUN PASSES IT OVER**:
+    /// from the 4th, rows `[240, 360)` are kept; the run `[0, 130)` lies
+    /// wholly before them and gives nothing, `[130, 260)` is cut, and
+    /// `[260, 360)` is served whole. The page and its extremes are the brute
+    /// force. Takes the true branch of `srt.end <= run.start` in `cut`.
+    #[test]
+    fn a_day_bound_after_a_whole_index_run_passes_it_over() {
+        let root = scratch("bound-after-run");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let (lo, _) = month(1).ist_bounds_micros();
+        let mut asked = query(index(), month(1), month(1), SortKey::Close);
+        asked.filter.from = Some(lo + 3 * 86_400 * MICROS);
+        asked.want_extremes = true;
+        let got = window(&root, &asked).expect("answers");
+        let mut want: Vec<(i64, i64)> = rows[240..]
+            .iter()
+            .map(|bar| (bar.close, bar.ts_micros))
+            .collect();
+        want.sort_unstable();
+        want.truncate(37);
+        let served: Vec<(i64, i64)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.bar.ts_micros))
+            .collect();
+        assert_eq!(served, want);
+        assert_eq!(got.extremes, Some(index_extremes(&rows[240..])));
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!((report.indexed_runs, report.cut_runs), (2, 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN OPEN-INTEREST PAGE OVER INDEXED AND READ ROWS, WITH NULLS IN
+    /// BOTH, IS THE BRUTE FORCE AT EVERY DEPTH**: values in their direction,
+    /// then nulls by time. January's 1,000 rows of a contract are indexed in
+    /// runs of 130; February's 360 are read. Every seventh row is null.
+    /// Pages at six offsets, in both directions, are the brute force over all
+    /// 1,360. Reaches the null kept rows of the value bisection
+    /// (`kept_le`, `value_slices`).
+    #[test]
+    fn an_open_interest_page_over_indexed_and_read_rows_with_nulls_is_the_brute_force() {
+        let root = scratch("oi-mixed");
+        let oi = |i: i64| {
+            if i % 7 == 3 {
+                OI_NULL
+            } else {
+                (i * 104_729) % 1_009
+            }
+        };
+        let jan: Vec<Bar> = (0..1_000).map(|i| bar(month(1), i, oi(i))).collect();
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, oi(i + 1_000))).collect();
+        write(&root, &option(), month(1), &jan, &jan);
+        let feb_srt = write(&root, &option(), month(2), &feb, &feb);
+        std::fs::remove_file(feb_srt).expect("February is left with no index");
+        for desc in [false, true] {
+            let key = |bar: &Bar| {
+                let null = bar.open_interest == OI_NULL;
+                let value = if null {
+                    0
+                } else if desc {
+                    -bar.open_interest
+                } else {
+                    bar.open_interest
+                };
+                (null, value, bar.ts_micros)
+            };
+            let mut want: Vec<(bool, i64, i64)> = jan.iter().chain(&feb).map(key).collect();
+            want.sort_unstable();
+            for offset in [0, 150, 400, 900, 1_200, 1_323] {
+                let mut asked = query(option(), month(1), month(2), SortKey::OpenInterest);
+                asked.desc = desc;
+                asked.offset = Some(offset);
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<(bool, i64, i64)> =
+                    got.bars.iter().map(|row| key(&row.bar)).collect();
+                let page: Vec<(bool, i64, i64)> =
+                    want.iter().skip(offset).take(37).copied().collect();
+                assert_eq!(served, page, "desc {desc} offset {offset}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`keep_best` WITH ROOM FOR NONE CUTS NOTHING, AND A PLAN WITH NO RUN
+    /// HAS NO RUN FOR ANY SLOT.** Two edges no caller reaches: `keep` is at
+    /// least one wherever it is asked, and a slot is only ever looked up
+    /// for a run it produced.
+    #[test]
+    fn keeping_none_cuts_nothing_and_a_runless_plan_has_no_run() {
+        let row = |vkey: i64| super::Kept {
+            key: super::Key {
+                null: false,
+                vkey,
+                ts: 0,
+                series: 0,
+            },
+            run: 0,
+            row: 0,
+        };
+        let mut kept = vec![row(3), row(1), row(2)];
+        let order = |a: &super::Kept, b: &super::Kept| a.key.vkey.cmp(&b.key.vkey);
+        assert!(super::keep_best(&mut kept, 0, order).is_none());
+        assert_eq!(kept.len(), 3, "nothing is cut");
+        let worst = super::keep_best(&mut kept, 2, order).expect("two kept");
+        assert_eq!((worst.key.vkey, kept.len()), (2, 2));
+
+        let root = scratch("runless");
+        let (plans, _) = plans_of(&root, &query(index(), month(1), month(1), SortKey::Close));
+        let plan = plans.first().expect("one plan");
+        assert!(plan.runs.is_empty(), "nothing is held");
+        assert_eq!(super::run_of_slot(plan, 0), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A VALUE PAGE NEEDS A VALUE COLUMN**: `page_once` asked for a time
+    /// order refuses by name. `window` sends only value orders there.
+    #[test]
+    fn a_value_page_without_a_value_column_is_refused() {
+        let root = scratch("no-column");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let asked = query(index(), month(1), month(1), SortKey::Ts);
+        let (mut plans, rules) = plans_of(&root, &asked);
+        let mut faults = crate::fault_log::FaultLog::default();
+        let refused = super::page_once(
+            &root,
+            &mut plans,
+            &rules,
+            &asked,
+            (0, 37),
+            &mut faults,
+            (&super::Cancel::never(), &super::Aside::new()),
+        );
+        assert!(
+            matches!(&refused, Err(super::Attempt::Refused(why)) if why == "a value page needs a value column"),
+            "{:?}",
+            refused.as_ref().map(|_| ()).err().map(|why| match why {
+                super::Attempt::Refused(why) => why.clone(),
+                super::Attempt::Broken { why, .. } => why.clone(),
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A CLIENT GONE AT ANY LOOK OF A DAY-CUT PAGE OR ITS EXTREMES ENDS THE
+    /// REQUEST AS CANCELLED** (DB-N15), on a value page and on a time-ordered
+    /// one. Two index runs of 5,000 rows; a day bound cuts both, so 8,000
+    /// kept rows are folded for the extremes and the fold looks at the flag
+    /// at row 4,096. A flag that turns at any look ends the request by name,
+    /// the cut fold's included. Runs `From<String> for Attempt` (a `?` on a
+    /// cancellation inside `page_once`) and the cut folds' `?`s in
+    /// `page_once` and `extremes_of`.
+    #[test]
+    fn a_client_gone_at_any_look_of_a_day_cut_page_ends_the_request() {
+        // ONE THOUSAND MINUTES A DAY FROM IST MIDNIGHT, ON THE 2ND TO THE 11TH.
+        let rows: Vec<Bar> = (0..10_000)
+            .map(|i| Bar {
+                ts_micros: month(1).ist_bounds_micros().0
+                    + (i / 1_000 + 1) * 86_400 * MICROS
+                    + (i % 1_000) * 60 * MICROS,
+                ..bar(month(1), i % 120, OI_NULL)
+            })
+            .collect();
+        let (lo, _) = month(1).ist_bounds_micros();
+        // A STORE EACH: the first request's fold is held, and a held fold
+        // reads no row and takes no look.
+        for (tag, sort) in [
+            ("cut-cancel-close", SortKey::Close),
+            ("cut-cancel-ts", SortKey::Ts),
+        ] {
+            let root = scratch(tag);
+            write_runs(&root, &index(), month(1), &rows, 5_000);
+            let mut asked = query(index(), month(1), month(1), sort);
+            asked.filter.from = Some(lo + 2 * 86_400 * MICROS);
+            asked.filter.to = Some(lo + 10 * 86_400 * MICROS);
+            asked.want_extremes = true;
+            let (cancel, guard) = super::Cancel::pair();
+            let mut tripped = 0;
+            for looks in 0..256_u64 {
+                super::super::cancel_trip::arm(looks);
+                let got = super::super::window_cancellable(&root, &asked, &cancel);
+                let left = super::super::cancel_trip::disarm();
+                match got {
+                    Err(why) => {
+                        assert!(why.starts_with("cancelled"), "{sort:?} look {looks}: {why}");
+                        tripped += 1;
+                    }
+                    Ok(window) => {
+                        // NOT EVERY LOOK IS SPENT: a fold cut short keeps the
+                        // stretches it finished, so a later attempt reads fewer
+                        // rows and may reach no stride look.
+                        assert!(left.is_some(), "{sort:?}: the flag was armed");
+                        assert_eq!(window.extremes_why, None, "{sort:?}");
+                        assert_eq!(window.extremes, Some(index_extremes(&rows[1_000..9_000])));
+                        break;
+                    }
+                }
+            }
+            assert!(
+                tripped >= 3,
+                "{sort:?}: {tripped} looks cut the request short"
+            );
+            guard.disarm();
+            // HELD NOW: the next request folds nothing.
+            let again = window(&root, &asked).expect("answers");
+            assert_eq!(again.extremes, Some(index_extremes(&rows[1_000..9_000])));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Writes `rows` as `key`'s month on GDFL, indexed in runs of `run`.
+    fn write_runs(
+        root: &std::path::Path,
+        key: &SeriesKey,
+        month: YearMonth,
+        rows: &[Bar],
+        run: usize,
+    ) {
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: &key.exchange,
+            segment: &key.segment,
+            symbol: &key.symbol,
+            contract: key.contract,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        let symbol_id = super::symbol_id(&key.symbol);
+        store::file::BarFile::open_or_create(root, path, symbol_id)
+            .expect("a generated bar file")
+            .append(rows)
+            .expect("generated records");
+        crate::scratch::plant_pre_rule_sort_index(
+            &path.to_path_buf(root),
+            &Shape::of(month, 60, symbol_id),
+            rows,
+            run,
+        );
+    }
+
+    /// **A SORT ENTRY THAT NAMES AN INSTANT NO BAR IS STAMPED AT IS NEVER
+    /// SERVED**: the index was built from rows in which one bar's stamp was
+    /// moved 30 s; the page's row there is named as a stale entry, with the
+    /// command that rebuilds it, and not served. Takes the false branch of
+    /// `bar.ts_micros == ts` in `page_once`.
+    #[test]
+    fn a_sort_entry_naming_an_unstamped_instant_is_never_served() {
+        let root = scratch("stale-instant");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        // THE SMALLEST CLOSE OF A ROW INSIDE A RUN: a run's first and last
+        // stamps are bound to the bars, an inner one is not.
+        let moved = (0..360_usize)
+            .filter(|i| !matches!(i % 130, 0 | 129) && *i != 359)
+            .min_by_key(|&i| (rows[i].close, rows[i].ts_micros))
+            .expect("an inner row");
+        let mut indexed = rows.clone();
+        indexed[moved].ts_micros += 30 * MICROS;
+        write(&root, &index(), month(1), &rows, &indexed);
+        let got =
+            window(&root, &query(index(), month(1), month(1), SortKey::Close)).expect("answers");
+        assert!(
+            got.bars
+                .iter()
+                .all(|row| row.bar.ts_micros != rows[moved].ts_micros),
+            "the stale row is not served"
+        );
+        assert!(
+            got.faults.iter().any(|fault| fault.contains(&format!(
+                "the sort index names a c of Some({}) at {}",
+                rows[moved].close, indexed[moved].ts_micros
+            )) && fault.contains("cli srt-build")),
+            "{:?}",
+            got.faults
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
