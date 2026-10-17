@@ -154,15 +154,15 @@ export function denseOwed(body) {
   if (!days || !Number.isSafeInteger(from)) return { owed, indexOwed };
   // A BODY IS IN HAND HERE: the guard above read its day string.
   const regular = Number.isSafeInteger(body.minuteOwed?.regular) ? body.minuteOwed.regular : null;
-  /** @type {Map<number, any>} */
-  const special = new Map();
-  for (const entry of Array.isArray(body.special) ? body.special : []) special.set(entry?.day, entry);
+  // A HANDFUL OF SPECIAL DAYS, found by their day; an answer with no list sizes none.
+  /** @type {any[] | null} */
+  const special = Array.isArray(body.special) ? body.special : null;
   for (let at = 0; at < days.length; at += 1) {
     const code = days[at];
     if (code === '.' || code === '-') continue;
     const day = from + at;
     const iso = isoOfEpochDay(day);
-    const sized = special.get(day);
+    const sized = special?.find((entry) => entry?.day === day);
     if (sized) {
       owed.set(iso, sized.minuteOwed ?? null);
       // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE" (D-0420).
@@ -457,7 +457,8 @@ export function monthsBetween(from, to) {
   const endY = Number(to.slice(0, 4));
   const endM = Number(to.slice(5, 7));
   while (y < endY || (y === endY && m <= endM)) {
-    out.push(`${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`);
+    // A year of the record has four digits; a month is padded to two.
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
     m += 1;
     if (m > 12) {
       m = 1;

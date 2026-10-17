@@ -452,7 +452,8 @@ export function contractTail(key) {
  * @returns {{ n: number, from: string, to: string, text: string } | null}
  */
 export function refusedFrontOf(cells, instrument) {
-  const days = (cells ?? []).filter((c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
+  if (!cells) return null;
+  const days = cells.filter((c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
   if (days.length === 0) return null;
   const from = days[0].day;
   const to = days[days.length - 1].day;

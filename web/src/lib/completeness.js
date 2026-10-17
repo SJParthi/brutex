@@ -388,7 +388,7 @@ export function judgeRow(row, ctx) {
   const mine = ctx.held ?? ledger;
   const own =
     mine.series !== null &&
-    mine.series.symbol === (row.underlying ?? '') &&
+    mine.series.symbol === row.underlying &&
     mine.series.segment === segment &&
     mine.held !== null;
   const heldSessions = own ? ledgerSpan(/** @type {any} */ (mine), from, to).heldSessions : null;
@@ -427,7 +427,8 @@ export function judgeRow(row, ctx) {
   if (kind.unresolved && span.share !== span.cas) cover.owedAlt = span.share;
   cover.owed = owed;
   const sessionsKnown = span.sessions - unknown;
-  const perSession = sessionsKnown > 0 && owed > 0 ? owed / sessionsKnown : ledger.regular;
+  // OWED ABOVE ZERO MEANS A SESSION WAS SIZED, so `sessionsKnown` is at least one.
+  const perSession = owed > 0 ? owed / sessionsKnown : ledger.regular;
   if (own) {
     cover.heldSessions = heldSessions;
     cover.heldExact = true;
@@ -650,7 +651,8 @@ export function rollUpMonths(items) {
     // (`over`) or a share whose auction flag is unread. Summing its count
     // would let it fill another row's hole, the month-grain fault R3-04
     // removes from the rows.
-    if (c.basis !== 'calendar' || c.missing === null) {
+    // A row with no calendar has no missing count either.
+    if (c.missing === null) {
       if (c.state === 'over') m.over += 1;
       else m.unmeasured += 1;
       continue;

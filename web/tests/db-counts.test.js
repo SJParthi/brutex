@@ -185,6 +185,7 @@ test('the_header_prints_a_strike_as_a_price, and describes the window in view (R
   assert.equal(contractTail('NSE-FNO-BANKNIFTY-2020-03-26-2795050-PE'), '27,950.50 PE', 'paisa kept when a strike has them');
   assert.equal(contractTail('NSE-FNO-NIFTY-2019-03-28-FUT'), 'FUT');
   assert.equal(contractTail('NSE-INDEX-NIFTY'), '');
+  assert.equal(contractTail('NSE-FNO-NIFTY-2019-03-28-FUTURE'), '', 'a future is the whole tail, not its start');
   // The range: the months on disk, in order, with no window.
   assert.deepEqual(headerRange(['2019-03', '2019-01', '2019-02'], null), { from: 'Jan 2019', to: 'Mar 2019', word: 'on disk' });
   assert.equal(headerRange([], null), null);

@@ -387,6 +387,7 @@ test('trade-driven series owe no count: a one-second share or an option at any r
   assert.equal(isTradeDriven('1s', 'INDEX', null), false, 'an index is computed every second');
   assert.equal(isTradeDriven('1min', 'FNO', 1270000), true);
   assert.equal(isTradeDriven('1min', 'FNO', null), false, 'a future is not an option');
+  assert.equal(isTradeDriven('1min', 'FNO', undefined), false, 'nor is a contract whose strike was never read');
   assert.equal(segmentOfKey('NSE-FNO-NIFTY-2023-12-28-1270000-PE'), 'FNO');
 });
 
@@ -843,6 +844,14 @@ test('an average session where nothing sized one, and no count owed at all', () 
   const u = judgeRow(nifty({ rows: 750 }), { ledger: U });
   assert.equal(u.heldSessions, 2);
   assert.equal(u.state, 'unmeasured');
+  // A month with an unsized session: the average is over the sized ones, and bars on the
+  // unsized day are no surplus (nobody can say what it owed).
+  const mixed = owedLedger(body({ from: '2021-03-01', days: 'RUR', regular: 375 }));
+  const m = judgeRow(nifty({ rows: 750 }), { ledger: mixed });
+  assert.equal(m.heldSessions, 2);
+  const extraOnU = judgeRow(nifty({ rows: 750 + 200 }), { ledger: mixed });
+  assert.equal(extraOnU.extra, 0);
+  assert.equal(extraOnU.state, 'full');
   // No regular count and nothing sized: no session to divide by.
   const none = owedLedger({ ...body({ from: '2021-03-01', days: MAR.replace(/R/g, 'U'), regular: 375 }), owed: { rung: '1min', regular: null } });
   assert.equal(judgeRow(nifty({ rows: 750 }), { ledger: none }).heldSessions, null);
@@ -882,6 +891,7 @@ test('a store-wide hole needs a known shortfall, two series at least, and nine i
   assert.deepEqual(wide(nifty(), { peers: { n: 3, atMost: 3 } }), [], 'a whole month shares no hole');
   assert.deepEqual(wide(short, { support: 2, fullest: 23 * 375 - 100 }), ['store_wide'], 'two series are enough');
   assert.deepEqual(wide(short, { peers: { n: 2, atMost: 2 } }), ['store_wide']);
+  assert.deepEqual(wide(short, { peers: { n: 1, atMost: 1 } }), [], 'one series has nothing to share a hole with');
   assert.deepEqual(wide(short, { peers: { n: 10, atMost: 9 } }), ['store_wide'], 'nine in ten is enough');
   assert.deepEqual(wide(short, { peers: { n: 10, atMost: 8 } }), []);
   assert.deepEqual(wide(short, { peers: { n: 10, atMost: 1 }, support: 10, fullest: 23 * 375 }), [], 'the fullest whole: nothing shared');
@@ -918,6 +928,7 @@ test('the month roll-up names its rung, counts full and store-wide rows, and kee
   const short = nifty({ rows: 23 * 375 - 100 });
   const wideCover = judgeRow(short, { ledger: MAR_L, peers: { n: 2, atMost: 2 } });
   assert.equal(rollUpMonths([{ ...short, cover: wideCover }])[0].storeWide, 1);
+  assert.equal(rollUpMonths([{ ...short, cover: wideCover }, { ...short, cover: wideCover }])[0].missing, 200, 'the month misses what its rows miss');
   // A later row missing fewer bars never takes the worst place, whatever its name.
   const big = { ...nifty({ instrument: 'NSE-INDEX-ZZZ', rows: 0 }), cover: judgeRow(nifty({ rows: 0 }), { ledger: MAR_L }) };
   const small = { ...nifty({ instrument: 'NSE-INDEX-AAA', rows: 23 * 375 - 1 }), cover: judgeRow(nifty({ rows: 23 * 375 - 1 }), { ledger: MAR_L }) };
@@ -991,6 +1002,7 @@ test('every prefix sum of a mixed calendar, day by day', () => {
   // A one-day span is that day, not an empty one.
   assert.equal(ledgerSpan(L, from, from).sessions, 1);
   assert.equal(ledgerSpan(L, from, from).inside, 1);
+  assert.equal(ledgerSpan(L, from, from).outside, 0);
   assert.equal(ledgerSpan(L, from - 5, from - 1).inside, 0);
   // A halt day with no record owes no halted bars.
   const bare = owedLedger({ days: 'H', from, owed: { regular: 375 } });
@@ -1028,6 +1040,8 @@ test('the reader and its helpers at their edges', async () => {
   assert.equal(derivativeEras(null), null);
   assert.throws(() => derivativeEras([{ from: '2026-08-03junk', to: '2026-10-04' }]), /malformed era/);
   assert.throws(() => derivativeEras([null]), /malformed era/);
+  assert.throws(() => derivativeEras([{ from: 'x2026-08-03', to: '2026-10-04' }]), /malformed era/, 'a day is the whole field, not its tail');
+  assert.deepEqual(derivativeEras([{ from: '2026-08-03', to: '2026-08-03', regular: 385 }])?.map((e) => [e.from, e.to]), [[epochDayOfIso('2026-08-03'), epochDayOfIso('2026-08-03')]], 'a one-day era stands');
   // The day after the last era is unknown to a future, and the era's last day is its own.
   const eraEnd = owedLedger({ days: 'RR..R', from: epochDayOfIso('2026-07-30'), owed: { regular: 375, derivatives: [{ from: '2018-01-01', to: '2026-07-30', regular: 375 }] } });
   const e = ledgerSpan(eraEnd, eraEnd.from, eraEnd.to);
