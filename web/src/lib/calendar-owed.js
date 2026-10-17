@@ -661,7 +661,8 @@ export function derivativeEras(rows) {
   if (!Array.isArray(rows)) throw new Error('/calendar.json `owed.derivatives` is not a list');
   const eras = rows.map((row) => {
     const iso = /^\d{4}-\d{2}-\d{2}$/;
-    if (!iso.test(String(row?.from)) || !iso.test(String(row?.to)) || row.to < row.from) {
+    // A row that is no object fails the first test and is never read further.
+    if (!iso.test(String(row?.from)) || !iso.test(String(row.to)) || row.to < row.from) {
       throw new Error(`/calendar.json \`owed.derivatives\` carries a malformed era: ${JSON.stringify(row)}`);
     }
     return {

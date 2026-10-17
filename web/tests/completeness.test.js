@@ -923,6 +923,9 @@ test('the month roll-up names its rung, counts full and store-wide rows, and kee
   const two = rollUpMonths([{ ...minute, cover: judgeRow(minute, { ledger: MAR_L }) }, { ...daily, cover: judgeRow(daily, { ledger: D }) }])[0];
   assert.equal(two.tf, false, 'two rungs in a month name none');
   assert.equal(two.full, 2);
+  assert.equal(two.storeWide, 0, 'no row shares a hole');
+  const mixedFull = rollUpMonths([{ ...minute, cover: judgeRow(minute, { ledger: MAR_L }) }, { ...nifty({ rows: 23 * 375 - 9 }), cover: judgeRow(nifty({ rows: 23 * 375 - 9 }), { ledger: MAR_L }) }])[0];
+  assert.equal(mixedFull.full, 1, 'a short row is not counted full');
   const one = rollUpMonths([{ ...minute, cover: judgeRow(minute, { ledger: MAR_L }) }, { ...minute, cover: judgeRow(minute, { ledger: MAR_L }) }])[0];
   assert.equal(one.tf, '1min');
   const short = nifty({ rows: 23 * 375 - 100 });
@@ -1070,6 +1073,8 @@ test('the reader and its helpers at their edges', async () => {
   assert.equal((await readCalendar('gdfl', async () => { throw 'not an Error'; }, signal)).why, 'the calendar request failed');
   const read = await readCalendar('gdfl', async () => answer(200, { days: [{ day: from, owed: 375 }], firstDay: from, lastDay: from }), signal);
   assert.equal(read.why, '');
+  assert.equal(read.clashes, 0, 'no disagreements listed, none counted');
+  assert.equal((await readCalendar('gdfl', async () => answer(200, { days: [], disagreements: ['a', 'b'] }), signal)).clashes, 2);
   assert.equal(read.first, '2026-08-03');
   assert.deepEqual(read.from, []);
   // The loader asks the held span unless told otherwise.
