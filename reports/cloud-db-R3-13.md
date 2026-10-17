@@ -154,7 +154,20 @@ cloud session runs as root, which matters for one gate below.
   suite). Whole files: `dayflags.js` 100% lines; `notes-labels.js`'s uncovered lines are all the
   base's. The `.svelte` components have no coverage tool here; their logic was moved into the
   two modules where it can be measured (`casCounts`, `bandInstrument`, `bandExpiry`).
-- `cargo mutants`: RESULT_MUTANTS
+- `cargo mutants`: **no surviving mutant.** `cargo-mutants` 27.1.0 over every
+  mutant of this branch's diff in `dayflags.rs` and `dayflags_rules.rs` (`--in-diff` against
+  `origin/feat/db-fix`), each run against the `server::dayflags` tests at opt-level 0. A first
+  pass, on 4ecb39e1, was stopped by the session's two-hour limit after 234 of its 337 mutants; it
+  missed 15. The final pass ran over the final production code's 346 mutants, in two shards: 287
+  caught, 48 unviable (they do not compile), 10 missed, all ten in `dayflags_rules.rs`, which the
+  first pass never reached; one mutant was not run because the disk filled. Each of the 25
+  survivors now has a test that kills it, except three that could not be killed because they
+  changed no answer: an `&&` turned `||` in `PageHeld::count` only added a read that no record of
+  that page shows. Those three conditions are now one `match` arm a page, and a deleted arm
+  changes an answer. Finally, the 55 mutants of the functions the final pass's survivors were in,
+  and the one it did not run, were run again on the final code: 53 caught, 2 unviable, 0 missed.
+  Between the final pass and that run only tests changed.
+
 - Web tests, `node --test "web/tests/*.test.js"`: 1,417 tests, 1,407 passed, **1 failed, 9
   cancelled, none in an R3-13 file.** The failure is `db-search.test.js`'s "p99 … inside one
   frame (16 ms)", a timing test, run while two mutant builds and the workspace build held all
