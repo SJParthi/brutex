@@ -200,10 +200,14 @@ test('one /db selection is one address: strikes sorted and deduplicated, keys in
   const a = encodeDb({ feed: 'gdfl', sym: 'NIFTY', k: ['1160000', '1150000', '1150000'] });
   const b = encodeDb({ k: [1150000, 1160000], sym: 'NIFTY', feed: 'gdfl' });
   assert.equal(a, b);
-  assert.equal(a, 'feed=gdfl&sym=NIFTY&k=1150000&k=1160000');
+  // R3-01: ONE `k` field — the server refuses a query naming a field twice.
+  assert.equal(a, 'feed=gdfl&sym=NIFTY&k=1150000,1160000');
   const order = [...new URLSearchParams(encodeDb({ oow: true, feed: 'z', tto: '10:00', seg: 'spot' })).keys()];
   assert.deepEqual(order, ['feed', 'seg', 'tto', 'oow']);
-  assert.deepEqual(DB_KEYS, ['feed', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'side', 'from', 'to', 'tfrom', 'tto', 'sort', 'dir', 'page', 'view', 'oow']);
+  assert.deepEqual(DB_KEYS, [
+    'feed', 'universe', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'mny', 'side', 'spot',
+    'from', 'to', 'tfrom', 'tto', 'sort', 'dir', 'rows', 'page', 'view', 'oow'
+  ]);
 });
 
 test('the opening values are not written: page 1, Bars, newest first, the window applied', () => {

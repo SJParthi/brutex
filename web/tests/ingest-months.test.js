@@ -367,14 +367,14 @@ test('an imported feed’s rows are worded as imports, with the same keys, tones
 test('an archive’s measured span is its reach on the strip, never "reach not stated"', () => {
   const gdflLike = feedSpan({ archive: { from: '2018-09-03', to: '2026-09-24', source: 'measured' } });
   // The window equals the archive: all of it is reachable.
-  assert.deepEqual(archiveLane(gdflLike, '2018-09-03', '2026-09-24'), { from: '2018-09-03', to: '2026-09-24', beforePct: 0, livePct: 100, afterPct: 0 });
+  assert.deepEqual(archiveLane(gdflLike, '2018-09-03', '2026-09-24'), { from: '2018-09-03', to: '2026-09-24', openEnd: false, beforePct: 0, livePct: 100, afterPct: 0 });
   // A window that opens 10 days early and closes 10 days late: 10 + 80 + 10.
   const tenth = archiveLane(feedSpan({ archive: { from: '2024-01-11', to: '2024-03-31' } }), '2024-01-01', '2024-04-10');
   assert.equal(tenth?.beforePct, 10);
   assert.equal(tenth?.livePct, 80);
   assert.equal(Math.round(/** @type {number} */ (tenth?.afterPct)), 10);
   // A window wholly before or after the archive reaches none of it.
-  assert.deepEqual(archiveLane(gdflLike, '2015-01-01', '2016-01-01'), { from: '2018-09-03', to: '2026-09-24', beforePct: 100, livePct: 0, afterPct: 0 });
+  assert.deepEqual(archiveLane(gdflLike, '2015-01-01', '2016-01-01'), { from: '2018-09-03', to: '2026-09-24', openEnd: false, beforePct: 100, livePct: 0, afterPct: 0 });
   assert.equal(archiveLane(gdflLike, '2027-01-01', '2027-06-01')?.livePct, 0);
   // A single-day archive inside the window is a zero-width reach, not NaN.
   const one = archiveLane(feedSpan({ archive: { from: '2024-01-06', to: '2024-01-06' } }), '2024-01-01', '2024-01-11');
@@ -393,6 +393,52 @@ test('an archive’s measured span is its reach on the strip, never "reach not s
   // The folder halt no longer denies the store's rows drawn under it.
   assert.doesNotMatch(page, /nothing below is a census\s+of anything/);
   assert.match(page, /they are the bars the STORE already holds/);
+});
+
+test('R3-05 repair 2: an archive whose last day is a dated lower bound caps nothing after it', () => {
+  // `/feeds.json` serves GDFL's archive as the vendor's archive AS MEASURED:
+  // its first day binds, its last day (`to_binds: false`) does not — a later
+  // day may be delivered and waiting (the delivery cadence is UNVERIFIED).
+  const open = feedSpan({ archive: { from: '2018-09-03', to: '2026-09-30', to_binds: false, source: 'measured' } });
+  assert.deepEqual([open.kind, open.binds, open.bindsTo], ['archive', true, false]);
+  // An older server's archive, with no `to_binds`, still binds both ends.
+  assert.equal(feedSpan({ archive: { from: '2018-09-03', to: '2026-09-24' } }).bindsTo, true);
+  // Before the first day: out of reach. After the last: never "outside".
+  assert.equal(outsideSpan(open, '2018-08', lastDay), true);
+  assert.equal(outsideSpan(open, '2026-10', lastDay), false);
+  // The form opens to the clock's ceiling, not to the measured last day.
+  const bounds = { floor: '2015-01-01', ceiling: '2026-10-13' };
+  assert.equal(defaultWindow(open, bounds).to, '2026-10-13');
+  assert.match(defaultWindow(open, bounds).why, /begins 2018-09-03 and is delivered through at least 2026-09-30/);
+  // The strip stays live to the window's end and says the end is open.
+  const lane = archiveLane(open, '2026-09-01', '2026-10-11');
+  assert.equal(lane?.openEnd, true);
+  assert.equal(lane?.afterPct, 0);
+  assert.equal(lane?.livePct, 100);
+  // The page's ceiling and its "archive ending" panel read `bindsTo`.
+  const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /activeSpan\.binds && activeSpan\.bindsTo && activeSpan\.to !== null && activeSpan\.to < clockCeiling/);
+  assert.equal(page.split("archiveTo={activeSpan.kind === 'archive' && activeSpan.bindsTo ? activeSpan.to : null}").length - 1, 2);
+});
+
+test('R3-05 repair 3: a window the server refused, or served from degraded settings, is said, never opened on silently', () => {
+  const bounds = { floor: '2015-01-01', ceiling: '2026-10-09' };
+  const refusedFeed = { archive: null, window: { why: 'the operator\'s settings cannot be read (fifo)', degraded: 'settings generation 2 did not read: not a regular file: pipe' } };
+  const refused = feedSpan(refusedFeed);
+  assert.equal(refused.kind, null);
+  assert.match(refused.refused, /cannot be read/);
+  assert.match(refused.degraded, /not a regular file: pipe/);
+  const opens = defaultWindow(refused, bounds);
+  assert.deepEqual([opens.from, opens.to], ['2015-01-01', '2026-10-09']);
+  assert.match(opens.why, /the server refused your window: the operator's settings cannot be read \(fifo\) \(settings generation 2 did not read: not a regular file: pipe\)$/);
+  // SERVED, BUT FROM DEGRADED SETTINGS: the days are used and the state is said.
+  const served = feedSpan({ archive: null, window: { from: '2018-01-01', to: '2026-09-30', source: 'settings generation 3', degraded: 'settings generation 4 did not read: torn' } });
+  assert.equal(served.kind, 'window');
+  assert.equal(served.refused, '');
+  assert.match(defaultWindow(served, bounds).why, /^your window for this feed opens 2018-01-01; your settings are degraded: settings generation 4 did not read: torn$/);
+  // A CLEAN WINDOW SAYS NOTHING MORE.
+  const clean = feedSpan({ archive: null, window: { from: '2018-01-01', to: '2026-09-30', degraded: null } });
+  assert.equal(defaultWindow(clean, bounds).why, 'your window for this feed opens 2018-01-01');
 });
 
 /* ======================================================================

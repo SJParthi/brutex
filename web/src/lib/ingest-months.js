@@ -190,7 +190,11 @@ export function archiveLane(span, from, to) {
   const opens = Date.parse(from);
   const closes = Date.parse(to);
   const first = Date.parse(span.from);
-  const last = Date.parse(span.to);
+  // AN OPEN LAST DAY (`to_binds: false`) cuts nothing after it: a later day
+  // may be delivered and waiting (the vendor's delivery cadence is
+  // UNVERIFIED), so the lane stays live to the window's end.
+  const openEnd = span.bindsTo === false;
+  const last = openEnd ? Math.max(Date.parse(span.to), closes) : Date.parse(span.to);
   if (![opens, closes, first, last].every(Number.isFinite) || !(closes > opens) || last < first) return null;
   const width = closes - opens;
   const a = Math.min(width, Math.max(0, first - opens));
@@ -200,7 +204,7 @@ export function archiveLane(span, from, to) {
   const overlap = last >= opens && first <= closes;
   const beforePct = overlap ? (a / width) * 100 : 100;
   const livePct = overlap ? (live / width) * 100 : 0;
-  return { from: span.from, to: span.to, beforePct, livePct, afterPct: Math.max(0, 100 - beforePct - livePct) };
+  return { from: span.from, to: span.to, openEnd, beforePct, livePct, afterPct: Math.max(0, 100 - beforePct - livePct) };
 }
 
 /** A zeroed tally with one slot per verdict. @returns {Record<Verdict, number>} */
@@ -530,25 +534,41 @@ const isoDay = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? 
 
 /**
  * THE SPAN A FEED'S DESCRIPTOR STATES, read off `/feeds.json` and nothing
- * else: an archive vendor's measured span (`archive`, both ends bind: no file
- * exists outside it), or the operator's window for a pulled feed (`window`,
- * which sets where the form OPENS and binds nothing — the vendor answers
- * outside it and a month there is real).
+ * else: an archive vendor's measured span (`archive`: its first day binds,
+ * no file exists before it; its last day binds only when the server says
+ * `to_binds` — a dated measurement is a lower bound, so a later day may be
+ * delivered and waiting; the vendor's delivery cadence is UNVERIFIED, R3-05
+ * repairs 2 and 5),
+ * or the operator's window for a pulled feed (`window`, which sets where the
+ * form OPENS and binds nothing — the vendor answers outside it and a month
+ * there is real).
  *
- * @param {{ archive?: { from?: string, to?: string, source?: string } | null,
- *   window?: { from?: string, to?: string, source?: string } | null } | null | undefined} feed
- * @returns {{ kind: 'archive' | 'window' | null, from: string | null, to: string | null, binds: boolean, source: string }}
+ * THE SERVER'S WORD ON THE OPERATOR'S WINDOW TRAVELS WITH IT (R3-05 repair
+ * 3, the second agent's follow-up): a window the server REFUSED (`why`, no
+ * days: the settings could not be read, or the window is inverted) is
+ * `refused`, and a window served from degraded settings carries `degraded`,
+ * so the page says why instead of opening on a default as if nothing were
+ * wrong.
+ *
+ * @param {{ archive?: { from?: string, to?: string, source?: string, to_binds?: boolean } | null,
+ *   window?: { from?: string, to?: string, source?: string, why?: string, degraded?: string | null } | null } | null | undefined} feed
+ * @returns {{ kind: 'archive' | 'window' | null, from: string | null, to: string | null, binds: boolean, bindsTo: boolean, source: string, refused: string, degraded: string }}
  */
 export function feedSpan(feed) {
   const a = feed?.archive;
-  if (a && isoDay(a.from) && isoDay(a.to)) {
-    return { kind: 'archive', from: /** @type {string} */ (a.from), to: /** @type {string} */ (a.to), binds: true, source: a.source ?? '' };
-  }
   const w = feed?.window;
-  if (w && isoDay(w.from) && isoDay(w.to)) {
-    return { kind: 'window', from: /** @type {string} */ (w.from), to: /** @type {string} */ (w.to), binds: false, source: w.source ?? '' };
+  const served = Boolean(w && isoDay(w.from) && isoDay(w.to));
+  const refused = w && !served && typeof w.why === 'string' ? w.why : '';
+  const degraded = w && typeof w.degraded === 'string' ? w.degraded : '';
+  if (a && isoDay(a.from) && isoDay(a.to)) {
+    // AN ABSENT `to_binds` IS AN OLDER SERVER, whose archive bound both ends.
+    const bindsTo = a.to_binds !== false;
+    return { kind: 'archive', from: /** @type {string} */ (a.from), to: /** @type {string} */ (a.to), binds: true, bindsTo, source: a.source ?? '', refused, degraded };
   }
-  return { kind: null, from: null, to: null, binds: false, source: '' };
+  if (w && served) {
+    return { kind: 'window', from: /** @type {string} */ (w.from), to: /** @type {string} */ (w.to), binds: false, bindsTo: false, source: w.source ?? '', refused: '', degraded };
+  }
+  return { kind: null, from: null, to: null, binds: false, bindsTo: false, source: '', refused, degraded };
 }
 
 /**
@@ -561,7 +581,7 @@ export function feedSpan(feed) {
  */
 export function outsideSpan(span, ym, lastDayOf) {
   if (!span.binds || !span.from || !span.to) return false;
-  return lastDayOf(ym) < span.from || `${ym}-01` > span.to;
+  return lastDayOf(ym) < span.from || (span.bindsTo && `${ym}-01` > span.to);
 }
 
 /**
@@ -578,14 +598,22 @@ export function outsideSpan(span, ym, lastDayOf) {
  */
 export function defaultWindow(span, bounds) {
   const from = span.from && span.from > bounds.floor ? span.from : bounds.floor;
-  const to = span.binds && span.to && span.to < bounds.ceiling ? span.to : bounds.ceiling;
+  const to = span.binds && span.bindsTo && span.to && span.to < bounds.ceiling ? span.to : bounds.ceiling;
   const why =
     span.kind === 'archive'
-      ? `the archive this feed was imported from spans ${span.from} to ${span.to}`
+      ? span.bindsTo
+        ? `the archive this feed was imported from spans ${span.from} to ${span.to}`
+        : `the archive this feed is imported from begins ${span.from} and is delivered through at least ${span.to}`
       : span.kind === 'window'
         ? `your window for this feed opens ${span.from}`
         : 'this feed states no span, so the window opens at the oldest day this page can ask for';
-  return { from: from <= to ? from : to, to, why };
+  // A REFUSED OR DEGRADED WINDOW IS SAID, never opened on silently.
+  const said = span.refused
+    ? `; the server refused your window: ${span.refused}${span.degraded ? ` (${span.degraded})` : ''}`
+    : span.degraded
+      ? `; your settings are degraded: ${span.degraded}`
+      : '';
+  return { from: from <= to ? from : to, to, why: why + said };
 }
 
 /* ======================================================================

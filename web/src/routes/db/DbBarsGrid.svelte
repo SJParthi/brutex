@@ -718,8 +718,11 @@
          request. In Fit mode the page waits for the settled measurement AND
          for the page size to have taken it — measured without the second
          half, a load still sent one 50-row request and aborted it for the
-         9-row one — and then asks once. */
-      const ready = db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit);
+         9-row one — and then asks once. A LINKED DAY WINDOW still being
+         checked against the selection's span waits too, in either mode
+         (R3-01): with rows=25 in the link the page read the era-checked
+         window, then aborted it when the span moved From (shadow, 16 Oct). */
+      const ready = !db.linkDaysPending && (db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit));
       if (!active || !feed || p.keys.length === 0) {
         barState = { loading: false, error: null, answer: null, rows: [], local: false };
         return;

@@ -1634,6 +1634,10 @@ mod month_change;
 /// (DB-B74, DB-B65; WP-81).
 #[path = "scrub_route.rs"]
 mod scrub_route;
+/// `/settings.json` and `POST /settings`: the operator's settings, the
+/// request ceilings and the closed lists, from the store (R3-05).
+#[path = "settings_route.rs"]
+pub mod settings_route;
 // `/pull/repair.json` and the plan behind `POST /pull/repair` (D-3350, WP-13c).
 #[path = "repair_route.rs"]
 mod repair_route;
@@ -1663,6 +1667,7 @@ use instruments_route::{instruments_json, universe_reach_json};
 pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
 use repair_route::repair_plan_json;
+use settings_route::{settings_json, settings_post};
 pub(crate) use store_route::behind as census_behind;
 pub use store_route::census_delta;
 #[cfg(test)]
@@ -16004,6 +16009,11 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // saw. D-0052.
         .route("/instruments.json", axum::routing::get(instruments_json))
         .route("/feeds.json", axum::routing::get(feeds_json))
+        // THE OPERATOR'S SETTINGS, CEILINGS AND LISTS, AND THE ONE WAY TO
+        // CHANGE A SETTING: checked, saved as a new generation, journaled
+        // (R3-05).
+        .route("/settings.json", axum::routing::get(settings_json))
+        .route("/settings", axum::routing::post(settings_post))
         // WHAT A UNIVERSE RESOLVES TO FOR THE SELECTED FEED. The one thing
         // `/ingest` needed to stop drawing four tiers as `no target`, and the
         // one thing no route said. D-0120.
