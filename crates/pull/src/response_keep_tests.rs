@@ -1859,3 +1859,167 @@ fn a_receipt_naming_lengths_past_the_caps_is_damage_to_the_writer() {
         assert_eq!(placed.receipt.refusals, 5);
     }
 }
+
+/// IA-RK-19 (repair round 2): healthy contention waits, it is not refused.
+/// Twenty appends of one pack queue behind a holder that lets go after a
+/// moment; every one is kept, none is refused `LockWaitersParked`, and no
+/// waiter is left counted as parked. Counting every waiter rather than the
+/// abandoned ones refused the sixth at once with a false "holder that has
+/// not let go" (measured by the second agent: 20 threads, 6 kept, 14
+/// refused).
+#[test]
+fn healthy_contention_on_one_pack_waits_rather_than_refusing() {
+    const APPENDS: u32 = 20;
+    let scratch = Scratch::new("healthy-contention");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let lock_file = dir.join(LOCK_NAME);
+    let held = lock(&dir).unwrap();
+    let ready = std::sync::Barrier::new(APPENDS as usize + 1);
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..APPENDS)
+            .map(|i| {
+                let (root, key, ready) = (scratch.root(), &key, &ready);
+                scope.spawn(move || {
+                    let text = invented(50_000 + i);
+                    ready.wait();
+                    append(root, pack(key), Offered::Answer(&answered(&text)), &june())
+                })
+            })
+            .collect();
+        ready.wait();
+        // Every append is now past its `try_lock` or about to be: the pack
+        // is contended twenty deep while the holder is alive.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(parked_on(&lock_file), 0, "a live wait is not parked");
+        drop(held);
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let refused: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert!(
+        refused.is_empty(),
+        "every healthy wait is kept: {refused:?}"
+    );
+    let segments = receipts(scratch.root(), pack(&key), june_month()).unwrap();
+    let total: usize = segments.iter().map(|(_, s)| s.receipts.len()).sum();
+    assert_eq!(total, APPENDS as usize);
+    assert_eq!(parked_on(&lock_file), 0, "nobody was abandoned");
+}
+
+/// IA-RK-19's other half: a waiter abandoned by its caller is counted the
+/// moment the wait runs out and uncounted once the holder lets go, while a
+/// live waiter beside it is never counted and takes the lock.
+#[test]
+fn only_an_abandoned_waiter_is_counted_as_parked() {
+    let scratch = Scratch::new("abandoned");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let lock_file = dir.join(LOCK_NAME);
+    let held = lock(&dir).unwrap();
+    let refused = lock_within(&dir, Duration::from_millis(20));
+    assert!(
+        matches!(refused, Err(KeepError::LockStalled { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(parked_on(&lock_file), 1, "the abandoned waiter is counted");
+    let live = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| lock_within(&dir, Duration::from_secs(20)));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(parked_on(&lock_file), 1, "the live waiter is not");
+        drop(held);
+        waiting.join().unwrap()
+    });
+    assert!(live.is_ok(), "{live:?}");
+    drop(live);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while parked_on(&lock_file) > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned waiter left once the holder let go"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// IA-RK-20 (follow-up of verify-IA-8-r2): a further month's `kept=0`
+/// pointer names the first month's receipt by segment and ordinal, as a
+/// `kept=3` pointer does. The first month here has rolled through all eight
+/// segments and keeps no body (`pack_full` in segment 7); its five refused
+/// rows are still written there, and the July pointer finds them. A pointer
+/// that took its own segment (0) named June's segment 0, which holds a
+/// different receipt.
+#[test]
+fn a_later_months_unkept_pointer_names_the_first_months_receipt() {
+    let scratch = Scratch::new("unkept-pointer");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let june = june_month();
+    for segment in 0..MAX_SEGMENTS {
+        let mut full = crafted(segment, 0, 0);
+        full.kept = Kept::Kept;
+        full.reason = Reason::Kept;
+        full.body_offset = MAX_PACK_BYTES - 10;
+        full.deflated_len = 10;
+        full.raw_len = 10;
+        full.digest = [7; 32];
+        fs::write(names(&dir, june, segment).receipts, full.encode()).unwrap();
+    }
+    let rows = five_refused();
+    let mut window = landing(day(2019, 6, 28), day(2019, 7, 2));
+    window.rows_refused = 5;
+    window.refused = &rows;
+    let outcome = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(60))),
+        &window,
+    )
+    .unwrap();
+    let last = MAX_SEGMENTS - 1;
+    assert_eq!(
+        (outcome.first.segment, outcome.first.ordinal),
+        (last, 1),
+        "June's receipt follows the full one in its last segment"
+    );
+    assert_eq!(
+        (outcome.first.receipt.kept, outcome.first.receipt.reason),
+        (Kept::NotKept, Reason::PackFull)
+    );
+    let [july] = outcome.further.as_slice() else {
+        panic!("one further month: {outcome:?}");
+    };
+    assert_eq!(
+        (july.month, july.segment, july.ordinal),
+        (YearMonth::new(2019, 7).unwrap(), 0, 0)
+    );
+    let stored = &receipts(scratch.root(), pack(&key), july.month).unwrap()[0]
+        .1
+        .receipts[0];
+    assert_eq!(stored, &july.receipt, "the pointer as written");
+    assert_eq!(stored.kept, Kept::NotKept);
+    assert_eq!(
+        (stored.segment, stored.body_of),
+        (last, 1),
+        "it names June's receipt, not its own segment"
+    );
+    assert_eq!(
+        (stored.refusals_from, stored.refusals),
+        (0, 0),
+        "it owns no records"
+    );
+    // Followed: June, at the segment and ordinal the pointer names, holds
+    // the window's receipt and its five rows.
+    let home = month_of_unix(stored.asked_from).unwrap();
+    assert_eq!(home, june);
+    let june_segments = receipts(scratch.root(), pack(&key), home).unwrap();
+    let owner = june_segments[usize::from(stored.segment)].1.receipts[stored.body_of as usize];
+    assert_eq!(owner, outcome.first.receipt);
+    let found = refused_rows(scratch.root(), pack(&key), home, stored.body_of, &owner).unwrap();
+    assert_eq!(found, rows);
+}

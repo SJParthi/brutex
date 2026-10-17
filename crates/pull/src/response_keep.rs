@@ -102,11 +102,17 @@ pub const MAX_PACK_BYTES: u64 = 64 * 1024 * 1024;
 pub const REFUSAL_ROOM: u64 = MAX_PACK_BYTES / REFUSAL_LEN as u64;
 /// The most receipts one pack segment holds.
 pub const MAX_RECEIPTS: u32 = 1_024;
-/// The most `keep-lock` waiter threads one pack lock may have parked at once.
-/// A waiter whose append was refused `lock_stalled` stays parked in `flock`
+/// The most ABANDONED `keep-lock` waiter threads one pack lock may have
+/// parked before a new contended append is refused at once. A waiter whose
+/// caller's wait ran out (refused `lock_stalled`) stays parked in `flock`
 /// until the holder lets go; against a holder that never does, this bounds
 /// the threads and descriptors left behind, and the next contended append is
-/// refused `lock_stalled` at once, naming how many are parked.
+/// refused `lock_stalled` at once, naming how many are parked. A waiter whose
+/// caller is still inside its wait is never counted, so healthy contention
+/// waits up to [`LOCK_WAIT`] however many appends queue (repair round 2). The
+/// waits already in flight when the fourth is abandoned can each still run
+/// out, so the threads left behind are at most this plus the appends that
+/// were waiting at that moment.
 pub const MAX_PARKED_WAITERS: usize = 4;
 /// The most segments one month's pack rolls through.
 pub const MAX_SEGMENTS: u8 = 8;
@@ -696,12 +702,13 @@ pub enum KeepError {
         /// Milliseconds waited before the refusal.
         waited_ms: u64,
     },
-    /// [`MAX_PARKED_WAITERS`] earlier waits on this lock are still parked on
-    /// a holder that has not let go; this append waited for nothing.
+    /// [`MAX_PARKED_WAITERS`] earlier waits on this lock ran out and their
+    /// waiters are still parked on a holder that has not let go since; this
+    /// append waited for nothing.
     LockWaitersParked {
         /// The lock file.
         lock: PathBuf,
-        /// Waiter threads parked on it.
+        /// Abandoned waiter threads parked on it.
         parked: usize,
     },
     /// A receipt before the last one fails its CRC: damage, not a torn tail.
@@ -1294,37 +1301,92 @@ fn lock_within(dir: &Path, wait: Duration) -> Result<Held, KeepError> {
     // bounded; past `wait` the caller is refused, and the waiter, once it
     // gets the lock, finds nobody listening and lets it go at once.
     //
-    // A REFUSED WAITER STAYS PARKED until the holder lets go, so a holder
+    // AN ABANDONED WAITER STAYS PARKED until the holder lets go, so a holder
     // that never does would leave one thread and one descriptor behind per
-    // refused append. At most `MAX_PARKED_WAITERS` are parked per lock; the
-    // next is refused at once, by name, and waits for nothing.
-    let parked = Parked::enter(&path)?;
+    // refused append. At most `MAX_PARKED_WAITERS` ABANDONED waiters are
+    // counted per lock; the next contended append is refused at once, by
+    // name, and waits for nothing. A waiter whose caller is still inside its
+    // wait is NOT counted (repair round 2 of IA-8: counting every waiter
+    // refused the sixth of six healthy concurrent appends of one pack at
+    // once, with a false "holder that has not let go").
+    Parked::admit(&path)?;
     let file = open()?;
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let waiter_path = path.clone();
+    let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = Waiter {
+        path: path.clone(),
+        abandoned: std::sync::Arc::clone(&abandoned),
+    };
     std::thread::Builder::new()
         .name("keep-lock".to_owned())
         .spawn(move || {
-            let _parked = parked;
-            let taken = store::flock::Flock::lock(file, waiter_path);
-            drop(tx.send(taken));
+            let taken = store::flock::Flock::lock(file, waiter.path.clone());
+            waiter.answer(taken, &tx);
         })
         .map_err(|why| KeepError::io("lock", &path, &why))?;
     let started = Instant::now();
-    match rx.recv_timeout(wait) {
-        Ok(Ok(held)) => Ok(Held { _lock: held }),
-        Ok(Err(why)) => Err(KeepError::io("lock", &path, &why)),
-        Err(_) => Err(KeepError::LockStalled {
-            lock: path,
-            waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        }),
+    let answer = match rx.recv_timeout(wait) {
+        Ok(answer) => answer,
+        Err(_) => match Parked::abandon(&path, &abandoned, &rx) {
+            // THE WAITER ANSWERED between the timeout and the abandon: the
+            // lock is ours, and nothing is parked.
+            Some(answer) => answer,
+            None => {
+                return Err(KeepError::LockStalled {
+                    lock: path,
+                    waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                });
+            }
+        },
+    };
+    match answer {
+        Ok(held) => Ok(Held { _lock: held }),
+        Err(why) => Err(KeepError::io("lock", &path, &why)),
     }
 }
 
-/// Waiter threads parked in `flock` on each contended pack lock, by lock
-/// path; a path leaves the map when its last waiter returns. Pre-sized for
-/// the pack locks one process contends at once (its landings in flight); a
-/// larger count only grows the map.
+/// What a waiter thread hands back: the lock, or why `flock` failed.
+type Taken = std::io::Result<store::flock::Flock<File, PathBuf>>;
+
+/// The waiter thread's half of one contended wait.
+#[derive(Debug)]
+struct Waiter {
+    path: PathBuf,
+    /// Set, under [`PARKED`], by a caller whose wait ran out.
+    abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Waiter {
+    /// Hands the lock to its caller, or, when the caller has already
+    /// abandoned the wait, lets it go and leaves the parked count. Decided
+    /// under [`PARKED`], the lock the caller abandons under, so the two
+    /// cannot both think the other has the lock.
+    fn answer(self, taken: Taken, tx: &std::sync::mpsc::SyncSender<Taken>) {
+        let mut parked = PARKED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.abandoned.load(std::sync::atomic::Ordering::Relaxed) {
+            let left = parked.get(&self.path).map_or(0, |n| n.saturating_sub(1));
+            if left == 0 {
+                parked.remove(&self.path);
+            } else {
+                parked.insert(self.path, left);
+            }
+            drop(parked);
+            drop(taken);
+        } else {
+            // A one-slot channel nobody has written to: this never blocks.
+            // The caller is still listening, or about to look under PARKED.
+            drop(tx.send(taken));
+        }
+    }
+}
+
+/// Waiter threads whose caller abandoned the wait and that are still parked
+/// in `flock` on each contended pack lock, by lock path; a path leaves the
+/// map when its last abandoned waiter takes the lock and lets it go.
+/// Pre-sized for the pack locks one process contends at once (its landings in
+/// flight); a larger count only grows the map.
 static PARKED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>> =
     std::sync::LazyLock::new(|| {
         std::sync::Mutex::new(std::collections::HashMap::with_capacity(PARKED_LOCKS))
@@ -1333,42 +1395,51 @@ static PARKED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Pa
 /// The pack locks [`PARKED`] is sized for.
 const PARKED_LOCKS: usize = 16;
 
-/// One parked waiter, counted in [`PARKED`] for as long as it lives.
+/// The abandoned-waiter count of [`PARKED`]: one hash probe under one mutex
+/// per contended wait.
 #[derive(Debug)]
-struct Parked(PathBuf);
+struct Parked;
 
 impl Parked {
-    fn enter(lock: &Path) -> Result<Self, KeepError> {
-        let mut parked = PARKED
+    /// Refuses a new wait once `MAX_PARKED_WAITERS` abandoned waiters are
+    /// parked on `lock`; a live wait is never counted.
+    fn admit(lock: &Path) -> Result<(), KeepError> {
+        let parked = PARKED
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = parked.entry(lock.to_path_buf()).or_insert(0);
-        if *count >= MAX_PARKED_WAITERS {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(lock)
+            .copied()
+            .unwrap_or(0);
+        if parked >= MAX_PARKED_WAITERS {
             return Err(KeepError::LockWaitersParked {
                 lock: lock.to_path_buf(),
-                parked: *count,
+                parked,
             });
         }
-        *count += 1;
-        Ok(Self(lock.to_path_buf()))
+        Ok(())
     }
-}
 
-impl Drop for Parked {
-    fn drop(&mut self) {
+    /// The caller's wait ran out: unless the waiter answered meanwhile, it
+    /// is marked abandoned and counted, under the same lock the waiter
+    /// decides under.
+    fn abandon(
+        lock: &Path,
+        abandoned: &std::sync::atomic::AtomicBool,
+        rx: &std::sync::mpsc::Receiver<Taken>,
+    ) -> Option<Taken> {
         let mut parked = PARKED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let left = parked.get(&self.0).map_or(0, |n| n.saturating_sub(1));
-        if left == 0 {
-            parked.remove(&self.0);
-        } else {
-            parked.insert(self.0.clone(), left);
+        if let Ok(answer) = rx.try_recv() {
+            return Some(answer);
         }
+        abandoned.store(true, std::sync::atomic::Ordering::Relaxed);
+        *parked.entry(lock.to_path_buf()).or_insert(0) += 1;
+        None
     }
 }
 
-/// Test-only: how many waiters are parked on a lock now.
+/// Test-only: how many abandoned waiters are parked on a lock now.
 #[cfg(test)]
 fn parked_on(lock: &Path) -> usize {
     PARKED
@@ -1445,25 +1516,22 @@ pub fn append(
 ) -> Result<Outcome, KeepError> {
     let result = append_unlogged(root, pack, offered, landing);
     match &result {
-        Ok(outcome) => note_kept(pack, outcome),
+        Ok(outcome) => note_kept(root, pack, outcome),
         Err(why) => note_not_kept(root, pack, landing, why),
     }
     result
 }
 
-fn note_kept(pack: Pack<'_>, outcome: &Outcome) {
+fn note_kept(root: &Path, pack: Pack<'_>, outcome: &Outcome) {
     let key = pack.key.to_string();
     let first = &outcome.first;
-    if first.rolled {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error(
-                "pull.keep",
-                "response pack segment full; keeping goes on in the next segment",
-            )
-            .with("instrument", telemetry::Value::Str(&key))
-            .with("timeframe", telemetry::Value::Str(pack.timeframe.as_str()))
-            .with("segment", telemetry::Value::Uint(u64::from(first.segment))),
-        );
+    // EVERY ROLL IS NAMED, the first month's and each further month's: a
+    // window over months whose later month rolled used to roll in silence,
+    // because only `first` was looked at (repair round 2 of IA-8).
+    for placed in std::iter::once(first).chain(&outcome.further) {
+        if placed.rolled {
+            note_rolled(root, pack, &key, placed);
+        }
     }
     if first.receipt.kept == Kept::NotKept {
         let _dropped_when_filtered = telemetry::emit(
@@ -1473,6 +1541,32 @@ fn note_kept(pack: Pack<'_>, outcome: &Outcome) {
                 .with("reason", telemetry::Value::Str(first.receipt.reason.word())),
         );
     }
+}
+
+/// One roll: the month, the segment it rolled to and that segment's receipts
+/// file, so the event names the pack it is about.
+fn note_rolled(root: &Path, pack: Pack<'_>, key: &str, placed: &Placed) {
+    let month = placed.month.to_string();
+    let file = pack_dir(root, pack).map_or_else(
+        |_| key.to_owned(),
+        |dir| {
+            names(&dir, placed.month, placed.segment)
+                .receipts
+                .display()
+                .to_string()
+        },
+    );
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error(
+            "pull.keep",
+            "response pack segment full; keeping goes on in the next segment",
+        )
+        .with("instrument", telemetry::Value::Str(key))
+        .with("timeframe", telemetry::Value::Str(pack.timeframe.as_str()))
+        .with("month", telemetry::Value::Str(&month))
+        .with("segment", telemetry::Value::Uint(u64::from(placed.segment)))
+        .with("pack", telemetry::Value::Str(&file)),
+    );
 }
 
 fn note_not_kept(root: &Path, pack: Pack<'_>, landing: &Landing<'_>, why: &KeepError) {
@@ -1571,7 +1665,9 @@ fn append_unlogged(
         let mut pointer = first.receipt;
         if pointer.kept == Kept::NotKept {
             // NO BODY TO POINT AT: the reason stands, and the refused rows
-            // are read from the first month's receipt (its `asked_from`).
+            // are read from the first month's receipt: its month from
+            // `asked_from`, its segment and ordinal from `segment` and
+            // `body_of`, which the first receipt already carries.
             pointer.refusals_from = 0;
             pointer.refusals = 0;
         } else {
@@ -1790,13 +1886,12 @@ fn place_receipt_only(
     pointer: Receipt,
 ) -> Result<Placed, KeepError> {
     let ordinal = state.count();
-    let mut receipt = pointer;
-    if receipt.kept == Kept::NotKept {
-        receipt.segment = segment;
-    }
     // A POINTER OWNS NO RECORDS OF ITS OWN: its `refusals_from` and
-    // `refusals` name the first month's, beside its body.
-    write_refusals_then_receipt(&at, &state, ordinal, receipt, &[], segment, month, rolled)
+    // `refusals` name the first month's, beside its body. ITS `segment` AND
+    // `body_of` NAME THE FIRST MONTH'S RECEIPT, a `kept=0` pointer's too: one
+    // that took its own segment lost which of the first month's segments
+    // held that receipt once the month had rolled (repair round 2).
+    write_refusals_then_receipt(&at, &state, ordinal, pointer, &[], segment, month, rolled)
 }
 
 #[cfg(test)]

@@ -3972,7 +3972,7 @@ month of the asked day.
 |---|---|---|
 | 0 | 8 | asked from: IST midnight of the window's first day (unix s) |
 | 8 | 8 | asked to: the last second of its last day (unix s) |
-| 16 | 8 | first decoded row's stamp (unix s; 0 = none). For `kept=4`: the refused answer's whole length in bytes |
+| 16 | 8 | first decoded row's stamp (unix s; 0 = none). For `kept=4`: the refused answer's whole length in bytes, and the same for a `kept=2` receipt whose `body_of` is a `kept=4` head (a refused answer repeated: the duplicate keeps the head's meaning of this field) |
 | 24 | 8 | last decoded row's stamp (unix s; 0 = none) |
 | 32 | 8 | body offset in the `.rsb` |
 | 40 | 4 | deflated length |
@@ -3987,10 +3987,10 @@ month of the asked day.
 | 68 | 1 | reason: 0 kept, 1 `pack_full`, 2 `storage_full`, 3 `duplicate_body`, 4 `later_month`, 5 `refused_answer` |
 | 69 | 1 | landing rules version (D-4843) |
 | 70 | 1 | door: 1 `from_window`, 2 `repair_window` |
-| 71 | 1 | the segment holding the body and the refused rows (the design's reserved byte; this receipt's own segment except for `kept=3`) |
+| 71 | 1 | the segment holding the body and the refused rows (the design's reserved byte; this receipt's own segment except for a further month's pointer, `kept=3` or `kept=0`, where it is the first month's receipt's segment) |
 | 72 | 32 | BLAKE3 of the raw body kept (of the head, for `kept=4`) |
 | 104 | 8 | `store::verdict::key_hash` of the instrument key's canonical name |
-| 112 | 4 | `body_of`: the ordinal of the receipt that holds the body (its own for `kept=1` and `4`) |
+| 112 | 4 | `body_of`: the ordinal of the receipt that holds the body (its own for `kept=1` and `4`); for a further month's pointer, `kept=3` or `kept=0`, the first month's receipt (month from offset 0, segment from offset 71) |
 | 116 | 4 | the first refused-row record this receipt owns, as a record index into the `.rsx` (the design's reserved bytes 116..124, DB-G46) |
 | 120 | 4 | how many records it owns (≤ offset 56; 0 when the caller passed the count only) |
 | 124 | 4 | CRC-32C over bytes 0..124 |
@@ -4022,10 +4022,14 @@ month's receipt: one `try_lock` uncontended, otherwise a blocking `flock` on
 one waiter thread bounded by 30 s, then refused `lock_stalled` (the D-4924
 bound; D-4920). A 10 ms `try_lock` poll was tried first and starved: under
 load the second of two landings was refused after 2,128 tries while the first
-never paused. A refused waiter stays parked in `flock` until the holder lets
-go, so at most four (`MAX_PARKED_WAITERS`) are parked per lock; the next
-contended append is refused `lock_stalled` at once, naming how many are
-parked, and a holder that never lets go leaves at most four threads behind.
+never paused. A waiter whose caller's wait ran out stays parked in `flock` until the
+holder lets go; once four such abandoned waiters (`MAX_PARKED_WAITERS`) are
+parked on a lock, the next contended append is refused `lock_stalled` at
+once, naming how many are parked, so a holder that never lets go leaves at
+most four threads behind, plus any waits already in flight when the fourth
+was abandoned. A waiter whose caller is still inside its wait is never
+counted: twenty healthy appends of one pack all wait and are all kept (repair
+round 2).
 One lock per (vendor, instrument,
 timeframe) rather than the critic's one per month (`<pack>.rsr.lock`): a
 month lock would add a file to every one of the store's instrument-months, and
@@ -4034,8 +4038,9 @@ landings of one instrument are serial anyway.
 **Caps and rolls.** A segment holds at most 64 MiB of deflated bodies,
 1,024 receipts and 2,796,202 refused-row records (`REFUSAL_ROOM`: 64 MiB of
 24-byte records in its `.rsx`). A segment that cannot take the next window's
-receipt, body or refused rows rolls to the next (an audited error event names
-it); a repeated body whose rows do not fit its segment rolls too, rather than
+receipt, body or refused rows rolls to the next (an audited error event
+names the month and the new segment's receipts file, for the window's first
+month and for every further month alike); a repeated body whose rows do not fit its segment rolls too, rather than
 writing a `kept=2` receipt with no record of them. In the last of eight
 segments a body that does not fit writes a receipt `kept=0 reason=pack_full`
 (its refused rows are still written); with 1,024 receipts there, or with no

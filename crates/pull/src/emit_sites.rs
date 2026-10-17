@@ -658,6 +658,95 @@ fn drive_keep_refusals_full(scratch: &Scratch) {
     );
 }
 
+/// `full`'s segment 0 of the `underlying` pack holds `MAX_RECEIPTS`
+/// receipts, and a window from `from` to `to` is kept: the month rolls to
+/// segment 1 and says so at `Error`, naming the month's new receipts file
+/// (IA-8, IA-RK-03, repair round 2).
+fn drive_keep_roll(
+    scratch: &Scratch,
+    underlying: &str,
+    full: (u16, u8),
+    from: (u16, u8, u8),
+    to: (u16, u8, u8),
+) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        underlying,
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let month = store::path::YearMonth::new(full.0, full.1).expect("a month");
+    let receipt = keep::Receipt {
+        asked_from: 0,
+        asked_to: 0,
+        first_stamp: 0,
+        last_stamp: 0,
+        body_offset: 0,
+        deflated_len: 0,
+        raw_len: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        run: 1,
+        status: 200,
+        rung: 3,
+        kept: keep::Kept::NotKept,
+        reason: keep::Reason::PackFull,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+        segment: 0,
+        digest: [0; 32],
+        key_hash: 0,
+        body_of: 0,
+        refusals_from: 0,
+        refusals: 0,
+    }
+    .encode();
+    let full_segment: Vec<u8> = (0..keep::MAX_RECEIPTS).flat_map(|_| receipt).collect();
+    fs::write(keep::names(&dir, month, 0).receipts, &full_segment).expect("a full segment");
+    let answered = keep::Answered::of(
+        crate::fetch::RawWindow::default(),
+        format!("{{\"invented\":\"{underlying}\"}}"),
+        200,
+    );
+    let landing = keep::Landing {
+        window: crate::session::Window::new(
+            crate::session::Day::new(from.0, from.1, from.2).expect("a day"),
+            crate::session::Day::new(to.0, to.1, to.2).expect("a day"),
+        )
+        .expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let outcome = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    )
+    .expect("kept");
+    let rolled = std::iter::once(&outcome.first)
+        .chain(&outcome.further)
+        .find(|placed| placed.month == month)
+        .expect("the full month took a receipt");
+    assert_eq!((rolled.segment, rolled.rolled), (1, true), "{outcome:?}");
+}
+
 struct Site {
     /// The `telemetry::emit(` this row proves, as `file:line`.
     at: &'static str,
@@ -698,6 +787,38 @@ static SITES: &[Site] = &[
         message: "response not kept",
         says: ("refused_rows", Says::Signs(5)),
         drive: drive_keep_refusals_full,
+    },
+    Site {
+        // Silent until repair round 2 of IA-8: only the first month's roll
+        // was looked at, so a later month rolled with no event at all.
+        at: "crates/pull/src/response_keep.rs — a later month of the window rolls",
+        target: "pull.keep",
+        message: "response pack segment full; keeping goes on in the next segment",
+        says: ("pack", Says::Holds("/EMITROLLLATER/1min/2019-07.1.rsr")),
+        drive: |scratch| {
+            drive_keep_roll(
+                scratch,
+                "EMITROLLLATER",
+                (2019, 7),
+                (2019, 6, 28),
+                (2019, 7, 2),
+            );
+        },
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — the window's first month rolls",
+        target: "pull.keep",
+        message: "response pack segment full; keeping goes on in the next segment",
+        says: ("pack", Says::Holds("/EMITROLLFIRST/1min/2019-06.1.rsr")),
+        drive: |scratch| {
+            drive_keep_roll(
+                scratch,
+                "EMITROLLFIRST",
+                (2019, 6),
+                (2019, 6, 27),
+                (2019, 6, 27),
+            );
+        },
     },
     Site {
         at: "ingest.rs off-grid candle refusal",

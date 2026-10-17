@@ -67882,6 +67882,16 @@ window over months asks every later month for room before the first keeps
 anything, so `receipts_full` writes nothing, as its text says. The writer itself
 refuses rows past the room `refusals_full`, in every build, where it held only
 a `debug_assert` that a release build would have skipped.
+Repair round 2 (17 Oct 2026) corrects two things the second check found in
+round 1. The parked-waiter bound counted every waiter in `flock`, including
+one whose caller was still inside its 30 s wait, so a sixth healthy
+concurrent append of one pack was refused at once with a false "holder that
+has not let go" (the checker: 20 threads, 6 kept, 14 refused). Only a waiter
+whose caller's wait ran out is counted now, under the same mutex the waiter
+decides under when it finally gets the lock, so the two can never both think
+the other holds it. And every roll is an audited error event naming the
+month and the new segment's receipts file: a later month of a window that
+rolled used to roll with no event at all.
 
 **Proof.** `the_kept_answer_decodes_to_the_rows_the_pull_landed`,
 `a_kept_answer_never_holds_a_header_or_token` (`crates/pull/src/http.rs`),
@@ -67892,8 +67902,11 @@ a `debug_assert` that a release build would have skipped.
 `more_refused_rows_than_a_segment_holds_are_refused_before_any_roll`,
 `the_writer_refuses_rows_past_the_room_by_name_in_every_build`,
 `a_receipt_naming_lengths_past_the_caps_is_damage_to_the_writer`,
-`a_window_over_months_writes_nothing_when_a_later_month_is_full`
-(`crates/pull/src/response_keep_tests.rs`).
+`a_window_over_months_writes_nothing_when_a_later_month_is_full`,
+`healthy_contention_on_one_pack_waits_rather_than_refusing`,
+`only_an_abandoned_waiter_is_counted_as_parked`
+(`crates/pull/src/response_keep_tests.rs`), and the two roll rows of
+`every_emit_site_in_this_crate_reaches_a_file` (`crates/pull/src/emit_sites.rs`).
 
 ### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
 
