@@ -8,6 +8,18 @@ Branch `cloud/mut-api-b-20261017`, cut from `origin/feat/db-fix` at
 `c9e3472e5`, the snapshot of `feat/db-fix` at `4756cce0`) re-applied with
 `git apply -3`, then finishes what that pass left open.
 
+**`origin/feat/db-fix` moved during the pass** (R3-09, R4-06, AG-04, DENY-1,
+BASE-GATE10 and the CLOUD-ATTACKO1 merge-back), and its head `dd7868a5` is
+merged in at `23bea1db` with no conflict. Afterwards the branch differs
+from `feat/db-fix` only in this pass's fourteen files (the scoped sources,
+their test files, `credential_law.rs`'s test script, `scratch.rs`,
+`emitted.rs` and this report). Every `feat/db-fix` change is kept, and
+`Cargo.toml`, `Cargo.lock` and `deny.toml` are byte-identical to it. The
+merged `api` lib suite passed 2,501 of 2,501 before any mutation job ran
+on it. Mutation jobs that started after the merge run on the merged tree;
+earlier jobs ran on `f9cdb584` plus the pass, and phase 2 re-runs every
+mutant in code changed since then (see Method).
+
 **This report holds no authority** (`CLAUDE.md` §10): it is evidence of what
 was measured on this date, on this machine.
 
@@ -84,6 +96,27 @@ both sides' intent:
    doc said its `seek` refusal could not fire. `lseek` takes a signed
    offset, so a start past `i64::MAX` bytes is `EINVAL`; the doc now says
    so and `a_page_past_every_seekable_offset_is_refused_by_name` drives it.
+4. **A dropped failure line panicked a debug build and lost the failure**
+   (`48bf6bbb`). Three error events in `server.rs` (`member did not land`,
+   `vendor refused a window`, `instrument refused`) `debug_assert`ed
+   `is_written() || no sink installed`. An error line is above every floor,
+   so that assertion could fail only when the sink DROPPED the line: a full
+   disk, or a sink already closed (R3-14). In any build with debug
+   assertions (the dev profile the Run button builds) the panic came first.
+   It fired before the autopilot's page heard of the member, inside the run
+   that refused an instrument, and inside the fetch the vendor refused. On
+   a full disk, where a member dies at the store and its line cannot be
+   written, that is every member. `telemetry::emit` never panics on a drop
+   and counts it in `Sink::health`, and the three sites now do what the
+   other emits in `server.rs` do. Test:
+   `server::cloud_mutant_tests_c::a_dropped_failure_line_loses_nothing_but_the_line`
+   (a child process with a closed sink). On the code before the fix, its
+   child panicked at `server.rs:5132`.
+5. **A count nobody read** (`a01d032f`). `Journal::measured` computed the
+   journal's record count beside its identity, and its only caller dropped
+   the count. Two mutants on that division survived because no reader
+   could see them. It is now `Journal::identity` and returns the identity
+   alone.
 
 ### Carried from the 16 Oct pass
 
@@ -126,39 +159,91 @@ both sides' intent:
 
 ## Results so far
 
+Phase 1 (the whole `api` lib suite per mutant):
+
 | File | Mutants | Caught | Missed | Timeout | Unviable |
 |---|---:|---:|---:|---:|---:|
 | `import_journal.rs` | 127 | 116 | **0** | 1 | 10 |
-| `audit.rs` | 371 | (running) | 6 so far, all equivalent | | |
-| `autopilot.rs`, `pullrun.rs`, `server.rs` | | queued | | | |
+| `audit.rs` | 371 | 321 | 10, all equivalent or removed | 0 | 40 |
+| `autopilot.rs` | 214 of 371 so far | 199 | 4, all equivalent | 0 | 11 |
+| `pullrun.rs`, `server.rs` | | queued | | | |
 
-Coverage, first run on the re-applied base (before this pass's tests):
-uncovered production lines / lines with an unhit branch side — `audit` 5 / 3,
-`import_journal` 1 / 1, `autopilot` 29 / 14, `pullrun` 34 / 32, `server`
-232 / 49. Each is being driven or explained; see below when final.
+Phase-1 survivors and why none needs a test (each re-run in phase 2):
+
+- `audit.rs:527:16` and `535:16`, `<` → `==` and `<` → `>` (4 mutants):
+  the loop of a `const _: () = { .. }` compile-time assertion. The mutant
+  makes the loop run zero times, so the check is skipped and the crate
+  still compiles. Nothing at run time differs. **Equivalent.**
+- `audit.rs:652:29`, `655:31`, `658:30`, `661:45`, `>` → `>=` in
+  `Drops::peak` (4): a running maximum. On a tie, `>=` assigns the value
+  `top` already holds. **Equivalent.**
+- `audit.rs:2807:50`, `/` → `%` and `/` → `*` in `Journal::measured` (2):
+  a count nobody read. **Removed** (defect 5).
+- `import_journal.rs:529:11`, delete `!` in `capped` (the timeout):
+  **detected**. Without the `!`, the loop walks `end` down to 0, where
+  `is_char_boundary(0)` is always true and `saturating_sub` keeps it at 0.
+  The cut never returns, so the over-long-value tests hang to the timeout
+  rather than pass.
+- `autopilot.rs:671:13` (`probe_secs`) and `1527:17`
+  (`FeedState::backoff_secs`), `>` → `>=`: when the shifted wait equals the
+  ceiling, both arms return the same value. **Equivalent.**
+- `autopilot.rs:863:25` and `864:22`, `<` → `<=` in `month_span`: a max
+  and a min of two `Day`s, which are the same `Day` on a tie.
+  **Equivalent.**
+
+Coverage (`--branch`, the whole `api` lib suite), uncovered production
+lines / lines with an unhit branch side:
+
+| File | Run 1 (re-applied base) | Run 2 (17:40, this pass's tests to then) |
+|---|---|---|
+| `audit.rs` | 5 / 3 | 1 / 0 |
+| `import_journal.rs` | 1 / 1 | 1 / 1 |
+| `autopilot.rs` | 29 / 14 | 29 / 8 |
+| `pullrun.rs` | 34 / 32 | 4 / 8 |
+| `server.rs` | 232 / 49 | 205 / 27 |
+
+What remains in run 2 is listed with its reason below once the final run
+on the final source has fixed the line numbers. Since run 2, tests have
+covered `server.rs`'s right-hand ISIN disqualifier in
+`spot_vendor_identity_for` and both `let` guards on `with_retry`'s
+named-throttle decrease. The three assertion arms of defect 4 are gone
+with the assertions.
 
 ## Done
 
 - Re-apply, its three conflicts, the latent `feat/db-fix` test failure.
-- Two production fixes above, each with its proving test.
-- New tests (17 Oct): `audit` 4, `autopilot` 4, `pullrun` 9,
-  `server_cloud_mutant_tests_c` 3, `server_cloud_mutant_tests_d` 17.
+- Three production fixes above, each with its proving test, plus the dead
+  count removed and the wrong doc corrected.
+- The newer `feat/db-fix` merged in, with the merged `api` lib suite green.
+- 54 new tests (17 Oct): `audit` 4, `autopilot` 4, `pullrun` 18,
+  `census_request_tests` 1, `server_cloud_mutant_tests_a` 1, `_b` 1, `_c` 7,
+  `_d` 18.
+- `import_journal.rs` and `audit.rs` phase 1 complete, with every survivor
+  classified above.
 
 ## Left
 
-- Finish phase 1 (`audit`, `autopilot`, `pullrun`, `server`), then phase 2:
-  every survivor and every mutant in a line this pass changed, re-run on the
-  newest source against the whole suite.
-- The remaining coverage gaps, driven or explained.
+- Finish phase 1 (`autopilot`, `pullrun`, `server`), then phase 2: every
+  survivor and every mutant in code changed since phase 1's base, on the
+  newest source, against the whole suite.
+- The final coverage run, with the remaining gaps listed and reasoned.
 - Gates, final.
 
 ## Gates
 
-- `cargo deny check`: **equal to the base**. Both fail `advisories` only, on
-  RUSTSEC-2026-0344 (`ruzstd`) and RUSTSEC-2026-0346, -0347, -0348, -0349
-  (`rustls`); `bans`, `licenses`, `sources` ok. No manifest or lockfile is
-  touched (DENY-1 owns them).
+- `cargo deny check`: **green, and equal to the base.** After the merge,
+  `advisories ok, bans ok, licenses ok, sources ok`, because DENY-1 bumped
+  `ruzstd` and `rustls` on `feat/db-fix`. This pass touches no manifest,
+  lockfile or `deny.toml`; all three are byte-identical to `feat/db-fix`
+  `dd7868a5`. (Before the merge, both this branch and the base failed
+  `advisories` alone, on RUSTSEC-2026-0344 and -0346 to -0349.)
 - `cargo fmt --check` clean on every commit.
+- One wall-clock test, `coverage::tests::the_lookup_does_not_grow_with_the_universe`
+  (`coverage.rs`, which this pass does not touch), failed once while three
+  mutation workers loaded every core. Its message was `124 ns against
+  734 ns, 501 against 1`. Run alone it passed 3 of 3, and it passed in
+  both coverage runs. This is recorded, not hidden. Its premise is
+  wall-clock timing, which depends on host load.
 - clippy and the workspace tests: final run pending.
 
 ## NEEDS THE MAC
