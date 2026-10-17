@@ -70737,6 +70737,19 @@ section, one pass over its minutes, and for a spot index at one second over
 each day's owed seconds); a month with no usable summary reads its bars whole,
 named. Caps unchanged: 12 one-second months, 240 minute months.
 
+**Gate 8 compares like with like, in the months and in the exposure to load**
+(R3-06 repair 1). Both of its asserted rows hold one p99 to another, and a
+p99 at a few hundred samples is decided by a handful of machine stalls; a row
+whose two sides were timed at different moments, or over different kinds of
+month, breached by load and passed by load. So the 240-month span is asked
+whole and as its ten 24-month tiles in the same round, the tiles' times summed
+into one sample (`spans_are_bounded`: the median at 1.5x, the sharp edge, and the p99 at 2x, stated headroom for the tail, because a p99 over 600 rounds is the sixth-largest sample and which side a stall lands in at that rank is chance; like with like it read 0.98x to 1.28x while the medians held at 0.94x to 1.00x), and the one-second kept
+months of 1,024, 10,240 and 102,400 bars are asked once each in every round
+with the first size rotating (`months_are_flat`, ceiling unchanged at 3x),
+600 rounds each. A kept answer that read its bars, or a span with a term in
+the months squared, still breaches: the answer's own words (`kept`, zero bar
+records read) are asserted on every sample.
+
 **Measured before choosing the home** (16 October 2026, a private APFS clone
 of real months, `cli msum-build`): a dense one-second month's `.sum` is 52 to
 66 KB (60 KiB on disk), a minute or option month's 771 to 1,629 bytes (one

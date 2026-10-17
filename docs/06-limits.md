@@ -18311,8 +18311,9 @@ the machine lands in a tenth as many of the short ones, so under load 68 to
 rounds; each asks the whole once and every tile once, in an order that
 alternates by round, and the round's ten tile times are SUMMED into one
 sample, so both samples cover the same months and about the same wall time.
-The whole's p99 is held to 1.5x the p99 of those sums. Measured 17 October
-2026 (release bench build of `fix/db-R3-06` at `0200b6f93`, n=600 a row,
+The whole's p99 was held to 1.5x the p99 of those sums (now the median at
+1.5x and the p99 at 2x, below). Measured 17 October
+2026 (release bench build of `fix/db-R3-06` after its merge of R3-05, n=600 a row,
 load average 16 to 30 on 14 cores, other agents' builds queued beside it):
 tiles from 2006 to 2016 p50 3.35 to 3.39 ms and from 2018 to 2024 p50 4.42
 to 4.51 ms (the era difference, measured), p99 5.4 to 7.5 ms; the ten summed
@@ -18329,6 +18330,42 @@ p99 15.7 ms, max 17.2 ms; 2006-10..2026-09 p50 25.1 ms, p99 52.6 ms, max
 150.0 ms. Every kept month answered `unreadable_records: null`; a 1 s month
 with no `.sum` (2019-09) read 392,147 records and answered `0`; every one of
 the 117 summaries `msum-build` wrote is one `store.sum` INFO line.
+
+**The one-second rows and the span's tail (R3-06 repair 1, second pass).**
+The one-second kept rows timed all of one size's answers before the next
+size's, so a stall of the machine landed in one row alone: on that build at
+load 16 to 37 the 10,240-bar row printed p99 46.6 ms between 5.8 ms on either
+side (8.1x, BREACH) with its p50 at 3.6 ms against 3.3 ms. They now run 600
+rounds that each ask every size once, the first size rotating. The span's
+p99 ratio, like with like, still moved with the load (0.981x, 1.014x, 0.980x
+at load 16 to 30; 1.283x at load 50 to 80) while its medians held at 0.938x
+to 1.006x, because both p99s are the sixth-largest of 600 and which side a
+stall lands in at that rank is chance. So the median is asserted at 1.5x and
+the p99 at 2x, both evaluated; a term in the months squared is ten times at
+both. Measured 17 October 2026 (release bench builds of `fix/db-R3-06` after
+merging `feat/db-fix` after AF-07, n=600 a row, 14 cores, this package's
+own clippy and test runs and other agents' builds beside them):
+
+| Gate 8 run | load | 1 s kept p99, 1,024 / 10,240 / 102,400 bars | ratios | span whole p50 / p99 | tile sums p50 / p99 | p50 ratio | p99 ratio |
+|---|---|---|---|---|---|---|---|
+| 1 (1.5x p99 ceiling) | 50 to 80 | 2.63 / 2.61 / 2.68 ms | 0.992x, 1.022x | 31.27 / 93.11 ms | 33.30 / 72.57 ms | 0.938x | 1.283x |
+| 2 (1.5x p99 ceiling) | 21 to 30 | 2.66 / 2.63 / 2.73 ms | 0.989x, 1.028x | 20.57 / 30.52 ms | 20.60 / 31.13 ms | 0.998x | 0.980x |
+| 3 (as built) | 12 to 16 | 2.89 / 2.79 / 2.88 ms | 0.965x, 0.997x | 29.28 / 37.03 ms | 29.09 / 37.97 ms | 1.006x | 0.975x |
+| 4 (as built) | 10 to 31 | 2.38 / 2.37 / 2.48 ms | 0.994x, 1.040x | 23.46 / 34.15 ms | 23.92 / 35.90 ms | 0.980x | 0.951x |
+
+On a fresh private clone (`shadow/R3-06-r4sum`: GDFL NIFTY 1 s 2018-09..2019-09
+and every Zerodha NIFTY 1 min month cloned, `.sum` built by `cli msum-build`
+for 2018-09..2019-08 and the 105 held minute months; curl `time_total`,
+sequential, one client, load average 16 to 19): GDFL NIFTY 1 s 12 months kept
+p50 36.2 ms, p99 39.1 ms, max 42.8 ms (n=200) against p50 406.5 ms, p99
+447.3 ms, max 525.4 ms read from the bars (n=100, 5,167,003 records);
+Zerodha NIFTY 1 min 2006-10..2026-09 kept p50 17.8 ms, p99 19.2 ms, max
+40.7 ms against p50 62.5 ms, p99 81.2 ms, max 147.3 ms (n=200 each, 796,027
+records); 2024-10..2026-09 kept p50 3.4 ms, p99 4.4 ms, max 4.4 ms (n=200).
+The kept and the bar-read answers were identical apart from how they were
+read (and, for the span, the shadow root in the `absent_file` sentences) for
+the 1 s year, the 240-month span, the 2020-03 halt month (expected 7,758,
+both halts suspected) and 2019-09 with no `.sum` (392,147 records read on both).
 
 **Not measured**: `/gaps.json` with an import writing the months it reads (no
 import may run against a shadow whose bars are the real store's); the

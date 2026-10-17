@@ -8,9 +8,9 @@
 //!
 //! | Row | Asserted |
 //! |---|---|
-//! | one one-second index month of 1,024, 10,240 and 102,400 bars (`MONTH_SIZES`), its summary kept | p99 at 10x and 100x within [`RATIO_CEILING_PERMILLE`] of 1x, and the answer says `kept` and zero bar records read |
+//! | one one-second index month of 1,024, 10,240 and 102,400 bars (`MONTH_SIZES`), its summary kept, each of `MONTH_ROUNDS` rounds asking every size once (the size asked first rotating) | p99 at 10x and 100x within [`RATIO_CEILING_PERMILLE`] of 1x, and the answer says `kept` and zero bar records read |
 //! | the same months with the summary spoiled, so the bars are read | printed, unasserted: it is the slow path a `built` answer names, and it grows with the bars by design |
-//! | 240 one-minute months 2006-01..2025-12 with their summaries kept, asked whole and as the ten 24-month tiles that cover them, each round asking the whole once and every tile once (`SPAN_ROUNDS` rounds, order alternating) | the whole's p99 within [`SPAN_CEILING_PERMILLE`] (one and a half times) of the p99 of each round's ten tile times summed: linear in the months asked, never in their bars, comparing the same months over the same exposure to load (`spans_are_bounded`) |
+//! | 240 one-minute months 2006-01..2025-12 with their summaries kept, asked whole and as the ten 24-month tiles that cover them, each round asking the whole once and every tile once (`SPAN_ROUNDS` rounds, order alternating) | the whole's p50 within [`SPAN_MEDIAN_CEILING_PERMILLE`] (one and a half times) of the median of each round's ten tile times summed, and its p99 within [`SPAN_CEILING_PERMILLE`] (twice) of their p99: linear in the months asked, never in their bars, comparing the same months over the same exposure to load (`spans_are_bounded`) |
 //! | a 375-bar commit onto a 1x, 10x and 100x month, and the summary step's own work on the same months | printed both, unasserted: the step's work is a read, a fold of the batch and a write of a few kilobytes |
 //!
 //! R3-06 owns this file. Each fixture root is a new directory of this run's
@@ -26,12 +26,23 @@ use super::{MONTH_SIZES, RATIO_CEILING_PERMILLE, month_file, ratio, refuse};
 /// Requests per timed row.
 const REQUESTS: usize = 200;
 
-/// The whole span may cost at most one and a half times its ten tiles asked
-/// one by one in the same round. Linear in the months, it costs no more than
-/// they do (one fixed cost against ten); a term in the months squared makes
-/// it up to ten times more. The half is headroom for one answer touching ten
-/// times the memory, and for two p99s that are each an order statistic.
-const SPAN_CEILING_PERMILLE: u128 = 1_500;
+/// The whole span's MEDIAN may be at most one and a half times the median of
+/// its ten tiles asked one by one in the same round. Linear in the months,
+/// it costs no more than they do (one fixed cost against ten); a term in the
+/// months squared makes it up to ten times more, at every quantile. The half
+/// is headroom for one answer touching ten times the memory. A median is far
+/// from where a machine stall decides the order statistic, so this is the
+/// row's sharp edge: measured 0.938x to 1.004x under load 16 to 80.
+const SPAN_MEDIAN_CEILING_PERMILLE: u128 = 1_500;
+
+/// The whole span's p99 may be at most twice the p99 of its rounds' tile
+/// sums. The same linearity, with stated headroom for the tail: a p99 over
+/// 600 rounds is the sixth-largest sample, and whether a stall lands in the
+/// sixth-largest whole or the sixth-largest sum is a coin the load tosses. On
+/// one like-with-like build it read 0.981x, 1.014x and 0.980x on a machine at
+/// load 16 to 30 and 1.283x at load 50 to 80 with the medians at 0.993x,
+/// 1.004x, 0.998x and 0.938x. A term in the months squared is still ten times.
+const SPAN_CEILING_PERMILLE: u128 = 2_000;
 
 /// Commits per timed commit row.
 const COMMITS: usize = 100;
@@ -112,10 +123,29 @@ fn runtime() -> tokio::runtime::Runtime {
     }
 }
 
+/// Rounds of the one-second kept rows: each asks every month size once.
+///
+/// Three times [`REQUESTS`] for the reason [`SPAN_ROUNDS`] is: the gate
+/// compares p99s, and at 200 samples a p99 is the second-largest, so two
+/// stalls of the machine decide it. At 600 it is the sixth-largest.
+const MONTH_ROUNDS: usize = 600;
+
 /// The one-second rows: kept is flat in the bars, spoiled is printed.
+///
+/// **INTERLEAVED, round by round** (R3-06 repair 1, D-4980). The first form
+/// timed all of one size's answers and then all of the next, so a stall of
+/// the machine landed in one size's row alone: on a merged tree under load
+/// 16-37 the 10,240-bar row printed p99 46.6 ms against 5.8 ms on either
+/// side of it (8.1x, BREACH) while its p50 sat at 3.6 ms against 3.3 ms, a
+/// breach made of load, not of bars. Now every round asks each size once,
+/// the size asked first rotating, so each sample of every size is exposed to
+/// the same machine over the same wall time and a stall is as likely to land
+/// in any of them. The ceiling is unchanged: a kept answer that read the
+/// bars would still grow with them, and the answer's own words (`kept`, zero
+/// bar records read) are asserted on every sample.
 fn months_are_flat(runtime: &tokio::runtime::Runtime) -> bool {
     let query = "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2024-06";
-    let mut kept = Vec::new();
+    let must = r#""summary":"kept","summary_fallback":null,"bar_records_read":0"#;
     let mut roots = Vec::new();
     for &n in &MONTH_SIZES {
         let (file, root) = month_file("gaps", n);
@@ -123,20 +153,27 @@ fn months_are_flat(runtime: &tokio::runtime::Runtime) -> bool {
         // THE WRITER'S LOCK IS RELEASED, as an import's is between days.
         drop(file);
         let site = site_over(&root);
-        let figures = timed(
-            runtime,
-            &site,
-            query,
-            r#""summary":"kept","summary_fallback":null,"bar_records_read":0"#,
-            REQUESTS,
-        );
+        roots.push((root, bars, site));
+    }
+    let mut kept_ns = vec![Vec::with_capacity(MONTH_ROUNDS); roots.len()];
+    for round in 0..MONTH_ROUNDS {
+        for step in 0..roots.len() {
+            let at = (round + step) % roots.len();
+            let (Some((_, _, site)), Some(samples)) = (roots.get(at), kept_ns.get_mut(at)) else {
+                refuse("every size has a site and a sample list");
+            };
+            samples.push(once(runtime, site, query, must));
+        }
+    }
+    let mut kept = Vec::new();
+    for (samples, n) in kept_ns.iter_mut().zip(MONTH_SIZES) {
+        let figures = percentiles(samples);
         print_row(
             &format!("gaps 1s month {n} bars, summary kept"),
-            REQUESTS,
+            MONTH_ROUNDS,
             figures,
         );
         kept.push(figures.1);
-        roots.push((root, bars, site));
     }
     for ((_, bars, site), n) in roots.iter().zip(MONTH_SIZES) {
         let beside = store::month_summary::path_beside(bars);
@@ -268,11 +305,19 @@ const SPAN_ROUNDS: usize = 600;
 /// that alternates round by round, and the round's TILE SAMPLE is the sum of
 /// its ten answers' times: one sample of the same months and about the same
 /// wall time as the whole's, so a stall is as likely to land in either. The
-/// gate holds the whole's p99 to [`SPAN_CEILING_PERMILLE`] of the p99 of
-/// those per-round sums. A route linear in its months answers the whole for
-/// no more than its parts (one fixed cost against ten); one with a term in
-/// the months squared answers it for up to ten times more, so the ceiling
-/// still catches what the first row was for, whatever kind each month is.
+/// gate holds the whole's median to [`SPAN_MEDIAN_CEILING_PERMILLE`] of the
+/// median of those per-round sums and its p99 to [`SPAN_CEILING_PERMILLE`] of
+/// their p99. A route linear in its months answers the whole for no more than
+/// its parts (one fixed cost against ten); one with a term in the months
+/// squared answers it for up to ten times more at both quantiles, so the
+/// ceilings still catch what the first row was for, whatever kind each month
+/// is.
+///
+/// **Third, the tail's ceiling had no stated headroom.** Like with like, the
+/// p99 ratio still moved with the load (0.98x to 1.28x on one build) while
+/// the medians held at 0.94x to 1.00x: both p99s are the sixth-largest of
+/// 600, and which side a stall lands in at that rank is chance. So the median
+/// carries the sharp ceiling and the p99 has twice, both asserted.
 fn spans_are_bounded(runtime: &tokio::runtime::Runtime) -> bool {
     let root = minute_months(SPAN_MONTHS);
     let site = site_over(&root);
@@ -334,24 +379,26 @@ fn spans_are_bounded(runtime: &tokio::runtime::Runtime) -> bool {
         SPAN_ROUNDS,
         figures,
     );
-    // THE MEDIANS TOO, printed and not asserted: the p99 ratio is the gate,
-    // and the p50 one says how close to "the sum of its parts" the whole is.
-    if let Some(permille) = figures.0.saturating_mul(1_000).checked_div(summed.0) {
-        println!(
-            "  {:<46} ratio {}.{:03}x  (printed, unasserted)",
-            format!("gaps p50 span {SPAN_MONTHS} vs its tiles summed"),
-            permille / 1_000,
-            permille % 1_000
-        );
-    }
     // NANOSECONDS INTO THE PICOSECONDS `ratio` PRINTS: the first row handed
     // it nanoseconds, so its line read 1,000 times too small.
-    ratio(
+    //
+    // BOTH QUANTILES ARE ASSERTED, and both are evaluated, so a breach of
+    // either is printed whatever the other says (R3-06 repair 1): the median
+    // is the sharp edge on how close to "the sum of its parts" the whole is,
+    // and the p99 holds the tail to stated headroom.
+    let median = ratio(
+        &format!("gaps p50 span {SPAN_MONTHS} vs its tiles summed"),
+        summed.0.saturating_mul(1_000),
+        figures.0.saturating_mul(1_000),
+        SPAN_MEDIAN_CEILING_PERMILLE,
+    );
+    let tail = ratio(
         &format!("gaps p99 span {SPAN_MONTHS} vs its tiles summed"),
         summed.1.saturating_mul(1_000),
         figures.1.saturating_mul(1_000),
         SPAN_CEILING_PERMILLE,
-    )
+    );
+    median && tail
 }
 
 /// A 375-bar commit onto a month of each size, and the summary step's own
