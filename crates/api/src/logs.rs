@@ -1613,10 +1613,33 @@ pub async fn note_request(
     // A `/db` READ KEEPS ITS SELECTION (WP-33c, DB-A42): the names it read
     // by, never the whole query, and only on a read route.
     let selection = is_db_read(&path).then(|| selection_of(request.uri().query().unwrap_or("")));
+    // EVERY ROUTE IS TIMED INTO ITS BUCKETS (R3-14, RA-014): its matched
+    // path, or the front end's one row. A request whose client leaves before
+    // the answer is dropped here with its `Pending`, which counts it
+    // cancelled.
+    let pending = crate::speed::Pending::start(
+        crate::speed::global().row(
+            request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .map_or(crate::speed::FRONT_END, axum::extract::MatchedPath::as_str),
+            crate::speed::Kind::Route,
+            crate::speed::now_ms(),
+        ),
+    );
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    pending.finish(
+        micros,
+        crate::speed::Outcome::of(
+            status.as_u16(),
+            response
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER),
+        ),
+    );
     let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
 
     let level = request_level(status);
@@ -1829,80 +1852,9 @@ fn selection_of(query: &str) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// One route's access window.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccessWindow {
-    /// When it opened, ms.
-    opened_ms: u64,
-    /// Reads served in it.
-    served: u64,
-    /// Reads refused in it.
-    refused: u64,
-    /// The slowest read in it, microseconds.
-    slowest: u64,
-    /// Whether its served read was written.
-    sampled: bool,
-}
-
-/// What one read writes, decided by [`AccessWindows::account`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccessPlan {
-    /// The window that just closed, to be said first, when it held more than
-    /// the line it wrote.
-    pub(crate) closed: Option<AccessWindow>,
-    /// Whether this read is written whole.
-    pub(crate) sample: bool,
-}
-
-/// Every route's access window. O(1) a read: one probe of a table of at most
-/// [`DB_READS`] routes.
-///
-/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
-/// "Cost claims of the /db fix round that name no proof").
-#[derive(Debug, Default)]
-pub(crate) struct AccessWindows {
-    routes: std::collections::HashMap<&'static str, AccessWindow>,
-}
-
-impl AccessWindows {
-    /// Accounts one read of `route`, `refused` or served, taking `micros`, at
-    /// `now_ms`.
-    pub(crate) fn account(
-        &mut self,
-        route: &'static str,
-        refused: bool,
-        micros: u64,
-        now_ms: u64,
-    ) -> AccessPlan {
-        let window = self.routes.entry(route).or_insert(AccessWindow {
-            opened_ms: now_ms,
-            ..AccessWindow::default()
-        });
-        let mut plan = AccessPlan::default();
-        if now_ms.saturating_sub(window.opened_ms) >= ACCESS_WINDOW_MS || now_ms < window.opened_ms
-        {
-            let reads = window.served.saturating_add(window.refused);
-            if reads > u64::from(window.sampled) {
-                plan.closed = Some(*window);
-            }
-            *window = AccessWindow {
-                opened_ms: now_ms,
-                ..AccessWindow::default()
-            };
-        }
-        if refused {
-            window.refused = window.refused.saturating_add(1);
-        } else {
-            window.served = window.served.saturating_add(1);
-            if !window.sampled {
-                window.sampled = true;
-                plan.sample = true;
-            }
-        }
-        window.slowest = window.slowest.max(micros);
-        plan
-    }
-}
+// THE PER-ROUTE MINUTE COUNTER LIVES IN `crate::speed` (R3-14): one module
+// keeps every per-route count, and this one decides what a read writes.
+use crate::speed::AccessWindows;
 
 /// The access windows of this process.
 static ACCESS: std::sync::Mutex<Option<AccessWindows>> = std::sync::Mutex::new(None);
@@ -4257,6 +4209,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::speed::AccessPlan;
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
     /// WIPE THE LOG. 100,000 failed requests inside one window write at most

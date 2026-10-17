@@ -695,7 +695,7 @@ pub(super) fn census_etag(body: &str) -> String {
 /// several, so this compares each in turn rather than the header as one string.
 /// `*` is deliberately not honoured: it means "if any representation exists",
 /// which for an endpoint that always has one would answer 304 forever.
-fn none_match_hit(headers: &axum::http::HeaderMap, etag: &str) -> bool {
+pub(super) fn none_match_hit(headers: &axum::http::HeaderMap, etag: &str) -> bool {
     headers
         .get(axum::http::header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())

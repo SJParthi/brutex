@@ -1437,3 +1437,113 @@ fn a_rows_answer_reads_the_same_keys_at_ten_times_the_census() {
     assert_eq!(few, many, "the same probes, whatever else the census holds");
     assert_eq!(sums_small, sums_large);
 }
+
+/// What the two counters must equal: every expiry's contracts summed, and
+/// each expiry's distinct option strikes, walked the way the answers walked
+/// them before the counters existed.
+fn walked(index: &Index) -> Vec<(u64, Vec<u64>)> {
+    index
+        .underlyings()
+        .map(|(_, under)| {
+            let contracts = under
+                .expiries
+                .values()
+                .map(|chain| u64::try_from(chain.contracts.len()).expect("fits"))
+                .sum();
+            let strikes = under
+                .expiries
+                .values()
+                .map(|chain| {
+                    let set: BTreeSet<i64> = chain
+                        .contracts
+                        .keys()
+                        .filter_map(|id| match *id {
+                            ContractId::Option { strike, .. } => Some(strike),
+                            ContractId::Future => None,
+                        })
+                        .collect();
+                    u64::try_from(set.len()).expect("fits")
+                })
+                .collect();
+            (contracts, strikes)
+        })
+        .collect()
+}
+
+/// The counters the index keeps.
+fn counted(index: &Index) -> Vec<(u64, Vec<u64>)> {
+    index
+        .underlyings()
+        .map(|(_, under)| {
+            (
+                under.contracts,
+                under.expiries.values().map(|chain| chain.strikes).collect(),
+            )
+        })
+        .collect()
+}
+
+/// **THE UNDERLYINGS ANSWER READS A COUNTER, NOT EVERY EXPIRY**
+/// (`cloud/attack-o1-20261016`).
+///
+/// With no underlying asked, `render_answer` summed the contracts of every
+/// expiry of every underlying, and with no expiry asked it collected every
+/// contract of every expiry into a set to count strikes: O(contracts of the
+/// segment) per request, growing with every stored month. `Index::apply`
+/// now counts both as a contract is first seen. Here the counters equal the
+/// walk on a fresh build, after a move that adds rows and grows one, and
+/// after a CE's PE lands at a strike already counted; and the answer sites
+/// hold no walk, asserted on the source (needles assembled at run time).
+#[test]
+fn the_contract_and_strike_counts_are_counters_kept_by_apply() {
+    let rows = chain();
+    let (first, rest) = rows.split_at(1);
+    let mut disk = OnDisk::new("counted", first);
+    let before = disk.read(None);
+    let mut index = built(Segment::Fno, &before);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(counted(&index), vec![(1, vec![1])], "one CE, one strike");
+
+    // THE PE AT THE SAME STRIKE: one more contract, no more strikes.
+    disk.append(&rest[..1]);
+    let moved = disk.read(Some(before.census()));
+    advance(&mut index, Segment::Fno, &moved);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(counted(&index), vec![(2, vec![1])]);
+
+    // THE REST, AND A KEY THAT GROWS: a grown key is no new contract.
+    let mut grown = rest[1..].to_vec();
+    grown.push(held(
+        fno("2019-03-28-1150000-CE", Timeframe::SECOND_1, month(2019, 3)),
+        11,
+        0,
+        110,
+        7_101,
+    ));
+    disk.append(&grown);
+    let after = disk.read(Some(moved.census()));
+    advance(&mut index, Segment::Fno, &after);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(
+        counted(&index),
+        vec![(5, vec![1, 2])],
+        "five contracts; 03-07 one strike, 03-28 two"
+    );
+    let fresh = built(Segment::Fno, &after);
+    assert_eq!(counted(&fresh), counted(&index), "moved equals fresh");
+
+    let source = include_str!("facets.rs");
+    for needle in [
+        format!(
+            "{}{}",
+            ".map(|chain| chain.contracts.len())", "\n            .sum()"
+        ),
+        format!("{}{}", "let strikes: BTreeSet", "<i64> = chain"),
+    ] {
+        assert!(
+            !source.contains(&needle),
+            "an answer walks the contracts again: {needle:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&disk.root);
+}

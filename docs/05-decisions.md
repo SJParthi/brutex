@@ -70635,3 +70635,752 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 `an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
+
+### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
+
+The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
+7,613 lines at `d7eb0ecf` (6,046 when the plan was written), and the build
+order of `state/design/ingest-automation.md` §16.2 has eleven packages edit
+it in strict order: WP-16, WP-11c, WP-12d, WP-12f, then IA-1, IA-2, IA-3,
+IA-16, IA-4, IA-7 and IA-17. The first four have merged. The file is split
+before IA-1, so that each later package edits the file that holds its seam.
+
+1. **Six files, by seam.** The five new modules are private, mounted by
+   `#[path]` from `gdfl_import.rs`, and every item a caller outside the module
+   reaches keeps its path through a `pub use`
+   (`pull::gdfl_import::{Cause, ImportRefusal, Outcome, Stage, cm_cause,
+   nfo_cause, CensusRoom, drive, drive_from, BAR_DEFINITION,
+   definition_is_current, journal_path}`, and `append_lines` for the crate),
+   so no caller in `pull`, `cli` or `api` changed.
+   - `gdfl_import.rs` (3,160 lines): the run's types and entry points
+     (`ImportKind`, `SourceKind`, `Origin` and its measurement, `RunOptions`,
+     `Durability`, `Workers`, `convert`, `TickFile`, `DayRead`, `Refused`,
+     `Report`, `Run`), the CM and options readers (`run_cm`, `cm_jobs`,
+     `cm_day_with`, `run_nfo`, `option_handed`, `warm_up`, `nfo_jobs`,
+     `nfo_day_with`), `Rescan`, and the module lines.
+   - `gdfl_import_day.rs` (1,663): the day loop (`Ctx`, `admit` and the
+     done-day skip, `decisive`, `close_of`, `close_day`, `drive`,
+     `drive_from`, `drive_core`, the reach-back, `widen`, `probe`, `day_pass`,
+     `record_close`).
+   - `gdfl_import_journal.rs` (992): `journal_path`, `BAR_DEFINITION`,
+     `definition_is_current`, the journal's parse, `Journal`, `append_lines`,
+     `closing_line`, `run_line`.
+   - `gdfl_import_filing.rs` (1,093): the provenance record, `BeginGate`,
+     `on_workers`, `Filing`, `DayFiler`, `make_durable`,
+     `stop_at_durability`.
+   - `gdfl_import_census.rs` (265): `CensusRoom`, the `Census` trait,
+     `StoreCensus`, `census_room`, `census_code`, `census_refusal`,
+     `stop_at_census`.
+   - `gdfl_import_causes.rs` (567): `ImportRefusal`, `Stage`, `Cause`,
+     `cm_cause`, `nfo_cause`, `Outcome`.
+2. **Move-only.** No line was added but module lines (the five `mod`
+   declarations with their `#[path]`, and a `//!` header for each new file),
+   use lines, and visibility (`pub(super)` where the file beside needs an
+   item). `the_split_moves_lines_and_changes_none` counts the six files'
+   non-blank lines as a multiset against the unsplit file's (blob
+   `1c349b13`), less those three kinds, and finds 0 others; it pins what it
+   set aside: 54 module, 97 use and 311 visibility lines, against the unsplit
+   file's 24, 23 and 154. `the_line_counter_sets_aside_only_module_use_and_visibility`
+   proves the counter cannot pass a changed line.
+   `the_split_importer_writes_the_same_bytes` was committed first, on the
+   unsplit importer, and is unchanged since: six imports of invented NIFTY,
+   BANKNIFTY, share and option days (a special session, a weekend, a holiday,
+   a refused file, an illiquid strike and a re-run among them) leave the same
+   files with the same bytes. The pull crate's test names are the same
+   before and after, plus the two line tests.
+3. **Where a later package edits: the file that holds its seam, and a new
+   seam beside the nearest one.** The map of §16.2's rows onto these files
+   (derived from the design's text, not measured) is
+   `docs/06-limits.md` L-R335-01, with the longest chain that is left.
+4. **Rejected.** `pub mod` for the new modules: it would add public paths no
+   caller asked for, and the re-exports keep every old one. A seventh file
+   for the CM and options readers: not in this package's seams; IA-1's run
+   seams and IA-4's `option_handed` counts share `gdfl_import.rs` with them.
+   Splitting `gdfl_import_tests.rs` (5,786 lines): not this package's file,
+   and each later package puts new tests in its own test file.
+
+Limits: `docs/06-limits.md` L-R335-01 (the chain left) and L-R335-02 (where
+the line proof cannot run). Invariants: `docs/04-invariants.md` R335-01 and
+R335-02.
+
+### D-4980 — The month summary: one section, version 1, carried by a sealed month's `.sbar` and kept in a `<yyyy-mm>.sum` sibling while a month is written; the gap audit reads it and no bar, and names the fall-back when it cannot — 2026-10-16
+
+**Implemented by** R3-06 (`store::month_summary`: `MonthSummary`, `Counts`,
+`Extremes`, `Refused`, `read_beside`, `path_beside`; the writer's step and the
+rebuild door `BarFile::month_summary_existing` in
+`crates/store/src/month_summary_writer.rs`; `FileKind::MonthSummary`; the gap
+audit in `crates/api/src/gaps_route.rs`; the halt rule in
+`crates/pull/src/gaps.rs`; gate 8's rows in `crates/api/benches/ratio/gaps.rs`;
+the store step `cli msum-build` in `crates/cli/src/msum_builder.rs`, which
+walks the rebuild door over named months with `cli srt-build`'s own argument
+parser; the `Read from` column and census cell on `/gaps`).
+**Closes** DB-A30 (the gap audit read every record of every month asked) and
+the `/gaps.json` half of DB-G47 (a recorded halt owed on some doors). **Number**:
+the numbers to D-4975 are in use or taken in open worktrees on 16 October
+2026; this takes D-4980 and the merge renumbers it if another lands first
+(amendment A6). **Bytes**: `docs/02-store-format.md` §8.6.
+
+**Decision.**
+
+1. **A summary of facts, not a stored gap result.** A gap result depends on
+   the request (the calendar asked, `min_run`, the contract's expiry); one
+   stored result would answer one request and silently mis-answer the rest.
+   The summary keeps the calendar-free facts every result is computed from:
+   the committed header it describes, the minutes held per day (a bitmap from
+   the first held minute to the last), the seconds held per day when the
+   month is dense enough (below), bars and first/last second per day, the
+   input counts the audit refuses on (off-grid or not strictly increasing,
+   decreasing, negative volume, outside the month, distinct seconds and
+   minutes held), and the extremes with the stamp of the earliest bar holding
+   each. The kept and the built answer are one computation.
+2. **One section, two homes (amendment A4).** The section is the summary
+   version (`u16`), two zero bytes, the payload and a CRC-32C. A sealed month
+   carries it in its `.sbar` summary section (head flag bit 2, `sum_off`,
+   `sum_len`, D-4965) and has no sidecar. A month still being written keeps
+   the same section behind the magic `BRUTEXU1` in `<yyyy-mm>.sum`, so the
+   sealer copies the bytes after the magic unchanged
+   (`a_sealed_month_carries_the_summary_section_byte_for_byte`).
+3. **No `.sum` under 1,024 bars** (D-4933's threshold): such a month's summary
+   is built from its at most 1,023 bars when asked. 552,686 of 852,757 months
+   are under it (D-4933), so at most 300,071 months pay a `.sum` and an inode
+   until they are sealed, and none after.
+4. **The density rule for seconds.** Seconds are kept when the distinct
+   seconds held are at least half of the seconds the days span, which bounds
+   that part at two bits a held second. It is judged at every write: a month
+   an append takes under half drops its seconds then, and a month whose
+   seconds were dropped or never kept is written whole the first time an
+   append makes it dense again. **That rebuild is `O(n_valid)` and runs on
+   every commit that takes the month back over the half line**, so a month
+   whose density moves back and forth across it pays it as often as every
+   second commit: the step is `O(batch)` per commit except on those commits.
+   (This item first said "once per crossing, never once per commit"; the
+   second half was wrong, and the R3-06 repair corrects it here before the
+   entry lands.) Hysteresis would amortise it and was refused, because the
+   kept bytes would then depend on how commits were batched rather than on the
+   bars, and a sealed month carries them as a pure function of its inputs
+   (D-4965). Each such rebuild is a `store.sum` INFO line, reason
+   `dense_again`, so its frequency is read off the log. Only the spot-index
+   one-second audit needs seconds; a reader that needs seconds a summary does
+   not keep reads the bars and says so.
+5. **The writer's step never refuses a commit.** After the sort index's step,
+   on every writer open and commit: extend a summary of the generation before
+   by the rows committed since (`O(batch)`), else build it whole; write to
+   `<yyyy-mm>.new.sum` (a new inode) and rename. A failure is a `store.sum`
+   warning; the summary left describes an older generation and every reader
+   refuses it as `stale` by a header comparison. Not flushed: every read checks
+   magic, CRC, geometry and the header; and for the same reason
+   `DurableBatch::confirm_month` passes the `.sum` over as it passes the lock,
+   so a confirmed month costs no flush for it (MS-09).
+   **Every whole write is logged**: a month's first `.sum` (reason
+   `absent`, once a month when it reaches 1,024 bars), one replaced (`torn`,
+   `stale`, ...), one the door rebuilt and a month dense again are each one
+   `store.sum` INFO line, "month summary written whole", naming the file, the
+   reason and `n_valid`; the per-commit extension is silent upkeep (MS-12).
+6. **Readers name every fall-back.** `read_beside` refuses by name (`absent`,
+   `below_threshold`, `unreadable`, `torn`, `magic`, `checksum`, `version`,
+   `shape`, `not_this_month`, `stale`). `/gaps.json` states per month
+   `summary` (`kept`, `built`, `absent_file`), `summary_fallback` (the
+   refusal, or why a kept summary was not enough: input the fold may refuse,
+   seconds not kept) and `bar_records_read`, and per answer
+   `summaries: {kept, built, bar_records_read}`. A kept month reads no record, so it
+   states `unreadable_records: null`, never a `0` it did not count: damage to
+   a record after its summary was written is seen only by a read of the bars
+   (MS-13). The summary is opened as
+   every sidecar is (`O_NOFOLLOW | O_NONBLOCK`, regular files only): a link
+   at its name is never followed, a FIFO never makes a request wait, and the
+   writer refuses such a name before it stages a file
+   (`a_linked_or_special_summary_is_refused_and_never_followed`).
+7. **A recorded halt is not owed by any classifier door.** `pull::gaps`
+   takes a recorded halt's minutes (`calendar::halt_on`, sourced or suspected,
+   D-3320) out of what a day owes whatever calendar sized the day -- the
+   table, the derivatives venue's hours, a cash schedule, a peer vote -- so
+   `/gaps.json` owes a halt day what `/calendar.json` and `/dayflags.json` owe
+   (`a_recorded_halt_is_not_owed_on_every_route`). A minute lost outside the
+   halt is still lost.
+
+**Limits** (for `docs/06-limits.md`): `/gaps.json` is O(months asked) per
+request, each month O(1) in its bars when its summary is kept (one read of the
+section, one pass over its minutes, and for a spot index at one second over
+each day's owed seconds); a month with no usable summary reads its bars whole,
+named. Caps unchanged: 12 one-second months, 240 minute months.
+
+**Gate 8 compares like with like, in the months and in the exposure to load**
+(R3-06 repair 1). Both of its asserted rows hold one p99 to another, and a
+p99 at a few hundred samples is decided by a handful of machine stalls; a row
+whose two sides were timed at different moments, or over different kinds of
+month, breached by load and passed by load. So the 240-month span is asked
+whole and as its ten 24-month tiles in the same round, the tiles' times summed
+into one sample (`spans_are_bounded`: the median at 1.5x, the sharp edge, and the p99 at 2x, stated headroom for the tail, because a p99 over 600 rounds is the sixth-largest sample and which side a stall lands in at that rank is chance; like with like it read 0.98x to 1.28x while the medians held at 0.94x to 1.00x), and the one-second kept
+months of 1,024, 10,240 and 102,400 bars are asked once each in every round
+with the first size rotating (`months_are_flat`, ceiling unchanged at 3x),
+600 rounds each. A kept answer that read its bars, or a span with a term in
+the months squared, still breaches: the answer's own words (`kept`, zero bar
+records read) are asserted on every sample.
+
+**Measured before choosing the home** (16 October 2026, a private APFS clone
+of real months, `cli msum-build`): a dense one-second month's `.sum` is 52 to
+66 KB (60 KiB on disk), a minute or option month's 771 to 1,629 bytes (one
+4 KiB block), one inode each; at most 300,071 such months, about 2.7 GiB,
+until sealed. The kept and the bar-read answer were byte-identical on 10 real
+selections (NIFTY, BANKNIFTY and RELIANCE at 1 s and 1 min, the 2020-03 halt
+month, two NIFTY 2019-06 strikes), and the kept NIFTY 1 s year read no bar
+where the real store read 5,167,003. Timings: `docs/06-limits.md`, "`/gaps.json`
+and the month summary".
+
+### D-4996 — The app runs under two launchd agents that `cli launch-agent` prints at install time and no file in the tree holds; the watchdog is one `cli watchdog` probe a minute whose notice is a page handed to `open` — 2026-10-14
+
+R3-32. Until now the app on :8080 ran only when a session started it, so a
+reboot, a crash or a drive that mounted after login left it down with nothing
+to say so.
+
+**What is decided.** (1) Two agents, `in.brutex.app` and `in.brutex.watchdog`,
+are rendered by `cli launch-agent app|watchdog` from the operator's own
+arguments and written by his shell into `~/Library/LaunchAgents/`; no `.plist`
+is tracked (`CLAUDE.md` §2, gate 1; round-3 amendment A5), so the verb, its
+tests and `docs/36-ops-runbook.md` §9 are the agents' source. The verb writes
+and installs nothing. (2) The app agent is kept alive by a `PathState` on the
+store root, so launchd waits for the drive rather than the api polling for it,
+and `ThrottleInterval` (10 s by default) bounds a start-time refusal to one a
+throttle interval (FM-196). It also sets `ProcessType Interactive` (unset,
+launchd throttles a job's CPU and I/O) and a soft `NumberOfFiles` of 65,536
+(launchd's own was measured at 256; FM-088). (3) The watchdog is one probe
+per run of `GET /health` within 5 s; an outage is two unanswered probes in a
+row, its one notice goes out at the second (at most 120 s after the last
+answer), and the first answer after it sends one "back" notice; a single miss
+is a `blip` with no notice. Any HTTP status line is an answer (`/health`
+answers 503 when the data is not clean). Its state lives off the store drive
+(refused by DEVICE: the store root's `st_dev` against the directory's nearest
+existing ancestor, so a sibling, a `..` or a link into the drive is refused
+like a path under the root; an agent rendered with the drive away carries a
+`NOT CHECKED` comment) and two misses are "in a row" only within two
+intervals (`--interval-seconds`, passed by the agent), so a miss at shutdown
+and one at the next login are no outage. `main` skips the store
+preflight for these two verbs, because an unmounted drive is one of the
+outages to report. (4) The notice is an HTML page under the state directory
+handed to `open`, not a Notification Center banner: a banner needs `osascript`
+(an interpreter, gate 0) or an Objective-C binding, both forbidden by §2. A
+page `open` could not deliver is retried at the next probe and is never
+counted as delivered. (5) A notice is SAVED BEFORE IT IS SENT (`pending=` in
+the v2 state line; v1 still reads): a state that cannot be saved withholds
+the notice with a `notice-withheld` line, and a run killed inside `open` is
+named `notify-unknown` by the next and counted as sent, so a notice goes out
+at most once per outage; the price is a silent watchdog when its own
+directory cannot be written (`docs/06-limits.md` L-WD-6). A lock held by
+another is waited for up to 1 s before the run is refused, because any spawn
+duplicates the lock's descriptor until its `exec` (verify-R3-32-r1).
+
+**Not decided here.** A distinct exit code per start refusal and a graceful
+stop on SIGTERM are the api's; the kill drill's seconds are the operator's to
+record in `docs/36` §9.4.
+
+**Proved by** `cli::watchdog_command::tests::the_watchdog_notifies_once_when_health_does_not_answer`,
+`cli::watchdog_command::tests::the_watchdog_says_when_the_app_is_back`,
+`cli::watchdog_command::tests::a_single_missed_probe_is_a_blip_and_sends_no_notice`,
+`cli::watchdog_command::tests::a_notice_that_could_not_be_delivered_is_tried_again_and_never_doubled`,
+`cli::watchdog_command::tests::the_launch_agent_waits_for_the_store_drive`,
+`cli::watchdog_command::tests::startup_waits_for_a_missing_root_with_backoff`,
+`cli::watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`,
+`watchdog_binary::the_watchdog_runs_with_the_store_drive_away`,
+`cli::watchdog_command::tests::a_state_that_cannot_be_saved_withholds_the_notice_and_never_repeats_it`,
+`cli::watchdog_command::tests::a_run_killed_while_open_runs_sends_no_second_notice`,
+`cli::watchdog_command::tests::a_lock_held_for_a_moment_is_waited_for_not_refused`,
+`cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
+`cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
+
+### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling, and the tick-store writer names the encoder it links — 2026-10-16, extended 2026-10-17
+
+**Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
+`feat/db-fix` stopped at `STEP deny rc=1` (gate 72c91a46, 14 Oct):
+`cargo deny check` failed `advisories` on **RUSTSEC-2026-0344**, "Decompression
+bomb in `ruzstd`: a tiny input can exhaust memory (OOM)",
+<https://rustsec.org/advisories/RUSTSEC-2026-0344>, against `ruzstd` 0.8.2
+(reached through `lake` and `pull`), patched `>= 0.9.1`. The advisory's cause:
+a compressed block's DECODED size was never held to RFC 8878's
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`. Re-run on 16 Oct against the
+advisory database at commit `479c888c` (2026-10-16), the same check also
+failed on four advisories dated 2026-10-14 against `rustls` 0.23.45, each
+patched `>= 0.23.46`: RUSTSEC-2026-0346 (`Debug` of client session values
+exposes TLS secrets), RUSTSEC-2026-0347 (buffered data sent to the outer
+server after ECH rejection), RUSTSEC-2026-0348 (brotli certificate
+decompression can allocate up to 1 GiB before authentication) and
+RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+connections to classical key exchange).
+
+**Decision.**
+
+1. **`ruzstd` floor 0.9.1**, in the root `[workspace.dependencies]` line and
+   `crates/lake/Cargo.toml` (0.9 is outside `"0.8"`'s semver range, so the
+   lines move, not only the lock). 0.9.1 is the newest published version.
+   Same features (`std`, `hash`); its dependency list is unchanged (`twox-hash`).
+2. **`rustls` 0.23.46 in `Cargo.lock` only**: a patch release inside every
+   manifest's existing range; its dependency list is unchanged.
+3. **Both decode call sites pass the window ceiling by name**:
+   `lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd` call
+   `StreamingDecoder::new_with_max_window_size(_, 128 MiB)`. 128 MiB is 0.9.1's
+   own `DEFAULT_MAX_WINDOW_SIZE`, so this is exactly what 0.9.1's `new` does;
+   naming it means a later `ruzstd` that moves its default cannot move ours.
+4. **What the bump refuses that 0.8.2 accepted, stated rather than hidden.**
+   (a) A block that decodes past its `Block_Maximum_Size` — the advisory's
+   class; a ten-byte frame that 0.8.2 expanded to 4,096 bytes is now refused.
+   (b) A frame declaring a window over 128 MiB: 0.8.2 checked its 100 MiB
+   `MAXIMUM_ALLOWED_WINDOW_SIZE` only when a decoder was `reset` for a second
+   frame, and both call sites build one decoder per frame, so it checked
+   nothing (measured: an 8 GiB declared window was accepted). Neither is
+   silent: each is the call site's existing refusal (`zstd frame refused` /
+   `zstd decode refused` in `lake`, `TickStoreMalformed` in `pull`).
+5. **Every frame written before still reads to the same bytes — measured, not
+   assumed.** A throwaway harness outside the repository links 0.8.2 and 0.9.1
+   side by side and drives both through the call sites' own shape (decoder,
+   `take(want + 1)`, `read_to_end`): every zstd frame of all **2,001** GDFL
+   index day files in the tick store (NIFTY spot and every other index,
+   2018–2026, special sessions included; 1,592,231 frames, 6.66 GB in,
+   329 GB out) plus six whole option and stock days — options, every
+   underlying and strike in the file (NIFTY, BANKNIFTY, stocks, illiquid
+   strikes alike): 25 and 27 Oct 2019 (the Muhurat session), 1 Feb 2020
+   (budget Saturday), 4 Jun 2024 (the largest file in the store); stocks:
+   3 Feb 2020 and 31 Aug 2026 — 337,126 more frames, 1,929,357 in all:
+   **0 frames differ, 0 refused by either**. The largest
+   declared window is 4,194,304 bytes (2^22), as the writer's settings predict
+   (`zstd` 0.13.3, level 9; libzstd 1.5.7 `clevels.h` gives level 9 window log
+   22), 1/32 of the ceiling. In the repository, six frames 0.8.2's own encoder
+   wrote (Raw with and without content, RLE across block boundaries,
+   Compressed) are frozen as hex in `crates/lake/src/zstd_v082_frames.rs` and
+   decoded byte for byte through both call sites; every truncation is refused,
+   a stated length one byte long or short is refused, and the two crafted
+   frames of point 4 are refused (both crafted tests fail under 0.8.2).
+6. **No decode timing changed.** Same harness,
+   same frames, the two versions interleaved per iteration: real tick-store
+   frames p50 301 µs vs 0.8.2's 308 µs, p99 2.56 ms vs 2.52 ms (n = 1,592,231);
+   synthetic frames n = 2,000 each, 0.9.1 equal or faster at p50 and p99 on all
+   six. Decoding stays O(frame) as before; nothing moved onto a per-request path.
+   The encoder's sizes and timing are point 8's; the memory one decode may
+   still hold inside the ceiling is point 9's, and both are in
+   `docs/06-limits.md` (L-TSW-4, L-ZST-1, L-ZST-2).
+7. **The dependency fingerprint is re-pinned** in
+   `crates/vocab/tests/workspace_is_rust.rs` after the scan it demands:
+   `ruzstd` 0.9.1 ships no `build.rs` and no C/assembly; `rustls` 0.23.46's
+   non-Rust file set equals 0.23.45's and its `build.rs` is byte-identical.
+   Package count unchanged at 195.
+8. **The third call site is the tick-store writer's ENCODER, and its output
+   bytes change; decoded-entry identity does not** (added 2026-10-17, DENY-1
+   repair round 1, after R4-08's writer reached `feat/db-fix`).
+   `pull::tickstore_write` (D-4967) writes every tick-store frame with
+   `compress_to_vec` at `Fastest`. Under 0.9.1 that encoder writes a block
+   Raw when compressing it would not make it smaller
+   (`encoding/levels/fastest.rs`: `compressed_size >= block_size`), where 0.8.2
+   kept the larger Compressed block. Measured with both versions linked side by
+   side on invented inputs: 512 noise bytes were a 529-byte frame (one
+   Compressed block of 516) and are now 525 (one Raw block of 512); a
+   132,024-byte input's short second block went from Compressed 956 to Raw 952;
+   ten other inputs (repeats, sparse zeros, text) came out byte-identical. 0.9.1
+   also corrects the extra bits of match-length code 52 (65,539..=131,074),
+   which 0.8.2's `encoding/blocks/compressed.rs` took over 32,771; `Fastest`
+   never writes a match that long (read from the source: its matcher's window
+   is one 128 KiB slice, evicted before the next block is matched, and a match
+   is no longer than its offset, so a match is at most 65,536 bytes), and no
+   input of 65,538 to 131,000 bytes changed. So a day this writer writes now is
+   at most the size 0.8.2 wrote, block by block. What does not change is
+   identity: FM-249 defines it on decoded entries (name, size, CRC-32, DOS
+   time, rebuilt bytes), never on `.bts` bytes, and point 5 shows every frame
+   of the old encoder decoding to the same bytes under 0.9.1, so a day held
+   under 0.8.2 still verifies and is never rewritten. **The label moves with
+   the encoder**: `WRITER` is `pull::tickstore_write/1 ruzstd-0.9.1 Fastest`.
+   After the merge it still said `ruzstd-0.8.2`, so every log line and event
+   would have named an encoder the build no longer links (the second agent's
+   blocking finding, `state/fix/round2/verify-DENY-1-r1.json`).
+   `the_writer_names_the_ruzstd_cargo_lock_links` now holds the label and the
+   module doc to the one `ruzstd` in `Cargo.lock`, and
+   `no_block_is_stored_larger_than_the_bytes_it_holds` holds the Raw fallback
+   (it fails under 0.8.2: run through both versions linked side by side, three
+   of its ten inputs store more than they hold under 0.8.2 — 516 bytes for
+   512, 4,100 for 4,096, 300,004 for 300,000 — and none under 0.9.1; log
+   `state/fix/deny-1-logs/no-block-larger-0.8.2-vs-0.9.1-20261017.log`).
+   D-4967's sizes were measured on 0.8.2's encoder and were taken again on
+   17 October on the same three day zips: 16,385,730, 59,143,634 and
+   253,387,791 B against 0.8.2's 16,400,878, 60,066,755 and 255,904,074 B,
+   1.0% fewer over the three days, every file verified against its zip; so
+   D-4967's "about 332 MB a trading day" is about 329 MB now and its "1.60 to
+   2.04 times" is 1.57 to 2.04 (`docs/06-limits.md` L-TSW-4, L-TSW-7).
+9. **What the ceiling does not bound, stated** (`docs/06-limits.md` L-ZST-1).
+   0.9.1's decoder keeps a frame's whole declared window before it hands a
+   byte out, so the `take(want + 1)` at both call sites bounds what is
+   RETURNED, not what is decoded: a 4,105-byte crafted frame of 1,024 RLE
+   blocks declaring a 128 MiB window, asked for 16 bytes, is refused after
+   peak RSS of 273,203,200 to 273,334,272 bytes (n = 3, `/usr/bin/time -l`,
+   17 Oct 2026, the second agent's harness; it measured 271 MB under 0.8.2).
+   Bounded where 0.8.2 was not, about twice the ceiling. A per-call ceiling
+   taken from the promised length (refusing a frame whose stated content size
+   is not the promise before decoding it) would close most of it and is NOT
+   built here: it changes what both call sites accept, and only the frames'
+   own measured windows (largest 4 MiB, point 5) say it would refuse nothing
+   real.
+
+**Supersedes** the version lines of D-2801 point 5 and of the `lake` entry
+that first named `ruzstd` 0.8, and D-4967's encoder version (its point naming
+"`ruzstd` 0.8.2 encoder" and its `WRITER` text `ruzstd-0.8.2`); the reasons
+those gave (pure Rust, no `build.rs`, no C) still hold for 0.9.1.
+
+### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
+
+**Number** taken from above every ledger head on the local branches on
+16 Oct (the highest was D-5240; D-5251 and D-5260 are named for branches not
+yet merged). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R3-01. **Findings** DB-077, DB-G98, DB-051, SC-CLOSE-18,
+and the second agent's re-check of 16 Oct (`verify-R3-01-r1.json`).
+
+**What was observed.** D-3337 item 4 says `k` is "a strike in paisa,
+repeatable" and names seventeen keys. The page has written strikes as ONE
+field since R3-01's first commit, because the server answered the repeated
+form 400 on reload and on every shared link, and it writes four keys item 4
+never named. The code and the append-only ledger said opposite things, and
+the bounds and the history rule the page follows were recorded nowhere.
+
+**Decision.** Item 4 of D-3337 is replaced by the following. Items 1–3, 5
+and 6 stand.
+
+1. **The keys, in the order the page writes them** (`DB_KEYS`,
+   `web/src/lib/urlstate.js`): `feed`, `universe`, `seg`, `sym`, `key`, `tf`,
+   `exp`, `k`, `mny`, `side`, `spot`, `from`, `to`, `tfrom`, `tto`, `sort`,
+   `dir`, `rows`, `page`, `view`, `oow`. Four are new: `universe` (a
+   membership universe key; Everything is `''` and is not written), `mny`
+   (moneyness rungs `ATM`, `ITM`, `OTM`, `ITM-n`, `OTM+n`), `spot` (`exact`, or
+   `prev` = the last spot at or before t, D-3328) and `rows` (a whole number of
+   rows per page, or `fit`).
+2. **A default is not written** (`DB_DEFAULTS`): `sort=ts`, `dir=desc` (the
+   Bars view; Coverage opens by instrument ascending), `page=1`, `view=bars`,
+   `oow` off, `spot=exact` (D-2807) and `rows=fit`. A bookmark names exactly
+   the choices that differ from opening the page.
+3. **`k` is ONE comma-joined field of strikes in whole paisa**, sorted
+   numerically and deduplicated: `k=1160000,1200000`. `mny` is one
+   comma-joined field too, sorted. The comma is written as itself; `%2C`
+   reads the same. **No field is written twice**: one selection is one
+   address, byte for byte, and `encodeDb(decodeDb(q).sel) === q`.
+4. **A repeated `k` (a link written before R3-01) is still read** by the
+   page's reader, `decodeDb`. **The server refuses it first**:
+   `crates/api/src/server.rs` `request_bounds_refusal` answers 400 to any
+   query that names a field twice, except the two list fields in
+   `MULTI_VALUED_QUERY_FIELDS` (`/bars/window.json`'s `key` and
+   `/scrub.json`'s `key`). So such a bookmark opens on the server's refusal
+   page and not on /db. This entry changes no server code. Letting /db's `k`
+   repeat, or redirecting to the comma form, is a follow-up for the `api`
+   owner. Until that lands, a pre-R3-01 two-strike link does not open.
+5. **Bounds**, each a bound and not a vendor fact: a text field (`sym`,
+   `key`, …) is read for at most `MAX_TEXT` = 128 characters
+   (`web/src/lib/db/input-check.js`). A list field (`k`, `mny`) is read for
+   at most `MAX_LIST_FIELD` = 1,024 characters (64 values of 16), and a
+   longer one is refused by its length before it is split. `page` and `rows`
+   are whole numbers from 1 to `MAX_PAGE` = 999,999,999. One address names
+   at most `MAX_REFUSED` = 12 refusals one by one and counts the rest in one
+   closing entry. A value refused twice is named once. One sentence quotes
+   at most 8 unknown field names.
+6. **Honoured or refused in words, never dropped.** A page past the end of
+   the answer is named, and the last page is shown. That costs one extra
+   `/bars/window.json` read, at most one (docs/06-limits.md). An unknown
+   sort, direction, side, view, universe or rows value is named. So is an
+   unknown field. A feed the operator excluded (`dhan`, `groww`, `truedata`,
+   D-3338) is refused by name and nothing is probed.
+7. **A key against the fields beside it** (`linkedContract`,
+   `web/src/lib/db/selection-model.js`): a key whose underlying differs
+   from `sym` is not read, and the page says so. Inside one underlying, a
+   field beside the key is read in place of the key's. A contract's segment
+   is filed by today's calendar. A contract field on a segment without that
+   rung is named and not applied. A key with any small letter is refused by
+   name and never re-cased (a stored key is upper case: `Symbol::new`
+   upper-cases a name and `Contract::parse` takes only A–Z, 0–9 and `-`).
+8. **Back and Forward** (`dbHistory`). The address is written with
+   SvelteKit's `pushState` or `replaceState` once the selection settles, and
+   only when it differs. The first write after the page opens is a
+   `replace`. So is a write after Back or Forward restored an entry, and a
+   write with no choice gesture since the last write (a seed, a clamp).
+   Anything else is a `push`. One press is one entry: the first write spends
+   it. **A choice gesture is a primary-button `pointerdown`, or a `keydown`
+   other than a modifier, Tab, Escape or a function key, on or inside a
+   control** (`CHOICE_TARGET`: a form control, a link, a label, a menu or
+   grid item, anything with `tabindex`; `isChoiceGesture`). A press on
+   blank space arms nothing. **`GESTURE_MS` = 30 s**: a press made longer
+   ago than that does not cause the next write, which is written as a
+   `replace`. The address is still exact; only that step loses its own Back
+   entry. Every pick on /db sets a field `encodeDb` writes inside the
+   press's own task, so the bound is not reached in normal use. The reader
+   reads the browser's `location.search` (`addressNow`), never the URL the
+   page was entered with.
+
+**Proof.** `web/tests/db-address.test.js`:
+`every_db_choice_round_trips_through_the_address`,
+`an_address_with_two_strikes_reloads`,
+`a_linked_page_number_is_honoured_or_refused`,
+`an_excluded_feed_in_a_link_is_refused_by_name`,
+`an_absurd_address_names_each_problem_once_and_a_bounded_few`,
+`a_lower_case_key_is_named_and_not_read`,
+`a_key_that_disagrees_with_the_fields_beside_it_is_named_and_not_read`, and
+the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
+`web/tests/db-history.test.js`: `back_and_forward_restore_each_selection`,
+`a seed, a clamp and a restore correct the current entry and never add one`,
+`a press off a control, or a key that chooses nothing, arms no Back entry`.
+Invariants R301-01 to R301-05 in docs/04-invariants.md.
+### D-5800 — The GDFL options reader splits a row into a fixed ten-field array, refuses the eleventh field where it is seen, and reserves its rows once from the body (CLOUD-ATTACKO1, F1) — 2026-10-17
+
+`pull::gdfl_nfo::decode_capped` collected a `Vec<&str>` of every comma-split
+field for every row of every options file. On 2026-08-03 the options tree is
+27.6 M rows over 11,524 files (`docs/06-limits.md`, the import-of-one-day row
+of the C-GI table). Counted on `feat/db-fix` at 62396df08 by
+`crates/pull/tests/allocation.rs`, 4,096 more rows made 12,289 more allocating
+calls: three per row, the collect and two growths to hold ten fields. A row of
+500,010 fields allocated 17,779,147 bytes for a 1,000,205-byte file. The row
+vector itself started from `Vec::new()`.
+
+1. **Ten fields, a fixed `[&str; 10]`.** The ten are the header the reader
+   already admits (`HEADER_OPEN_INTEREST` or its spaced form;
+   `docs/00-charter.md`, "GDFL NSE options tick files", D-2806). It is the
+   capital-market reader's `gdfl_cm::parse_row` shape. `csv::decode_rows`
+   was given the same shape by D-0721.
+2. **The eleventh field is `MalformedRow` at its line, the moment it is
+   seen.** A line of a million commas costs eleven steps, not a
+   million-slot vector. A line with fewer than ten fields is the same
+   refusal it always was. Rejected: counting every field to report the true
+   width, as `csv::decode` does. `NfoRefusal::MalformedRow` carries only the
+   line, and widening the wire is not this package's change.
+3. **Rows reserved once, from the body's newline count, capped at the row
+   bound** (`fetch::MAX_ROWS`, 1,000,000). That is D-1203's rule for
+   `csv::decode_rows`. The newline count is one extra pass over bytes the
+   CRC check has already read (O(bytes) per file, O(1) per row). The
+   reservation is at most `MAX_ROWS` × 32 B = 32 MB, the size of the rows
+   such a file would keep; a body of blank lines can ask that much for rows
+   it never fills, and that bound is named in `docs/06-limits.md` under this
+   number.
+
+Proof: `pull::gdfl_nfo::tests::the_options_row_loop_collects_no_field_vector`
+(source shape; fails on 62396df08) and
+`a_row_of_many_fields_is_malformed_at_its_line` (the refusal, unchanged).
+`crates/pull/tests/allocation.rs`
+`gdfl_nfo::twice_the_options_rows_cost_no_allocation_per_row` (at most 4 more
+calls for 4,096 more rows; 12,289 on 62396df08) and
+`gdfl_nfo::a_row_of_half_a_million_fields_is_refused_without_holding_them`
+(under twice the file's bytes; 17,779,147 on 62396df08). These reuse that
+file's one global allocator (D-0724). No new unsafe root is added. Bench row
+C-NFO-01 (`crates/pull/benches/ratio.rs`): `read_file` per row at 1k, 10k and
+100k rows, asserted flat, with p50/p99/max per file. The numbers are in
+`docs/06-limits.md` under D-5804.
+
+On real days, read-only: `pull::gdfl_nfo::tests::the_fixed_array_decodes_real_days_as_the_field_vector_did`
+(ignored; `BRUTEX_GDFL_TICKSTORE` is the tick store root). It decodes every
+NIFTY, BANKNIFTY and RELIANCE option file of three days with both readers:
+the fixed array, and the field-vector loop kept in the test as an oracle
+(`decode_by_field_vector`, checked against the fixed array on invented
+files by `the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files`).
+The three days are 2018-09-03, the tick store's first options day and the
+early day form (469 files, 3,751,736 rows); 2023-11-12, the Muhurat special
+session (1,163 files, 1,281,196 rows); and 2026-08-03 (1,374 files,
+8,867,328 rows). Every file gave the same rows or the same refusal under
+both readers, and no file was refused. Run on 17 Oct 2026; no vendor row
+reaches the repository.
+
+### D-5801 — `/live.json` holds the hard response ceiling every other JSON route holds, stops encoding at it, and refuses the census whole, by name (CLOUD-ATTACKO1, F2) — 2026-10-17
+
+`api::livejson::respond` encoded whatever the live census held and answered
+200. The census admits `cli::live::LIVE_RUN_LIMIT` (128) runs of
+`LIVE_ROW_LIMIT` (256) rows. A killed run leaves its file, so a store can
+reach that maximum without one run in flight. The test fixture (128 runs of
+256 rows, each field at its widest) was served whole on 62396df08 at
+12,960,281 bytes with 200, by a route the page polls every 2 s.
+
+1. **The ceiling is `detail::MAX_RESPONSE_BYTES`, 8,388,608 bytes.** Why
+   that size: it is the one every other JSON route here already holds, so
+   the console has one ceiling to know, not two. At about 395 encoded bytes
+   per row at their widest, it holds about 21,000 rows, some 82 full runs.
+   That is far more than any in-flight count the store has shown. A census
+   past it is stale files, not a live answer. Rejected: a larger ceiling for
+   this route, which would send a body the size of a month of bars every
+   2 s; paging, which is a wire change the page is not built for; and
+   serving the first runs that fit, because a cut list reads as every run in
+   flight.
+2. **Encoding stops at the first run that carries the body past the
+   ceiling.** A refused census costs the ceiling plus one run's rows (at
+   most 256 rows, about 100 KB), not the whole admitted census. The one
+   check after the trailer refuses it, and also a body that the trailer
+   alone carries over.
+3. **The refusal is 503 with `"runs":[]`.** It names the run count, the
+   ceiling, the byte count at which encoding stopped, and how many runs were
+   encoded. The status is the one this route already gives a census it
+   cannot read whole.
+
+Proof: `api::livejson::tests::a_full_live_census_is_refused_past_the_response_ceiling`
+(on 62396df08: 200 with 12,960,281 bytes; here: 503, a small body, an empty
+list, and fewer runs encoded than the census holds).
+`a_run_in_flight_carries_its_bar_and_is_not_given_a_verdict` still answers
+200. Not changed here, and named in `docs/06-limits.md` under this number:
+the census `refresh` walks the live directory per poll (O(live files),
+bounded by `LIVE_ENTRY_LIMIT` 4,096), and it clones each run twice.
+
+### D-5802 — A `/bars.json` row writes its open interest into the body in place, never through a `String` per bar (CLOUD-ATTACKO1, F3) — 2026-10-17
+
+`api::server::bars_route::bars_array_of` formatted every row with an open
+interest built as `"null".to_owned()` or `open_interest.to_string()`. That is
+one heap allocation per bar, about 2.7 M for a one-second month. The row is
+now written straight into the reserved body. The bytes are unchanged for FNO
+(a number or `null`), INDEX and CASH (always `null`, with their `oichg_why`
+and `v_why` tails). Rejected: a per-row scratch buffer, which is the same
+copy with one more step.
+
+Proof: `api::server::bars_route::tests::a_bars_row_is_written_in_place_with_the_same_bytes`.
+It pins the bytes for all three segment shapes, and the absence of
+`.to_owned()` and `.to_string()` in `bars_array_of`'s source. On 62396df08
+the bytes match and the source check fails. `api` has no counting allocator:
+Gate 5 admits three unsafe test roots, none in `api`. So the allocation is
+pinned on the source, which is weaker than a count and is said here. Shadow
+timings are in `docs/06-limits.md` under D-5804. The whole-month `/bars.json`
+ask (no `from`/`to`) still reads and encodes the whole month, which is
+O(bars of the month). It is named there, not fixed here.
+
+### D-5803 — `/census/facets.json` reads an underlying's contract count and an expiry's strike count from counters `Index::apply` keeps (CLOUD-ATTACKO1, F4) — 2026-10-17
+
+With no underlying asked, `render_answer` summed every expiry's contracts of
+every underlying. With no expiry asked, it collected every contract of every
+expiry into a `BTreeSet` of strikes. Both are O(contracts of the segment) per
+request, growing with every stored month. `Underlying::contracts` and
+`Expiry::strikes` are now counted in `Index::apply` as a contract is first
+seen:
+
+1. **A contract is new when its `ContractId` is not yet in its expiry's
+   map.** A strike is new when neither its call nor its put was held there
+   before. A future is a contract and no strike.
+2. **Exact without a decrement.** `apply` never removes a key from any map
+   in this index (a census key's rows only grow, the rule `denoms` already
+   relies on), so a counter never has to come down. A rebuilt index and a
+   moved one agree.
+
+Proof: `api::server::facets::tests::the_contract_and_strike_counts_are_counters_kept_by_apply`.
+The counters equal the old walk on a fresh build, after a move that adds a PE
+at a CE's strike, after a move that grows a key, and on a rebuild; the
+answer sites hold no walk (source needles). On 62396df08 it does not compile:
+the counters do not exist. On the shadow, the NIFTY underlyings answer's
+`contracts` equals the sum of its expiries answer's `contracts`. The URLs and
+values are in `docs/06-limits.md` under D-5804.
+
+### D-5804 — The month-axis benches: the bars per month are held fixed and the months grow, rows printed where the cost is O(months) by design and asserted where it is not (CLOUD-ATTACKO1) — 2026-10-17
+
+Every earlier store-backed bench row grew ONE month (1,024, 10,240 and
+102,400 bars), which cannot see a cost paid once per month of a range.
+`cloud/attack-o1-20261016` added rows that hold 1,024 bars a month fixed (the
+smallest indexed month, D-4933) and grow the series to 1, 10 and 100 months.
+They are merged here unchanged:
+
+1. **`crates/api/benches/ratio/months.rs`.** `/bars/window.json` (first
+   page, last page, `sort=c`, `at=`), the `/verify.json` scrub, `/spot.json`
+   at the last month (asserted flat), the `/store` page over the months, and
+   the warm `/store` page over censuses of 1k, 10k and 100k entries
+   (asserted flat).
+2. **`crates/store/benches/ratio/months.rs`.** C-MO-01 (open, read and
+   `.tix` lookup beside 1, 10 and 100 months, asserted flat), C-MO-02
+   (`read_record` and the `.tix` lookup, reader handle), and C-MO-03 (96
+   one-bar commits per month size, the three slowest named by position).
+3. **`crates/pull/benches/ratio.rs`.** C-FD-01 (`fold_from_snapshots`, per
+   bar, asserted flat) and, from this package, C-NFO-01 (D-5800).
+4. **Printed, never asserted, where the route's own doc states O(months) or
+   O(entries).** The window seek is one pointer open and one `stat` per held
+   month; the scrub opens every held entry. The figure is the finding, and
+   it is named in `docs/06-limits.md` under this number with the Mac's
+   numbers.
+
+The cloud container could not build the `api` bench under the real bench
+profile (out of memory, twice). Every number in `docs/06-limits.md` under
+this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
+one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
+gate-8 command.
+
+### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
+
+**Number** the first of the block D-5830..D-5849 assigned to BASE-GATE10;
+unused when this entry was written (`grep -n 'D-58[34][0-9]'` over `docs/`
+found none on feat/db-fix at f9cdb5840).
+
+**Finding** BASE-RED-GATE10, from the CLOUD-RUST1 merge-back of 17 Oct: gate 10
+was red on feat/db-fix itself, which blocks "all gates green". On the head
+this package started from (f9cdb5840) the gate's two steps refused fourteen
+names. The other rows the merge-back listed (MR-34, AF-23, GI-07, ...) had been
+repaired by merges in between and resolve today.
+
+**What was observed.**
+
+1. **GI-08 named a test that a later package renamed.** AF-01 (D-4977) turned
+   `an_empty_source_reports_every_day_it_does_not_hold`, which pinned an OK
+   exit for a run that read no file, into
+   `cli::gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`,
+   which pins FAILED. Its own doc comment records the rename. The row was not
+   moved with it, so `gates_ledger invariant-tests` reported it missing.
+2. **Thirteen front-end test names were refused although every one of them
+   exists.** AF06-05 and AF06-07 (D-4978) cite `web/tests/status-poll.test.js`
+   tests by their snake-case names, and R301-01 to R301-04 (D-5301) cite
+   `web/tests/db-address.test.js` and `web/tests/db-history.test.js` tests the
+   same way. D-1606 resolves a backticked bare name with three or more
+   underscores in a status row against RUST declarations only, so each was
+   refused as "declared in no tracked source file". The names did not move: the
+   gate could not see the files that declare them.
+3. **R301-05 named no proof the `✓` check accepts.** Its two tests are named by
+   their sentence names, with no file. Point 2's refusal hid it, because the
+   `✓` check runs only after the name check passes.
+
+**Decision.**
+
+1. GI-08's proof cell names `a_run_that_read_no_file_never_exits_ok`, and says
+   in prose (not in a code span, which the gate would read as a phantom) which
+   name it replaced and why. R301-05's proof cell names its file,
+   `web/tests/db-address.test.js`. No row is deleted or weakened, and no
+   allowlist entry is added.
+2. **`.github/invariant_paths.rs --web-tests FILE...`** lists `FILE<TAB>name`
+   for every test a front-end test file declares: the literal first argument
+   of each `test(` call made in CODE. The source is read by a lexer, not a
+   line pattern (D-1114's reason, for the browser's files): a `test('a_b_c_d'`
+   inside a `//` or `/* */` comment, a string, a template or a regular
+   expression lists nothing, and so do `x.test(` (a method), `test.skip(`,
+   `test.only(` (a skipped test proves nothing) and a name built at run time.
+   Only `web/tests/<name>.test.js` is read, the runner's own glob
+   (`node --test "tests/*.test.js"`); a deeper file declares no test that
+   runs. A source the lexer cannot delimit (an unterminated comment, string,
+   template or regular expression, or a `}` that closes nothing) is a refusal
+   naming the file and line, and so is a name holding a tab or line break.
+3. **Gate 10 passes that listing to the check as a fourth argument.** A bare
+   proof name resolves when a tracked Rust source declares it OR a runner-run
+   front-end file declares a test of exactly that name, and a `✓` row whose
+   proof names such a test is accepted. An undeclared name is refused by the
+   same message as before. The step refuses an empty listing
+   (`GATE 10 READ NO FRONT-END TEST.`) and the tool refuses a listing file that
+   names no test, so a glob that stops matching is red rather than a smaller
+   table. The two- and three-argument forms are unchanged, and without a
+   listing a web name is still refused, so a caller cannot lose the check by
+   omitting it.
+
+**What this does not do.** It does not resolve sentence-named web tests
+(`'a seed, a clamp and a restore ...'`) or a snake-case name under D-1606's
+three-underscore threshold (`pauses_while_hidden`): of the 1,403 names the
+tree declares, 26 have the bare-name shape and 1,377 do not,
+and a backticked phrase in a proof cell is not
+distinguishable from prose by shape. A row that cites them is accepted on its
+`.test.js` mention, as before. A web name resolves anywhere among the runner's
+files, not in the file the row names, the rule bare Rust names already follow.
+Both are in docs/06-limits.md (L-G10W-1, L-G10W-2).
+
+**Proof.** Before, on f9cdb5840: `invariant-paths` refused thirteen names
+(lines 7365, 7366, 7405 to 7408) and `invariant-tests` reported
+`1 missing` (GI-08). After, on this branch: `1920 path-qualified test
+references checked`, `0 missing`, both steps exit 0; the web listing reads
+1,403 names from 145 files, which matches the 1,393 `test('` and 10 `test("`
+declarations at line start (the one template-named test is built at run time).
+A copy of the document with one AF06-05 and one R301-04 name misspelled is
+refused by both names. Tests in `.github/invariant_paths.rs`:
+`web_test_names_are_read_from_code_and_never_from_prose`,
+`a_web_source_the_lexer_cannot_delimit_is_refused_by_its_line`,
+`only_a_file_the_runner_runs_declares_a_web_test`,
+`a_bare_proof_name_resolves_against_a_declared_front_end_test`. Fourteen hand
+mutants of the new lines (the method-call rule, the keyword rule, the comment,
+class, interpolation and template rules, the path rule both ways, the listing's
+line-break check, the stray `}`, the unclosed interpolation, the resolution
+and the `✓` union) were each killed by those tests. Invariants G10W-01 to
+G10W-04.
+
+**Cost.** Not a hot path: a CI step, linear in the bytes of the tracked web
+test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
+builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
+p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
+the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).

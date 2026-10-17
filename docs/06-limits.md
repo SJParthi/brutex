@@ -15136,8 +15136,8 @@ bounds are all nonzero.
   rung's level-wise engine sweep over bars already loaded, or one
   candidate's exit grid, runs to its end, because gate 17 keeps the inner
   loops of `vocab`, `engine`, `indicators` and `runner` call-free. If that
-  stretch outlasts `SHUTDOWN_GRACE` (10 s) the task is abandoned and named,
-  as D-1582 states. How long such a stretch takes on real data is
+  stretch outlasts `SHUTDOWN_GRACE` (3 s since R3-14 repair 3; 10 s before)
+  the task is abandoned and named, as D-1582 states. How long such a stretch takes on real data is
   unmeasured.
 - **Cross-site failed-request log lines are rationed (D-1583).** For requests
   whose `Sec-Fetch-Site` names another site, at most
@@ -15164,11 +15164,65 @@ bounds are all nonzero.
   refuse a duplicate key themselves; any other route's body is checked
   whatever its `Content-Type` says (P5-06, D-2659). `member` and `leg` are
   list fields and may repeat and are not counted.
-- **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
-  (D-1582).** A sweep, descent or command still running then is abandoned
-  with the process — named on stderr and in the log — and its invocation
-  audit stays non-terminal. `cli` has no cancellation point inside a sweep;
-  threading one through it is not done.
+- **Shutdown waits at most `server::SHUTDOWN_GRACE` (3 s; 10 s until R3-14
+  repair 3) for engine tasks (D-1582).** A sweep, descent or command still
+  running then is abandoned with the process — named on stderr and in the
+  log — and its invocation audit stays non-terminal. `cli` has no
+  cancellation point inside a sweep; threading one through it is not done.
+- **A served stop (Ctrl-C or `SIGTERM`) ends within `speed::STOP_BOUND`,
+  6 s (R3-14 repair 3):** at most `speed::DRAIN_GRACE` (3 s) for requests
+  still open, which are then cut and counted as cancelled, and
+  `SHUTDOWN_GRACE` (3 s) for blocking work. The bound must stay inside
+  `speed::REDEPLOY_WAIT` (10 s, what the operator's redeploy waits for the
+  port) with half of itself to spare, which a test asserts. Throughout, the
+  process holds its log (`<store>/telemetry/events.lock`), the store's
+  `serve.lock` and its port, and frees them in that order after its exit
+  line, so a free port means a free store and a free log. A redeploy tool
+  that waits less than the bound for the port is not covered; waiting for
+  the old process's pid to end is the form that needs no number.
+  **Blocking work still running when `SHUTDOWN_GRACE` runs out (R3-14
+  repair 4)** is detached by tokio and runs on until the process ends, so
+  that end closes the log as usual but leaves the serve lock and the port
+  for the process's own end to free: said as `api.main blocking work
+  outlived the shutdown wait`. Measured on a shadow with a `/verify.json`
+  scrub in flight, n = 3, polled every ~20 ms: pid gone at +6.17 to +6.22 s
+  after the `TERM`, the port refusing connections at +6.20 to +6.24 s (an
+  `nc -z` poll). CORRECTED (repair 5): that poll fills the accept backlog,
+  so "never before the pid" was the poll's artefact. Read with `lsof`, the
+  `LISTEN` socket and `serve.lock` go 0.03 to 0.14 s before the pid is gone
+  (the second agent, check 4), and the `LISTEN` socket 0.03 to 0.06 s
+  before it here (n = 4, the load stops below), because a process's
+  descriptors close as it exits, before its parent reaps it. When work
+  outlived the wait, the port is freed by the process's exit itself, never
+  while a thread of it still runs; on a clean end, by `Held::release` after
+  the exit line, the last step before `main` returns. Before repair 4,
+  the port was free 0.15 to 0.5 s before the
+  pid ended, with blocking work still running. Whether a blocking thread
+  outlived the wait is read from how long `Runtime::shutdown_timeout` took (it
+  returns early only when every thread has ended); tokio's own busy-thread
+  count needs `tokio_unstable`. The exit line of such a stop is
+  `api.main exited cleanly` at `Warn` with `outlived: true`, never
+  "everything went as asked" (repair 5, STP-08); the code stays 0.
+  **A stop during the start-up load (R3-14 repair 5)** is inside the bound.
+  The load (`Site::serving`) runs on the blocking pool, raced against the
+  stop (`server::loaded_or_stopped`, stop polled first). A `TERM` during it
+  is answered at once (`api.serve stop asked during the start-up load`,
+  within 1 ms of the signal in the log), and the end waits
+  `SHUTDOWN_GRACE` for the load's thread, then leaves the store and the
+  port to the process's end. Before, the `TERM` was answered only after
+  the whole load: 2.6 to 18.2 s with the port bound, longer than the
+  redeploy's 10 s wait. MEASURED on this package's shadow (release build,
+  17 October 2026, load average 44 to 46 on 14 cores, `kill -0` and `lsof`
+  polled every ~20 ms; `tgt/p-R3-14/r5/loadterm.log`): TERMs at +0.53,
+  +0.91 and +1.51 s after the spawn (n = 3, during the load): pid gone
+  +3.09 to +3.12 s after the `TERM`, `LISTEN` socket gone +3.06 to +3.07 s.
+  A TERM at +3.01 s, as the load ended: pid gone +0.55 s. Only a serve
+  registers the signals (`server::catches_stops`, STP-07; by the code and
+  its test, not timed): `api report` keeps the default disposition, so
+  Ctrl-C ends it at once. NOT COVERED: a `TERM`
+  before the runtime is built, the process's first instants. One of two
+  `TERM`s sent +0.5 s after the spawn on this loaded machine landed there
+  and ended the process in 0.09 s with no line.
 - **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
   queue to another thread for the length of each landing, so the HTTP surface
   keeps answering; the landing itself is as costly as before (D-1446).
@@ -18257,13 +18311,156 @@ log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
 | L-TSW-1 | Writing a day reads, encodes, writes and reads back every byte | the day file must hold every entry and be compared with the zip before it is held | O(the day's CSV bytes), by design. Measured: indices 9.6 s (527 MB of CSV, 55 MB/s), stocks 17.5 s (429 MB, 24 MB/s), options 60.5 s (2.56 GB, 42 MB/s), on up to eight threads, write and verify together. Through `cli tickstore-write` (release, 15 October, a lighter load): 4.2 s, 6.7 s and 23.9 s for the same three days, the files byte-identical to the first run's. Bench C-TSW-01 (release, invented options days of 40, 400 and 4,000 members, 15 October): 55.8 ms, 93.2 ms and 588.5 ms a day, a fixed part of about 52 ms a day (the lock, the folders, the fsyncs, the threads); the MARGINAL cost a member from 10x to 100x is 1.32x the marginal cost from 1x to 10x (the first form divided by the whole 1x day, fixed part included, and could hardly fail), within the 3.0x ceiling | R4-08 |
 | L-TSW-2 | A rerun on a held day verifies it whole | "a held, verified day writes nothing" is only known by comparing it again | O(the day's bytes), the same pass as L-TSW-1 without the encode: the tool's options day verified in 13.1 s (195 MB/s), stocks 4.2 s, indices 3.3 s; this writer's three days held again on 15 October in 4.8 s, 1.0 s and 0.9 s (options, stocks, indices). A chain that records a verified day (E2E-03) need not re-verify it | R4-08 |
 | L-TSW-3 | Memory | members are encoded in memory before the day's file is created, so a bad member writes nothing | the day's compressed blocks, refused past 4 GiB (`day_too_large`, about 16 times the heaviest measured day's 256 MB), plus one member per thread, each refused past 2 GiB before it is read (`member_too_large`; the largest measured member is 14.5 MB) | R4-08 |
-| L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | 1.60 to 2.04 times the tool's bytes for the same day (indices 16.4 MB against 8.0 MB, stocks 60.1 against 37.6 MB, options 255.9 against 151.0 MB). About 332 MB a trading day against 197 MB, about 34 GB more a year (EXTRAPOLATION from three days). Why, read from `ruzstd` 0.8.2's source: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08 |
+| L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | **Re-measured under `ruzstd` 0.9.1** (D-5090 point 8; 17 October 2026, the same three read-only day zips and the same test, log `state/fix/deny-1-logs/tsw-measure-ruzstd-0.9.1-20261017.log`, each file verified entry for entry against its zip): 1.57 to 2.04 times the tool's bytes for the same day (indices 16,385,730 B against 8,042,422, stocks 59,143,634 against 37,566,114, options 253,387,791 against 151,027,298). Under 0.8.2 (14 October) the same days were 16,400,878, 60,066,755 and 255,904,074 B (1.60 to 2.04 times): 0.9.1's Raw fallback stores 1.0% fewer bytes over the three days, never more. About 329 MB a trading day against 197 MB, about 33 GB more a year (EXTRAPOLATION from three days; 332 MB and 34 GB under 0.8.2). Why, read from `ruzstd`'s source and unchanged in 0.9.1: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more (`MIN_MATCH_LEN`, `encoding/match_generator.rs`) over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08, DENY-1 |
 | L-TSW-5 | One entry rebuilt | a file is decoded whole | O(the file's bytes), the reader's (`gdfl_tickstore::rebuild`), unchanged: from this writer's options day p50 0.30 ms, p99 81 ms, max 275 ms (n = 20,054), from the tool's p50 0.30 ms, p99 93 ms; indices files (3.7 MB each) p50 125 ms, p99 260 ms (n = 141) | R4-08 |
 | L-TSW-6 | Point lookup on a written day | none: it is O(1) | the readers' listing, one probe: p50 41 ns, p99 125 ns, max 0.34 ms (scheduler), n = 200,540 on the options day and 36,820 on the stocks day; the tool's own figure was 208 ns p99. Bench C-TSW-02 on a written 4,000-member day: p50 41 ns, p99 42 ns, max 167 ns, n = 20,000; flat at 10x and 100x members (1.03x, 1.04x) | R4-08 |
-| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 332 MB of new day files a trading day, three files a day | R4-08 |
+| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
 | L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
 | L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
 
+## `/gaps.json` and the month summary (R3-06; D-4980; DB-A30)
+
+**The bound.** `/gaps.json` is O(months asked) per request, capped at 12
+one-second months and 240 minute months (`asked_range`), audited on the
+calendar pool (at most 8 at once; a ninth is answered 429 `calendar derivation
+not admitted (Saturated)`, never queued silently). A month whose `.sum` is kept
+reads one summary and no bar record; its cost is one open, one read of the
+section (771 to 1,629 bytes for a minute month, 52 to 66 KB for a dense
+one-second month, at most 340,912 bytes), one pass over its minutes and, for a
+spot index at one second, one pass over each day's owed seconds (at most 86,400
+a day). None of it moves with the bars a month holds. A month with no usable
+summary (none kept, under 1,024 bars, torn, stale, sparse seconds an index
+audit needs, input the fold may refuse) reads its bars whole, O(bars), and the
+answer says `"summary":"built"`, why, and how many records it read.
+
+**Measured** (16 October 2026, load average 42 to 59 on 14 cores; release
+build of `fix/db-R3-06`; nearest-rank over the 200 answers):
+
+| Selection | Read from | n | clients | p50 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|
+| GDFL NIFTY 1 s, 2018-09..2019-08 (5,167,003 bars) | 12 kept summaries, 0 bar records | 200 | 1 | 66.7 ms | 145.1 ms | 201.9 ms |
+| the same | the real store, no `.sum`: 5,167,003 bar records | 200 | 1 | 682.9 ms | 1,494.5 ms | 1,859.2 ms |
+| Zerodha NIFTY 1 min, 2024-10..2026-09 (24 months) | kept | 200 | 1 | 5.9 ms | 36.6 ms | 63.1 ms |
+| Zerodha NIFTY 1 min, 2006-10..2026-09 (240 months, 105 held) | kept | 200 | 1 | 29.9 ms | 86.7 ms | 103.2 ms |
+| the same | the real store: 796,027 bar records | 200 | 1 | 94.7 ms | 157.4 ms | 204.0 ms |
+| GDFL NIFTY 1 s, 12 months | kept | 600 asked, 238 admitted | 60 | 285.4 ms | 481.0 ms | 502.0 ms |
+| Zerodha NIFTY 1 min, 240 months | kept | 600 asked, 377 admitted | 60 | 227.4 ms | 392.2 ms | 486.0 ms |
+
+The rest of the 60-client requests were the pool's named 429. Cold (the first
+request after a server start, page cache not dropped): 60.0 ms and 67.6 ms
+kept against 718.5 ms and 326.2 ms read from the bars. Gate 8
+(`crates/api/benches/ratio/gaps.rs`, n=200): a kept one-second month of 1,024,
+10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x).
+
+**The span row compares like with like (R3-06 repairs).** It first held a
+2006-01..2007-12 span to a tenth of 2006-01..2025-12, and those are different
+months: the calendar of record vouches for days from 2018-01-01, so all 24
+base months were unmeasured days and 96 of the 240 measured ones, which cost
+more to audit. It breached at 11.1x and 17.6x and passed at 0.9x and 5.1x,
+by load. The first repair asked the 240 months whole and as the ten 24-month
+tiles that cover them and held the whole's p99 to 1.5x the tiles' own p99s
+added up; that compared one 40 ms answer with ten 4 ms ones, and a stall of
+the machine lands in a tenth as many of the short ones, so under load 68 to
+120 it breached at 1.504x with the medians at 0.990x. The row now runs 600
+rounds; each asks the whole once and every tile once, in an order that
+alternates by round, and the round's ten tile times are SUMMED into one
+sample, so both samples cover the same months and about the same wall time.
+The whole's p99 was held to 1.5x the p99 of those sums (now the median at
+1.5x and the p99 at 2x, below). Measured 17 October
+2026 (release bench build of `fix/db-R3-06` after its merge of R3-05, n=600 a row,
+load average 16 to 30 on 14 cores, other agents' builds queued beside it):
+tiles from 2006 to 2016 p50 3.35 to 3.39 ms and from 2018 to 2024 p50 4.42
+to 4.51 ms (the era difference, measured), p99 5.4 to 7.5 ms; the ten summed
+per round p50 39.48 ms, p99 52.21 ms, max 83.10 ms; the whole p50 39.21 ms,
+p99 51.27 ms, max 841.67 ms: p99 0.981x (ceiling 1.5x), p50 0.993x. The
+same gate run's kept one-second months of 1,024, 10,240 and 102,400 bars:
+p99 3.03, 3.15 and 3.21 ms (1.037x and 1.059x).
+Re-measured on a clone after the repair (Zerodha NIFTY 1 min 2006-10..2026-09,
+105 months held, and GDFL NIFTY 1 s 2018-09..2019-08, `.sum` built by
+`cli msum-build`; curl `time_total`, n=200 sequential, one client, load
+average 84 to 107): Zerodha NIFTY 1 min 2024-10..2026-09 kept p50 6.9 ms,
+p99 15.7 ms, max 17.2 ms; 2006-10..2026-09 p50 25.1 ms, p99 52.6 ms, max
+72.4 ms; GDFL NIFTY 1 s 2018-09..2019-08 p50 79.2 ms, p99 143.9 ms, max
+150.0 ms. Every kept month answered `unreadable_records: null`; a 1 s month
+with no `.sum` (2019-09) read 392,147 records and answered `0`; every one of
+the 117 summaries `msum-build` wrote is one `store.sum` INFO line.
+
+**The one-second rows and the span's tail (R3-06 repair 1, second pass).**
+The one-second kept rows timed all of one size's answers before the next
+size's, so a stall of the machine landed in one row alone: on that build at
+load 16 to 37 the 10,240-bar row printed p99 46.6 ms between 5.8 ms on either
+side (8.1x, BREACH) with its p50 at 3.6 ms against 3.3 ms. They now run 600
+rounds that each ask every size once, the first size rotating. The span's
+p99 ratio, like with like, still moved with the load (0.981x, 1.014x, 0.980x
+at load 16 to 30; 1.283x at load 50 to 80) while its medians held at 0.938x
+to 1.006x, because both p99s are the sixth-largest of 600 and which side a
+stall lands in at that rank is chance. So the median is asserted at 1.5x and
+the p99 at 2x, both evaluated; a term in the months squared is ten times at
+both. Measured 17 October 2026 (release bench builds of `fix/db-R3-06` after
+merging `feat/db-fix` after AF-07, n=600 a row, 14 cores, this package's
+own clippy and test runs and other agents' builds beside them):
+
+| Gate 8 run | load | 1 s kept p99, 1,024 / 10,240 / 102,400 bars | ratios | span whole p50 / p99 | tile sums p50 / p99 | p50 ratio | p99 ratio |
+|---|---|---|---|---|---|---|---|
+| 1 (1.5x p99 ceiling) | 50 to 80 | 2.63 / 2.61 / 2.68 ms | 0.992x, 1.022x | 31.27 / 93.11 ms | 33.30 / 72.57 ms | 0.938x | 1.283x |
+| 2 (1.5x p99 ceiling) | 21 to 30 | 2.66 / 2.63 / 2.73 ms | 0.989x, 1.028x | 20.57 / 30.52 ms | 20.60 / 31.13 ms | 0.998x | 0.980x |
+| 3 (as built) | 12 to 16 | 2.89 / 2.79 / 2.88 ms | 0.965x, 0.997x | 29.28 / 37.03 ms | 29.09 / 37.97 ms | 1.006x | 0.975x |
+| 4 (as built) | 10 to 31 | 2.38 / 2.37 / 2.48 ms | 0.994x, 1.040x | 23.46 / 34.15 ms | 23.92 / 35.90 ms | 0.980x | 0.951x |
+
+On a fresh private clone (`shadow/R3-06-r4sum`: GDFL NIFTY 1 s 2018-09..2019-09
+and every Zerodha NIFTY 1 min month cloned, `.sum` built by `cli msum-build`
+for 2018-09..2019-08 and the 105 held minute months; curl `time_total`,
+sequential, one client, load average 16 to 19): GDFL NIFTY 1 s 12 months kept
+p50 36.2 ms, p99 39.1 ms, max 42.8 ms (n=200) against p50 406.5 ms, p99
+447.3 ms, max 525.4 ms read from the bars (n=100, 5,167,003 records);
+Zerodha NIFTY 1 min 2006-10..2026-09 kept p50 17.8 ms, p99 19.2 ms, max
+40.7 ms against p50 62.5 ms, p99 81.2 ms, max 147.3 ms (n=200 each, 796,027
+records); 2024-10..2026-09 kept p50 3.4 ms, p99 4.4 ms, max 4.4 ms (n=200).
+The kept and the bar-read answers were identical apart from how they were
+read (and, for the span, the shadow root in the `absent_file` sentences) for
+the 1 s year, the 240-month span, the 2020-03 halt month (expected 7,758,
+both halts suspected) and 2019-09 with no `.sum` (392,147 records read on both).
+
+**Not measured**: `/gaps.json` with an import writing the months it reads (no
+import may run against a shadow whose bars are the real store's); the
+summary read at 10x and 100x the store's month COUNT (a summary is found by
+path arithmetic, one open, so the count is not on the path, but that is not a
+measurement); whether the writer's `.sum` step costs less than its `.srt` step
+(the `.srt` step has no seam to time alone: a 375-bar commit onto a 1x, 10x and
+100x month measured p50 124 to 135 ms, p99 221 to 257 ms with all its steps,
+and the `.sum` step's own work p50 32 to 37 ms, p99 68 to 95 ms, n=100 each, at
+load average above 40).
+
+**The writer's step is not O(1) on every commit (R3-06 repair).** It is
+`O(batch)` when it extends the kept summary, and `O(n_valid)` -- every
+committed row read again, at most 2,678,400 for a one-second month of 31 whole
+days -- on a month's first summary, on a summary refused as torn, foreign or
+rewritten, and on EVERY commit that takes a one-second month back over the
+half line of the density rule (D-4980 item 4). A month whose density moves
+back and forth across that line can pay it on every second commit; it is not
+amortised, and hysteresis that would amortise it was refused because the bytes
+would then depend on how the commits were batched. Each such write is a
+`store.sum` INFO line ("month summary written whole", reason `absent`,
+`dense_again`, ...), so how often it happens is read off the log rather than
+assumed. The rebuild's cost is the rebuild door's: `cli msum-build` wrote 12
+NIFTY 1 s months (5,167,003 bars) in 0.56 s, about 47 ms a month.
+
+**A cost the summary does not remove, owned elsewhere.** A cash stock's minute
+month on or after 2026-08-03 builds its dated cash-session schedule from the
+local NSE masters on every request (`server::audit_cash_schedule_window`):
+Zerodha RELIANCE 1 min 2026-08 answers in 1.87 s and 2026-09 in 0.38 s with
+its summary kept and no bar read, and a 2018-01..2026-09 span in 2.5 to 2.7 s
+either way, against 10 ms for 2018-01..2021-12. O(days of the month) master
+reads per request, not O(1); the fix (a schedule kept per month and master
+stamp) belongs to the owner of that function (R4-20's sequenced edit).
+
+**Disk** (measured on the clone): one `.sum` and one inode per month of 1,024
+bars or more while it is unsealed, none once sealed. GDFL cash and index 1 s
+months average 58.8 KB (60 KiB on disk); minute and option months 1.2 to
+1.6 KB (one 4 KiB block). Projected for the store: 29,482 GDFL cash and index
+1 s months x 60 KiB = 1.69 GiB, and at most 270,589 other months x 4 KiB =
+1.03 GiB; at most 300,071 inodes (D-4933's count of months at 1,024 bars or
+more), about 2.7 GiB in all until sealing moves the bytes into the `.sbar`.
 
 ## Import records on filtered days — D-4970 (AF-02, ingest-6), 14 October 2026
 
@@ -18403,3 +18600,195 @@ under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
 `incomplete` close counts 94 refusals in its own window, equal to its
 `failures=94`, where it counted 151 (57 move to `later_count`); neither
 sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
+
+## The app under launchd and its watchdog — D-4996, 14 October 2026
+
+`cli watchdog` and `cli launch-agent` (R3-32; `docs/36-ops-runbook.md` §9).
+Measured on 14 October 2026 against a release build serving a private shadow
+of the store on 127.0.0.1:8501 (`state/fix/serve.sh`), n = 200 sequential
+runs each, on the shared machine with other builds running.
+
+| Id | Limit | Why | Bound, measured | Owner |
+|---|---|---|---|---|
+| L-WD-1 | One probe waits at most its limit | a stopped or hung app must not hold the probe past the next one | connect, request and status line inside `--timeout-ms` (5,000 by default); no name is resolved, so no resolver can stretch it. The probe itself: p50 0 ms, p99 6 ms, max 7 ms; `GET /health` by `curl`: p50 0.76 ms, p99 5.08 ms, max 6.53 ms; one whole `cli watchdog` process (start, probe, state, exit): p50 11.1 ms, p99 19.1 ms, max 22.3 ms | R3-32 |
+| L-WD-2 | A run's cost does not grow with its history | the log is appended to and never read, a notice page is created by name and the folder never listed (`a_run_never_lists_the_notices_or_reads_the_log`) | one state read of under 200 bytes, one read of at most 42 bytes at the start of `watchdog.lock` (and, only when the state cannot be saved, one 41-byte write there), at most four appended lines, at most one new page, one rename | R3-32 |
+| L-WD-3 | The notice is at most two probes late | an outage is two unanswered probes in a row, so a restart inside one interval is a `blip` | at most 2 × `StartInterval` (120 s at 60 s) after the last answer, tested with a fake clock; a probe missed while the Mac sleeps is not run (`man launchd.plist`, `StartInterval`) | R3-32 |
+| L-WD-4 | The watchdog's files grow | every change is kept; nothing is deleted | `watchdog.log`: one line of about 200 bytes per change; `launchd.log`: the report line of each run, about 60 bytes, so about 86 KB a day (computed from the measured line, not from a day's run); one page per notice | R3-32 |
+| L-WD-5 | A refusal at start is retried by launchd, not by the api | the api has no wait mode (FM-196) | at most one start a `ThrottleInterval` (10 s by default) while the store root exists; none while it is absent (`PathState`); UNVERIFIED on this Mac until the operator loads the agent | R3-32 |
+| L-WD-6 | The watchdog goes SILENT when its own directory cannot be written | a notice is saved before it is sent (at most once per outage, R332-12), so a state that cannot be saved — a full Mac disk, a read-only or damaged state directory, a non-file at `watchdog.state.tmp` — withholds every notice rather than repeating it | one `notice-withheld` line a minute in `watchdog.log` when the log can still be appended to, the run's refusal in `launchd.log` (the same directory) and exit 1 in `launchctl print`; no page and no `open`. Nothing outside the directory says so: the health page's last-restart tile (R3-33) is the second witness | R3-32, R3-33 |
+| L-WD-7 | A run killed inside `open` may have shown nothing | the notice is counted as sent once its run saved `pending` (R332-12), so a run killed before `open` showed the page leaves the operator unwarned for that outage | the next run's `notify-unknown` line names it with the minute it was sent; the page is in `notices/` under that minute's name | R3-32 |
+| L-WD-8 | Waiting for the lock | a spawn duplicates the lock's descriptor until its `exec` | at most `LOCK_WAIT` (1 s) of 5, 10, 20, 40, 80 then 100 ms pauses, then refused by name (R332-11) | R3-32 |
+| L-WD-9 | The drive check needs the drive | the store root's device can be read only while it is mounted | rendered with the drive away, an agent carries a `NOT CHECKED` comment and only the by-name check was made; the verb at run time refuses the same drive whenever the root can be looked at (R332-16). One `stat` per missing path component | R3-32 |
+
+## zstd decoding inside the 128 MiB window ceiling — D-5090, 17 October 2026
+
+`lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd`, the
+workspace's two zstd decode call sites, both on `ruzstd` 0.9.1 with the window
+ceiling named (`MAX_ZSTD_WINDOW`, 128 MiB). Neither is on a per-request path
+that was O(1) before: a frame is decoded whole, O(its decoded bytes), as it
+always was.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-ZST-1 | One decode can hold about twice its declared window, whatever length the caller promised | `ruzstd`'s decoder keeps the whole declared window before it hands a byte out, so the call sites' `take(want + 1)` bounds what is RETURNED, not what is decoded | about twice the 128 MiB ceiling per decode (the window it keeps and the buffer it grew to hold it), where 0.8.2 had no bound. Measured 17 Oct 2026 with the second agent's harness (`tgt/verify-DENY-1-r1-harness`, mode `bomb09`): a 4,105-byte crafted frame (1,024 RLE blocks, declared window 128 MiB) asked for 16 bytes is refused after 20 ms at peak RSS 273,203,200 / 273,334,272 / 273,317,888 bytes (n = 3, `/usr/bin/time -l`). Real frames declare at most 4 MiB (1,929,357 frames, D-5090 point 5). Closing it — refusing a frame whose stated content size is not the promise before decoding — is NOT built (D-5090 point 9) | DENY-1 |
+| L-ZST-2 | The frame's own content checksum is not checked | `ruzstd`'s `StreamingDecoder` (0.8.2 and 0.9.1 alike) reads the checksum field and compares nothing; `FrameDecoder` only exposes the two values | the tick store: the index CRC-32 is checked on every open (`gdfl_tickstore::read_index`) and the writer checks every entry's CRC-32 before a day is held (TSW-01); whether every READ path checks an entry's CRC-32 is NOT CHECKED here. `lake`: no checksum or page CRC is compared on a zstd page body, so a body that decodes to the promised length with other bytes is not caught at this layer; `lake` has no runtime caller (D-5090 point 5) | DENY-1 |
+
+## The /db address (R3-01, D-5301)
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R301-1 | A linked page past the end of the answer costs a second `/bars/window.json` read | the first read is the only way to learn the total, and the last page is read once it is known | at most one extra read per opened address (the second agent counted it on `page=999999999` on 16 Oct, `verify-R3-01-r1.json`); a page that exists costs one read | R3-01 |
+| L-R301-2 | Whether a typed name is held is answered from a set folded once per census load | the set is built from the census rows as they arrive | O(census rows) once per census load, already the cost of reading the census; each question after that is one `Set` probe (it was a `db.deco.some` scan per change until R3-01 repair 1) | R3-01 |
+| L-R301-3 | A press older than `GESTURE_MS` (30 s) is not the cause of the next address write | a write with no recent choice must be told apart from a seed or a clamp, and nothing else on the page says which caused it | such a write is a `replace`: the address stays exact and only that step's own Back entry is lost. Every pick on /db moves the selection in the press's own task, so this is a bound, not a measured case | R3-01 |
+
+## The importer's file split: the chain that is left (R3-35, D-4979)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
+| L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
+## The O(1) attack merged back: what is now flat, what is bounded, and what is still named — D-5800 to D-5804, 17 October 2026
+
+Every number in this section was taken on the operator's Mac (M4 Pro, 14
+cores). The host was shared with other builds the whole time, with a load
+average between 17 and 43 on 14 cores. Every p99 here is therefore an upper
+figure for this host, not a quiet-machine figure. Bench rows ran under
+`[profile.bench]` (fat LTO, one codegen unit) by `cargo bench -p <crate>
+--locked --bench ratio`. All three crates printed "all ratios within the
+ceiling", with no BREACH. Single-call spreads are p50 / p99 / max.
+
+### Measured flat (asserted)
+
+| Row | 1x | 10x | 100x | min-of-trials ratio |
+|---|---|---|---|---|
+| C-NFO-01 `gdfl_nfo::read_file` per file, 1k / 10k / 100k rows (D-5800) | 0.172 / 0.567 / 1.447 ms | 1.706 / 3.303 / 4.942 ms | 17.594 / 20.980 / 25.033 ms | 162.1 ns per row; 1.002x, 1.021x |
+| C-FD-01 `fold_from_snapshots` to 1min, 1k / 10k / 100k snapshots | 2.04 / 2.13 / 2.17 µs | 19.67 / 20.50 / 21.96 µs | 207.2 / 864.9 / 940.8 µs | 2,014 ps per bar; 0.947x, 0.971x |
+| C-MO-01 open + read + `.tix` beside 1 / 10 / 100 months | 91.2 / 124.6 / 140.3 µs | 85.8 / 153.8 / 203.0 µs | 98.0 / 280.4 / 584.0 µs | 0.797x, 0.729x |
+| `/spot.json` at the last month, 1 / 10 / 100 held months | 62.1 / 121.9 / 1,278.6 µs | 65.5 / 288.5 / 872.8 µs | 61.5 / 102.0 / 375.0 µs | 1.050x, 1.013x |
+| warm `/store` page, 1k / 10k / 100k census entries | 179.0 / 547.0 / 688.4 µs | 177.3 / 1,163.5 / 20,420.3 µs | 178.5 / 2,771.5 / 7,099.7 µs | 1.072x, 1.077x |
+
+C-MO-02 (reader handle, strided rows, at 1,024 / 10,240 / 102,400 bars):
+`read_record` 5.29 / 6.08 / 7.79, 6.46 / 37.42 / 68.13 and 4.58 / 5.54 /
+7.42 µs; the `.tix` lookup 0.67 / 1.04 / 66.5, 0.63 / 0.96 / 52.0 and 0.50 /
+0.88 / 65.8 µs. The 10,240-bar `read_record` p99 is the high one here, as it
+was on the cloud host (`cloud/attack-o1-20261016`). It is not explained:
+UNVERIFIED.
+
+**The warm `/store` page's p50 and its asserted ratio are flat, but its p99
+is not**: 0.55, 1.16 and 2.77 ms at 1k, 10k and 100k entries. On this loaded
+host that may be scheduling noise, or a cost that grows with the census. It
+is UNVERIFIED which, and it is named here rather than called O(1) at p99.
+Owner: whoever next touches `store_html`; the check is the same row on a
+quiet host.
+
+### Measured on the shadow, before and after, on real data
+
+Release builds, served over private shadows of the real store
+(`state/fix/shadow.sh`): this branch on :9303, and `feat/db-fix` at the AF-07
+merge (this package's base) on :9304. Each round sent one GET to each server in turn,
+n = 200 rounds, curl `time_total`. Every body was byte-identical between the
+two servers (equal SHA-256): F3 and F4 change no answer.
+
+| Selection | after (this branch) | before (the base, `feat/db-fix` at the AF-07 merge) |
+|---|---|---|
+| `/bars.json` NIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.64 / 10.16 / 15.56 ms | 9.60 / 11.18 / 12.02 ms |
+| `/bars.json` NIFTY INDEX Zerodha 1min, 2024-01 whole month (1,138,501 B) | 2.18 / 2.84 / 15.35 ms | 2.32 / 3.02 / 3.29 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1010000-CE` 1s, 2018-09 (17,043 B) | 0.65 / 1.02 / 2.42 ms | 0.64 / 0.96 / 1.61 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1000000-PE` 1s, 2018-09 (1,189,571 B) | 3.42 / 4.61 / 5.33 ms | 3.61 / 4.71 / 4.89 ms |
+| `/bars.json` BANKNIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.56 / 11.18 / 13.40 ms | 9.42 / 11.63 / 12.46 ms |
+| `/bars.json` RELIANCE CASH GDFL 1s, 2026-09-01 (3,197,131 B) | 5.72 / 7.83 / 10.78 ms | 6.36 / 7.63 / 9.00 ms |
+| `/census/facets.json?feed=gdfl&segment=FNO` (underlyings) | 0.92 / 2.38 / 4.18 ms | 1.28 / 1.85 / 3.21 ms |
+| `…&underlying=NIFTY` (422 expiries) | 1.25 / 3.29 / 5.01 ms | 2.92 / 8.85 / 24.37 ms |
+| `…&underlying=BANKNIFTY` | 1.15 / 2.94 / 5.07 ms | 2.59 / 5.68 / 8.86 ms |
+| `…&underlying=RELIANCE` | 0.98 / 3.86 / 10.27 ms | 1.24 / 3.87 / 13.03 ms |
+| `/live.json` (the real store holds no live file) | 5.06 / 18.79 / 72.58 ms | 4.88 / 29.18 / 63.44 ms |
+
+On the shadow, the NIFTY underlyings row says `contracts` 70,445, and the
+NIFTY expiries answer's `contracts` sum to 70,445. The 2018-09-27,
+2020-09-24 and 2026-09-29 expiries answer `contracts` / `strikes` 151 / 86,
+200 / 115 and 251 / 144. Those equal the contract directories on disk and
+their distinct strikes. `/live.json`'s cost on an empty census is the
+per-request invocation journal (D-1445, D-4978), not the encoding. Its
+refusal past the ceiling is proved by the unit test only. The real store
+has no `results/live` directory, so no shadow can reach it without writing
+live files.
+
+### Bounded, not constant, and named
+
+- **D-5800, the options reader.** The newline count that sizes the row
+  vector is one more pass over each file's bytes (O(bytes) per file, O(1)
+  per row; C-NFO-01 is flat per row with it). The reservation is at most
+  `fetch::MAX_ROWS` × 32 B = 32 MB. A body of blank lines can ask that much
+  for rows it never fills, and the cap is the bound. On real days, read-only
+  from the tick store, in a debug build (not a production figure), the
+  NIFTY, BANKNIFTY and RELIANCE option files decoded in these times, against
+  the field vector's: 913 ms against 1,200 ms on 2018-09-03 (3,751,736 rows),
+  339 against 446 ms on 2023-11-12 (1,281,196 rows), and 2,278 against
+  2,968 ms on 2026-08-03 (8,867,328 rows). The rows were equal on every file
+  (AO1-06).
+- **D-5801, `/live.json`.** Encoding is cut at `MAX_RESPONSE_BYTES` plus one
+  run (at most 256 rows). The census `refresh` still reads the live
+  directory on every poll (O(live files), at most `LIVE_ENTRY_LIMIT`
+  4,096) and clones each run twice (`cli/src/live.rs`, the two `run.clone()`
+  calls). Not fixed here.
+- **D-5802, `/bars.json`.** The cost is O(bars in the window), by design. A
+  request with no `from`/`to` reads and encodes the whole month, which is
+  about 2.7 M rows for a one-second month. That is neither refused nor
+  paged: named, not fixed.
+- **D-5803, `/census/facets.json`.** The underlyings answer is
+  O(underlyings of the segment) and the expiries answer is O(expiries of
+  one underlying), 422 for NIFTY. Each row is now O(1). The rebuild on a
+  census move is unchanged.
+
+### Printed, never asserted: O(months) and O(entries) by the route's own doc (D-5804)
+
+| Row | 1 month | 10 months | 100 months | per extra month (min-of-trials) |
+|---|---|---|---|---|
+| `/bars/window.json` seek, first page | 60.0 / 170.5 / 314.5 µs | 90.6 / 337.6 / 590.2 µs | 410.0 / 5,117.3 / 7,502.6 µs | 3.46 µs |
+| `/bars/window.json` seek, last page | 59.5 / 3,316.0 / 8,535.0 µs | 88.3 / 331.0 / 1,938.2 µs | 395.6 / 2,108.2 / 4,549.8 µs | 3.77 µs |
+| `/bars/window.json` `sort=c`, first page | 120.3 / 283.1 / 687.8 µs | 330.4 / 1,746.5 / 3,267.4 µs | 2,934.6 / 16,413.8 / 24,560.0 µs | 31.86 µs |
+| `/bars/window.json` `at=` | 78.4 / 131.3 / 387.0 µs | 100.8 / 540.9 / 789.5 µs | 418.3 / 3,186.3 / 12,514.9 µs | 3.55 µs |
+| `/verify.json` scrub (one entry per month) | 48.0 / 140.4 / 166.1 µs | 506.5 / 5,304.2 / 14,573.5 µs | 7,399.6 / 39,275.3 / 54,500.8 µs | 93.9 µs per entry |
+| `/store` page (rows drawn = months) | 22.7 / 80.5 / 393.1 µs | 30.9 / 94.2 / 233.4 µs | 100.0 / 347.7 / 459.3 µs | 0.79 µs per row |
+
+The window rows are capped by `MAX_WINDOW_MONTHS` (240). At the cap, the
+`sort=c` first page is about 7.6 ms at p50 by the per-month figure. That is
+an EXTRAPOLATION, not a measurement. The scrub over GDFL's 246,147 held
+entries at 93.9 µs each would be about 23 s, also an EXTRAPOLATION, and
+`/verify.json` has no cap on entries. C-MO-03 (96 one-bar commits a month):
+p50 40.9 / 48.1 / 43.0 ms, p99 158.5 / 179.8 / 90.5 ms and max 287.8 /
+554.7 / 96.8 ms at 1,024 / 10,240 / 102,400 bars. The slowest commits were
+#64, #65, #31; #17, #18, #93; and #31, #62, #72. The `.srt` compaction
+cadence (#31, #62, #93) stands out from the device's flush time only at
+102,400 bars, where #31 and #62 cost 96.8 and 90.5 ms against a 43.0 ms
+p50. The cloud host saw it at every size. The compaction grows with the
+month: named, not fixed.
+
+### The attack's other HIGH rows: NOT fixed by this package
+
+These are the rows of `cloud/attack-o1-20261016`'s report marked HIGH and
+not fixed there. Each is named here with what grows; none was re-measured
+here unless a table above says so, and each is UNVERIFIED as a latency.
+
+| Row | Where (as read on the cloud's base) | What grows |
+|---|---|---|
+| R11 | `/bars.json` with no `from`/`to` | the whole month per request |
+| R13 | `/gaps.json` NSE CASH, `audit_cash_schedule` per month | every CAS day's master decoded per month per request |
+| R25 | `provenance.rs` `read_runs` | the first call walks the whole pull journal under one lock |
+| R27 | `/verify.json` | one open per held entry (measured above: 93.9 µs per entry) |
+| R28 | `/bars` page with no `exchange`/`segment` | `held_entries` per vendor, inline on the async worker |
+| C1 | `census_cache.rs` `manifest_stamps` → `current_epoch` | one `read_dir` of a segment's epoch files per census-backed request; epochs are never deleted |
+| C6 | `store_route.rs` `behind_in` | every GDFL journal row on any journal change |
+| C24 | `ingest_refusals.rs` | the run and fault index read again for every symbol |
+| E1 | `/backtest.json` | up to `limit` ledger runs read inline on a Tokio worker |
+| E4 | every audited route | one invocation-journal file per request, with no rotation |
+| H9 | `.srt` compaction inside `append` | O(n log n) in the month on one commit in about 31 (C-MO-03 above) |
+| H20 | `runner/src/trade.rs` trade walk | unreserved pushes in the per-candidate loop, under a doc that says "no allocation" |
+
+## Gate 10's front-end test names (BASE-GATE10, D-5830)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-G10W-1 | Only a front-end test name of the bare-name shape is resolved: snake case with three or more underscores, backticked in the cell before a status glyph | a sentence-named test (`'a seed, a clamp and a restore ...'`) cannot be told from a backticked prose phrase by its shape, so a rule reading every backticked phrase would refuse prose all over this file | of the 1,403 literal names the tree declares on 17 Oct (145 files), 26 have the shape and are checked; the other 1,377, and `pauses_while_hidden` (two underscores), are not. A `✓` row citing them is accepted on its `.test.js` mention and can go stale with the gate green, as before D-5830 | BASE-GATE10 |
+| L-G10W-2 | A front-end name resolves anywhere among the runner's files, not in the file the row names; the listing does not check that `test` is `node:test`'s binding | the bare-name rule binds a Rust name the same way (D-1606), and the rows cite files as `` `web/tests/x.test.js`: `name` ``, a form no reference rule reads | a name declared in two files satisfies a row naming either; a file that rebinds `test` to something else would still list its calls | BASE-GATE10 |
+| L-G10W-3 | The listing is linear in the bytes of the tracked front-end test files, and the lexer's regex-or-division choice after `}` is a heuristic | a CI step reads every file it lists once; after `}` a `/` is taken to open a regular expression (a block ends there far more often than an object literal is divided) | measured 17 Oct 2026, n = 200 sequential runs, built as CI builds it, a loaded machine: listing 1,627,386 bytes p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the whole check p50 192.4 ms, p99 229.3 ms, max 250.2 ms. A misread `/` reads to the end of its line and is refused there by line number (`unterminated regular expression`), so the failure is loud; a misread that closes on the same line is not detected | BASE-GATE10 |
