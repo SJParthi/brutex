@@ -640,3 +640,96 @@ fn an_untracked_name_is_never_a_spot_target() {
         .collect();
     assert_eq!(names, ["RELIANCE"], "the tracked equity is still a target");
 }
+
+/// **A day past the calendar of record is the run's one line, never a
+/// member's failure on the autopilot's page.** A NIFTY minute landing on
+/// 2027-01-08, after the record ends on 2026-12-31, carries the
+/// `PAST_RECORD_FINDING` finding and a second, ordinary one; the member
+/// path files only the second (DB-B25). Covers `land_broker_member`'s
+/// `PAST_RECORD_FINDING` skip (server.rs:5792).
+#[tokio::test]
+async fn a_day_past_the_record_is_never_filed_as_a_member_failure() {
+    use pull::fetch::{RawRow, RawWindow};
+    use pull::vendor::{Feed, Granularity, Listing, Transport};
+    let (site, _) = super::tests::readiness_fixture("cloudd-past-record", "INE002A01018");
+    let date = Day::new(2027, 1, 8).expect("a day");
+    let midnight = i64::from(date.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS;
+    let row = |timestamp| RawRow {
+        timestamp,
+        open: 100,
+        high: 100,
+        low: 100,
+        close: 100,
+        volume: 0,
+        open_interest: None,
+    };
+    let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+        panic!("HTTP descriptor");
+    };
+    let window = pull::session::Window::new(date, date).expect("a window");
+    let mut landed = BrokerWindow {
+        listing: Listing::Index,
+        contract: None,
+        unfetched: None,
+        before_first_bar: None,
+        instrument: "NIFTY".to_owned(),
+        origin: "test only".to_owned(),
+        spec,
+        exchange: "NSE",
+        segment: "INDEX",
+        store_vendor: Vendor::Zerodha,
+        window,
+        granularity: Granularity::Day1,
+        bodies: vec![(
+            window,
+            RawWindow {
+                rows: vec![row(midnight)],
+            },
+        )],
+    };
+    assert_eq!(land_one(&landed, &site).bars_committed, 1, "the day lands");
+    landed.granularity = Granularity::Minute1;
+    landed.bodies = vec![(
+        window,
+        RawWindow {
+            rows: (0..375)
+                .map(|minute| row(midnight + (555 + minute) * 60))
+                .collect(),
+        },
+    )];
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("a key");
+    let asked = ingest::parse_spot(
+        "target=swept&vendor=zerodha&granularity=1min&from=2027-01-08&to=2027-01-08",
+        Day::new(2027, 1, 20).expect("a day"),
+    )
+    .expect("a request");
+    let mut dated = std::collections::HashMap::new();
+    let done = land_broker_member(&landed, &key, &site, &mut dated, &asked).await;
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.starts_with(pull::calendar::PAST_RECORD_FINDING)),
+        "the premise: the day is past the record: {:?}",
+        done.failures
+    );
+    let filed = done
+        .failures
+        .iter()
+        .find(|f| !f.why.starts_with(pull::calendar::PAST_RECORD_FINDING))
+        .expect("the premise: an ordinary finding beside it");
+    let json = site.autopilot.json();
+    assert!(
+        json.contains(
+            &render::json_string(&filed.why)
+                .chars()
+                .skip(1)
+                .take(30)
+                .collect::<String>()
+        ),
+        "the ordinary finding is filed: {json}"
+    );
+    assert!(
+        !json.contains("request minute coverage NOT JUDGED"),
+        "the past-the-record finding is not: {json}"
+    );
+}
