@@ -352,6 +352,17 @@ fn a_flag_is_read_only_on_an_open_session_up_to_today() {
     let open = flags.on_session(day("2026-08-04"), true, false);
     assert_eq!(open.eligibility, CasEligibility::Eligible);
     assert_eq!(open.basis, CasBasis::DatedMaster);
+    // A MASTER THAT LOADED IS KEPT FOR THE PROCESS, by its directory and day.
+    assert!(
+        masters()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&(
+                root.join("session-masters"),
+                day("2026-08-04").days_from_epoch()
+            )),
+        "the loaded master is kept"
+    );
     // An index, or a day before the auction began, needs no flag, open or not,
     // and asked directly reads none either.
     let mut index = CasFlags::of(&root, "NIFTY", false);
@@ -2378,4 +2389,68 @@ fn an_empty_month_before_the_page_is_not_an_empty_history() {
         )),
     );
     assert_eq!(got["zerodha_1day_start"]["state"], "held_before", "{got:#}");
+}
+
+/// **A DAY'S BAR PHRASES ARE SAID WHERE THEY APPLY, AND ONLY THERE**: an own
+/// month that will not read is said so; a month with no file is said only on
+/// a session; the peer's count is said on a session even when it is zero, and
+/// on a day outside the calendar where it holds bars.
+#[test]
+fn a_days_bar_phrases_are_said_only_where_they_apply() {
+    let root = root_of("r3-13-bar-phrases");
+    let key = "NSE-INDEX-NIFTY";
+    let month = |y: u16, m: u8| YearMonth::new(y, m).expect("a month");
+    // Zerodha's own October 2024 will not read; GDFL holds October with a bar
+    // on the 1st only, and a bar far past the calendar.
+    write(
+        &month_path(
+            &root,
+            Vendor::Zerodha,
+            key,
+            Timeframe::MINUTE_1,
+            month(2024, 10),
+        ),
+        "not a bar file",
+    );
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        key,
+        Timeframe::SECOND_1,
+        vec![
+            bar("2024-10-01", 10 * 3_600, [2_500_000; 4], 0),
+            bar("2099-01-05", 10 * 3_600, [2_500_000; 4], 0),
+        ],
+    );
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-10-03&to=2024-10-03"),
+    );
+    let rec = record(&got, "2024-10-03");
+    says_has(rec, "Zerodha's month could not be read");
+    says_has(rec, "GDFL holds 0 bar(s)");
+    // November: no file at all. A session says so; a Saturday says nothing.
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-11-08&to=2024-11-09"),
+    );
+    says_has(
+        record(&got, "2024-11-08"),
+        "Zerodha holds no file for this month",
+    );
+    assert!(
+        says(record(&got, "2024-11-09"))
+            .iter()
+            .all(|say| !say.contains("holds no file")),
+        "{:#?}",
+        says(record(&got, "2024-11-09"))
+    );
+    // A day outside the calendar: the peer's bars are said.
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2099-01-05&to=2099-01-05"),
+    );
+    let far = record(&got, "2099-01-05");
+    assert_eq!(far["calendar"]["code"], "-", "{far:#}");
+    says_has(far, "GDFL holds 1 bar(s)");
 }
