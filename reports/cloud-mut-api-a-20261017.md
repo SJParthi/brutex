@@ -250,7 +250,9 @@ request, where no seam reaches.**
   11 of 12 caught, `page_peak` left; `gaps_route.rs` one survivor, a dead
   store (see *Survivors*); `bars.rs` 25 of 32 caught (`note_refused` and
   `retired_refusal` by library tests outside the stage-1 filter, the rest
-  by the integration file), 16 Oct's seven equivalents left.
+  by the integration file), 16 Oct's seven equivalents left. Stage 1 is
+  complete for all eight files (23:08 UTC); stage 2 for `bars_sort.rs` (32)
+  and `bars_series.rs` (27) is running.
 - The coverage re-measurement after the new tests, and the reason for
   every line and branch still unrun.
 - `cargo test --workspace --locked`, and the final clippy.
