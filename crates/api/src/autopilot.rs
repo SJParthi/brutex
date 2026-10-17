@@ -8765,4 +8765,150 @@ mod cloud_mutant_tests {
             site.autopilot.json()
         );
     }
+
+    /// **A hint below the floor's month scans up to that month, and the unit
+    /// starts on the floor.** The months below it have no span (`month_span`
+    /// is `None`), so they are passed over, never chosen and never asked for.
+    /// Covers the `None` side of `frontier`'s `if let Some(span)`
+    /// (autopilot.rs:2791).
+    #[test]
+    fn a_hint_below_the_floor_scans_up_to_the_floors_month() {
+        let axis = [series("NIFTY")];
+        let (at, unit) = frontier(
+            |_| None,
+            &axis,
+            month(2020, 1),
+            day(2020, 3, 10),
+            day(2020, 4, 20),
+        );
+        assert_eq!(at, month(2020, 3));
+        let unit = unit.expect("nothing is held, so the floor's month is owed");
+        assert_eq!(unit.month, month(2020, 3));
+        assert_eq!(
+            (unit.window.from(), unit.window.to()),
+            (day(2020, 3, 10), day(2020, 3, 31))
+        );
+        assert_eq!((unit.behind, unit.done), (1, 0));
+    }
+
+    /// **A feed with no history floor is reported and never chosen.** An
+    /// archive-folder feed has no HTTP descriptor, so `floor_day` answers
+    /// `None`: its report owes no month, and the survey asks it for nothing,
+    /// while an HTTP feed beside it over the same empty store is chosen.
+    /// Covers the `None` sides of `survey`'s two `Some(floor)` tests
+    /// (autopilot.rs:3172 and 3183).
+    #[test]
+    fn a_feed_with_no_floor_is_reported_and_never_chosen() {
+        let yesterday = day(2026, 8, 6);
+        let folder = pull::vendor::Feed::TrueData;
+        assert!(floor_day(folder, yesterday).is_none(), "the premise");
+        let vendor = folder.store_vendor().expect("a store prefix of its own");
+        let mut feeds = vec![FeedState::new(folder, vendor, month(2026, 1))];
+        let censuses = [census_of(vendor, Census::Absent)];
+        let (reports, chosen) = survey(&mut feeds, &[series("NIFTY")], &censuses, yesterday);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].months_total, 0, "no floor, so no month is owed");
+        assert!(chosen.is_none(), "nothing is asked of a feed with no floor");
+        assert!(feeds[0].halted.is_none(), "and it is not halted for it");
+
+        // THE SAME SURVEY WITH AN HTTP FEED BESIDE IT chooses that feed.
+        let mut both = drivable(yesterday);
+        let http = both.len();
+        assert!(http > 0, "the premise: some feed is drivable");
+        both.push(FeedState::new(folder, vendor, month(2026, 1)));
+        let censuses: Vec<VendorCensus> = both
+            .iter()
+            .map(|state| census_of(state.vendor, Census::Absent))
+            .collect();
+        let (reports, chosen) = survey(&mut both, &[series("NIFTY")], &censuses, yesterday);
+        let (slot, _unit) = chosen.expect("an HTTP feed over an empty store owes a month");
+        assert!(slot < http, "the chosen feed is an HTTP one: slot {slot}");
+        assert!(reports[0].months_total > 0, "{:?}", reports[0]);
+        assert_eq!(reports[http].months_total, 0);
+    }
+
+    /// **A round that owes nothing over a tracked universe is complete, not
+    /// halted, and waits the idle poll.** The only feed has no floor, so the
+    /// survey chooses nothing; no feed is halted and nothing is reconsidered,
+    /// and one tracked instrument makes the verdict `Complete`. Covers the
+    /// `Idle` arm of `round`'s phase line through `settled.halts()` false
+    /// (autopilot.rs:3619).
+    #[tokio::test]
+    async fn a_round_owing_nothing_over_a_tracked_universe_is_complete() {
+        let site = empty_site("owing-nothing");
+        let folder = pull::vendor::Feed::TrueData;
+        let vendor = folder.store_vendor().expect("a store prefix of its own");
+        let mut feeds = vec![FeedState::new(folder, vendor, month(2026, 1))];
+        let pass = round(
+            &site,
+            &mut feeds,
+            &[series("NIFTY")],
+            pull::vendor::Granularity::Minute1,
+        )
+        .await;
+        assert_eq!((pass.wait, pass.owed), (IDLE_POLL_SECS, false));
+        assert_eq!(
+            site.autopilot.inspect(|status| status.phase),
+            Some(Phase::Idle)
+        );
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""state":"complete""#), "{json}");
+        assert!(
+            json.contains(
+                "nothing is missing that any feed can still be asked for, across 1 tracked \
+                 instrument(s)"
+            ),
+            "{json}"
+        );
+    }
+
+    /// **The last month there is stays the frontier.** 9999-12 has no month
+    /// after it, so neither a completed month nor a passed-over one moves the
+    /// frontier, and the stall is still said. Covers the `None` sides of
+    /// `settle`'s two `month_after` tests (autopilot.rs:3697 and 3720).
+    #[tokio::test]
+    async fn the_last_month_there_is_stays_the_frontier() {
+        let site = empty_site("last-month");
+        let last = month(9999, 12);
+        let failed = TickOutcome {
+            attempted: 1,
+            reached: 0,
+            stored: 0,
+            reason: Some(String::from("connection reset by peer")),
+            complete: false,
+            stopped: false,
+            journal_error: None,
+            credential: None,
+        };
+        let complete = TickOutcome {
+            reached: 1,
+            stored: 10,
+            reason: None,
+            complete: true,
+            ..failed.clone()
+        };
+        let mut done = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            last,
+        );
+        assert_eq!(settle(&site, &mut done, &complete), 0);
+        assert_eq!(done.frontier, last, "there is no month after it");
+
+        let mut stalling = FeedState {
+            attempts: MAX_MONTH_ATTEMPTS.saturating_sub(1),
+            ..FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                last,
+            )
+        };
+        assert_eq!(settle(&site, &mut stalling, &failed), 0);
+        assert_eq!(stalling.frontier, last, "passed over, and nowhere to go");
+        let json = site.autopilot.json();
+        assert!(
+            json.contains("9999-12 was passed over after"),
+            "the stall is still said: {json}"
+        );
+    }
 }
