@@ -733,3 +733,36 @@ async fn a_day_past_the_record_is_never_filed_as_a_member_failure() {
         "the past-the-record finding is not: {json}"
     );
 }
+
+/// **A vendor ID that no longer matches the join made from it is refused,
+/// even with the vendor's own ISIN in place.** RELIANCE's Groww row carries
+/// the exchange ISIN, and the join built at load names its Groww ID; the
+/// entry's ID is then changed after the join, so the join's answer for that
+/// ISIN is no longer the ID asked about. Covers the first disqualifier of
+/// `spot_vendor_identity_for`'s ISIN check (server.rs:6028), which a wrong
+/// ISIN (the second) has always reached first.
+#[test]
+fn a_vendor_id_that_no_longer_matches_its_join_is_refused() {
+    use super::tests::{DHAN_HEAD, GROWW_HEAD};
+    let groww = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
+    let dir = super::tests::masters("cloudd-join-moved", Some(&groww), Some(DHAN_HEAD));
+    let mut read = universe(&dir);
+    let key = *read
+        .merged
+        .by_key
+        .keys()
+        .find(|key| key.underlying.as_str() == "RELIANCE")
+        .expect("a cash listing");
+    assert!(
+        spot_vendor_identity_for(&read, &key, Vendor::Groww, ingest::CashIdentity::Isin).is_ok(),
+        "the premise: the identity verifies as loaded"
+    );
+    read.merged.by_key.get_mut(&key).expect("the entry").ids[Vendor::Groww as usize] =
+        Some(brutex_core::vendor::VendorId::new("changed-after-join").expect("an id"));
+    let why = spot_vendor_identity_for(&read, &key, Vendor::Groww, ingest::CashIdentity::Isin)
+        .expect_err("the join names another ID");
+    assert_eq!(
+        why,
+        "RELIANCE: selected vendor ID does not uniquely match the exchange ISIN INE002A01018"
+    );
+}
