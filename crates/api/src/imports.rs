@@ -783,6 +783,13 @@ fn wanted(
 /// which is D-3317's `refused`; the row says it is read from the log, with
 /// `line: null` and `outcome_from: log`, and carries the importer's own words.
 /// Its `failures` is the distinct refusals (`about`, `why`) the log names.
+///
+/// It is made for the refusals NO CLOSE of the kind-day owns (AF-02,
+/// ingest-6, repair 2; [`merged`]): a day closed only under `BANKNIFTY,NIFTY`
+/// or the 277-name key HAS a line, and the refusals that close names in its
+/// own run are its own; a whole-day refusal that only a `*` close could own,
+/// or one logged after every naming close, is not, and keeps this row. Its
+/// `failures` then counts the unowned distinct refusals.
 fn logged_only(kind: ImportKind, day: Day, failures: usize) -> DayRow {
     DayRow {
         kind,
@@ -863,9 +870,42 @@ fn walk<'p>(
 }
 
 /// The journal's rows of `from..=to` and a [`logged_only`] row for each day
-/// the importer's log names and the journal does not, in day order, then
-/// kind order. O(rows + logged days in the range), each logged day checked
-/// against the journal by one range probe.
+/// the importer's log names with a refusal NO CLOSE of that kind-day owns, in
+/// day order, then kind order. O(rows + logged days in the range); each
+/// logged day reads its own keys by one range probe and decides each of its
+/// distinct refusals against each of its closes (a handful), each filter's
+/// names split once per call ([`Owners`]).
+///
+/// # Which refusals a close owns (AF-02, ingest-6, repair 2)
+///
+/// The importer's `refused` event carries no run id and no filter
+/// (`pull::gdfl_import::note_failure`), so a refusal is placed by WHAT it is
+/// about and WHEN it was logged ([`placed`]). A close OWNS a refusal when:
+///
+/// * its filter NAMES the refusal's subject ([`Subject`]): `*` names every
+///   subject; a list names an underlying it holds as a whole name; only `*`
+///   names a day-level refusal (the calendar, the census), which is about
+///   every instrument of the kind; and a file no decoder places is about no
+///   instrument, so any close may own it; and
+/// * the refusal was not logged in a LATER closing run's window: one logged
+///   at or after the start of the next run that closed the same kind-day is
+///   that run's. One logged BEFORE the close's run is an earlier attempt's,
+///   and the close is that subject's later state: history beside it
+///   (DB-B45), never a second row. A close with no `run=`, or a refusal with
+///   no time, cannot be placed, and keeps every refusal it names.
+///
+/// A refusal no close owns is DB-025's: an attempt refused the day and
+/// wrote no line, and nothing since names what it refused. It keeps its
+/// log-only `*` row, `refused`, whose `failures` counts the distinct
+/// unowned refusals (`logged` beside it lists the whole kind-day's).
+///
+/// Before AF-02 the probe looked for a `*` line only, so a day the journal
+/// closed only under `BANKNIFTY,NIFTY` or the 277-name key gained a made-up
+/// `*` row for the very refusals its own close counts as `vendor_refused=`
+/// (the operator's 2026-04-16 and 2025-03-11). AF-02's first answer (any
+/// line suppresses the row) hid a whole-day refusal from every instrument a
+/// list does not name: a calendar refusal of an earlier attempt, then a
+/// `BANKNIFTY,NIFTY` close, read `none` for RELIANCE. Both are refused here.
 fn merged<'p>(
     parsed: &'p Parsed,
     from: Day,
@@ -876,6 +916,7 @@ fn merged<'p>(
         .range(from, to)
         .map(std::borrow::Cow::Borrowed)
         .collect();
+    let mut owners = Owners::default();
     for (kind, day) in evidence.days(&from.to_string(), &to.to_string()) {
         let (Ok(kind), Some(day)) = (
             ImportKind::parse(kind),
@@ -883,26 +924,29 @@ fn merged<'p>(
         ) else {
             continue;
         };
-        let journalled = parsed
+        let closes: Vec<&'p DayRow> = parsed
             .range(day, day)
-            .any(|row| row.kind == kind && row.filter == "*");
-        if !journalled {
-            // DISTINCT REFUSALS, NOT LOG LINES: a day attempted by two runs
-            // logs each refusal twice, and `logged` lists every line.
-            let failures = evidence
-                .of(kind.as_str(), &day.to_string())
-                .iter()
-                .map(|record| {
-                    (
-                        record
-                            .field("about")
-                            .and_then(telemetry::OwnedValue::as_str),
-                        record.field("why").and_then(telemetry::OwnedValue::as_str),
-                    )
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            rows.push(std::borrow::Cow::Owned(logged_only(kind, day, failures)));
+            .filter(|row| row.kind == kind)
+            .collect();
+        // DISTINCT REFUSALS, NOT LOG LINES: a day attempted by two runs logs
+        // each refusal twice, and `logged` lists every line. A pair is
+        // unowned when any of its lines is.
+        let unowned = evidence
+            .of(kind.as_str(), &day.to_string())
+            .iter()
+            .filter(|record| !owners.owned(parsed, &closes, kind, day, record))
+            .map(|record| {
+                (
+                    record
+                        .field("about")
+                        .and_then(telemetry::OwnedValue::as_str),
+                    record.field("why").and_then(telemetry::OwnedValue::as_str),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if unowned > 0 {
+            rows.push(std::borrow::Cow::Owned(logged_only(kind, day, unowned)));
         }
     }
     rows.sort_by_key(|row| {
@@ -913,6 +957,159 @@ fn merged<'p>(
         )
     });
     rows
+}
+
+/// Where a refusal logged at `at_ms` falls against one close of its
+/// kind-day (AF-02 repair 2): the close's run started at `start_s`, and the
+/// next run that closed the same kind-day, under any filter, at `next_s`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// Logged before the close's run started: an earlier attempt's, history
+    /// beside the close (DB-B45).
+    Before,
+    /// Logged in the close's own window. Also every refusal of a close with
+    /// no `run=` and every refusal with no time: nothing places it elsewhere.
+    Within,
+    /// Logged at or after the next closing run's start: that run's, never
+    /// this close's.
+    After,
+}
+
+/// See [`Placed`]. Seconds against milliseconds, saturating.
+pub(crate) fn placed(at_ms: Option<u64>, start_s: Option<u64>, next_s: Option<u64>) -> Placed {
+    let (Some(at), Some(start)) = (at_ms, start_s) else {
+        return Placed::Within;
+    };
+    if at < start.saturating_mul(1_000) {
+        Placed::Before
+    } else if next_s.is_some_and(|next| at >= next.saturating_mul(1_000)) {
+        Placed::After
+    } else {
+        Placed::Within
+    }
+}
+
+/// The second the next run to close the same kind-day started: the earliest
+/// of `closing_s` strictly after `start_s`. Two runs that started in the same
+/// second share one window, since nothing in the log splits them.
+pub(crate) fn next_start(start_s: u64, closing_s: impl IntoIterator<Item = u64>) -> Option<u64> {
+    closing_s.into_iter().filter(|start| *start > start_s).min()
+}
+
+/// The second run `id` started: its first `run` line's `started=`, else the
+/// id itself (a run's id is the second it started, D-3317).
+fn started_of(parsed: &Parsed, id: u64) -> u64 {
+    parsed
+        .runs_of(id)
+        .next()
+        .and_then(|run| {
+            run.fields
+                .iter()
+                .find(|(name, _)| name == "started")
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+        })
+        .unwrap_or(id)
+}
+
+/// What a logged refusal is about, as a close's filter names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Subject {
+    /// The whole kind-day: the calendar, the census, or no file named. About
+    /// every instrument of the kind (`dayflags::about_this`), so named only
+    /// by `*`.
+    Day,
+    /// One underlying's file, by its symbol: named by `*` and by a list
+    /// holding the symbol as a whole name.
+    Underlying(String),
+    /// A file no decoder places under a swept underlying: about no
+    /// instrument (`dayflags::about_this` matches it to none), so any close
+    /// may own it, by time alone.
+    Unknown,
+}
+
+/// The subject of a refusal `about` a file of `kind` on `day`, decoded as
+/// `dayflags::about_this` decodes it.
+fn subject_of(kind: ImportKind, about: &str, day: Day) -> Subject {
+    if about.is_empty()
+        || [Stage::Calendar, Stage::Census]
+            .iter()
+            .any(|s| s.as_str() == about)
+    {
+        return Subject::Day;
+    }
+    let symbol = match kind {
+        ImportKind::Options => {
+            let ticker = about.strip_suffix(".NFO").unwrap_or(about);
+            pull::gdfl_nfo::decode_ticker(ticker, day)
+                .ok()
+                .map(|decoded| decoded.underlying.as_str().to_owned())
+        }
+        ImportKind::Indices | ImportKind::Stocks => {
+            let tree = if kind == ImportKind::Indices {
+                pull::gdfl_cm::CmKind::Indices
+            } else {
+                pull::gdfl_cm::CmKind::Stocks
+            };
+            let stem = pull::gdfl_cm::split_name(about).map_or(about, |(stem, _)| stem);
+            match pull::gdfl_cm::resolve(tree, stem) {
+                pull::gdfl_cm::Resolution::Swept(key) => Some(key.underlying.as_str().to_owned()),
+                _ => None,
+            }
+        }
+    };
+    symbol.map_or(Subject::Unknown, Subject::Underlying)
+}
+
+/// The closes' filters, each split into its names once per [`merged`] call.
+#[derive(Debug, Default)]
+struct Owners<'p> {
+    /// Each distinct list filter seen, as its set of whole names.
+    names: std::collections::HashMap<&'p str, std::collections::HashSet<&'p str>>,
+}
+
+impl<'p> Owners<'p> {
+    /// Whether `filter` names `subject` (see [`Subject`]).
+    fn names(&mut self, filter: &'p str, subject: &Subject) -> bool {
+        if filter == "*" {
+            return true;
+        }
+        match subject {
+            Subject::Day => false,
+            Subject::Unknown => true,
+            Subject::Underlying(symbol) => self
+                .names
+                .entry(filter)
+                .or_insert_with(|| filter.split(',').collect())
+                .contains(symbol.as_str()),
+        }
+    }
+
+    /// Whether one of `closes` (the kind-day's journal rows, any filter)
+    /// owns the logged refusal `record`: see [`merged`].
+    fn owned(
+        &mut self,
+        parsed: &Parsed,
+        closes: &[&'p DayRow],
+        kind: ImportKind,
+        day: Day,
+        record: &telemetry::Record,
+    ) -> bool {
+        let about = record
+            .field("about")
+            .and_then(telemetry::OwnedValue::as_str)
+            .unwrap_or_default();
+        let subject = subject_of(kind, about, day);
+        let at_ms = u64::try_from(record.at_unix_millis).ok();
+        let starts: Vec<Option<u64>> = closes
+            .iter()
+            .map(|close| close.stats.run.map(|id| started_of(parsed, id)))
+            .collect();
+        closes.iter().zip(&starts).any(|(close, start)| {
+            let next = start.and_then(|start| next_start(start, starts.iter().flatten().copied()));
+            self.names(close.filter.as_str(), &subject)
+                && placed(at_ms, *start, next) != Placed::After
+        })
+    }
 }
 
 /// Where each kind stands: its last line, and its pace, measured, never
@@ -987,6 +1184,10 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
             })
         })
         .collect();
+    let looked = lifecycle
+        .records
+        .is_empty()
+        .then(|| where_looked(root, &lifecycle.unread, !lines.is_empty()));
     json!({
         "id": run,
         "journal_lines": lines,
@@ -1012,6 +1213,9 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
         "lifecycle": {
             "events": events,
             "events_total": lifecycle.records.len(),
+            "says": looked.as_ref().map(|(says, _, _)| says.clone()),
+            "not_read_total": looked.as_ref().map_or(0, |(_, _, total)| *total),
+            "not_read": looked.map(|(_, not_read, _)| not_read).unwrap_or_default(),
             "from": lifecycle.from,
             "unread": lifecycle.unread,
             "capped": lifecycle.capped,
@@ -1026,6 +1230,156 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
             ),
         },
     })
+}
+
+/// The most directories under `<store>/logs` a run's empty lifecycle names
+/// as there and not read.
+const MAX_NOT_READ_NAMED: usize = 32;
+
+/// What a run with no lifecycle event in any directory read owes its reader
+/// (AF-02, ingest-6 part 3): the sentence naming every directory read, and
+/// the directories under `<store>/logs` that are there and that no read
+/// covers, sorted, at most [`MAX_NOT_READ_NAMED`]. A `cli` given
+/// `BRUTEX_LOG_DIR` logs where it was told (`logs/cli-batch` for the
+/// operator's batch script), and a bare `events_total: 0` read as "this run
+/// logged nothing" when it meant "not where this route looks".
+///
+/// One `read_dir` of `<store>/logs`, and one of each directory that is only
+/// a parent of read ones ([`unread_under`]), only for a run asked and found
+/// empty.
+///
+/// # Nothing it could not see is left unsaid (AF-02 repair round 2)
+///
+/// A run id with no `run` line in the import journal says so (`journaled`
+/// false): an id the journal does not hold is not "a run that logged
+/// elsewhere". A directory under `logs` that is there and cannot be listed
+/// is named with the error, and an entry the walk cannot read, or whose name
+/// is not UTF-8, is counted ([`Unlisted`]); a link to a directory is a
+/// directory a `cli` may log through, and is named like one.
+fn where_looked(
+    root: &std::path::Path,
+    unread: &[String],
+    journaled: bool,
+) -> (String, Vec<String>, usize) {
+    let read: Vec<String> = crate::logs::import_dirs()
+        .map(|dir| format!("logs/{dir}"))
+        .collect();
+    let mut not_read = Vec::new();
+    let mut unlisted = Unlisted::default();
+    unread_under(&root.join("logs"), "", &mut not_read, &mut unlisted);
+    not_read.sort();
+    // EVERY UNREAD DIRECTORY IS COUNTED, and the names past the cap are said
+    // as a number, never dropped without a word (AF-02 repair).
+    let total = not_read.len();
+    not_read.truncate(MAX_NOT_READ_NAMED);
+    let mut parts = vec![format!("no lifecycle event in {}", read.join(", "))];
+    if !journaled {
+        parts.push("the import journal holds no `run` line of this id".to_owned());
+    }
+    if !unlisted.dirs.is_empty() {
+        parts.push(format!("{} could not be listed", unlisted.dirs.join(", ")));
+    }
+    if unlisted.unnamed > 0 {
+        parts.push(format!(
+            "{} {} under logs could not be named (unreadable, or a name that is not UTF-8)",
+            unlisted.unnamed,
+            if unlisted.unnamed == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
+        ));
+    }
+    if !unread.is_empty() {
+        parts.push(format!(
+            "not every one could be read: {}",
+            unread.join("; ")
+        ));
+    }
+    if !not_read.is_empty() {
+        let more = total.saturating_sub(not_read.len());
+        parts.push(format!(
+            "{}{} {} there and not read by this route: a `cli` given BRUTEX_LOG_DIR logs \
+             where it was told",
+            not_read.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            },
+            if total == 1 { "is" } else { "are" }
+        ));
+    }
+    (parts.join("; "), not_read, total)
+}
+
+/// The directories under `dir` (`logs/<prefix>`) that no read covers, pushed
+/// as `logs/<path>`. A directory that IS read is skipped; one that is only a
+/// PARENT of read ones (`logs/gdfl`, whose `indices`, `stocks`, `options`
+/// and `store` are read) is walked one level down, so an unread
+/// `logs/gdfl/<other>` is named too (AF-02 repair). The depth is bounded by
+/// the read directories' own: no read directory is deeper than two names.
+///
+/// A directory it cannot list, an entry it cannot read and a directory whose
+/// name is not UTF-8 go to `odd`, never dropped (AF-02 repair round 2); a
+/// missing `logs` is a store that never logged and names nothing. A link is
+/// followed to see whether it is a directory (one `stat`, links only).
+fn unread_under(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>, odd: &mut Unlisted) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            let here = prefix.trim_end_matches('/');
+            odd.dirs.push(if here.is_empty() {
+                format!("logs ({error})")
+            } else {
+                format!("logs/{here} ({error})")
+            });
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            odd.unnamed = odd.unnamed.saturating_add(1);
+            continue;
+        };
+        let is_dir = entry.file_type().is_ok_and(|kind| {
+            kind.is_dir()
+                || (kind.is_symlink()
+                    && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir()))
+        });
+        if !is_dir {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            odd.unnamed = odd.unnamed.saturating_add(1);
+            continue;
+        };
+        let path = format!("{prefix}{name}");
+        if crate::logs::import_dirs().any(|read| read == path) {
+            continue;
+        }
+        let parent = crate::logs::import_dirs().any(|read| {
+            read.strip_prefix(path.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if parent {
+            unread_under(&dir.join(&name), &format!("{path}/"), out, odd);
+        } else {
+            out.push(format!("logs/{path}"));
+        }
+    }
+}
+
+/// What the walk under `<store>/logs` saw and could not name
+/// ([`unread_under`]).
+#[derive(Debug, Default)]
+struct Unlisted {
+    /// Each directory that is there and could not be listed, with the error.
+    dirs: Vec<String>,
+    /// Entries that could not be read, and directories whose name is not
+    /// UTF-8.
+    unnamed: usize,
 }
 
 /// `/dayflags.json`'s body for `query` over the store at `root`: the day
@@ -1309,6 +1663,13 @@ pub(crate) fn body(
         "notes": notes,
     })
 }
+
+/// AF-02 (ingest-6): filtered days, log-only rows and where a run's
+/// lifecycle was looked for. Its own file so the packages that edit this
+/// module's tests merge beside it.
+#[cfg(test)]
+#[path = "imports_filter_tests.rs"]
+mod filter_tests;
 
 #[cfg(test)]
 #[allow(
