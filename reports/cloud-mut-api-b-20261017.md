@@ -169,6 +169,15 @@ both sides' intent:
   `RUSTC_BOOTSTRAP=1` on the pinned toolchain (branch coverage is a nightly
   flag; this is measurement only, nothing is committed that needs it).
 
+## Network
+
+The whole merged `api` lib suite was run under `strace -f -e trace=connect`
+as the non-root user, with no proxy in its environment (libtest, four
+threads, 2,501 of 2,501 passed). It made **867 `connect()` calls, every one
+to `127.0.0.1`**; none went to IPv6 or a Unix socket. No test reads a
+credential or reaches a vendor. (The 16 Oct pass's check covered its
+cloud tests only; this one covers every test in the crate.)
+
 ## Results so far
 
 Phase 1 (the whole `api` lib suite per mutant):
