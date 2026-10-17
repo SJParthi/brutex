@@ -286,11 +286,13 @@ the old pass already used. No vendor byte is committed.
 | Gate | Result |
 |---|---|
 | `cargo fmt --all --check` | **pass** |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **pass** (exit 0) |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings`, before the merge | **pass** (exit 0) |
+| the same, merged head (`--keep-going`) | **exit 101, one error, in `api`, identical on `feat/db-fix` `297996d9`**: `crates/api/src/logs.rs:1606` `note_request` has 104 lines (`too_many_lines`, limit 100). Every other crate, `pull` included, is clean. `crates/api` is byte-identical to `feat/db-fix`. |
 | `cargo test --workspace --locked --no-fail-fast`, as the unprivileged user | **exit 101: 159 test runs (unit, integration and doc) ok, 2 tests fail, both outside this branch's diff** (below); 38 min with two build jobs |
 | `cargo test -p pull --locked`, as the unprivileged user (inside the coverage run) | **pass**: every `pull` test, lib and integration |
 | `cargo test -p pull --locked`, as root | the two `gdfl_import` permission tests still fail as root, as on the base (`a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`, `a_journal_that_cannot_be_written_fails_the_day_by_name`); both pass as uid 65534. `gdfl_tickstore`'s third one passes as root now (repaired here). |
-| `cargo deny check` (0.19.0) | **red, identical to the base**: advisories RUSTSEC-2026-0344 (ruzstd) and RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls); bans, licenses and sources ok. Same five errors and two duplicate warnings on `origin/feat/db-fix`. `Cargo.toml`/`Cargo.lock` untouched (part DENY-1). |
+| `cargo deny check` (0.19.0), merged head `0a636bbb` | **pass**: advisories, bans, licenses and sources ok; two duplicate-crate warnings (`getrandom`, `syn`). Identical on `origin/feat/db-fix` `297996d9`, whose lock carries part DENY-1's fix. `Cargo.toml`, `Cargo.lock` and `deny.toml` are byte-identical to `feat/db-fix`: never touched here. |
+| `cargo deny check`, before the merge (`f9cdb584` base) | red, identical to that base: RUSTSEC-2026-0344 (ruzstd) and RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls). |
 | Gate 1d (`gates_tree gate-1d`, built from the tree) | **red on the base** (141 undeclared words in `crates/pull` on `f9cdb584`); **this branch adds none**. The re-applied tests brought three (`store-root`, `proc`, `self`): the first is gone from the test, the other two are declared in `CLOUD_MUT_PULL_LITERAL` with their reason (`/proc/self/status`, the procfs file `read_limited`'s test needs). `gates_tree`'s own 48 tests pass. |
 
 The two workspace failures, both identical on `feat/db-fix` (this branch
