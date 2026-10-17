@@ -120,7 +120,9 @@ export function segmentOfKey(instrument) {
  * @param {number | null | undefined} strike the option's strike, `null` for a future or spot
  */
 export function isTradeDriven(timeframe, segment, strike) {
-  if (segment === 'FNO') return strike !== null && strike !== undefined;
+  // A FUTURE AT ONE SECOND is trade-driven too: the calendar's derivatives
+  // row at `1s` is a ceiling, not a count owed (`tradeDriven`, SC-CLOSE-16).
+  if (segment === 'FNO') return (strike !== null && strike !== undefined) || timeframe === '1s';
   return timeframe === '1s' && segment === 'CASH';
 }
 
@@ -142,6 +144,7 @@ export function isTradeDriven(timeframe, segment, strike) {
  * @property {{ rows: number, lastAt: number | null, cover?: Cover } | null} [source] the 1min row of the same instrument-month, judged against the 1min calendar
  * @property {number} [rungMs] the rung's own length, milliseconds
  * @property {{ n: number, atMost: number } | null} [peers] how many calendar-owed series are stored at this month and rung, and how many of them hold no more bars than this row (`peersAtMost`)
+ * @property {boolean | null} [casFlag] a share's dated closing-auction flag for the span: `true` eligible, `false` not, `null` (the census carries none) unknown, so a count between the two is not called full (SC-CLOSE-17)
  */
 
 /**
@@ -209,6 +212,52 @@ export function peersAtMost(sorted, rows) {
     else hi = mid;
   }
   return { n: sorted.length, atMost: lo };
+}
+
+/**
+ * WHICH OF THE LEDGER'S COUNTS A ROW OWES, by its segment, whether its span
+ * holds closing-auction days, and a share's dated flag (SC-CLOSE-17).
+ *
+ * - a future: `deriv`, the derivatives venue's own count (never an index's);
+ * - an index: `index`;
+ * - a share: `share`, or on auction days `cas` when it is eligible and
+ *   `share` when it is not. With no flag (the census carries none) it is
+ *   held to `cas`, the lower, and `unresolved` says the other count stands
+ *   beside it.
+ *
+ * `owed`, `unknown` and `unheld` are field names of a `ledgerSpan` answer.
+ *
+ * @param {string} segment
+ * @param {boolean} auction the span holds at least one auction day
+ * @param {boolean | null} flag the share's dated closing-auction flag, `null` unknown
+ * @returns {{ owed: string, unknown: string[], unheld: string, cas: boolean, unresolved: boolean }}
+ */
+export function owedKind(segment, auction, flag) {
+  if (segment === 'FNO') return { owed: 'deriv', unknown: ['unknownDeriv'], unheld: 'unheldDeriv', cas: false, unresolved: false };
+  if (segment !== 'CASH') return { owed: 'index', unknown: ['unknownIndex'], unheld: 'unheldIndex', cas: false, unresolved: false };
+  if (!auction || flag === false) return { owed: 'share', unknown: ['unknownShare'], unheld: 'unheldShare', cas: false, unresolved: false };
+  if (flag === true) return { owed: 'cas', unknown: ['unknownCas'], unheld: 'unheldCas', cas: true, unresolved: false };
+  return { owed: 'cas', unknown: ['unknownCas', 'unknownShare'], unheld: 'unheldCas', cas: true, unresolved: true };
+}
+
+/**
+ * A coverage ratio as the page prints it: two decimals, ROUNDED DOWN, so a
+ * month missing one bar of 4,72,500 reads 99.99% and never 100.00%
+ * (R3-04). `toFixed` rounds half up and printed exactly that. A ratio above
+ * zero that floors to nothing reads `<0.01%`, never `0.00%`, which would
+ * say nothing is held; `null` (nothing can be owed) is a dash.
+ *
+ * @param {number | null | undefined} ratio held over owed, 0..1
+ * @returns {string}
+ */
+export function coverPct(ratio) {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '—';
+  if (ratio >= 1) return '100.00%';
+  // `1e-9` absorbs the float's own error (0.29 x 10,000 is 2,899.999...);
+  // the cap keeps a ratio under 1 under 100.00% whatever that adds.
+  const hundredths = Math.min(9_999, Math.floor(ratio * 10_000 + 1e-9));
+  if (hundredths <= 0) return ratio > 0 ? '<0.01%' : '0.00%';
+  return `${Math.floor(hundredths / 100)}.${String(hundredths % 100).padStart(2, '0')}%`;
 }
 
 /** Milliseconds in a day. */
@@ -351,16 +400,25 @@ export function judgeRow(row, ctx) {
     }
     return cover;
   }
+  // A FUTURE IS OWED THE DERIVATIVES VENUE'S COUNT, never an index's
+  // (SC-CLOSE-17): an answer that serves no derivatives row judges no future.
+  const future = segment === 'FNO';
+  if (future && !Array.isArray(ledger.derivatives)) {
+    cover.why = 'the calendar of record serves no derivatives figure at this rung, so a future is owed no count here (SC-CLOSE-17)';
+    return cover;
+  }
   cover.basis = 'calendar';
   const share = segment === 'CASH';
-  const owed = share ? (span.auction > 0 ? span.cas : span.share) : span.index;
-  const unknown = share ? (span.auction > 0 ? span.unknownCas : span.unknownShare) : span.unknownIndex;
+  const kind = owedKind(segment, span.auction > 0, ctx.casFlag ?? null);
+  const owed = span[kind.owed];
+  const unknown = kind.unknown.reduce((most, k) => Math.max(most, span[k]), 0);
   cover.unknownDays = unknown;
   if (unknown > 0) notes.push('unknown_days');
-  if (share && span.auction > 0) {
-    notes.push('cas');
-    if (span.share !== span.cas) cover.owedAlt = span.share;
-  }
+  if (kind.cas) notes.push('cas');
+  // THE OTHER COUNT, NAMED: a share on auction days whose dated flag the
+  // census does not carry is held to the eligible count and the ineligible
+  // one is beside it. A flag that is known decides, and names nothing.
+  if (kind.unresolved && span.share !== span.cas) cover.owedAlt = span.share;
   cover.owed = owed;
   const sessionsKnown = span.sessions - unknown;
   const perSession = sessionsKnown > 0 && owed > 0 ? owed / sessionsKnown : ledger.regular;
@@ -380,24 +438,48 @@ export function judgeRow(row, ctx) {
   // ineligible count, for a share on auction days), plus the bars a halt
   // leaves unowed — a frozen bar in a halted minute is labelled, not extra.
   // A month with days of unknown length cannot be said to hold too much.
-  const ceiling = (cover.owedAlt ?? owed) + span.haltBars;
-  cover.missing = Math.max(0, owed - row.rows);
+  const ceiling = (cover.owedAlt ?? owed) + (future ? 0 : span.haltBars);
   cover.extra = unknown > 0 ? 0 : Math.max(0, row.rows - ceiling);
-  if (share && cover.owedAlt !== null && row.rows > owed && row.rows < cover.owedAlt) {
-    // HELD MORE THAN AN ELIGIBLE SHARE OWES AND LESS THAN AN INELIGIBLE ONE:
-    // eligibility cannot be told from the count alone, and the page says so.
+  // PER DAY, NOT PER MONTH (R3-04, DB-014). What the sessions it holds no
+  // bar on owe is missing whatever the other days hold: a surplus on one
+  // day never pays for a hole on another. Read off the series' own held
+  // digits; with none read, the floor is nothing and the count decides.
+  const unheld = own ? Number(ledgerSpan(/** @type {any} */ (mine), from, to)[kind.unheld]) || 0 : 0;
+  const missing = Math.max(0, owed - row.rows, unheld);
+  if (unheld > owed - row.rows) notes.push('unheld_sessions');
+  if (kind.unresolved && cover.owedAlt !== null && row.rows >= owed && row.rows < cover.owedAlt) {
+    // HELD AT LEAST WHAT AN ELIGIBLE SHARE OWES AND LESS THAN AN INELIGIBLE
+    // ONE: eligibility cannot be told from the count alone, so neither
+    // verdict is claimed — a flag-0 share at 360 a session is short, an
+    // eligible one full, and the census carries no flag (SC-CLOSE-17).
     notes.push('cas_unresolved');
+    cover.missing = missing > 0 ? missing : null;
+  } else {
+    if (kind.unresolved && cover.owedAlt !== null && row.rows < owed) notes.push('cas_unresolved');
+    cover.missing = missing;
   }
-  cover.ratio = owed > 0 ? Math.min(row.rows, owed) / owed : null;
+  // A SURPLUS IS NOT PLACED BY A MONTH TOTAL. A month holding more than it
+  // owes may hold it on one day and lack it on another, so its count
+  // proves nothing missing and nothing whole: no bar it is known to lack
+  // makes it `over`, never `full` and never 100.00%, until a per-day count
+  // places the surplus.
+  if (cover.extra > 0 && cover.missing === 0) cover.missing = null;
+  cover.ratio = owed > 0 && cover.missing !== null ? (owed - cover.missing) / owed : null;
   if (owed === 0) {
     cover.state = unknown > 0 ? 'unmeasured' : row.rows > 0 ? 'over' : 'full';
+  } else if (cover.missing === null) {
+    cover.state = cover.extra > 0 ? 'over' : 'unmeasured';
   } else if (cover.missing === 0) {
     cover.state = 'full';
   } else {
-    const per = ledger.regular ?? perSession ?? owed;
+    const per = (future ? null : ledger.regular) ?? perSession ?? owed;
     cover.state = cover.missing < per ? 'near' : 'gap';
   }
-  if (cover.extra > 0) notes.push('extra');
+  if (cover.extra > 0) {
+    notes.push('extra');
+    // OWED MORE THAN ZERO: the surplus may stand on a day another lacks.
+    if (owed > 0) notes.push('surplus_unplaced');
+  }
   // A HOLE THE WHOLE STORE SHARES (DB-012, DB-G34): if even the fullest
   // series stored at this (month, rung) is short of what the calendar owes
   // an index over the WHOLE month, every series is, and the hole is the
@@ -501,6 +583,7 @@ export function absentMonths(firstMonth, lastMonth, held) {
  * @property {number} absent
  * @property {number} trade trade-driven rows, owed no count
  * @property {number} unmeasured rows no calendar could judge
+ * @property {number} over rows holding more than they owe and nothing known missing: a surplus no month total can place (R3-04)
  * @property {number} storeWide rows short by a hole the whole store shares
  * @property {string | false | undefined} tf the rung all rows share, `false` when two disagree
  * @property {any | null} worst the row missing the most bars
@@ -531,6 +614,7 @@ export function rollUpMonths(items) {
         absent: 0,
         trade: 0,
         unmeasured: 0,
+        over: 0,
         storeWide: 0,
         tf: undefined,
         worst: null
@@ -546,13 +630,19 @@ export function rollUpMonths(items) {
       m.trade += 1;
       continue;
     }
-    if (c.basis !== 'calendar' || c.owed === null) {
-      m.unmeasured += 1;
+    // A ROW WHOSE MISSING COUNT IS UNKNOWN joins no sum: an unplaced surplus
+    // (`over`) or a share whose auction flag is unread. Summing its count
+    // would let it fill another row's hole, the month-grain fault R3-04
+    // removes from the rows.
+    if (c.basis !== 'calendar' || c.owed === null || c.missing === null) {
+      if (c.state === 'over') m.over += 1;
+      else m.unmeasured += 1;
       continue;
     }
     m.owed += c.owed;
-    m.bars += Math.min(it.rows, c.owed);
-    m.missing += c.missing ?? 0;
+    // HELD IS OWED LESS MISSING, so a per-day floor lowers the month too.
+    m.bars += c.owed - c.missing;
+    m.missing += c.missing;
     if (c.state === 'full') m.full += 1;
     // THE WORST ROW, ORDER-INDEPENDENT: the most missing, ties broken on
     // the row's own identity rather than on which arrived first.
@@ -577,15 +667,19 @@ const rowId = (it) => `${it.instrument ?? ''}|${it.timeframe}`;
  * count: trade-driven rows, or rows no calendar could judge. A ratio nobody
  * can compute is a dash.
  *
+ * A month with an `over` row and nothing known missing is `over`, never
+ * `full`: the surplus is not placed (R3-04).
+ *
  * @param {{ n: number, owed: number, bars: number, missing: number,
- *           trade: number, unmeasured: number, absent: number }} m
- * @returns {{ pct: number | null, state: 'trade' | 'unmeasured' | 'full' | 'near' | 'gap' | 'absent' }}
+ *           trade: number, unmeasured: number, absent: number, over?: number }} m
+ * @returns {{ pct: number | null, state: 'trade' | 'unmeasured' | 'full' | 'near' | 'gap' | 'absent' | 'over' }}
  */
 export function monthVerdict(m) {
-  const judged = m.n - m.trade - m.unmeasured;
+  const over = m.over ?? 0;
+  const judged = m.n - m.trade - m.unmeasured - over;
   const pct = judged > 0 && m.owed > 0 ? m.bars / m.owed : null;
-  if (judged === 0) return { pct, state: m.trade > 0 ? 'trade' : 'unmeasured' };
+  if (judged === 0) return { pct, state: over > 0 ? 'over' : m.trade > 0 ? 'trade' : 'unmeasured' };
   if (m.absent === m.n) return { pct, state: 'absent' };
-  if (m.missing === 0) return { pct, state: 'full' };
+  if (m.missing === 0) return { pct, state: over > 0 ? 'over' : 'full' };
   return { pct, state: m.bars >= 0.99 * m.owed ? 'near' : 'gap' };
 }

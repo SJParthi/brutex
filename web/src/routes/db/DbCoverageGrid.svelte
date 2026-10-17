@@ -34,9 +34,23 @@
     peersAtMost
   } from '$lib/completeness.js';
   import { calendarUrl, readLedger, ledgerSpan, ledgerDay, monthSpan, epochDayOfIso, isoOfEpochDay } from '$lib/calendar-owed.js';
-  import { OVER, heldWindow, pctText, contractLife } from '$lib/db/decoration.js';
+  import { OVER, heldWindow, contractLife } from '$lib/db/decoration.js';
   import { txt, fmt, tfCmp, TF_SECS } from '$lib/db/notes-labels.js';
-  import { bytesText, BYTES_PER_BAR, COLS, whyText, noteText, STATE_WORD } from '$lib/db/notes-coverage.js';
+  import {
+    bytesText,
+    BYTES_PER_BAR,
+    COLS,
+    whyText,
+    noteText,
+    STATE_WORD,
+    coverPct,
+    coverWindow,
+    monthInWindow,
+    windowText,
+    windowEmptyWhy,
+    coverTotals,
+    missingText
+  } from '$lib/db/notes-coverage.js';
   import { untrack } from 'svelte';
   import { ROW, HEAD } from '$lib/db/bars-plan.js';
   import { dayLabel, monthLabel } from '$lib/dates.js';
@@ -205,10 +219,12 @@
        a series' first month is measured from its first bar, and the months
        between its two ends it does not hold are drawn absent.
        ====================================================================== */
+    /* ON EITHER TAB (R3-04): the Coverage tab's count is read on the Bars
+       tab too, and it counts the absent months this index finds. One pass
+       per census read, as before; no request. */
     const seriesIndex = $derived.by(() => {
       /** @type {Map<string, { first: string, last: string, firstDay: number | null, lastDay: number | null, months: Set<string>, like: any }>} */
       const by = new Map();
-      if (db.view !== 'census') return by;
       for (const r of db.deco) {
         const key = `${r.instrument}\u0000${r.timeframe}`;
         let s = by.get(key);
@@ -314,7 +330,11 @@
         archive: /** @type {any} */ (db.activeFeed)?.archive ?? null,
         derived,
         source,
-        rungMs: secs === undefined ? 0 : secs * 1000
+        rungMs: secs === undefined ? 0 : secs * 1000,
+        // A SHARE'S DATED AUCTION FLAG IS NOT ON THE CENSUS WIRE: unknown, so
+        // a count between the two auction-day counts is never called full
+        // (SC-CLOSE-17).
+        casFlag: null
       });
     }
 
@@ -329,6 +349,18 @@
      */
     function absentOf(instrument, timeframe) {
       const s = seriesIndex.get(`${instrument}\u0000${timeframe}`);
+      return s ? absentMonthsOf(instrument, timeframe).map((m) => absentRow(s.like, m)) : [];
+    }
+
+    /**
+     * The absent months of one series as `YYYY-MM`, before any row is built:
+     * what `absentOf` draws and what the Coverage tab's count counts.
+     *
+     * @param {string} instrument
+     * @param {string} timeframe
+     */
+    function absentMonthsOf(instrument, timeframe) {
+      const s = seriesIndex.get(`${instrument}\u0000${timeframe}`);
       if (!s) return [];
       let first = s.first;
       let last = s.last;
@@ -340,32 +372,89 @@
         }
       }
       const win = /** @type {any} */ (db.activeFeed)?.window ?? null;
-      return absentMonths(first, last, s.months)
-        .filter((m) => db.oow || !win || (m >= win.from.slice(0, 7) && m <= win.to.slice(0, 7)))
-        .map((m) => absentRow(s.like, m));
+      return absentMonths(first, last, s.months).filter(
+        (m) => db.oow || !win || (m >= win.from.slice(0, 7) && m <= win.to.slice(0, 7))
+      );
     }
 
-    /**
-     * THE ROWS THE GRID JUDGES: the matched rows, and every absent month of
-     * each series among them. Absent months are drawn only when no single
-     * month is chosen, since a chosen month is already a narrowing.
-     */
+    /* ======================================================================
+       THE ROWS COVERAGE LISTS, AND THEIR COUNT ON EITHER TAB (R3-04)
+       ----------------------------------------------------------------------
+       The Coverage tab's count read the matched rows on the Bars tab and the
+       judged rows on Coverage — matched plus absent months — so one tab read
+       4 and then 7 for one selection. And the list ignored the From and To
+       days the Bars grid applies (DB-046), so a window that excludes a
+       contract emptied Bars and left Coverage full. Both read this now: the
+       matched rows and every absent month of each matched series, each in a
+       month the window touches. Absent months are listed only when no single
+       month is chosen, since a chosen month is already a narrowing.
+       ====================================================================== */
+    /** The From and To days, ordered, when they narrow; `null` when not. */
+    const covWindow = $derived(coverWindow(db.fromDay ?? '', db.toDay ?? '', Boolean(db.dayNarrowing)));
+    const listedStored = $derived(db.matched.filter((/** @type {any} */ r) => monthInWindow(r.month, covWindow)));
+    const listedAbsent = $derived.by(() => {
+      /** @type {{ like: any, month: string }[]} */
+      const out = [];
+      if (db.month) return out;
+      const seen = new Set();
+      for (const r of db.matched) {
+        const key = `${r.instrument}\u0000${r.timeframe}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const s = seriesIndex.get(key);
+        if (!s) continue;
+        for (const m of absentMonthsOf(r.instrument, r.timeframe)) {
+          if (monthInWindow(m, covWindow)) out.push({ like: s.like, month: m });
+        }
+      }
+      return out;
+    });
+    /** How many rows Coverage lists: its tab's count on either tab, and its pager's. */
+    const covCount = $derived(listedStored.length + listedAbsent.length);
+
+    /** THE ROWS THE GRID JUDGES: the listed rows, each with its verdict. */
     const judged = $derived.by(() => {
       if (db.view !== 'census') return [];
       /** @type {any[]} */
       const out = [];
-      const seen = new Set();
-      for (const r of db.matched) {
-        out.push({ ...r, cover: coverOf(r) });
-        seen.add(`${r.instrument}\u0000${r.timeframe}`);
-      }
-      if (!db.month) {
-        for (const key of seen) {
-          const [instrument, timeframe] = key.split('\u0000');
-          for (const a of absentOf(instrument, timeframe)) out.push({ ...a, cover: coverOf(a) });
-        }
+      for (const r of listedStored) out.push({ ...r, cover: coverOf(r) });
+      for (const a of listedAbsent) {
+        const row = absentRow(a.like, a.month);
+        out.push({ ...row, cover: coverOf(row) });
       }
       return out;
+    });
+
+    /** The selection's held days, first and last, from the census stamps: what an emptied window is set against. */
+    const heldSpan = $derived.by(() => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const r of db.matched) {
+        if (r.firstAt !== null) lo = Math.min(lo, istDayOf(r.firstAt));
+        if (r.lastAt !== null) hi = Math.max(hi, istDayOf(r.lastAt));
+      }
+      return Number.isFinite(lo) && Number.isFinite(hi) ? { lo: isoOfEpochDay(lo), hi: isoOfEpochDay(hi) } : null;
+    });
+    /** Why the grid is empty when the window emptied it, said once; `''` otherwise. */
+    const windowEmpty = $derived(windowEmptyWhy({ matched: db.matched.length, listed: covCount, window: covWindow, held: heldSpan }));
+
+    /**
+     * REFUSED FRONTS THE DAY BAND READ (D-3315): days before a series' first
+     * `1day` bar that a pull refused, so the rung has no daily bars there.
+     * Coverage measures a series from its first bar, so they are not counted
+     * missing; they are named beside the coverage figure instead, from the
+     * band's own answer — no request of their own.
+     */
+    const refusedFront = $derived.by(() => {
+      const days = (db.dayBandCells ?? []).filter((/** @type {any} */ c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
+      if (days.length === 0) return null;
+      return {
+        n: days.length,
+        from: days[0].day,
+        to: days[days.length - 1].day,
+        instrument: db.dayBandInstrument ?? '',
+        text: `${fmt(days.length)} day(s) of a refused front, ${dayLabel(days[0].day)} → ${dayLabel(days[days.length - 1].day)}${db.dayBandInstrument ? ` (${db.dayBandInstrument})` : ''}: the vendor served them and a pull refused them before append, so no daily bar is stored there (D-3315). Coverage measures from the first stored bar, so these days are named here, never counted as held.`
+      };
     });
 
     const storeBars = $derived(db.deco.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
@@ -500,39 +589,35 @@
     /* ======================================================================
        THE SUMMARY, over the judged set — the question actually on screen
        ====================================================================== */
-    const stored = $derived(judged.filter((/** @type {any} */ r) => !r.absent));
-    /** Bars the selection holds — every matched row, whichever view is shown (the Bars tab's count). */
+    /* ONE FUNCTION COUNTS THE LINE ABOVE THE GRID AND THE DRAWER (R3-04):
+       `coverTotals` over the rows each shows, so neither disagrees with the
+       rows under it. Missing is per row, and a row's missing is per day
+       where its held days were read (`judgeRow`). */
+    const totals = $derived(coverTotals(judged));
+    /** Bars the selection holds — every matched row, whichever view is shown (the Bars tab's census count). */
     const total = $derived(db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
     /** Rows the calendar judged complete. */
-    const full = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.state === 'full' ? 1 : 0), 0));
+    const full = $derived(totals.full);
     /** Rows no calendar could judge: their reason is on each. */
-    const unverified = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'none' ? 1 : 0), 0));
+    const unverified = $derived(totals.unverified);
     /** Trade-driven rows: owed no count (D-3336 §2). */
-    const tradeRows = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'trade' ? 1 : 0), 0));
+    const tradeRows = $derived(totals.trade);
     /** Bars the calendar owes the judged rows and the store does not hold. */
-    const gaps = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.missing ?? 0), 0));
-    /** Bars owed to the calendar-judged rows. */
-    const owed = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'calendar' ? r.cover.owed ?? 0 : 0), 0));
-    /** Bars those rows hold, each capped at what it owes. */
-    const judgedBars = $derived(
-      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'calendar' && r.cover.owed !== null ? Math.min(r.rows, r.cover.owed) : 0), 0)
-    );
+    const gaps = $derived(totals.missing);
+    /** Bars owed to the calendar-judged rows whose missing count is known. */
+    const owed = $derived(totals.owed);
+    /** Bars those rows hold: owed less missing, so a per-day floor lowers it. */
+    const judgedBars = $derived(totals.held);
     /** Bars held over bars owed, or `null` where nothing is owed. */
-    const coverage = $derived(owed > 0 ? judgedBars / owed : null);
+    const coverage = $derived(totals.coverage);
     /** Months a calendar-owed series does not hold between its two ends (`months_missing`): holes. */
-    const absentCount = $derived(
-      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.absent && r.cover.basis !== 'trade' ? 1 : 0), 0)
-    );
+    const absentCount = $derived(totals.absent);
     /** Months a trade-driven series does not hold between its two ends: nothing traded, not holes. */
-    const noTradeMonths = $derived(
-      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.absent && r.cover.basis === 'trade' ? 1 : 0), 0)
-    );
+    const noTradeMonths = $derived(totals.noTrade);
     /** Rows short by a hole every stored series shares. */
-    const storeWideRows = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.notes.includes('store_wide') ? 1 : 0), 0));
+    const storeWideRows = $derived(totals.storeWide);
     /** Derived rows behind or short of their 1min source. */
-    const derivedLagging = $derived(
-      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.notes.includes('derived_behind') || r.cover.notes.includes('derived_partial') ? 1 : 0), 0)
-    );
+    const derivedLagging = $derived(totals.derivedLagging);
     const monthsIn = $derived.by(() => {
       const s = new Set();
       for (const r of db.matched) s.add(r.month);
@@ -666,27 +751,25 @@
         .map((r) => judgedByKey.get(r.key) ?? { ...r, cover: coverOf(r) })
         .sort((x, y) => txt(y.month, x.month));
     });
+    /* THE DRAWER'S FOUR FIGURES ARE THE SAME FUNCTION OVER ITS OWN ROWS
+       (R3-04): Missing sums what each row prints under it — an absent
+       month's owed bars beside the word, never hidden behind it — and a
+       row whose missing count is unknown prints no number and joins no
+       sum. */
     const openTotals = $derived.by(() => {
-      let bars = 0;
-      let missing = 0;
-      let complete = 0;
-      let unproven = 0;
-      let absent = 0;
-      let sessions = 0;
-      let held = 0;
-      let exact = true;
-      for (const m of openMonths) {
-        const c = m.cover;
-        bars += m.rows;
-        missing += c.missing ?? 0;
-        if (m.absent) absent += 1;
-        if (c.basis === 'none') unproven += 1;
-        else if (c.state === 'full') complete += 1;
-        sessions += c.sessions ?? 0;
-        held += c.heldSessions ?? 0;
-        if (!c.heldExact) exact = false;
-      }
-      return { bars, missing, complete, unproven, absent, sessions, held, exact, n: openMonths.length };
+      const t = coverTotals(openMonths);
+      return {
+        bars: t.bars,
+        missing: t.missing,
+        complete: t.full,
+        unproven: t.unverified,
+        absent: t.absent + t.noTrade,
+        over: t.over,
+        sessions: t.sessions,
+        held: t.heldSessions,
+        exact: t.heldExact,
+        n: t.n
+      };
     });
 
     /* ---- the opened month against the previous month's close (DB-081) ----
@@ -914,7 +997,13 @@
       covTradeRows: { get: () => tradeRows },
       covAbsent: { get: () => absentCount },
       covNoTrade: { get: () => noTradeMonths },
-      covStored: { get: () => stored.length },
+      covStored: { get: () => totals.stored },
+      covOver: { get: () => totals.over },
+      covUnresolved: { get: () => totals.unresolved },
+      covCount: { get: () => covCount },
+      covWindow: { get: () => covWindow },
+      covWindowEmpty: { get: () => windowEmpty },
+      covRefusedFront: { get: () => refusedFront },
       covStoreWide: { get: () => storeWideRows },
       covDerivedLagging: { get: () => derivedLagging },
       covVsPrev: { get: () => vsPrev },
@@ -1327,9 +1416,25 @@
   {/if}
   <span class="cs"><b>{fmt(db.full)}</b> full</span>
   <span class="cs" class:risk={db.gaps > 0}><b>{fmt(db.gaps)}</b> bar(s) missing</span>
-  <span class="cs" title="Bars held over bars the calendar of record owes these rows at their rungs (D-3336) — never against the fullest stored series."
-    >coverage <b>{pctText(db.coverage)}</b> of {fmt(db.owed)} owed</span
+  <span class="cs" title="Bars held over bars the calendar of record owes these rows at their rungs (D-3336) — never against the fullest stored series. Held is owed less missing, and missing is counted day by day where the series' own held days were read, so a surplus on one day never pays for a hole on another. Rounded down: a month missing one bar never reads 100.00%."
+    >coverage <b>{coverPct(db.coverage)}</b> of {fmt(db.owed)} owed</span
   >
+  {#if db.covRefusedFront}
+    <!-- THE REFUSED FRONT, BESIDE THE FIGURE IT IS LEFT OUT OF (R3-04). -->
+    <span class="cs risk" title={db.covRefusedFront.text}><b>{fmt(db.covRefusedFront.n)}</b> refused-front day(s), not in coverage</span>
+  {/if}
+  {#if db.covOver > 0}
+    <span class="cs risk" title={noteText('surplus_unplaced')}><b>{fmt(db.covOver)}</b> over what is owed, surplus unplaced</span>
+  {/if}
+  {#if db.covUnresolved > 0}
+    <span class="cs dim" title={noteText('cas_unresolved')}><b>{fmt(db.covUnresolved)}</b> share-month(s) the auction flag decides</span>
+  {/if}
+  {#if db.covWindow}
+    <!-- COVERAGE FOLLOWS THE WINDOW, AND SAYS SO (DB-046, R3-04). -->
+    <span class="cs dim" title="The From and To days narrow Coverage as they narrow Bars: a month is listed when the window touches it, and judged whole — its row counts every bar the month holds against every bar the month owes."
+      >months touching <b>{windowText(db.covWindow)}</b></span
+    >
+  {/if}
   {#if db.covStoreWide > 0}
     <span class="cs risk" title={noteText('store_wide')}><b>{fmt(db.covStoreWide)}</b> in a store-wide hole</span>
   {/if}
@@ -1391,13 +1496,23 @@
       {#if db.sorted.length === 0}
         <div class="tnone">
           <h3>No row matches</h3>
-          <p>
-            {db.feedName} holds {fmt(db.deco.length)} instrument-months, and none of them match
-            {#each db.narrowing as n, i (n.k)}{i > 0 ? ', ' : ''}<b
-                title={n.key ? `the store's own key for it is ${n.key}` : undefined}
-                >{n.text}</b
-              >{/each}.
-          </p>
+          {#if db.covWindowEmpty}
+            <!-- THE WINDOW EMPTIED IT, AND THIS IS THE ONE PLACE THAT SAYS SO,
+                 in order, beside the days the selection does hold (R3-04). -->
+            <p>{db.covWindowEmpty}</p>
+          {:else}
+            <p>
+              {db.feedName} holds {fmt(db.deco.length)} instrument-months, and none of them match
+              {#each db.narrowing as n, i (n.k)}{i > 0 ? ', ' : ''}<b
+                  title={n.key ? `the store's own key for it is ${n.key}` : undefined}
+                  >{n.text}</b
+                >{/each}.
+            </p>
+          {/if}
+          {#if db.covRefusedFront}
+            <!-- THE SAME WORDS THE BOX ABOVE CARRIES (R3-04). -->
+            <p class="tgate">{db.covRefusedFront.text}</p>
+          {/if}
           {#if db.expiryHeld > 0}
             <p class="tgate">
               {fmt(db.expiryHeld)} of them are futures or options and are being <b>held back</b>,
@@ -1497,7 +1612,7 @@
                       ><span class="fill" style="width:{c.ratio * 100}%"></span></span
                     >
                   {/if}
-                  <span class="cpct">{c.basis === 'trade' ? STATE_WORD.trade : pctText(c.ratio)}</span>
+                  <span class="cpct">{c.basis === 'trade' ? STATE_WORD.trade : coverPct(c.ratio)}</span>
                 </span>
                 <span class="cell num pc" role="gridcell" data-dir={dirOf(it.chg)}>
                   {#if it.chg === null}
@@ -1566,11 +1681,16 @@
               : db.openTotals.exact
                 ? 'held days counted from the series\' own calendar'
                 : 'bars over the average session'}
-            >{oc.basis === 'trade' ? '—' : db.openTotals.exact ? fmt(db.openTotals.held) : db.openTotals.held.toFixed(1)} / {fmt(db.openTotals.sessions)}</span
+            >{oc.basis === 'trade' ? '—' : db.openTotals.exact ? fmt(db.openTotals.held) : db.openTotals.held.toFixed(2)} / {fmt(db.openTotals.sessions)}</span
           >
         </div>
         <div class="dstat">
-          <span class="k">Missing</span><span class="v" class:risk={db.openTotals.missing > 0}>{fmt(db.openTotals.missing)}</span>
+          <span class="k">Missing</span><span
+            class="v"
+            class:risk={db.openTotals.missing > 0}
+            title="The sum of the figures under Missing below: each month's bars owed and not held, an absent month's whole owed count included.{db.openTotals.over > 0 ? ` ${fmt(db.openTotals.over)} month(s) hold an unplaced surplus and print +N: no missing count is known for them, so none is added.` : ''}"
+            >{fmt(db.openTotals.missing)}</span
+          >
         </div>
       </div>
 
@@ -1632,9 +1752,7 @@
               >
             {/if}
             <span class="dpct">{sessionsText(m.cover)}</span>
-            <span class="dshort"
-              >{#if m.absent}{m.cover.basis === 'trade' ? 'no trade' : 'absent'}{:else if m.cover.basis !== 'calendar' || m.cover.state === 'unmeasured'}—{:else if m.cover.state === 'full'}full{:else}−{fmt(m.cover.missing ?? 0)}{/if}</span
-            >
+            <span class="dshort">{missingText(m)}</span>
           </div>
         {/each}
       </div>
