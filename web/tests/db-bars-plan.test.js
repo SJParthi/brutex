@@ -9,8 +9,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   WIRE_SORT, WINDOW_SORTS, LOCAL_SORTS, wireSort, seriesPlan, windowQuery, todWire, istInstant,
-  parseGoto, pageOfIndex, censusBehind, localComparator, rowKey, MAX_SERIES, monthSpan
+  pageOfIndex, censusBehind, localComparator, rowKey, MAX_SERIES, monthSpan
 } from '../src/lib/db/bars-plan.js';
+import { parseGoto } from '../src/lib/db/goto.js';
 import { BAR_CSV_COLS, barCsvText, barCsvName, istClock } from '../src/lib/db/export.js';
 import { BAR_COLS } from '../src/lib/db/notes-bars.js';
 import { dbSource } from './database-page-fixture.js';
@@ -82,9 +83,9 @@ test('Go to reads a day and a time to the second, or a time on the day on screen
   assert.equal(istInstant('2019-03-20', '12:33'), 1_553_065_380);
   assert.equal(istInstant('2019-02-30', '10:00'), null, 'no such day');
   assert.equal(istInstant('2019-03-20', '24:00'), null);
-  assert.deepEqual(parseGoto('2019-03-20 12:33:38', ''), { at: 1_553_065_418, label: '2019-03-20 12:33:38' });
-  assert.deepEqual(parseGoto('12:33:38', '2019-03-20'), { at: 1_553_065_418, label: '2019-03-20 12:33:38' });
-  assert.deepEqual(parseGoto('2019-03-20T12:33', ''), { at: 1_553_065_380, label: '2019-03-20 12:33:00' });
+  assert.deepEqual(parseGoto('2019-03-20 12:33:38', ''), { at: 1_553_065_418, label: '2019-03-20 12:33:38', minute: false });
+  assert.deepEqual(parseGoto('12:33:38', '2019-03-20'), { at: 1_553_065_418, label: '2019-03-20 12:33:38', minute: false });
+  assert.deepEqual(parseGoto('2019-03-20T12:33', ''), { at: 1_553_065_380, label: '2019-03-20 12:33:00', minute: true });
   assert.match(/** @type {any} */ (parseGoto('12:33', '')).why, /names no day/);
   assert.match(/** @type {any} */ (parseGoto('noon', '2019-03-20')).why, /is not an instant/);
   assert.equal(pageOfIndex(0, 50), 1);
@@ -158,7 +159,8 @@ test('/db reads bars through one window request a page and never the whole-month
   assert.doesNotMatch(script, /\/bars\.json/);
   assert.doesNotMatch(script, /extremes: '1'/);
   assert.doesNotMatch(script, /pooled\(/, 'no fan-out of one request per series or file');
-  assert.match(script, /readWindowPage\(windowQuery\(feed, p, \{ \.\.\.b, sort: wire, desc, offset, limit: size \}\), size, signal\)/);
+  assert.match(script, /windowQuery\(feed, p, \{ \.\.\.b, sort: wire, desc, offset: \(asked - 1\) \* size, limit: size \}\)/);
+  assert.match(script, /const answer = await readWindowPage\(query, size, signal, asking\(seen\)\);/);
   // NOTHING IS READ BEFORE THE FIT SETTLES (DB-N02), AND PAGING DOES NOT
   // RE-MEASURE IT (DB-N11).
   assert.match(script, /const ready = !db\.linkDaysPending && \(db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\);/);

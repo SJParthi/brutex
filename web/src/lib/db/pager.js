@@ -95,6 +95,21 @@ export const isServed = (s, p) =>
 export const lastServed = (s) => (s.tail === null ? s.front : s.count);
 
 /**
+ * The page a reader is shown when `p` is asked: 1 below the first, the last
+ * served page past it, and the last page before a refused stretch inside it.
+ * A clamp at every read, never a write-back: a narrowing that shortens the run
+ * cannot strand the reader on a page that does not exist or is not served.
+ * @param {Served} s @param {number} p
+ */
+export function clampServed(s, p) {
+  const n = Math.trunc(Number(p));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  const last = lastServed(s);
+  if (n >= last) return last;
+  return isServed(s, n) ? n : s.front;
+}
+
+/**
  * The served page one step from `p` in direction `step` (+1 or -1), or `null`
  * at the end. Across the dead stretch the step jumps it, so Next never lands
  * on a refusal; the button names the jump.

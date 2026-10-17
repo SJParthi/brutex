@@ -32,6 +32,7 @@
   import { fmt } from '$lib/db/notes-labels.js';
   import { windowQuery, paisaText } from '$lib/db/bars-plan.js';
   import { readWindowPage } from '$lib/database-pages.js';
+  import { askOnce } from '$lib/db/pager.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
 
   /** Where this browser remembers whether the panel is open. */
@@ -68,19 +69,32 @@
    */
   export function extremesState(db) {
     let extremesOpen = $state(rememberedOpen());
-    /** @typedef {{ for: string, loading: boolean, value: any, why: string | null, total: number, ms: number }} ExtremesRead */
+    /** @typedef {{ for: string, loading: boolean, value: any, why: string | null, total: number, ms: number, newest?: any }} ExtremesRead */
     let extremesRead = $state.raw(/** @type {ExtremesRead | null} */ (null));
 
     /** The row set to fold, or `''` when nothing is to be asked. A string, so
         a recomputed plan with the same series, months and bounds asks nothing. */
     const want = $derived(extremesOpen && db.view === 'bars' ? db.barSetKey : '');
 
+    /* ONE FOLD PER ROW SET, AND NONE FOR A SELECTION STILL SETTLING (R3-03).
+       The fold was asked the moment the row set's key moved, so a change of
+       Side or Segment folded each intermediate selection in turn — contracts
+       and months the final one does not hold — and a re-run of this effect
+       for the same set aborted the fold in flight and asked it again. It now
+       waits on the bar read's own readiness (`db.barsReady`), asks a set
+       once, and only a newer set or a closed panel stops the one in flight. */
+    const asks = askOnce();
+    let flight = /** @type {AbortController | null} */ (null);
     $effect(() => {
       const key = want;
       if (!key) {
+        flight?.abort();
+        flight = null;
+        asks.forget();
         extremesRead = null;
         return;
       }
+      if (!db.barsReady) return;
       const feed = untrack(() => feeds.active);
       const plan = untrack(() => db.barQueryPlan);
       const bounds = untrack(() => db.barBounds);
@@ -88,7 +102,10 @@
         extremesRead = null;
         return;
       }
+      if (!asks.fresh(key)) return;
+      flight?.abort();
       const controller = new AbortController();
+      flight = controller;
       const started = performance.now();
       extremesRead = { for: key, loading: true, value: null, why: null, total: 0, ms: 0 };
       readWindowPage(
@@ -104,7 +121,11 @@
             value: answer.extremes ?? null,
             why: answer.extremes ? null : (answer.extremes_why ?? 'the server folded no extremes for this query'),
             total: answer.total,
-            ms: Math.round(performance.now() - started)
+            ms: Math.round(performance.now() - started),
+            /* THE NEWEST BAR OF THE SET, which this read is (ts, newest
+               first, one row): the grid's newest close takes it from here
+               rather than asking again (R3-03). */
+            newest: answer.bars[0] ?? null
           };
         })
         .catch((why) => {
@@ -118,8 +139,8 @@
             ms: Math.round(performance.now() - started)
           };
         });
-      return () => controller.abort();
     });
+    $effect(() => () => flight?.abort());
 
     /** The fold's values when they answer the row set on screen, else `null`. */
     const extremesNow = $derived(extremesRead && !extremesRead.loading ? extremesRead.value : null);

@@ -66,7 +66,15 @@ export const HEAD = 30; /* the sticky header covers the top of the scroll box */
    that is the third time in this file, so the rule is now simply that a
    constant shared by two deriveds lives above both. Its reasoning stays with
    `rowsThatFit`, which is where the 24 was measured. */
-export const FIT_SLACK = 24;
+/* EIGHT SINCE R3-03, AND THE SEVENTEEN IT HELD FOR `.bnotes` IS GONE: the notes
+   strip is now always in the box at one line's height, so its arrival after a
+   read no longer shrinks the box under a fitted page, and the heading's real
+   height (its band and its labels) is measured rather than taken as `HEAD`.
+   What remains is the damper — a fifth of a row for fonts and sub-pixels.
+   Twenty-four counted a row fewer than the window holds whenever the box was
+   within sixteen pixels of one more (the re-check's "Fit counts the rows that
+   fit the window"). */
+export const FIT_SLACK = 8;
 /* `--s4`, WHICH IS `.board`'s `gap`. Written here because this file cannot
    read a stylesheet token, and named rather than inlined so the next reader
    knows which declaration it is shadowing. If `.board`'s gap changes, this
