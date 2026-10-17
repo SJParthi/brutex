@@ -60,14 +60,14 @@ export const MAX_READ_HELD = 1_000_000;
  */
 export function servedPages({ total, size, wire, report }) {
   const rows = Math.max(1, Math.trunc(size) || 1);
-  const n = Number.isSafeInteger(total) && total > 0 ? total : 0;
+  const n = Number.isSafeInteger(total) ? total : 0;
   const count = Math.max(1, Math.ceil(n / rows));
   const every = { count, front: count, tail: null, why: null };
   if (wire === null || wire === 'ts') return every;
-  if (wire !== 'tod' && report && typeof report === 'object') {
+  if (wire !== 'tod' && report) {
     if (report.by_time === true) return every;
     const read = Number(report.scanned_rows);
-    if (Number.isSafeInteger(read) && read >= 0 && read <= MAX_READ_HELD) return every;
+    if (read >= 0 && read <= MAX_READ_HELD) return every;
   }
   const front = Math.min(count, Math.max(1, Math.floor(MAX_SORT_DEPTH / rows)));
   if (front >= count) return every;
@@ -102,10 +102,7 @@ export const lastServed = (s) => (s.tail === null ? s.front : s.count);
  * @param {Served} s @param {number} p
  */
 export function clampServed(s, p) {
-  const n = Math.trunc(Number(p));
-  if (!Number.isFinite(n) || n < 1) return 1;
-  const last = lastServed(s);
-  if (n >= last) return last;
+  const n = Math.min(Math.max(1, Math.trunc(Number(p)) || 1), lastServed(s));
   return isServed(s, n) ? n : s.front;
 }
 
@@ -120,7 +117,7 @@ export function stepServed(s, p, step) {
   const want = p + step;
   if (want < 1 || want > lastServed(s)) return null;
   if (isServed(s, want)) return want;
-  return step > 0 ? s.tail : s.front;
+  return step === 1 ? s.tail : s.front;
 }
 
 /**
@@ -136,24 +133,28 @@ export function stepServed(s, p, step) {
  */
 export function pageItems(cur, s) {
   const last = lastServed(s);
+  /* The neighbours already give page 2 near the start and the page before the
+     last near the end; the two pages after them make the run four long. */
   const want = new Set([1, cur - 1, cur, cur + 1, last]);
-  if (cur <= 3) for (const p of [2, 3, 4]) want.add(p);
-  if (cur >= last - 2) for (const p of [last - 1, last - 2, last - 3]) want.add(p);
+  if (cur < 4) for (const p of [3, 4]) want.add(p);
+  if (cur > last - 3) for (const p of [last - 2, last - 3]) want.add(p);
   if (s.tail !== null) {
     want.add(s.front);
     want.add(s.tail);
   }
   const list = [...want].filter((p) => isServed(s, p)).sort((a, b) => a - b);
+  /* Page 1 is always served, so the list always opens on it. */
   /** @type {{k: string, p: number, gap: boolean, dead: boolean}[]} */
-  const out = [];
-  list.forEach((p, i) => {
-    const before = i > 0 ? list[i - 1] : 0;
-    if (i > 0 && p - before > 1) {
+  const out = [{ k: 'p1', p: 1, gap: false, dead: false }];
+  for (let i = 1; i < list.length; i += 1) {
+    const p = list[i];
+    const before = list[i - 1];
+    if (p - before > 1) {
       const dead = s.tail !== null && before <= s.front && p >= s.tail;
       out.push({ k: `${dead ? 'dead' : 'gap'}${p}`, p, gap: true, dead });
     }
     out.push({ k: `p${p}`, p, gap: false, dead: false });
-  });
+  }
   if (s.tail === null && s.front < s.count) out.push({ k: 'dead-end', p: s.front + 1, gap: true, dead: true });
   return out;
 }

@@ -111,7 +111,8 @@ export const gotoAsk = (at) => ({ sort: 'ts', desc: false, at, limit: 1 });
 export function landing(answer, o) {
   const total = Number(answer?.total);
   if (!Number.isSafeInteger(total) || total <= 0) return { why: 'No bar is kept by this query, so there is nothing to land on.' };
-  const ascIndex = Number(answer.at_index);
+  /* A number, not `Number(…)` of it: `null` — no place computed — is not row 0. */
+  const ascIndex = answer.at_index;
   const bar = Array.isArray(answer.bars) ? answer.bars[0] : undefined;
   if (!Number.isSafeInteger(ascIndex) || ascIndex < 0 || !bar) {
     return { why: 'The server did not say where that instant lies, so Go to did not move the grid.' };

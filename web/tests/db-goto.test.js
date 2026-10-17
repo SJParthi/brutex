@@ -147,3 +147,33 @@ test('Go to takes a time alone, exact seconds, and refuses 1969, 2099 and nonsen
   assert.match(grid, /const got = parseGoto\(String\(at \?\? ''\), dayOnScreen\(\), gotoSpan\(\)\);/);
   assert.match(grid, /: \{ lo: db\.heldDays\?\.lo \|\| '', hi: db\.heldDays\?\.hi \|\| '', what: 'this selection' \};/);
 });
+
+test('Go to at every boundary of what it reads, and every sentence it says, exactly', () => {
+  const span = { lo: '2019-03-15', hi: '2019-03-15' };
+  const why = (/** @type {unknown} */ text, day = DAY, o = {}) => /** @type {any} */ (parseGoto(text, day, o)).why;
+  // Length: 32 characters are read, 33 are refused by their length.
+  assert.equal(why('x'.repeat(33)), 'Go to read 33 characters, and an instant is at most 32: type a day and a time, 2019-03-15 10:02:07, or a time alone.');
+  assert.equal(why('x'.repeat(32)), `"${'x'.repeat(32)}" is not an instant. Type a day and a time, 2019-03-15 10:02, or a time alone, 10:02, for the day on screen.`);
+  // Anchored at both ends: nothing before the day, nothing after the time.
+  assert.equal(why('x2019-03-15 10:02'), '"x2019-03-15 10:02" is not an instant. Type a day and a time, 2019-03-15 10:02, or a time alone, 10:02, for the day on screen.');
+  assert.match(why('2019-03-15 10:02x'), /is not an instant/);
+  assert.match(why('x10:02'), /is not an instant/);
+  assert.match(why('10:02x'), /is not an instant/);
+  assert.deepEqual(parseGoto('2019-03-15   10:02', ''), { at: at('10:02:00'), label: `${DAY} 10:02:00`, minute: true }, 'any run of spaces between day and time');
+  // The span's own ends are inside it; the default name is "this selection".
+  assert.equal(/** @type {any} */ (parseGoto('2019-03-15 10:02', '', span)).at, at('10:02:00'));
+  assert.equal(why('2019-03-14 10:02', '', span), "14 Mar 2019 is before this selection's first day, 15 Mar 2019: no bar of it lies that early. Pick a day from 15 Mar 2019 to 15 Mar 2019.");
+  assert.equal(why('2019-03-16 10:02', '', span), "16 Mar 2019 is after this selection's last day, 15 Mar 2019: no bar of it lies that late. Pick a day from 15 Mar 2019 to 15 Mar 2019.");
+  // A place that is not a whole non-negative number moves nothing, even with a bar.
+  const bar = { t: at('10:02:03') };
+  const o = { at: at('10:02:00'), label: `${DAY} 10:02:00`, minute: true, desc: true, size: 8, when };
+  for (const bad of [-1, 1.5, '3', undefined, Number.NaN]) {
+    assert.deepEqual(landing({ total: 30, at_index: bad, bars: [bar] }, o), { why: 'The server did not say where that instant lies, so Go to did not move the grid.' }, String(bad));
+  }
+  // The minute's sixtieth second is the next minute: said as a silent minute.
+  const next = { t: at('10:03:00') };
+  assert.equal(/** @type {any} */ (landing({ total: 30, at_index: 12, bars: [next] }, o)).why,
+    'No bar opens in the minute 2019-03-15 10:02. Landed on the first bar after it, 2019-03-15 10:03:00 IST, 60 second(s) later — row 18 of 30.');
+  assert.equal(/** @type {any} */ (landing({ total: 30, at_index: 12, bars: [{ t: at('10:02:59') }] }, o)).why,
+    'The first bar of 2019-03-15 10:02 opens at 2019-03-15 10:02:59 IST, 59 second(s) into the minute — row 18 of 30.');
+});

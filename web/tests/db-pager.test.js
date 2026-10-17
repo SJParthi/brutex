@@ -425,3 +425,102 @@ test('a Change % measured across the overnight gap says so on the row', () => {
   assert.match(grid, />overnight<\/span/);
   assert.match(gridScript(), /acrossDay\(barRows, \{ timeNarrows, dayRung, edgeEarlier: barState\.local && dayWindowNarrows \}\)/);
 });
+
+test('the pager arithmetic at every boundary, and every sentence it says, exactly', () => {
+  // A total that is not a whole number is no rows; a negative one is none.
+  assert.equal(servedPages({ total: Number.NaN, size: 8, wire: 'ts' }).count, 1);
+  assert.equal(servedPages({ total: 9.5, size: 8, wire: 'ts' }).count, 1);
+  // A local sort (no wire) serves every page, however deep.
+  assert.equal(servedPages({ total: 5_000_000, size: 8, wire: null }).why, null);
+  // A time-of-day order ignores any report; a report of null is no report.
+  const tod = { indexed_rows: 0, scanned_rows: 10 };
+  assert.deepEqual(servedPages({ total: 2_000_000, size: 1000, wire: 'tod', report: tod }), servedPages({ total: 2_000_000, size: 1000, wire: 'tod' }));
+  assert.equal(servedPages({ total: 2_000_000, size: 1000, wire: 'tod', report: { indexed_rows: 0, scanned_rows: 2_000_000 } }).tail, null);
+  assert.equal(servedPages({ total: 2_000_000, size: 1000, wire: 'c', report: null }).tail, null);
+  // The read count: exactly MAX_READ_HELD serves all; one more does not; nonsense is not "few".
+  const read = (/** @type {number} */ n) => servedPages({ total: 2_000_000, size: 1000, wire: 'c', report: { indexed_rows: 7, scanned_rows: n } });
+  assert.equal(read(1_000_000).why, null);
+  assert.equal(read(1_000_001).front, 100);
+  assert.equal(read(-5).front, 100);
+  assert.equal(servedPages({ total: 2_000_000, size: 1000, wire: 'c', report: { indexed_rows: 7 } }).front, 100);
+  // A front that reaches the count serves every page.
+  assert.deepEqual(servedPages({ total: 100_000, size: 8, wire: 'tod' }), { count: 12_500, front: 12_500, tail: null, why: null });
+  // A tail that starts one past the front serves every page; one later does not.
+  const noIndex = { indexed_rows: 0, scanned_rows: 2_000_000 };
+  assert.equal(servedPages({ total: 200_000, size: 1000, wire: 'c', report: noIndex }).why, null);
+  assert.deepEqual(servedPages({ total: 201_000, size: 1000, wire: 'c', report: noIndex }).tail, 102);
+  // The sentences, whole.
+  assert.equal(servedPages({ total: 153_107, size: 8, wire: 'tod' }).why,
+    'the server reads a time-of-day order rather than taking it from a sort index, and serves it from the front only: rows 1 to 1,00,000 ' +
+    '(1,00,000 rows deep, bars::MAX_SORT_DEPTH). Pages between are refused sort_too_deep, so they are not offered: ' +
+    'page in time order, or narrow the days, the time of day or the series to reach every row.');
+  assert.equal(servedPages({ total: 2_000_000, size: 1000, wire: 'v', report: noIndex }).why,
+    'the server reads this value order rather than taking it from a sort index, and serves it within 1,00,000 rows of either end: pages 1 to 100 and 1,901 to 2,000 ' +
+    '(1,00,000 rows deep, bars::MAX_SORT_DEPTH). Pages between are refused sort_too_deep, so they are not offered: ' +
+    'page in time order, or narrow the days, the time of day or the series to reach every row.');
+  assert.equal(servedPages({ total: 2_000_000, size: 1000, wire: 'h', report: { indexed_rows: 4, scanned_rows: 2_000_000 } }).why?.includes('this value order rather than taking it from a sort index, and serves it from the front only: rows 1 to 1,00,000 '), true);
+
+  const both = servedPages({ total: 2_000_000, size: 1000, wire: 'v', report: noIndex });
+  const front = servedPages({ total: 153_107, size: 8, wire: 'tod' });
+  // isServed past the count, even with a tail.
+  assert.equal(isServed(both, 2001), false);
+  assert.equal(isServed(both, 2000), true);
+  // clampServed: nonsense is page 1; a page past the end the last served; a dead page the front.
+  assert.equal(clampServed(front, 'x'), 1);
+  assert.equal(clampServed(front, 0), 1);
+  assert.equal(clampServed(front, 1), 1);
+  assert.equal(clampServed(front, 2.9), 2);
+  assert.equal(clampServed(front, 12_500), 12_500);
+  assert.equal(clampServed(both, 5000), 2000);
+  assert.equal(clampServed(both, 1901), 1901);
+  // stepServed at both ends, and across the dead stretch both ways.
+  assert.equal(stepServed(front, 2, -1), 1);
+  assert.equal(stepServed(front, 12_499, 1), 12_500);
+  assert.equal(stepServed(both, 2000, 1), null);
+  assert.equal(stepServed(both, 1999, 1), 2000);
+  assert.equal(stepServed(both, 101, -1), 100, 'a page inside the stretch steps back to the front');
+
+  // THE BUTTON ROW, item by item.
+  const row = (/** @type {number} */ cur, /** @type {any} */ s) =>
+    pageItems(cur, s).map((i) => (i.dead ? `x${i.p}` : i.gap ? `…${i.p}` : i.p)).join(' ');
+  const flat = servedPages({ total: 8_000, size: 8, wire: 'ts' });
+  assert.equal(row(1, flat), '1 2 3 4 …1000 1000');
+  assert.equal(row(3, flat), '1 2 3 4 …1000 1000');
+  assert.equal(row(4, flat), '1 …3 3 4 5 …1000 1000');
+  assert.equal(row(997, flat), '1 …996 996 997 998 …1000 1000');
+  assert.equal(row(998, flat), '1 …997 997 998 999 1000');
+  assert.equal(row(1000, flat), '1 …997 997 998 999 1000');
+  assert.equal(row(1, front), '1 2 3 4 …12500 12500 x12501');
+  assert.equal(row(1, both), '1 2 3 4 …100 100 x1901 1901 …2000 2000');
+  assert.equal(row(1950, both), '1 …100 100 x1901 1901 …1949 1949 1950 1951 …2000 2000');
+  assert.deepEqual(pageItems(1, both).slice(0, 2), [
+    { k: 'p1', p: 1, gap: false, dead: false },
+    { k: 'p2', p: 2, gap: false, dead: false }
+  ]);
+  assert.deepEqual(pageItems(1, both).filter((i) => i.gap).map((i) => i.k), ['gap100', 'dead1901', 'gap2000']);
+  assert.deepEqual(pageItems(1, flat).filter((i) => i.gap).map((i) => i.k), ['gap1000']);
+  assert.deepEqual(pageItems(1, servedPages({ total: 1, size: 8, wire: 'ts' })), [{ k: 'p1', p: 1, gap: false, dead: false }]);
+
+  // THE PAGE BOX'S SENTENCES, whole.
+  const s = servedPages({ total: 80, size: 8, wire: 'ts' });
+  assert.deepEqual(parsePageBox('   ', s), { ok: false, why: 'Type a page number, 1 to 10.' });
+  assert.deepEqual(parsePageBox('0', s), { ok: false, why: 'Page "0" is outside 1 to 10: this selection has 10 page(s) at this many rows a page. Type 1 to 10.' });
+  assert.deepEqual(parsePageBox('x', s), { ok: false, why: 'Page "x" is not a whole number from 1: this selection has 10 page(s) at this many rows a page. Type 1 to 10.' });
+  assert.deepEqual(parsePageBox('500', both), { ok: false, why: `Page 500 is not served: ${both.why} Type 1 to 100 or 1,901 to 2,000.` });
+
+  // THE READ'S MEMORY: an unchanged order keeps its page; a fresh memory has asked nothing.
+  assert.equal(pageToRead({ page: 7, order: 'a', lastOrder: 'a', held: false }), 7);
+  assert.equal(pageToRead({ page: 7, order: 'b', lastOrder: 'a', held: false }), 1);
+  assert.equal(pageToRead({ page: 7, order: 'b', lastOrder: 'a', held: true }), 7);
+  assert.equal(askOnce().asked, '');
+  assert.equal(askOnce().fresh(''), false, 'nothing asked is the empty question');
+
+  // THE MOVE BETWEEN TWO PAGES, said whole.
+  const key = (/** @type {any} */ b) => String(b.t);
+  assert.deepEqual(joinPage({ rows: [{ t: 3 }, { t: 2 }], generation: 'a', total: 10 }, { rows: [{ t: 2 }, { t: 1 }], generation: 'b', total: 11 }, key), {
+    rows: [{ t: 1 }],
+    dropped: 1,
+    moved: 'The store grew by 1 bar(s) between the page before and this one (10 then 11), so the offsets moved under the pager; ' +
+      '1 row(s) already shown on the page before are dropped here rather than shown twice. Read again for pages counted against the store as it is now.'
+  });
+});
