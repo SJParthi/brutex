@@ -498,3 +498,18 @@ test('R3-13 review: a closing-auction day whose flag no master holds is never co
   const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
   assert.match(svelte, /const cas = \$derived\(casCounts\(flagged\)\);/);
 });
+
+test('R3-13: a key that names no family is no band key, and a row with no rung is counted at any rung', () => {
+  // Two keys of two parts name no family: neither one instrument nor a family.
+  assert.equal(bandInstrument([{ instrument: 'NSE-X' }, { instrument: 'NSE-Y' }]), '');
+  // A row that names no timeframe is not dropped by the grid's rung.
+  const strikes = [
+    { instrument: 'NSE-FNO-NIFTY-2019-03-28-1150000-CE', underlying: 'NIFTY', expiry: '2019-03-28' },
+    { instrument: 'NSE-FNO-NIFTY-2019-03-28-1160000-PE', underlying: 'NIFTY', expiry: '2019-03-28', timeframe: '1s' }
+  ];
+  assert.equal(bandInstrument(strikes, '1s'), 'NSE-FNO-NIFTY');
+  assert.equal(bandExpiry(strikes, 'NSE-FNO-NIFTY', '1s'), '2019-03-28');
+  // The legend counts each kind once per word, in the fixed order, and leaves out a kind no cell has.
+  const cells = [cellOf(rec({ degraded: ['x'] })), cellOf(rec()), cellOf(rec({ degraded: ['y'] }))];
+  assert.deepEqual(tally(cells).map((k) => [k.kind, k.n]), [['degraded', 2], ['session', 1]]);
+});

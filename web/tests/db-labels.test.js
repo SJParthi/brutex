@@ -770,6 +770,10 @@ test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named 
   const lone = basisRunsOf({ days: [unmeasured('2019-07-01'), basisDay('2019-07-02', { quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: null } }), unmeasured('2019-07-03')] });
   assert.match(basisRunLabel(lone, '2019-07-02')?.text ?? '', /quantised against GDFL's raw prints: 2019-07-02 to 2019-07-02, 1 day\(s\) measured, factor ×1\.0254; Zerodha's prices sit on a 50-paisa grid, coarser than an exact adjustment leaves \(the run may go on both ways the days read\)/);
   assert.equal(basisRunLabel(lone, '2019-07-03'), null, 'an unmeasured day past the run is not in it');
+  // A run with a measured raw day on each side is closed both ways: no edge is said.
+  const closed = basisRunsOf({ days: [basisDay('2019-08-01', { factor: 1, basis_differs: false }), basisDay('2019-08-02', { factor: 4, basis_differs: true }), basisDay('2019-08-05', { factor: 1, basis_differs: false })] });
+  assert.deepEqual(closed[0].open, { before: false, after: false });
+  assert.doesNotMatch(basisRunLabel(closed, '2019-08-02')?.text ?? '', /the run may go on/);
   // The drawer names the run of its row's day.
   const row = bar('NSE-CASH-ACME', '1min', '2019-06-04', '10:00:00');
   const facts = drawerFacts({ feed: ZERODHA, row, answer: null, basis: runs });
@@ -813,6 +817,11 @@ test('R3-13 goal 3: an option day names its bar definition on its rows\' label a
   assert.match(definitionFact(answer, '2019-03-07', old)?.v ?? '', /^definition 2: fixture means \(from the day band\)/);
   assert.equal(definitionFact(answer, '2019-03-07'), null);
   assert.equal(definitionFact(null, '2019-03-05'), null);
+  // A band that does not say which definition this build builds says "another".
+  assert.match(
+    definitionFact(answer, '2019-03-05', { definition: { value: 2, current: false, thisBuild: null, means: '' } })?.v ?? '',
+    /this build builds definition another, so the day is labelled until it is restated$/
+  );
   // A band that names another definition than the journal's is not borrowed.
   assert.match(definitionFact(answer, '2019-03-05', { definition: { value: 3, current: true, thisBuild: 4, means: '' } })?.v ?? '', /was not read for this day/);
   const row = bar('NSE-FNO-ACME-2019-03-28-100000-CE', '1s', '2019-03-05', '10:00:00');

@@ -308,7 +308,9 @@ function segmentOf(key) {
  */
 export function cellOf(rec, ctx = {}) {
   const kinds = kindsOf(rec, ctx);
-  const known = KIND.get(kinds[0]) ?? { kind: kinds[0], word: kinds[0], tone: 'quiet' };
+  // EVERY KIND `kindsOf` ANSWERS IS ONE OF `DAY_KINDS` (it filters by them, and
+  // always answers one), so the lookup always finds it.
+  const known = /** @type {(typeof DAY_KINDS)[number]} */ (KIND.get(kinds[0]));
   // A CLOSING-AUCTION DAY WHOSE FLAG NO MASTER HOLDS is said as that
   // (SC-CLOSE-8, SC-CLOSE-9): never "closing auction from 15:15".
   const lead = known.kind === 'cas' && rec?.calendar?.cas?.eligible !== true ? { ...known, word: CAS_UNHELD } : known;
@@ -484,7 +486,7 @@ export function tally(cells) {
     else words.push({ word: c.word, n: 1 });
     by.set(c.kind, words);
   }
-  return DAY_KINDS.filter((k) => by.has(k.kind)).flatMap((k) => (by.get(k.kind) ?? []).map((w) => ({ ...k, word: w.word, n: w.n })));
+  return DAY_KINDS.flatMap((k) => (by.get(k.kind) ?? []).map((w) => ({ ...k, word: w.word, n: w.n })));
 }
 
 /**

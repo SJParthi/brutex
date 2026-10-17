@@ -681,7 +681,8 @@ export function auctionVerdict({ feed, segment, t, phase, tail = null, dayFacts 
             : `the closing-auction session's last print (${at}) differs from the official day close by ${bps} bps (/sources/day.json), so it is not called the auction's print: the vendor's file may hold no auction print at all, and which row, if any, is the auction's is NOT PROVED`
       };
     }
-    const twins = bars ? bars.filter((/** @type {any} */ b) => b?.phase === 'cas' && b.t !== t && b.c === last.c).length : 0;
+    // A LAST PRINT WAS FOUND IN `bars`, so they are there.
+    const twins = /** @type {any[]} */ (bars).filter((/** @type {any} */ b) => b?.phase === 'cas' && b.t !== t && b.c === last.c).length;
     return {
       tone: 'auction',
       short: 'closing auction print',
