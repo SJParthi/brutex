@@ -3182,3 +3182,48 @@ async fn a_plain_429_is_recorded_against_the_shared_governor_once() {
     assert_ne!(expected, Some(100_000), "the premise: a decrease shows");
     assert_eq!(day(&site), expected, "one decrease, the transport's");
 }
+
+/// **A run over a target the universe holds nothing of reaches nothing and
+/// refuses nothing, and its receipt says so in those words.** With no
+/// masters there is no universe, so `target=swept` (which has no published
+/// list) resolves to no instrument: no member is unmapped, the order owes
+/// nothing, and the run opens over zero instruments. Nothing is asked of the vendor. Covers
+/// `broker_answer`'s default first refusal (server.rs:3660).
+#[tokio::test]
+async fn a_run_over_a_target_with_no_instrument_says_none_could_be_reached() {
+    let vendor = FakeVendor::answering(|_, _| (500, "never asked".to_owned())).await;
+    let script = live(&vendor, "live");
+    let fx = Fixture::new("no-instrument");
+    // NO MASTERS, SO NO UNIVERSE: the swept target has no published list to
+    // be unmapped against, and resolves to nothing.
+    for master in ["groww_instruments.csv", "dhan_scrip.csv"] {
+        std::fs::remove_file(fx.masters.join(master)).expect("the master removed");
+    }
+    let site = fx.serving(&script);
+    let asked = spot(DHAN_DAY);
+    assert!(
+        spot_targets(&asked, &site).is_empty(),
+        "the premise: nothing resolves"
+    );
+    let journal = audit::Journal::at(&fx.root);
+
+    let (code, body) = broker_answer(
+        asked,
+        std::time::SystemTime::UNIX_EPOCH,
+        &site,
+        &journal,
+        Vec::new(),
+    )
+    .await;
+
+    assert!(
+        body.contains("no instrument in the universe could be reached"),
+        "{code}: {body}"
+    );
+    assert_eq!(
+        code,
+        axum::http::StatusCode::BAD_REQUEST,
+        "no socket was opened, so this side refused it, not the vendor"
+    );
+    assert!(vendor.seen().is_empty(), "nothing was asked of the vendor");
+}
