@@ -766,3 +766,87 @@ fn a_vendor_id_that_no_longer_matches_its_join_is_refused() {
         "RELIANCE: selected vendor ID does not uniquely match the exchange ISIN INE002A01018"
     );
 }
+
+/// The CRC-32 (IEEE, reflected) gzip's trailer carries.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFF_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// `data` as a gzip member of ONE stored (uncompressed) deflate block: the
+/// ten-byte header, the block, then the CRC-32 and the length. This crate
+/// has no compressor among its dependencies, and a stored block is a valid
+/// deflate stream any reader inflates.
+fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(data.len()).expect("one stored block holds it");
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 0x01];
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(data.len())
+            .expect("a short fixture")
+            .to_le_bytes(),
+    );
+    out
+}
+
+/// **A cash name with no exchange ISIN is refused its dated cash-session
+/// schedule by name, once the day's eligibility is in hand.** The day's NSE
+/// security master is installed, receipted, in the store's own
+/// `session-masters`, so nothing is fetched; the schedule then needs the
+/// name's exchange ISIN, and `ZZSMALL` has none. Covers
+/// `prepare_cash_schedule`'s ISIN refusal (server.rs:5680-5684).
+#[tokio::test]
+async fn a_cash_name_with_no_exchange_isin_is_refused_its_dated_schedule() {
+    let root = fresh_dir("dated-no-isin");
+    let site = Site::load(&root, &root);
+    let day = auction_era_open_day();
+    let master = b"FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n\
+                   1363,HINDALCO,EQ,INE038A01020,1\n";
+    pull::cash_session_cache::install(&root.join("session-masters"), day, &gzip_stored(master))
+        .expect("the day's master installs, receipted");
+    assert!(
+        brutex_core::universe::nse_isin("ZZSMALL").is_none(),
+        "the premise: no exchange ISIN"
+    );
+    let mut landed = landed_cash("ZZSMALL");
+    landed.bodies = vec![(
+        landed.window,
+        pull::fetch::RawWindow {
+            rows: vec![pull::fetch::RawRow {
+                // 09:15 IST, inside the cash session.
+                timestamp: i64::from(day.days_from_epoch()) * 86_400
+                    - pull::session::IST_OFFSET_SECS
+                    + 555 * 60,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+                open_interest: None,
+            }],
+        },
+    )];
+    landed.spec.timestamps = pull::vendor::TimestampEncoding::EpochSecondsUtc;
+    let key = InstrumentKey::cash(Exchange::Nse, "ZZSMALL").expect("a key");
+    let mut dated = std::collections::HashMap::new();
+    let refused = prepare_cash_schedule(&landed, &landed.bodies, &key, &site, &mut dated).await;
+    assert_eq!(
+        refused.map(|schedule| schedule.is_some()),
+        Err("ZZSMALL: no ISIN for dated cash-session verification".to_owned())
+    );
+    assert!(
+        dated.contains_key(&day.days_from_epoch()),
+        "the day's eligibility was acquired, from the local master"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
