@@ -240,7 +240,10 @@ function isReportRoute(url, origin) {
  */
 export function installPageReport(win, options = {}) {
   if (!win || typeof win.fetch !== 'function' || win[INSTALLED]) return () => {};
-  const original = win.fetch.bind(win);
+  // The page's own `fetch`, kept to be put back as it was; called bound to
+  // its window, which a browser's `fetch` requires.
+  const own = win.fetch;
+  const original = own.bind(win);
   const origin = String(win.location?.origin ?? 'http://localhost');
   const reporter = createPageReporter({
     ...options,
@@ -298,7 +301,7 @@ export function installPageReport(win, options = {}) {
   win.addEventListener(FALLBACK_EVENT, onFallback);
   win[INSTALLED] = reporter;
   return () => {
-    if (win.fetch === reportingFetch) win.fetch = original;
+    if (win.fetch === reportingFetch) win.fetch = own;
     win.removeEventListener('error', onError);
     win.removeEventListener('unhandledrejection', onRejection);
     win.removeEventListener(FALLBACK_EVENT, onFallback);
