@@ -2060,6 +2060,13 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
         Some(super::super::ist_midnight_micros(day("2022-03-07")) + i64::from(open) * 1_000_000)
     );
     assert!(whole.is_empty(), "{whole:#?}");
+    // A HANDLE OF ITS OWN, opened before the cut: the first one keeps the
+    // block it read, so only a handle that has read nothing meets the cut.
+    let super::super::Opened::File(file) =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
+    else {
+        panic!("the month opens again");
+    };
     let path = month_path(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, month);
     std::fs::OpenOptions::new()
         .write(true)
