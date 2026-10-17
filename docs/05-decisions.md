@@ -70729,6 +70729,73 @@ rather than answered `408` (the wrapper did not see those bytes; it used to,
 when the head clock wrongly ran during the body). Both are written down in
 `docs/06-limits.md` under D-4975.
 
+### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
+
+The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
+7,613 lines at `d7eb0ecf` (6,046 when the plan was written), and the build
+order of `state/design/ingest-automation.md` §16.2 has eleven packages edit
+it in strict order: WP-16, WP-11c, WP-12d, WP-12f, then IA-1, IA-2, IA-3,
+IA-16, IA-4, IA-7 and IA-17. The first four have merged. The file is split
+before IA-1, so that each later package edits the file that holds its seam.
+
+1. **Six files, by seam.** The five new modules are private, mounted by
+   `#[path]` from `gdfl_import.rs`, and every item a caller outside the module
+   reaches keeps its path through a `pub use`
+   (`pull::gdfl_import::{Cause, ImportRefusal, Outcome, Stage, cm_cause,
+   nfo_cause, CensusRoom, drive, drive_from, BAR_DEFINITION,
+   definition_is_current, journal_path}`, and `append_lines` for the crate),
+   so no caller in `pull`, `cli` or `api` changed.
+   - `gdfl_import.rs` (3,160 lines): the run's types and entry points
+     (`ImportKind`, `SourceKind`, `Origin` and its measurement, `RunOptions`,
+     `Durability`, `Workers`, `convert`, `TickFile`, `DayRead`, `Refused`,
+     `Report`, `Run`), the CM and options readers (`run_cm`, `cm_jobs`,
+     `cm_day_with`, `run_nfo`, `option_handed`, `warm_up`, `nfo_jobs`,
+     `nfo_day_with`), `Rescan`, and the module lines.
+   - `gdfl_import_day.rs` (1,663): the day loop (`Ctx`, `admit` and the
+     done-day skip, `decisive`, `close_of`, `close_day`, `drive`,
+     `drive_from`, `drive_core`, the reach-back, `widen`, `probe`, `day_pass`,
+     `record_close`).
+   - `gdfl_import_journal.rs` (992): `journal_path`, `BAR_DEFINITION`,
+     `definition_is_current`, the journal's parse, `Journal`, `append_lines`,
+     `closing_line`, `run_line`.
+   - `gdfl_import_filing.rs` (1,093): the provenance record, `BeginGate`,
+     `on_workers`, `Filing`, `DayFiler`, `make_durable`,
+     `stop_at_durability`.
+   - `gdfl_import_census.rs` (265): `CensusRoom`, the `Census` trait,
+     `StoreCensus`, `census_room`, `census_code`, `census_refusal`,
+     `stop_at_census`.
+   - `gdfl_import_causes.rs` (567): `ImportRefusal`, `Stage`, `Cause`,
+     `cm_cause`, `nfo_cause`, `Outcome`.
+2. **Move-only.** No line was added but module lines (the five `mod`
+   declarations with their `#[path]`, and a `//!` header for each new file),
+   use lines, and visibility (`pub(super)` where the file beside needs an
+   item). `the_split_moves_lines_and_changes_none` counts the six files'
+   non-blank lines as a multiset against the unsplit file's (blob
+   `1c349b13`), less those three kinds, and finds 0 others; it pins what it
+   set aside: 54 module, 97 use and 311 visibility lines, against the unsplit
+   file's 24, 23 and 154. `the_line_counter_sets_aside_only_module_use_and_visibility`
+   proves the counter cannot pass a changed line.
+   `the_split_importer_writes_the_same_bytes` was committed first, on the
+   unsplit importer, and is unchanged since: six imports of invented NIFTY,
+   BANKNIFTY, share and option days (a special session, a weekend, a holiday,
+   a refused file, an illiquid strike and a re-run among them) leave the same
+   files with the same bytes. The pull crate's test names are the same
+   before and after, plus the two line tests.
+3. **Where a later package edits: the file that holds its seam, and a new
+   seam beside the nearest one.** The map of §16.2's rows onto these files
+   (derived from the design's text, not measured) is
+   `docs/06-limits.md` L-R335-01, with the longest chain that is left.
+4. **Rejected.** `pub mod` for the new modules: it would add public paths no
+   caller asked for, and the re-exports keep every old one. A seventh file
+   for the CM and options readers: not in this package's seams; IA-1's run
+   seams and IA-4's `option_handed` counts share `gdfl_import.rs` with them.
+   Splitting `gdfl_import_tests.rs` (5,786 lines): not this package's file,
+   and each later package puts new tests in its own test file.
+
+Limits: `docs/06-limits.md` L-R335-01 (the chain left) and L-R335-02 (where
+the line proof cannot run). Invariants: `docs/04-invariants.md` R335-01 and
+R335-02.
+
 ### D-4996 — The app runs under two launchd agents that `cli launch-agent` prints at install time and no file in the tree holds; the watchdog is one `cli watchdog` probe a minute whose notice is a page handed to `open` — 2026-10-14
 
 R3-32. Until now the app on :8080 ran only when a session started it, so a
@@ -70788,3 +70855,103 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_lock_held_for_a_moment_is_waited_for_not_refused`,
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
+
+### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
+
+**Number** taken from above every ledger head on the local branches on
+16 Oct (the highest was D-5240; D-5251 and D-5260 are named for branches not
+yet merged). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R3-01. **Findings** DB-077, DB-G98, DB-051, SC-CLOSE-18,
+and the second agent's re-check of 16 Oct (`verify-R3-01-r1.json`).
+
+**What was observed.** D-3337 item 4 says `k` is "a strike in paisa,
+repeatable" and names seventeen keys. The page has written strikes as ONE
+field since R3-01's first commit, because the server answered the repeated
+form 400 on reload and on every shared link, and it writes four keys item 4
+never named. The code and the append-only ledger said opposite things, and
+the bounds and the history rule the page follows were recorded nowhere.
+
+**Decision.** Item 4 of D-3337 is replaced by the following. Items 1–3, 5
+and 6 stand.
+
+1. **The keys, in the order the page writes them** (`DB_KEYS`,
+   `web/src/lib/urlstate.js`): `feed`, `universe`, `seg`, `sym`, `key`, `tf`,
+   `exp`, `k`, `mny`, `side`, `spot`, `from`, `to`, `tfrom`, `tto`, `sort`,
+   `dir`, `rows`, `page`, `view`, `oow`. Four are new: `universe` (a
+   membership universe key; Everything is `''` and is not written), `mny`
+   (moneyness rungs `ATM`, `ITM`, `OTM`, `ITM-n`, `OTM+n`), `spot` (`exact`, or
+   `prev` = the last spot at or before t, D-3328) and `rows` (a whole number of
+   rows per page, or `fit`).
+2. **A default is not written** (`DB_DEFAULTS`): `sort=ts`, `dir=desc` (the
+   Bars view; Coverage opens by instrument ascending), `page=1`, `view=bars`,
+   `oow` off, `spot=exact` (D-2807) and `rows=fit`. A bookmark names exactly
+   the choices that differ from opening the page.
+3. **`k` is ONE comma-joined field of strikes in whole paisa**, sorted
+   numerically and deduplicated: `k=1160000,1200000`. `mny` is one
+   comma-joined field too, sorted. The comma is written as itself; `%2C`
+   reads the same. **No field is written twice**: one selection is one
+   address, byte for byte, and `encodeDb(decodeDb(q).sel) === q`.
+4. **A repeated `k` (a link written before R3-01) is still read** by the
+   page's reader, `decodeDb`. **The server refuses it first**:
+   `crates/api/src/server.rs` `request_bounds_refusal` answers 400 to any
+   query that names a field twice, except the two list fields in
+   `MULTI_VALUED_QUERY_FIELDS` (`/bars/window.json`'s `key` and
+   `/scrub.json`'s `key`). So such a bookmark opens on the server's refusal
+   page and not on /db. This entry changes no server code. Letting /db's `k`
+   repeat, or redirecting to the comma form, is a follow-up for the `api`
+   owner. Until that lands, a pre-R3-01 two-strike link does not open.
+5. **Bounds**, each a bound and not a vendor fact: a text field (`sym`,
+   `key`, …) is read for at most `MAX_TEXT` = 128 characters
+   (`web/src/lib/db/input-check.js`). A list field (`k`, `mny`) is read for
+   at most `MAX_LIST_FIELD` = 1,024 characters (64 values of 16), and a
+   longer one is refused by its length before it is split. `page` and `rows`
+   are whole numbers from 1 to `MAX_PAGE` = 999,999,999. One address names
+   at most `MAX_REFUSED` = 12 refusals one by one and counts the rest in one
+   closing entry. A value refused twice is named once. One sentence quotes
+   at most 8 unknown field names.
+6. **Honoured or refused in words, never dropped.** A page past the end of
+   the answer is named, and the last page is shown. That costs one extra
+   `/bars/window.json` read, at most one (docs/06-limits.md). An unknown
+   sort, direction, side, view, universe or rows value is named. So is an
+   unknown field. A feed the operator excluded (`dhan`, `groww`, `truedata`,
+   D-3338) is refused by name and nothing is probed.
+7. **A key against the fields beside it** (`linkedContract`,
+   `web/src/lib/db/selection-model.js`): a key whose underlying differs
+   from `sym` is not read, and the page says so. Inside one underlying, a
+   field beside the key is read in place of the key's. A contract's segment
+   is filed by today's calendar. A contract field on a segment without that
+   rung is named and not applied. A key with any small letter is refused by
+   name and never re-cased (a stored key is upper case: `Symbol::new`
+   upper-cases a name and `Contract::parse` takes only A–Z, 0–9 and `-`).
+8. **Back and Forward** (`dbHistory`). The address is written with
+   SvelteKit's `pushState` or `replaceState` once the selection settles, and
+   only when it differs. The first write after the page opens is a
+   `replace`. So is a write after Back or Forward restored an entry, and a
+   write with no choice gesture since the last write (a seed, a clamp).
+   Anything else is a `push`. One press is one entry: the first write spends
+   it. **A choice gesture is a primary-button `pointerdown`, or a `keydown`
+   other than a modifier, Tab, Escape or a function key, on or inside a
+   control** (`CHOICE_TARGET`: a form control, a link, a label, a menu or
+   grid item, anything with `tabindex`; `isChoiceGesture`). A press on
+   blank space arms nothing. **`GESTURE_MS` = 30 s**: a press made longer
+   ago than that does not cause the next write, which is written as a
+   `replace`. The address is still exact; only that step loses its own Back
+   entry. Every pick on /db sets a field `encodeDb` writes inside the
+   press's own task, so the bound is not reached in normal use. The reader
+   reads the browser's `location.search` (`addressNow`), never the URL the
+   page was entered with.
+
+**Proof.** `web/tests/db-address.test.js`:
+`every_db_choice_round_trips_through_the_address`,
+`an_address_with_two_strikes_reloads`,
+`a_linked_page_number_is_honoured_or_refused`,
+`an_excluded_feed_in_a_link_is_refused_by_name`,
+`an_absurd_address_names_each_problem_once_and_a_bounded_few`,
+`a_lower_case_key_is_named_and_not_read`,
+`a_key_that_disagrees_with_the_fields_beside_it_is_named_and_not_read`, and
+the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
+`web/tests/db-history.test.js`: `back_and_forward_restore_each_selection`,
+`a seed, a clamp and a restore correct the current entry and never add one`,
+`a press off a control, or a key that chooses nothing, arms no Back entry`.
+Invariants R301-01 to R301-05 in docs/04-invariants.md.

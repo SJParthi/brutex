@@ -7399,3 +7399,25 @@ notifier a counter, every app a listener the test opened.
 | R332-17 | **A port is digits only, with no sign and no leading zero** (`+80`, `0080` refused) | `a_port_with_a_sign_or_a_leading_zero_is_refused` | ✓ |
 | R332-18 | **Every number flag is digits only, with no sign and no leading zero** (`--timeout-ms`, `--interval-seconds`, `--throttle-seconds`, `--max-files`: `+60`, `060`, ` 500`, `6e1` and an empty value refused by name, as the port is) | `a_number_flag_with_a_sign_or_a_leading_zero_is_refused` | ✓ |
 | R332-19 | **A probe that ran but could not save its state is not a skipped probe**: it stamps `watchdog.lock` (one fixed 41-byte line), so ten minutes of an unwritable state directory are ten `notice-withheld` lines, never a `suspect-expired`, and the DOWN goes out at the first probe that can be saved, dated from the first miss; a stamp older than the saved probe, in the future, or not a stamp at all keeps nothing (the last named once and rewritten), and a stamp that cannot be written is named in the refusal | `probes_that_could_not_save_are_not_a_sleep_and_the_withheld_notice_stays_due`, `the_lock_stamp_never_keeps_a_miss_across_a_real_sleep`, `a_state_that_cannot_be_saved_withholds_the_notice_and_never_repeats_it`, `a_read_only_state_directory_sends_no_notice_at_all_rather_than_many` | ✓ |
+
+## The /db address and its history (R3-01, D-5301)
+
+`web/src/lib/urlstate.js` (`encodeDb`, `decodeDb`, `dbHistory`,
+`isChoiceGesture`) and `web/src/lib/db/selection-model.js`
+(`linkedContract`). Proofs in `web/tests/db-address.test.js` and
+`web/tests/db-history.test.js`, run by `npm test` in `web/`.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R301-01 | **An address the page writes never names a field twice.** Strikes are one comma field (`k=1160000,1200000`), moneyness rungs one comma field, so the server's one-value-per-field rule never refuses an address the page wrote | `an_address_with_two_strikes_reloads`, `every_db_choice_round_trips_through_the_address` (every key at once: `repeatedKey(q) === null`) | ✓ |
+| R301-02 | **One selection is one address, byte for byte**: keys in `DB_KEYS` order, strikes sorted numerically and deduplicated, defaults not written, and `encodeDb(decodeDb(q).sel) === q` for every key | `every_db_choice_round_trips_through_the_address`; `urlstate.test.js` `one /db selection is one address: strikes sorted and deduplicated, keys in D-3337 order` | ✓ |
+| R301-03 | **Every value a link carries is honoured or named, never dropped**, each distinct problem once and at most `MAX_REFUSED` of them; an excluded feed is refused by name and probes nothing; a key in small letters is refused and never re-cased | `a_linked_page_number_is_honoured_or_refused`, `an_excluded_feed_in_a_link_is_refused_by_name`, `an_absurd_address_names_each_problem_once_and_a_bounded_few`, `an unknown sort, direction, side, view, universe, rows or field is named, never dropped`, `a_lower_case_key_is_named_and_not_read` | ✓ |
+| R301-04 | **One choice made on a control is one Back entry; nothing else adds one**: a seed, a clamp, a restore after Back or Forward, and a press or key that chooses nothing (blank space, Tab, Escape, a modifier) correct the current entry | `back_and_forward_restore_each_selection`, `a seed, a clamp and a restore correct the current entry and never add one`, `a press off a control, or a key that chooses nothing, arms no Back entry` | ✓ |
+| R301-05 | **Reading an address is constant work per address**: encode, decode and `linkedContract` under 1 ms at p99, n = 1,000; whether a typed name is held is one `Set` probe (`heldUnderlyings`), not a scan of the census | `encode plus decode, with the contract resolved, stays under 1 ms at p99 (n = 1,000)`, `when the instrument matches nothing the Timeframe box says so, and blames no other rung` | ✓ |
+
+## The importer's file split moves lines and changes none (R3-35, D-4979)
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R335-01 | **The split importer writes the same bytes.** Six imports of invented NIFTY and BANKNIFTY spot (a special session, a weekend and a holiday in the span), shares and options (NIFTY strikes both sides, a BANKNIFTY and a share option, an illiquid strike, a refused file, and a re-run that skips its done day) into one store say what the unsplit importer said and leave exactly its files with its bytes (SHA-256 of every month, checksum, census, journal, day ledger, lineage and lots ledger and provenance record, less the wall clock); the pins were taken on the unsplit file and are unchanged | `pull::gdfl_import::split_tests::the_split_importer_writes_the_same_bytes` | ✓ |
+| R335-02 | **The split moves lines and changes none.** The six files' non-blank lines are the unsplit file's as a multiset, less module, use and visibility lines, with 0 others; what is set aside is pinned (54, 97, 311), and a counter that set aside a changed line could not pass | `pull::gdfl_import::split_tests::the_split_moves_lines_and_changes_none`, `pull::gdfl_import::split_tests::the_line_counter_sets_aside_only_module_use_and_visibility` | ✓ |
