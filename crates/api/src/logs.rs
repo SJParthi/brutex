@@ -791,13 +791,14 @@ fn reached(halves: &[Half], now: i64) -> Reached {
         .filter_map(|(_, reach)| reach.audited_from())
         .min();
     let days = audited_from.map(|from| now.saturating_sub(from).div_euclid(86_400_000));
-    let alert = match (audited_from, days) {
-        (Some(from), Some(days)) if days < YOUNG_AUDIT_DAYS => Some(format!(
-            "the audit history reaches back {days} day(s), to {}: younger than \
-             {YOUNG_AUDIT_DAYS} days, so nothing audited before then can be answered",
-            crate::server::ist_stamp(from.div_euclid(1_000))
+    // NO RENDERED CLOCK IN THE WORDS: the JSON's times are epoch
+    // milliseconds (`audited_from`), and the page adds its IST stamp itself.
+    let alert = match days {
+        Some(days) if days < YOUNG_AUDIT_DAYS => Some(format!(
+            "the audit history reaches back {days} day(s): younger than {YOUNG_AUDIT_DAYS} days, \
+             so nothing audited before then can be answered"
         )),
-        (Some(_), _) => None,
+        Some(_) => None,
         _ => Some(
             "no directory read keeps an audit history: nothing audited can be answered for any \
              time"
@@ -851,8 +852,12 @@ fn reach_note(halves: &[Half], now: i64) -> String {
     if let Some(ref alert) = reach.alert {
         let _ = write!(
             out,
-            "<p class=\"halt\"><b>Audit history is short</b>{}.</p>",
-            render::escape(alert)
+            "<p class=\"halt\"><b>Audit history is short</b>{}{}.</p>",
+            render::escape(alert),
+            reach.audited_from.map_or_else(String::new, |from| format!(
+                " (its oldest line: {})",
+                render::escape(&crate::server::ist_stamp(from.div_euclid(1_000)))
+            )),
         );
     }
     out.push_str("<p class=\"lead\">Reaches back:");
@@ -3035,10 +3040,16 @@ fn line_after(path: &std::path::Path, at: u64, end: u64) -> Option<Placed> {
 /// them under its lock and clamps its clock, so `ms` order is file order
 /// (`telemetry` `Inner::stamp`).
 fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> u64 {
+    // `low` is always a line's start: every line starting before it is
+    // stamped at or before `to`. A probe that finds no line starting below
+    // `high` narrows to `middle` and loses nothing: the line straddling
+    // `middle` starts below it and is read whole, to `end`, when a later probe
+    // reaches it, and if it is at or before `to` then `low` moves past it to
+    // where `high` was.
     let (mut low, mut high) = (0u64, end);
     while low < high {
         let middle = low + (high - low) / 2;
-        match line_after(path, middle, high) {
+        match line_after(path, middle, end) {
             Some(line) if line.start < high && line.record.at_unix_millis > to => {
                 high = line.start;
             }
@@ -3563,21 +3574,30 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
             stream.fill(&mut budget, &mut out.rolled_off, &mut out.errors);
         }
         // A STREAM WITH POINTERS LEFT AND NO HEAD READ could hold the newest
-        // line: with the budget spent, the page stops rather than guess.
+        // line: with the budget spent, the page stops rather than guess. So
+        // does one whose fetched page is spent while its posting holds older
+        // pointers (`more`): a line from another stream could be older than
+        // one it has not fetched yet (R3-24).
         if streams
             .iter()
-            .any(|s| s.head.is_none() && s.next < s.page.pointers.len())
+            .any(|s| s.head.is_none() && (s.next < s.page.pointers.len() || s.more))
         {
             out.capped = true;
             break;
         }
+        // NEWEST FIRST; on a tie (the same line in a half's two streams) the
+        // rolling audit stream's copy, which is where it was first written.
         let best = streams
             .iter()
             .enumerate()
             .filter_map(|(at, stream)| {
                 stream.head.as_ref().map(|(_, record)| {
                     let half_rank = usize::from(stream.half != "served");
-                    (at, (record.at_unix_millis, half_rank, record.seq))
+                    let source_rank = usize::from(stream.source == "audit");
+                    (
+                        at,
+                        (record.at_unix_millis, half_rank, record.seq, source_rank),
+                    )
                 })
             })
             .max_by_key(|(_, key)| *key)
@@ -7010,11 +7030,12 @@ mod tests {
     }
 
     /// **A PARAMETER NO FILTER READS IS NAMED, NEVER DROPPED** (WP-33c,
-    /// DB-A45): `reason=`, `why=` and any other name come back under
-    /// `ignored`, and a cursor with no key to page is named too.
+    /// DB-A45): `cause=`, `why=` and any other name come back under
+    /// `ignored`, and a cursor with no key to page is named too. (`reason=`
+    /// was this test's unknown name until R3-24 made it a key.)
     #[test]
     fn a_parameter_no_filter_reads_is_named_never_dropped() {
-        let read = asked("reason=census&why=x&bogus=1&before=1.2");
+        let read = asked("cause=census&why=x&bogus=1&before=1.2");
         let named: Vec<(&str, &str)> = read
             .ignored
             .iter()
@@ -7024,7 +7045,7 @@ mod tests {
             named,
             [
                 ("before", "1.2"),
-                ("unknown parameter", "reason"),
+                ("unknown parameter", "cause"),
                 ("unknown parameter", "why"),
                 ("unknown parameter", "bogus"),
             ]
@@ -7805,5 +7826,463 @@ mod tests {
                 (9, "r9")
             ]
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_tests {
+    //! R3-24: the never-rolling state stream read, the new keys, a capped
+    //! answer continued, every answer's reach, and the import journal's
+    //! contradiction of an old "day imported" line (DB-G88, DB-023, DB-A48).
+
+    use super::{
+        Half, IST_OFFSET_MS, MAX_KEYED_READS, SCAN_BYTES, YOUNG_AUDIT_DAYS, asked, instant_of,
+        json_over, keyed_json, logs_json_over, page_over, reach_json, store_of,
+    };
+
+    /// A fresh directory and a sink writing every level into it.
+    fn sink_in(name: &str) -> (std::path::PathBuf, telemetry::Sink) {
+        let dir = crate::scratch::path(&format!("logs-r324-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        (dir, sink)
+    }
+
+    /// The keyed `/logs.json` body over `dir` alone.
+    fn keyed(dir: &std::path::Path, query: &str) -> serde_json::Value {
+        let asked = asked(query);
+        assert!(!asked.keys.is_empty(), "{query} names a key");
+        serde_json::from_str(&keyed_json(dir, None, &asked, None)).expect("JSON")
+    }
+
+    /// The records of an answer, as `(target, message)`.
+    fn named(got: &serde_json::Value) -> Vec<(String, String)> {
+        got["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| {
+                (
+                    record["target"].as_str().unwrap().to_owned(),
+                    record["message"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The names an answer lists as ignored.
+    fn ignored(got: &serde_json::Value) -> Vec<String> {
+        got["ignored"]
+            .as_array()
+            .expect("ignored")
+            .iter()
+            .map(|entry| entry["param"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// **A CAPPED ANSWER CAN BE CONTINUED** (R3-24): 2,100 lines of one code
+    /// stand newer than the one the request's target admits, so the first
+    /// page reads its 2,000 lines, finds nothing, and says so: "the first
+    /// 2000 of 2101", `capped`, and a cursor. The cursor's page reads on from
+    /// there and finds the line. Before R3-24 the answer named no `of` and
+    /// said nothing of how many it had not read.
+    #[test]
+    fn a_capped_answer_can_be_continued() {
+        let (dir, sink) = sink_in("capped");
+        let _ = sink.emit(
+            &telemetry::Event::error("gdfl.import", "refused")
+                .with("code", "too_many_entries")
+                .with("kind", "options")
+                .with("day", "2020-01-02"),
+        );
+        for n in 0..2_100u32 {
+            let _ = sink.emit(
+                &telemetry::Event::error("pull.spot", "member did not land")
+                    .with("code", "too_many_entries")
+                    .with("n", n),
+            );
+        }
+        let query = "code=too_many_entries&target=gdfl.import&limit=5";
+        let first = keyed(&dir, query);
+        let index = &first["keyed"]["index"];
+        assert_eq!(first["records"].as_array().unwrap().len(), 0, "{index:#}");
+        assert_eq!(index["capped"], true);
+        assert_eq!(index["reads"], MAX_KEYED_READS);
+        assert_eq!(index["of"], 2_101);
+        let said = index["said"].as_str().expect("words");
+        assert!(said.contains("the first 2000 of 2101"), "{said}");
+        assert!(said.contains("before=<next>"), "{said}");
+        let next = first["keyed"]["next"].as_str().expect("a cursor");
+        let second = keyed(&dir, &format!("{query}&before={next}"));
+        assert_eq!(
+            named(&second),
+            [("gdfl.import".to_owned(), "refused".to_owned())]
+        );
+        assert_eq!(second["keyed"]["index"]["capped"], false);
+        assert!(second["keyed"]["next"].is_null(), "every line read");
+        assert!(
+            second["keyed"]["index"]["said"]
+                .as_str()
+                .unwrap()
+                .contains("every match")
+        );
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE LOG IS ASKED BY MONTH, BY REASON, BY IMPORT KIND AND BY A TIME
+    /// SPAN** (R3-24): each through its own posting or the files its time
+    /// meets, each narrowing a key beside it, each garbage value named.
+    #[test]
+    fn the_log_is_asked_by_month_reason_kind_and_span() {
+        let (dir, sink) = sink_in("keys");
+        let refusal = |kind: &'static str, day: &'static str, code: &'static str, reason| {
+            telemetry::Event::error("gdfl.import", "refused")
+                .with("kind", kind)
+                .with("day", day)
+                .with("code", code)
+                .with("reason", reason)
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        let _ = sink.emit(&refusal("options", "2020-01-02", "A", "census_full"));
+        pause();
+        let _ = sink.emit(&refusal("stocks", "2020-02-03", "B", "census_full"));
+        pause();
+        let _ = sink.emit(&refusal("options", "2020-02-04", "C", "bad_row"));
+        let days = |got: &serde_json::Value| -> Vec<String> {
+            got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["fields"]["day"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            days(&keyed(&dir, "month=2020-02")),
+            ["2020-02-04", "2020-02-03"]
+        );
+        assert_eq!(
+            days(&keyed(&dir, "reason=census_full")),
+            ["2020-02-03", "2020-01-02"],
+            "found by reason though each code differs"
+        );
+        assert_eq!(
+            days(&keyed(&dir, "kind=options")),
+            ["2020-02-04", "2020-01-02"]
+        );
+        assert_eq!(
+            days(&keyed(&dir, "kind=stocks&month=2020-02")),
+            ["2020-02-03"]
+        );
+        let by_kind = keyed(&dir, "kind=options");
+        assert_eq!(
+            by_kind["keyed"]["kind"], "options",
+            "the importer's spelling"
+        );
+        assert_eq!(asked("kind=Options").ignored[0].0, "kind", "and only it");
+
+        // A SPAN ALONE: exactly the line stamped inside it.
+        let all = keyed(&dir, "month=2020-01");
+        let at = all["records"][0]["ts"].as_i64().unwrap();
+        let got = keyed(&dir, &format!("from={at}&to={at}"));
+        assert_eq!(days(&got), ["2020-01-02"], "{got:#}");
+        assert_eq!(got["keyed"]["span"]["from"], at);
+        assert_eq!(got["keyed"]["index"]["postings"][0]["dimension"], "span");
+        let open_ended = keyed(&dir, &format!("from={at}"));
+        assert_eq!(open_ended["records"].as_array().unwrap().len(), 3);
+        assert!(open_ended["keyed"]["span"]["to"].is_null());
+        // A SPAN BESIDE A KEY narrows it, and one before every line is empty.
+        assert_eq!(
+            days(&keyed(&dir, &format!("reason=census_full&to={at}"))),
+            ["2020-01-02"]
+        );
+        assert!(
+            keyed(&dir, "to=2020-01-01")["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // GARBAGE IS NAMED, never read as no filter.
+        let bad = serde_json::from_str::<serde_json::Value>(&json_over(
+            &dir,
+            None,
+            &asked("month=2020-13&kind=futures&reason=a/b&from=yesterday&to=x"),
+            None,
+        ))
+        .expect("JSON");
+        assert_eq!(ignored(&bad), ["month", "reason", "kind", "from"]);
+        let reversed = asked("from=2026-10-17&to=2026-10-16");
+        assert!(reversed.keys.span.is_none());
+        assert_eq!(reversed.ignored[0].0, "from");
+        let only_to = asked("to=junk");
+        assert_eq!(only_to.ignored[0].0, "to");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An instant is a number of milliseconds, an IST day or minute or second,
+    /// or the same in UTC with `Z`; the end of a day or minute is its last
+    /// millisecond; nothing else reads.
+    #[test]
+    fn an_instant_is_read_in_ist_unless_it_says_utc() {
+        let midnight_utc = 20_378 * 86_400_000_i64; // 2025-10-17
+        assert_eq!(instant_of("2025-10-17Z", false), Some(midnight_utc));
+        assert_eq!(
+            instant_of("2025-10-17", false),
+            Some(midnight_utc - IST_OFFSET_MS)
+        );
+        assert_eq!(
+            instant_of("2025-10-17", true),
+            Some(midnight_utc - IST_OFFSET_MS + 86_400_000 - 1)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15", false),
+            Some(midnight_utc - IST_OFFSET_MS + (9 * 60 + 15) * 60_000)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15", true),
+            Some(midnight_utc - IST_OFFSET_MS + (9 * 60 + 16) * 60_000 - 1)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15:30Z", true),
+            Some(midnight_utc + ((9 * 60 + 15) * 60 + 31) * 1_000 - 1)
+        );
+        assert_eq!(instant_of("1760659200000", false), Some(1_760_659_200_000));
+        for garbage in [
+            "",
+            "abc",
+            "2025-10-17T24:00",
+            "2025-10-17T09:60",
+            "2025-10-17T09:15:60",
+            "2025-10-17T09",
+            "2025-10-17T9:15",
+            "2025-10-17T09:15:30:00",
+            "2025-13-01",
+            "12345678901234567",
+        ] {
+            assert_eq!(instant_of(garbage, false), None, "{garbage:?}");
+        }
+    }
+
+    /// **A TARGET ALONE READS EVERY AUDITED LINE, NOT THE NEWEST 4 MiB**
+    /// (R3-24, DB-023): one refusal, then more than [`SCAN_BYTES`] of other
+    /// lines over it. `target=` used to be the ring's filter and stopped at
+    /// the scan cap without it; it is the index's key now, with the newest
+    /// ring bytes beside it on a first page.
+    #[test]
+    fn a_target_alone_reads_every_audited_line_not_the_newest_4_mib() {
+        let (dir, sink) = sink_in("target-alone");
+        let _ = sink.emit(
+            &telemetry::Event::error("pull.spot", "member did not land").with("instrument", "ACC"),
+        );
+        let wide = "w".repeat(telemetry::MAX_STR_VALUE_BYTES);
+        let mut written = 0u64;
+        while written < SCAN_BYTES + 512 * 1024 {
+            let before = sink.health().current_bytes;
+            let _ =
+                sink.emit(&telemetry::Event::info("api.noise", "busy").with("w", wide.as_str()));
+            written += sink.health().current_bytes - before;
+        }
+        let read = asked("target=pull.spot");
+        assert_eq!(read.keys.target.as_deref(), Some("pull.spot"));
+        assert!(read.ring, "a first page reads the ring's newest bytes too");
+        let got = keyed(&dir, "target=pull.spot");
+        assert_eq!(
+            named(&got),
+            [("pull.spot".to_owned(), "member did not land".to_owned())],
+            "{:#}",
+            got["keyed"]
+        );
+        assert_eq!(got["keyed"]["rows"][0]["source"], "audit");
+        assert_eq!(
+            got["hit_scan_cap"], true,
+            "the ring alone would have missed it"
+        );
+        // A RUN BESIDE IT keeps `target=` a filter of the ring, as before.
+        assert!(asked("target=pull.spot&run=7").keys.is_empty());
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STATE CHANGE THE AUDIT STREAM LOST IS ANSWERED FROM THE STATE
+    /// STREAM** (R3-24, DB-G88), and one both streams hold is shown once.
+    #[test]
+    fn a_state_change_is_found_in_the_state_stream_once() {
+        let (dir, sink) = sink_in("state");
+        let _ = sink.emit(&telemetry::Event::warn("autopilot", "paused").with("epoch", 3u64));
+        let _ = sink.emit(&telemetry::Event::error("x", "refused"));
+        let both = keyed(&dir, "target=autopilot");
+        assert_eq!(both["keyed"]["matched"], 1, "{:#}", both["keyed"]);
+        assert_eq!(both["records"].as_array().unwrap().len(), 1);
+        let sources: Vec<&str> = both["keyed"]["index"]["postings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|posting| posting["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, ["audit", "state"]);
+        drop(sink);
+        // AS IF THE REFUSALS HAD ROLLED IT AWAY: the audit stream is gone.
+        std::fs::remove_file(telemetry::audit_current_path(&dir)).expect("the audit file");
+        std::fs::remove_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("its index");
+        let lost = keyed(&dir, "target=autopilot");
+        assert_eq!(
+            named(&lost),
+            [("autopilot".to_owned(), "paused".to_owned())]
+        );
+        assert_eq!(lost["keyed"]["rows"][0]["source"], "state");
+        assert_eq!(
+            lost["keyed"]["index"]["postings"][0]["state"], "no audit stream",
+            "the gone stream is named, never read as empty"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EVERY LOG ANSWER SAYS HOW FAR BACK IT REACHES, WITH ONE ALERT WHEN
+    /// THE AUDIT HISTORY IS YOUNGER THAN 30 DAYS** (R3-24, DB-G88).
+    #[test]
+    fn every_log_answer_says_how_far_back_it_reaches() {
+        let (dir, sink) = sink_in("reach");
+        let _ = sink.emit(&telemetry::Event::info("cli.lifecycle", "command started"));
+        let _ = sink.emit(&telemetry::Event::error("x", "refused"));
+        let first = serde_json::from_str::<serde_json::Value>(&json_over(
+            &dir,
+            None,
+            &asked("limit=5"),
+            None,
+        ))
+        .expect("JSON");
+        let started = first["records"][1]["ts"].as_i64().unwrap();
+        let reach = &first["reach"];
+        assert_eq!(reach["halves"][0]["half"], "served");
+        assert_eq!(reach["halves"][0]["ring_from"], started);
+        assert_eq!(reach["halves"][0]["state_from"], started);
+        assert_eq!(reach["audited_from"], started);
+        assert_eq!(reach["young_below_days"], YOUNG_AUDIT_DAYS);
+        assert!(
+            reach["alert"]
+                .as_str()
+                .is_some_and(|alert| alert.contains("younger than 30 days")),
+            "{reach:#}"
+        );
+        // THE KEYED ANSWER SAYS IT TOO.
+        assert_eq!(keyed(&dir, "target=x")["reach"]["audited_from"], started);
+        // THIRTY-ONE DAYS ON there is no alert.
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let later: serde_json::Value = serde_json::from_str(&format!(
+            "{{{}}}",
+            reach_json(&halves, started + 31 * 86_400_000)
+        ))
+        .expect("JSON");
+        assert!(later["reach"]["alert"].is_null(), "{later:#}");
+        assert_eq!(later["reach"]["days"], 31);
+        // NOTHING KEPT is the alert, never a quiet answer.
+        let empty = [Half {
+            name: "served",
+            path: dir.join("nothing-here"),
+        }];
+        let none: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", reach_json(&empty, started))).expect("JSON");
+        assert!(
+            none["reach"]["alert"]
+                .as_str()
+                .unwrap()
+                .contains("no directory read keeps an audit history")
+        );
+        assert!(none["reach"]["halves"][0]["ring_from"].is_null());
+        // THE PAGE says it, the alert first.
+        let page = page_over(&dir, None, &asked("limit=5"), None);
+        assert!(page.contains("Audit history is short"), "{page}");
+        assert!(page.contains("Reaches back:"));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A CONTRADICTED DAY-IMPORTED LINE IS MARKED** (R3-24, DB-A48): the
+    /// import journal closed 2020-01-02 `incomplete` and holds no line for
+    /// 2022-03-07, so the log's "day imported" for each carries a conflict
+    /// with the journal's outcome beside it; 2020-01-03, which the journal
+    /// closed `done`, does not; nor does any other line.
+    #[test]
+    fn a_contradicted_day_imported_line_is_marked() {
+        let root = crate::server::import_journal::tests::journal(
+            "r324-contradicted",
+            "begin options 2020-01-02 *\n\
+             incomplete options 2020-01-02 * definition=2 files=12 seconds=333 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+             begin options 2020-01-03 *\n\
+             done options 2020-01-03 * definition=2 files=11 seconds=222 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+        );
+        let cli = root.join("logs").join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            for day in ["2020-01-02", "2020-01-03", "2022-03-07"] {
+                let day: &'static str = Box::leak(day.to_owned().into_boxed_str());
+                let _ = sink.emit(
+                    &telemetry::Event::info("gdfl.import", "day imported")
+                        .with("kind", "options")
+                        .with("day", day),
+                );
+            }
+            let _ = sink.emit(
+                &telemetry::Event::info("gdfl.import", "day incomplete")
+                    .with("kind", "options")
+                    .with("day", "2020-01-02"),
+            );
+        }
+        let got: serde_json::Value =
+            serde_json::from_str(&logs_json_over(None, &root, "limit=10")).expect("JSON");
+        let conflict_of = |day: &str, message: &str| -> serde_json::Value {
+            got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["fields"]["day"] == day && record["message"] == message)
+                .unwrap_or_else(|| panic!("{day} {message}: {got:#}"))
+                .get("conflict")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let incomplete = conflict_of("2020-01-02", "day imported");
+        assert_eq!(
+            incomplete["journal_outcome"], "incomplete",
+            "{incomplete:#}"
+        );
+        assert_eq!(incomplete["journal_line"], 2);
+        assert_eq!(incomplete["with"], "import journal");
+        assert!(conflict_of("2020-01-03", "day imported").is_null());
+        let unlined = conflict_of("2022-03-07", "day imported");
+        assert_eq!(unlined["journal_outcome"], "no journal line");
+        assert!(unlined["journal_line"].is_null());
+        assert!(conflict_of("2020-01-02", "day incomplete").is_null());
+        // THE PAGE marks the same rows.
+        let halves = super::halves_of(None, Some(&root));
+        assert_eq!(store_of(&halves).as_deref(), Some(root.as_path()));
+        let page = super::page_across(&halves, &asked("limit=10"), None);
+        assert_eq!(page.matches("<b>CONFLICT</b>").count(), 2, "{page}");
+        assert!(page.contains("closed this day incomplete (line 2)"));
+        // NO STORE, NO JOURNAL: nothing to compare with, nothing marked.
+        assert!(
+            store_of(&[Half {
+                name: "served",
+                path: cli.clone(),
+            }])
+            .is_none()
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
