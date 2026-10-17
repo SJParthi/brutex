@@ -49,7 +49,8 @@
     windowText,
     windowEmptyWhy,
     coverTotals,
-    missingText
+    missingText,
+    refusedFrontOf
   } from '$lib/db/notes-coverage.js';
   import { untrack } from 'svelte';
   import { ROW, HEAD } from '$lib/db/bars-plan.js';
@@ -445,17 +446,7 @@
      * missing; they are named beside the coverage figure instead, from the
      * band's own answer — no request of their own.
      */
-    const refusedFront = $derived.by(() => {
-      const days = (db.dayBandCells ?? []).filter((/** @type {any} */ c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
-      if (days.length === 0) return null;
-      return {
-        n: days.length,
-        from: days[0].day,
-        to: days[days.length - 1].day,
-        instrument: db.dayBandInstrument ?? '',
-        text: `${fmt(days.length)} day(s) of a refused front, ${dayLabel(days[0].day)} → ${dayLabel(days[days.length - 1].day)}${db.dayBandInstrument ? ` (${db.dayBandInstrument})` : ''}: the vendor served them and a pull refused them before append, so no daily bar is stored there (D-3315). Coverage measures from the first stored bar, so these days are named here, never counted as held.`
-      };
-    });
+    const refusedFront = $derived(refusedFrontOf(db.dayBandCells, db.dayBandInstrument ?? ''));
 
     const storeBars = $derived(db.deco.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
     const kindCount = $derived.by(() => {

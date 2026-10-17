@@ -27,9 +27,10 @@
   import { rungMatches } from '$lib/db/notes-options.js';
   import { ask } from '$lib/ask.js';
   import { readGreeks, greekCell, greekKey } from '$lib/greeks.js';
-  import { dayLabel, barTimeLabel } from '$lib/dates.js';
+  import { dayLabel, barTimeLabel, istDay } from '$lib/dates.js';
   import DbBasisBadge from './DbBasisBadge.svelte';
   import { oneInstrument, sourcesHrefOfDb } from '$lib/sources.js';
+  import { barsBadge, barsQueryKey, headerRange, closeInWindow, contractTail } from '$lib/db/notes-coverage.js';
 
   /**
    * THE ANCHOR'S READOUTS AND THE EXPORT — the window band's facts and their
@@ -228,6 +229,58 @@
       )
     );
 
+    /* ---------------------------------------------------------------------
+       THE BARS TAB'S COUNT KEEPS THE SERVER'S NUMBER ON BOTH TABS (R3-04,
+       DB-048).
+
+       Leaving Bars drops its rows and its answer by design, and the badge
+       fell back to the census's stored count: the pager read 434 and the
+       Coverage tab's Bars badge 443 for one selection and one day window.
+       The last count the server gave is kept under the query it counted
+       (`barsQueryKey`: feed, rung, months, series, bounds — never the page
+       or the order) and read back while the query is unchanged. It costs no
+       request: it is the answer the Bars grid already read.
+       --------------------------------------------------------------------- */
+    /** @type {{ key: string, total: number } | null} */
+    let barsCounted = $state.raw(null);
+    const barsKey = $derived(barsQueryKey(feeds.active ?? '', db.barQueryPlan, db.barBounds, db.nonce));
+    $effect(() => {
+      /* ONLY A SETTLED ANSWER IS KEPT: while a new query loads, the grid
+         still holds the last one's answer, and keeping it then would file
+         the old count under the new query. A settled answer is the latest
+         query's — the read aborts every earlier one. */
+      const said = db.view === 'bars' && !db.barState?.loading ? db.windowSaid : null;
+      if (said) barsCounted = { key: untrack(() => barsKey), total: said.total };
+    });
+    const barsCount = $derived(
+      barsBadge({
+        said: db.view === 'bars' && db.windowSaid ? db.windowSaid.total : null,
+        remembered: barsCounted,
+        key: barsKey,
+        census: db.total,
+        narrows: Boolean(db.barBounds?.fromDay || db.barBounds?.toDay || db.barBounds?.fromTime || db.barBounds?.toTime)
+      })
+    );
+
+    /**
+     * THE HEADER LINE BESIDE THE TABS DESCRIBES THE WINDOW IN VIEW (R3-04):
+     * the From and To days when they narrow, else the months on disk; the
+     * newest close only when it falls in that window; and a contract's
+     * strike as a price, `11,650 CE`, never `1165000 CE`.
+     */
+    const header = $derived.by(() => {
+      const range = headerRange(db.monthsIn ?? [], db.covWindow ?? null);
+      const nc = db.newestClose;
+      if (!nc || !('bar' in nc)) return { range, close: null, outside: '' };
+      const ms = nc.bar.t * 1000;
+      const where = closeInWindow(ms, db.covWindow ?? null, istDay);
+      return {
+        range,
+        close: where === 'in' ? { bar: nc.bar, key: nc.key, tail: contractTail(nc.key) } : null,
+        outside: where === 'in' ? '' : `newest stored close ${dayLabel(ms)} is ${where} the window`
+      };
+    });
+
     /**
      * The file's text: the census view's instrument-months, or the bar view's
      * rows with their option analytics (DB-047, DB-G101).
@@ -368,6 +421,8 @@
 
     Object.defineProperties(db, {
       coverBand: { get: () => coverBand },
+      barsCount: { get: () => barsCount },
+      header: { get: () => header },
       factFlash: { get: () => factFlash, set: (v) => (factFlash = v) },
       factSeen: { get: () => factSeen },
       factSeeded: { get: () => factSeeded, set: (v) => (factSeeded = v) },
@@ -474,11 +529,15 @@
            side.
            `0` is not a formatting slip, it is a measurement claim, and it
            was false -- the same `null`-versus-zero rule this page keeps
-           everywhere else. `total` is `matched.reduce((a, r) => a + r.rows)`
-           off /store.json, which carries `rows` per instrument-month, so the
-           honest number is available without opening a single bar file.
-           THE PAGER STILL READS `barSorted.length`, and must: it can only
-           page through rows that are actually loaded. -->
+           everywhere else.
+           ONE COUNT FOR ONE SELECTION AND ONE WINDOW, ON EITHER TAB (R3-04,
+           DB-048): the Bars badge is the server's count, live or kept from
+           the last read of the same query (`barsCount`); the census's
+           stored count only where no day or time bound narrows; a dash,
+           never a different set's number, where neither can speak. The
+           Coverage badge is the count Coverage lists (`covCount`), the same
+           on both tabs — it read the matched rows on Bars and added the
+           absent months on Coverage, 4 against 7. -->
       {#each VIEWS as v (v.key)}
         <button
           class="seg"
@@ -491,11 +550,9 @@
           >{v.label}<span
             class="c"
             title={v.key === 'bars'
-              ? db.windowSaid
-                ? `${fmt(db.pageTotal)} bar(s) this query keeps — the server's count over every matched month and series, after the date and time bounds; the same number the pager counts.`
-                : `${fmt(db.total)} bar(s) stored in the matched months, by the census; the server has not answered for this query yet.`
-              : `${fmt(db.sorted.length)} instrument-month(s) matched.`}
-            >{fmt(v.key === 'bars' ? (db.windowSaid ? db.pageTotal : db.total) : db.sorted.length)}</span
+              ? db.barsCount.title
+              : `${fmt(db.covCount)} instrument-month(s) Coverage lists: the matched months${db.covWindow ? ' the From and To days touch' : ''} and the months each matched series does not hold between its first and last — the same count on either tab, and the Coverage pager's.`}
+            >{v.key === 'bars' ? (db.barsCount.n === null ? '—' : fmt(db.barsCount.n)) : fmt(db.covCount)}</span
           ></button
         >
       {/each}
@@ -589,29 +646,34 @@
        SO THEY SIT WHERE THEY ARE READ FROM. The range describes the
        selection the tabs above count; the close is the newest row of the
        grid below. Both belong beside them, not in a band of their own. -->
-  {#if db.view === 'bars' && db.coverBand.cells.length > 0}
+  {#if db.view === 'bars' && db.header.range}
+    <!-- THE WINDOW IN VIEW, NOT THE WHOLE SERIES (R3-04): the From and To
+         days when they narrow, in order, else the matched months on disk. -->
     <span class="afacts">
       <span class="af">
-        <b>{db.coverBand.cells[0].month}</b><span class="arw">→</span><b
-          >{db.coverBand.cells[db.coverBand.cells.length - 1].month}</b
-        >
-        <i>on disk</i>
+        <b>{db.header.range.from}</b><span class="arw">→</span><b>{db.header.range.to}</b>
+        <i>{db.header.range.word}</i>
       </span>
-      {#if db.newestClose && 'bar' in db.newestClose}
+      {#if db.header.close}
         <!-- THE SELECTION'S NEWEST STORED CLOSE, NOT THE PAGE'S FIRST ROW
              (DB-007). One seek over every series and month of the selection,
-             asked once per selection; the date and time bounds do not move it,
-             as they do not move the "on disk" range beside it. -->
-        {@const nb = db.newestClose.bar}
+             asked once per selection. Shown only when it falls in the window
+             in view; one outside it is named as outside, never printed as the
+             window's own close. A contract's strike is a price (R3-04). -->
+        {@const nb = db.header.close.bar}
         {@const at = db.dayRung ? dayLabel(nb.t * 1000) : `${dayLabel(nb.t * 1000)} ${barTimeLabel(nb.t * 1000, db.rungSecs)}`}
-        {@const tail = (db.barQueryAll?.keys.length ?? 0) > 1 ? db.newestClose.key.split('-').slice(-2).join(' ') : ''}
+        {@const tail = (db.barQueryAll?.keys.length ?? 0) > 1 ? db.header.close.tail : ''}
         <span
           class="af"
-          title="The newest stored bar of this selection: {at}{db.dayRung ? '' : ' IST'}, {db.newestClose.key}. Read once for the selection, over every series and month — not the first row of the page."
+          title="The newest stored bar of this selection: {at}{db.dayRung ? '' : ' IST'}, {db.header.close.key}. Read once for the selection, over every series and month — not the first row of the page."
         >
           <b class="num" data-dir={nb.c > nb.o ? 'up' : nb.c < nb.o ? 'down' : 'flat'}>{paisaText(nb.c)}</b>
           <i>newest close · {at}{tail ? ` · ${tail}` : ''}</i>
         </span>
+      {:else if db.header.outside}
+        <span class="af" title="The newest stored bar of the whole selection falls outside the From and To window, so it is not this window's close."
+          ><i>{db.header.outside}</i></span
+        >
       {/if}
     </span>
   {/if}

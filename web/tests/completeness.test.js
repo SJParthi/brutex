@@ -31,9 +31,11 @@ import {
   derivedPartial,
   istDayOf,
   peersAtMost,
-  STORE_WIDE_SHARE
+  STORE_WIDE_SHARE,
+  coverPct,
+  owedKind
 } from '../src/lib/completeness.js';
-import { owedLedger, epochDayOfIso } from '../src/lib/calendar-owed.js';
+import { owedLedger, epochDayOfIso, ledgerSpan, derivativeEras } from '../src/lib/calendar-owed.js';
 
 /**
  * A synthetic `/calendar.json` body over `from` with the given day codes.
@@ -127,11 +129,12 @@ test('a CAS-eligible share owes 360 a session from 2026-08-03 and reads full at 
   const days = 'XX..XXXXX..XXXXX..XXXXX..XXXX.';
   const L = owedLedger(body({ from: '2026-09-01', days, regular: 375, cas: 360 }));
   const share = row({ instrument: 'NSE-CASH-RELIANCE', month: '2026-09', rows: 21 * 360 });
-  const c = judgeRow(share, { ledger: L });
+  // AN ELIGIBLE SHARE, BY ITS DATED FLAG, owes 360 a session and is full at 7,560.
+  const c = judgeRow(share, { ledger: L, casFlag: true });
   assert.equal(c.sessions, 21);
   assert.equal(c.auctionDays, 21);
   assert.equal(c.owed, 7560);
-  assert.equal(c.owedAlt, 7875, 'the ineligible count is named beside it');
+  assert.equal(c.owedAlt, null, 'a known flag decides; no other count stands beside it');
   assert.equal(c.state, 'full');
   assert.ok(c.notes.includes('cas'));
   // An index on the same days owes 375: it has no auction phase.
@@ -139,13 +142,194 @@ test('a CAS-eligible share owes 360 a session from 2026-08-03 and reads full at 
   assert.equal(index.owed, 7875);
   assert.equal(index.state, 'full');
   assert.ok(!index.notes.includes('cas'));
-  // A share at the ineligible count is full too; between the two it cannot be told.
+  // A share at the ineligible count is full under either flag.
   assert.equal(judgeRow({ ...share, rows: 7875 }, { ledger: L }).state, 'full');
-  assert.ok(judgeRow({ ...share, rows: 7700 }, { ledger: L }).notes.includes('cas_unresolved'));
   // Short of the eligible count is short.
-  const short = judgeRow({ ...share, rows: 7560 - 360 }, { ledger: L });
+  const short = judgeRow({ ...share, rows: 7560 - 360 }, { ledger: L, casFlag: true });
   assert.equal(short.missing, 360);
   assert.equal(short.state, 'near', 'one session short is under one session of 375');
+});
+
+test('a share on auction days is judged by its dated flag, and a flag the census lacks is never "full" between the counts (SC-CLOSE-17)', () => {
+  const days = 'XX..XXXXX..XXXXX..XXXXX..XXXX.';
+  const L = owedLedger(body({ from: '2026-09-01', days, regular: 375, cas: 360 }));
+  const share = row({ instrument: 'NSE-CASH-ZZFLAGZERO', month: '2026-09', rows: 21 * 360 });
+  // BEFORE: every share on an auction day owed 360, so a flag-0 share holding
+  // 360 a session read "full" though it owes 375 and lacks 15 a session.
+  // AFTER, FLAG 0: owed the regular count, short by 21 x 15.
+  const flagZero = judgeRow(share, { ledger: L, casFlag: false });
+  assert.equal(flagZero.owed, 7875);
+  assert.equal(flagZero.missing, 315);
+  assert.equal(flagZero.state, 'near');
+  assert.ok(!flagZero.notes.includes('cas'), 'an ineligible share is not judged at the auction count');
+  // AFTER, NO FLAG (the census carries none): neither verdict is claimed.
+  const unread = judgeRow(share, { ledger: L });
+  assert.equal(unread.state, 'unmeasured');
+  assert.equal(unread.missing, null);
+  assert.equal(unread.ratio, null, 'no percentage for a count the flag decides');
+  assert.equal(unread.owedAlt, 7875, 'the ineligible count is named beside the eligible one');
+  assert.ok(unread.notes.includes('cas_unresolved'));
+  assert.notEqual(unread.state, 'full');
+  // Under both counts it is short whatever the flag, by at least the eligible shortfall.
+  const under = judgeRow({ ...share, rows: 7000 }, { ledger: L });
+  assert.equal(under.missing, 560);
+  assert.ok(under.notes.includes('cas_unresolved'));
+  assert.equal(under.state, 'gap');
+  // Which count each kind of row owes.
+  assert.deepEqual(owedKind('CASH', true, null), { owed: 'cas', unknown: ['unknownCas', 'unknownShare'], unheld: 'unheldCas', cas: true, unresolved: true });
+  assert.equal(owedKind('CASH', true, false).owed, 'share');
+  assert.equal(owedKind('CASH', false, null).owed, 'share', 'no auction day, nothing to resolve');
+  assert.equal(owedKind('FNO', true, null).owed, 'deriv');
+  assert.equal(owedKind('INDEX', true, true).owed, 'index', 'an index has no auction phase, whatever the flag');
+  // The roll-up keeps an unresolved month out of every sum.
+  const month = rollUpMonths([{ ...share, cover: unread }])[0];
+  assert.equal(month.unmeasured, 1);
+  assert.equal(month.owed, 0);
+  assert.equal(month.pct, null);
+});
+
+test('a future is owed the derivatives venue\'s own count, era by era, never an index\'s (SC-CLOSE-17)', () => {
+  // 2026-07-30 .. 2026-08-05: Thu, Fri regular; weekend; Mon 3rd onward auction days.
+  const days = 'RR..XXX';
+  const withDerivs = {
+    ...body({ from: '2026-07-30', days, regular: 375, cas: 360 }),
+    owed: {
+      rung: '1min',
+      regular: 375,
+      casEligible: 360,
+      derivatives: [
+        { from: '2018-01-01', to: '2026-08-02', regular: 375, tradeDriven: false },
+        { from: '2026-08-03', to: '2026-10-04', regular: 385, tradeDriven: false }
+      ]
+    }
+  };
+  const L = owedLedger(withDerivs);
+  const fut = row({ instrument: 'NSE-FNO-NIFTY-2026-08-27-FUT', month: '2026-07', rows: 0 });
+  // July's two days owe 375 each; August's first three owe 385 each (the 15:40 close).
+  const july = judgeRow({ ...fut, rows: 750 }, { ledger: L });
+  assert.equal(july.owed, 750);
+  assert.equal(july.state, 'full');
+  const aug = judgeRow({ ...fut, month: '2026-08', rows: 3 * 375 }, { ledger: L });
+  assert.equal(aug.owed, 3 * 385, 'BEFORE it owed the index count, 3 x 375, and read full');
+  assert.equal(aug.missing, 30);
+  assert.equal(aug.state, 'near');
+  // An index on the same days still owes 375.
+  assert.equal(judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-08', rows: 1125 }), { ledger: L }).owed, 1125);
+  // An answer that serves no derivatives row judges no future: named, never the index count.
+  const old = judgeRow({ ...fut, month: '2026-08', rows: 1125 }, { ledger: owedLedger(body({ from: '2026-07-30', days, regular: 375, cas: 360 })) });
+  assert.equal(old.basis, 'none');
+  assert.match(old.why, /derivatives/);
+  // A special day owes a future no derivatives count: unknown, never the index's.
+  const special = owedLedger({
+    ...withDerivs,
+    days: 'RRP',
+    special: [{ day: epochDayOfIso('2026-08-01'), code: 'P', owed: 60, indexOwed: 60 }]
+  });
+  const s = judgeRow({ ...fut, month: '2026-08', rows: 60 }, { ledger: special });
+  assert.equal(s.unknownDays, 1);
+  assert.equal(s.owed, 0, 'never the 60 an index owes that Saturday');
+  assert.equal(s.state, 'unmeasured');
+  assert.ok(s.notes.includes('unknown_days'));
+  // At one second a future is trade-driven: the derivatives figure there is a ceiling.
+  assert.equal(isTradeDriven('1s', 'FNO', null), true);
+  assert.equal(judgeRow({ ...fut, timeframe: '1s', rows: 9 }, { ledger: L }).basis, 'trade');
+});
+
+test('a malformed derivatives era is refused, never skipped; an era with no count owes nothing', () => {
+  assert.equal(derivativeEras(undefined), null);
+  assert.throws(() => derivativeEras('375'), /not a list/);
+  assert.throws(() => derivativeEras([{ from: '2026-08-03', to: '2026-08-01', regular: 385 }]), /malformed era/);
+  assert.throws(() => derivativeEras([{ from: 20000, to: '2026-08-01' }]), /malformed era/);
+  const eras = derivativeEras([
+    { from: '2026-08-03', to: '2026-10-04', regular: 385 },
+    { from: '2018-01-01', to: '2026-08-02', regular: null, why: 'no verified hours' }
+  ]);
+  assert.deepEqual(eras?.map((e) => e.regular), [null, 385], 'sorted by their first day');
+  const L = owedLedger({
+    ...body({ from: '2026-07-31', days: 'R..R', regular: 375 }),
+    owed: { rung: '1min', regular: 375, casEligible: null, derivatives: [{ from: '2026-08-03', to: '2026-10-04', regular: 385 }] }
+  });
+  const span = ledgerSpan(L, L.from, L.to);
+  assert.equal(span.deriv, 385, 'the day before the first era owes a future nothing');
+  assert.equal(span.unknownDeriv, 1, 'and is named unknown');
+});
+
+test('a_surplus_day_never_hides_a_short_day: a session held with no bar is missing whatever the other days hold (R3-04, DB-014)', () => {
+  // 2022-03: 21 sessions at one second; the 7th (a Monday) is held with no bar.
+  // The 1st (Mahashivratri) and the 18th (Holi) closed, weekends closed.
+  const codes = '.RRR..RRRRR..RRRR...RRRRR..RRRR';
+  const held = codes
+    .split('')
+    .map((c, i) => (c === '.' ? '0' : i === 6 ? '0' : '1'))
+    .join('');
+  const own = owedLedger(
+    body({ from: '2022-03-01', days: codes, regular: 22500, rung: '1s', held, series: { symbol: 'BANKNIFTY', segment: 'INDEX' } })
+  );
+  const exchange = owedLedger(body({ from: '2022-03-01', days: codes, regular: 22500, rung: '1s' }));
+  const sessions = codes.split('').filter((c) => c === 'R').length;
+  assert.equal(sessions, 21);
+  // Twenty held days, each with 1,125 seconds more than a session owes: the
+  // month total reaches what 21 sessions owe, though one session has nothing.
+  const total = 20 * (22500 + 1125);
+  assert.equal(total, 21 * 22500);
+  const bank = row({ instrument: 'NSE-INDEX-BANKNIFTY', month: '2022-03', timeframe: '1s', rows: total });
+  // BEFORE: the month total covered the hole — "full", 100.00%.
+  const blind = judgeRow(bank, { ledger: exchange });
+  assert.equal(Math.max(0, /** @type {number} */ (blind.owed) - bank.rows), 0, 'the month total sees nothing missing');
+  // AFTER: the 7th's 22,500 seconds are missing whatever the other days hold.
+  const c = judgeRow(bank, { ledger: exchange, held: own });
+  assert.equal(c.missing, 22500);
+  assert.equal(c.state, 'gap', 'a whole session missing is a gap, never full');
+  assert.ok(c.ratio !== null && c.ratio < 1);
+  assert.equal(coverPct(c.ratio), '95.23%');
+  assert.ok(c.notes.includes('unheld_sessions'));
+  assert.equal(c.heldSessions, 20);
+  // The ledger's own floor: what the unheld session owes, in every kind.
+  const span = ledgerSpan(own, epochDayOfIso('2022-03-01'), epochDayOfIso('2022-03-31'));
+  assert.equal(span.unheldIndex, 22500);
+  assert.equal(span.unheldShare, 22500);
+  // A `-` digit (not read) owes no floor.
+  const unread = owedLedger(body({ from: '2022-03-01', days: codes, regular: 22500, rung: '1s', held: held.replace(/0/g, '-'), series: { symbol: 'BANKNIFTY', segment: 'INDEX' } }));
+  assert.equal(ledgerSpan(unread, unread.from, unread.to).unheldIndex, 0);
+  // A SURPLUS NO MONTH TOTAL CAN PLACE, with no held day read: never full.
+  const over = judgeRow({ ...bank, rows: 21 * 22500 + 400 }, { ledger: exchange });
+  assert.equal(over.state, 'over');
+  assert.equal(over.missing, null, 'nothing is known missing, and nothing is known whole');
+  assert.equal(over.ratio, null);
+  assert.equal(over.extra, 400);
+  assert.ok(over.notes.includes('surplus_unplaced'));
+  // ...and the month it stands in is "over", never "full".
+  const month = rollUpMonths([
+    { ...bank, cover: over },
+    { ...bank, instrument: 'NSE-INDEX-NIFTY', rows: 21 * 22500, cover: judgeRow({ ...bank, rows: 21 * 22500 }, { ledger: exchange }) }
+  ])[0];
+  assert.equal(month.over, 1);
+  assert.equal(month.state, 'over');
+  assert.deepEqual(monthVerdict({ n: 1, owed: 0, bars: 0, missing: 0, trade: 0, unmeasured: 0, absent: 0, over: 1 }), { pct: null, state: 'over' });
+});
+
+test('a_month_missing_one_bar_is_never_100_percent (R3-04, DB-014)', () => {
+  const days = '.RRR..RRRRR..RRRR...RRRRR..RRRR';
+  const L = owedLedger(body({ from: '2022-03-01', days, regular: 22500, rung: '1s' }));
+  const r = row({ instrument: 'NSE-INDEX-NIFTY', month: '2022-03', timeframe: '1s', rows: 21 * 22500 - 1 });
+  const c = judgeRow(r, { ledger: L });
+  assert.equal(c.missing, 1);
+  assert.equal(c.state, 'near');
+  // BEFORE: two decimals rounded half up, so one bar of 4,72,500 read 100.00%.
+  assert.equal(`${(/** @type {number} */ (c.ratio) * 100).toFixed(2)}%`, '100.00%');
+  // AFTER: rounded down.
+  assert.equal(coverPct(c.ratio), '99.99%');
+  assert.equal(coverPct(1), '100.00%');
+  assert.equal(coverPct(0.29), '29.00%', 'the float error of 0.29 x 10,000 is absorbed');
+  assert.equal(coverPct(0.00001), '<0.01%', 'something held never reads as nothing');
+  assert.equal(coverPct(0), '0.00%');
+  assert.equal(coverPct(null), '—');
+  assert.equal(coverPct(Number.NaN), '—');
+  assert.equal(coverPct(1 - 1e-15), '99.99%', 'a ratio under 1 never reaches 100.00%');
+  // The month card rounds the same way and is never "full".
+  const card = rollUpMonths([{ ...r, cover: c }])[0];
+  assert.equal(card.state, 'near');
+  assert.equal(coverPct(card.pct), '99.99%');
 });
 
 test('NIFTY 1s 2018-09 is 98.81% of 18 x 22,500, not "full 100.00%" (DB-014)', () => {

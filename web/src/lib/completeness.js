@@ -410,8 +410,10 @@ export function judgeRow(row, ctx) {
   cover.basis = 'calendar';
   const share = segment === 'CASH';
   const kind = owedKind(segment, span.auction > 0, ctx.casFlag ?? null);
-  const owed = span[kind.owed];
-  const unknown = kind.unknown.reduce((most, k) => Math.max(most, span[k]), 0);
+  /** The span's counts by field name, for the kind's names. */
+  const count = /** @type {Record<string, number>} */ (/** @type {unknown} */ (span));
+  const owed = count[kind.owed];
+  const unknown = kind.unknown.reduce((most, k) => Math.max(most, count[k]), 0);
   cover.unknownDays = unknown;
   if (unknown > 0) notes.push('unknown_days');
   if (kind.cas) notes.push('cas');
@@ -444,7 +446,9 @@ export function judgeRow(row, ctx) {
   // bar on owe is missing whatever the other days hold: a surplus on one
   // day never pays for a hole on another. Read off the series' own held
   // digits; with none read, the floor is nothing and the count decides.
-  const unheld = own ? Number(ledgerSpan(/** @type {any} */ (mine), from, to)[kind.unheld]) || 0 : 0;
+  const unheld = own
+    ? Number(/** @type {Record<string, number>} */ (/** @type {unknown} */ (ledgerSpan(/** @type {any} */ (mine), from, to)))[kind.unheld]) || 0
+    : 0;
   const missing = Math.max(0, owed - row.rows, unheld);
   if (unheld > owed - row.rows) notes.push('unheld_sessions');
   if (kind.unresolved && cover.owedAlt !== null && row.rows >= owed && row.rows < cover.owedAlt) {
@@ -492,18 +496,19 @@ export function judgeRow(row, ctx) {
   // hole. Failing that, `sharedMissing` is the shortfall EVERY series has —
   // the month's index count less the fullest series' (2020-02: no series
   // holds the 13th's 10:32 minute) — and a row missing more owns the rest.
-  if (cover.missing > 0) {
+  const short = cover.missing;
+  if (short !== null && short > 0) {
     const peers = ctx.peers ?? null;
     const whole = ledgerSpan(ledger, first, last);
     const shared =
       (ctx.support ?? 0) >= 2 && Number.isFinite(ctx.fullest)
         ? Math.max(0, whole.index - /** @type {number} */ (ctx.fullest))
         : 0;
-    cover.sharedMissing = Math.min(shared, cover.missing);
+    cover.sharedMissing = Math.min(shared, short);
     if (peers && peers.n >= 2 && peers.atMost >= STORE_WIDE_SHARE * peers.n) {
       notes.push('store_wide');
     } else if (shared > 0) {
-      notes.push(cover.missing <= shared ? 'store_wide' : 'store_wide_part');
+      notes.push(short <= shared ? 'store_wide' : 'store_wide_part');
     }
   }
   // A DERIVED RUNG BEHIND OR SHORT OF ITS 1min SOURCE (DB-013, DB-G12,

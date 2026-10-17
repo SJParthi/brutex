@@ -389,14 +389,16 @@ export function headerRange(months, window) {
     const lo = months.length ? months.reduce((a, b) => (b < a ? b : a)) : '';
     const hi = months.length ? months.reduce((a, b) => (b > a ? b : a)) : '';
     return {
-      from: window.from ? dayLabel(window.from) : lo ? monthLabel(lo) : '—',
-      to: window.to ? dayLabel(window.to) : hi ? monthLabel(hi) : '—',
+      from: window.from ? dayLabel(window.from) : lo ? monthLabel(lo) ?? lo : '—',
+      to: window.to ? dayLabel(window.to) : hi ? monthLabel(hi) ?? hi : '—',
       word: 'in view'
     };
   }
   if (months.length === 0) return null;
   const sorted = [...months].sort();
-  return { from: monthLabel(sorted[0]), to: monthLabel(sorted[sorted.length - 1]), word: 'on disk' };
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  return { from: monthLabel(first) ?? first, to: monthLabel(last) ?? last, word: 'on disk' };
 }
 
 /**
@@ -428,6 +430,32 @@ export function contractTail(key) {
   const ct = contractOf(key);
   if (ct !== null) return `${strikeText(ct.strike)} ${ct.side}`;
   return /-\d{4}-\d{2}-\d{2}-FUT$/.test(key) ? 'FUT' : '';
+}
+
+/**
+ * REFUSED FRONTS THE DAY BAND READ (D-3315), as one sentence: days before a
+ * series' first `1day` bar that a pull refused before append, so the rung
+ * holds no daily bar there. Coverage measures a series from its first bar,
+ * so these days are never counted missing; the box beside the coverage
+ * figure and the empty grid both print this sentence, so the two say the
+ * same thing. `null` when the band read none. Cells are the band's own,
+ * oldest first (`bandOf`).
+ *
+ * @param {Array<{ day: string, kinds?: string[] }> | null | undefined} cells
+ * @param {string} instrument the band's instrument, `''` when it names none
+ * @returns {{ n: number, from: string, to: string, text: string } | null}
+ */
+export function refusedFrontOf(cells, instrument) {
+  const days = (cells ?? []).filter((c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
+  if (days.length === 0) return null;
+  const from = days[0].day;
+  const to = days[days.length - 1].day;
+  return {
+    n: days.length,
+    from,
+    to,
+    text: `${fmt(days.length)} day(s) of a refused front, ${dayLabel(from)} → ${dayLabel(to)}${instrument ? ` (${instrument})` : ''}: the vendor served them and a pull refused them before append, so no daily bar is stored there (D-3315). Coverage measures from the first stored bar, so these days are named here and never counted as held.`
+  };
 }
 
 /** A coverage ratio, never 100.00% for a month missing a bar (`coverPct`). */
