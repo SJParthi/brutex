@@ -17,8 +17,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 use super::{
-    BEFORE_LISTING, HISTORY_ENDS, Listing, MASTER_DIR, Source, Span, Unknown, for_store,
-    master_day,
+    BEFORE_LISTING, HISTORY_ENDS, Listing, MASTER_DIR, Source, Span, Unknown, for_store, master_day,
 };
 use crate::session::Day;
 
@@ -106,8 +105,16 @@ const ALPHA: &str = "INE000A01001";
 fn the_newest_master_that_checks_is_used_and_a_bad_newer_one_is_named() {
     let root = Root::new("newest");
     let listed = day(2021, 3, 4);
-    install(&root.0, day(2026, 8, 3), &[row("ALPHA", ALPHA, Some(listed))]);
-    install(&root.0, day(2026, 8, 4), &[row("ALPHA", ALPHA, Some(listed))]);
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(listed))],
+    );
+    install(
+        &root.0,
+        day(2026, 8, 4),
+        &[row("ALPHA", ALPHA, Some(listed))],
+    );
     let table = Listing::load(&root.masters());
     assert_eq!(table.master().map(|(_, on)| on), Some(day(2026, 8, 4)));
     assert!(table.passed_over().is_empty());
@@ -126,7 +133,9 @@ fn the_newest_master_that_checks_is_used_and_a_bad_newer_one_is_named() {
     assert_eq!(table.passed_over().len(), 1);
     assert_eq!(table.passed_over()[0].0, "NSE_CM_security_04082026.csv.gz");
     assert!(table.passed_over()[0].1.contains("UNVERIFIED"));
-    let span = table.span("NSE", "ALPHA", Some(ALPHA)).expect("a master row");
+    let span = table
+        .span("NSE", "ALPHA", Some(ALPHA))
+        .expect("a master row");
     assert_eq!(span.first, Ok(listed));
     assert_eq!(span.source.code(), "nse_security_master");
     let Source::NseSecurityMaster { file, sha256 } = span.source else {
@@ -140,11 +149,18 @@ fn the_newest_master_that_checks_is_used_and_a_bad_newer_one_is_named() {
 fn a_bar_before_the_listing_day_is_refused_and_the_listing_day_is_kept() {
     let root = Root::new("before");
     let listed = day(2021, 3, 4);
-    install(&root.0, day(2026, 8, 3), &[row("ALPHA", ALPHA, Some(listed))]);
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(listed))],
+    );
     let table = Listing::load(&root.masters());
     let span = table.span("NSE", "ALPHA", Some(ALPHA)).unwrap();
     assert!(span.before_listing(day(2021, 3, 3)));
-    assert!(!span.before_listing(listed), "a bar ON the listing day is kept");
+    assert!(
+        !span.before_listing(listed),
+        "a bar ON the listing day is kept"
+    );
     assert!(!span.before_listing(day(2021, 3, 5)));
     assert_eq!(span.listed_on(), Some(listed));
     assert_eq!(BEFORE_LISTING, "before_listing");
@@ -247,7 +263,11 @@ fn history_ends_after_removal_unless_readmitted() {
     let table = Listing::load(&root.masters());
     let span = table.span("NSE", "GONE", Some("INE000F01006")).unwrap();
     assert_eq!(span.last, Some(removed_on));
-    assert_eq!(span.history_ended(removed_on), None, "the removal day itself");
+    assert_eq!(
+        span.history_ended(removed_on),
+        None,
+        "the removal day itself"
+    );
     assert_eq!(span.history_ended(day(2019, 7, 1)), Some(removed_on));
     let back = table.span("NSE", "BACK", Some("INE000G01007")).unwrap();
     assert_eq!(back.last, None);
@@ -266,7 +286,11 @@ fn no_master_on_disk_answers_nothing_and_names_why() {
     assert_eq!(missing.master(), None);
     assert_eq!(missing.passed_over().len(), 1);
     // Another exchange has no span here, master or not.
-    install(&root.0, day(2026, 8, 3), &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))]);
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
     let table = Listing::load(&root.masters());
     assert_eq!(table.span("BSE", "ALPHA", Some(ALPHA)), None);
     assert!(table.span("NSE", "ALPHA", Some(ALPHA)).is_some());
@@ -296,7 +320,11 @@ fn a_store_table_is_remembered_only_once_a_master_loads() {
     let first = for_store(&root.0);
     assert_eq!(first.master(), None);
     // Installed after a load that found nothing: the next call reads it.
-    install(&root.0, day(2026, 8, 3), &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))]);
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
     let second = for_store(&root.0);
     assert!(second.master().is_some());
     let third = for_store(&root.0);

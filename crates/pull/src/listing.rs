@@ -311,7 +311,11 @@ fn listing_day(field: &LifecycleDate, master_day: Day) -> Result<Day, Unknown> {
 
 /// The removal day, when the master states one on or before its own day and
 /// no readmission after it.
-fn removal_day(removal: &LifecycleDate, readmission: &LifecycleDate, master_day: Day) -> Option<Day> {
+fn removal_day(
+    removal: &LifecycleDate,
+    readmission: &LifecycleDate,
+    master_day: Day,
+) -> Option<Day> {
     let removed = removal.date().filter(|day| *day <= master_day)?;
     match readmission.date() {
         Some(back) if back > removed => None,

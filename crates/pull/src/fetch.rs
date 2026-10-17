@@ -1494,9 +1494,18 @@ pub fn fetch_and_land_listed<S: BarSource>(
                      security's history, not a failure (D-4991)",
                 )
                 .with("instrument", telemetry::Value::Str(&request.instrument_id))
-                .with("delisted_on", telemetry::Value::Str(&delisted_on.to_string()))
-                .with("from", telemetry::Value::Str(&request.window.from().to_string()))
-                .with("to", telemetry::Value::Str(&request.window.to().to_string()))
+                .with(
+                    "delisted_on",
+                    telemetry::Value::Str(&delisted_on.to_string()),
+                )
+                .with(
+                    "from",
+                    telemetry::Value::Str(&request.window.from().to_string()),
+                )
+                .with(
+                    "to",
+                    telemetry::Value::Str(&request.window.to().to_string()),
+                )
                 .with("code", telemetry::Value::Str(HistoryEnds::CODE)),
             );
             Ok(Landed {

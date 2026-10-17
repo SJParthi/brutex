@@ -154,7 +154,11 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
                 for bar in &bars {
                     let day = ist_day(bar.ts_micros);
                     let cause = series_identity::judge_day(day, prices(bar), rules);
-                    tally.count(cause.map_or(Verdict::Held, Verdict::Refused), day, bar.ts_micros);
+                    tally.count(
+                        cause.map_or(Verdict::Held, Verdict::Refused),
+                        day,
+                        bar.ts_micros,
+                    );
                     if let Some(cause) = cause {
                         scan.refused.push(RefusedBar {
                             timeframe: Timeframe::DAY_1,
@@ -257,7 +261,14 @@ pub(super) fn screen(
                 // CASH MINUTES ONLY: the population JUMP_BPS is measured over.
                 jumps: table.is_some() && step == 60,
             };
-            minute_arm(raw, kept, &witness, (store_root, &identity), rules, i64::from(step))
+            minute_arm(
+                raw,
+                kept,
+                &witness,
+                (store_root, &identity),
+                rules,
+                i64::from(step),
+            )
         }
         _ => day_arm(raw, kept, &witness, listed_on),
     }
@@ -423,12 +434,9 @@ fn minute_arm(
             out.push(row);
             continue;
         };
-        refused.note(
-            row_cause(cause),
-            (cursor, row.timestamp),
-            second,
-            || sentence(cause, cursor, ohlc, witness.listing),
-        );
+        refused.note(row_cause(cause), (cursor, row.timestamp), second, || {
+            sentence(cause, cursor, ohlc, witness.listing)
+        });
     }
     if tally.refused() + tally.suspect_level + tally.unchecked() > 0 {
         note(witness, &tally, book.first(), None);
