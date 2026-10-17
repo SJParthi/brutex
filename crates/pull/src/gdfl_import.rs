@@ -7611,3 +7611,7 @@ mod r3_attack_tests;
 #[cfg(test)]
 #[path = "gdfl_r4_attack_tests.rs"]
 mod r4_attack_tests;
+
+#[cfg(test)]
+#[path = "gdfl_import_split_tests.rs"]
+mod split_tests;
