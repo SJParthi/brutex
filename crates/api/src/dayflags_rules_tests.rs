@@ -360,33 +360,39 @@ fn a_flag_is_read_only_on_an_open_session_up_to_today() {
         flags.on_session(day("2026-07-31"), true, true).basis,
         CasBasis::NotRequired
     );
-    // The route passes today: a session after it reads not_yet, with no note.
-    let got = answer(
-        &root,
-        &ask("feed=zerodha&instrument=NSE-CASH-RELIANCE&from=2099-01-01&to=2099-01-07"),
+    // The page's days, with today given: Tue 2026-08-04 is today's own session
+    // and read, Sat 08-08 is closed and Mon 08-10 after today, so neither is
+    // read and no note says a flag could not be read.
+    let asked = ask("feed=zerodha&instrument=NSE-CASH-RELIANCE&from=2026-08-04&to=2026-08-10");
+    let days = [day("2026-08-04"), day("2026-08-08"), day("2026-08-10")];
+    let mut notes = Vec::new();
+    let (got, sidecars) =
+        super::super::auction_of_days(&root, &asked, (&days, Some(day("2026-08-04"))), &mut notes);
+    assert_eq!(
+        got.iter()
+            .map(|flag| flag.basis.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            CasBasis::DatedMaster,
+            CasBasis::NotRequired,
+            CasBasis::NotYet
+        ]
     );
-    let sessions: Vec<&Value> = got["days"]
-        .as_array()
-        .expect("days")
-        .iter()
-        .filter(|rec| rec["calendar"]["cas"] != Value::Null)
-        .collect();
-    assert!(!sessions.is_empty(), "{got:#}");
-    for rec in sessions {
-        assert_eq!(rec["calendar"]["cas"]["basis"], "not_yet", "{rec:#}");
-    }
+    assert!(notes.is_empty(), "{notes:#?}");
+    assert_eq!(
+        sidecars,
+        vec![None, None, None],
+        "a Zerodha share keeps no sidecar"
+    );
+    // With no today known, every open session is read: 08-10's master is not
+    // there, and that is said.
+    let mut notes = Vec::new();
+    let (got, _) = super::super::auction_of_days(&root, &asked, (&days, None), &mut notes);
     assert!(
-        got["notes"]
-            .as_array()
-            .expect("notes")
-            .iter()
-            .all(|note| !note
-                .as_str()
-                .unwrap_or("")
-                .contains("closing-auction flag could not be read")),
-        "{:#?}",
-        got["notes"]
+        matches!(&got[2].basis, CasBasis::Unread(why) if why.starts_with("2026-08-10: ")),
+        "{got:?}"
     );
+    assert_eq!(notes.len(), 1, "{notes:#?}");
 }
 
 /// **A REFUSED LOAD IS READ AGAIN BY THE NEXT REQUEST** (AF-03's rule, kept):
