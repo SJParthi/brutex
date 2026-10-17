@@ -1287,3 +1287,36 @@ BEL, GAIL, TATACHEM, CENTURYTEX and the others the sweep lists): each `event`
 record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
+
+## Filesystem counts for `/disk.json` — read 16 Oct 2026 (D-5240, D-5241)
+
+`/disk.json` reports the store's filesystem from one system call made in the
+server process (it started `/bin/df -Pk` until D-5240). Which call, and in
+which units, rests on the operating system's own declarations, read from the
+macOS SDK on the operator's machine (Command Line Tools
+`MacOSX27.0.sdk`, macOS 27.0.1, build 26A434) and from the `rustix` 1.1.4
+registry source the build compiles. The digest is of the bytes read; another
+SDK may declare otherwise.
+
+| Source | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|
+| `usr/include/sys/_types.h` | `863c4f07045775002b63b7e616742d9f746e4a02da4441442d8fe1138bbd0ff9` | line 70: `typedef unsigned int __darwin_fsblkcnt_t; /* Used by statvfs and fstatvfs */` — 32 bits | macOS reads `statfs(2)`, not `statvfs(2)` (D-5241) |
+| `usr/include/sys/statvfs.h` | `658ae523adc689c84eef80fd16a9dbd7d4f00fbc7eba0499f96c1afba6033ace` | `struct statvfs`: `f_blocks`, `f_bfree`, `f_bavail` are `fsblkcnt_t`, "in units of `f_frsize`" | the counts off macOS (`statvfs`, D-5240); why not on macOS (D-5241) |
+| `usr/include/sys/mount.h` | `45872741bb916b92bddd2e562d2047b552af1f68269081a0aeb58a3e5a2b8a51` | `__DARWIN_STRUCT_STATFS64`: `uint32_t f_bsize` "fundamental file system block size"; `uint64_t f_blocks`, `f_bfree`, `f_bavail` ("free blocks avail to non-superuser"); `char f_mntonname[MAXPATHLEN]` "directory on which mounted" | the counts and the mount point on macOS (D-5241) |
+| `rustix-1.1.4/src/backend/libc/fs/types.rs` (crates.io) | not recorded: the lock's own checksum pins the package | line 1069: `pub type StatFs = c::statfs;` on the libc backend, so `rustix::fs::statfs` hands back the SDK's struct unchanged; `StatVfs` widens every count to `u64` | the fields `disk_route::counts_and_mount` reads |
+
+**What is NOT sourced here.** How Darwin's `statvfs` folds a volume of 2^32
+fragments or more into its 32-bit counts — truncation, or a larger `f_frsize`
+— was not read: Apple's libc source was not consulted, and no such volume was
+measured. It is UNVERIFIED, and it is why macOS does not use that call. The
+`df` behaviour the route matches (total = every fragment, free = what an
+unprivileged writer may take, the mount point `df` prints) is checked by
+measurement, not by source: `on_macos_total_free_and_mount_are_what_bin_df_printed`
+compares the route with `/bin/df -Pk` on this machine, and the Linux branch was
+compared with GNU `df -Pk` by hand in the cloud container (D-5240). **What it
+does not match, measured 17 Oct 2026**: on APFS macOS `df`'s Used column is
+not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
+425,294,667,776), and no field of the `statfs` structure above carries the
+figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
+route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
+`docs/06-limits.md` L-RUST1-1).
