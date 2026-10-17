@@ -13,7 +13,9 @@ checks only the Mac can run.
 # R4-17 — Zerodha series identity: listing dates, landing refusals (day rung too), history ends at delisting, store scan, token guard
 
 Branch `cloud/db-R4-17-20261017`, cut from `origin/feat/db-fix` 3911d1b9, with
-`origin/feat/db-fix` 62396df0 (AF-07) merged in. Prerequisites: none (R4-17.md),
+`origin/feat/db-fix` 62396df0 (AF-07) and then f9cdb584 (R3-14) merged in. The second merge conflicted only
+where both sides appended to docs/04, docs/05 and docs/06; both sides were kept, feat/db-fix's first.
+R3-14 took D-4979, D-4980, D-4996 and D-5301, so D-4990..D-4995 do not collide. Prerequisites: none (R4-17.md),
 confirmed against `git log origin/feat/db-fix --merges --format=%s`.
 
 ## Done
@@ -123,10 +125,16 @@ gate (`cargo llvm-cov --workspace`, stable) measures lines and regions.
     is unchanged by R4-17.
   - store `cited_commits`: commits cited by feat/db-fix's own `docs/06-limits.md` are not ancestors of
     `origin/main` (feat/db-fix is not merged into main). R4-17's docs cite no commit.
-- **Final re-run on the last commit**: `cargo test -p pull -p cli -p core --locked --no-fail-fast -- --skip
-  the_pool_verb_prints_its_whole_page_on_a_generated_store` ran 112 test binaries. The only failures are the four
-  root-only permission tests of `pull` (`gdfl_import` 2, `gdfl_tickstore` 1) and `cli` (`scrub_blocks` 1) named
-  above. Core's `decision_citations` and `graph` pass. fmt and workspace clippy are clean on the same commit.
+- **Final re-run on the last commit** (after merging f9cdb584): `cargo test -p pull -p cli -p core --locked
+  --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store` ran 113 test binaries. The
+  only failures are six root-only permission tests:
+  - `pull`: `gdfl_import` (2) and `gdfl_tickstore` (1);
+  - `cli`: `scrub_blocks` (1) and R3-14's new `watchdog_command` (2:
+    `a_read_only_state_directory_sends_no_notice_at_all_rather_than_many`,
+    `a_run_never_lists_the_notices_or_reads_the_log`).
+
+  All six pass as `nobody`. Core's `decision_citations` and `graph` pass. fmt and workspace clippy are clean on the
+  same commit.
 - `cargo deny check`: bans ok, licenses ok, sources ok; **advisories FAILED** on five advisories published
   in the live database: RUSTSEC-2026-0344 (`ruzstd` 0.8.2) and RUSTSEC-2026-0346..0349 (`rustls`).
   `Cargo.lock`, `deny.toml` and every `Cargo.toml` are byte-identical to `origin/feat/db-fix`, so the base
