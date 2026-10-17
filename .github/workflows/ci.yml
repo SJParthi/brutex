@@ -2663,7 +2663,7 @@ jobs:
           "${gs}-tests"
           rustc --edition=2024 -D warnings .github/gates_store_steps.rs -o "$gs"
           git log --format=%s --merges > "${gs}-merges"
-          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md
+          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu
@@ -2968,7 +2968,19 @@ jobs:
           git ls-files -z -- 'crates/*.rs' '.github/*.rs' | xargs -0 -r "$scan" fns | "$ledger" path-declarations > "$work/path-fns"
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" | "$ledger" module-table > "$work/modules"
-          "$work/invariant-paths" docs/04-invariants.md "$work/path-fns" "$work/modules"
+          # D-5830 (BASE-GATE10): a bare proof name resolves against the tests
+          # the front-end runner runs as well as against Rust declarations.
+          # Thirteen rows (AF06-05, AF06-07, R301-01..04) cite web tests that
+          # exist by their snake-case names and were refused as "declared in no
+          # tracked source file". `--web-tests` lexes each tracked
+          # web/tests/*.test.js (the runner's own glob, one level deep) and
+          # lists the literal first argument of every `test(` call in code; a
+          # name in a comment, string, template or regex lists nothing, and a
+          # source it cannot delimit is a refusal. An undeclared name is still
+          # refused, and an empty listing is a refusal, not an empty table.
+          git ls-files -z -- ':(glob)web/tests/*.test.js' | xargs -0 -r "$work/invariant-paths" --web-tests > "$work/web-tests"
+          [ -s "$work/web-tests" ] || { echo "GATE 10 READ NO FRONT-END TEST."; exit 1; }
+          "$work/invariant-paths" docs/04-invariants.md "$work/path-fns" "$work/modules" "$work/web-tests"
           # D-2100, carried onto the tool by D-2105: the crate-and-name check
           # reads no middle segment, so `store::file::x_tests::name` passed on
           # any `name` in `store`. `inline-mods` lists every braced `mod m {`,

@@ -420,3 +420,126 @@ mod sealed_codec {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `pull::gdfl_nfo`: the options reader's rows, counted (D-5800).
+//
+// WHY THESE ARE HERE. The options row loop collected a `Vec<&str>` per row
+// until `cloud/attack-o1-20261016` gave it the capital-market reader's fixed
+// `[&str; 10]`, and `gdfl_nfo_tests` pins that on the source text. A text
+// search can only find the spellings it knows (this file's own header says
+// why), so the allocation itself is counted here, through `read_file`, the one
+// public way from a source's bytes to rows. Every row is invented: a strike,
+// prices and quantities that no vendor file printed.
+// ---------------------------------------------------------------------------
+
+mod gdfl_nfo {
+    use pull::gdfl_archive::crc32;
+    use pull::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, ListedFile};
+    use pull::gdfl_nfo::{NfoDay, NfoRefusal, NfoSource, day_folder_name, read_file};
+    use pull::session::Day;
+
+    use super::counted;
+
+    /// The invented contract every row is of: a weekly NIFTY call that
+    /// expires three days after [`trade`].
+    const TICKER: &str = "NIFTY04APR2422000CE";
+
+    /// A regular session the calendar records.
+    fn trade() -> Day {
+        Day::new(2024, 4, 1).expect("a real day")
+    }
+
+    /// A source holding one file's bytes and nothing else.
+    struct OneFile(Vec<u8>);
+
+    impl NfoSource for OneFile {
+        type Locator = ();
+
+        fn day(&self, _: Day) -> Result<Option<NfoDay<()>>, CmRefusal> {
+            Ok(None)
+        }
+
+        fn fetch(&self, _: &ListedFile<()>) -> Result<Vec<u8>, CmRefusal> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// One invented row at second `sod` of the IST day, ten fields.
+    fn row(sod: u32) -> String {
+        format!(
+            "{TICKER}.NFO,01/04/2024,{:02}:{:02}:{:02},10.05,0,0,0,0,75,300\r\n",
+            sod / 3_600,
+            sod / 60 % 60,
+            sod % 60
+        )
+    }
+
+    /// The header and `rows` rows inside the session, as file bytes.
+    fn file_of(rows: usize, extra: &str) -> Vec<u8> {
+        let mut text = format!("{HEADER_OPEN_INTEREST}\r\n");
+        for i in 0..rows {
+            let step = u32::try_from(i % 22_000).expect("fits");
+            text.push_str(&row(33_300 + step));
+        }
+        text.push_str(extra);
+        text.into_bytes()
+    }
+
+    /// `bytes` listed as the day's one option file and read through
+    /// `read_file`: the rows decoded, the allocating calls and bytes taken.
+    fn read(bytes: Vec<u8>) -> (Result<usize, NfoRefusal>, usize, usize) {
+        let mut listing: NfoDay<()> = NfoDay::new(trade(), 1);
+        let entry = format!("{}/Options/{TICKER}.NFO.csv", day_folder_name(trade()));
+        let len = u64::try_from(bytes.len()).expect("fits");
+        listing.push(&entry, len, crc32(&bytes), ());
+        let source = OneFile(bytes);
+        let file = listing.entries().first().expect("one entry").clone();
+        counted(|| read_file(&source, &listing, &file).map(|day| day.file.rows.len()))
+    }
+
+    /// **TWICE THE OPTIONS ROWS COST NO ALLOCATION PER ROW** (D-5800).
+    ///
+    /// 4,096 rows and then 8,192 are read, and the second may make at most
+    /// four more allocating calls than the first. A `Vec<&str>` per row adds
+    /// at least 4,096; the row vector is reserved once from the body's lines,
+    /// so it takes no doubling either. One untimed read runs first, so a
+    /// one-time setup anywhere under `read_file` is not charged to the smaller
+    /// file.
+    #[test]
+    fn twice_the_options_rows_cost_no_allocation_per_row() {
+        assert_eq!(read(file_of(1, "")).0, Ok(1), "the fixture row decodes");
+        let (few, few_calls, _) = read(file_of(4_096, ""));
+        let (many, many_calls, _) = read(file_of(8_192, ""));
+        assert_eq!(few, Ok(4_096));
+        assert_eq!(many, Ok(8_192));
+        let added = many_calls.saturating_sub(few_calls);
+        assert!(
+            added <= 4,
+            "4,096 more options rows made {added} more allocating calls \
+             ({few_calls} for 4,096 rows, {many_calls} for 8,192): a row allocates"
+        );
+    }
+
+    /// **A ROW OF HALF A MILLION FIELDS IS REFUSED WITHOUT HOLDING THEM**
+    /// (D-5800).
+    ///
+    /// The eleventh field is refused the moment it is seen. A vector of the
+    /// row's 500,010 fields holds one 16-byte `&str` each, about 8 MB against
+    /// the row's own 1 MB, so the bytes allocated on the way to the refusal
+    /// must stay under twice the file: the source's one copy of it, and
+    /// nothing that scales with the fields.
+    #[test]
+    fn a_row_of_half_a_million_fields_is_refused_without_holding_them() {
+        assert_eq!(read(file_of(1, "")).0, Ok(1), "the fixture row decodes");
+        let wide = row(33_301).replace("\r\n", &format!("{}\r\n", ",0".repeat(500_000)));
+        let bytes = file_of(1, &wide);
+        let size = bytes.len();
+        let (outcome, _, allocated) = read(bytes);
+        assert_eq!(outcome, Err(NfoRefusal::MalformedRow { line: 3 }));
+        assert!(
+            allocated < size.saturating_mul(2),
+            "refusing a {size}-byte file allocated {allocated} bytes: its fields were held"
+        );
+    }
+}

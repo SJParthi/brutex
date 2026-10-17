@@ -1789,7 +1789,7 @@ static AUDITED_ERRORS: std::sync::Mutex<Ration> =
 
 /// The routes a `/db` page reads its data from: each read is counted and
 /// sampled into the durable stream (WP-33c, DB-A42).
-pub const DB_READS: [&str; 16] = [
+pub const DB_READS: [&str; 17] = [
     "/bars.json",
     "/bars/window.json",
     "/spot.json",
@@ -1806,6 +1806,8 @@ pub const DB_READS: [&str; 16] = [
     "/sources/bars.json",
     "/sources/day.json",
     "/census/facets.json",
+    // The Coverage grid's roll-up per month (R3-09).
+    "/census/rollup.json",
 ];
 
 /// The query names an access record keeps: the selection, never anything
