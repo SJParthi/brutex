@@ -46,7 +46,9 @@ No file under `crates/`, no `Cargo.toml` / `Cargo.lock` / `deny.toml`, no doc.
 
 ## Left
 
-- Mutation run on the three touched modules (in progress), then the final gates and STATUS line.
+- Mutation pass 3 on the three touched modules (in progress; pass 2 left 335 survivors, since pinned by
+  tests or removed as equivalent spellings), the cargo suite on the merged tree, then the final report.
+- Merged `origin/feat/db-fix` (f9cdb584: R3-06, R3-14) into the branch at a058b0f0; neither touches an R3-04 file.
 
 ## Gate results (so far)
 
