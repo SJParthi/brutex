@@ -7773,6 +7773,10 @@ mod tests {
         let mut seen: Vec<u64> = Vec::new();
         let serial = audit_serial(&dir).expect("serial");
         let mut page = first;
+        // Twelve lines in pages of five are three pages and an empty fourth.
+        // A pager that hands a place's pointers out again never empties, so
+        // asking for a fifth page is itself the failure, not a hang.
+        let mut pages = 1u32;
         loop {
             for (_, pointer) in &page.pointers {
                 let AuditLine::Found(record) = audit_read(&dir, serial, pointer) else {
@@ -7788,6 +7792,8 @@ mod tests {
             let Some(&(last, _)) = page.pointers.last() else {
                 break;
             };
+            assert!(pages < 4, "a fifth page after {seen:?}");
+            pages += 1;
             page = super::audit_postings_before(&dir, "instrument", "VBL", 5, Some(last))
                 .expect("the next page");
         }

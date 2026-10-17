@@ -123,11 +123,46 @@ How it was run, and how the catches were checked:
 - One is `flock::note_unreleased` → `()`, caught by `emits`' own test,
   which is what that test exists for.
 
+### Mutation runs B and D, part way
+
+Run B covers `file.rs` and `verdict.rs` (1,245 mutants). Run D covers
+`sink.rs` (437 mutants). Both started before the commits that answer them,
+so every survivor below is re-tested on the final tree.
+- **Run B** at 290 of 1,245: 242 caught, 42 unviable, 3 missed, 3 timeouts.
+  - The 3 missed are `MAX_ROW_LEN` (215:32 twice, 220:15), which are already
+    argued equivalent.
+  - The `suffix_that_follows` partition timeout (3996:61) is answered by
+    `d2c2b19f`: the overlap tests now run under a deadline and fail in 31 s.
+  - `first_at_or_after` (4313:15 `<` → `<=`, 4319:63 `/` → `%`) are
+    **detected, not survivors**. Measured on each mutant, every lib test run
+    alone:
+    - `first_at_or_after_never_probes_more_than_the_bisection_height` fails
+      at once (exit 101) on both mutants.
+    - 15 lookup tests (12 under `%`) loop forever, because the bisection
+      never ends or becomes a scan. They hold up the binary, so the
+      binary's result is a timeout.
+    - These lines are unchanged on this branch, so CI gate 18 (changed
+      lines) does not mutate them.
+    - Bounding 15 base tests that this pass does not otherwise touch, only
+      to turn a timeout into a fast failure, is churn beyond this pass. A
+      probe bound inside the production loop would add a panic branch that
+      no test can take.
+- **Run D** at 357 of 437: 317 caught, 35 unviable, 1 missed, 4 timeouts.
+  - Missed `sink.rs` `Sink::open` `resumed.last_at > now` → `>=`: answered
+    by `559624ab`, which pins the clock so a floor can equal it. That commit
+    landed after run D started.
+  - The 4 timeouts are `audit_postings_before`'s two generation guards
+    (`serial > at.serial` and `serial == at.serial`, each forced false and
+    flipped). Every one of them hangs one test,
+    `a_posting_is_paged_from_a_place_without_a_line_twice_or_skipped`, whose
+    page loop had no bound. The loop now refuses a fifth page, so all four
+    fail in 0.15 s, with the repeated pointers in the message.
+
 ## Left
 
-- **Mutation run B** (`file.rs` + `verdict.rs`) is running. Still to run:
-  `sealed.rs`, `sealed_codec.rs`, `sink.rs`, and a final re-test of the
-  survivors on the final tree.
+- **Mutation runs**: finish B and D, then run C on `sealed.rs` and
+  `sealed_codec.rs`, then a final re-test of every survivor on the final
+  tree.
 - **Coverage**: a final per-binary union run. The production lines that
   remain uncovered on this tree, each with its reason:
   - **`file.rs` defensive re-borrows**, after the caller checked the same
@@ -179,7 +214,7 @@ How it was run, and how the catches were checked:
 | `cargo clippy -p store -p telemetry --all-targets -- -D warnings` | clean at every commit since `2e6cf25c`. Commit `a84f53b5` carried one clippy error, fixed in the next commit |
 | `cargo test -p store -p telemetry --lib` | pass at every commit since `0b04e863` |
 | `cargo deny check` | `advisories FAILED` on RUSTSEC-2026-0344 (`ruzstd`) and RUSTSEC-2026-0346 to 0349 (`rustls`), and nothing else (bans, licenses and sources ok). This is the base's set. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` |
-| `cargo test --workspace --locked` | running |
+| `cargo test --workspace --locked` | On `559624ab`, as root with the capabilities dropped, in 85 min: 161 of 162 targets green. The one red target is `store --test cited_commits` (`every_commit_the_store_records_cite_is_on_main_or_says_why_not`), which is also red on the base and is BASE-CITED's to fix. To be re-run on the final tree |
 | CI job `language-purity`, every `run:` step but 1e and 14, run locally through `.github/checks_all.rs`'s plan | 24 green. 8 red: gates 0, 1d, 10, 11, 12, 19, 23 and 30. **All eight are red identically on the base**, run the same way in a worktree of `origin/feat/db-fix`. Their violation lines, sorted and stripped of line numbers, are the same set, so this branch adds none; only the file and function counts differ. The causes are in `api`, `pull`, `web/` tests, `config/store-steps.toml` (R3-18 merged), and the base's `sealed.rs`, `sink.rs` and `settings.rs` lines |
 
 ## NEEDS THE MAC
