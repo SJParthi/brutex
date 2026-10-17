@@ -502,6 +502,162 @@ impl Says {
 }
 
 /// One production `telemetry::emit`, and the production call that reaches it.
+/// Every segment of one month's pack holds `MAX_RECEIPTS` receipts, so the
+/// append is refused `receipts_full` and says so at `Error` (IA-8, §8 Z11).
+fn drive_keep_receipts_full(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let day = crate::session::Day::new(2019, 6, 27).expect("a day");
+    let month = store::path::YearMonth::new(2019, 6).expect("a month");
+    let receipt = keep::Receipt {
+        asked_from: 0,
+        asked_to: 0,
+        first_stamp: 0,
+        last_stamp: 0,
+        body_offset: 0,
+        deflated_len: 0,
+        raw_len: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        run: 1,
+        status: 200,
+        rung: 3,
+        kept: keep::Kept::NotKept,
+        reason: keep::Reason::PackFull,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+        segment: 0,
+        digest: [0; 32],
+        key_hash: 0,
+        body_of: 0,
+        refusals_from: 0,
+        refusals: 0,
+    }
+    .encode();
+    let full: Vec<u8> = (0..keep::MAX_RECEIPTS).flat_map(|_| receipt).collect();
+    for segment in 0..keep::MAX_SEGMENTS {
+        fs::write(keep::names(&dir, month, segment).receipts, &full).expect("a full segment");
+    }
+    let answered = keep::Answered::of(crate::fetch::RawWindow::default(), "{}".to_owned(), 200);
+    let landing = keep::Landing {
+        window: crate::session::Window::new(day, day).expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let refused = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    );
+    assert!(
+        matches!(refused, Err(keep::KeepError::ReceiptsFull { .. })),
+        "{refused:?}"
+    );
+}
+
+/// Every segment of one month's pack holds `REFUSAL_ROOM` refused-row
+/// records, so a window with five refused rows is refused `refusals_full`
+/// and says so at `Error`, counting the five (IA-8, DB-G46, verify round 1).
+fn drive_keep_refusals_full(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let day = crate::session::Day::new(2019, 6, 27).expect("a day");
+    let month = store::path::YearMonth::new(2019, 6).expect("a month");
+    let room = u32::try_from(keep::REFUSAL_ROOM).expect("the room is a u32");
+    for segment in 0..keep::MAX_SEGMENTS {
+        let receipt = keep::Receipt {
+            asked_from: 0,
+            asked_to: 0,
+            first_stamp: 0,
+            last_stamp: 0,
+            body_offset: 0,
+            deflated_len: 0,
+            raw_len: 0,
+            rows_decoded: 2,
+            rows_landed: 0,
+            rows_refused: 2,
+            run: 1,
+            status: 200,
+            rung: 3,
+            kept: keep::Kept::NotKept,
+            reason: keep::Reason::PackFull,
+            rules_version: 1,
+            door: keep::Door::FromWindow,
+            segment,
+            digest: [0; 32],
+            key_hash: 0,
+            body_of: 0,
+            refusals_from: room - 2,
+            refusals: 2,
+        }
+        .encode();
+        fs::write(keep::names(&dir, month, segment).receipts, receipt)
+            .expect("a segment whose refused rows are at the room");
+    }
+    let rows: Vec<keep::RefusedRow> = (0..5)
+        .map(|i| keep::RefusedRow {
+            local_second: 1_561_600_000 + 60 * i,
+            cause: crate::fetch::RowCause::OffGrid,
+        })
+        .collect();
+    let answered = keep::Answered::of(crate::fetch::RawWindow::default(), "{}".to_owned(), 200);
+    let landing = keep::Landing {
+        window: crate::session::Window::new(day, day).expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 5,
+        rows_landed: 0,
+        rows_refused: 5,
+        refused: &rows,
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let refused = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    );
+    assert!(
+        matches!(refused, Err(keep::KeepError::RefusalsFull { rows: 5, .. })),
+        "{refused:?}"
+    );
+}
+
 struct Site {
     /// The `telemetry::emit(` this row proves, as `file:line`.
     at: &'static str,
@@ -522,6 +678,27 @@ struct Site {
 /// Every `telemetry::emit` under `crates/pull/src` except the one the module
 /// header names, one row each.
 static SITES: &[Site] = &[
+    Site {
+        at: "crates/pull/src/response_keep.rs — a pack whose last segment is full",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("reason", Says::Holds("receipts_full")),
+        drive: drive_keep_receipts_full,
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — no segment can take the refused rows",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("reason", Says::Holds("refusals_full")),
+        drive: drive_keep_refusals_full,
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — the refused rows left unkept, counted",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("refused_rows", Says::Signs(5)),
+        drive: drive_keep_refusals_full,
+    },
     Site {
         at: "ingest.rs off-grid candle refusal",
         target: "pull.file",

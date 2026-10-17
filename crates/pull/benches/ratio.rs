@@ -1099,6 +1099,165 @@ fn alert_window_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
     a && b
 }
 
+// ══ Kept answers (D-4859, D-4920): C-RK-01, C-RK-02 ══════════════════════════
+//
+// The store grows by packs (one per instrument, timeframe and month); neither
+// reading one pack's receipts nor appending to one may grow with it. A pack's
+// own receipts are bounded by `MAX_RECEIPTS` (1,024 × 128 B), which is the
+// lookup's whole cost and the duplicate check's (design §10.2, L-IA-6).
+
+fn keep_receipt(i: u32) -> pull::response_keep::Receipt {
+    pull::response_keep::Receipt {
+        asked_from: 1_000_000 + i64::from(i),
+        asked_to: 1_086_399 + i64::from(i),
+        first_stamp: 0,
+        last_stamp: 0,
+        body_offset: 0,
+        deflated_len: 0,
+        raw_len: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        run: i,
+        status: 200,
+        rung: 3,
+        kept: pull::response_keep::Kept::NotKept,
+        reason: pull::response_keep::Reason::PackFull,
+        rules_version: 1,
+        door: pull::response_keep::Door::FromWindow,
+        segment: 0,
+        digest: [0; 32],
+        key_hash: 0,
+        body_of: i,
+        refusals_from: 0,
+        refusals: 0,
+    }
+}
+
+fn keep_key() -> brutex_core::instrument::InstrumentKey {
+    brutex_core::instrument::InstrumentKey::index(Exchange::Nse, "NIFTY")
+        .unwrap_or_else(|_| refuse("a NIFTY key"))
+}
+
+fn keep_pack(key: &brutex_core::instrument::InstrumentKey) -> pull::response_keep::Pack<'_> {
+    pull::response_keep::Pack {
+        vendor: Vendor::Zerodha,
+        key,
+        timeframe: Timeframe::MINUTE_1,
+    }
+}
+
+/// A scratch store holding `packs` month packs of 1,024 receipts each.
+fn keep_store(root: &std::path::Path, packs: u32) {
+    let key = keep_key();
+    let dir = pull::response_keep::pack_dir(root, keep_pack(&key))
+        .unwrap_or_else(|_| refuse("a pack directory"));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| refuse("a scratch pack directory"));
+    let mut full = Vec::with_capacity(1_024 * pull::response_keep::RECEIPT_LEN);
+    for i in 0..pull::response_keep::MAX_RECEIPTS {
+        full.extend_from_slice(&keep_receipt(i).encode());
+    }
+    for n in 0..packs {
+        let year = u16::try_from(2001 + n / 12).unwrap_or(2001);
+        let month = u8::try_from(1 + n % 12).unwrap_or(1);
+        let ym = YearMonth::new(year, month).unwrap_or_else(|_| refuse("a month"));
+        let names = pull::response_keep::names(&dir, ym, 0);
+        std::fs::write(&names.receipts, &full).unwrap_or_else(|_| refuse("a scratch pack"));
+    }
+}
+
+fn keep_stores() -> (std::path::PathBuf, [std::path::PathBuf; 3]) {
+    let root = std::env::temp_dir().join(format!("brutex-bench-keep-{}", std::process::id()));
+    let stores = [root.join("1"), root.join("10"), root.join("100")];
+    for (store, n) in stores.iter().zip([1_u32, 10, 100]) {
+        keep_store(store, n);
+    }
+    (root, stores)
+}
+
+/// C-RK-01: one pack's receipts (a full pack, 1,024) read under the torn
+/// rule, flat at 1x, 10x and 100x packs in the store.
+fn keep_lookup_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
+    let [one, ten, hundred] = stores;
+    let key = keep_key();
+    let month = YearMonth::new(2001, 1).unwrap_or_else(|_| refuse("a month"));
+    let read = |store: &std::path::Path| {
+        cost_ps(20, || {
+            pull::response_keep::receipts(black_box(store), keep_pack(&key), month)
+                .map_or(0, |segments| segments.len())
+        })
+    };
+    let base = read(one);
+    let a = ratio("C-RK-01 full-pack receipts, 10x store", base, read(ten));
+    let b = ratio(
+        "C-RK-01 full-pack receipts, 100x store",
+        base,
+        read(hundred),
+    );
+    spread("C-RK-01 full-pack receipts, 100x store", 2_000, || {
+        black_box(pull::response_keep::receipts(hundred, keep_pack(&key), month).is_ok());
+    });
+    a && b
+}
+
+fn keep_append(store: &std::path::Path, next: &std::cell::Cell<u32>) -> u32 {
+    let n = next.get();
+    next.set(n + 1);
+    let key = keep_key();
+    let body = format!("{{\"invented\":[{n}.01,{n}.02]}}");
+    let answered = pull::response_keep::Answered::of(pull::fetch::RawWindow::default(), body, 200);
+    let day = pull::session::Day::new(2030, 1, 2).unwrap_or_else(|_| refuse("a day"));
+    let landing = pull::response_keep::Landing {
+        window: pull::session::Window::new(day, day).unwrap_or_else(|_| refuse("a window")),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 2,
+        rows_landed: 2,
+        rows_refused: 0,
+        refused: &[],
+        run: n,
+        rung: 3,
+        rules_version: 1,
+        door: pull::response_keep::Door::FromWindow,
+    };
+    match pull::response_keep::append(
+        store,
+        keep_pack(&key),
+        pull::response_keep::Offered::Answer(&answered),
+        &landing,
+    ) {
+        Ok(outcome) => outcome.first.ordinal,
+        Err(_) => refuse("a kept answer"),
+    }
+}
+
+/// C-RK-02: one append (deflate, the pack lock, two positional writes and
+/// two syncs) flat at 1x, 10x and 100x packs in the store.
+fn keep_append_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
+    let [one, ten, hundred] = stores;
+    let next = std::cell::Cell::new(0_u32);
+    let append = |store: &std::path::Path| {
+        let mut best = u128::MAX;
+        for _ in 0..12 {
+            let start = Instant::now();
+            black_box(keep_append(black_box(store), &next));
+            best = best.min(start.elapsed().as_nanos() * 1_000);
+        }
+        best
+    };
+    let base = append(one);
+    let a = ratio("C-RK-02 kept-answer append, 10x store", base, append(ten));
+    let b = ratio(
+        "C-RK-02 kept-answer append, 100x store",
+        base,
+        append(hundred),
+    );
+    spread("C-RK-02 kept-answer append, 100x store", 200, || {
+        black_box(keep_append(hundred, &next));
+    });
+    a && b
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -1116,6 +1275,10 @@ fn main() {
     ok &= alert_window_is_flat(&alert_stores);
     ok &= tickstore_write::tickstore_write_is_flat_per_member();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
+    let (keep_root, keep_stores) = keep_stores();
+    ok &= keep_lookup_is_flat(&keep_stores);
+    ok &= keep_append_is_flat(&keep_stores);
+    let _cleanup = std::fs::remove_dir_all(&keep_root);
     if ok {
         println!("all ratios within the ceiling");
     } else {

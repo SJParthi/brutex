@@ -3941,6 +3941,136 @@ foreign extents, tails and insufficient whole-publication admission refuse.
 The independent reference pins never become a source/run,
 search, qualification or ranking identity.
 
+## §36 — Kept vendor answers, format v1 (D-4810, D-4859, D-4920)
+
+Written by `pull::response_keep` (IA-8). Every body a broker answered for a
+bar window is kept, deflated, beside a fixed receipt, so a stored minute can
+be checked against what the vendor actually sent, and a stored hole is told
+apart as "not asked", "the vendor sent nothing" or "the landing refused the
+row" (finding F7, DB-G46).
+
+```text
+<store>/responses/<vendor>/<EXCH>/<SEG>/<SYMBOL>[/<contract>]/<tf>/
+    <yyyy-mm>.rsb         deflated bodies (RFC 1951, flate2), appended
+    <yyyy-mm>.rsr         128-byte receipts, appended
+    <yyyy-mm>.rsx         24-byte refused-row records, appended
+    <yyyy-mm>.<n>.rs[brx] segment n, 1..=7, once segment n-1 is full
+    keep.lock             the directory's one lock (flock, exclusive)
+```
+
+The directory is the bar path's own (`store::path::StorePath::for_key`
+validates every segment, and `Contract::of` renders the contract), under
+`responses/` instead of `bars/`. **The design wrote `<SEG>/<SYMBOL>`; the
+exchange level is kept** because the bar path has it, so one rule builds both
+paths. A window's body goes into its **first** month's pack; every further
+month the window covers gets a receipt only (`kept=3`). The month is the IST
+month of the asked day.
+
+**Receipt (128 bytes, little-endian, no header; a reader trusts receipts only).**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | asked from: IST midnight of the window's first day (unix s) |
+| 8 | 8 | asked to: the last second of its last day (unix s) |
+| 16 | 8 | first decoded row's stamp (unix s; 0 = none). For `kept=4`: the refused answer's whole length in bytes |
+| 24 | 8 | last decoded row's stamp (unix s; 0 = none) |
+| 32 | 8 | body offset in the `.rsb` |
+| 40 | 4 | deflated length |
+| 44 | 4 | raw length |
+| 48 | 4 | rows decoded |
+| 52 | 4 | rows the landing appended |
+| 56 | 4 | rows the landing refused by name (D-3351) |
+| 60 | 4 | run id from the runs ledger (D-4880) |
+| 64 | 2 | HTTP status |
+| 66 | 1 | rung asked (`pull::vendor::Granularity` as a byte) |
+| 67 | 1 | `kept`: 0 not kept, 1 kept here, 2 the same body as receipt `body_of` of this segment, 3 the body is in the window's first month's pack, 4 the head of a refused answer is kept here |
+| 68 | 1 | reason: 0 kept, 1 `pack_full`, 2 `storage_full`, 3 `duplicate_body`, 4 `later_month`, 5 `refused_answer` |
+| 69 | 1 | landing rules version (D-4843) |
+| 70 | 1 | door: 1 `from_window`, 2 `repair_window` |
+| 71 | 1 | the segment holding the body and the refused rows (the design's reserved byte; this receipt's own segment except for `kept=3`) |
+| 72 | 32 | BLAKE3 of the raw body kept (of the head, for `kept=4`) |
+| 104 | 8 | `store::verdict::key_hash` of the instrument key's canonical name |
+| 112 | 4 | `body_of`: the ordinal of the receipt that holds the body (its own for `kept=1` and `4`) |
+| 116 | 4 | the first refused-row record this receipt owns, as a record index into the `.rsx` (the design's reserved bytes 116..124, DB-G46) |
+| 120 | 4 | how many records it owns (≤ offset 56; 0 when the caller passed the count only) |
+| 124 | 4 | CRC-32C over bytes 0..124 |
+
+**Refused-row record (24 bytes, DB-G46).** 0: the row's stamp as the landing
+judged it, IST local seconds since 1970 (`fetch::Refused::local_seconds`);
+8: the owning receipt's ordinal in its segment (`u32`); 12: the cause, 1
+`timestamp_refused`, 2 `cash_eligibility_unknown`, 3 `price_off_grid`, 4
+`off_grid_candle`, 5 `conflicting_candles`, 6 `before_first_day_bar`, 7
+`foreign_level` (append-only); 13..20 zero; 20: CRC-32C over bytes 0..20. A
+`kept=3` receipt's records are its first month's receipt's (`body_of`). The
+cause at 12 is the row's own, from `fetch::Refused::causes` (parallel to
+`local_seconds`, written by the one `note` every landing refuses through),
+never re-derived from the per-(day, cause) groups (`RefusedRow::all_of`).
+
+**Order and torn writes (D-4865).** Body, then refused rows, then receipt;
+each written at the place the trusted receipts name, cut there, and synced
+(`F_FULLFSYNC` on macOS). Bytes past what the last valid receipt vouches for,
+a receipt file whose length is not a multiple of 128, and a whole last
+receipt whose CRC fails are an interrupted append that the next append
+overwrites. A receipt before the last that fails its CRC is damage: refused
+`pack_damaged`, never overwritten. A body read back is inflated to at most its
+raw length plus one byte and checked against the length and BLAKE3 of its
+receipt (`body_mismatch` otherwise).
+
+**One writer per pack directory.** `keep.lock` is taken exclusively around
+"read the receipts, write the body, write the receipt" and every further
+month's receipt: one `try_lock` uncontended, otherwise a blocking `flock` on
+one waiter thread bounded by 30 s, then refused `lock_stalled` (the D-4924
+bound; D-4920). A 10 ms `try_lock` poll was tried first and starved: under
+load the second of two landings was refused after 2,128 tries while the first
+never paused. A refused waiter stays parked in `flock` until the holder lets
+go, so at most four (`MAX_PARKED_WAITERS`) are parked per lock; the next
+contended append is refused `lock_stalled` at once, naming how many are
+parked, and a holder that never lets go leaves at most four threads behind.
+One lock per (vendor, instrument,
+timeframe) rather than the critic's one per month (`<pack>.rsr.lock`): a
+month lock would add a file to every one of the store's instrument-months, and
+landings of one instrument are serial anyway.
+
+**Caps and rolls.** A segment holds at most 64 MiB of deflated bodies,
+1,024 receipts and 2,796,202 refused-row records (`REFUSAL_ROOM`: 64 MiB of
+24-byte records in its `.rsx`). A segment that cannot take the next window's
+receipt, body or refused rows rolls to the next (an audited error event names
+it); a repeated body whose rows do not fit its segment rolls too, rather than
+writing a `kept=2` receipt with no record of them. In the last of eight
+segments a body that does not fit writes a receipt `kept=0 reason=pack_full`
+(its refused rows are still written); with 1,024 receipts there, or with no
+room in its `.rsx` for the window's refused rows, nothing is written and the
+append is refused `receipts_full` or `refusals_full` naming the file, its
+audited error event "response not kept" counting the rows left unkept
+(`refused_rows`). A window that refused more rows than any segment holds is
+refused `refusals_full` at once, without spending a segment on a roll. A
+refused row is never dropped while its receipt says it was refused (verify
+round 1 of IA-8 found exactly that: the receipt written `rows_refused=5`,
+`refusals=0`, and `Ok`). A window that refused more rows than any segment holds is refused
+before any roll a full receipts file or a full body file would take, so no
+empty segment is handed rows it cannot hold (repair round 1). A window over
+months asks every later month for room for its pointer receipt before the
+first month keeps anything, so `receipts_full` there writes nothing, as it
+says. A body over
+`MAX_RESPONSE_BYTES` (64 MiB) is refused `source_refused` with nothing kept.
+A body whose BLAKE3 a receipt of the newest segment holds is not written
+again: `kept=2 reason=duplicate_body`.
+
+**A receipt's lengths are claims, checked before a read.** A reader refuses
+a receipt whose body would end past 64 MiB or inflate past
+`MAX_RESPONSE_BYTES` (`body_mismatch`), and one whose records would end past
+`REFUSAL_ROOM` (`pack_damaged`), before it allocates anything for them: no
+writer writes either, and a CRC-valid receipt could otherwise ask for 4 GiB
+of body or 96 GiB of records. The writer reads every receipt of the segment it appends to
+and refuses a CRC-valid one naming a body past 64 MiB or records past
+`REFUSAL_ROOM` as `pack_damaged`, with nothing written: such a claim used to
+roll the month for no writer's reason, and at the edge of a u32 or a u64 its
+sum overflowed into a small end that sent the next append over records
+already kept.
+
+**Never a header or a token.** The keeper takes the body text and nothing
+else (`pull::response_keep::Answered` has no header field).
+
 ## §38 — The alert queue, format v1 (D-4883, D-4893, D-4895)
 
 `<store>/audit/alerts`. One file, append-only, little-endian, packed (no field

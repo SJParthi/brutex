@@ -2480,6 +2480,33 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
      wp16-order wp16-order-durable wp16-torn-open wp16-workers x019-03-28 years zero-padded \
      zero_ltp zip";
 
+// THE KEPT VENDOR ANSWERS (IA-8; D-4810, D-4859, D-4920; 14 Oct 2026). Every
+// word was read before it was listed, and they are of four kinds. (1) The
+// keeper's refusal and reason words, written into receipts, events and the
+// verdict's detail: `pack_full`, `storage_full`, `duplicate_body`,
+// `later_month`, `refused_answer`, `receipts_full`, `refusals_full` (verify
+// round 1: no segment can take a window's refused rows), `lock_stalled`,
+// `pack_damaged`, `not_a_regular_file`, `source_refused`, `body_mismatch`,
+// `body_not_kept`, `path_refused`, `io`, and the host operations an `Io`
+// refusal names (`create`, `deflate`, `decode`). (2) Its directory and file
+// words: `responses` (the root under the store, beside `bars`), `rsb` and
+// `rsx` (bodies and refused rows, as the test-only fault seam names
+// them). (3) Event field
+// names: `pack`, `detail`, `refused_rows` (the rows a refusal left unkept);
+// and `keep-lock`, the name of the thread a
+// contended pack lock waits on.
+// (4) Test-only: scratch tags (`doors`, `dup`, `race`, `shapes`, `odd-dir`,
+// `oversize`, `torn-body`, `disk`, `ia8-session`, `ia8-causes`), invented
+// months and a contract prefix (`2019-12`, `2020-01`, `2020-02`,
+// `2019-06-27-`), and the marked header, cookie and token a test proves never
+// reach a pack (`ia8-*-secret`, `ia8-header-mark`, `set-cookie`, `x-marker`).
+// None names an account, an organisation or an environment.
+const KEPT_ANSWER_LITERAL: &str = "keep-lock 2019-06-27- 2019-12 2020-01 2020-02 body_mismatch body_not_kept create decode deflate \
+     detail disk doors dup duplicate_body ia8-causes ia8-cookie-secret ia8-header-mark ia8-session ia8-token-secret \
+     io later_month lock_stalled not_a_regular_file odd-dir oversize pack pack_damaged \
+     pack_full path_refused race receipts_full refusals_full refused_answer refused_rows responses rsb rsx set-cookie \
+     shapes source_refused storage_full torn-body x-marker";
+
 // WP-12f, THE GDFL CAPITAL-MARKET SCOPE (D-4878; 14 Oct 2026). The package's
 // rounds added literals under crates/pull and ran no CI gate; its fifth round
 // ran gate 1d and declares them here, each read before it was listed. Four
@@ -2514,7 +2541,7 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
 const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 62] = [
+const DECLARED: [&str; 63] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2575,6 +2602,7 @@ const DECLARED: [&str; 62] = [
     GDFL_JOINED_PIECE,
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
+    KEPT_ANSWER_LITERAL,
     WP12F_LITERAL,
     R3_35_LITERAL,
 ];
