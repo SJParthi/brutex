@@ -650,8 +650,9 @@ impl<'a> MinuteJudge<'a> {
 #[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        Cause, DayBook, FOREIGN_BAND_BPS, FirstDay, SUSPECT_BAND_BPS, SUSPECT_CODE, Unchecked,
-        Verdict, audit, ist_day,
+        Cause, DayBook, FOREIGN_BAND_BPS, FirstDay, JUMP_BPS, JumpRun, MinuteJudge, Rules,
+        SUSPECT_BAND_BPS, SUSPECT_CODE, Tally, Unchecked, Verdict, audit, ist_day, judge_day,
+        jump_bps, non_positive, prices,
     };
     use store::format::Bar;
 
@@ -935,5 +936,220 @@ mod tests {
         );
         assert_eq!((first.suspect_level, first.minutes()), (1, 4));
         assert_eq!(first.flagged.len(), 3);
+    }
+
+    // R4-17: the jump, the run, the listing and the day arm.
+
+    #[test]
+    fn a_jump_is_measured_against_the_smaller_price_either_way() {
+        assert_eq!(jump_bps(100, 100), Some(0));
+        assert_eq!(jump_bps(100, 200), Some(10_000));
+        assert_eq!(
+            jump_bps(200, 100),
+            Some(10_000),
+            "a halving reads as a doubling"
+        );
+        assert_eq!(jump_bps(82_165, 8_990), Some(81_395), "PIIND's interleave");
+        assert_eq!(jump_bps(10_000, 13_000), Some(JUMP_BPS));
+        assert_eq!(jump_bps(10_000, 13_001), Some(JUMP_BPS + 1), "the first that trips");
+        assert_eq!(jump_bps(13_001, 10_000), Some(JUMP_BPS + 1), "the same, downwards");
+        for (close, open) in [(0, 5), (5, 0), (-1, 5), (5, -1)] {
+            assert_eq!(jump_bps(close, open), None, "{close} -> {open}");
+        }
+        assert_eq!(
+            jump_bps(1, i64::MAX),
+            Some(i64::MAX),
+            "saturated, never wrapped"
+        );
+    }
+
+    #[test]
+    fn a_run_breaks_on_any_gap_and_judges_against_the_last_kept_close() {
+        let mut run = JumpRun::default();
+        assert_eq!(
+            run.judge(600, 60, 100),
+            None,
+            "a run's first minute is never judged"
+        );
+        run.keep(100);
+        assert_eq!(run.judge(660, 60, 150), Some(5_000));
+        // Not kept: the reference stays at 100.
+        assert_eq!(run.judge(720, 60, 101), Some(100));
+        run.keep(101);
+        assert_eq!(run.judge(780, 60, 101), Some(0));
+        // A missing minute, a stamp out of order and a stamp repeated each break it.
+        for second in [900, 840, 840] {
+            assert_eq!(run.judge(second, 60, 500), None, "{second}");
+        }
+        run.keep(500);
+        assert_eq!(run.judge(900, 60, 500), Some(0));
+        assert_eq!(
+            run.judge(i64::MIN, 60, 500),
+            None,
+            "no overflow on any stamp"
+        );
+    }
+
+    #[test]
+    fn the_day_arm_refuses_a_non_positive_price_and_a_day_before_listing_only() {
+        let listed = Rules {
+            listed_on: Some(day(2)),
+            jumps: false,
+        };
+        assert_eq!(
+            judge_day(day(2), [1, 1, 1, 1], listed),
+            None,
+            "the listing day itself"
+        );
+        assert_eq!(
+            judge_day(day(1), [5, 6, 4, 5], listed),
+            Some(Cause::BeforeListing { listed_on: day(2) })
+        );
+        assert_eq!(judge_day(day(1), [5, 6, 4, 5], Rules::default()), None);
+        for ohlc in [
+            [0, 1, 1, 1],
+            [1, 0, 1, 1],
+            [1, 1, 0, 1],
+            [1, 1, 1, 0],
+            [1, 1, -3, 1],
+        ] {
+            assert!(non_positive(ohlc[0], ohlc[1], ohlc[2], ohlc[3]));
+            assert_eq!(
+                judge_day(day(3), ohlc, listed),
+                Some(Cause::NonPositivePrice)
+            );
+        }
+        // Any positive range lands, however wild: never judged by range.
+        assert_eq!(judge_day(day(3), [1, i64::MAX, 1, 9], listed), None);
+        assert!(!non_positive(1, 1, 1, 1));
+    }
+
+    #[test]
+    fn a_minute_is_judged_price_listing_day_rung_then_jump() {
+        let book = DayBook::new(
+            &[day_bar(2, 9_000, 11_000), day_bar(3, 9_000, 11_000)],
+            FirstDay::NoDayRung,
+        );
+        let rules = Rules {
+            listed_on: Some(day(1)),
+            jumps: true,
+        };
+        let mut judge = MinuteJudge::new(&book, rules, 60);
+        let second = |d: i64, m: i64| at(d, m) / 1_000_000;
+        let ohlc = |price: i64| [price, price, price, price];
+        // Before the listing: refused as before_listing, never before_first_day_bar.
+        assert_eq!(
+            judge.judge(second(0, 0), day(0), ohlc(10_000)).0,
+            Verdict::Refused(Cause::BeforeListing { listed_on: day(1) })
+        );
+        // On the listing day, before the first day bar: the series' own, unchecked.
+        assert_eq!(
+            judge.judge(second(1, 0), day(1), ohlc(10_000)).0,
+            Verdict::Unchecked(Unchecked::NoDayBar)
+        );
+        // A zero price before anything else.
+        assert_eq!(
+            judge
+                .judge(second(2, 0), day(2), [0, 10_000, 10_000, 10_000])
+                .0,
+            Verdict::Refused(Cause::NonPositivePrice)
+        );
+        assert_eq!(
+            judge.judge(second(2, 1), day(2), ohlc(10_000)),
+            (Verdict::Held, None)
+        );
+        assert_eq!(
+            judge.judge(second(2, 2), day(2), ohlc(10_100)),
+            (Verdict::Held, Some(100))
+        );
+        // Inside the day's range and beyond JUMP_BPS of the kept close.
+        let jumped = judge.judge(second(2, 3), day(2), [13_200, 13_200, 10_500, 10_500]);
+        assert_eq!(
+            jumped,
+            (
+                Verdict::Refused(Cause::InSessionJump {
+                    reference: 10_100,
+                    bps: 3_069
+                }),
+                Some(3_069)
+            )
+        );
+        // Wholly outside the day: the day rung's refusal, with the jump measured.
+        let foreign = judge.judge(second(2, 4), day(2), ohlc(1_000));
+        assert_eq!(
+            foreign,
+            (
+                Verdict::Refused(Cause::ForeignLevel {
+                    day_low: 9_000,
+                    day_high: 11_000
+                }),
+                Some(91_000)
+            )
+        );
+        assert_eq!(
+            judge.judge(second(2, 5), day(2), ohlc(10_100)),
+            (Verdict::Held, Some(0))
+        );
+        // Without the jump rule nothing is measured, and without a listing the
+        // first-day-bar rule refuses.
+        let mut plain = MinuteJudge::new(&book, Rules::default(), 60);
+        assert_eq!(
+            plain.judge(second(1, 0), day(1), ohlc(10_000)).0,
+            Verdict::Refused(Cause::BeforeFirstDayBar { first: day(2) })
+        );
+        assert_eq!(
+            plain.judge(second(2, 0), day(2), ohlc(10_000)),
+            (Verdict::Held, None)
+        );
+        assert_eq!(
+            plain.judge(second(2, 1), day(2), ohlc(10_900)),
+            (Verdict::Held, None)
+        );
+    }
+
+    #[test]
+    fn every_new_cause_is_counted_named_and_folded() {
+        let mut tally = Tally::default();
+        let causes = [
+            Cause::NonPositivePrice,
+            Cause::BeforeListing { listed_on: day(1) },
+            Cause::InSessionJump {
+                reference: 1,
+                bps: 9,
+            },
+        ];
+        for (n, cause) in causes.into_iter().enumerate() {
+            tally.count(
+                Verdict::Refused(cause),
+                day(i64::try_from(n).unwrap()),
+                at(0, 0),
+            );
+        }
+        assert_eq!(
+            causes.map(Cause::code),
+            ["non_positive_price", "before_listing", "in_session_jump"]
+        );
+        assert_eq!(
+            (
+                tally.non_positive_price,
+                tally.before_listing,
+                tally.in_session_jump
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!((tally.refused(), tally.minutes()), (3, 3));
+        let mut sum = tally.clone();
+        sum.absorb(tally);
+        assert_eq!(
+            (
+                sum.non_positive_price,
+                sum.before_listing,
+                sum.in_session_jump,
+                sum.refused()
+            ),
+            (2, 2, 2, 6)
+        );
+        assert_eq!(sum.flagged.len(), 6);
+        assert_eq!(prices(&bar(0, 3, 4)), [3, 4, 3, 4]);
     }
 }

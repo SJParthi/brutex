@@ -70698,4 +70698,134 @@ rows 16 and 18).
    did not end.
 
 Proof: `pull::listing::tests::history_ends_after_removal_unless_readmitted`;
-the landing side is proved by the tests R4-17 adds beside `fetch_and_land_listed`.
+`crates/pull/tests/zerodha_identity.rs::a_404_after_delisting_is_history_ending_not_a_failure`
+(a 404 and an empty answer after the removal day end the history; a 404 for a
+still-listed share, a window that includes the removal day, a 500, an index and
+rows that do arrive are each judged as before). **Not wired into the broker
+run here**: the Zerodha pull loop is R4-14's (`broker_run`), which calls
+`fetch_and_land_listed` with the share's span; until it does, the live pull
+reports such a window as it did.
+
+### D-4992 — The day rung is judged at landing ONLY for a price at or below zero and for a CASH day before its listing, never by range (R4-17; ING-01 c, d) — 2026-10-17
+
+**Amends WP-13d's rule** that a non-intraday window is returned untouched
+because "the day rung is the witness, not the accused"
+(`pull::ingest::identity_screen`). That left MAZDOCK's 1day bars with
+o=h=l=c=0 and IRFC's day bars before its listing landing (per the R4-17 work
+package). The witness half stands: a day bar is never judged by its range,
+its neighbours or any minute, so the day rung stays what minutes are judged
+against. Two things are refused by name, that row only:
+
+1. **`non_positive_price`**: any open, high, low or close at or below zero
+   paisa, on an index, a share or a future, on every rung. Options are not
+   judged by it (an option's zero is not this rule's). The store format is not
+   changed: `store::format`'s sanity check and `http`'s price decode both admit
+   zero, and this door refuses it instead.
+2. **`before_listing`**: a CASH bar on a day before its master's listing day
+   (D-4990).
+
+Proof: `crates/pull/tests/zerodha_identity.rs`
+(`a_zero_price_day_bar_is_refused_by_name_at_landing`,
+`a_day_bar_before_listing_is_refused_by_name`,
+`the_day_rung_is_never_judged_by_range`).
+
+### D-4993 — A CASH minute whose open jumps beyond JUMP_BPS from the minute kept before it, inside one continuous run, is refused by name; JUMP_BPS is PROVISIONAL until measured on the store (R4-17; RT-DATA-02 a) — 2026-10-17
+
+**Decision.** `pull::series_identity::JumpRun` follows one continuous recorded
+run of CASH minutes on the 1-minute grid. A minute whose open lies more than
+`JUMP_BPS` from the close of the minute last KEPT in the run is refused
+(`in_session_jump`). Several choices are locked here:
+
+1. **Continuous means one grid step apart.** A halt (2020-03-13, 2020-03-23), a
+   missing minute or the night breaks the run, so a session's first minute and
+   the first after any gap are never judged: 09:15 is never a jump, and a split
+   or bonus, which takes effect between sessions, cannot trip it.
+2. **Measured against the SMALLER price** (`jump_bps`), not the earlier close
+   alone, and that is a deliberate departure from the work package's
+   `|open(n) - close(n-1)| / close(n-1)`. Against the earlier close, a basis
+   halving reads 50% and a doubling 100%, so in an interleave the wrong side
+   is refused. Against the smaller, a factor trips alike either way.
+3. **The reference is the last KEPT minute**, so a block of foreign minutes is
+   refused whole, not at its edges. A minute refused for any cause keeps the
+   run continuous and never becomes the reference. When a run's FIRST minute is
+   the foreign one, the share's own minutes after it are refused instead:
+   loudly, by name, never stored silently. The day rung's `foreign_level`
+   judges the same minutes independently.
+4. **CASH 1-minute only.** That is the population the threshold is to be
+   measured over. Indices are judged by the day rung (`foreign_level`), and
+   options can legitimately move more than any such band.
+5. **`JUMP_BPS` = 3,000 is PROVISIONAL.** The work package requires it measured
+   first, read-only, over every stored Zerodha CASH minute, per share (p99,
+   p999, max). It must show zero trips on split and bonus ex-dates, a trip on
+   PIIND's interleave (the 09:15 close 821.65 against the 09:16 open 89.90 is
+   81,395 bps by this measure), and none on a clean share. The cloud session
+   that wrote this has no store. `cli series-identity ALL --segment CASH
+   --feed zerodha` prints exactly that distribution per share, and the
+   operator's run of it is the measurement. Until it is recorded beside the
+   constant and in `docs/06-limits.md`, the value is UNVERIFIED. If any action
+   day trips, or a clean share's maximum reaches 3,000, the constant is wrong:
+   stop and say so before this merges.
+
+Proof: `crates/pull/tests/zerodha_identity.rs`
+(`a_session_interleaving_two_price_bases_is_refused_at_landing`,
+`a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump`);
+`pull::series_identity` unit tests of `jump_bps` and `JumpRun`.
+
+### D-4994 — `cli series-identity` gives every flagged stored bar a measured cause and writes a quarantine PLAN under `<store>/audit/series-identity/`, and writes no bar (R4-17; RT-DATA-02 b, Z6) — 2026-10-17
+
+**Decision.** The store scan judges every stored bar by the landing door's
+own rules (`identity_screen::scan_series`, one `MinuteJudge` shared with the
+landing). It counts in-session jumps per month and exits non-zero when any
+bar would be refused, an in-session jump among them. Each flagged bar is given
+a measured cause:
+
+| Code | Means | Plan action |
+|---|---|---|
+| `zero_price` | a price at or below zero (D-4992) | quarantine |
+| `before_listing` | before its master's listing day (D-4990) | quarantine |
+| `before_first_day_bar` | before the first day bar, where no master states the listing (WP-13d) | quarantine |
+| `basis_mismatch` | accused by its day rung or its run, but within `WITNESS_TOLERANCE_BPS` (100, chosen and stated) of GDFL's 1s bars of that minute folded by `pull::fold`: the vendor's minute is GDFL's and its day bar was adjusted apart | label |
+| `foreign_level` | matches neither its own day nor GDFL's minute | quarantine |
+| `no_gdfl_witness` | GDFL holds no minute to compare | quarantine if a landing refuses it; label if it is only suspect |
+
+1. **The plan is the only file written.** One tab-separated row per (key, rung,
+   month, cause, action): `whole_month` when the row covers every bar of that
+   month's rung, else every stamp (UTC microseconds). Its name carries the
+   BLAKE3 of its content, so a rerun over the same store finds it and writes
+   nothing (`CLAUDE.md` §3 rule 5). It is published through
+   `store::staging::create` and a rename. No bar is written, moved or
+   changed; acting on the plan is a versioned generation's job (D-3350), not
+   this verb's.
+2. **Which named shares hold which cause is NOT stated here.** The work package
+   names PIIND 2018-12..2020-01, VBL 2023-06-14, PATANJALI, UNITDSPR, IRFC,
+   KFINTECH, DALBHARAT and MAZDOCK. Their causes are measured by the
+   operator's read-only run of this verb on the store and recorded from its
+   output. Writing them here without that run would be invention.
+
+Proof: `cli::series_identity::tests`
+(`the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,
+`piind_minutes_are_named_by_cause_before_any_write`,
+`a_month_refused_whole_is_planned_whole`, and the WP-13d tests kept).
+
+### D-4995 — No store path and no census key is built from a vendor's instrument token, checked from the source (R4-17; CON-13) — 2026-10-17
+
+**Decision.** `crates/pull/tests/token_identity.rs` reads six modules
+(`store/src/path.rs`, `pull/src/manifest.rs`, `core/src/instrument.rs`,
+`pull/src/census_store.rs`, `pull/src/gdfl_lineage.rs`, `api/src/facets.rs`)
+with `include_str!`. None of the following may hold an identifier naming
+`token`, `instrument_token`, `exchange_token`, `security_id` or `fininstrmid`
+(or holding `token` at all):
+
+- the bodies of `PathParts`, `StorePath`, `EntryKey`, `Contract` and `InstrumentKey`;
+- the parameters of `StorePath::new`, `StorePath::for_key`, `option_key` and `parse_option_key`;
+- any `EntryKey` or `PathParts` literal those modules build.
+
+Comments are not read. The list is closed: each item is found in exactly one
+listed module, every listed module holds something read, and no other non-test
+source file of `core`, `store`, `pull` or `api` defines a type or function of
+those names. A self-test over an in-memory module with an `instrument_token`
+field must be refused, so a checker that refuses nothing fails the build.
+
+Proof: `no_store_or_census_key_is_built_from_a_token`,
+`the_module_list_is_closed_over_every_definition_of_a_key`,
+`a_token_field_in_a_fixture_key_builder_is_refused`.
