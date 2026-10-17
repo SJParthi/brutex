@@ -827,7 +827,15 @@ fn tickstore_a_socket_at_a_day_name_is_refused_by_name() {
     let d = day(2024, 4, 1);
     let path = store.day_path(CmKind::Indices, d);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    // BOUND AT A SHORT NAME, THEN MOVED: a socket's name must fit `sun_path`
+    // (108 bytes on Linux, 104 on macOS), which a day path under a long
+    // temporary directory does not. The rename keeps the inode a socket.
+    let short = root.join("Sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
+    std::fs::rename(&short, &path).unwrap();
+    assert!(std::os::unix::fs::FileTypeExt::is_socket(
+        &std::fs::symlink_metadata(&path).unwrap().file_type()
+    ));
     match store.day(CmKind::Indices, d) {
         Err(CmRefusal::TickStoreMalformed { what }) => {
             assert!(what.contains("a socket or a device"), "{what}");
