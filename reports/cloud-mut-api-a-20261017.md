@@ -178,8 +178,8 @@ whole `api` library (less the twelve root-only tests) and
 | `render.rs` | 12 | 11 | 1 |
 | `gaps_route.rs` | 1 | 0 | 1 |
 | `bars.rs` | 32 | 25 | 7 |
-| `bars_sort.rs` | 32 | 12 so far (library); 20 running against both | — |
-| `bars_series.rs` | 27 | running | — |
+| `bars_sort.rs` | 32 | 12 (library); 18 of the other 20 run against both, all survived (the 16 Oct equivalents) | 2 running |
+| `bars_series.rs` | 27 | 17 of 28 run so far, all caught | running |
 
 ## Coverage
 
@@ -287,11 +287,9 @@ request, where no seam reaches.**
 
 - Stage 2 for `bars_sort.rs` (20) and `bars_series.rs` (27), and the reason
   for every mutant that survives it (see *Mutation*).
-- Re-running the six `gaps_route.rs` timeouts against the fixed pool test
-  (a failed assertion in it used to hang; it now fails in about a second).
-- The coverage re-measurement after the new tests, and the reason for
-  every line and branch still unrun.
-- `cargo test --workspace --locked`, and the final clippy.
+- `cargo test --workspace --locked` (building), the final clippy, then the final report.
+- Done since the last commit: the six `gaps_route.rs` timeouts were run
+  again against the fixed pool test and all six were caught.
 
 ## Conduct: two lapses against the brief's language rule
 
