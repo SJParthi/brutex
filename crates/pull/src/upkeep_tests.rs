@@ -1489,6 +1489,13 @@ fn a_sidecar_name_held_by_anything_is_not_lacking() {
     assert!(!Lacks::of(Kind::ALL).has(Kind::Recount) && !Lacks::of(Kind::ALL).has(Kind::Rekey));
     assert_eq!(Lacks::of([Kind::Recount, Kind::Rekey]), Lacks::default());
     assert_eq!(Lacks::of(Kind::ALL).kinds().count(), 3);
+    // A kind named twice is still lacked: a set, never a toggle.
+    assert_eq!(
+        Lacks::of([Kind::SortIndex, Kind::SortIndex])
+            .kinds()
+            .collect::<Vec<_>>(),
+        [Kind::SortIndex]
+    );
     let month: &Month = &walked.months[0];
     assert_eq!(month.symbol, "NIFTY");
     assert_eq!(
