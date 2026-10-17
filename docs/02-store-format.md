@@ -481,6 +481,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.srt` | the bar file's sort index: rows ordered by each sortable column, in runs, version 1 (§8.4, D-3349) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
 | `.sbar` | the sealed form of a closed month: every committed record, the committed header and the `.prv` image in one file written once, version 1 (§8.5, D-4965) |
+| `.sum` | the month summary while the month is still being written: its minute and second index, extremes, bars per day and input faults, the same section a `.sbar` carries, version 1 (§8.6, D-4980) |
 
 ```
 bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.bin
@@ -1106,6 +1107,72 @@ frame, the stamps' order, the BLAKE3, the regenerated `.crc` image, the
 ranges, the extremes, the table, the provenance and the summary against the
 head: O(the month), once, for a seal and a scrub, never for a request
 (`docs/06-limits.md` L-SC-16).
+
+### 8.6 `.sum` — month summary, version 1 (D-4980)
+
+What a reader needs to know about a month without reading its bars (R3-06):
+the minutes and seconds of the day it holds, its extremes, its bars per day
+and the input a gap audit refuses on. Derived from the committed bars, never
+a record stream, and self-checked. `store::month_summary`.
+
+**The section** (the same bytes in both places):
+
+| Bytes | Field |
+|---|---|
+| 2 | summary version `1`, little-endian |
+| 2 | zero |
+| n | the payload, below |
+| 4 | CRC-32C over everything before it |
+
+**Where it is.** A sealed month carries the section in its `.sbar` (head flag
+bit 2, `sum_off`, `sum_len`; §8.5, amendment A4) and has no `.sum`. A month
+still being written keeps it in `<yyyy-mm>.sum` behind the 8-byte magic
+`BRUTEXU1`, so the sealer copies the bytes after the magic and changes none.
+A month under `store::time_index::INDEX_MIN_ROWS` (1,024) bars has no `.sum`,
+as it has no `.tix` and no `.srt` (D-4933); a reader builds its summary from
+its at most 1,023 bars.
+
+**The payload**, little-endian:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | symbol id |
+| 4 | 4 | rung in seconds |
+| 8 | 2 | year; 10: month `u8`; 11: days in the month `u8` |
+| 12 | 4 | flags: bit 0 the seconds bitmaps are present; any other bit is refused |
+| 16 | 8 | the committed header's `generation` it describes |
+| 24 | 8 | `n_valid` it describes |
+| 32 | 8 | first row's stamp; 40: last row's stamp (both 0 when empty) |
+| 48 | 8 | rows folded |
+| 56 | 24 | six `u32`: stamps off the rung's grid or not strictly increasing; stamps before the one before; negative volumes; rows outside the month's IST days; distinct seconds held; distinct minutes held |
+| 80 | 64 | eight `i64`: highest high and the stamp of the earliest bar holding it, lowest low and its stamp, first open, last close, volume summed (saturating), last open interest |
+| 144 | 16 | zero; a set byte is refused |
+| 160 | 12 × days | per day: bars, first second held, last second held (`u32::MAX` twice for a day without a bar) |
+| … | | per day with bars, in day order: its minutes from the first held to the last held, one bit each, low bit first, padded to a byte with zero bits |
+| … | | when flag bit 0: per day with bars, its seconds from the first held to the last held, the same way |
+
+The seconds are kept when the distinct seconds held are at least half of the
+seconds the days span (two bits a held second at most), judged at every write:
+a month an append takes under half drops its seconds at that write, and a
+month whose seconds were dropped or never kept is written whole the first time
+an append makes it dense again. The longest payload is a 31-day month holding
+every second: 340,912 bytes, under the `.sbar`'s 1 MiB section limit.
+
+**Written** by the writer's step after the sort index's, on every writer open
+and every commit: a summary describing the generation before, of a prefix of
+these rows, is extended by the rows committed since; anything else is built
+whole from every committed row. Either way into `<yyyy-mm>.new.sum` (a new
+inode) and renamed over `<yyyy-mm>.sum`; not flushed, because every read
+checks it against the committed header. The step never refuses the commit it
+follows: a failure is a `store.sum` warning and the summary left describes an
+older generation. `BarFile::month_summary_existing` is the one rebuild door.
+
+**Read** by `store::month_summary::read_beside`: one open and one read, the
+magic, the CRC, the payload's own geometry, and the committed header (symbol,
+rung, month, generation, `n_valid`, first and last stamp). Every refusal has
+its own name (`absent`, `below_threshold`, `unreadable`, `torn`, `magic`,
+`checksum`, `version`, `shape`, `not_this_month`, `stale`), and a reader that
+gets one reads the bars and says so.
 
 ## 9. What this format does not solve
 

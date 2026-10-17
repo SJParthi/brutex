@@ -72,13 +72,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 12] = [
+pub(crate) const WRITERS: [&str; 13] = [
     "alerts",
     "census-migrate",
     "census-recount",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
+    "msum-build",
     "scrub-blocks",
     "srt-build",
     "tickstore-write",
@@ -90,9 +91,9 @@ pub(crate) const WRITERS: [&str; 12] = [
 /// Whether `verb`, invoked with `arguments`, writes the store.
 ///
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
-/// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`, `gdfl-rekey`
-/// without `--apply`, `zerodha-gaps` without `--apply`, and `zerodha-repair`
-/// without `--from-store` each state
+/// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
+/// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, `zerodha-gaps`
+/// without `--apply`, and `zerodha-repair` without `--from-store` each state
 /// in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it.
@@ -100,7 +101,7 @@ pub(crate) const WRITERS: [&str; 12] = [
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
-        "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
+        "msum-build" | "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
@@ -381,13 +382,14 @@ mod tests {
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
         // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 12] = [
+        let writing: [(&str, &[&str]); 13] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),
+            ("msum-build", &[]),
             ("scrub-blocks", &[]),
             ("srt-build", &[]),
             ("tickstore-write", &["ZIP", "ROOT"]),
@@ -416,6 +418,7 @@ mod tests {
         for (verb, arguments) in [
             ("alerts", &[][..]),
             ("gdfl-rekey", &["--plan"][..]),
+            ("msum-build", &["--dry-run"][..]),
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-gaps", &[][..]),
