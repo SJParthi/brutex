@@ -493,6 +493,28 @@ fn an_auction_print_is_said_kept_apart_only_where_a_sidecar_is() {
     );
     let mut none = AuctionSidecars::of(&root, Vendor::Gdfl, "NIFTY", false);
     assert_eq!(none.on(day("2026-08-04")), None);
+    // A stocks line that counts no print says nothing of an auction print.
+    let quiet = super::super::tests::flags_line(
+        "stocks",
+        "2026-08-05",
+        "*",
+        &super::super::STOCKS_FIELDS,
+        &[("auction_prints", "0")],
+    );
+    super::super::tests::append(&super::super::quality_path(&root), &quiet);
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2026-08-05&to=2026-08-05"),
+    );
+    let rec = record(&got, "2026-08-05");
+    assert_eq!(rec["quality"]["stocks"]["auction_prints"], 0, "{rec:#}");
+    assert!(
+        says(rec)
+            .iter()
+            .all(|say| !say.contains("closing-auction print(s)")),
+        "{:#?}",
+        says(rec)
+    );
     // ONE STAT A MONTH: the month's second day is answered from the first's.
     let mut held = AuctionSidecars::of(&root, Vendor::Gdfl, "RELIANCE", true);
     assert_eq!(held.on(day("2026-08-04")), Some(true));
@@ -1155,6 +1177,10 @@ fn a_frozen_index_run_is_flagged_on_both_feeds() {
 
 /// A GDFL ledger run that starts inside the recorded halt is the halt's.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one halt day, its boundaries and every placement of a run against it, read together"
+)]
 fn a_ledger_run_inside_the_halt_is_not_frozen() {
     let halt = pull::calendar::halt_on(i64::from(day("2020-03-13").days_from_epoch()))
         .expect("a recorded halt")
@@ -2079,7 +2105,7 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
     assert_eq!(scan.map(|scan| scan.bars), Some(2));
     assert_eq!(
         first,
-        Some(super::super::ist_midnight_micros(day("2022-03-07")) + i64::from(open) * 1_000_000)
+        Some(super::super::ist_midnight_micros(day("2022-03-07")) + open * 1_000_000)
     );
     assert!(whole.is_empty(), "{whole:#?}");
     // A HANDLE OF ITS OWN, opened before the cut: the first one keeps the

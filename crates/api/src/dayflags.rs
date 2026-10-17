@@ -3539,11 +3539,11 @@ fn counts(
             Opened::File(file) => {
                 // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
                 let identity = reads.scan.then(|| rules::file_identity(&file)).flatten();
-                let spans = day_spans(&file, month_days);
+                let day_rows = day_spans(&file, month_days);
                 if let Some(identity) = identity {
                     let held: Vec<(Day, u64, u64)> = month_days
                         .iter()
-                        .zip(&spans)
+                        .zip(&day_rows)
                         .filter_map(|(day, span)| {
                             span.as_ref().ok().map(|&(lo, hi)| (*day, lo, hi))
                         })
@@ -3553,7 +3553,7 @@ fn counts(
                         in_recorded_halt(venue, day, ts)
                     });
                 }
-                for (day, counted) in month_days.iter().zip(spans) {
+                for (day, counted) in month_days.iter().zip(day_rows) {
                     match counted {
                         Ok((lo, hi)) => {
                             let held = hi.saturating_sub(lo);
@@ -4015,12 +4015,12 @@ impl PageHeld {
         // open a month per name the symbol table gives it.
         if peer.per_day.contains(&Held::NoFile) {
             // A SHARE'S NAMES ONLY: the lineage table renames shares.
-            let names = if inst.segment == Segment::Cash {
+            let aliases = if inst.segment == Segment::Cash {
                 rules::other_names(&inst.symbol)
             } else {
                 Vec::new()
             };
-            for name in names {
+            for name in aliases {
                 let named = Instrument {
                     symbol: name.to_owned(),
                     ..inst.clone()
