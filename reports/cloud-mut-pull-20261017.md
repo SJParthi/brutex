@@ -62,10 +62,10 @@ survivors and timeouts were re-tested above.
 
 | Old NOT DONE item | Now |
 |---|---|
-| Branch coverage not measured | **Measured** (nightly `--branch`, opt-level 0, unprivileged): 818/842 branches; five files 100%; each remaining branch explained. |
+| Branch coverage not measured | **Measured** (nightly `--branch`, opt-level 0, unprivileged): 854/876 branches (97.49%) and 4,721/4,786 lines (98.64%) on the final head; five files 100% of both; each remaining branch explained. |
 | Five timeouts remain timeouts | **All five caught** under Gate 18's flags: one already was under nextest, three by the old pass's fold watchdog run first, one by a new options-expiry watchdog run first. |
 | 18 equivalent mutants remain missed | **Re-confirmed missed under Gate 18's flags**, each still equivalent for the stated reason; one more found on new code (`gdfl_archive.rs:280:58`). 16 of the 19 sit on lines Gate 18 will plan for `feat/db-fix` → `main` (NEEDS THE MAC 1). |
-| Uncovered production lines remain | Reduced: `cash_session_cache.rs:184–188` now counted (the uid-65534 child's own run); twelve provokable refusal and host-error paths given tests (Tests added); every line still unreached listed with why. |
+| Uncovered production lines remain | Reduced: `cash_session_cache.rs:184–188` now counted (the uid-65534 child's own run); fourteen provokable refusal and host-error paths given tests (Tests added); every line still unreached listed with why. |
 | The container runs as root; three tests fail as root | `gdfl_tickstore`'s test now re-runs itself where permission binds and passes as root. The two in `gdfl_import` (not this part's files) still fail as root and pass as any ordinary user. Every run here was also made as an ordinary user. |
 | Not run: `cargo deny`, workspace clippy and tests | **Run** (Gates). |
 | CI red on the old draft PR for base-snapshot reasons | No PR is opened from this branch. Gate 1d checked locally: red on the base, this branch adds no undeclared word. |
@@ -218,8 +218,9 @@ user, at **opt-level 0**. That last setting matters: at the workspace's dev
 opt-level 3 a small `pub const fn` (`scrub::contract_of`, the `fold::Ladder`
 methods) is inlined across crates into the integration-test binary and the
 nightly report loses its counters, so it reads 0 hits though tests call it.
-At opt-level 0 nothing is inlined and the count is honest. Every test passes
-in this run.
+At opt-level 0 nothing is inlined and the count is honest. Measured on the
+final head `b86d5a0e` (the merged tree, with every test of this pass); every
+test passes in this run.
 
 | File | Lines | Branches |
 |---|---:|---:|
@@ -227,13 +228,13 @@ in this run.
 | `fold.rs` | 618/629 | 117/126 |
 | `gdfl_archive.rs` | **374/374** | **44/44** |
 | `gdfl_cm.rs` | 1,143/1,151 | 263/270 |
-| `gdfl_cm_auction.rs` | 188/201 | 33/38 |
+| `gdfl_cm_auction.rs` (v2, after the merge) | 372/385 | 67/70 |
 | `gdfl_import_scope.rs` | **104/104** | **10/10** |
-| `gdfl_nfo.rs` | **611/611** | **122/122** |
-| `gdfl_tickstore.rs` | **343/343** | **82/82** |
+| `gdfl_nfo.rs` | **620/620** | **124/124** |
+| `gdfl_tickstore.rs` | **344/344** | **82/82** |
 | `request_minutes.rs` | 589/599 | 88/90 |
 | `scrub.rs` | 122/126 | **12/12** |
-| **Ten files** | **4,527/4,592 (98.58%)** | **818/842 (97.15%)** |
+| **Ten files** | **4,721/4,786 (98.64%)** | **854/876 (97.49%)** |
 
 Line counts differ from the old report's (e.g. `cash_session_cache` 453 →
 454): a different compiler's coverage mapping, and the nightly counts a
@@ -267,11 +268,14 @@ another check already decided.
 | `gdfl_cm.rs:2306` (branch) | an unknown-eligibility one-price band with no booked row | A zero-book candidate of unknown eligibility refuses the file at its row, so such a band is only ever observed by booked rows (equivalent mutant `2306:70`). |
 | `gdfl_cm.rs:2352` (branch), `2354` | the merge's `next` is `None` | The loop breaks when both runs are empty; any other case takes a row. |
 | `gdfl_cm.rs:2836` (branch), `2837` | `Window::new(day, day)` refused | `Window::new` refuses only a window that runs backwards. |
-| `gdfl_cm_auction.rs:173`, `201`, `204`, `207` (branches), `175`, `203`, `206`, `209` | `get_mut` of a fixed slice returning `None` | Every range is inside a fixed-size array whose length is a constant (28 of 32 bytes, 12 of 16). |
-| `gdfl_cm_auction.rs:255` | `YearMonth::new` refusing a `Day`'s month | `Day` and `YearMonth` share the years 1970–9999. |
-| `gdfl_cm_auction.rs:292` (branch), `295` | a sidecar path with no parent | A path built under the store root always has one. |
-| `gdfl_cm_auction.rs:310–314` | the sidecar lock not released | A host error on `flock` release. |
-| `gdfl_cm_auction.rs:329`, `373` | reading or writing the open sidecar failing | An I/O error or a full disk. |
+| `gdfl_cm_auction.rs:226` (branch), `228` | `put`'s `get_mut` returning `None` | Every call writes a constant range inside a fixed-size array (`header_of`'s 16 bytes, a record's 32). |
+| `gdfl_cm_auction.rs:545` | `TryLockError::Error` in `hold` | `flock` refused by the host for a reason other than contention. |
+| `gdfl_cm_auction.rs:569` | `YearMonth::new` refusing a `Day`'s month | `Day` and `YearMonth` share the years 1970–9999. |
+| `gdfl_cm_auction.rs:610` (branch), `618` | a sidecar path with no parent | A path built under the store root always has one. |
+| `gdfl_cm_auction.rs:612` (branch) | the directory walk meeting an empty path | Only a relative store root walks up to `""`; every caller and test passes an absolute one, and a test of a relative root would have to write into the crate's own directory. |
+| `gdfl_cm_auction.rs:633–637` | the sidecar lock not released | A host error on `flock` release. |
+| `gdfl_cm_auction.rs:659` | reading the open, locked sidecar failing | An I/O error. |
+| `gdfl_cm_auction.rs:714–717` | undoing a failed append failing too | The `seam::FAIL_AFTER` hook fails the write; the `set_len` that undoes it failing as well needs a second host error. |
 | `request_minutes.rs:347` (branch), `349` | `regular_plan`'s refusal of venue hours | Every venue row is `verified` and continuous (equivalent mutant `347:22`). |
 | `request_minutes.rs:425` (branch), `426–433` | the "invalid day" finding | The loop walks day numbers between two valid `Day`s. |
 | `request_minutes.rs:1039` | the ledger append's host-error closure | Used only by `fstat`, `flock`, `pread`, `write` or `sync` failing on an open regular file. |
@@ -301,6 +305,12 @@ the old pass already used. No vendor byte is committed.
 | `a_stored_share_of_the_full_symbol_width_is_filed` (extended) | `tests/cloud_mutants_import.rs` | One byte past the symbol capacity is no slot and no member. |
 | `the_monthly_walk_back_over_a_holiday_answers_within_a_bound` | `gdfl_nfo.rs` | The monthly expiry over Thu 29 Mar 2018 (a holiday) answers 28 Mar inside a ten-second watchdog; a walk that stops stepping fails here instead of hanging the run. |
 | `a_stored_day_holding_every_owed_minute_has_no_line` | `request_minutes.rs` | `stored_line`: a whole stored day has no `gap` line; a day one minute short has the line, field by field, with `fill=` and `source=store`, and a count of 1. |
+| `a_print_at_ist_midnight_is_its_own_days_and_not_the_day_befores` (adapted) | `tests/cloud_mutants_import.rs` | After the merge `auction::parse` answers a `Sidecar`; the test reads its `.records`. Assertions unchanged. |
+| `a_bad_header_is_refused_in_its_own_versions_words` | `gdfl_cm_auction.rs` | A version-1 header with a reserved byte set and a version-2 header with its checksum broken are each refused in their own version's words; both unbroken are read with no record. |
+| `only_a_missing_sidecar_reads_as_none` | `gdfl_cm_auction.rs` | `read`: an absent sidecar is `None`; one under a regular file (`ENOTDIR`) is refused naming the path. |
+| `a_fresh_sidecar_syncs_no_directory_above_the_one_it_was_made_in` | `gdfl_cm_auction.rs` | A fresh sidecar syncs the store root (parent of the first directory it made) and nothing above it, read through `seam::SYNCED`. |
+| `a_sidecar_lock_held_past_the_bound_is_refused_in_time` | `gdfl_cm_auction.rs` | `hold` with a 50 ms bound against a held lock refuses naming the bound, inside a ten-second watchdog (run first under nextest). |
+| `a_sidecar_directory_that_cannot_be_synced_is_named` | `gdfl_cm_auction.rs` | A fresh sidecar in a writable, unreadable directory is written and synced, then refused naming the directory not synced; the record stays (where permission binds). |
 
 ## Gates
 
