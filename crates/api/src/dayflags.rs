@@ -29,7 +29,11 @@
 //! | `gaps`, `refused_front` | `<store>/audit/zerodha.gaps` (D-3335 §2): always the Zerodha line | both |
 //! | `pull`, `refused_front` | `<store>/audit/pull.journal`: Zerodha's member failures that refused a window before append (D-3315) or a dated day's rows (D-3344), and where the series' `1day` bars start | zerodha spot |
 //! | `junk`, `day_bar` | the day's stored Zerodha `1day` bar, and the bar counts | zerodha |
-//! | `held`, `peer` | the day's bars at this feed's finest rung, and the other feed's | both |
+//! | `held`, `finest`, `peer` | the day's bars at the asked `timeframe=` (the grid's rung, else this feed's finest), at the finest beside it where they differ, and the other feed's, under a share's other names where its own holds no month (`peer.as`; R3-13) | both |
+//! | `calendar.cas`, `auction_sidecar` | a share's dated closing-auction flag from that day's NSE master, and whether a GDFL share month keeps its auction prints apart (SC-CLOSE-8, SC-CLOSE-9; `dayflags_rules`) | both |
+//! | `contract`, `calendar.expired` | a contract's expiry, and whether the day is after it and owes nothing (SC-CLOSE-12) | both |
+//! | `bar_definition` | the bar definition that built the day, from the import journal or the day ledger (R3-13 goal 3) | gdfl |
+//! | `index` | an index's frozen runs and values outside the day bar's range (DB-B20; `dayflags_rules`) | both |
 //! | `says` | the above as short phrases, in a fixed order | both |
 //!
 //! # Built against the format, before the writers
@@ -432,9 +436,14 @@ pub(super) async fn dayflags_json(
     // THE GRID'S RUNG, beside `Asked` and never inside it (R3-13 goal 1): a
     // band counts what the grid shows, and `sources.rs` builds `Asked` by
     // name for a GDFL read at the finest rung.
-    let asked = match asked(&query)
-        .and_then(|asked| Ok((asked, rules::asked_rung(&param(&query, "timeframe"))?)))
-    {
+    let asked = match asked(&query).and_then(|asked| {
+        let band = rules::band_of(
+            &param(&query, "timeframe"),
+            &param(&query, "expiry"),
+            &asked.instrument,
+        )?;
+        Ok((asked, band))
+    }) {
         Ok(asked) => asked,
         // THE REFUSAL IS THE BODY'S, and `logs::note_request` records the path
         // and the 400. No event of its own: this crate counts its emit sites.
@@ -447,8 +456,8 @@ pub(super) async fn dayflags_json(
         }
     };
     let root = site.store_root.clone();
-    let (asked, rung) = asked;
-    match crate::detail::run_store_read(move || answer_at(&root, &asked, rung)).await {
+    let (asked, band) = asked;
+    match crate::detail::run_store_read(move || answer_at(&root, &asked, band)).await {
         Ok(body) => (axum::http::StatusCode::OK, json_header(), body.to_string()),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
@@ -502,20 +511,21 @@ const fn finest(feed: Vendor) -> Timeframe {
 /// that cannot be read is named under `sources` and in `notes`, and the
 /// other sources still answer.
 pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
-    answer_at(root, asked, None)
+    answer_at(root, asked, rules::Band::default())
 }
 
-/// [`answer`], with each day's bars counted at `rung` (the grid's, from
-/// `timeframe=`) where it is not the feed's finest (R3-13 goal 1). The finest
-/// rung is still counted beside it, so a Zerodha `1day` page names a session
+/// [`answer`], with each day's bars counted at `band.rung` (the grid's, from
+/// `timeframe=`) where it is not the feed's finest (R3-13 goal 1), and an
+/// option family's days after `band.expiry` expired. The finest rung is
+/// still counted beside the grid's, so a Zerodha `1day` page names a session
 /// that holds minutes and no day bar, and never says "no Zerodha bar" above a
 /// day bar the grid shows.
-pub(crate) fn answer_at(root: &Path, asked: &Asked, rung: Option<Timeframe>) -> Value {
+pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value {
     let (first, last, page, pages) = page_span(asked);
     let days = days_between(first, last);
     let inst = &asked.instrument;
     let peer_feed = peer_of(asked.feed);
-    let counted = rung.unwrap_or_else(|| finest(asked.feed));
+    let counted = band.rung.unwrap_or_else(|| finest(asked.feed));
     let mut notes: Vec<String> = Vec::new();
     let journal = (asked.feed == Vendor::Gdfl).then(|| journal_rows(root, inst, first, last));
     let quality =
@@ -571,7 +581,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, rung: Option<Timeframe>) -> 
     let ctx = Context {
         asked,
         rung: counted,
-        expiry: rules::expiry_of(inst.contract),
+        expiry: rules::expiry_of(inst.contract).or(band.expiry),
         sampled_of: underlying.as_ref(),
         journal: journal.as_ref().and_then(|j| j.as_ref().ok()),
         quality: quality.as_ref().and_then(|q| q.as_ref().ok()),
@@ -611,6 +621,8 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, rung: Option<Timeframe>) -> 
             "from": asked.from.to_string(),
             "to": asked.to.to_string(),
             "order": if asked.newest_first { "desc" } else { "asc" },
+            "timeframe": band.rung.map(|rung| rung.as_str()),
+            "expiry": band.expiry.map(|expiry| expiry.to_string()),
         },
         "page": page,
         "pages": pages,
@@ -4637,6 +4649,13 @@ impl Context<'_> {
             }
             out
         });
+        let mut peer_json = peer.json(peer_of(asked.feed), finest(peer_of(asked.feed)));
+        if let Some(fields) = peer_json.as_object_mut() {
+            let _was = fields.insert(
+                "as".to_owned(),
+                held.peer_as.map_or(Value::Null, Value::from),
+            );
+        }
         let mut held = own.json(asked.feed, self.rung);
         if let Some(fields) = held.as_object_mut() {
             // ZERO-VOLUME BARS ARE THE FINEST RUNG'S MINUTES, so they sit
@@ -4671,7 +4690,7 @@ impl Context<'_> {
                 "expiry": expiry.to_string(),
                 "expired": expired,
             })),
-            "peer": peer.json(peer_of(asked.feed), finest(peer_of(asked.feed))),
+            "peer": peer_json,
             "says": says,
         })
     }
@@ -5677,6 +5696,22 @@ fn rules_json() -> Value {
         },
         "pull": "a Zerodha member failure is named on a day it dates, and a whole-window refusal only on a day no 1day bar of the series is held up to",
         "windows": "from and to are minute opens, both inclusive",
+        // R3-13's read-time rules, each from `dayflags_rules`.
+        "held": "held counts the asked timeframe= (the grid's rung), or the feed's finest when none is asked; finest counts the feed's finest rung beside it where the two differ, so a session holding minutes and no 1day bar reads the day bar missing (R3-13 goal 1)",
+        "cas": "calendar.cas is a share's dated closing-auction flag from that day's NSE master, read as /bars/window.json reads it: true (flag 1, continuous to 15:15, 360 owed), false (flag 0, continuous to 15:29, 375 owed), null with why where no master holds it; null where none applies (an index, an option, a day before 2026-08-03) (SC-CLOSE-8); auction_sidecar says whether a GDFL share month keeps its prints apart in the .auc sidecar, and no print is called kept apart without one (SC-CLOSE-9), one stat per month a request",
+        "expired": "a day after a contract's expiry is expired and owes nothing: owed_minutes and unverified_minutes 0, as /gaps.json says (SC-CLOSE-12)",
+        "late": "import.late and max_back_s count every file of the kind-day; on a recounted day they are the close before the census recount, named by late_line (DB-029)",
+        "bar_definition": "the bar definition that built the day, from the import journal's deciding line or else the day ledger's: named on every option day, and on any day whose definition this build would not build (R3-13 goal 3)",
+        "index": {
+            "frozen": format!(
+                "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; null where neither measured the day",
+                rules::FROZEN_MIN_S
+            ),
+            "outside_day_range": "a minute's high above the day's Zerodha 1day bar's high, or its low below its low; null on GDFL, whose seconds this route does not read whole (up to 22,500 reads a day)",
+            "source": "DB-B20's detector: chosen, not sourced; flags only, the bars are served unchanged",
+        },
+        "peer": "a share's peer count is looked up under its other names from the sourced symbol changes where its own name holds no month (DB-031), and peer_as says which",
+        "quality_unknown": "a day-ledger field this reader has no name for is served under its own name on the line's object and listed in unknown (R3-13 goal 5)",
     })
 }
 

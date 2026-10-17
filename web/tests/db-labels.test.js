@@ -49,6 +49,10 @@ import {
   sourceOfDay,
   recordText,
   drawerFacts,
+  shareBasisUrl,
+  basisRunsOf,
+  basisRunLabel,
+  definitionFact,
   remember,
   PROV_FILES_MAX,
   PROV_CACHE_MAX
@@ -300,10 +304,44 @@ test('DB-G42: the day\'s last print in the closing-auction session is the auctio
   assert.equal(v?.tone, 'auction');
   assert.match(v?.text ?? '', /holds it as an ordinary one-second bar until it is re-imported \(D-3320 item 4\); it is not a continuous trade/);
   assert.match(v?.text ?? '', /an inference \(charter §9\)/);
-  assert.match(v?.text ?? '', /as it does on this day/);
+  assert.match(v?.text ?? '', /equals the official day close \(\/sources\/day\.json: 0 bps\)/);
   const other = auctionVerdict({ feed: GDFL, segment: 'CASH', t: firstCasT, phase: 'cas', tail, dayFacts: noSidecar });
   assert.equal(other?.short, 'closing-auction session');
   assert.match(other?.text ?? '', /not the session's last \(that one is at 15:28:07\)/);
+});
+
+// SC-CLOSE-10: on 9 of 133 share-sessions the vendor dropped the auction's
+// print, the session's last print was a 15:15:0x trade, and this label called
+// it the auction's; its text claimed a zero bid and ask that 40 of 116 prints
+// do not carry. The print is now named only where it equals the official
+// close, and no book is claimed.
+test('SC-CLOSE-10: a last print that does not equal the official close is never called the auction\'s', () => {
+  const early = ist(CAS_DAY, '15:15:01') / 1000;
+  const lone = { bars: [{ t: early, c: 50100, phase: 'cas' }] };
+  const differs = { ...noSidecar, close: { official_vs_gdfl_last_print: { bps: -16.75, flag: true } } };
+  const v = auctionVerdict({ feed: GDFL, segment: 'CASH', t: early, phase: 'cas', tail: lone, dayFacts: differs });
+  assert.equal(v?.short, 'closing-auction session');
+  assert.notEqual(v?.tone, 'auction');
+  assert.match(v?.text ?? '', /\(15:15:01\) differs from the official day close by -16\.75 bps/);
+  assert.match(v?.text ?? '', /NOT PROVED/);
+  // Not compared: not called the print either.
+  const unmeasured = { ...noSidecar, close: {} };
+  const u = auctionVerdict({ feed: GDFL, segment: 'CASH', t: early, phase: 'cas', tail: lone, dayFacts: unmeasured });
+  assert.equal(u?.short, 'closing-auction session');
+  assert.match(u?.text ?? '', /the official close was not compared with it/);
+  // No verdict ever claims the print's book.
+  for (const d of [noSidecar, differs, unmeasured]) {
+    for (const t of [lastT, firstCasT, early]) {
+      const said = auctionVerdict({ feed: GDFL, segment: 'CASH', t, phase: 'cas', tail, dayFacts: d })?.text ?? '';
+      assert.doesNotMatch(said, /zero bid and ask/);
+    }
+  }
+  // Two prints of the session at the official close: which is the auction's
+  // is said to be NOT PROVED.
+  const twin = { bars: [{ t: lastT, c: 50000, phase: 'cas' }, { t: lastT - 2, c: 50000, phase: 'cas' }] };
+  const w = auctionVerdict({ feed: GDFL, segment: 'CASH', t: lastT, phase: 'cas', tail: twin, dayFacts: noSidecar });
+  assert.equal(w?.short, 'closing auction print');
+  assert.match(w?.text ?? '', /1 other print\(s\) of the session carry the same price, and which of them is the auction's is NOT PROVED/);
 });
 
 test('a month that files the auction apart never calls a bar its print', () => {
@@ -675,4 +713,97 @@ test('DB-A40: the drawer and the badge are no longer placeholders that render no
   assert.doesNotMatch(badge, /A PLACEHOLDER/);
   for (const name of ['provenanceUrl', 'sourceRuns', 'sourceOfDay', 'drawerFacts', 'auctionMarks']) assert.match(prov, new RegExp(`\\b${name}\\(`));
   for (const name of ['priceBadge', 'volumeBadge', 'closeBadge', 'auctionNote', 'spotNote']) assert.match(badge, new RegExp(`\\b${name}\\(`));
+});
+
+/* ── R3-13 goal 4: a Zerodha share's adjusted or quantised run, by its days ── */
+
+/** One `/sources/day.json` day with an invented `share_basis`. */
+const basisDay = (/** @type {string} */ day, /** @type {Record<string, any> | null} */ b) => ({ day, share_basis: b });
+
+test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named with its first and last day', () => {
+  assert.equal(
+    shareBasisUrl('NSE-CASH-ACME', '2019-06-01', '2019-06-30'),
+    '/sources/day.json?exchange=NSE&segment=CASH&symbol=ACME&from=2019-06-01&to=2019-06-30'
+  );
+  assert.equal(shareBasisUrl('NSE-INDEX-NIFTY', '2019-06-01', '2019-06-30'), null);
+  assert.equal(shareBasisUrl('NSE-CASH-ACME', '', '2019-06-30'), null);
+  const body = {
+    days: [
+      basisDay('2019-06-05', { basis_differs: true, quantised: false, factor: 4.1, grid_paisa: { zerodha_minutes: 5, gdfl_seconds: 5 } }),
+      basisDay('2019-06-03', { basis_differs: true, quantised: false, factor: 4, grid_paisa: { zerodha_minutes: 5, gdfl_seconds: 5 } }),
+      basisDay('2019-06-04', null), // neither feed measured it: joins and breaks nothing
+      basisDay('2019-06-06', { basis_differs: false, quantised: false, factor: 1 }),
+      basisDay('2019-06-07', { basis_differs: false, quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: 5 } }),
+      basisDay('2019-06-10', { basis_differs: true, quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: 5 } })
+    ]
+  };
+  const runs = basisRunsOf(body);
+  assert.deepEqual(runs.map((r) => [r.from, r.to, r.days, r.adjusted, r.quantised]), [
+    ['2019-06-03', '2019-06-05', 2, true, false],
+    ['2019-06-07', '2019-06-10', 2, true, true]
+  ]);
+  assert.deepEqual(runs[0].factors, [4, 4.1]);
+  assert.deepEqual(runs[0].open, { before: true, after: false });
+  assert.deepEqual(runs[1].open, { before: false, after: true });
+  const first = basisRunLabel(runs, '2019-06-04');
+  assert.equal(first?.short, 'adjusted run 2019-06-03 → 2019-06-05');
+  assert.match(first?.text ?? '', /2019-06-03 to 2019-06-05, 2 day\(s\) measured, factor ×4\.0000 to ×4\.1000 \(it drifts\) \(the run may go on before the days read\)/);
+  assert.match(first?.text ?? '', /D-3323's to decide/);
+  const second = basisRunLabel(runs, '2019-06-10');
+  assert.equal(second?.short, 'adjusted and quantised run 2019-06-07 → 2019-06-10');
+  assert.match(second?.text ?? '', /factor ×1\.0254; Zerodha's prices sit on a 50-paisa grid against GDFL's raw 5-paisa grid/);
+  assert.equal(basisRunLabel(runs, '2019-06-06'), null, 'a day on the raw basis carries none');
+  assert.equal(basisRunLabel(runs, ''), null);
+  assert.deepEqual(basisRunsOf(null), []);
+  // A quantised run with no factor served says so.
+  const bare = basisRunsOf({ days: [basisDay('2019-07-01', { quantised: true })] });
+  assert.match(basisRunLabel(bare, '2019-07-01')?.text ?? '', /quantised against GDFL's raw prints: .* no factor served \(the run may go on both ways the days read\)/);
+  // The drawer names the run of its row's day.
+  const row = bar('NSE-CASH-ACME', '1min', '2019-06-04', '10:00:00');
+  const facts = drawerFacts({ feed: ZERODHA, row, answer: null, basis: runs });
+  assert.match(facts.find((f) => f.k === 'Adjusted run')?.v ?? '', /^Zerodha's prices on this run are adjusted against GDFL's raw prints: 2019-06-03 to 2019-06-05/);
+  // The source line and the badge say where the run is named.
+  const prov = readFileSync(new URL('../src/routes/db/DbProvenance.svelte', import.meta.url), 'utf8');
+  assert.match(prov, /\{#if l\.basis\}<span class="bb \{l\.basis\.tone\}" title=\{l\.basis\.text\}>\{l\.basis\.short\}<\/span>\{\/if\}/);
+  const badge = readFileSync(new URL('../src/routes/db/DbBasisBadge.svelte', import.meta.url), 'utf8');
+  assert.match(badge, /adjusted or quantised run is named, with its first and last day/);
+});
+
+/* ── R3-13 goal 3: the bar definition that built a row's day ─────────────── */
+
+test('R3-13 goal 3: an option day names its bar definition on its rows\' label and in the drawer', () => {
+  const answer = {
+    reconstruction: {
+      kind: 'options',
+      source: 'imports/gdfl.journal',
+      days: [
+        { day: '2019-03-05', line: 246, outcome: 'done', attempts: 1, definition: 2, run: null, vendor_files: null },
+        { day: '2019-03-06', line: 247, outcome: 'done', attempts: 1, definition: 4, run: null, recounted: true, vendor_files: null },
+        { day: '2019-03-07', line: 248, outcome: 'done', attempts: 1, definition: null, run: null, vendor_files: null }
+      ],
+      archive: { runs: [] }
+    }
+  };
+  assert.match(sourceOfDay(answer, '2019-03-05').text, / · bar definition 2$/);
+  assert.doesNotMatch(sourceOfDay(answer, '2019-03-07').text, /bar definition/);
+  const old = { definition: { value: 2, current: false, thisBuild: 4, means: 'fixture means' } };
+  assert.deepEqual(definitionFact(answer, '2019-03-05', old), {
+    k: 'Bar definition',
+    v: "definition 2: fixture means (from the import journal's line 246); this build builds definition 4, so the day is labelled until it is restated",
+    tone: 'warn'
+  });
+  assert.equal(
+    definitionFact(answer, '2019-03-06', { definition: { value: 4, current: true, thisBuild: 4, means: '' } })?.v,
+    "definition 4 (from the import journal's line 247, closed by the census recount); this build builds the same bars"
+  );
+  assert.match(definitionFact(answer, '2019-03-05')?.v ?? '', /whether this build builds the same bars is the day band's to say, and it was not read/);
+  // No journal definition: the band's, where it has one.
+  assert.match(definitionFact(answer, '2019-03-07', old)?.v ?? '', /^definition 2: fixture means \(from the day band\)/);
+  assert.equal(definitionFact(answer, '2019-03-07'), null);
+  assert.equal(definitionFact(null, '2019-03-05'), null);
+  // A band that names another definition than the journal's is not borrowed.
+  assert.match(definitionFact(answer, '2019-03-05', { definition: { value: 3, current: true, thisBuild: 4, means: '' } })?.v ?? '', /was not read for this day/);
+  const row = bar('NSE-FNO-ACME-2019-03-28-100000-CE', '1s', '2019-03-05', '10:00:00');
+  const facts = drawerFacts({ feed: GDFL, row, answer, band: old });
+  assert.equal(facts.find((f) => f.k === 'Bar definition')?.tone, 'warn');
 });

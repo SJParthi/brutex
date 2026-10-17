@@ -663,13 +663,29 @@ export function auctionVerdict({ feed, segment, t, phase, tail = null, dayFacts 
   if (auction?.state === 'unreadable') {
     return { tone: 'warn', short: 'auction record unreadable', text: `the day's auction record would not read: ${auction.why}` };
   }
-  if (auction?.state === 'no_sidecar' && isLast === true) {
+  // THE LAST PRINT IS CALLED THE AUCTION'S ONLY WHERE IT EQUALS THE OFFICIAL
+  // CLOSE (SC-CLOSE-10). On 9 of 133 share-sessions the vendor dropped the
+  // auction's print and the session's last print was a 15:15:0x trade, which
+  // this label called the auction's; and the print's book is not on the bar,
+  // so no zero-book claim is made (it was false on 40 of 116).
+  if (auction?.state === 'no_sidecar' && isLast === true && last) {
     const cmp = dayFacts?.close?.official_vs_gdfl_last_print;
-    const equal = cmp && typeof cmp.bps === 'number' && cmp.bps === 0;
+    const bps = cmp && typeof cmp.bps === 'number' ? cmp.bps : null;
+    const at = secondLabel(t * 1000);
+    if (bps !== 0) {
+      return {
+        ...base,
+        text:
+          bps === null
+            ? `the closing-auction session's last print (${at}); the official close was not compared with it, so it is not called the auction's print (D-3320 item 3)`
+            : `the closing-auction session's last print (${at}) differs from the official day close by ${bps} bps (/sources/day.json), so it is not called the auction's print: the vendor's file may hold no auction print at all, and which row, if any, is the auction's is NOT PROVED`
+      };
+    }
+    const twins = bars ? bars.filter((/** @type {any} */ b) => b?.phase === 'cas' && b.t !== t && b.c === last.c).length : 0;
     return {
       tone: 'auction',
       short: 'closing auction print',
-      text: `the closing-auction session's last print. This month was imported before D-3320's rule and holds it as an ordinary one-second bar until it is re-imported (D-3320 item 4); it is not a continuous trade. Calling it the auction's is an inference (charter §9): the measured print carries zero bid and ask and equals Zerodha's official day close${equal ? ', as it does on this day (/sources/day.json: 0 bps)' : ''}.`
+      text: `the closing-auction session's last print, and it equals the official day close (/sources/day.json: 0 bps). This month was imported before D-3320's rule and holds it as an ordinary one-second bar until it is re-imported (D-3320 item 4); it is not a continuous trade. Calling it the auction's is an inference (charter §9)${twins > 0 ? `; ${exact(twins)} other print(s) of the session carry the same price, and which of them is the auction's is NOT PROVED` : ''}.`
     };
   }
   if (auction?.state === 'no_sidecar' && isLast === false && last) {
@@ -1160,10 +1176,13 @@ export function sourceOfDay(answer, day) {
       ? runText(run)
       : `archive not recorded (its closing line names no run: written before D-3317); this build would read ${vendorFilesText(row.vendor_files) ?? 'the day'}`;
     const attempts = row.attempts > 1 ? `, ${exact(row.attempts)} attempts` : '';
+    // THE BAR DEFINITION THAT BUILT THE DAY rides on its rows' label (R3-13
+    // goal 3), where the deciding line names one.
+    const definition = Number.isSafeInteger(row.definition) ? ` · bar definition ${row.definition}` : '';
     return {
       state: 'journal',
       short: label || 'reconstructed',
-      text: `import day ${row.day} · ${src} line ${row.line} (${row.outcome}${attempts}) · ${archive}`,
+      text: `import day ${row.day} · ${src} line ${row.line} (${row.outcome}${attempts}) · ${archive}${definition}`,
       pullDay: null
     };
   }
@@ -1188,7 +1207,7 @@ export function sourceOfDay(answer, day) {
  * @param {{ feed: any, row: any, answer: any, bar?: any, tail?: any, dayFacts?: any }} on
  * @returns {{ k: string, v: string, tone?: string }[]}
  */
-export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFacts = null }) {
+export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFacts = null, band = null, basis = null }) {
   /** @type {{ k: string, v: string, tone?: string }[]} */
   const out = [];
   if (!row) return out;
@@ -1208,6 +1227,13 @@ export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFac
   const src = sourceOfDay(answer, row.tf === '1day' ? '' : day);
   const price = priceBadge(feed, segment, row.tf, src.pullDay);
   out.push({ k: 'Price basis', v: price.text, tone: price.tone });
+  // THE RUN THIS ROW'S DAY BELONGS TO, where its prices are adjusted or
+  // quantised (R3-13 goal 4): the fact, from the served factor.
+  const run = Array.isArray(basis) ? basisRunLabel(basis, day) : null;
+  if (run) out.push({ k: 'Adjusted run', v: run.text, tone: run.tone });
+  // WHICH BAR DEFINITION BUILT THE DAY (R3-13 goal 3).
+  const defined = definitionFact(answer, day, band);
+  if (defined) out.push(defined);
   const vol = volumeBadge(feed, segment, row.tf);
   if (vol) out.push({ k: 'Volume basis', v: `${vol.text}. ${VOLUME_OWN}`, tone: vol.tone });
   const close = closeBadge(feed, segment, row.tf);
@@ -1244,6 +1270,134 @@ export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFac
     out.push({ k: 'Source', v: `${src.short}: ${src.text}`, tone: src.state });
   }
   return out;
+}
+
+/* ── a Zerodha share's adjusted or quantised run (R3-13 goal 4) ────────── */
+
+/**
+ * `/sources/day.json` over one share's days, the route that serves each day's
+ * measured factor against GDFL's raw prints and whether Zerodha's grid is
+ * coarser than an exact adjustment leaves (`share_basis`, DB-G38, DB-G40).
+ * `null` for anything but a spot share key.
+ *
+ * @param {string} instrument
+ * @param {string} from `YYYY-MM-DD`
+ * @param {string} to `YYYY-MM-DD`
+ */
+export function shareBasisUrl(instrument, from, to) {
+  const p = parseKey(instrument);
+  if (p.why !== null || p.kind !== 'spot' || p.segment !== 'CASH' || !p.exchange || !p.underlying || !from || !to) return null;
+  const q = new URLSearchParams({ exchange: p.exchange, segment: p.segment, symbol: p.underlying, from, to });
+  return `/sources/day.json?${q}`;
+}
+
+/**
+ * THE RUNS OF DAYS WHOSE ZERODHA PRICES ARE ADJUSTED OR QUANTISED, from a
+ * `/sources/day.json` answer (R3-13 goal 4; DB-G38, DB-G40): consecutive days
+ * of the answer (oldest first) whose served `share_basis` says the basis
+ * differs from GDFL's raw prints, or the grid is quantised. A day neither
+ * feed measured breaks no run and joins none. Each run names its first and
+ * last day, the factors served on it and the grids, and whether it touches
+ * the answer's edge (it may go on past the days read). The fact only, from
+ * the served factor: whether a percentage statistic on such a run is refused
+ * is the operator's decision D-3323, not decided here.
+ *
+ * @param {any} body
+ * @returns {{ from: string, to: string, days: number, adjusted: boolean, quantised: boolean, factors: number[], grid: { zerodha: number | null, gdfl: number | null }, open: { before: boolean, after: boolean } }[]}
+ */
+export function basisRunsOf(body) {
+  const days = Array.isArray(body?.days) ? [...body.days] : [];
+  days.sort((a, b) => (String(a?.day) < String(b?.day) ? -1 : 1));
+  /** @type {ReturnType<typeof basisRunsOf>} */
+  const out = [];
+  /** @type {ReturnType<typeof basisRunsOf>[number] | null} */
+  let cur = null;
+  for (const [i, d] of days.entries()) {
+    const b = d?.share_basis;
+    if (!b || typeof b !== 'object') continue;
+    const adjusted = b.basis_differs === true;
+    const quantised = b.quantised === true;
+    if (!adjusted && !quantised) {
+      cur = null;
+      continue;
+    }
+    if (!cur) {
+      cur = { from: d.day, to: d.day, days: 0, adjusted: false, quantised: false, factors: [], grid: { zerodha: null, gdfl: null }, open: { before: i === 0, after: false } };
+      out.push(cur);
+    }
+    cur.to = d.day;
+    cur.days += 1;
+    cur.adjusted ||= adjusted;
+    cur.quantised ||= quantised;
+    if (typeof b.factor === 'number' && !cur.factors.includes(b.factor)) cur.factors.push(b.factor);
+    if (Number.isSafeInteger(b.grid_paisa?.zerodha_minutes)) cur.grid.zerodha = b.grid_paisa.zerodha_minutes;
+    if (Number.isSafeInteger(b.grid_paisa?.gdfl_seconds)) cur.grid.gdfl = b.grid_paisa.gdfl_seconds;
+    cur.open.after = i === days.length - 1;
+  }
+  return out;
+}
+
+/**
+ * The label a row of `day` carries for the run that holds it, or `null`:
+ * "adjusted run 2019-06-03 → 2019-06-28 ×4.0000", with the grid when it is
+ * quantised, and the edge said where the run may go on past the days read.
+ *
+ * @param {ReturnType<typeof basisRunsOf>} runs
+ * @param {string} day `YYYY-MM-DD`
+ * @returns {{ tone: string, short: string, text: string } | null}
+ */
+export function basisRunLabel(runs, day) {
+  const run = runs.find((r) => day && r.from <= day && day <= r.to);
+  if (!run) return null;
+  const what = run.adjusted && run.quantised ? 'adjusted and quantised' : run.adjusted ? 'adjusted' : 'quantised';
+  const factors = run.factors.length === 0
+    ? 'no factor served'
+    : run.factors.length === 1
+      ? `factor ×${run.factors[0].toFixed(4)}`
+      : `factor ×${Math.min(...run.factors).toFixed(4)} to ×${Math.max(...run.factors).toFixed(4)} (it drifts)`;
+  const grid = run.quantised && run.grid.zerodha !== null
+    ? `; Zerodha's prices sit on a ${exact(run.grid.zerodha)}-paisa grid${run.grid.gdfl !== null ? ` against GDFL's raw ${exact(run.grid.gdfl)}-paisa grid` : ''}, coarser than an exact adjustment leaves`
+    : '';
+  const edge = run.open.before || run.open.after
+    ? ` (the run may go on ${run.open.before && run.open.after ? 'both ways' : run.open.before ? 'before' : 'after'} the days read)`
+    : '';
+  return {
+    tone: 'adjusted',
+    short: `${what} run ${run.from} → ${run.to}`,
+    text: `Zerodha's prices on this run are ${what} against GDFL's raw prints: ${run.from} to ${run.to}, ${exact(run.days)} day(s) measured, ${factors}${grid}${edge}. The fact as /sources/day.json serves it; whether a percentage statistic on it is refused is D-3323's to decide.`
+  };
+}
+
+/**
+ * THE BAR DEFINITION THAT BUILT A ROW'S DAY, for the drawer (R3-13 goal 3):
+ * the import journal's deciding line for the day (`/provenance.json`'s
+ * reconstruction), and whether this build builds the same bars, from the day
+ * band's record of that day where it was read. `null` where no journal row
+ * names a definition.
+ *
+ * @param {any} answer `/provenance.json`'s month answer
+ * @param {string} day `YYYY-MM-DD`
+ * @param {{ definition?: { value: number, current: boolean, thisBuild: number | null, means: string } | null } | null} [band] the day band's cell for the day
+ * @returns {{ k: string, v: string, tone?: string } | null}
+ */
+export function definitionFact(answer, day, band = null) {
+  const rows = answer?.reconstruction?.days;
+  const row = Array.isArray(rows) ? rows.find((/** @type {any} */ d) => d?.day === day) : null;
+  const value = Number.isSafeInteger(row?.definition) ? row.definition : (band?.definition?.value ?? null);
+  if (value === null) return null;
+  const where = Number.isSafeInteger(row?.definition) ? `the import journal's line ${row.line}${row.recounted ? ', closed by the census recount' : ''}` : 'the day band';
+  const d = band?.definition && band.definition.value === value ? band.definition : null;
+  if (!d) {
+    return { k: 'Bar definition', v: `definition ${value}, from ${where}; whether this build builds the same bars is the day band's to say, and it was not read for this day` };
+  }
+  const means = d.means ? `: ${d.means}` : '';
+  return d.current
+    ? { k: 'Bar definition', v: `definition ${value}${means} (from ${where}); this build builds the same bars` }
+    : {
+        k: 'Bar definition',
+        v: `definition ${value}${means} (from ${where}); this build builds definition ${d.thisBuild ?? 'another'}, so the day is labelled until it is restated`,
+        tone: 'warn'
+      };
 }
 
 /**

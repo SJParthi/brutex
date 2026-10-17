@@ -73,6 +73,57 @@ pub(super) const fn feed_rungs(feed: Vendor) -> FeedRungs {
     }
 }
 
+/// What a band asks beside [`super::Asked`], which `sources.rs` builds by
+/// name and so cannot gain a field: the grid's rung, and the one expiry an
+/// option family is narrowed to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Band {
+    /// The rung the grid shows; `None` counts the feed's finest.
+    pub(crate) rung: Option<Timeframe>,
+    /// The expiry the band's option family is narrowed to (`expiry=`): the
+    /// days after it are `expired` (SC-CLOSE-12). A contract's own expiry
+    /// is its key's.
+    pub(crate) expiry: Option<Day>,
+}
+
+/// The band `timeframe=` and `expiry=` ask for `inst`.
+///
+/// # Errors
+///
+/// A rung this store does not file, an expiry that is not a day, an expiry
+/// on a spot instrument, or an expiry other than the one the contract's own
+/// key names, each as one sentence for a 400.
+pub(super) fn band_of(
+    timeframe: &str,
+    expiry: &str,
+    inst: &super::Instrument,
+) -> Result<Band, String> {
+    let rung = asked_rung(timeframe)?;
+    if expiry.is_empty() {
+        return Ok(Band { rung, expiry: None });
+    }
+    let day = super::super::import_journal::parse_day(expiry)
+        .ok_or_else(|| format!("expiry={expiry:?} is not a day as YYYY-MM-DD"))?;
+    if inst.segment != brutex_core::instrument::Segment::Fno {
+        return Err(format!(
+            "expiry={expiry} names an expiry, and {} has none",
+            inst.key()
+        ));
+    }
+    if let Some(own) = expiry_of(inst.contract)
+        && own != day
+    {
+        return Err(format!(
+            "expiry={expiry} is not the expiry {} names ({own})",
+            inst.key()
+        ));
+    }
+    Ok(Band {
+        rung,
+        expiry: Some(day),
+    })
+}
+
 /// The rung a band is asked to count, from `timeframe=` (the grid's rung):
 /// `Ok(None)` when the parameter is absent, so the feed's finest is counted.
 ///

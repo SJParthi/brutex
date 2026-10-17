@@ -28,11 +28,17 @@
   import {
     bandOf,
     bandSpan,
+    bandInstrument,
+    bandExpiry,
     dayflagsUrl,
     emptyWindowWhy,
     tally,
     DAYFLAGS_PAGE_DAYS
   } from '$lib/db/dayflags.js';
+
+  /* `bandInstrument` lives in the plain module so `node --test` reaches it;
+     `DbCalendar` imports it from here, as before. */
+  export { bandInstrument };
 
   /**
    * `YYYY-MM-DD` moved by `n` days, on the calendar (no time zone).
@@ -43,30 +49,6 @@
   const addDays = (iso, n) =>
     new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
-  /**
-   * THE ONE INSTRUMENT A DAY FLAG IS ABOUT, from the rows the selection
-   * matches: the exact key when there is one series (a spot series, or one
-   * contract), else the underlying's options as a kind (`NSE-FNO-NIFTY`),
-   * whose calendar and import days still answer though no one contract's
-   * bars can be counted. `''` when the selection spans instruments.
-   *
-   * @param {any[]} rows
-   */
-  export function bandInstrument(rows) {
-    let one = '';
-    let base = '';
-    for (const r of rows) {
-      if (r.absent) continue;
-      if (one === '') one = r.instrument;
-      else if (one !== r.instrument) one = '\u0000';
-      const parts = String(r.instrument).split('-');
-      const kind = parts.length > 2 ? `${parts[0]}-${parts[1]}-${r.underlying ?? parts.slice(2).join('-')}` : '';
-      if (base === '') base = kind;
-      else if (base !== kind) base = '\u0000';
-    }
-    if (one !== '' && one !== '\u0000') return one;
-    return base !== '' && base !== '\u0000' ? base : '';
-  }
 
   /**
    * The vendor archive's span of `feed`, from `/feeds.json` (D-3338): GDFL's
@@ -95,7 +77,11 @@
     let bandWhy = $state('');
     let bandFor = $state('');
     let bandLoading = $state(false);
-    const instrument = $derived(bandInstrument(db.matched ?? []));
+    /* THE GRID'S RUNG (R3-13 goal 1): the band counts what the grid shows. */
+    const timeframe = $derived(typeof db.timeframe === 'string' ? db.timeframe : '');
+    const instrument = $derived(bandInstrument(db.matched ?? [], timeframe));
+    /* A FAMILY'S ONE EXPIRY, sent only where the band asks the family. */
+    const expiry = $derived(bandExpiry(db.matched ?? [], instrument, timeframe));
     const span = $derived(bandSpan(db.fromDay ?? '', db.toDay ?? '', addDays));
     const reads = createPageRequests();
 
@@ -111,7 +97,7 @@
         bandLoading = false;
         return;
       }
-      const url = dayflagsUrl(feed, inst, s.from, s.to);
+      const url = dayflagsUrl(feed, inst, s.from, s.to, 0, { timeframe, expiry });
       if (untrack(() => bandFor) === url) return;
       bandFor = url;
       bandLoading = true;
@@ -196,6 +182,10 @@
     flagged.filter((/** @type {any} */ c) => !(c.kind === 'cas' && c.kinds.length === 1))
   );
   const casDays = $derived(flagged.length - listed.length);
+  /** Of those, the days whose month keeps the auction print apart (SC-CLOSE-9). */
+  const casApart = $derived(
+    flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1 && c.auctionSidecar === true).length
+  );
   const sessions = $derived(
     db.dayBandCells.filter((/** @type {any} */ c) => c.kind !== 'closed' && c.kind !== 'outside').length
   );
@@ -275,11 +265,17 @@
             <li class="more">and {listed.length - 12} more flagged day(s) — each is a cell above; hover it for its reason</li>
           {/if}
           {#if casDays}
+            <!-- ONLY DAYS THE SHARE'S DATED FLAG IS 1 (SC-CLOSE-9), and "kept
+                 apart" only where a sidecar keeps the prints apart. -->
             <li data-tone="info">
               <span class="kw">closing auction</span>
               <span class="says"
-                >{casDays} session(s) of this share are closing-auction days: continuous trading ends
-                at 15:15 and the auction print is kept apart from trades (charter §9, D-3320).</span
+                >{casDays} session(s) of this share are closing-auction days by its dated flag:
+                continuous trading ends at 15:15{casApart === casDays
+                  ? ' and the auction print is kept apart from trades in the month\'s sidecar'
+                  : casApart > 0
+                    ? `; ${casApart} of them keep the auction print apart in the month's sidecar, the rest hold it as an ordinary bar`
+                    : '; no month holds an auction sidecar, so the print is an ordinary bar here'} (charter §9, D-3320).</span
               >
             </li>
           {/if}
@@ -295,12 +291,30 @@
               >{c.held === null ? `this feed holds no file (${c.heldWhy ?? 'not held'})` : `${c.held} bar(s) here`}
               · {c.peer === null ? `${feedWord(c.peerFeed)} holds none` : `${feedWord(c.peerFeed)} holds ${c.peer}`}</span
             >
+            {#if c.finest !== null}
+              <!-- THE GRID'S RUNG IS NOT THE FINEST (R3-13 goal 1): both counts. -->
+              <span class="counts">· {c.finest} {c.finestRung} bar(s) beside the {c.rung} count</span>
+            {/if}
             {#if c.fills !== null}
               <span class="counts">· {c.fills} zero-volume bar(s), held but not traded</span>
+            {/if}
+            {#if c.definition}
+              <!-- WHICH BAR DEFINITION BUILT THE DAY (R3-13 goal 3). -->
+              <span class="counts" class:stale={!c.definition.current}
+                >· bar definition {c.definition.value}{c.definition.current ? '' : ` — this build builds ${c.definition.thisBuild ?? 'another'}, labelled until restated`}</span
+              >
             {/if}
             <ul>
               {#each c.says as s, i (i)}<li>{s}</li>{/each}
             </ul>
+            {#if c.unknown.length}
+              <!-- A DAY FIELD THIS PAGE HAS NO NAME FOR (R3-13 goal 5), drawn
+                   under the name the ledger wrote it with. -->
+              <p class="hist">Day-ledger fields this page does not name yet, as served:</p>
+              <ul class="unknown">
+                {#each c.unknown as f (`${f.kind}.${f.name}`)}<li><code>{f.kind}.{f.name}</code> = {f.value}</li>{/each}
+              </ul>
+            {/if}
             {#if c.superseded.length}
               <p class="hist">History — refusals an earlier run logged for this day, superseded by the run that closed it:</p>
               <ul class="hist">
@@ -457,6 +471,12 @@
   .dopen .counts {
     color: var(--dim);
     margin-left: var(--s3);
+  }
+  .dopen .counts.stale {
+    color: var(--warn);
+  }
+  .unknown code {
+    font-family: var(--mono);
   }
   .dopen ul,
   .dnotes ul {

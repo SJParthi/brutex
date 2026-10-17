@@ -145,7 +145,14 @@ fn the_band_counts_the_asked_timeframe() {
     assert_eq!(record(&before, "2024-10-03")["held"]["bars"], 375);
 
     // AFTER: the grid's rung.
-    let got = answer_at(&root, &asked, Some(Timeframe::DAY_1));
+    let got = answer_at(
+        &root,
+        &asked,
+        Band {
+            rung: Some(Timeframe::DAY_1),
+            expiry: None,
+        },
+    );
     assert_eq!(got["rungs"]["held"]["rung"], "1day");
     assert_eq!(got["rungs"]["finest"]["rung"], "1min");
     let missing = record(&got, "2024-10-03");
@@ -179,14 +186,24 @@ fn the_band_counts_the_asked_timeframe() {
     );
     // AT THE FINEST RUNG THE ANSWER IS THE ONE IT ALWAYS WAS: no `finest`
     // object, the zero-volume count beside `held`.
-    let same = answer_at(&root, &asked, Some(Timeframe::MINUTE_1));
+    let same = answer_at(
+        &root,
+        &asked,
+        Band {
+            rung: Some(Timeframe::MINUTE_1),
+            expiry: None,
+        },
+    );
     assert_eq!(same["days"], before["days"]);
     assert_eq!(record(&same, "2024-10-03")["finest"], Value::Null);
     // A month with no file at the grid's rung says so, at that rung.
     let empty = answer_at(
         &root,
         &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-11-04&to=2024-11-04"),
-        Some(Timeframe::DAY_1),
+        Band {
+            rung: Some(Timeframe::DAY_1),
+            expiry: None,
+        },
     );
     says_has(
         record(&empty, "2024-11-04"),
@@ -767,4 +784,434 @@ fn a_day_field_the_reader_has_never_seen_is_served_and_drawn() {
             "{text}"
         );
     }
+}
+
+// ══ A frozen index, and a value outside the day's range ═════════════════════
+
+/// Three consecutive unchanged minutes are a run; two are not; a minute
+/// missing between them breaks it; a minute inside a recorded halt is the
+/// halt's. The extremes are the day's highest high and lowest low, with when.
+#[test]
+fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
+    let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
+    let flat = |m: i64, v: i64| bar("2022-03-07", at(m), [v; 4], 0);
+    let moving = |m: i64, v: i64| bar("2022-03-07", at(m), [v, v + 5, v - 5, v], 0);
+    let bars = vec![
+        moving(0, 1_000),
+        flat(1, 1_000),
+        flat(2, 1_000),
+        flat(3, 1_000), // 3 flat minutes: a run of 180 s
+        moving(4, 1_010),
+        flat(5, 1_020),
+        flat(6, 1_020), // 2 flat minutes: not a run
+        flat(8, 1_020),
+        flat(9, 1_020),
+        flat(10, 1_020), // minute 7 missing: a new run of 3
+        flat(11, 1_030),
+    ];
+    let scan = fold_minutes(bars.into_iter(), |_| false);
+    assert_eq!(scan.bars, 11);
+    assert_eq!(scan.frozen_runs, 2);
+    assert_eq!(scan.longest.map(|(_, s)| s), Some(180));
+    assert_eq!(
+        scan.longest.map(|(from, _)| from),
+        Some(bar("2022-03-07", at(1), [0; 4], 0).ts_micros)
+    );
+    assert_eq!(scan.high.map(|(high, _)| high), Some(1_030));
+    assert_eq!(scan.low.map(|(low, _)| low), Some(995));
+    // Inside a recorded halt, an unchanged value is the halt's.
+    let halted = fold_minutes(
+        vec![flat(1, 1_000), flat(2, 1_000), flat(3, 1_000)].into_iter(),
+        |_| true,
+    );
+    assert_eq!(halted.frozen_runs, 0);
+    assert_eq!(halted.longest, None);
+    // A longer run later replaces the longest.
+    let longer = fold_minutes(
+        (1..=3)
+            .map(|m| flat(m, 7))
+            .chain((10..=14).map(|m| flat(m, 8))),
+        |_| false,
+    );
+    assert_eq!(longer.frozen_runs, 2);
+    assert_eq!(longer.longest.map(|(_, s)| s), Some(300));
+    assert_eq!(points(22_985), "229.85");
+    assert_eq!(points(-5), "-0.05");
+}
+
+/// **A FROZEN INDEX RUN IS FLAGGED ON BOTH FEEDS** (R3-13 goal 2; DB-B20).
+/// 2022-03-07: Zerodha's minutes stand at one value 09:57-10:21 and a minute's
+/// high is above the day bar's; GDFL's day ledger measured the vendor's rows
+/// unchanged for 1,500 s from 09:57:00. Both pages flag the frozen run, and
+/// Zerodha's names the high outside the day's range. A run inside the
+/// recorded halt of 2020-03-13 is the halt's, never frozen. Before, neither
+/// page said either.
+#[test]
+fn a_frozen_index_run_is_flagged_on_both_feeds() {
+    let root = root_of("r3-13-frozen");
+    let key = "NSE-INDEX-NIFTY";
+    let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
+    let mut minutes: Vec<store::format::Bar> = (0..375)
+        .map(|m| {
+            let v = 1_600_000 + (m % 7) * 100;
+            bar("2022-03-07", at(m), [v, v + 50, v - 50, v], 0)
+        })
+        .collect();
+    // 09:57 is minute 42; 10:21 is minute 66.
+    for m in 42..=66 {
+        minutes[usize::try_from(m).unwrap()] = bar("2022-03-07", at(m), [1_590_000; 4], 0);
+    }
+    // 10:07 prints a high above the day bar's.
+    minutes[52] = bar(
+        "2022-03-07",
+        at(52),
+        [1_590_000, 1_640_000, 1_590_000, 1_590_000],
+        0,
+    );
+    // The halt day: a long unchanged stretch inside the recorded halt only.
+    let halt_minutes: Vec<store::format::Bar> = (0..375)
+        .map(|m| bar("2020-03-13", at(m), [900_000; 4], 0))
+        .collect();
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::MINUTE_1,
+        [minutes, halt_minutes].concat(),
+    );
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::DAY_1,
+        vec![
+            bar(
+                "2022-03-07",
+                0,
+                [1_600_000, 1_617_015, 1_580_000, 1_600_000],
+                0,
+            ),
+            bar("2020-03-13", 0, [900_000; 4], 0),
+        ],
+    );
+    let zerodha = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2022-03-07&to=2022-03-07"),
+    );
+    let rec = record(&zerodha, "2022-03-07");
+    let frozen = &rec["index"]["frozen"];
+    assert_eq!(frozen["basis"], "minutes_scanned", "{rec:#}");
+    assert_eq!(frozen["flagged"], true);
+    assert_eq!(frozen["longest_from"], "10:08");
+    assert_eq!(frozen["longest_s"], 840);
+    says_has(
+        rec,
+        "index value frozen in session: 2 run(s) of 3 minutes or more with no change, the \
+         longest 14 minute(s) from 10:08 to 10:21 (1min), outside any recorded halt",
+    );
+    let outside = &rec["index"]["outside_day_range"];
+    assert_eq!(outside["flagged"], true);
+    assert_eq!(outside["above_by"], 22_985);
+    assert_eq!(outside["above_at"], "10:07");
+    assert_eq!(outside["below_by"], Value::Null);
+    says_has(
+        rec,
+        "intraday high 229.85 points above the day bar's high, at 10:07 (1min)",
+    );
+    // The halt day's unchanged minutes outside the halt are still flagged;
+    // none inside it is: the longest run starts after the halt resumes.
+    let halt = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2020-03-13&to=2020-03-13"),
+    );
+    let halted = &record(&halt, "2020-03-13")["index"]["frozen"];
+    assert_eq!(halted["flagged"], true, "{halted:#}");
+    let from = halted["longest_from"].as_str().expect("a run");
+    let resume = pull::calendar::halt_on(i64::from(day("2020-03-13").days_from_epoch()))
+        .expect("a recorded halt")
+        .seconds(pull::vendor::Venue::NseIndex)
+        .resume;
+    let resume_hm = format!("{:02}:{:02}", resume / 3_600, resume % 3_600 / 60);
+    assert!(
+        from >= resume_hm.as_str() || from < "09:15",
+        "{from} vs {resume_hm}"
+    );
+
+    // GDFL: the day ledger's measure of the vendor's rows.
+    let line = super::super::tests::index_flags("2022-03-07", "NIFTY", &[])
+        .replace('\n', " flat_max_s=1500 flat_max_at=09:57:00\n");
+    let short = super::super::tests::index_flags("2022-03-08", "NIFTY", &[])
+        .replace('\n', " flat_max_s=120 flat_max_at=11:00:00\n");
+    write(&super::super::quality_path(&root), &(line + &short));
+    let gdfl = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2022-03-07&to=2022-03-08"),
+    );
+    let rec = record(&gdfl, "2022-03-07");
+    let frozen = &rec["index"]["frozen"];
+    assert_eq!(frozen["basis"], "day_ledger", "{rec:#}");
+    assert_eq!(frozen["flagged"], true);
+    assert_eq!(frozen["longest_s"], 1_500);
+    assert_eq!(frozen["longest_from"], "09:57:00");
+    says_has(
+        rec,
+        "index value frozen in session: unchanged for 1500 s from 09:57:00 (the import's \
+         measure of the vendor's rows), outside any recorded halt",
+    );
+    // GDFL reads no day bar, so its range check is not made.
+    assert_eq!(rec["index"]["outside_day_range"], Value::Null);
+    let short = &record(&gdfl, "2022-03-08")["index"]["frozen"];
+    assert_eq!(short["flagged"], false, "two minutes is not a run");
+    // A share has no index rule at all.
+    let share = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2022-03-07&to=2022-03-07"),
+    );
+    assert_eq!(record(&share, "2022-03-07")["index"], Value::Null);
+}
+
+/// A GDFL ledger run that starts inside the recorded halt is the halt's.
+#[test]
+fn a_ledger_run_inside_the_halt_is_not_frozen() {
+    let halt = pull::calendar::halt_on(i64::from(day("2020-03-13").days_from_epoch()))
+        .expect("a recorded halt")
+        .seconds(pull::vendor::Venue::NseIndex);
+    let inside = IndexDay {
+        feed: Vendor::Gdfl,
+        midnight: 0,
+        scan: None,
+        day_bar: None,
+        ledger: Some((2_700, Some(halt.from), 4)),
+        halt: Some((halt.from, halt.resume)),
+    };
+    let (json, says) = inside.json();
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert!(says.is_empty());
+    let outside = IndexDay {
+        ledger: Some((2_700, Some(halt.resume), 4)),
+        ..inside
+    };
+    assert_eq!(outside.json().0["frozen"]["flagged"], true);
+    let unknown = IndexDay {
+        feed: Vendor::Gdfl,
+        midnight: 0,
+        scan: None,
+        day_bar: None,
+        ledger: Some((600, None, 4)),
+        halt: None,
+    };
+    let (json, says) = unknown.json();
+    assert_eq!(json["frozen"]["longest_from"], Value::Null);
+    assert_eq!(says, vec!["index value frozen in session: unchanged for 600 s from - (the import's measure of the vendor's rows), outside any recorded halt".to_owned()]);
+    let nothing = IndexDay {
+        feed: Vendor::Zerodha,
+        midnight: 0,
+        scan: None,
+        day_bar: Some((10, 5)),
+        ledger: None,
+        halt: None,
+    };
+    assert_eq!(
+        nothing.json().0,
+        serde_json::json!({ "frozen": null, "outside_day_range": null })
+    );
+    // A low below the day bar's is named too.
+    let low = IndexDay {
+        feed: Vendor::Zerodha,
+        midnight: 0,
+        scan: Some(DayScan {
+            bars: 1,
+            high: Some((10, 0)),
+            low: Some((1, 60_000_000)),
+            frozen_runs: 0,
+            longest: None,
+        }),
+        day_bar: Some((10, 5)),
+        ledger: None,
+        halt: None,
+    };
+    let (json, says) = low.json();
+    assert_eq!(json["outside_day_range"]["below_by"], 4);
+    assert_eq!(json["outside_day_range"]["below_at"], "00:01");
+    assert_eq!(json["outside_day_range"]["above_by"], Value::Null);
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert_eq!(
+        says,
+        vec!["intraday low 0.04 points below the day bar's low, at 00:01 (1min)".to_owned()]
+    );
+}
+
+// ══ A renamed share's peer ══════════════════════════════════════════════════
+
+/// **A ZERO-VOLUME PEER IS LOOKED UP UNDER A SHARE'S OTHER NAMES** (R3-13
+/// goal 2; DB-031). Zerodha holds ZOMATO's day with volume 0; GDFL files the
+/// share's seconds under ETERNAL, its newest name (D-3333). The peer is found
+/// under that name, so the day is `zero_volume_peer_traded` and the phrase
+/// says which name. Before, GDFL "held no file" and the junk row read clean.
+#[test]
+fn a_zero_volume_peer_is_found_under_the_shares_other_name() {
+    let root = root_of("r3-13-other-names");
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-CASH-ZOMATO",
+        Timeframe::DAY_1,
+        vec![bar("2024-10-01", 0, [25_000; 4], 0)],
+    );
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-CASH-ETERNAL",
+        Timeframe::SECOND_1,
+        vec![
+            bar("2024-10-01", 10 * 3_600, [25_000; 4], 40),
+            bar("2024-10-01", 10 * 3_600 + 1, [25_005; 4], 40),
+        ],
+    );
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-CASH-ZOMATO&from=2024-10-01&to=2024-10-01"),
+    );
+    let rec = record(&got, "2024-10-01");
+    assert_eq!(
+        rec["junk"],
+        serde_json::json!(["zero_volume_peer_traded"]),
+        "{rec:#}"
+    );
+    assert_eq!(rec["peer"]["bars"], 2);
+    says_has(
+        rec,
+        "GDFL holds 2 bar(s), filed under ETERNAL, this share's other name",
+    );
+    assert_eq!(other_names("ZOMATO"), vec!["ETERNAL"]);
+    assert_eq!(other_names("ETERNAL"), vec!["ZOMATO"]);
+    assert!(other_names("RELIANCE").is_empty());
+}
+
+// ══ A share's sampled day, and a closed day the peer traded ══════════════════
+
+/// **A SHARE'S DAY NAMES THE MARKET'S SAMPLING AND ITS OWN FIRST SECOND**
+/// (CMP-06). 2019-05-30: the market index holds two bars a minute and the
+/// share's first second is 11:57:47, the vendor's missing morning. Before, a
+/// share's day named nothing and read as fully held.
+#[test]
+fn a_shares_day_names_the_markets_sampling_and_its_first_second() {
+    let root = root_of("r3-13-cmp06");
+    let index: Vec<store::format::Bar> = (0..375)
+        .map(|m| {
+            bar(
+                "2019-05-30",
+                9 * 3_600 + 15 * 60 + m * 60 + 59,
+                [1_000_000; 4],
+                0,
+            )
+        })
+        .collect();
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        index,
+    );
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-CASH-RELIANCE",
+        Timeframe::SECOND_1,
+        vec![
+            bar("2019-05-30", 11 * 3_600 + 57 * 60 + 47, [130_000; 4], 10),
+            bar("2019-05-30", 12 * 3_600, [130_005; 4], 10),
+        ],
+    );
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2019-05-30&to=2019-05-30"),
+    );
+    let rec = record(&got, "2019-05-30");
+    assert_eq!(rec["sampled"]["of"], "market", "{rec:#}");
+    assert_eq!(rec["sampled"]["is"], true);
+    assert_eq!(rec["sampled"]["first_held"], "11:57:47");
+    says_has(
+        rec,
+        "degraded vendor day -- market-wide, the index NSE-INDEX-NIFTY: minute-sampled or \
+         mostly missing (suspected), 375 of 22500 session second(s) held (1.7%), at most 2 a \
+         minute; no day-ledger line measures its rows yet; this share's first held second is \
+         11:57:47",
+    );
+}
+
+/// **A CLOSED DAY THE OTHER FEED TRADED IS SAID AS EVIDENCE** (DB-A15): the
+/// calendar's measured window is derived from Zerodha's own bars, so a
+/// Zerodha day the calendar calls closed while GDFL holds bars is named with
+/// GDFL's count. Before, the count was said with no word on the calendar.
+#[test]
+fn a_closed_day_the_peer_traded_is_said_as_independent_evidence() {
+    let root = root_of("r3-13-closed-peer");
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        vec![bar("2024-10-02", 10 * 3_600, [1_000_000; 4], 0)],
+    );
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-10-02&to=2024-10-02"),
+    );
+    says_has(
+        record(&got, "2024-10-02"),
+        "GDFL holds 1 bar(s) on a day the calendar of record calls closed: evidence independent \
+         of Zerodha's own series",
+    );
+}
+
+/// **AN OPTION FAMILY NARROWED TO ONE EXPIRY OWES NOTHING AFTER IT**
+/// (SC-CLOSE-12; R3-13 goal 1's "any strike" selection). `NSE-FNO-NIFTY`
+/// with `expiry=2019-03-28` reads every day of an October 2024 window
+/// expired; the route refuses an expiry on a spot key and one that
+/// contradicts a contract's own, and reads a matching one.
+#[test]
+fn an_option_family_narrowed_to_an_expiry_is_expired_after_it() {
+    let root = root_of("r3-13-family-expiry");
+    let asked = ask("feed=gdfl&instrument=NSE-FNO-NIFTY&from=2024-10-01&to=2024-10-01");
+    let band = band_of("", "2019-03-28", &asked.instrument).expect("a family expiry");
+    assert_eq!(band.expiry, Some(day("2019-03-28")));
+    let got = answer_at(&root, &asked, band);
+    assert_eq!(got["asked"]["expiry"], "2019-03-28");
+    assert_eq!(got["asked"]["timeframe"], Value::Null);
+    let rec = record(&got, "2024-10-01");
+    assert_eq!(rec["contract"]["expired"], true, "{rec:#}");
+    assert_eq!(rec["calendar"]["owed_minutes"], 0);
+    says_has(
+        rec,
+        "expired: the contract's last session was 2019-03-28, so this day owes nothing",
+    );
+    // Without it the family's day is a session that names no contract.
+    let plain = answer(&root, &asked);
+    assert_eq!(record(&plain, "2024-10-01")["contract"], Value::Null);
+
+    let spot = ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-10-01");
+    assert_eq!(
+        band_of("", "2019-03-28", &spot.instrument),
+        Err("expiry=2019-03-28 names an expiry, and NSE-INDEX-NIFTY has none".to_owned())
+    );
+    let contract = ask("feed=gdfl&instrument=NSE-FNO-NIFTY-2019-03-28-1150000-CE&from=2019-03-01");
+    assert_eq!(
+        band_of("", "2019-04-25", &contract.instrument),
+        Err("expiry=2019-04-25 is not the expiry NSE-FNO-NIFTY-2019-03-28-1150000-CE names (2019-03-28)".to_owned())
+    );
+    assert!(band_of("", "2019-03-28", &contract.instrument).is_ok());
+    assert_eq!(
+        band_of("", "28-03-2019", &asked.instrument),
+        Err("expiry=\"28-03-2019\" is not a day as YYYY-MM-DD".to_owned())
+    );
+    assert!(band_of("7min", "", &asked.instrument).is_err());
+    assert_eq!(
+        band_of("1day", "", &asked.instrument),
+        Ok(Band {
+            rung: Some(Timeframe::DAY_1),
+            expiry: None
+        })
+    );
 }

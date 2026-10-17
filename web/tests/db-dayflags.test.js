@@ -8,13 +8,18 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   DAYFLAGS_PAGE_DAYS,
   DAY_KINDS,
   bandOf,
   bandSpan,
+  bandInstrument,
+  bandExpiry,
   cellOf,
+  definitionOf,
+  unknownFieldsOf,
   dayflagsUrl,
   emptyWindowWhy,
   kindsOf,
@@ -77,8 +82,8 @@ test('a drill day the import left incomplete names why and the other feed\'s cou
 });
 
 test('a weekend or holiday window says closed; a window with no record says nothing yet', () => {
-  const sat = cellOf(rec({ day: '2024-03-02', calendar: { code: '.' }, held: { bars: 0 }, says: ['closed: a weekend'] }));
-  const sun = cellOf(rec({ day: '2024-03-03', calendar: { code: '.' }, held: { bars: 0 }, says: ['closed: a weekend'] }));
+  const sat = cellOf(rec({ day: '2024-03-02', calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'zerodha', bars: 0 }, says: ['closed: a weekend'] }));
+  const sun = cellOf(rec({ day: '2024-03-03', calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'zerodha', bars: 0 }, says: ['closed: a weekend'] }));
   assert.equal(sat.kind, 'closed');
   assert.equal(sat.flagged, false);
   assert.equal(emptyWindowWhy([sat], '2024-03-02', '2024-03-02', label), 'No bar on [2024-03-02]: closed: a weekend.');
@@ -118,7 +123,11 @@ test('every vendor-fault and exchange-event field becomes its kind, in a fixed s
   assert.deepEqual(kindsOf(rec({ import: { outcome: 'none', reached: false }, held: { bars: null } })), ['not_reached']);
   assert.deepEqual(kindsOf(rec()), ['session']);
   // The auction phase is a share's: an index on the same day has none (D-3320).
-  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X' } })), ['cas']);
+  // SC-CLOSE-9: only on a day the share's dated flag is 1; flag 0 or none held is a session.
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: true } } })), ['cas']);
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: false } } })), ['session']);
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: null, why: 'no master' } } })), ['session']);
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X' } })), ['session']);
   assert.deepEqual(kindsOf(rec({ instrument: 'NSE-INDEX-NIFTY', calendar: { code: 'X' } })), ['session']);
   // A null ledger field is not measured, never clean and never a fault.
   assert.deepEqual(kindsOf(rec({ quality: null, gaps: null, junk: null })), ['session']);
@@ -302,4 +311,137 @@ test("R3-05 repair 3: a day before a binding archive start is outside the vendor
   // A FIRST DAY THE SERVER SAYS DOES NOT BIND is not imported, not outside.
   const loose = cellOf(rec({ day: '2018-08-31', import: { outcome: 'none', reached: false }, held: { bars: 0 } }), { archive: { ...archive, from_binds: false } });
   assert.deepEqual(loose.kinds, ['outside_archive']);
+});
+
+// ── R3-13: the band at the grid's rung, frozen index values, late rows, the
+// bar definition of a day, and fields the page has never seen ─────────────
+
+test('R3-13: the band counts the asked timeframe, and a missing day bar is a hole', () => {
+  // The URL carries the grid's rung and a family's expiry, or neither.
+  assert.equal(
+    dayflagsUrl('zerodha', 'NSE-INDEX-NIFTY', '2024-10-01', '2024-10-04', 0, { timeframe: '1day' }),
+    '/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-10-01&to=2024-10-04&order=asc&timeframe=1day'
+  );
+  assert.equal(
+    dayflagsUrl('gdfl', 'NSE-FNO-NIFTY', '2024-10-01', '2024-10-31', 1, { expiry: '2019-03-28' }),
+    '/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2024-10-01&to=2024-10-31&order=asc&page=1&expiry=2019-03-28'
+  );
+  assert.equal(dayflagsUrl('gdfl', 'NSE-INDEX-NIFTY', '2024-10-01', '2024-10-01'), '/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-10-01&to=2024-10-01&order=asc');
+  // A Zerodha 1day session holding minutes and no day bar is the day bar missing.
+  const missing = cellOf(
+    rec({
+      feed: 'zerodha',
+      held: { feed: 'zerodha', rung: '1day', bars: 0, why: null, zero_volume: null },
+      finest: { feed: 'zerodha', rung: '1min', bars: 375, why: null, zero_volume: null },
+      peer: { feed: 'gdfl', rung: '1s', bars: 0, why: null },
+      says: ['no Zerodha 1day bar on this session, while Zerodha holds 375 1min bar(s) that day: the 1day bar is missing']
+    })
+  );
+  assert.equal(missing.kind, 'store_gap');
+  assert.deepEqual([missing.held, missing.rung, missing.finest, missing.finestRung], [0, '1day', 375, '1min']);
+  // A day bar held, with no minutes, is a session: never "no Zerodha bar".
+  const shown = cellOf(
+    rec({
+      feed: 'zerodha',
+      held: { feed: 'zerodha', rung: '1day', bars: 1, why: null },
+      finest: { feed: 'zerodha', rung: '1min', bars: 0, why: null },
+      says: []
+    })
+  );
+  assert.equal(shown.kind, 'session');
+  // At the finest rung there is no second count.
+  assert.equal(cellOf(rec()).finest, null);
+});
+
+test('R3-13: one contract is asked about itself, one expiry at any strike is the family narrowed to it', () => {
+  const contract = 'NSE-FNO-NIFTY-2019-03-28-1150000-CE';
+  const row = (/** @type {Record<string, any>} */ o) => ({ underlying: 'NIFTY', timeframe: '1s', expiry: '2019-03-28', ...o });
+  // One contract, at two rungs: the contract, at either rung or both.
+  const one = [row({ instrument: contract }), row({ instrument: contract, timeframe: '1min' })];
+  assert.equal(bandInstrument(one), contract);
+  assert.equal(bandInstrument(one, '1s'), contract);
+  assert.equal(bandExpiry(one, contract), '', 'a contract carries its own expiry');
+  // Another contract at another rung than the grid's is not the grid's.
+  const mixed = [row({ instrument: contract }), row({ instrument: 'NSE-FNO-NIFTY-2019-03-28-1160000-PE', timeframe: '1min' })];
+  assert.equal(bandInstrument(mixed, '1s'), contract);
+  assert.equal(bandInstrument(mixed), 'NSE-FNO-NIFTY');
+  // Any strike of one expiry: the family, narrowed to that expiry.
+  const strikes = [row({ instrument: contract }), row({ instrument: 'NSE-FNO-NIFTY-2019-03-28-1160000-PE' })];
+  assert.equal(bandInstrument(strikes), 'NSE-FNO-NIFTY');
+  assert.equal(bandExpiry(strikes, 'NSE-FNO-NIFTY'), '2019-03-28');
+  // Two expiries, or a row with none: no one expiry.
+  assert.equal(bandExpiry([...strikes, row({ instrument: 'NSE-FNO-NIFTY-2019-04-25-1160000-PE', expiry: '2019-04-25' })], 'NSE-FNO-NIFTY'), '');
+  assert.equal(bandExpiry([row({ instrument: 'NSE-FNO-NIFTY-2019-03-28-FUT', expiry: null }), ...strikes], 'NSE-FNO-NIFTY'), '');
+  // A share or an index never sends one; an absent row is passed over.
+  assert.equal(bandExpiry(strikes, 'NSE-INDEX-NIFTY'), '');
+  assert.equal(bandInstrument([{ instrument: 'NSE-INDEX-NIFTY', absent: true }, { instrument: 'NSE-INDEX-BANKNIFTY' }]), 'NSE-INDEX-BANKNIFTY');
+  assert.equal(bandExpiry([{ ...strikes[0], absent: true }, strikes[1]], 'NSE-FNO-NIFTY'), '2019-03-28');
+  assert.equal(bandInstrument([{ instrument: 'NSE-INDEX-NIFTY' }, { instrument: 'NSE-CASH-RELIANCE' }]), '');
+});
+
+test('SC-CLOSE-12: a day after expiry is expired, owing nothing — never a hole or "not imported yet"', () => {
+  const after = cellOf(
+    rec({
+      instrument: 'NSE-FNO-NIFTY-2026-08-04-2700000-CE',
+      day: '2026-08-05',
+      calendar: { code: 'R', owed_minutes: 0, expired: true },
+      contract: { expiry: '2026-08-04', expired: true },
+      import: { outcome: 'none', reached: false, late: null },
+      held: { feed: 'gdfl', rung: '1s', bars: 0, why: null },
+      says: ["expired: the contract's last session was 2026-08-04, so this day owes nothing"]
+    })
+  );
+  assert.deepEqual(after.kinds, ['expired']);
+  assert.equal(after.tone, 'quiet');
+  assert.equal(after.flagged, false);
+  // A family narrowed to an expiry reads the same.
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-FNO-NIFTY', contract: { expiry: '2019-03-28', expired: true }, held: { bars: null } })), ['expired']);
+});
+
+test('DB-B20, DB-A15, goal 3: a frozen index, a value outside the day range, a closed day the peer traded, an older definition', () => {
+  assert.deepEqual(kindsOf(rec({ index: { frozen: { flagged: true }, outside_day_range: { flagged: true } } })), ['frozen', 'outside_range']);
+  assert.deepEqual(kindsOf(rec({ index: { frozen: { flagged: false }, outside_day_range: null } })), ['session']);
+  assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 21594 } })), ['peer_on_closed', 'closed']);
+  assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 0 } })), ['closed']);
+  const old = cellOf(rec({ bar_definition: { value: 2, current: false, means: 'fixture', from: 'import_journal', this_build: 4 } }));
+  assert.deepEqual(old.kinds, ['old_definition']);
+  assert.deepEqual(old.definition, { value: 2, current: false, means: 'fixture', from: 'import_journal', thisBuild: 4 });
+  assert.equal(cellOf(rec({ bar_definition: { value: 4, current: true } })).kind, 'session');
+  assert.equal(definitionOf(null), null);
+  assert.equal(definitionOf({ value: 'two' }), null);
+  assert.deepEqual(definitionOf({ value: 3 }), { value: 3, current: false, means: '', from: '', thisBuild: null });
+  // Every new kind has a word and a tone.
+  for (const kind of ['frozen', 'outside_range', 'peer_on_closed', 'old_definition', 'expired']) {
+    assert.ok(DAY_KINDS.some((k) => k.kind === kind && k.word && k.tone), kind);
+  }
+});
+
+test('R3-13: a day field the reader has never seen is served and drawn', () => {
+  const quality = {
+    indices: { holes_5s: 0, frozen_runs: 2, frozen_note: 'vendor_flat', unknown: ['frozen_runs', 'frozen_note'] },
+    stocks: { unknown: ['gone'] },
+    options: null
+  };
+  assert.deepEqual(unknownFieldsOf(quality), [
+    { kind: 'indices', name: 'frozen_runs', value: '2' },
+    { kind: 'indices', name: 'frozen_note', value: 'vendor_flat' }
+  ]);
+  assert.deepEqual(cellOf(rec({ quality })).unknown.map((f) => f.name), ['frozen_runs', 'frozen_note']);
+  assert.deepEqual(unknownFieldsOf({ indices: { unknown: ['n'], n: null } }), [{ kind: 'indices', name: 'n', value: 'null' }]);
+  assert.deepEqual(unknownFieldsOf(null), []);
+  assert.deepEqual(unknownFieldsOf({ indices: { unknown: 'not a list' } }), []);
+  // The band component draws them, under their own names.
+  const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
+  assert.match(svelte, /\{#each c\.unknown as f/);
+  assert.match(svelte, /<code>\{f\.kind\}\.\{f\.name\}<\/code> = \{f\.value\}/);
+});
+
+test('SC-CLOSE-9: the auction line claims "kept apart" only where a sidecar keeps the print apart', () => {
+  const c = cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: true } }, auction_sidecar: false }));
+  assert.equal(c.cas, true);
+  assert.equal(c.auctionSidecar, false);
+  assert.equal(cellOf(rec()).auctionSidecar, null);
+  const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
+  assert.doesNotMatch(svelte, /at 15:15 and the auction print is kept apart from trades \(charter/);
+  assert.match(svelte, /no month holds an auction sidecar, so the print is an ordinary bar here/);
 });
