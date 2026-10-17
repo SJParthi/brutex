@@ -286,6 +286,7 @@ test('the plan, the query and the instant at every boundary (R3-03)', () => {
     `feed=gdfl&timeframe=1s&from=2019-03&to=2019-03&key=${CE}&sort=c&dir=asc&offset=8&limit=8&to_day=2019-03-09&tod_from=09%3A15%3A00&tod_to=10%3A00%3A05&extremes=0`);
   // A time bound: trimmed, anchored at both ends.
   assert.equal(todWire(' 10:00 ', 'to'), '10:00:59');
+  assert.equal(todWire('10:00', 'from'), '10:00:00');
   assert.equal(todWire('x10:00:07', 'to'), '');
   assert.equal(todWire('10:00:07x', 'to'), '');
   // An instant: anchored, every part bounded, a rolled-over day refused.
@@ -305,7 +306,7 @@ test('the plan, the query and the instant at every boundary (R3-03)', () => {
 
 test('an unknown on either side of a comparison is last, an empty plan names no month, and a day key is zero-padded (R3-03)', async () => {
   const { istDayKey, acrossDay } = await import('../src/lib/db/bars-plan.js');
-  assert.equal(localComparator('chg', false)({ chg: 5, ts: 1, rk: 'a' }, { chg: undefined, ts: 1, rk: 'b' }), -1);
+  assert.equal(localComparator('chg', false)({ chg: 5, ts: 1, rk: 'b' }, { chg: undefined, ts: 1, rk: 'a' }), -1, 'not by the tie-break');
   assert.equal(localComparator('chg', true)({ chg: 5, ts: 1, rk: 'a' }, { chg: null, ts: 1, rk: 'b' }), -1);
   assert.deepEqual([seriesPlan([]).from, seriesPlan([]).to], ['', '']);
   assert.equal(istDayKey(Date.UTC(2019, 2, 4, 20, 0)), '2019-03-05', 'IST is ahead: 20:00 UTC on the 4th is the 5th');

@@ -236,6 +236,9 @@ export function seriesPlan(rows, fromDay, toDay) {
   return { keys, series, timeframe, from, to, why };
 }
 
+/** The second a minute bound is sent at, by end. */
+const MINUTE_END = Object.freeze({ from: '00', to: '59' });
+
 /**
  * A time bound as the wire spells it, `HH:MM:SS`.
  *
@@ -249,8 +252,9 @@ export function seriesPlan(rows, fromDay, toDay) {
  * @param {string | undefined} t @param {'from' | 'to'} end
  */
 export function todWire(t, end) {
-  const s = typeof t === 'string' ? t.trim() : '';
-  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${end === 'to' ? '59' : '00'}`;
+  if (typeof t !== 'string') return '';
+  const s = t.trim();
+  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${MINUTE_END[end]}`;
   if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
   return '';
 }
