@@ -672,6 +672,12 @@ struct Inner {
     /// Behind the same lock as the ring, so an audited line lands in both
     /// files in one order and under one writer.
     audit: Option<Audit>,
+    /// The never-rolling state stream, kept beside the audit stream whenever
+    /// that one is (R3-24): the who-did-what lines
+    /// (`crate::run_dirs::state_events::is_state_change`), a second copy that
+    /// no flood of refusals can roll away. Behind the same lock, so a line
+    /// lands in all three files in one order.
+    state: Option<Audit>,
     /// The flood ration's pairs (DB-A43). Behind the ring's lock, so a pair's
     /// count and the lines it admits are one order.
     flood: Flood,
@@ -980,11 +986,13 @@ impl Sink {
         // short one (`CLAUDE.md` §4: loud, never silent). D-3341 item 3.
         if config.audit {
             let (audit, said) = Audit::open(&config.dir, config.keep_files);
-            sink.inner
-                .get_mut()
-                .unwrap_or_else(PoisonError::into_inner)
-                .audit = Some(audit);
-            if let Some(why) = said {
+            // THE STATE STREAM OPENS AFTER THE AUDIT STREAM, whose torn tail
+            // is then closed, because a new one is seeded from it (R3-24).
+            let (state, state_said) = Audit::open_state(&config.dir, config.keep_files);
+            let inner = sink.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+            inner.audit = Some(audit);
+            inner.state = Some(state);
+            for why in [said, state_said].into_iter().flatten() {
                 sink.report(&why);
             }
         }
@@ -1057,6 +1065,7 @@ impl Sink {
                 buf: Vec::with_capacity(512),
                 torn: false,
                 audit: None,
+                state: None,
                 flood: Flood::default(),
             }),
             written: AtomicU64::new(0),
@@ -1478,10 +1487,28 @@ impl Sink {
         let audit_failure = match inner.audit {
             Some(ref mut audit) if audited => {
                 let own = inner.buf.get(own_from..).unwrap_or(&[]);
-                audit.append(own, inner.seq, event.level(), &EventKeys(event, run))
+                audit.append(own, inner.seq, event.level(), at, &EventKeys(event, run))
             }
             _ => None,
         };
+        // AND THE STATE STREAM'S, for a who-did-what line (R3-24): the same
+        // bytes again, in a stream that never rolls. Every other event pays
+        // the `audited` test it already paid.
+        let state_failure = match inner.state {
+            Some(ref mut state)
+                if audited
+                    && crate::run_dirs::state_events::is_state_change(
+                        event.level(),
+                        event.target(),
+                        event.message(),
+                    ) =>
+            {
+                let own = inner.buf.get(own_from..).unwrap_or(&[]);
+                state.append(own, inner.seq, event.level(), at, &EventKeys(event, run))
+            }
+            _ => None,
+        };
+        let audit_failure = audit_failure.or(state_failure);
         match landed {
             Ok(()) => {
                 inner.bytes = inner.bytes.saturating_add(span);
@@ -1613,6 +1640,7 @@ impl Sink {
         }
         let synced = guard.target.sync();
         guard.audit = None;
+        guard.state = None;
         drop(guard);
         let unlocked = self.held_lock.as_ref().map_or(Ok(()), File::unlock);
         synced.and(unlocked).map_err(|e| {
@@ -1634,6 +1662,16 @@ impl Sink {
     pub fn audit_health(&self) -> Option<AuditHealth> {
         let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         guard.audit.as_ref().map(Audit::health)
+    }
+
+    /// What the never-rolling state stream has done, and failed to do
+    /// (R3-24): `None` exactly when [`Self::audit_health`] is. Its
+    /// [`AuditHealth::never_rolls`] is set and its rotation and reaper counts
+    /// stay zero: it rolls nothing.
+    #[must_use]
+    pub fn state_health(&self) -> Option<AuditHealth> {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.state.as_ref().map(Audit::health)
     }
 
     /// What it has done, and what it has failed to do.
@@ -2147,7 +2185,14 @@ const AUDIT_POINTER_BYTES_U64: u64 = 32;
 /// refused for one reason is one posting. A generation written before a
 /// dimension existed does not index its earlier lines by it; [`audit_coverage`]
 /// says from which offset each generation does.
-pub const AUDIT_DIMENSIONS: [&str; 8] = [
+///
+/// `reason` and `kind` were added by R3-24: `reason` is a line's own `reason`
+/// field, so a refusal whose `code` and `reason` differ is found by either,
+/// and `kind` is its `kind` field (the GDFL importer's `indices`, `stocks` or
+/// `options`), so the log can be asked by import kind. A generation opened by
+/// an earlier build is covered by them from the offset this build opened it
+/// at ([`AUDIT_DIMS_FILE`]), never read as holding nothing.
+pub const AUDIT_DIMENSIONS: [&str; 10] = [
     "day",
     "month",
     "feed",
@@ -2156,7 +2201,145 @@ pub const AUDIT_DIMENSIONS: [&str; 8] = [
     "target",
     "run",
     "code",
+    "reason",
+    "kind",
 ];
+
+/// The file in each index generation holding the first and last event time
+/// of its audit file (R3-24): 16 bytes, the first `ms` then the last, both
+/// little-endian `i64`, the last [`i64::MAX`] while the file is still being
+/// appended to. Written at the generation's first line and again when it
+/// rolls, never per line, so a time-span question picks the files it reads
+/// without opening the others.
+pub const AUDIT_SPAN_FILE: &str = "span";
+
+/// How large the never-rolling state stream may grow before its health says
+/// so: 256 MiB. It is not a bound: the stream never rolls and never drops a
+/// line, so what it holds is what the writers' state changes add, and past
+/// this size the operator is told to look at what writes it (R3-24;
+/// `docs/06-limits.md`, proposed in the R3-24 report).
+pub const STATE_LOUD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The first and last event time of one audit file, as its index generation
+/// records them ([`AUDIT_SPAN_FILE`]) or, for a generation an earlier build
+/// wrote, as its first and last lines say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditSpan {
+    /// The `ms` of its first line.
+    pub first_ms: i64,
+    /// The `ms` of its last line, or `None` while it is the file being
+    /// appended to: a line may land after any answer.
+    pub last_ms: Option<i64>,
+}
+
+impl AuditSpan {
+    /// Whether any line of the file can fall in `from..=to`, both `ms`.
+    #[must_use]
+    pub fn overlaps(&self, from: i64, to: i64) -> bool {
+        self.first_ms <= to && self.last_ms.is_none_or(|last| last >= from)
+    }
+}
+
+/// How far back one log directory's three streams reach (R3-24): the time of
+/// the oldest line each still holds. `None` for a stream with no line, or
+/// none that could be read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reach {
+    /// The rolling ring's oldest line: every event the sink wrote.
+    pub ring_from: Option<i64>,
+    /// The rolling audit stream's oldest line: refusals, access records and
+    /// lifecycles, kept [`AUDIT_KEEP_FILES`] files.
+    pub audit_from: Option<i64>,
+    /// The never-rolling state stream's oldest line: who did what, kept for
+    /// ever.
+    pub state_from: Option<i64>,
+}
+
+impl Reach {
+    /// The oldest audited line either durable stream holds: how far back the
+    /// directory's audit history reaches.
+    #[must_use]
+    pub fn audited_from(&self) -> Option<i64> {
+        match (self.audit_from, self.state_from) {
+            (Some(audit), Some(state)) => Some(audit.min(state)),
+            (one, other) => one.or(other),
+        }
+    }
+}
+
+/// The `ms` of the first line of `path` that decodes, reading at most one
+/// line's ceiling from its start; `None` for a file that is not there, is
+/// empty, or whose head does not decode.
+fn head_ms(path: &Path) -> Option<i64> {
+    use std::io::{BufRead as _, Read as _};
+    let file = File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(
+        file.take(u64::try_from(crate::tail::MAX_LINE_BYTES).unwrap_or(u64::MAX)),
+    );
+    let mut line = Vec::new();
+    let _read = reader.read_until(b'\n', &mut line).ok()?;
+    let line = line.strip_suffix(b"\n").unwrap_or(&line);
+    Record::decode(line)
+        .ok()
+        .map(|record| record.at_unix_millis)
+}
+
+/// The span of the audit file of `serial`, in a stream whose current serial is
+/// `current_serial`: its [`AUDIT_SPAN_FILE`] when that holds one, else its
+/// first and last lines (one read at each end). `None` once the file has
+/// rolled out of the kept set, or when it holds no line.
+#[must_use]
+pub fn audit_span(dir: &Path, current_serial: u64, serial: u64) -> Option<AuditSpan> {
+    let path = audit_path_for(dir, current_serial, serial)?;
+    let open = serial == current_serial;
+    if let Ok(bytes) = std::fs::read(audit_generation_path(dir, serial).join(AUDIT_SPAN_FILE))
+        && let Ok(image) = <[u8; 16]>::try_from(bytes.as_slice())
+    {
+        let half = |from: usize| {
+            image
+                .get(from..from.saturating_add(8))
+                .and_then(|eight| <[u8; 8]>::try_from(eight).ok())
+                .map_or(i64::MAX, i64::from_le_bytes)
+        };
+        let (first_ms, last) = (half(0), half(8));
+        return Some(AuditSpan {
+            first_ms,
+            last_ms: (!open && last != i64::MAX).then_some(last),
+        });
+    }
+    let first_ms = head_ms(&path)?;
+    let last_ms = if open {
+        None
+    } else {
+        let len = std::fs::metadata(&path).ok()?.len();
+        last_records(&path, len).map(|last| last.last_at)
+    };
+    Some(AuditSpan { first_ms, last_ms })
+}
+
+/// How far back the streams of the log directory `dir` reach. One `open` per
+/// ring file until the oldest present one is found and one line read from it;
+/// the audit serial and at most [`AUDIT_KEEP_FILES`] span probes, each one
+/// small read, stopping at the oldest kept generation that has a line; one
+/// span probe of the state stream. Nothing scales with what the files hold.
+#[must_use]
+pub fn reach_of(dir: &Path, ring_keep: u8) -> Reach {
+    let ring_from = paths_newest_first(dir, ring_keep)
+        .iter()
+        .rev()
+        .find_map(|path| head_ms(path));
+    let oldest_of = |stream: &Path| {
+        let current = audit_serial(stream).ok()?;
+        let oldest = current.saturating_sub(u64::from(AUDIT_KEEP_FILES.saturating_sub(1)));
+        (oldest..=current)
+            .find_map(|serial| audit_span(stream, current, serial).map(|s| s.first_ms))
+    };
+    Reach {
+        ring_from,
+        audit_from: oldest_of(dir),
+        state_from: oldest_of(&crate::run_dirs::state_stream_of(dir)),
+    }
+}
 
 /// The dimensions the first index build (D-3341 item 3) kept, from the start
 /// of every generation it wrote. A generation with no [`AUDIT_DIMS_FILE`] was
@@ -2271,14 +2454,18 @@ fn hex_digit(nibble: u8) -> char {
 
 /// Whether an event belongs in the audit stream: every event at `error`, and
 /// every event at `info` or above whose target ends in `lifecycle` or
-/// [`AUDIT_ACCESS_SEGMENT`], or whose message holds one of
-/// [`AUDIT_LIFECYCLE_WORDS`] as a word.
+/// [`AUDIT_ACCESS_SEGMENT`], whose message holds one of
+/// [`AUDIT_LIFECYCLE_WORDS`] as a word, or that is a row of the state-change
+/// table (`crate::run_dirs::state_events::TABLE`, R3-24).
 ///
 /// `warn` is not a refusal here: the ring's flood was `warn` (an expected
 /// absence logged once per month asked, DB-023), and a stream that took it
 /// would roll as fast as the ring does. An access record is taken because its
 /// writer bounds it before it is emitted (DB-A42); this crate cannot, as it
-/// knows no route. O(message length), which `crate::event` bounds.
+/// knows no route. A table row is taken whatever its words: "listening" and
+/// "census compacted" are state changes no word rule can see, and until R3-24
+/// they reached the rolling ring alone. O(message length), which
+/// `crate::event` bounds, plus at most the table's length of comparisons.
 #[must_use]
 pub fn is_audited(level: Level, target: &str, message: &str) -> bool {
     if level.at_least(Level::Error) {
@@ -2287,9 +2474,18 @@ pub fn is_audited(level: Level, target: &str, message: &str) -> bool {
     if !level.at_least(Level::Info) {
         return false;
     }
-    let last = target.rsplit('.').next();
-    last == Some("lifecycle")
-        || last == Some(AUDIT_ACCESS_SEGMENT)
+    is_lifecycle(target, message)
+        || target.rsplit('.').next() == Some(AUDIT_ACCESS_SEGMENT)
+        || crate::run_dirs::state_events::row_of(target, message).is_some()
+}
+
+/// Whether `target` and `message` mark a run's lifecycle as the audit stream
+/// reads one: a target ending `lifecycle`, or a message holding one of
+/// [`AUDIT_LIFECYCLE_WORDS`] as a word. Shared by [`is_audited`] and the
+/// state stream's own test, so the two cannot read a lifecycle differently.
+#[must_use]
+pub(crate) fn is_lifecycle(target: &str, message: &str) -> bool {
+    target.rsplit('.').next() == Some("lifecycle")
         || message
             .split(|c: char| !c.is_ascii_alphabetic())
             .any(|word| AUDIT_LIFECYCLE_WORDS.contains(&word))
@@ -2401,6 +2597,10 @@ pub struct AuditHealth {
     /// The most recent failure of the stream's writer, in its own words;
     /// when it has none, the reaper's ([`Self::reap_error`]).
     pub last_error: Option<String>,
+    /// Whether this is the never-rolling state stream (R3-24): it keeps every
+    /// line for ever, so its size is what an operator watches, and past
+    /// [`STATE_LOUD_BYTES`] it is loud.
+    pub never_rolls: bool,
 }
 
 impl AuditHealth {
@@ -2412,6 +2612,15 @@ impl AuditHealth {
             || self.index_failures > 0
             || self.reap_failures > 0
             || self.reaper_behind()
+            || self.grown_past_loud()
+    }
+
+    /// Whether the never-rolling state stream has grown past
+    /// [`STATE_LOUD_BYTES`]. Always `false` for the rolling audit stream,
+    /// whose size its roll bounds.
+    #[must_use]
+    pub const fn grown_past_loud(&self) -> bool {
+        self.never_rolls && self.current_bytes > STATE_LOUD_BYTES
     }
 
     /// Whether more retired generations wait for the reaper than the stream
@@ -2514,7 +2723,7 @@ fn is_day_text(text: &str) -> bool {
 }
 
 /// The posting values one event carries, one per [`AUDIT_DIMENSIONS`] entry.
-fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 8] {
+fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 10] {
     use std::borrow::Cow;
     let day = keys.text("day").filter(|text| is_day_text(text));
     let month = keys
@@ -2536,6 +2745,8 @@ fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 8] {
         keys.text("code")
             .or_else(|| keys.text("reason"))
             .map(Cow::Borrowed),
+        keys.text("reason").map(Cow::Borrowed),
+        keys.text("kind").map(Cow::Borrowed),
     ]
 }
 
@@ -2860,6 +3071,14 @@ struct Audit {
     /// [`AuditHealth::last_error`] names; the entries then wait for the next
     /// start. Dropping the stream closes the channel and ends the thread.
     reaper: Option<std::sync::mpsc::Sender<Retired>>,
+    /// Whether this stream rolls: the audit stream does, the state stream
+    /// (`crate::run_dirs::STATE_STREAM_DIR`, R3-24) never does, so it starts
+    /// no reaper and retires nothing.
+    rolls: bool,
+    /// The current generation's first line's `ms`, once it has one.
+    span_first: Option<i64>,
+    /// Its last line's `ms`, written into [`AUDIT_SPAN_FILE`] when it rolls.
+    span_last: i64,
 }
 
 /// One retired index generation handed to the reaper: its path, and the
@@ -3006,10 +3225,109 @@ fn reaper(jobs: &std::sync::mpsc::Receiver<Retired>, reap: &Reap) {
     }
 }
 
+/// What [`Audit::open_in`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    /// A stream that never existed: it is to be seeded.
+    Fresh,
+    /// A stream written before: its lines are never copied a second time.
+    Existing,
+    /// It could not be opened; the reason is in its health.
+    Failed,
+}
+
+/// The state-change lines of several files, read in turn, each file from its
+/// start: the line as written (without its newline) and decoded. A line that
+/// does not decode is passed over; a file that cannot be opened is too, as
+/// the audit stream's own seed passes it over.
+struct StateLines {
+    files: std::vec::IntoIter<PathBuf>,
+    reader: Option<std::io::BufReader<File>>,
+}
+
+impl StateLines {
+    /// The lines of `files`, in that order.
+    fn new(files: Vec<PathBuf>) -> Self {
+        Self {
+            files: files.into_iter(),
+            reader: None,
+        }
+    }
+}
+
+impl Iterator for StateLines {
+    type Item = (Record, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::BufRead as _;
+        loop {
+            let Some(reader) = self.reader.as_mut() else {
+                let path = self.files.next()?;
+                self.reader = File::open(&path).ok().map(std::io::BufReader::new);
+                continue;
+            };
+            let mut line = Vec::new();
+            if !matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+                self.reader = None;
+                continue;
+            }
+            if line.last() == Some(&b'\n') {
+                let _newline = line.pop();
+            }
+            if let Ok(record) = Record::decode(&line)
+                && crate::run_dirs::state_events::is_state_change(
+                    record.level,
+                    &record.target,
+                    &record.message,
+                )
+            {
+                return Some((record, line));
+            }
+        }
+    }
+}
+
 impl Audit {
     /// Opens the stream in `dir`, seeding it from the ring there when it is
     /// new, and says what went wrong, if anything did.
     fn open(dir: &Path, ring_keep: u8) -> (Self, Option<String>) {
+        let (mut audit, said, opened) = Self::open_in(dir, true);
+        match opened {
+            Opened::Failed => return (audit, said),
+            Opened::Fresh => audit.seed(ring_keep),
+            Opened::Existing => {}
+        }
+        // THE REAPER STARTS LAST, with what an earlier process left it: a
+        // stream that could not open returned above and starts no thread.
+        let reaping = audit.start_reaper();
+        (audit, said.or(reaping.err()))
+    }
+
+    /// Opens the never-rolling state stream of the log directory `parent`
+    /// (R3-24): `<parent>/audit.state/`, laid out as an audit stream. A new
+    /// one is seeded from what `parent` already holds ([`Self::seed_state`]).
+    /// It rolls nothing, so it starts no reaper.
+    fn open_state(parent: &Path, ring_keep: u8) -> (Self, Option<String>) {
+        let dir = crate::run_dirs::state_stream_of(parent);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            let (stream, _, _) = Self::open_in(&dir, false);
+            return stream.failed(format!(
+                "{}: cannot create the state stream — {e}",
+                dir.display()
+            ));
+        }
+        let (mut state, said, opened) = Self::open_in(&dir, false);
+        if opened == Opened::Fresh {
+            state.seed_state(parent, ring_keep);
+        }
+        (state, said)
+    }
+
+    /// The opening both streams share: the serial, the file, a torn tail
+    /// closed, the coverage marked and the span resumed. Says whether the
+    /// stream is new (and so to be seeded), was there already, or could not
+    /// be opened, in which case the reason is in the health and returned.
+    fn open_in(dir: &Path, rolls: bool) -> (Self, Option<String>, Opened) {
         let current = audit_current_path(dir);
         let mut audit = Self {
             dir: dir.to_path_buf(),
@@ -3021,26 +3339,32 @@ impl Audit {
             handles: std::collections::HashMap::new(),
             health: AuditHealth {
                 path: current.clone(),
+                never_rolls: !rolls,
                 ..AuditHealth::default()
             },
             reap: std::sync::Arc::new(Reap::default()),
             reaper: None,
+            rolls,
+            span_first: None,
+            span_last: 0,
         };
         // A STREAM THAT HAS NEVER EXISTED, and only that, is seeded: a
         // current file or a serial on disk means a stream that was written
         // before, whose lines must not be copied a second time.
         let fresh = !current.exists() && !audit_serial_path(dir).exists();
+        let failed = |audit: Self, why: String| {
+            let (audit, said) = audit.failed(why);
+            (audit, said, Opened::Failed)
+        };
         audit.serial = match audit_serial(dir) {
             Ok(serial) => serial,
-            Err(why) => return audit.failed(format!("the audit stream's serial: {why}")),
+            Err(why) => return failed(audit, format!("the audit stream's serial: {why}")),
         };
         let mut target = match FileTarget::open(&current) {
             Ok(target) => target,
             Err(e) => {
-                return audit.failed(format!(
-                    "{}: cannot open the audit stream — {e}",
-                    current.display()
-                ));
+                let why = format!("{}: cannot open the audit stream — {e}", current.display());
+                return failed(audit, why);
             }
         };
         let found = target.len();
@@ -3053,13 +3377,132 @@ impl Audit {
         // predates the dimension (WP-33c). Before the seed, so seeded lines
         // are covered.
         let marked = audit.mark_coverage();
-        if fresh {
-            audit.seed(ring_keep);
+        audit.resume_span();
+        let opened = if fresh {
+            Opened::Fresh
+        } else {
+            Opened::Existing
+        };
+        (audit, torn.or(marked.err()), opened)
+    }
+
+    /// Picks up the current generation's span where the last process left it
+    /// (R3-24): its first line's time from [`AUDIT_SPAN_FILE`], or from the
+    /// file's first line for a generation an earlier build wrote (and then
+    /// records it), and its last line's time from the file's end. One small
+    /// read at each end, once per open.
+    fn resume_span(&mut self) {
+        if self.bytes == 0 {
+            return;
         }
-        // THE REAPER STARTS LAST, with what an earlier process left it: a
-        // stream that could not open returned above and starts no thread.
-        let reaping = audit.start_reaper();
-        (audit, torn.or(marked.err()).or(reaping.err()))
+        let current = audit_current_path(&self.dir);
+        let recorded = audit_span(&self.dir, self.serial, self.serial).map(|span| span.first_ms);
+        let first = recorded.or_else(|| head_ms(&current));
+        self.span_last = last_records(&current, self.bytes).map_or(0, |last| last.last_at);
+        if let Some(first) = first {
+            self.span_first = Some(first);
+            self.span_last = self.span_last.max(first);
+            self.write_span(false);
+        }
+    }
+
+    /// Writes the current generation's [`AUDIT_SPAN_FILE`]: its first line's
+    /// time and, once it is `closed` by a roll, its last; [`i64::MAX`] while
+    /// it is still appended to. One write of 16 bytes. A write that fails is
+    /// counted with the index's failures and named: a reader then reads the
+    /// file's own first and last lines, which is slower and never wrong.
+    fn write_span(&mut self, closed: bool) {
+        let Some(first) = self.span_first else {
+            return;
+        };
+        let last = if closed { self.span_last } else { i64::MAX };
+        let mut image = [0u8; 16];
+        for (dst, src) in image
+            .iter_mut()
+            .zip(first.to_le_bytes().into_iter().chain(last.to_le_bytes()))
+        {
+            *dst = src;
+        }
+        let generation = audit_generation_path(&self.dir, self.serial);
+        let path = generation.join(AUDIT_SPAN_FILE);
+        if let Err(e) =
+            std::fs::create_dir_all(&generation).and_then(|()| std::fs::write(&path, image))
+        {
+            self.health.index_failures = self.health.index_failures.saturating_add(1);
+            self.health.last_error = Some(format!(
+                "{}: cannot record the generation's time span — {e}",
+                path.display()
+            ));
+        }
+    }
+
+    /// Copies what the log directory `parent` already holds of the state
+    /// stream's lines into a new one, oldest first (R3-24): its audit
+    /// stream's kept files and its ring, merged by `seq`, each line once.
+    ///
+    /// # Why both, and why merged
+    ///
+    /// The audit stream holds the lifecycles of every run since it began,
+    /// long after the ring rolled them away; the ring holds the state changes
+    /// no rule audited before R3-24 ("listening", "census compacted"). Each
+    /// is written in `seq` order, so one pass over both, taking the lower
+    /// `seq` each step and a line both hold once, gives one stream in the
+    /// order the lines were written.
+    ///
+    /// # Cost
+    ///
+    /// Once, when the stream is new: one sequential read of at most the audit
+    /// stream's ceiling ([`AUDIT_MAX_FILE_BYTES`] x [`AUDIT_KEEP_FILES`]) and
+    /// the ring's, one line held at a time from each. Counted in
+    /// [`AuditHealth::seeded`].
+    fn seed_state(&mut self, parent: &Path, ring_keep: u8) {
+        let audit_files: Vec<PathBuf> = (1..AUDIT_KEEP_FILES)
+            .rev()
+            .map(|n| audit_rolled_path(parent, n))
+            .chain(std::iter::once(audit_current_path(parent)))
+            .collect();
+        let ring_files: Vec<PathBuf> = paths_newest_first(parent, ring_keep)
+            .into_iter()
+            .rev()
+            .collect();
+        let mut audited = StateLines::new(audit_files);
+        let mut ring = StateLines::new(ring_files);
+        let (mut left, mut right) = (audited.next(), ring.next());
+        loop {
+            let take_left = match (&left, &right) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some((one, one_line)), Some((other, other_line))) => {
+                    // THE SAME LINE IN BOTH is one line: the ring's copy goes.
+                    if one.seq == other.seq && one_line == other_line {
+                        right = ring.next();
+                        continue;
+                    }
+                    one.seq <= other.seq
+                }
+            };
+            let taken = if take_left {
+                std::mem::replace(&mut left, audited.next())
+            } else {
+                std::mem::replace(&mut right, ring.next())
+            };
+            if let Some((record, mut line)) = taken {
+                line.push(b'\n');
+                if self
+                    .append(
+                        &line,
+                        record.seq,
+                        record.level,
+                        record.at_unix_millis,
+                        &record,
+                    )
+                    .is_none()
+                {
+                    self.health.seeded = self.health.seeded.saturating_add(1);
+                }
+            }
+        }
     }
 
     /// Starts the stream's reaper and hands it what is already waiting
@@ -3319,7 +3762,13 @@ impl Audit {
                 let mut whole = line;
                 whole.push(b'\n');
                 if self
-                    .append(&whole, record.seq, record.level, &record)
+                    .append(
+                        &whole,
+                        record.seq,
+                        record.level,
+                        record.at_unix_millis,
+                        &record,
+                    )
                     .is_none()
                 {
                     self.health.seeded = self.health.seeded.saturating_add(1);
@@ -3328,11 +3777,20 @@ impl Audit {
         }
     }
 
-    /// Appends one whole line and its pointers, or says why it could not.
-    fn append(&mut self, line: &[u8], seq: u64, level: Level, keys: &impl Keyed) -> Option<String> {
+    /// Appends one whole line, stamped `at`, and its pointers, or says why it
+    /// could not.
+    fn append(
+        &mut self,
+        line: &[u8],
+        seq: u64,
+        level: Level,
+        at: i64,
+        keys: &impl Keyed,
+    ) -> Option<String> {
         let span = u64::try_from(line.len()).unwrap_or(u64::MAX);
         let mut said = None;
-        if !self.rotation_broken
+        if self.rolls
+            && !self.rotation_broken
             && self.bytes > 0
             && self.bytes.saturating_add(span) > self.max_file_bytes
             && let Err(why) = self.roll()
@@ -3368,6 +3826,14 @@ impl Audit {
         };
         self.bytes = self.bytes.saturating_add(span);
         self.health.written = self.health.written.saturating_add(1);
+        // THE GENERATION'S SPAN (R3-24): its first line's time recorded once,
+        // its last kept here and recorded when it rolls.
+        self.span_last = self.span_last.max(at);
+        if self.span_first.is_none() {
+            self.span_first = Some(at);
+            self.span_last = at;
+            self.write_span(false);
+        }
         let image = pointer.image();
         for (dimension, value) in AUDIT_DIMENSIONS.into_iter().zip(postings_of(keys)) {
             let Some(value) = value else {
@@ -3439,6 +3905,8 @@ impl Audit {
         let current = audit_current_path(&self.dir);
         rename_if_present(&current, &audit_rolled_path(&self.dir, 1))
             .map_err(|e| named(&current, "cannot roll the audit file", &e))?;
+        // THE CLOSED FILE'S SPAN, with its last line's time (R3-24).
+        self.write_span(true);
         let next = self.serial.saturating_add(1);
         let path = audit_serial_path(&self.dir);
         let staged = path.with_extension("next");
@@ -3457,6 +3925,7 @@ impl Audit {
                 .map_err(|e| named(&current, "cannot open the next audit file", &e))?,
         );
         self.bytes = 0;
+        self.span_first = None;
         self.health.rotations = self.health.rotations.saturating_add(1);
         // A NEW GENERATION IS COVERED BY EVERY DIMENSION FROM ITS FIRST LINE.
         // A coverage file that cannot be written does not stop the roll: the
@@ -3888,6 +4357,7 @@ mod tests {
             buf: Vec::new(),
             torn: false,
             audit: None,
+            state: None,
             flood: super::Flood::default(),
         };
 
@@ -8001,6 +8471,401 @@ mod tests {
             page.pointers[1].0.index, 0,
             "the foreign record's place passed over"
         );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod state_tests {
+    //! The never-rolling state stream, the generations' time spans and how
+    //! far back a directory reaches (R3-24; DB-G88, DB-023).
+
+    use super::{
+        AUDIT_KEEP_FILES, AUDIT_MAX_FILE_BYTES, AUDIT_SPAN_FILE, AuditHealth, AuditLine, AuditSpan,
+        Config, DEFAULT_KEEP_FILES, STATE_LOUD_BYTES, Sink, audit_current_path,
+        audit_generation_path, audit_postings, audit_read, audit_serial, audit_span, reach_of,
+    };
+    use crate::event::Event;
+    use crate::record::Record;
+    use crate::run_dirs::state_stream_of;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        crate::tests::sweep_stale_scratch();
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-telemetry-{}-state-{name}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Every line `dimension = value` holds in the stream at `dir`, oldest
+    /// first, read through its pointers.
+    fn every_line(dir: &Path, dimension: &str, value: &str) -> Vec<Record> {
+        let postings = audit_postings(dir, dimension, value, usize::MAX).expect("a probe");
+        let serial = audit_serial(dir).expect("a serial");
+        let mut out: Vec<Record> = postings
+            .pointers
+            .iter()
+            .filter_map(|pointer| match audit_read(dir, serial, pointer) {
+                AuditLine::Found(record) => Some(record),
+                AuditLine::RolledOff => None,
+                AuditLine::Unreadable(why) => panic!("{dimension}={value}: {why}"),
+            })
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// Writes at least `refusals` bytes of refusals through a sink whose audit
+    /// stream rolls at `audit_file_bytes`, with a state change first, one
+    /// every 997 refusals and one last; answers the sink, its directory and
+    /// the state changes' `seq`s.
+    fn through_a_flood(
+        name: &str,
+        refusals: u64,
+        audit_file_bytes: u64,
+    ) -> (Sink, PathBuf, Vec<u64>) {
+        let dir = scratch(name);
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("an audit stream")
+            .max_file_bytes = audit_file_bytes;
+        let state = |sink: &Sink, n: u64, wanted: &mut Vec<u64>| {
+            assert!(
+                sink.emit(&Event::warn("autopilot", "paused").with("epoch", n))
+                    .is_written()
+            );
+            wanted.push(sink.health().next_seq - 1);
+        };
+        let mut wanted = Vec::new();
+        state(&sink, 0, &mut wanted);
+        let why = "a refusal's reason, long enough to be a real one ".repeat(8);
+        let mut written = 0u64;
+        let mut n = 0u64;
+        while written < refusals {
+            let before = sink.audit_health().expect("a stream");
+            let _ = sink.emit(
+                &Event::error("pull.spot", "member did not land")
+                    .with("instrument", "NIFTY")
+                    .with("day", "2026-10-01")
+                    .with("why", why.as_str()),
+            );
+            let after = sink.audit_health().expect("a stream");
+            written += if after.rotations > before.rotations {
+                after.current_bytes
+            } else {
+                after.current_bytes - before.current_bytes
+            };
+            n += 1;
+            if n % 997 == 0 {
+                state(&sink, n, &mut wanted);
+            }
+        }
+        state(&sink, n, &mut wanted);
+        (sink, dir, wanted)
+    }
+
+    /// The proof at a given size: the refusals outgrow the rolling audit
+    /// stream twice over, the rolling stream loses the first state change,
+    /// and the state stream still finds every one by key, never having
+    /// rolled.
+    fn survives(name: &str, refusals: u64, audit_file_bytes: u64) {
+        let retention = u64::from(AUDIT_KEEP_FILES) * audit_file_bytes;
+        assert!(
+            refusals >= 2 * retention,
+            "premise: twice what the stream keeps"
+        );
+        let (sink, dir, wanted) = through_a_flood(name, refusals, audit_file_bytes);
+        let rolling: Vec<u64> = every_line(&dir, "target", "autopilot")
+            .iter()
+            .map(|record| record.seq)
+            .collect();
+        assert!(
+            !rolling.contains(&wanted[0]),
+            "premise: the rolling stream rolled the first state change away"
+        );
+        let state_dir = state_stream_of(&dir);
+        let kept: Vec<u64> = every_line(&state_dir, "target", "autopilot")
+            .iter()
+            .map(|record| record.seq)
+            .collect();
+        assert_eq!(kept, wanted, "every state change, in order, once");
+        let by_day = every_line(&state_dir, "day", "2026-10-01");
+        assert!(by_day.is_empty(), "no refusal is a state change");
+        let health = sink.state_health().expect("a state stream");
+        assert!(health.never_rolls);
+        assert_eq!((health.serial, health.rotations), (0, 0));
+        assert_eq!(health.written, wanted.len() as u64);
+        assert!(!health.is_loud(), "{health:?}");
+        // THE ANSWER SAYS HOW FAR BACK IT REACHES: the state stream to the
+        // first state change, further than the rolling stream.
+        let reach = reach_of(&dir, DEFAULT_KEEP_FILES);
+        let first = every_line(&state_dir, "target", "autopilot")[0].at_unix_millis;
+        assert_eq!(reach.state_from, Some(first));
+        assert!(reach.audit_from.expect("an audit stream") >= first);
+        assert_eq!(reach.audited_from(), Some(first));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN AUDIT LINE SURVIVES 2 GiB OF REFUSALS** (R3-24, DB-G88): every
+    /// who-did-what line is still found by key after the refusals have rolled
+    /// the audit stream past its whole retention twice.
+    ///
+    /// Scaled by 1,024 on both sides so it runs in a test: the audit stream
+    /// rolls at 64 KiB instead of 64 MiB (16 files, 1 MiB kept instead of
+    /// 1 GiB) and 2 MiB of refusals go through it instead of 2 GiB, the same
+    /// ratio. `an_audit_line_survives_2_gib_of_refusals_at_full_size` is the
+    /// same proof at the real bounds. Before R3-24 there was no state stream
+    /// and the first state change was gone with its audit file.
+    #[test]
+    fn an_audit_line_survives_2_gib_of_refusals() {
+        const SCALE: u64 = 1024;
+        survives(
+            "survives",
+            2 * 1024 * 1024 * 1024 / SCALE,
+            AUDIT_MAX_FILE_BYTES / SCALE,
+        );
+    }
+
+    /// The same proof at the real bounds: 2 GiB of refusals through a 64 MiB
+    /// x 16 audit stream. Ignored in the ordinary run because it writes 2 GiB;
+    /// run with `cargo test -p telemetry --release --
+    /// --ignored an_audit_line_survives_2_gib_of_refusals_at_full_size`.
+    #[test]
+    #[ignore = "writes 2 GiB: run by hand at the real bounds (R3-24 report)"]
+    fn an_audit_line_survives_2_gib_of_refusals_at_full_size() {
+        survives(
+            "survives-full",
+            2 * 1024 * 1024 * 1024,
+            AUDIT_MAX_FILE_BYTES,
+        );
+    }
+
+    /// The lines of a stream's current file, decoded.
+    fn lines_of(dir: &Path) -> Vec<Record> {
+        std::fs::read(audit_current_path(dir))
+            .expect("a stream")
+            .split(|&byte| byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| Record::decode(line).expect("a line"))
+            .collect()
+    }
+
+    /// **A NEW STATE STREAM IS SEEDED FROM WHAT THE DIRECTORY HOLDS**: the
+    /// lifecycles the audit stream kept and the state changes only the ring
+    /// held (an earlier build audited no "listening"), merged by `seq`, a line
+    /// both hold copied once, and never again on a later open.
+    #[test]
+    fn a_new_state_stream_is_seeded_from_the_audit_stream_and_the_ring() {
+        let dir = scratch("seed");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::info("cli.lifecycle", "command started"));
+            let _ = sink.emit(&Event::error("pull.spot", "member did not land"));
+            let _ = sink.emit(&Event::info("x", "quiet"));
+        }
+        {
+            let ring_only = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
+            let _ = ring_only.emit(&Event::info("api.serve", "listening"));
+        }
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::info("cli.lifecycle", "command finished"));
+        }
+        // AS IF THE DIRECTORY WERE AN EARLIER BUILD'S: no state stream yet.
+        std::fs::remove_dir_all(state_stream_of(&dir)).expect("a state stream");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert_eq!(sink.state_health().expect("a state stream").seeded, 3);
+        let seeded: Vec<(String, String)> = lines_of(&state_stream_of(&dir))
+            .into_iter()
+            .map(|record| (record.target, record.message))
+            .collect();
+        let named = |target: &str, message: &str| (target.to_owned(), message.to_owned());
+        assert_eq!(
+            seeded,
+            [
+                named("cli.lifecycle", "command started"),
+                named("api.serve", "listening"),
+                named("cli.lifecycle", "command finished"),
+            ]
+        );
+        let seqs: Vec<u64> = lines_of(&state_stream_of(&dir))
+            .iter()
+            .map(|record| record.seq)
+            .collect();
+        assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+        drop(sink);
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert_eq!(again.state_health().expect("a state stream").seeded, 0);
+        assert_eq!(
+            lines_of(&state_stream_of(&dir)).len(),
+            3,
+            "never copied twice"
+        );
+        drop(again);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EACH AUDIT FILE KEEPS ITS FIRST AND LAST EVENT TIME** (R3-24): the
+    /// file being appended to is open-ended, a rolled one closed at its last
+    /// line; a generation an earlier build wrote, with no span file, reads its
+    /// own first and last lines; a reopened stream records the span again.
+    #[test]
+    fn a_generation_keeps_its_first_and_last_event_time() {
+        let dir = scratch("span");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("an audit stream")
+            .max_file_bytes = 1;
+        let _ = sink.emit(&Event::error("x", "one").with("instrument", "AAA"));
+        let _ = sink.emit(&Event::error("x", "two").with("instrument", "AAA"));
+        let _ = sink.emit(&Event::error("x", "three").with("instrument", "BBB"));
+        let at = |instrument: &str| -> Vec<i64> {
+            every_line(&dir, "instrument", instrument)
+                .iter()
+                .map(|record| record.at_unix_millis)
+                .collect()
+        };
+        let (aaa, bbb) = (at("AAA"), at("BBB"));
+        assert_eq!(audit_serial(&dir).expect("a serial"), 2);
+        let first = audit_span(&dir, 2, 0).expect("the first file");
+        assert_eq!(
+            first,
+            AuditSpan {
+                first_ms: aaa[0],
+                last_ms: Some(aaa[0])
+            }
+        );
+        assert_eq!(
+            audit_span(&dir, 2, 2),
+            Some(AuditSpan {
+                first_ms: bbb[0],
+                last_ms: None
+            }),
+            "the file being appended to is open-ended"
+        );
+        assert!(first.overlaps(aaa[0], aaa[0]));
+        assert!(!first.overlaps(aaa[0] + 1, i64::MAX));
+        assert!(!first.overlaps(i64::MIN, aaa[0] - 1));
+        let open = audit_span(&dir, 2, 2).expect("open");
+        assert!(open.overlaps(i64::MAX - 1, i64::MAX));
+        assert_eq!(
+            std::fs::read(audit_generation_path(&dir, 0).join(AUDIT_SPAN_FILE))
+                .expect("a span file")
+                .len(),
+            16
+        );
+        // A GENERATION AN EARLIER BUILD WROTE reads its own lines.
+        std::fs::remove_file(audit_generation_path(&dir, 1).join(AUDIT_SPAN_FILE))
+            .expect("a span file");
+        assert_eq!(
+            audit_span(&dir, 2, 1),
+            Some(AuditSpan {
+                first_ms: aaa[1],
+                last_ms: Some(aaa[1])
+            })
+        );
+        // A FILE ROLLED OUT OF THE KEPT SET has no span to read.
+        assert_eq!(audit_span(&dir, u64::from(AUDIT_KEEP_FILES) + 5, 0), None);
+        // A REOPENED STREAM records the current file's span again.
+        drop(sink);
+        std::fs::remove_file(audit_generation_path(&dir, 2).join(AUDIT_SPAN_FILE))
+            .expect("a span file");
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert!(
+            audit_generation_path(&dir, 2)
+                .join(AUDIT_SPAN_FILE)
+                .exists(),
+            "resumed and recorded"
+        );
+        assert_eq!(
+            audit_span(&dir, 2, 2).map(|span| span.first_ms),
+            Some(bbb[0])
+        );
+        let reach = reach_of(&dir, DEFAULT_KEEP_FILES);
+        assert_eq!(reach.audit_from, Some(aaa[0]));
+        assert!(reach.ring_from.is_some_and(|ring| ring <= aaa[0]));
+        assert_eq!(reach.state_from, None, "no refusal is a state change");
+        assert_eq!(reach.audited_from(), Some(aaa[0]));
+        drop(again);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory with nothing in it reaches nowhere, and says so with
+    /// `None` rather than a time.
+    #[test]
+    fn an_empty_directory_reaches_nowhere() {
+        let dir = scratch("reach-empty");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        assert_eq!(reach_of(&dir, DEFAULT_KEEP_FILES), super::Reach::default());
+        assert_eq!(super::Reach::default().audited_from(), None);
+        let only_state = super::Reach {
+            state_from: Some(5),
+            ..super::Reach::default()
+        };
+        assert_eq!(only_state.audited_from(), Some(5));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The state stream never rolls, so its size is what is watched: loud
+    /// past [`STATE_LOUD_BYTES`], and the rolling stream never by size.
+    #[test]
+    fn the_state_stream_is_loud_only_past_its_size() {
+        let at = |never_rolls: bool, current_bytes: u64| AuditHealth {
+            never_rolls,
+            current_bytes,
+            ..AuditHealth::default()
+        };
+        assert!(!at(true, STATE_LOUD_BYTES).is_loud());
+        assert!(at(true, STATE_LOUD_BYTES + 1).is_loud());
+        assert!(at(true, STATE_LOUD_BYTES + 1).grown_past_loud());
+        assert!(!at(false, u64::MAX).is_loud());
+    }
+
+    /// **A STATE STREAM THAT CANNOT BE MADE IS NAMED**, and the ring and the
+    /// audit stream still write: a file where its directory goes.
+    #[test]
+    fn a_state_stream_that_cannot_be_made_is_named() {
+        let dir = scratch("state-blocked");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        std::fs::write(state_stream_of(&dir), b"in the way").expect("a file in its place");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let health = sink.state_health().expect("named, not absent");
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot create the state stream")),
+            "{health:?}"
+        );
+        assert!(
+            sink.emit(&Event::warn("autopilot", "paused")).is_written(),
+            "the ring still writes"
+        );
+        let after = sink.state_health().expect("a state stream");
+        assert_eq!(after.dropped, 1, "the state line is counted as lost");
+        assert!(after.is_loud());
+        assert_eq!(sink.audit_health().expect("an audit stream").written, 1);
+        drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
