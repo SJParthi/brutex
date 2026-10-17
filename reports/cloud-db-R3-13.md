@@ -2,6 +2,26 @@ STATUS: IN PROGRESS
 
 # R3-13 — /db day band and row labels (cloud build report)
 
+**Why the first line does not say DONE.** Every goal and finding of R3-13 is built and tested,
+and every gate is green on what R3-13 changes: formatting, clippy, its tests, 100% of its
+changed lines and branches but one declared line, no surviving mutant, and the measured target
+met on the synthetic store. But `STATUS: DONE` needs every gate green, and two are red on
+`origin/feat/db-fix` itself, in files R3-13 may not touch. `cargo deny check` fails five
+advisories in `Cargo.lock`, and `cargo test --workspace` fails `store`'s `cited_commits`, which
+checks the citations in `docs/06-limits.md` against `main`. The front end's W3 (svelte-check, 7
+errors, the base's 7) is red on the base too. This cloud machine adds failures of its own: 25
+tests fail as root and pass as an unprivileged user, one `store` test fails on this filesystem's
+inode reuse, and gate W1 waits for the Mac to rebuild `web/build`. Nothing is left for R3-13 to
+build in the cloud. What remains is in NEEDS THE MAC.
+
+## What is left
+
+- Everything under NEEDS THE MAC: the real-store checks and timing, the gates the cloud could not
+  close (the suite as a non-root user, the `web/build` rebuild for W1, the store volume's inode
+  behaviour), the docs rows to land, and the two notes for other owners.
+- The base's own red gates (`cargo deny`'s advisories, `cited_commits`, W3) belong to their
+  owners. R3-13 changes none of the files they read.
+
 Branch `cloud/db-R3-13-20261017`, from `origin/feat/db-fix` 3911d1b9c; the newer
 `origin/feat/db-fix` was merged in twice as it moved (62396df0, then 50093fa3: AF-02, AF-07,
 R3-01, R3-32, R3-35). No merge touched an R3-13 file except `dayflags.rs` (AF-02/AF-07, merged
@@ -67,44 +87,57 @@ unfixed code:
 | 8 | The band's "kept apart" count included days whose flag no master holds | `casCounts` in `dayflags.js` counts apart only flag-1 days; the component uses it | web `R3-13 review: a closing-auction day whose flag no master holds…` |
 | 9 | `imports::day_band_json` (the L-IA-39 bench's entry) parses `Asked` alone, so it cannot ask for a rung or an expiry | `dayflags::query_of` is now the one parse of the band's query, used by the route; `imports.rs` is not an R3-13 file, so its one-line change is in NEEDS THE MAC | `an_option_family_narrowed_to_an_expiry_is_expired_after_it` (extended) |
 
-### A cost found and removed on the way
-
-The first measurement had the branch SLOWER than the base (warm p50 8.3 ms against 6.4 ms).
-Callgrind (`the_day_band_pages_for_a_profiler`) showed 43% of `/dayflags.json`'s instructions in
-`serde_json` copying values: `json!` serializes every `Value` it is handed into a new one, so
-each record's nested objects, and then all 92 records, were deep-copied — the base pays this
-too. The record, the day's events and the answer's envelope are now built by moving values in
-(`dayflags::object`), and the branch is faster than the base on every page (below).
-
 ## Measured target (synthetic store, this cloud machine)
 
 `the_day_band_is_timed_cold_warm_concurrent_and_growing` (`#[ignore]`; run with `--ignored`):
-92-day pages of NIFTY on both feeds, RELIANCE on both, one NIFTY contract; 375 bars a session at
-each finest rung; n = 200 a page. Run on the base (the same harness pasted into a worktree of
-`origin/feat/db-fix` 62396df0) and on the branch, back to back, 4 cores, idle. **Not a gate: one
-machine, one run each; the real store's figure is NEEDS THE MAC below.** The branch figures are
-of commit 5af9ea1e's code, before the second review's fixes and the R3-06/R3-14 merge; those add
-no read to a page (one more in-memory calendar lookup a day, `pull::calendar::record_of`, for
-the closing-auction flag; no file is opened for it) and were not re-timed here, because the machine was not idle again while
-the mutant run held it. RETIME_NOTE
+92-day pages of NIFTY on both feeds, RELIANCE on both and one NIFTY contract, 375 bars a session
+at each finest rung. Warm: n = 200 a page, 1,000 over the five pages. Cold: n = 20, each request
+on a fresh copy of the store, so every memo is empty while the page cache is warm. 60 clients:
+n = 1,200 while an import appends to the journal. Growth: the warm p50 with 10x and 100x the
+history that no page reads. The final binary (this branch's head) and the base (the same
+harness in a binary of `origin/feat/db-fix` 62396df0) were each run three times, alternately, on
+the same 4-core machine with nothing else running. The base's third run stopped at its 100x copy
+when the disk filled: its harness predates the fix that makes the harness remove its own
+fixtures. **Not a gate: one synthetic store on one machine. The real store's figure is the
+Mac's (NEEDS THE MAC section 2).**
 
-| measure (p50 / p99 / max) | base | branch |
+| p50 / p99 / max, ms (three runs) | base | branch |
 |---|---|---|
-| warm, 1 client, all 5 pages, n = 1,000 | 6.37 / 16.30 / 21.73 ms | **4.35 / 8.67 / 10.86 ms** |
-| warm, 1 client, import writing | 6.38 / 18.12 / 19.86 ms | **4.48 / 8.90 / 13.37 ms** |
-| 60 clients at once, import writing, n = 1,200 | 214.4 / 958.5 / 1,150.5 ms | **66.7 / 725.0 / 861.4 ms** |
-| cold (a fresh copy of the store: every memo empty, page cache warm), Zerodha NIFTY page, n = 20 | 4.40 / 8.99 ms | **6.51 / 9.29 ms** — slower |
-| GDFL NIFTY, warm | 9.47 / 17.94 ms | 5.39 / 10.77 ms |
-| Zerodha NIFTY, warm | 4.01 / 8.44 ms | 2.79 / 5.40 ms |
-| Zerodha RELIANCE, warm | 6.57 / 11.58 ms | 4.63 / 5.84 ms |
-| GDFL RELIANCE, warm | 6.40 / 7.16 ms | 5.12 / 7.41 ms |
-| GDFL NIFTY contract, warm | 6.92 / 16.95 ms | 4.69 / 9.06 ms |
-| growth, warm p50 at 10x / 100x history no page reads, over 1x | 1.02 / 1.01 | 0.98 / 1.01 (gate: ≤ 3.00) |
+| warm, 1 client | 6.76 / 15.93 / 20.91; 6.43 / 15.45 / 17.25; 6.97 / 15.30 / 23.79 | **4.59 / 12.28 / 13.09; 4.44 / 9.71 / 13.17; 4.68 / 8.95 / 10.89** |
+| warm, 1 client, import writing | 8.19 / 18.67 / 31.04; 7.83 / 17.93 / 23.07; 7.61 / 18.36 / 24.89 | **5.06 / 11.65 / 12.66; 5.05 / 10.92 / 13.85; 4.87 / 11.22 / 18.64** |
+| 60 clients, import writing | 400.0 / 1,262.9 / 1,522.8; 233.6 / 1,135.8 / 1,279.8; 267.4 / 1,161.9 / 1,775.4 | **206.7 / 900.3 / 1,047.5; 165.4 / 1,064.0 / 1,556.9; 73.8 / 1,074.2 / 1,156.6** |
+| cold, Zerodha NIFTY page (p99 = max at n = 20) | 5.10 / 23.69; 4.78 / 11.04; 5.30 / 8.55 | **4.03 / 8.45; 4.39 / 8.57; 5.39 / 7.41** |
+| cold, at 10x history | 8.04 / 12.24; 5.50 / 7.64; 6.15 / 12.35 | 5.04 / 9.96; 6.01 / 7.42; 5.29 / 10.02 |
+| cold, at 100x history | 5.13 / 7.06; 5.18 / 8.63; (not reached) | 4.49 / 9.04; 4.32 / 10.15; 4.68 / 8.29 |
+| growth, warm p50 at 10x and 100x over 1x | 0.97 / 1.19; 1.00 / 0.98; (not reached) | 0.93 / 1.04; 0.94 / 0.98; 0.92 / 0.89 (gate ≤ 3.00) |
 
-**The one figure that is slower is the cold Zerodha index page** (+2.1 ms at p50): DB-B20's scan
-reads each index day's minutes once per process (63 sessions × 375 reads here) before its memo
-holds them. Every later answer is faster than the base. A cold DEVICE (page cache dropped) is
-NOT MEASURED.
+By the median of three runs, every figure of the target is lower on the branch: warm p50 4.59
+against 6.76 ms, p99 9.71 against 15.45, max 13.09 against 20.91; with an import writing 5.05
+against 7.83, 11.22 against 18.36, 13.85 against 24.89; 60 clients 165.4 against 267.4, 1,064.0
+against 1,161.9, 1,156.6 against 1,522.8; cold 4.39 against 5.10, max 8.45 against 11.04. Run by
+run there are three overlaps, all said here: the branch's third cold p50 (5.39 ms) is 0.09 ms
+above the base's highest (5.30), its second cold max (8.57 ms) is 0.02 ms above the base's
+lowest (8.55), and its second 60-client max (1,556.9 ms) is above the base's lowest (1,279.8). One cold figure beyond the target is higher: at 100x history the branch's cold p99
+(8.3 to 10.2 ms) is above the base's two runs (7.1 and 8.6 ms), while its cold p50 is lower. A cold
+DEVICE (page cache dropped) is NOT MEASURED.
+
+**How the cold page stopped being the slower figure.** DB-B20's scan reads each index day's
+minutes once per process before its memo holds them: 63 sessions × 375 reads on the cold page.
+The first build scanned them in order, and the cold p50 was 6.51 ms against the base's 4.40. Three
+designs were measured. Lanes of eight days sharing the count's one handle: p50 3.95 to 4.19 ms,
+but a slow sample of 16 to 18 ms in every run, because a handle verifies a sealed month's reads
+through ONE cached block behind one lock, and lanes on different days evicted each other's
+block. Lanes each opening the month again: max 9.4 to 11.3 ms, but p50 6.0 to 6.4 ms, since an
+open is a generation lookup, a shared lock and a header check. The design kept is one scoped
+thread a month, on the handle the count has already opened (`scan_months`): no shared block and
+no extra open, and a page the memo holds spawns no thread.
+
+**And the warm page.** The first measurement had the branch slower than the base on warm pages
+too (p50 8.3 ms against 6.4). Callgrind (`the_day_band_pages_for_a_profiler`) showed 43% of
+`/dayflags.json`'s instructions in `serde_json` copying values: `json!` serializes every `Value`
+it is handed into a new one, so each record's nested objects, and then all 92 records, were
+deep-copied, and the base pays this too. The records, the day's events and the answer's envelope
+are now built by moving values in (`dayflags::object`).
 
 ## Gate results (this cloud machine)
 
@@ -125,7 +158,12 @@ cloud session runs as root, which matters for one gate below.
   which this branch leaves as `origin/feat/db-fix` has it, cites nine `feat/db-fix` commits not yet
   on `main` (72c91a46, the WP-62 merge, among them). The known-slow `cli` pool test was skipped, as
   `CONTEXT.md` directs. That run built `api` before the parallel first scan, so the `api` package
-  was run again on the final code: RESULT_API
+  was run again on the final code: 2,147 passed, 13 failed, 10 ignored. The 13 are
+  the 12 root-only tests above, which pass when the same binary is run as `nobody`, and
+  `coverage::tests::the_lookup_does_not_grow_with_the_universe`, a nanosecond timing test in a file
+  R3-13 does not touch (`coverage.rs`). It measured 1 ns against 8 ns while 2,000 tests ran beside
+  it, passed in the two `api` runs before this one, and passes alone three times in three.
+
 
 - `cargo deny check`: **advisories FAILED; bans, licenses and sources ok.** RUSTSEC-2026-0344,
   -0346, -0347, -0348 and -0349 (`ruzstd` 0.8.2 under `lake` and `pull`; `rustls`). The same five
@@ -170,7 +208,10 @@ cloud session runs as root, which matters for one gate below.
   that page shows. Those three conditions are now one `match` arm a page, and a deleted arm
   changes an answer. Finally, the 55 mutants of the functions the final pass's survivors were in,
   and the one it did not run, were run again on the final code: 53 caught, 2 unviable, 0 missed.
-  Between the final pass and that run only tests changed.
+  Between the final pass and that run only tests changed. The scan was then rebuilt twice for the
+  measured target (a handle a lane, then a month a thread), and the mutants of every function
+  those two changes touched were run on the code as it now stands: 17, then 19, with 0 missed
+  (the last: 14 caught, 5 unviable).
 
 - Web tests, `node --test "web/tests/*.test.js"`: 1,417 tests, 1,407 passed, **1 failed, 9
   cancelled, none in an R3-13 file.** The failure is `db-search.test.js`'s "p99 … inside one
@@ -427,7 +468,7 @@ definition of a day at read time — 2026-10-17**
 
 #### `docs/06-limits.md` (one row, numbered at landing)
 
-| L-R3-13 | `/dayflags.json` with R3-13's read-time rules | per page of at most 92 days: (a) a Zerodha index page scans each day's one-minute bars once per process — at most 1,440 record reads a day, 92 × 1,440 a page — and keeps the scan per (device, inode, first row) with its end row, one probe a day after; a page's first scans run on one scoped thread a month (at most four for 92 days), each on the handle the count already opened, none where the memo holds every day; the memo takes (device, inode) for the month file's identity, as the base's ledger tail readers do, so on a filesystem that reuses an inode number at once (this cloud container's does: `store`'s own `staging` test measures it) a month replaced by a new generation could be served its old scan for a day whose end row is unchanged, until the process restarts; the memo holds one entry per (month file, day) shown, however often a month grows; (b) the previous `1day` bar is looked for 12 opens back, then up to 144 `stat`s and one open, once a page; a history found empty is not probed back again by `series_start`; (c) a share's closing-auction flag reads that day's NSE master once per process from 2026-08-03 (a refusal once per request), and one `stat` a month for its `.auc` sidecar; (d) the late-row ledger is a tail read of the import journal: the whole journal once per process, then the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | **Measured** (synthetic store, 4-core cloud machine, one run each, `the_day_band_is_timed_cold_warm_concurrent_and_growing`, n = 200 a page over 5 pages): warm 1 client p50 4.35 / p99 8.67 / max 10.86 ms (the base 6.37 / 16.30 / 21.73); with an import writing 4.48 / 8.90 / 13.37 ms (base 6.38 / 18.12 / 19.86); 60 clients 66.7 / 725.0 / 861.4 ms (base 214.4 / 958.5 / 1,150.5); cold, memo empty, page cache warm, Zerodha NIFTY page, n = 20: 6.51 / 9.29 ms (base 4.40 / 8.99) — the one figure slower than the base, DB-B20's first scan; warm p50 at 10x and 100x history 0.98x and 1.01x of 1x. A cold device is NOT MEASURED; the real store's figure is the Mac's. The answer is built by moving values into its maps: `json!` deep-copied every nested value, 43% of the base's instructions (callgrind) | R3-13 |
+| L-R3-13 | `/dayflags.json` with R3-13's read-time rules | per page of at most 92 days: (a) a Zerodha index page scans each day's one-minute bars once per process — at most 1,440 record reads a day, 92 × 1,440 a page — and keeps the scan per (device, inode, first row) with its end row, one probe a day after; a page's first scans run on one scoped thread a month (at most four for 92 days), each on the handle the count already opened, none where the memo holds every day; the memo takes (device, inode) for the month file's identity, as the base's ledger tail readers do, so on a filesystem that reuses an inode number at once (this cloud container's does: `store`'s own `staging` test measures it) a month replaced by a new generation could be served its old scan for a day whose end row is unchanged, until the process restarts; the memo holds one entry per (month file, day) shown, however often a month grows; (b) the previous `1day` bar is looked for 12 opens back, then up to 144 `stat`s and one open, once a page; a history found empty is not probed back again by `series_start`; (c) a share's closing-auction flag reads that day's NSE master once per process from 2026-08-03 (a refusal once per request), and one `stat` a month for its `.auc` sidecar; (d) the late-row ledger is a tail read of the import journal: the whole journal once per process, then the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | **Measured** (synthetic store, 4-core cloud machine, three runs each, alternately, `the_day_band_is_timed_cold_warm_concurrent_and_growing`; medians of the three, branch against base): warm 1 client, n = 1,000, p50 4.59 / p99 9.71 / max 13.09 ms (6.76 / 15.45 / 20.91); with an import writing 5.05 / 11.22 / 13.85 (7.83 / 18.36 / 24.89); 60 clients, n = 1,200, 165.4 / 1,064.0 / 1,156.6 (267.4 / 1,161.9 / 1,522.8); cold, memo empty, page cache warm, Zerodha NIFTY, n = 20, p50 4.39 / max 8.45 (5.10 / 11.04); warm p50 at 10x and 100x history 0.93x and 0.98x of 1x. A cold device is NOT MEASURED; the real store's figure is the Mac's. The answer is built by moving values into its maps (`json!` deep-copied every nested value: 43% of the base's instructions, callgrind), and a page's first scans run a month a thread | R3-13 |
 
 ### 5. For other owners (files R3-13 does not own)
 
