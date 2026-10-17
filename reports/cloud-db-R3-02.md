@@ -77,7 +77,14 @@ this branch:
 
 - `cargo fmt --check`: clean.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean (exit 0).
-- `cargo test --workspace --locked`: running.
+- `cargo test --workspace --locked -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
+  (the known slow cli test skipped, per CONTEXT): running. The `api` unit tests: 2071 passed, 12
+  failed, 8 ignored. All 12 are permission tests that cannot hold for root ("mode 000 does not stop
+  this process from searching …: run the tests as a user the mode bits bind"); this container runs
+  as uid 0. Re-run as user `nobody` (`runuser -u nobody -- env TMPDIR=/tmp/r302-nobody
+  target/debug/deps/api-0905266a9a1c1444 --exact <the 12>`), all 12 pass. No crate reads a file this
+  branch changes (no `.rs`, `Cargo.toml` or `Cargo.lock` change; the Rust mentions of `web/src` are
+  comments and a runtime staleness walk), so the Rust test binaries are the base's.
 - `cargo deny check`: base and branch fail on exactly the same five advisories
   (RUSTSEC-2026-0344, -0346, -0347, -0348, -0349); `bans ok, licenses ok, sources ok`.
 - Web suite `node --test tests/*.test.js`: base 1393 pass / 0 fail / 5 cancelled; branch 1403 pass /
