@@ -47,7 +47,25 @@ in `token_identity.rs`.
 
 ## Left
 
-- Coverage (nightly `--branch`) and mutants on the touched modules: running now.
+- Mutants on the touched modules: running now.
+
+## Coverage (nightly `cargo +nightly llvm-cov --branch`, the three runs unioned)
+
+The runs were split because one run hits "mismatched data": the lib built with `cfg(test)` and the lib
+linked into integration tests map differently, and llvm-cov drops one. The three runs:
+(a) `-p pull --lib -- listing series_identity identity_screen fetch::`; (b) `-p pull --test zerodha_identity
+--test token_identity --test pipeline`; (c) `-p cli --lib -- series_identity`.
+
+| File | Every line and branch R4-17 added or changed | Still uncovered (all pre-existing, not R4-17's) |
+|---|---|---|
+| `pull/src/listing.rs` (new) | 100% lines (154/154), 100% branches (24/24), 100% functions | none |
+| `pull/src/series_identity.rs` | covered | line 381 and branches 380/383 (`DayBook::judge`'s second `NoDayBar` and the day-bar sanity check, WP-13d), branch 508 (`Tally::flag`, WP-13d) |
+| `pull/src/identity_screen.rs` | covered | lines 529 (`book_first`'s `Some` arm), 599, 605, 625 and branches 598/603 (`day_book`, WP-13d, unchanged) |
+| `pull/src/fetch.rs` | covered (`RowCause` codes, `HistoryEnds`, `fetch_and_land_listed`, `Landed::history_ends`) | older `fetch.rs` code the narrow runs do not reach; the full `pull` suite covers it |
+| `cli/src/series_identity.rs` | covered | lines 161-163 (`command()` reads the process environment), 593 and 756 and branches 592/755 (`scan()`'s `None` arms, which cannot be reached: WP-13d) |
+
+**Branch coverage is not on stable Rust**; nightly was installed here only for this measurement. CI's
+gate (`cargo llvm-cov --workspace`, stable) measures lines and regions.
 
 ## Gate results (this container: 4 vCPU, root, ext4)
 
