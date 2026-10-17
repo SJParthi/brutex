@@ -398,3 +398,68 @@ fn a_publishable_pass_writes_no_reason_and_separates_every_list() {
         serde_json::json!(["listing-100", "listing-101"])
     );
 }
+
+/// Set in a child of this binary: the test runs its child half.
+const CHILD: &str = "BRUTEX_CLOUDD_CHILD";
+
+/// **A released serve lock gives its key back even through a poisoned
+/// set, so the next serve of that root holds the FILE lock again.**
+/// `take_serve_lock` inserts through a poisoned set; `ServeLock::drop` and
+/// `release_root` skipped the removal on poison, so after a panic poisoned
+/// the set, a root once served stayed in it: the next take was handed the
+/// in-process pass with no file lock held, and a second process could take
+/// the store beside it. Driven in a child, because the poison is the whole
+/// process's. Fails on the code before this pass's fix: both second takes
+/// answered `held: None`.
+#[test]
+fn a_released_lock_gives_its_key_back_through_a_poisoned_set() {
+    if std::env::var_os(CHILD).is_some() {
+        let a = fresh_dir("poison-release-a");
+        let b = fresh_dir("poison-release-b");
+        let unwound = std::panic::catch_unwind(|| {
+            let _held = serving_roots().lock();
+            std::panic::resume_unwind(Box::new("poison the root set"));
+        });
+        assert!(unwound.is_err());
+        assert!(serving_roots().is_poisoned(), "the premise");
+
+        // A DROP UNDER POISON.
+        let first = take_serve_lock(&a, lock_addr()).expect("a free store");
+        assert!(first.held.is_some(), "a fresh root takes the file lock");
+        drop(first);
+        let again = take_serve_lock(&a, lock_addr()).expect("free again");
+        assert!(
+            again.held.is_some(),
+            "the dropped lock gave its key back: the file lock, not an in-process pass"
+        );
+        drop(again);
+
+        // A FAILED TAKE UNDER POISON (`release_root`).
+        std::fs::create_dir(b.join(SERVE_LOCK)).expect("a directory in the lock's place");
+        let _refused = take_serve_lock(&b, lock_addr()).expect_err("not a lock file");
+        std::fs::remove_dir(b.join(SERVE_LOCK)).expect("the obstacle removed");
+        let taken = take_serve_lock(&b, lock_addr()).expect("free once the obstacle is gone");
+        assert!(
+            taken.held.is_some(),
+            "the refused take gave its key back through the poison"
+        );
+        drop(taken);
+        serving_roots().clear_poison();
+        println!();
+        println!("CLOUDD-POISON-RELEASE=checked");
+        for path in [&a, &b] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_d::a_released_lock_gives_its_key_back_through_a_poisoned_set",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDD-POISON-RELEASE=checked"),
+        "{stdout}"
+    );
+}

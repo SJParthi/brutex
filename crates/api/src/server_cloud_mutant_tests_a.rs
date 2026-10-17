@@ -1418,8 +1418,10 @@ fn an_unstamped_build_serves_no_write_and_says_so() {
 
 /// **A poisoned root set is still read, and still shares a held key.** A
 /// panic that poisons the process-global set is driven in a child, because
-/// while it is poisoned every other test's `ServeLock::drop` would skip its
-/// key removal. The child asserts that a held root is shared without a
+/// the poison is the whole process's and no other test should run under it
+/// (until the 17 Oct pass, `ServeLock::drop` also skipped its key removal
+/// under it; see `a_released_lock_gives_its_key_back_through_a_poisoned_set`).
+/// The child asserts that a held root is shared without a
 /// second lock and a fresh root is locked (kills `delete !` at
 /// server.rs:18365), then clears the poison and proves both keys released.
 /// Covers server.rs:18364-18370.

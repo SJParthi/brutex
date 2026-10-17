@@ -18561,9 +18561,15 @@ impl Drop for ServeLock {
     /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
         drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
-        }
+        // THROUGH A POISONED SET, as `take_serve_lock` inserts through one.
+        // Skipping the removal on poison left the key in the set after the
+        // file lock was released, so the next serve of this root in this
+        // process was handed the in-process pass with NO file lock held, and
+        // a second process could take the store beside it.
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.root);
     }
 }
 
@@ -18852,9 +18858,11 @@ fn stamp_outcome(
 
 /// Drops a root out of the in-process set after a failed take.
 fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
-    }
+    // Through a poisoned set, for the reason `ServeLock::drop` gives.
+    serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key);
 }
 
 /// The exit code of a server that has stopped, and the reason if it fell over.
