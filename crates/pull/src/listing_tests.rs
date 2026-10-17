@@ -193,7 +193,6 @@ fn every_unknown_listing_names_why_and_refuses_nothing() {
         Unknown::Conflicting,
         Unknown::AfterMaster,
         Unknown::Contradictory,
-        Unknown::Inferred,
     ]
     .map(Unknown::code);
     assert_eq!(
@@ -205,7 +204,6 @@ fn every_unknown_listing_names_why_and_refuses_nothing() {
             "listing_conflicting",
             "listing_after_master",
             "listing_contradictory",
-            "listing_inferred",
         ]
     );
 }
@@ -218,22 +216,22 @@ fn a_name_absent_from_every_master_is_labelled_inferred() {
         day(2026, 8, 3),
         &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
     );
-    let mut table = Listing::load(&root.masters());
+    let table = Listing::load(&root.masters());
     assert_eq!(table.span("NSE", "GONE", None), None);
-    table.infer("GONE", day(2015, 1, 1), day(2019, 6, 28));
-    let span = table.span("NSE", "GONE", None).expect("the vendor's span");
-    assert_eq!(span, Span::inferred(day(2015, 1, 1), day(2019, 6, 28)));
+    assert_eq!(table.span("NSE", "GONE", Some("INE000H01008")), None);
+    let span = Span::inferred(day(2015, 1, 1), day(2019, 6, 28));
+    assert_eq!(span.first, Ok(day(2015, 1, 1)));
+    assert_eq!(span.last, Some(day(2019, 6, 28)));
     assert_eq!(span.source.code(), "inferred_from_vendor_span");
     // A label only: the vendor's own span accuses none of its own rows.
     assert!(!span.before_listing(day(2014, 1, 1)));
     assert_eq!(span.listed_on(), None);
     assert_eq!(span.history_ended(day(2020, 1, 1)), None);
-    // A symbol the master holds under ANOTHER ISIN is not its row.
-    table.infer("ALPHA", day(2015, 1, 1), day(2026, 8, 3));
-    let other = table
-        .span("NSE", "ALPHA", Some("INE999Z01999"))
-        .expect("inferred");
-    assert_eq!(other.source.code(), "inferred_from_vendor_span");
+    // A symbol the master holds under ANOTHER ISIN is not its row, and no ISIN
+    // is no row either.
+    assert_eq!(table.span("NSE", "ALPHA", Some("INE999Z01999")), None);
+    assert_eq!(table.span("NSE", "ALPHA", None), None);
+    assert!(table.span("NSE", "ALPHA", Some(ALPHA)).is_some());
 }
 
 #[test]

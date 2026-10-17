@@ -48,8 +48,7 @@
 //! # Cost
 //!
 //! [`Listing::span`] is one expected-O(1) hash probe into the master's index
-//! (parsed once at load) plus bounded key bytes, or one into the inferred
-//! table. Loading lists the master directory once and parses one master: done
+//! (parsed once at load) plus bounded key bytes. Loading lists the master directory once and parses one master: done
 //! once per store root per process by [`for_store`], and only remembered when
 //! a master was loaded (AF-03: a failed load is never remembered). Measured by
 //! `crates/pull/benches/ratio/identity.rs`.
@@ -114,8 +113,6 @@ pub enum Unknown {
     AfterMaster,
     /// The master's dates contradict each other (a removal before the listing).
     Contradictory,
-    /// The span is inferred from the vendor, which cannot accuse itself.
-    Inferred,
 }
 
 impl Unknown {
@@ -130,7 +127,6 @@ impl Unknown {
             Self::Conflicting => "listing_conflicting",
             Self::AfterMaster => "listing_after_master",
             Self::Contradictory => "listing_contradictory",
-            Self::Inferred => "listing_inferred",
         }
     }
 }
@@ -188,12 +184,11 @@ impl Span<'_> {
 }
 
 /// The listing table of one store: the newest receipted master that checks,
-/// and the spans inferred for names in none.
+/// and every newer one it passed over.
 #[derive(Debug)]
 pub struct Listing {
     master: Option<(String, VerifiedLifecycleMaster)>,
     passed_over: Vec<(String, String)>,
-    inferred: HashMap<String, (Day, Day)>,
 }
 
 impl Listing {
@@ -215,7 +210,6 @@ impl Listing {
                 return Self {
                     master: None,
                     passed_over: vec![(masters.display().to_string(), why.to_string())],
-                    inferred: HashMap::new(),
                 };
             }
         };
@@ -228,7 +222,6 @@ impl Listing {
                     return Self {
                         master: Some((name, master)),
                         passed_over,
-                        inferred: HashMap::new(),
                     };
                 }
                 Err(why) => passed_over.push((name, why)),
@@ -237,7 +230,6 @@ impl Listing {
         Self {
             master: None,
             passed_over,
-            inferred: HashMap::new(),
         }
     }
 
@@ -255,15 +247,10 @@ impl Listing {
         &self.passed_over
     }
 
-    /// Record the vendor's own span for `symbol`, used only when no master
-    /// row answers for it.
-    pub fn infer(&mut self, symbol: &str, first: Day, last: Day) {
-        self.inferred.insert(symbol.to_owned(), (first, last));
-    }
-
-    /// The span of the NSE security `symbol` with `isin`, when known: the
-    /// master's row for exactly that identity, else a span inferred for the
-    /// symbol, else `None`. Any exchange but NSE has no span here.
+    /// The span of the NSE security `symbol` with `isin`, when the master holds
+    /// a row for exactly that identity; `None` otherwise, and the caller labels
+    /// the vendor's own span with [`Span::inferred`]. Any exchange but NSE has
+    /// no span here.
     #[must_use]
     pub fn span(&self, exchange: &str, symbol: &str, isin: Option<&str>) -> Option<Span<'_>> {
         if exchange != "NSE" {
@@ -291,9 +278,7 @@ impl Listing {
                 source,
             });
         }
-        self.inferred
-            .get(symbol)
-            .map(|(first, last)| Span::inferred(*first, *last))
+        None
     }
 }
 

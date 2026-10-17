@@ -81,7 +81,8 @@ use store::format::Bar;
 /// It is the audit's own threshold (DB-B60, DB-B64: a minute more than 8% off
 /// its day). Measured on the operator's store, 11 Oct 2026, read-only, all
 /// 330 Zerodha series holding both rungs, each 1min bar against its own 1day
-/// (`state/fix/round2/fix-WP-13d.json` names the method): every minute the
+/// (the WP-13d package's fix record, kept outside this repository, names the
+/// method): every minute the
 /// audit named lies beyond it — `PIIND` 7,576 of 7,576, `VBL` 8 of 8,
 /// `NIFTYNEXT50` 87,375 of 87,375, `NIFTYPVTBANK` 61,088 of 61,088 — and
 /// `NIFTY`, `BANKNIFTY` and `RELIANCE` hold none beyond it, of 796,027,
@@ -109,6 +110,89 @@ pub const FOREIGN_BAND_BPS: i64 = 800;
 /// 150, `NIFTYGS813YR` 108 and `INDIAVIX` 99: some another index's, some the
 /// series' own, and nothing here can tell which.
 pub const SUSPECT_BAND_BPS: i64 = 200;
+
+/// How far a CASH minute's open may lie from the close of the minute kept
+/// before it, inside one continuous recorded run, before it is refused as
+/// another price basis interleaved under the key (R4-17, RT-DATA-02 a).
+///
+/// Measured in basis points of the SMALLER of the two prices
+/// ([`jump_bps`]), so a basis change by a factor trips alike in both
+/// directions: measured against the earlier close alone, a halving reads 50%
+/// and a doubling 100%, and in an interleave the wrong side would be the one
+/// refused.
+///
+/// # PROVISIONAL: NOT YET MEASURED
+///
+/// The work package requires this to be measured, read-only, over every
+/// stored Zerodha CASH minute (per-share p99, p999 and max of [`jump_bps`]
+/// across continuous minutes) and against every split or bonus ex-date of the
+/// basis-run shares, before it is trusted. The cloud session that wrote it has
+/// no store, so **3,000 is a chosen value, not a measurement** (`CLAUDE.md` §3
+/// rule 6): a jump of 30% of the smaller price between two consecutive
+/// minutes of one continuous run. What it must satisfy, and what the
+/// operator's read-only `cli series-identity ALL --segment CASH --feed
+/// zerodha` run (which prints that distribution) decides before merge: PIIND's
+/// interleave — the 09:15 close 821.65 beside the 09:16 open 89.90, 81,395
+/// bps by this measure — trips; no clean share's measured maximum reaches it;
+/// and no split or bonus ex-date trips, because actions take effect between
+/// sessions and a session's first minute is never judged. Until that run is
+/// recorded beside this constant and in `docs/06-limits.md`, the value is
+/// UNVERIFIED.
+pub const JUMP_BPS: i64 = 3_000;
+
+/// The jump from `close` to `open`, in basis points of the smaller of the
+/// two, or `None` when either is not a positive price. Widened in `i128`, so no
+/// paisa pair overflows, and saturated into `i64`.
+#[must_use]
+pub fn jump_bps(close: i64, open: i64) -> Option<i64> {
+    if close <= 0 || open <= 0 {
+        return None;
+    }
+    let smaller = i128::from(close.min(open));
+    let gap = (i128::from(open) - i128::from(close)).abs();
+    Some(i64::try_from(gap * 10_000 / smaller).unwrap_or(i64::MAX))
+}
+
+/// One continuous recorded run of minutes, and the close of the minute last
+/// KEPT in it: the reference a new minute's open is judged against.
+///
+/// A run breaks wherever two recorded minutes are not exactly one grid step
+/// apart — a halt, a missing minute, the night — so a session's first minute
+/// and the first after any gap are never judged (09:15 is never a jump). A
+/// minute refused for any cause is recorded (it keeps the run continuous) but
+/// never becomes the reference, so a block of foreign minutes is refused
+/// whole, not only at its edges.
+///
+/// **What this cannot see.** When a run's FIRST minute is the foreign one, it
+/// becomes the reference and the security's own minutes after it are the ones
+/// refused — loudly and by name, never stored silently; the day rung's
+/// [`Cause::ForeignLevel`] judges the same minutes independently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JumpRun {
+    last_second: Option<i64>,
+    reference: Option<i64>,
+}
+
+impl JumpRun {
+    /// Record the minute stamped `second` (epoch seconds, any fixed offset)
+    /// on a grid of `step` seconds, and answer the jump of its `open` from the
+    /// run's reference: `Some(bps)` when there is a reference to judge against.
+    pub fn judge(&mut self, second: i64, step: i64, open: i64) -> Option<i64> {
+        let continuous = self
+            .last_second
+            .is_some_and(|last| second.checked_sub(last) == Some(step));
+        self.last_second = Some(second);
+        if !continuous {
+            self.reference = None;
+        }
+        self.reference.and_then(|close| jump_bps(close, open))
+    }
+
+    /// The minute last judged was kept: its close is the run's reference.
+    pub const fn keep(&mut self, close: i64) {
+        self.reference = Some(close);
+    }
+}
 
 /// The IST calendar day a stamp in UTC microseconds falls on, as days since
 /// the epoch: the arithmetic [`crate::daycheck`] uses.
@@ -150,6 +234,22 @@ pub enum Cause {
         /// The served day's high, in paisa.
         day_high: i64,
     },
+    /// An open, high, low or close at or below zero (R4-17, ING-01 c).
+    NonPositivePrice,
+    /// Its day is before the master's listing day for its exact symbol and
+    /// ISIN ([`crate::listing`], D-4990).
+    BeforeListing {
+        /// The listing day, as IST days since the epoch.
+        listed_on: i64,
+    },
+    /// Its open lies more than [`JUMP_BPS`] from the close of the minute kept
+    /// before it in one continuous run ([`JumpRun`]).
+    InSessionJump {
+        /// That close, in paisa.
+        reference: i64,
+        /// The jump, in basis points of the smaller price.
+        bps: i64,
+    },
 }
 
 impl Cause {
@@ -159,8 +259,17 @@ impl Cause {
         match self {
             Self::BeforeFirstDayBar { .. } => "before_first_day_bar",
             Self::ForeignLevel { .. } => "foreign_level",
+            Self::NonPositivePrice => "non_positive_price",
+            Self::BeforeListing { .. } => crate::listing::BEFORE_LISTING,
+            Self::InSessionJump { .. } => "in_session_jump",
         }
     }
+}
+
+/// Whether any of a bar's four prices is at or below zero paisa.
+#[must_use]
+pub const fn non_positive(open: i64, high: i64, low: i64, close: i64) -> bool {
+    open <= 0 || high <= 0 || low <= 0 || close <= 0
 }
 
 /// Why a minute could not be judged. It lands, and it is counted here.
@@ -328,6 +437,13 @@ pub struct Tally {
     pub no_day_bar: u64,
     /// Minutes whose day bar is not a usable range.
     pub day_bar_unusable: u64,
+    /// Bars with a price at or below zero.
+    pub non_positive_price: u64,
+    /// Bars before the master's listing day.
+    pub before_listing: u64,
+    /// Minutes whose open jumps from the run's reference by more than
+    /// [`JUMP_BPS`].
+    pub in_session_jump: u64,
     /// One entry per (day, code) refused or suspect, in the order met.
     pub flagged: Vec<Flagged>,
 }
@@ -336,7 +452,11 @@ impl Tally {
     /// Minutes a landing would refuse.
     #[must_use]
     pub const fn refused(&self) -> u64 {
-        self.before_first_day_bar + self.foreign_level
+        self.before_first_day_bar
+            + self.foreign_level
+            + self.non_positive_price
+            + self.before_listing
+            + self.in_session_jump
     }
 
     /// Minutes that were not judged.
@@ -371,6 +491,9 @@ impl Tally {
                 match cause {
                     Cause::BeforeFirstDayBar { .. } => self.before_first_day_bar += 1,
                     Cause::ForeignLevel { .. } => self.foreign_level += 1,
+                    Cause::NonPositivePrice => self.non_positive_price += 1,
+                    Cause::BeforeListing { .. } => self.before_listing += 1,
+                    Cause::InSessionJump { .. } => self.in_session_jump += 1,
                 }
                 self.flag(cause.code(), true, day, ts_micros);
             }
@@ -405,6 +528,9 @@ impl Tally {
         self.no_day_rung += other.no_day_rung;
         self.no_day_bar += other.no_day_bar;
         self.day_bar_unusable += other.day_bar_unusable;
+        self.non_positive_price += other.non_positive_price;
+        self.before_listing += other.before_listing;
+        self.in_session_jump += other.in_session_jump;
         self.flagged.extend(other.flagged);
     }
 }
@@ -413,12 +539,111 @@ impl Tally {
 /// the landing door gives, for bars that are already on disk.
 #[must_use]
 pub fn audit(minutes: &[Bar], book: &DayBook) -> Tally {
+    let mut judge = MinuteJudge::new(book, Rules::default(), 60);
     let mut tally = Tally::default();
     for bar in minutes {
         let day = ist_day(bar.ts_micros);
-        tally.count(book.judge(day, bar.low, bar.high), day, bar.ts_micros);
+        let (verdict, _) = judge.judge(bar.ts_micros.div_euclid(1_000_000), day, prices(bar));
+        tally.count(verdict, day, bar.ts_micros);
     }
     tally
+}
+
+/// A bar's open, high, low and close, in that order.
+#[must_use]
+pub const fn prices(bar: &Bar) -> [i64; 4] {
+    [bar.open, bar.high, bar.low, bar.close]
+}
+
+/// What a series' identity rules need beyond its day book (R4-17).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rules {
+    /// The master's listing day, as IST days since the epoch, when a refusal
+    /// may rest on it ([`crate::listing::Span::listed_on`]). When it is known,
+    /// a minute before the first served day bar but on or after it is the
+    /// series' own and is not refused as [`Cause::BeforeFirstDayBar`].
+    pub listed_on: Option<i64>,
+    /// Whether [`JUMP_BPS`] applies: CASH minutes only, the series it was
+    /// measured over.
+    pub jumps: bool,
+}
+
+/// A day bar judged by the day-rung arm (R4-17): ONLY a non-positive price
+/// or a day before the listing, never by range — the day rung is the witness
+/// the minute ranges are judged against, not the accused.
+#[must_use]
+pub fn judge_day(day: i64, [open, high, low, close]: [i64; 4], rules: Rules) -> Option<Cause> {
+    if non_positive(open, high, low, close) {
+        return Some(Cause::NonPositivePrice);
+    }
+    match rules.listed_on {
+        Some(listed_on) if day < listed_on => Some(Cause::BeforeListing { listed_on }),
+        _ => None,
+    }
+}
+
+/// Minutes in time order judged against one day book, with the run state the
+/// jump rule needs: the one implementation the landing door and the store
+/// scan share.
+#[derive(Debug, Clone)]
+pub struct MinuteJudge<'a> {
+    book: &'a DayBook,
+    rules: Rules,
+    run: JumpRun,
+    step: i64,
+}
+
+impl<'a> MinuteJudge<'a> {
+    /// A judge over `book` under `rules`, for minutes on a grid of `step`
+    /// seconds.
+    #[must_use]
+    pub const fn new(book: &'a DayBook, rules: Rules, step: i64) -> Self {
+        Self {
+            book,
+            rules,
+            run: JumpRun {
+                last_second: None,
+                reference: None,
+            },
+            step,
+        }
+    }
+
+    /// The verdict on the minute stamped `second` (epoch seconds) of IST day
+    /// `day`, and its jump from the run's reference when it had one and the
+    /// jump rule applies (whether or not it tripped), for the distribution a
+    /// scan reports.
+    pub fn judge(&mut self, second: i64, day: i64, ohlc: [i64; 4]) -> (Verdict, Option<i64>) {
+        let [open, high, low, close] = ohlc;
+        let jump = self
+            .run
+            .judge(second, self.step, open)
+            .filter(|_| self.rules.jumps);
+        if let Some(cause) = judge_day(day, ohlc, self.rules) {
+            return (Verdict::Refused(cause), None);
+        }
+        let verdict = match self.book.judge(day, low, high) {
+            // THE LISTING, NEVER THE FIRST DAY BAR, WHEN A MASTER STATES IT
+            // (D-4990): a minute between the two is the series' own.
+            Verdict::Refused(Cause::BeforeFirstDayBar { .. }) if self.rules.listed_on.is_some() => {
+                Verdict::Unchecked(Unchecked::NoDayBar)
+            }
+            verdict => verdict,
+        };
+        if matches!(verdict, Verdict::Refused(_)) {
+            return (verdict, jump);
+        }
+        if let (Some(bps), Some(reference)) = (jump, self.run.reference)
+            && bps > JUMP_BPS
+        {
+            return (
+                Verdict::Refused(Cause::InSessionJump { reference, bps }),
+                jump,
+            );
+        }
+        self.run.keep(close);
+        (verdict, jump)
+    }
 }
 
 #[cfg(test)]

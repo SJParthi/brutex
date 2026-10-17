@@ -691,6 +691,9 @@ pub struct Landed {
     /// the first is named in its own words, and every other row lands. Neither
     /// stored nor counted in [`Self::census`]; the caller names each group.
     pub refused: Refused,
+    /// Set when the answer was the end of a delisted security's history
+    /// ([`fetch_and_land_listed`], D-4991): nothing landed, and nothing failed.
+    pub history_ends: Option<HistoryEnds>,
 }
 
 /// Why a row of a vendor answer was refused by name rather than landed
@@ -717,6 +720,21 @@ pub enum RowCause {
     /// instrument's, another index's or another price basis (WP-13d, DB-B07,
     /// DB-B10, DB-B60).
     ForeignLevel,
+    /// An open, high, low or close at or below zero paisa, on any rung of an
+    /// index, a share or a future (R4-17, ING-01 c). The store format admits
+    /// zero (`store::format`'s sanity check and `http`'s price decode both
+    /// do), so the landing refuses it by name instead; the format is not
+    /// changed.
+    NonPositivePrice,
+    /// A CASH bar, minute or day, on a day before its exact symbol+ISIN's
+    /// listing day in the receipted NSE security master ([`crate::listing`],
+    /// R4-17, Z5, ING-01 d, D-4990). Never on an unknown listing.
+    BeforeListing,
+    /// A CASH minute whose open lies more than
+    /// [`crate::series_identity::JUMP_BPS`] from the close of the minute kept
+    /// before it inside one continuous recorded run: another price basis
+    /// interleaved under the key (R4-17, RT-DATA-02 a).
+    InSessionJump,
 }
 
 impl RowCause {
@@ -731,8 +749,25 @@ impl RowCause {
             Self::Conflicting => "conflicting_candles",
             Self::BeforeFirstDayBar => "before_first_day_bar",
             Self::ForeignLevel => "foreign_level",
+            Self::NonPositivePrice => "non_positive_price",
+            Self::BeforeListing => crate::listing::BEFORE_LISTING,
+            Self::InSessionJump => "in_session_jump",
         }
     }
+}
+
+/// A delisted CASH security's history has ended before the window began: the
+/// vendor answered a 404 or nothing for days strictly after the removal day the
+/// receipted master states (R4-17, COR-07, D-4991). Not a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryEnds {
+    /// The master's removal day.
+    pub delisted_on: Day,
+}
+
+impl HistoryEnds {
+    /// The code a receipt line and a log event carry.
+    pub const CODE: &'static str = crate::listing::HISTORY_ENDS;
 }
 
 /// One group of refused rows: one cause on one IST day, the first named.
@@ -1188,6 +1223,7 @@ pub fn land_rows(
         outside_session,
         refused_days,
         refused,
+        history_ends: None,
     })
 }
 
@@ -1418,8 +1454,58 @@ pub fn fetch_and_land<S: BarSource>(
     encoding: TimestampEncoding,
     scale: PriceScale,
 ) -> Result<Landed, FetchError> {
-    let raw = source.window(request)?;
-    land(&raw, request, encoding, scale)
+    fetch_and_land_listed(source, request, encoding, scale, None)
+}
+
+/// [`fetch_and_land`] for a security whose listing span is known
+/// ([`crate::listing::Listing::span`]): a CASH window that starts strictly
+/// after the master's removal day, answered by a 404 or by no rows, lands
+/// nothing and is [`Landed::history_ends`], never a failure (COR-07, D-4991).
+/// One `info` `pull.history_ends` event names the instrument and the window.
+///
+/// Anything else is exactly [`fetch_and_land`]: a 404 for a security still
+/// listed, or one whose span is inferred or unknown, is the failure it was,
+/// and rows that arrive are landed as rows.
+///
+/// # Errors
+///
+/// Whatever the source or [`land`] refuses, outside the case above.
+pub fn fetch_and_land_listed<S: BarSource>(
+    source: &S,
+    request: &BarRequest,
+    encoding: TimestampEncoding,
+    scale: PriceScale,
+    span: Option<&crate::listing::Span<'_>>,
+) -> Result<Landed, FetchError> {
+    let ended = span
+        .filter(|_| request.listing == crate::vendor::Listing::Equity)
+        .and_then(|span| span.history_ended(request.window.from()));
+    let answer = source.window(request);
+    let Some(delisted_on) = ended else {
+        return land(&answer?, request, encoding, scale);
+    };
+    match answer {
+        Ok(raw) if !raw.rows.is_empty() => land(&raw, request, encoding, scale),
+        Ok(_) | Err(FetchError::VendorRefused { status: 404, .. }) => {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::info(
+                    "pull.history_ends",
+                    "nothing after the removal day the NSE master states: the end of this \
+                     security's history, not a failure (D-4991)",
+                )
+                .with("instrument", telemetry::Value::Str(&request.instrument_id))
+                .with("delisted_on", telemetry::Value::Str(&delisted_on.to_string()))
+                .with("from", telemetry::Value::Str(&request.window.from().to_string()))
+                .with("to", telemetry::Value::Str(&request.window.to().to_string()))
+                .with("code", telemetry::Value::Str(HistoryEnds::CODE)),
+            );
+            Ok(Landed {
+                history_ends: Some(HistoryEnds { delisted_on }),
+                ..Landed::default()
+            })
+        }
+        Err(why) => Err(why),
+    }
 }
 
 /// The wire value for a window's end, honouring the vendor's inclusivity.
