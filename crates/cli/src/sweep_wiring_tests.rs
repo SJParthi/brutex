@@ -156,6 +156,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "gdfl-dayflags"
                 | "gdfl-import"
                 | "gdfl-rekey"
+                | "msum-build"
                 | "srt-build"
                 | "tix-rebuild"
                 | "research-plan"

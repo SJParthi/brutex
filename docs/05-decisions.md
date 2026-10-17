@@ -70977,6 +70977,130 @@ Limits: `docs/06-limits.md` L-R335-01 (the chain left) and L-R335-02 (where
 the line proof cannot run). Invariants: `docs/04-invariants.md` R335-01 and
 R335-02.
 
+### D-4980 — The month summary: one section, version 1, carried by a sealed month's `.sbar` and kept in a `<yyyy-mm>.sum` sibling while a month is written; the gap audit reads it and no bar, and names the fall-back when it cannot — 2026-10-16
+
+**Implemented by** R3-06 (`store::month_summary`: `MonthSummary`, `Counts`,
+`Extremes`, `Refused`, `read_beside`, `path_beside`; the writer's step and the
+rebuild door `BarFile::month_summary_existing` in
+`crates/store/src/month_summary_writer.rs`; `FileKind::MonthSummary`; the gap
+audit in `crates/api/src/gaps_route.rs`; the halt rule in
+`crates/pull/src/gaps.rs`; gate 8's rows in `crates/api/benches/ratio/gaps.rs`;
+the store step `cli msum-build` in `crates/cli/src/msum_builder.rs`, which
+walks the rebuild door over named months with `cli srt-build`'s own argument
+parser; the `Read from` column and census cell on `/gaps`).
+**Closes** DB-A30 (the gap audit read every record of every month asked) and
+the `/gaps.json` half of DB-G47 (a recorded halt owed on some doors). **Number**:
+the numbers to D-4975 are in use or taken in open worktrees on 16 October
+2026; this takes D-4980 and the merge renumbers it if another lands first
+(amendment A6). **Bytes**: `docs/02-store-format.md` §8.6.
+
+**Decision.**
+
+1. **A summary of facts, not a stored gap result.** A gap result depends on
+   the request (the calendar asked, `min_run`, the contract's expiry); one
+   stored result would answer one request and silently mis-answer the rest.
+   The summary keeps the calendar-free facts every result is computed from:
+   the committed header it describes, the minutes held per day (a bitmap from
+   the first held minute to the last), the seconds held per day when the
+   month is dense enough (below), bars and first/last second per day, the
+   input counts the audit refuses on (off-grid or not strictly increasing,
+   decreasing, negative volume, outside the month, distinct seconds and
+   minutes held), and the extremes with the stamp of the earliest bar holding
+   each. The kept and the built answer are one computation.
+2. **One section, two homes (amendment A4).** The section is the summary
+   version (`u16`), two zero bytes, the payload and a CRC-32C. A sealed month
+   carries it in its `.sbar` summary section (head flag bit 2, `sum_off`,
+   `sum_len`, D-4965) and has no sidecar. A month still being written keeps
+   the same section behind the magic `BRUTEXU1` in `<yyyy-mm>.sum`, so the
+   sealer copies the bytes after the magic unchanged
+   (`a_sealed_month_carries_the_summary_section_byte_for_byte`).
+3. **No `.sum` under 1,024 bars** (D-4933's threshold): such a month's summary
+   is built from its at most 1,023 bars when asked. 552,686 of 852,757 months
+   are under it (D-4933), so at most 300,071 months pay a `.sum` and an inode
+   until they are sealed, and none after.
+4. **The density rule for seconds.** Seconds are kept when the distinct
+   seconds held are at least half of the seconds the days span, which bounds
+   that part at two bits a held second. It is judged at every write: a month
+   an append takes under half drops its seconds then, and a month whose
+   seconds were dropped or never kept is written whole the first time an
+   append makes it dense again. **That rebuild is `O(n_valid)` and runs on
+   every commit that takes the month back over the half line**, so a month
+   whose density moves back and forth across it pays it as often as every
+   second commit: the step is `O(batch)` per commit except on those commits.
+   (This item first said "once per crossing, never once per commit"; the
+   second half was wrong, and the R3-06 repair corrects it here before the
+   entry lands.) Hysteresis would amortise it and was refused, because the
+   kept bytes would then depend on how commits were batched rather than on the
+   bars, and a sealed month carries them as a pure function of its inputs
+   (D-4965). Each such rebuild is a `store.sum` INFO line, reason
+   `dense_again`, so its frequency is read off the log. Only the spot-index
+   one-second audit needs seconds; a reader that needs seconds a summary does
+   not keep reads the bars and says so.
+5. **The writer's step never refuses a commit.** After the sort index's step,
+   on every writer open and commit: extend a summary of the generation before
+   by the rows committed since (`O(batch)`), else build it whole; write to
+   `<yyyy-mm>.new.sum` (a new inode) and rename. A failure is a `store.sum`
+   warning; the summary left describes an older generation and every reader
+   refuses it as `stale` by a header comparison. Not flushed: every read checks
+   magic, CRC, geometry and the header; and for the same reason
+   `DurableBatch::confirm_month` passes the `.sum` over as it passes the lock,
+   so a confirmed month costs no flush for it (MS-09).
+   **Every whole write is logged**: a month's first `.sum` (reason
+   `absent`, once a month when it reaches 1,024 bars), one replaced (`torn`,
+   `stale`, ...), one the door rebuilt and a month dense again are each one
+   `store.sum` INFO line, "month summary written whole", naming the file, the
+   reason and `n_valid`; the per-commit extension is silent upkeep (MS-12).
+6. **Readers name every fall-back.** `read_beside` refuses by name (`absent`,
+   `below_threshold`, `unreadable`, `torn`, `magic`, `checksum`, `version`,
+   `shape`, `not_this_month`, `stale`). `/gaps.json` states per month
+   `summary` (`kept`, `built`, `absent_file`), `summary_fallback` (the
+   refusal, or why a kept summary was not enough: input the fold may refuse,
+   seconds not kept) and `bar_records_read`, and per answer
+   `summaries: {kept, built, bar_records_read}`. A kept month reads no record, so it
+   states `unreadable_records: null`, never a `0` it did not count: damage to
+   a record after its summary was written is seen only by a read of the bars
+   (MS-13). The summary is opened as
+   every sidecar is (`O_NOFOLLOW | O_NONBLOCK`, regular files only): a link
+   at its name is never followed, a FIFO never makes a request wait, and the
+   writer refuses such a name before it stages a file
+   (`a_linked_or_special_summary_is_refused_and_never_followed`).
+7. **A recorded halt is not owed by any classifier door.** `pull::gaps`
+   takes a recorded halt's minutes (`calendar::halt_on`, sourced or suspected,
+   D-3320) out of what a day owes whatever calendar sized the day -- the
+   table, the derivatives venue's hours, a cash schedule, a peer vote -- so
+   `/gaps.json` owes a halt day what `/calendar.json` and `/dayflags.json` owe
+   (`a_recorded_halt_is_not_owed_on_every_route`). A minute lost outside the
+   halt is still lost.
+
+**Limits** (for `docs/06-limits.md`): `/gaps.json` is O(months asked) per
+request, each month O(1) in its bars when its summary is kept (one read of the
+section, one pass over its minutes, and for a spot index at one second over
+each day's owed seconds); a month with no usable summary reads its bars whole,
+named. Caps unchanged: 12 one-second months, 240 minute months.
+
+**Gate 8 compares like with like, in the months and in the exposure to load**
+(R3-06 repair 1). Both of its asserted rows hold one p99 to another, and a
+p99 at a few hundred samples is decided by a handful of machine stalls; a row
+whose two sides were timed at different moments, or over different kinds of
+month, breached by load and passed by load. So the 240-month span is asked
+whole and as its ten 24-month tiles in the same round, the tiles' times summed
+into one sample (`spans_are_bounded`: the median at 1.5x, the sharp edge, and the p99 at 2x, stated headroom for the tail, because a p99 over 600 rounds is the sixth-largest sample and which side a stall lands in at that rank is chance; like with like it read 0.98x to 1.28x while the medians held at 0.94x to 1.00x), and the one-second kept
+months of 1,024, 10,240 and 102,400 bars are asked once each in every round
+with the first size rotating (`months_are_flat`, ceiling unchanged at 3x),
+600 rounds each. A kept answer that read its bars, or a span with a term in
+the months squared, still breaches: the answer's own words (`kept`, zero bar
+records read) are asserted on every sample.
+
+**Measured before choosing the home** (16 October 2026, a private APFS clone
+of real months, `cli msum-build`): a dense one-second month's `.sum` is 52 to
+66 KB (60 KiB on disk), a minute or option month's 771 to 1,629 bytes (one
+4 KiB block), one inode each; at most 300,071 such months, about 2.7 GiB,
+until sealed. The kept and the bar-read answer were byte-identical on 10 real
+selections (NIFTY, BANKNIFTY and RELIANCE at 1 s and 1 min, the 2020-03 halt
+month, two NIFTY 2019-06 strikes), and the kept NIFTY 1 s year read no bar
+where the real store read 5,167,003. Timings: `docs/06-limits.md`, "`/gaps.json`
+and the month summary".
+
 ### D-4996 — The app runs under two launchd agents that `cli launch-agent` prints at install time and no file in the tree holds; the watchdog is one `cli watchdog` probe a minute whose notice is a page handed to `open` — 2026-10-14
 
 R3-32. Until now the app on :8080 ran only when a session started it, so a
