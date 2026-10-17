@@ -113,7 +113,20 @@ cloud session runs as root, which matters for one gate below.
 
 - `cargo fmt --all --check`: **clean.**
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: **clean.**
-- `cargo test --workspace --locked`: RESULT_TEST
+- `cargo test --workspace --locked`: **9,097 passed, 27 failed, 49 ignored over 221 test
+  binaries; none of the 27 is in an R3-13 file or reads one.** 25 fail because the cloud session
+  runs as root, which ignores file modes: 12 in `api` (`logs::tests` x3, `pullrun` x3,
+  `server::feeds_route` x1, `server::tests` x5), 3 in `cli`, 3 in `pull`, 3 in `store`
+  (`settings::tests`) and 4 in `telemetry` (`sink::tests`). Every one passes when the same binary is
+  run as an unprivileged user (`runuser -u nobody`), and the 12 in `api` fail identically on the
+  base's binary as root. `store`'s `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+  asserts that a new file gets a new inode, and this container's filesystem reuses an inode number
+  at once, so it fails as `nobody` too. `store`'s `cited_commits` fails because `docs/06-limits.md`,
+  which this branch leaves as `origin/feat/db-fix` has it, cites nine `feat/db-fix` commits not yet
+  on `main` (72c91a46, the WP-62 merge, among them). The known-slow `cli` pool test was skipped, as
+  `CONTEXT.md` directs. That run built `api` before the parallel first scan, so the `api` package
+  was run again on the final code: RESULT_API
+
 - `cargo deny check`: **advisories FAILED; bans, licenses and sources ok.** RUSTSEC-2026-0344,
   -0346, -0347, -0348 and -0349 (`ruzstd` 0.8.2 under `lake` and `pull`; `rustls`). The same five
   fail on `origin/feat/db-fix`; `Cargo.lock` is not an R3-13 file, and this branch leaves it
@@ -192,6 +205,19 @@ cargo deny check
 # bundle as feat/db-fix built it, and W1 fails until it is rebuilt from the merged tree. The cloud
 # built it from a copy of this tree (`npm run build`, exit 0); the Mac rebuilds and commits it:
 npm --prefix web ci && npm --prefix web run build && git add web/build
+```
+
+```sh
+# The scan memo (DB-B20) and the base's ledger tail readers take a file's (device, inode) for its
+# identity. This cloud container's filesystem reuses an inode number at once (store's
+# staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported fails here).
+# Say what the store volume is, and run that test with its scratch files ON that volume (a new
+# directory beside the store, never inside it): green means a replaced month is never taken for
+# its old self there.
+diskutil info /Volumes/WD_BLACK | grep -E 'File System Personality|Type \(Bundle\)'
+mkdir -p /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/tmp-r3-13-inode
+TMPDIR=/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/tmp-r3-13-inode \
+  cargo test -p store --locked --lib -- staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported
 ```
 
 ### 2. Real-store tests and the measured target
@@ -381,7 +407,7 @@ definition of a day at read time — 2026-10-17**
 
 #### `docs/06-limits.md` (one row, numbered at landing)
 
-| L-R3-13 | `/dayflags.json` with R3-13's read-time rules | per page of at most 92 days: (a) a Zerodha index page scans each day's one-minute bars once per process — at most 1,440 record reads a day, 92 × 1,440 a page — and keeps the scan per (device, inode, first row) with its end row, one probe a day after; a month's first scans run on ⌈days ÷ 8⌉ scoped threads, none where the memo holds the month; the memo holds one entry per (month file, day) shown, however often a month grows; (b) the previous `1day` bar is looked for 12 opens back, then up to 144 `stat`s and one open, once a page; a history found empty is not probed back again by `series_start`; (c) a share's closing-auction flag reads that day's NSE master once per process from 2026-08-03 (a refusal once per request), and one `stat` a month for its `.auc` sidecar; (d) the late-row ledger is a tail read of the import journal: the whole journal once per process, then the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | **Measured** (synthetic store, 4-core cloud machine, one run each, `the_day_band_is_timed_cold_warm_concurrent_and_growing`, n = 200 a page over 5 pages): warm 1 client p50 4.35 / p99 8.67 / max 10.86 ms (the base 6.37 / 16.30 / 21.73); with an import writing 4.48 / 8.90 / 13.37 ms (base 6.38 / 18.12 / 19.86); 60 clients 66.7 / 725.0 / 861.4 ms (base 214.4 / 958.5 / 1,150.5); cold, memo empty, page cache warm, Zerodha NIFTY page, n = 20: 6.51 / 9.29 ms (base 4.40 / 8.99) — the one figure slower than the base, DB-B20's first scan; warm p50 at 10x and 100x history 0.98x and 1.01x of 1x. A cold device is NOT MEASURED; the real store's figure is the Mac's. The answer is built by moving values into its maps: `json!` deep-copied every nested value, 43% of the base's instructions (callgrind) | R3-13 |
+| L-R3-13 | `/dayflags.json` with R3-13's read-time rules | per page of at most 92 days: (a) a Zerodha index page scans each day's one-minute bars once per process — at most 1,440 record reads a day, 92 × 1,440 a page — and keeps the scan per (device, inode, first row) with its end row, one probe a day after; a month's first scans run on ⌈days ÷ 8⌉ scoped threads, none where the memo holds the month; the memo takes (device, inode) for the month file's identity, as the base's ledger tail readers do, so on a filesystem that reuses an inode number at once (this cloud container's does: `store`'s own `staging` test measures it) a month replaced by a new generation could be served its old scan for a day whose end row is unchanged, until the process restarts; the memo holds one entry per (month file, day) shown, however often a month grows; (b) the previous `1day` bar is looked for 12 opens back, then up to 144 `stat`s and one open, once a page; a history found empty is not probed back again by `series_start`; (c) a share's closing-auction flag reads that day's NSE master once per process from 2026-08-03 (a refusal once per request), and one `stat` a month for its `.auc` sidecar; (d) the late-row ledger is a tail read of the import journal: the whole journal once per process, then the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | **Measured** (synthetic store, 4-core cloud machine, one run each, `the_day_band_is_timed_cold_warm_concurrent_and_growing`, n = 200 a page over 5 pages): warm 1 client p50 4.35 / p99 8.67 / max 10.86 ms (the base 6.37 / 16.30 / 21.73); with an import writing 4.48 / 8.90 / 13.37 ms (base 6.38 / 18.12 / 19.86); 60 clients 66.7 / 725.0 / 861.4 ms (base 214.4 / 958.5 / 1,150.5); cold, memo empty, page cache warm, Zerodha NIFTY page, n = 20: 6.51 / 9.29 ms (base 4.40 / 8.99) — the one figure slower than the base, DB-B20's first scan; warm p50 at 10x and 100x history 0.98x and 1.01x of 1x. A cold device is NOT MEASURED; the real store's figure is the Mac's. The answer is built by moving values into its maps: `json!` deep-copied every nested value, 43% of the base's instructions (callgrind) | R3-13 |
 
 ### 5. For other owners (files R3-13 does not own)
 
