@@ -248,3 +248,42 @@ on):
   (`4bbd37df`). Fails the same in the real checkout.
 
 ## NEEDS THE MAC
+
+1. **Gate 18 will be red on 16 equivalent mutants when `feat/db-fix` is
+   planned against `main`, whatever the tests.** Gate 18 plans every line of
+   the PR's diff (`main...feat/db-fix` holds 6,241 `pull` mutants) and "never
+   excludes a mutation or credits a timeout". 16 of this report's 19
+   equivalents are on lines of that diff (all but `fold.rs:272:38`,
+   `272:44` and `1527:9`). No test can kill them; only a production
+   rewrite that removes the mutation site, or a gate policy, can. Each
+   rewrite below keeps behaviour by the same argument that makes the mutant
+   equivalent; none was made here (production code of other parts, and a
+   tests-only pass):
+
+   | Mutant(s) | Behaviour-preserving rewrite that removes the site |
+   |---|---|
+   | `gdfl_archive.rs:280:58` | `field(14, 2)? << 16 \| field(12, 2)?` → `… << 16) + field(12, 2)?`. `+`'s mutants (`-`, `*`) differ whenever the time is non-zero, and `a_bts_round_trips_every_entry_byte_identical`'s members carry times `0x7A2F` and `0x6B10`, so both are expected killed (expected, not measured). |
+   | `gdfl_cm.rs:854:13` | delete the `indices: Vec::new(),` line; `..Self::swept()` supplies it. |
+   | `gdfl_cm.rs:965:31` | delete the `CmKind::Stocks if name.len() > SYMBOL_CAPACITY => None` arm; the probe answers `None` for such a name. |
+   | `gdfl_cm.rs:1010:41`, `1097:22` | drop the `if self.series` / `if self.stored` guards they are implied by (or make `series` a function of `stored`). |
+   | `gdfl_cm.rs:2306:70`, `2313:34`, `2313:46` | drop `&& self.booked > 0` / `if self.booked > 0` where the band is `One` (a one-price band here always has a booked row, and with none the arm changes nothing). |
+   | `fold.rs:1126:32` | have `day_session` return its `Option<Note>` and push it in `fold_month`, setting `day_note_at` from the push: no length comparison left. |
+   | `fold.rs:1149:68` | drop `.filter(\|missing\| *missing < start)`: `expected > 0` already refuses `missing >= start`. |
+   | `fold.rs:1206:42`, `1209:22`, `1210:25` | drop the `expected > 0` and `count > 0` conjuncts, implied by `count ≥ 1` (every candidate bucket holds a bar). |
+   | `request_minutes.rs:333:35` | ask the calendar whether `at` is past the record (one function), instead of comparing with `SOURCED_LAST_DAY` at a boundary the arm never reaches. |
+   | `request_minutes.rs:347:22` | none without a venue-table seam a test can fill; the guard is data-equivalent (every shipped row continuous). A gate policy is the only other way. |
+   | `cash_session_cache.rs:508:5` | open the lock with `O_NOFOLLOW` and judge the open handle's own `fstat` (as `request_minutes::append_named_picking` now does) instead of re-reading the path: the race the re-check guards no longer exists, and a pipe or device at the name becomes a testable refusal. |
+
+2. **`cli` `generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`
+   fails as an ordinary user here and passes as root** (Gates). Not this
+   part's crate; sources identical to `feat/db-fix`. The Mac runs as an
+   ordinary user, so it will show there if it is not this container.
+3. **`store` `cited_commits` is red on `feat/db-fix` itself**: nine commits
+   cited in `docs/06-limits.md` are not on `origin/main` and not in
+   `NOT_ON_MAIN`.
+4. **Two root-only test failures in `gdfl_import`** (outside this part's
+   files) pass as uid 65534 and as any ordinary user; nothing to do on a Mac.
+5. **A D-number, if wanted.** The nextest order override and the gate-1d
+   declaration follow the repo's existing patterns (D-0693, D-0694; the
+   per-package `*_LITERAL` groups) but cite no decision of their own; numbers
+   are the Mac's to allocate, so none was claimed here.
