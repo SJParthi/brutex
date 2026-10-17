@@ -4602,4 +4602,73 @@ mod cloud_mutant_tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A PAGE IS FOUND INSIDE THE ONE BLOCK ITS FENCES BOUND: A DAMAGED
+    /// BLOCK ELSEWHERE IN THE RUN IS NEVER READ.** One index run of 1,200
+    /// rows, five blocks of 256 entries a column; the close column's third
+    /// block is damaged. The first page lies in the first block, so it is
+    /// served from the index whole, with no row read, no fault and the index
+    /// never set aside. Kills `< with >` and `> with <` in
+    /// `RunArray::bounds`, which the 16 Oct pass called cost-only: each
+    /// widened the search to the whole run, and the cost is a block read the
+    /// fences had ruled out — here, the damaged one.
+    #[test]
+    fn a_damaged_block_the_fences_rule_out_is_never_read() {
+        let root = scratch("fence-bounded");
+        let rows: Vec<Bar> = (0..1_200).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write_runs(&root, &index(), month(1), &rows, 1_200);
+        let srt = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(1),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path")
+        .to_path_buf(&root)
+        .with_extension("srt");
+        let shape = Shape::of(month(1), 60, super::symbol_id("NIFTY"));
+        let at = {
+            let index = SortIndex::open(&srt, &shape).expect("the planted index opens");
+            let run = index.runs()[0];
+            let close = run.column(Column::Close);
+            assert_eq!(close.blocks, 5, "five blocks of 256");
+            run.offset
+                + close.entries_at()
+                + 2 * store::sort_index::FENCE * u64::from(close.width)
+                + 3
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&srt)
+            .expect("the planted index");
+        let mut byte = [0u8; 1];
+        std::os::unix::fs::FileExt::read_exact_at(&file, &mut byte, at).expect("a byte");
+        byte[0] ^= 0x04;
+        std::os::unix::fs::FileExt::write_all_at(&file, &byte, at).expect("a byte");
+        drop(file);
+        let got =
+            window(&root, &query(index(), month(1), month(1), SortKey::Close)).expect("answers");
+        let mut want: Vec<(i64, i64)> = rows.iter().map(|bar| (bar.close, bar.ts_micros)).collect();
+        want.sort_unstable();
+        want.truncate(37);
+        let served: Vec<(i64, i64)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.bar.ts_micros))
+            .collect();
+        assert_eq!(served, want);
+        assert!(got.faults.is_empty(), "{:?}", got.faults);
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!(
+            (report.indexed_rows, report.scanned_rows),
+            (1_200, 0),
+            "{report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
