@@ -4196,8 +4196,7 @@ mod cloud_mutant_tests {
             matches!(&refused, Err(super::Attempt::Refused(why)) if why == "a value page needs a value column"),
             "{:?}",
             refused.as_ref().map(|_| ()).err().map(|why| match why {
-                super::Attempt::Refused(why) => why.clone(),
-                super::Attempt::Broken { why, .. } => why.clone(),
+                super::Attempt::Refused(why) | super::Attempt::Broken { why, .. } => why.clone(),
             })
         );
         let _ = std::fs::remove_dir_all(&root);
