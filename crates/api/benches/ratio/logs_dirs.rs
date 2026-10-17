@@ -19,6 +19,16 @@
 //! 100,000 `run` lines: the answer decodes the 20 lines of its page and
 //! `run=<id>` the id's own, so neither may cost more on the longer journal.
 //!
+//! **C-LG-03 (R3-24).** Every keyed search `/logs.json` answers since R3-24
+//! (day, month, reason, import kind, code, run, a target alone, a time span
+//! alone and a span beside a key) over the same stores at 1x and 10x, gated
+//! on the ratio as C-LG-01 is; each one's first call ("cold") and p50, p99
+//! and max over n=200 single calls ("warm"), then at 10x with 60 clients at
+//! once and while an import writes into `logs/cli`; and the live tail from
+//! an installed sink's copy in memory beside the same tail read from files.
+//! Each row prints whether its p99 met R3-24's 5 ms target on THIS machine;
+//! the operator's figures are the Mac's (the R3-24 report).
+//!
 //! **Printed, not asserted:** each figure's p50, p99 and max over single
 //! calls, and the first read of each store (the ring read once, the journal
 //! parsed once), which is bounded by the files and paid once per process.
@@ -95,7 +105,8 @@ fn fill(dir: &Path, kind: &str, lines: usize) {
             .with("kind", kind)
             .with("day", day.as_str())
             .with("about", "ZZ BENCH FIXTURE.csv")
-            .with("code", "malformed_row");
+            .with("code", "malformed_row")
+            .with("reason", "row_refused");
         if !sink.emit(&event).is_written() {
             refuse("a bench line was not written");
         }
@@ -185,7 +196,7 @@ fn keyed_reads_are_flat(id: &str) -> bool {
         let body = api::logs::logs_json_over(Some(&served), root, &query);
         // THE FIXTURE IS WHAT IT CLAIMS: 20 rows, from the index, and every
         // one of the 8 directories named as read.
-        let rows = body.matches("\"source\":\"audit\"").count();
+        let rows = body.matches("\"source\":\"audit\",\"scope\"").count();
         let read = body.matches("\"state\":\"read\"").count();
         if rows != 20 || read != 8 {
             refuse(&format!(
@@ -322,8 +333,243 @@ fn the_runs_page_is_flat(id: &str) -> bool {
     ok
 }
 
-/// Both rows. `keyed` and `runs` are their ids, named by
-/// `crates/api/benches/ratio.rs`'s `main`.
+/// Every row. `keyed` and `runs` are the first two's ids, named by
+/// `crates/api/benches/ratio.rs`'s `main`; R3-24's row is C-LG-03, named
+/// here because `ratio.rs` is not R3-24's file.
 pub(crate) fn reads_are_flat(keyed: &str, runs: &str) -> bool {
-    keyed_reads_are_flat(keyed) & the_runs_page_is_flat(runs)
+    keyed_reads_are_flat(keyed) & the_runs_page_is_flat(runs) & r3_24_searches_are_flat("C-LG-03")
+}
+
+// ---------------------------------------------------------------------------
+// C-LG-03 (R3-24): EVERY KEYED SEARCH, COLD AND WARM, 1 AND 60 CLIENTS, AND
+// WITH AN IMPORT WRITING; THE LIVE TAIL FROM MEMORY
+// ---------------------------------------------------------------------------
+
+/// The searches R3-24 times, by name, over a store of [`logs_store`]: each a
+/// key `/logs.json` reads through the index (or, for a span alone, through
+/// the audit files its time meets). `{ts}` is replaced by the newest line's
+/// stamp, so the span is one a real line falls in.
+const SEARCHES: [(&str, &str); 9] = [
+    ("day", "day=2022-03-07&limit=20"),
+    ("month", "month=2021-03&limit=20"),
+    ("reason", "reason=row_refused&limit=20"),
+    ("kind", "kind=stocks&limit=20"),
+    ("code", "code=malformed_row&limit=20"),
+    ("run", "run=1791700000&durable=1&limit=20"),
+    ("target alone", "target=gdfl.import&limit=20"),
+    ("span alone", "from={ts}&to={ts}&limit=20"),
+    (
+        "span beside a code",
+        "code=malformed_row&from=0&to={ts}&limit=20",
+    ),
+];
+
+/// R3-24's target for every keyed search: p99 under 5 ms (the operator's
+/// store measured 11 to 15 ms for the slowest keys before it). Printed per
+/// row, never asserted here: this machine's p99 is not the operator's, and
+/// `crates/api/benches/ratio.rs` gates shapes, not seconds.
+const TARGET_P99_NS: u128 = 5_000_000;
+
+/// p50, p99 and max of sorted nanoseconds.
+fn quantiles(ns: &mut [u128]) -> (u128, u128, u128) {
+    ns.sort_unstable();
+    let at = |permille: usize| {
+        ns.get((ns.len() * permille / 1_000).min(ns.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    (at(500), at(990), ns.last().copied().unwrap_or(0))
+}
+
+/// Prints one row of [`quantiles`] with whether its p99 meets
+/// [`TARGET_P99_NS`].
+fn print_row(label: &str, ns: &mut [u128]) {
+    let n = ns.len();
+    let (p50, p99, max) = quantiles(ns);
+    println!(
+        "  {label:<46} p50 {p50:>9} ns  p99 {p99:>9} ns  max {max:>9} ns  n={n}  {}",
+        if p99 < TARGET_P99_NS {
+            "p99 < 5 ms"
+        } else {
+            "p99 OVER 5 ms"
+        }
+    );
+}
+
+/// `reps` single calls of `op` from each of `clients` threads at once.
+fn clients_at_once(clients: usize, reps: usize, op: impl Fn() -> usize + Sync) -> Vec<u128> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..clients)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..reps)
+                        .map(|_| {
+                            let start = Instant::now();
+                            std::hint::black_box(op());
+                            start.elapsed().as_nanos()
+                        })
+                        .collect::<Vec<u128>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    })
+}
+
+/// The newest line's stamp in `root`'s served directory, read through the
+/// route itself.
+fn newest_stamp(served: &Path, root: &Path) -> String {
+    let body = api::logs::logs_json_over(Some(served), root, "code=malformed_row&limit=1");
+    let Some(at) = body.split("\"ts\":").nth(1) else {
+        refuse("the newest line's stamp");
+    };
+    at.chars().take_while(char::is_ascii_digit).collect()
+}
+
+/// C-LG-03: each search at 1x and 10x (gated on the ratio, as C-LG-01),
+/// cold (the first call on its store) and warm (n=200), then at 10x with 60
+/// clients at once and with an import writing; then the live tail from the
+/// installed sink's copy in memory beside the same tail read from files.
+fn r3_24_searches_are_flat(id: &str) -> bool {
+    let stores: Vec<(usize, PathBuf)> = POSTING_SIZES
+        .iter()
+        .map(|&lines| (lines, logs_store(lines)))
+        .collect();
+    let mut ok = true;
+    let mut costs: Vec<Vec<u128>> = vec![Vec::new(); SEARCHES.len()];
+    for (lines, root) in &stores {
+        let served = root.join("logs");
+        let ts = newest_stamp(&served, root);
+        for (n, (name, query)) in SEARCHES.iter().enumerate() {
+            let query = query.replace("{ts}", &ts);
+            let cold = Instant::now();
+            let body = api::logs::logs_json_over(Some(&served), root, &query);
+            let cold = cold.elapsed().as_nanos();
+            if !body.contains("\"keyed\":{") || body.contains("\"ignored\":[{") {
+                refuse(&format!(
+                    "the {name} search ({query}) is not a keyed answer"
+                ));
+            }
+            if !body.contains("\"records\":[{") {
+                refuse(&format!("the {name} search ({query}) found nothing"));
+            }
+            println!(
+                "  {:<46} cold {cold:>9} ns",
+                format!("{id} {name}, {lines}/dir")
+            );
+            let mut warm: Vec<u128> = (0..200)
+                .map(|_| {
+                    let start = Instant::now();
+                    std::hint::black_box(api::logs::logs_json_over(Some(&served), root, &query));
+                    start.elapsed().as_nanos()
+                })
+                .collect();
+            print_row(&format!("{id} {name}, {lines}/dir, warm"), &mut warm);
+            if let Some(row) = costs.get_mut(n) {
+                row.push(cost_ps(20, || {
+                    api::logs::logs_json_over(Some(&served), root, &query).len()
+                }));
+            }
+        }
+    }
+    for ((name, _), row) in SEARCHES.iter().zip(&costs) {
+        let (Some(&base), Some(&big)) = (row.first(), row.get(1)) else {
+            refuse("two sizes measured");
+        };
+        ok &= ratio(
+            &format!("{id} {name} {}->{}", POSTING_SIZES[0], POSTING_SIZES[1]),
+            base,
+            big,
+            RATIO_CEILING_PERMILLE,
+        );
+    }
+    // AT 10x: 60 CLIENTS AT ONCE, then ONE CLIENT WHILE AN IMPORT WRITES.
+    if let Some((lines, root)) = stores.last() {
+        let served = root.join("logs");
+        let ts = newest_stamp(&served, root);
+        for (name, query) in SEARCHES {
+            let query = query.replace("{ts}", &ts);
+            let mut many = clients_at_once(60, 4, || {
+                api::logs::logs_json_over(Some(&served), root, &query).len()
+            });
+            print_row(&format!("{id} {name}, {lines}/dir, 60 clients"), &mut many);
+        }
+        let writing = std::sync::atomic::AtomicBool::new(true);
+        let cli = served.join(telemetry::run_dirs::CLI);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let Ok(sink) = telemetry::Sink::open(&telemetry::Config::new(&cli)) else {
+                    refuse("the import's sink would not open");
+                };
+                let mut written = 0u64;
+                while writing.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = sink.emit(
+                        &telemetry::Event::error("gdfl.import", "refused")
+                            .with("kind", "options")
+                            .with("day", "2021-06-01")
+                            .with("code", "malformed_row")
+                            .with("reason", "row_refused"),
+                    );
+                    written += 1;
+                }
+                written
+            });
+            for (name, query) in SEARCHES {
+                let query = query.replace("{ts}", &ts);
+                let mut during: Vec<u128> = (0..200)
+                    .map(|_| {
+                        let start = Instant::now();
+                        std::hint::black_box(api::logs::logs_json_over(
+                            Some(&served),
+                            root,
+                            &query,
+                        ));
+                        start.elapsed().as_nanos()
+                    })
+                    .collect();
+                print_row(
+                    &format!("{id} {name}, {lines}/dir, import writing"),
+                    &mut during,
+                );
+            }
+            writing.store(false, std::sync::atomic::Ordering::Relaxed);
+            let written = writer.join().unwrap_or(0);
+            println!("  {id} the import wrote {written} refusal(s) while those rows ran");
+        });
+    }
+    // THE LIVE TAIL: the installed sink's copy in memory, beside the same
+    // request over a directory no installed sink writes (its files).
+    let live = root_of("live");
+    let Ok(sink) = telemetry::install(&telemetry::Config::new(&live)) else {
+        refuse("the bench's sink would not install");
+    };
+    for n in 0..POSTING_SIZES[1] {
+        let _ = sink.emit(&telemetry::Event::info("api.bench", "a line").with("n", n));
+    }
+    let files = root_of("live-files");
+    fill(&files.join("logs"), "served", POSTING_SIZES[1]);
+    for (label, dir) in [
+        ("live tail from memory", &live),
+        ("tail from files", &files.join("logs")),
+    ] {
+        let mut ns: Vec<u128> = (0..200)
+            .map(|_| {
+                let start = Instant::now();
+                std::hint::black_box(api::logs::logs_json_over(Some(dir), &files, "limit=50"));
+                start.elapsed().as_nanos()
+            })
+            .collect();
+        print_row(
+            &format!("{id} {label}, {} lines", POSTING_SIZES[1]),
+            &mut ns,
+        );
+    }
+    for (_, root) in stores {
+        let _ignored = std::fs::remove_dir_all(root);
+    }
+    let _ignored = std::fs::remove_dir_all(files);
+    ok
 }

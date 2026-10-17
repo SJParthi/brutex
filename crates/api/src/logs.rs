@@ -5122,10 +5122,18 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
 /// A directory whose ring is still being read, in words: it is not `read`,
 /// and an answer of "none" may not rest on it (R3-24).
 fn behind_words(behind: u64) -> String {
-    format!(
-        "{behind} byte(s) of its ring are not read yet: the follower reads them a slice at a \
-         time, off every request; ask again"
-    )
+    behind_words_with(behind, FOLLOWER_FAILED.get().map(String::as_str))
+}
+
+/// [`behind_words`] with the follower's start failure, when it has one.
+fn behind_words_with(behind: u64, failed: Option<&str>) -> String {
+    match failed {
+        None => format!(
+            "{behind} byte(s) of its ring are not read yet: the follower reads them a slice at \
+             a time, off every request; ask again"
+        ),
+        Some(why) => format!("{behind} byte(s) of its ring are not read yet, and {why}; ask again"),
+    }
 }
 
 /// One directory's importer evidence, read through its tail, at most `slice`
@@ -5228,16 +5236,31 @@ fn follow(dir: &std::path::Path) {
     }
     if !*started {
         *started = true;
-        let spawned = std::thread::Builder::new()
-            .name("api-refusal-follower".to_owned())
-            .spawn(follow_refusals);
-        if let Err(e) = spawned {
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::error("api.logs", "the refusal follower did not start")
-                    .with("why", telemetry::Value::Str(&e.to_string())),
-            );
-        }
+        let failed = start_follower(|| {
+            std::thread::Builder::new()
+                .name("api-refusal-follower".to_owned())
+                .spawn(follow_refusals)
+                .map(|_detached| ())
+        });
+        let _first_failure_kept = failed.map(|why| FOLLOWER_FAILED.set(why));
     }
+}
+
+/// Why the follower's thread could not start, once that was found: every
+/// later answer of a directory still behind says so (R3-24). Never cleared:
+/// a process whose follower did not start reads each ring one request's
+/// slice at a time for its whole life, and says that, never "none".
+static FOLLOWER_FAILED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Starts the follower through `spawn`, answering the failure in words, or
+/// `None` once it runs. The start is handed in so a test can state one that
+/// fails, which no test can cause.
+fn start_follower(spawn: impl FnOnce() -> std::io::Result<()>) -> Option<String> {
+    spawn().err().map(|e| {
+        format!(
+            "the follower's thread could not start ({e}), so only each request's slice reads it"
+        )
+    })
 }
 
 /// The follower (R3-24): every [`FOLLOW_PAUSE`], one slice of at most
@@ -9175,5 +9198,25 @@ mod r3_24_follow_tests {
             .sum();
         assert_eq!(total, 28 * 100);
         let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod r3_24_follower_start_tests {
+    //! The follower's start, stated as failing, which no test can cause.
+
+    /// **A FOLLOWER THAT CANNOT START IS SAID, NEVER SILENT** (R3-24): its
+    /// words name the failure and what still reads the ring, and a directory
+    /// still behind says them; one that starts says nothing.
+    #[test]
+    fn a_follower_that_cannot_start_is_said() {
+        let failed = super::start_follower(|| Err(std::io::Error::other("no threads left")));
+        let words = failed.expect("a failure in words");
+        assert!(words.contains("no threads left"), "{words}");
+        assert!(words.contains("only each request's slice reads it"));
+        assert_eq!(super::start_follower(|| Ok(())), None);
+        let behind = super::behind_words_with(7, Some(&words));
+        assert!(behind.starts_with("7 byte(s) of its ring are not read yet, and the follower"));
+        assert!(super::behind_words_with(7, None).contains("off every request"));
     }
 }
