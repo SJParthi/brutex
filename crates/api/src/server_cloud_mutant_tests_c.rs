@@ -3099,3 +3099,34 @@ async fn laddered_calls_a_transport_that_never_answers_down_after_every_attempt(
         )
     );
 }
+
+/// **With no log installed, a window the vendor refuses is still refused
+/// with the vendor's words.** The refusal event answers `NotInstalled` and
+/// its `debug_assert` allows a process with no sink; this test installs
+/// none, so under nextest the permissive side is the one taken
+/// (server.rs:7485). Beside a test that installed the shared sink the event
+/// is written instead, and the refusal is the same.
+#[tokio::test]
+async fn with_no_log_installed_a_refused_window_is_still_refused() {
+    let vendor = FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
+    let (source, spec) = loopback_source(&vendor);
+    let fx = Fixture::new("refused-no-log");
+    let site = fx.refused();
+    let refused = fetch_chunks(
+        &spot(DHAN_DAY),
+        &site,
+        &source,
+        "990012",
+        pull::vendor::Listing::Index,
+        &spec,
+    )
+    .await;
+    let Err(refused) = refused else {
+        panic!("nothing landed before the refusal");
+    };
+    assert!(
+        refused.contains("400"),
+        "the vendor's status is kept: {refused}"
+    );
+    assert_eq!(vendor.seen().len(), 1, "a refusal is asked once");
+}

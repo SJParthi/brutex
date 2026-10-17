@@ -463,3 +463,119 @@ fn a_released_lock_gives_its_key_back_through_a_poisoned_set() {
         "{stdout}"
     );
 }
+
+/// One raw request to `addr`, written as bytes, and the whole answer read
+/// back as text.
+async fn raw_exchange(addr: SocketAddr, request: Vec<u8>) -> String {
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read as _, Write as _};
+        let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+        stream.write_all(&request).expect("write");
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).expect("read");
+        String::from_utf8_lossy(&answer).into_owned()
+    })
+    .await
+    .expect("the client thread")
+}
+
+/// **A form body that is not UTF-8 is not judged by its keys; the route
+/// reading it answers for it.** The repeated-key refusal reads the body as
+/// text, so a body that is not text passes the guard and reaches the
+/// handler, which refuses it on its own terms. Covers the `Err` side of
+/// `one_value_per_form_field`'s `from_utf8` (server.rs:15900).
+#[tokio::test]
+async fn a_form_body_that_is_not_utf8_is_left_to_its_route() {
+    let dir = super::tests::agreeing("cloudd-form-not-utf8");
+    let built = Loaded::new(super::tests::site("cloudd-form-not-utf8", &dir));
+    super::tests::served_over("cloudd-form-not-utf8", built, |addr| async move {
+        let host = format!("localhost:{}", addr.port());
+        let form: &[u8] = b"k=1&k=1&\xff";
+        let mut request = format!(
+            "POST /pull/run HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+             Sec-Fetch-Site: same-origin\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            form.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(form);
+        let answer = raw_exchange(addr, request).await;
+        let body = super::tests::body_of(&answer);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(
+            !body.contains("more than once"),
+            "a body that is not text is not judged by its keys: {answer}"
+        );
+        assert!(
+            body.contains("valid UTF-8"),
+            "the route's own reader refused it: {answer}"
+        );
+    })
+    .await;
+}
+
+/// A window over August and September 2026, which is no single month.
+fn two_month_window() -> pull::session::Window {
+    pull::session::Window::new(
+        Day::new(2026, 8, 3).expect("a day"),
+        Day::new(2026, 9, 4).expect("a day"),
+    )
+    .expect("a window")
+}
+
+/// **An instrument refused over a window of two months is logged with its
+/// window and no month.** A month index keys only on ONE month, so a refusal
+/// about a span carries no `month` field (D-3341). Covers the `None` side of
+/// `note_instrument_refusal`'s `one_month` (server.rs:8775).
+#[test]
+fn an_instrument_refused_over_two_months_is_logged_with_no_month() {
+    let _shared = crate::emitted::sink();
+    let about = crate::autopilot::About::of(None, None, two_month_window());
+    assert_eq!(about.one_month(), None, "the premise: a span");
+    let from = crate::emitted::mark();
+    note_instrument_refusal("ZZSPAN", &about, "dhan", 0, 1, "refused over a span");
+    let logged: Vec<telemetry::Record> =
+        crate::emitted::landed(from, "pull.spot", "instrument refused")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "instrument", "ZZSPAN"))
+            .collect();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].field("month").is_none(), "{logged:?}");
+    assert!(
+        crate::emitted::says(&logged[0], "window", "2026-08-03..=2026-09-04"),
+        "{logged:?}"
+    );
+}
+
+/// **With no log installed, a member that did not land still reaches the
+/// autopilot's page, and an instrument refusal is still made.** The emits
+/// answer `NotInstalled` and each `debug_assert` allows exactly that: a
+/// process with no sink. This test installs none; under nextest it is its
+/// own process, so the permissive side of both asserts is the one taken
+/// (server.rs:5133 and 8780). Run beside a test that installed the shared
+/// sink, the emits are written instead, and every assertion still holds.
+#[test]
+fn with_no_log_installed_a_failure_still_reaches_the_page() {
+    let root = fresh_dir("no-log-failure");
+    let site = Site::load(&root, &root);
+    let asked = ingest::parse_spot(
+        "target=swept&feed=dhan&from=2026-08-03&to=2026-08-05&granularity=1min",
+        Day::new(2026, 8, 10).expect("a day"),
+    )
+    .expect("a request in the past");
+    let failure = pull::ingest::Failure {
+        instrument: "ZZNOLOG".to_owned(),
+        why: "a gap the vendor holds".to_owned(),
+        month: None,
+        day: Day::new(2026, 8, 4).ok(),
+    };
+    note_member_failure(&failure, &asked, &site);
+    let about = crate::autopilot::About::of(None, None, two_month_window());
+    note_instrument_refusal("ZZNOLOG", &about, "dhan", 0, 1, "refused");
+    let json = site.autopilot.json();
+    assert!(json.contains("ZZNOLOG"), "{json}");
+    assert!(json.contains("a gap the vendor holds"), "{json}");
+    assert!(json.contains("2026-08-04"), "the failure's own day: {json}");
+    let _ = std::fs::remove_dir_all(&root);
+}
