@@ -605,8 +605,9 @@ fn render_run(
             shown += 1;
         }
     }
-    if shown > SHOWN {
-        let _ = writeln!(out, "    ... and {} more not clean", shown - SHOWN);
+    let hidden = shown.saturating_sub(SHOWN);
+    if hidden > 0 {
+        let _ = writeln!(out, "    ... and {hidden} more not clean");
     }
     let _ = writeln!(
         out,
@@ -711,8 +712,9 @@ fn plan(out: &mut String, root: &Path, vendor: Vendor, scope: &Scope) -> u8 {
             );
         }
     }
-    if groups.len() > SHOWN {
-        let _ = writeln!(out, "  ... and {} more series", groups.len() - SHOWN);
+    let hidden = groups.len().saturating_sub(SHOWN);
+    if hidden > 0 {
+        let _ = writeln!(out, "  ... and {hidden} more series");
     }
     let _ = writeln!(
         out,

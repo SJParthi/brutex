@@ -294,6 +294,7 @@ fn an_upkeep_run_stops_and_resumes_where_it_stopped() {
         text.contains(" workers=1 asked=1 "),
         "a run that names no --workers asks for one: {text}"
     );
+    assert!(!out.contains("torn tail"), "nothing was torn: {out}");
     for &month in &months {
         assert_eq!(
             fs::read(srt(&root.0, month)).unwrap(),
@@ -346,6 +347,10 @@ fn upkeep_and_an_import_exclude_each_other_on_a_month() {
     );
     assert!(out.contains("is held by another process"), "{out}");
     assert!(out.contains("(3 built, 2 clean, 0 left)"), "{out}");
+    assert!(
+        !out.contains("more not clean"),
+        "one is shown, none hidden: {out}"
+    );
     assert!(srt(&root.0, months[0]).exists() && srt(&root.0, months[2]).exists());
     assert_eq!(
         fs::read(srt(&root.0, months[1])).unwrap(),
@@ -940,6 +945,7 @@ fn the_plan_lists_what_each_series_lacks_and_writes_nothing() {
         "{out}"
     );
     assert!(out.contains("stray.txt"), "{out}");
+    assert!(!out.contains("more series"), "every series is shown: {out}");
     assert!(out.contains("rekey: 1 option underlying(s)"), "{out}");
     assert!(out.contains("tix      no run yet"), "{out}");
     let (code, out) = plain(
@@ -996,6 +1002,7 @@ fn the_plan_lists_what_each_series_lacks_and_writes_nothing() {
     let (code, out) = plain(&root.0, &["plan", "gdfl", "NSE/CASH"]);
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("... and 2 more series"), "{out}");
+    assert_eq!(out.matches(" month(s); lacks .tix").count(), super::SHOWN);
     // A plan of a feed the store does not hold, and a journal unreadable.
     let (code, out) = plain(&root.0, &["plan", "zerodha"]);
     assert_eq!(code, FAILED, "{out}");
@@ -1295,6 +1302,7 @@ fn a_run_that_cannot_begin_is_refused_by_name() {
     let (code, out) = plain(&many.0, &["run", "srt", "gdfl", "--all", "--workers", "4"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("... and 3 more not clean"), "{out}");
+    assert_eq!(out.matches("\n    NOT CLEAN ").count(), super::SHOWN);
 }
 
 /// The outcome helper takes the word after the label and keeps the line;
