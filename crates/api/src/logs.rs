@@ -4714,7 +4714,38 @@ struct RefusalTail {
     /// request.
     read_error: Option<String>,
     built: std::sync::Arc<DirRefusals>,
+    /// The rolled files not read to their end yet, oldest first (R3-24): a
+    /// ring read afresh is read a slice at a time from here, by a request
+    /// and by the follower, never whole inside one request.
+    queue: std::collections::VecDeque<Queued>,
 }
+
+/// One rolled ring file still to be read: where, how long it was when the
+/// ring was read afresh, and how far it has been read.
+#[derive(Debug)]
+struct Queued {
+    path: std::path::PathBuf,
+    len: u64,
+    at: u64,
+}
+
+/// The most ring bytes one page request reads of one directory's importer
+/// evidence (R3-24): a fixed slice, so no request waits on a 64 MiB ring;
+/// the follower reads the rest ([`follow_refusals`]). Twice the widest line
+/// at least, so every slice makes progress.
+pub const REQUEST_SLICE_BYTES: u64 = 256 * 1024;
+
+/// The most ring bytes the follower reads of one directory per turn, and how
+/// long it waits between turns: one directory's lock is held for one slice at
+/// a time, so a request waits at most that long for it.
+pub const FOLLOW_SLICE_BYTES: u64 = 1024 * 1024;
+
+/// How long the follower sleeps between turns.
+const FOLLOW_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many directories the follower keeps following, newest asked last:
+/// the five of a store, for a few stores.
+const FOLLOWED_DIRS: usize = 32;
 
 /// Every `cli` directory read so far.
 fn refusal_tails()
@@ -5051,15 +5082,20 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
     let read: Vec<DirEvidence> = import_dirs()
         .map(|half| {
             let path = store_root.join(telemetry::run_dirs::LOGS).join(half);
-            let held = refusals_in(&path);
+            // FOLLOWED FROM HERE ON (R3-24): what this request leaves unread
+            // the follower reads, a slice at a time, off every request.
+            follow(&path);
+            let (held, behind) = refusals_in(&path, REQUEST_SLICE_BYTES);
             // THE DISK'S ANSWER FIRST, then the tail's: a directory that can
             // be searched whose ring file could not be read is unread in
-            // part, and cannot vouch for "none" either.
+            // part, and cannot vouch for "none" either. Nor can one whose
+            // ring is still being read: it is named with what is left.
             let state = match DirState::of(&path) {
-                DirState::Read => held
-                    .errors
-                    .first()
-                    .map_or(DirState::Read, |why| DirState::Unreadable(why.clone())),
+                DirState::Read => match held.errors.first() {
+                    Some(why) => DirState::Unreadable(why.clone()),
+                    None if behind > 0 => DirState::Unreadable(behind_words(behind)),
+                    None => DirState::Read,
+                },
                 other @ (DirState::Absent | DirState::Unreadable(_)) => other,
             };
             DirEvidence {
@@ -5083,18 +5119,30 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
     merged
 }
 
-/// One directory's importer evidence, read through its tail.
+/// A directory whose ring is still being read, in words: it is not `read`,
+/// and an answer of "none" may not rest on it (R3-24).
+fn behind_words(behind: u64) -> String {
+    format!(
+        "{behind} byte(s) of its ring are not read yet: the follower reads them a slice at a \
+         time, off every request; ask again"
+    )
+}
+
+/// One directory's importer evidence, read through its tail, at most `slice`
+/// bytes of it in this call; and how many bytes of its ring are still unread
+/// after it (R3-24).
 ///
 /// # Cost
 ///
-/// The first call reads the directory's whole ring once (at most its 64 MiB
-/// ceiling; `logs/cli` held 1,158,202 bytes on the operator's store, 9 Oct
-/// 2026). After that, while only the current file grows, a call reads only
-/// the bytes appended since; a roll, a file replaced, or a file whose
-/// `metadata` answers differently (there, not there, or failing, in other
-/// words than before) reads the ring again. A line is decoded only when it
-/// names the importer's target. One `metadata` call per ring file per call
-/// (8). `docs/06-limits.md` L-IA-37.
+/// At most `slice` bytes read, whatever the ring holds: a request passes
+/// [`REQUEST_SLICE_BYTES`], the follower [`FOLLOW_SLICE_BYTES`]. A ring read
+/// afresh (the first call, a roll, a file replaced, or a file whose
+/// `metadata` answers differently: there, not there, or failing, in other
+/// words than before) is queued, not read, and the slices work through it
+/// oldest file first, then the current file's new bytes. Whole lines only: a
+/// slice ends at its last newline and the next starts there. A line is
+/// decoded only when it names the importer's target. One `metadata` call per
+/// ring file per call (8). `docs/06-limits.md` L-IA-37.
 ///
 /// # Errors are the read's, not the process's
 ///
@@ -5103,10 +5151,10 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
 /// ([`Seen`]), a file that stays unreadable is named once however many
 /// calls find it so, and one that becomes readable again is read and its
 /// error dropped.
-fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
+fn refusals_in(dir: &std::path::Path, slice: u64) -> (std::sync::Arc<DirRefusals>, u64) {
     let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
     let Some((current, rolled_paths)) = paths.split_first() else {
-        return std::sync::Arc::default();
+        return (std::sync::Arc::default(), 0);
     };
     // OLDEST FIRST, as the ring was written.
     let rolled: Vec<(&std::path::PathBuf, Seen)> = rolled_paths
@@ -5126,16 +5174,94 @@ fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
         || !tail.current.same_file(&now)
         || len < tail.parsed;
     if fresh {
-        *tail = RefusalTail::read_ring(&rolled, current, now);
+        *tail = RefusalTail::queue_ring(&rolled, current, now);
     }
-    if len > tail.parsed {
-        tail.read_appended(current, len);
+    let left = tail.read_queued(slice);
+    if len > tail.parsed && left > 0 {
+        tail.read_appended(current, len, left);
     }
-    std::sync::Arc::clone(&tail.built)
+    let behind = tail.behind(len);
+    (std::sync::Arc::clone(&tail.built), behind)
+}
+
+/// One directory's evidence read to its end, a request's slice at a time:
+/// what a test of the fold reads, where the slicing is not the question.
+/// Stops after as many slices as a ring at its ceiling takes.
+#[cfg(test)]
+fn refusals_whole(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
+    let most = (64 * 1024 * 1024 / REQUEST_SLICE_BYTES).saturating_add(8);
+    let mut held = std::sync::Arc::default();
+    for _ in 0..most {
+        let (read, behind) = refusals_in(dir, REQUEST_SLICE_BYTES);
+        held = read;
+        if behind == 0 {
+            break;
+        }
+    }
+    held
+}
+
+/// The directories the follower reads, oldest asked first, at most
+/// [`FOLLOWED_DIRS`]; and whether its thread has been started.
+fn followed() -> &'static std::sync::Mutex<(std::collections::VecDeque<std::path::PathBuf>, bool)> {
+    static FOLLOWED: std::sync::OnceLock<
+        std::sync::Mutex<(std::collections::VecDeque<std::path::PathBuf>, bool)>,
+    > = std::sync::OnceLock::new();
+    FOLLOWED.get_or_init(|| std::sync::Mutex::new((std::collections::VecDeque::new(), false)))
+}
+
+/// Follows `dir` from now on (R3-24): the follower reads what a request
+/// left unread there. The first call starts the follower's thread; a thread
+/// that cannot start is named once on the importer's evidence log line and
+/// leaves every request reading its own slice, which still answers, only
+/// more slowly. One lock and a scan of at most [`FOLLOWED_DIRS`] paths.
+fn follow(dir: &std::path::Path) {
+    let mut held = followed()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (dirs, started) = &mut *held;
+    if !dirs.iter().any(|known| known == dir) {
+        if dirs.len() >= FOLLOWED_DIRS {
+            let _oldest = dirs.pop_front();
+        }
+        dirs.push_back(dir.to_path_buf());
+    }
+    if !*started {
+        *started = true;
+        let spawned = std::thread::Builder::new()
+            .name("api-refusal-follower".to_owned())
+            .spawn(follow_refusals);
+        if let Err(e) = spawned {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error("api.logs", "the refusal follower did not start")
+                    .with("why", telemetry::Value::Str(&e.to_string())),
+            );
+        }
+    }
+}
+
+/// The follower (R3-24): every [`FOLLOW_PAUSE`], one slice of at most
+/// [`FOLLOW_SLICE_BYTES`] of each followed directory that is behind. It
+/// holds the tails' lock for one slice of one directory at a time, so a
+/// request waits at most that long, and it never ends: the process does.
+fn follow_refusals() {
+    loop {
+        std::thread::sleep(FOLLOW_PAUSE);
+        let dirs: Vec<std::path::PathBuf> = followed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .iter()
+            .cloned()
+            .collect();
+        for dir in dirs {
+            let _read = refusals_in(&dir, FOLLOW_SLICE_BYTES);
+        }
+    }
 }
 
 impl RefusalTail {
-    /// A directory nothing has been read from yet: its first question reads
+    /// A directory nothing has been read from yet: its first question queues
     /// its ring.
     fn unread() -> Self {
         Self {
@@ -5145,36 +5271,31 @@ impl RefusalTail {
             counted: false,
             read_error: None,
             built: std::sync::Arc::default(),
+            queue: std::collections::VecDeque::new(),
         }
     }
 
-    /// The ring read afresh: every rolled file that is there, oldest first,
-    /// and the current file left for [`Self::read_appended`] to read from its
-    /// start. A file that could not be asked about, rolled or current, is
-    /// named in `errors` and not read.
-    fn read_ring(
+    /// The ring read afresh: every rolled file that is there queued, oldest
+    /// first, nothing read yet, and the current file left for
+    /// [`Self::read_appended`] to read from its start. A file that could not
+    /// be asked about, rolled or current, is named in `errors` and not
+    /// queued.
+    fn queue_ring(
         rolled: &[(&std::path::PathBuf, Seen)],
         current: &std::path::Path,
         now: Seen,
     ) -> Self {
         let mut built = DirRefusals::default();
+        let mut queue = std::collections::VecDeque::new();
         for (path, seen) in rolled {
             match seen {
                 Seen::Absent => {}
                 Seen::Failed(why) => built.errors.push(format!("{}: {why}", path.display())),
-                Seen::There { .. } => match std::fs::read(path) {
-                    Ok(bytes) => {
-                        built.files = built.files.saturating_add(1);
-                        built.bytes = built
-                            .bytes
-                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                        for line in bytes.split(|&byte| byte == b'\n') {
-                            built.fold(line);
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => built.errors.push(format!("{}: {e}", path.display())),
-                },
+                Seen::There { len, .. } => queue.push_back(Queued {
+                    path: (*path).clone(),
+                    len: *len,
+                    at: 0,
+                }),
             }
         }
         if let Seen::Failed(why) = &now {
@@ -5187,18 +5308,95 @@ impl RefusalTail {
             counted: false,
             read_error: None,
             built: std::sync::Arc::new(built),
+            queue,
         }
     }
 
-    /// Reads the current file's bytes from [`Self::parsed`] to `len` and
-    /// folds its whole lines in. A read that fails is named in `errors` in
-    /// one slot, replaced and never appended to; one that succeeds drops it.
-    fn read_appended(&mut self, current: &std::path::Path, len: u64) {
+    /// Bytes of the ring not read yet, the current file being `len` long.
+    fn behind(&self, len: u64) -> u64 {
+        self.queue
+            .iter()
+            .fold(len.saturating_sub(self.parsed), |sum, file| {
+                sum.saturating_add(file.len.saturating_sub(file.at))
+            })
+    }
+
+    /// Reads the queued rolled files, oldest first, at most `slice` bytes in
+    /// all, whole lines only (a file's last fragment is folded at its end, as
+    /// a whole read folds it); answers the slice left. A file read to its end
+    /// is counted and leaves the queue; one that cannot be read is named and
+    /// leaves it too.
+    fn read_queued(&mut self, slice: u64) -> u64 {
+        use std::io::{Read as _, Seek as _};
+        let mut left = slice;
+        while left > 0 {
+            let Some(file) = self.queue.front_mut() else {
+                break;
+            };
+            let take = left.min(file.len.saturating_sub(file.at));
+            let mut bytes = Vec::new();
+            let read = std::fs::File::open(&file.path).and_then(|mut opened| {
+                opened.seek(std::io::SeekFrom::Start(file.at))?;
+                opened.take(take).read_to_end(&mut bytes)
+            });
+            let built = std::sync::Arc::make_mut(&mut self.built);
+            match read {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let _gone = self.queue.pop_front();
+                    continue;
+                }
+                Err(e) => {
+                    built.errors.push(format!("{}: {e}", file.path.display()));
+                    let _named = self.queue.pop_front();
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            let at_end = file
+                .at
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                >= file.len
+                || bytes.is_empty();
+            // WHOLE LINES: through the last newline, or the whole rest at the
+            // file's end. A slice with no newline short of the end stops here
+            // and the next, wider in all, goes on.
+            let used = if at_end {
+                bytes.len()
+            } else {
+                match bytes.iter().rposition(|&byte| byte == b'\n') {
+                    Some(last) => last.saturating_add(1),
+                    None => break,
+                }
+            };
+            for line in bytes
+                .get(..used)
+                .unwrap_or_default()
+                .split(|&byte| byte == b'\n')
+            {
+                built.fold(line);
+            }
+            let used = u64::try_from(used).unwrap_or(u64::MAX);
+            built.bytes = built.bytes.saturating_add(used);
+            file.at = file.at.saturating_add(used);
+            left = left.saturating_sub(used.max(1));
+            if at_end {
+                built.files = built.files.saturating_add(1);
+                let _done = self.queue.pop_front();
+            }
+        }
+        left
+    }
+
+    /// Reads the current file's bytes from [`Self::parsed`] toward `len`, at
+    /// most `slice` of them, and folds its whole lines in. A read that fails
+    /// is named in `errors` in one slot, replaced and never appended to; one
+    /// that succeeds drops it.
+    fn read_appended(&mut self, current: &std::path::Path, len: u64, slice: u64) {
         use std::io::{Read as _, Seek as _};
         let mut bytes = Vec::new();
         let read = std::fs::File::open(current).and_then(|mut file| {
             file.seek(std::io::SeekFrom::Start(self.parsed))?;
-            file.take(len.saturating_sub(self.parsed))
+            file.take(len.saturating_sub(self.parsed).min(slice))
                 .read_to_end(&mut bytes)
         });
         let why = match read {
@@ -5218,6 +5416,7 @@ impl RefusalTail {
             self.read_error = Some(why);
             return;
         }
+        let mut used = 0usize;
         if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
             for line in bytes
                 .get(..last)
@@ -5226,19 +5425,21 @@ impl RefusalTail {
             {
                 built.fold(line);
             }
+            used = last.saturating_add(1);
             self.parsed = self
                 .parsed
-                .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
-                .saturating_add(1);
+                .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
         }
         // THE CURRENT FILE IS ONE FILE, counted the first time any of it is
         // read, whether or not the ring was read afresh in this call: a ring
         // first seen empty used to stay at 0 files while its bytes grew.
         built.files = built.files.saturating_add(u64::from(!self.counted));
         self.counted = true;
+        // THE BYTES FOLDED, not the bytes read: a line not yet whole is read
+        // again with the next slice and counted then, once.
         built.bytes = built
             .bytes
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
     }
 }
 
@@ -7553,7 +7754,7 @@ mod tests {
             line(1, "error", "2019-11-14") + &line(2, "info", "2019-11-14"),
         )
         .expect("write");
-        let first = refusals_in(&dir);
+        let first = refusals_whole(&dir);
         assert_eq!(first.of("options", "2019-11-14").len(), 1);
         let bytes = first.bytes;
         std::fs::OpenOptions::new()
@@ -7562,7 +7763,7 @@ mod tests {
             .expect("open")
             .write_all(line(3, "error", "2019-11-15").as_bytes())
             .expect("append");
-        let second = refusals_in(&dir);
+        let second = refusals_whole(&dir);
         assert_eq!(second.of("options", "2019-11-15").len(), 1);
         assert_eq!(
             second.bytes - bytes,
@@ -7573,7 +7774,7 @@ mod tests {
         // A ROLL READS THE RING AGAIN, oldest file first.
         std::fs::rename(&current, telemetry::rotated_path(&dir, 1)).expect("roll");
         std::fs::write(&current, line(4, "error", "2019-11-18")).expect("write");
-        let third = refusals_in(&dir);
+        let third = refusals_whole(&dir);
         assert_eq!(third.of("options", "2019-11-14").len(), 1);
         assert_eq!(third.of("options", "2019-11-18").len(), 1);
         assert_eq!(third.files, 2);
@@ -7905,7 +8106,7 @@ mod tests {
         let dir = crate::scratch::path("logs-ring-file-unreadable");
         let _ignored = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let empty = refusals_in(&dir);
+        let empty = refusals_whole(&dir);
         assert_eq!((empty.files, empty.bytes), (0, 0));
         let line = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
              \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
@@ -7919,9 +8120,9 @@ mod tests {
                 std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
             panic!("mode 000 does not stop this process from reading: run as a user it binds");
         }
-        let first = refusals_in(&dir);
-        let second = refusals_in(&dir);
-        let third = refusals_in(&dir);
+        let first = refusals_whole(&dir);
+        let second = refusals_whole(&dir);
+        let third = refusals_whole(&dir);
         let _restored = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
         assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
         assert!(
@@ -7941,7 +8142,7 @@ mod tests {
         );
 
         // READABLE: read, counted as one file, and the error dropped.
-        let readable = refusals_in(&dir);
+        let readable = refusals_whole(&dir);
         assert!(readable.errors.is_empty(), "{:?}", readable.errors);
         assert_eq!(readable.of("options", "2019-11-14").len(), 1);
         assert_eq!(
@@ -8836,5 +9037,143 @@ mod r3_24_picture_tests {
         let none: serde_json::Value =
             serde_json::from_str(&format!("{{{}}}", streams_json(None, None))).expect("JSON");
         assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_follow_tests {
+    //! R3-24: the importer's refusal lines are followed on a background
+    //! thread, and no page request reads more than a fixed slice.
+
+    use super::{REQUEST_SLICE_BYTES, import_refusals, refusals_in};
+
+    /// A ring of rolled files holding `days` x `per_day` importer refusals of
+    /// the options kind, written by a sink whose files roll at 256 KiB, under
+    /// `<root>/logs/cli`. Answers the root.
+    fn big_ring(name: &str, days: u32, per_day: u32) -> std::path::PathBuf {
+        let root = crate::scratch::path(&format!("logs-r324f-{name}"));
+        let _ignored = std::fs::remove_dir_all(&root);
+        let dir = root.join("logs").join("cli");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir)
+                .with_max_file_bytes(256 * 1024)
+                .with_audit(false),
+        )
+        .expect("opens");
+        let why = "a reason long enough to make the ring several slices wide ".repeat(4);
+        for day in 0..days {
+            let text: &'static str =
+                Box::leak(format!("2020-01-{:02}", day % 28 + 1).into_boxed_str());
+            for n in 0..per_day {
+                let _ = sink.emit(
+                    &telemetry::Event::error("gdfl.import", "refused")
+                        .with("kind", "options")
+                        .with("day", text)
+                        .with("n", n)
+                        .with("why", why.as_str()),
+                );
+            }
+        }
+        assert!(
+            sink.health().rotations >= 4,
+            "premise: a ring of rolled files"
+        );
+        root
+    }
+
+    /// The refusals the evidence holds for every January 2020 day.
+    fn held_in(refusals: &super::DirRefusals) -> usize {
+        (1..=28)
+            .map(|day| refusals.of("options", &format!("2020-01-{day:02}")).len())
+            .sum()
+    }
+
+    /// **NO PAGE REQUEST READS MORE THAN A FIXED SLICE** (R3-24): a ring
+    /// several slices wide is read across calls, each folding at most
+    /// [`REQUEST_SLICE_BYTES`], each saying how much is left, and the last
+    /// holds every refusal. It used to be read whole inside the first
+    /// request.
+    #[test]
+    fn a_request_reads_at_most_its_slice() {
+        let root = big_ring("slice", 28, 100);
+        let dir = root.join("logs").join("cli");
+        let mut calls = 0u32;
+        let mut read = 0u64;
+        let mut last_behind = u64::MAX;
+        let held = loop {
+            let (held, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+            assert!(
+                held.bytes - read <= REQUEST_SLICE_BYTES,
+                "call {calls} read {} bytes",
+                held.bytes - read
+            );
+            assert!(behind < last_behind, "every slice makes progress");
+            read = held.bytes;
+            last_behind = behind;
+            calls += 1;
+            if behind == 0 {
+                break held;
+            }
+        };
+        assert!(
+            calls >= 4,
+            "a ring several slices wide took {calls} call(s)"
+        );
+        assert_eq!(held_in(&held), 28 * 100);
+        assert!(held.errors.is_empty(), "{:?}", held.errors);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE FOLLOWER READS THE REST, OFF EVERY REQUEST** (R3-24): the first
+    /// question of a wide ring answers its slice and names the directory as
+    /// not read yet, never "none"; the follower catches up in the background
+    /// and a later question holds every refusal.
+    #[test]
+    fn the_follower_reads_what_a_request_left() {
+        let root = big_ring("follow", 28, 100);
+        let first = import_refusals(&root);
+        let unread = first.unread("options");
+        assert!(
+            unread
+                .iter()
+                .any(|why| why.contains("logs/cli") && why.contains("not read yet")),
+            "{unread:?}"
+        );
+        let started = std::time::Instant::now();
+        let caught_up = loop {
+            let now = import_refusals(&root);
+            if now
+                .unread("options")
+                .iter()
+                .all(|why| !why.contains("logs/cli"))
+            {
+                break now;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "the follower did not catch up: {:?}",
+                now.unread("options")
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let cli = caught_up
+            .dirs()
+            .iter()
+            .find(|dir| dir.half == "cli")
+            .expect("the cli directory");
+        assert_eq!(cli.state, super::DirState::Read);
+        let total: usize = (1..=28)
+            .map(|day| caught_up.of("options", &format!("2020-01-{day:02}")).len())
+            .sum();
+        assert_eq!(total, 28 * 100);
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
