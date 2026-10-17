@@ -936,6 +936,28 @@ mod cloud_mutant_tests {
             assert_eq!((read.version, read.records.len()), (version, 0));
         }
     }
+
+    /// Only a sidecar that is not there reads as no sidecar: one that cannot
+    /// be opened for another reason (a regular file where its directory
+    /// belongs) is refused naming the path. Kills the absence guard read as
+    /// `true`, which answered every open failure as an absent file.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn only_a_missing_sidecar_reads_as_none() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarRead");
+        assert!(matches!(super::read(&root.join("Absent.auc")), Ok(None)));
+        let file = root.join("File");
+        std::fs::write(&file, b"x").unwrap();
+        let under = file.join("Under.auc");
+        let refused = super::read(&under).unwrap_err();
+        assert_eq!(refused.ordinal, None);
+        assert!(
+            refused.why.starts_with(&format!("{}: ", under.display())),
+            "{}",
+            refused.why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
