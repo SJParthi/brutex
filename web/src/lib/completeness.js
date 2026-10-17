@@ -76,8 +76,7 @@ export function denominators(rows) {
   const support = new Map();
   for (const r of rows ?? []) {
     const at = denomKey(r.month, r.timeframe);
-    const seen = fullest.get(at);
-    if (seen === undefined || r.rows > seen) fullest.set(at, r.rows);
+    fullest.set(at, Math.max(fullest.get(at) ?? 0, r.rows));
     support.set(at, (support.get(at) ?? 0) + 1);
   }
   return { fullest, support };
@@ -251,12 +250,14 @@ export function owedKind(segment, auction, flag) {
  * @returns {string}
  */
 export function coverPct(ratio) {
-  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '—';
-  if (ratio >= 1) return '100.00%';
+  // `Number.isFinite` is false for `null` and `undefined` as for NaN.
+  if (!Number.isFinite(ratio)) return '—';
+  const r = /** @type {number} */ (ratio);
+  if (r >= 1) return '100.00%';
   // `1e-9` absorbs the float's own error (0.29 x 10,000 is 2,899.999...);
   // the cap keeps a ratio under 1 under 100.00% whatever that adds.
-  const hundredths = Math.min(9_999, Math.floor(ratio * 10_000 + 1e-9));
-  if (hundredths <= 0) return ratio > 0 ? '<0.01%' : '0.00%';
+  const hundredths = Math.min(9_999, Math.floor(r * 10_000 + 1e-9));
+  if (hundredths <= 0) return r > 0 ? '<0.01%' : '0.00%';
   return `${Math.floor(hundredths / 100)}.${String(hundredths % 100).padStart(2, '0')}%`;
 }
 
@@ -321,7 +322,9 @@ export function judgeRow(row, ctx) {
     why: ''
   };
   const { first, last } = monthSpan(row.month);
-  if (ctx.window && (row.month < ctx.window.from.slice(0, 7) || row.month > ctx.window.to.slice(0, 7))) {
+  // A month is in the window when its first day is not after its end and
+  // its last is not before its start (`-31` bounds every day as text).
+  if (ctx.window && !(`${row.month}-01` <= ctx.window.to && `${row.month}-31` >= ctx.window.from)) {
     notes.push('outside_window');
   }
   if (ctx.derived) {
@@ -332,15 +335,19 @@ export function judgeRow(row, ctx) {
   // owing a listing month its days before the listing would call every new
   // share short. The note says so, so a front the import refused is still
   // visible as a note and as the series' first day (D-3315).
+  //
+  // NO DAY OF A ROW'S SPAN CAN LIE OUTSIDE THESE BOUNDS, so they are a max
+  // and a min and nothing more: a series' first bar is never after a month
+  // it holds or lies between, a contract never holds a month after its
+  // expiry, and the store's reach is never before a month it holds.
   let from = first;
   let to = last;
-  const seriesFirst = ctx.seriesFirstDay ?? null;
-  if (seriesFirst !== null && seriesFirst > first && seriesFirst <= last) {
+  const seriesFirst = ctx.seriesFirstDay ?? -Infinity;
+  if (seriesFirst > first) {
     from = seriesFirst;
     notes.push('series_start');
   }
-  const expiryDay = row.expiry ? epochDayOfIso(row.expiry) : null;
-  if (expiryDay !== null && expiryDay >= first && expiryDay < last) to = expiryDay;
+  to = Math.min(to, row.expiry ? epochDayOfIso(row.expiry) : Infinity);
   // THE SPAN'S END. A month the store has not finished reaching is owed only
   // to the store's reach (the last bar any series holds at this rung: GDFL's
   // archive ends 2026-09-24). A series whose last stored bar falls short of
@@ -349,15 +356,14 @@ export function judgeRow(row, ctx) {
   // earlier one ENDED there (a delisting, a rename, a pull that stopped
   // months ago): it is measured to its last bar and the note says so, with
   // the store's reach beside it, so the end is seen and judged by a reader.
-  const reach = ctx.storeLastDay ?? null;
-  const seriesLast = ctx.seriesLastDay ?? null;
-  if (reach !== null && reach >= first && reach < to) to = reach;
-  if (seriesLast !== null && seriesLast >= from && seriesLast < to) {
-    const storesLastMonth = reach !== null && reach >= first && reach <= last;
-    if (!storesLastMonth) {
-      to = seriesLast;
-      notes.push('series_end');
-    }
+  const reach = ctx.storeLastDay ?? Infinity;
+  to = Math.min(to, reach);
+  // ENDED, NOT STOPPED: the store reaches past this month, and the series'
+  // last bar is short of the span's end.
+  const seriesLast = ctx.seriesLastDay ?? Infinity;
+  if (seriesLast < to && reach > last) {
+    to = seriesLast;
+    notes.push('series_end');
   }
   cover.spanFrom = from;
   cover.spanTo = to;
@@ -379,9 +385,8 @@ export function judgeRow(row, ctx) {
   // sessions" is then a count of days, not bars over 22,500. A day of the
   // span outside the series' own calendar holds no bar of it (its census
   // span ends there), so only the series' own span is counted.
-  const mine = ctx.held ?? (ledger.series !== null ? ledger : null);
+  const mine = ctx.held ?? ledger;
   const own =
-    mine !== null &&
     mine.series !== null &&
     mine.series.symbol === (row.underlying ?? '') &&
     mine.series.segment === segment &&
@@ -408,7 +413,6 @@ export function judgeRow(row, ctx) {
     return cover;
   }
   cover.basis = 'calendar';
-  const share = segment === 'CASH';
   const kind = owedKind(segment, span.auction > 0, ctx.casFlag ?? null);
   /** The span's counts by field name, for the kind's names. */
   const count = /** @type {Record<string, number>} */ (/** @type {unknown} */ (span));
@@ -427,7 +431,8 @@ export function judgeRow(row, ctx) {
   if (own) {
     cover.heldSessions = heldSessions;
     cover.heldExact = true;
-  } else if (perSession !== null && perSession > 0) {
+  } else if (perSession) {
+    // NULL OR ZERO HAS NO AVERAGE SESSION TO DIVIDE BY.
     cover.heldSessions = row.rows / perSession;
   }
   if (row.absent) {
@@ -453,17 +458,16 @@ export function judgeRow(row, ctx) {
   // NAMED ONLY WHERE THE FLOOR DECIDES: a session with no bar owes more than
   // the month total says is missing (never a surplus month with none).
   if (unheld > 0 && unheld > owed - row.rows) notes.push('unheld_sessions');
-  if (kind.unresolved && cover.owedAlt !== null && row.rows >= owed && row.rows < cover.owedAlt) {
-    // HELD AT LEAST WHAT AN ELIGIBLE SHARE OWES AND LESS THAN AN INELIGIBLE
-    // ONE: eligibility cannot be told from the count alone, so neither
-    // verdict is claimed — a flag-0 share at 360 a session is short, an
-    // eligible one full, and the census carries no flag (SC-CLOSE-17).
-    notes.push('cas_unresolved');
-    cover.missing = missing > 0 ? missing : null;
-  } else {
-    if (kind.unresolved && cover.owedAlt !== null && row.rows < owed) notes.push('cas_unresolved');
-    cover.missing = missing;
-  }
+  // THE OTHER COUNT DECIDES BELOW IT (SC-CLOSE-17). `owedAlt` stands only
+  // for a share whose flag the census does not carry, so `alt > owed` is
+  // that share. Under the ineligible count its verdict hangs on the flag;
+  // at or above what an eligible share owes and under the other count,
+  // nothing is known missing and nothing is known whole — a flag-0 share
+  // at 360 a session is short, an eligible one full — so neither verdict
+  // is claimed.
+  const alt = cover.owedAlt ?? owed;
+  if (alt > owed && row.rows < alt) notes.push('cas_unresolved');
+  cover.missing = missing === 0 && row.rows < alt ? null : missing;
   // A SURPLUS IS NOT PLACED BY A MONTH TOTAL. A month holding more than it
   // owes may hold it on one day and lack it on another, so its count
   // proves nothing missing and nothing whole: no bar it is known to lack
@@ -522,11 +526,7 @@ export function judgeRow(row, ctx) {
   // than one bucket, or it holds fewer sessions' worth than the source.
   if (ctx.derived && ctx.source) {
     const rungMs = ctx.rungMs ?? 0;
-    if (
-      ctx.source.lastAt !== null &&
-      row.lastAt !== null &&
-      row.lastAt + rungMs < ctx.source.lastAt
-    ) {
+    if (row.lastAt !== null && row.lastAt + rungMs < (ctx.source.lastAt ?? -Infinity)) {
       notes.push('derived_behind');
     }
     if (ctx.source.cover && derivedPartial(cover, ctx.source.cover)) notes.push('derived_partial');
@@ -548,12 +548,14 @@ export function judgeRow(row, ctx) {
  * @param {Cover} source
  */
 export function derivedPartial(derived, source) {
-  if (derived.owed === null || source.owed === null || derived.missing === null || source.missing === null) {
-    return false;
-  }
-  if (derived.owed <= 0 || source.owed <= 0) return false;
-  const bucket = source.owed / derived.owed;
-  return derived.missing * bucket > source.missing + bucket;
+  // NOTHING UNKNOWN OR UNOWED IS EVER PARTIAL, by the arithmetic itself: an
+  // unknown count reads 0, so an unowed derived month makes the bucket
+  // infinite (Infinity > Infinity, or NaN, is false) and an unowed source
+  // makes it 0 (0 > a count is false). Only an unknown source shortfall
+  // must be refused by name — it would read as nothing lost.
+  if (source.missing === null) return false;
+  const bucket = Number(source.owed) / Number(derived.owed);
+  return Number(derived.missing) * bucket > source.missing + bucket;
 }
 
 /**
@@ -573,7 +575,9 @@ export function derivedPartial(derived, source) {
  * @returns {string[]} the months it does not hold, oldest first
  */
 export function absentMonths(firstMonth, lastMonth, held) {
-  if (!firstMonth || !lastMonth || firstMonth > lastMonth) return [];
+  // An empty first month would count from the year 0; an empty last, or a
+  // last before the first, counts nothing on its own.
+  if (!firstMonth) return [];
   return monthsBetween(firstMonth, lastMonth).filter((m) => !held.has(m));
 }
 
@@ -645,21 +649,24 @@ export function rollUpMonths(items) {
     // (`over`) or a share whose auction flag is unread. Summing its count
     // would let it fill another row's hole, the month-grain fault R3-04
     // removes from the rows.
-    if (c.basis !== 'calendar' || c.owed === null || c.missing === null) {
+    if (c.basis !== 'calendar' || c.missing === null) {
       if (c.state === 'over') m.over += 1;
       else m.unmeasured += 1;
       continue;
     }
-    m.owed += c.owed;
+    // A CALENDAR ROW ALWAYS CARRIES ITS OWED COUNT; its missing one is known here.
+    const owedHere = /** @type {number} */ (c.owed);
+    m.owed += owedHere;
     // HELD IS OWED LESS MISSING, so a per-day floor lowers the month too.
-    m.bars += c.owed - c.missing;
+    m.bars += owedHere - c.missing;
     m.missing += c.missing;
     if (c.state === 'full') m.full += 1;
     // THE WORST ROW, ORDER-INDEPENDENT: the most missing, ties broken on
     // the row's own identity rather than on which arrived first.
     const miss = c.missing;
     const was = m.worst ? m.worst.cover.missing : -1;
-    if (miss > was || (miss === was && m.worst && rowId(it) < rowId(m.worst))) m.worst = it;
+    // `was` is -1 only before a first row, and `miss` is never negative.
+    if (miss > was || (miss === was && rowId(it) < rowId(m.worst))) m.worst = it;
   }
   return [...by.values()].map((m) => ({ ...m, ...monthVerdict(m) }));
 }
@@ -669,7 +676,7 @@ export function rollUpMonths(items) {
  *
  * @param {{ month: string, timeframe: string, instrument?: string }} it
  */
-const rowId = (it) => `${it.instrument ?? ''}|${it.timeframe}`;
+const rowId = (it) => `${it.instrument}|${it.timeframe}`;
 
 /**
  * A month's coverage and its band.
