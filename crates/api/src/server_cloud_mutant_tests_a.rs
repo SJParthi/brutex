@@ -1987,3 +1987,34 @@ fn the_index_map_reads_the_catalogue_from_the_masters_folder_on_each_request() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+
+/// **A census that holds only a contract of a name places no spot series of
+/// it.** The contract row is the census's own, filed under the same symbol,
+/// and `locate_spot` passes over it: a spot `/bars` for NIFTY with no
+/// exchange or segment named is not held, never placed at the option's
+/// exchange. Covers the `contract.is_some()` skip in `locate_spot`
+/// (server.rs:15041).
+#[test]
+fn a_census_holding_only_a_contract_places_no_spot_series() {
+    use brutex_core::instrument::Exchange;
+    let store = ContractStore::new("contract-only-spot", Some(&[Exchange::Nse]), false);
+    let placed = locate_spot(
+        &store.site,
+        "feed=gdfl&symbol=NIFTY&timeframe=1s&month=2024-03",
+        "NIFTY",
+    );
+    assert!(
+        matches!(placed, Err(Unlocated::NotHeld(ref unreadable)) if unreadable.is_empty()),
+        "the option is not a spot series: {:?}",
+        placed.as_ref().ok()
+    );
+    // THE PREMISE: the same census places the option by its contract.
+    let (status, page) = bars_html(&store.site, OPTION_QUERY);
+    assert_ne!(status, axum::http::StatusCode::BAD_REQUEST, "{page}");
+    assert!(
+        !page.contains("holds no NIFTY contract at this rung and month"),
+        "{page}"
+    );
+}
