@@ -298,9 +298,21 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
 
 ## Left
 
-- **Mutation runs**: finish B and D, then run C on `sealed.rs` and
-  `sealed_codec.rs`, then a final re-test of every survivor on the final
-  tree.
+- **Mutation runs**: finish B and C, then re-test every survivor on the
+  final tree with the full suite (no skips but `cited_commits`). At 22:03:
+  - **Run B**, resumed twice (`--iterate`, on `af6423fe`'s tree): 283 of
+    the 530 left. 8 missed, every one an argued equivalent: `MAX_ROW_LEN`
+    ×3, `O_SYNC.is_none()`, `flush_all`, `writer_flags` ×2 and
+    `Code::worse`. 2 timeouts, the `first_at_or_after` pair above.
+  - **Run C** (`sealed.rs`, `sealed_codec.rs`, 910 mutants): 412 done, 392
+    caught, 17 unviable, 3 missed.
+    - `Head::check` → `Ok(())` and its `||` → `&&`: run C skips
+      `a_misfiled_month_is_refused` and
+      `a_length_that_is_not_the_heads_is_refused` for speed, and those two
+      exist to kill both. The misfiled test moves the month within its
+      year and the year within its month. The re-test with the full suite
+      is what counts.
+    - `Fold::push` `<` → `<=`, an argued equivalent.
 - **Coverage**: a final run on the final tree.
 - **Equivalent mutants** still argued, each to be confirmed by the runs:
   - `verdict` `Code::worse` `<` → `<=`.
