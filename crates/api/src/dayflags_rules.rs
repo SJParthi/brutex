@@ -632,6 +632,50 @@ pub(super) fn scan_day(
     Ok(Some(scan))
 }
 
+/// The days one lane of [`scan_month`] scans: a month's twenty-odd sessions
+/// on three or four scoped threads.
+const SCAN_LANE_DAYS: usize = 8;
+
+/// **A MONTH'S FIRST SCANS RUN IN PARALLEL** (DB-B20's cold cost; R3-13's
+/// measured target, "no slower than today's figure"): every day of `spans`
+/// that holds bars and that the memo does not hold at its end row is scanned
+/// once, [`SCAN_LANE_DAYS`] days a scoped thread, and kept; each day's own
+/// [`scan_day`] then answers from the memo. A month the memo holds spawns
+/// nothing. A day that will not read is left for [`scan_day`] to read again
+/// and name. Returns how many days were scanned here.
+pub(super) fn scan_month(
+    file: &store::file::BarFile,
+    (dev, ino): (u64, u64),
+    spans: &[(Day, u64, u64)],
+    in_halt: impl Fn(Day, i64) -> bool + Sync,
+) -> usize {
+    let cold: Vec<(Day, u64, u64)> = {
+        let memo = SCANS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        spans
+            .iter()
+            .filter(|(_, lo, hi)| {
+                hi > lo && memo.get(&(dev, ino, *lo)).is_none_or(|(end, _)| end != hi)
+            })
+            .copied()
+            .collect()
+    };
+    let in_halt = &in_halt;
+    std::thread::scope(|scope| {
+        for lane in cold.chunks(SCAN_LANE_DAYS) {
+            let _lane = scope.spawn(move || {
+                for &(day, lo, hi) in lane {
+                    let _scanned =
+                        scan_day(file, Some((dev, ino)), (lo, hi), |ts| in_halt(day, ts));
+                }
+            });
+        }
+    });
+    cold.len()
+}
+
 /// What an index day's rules read: the feed, the day's scan of its minutes
 /// (Zerodha), the day bar's high and low, and the day ledger's longest
 /// unchanged run (GDFL: `flat_max_s`, `flat_max_at`, its line).

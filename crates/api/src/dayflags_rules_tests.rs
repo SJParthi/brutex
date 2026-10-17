@@ -1159,6 +1159,21 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
     let (json, says) = inside.json();
     assert_eq!(json["frozen"]["flagged"], false);
     assert!(says.is_empty());
+    // THE HALT IS `[from, resume)`: its first second is inside, the second it
+    // resumes at is not, for a minute bar's stamp as for the ledger's run.
+    let on = day("2020-03-13");
+    let at = |second: u32| super::super::ist_midnight_micros(on) + i64::from(second) * 1_000_000;
+    let venue = pull::vendor::Venue::NseIndex;
+    let inside_halt = |second| super::super::in_recorded_halt(venue, on, at(second));
+    assert!(!inside_halt(halt.from - 1));
+    assert!(inside_halt(halt.from));
+    assert!(inside_halt(halt.resume - 1));
+    assert!(!inside_halt(halt.resume));
+    assert!(!super::super::in_recorded_halt(
+        venue,
+        day("2020-03-12"),
+        at(halt.from)
+    ));
     let outside = IndexDay {
         ledger: Some((2_700, Some(halt.resume), 4)),
         ..inside
@@ -2136,4 +2151,75 @@ fn a_day_bar_session_without_minutes_says_only_no_bar() {
         "{:#?}",
         says(rec)
     );
+}
+
+/// **A MONTH'S FIRST SCANS RUN IN PARALLEL AND ARE KEPT** (R3-13's measured
+/// target): every day that holds bars and that the memo does not hold at its
+/// end row is scanned once, over more than one lane; a second call scans
+/// none; a day read to another end row is scanned again; a day with no bar is
+/// never scanned. Each day's own scan then answers from the memo.
+#[test]
+fn a_months_first_scans_run_in_parallel_and_are_kept() {
+    let root = root_of("r3-13-scan-month");
+    let key = "NSE-INDEX-NIFTY";
+    let open = 9 * 3_600 + 15 * 60;
+    let held: Vec<Day> = [2, 3, 4, 7, 8, 9, 10, 11, 14, 15]
+        .iter()
+        .map(|d| day(&format!("2022-03-{d:02}")))
+        .collect();
+    let bars = held
+        .iter()
+        .flat_map(|on| {
+            let on = on.to_string();
+            [
+                bar(&on, open, [1_600_000; 4], 0),
+                bar(&on, open + 60, [1_600_100; 4], 0),
+            ]
+        })
+        .collect();
+    file_bars(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, bars);
+    let inst = super::super::instrument_of(key, "").expect("a key");
+    let month = YearMonth::new(2022, 3).expect("a month");
+    let super::super::Opened::File(file) =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
+    else {
+        panic!("the month opens");
+    };
+    let identity = file_identity(&file).expect("an identity");
+    let mut days = held.clone();
+    days.push(day("2022-03-16"));
+    let spans: Vec<(Day, u64, u64)> = days
+        .iter()
+        .zip(super::super::day_spans(&file, &days))
+        .map(|(on, span)| {
+            let (lo, hi) = span.expect("a span");
+            (*on, lo, hi)
+        })
+        .collect();
+    assert_eq!(
+        spans.last().map(|(_, lo, hi)| hi - lo),
+        Some(0),
+        "the 16th holds no bar"
+    );
+    let quiet = |_: Day, _: i64| false;
+    assert_eq!(
+        scan_month(&file, identity, &spans, quiet),
+        10,
+        "ten days, two lanes"
+    );
+    assert_eq!(
+        scan_month(&file, identity, &spans, quiet),
+        0,
+        "every day is kept"
+    );
+    for &(_, lo, hi) in &spans[..10] {
+        let kept = scan_day(&file, Some(identity), (lo, hi), |_| false).expect("from the memo");
+        assert_eq!(kept.map(|scan| scan.bars), Some(2));
+    }
+    // A day read to another end row is scanned again, once.
+    let (on, lo, hi) = spans[0];
+    let shorter = [(on, lo, hi - 1)];
+    assert_eq!(scan_month(&file, identity, &shorter, quiet), 1);
+    assert_eq!(scan_month(&file, identity, &shorter, quiet), 0);
+    assert_eq!(scan_month(&file, identity, &spans[..1], quiet), 1);
 }

@@ -3537,17 +3537,23 @@ fn counts(
                 per_day.extend(month_days.iter().map(|_| Held::Unreadable));
             }
             Opened::File(file) => {
-                let mut lower: Option<u64> = None;
                 // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
                 let identity = reads.scan.then(|| rules::file_identity(&file)).flatten();
-                for day in month_days {
-                    let start = ist_midnight_micros(*day);
-                    let counted = lower
-                        .map_or_else(|| file.first_at_or_after(start), Ok)
-                        .and_then(|lo| {
-                            let hi = file.first_at_or_after(start.saturating_add(DAY_MICROS))?;
-                            Ok((lo, hi))
-                        });
+                let spans = day_spans(&file, month_days);
+                if let Some(identity) = identity {
+                    let held: Vec<(Day, u64, u64)> = month_days
+                        .iter()
+                        .zip(&spans)
+                        .filter_map(|(day, span)| {
+                            span.as_ref().ok().map(|&(lo, hi)| (*day, lo, hi))
+                        })
+                        .collect();
+                    let venue = inst.venue();
+                    let _scanned = rules::scan_month(&file, identity, &held, |day, ts| {
+                        in_recorded_halt(venue, day, ts)
+                    });
+                }
+                for (day, counted) in month_days.iter().zip(spans) {
                     match counted {
                         Ok((lo, hi)) => {
                             let held = hi.saturating_sub(lo);
@@ -3563,7 +3569,6 @@ fn counts(
                             zero.push(fills);
                             scans.push(scan);
                             first_at.push(first);
-                            lower = Some(hi);
                         }
                         Err(why) => {
                             notes.push(format!(
@@ -3579,7 +3584,6 @@ fn counts(
                             halted.push(None);
                             scans.push(None);
                             first_at.push(None);
-                            lower = None;
                         }
                     }
                 }
@@ -3599,6 +3603,27 @@ fn counts(
         first_at,
         notes,
     }
+}
+
+/// Each day's `[lo, hi)` rows in `file`, or the lookup's refusal: two lookups
+/// a day, the first of them the previous day's end where that day read. A
+/// failed lookup starts the next day afresh, so no later day of the month
+/// reads the next day's counts.
+fn day_spans(file: &BarFile, days: &[Day]) -> Vec<Result<(u64, u64), StoreError>> {
+    let mut lower: Option<u64> = None;
+    days.iter()
+        .map(|day| {
+            let start = ist_midnight_micros(*day);
+            let counted = lower
+                .map_or_else(|| file.first_at_or_after(start), Ok)
+                .and_then(|lo| {
+                    let hi = file.first_at_or_after(start.saturating_add(DAY_MICROS))?;
+                    Ok((lo, hi))
+                });
+            lower = counted.as_ref().ok().map(|&(_, hi)| hi);
+            counted
+        })
+        .collect()
 }
 
 /// One day's reads past its boundaries, each only where `reads` asks: its
