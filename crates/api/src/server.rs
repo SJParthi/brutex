@@ -1659,6 +1659,8 @@ use census_cache::{
 pub use census_cache::{CensusCache, CensusNow, CensusStamps};
 pub(crate) use census_cache::{Slot as CensusSlot, census_now, census_now_stamped, vendor_census};
 use feeds_route::feeds_json;
+/// `/gaps.json` through its own handler, for gate 8 (R3-06).
+pub use gaps_route::gaps_answer;
 use gaps_route::gaps_json;
 #[cfg(test)]
 use gaps_route::{peer_calendar, peer_calendar_reading};
@@ -5768,7 +5770,15 @@ async fn land_broker_member(
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
     asked: &ingest::SpotRequest,
 ) -> pull::ingest::Ingested {
+    // TIMED AS A STAGE (R3-14, RA-014): each member's landing, in the buckets
+    // a route has, on `/speed.json` as `stage:zerodha landing`.
+    let stage = crate::speed::stage_start("zerodha landing");
     let mut landed_one = land_spot(landed, instrument, site, dated, asked.repair.as_deref()).await;
+    stage.finish_now(if landed_one.failures.is_empty() {
+        crate::speed::Outcome::Answered
+    } else {
+        crate::speed::Outcome::Failed
+    });
     note_short_window(
         &landed.instrument,
         landed.unfetched.as_deref(),
@@ -16396,6 +16406,17 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             axum::routing::get(crate::operation_audit::audit_json),
         )
         .route("/health", axum::routing::get(health))
+        // THE APP'S OWN SPEED, AND A PAGE'S OWN FAILURE (R3-14, RA-014): p50,
+        // p99 and max per route kept by `crate::speed`, and the one route a
+        // page reports that it broke on, 1 KiB a report, rationed, audited.
+        .route(
+            "/speed.json",
+            axum::routing::get(crate::speed_route::speed_json),
+        )
+        .route(
+            "/page-report",
+            axum::routing::post(crate::page_report_route::page_report),
+        )
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
         // every line above keeps winning and nothing on disk can shadow one.
         .fallback(move |request: axum::extract::Request| {
@@ -16969,6 +16990,9 @@ pub struct ConnectionLimits {
     /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
     /// accept is a hang, not a limit.
     pub max_connections: usize,
+    /// How long a stop waits for requests still open: see
+    /// [`crate::speed::DRAIN_GRACE`] and [`crate::speed::drain_bound`].
+    pub drain_grace: std::time::Duration,
 }
 
 impl ConnectionLimits {
@@ -16977,6 +17001,7 @@ impl ConnectionLimits {
         head_read_timeout: HEAD_READ_TIMEOUT,
         body_read_timeout: BODY_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
+        drain_grace: crate::speed::DRAIN_GRACE,
     };
 }
 
@@ -17447,15 +17472,231 @@ pub async fn serve_limited(
         limits.body_read_timeout,
         body_deadline,
     ));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // The signal's own error is not actionable: a failed ctrl-c
-            // registration still means stop, and there is nothing else to do
-            // about it here.
-            let _ = shutdown.await;
-        })
-        .await
+    // THE GRACEFUL STOP IS BOUNDED (R3-14): `crate::speed::drain_bound`
+    // waits for requests still open at most `DRAIN_GRACE` past the signal,
+    // then says so, and the stop returns: a slow read cannot hold a
+    // `kill -TERM`.
+    let (stopping, stop_asked) = tokio::sync::oneshot::channel::<()>();
+    let drain_grace = limits.drain_grace;
+    let served = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // The signal's own error is not actionable: a failed ctrl-c
+        // registration still means stop, and there is nothing else to do
+        // about it here.
+        let _ = shutdown.await;
+        // THE STOP IS SAID WHEN IT STARTS, with its bounds: the open
+        // requests get `drain_ms`, and the whole stop, during which the
+        // port stays bound and the store held (`Held`), ends within
+        // `bound_ms` of this line.
+        let _said = telemetry::emit(
+            &telemetry::Event::info("api.serve", "stop started")
+                .with("open", telemetry::Value::Uint(open_requests()))
+                .with("drain_ms", telemetry::Value::Uint(millis(drain_grace)))
+                .with(
+                    "bound_ms",
+                    telemetry::Value::Uint(millis(drain_grace.saturating_add(SHUTDOWN_GRACE))),
+                ),
+        );
+        let _bound_armed = stopping.send(());
+    });
+    let served = tokio::select! {
+        ended = std::future::IntoFuture::into_future(served) => ended,
+        () = crate::speed::drain_bound(stop_asked, limits.drain_grace) => Ok(()),
+    };
+    // THE MINUTE STILL OPEN IS WRITTEN, marked partial, so a stop loses no
+    // count (R3-14): `crate::speed::flush_at_shutdown`.
+    let _lines = crate::speed::flush_at_shutdown();
+    served
 }
+
+/// Requests open across every row of the process's speed table: what the
+/// stop line says it starts with.
+fn open_requests() -> u64 {
+    crate::speed::open_summary(&crate::speed::global().open_now()).0
+}
+
+/// A duration in whole milliseconds, saturating.
+fn millis(span: std::time::Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What a serving process keeps until its runtime has ended: its log, the
+/// store's serve lock and a duplicate of its listening socket (R3-14).
+///
+/// # Why the port is kept
+///
+/// A graceful stop closes the listener at once, while the stop itself goes on
+/// for up to [`crate::speed::STOP_BOUND`]: the open requests drain, then the
+/// runtime waits for blocking work, and the store must stay locked for all of
+/// it because that work may still be writing. A redeploy waits for the port
+/// to close and starts the new build; when the port closed first, the new
+/// instance met a lock still held and was REFUSED, and nothing listened
+/// afterwards. Holding a duplicate of the socket keeps the port bound until
+/// the lock is gone, so a free port means a free store. A connection that
+/// arrives in that window waits in the kernel's backlog and is reset when the
+/// process ends; it is never answered by a server that is ending.
+///
+/// # Why the log is kept, and closed first (R3-14 repair 3)
+///
+/// The store's log directory has its own lock, `<store>/telemetry/events.lock`,
+/// held by the process's sink. Freeing the store and the port while that lock
+/// lived on until the process's last instant let a successor started in the
+/// gap answer `/health` 200 and run its whole life with NO log and no audit
+/// stream ("log: NOT WRITABLE", 2 of 6 measured redeploys). [`Held::release`]
+/// therefore closes the sink this serve installed first
+/// ([`telemetry::Sink::close`]); a line after that is dropped and counted,
+/// never written into the successor's file.
+///
+/// # The order is the contract
+///
+/// [`Held::release`] frees the log FIRST, the store SECOND and the port LAST,
+/// so no instant exists in which the port is free and either lock is not. It
+/// is called by [`end_served`] after the process's last line.
+///
+/// DROPPING a `Held` frees the store and then the port but leaves the log
+/// open: a log is the process's, a test process shares one across many
+/// serves, and only the process's end may close it.
+#[derive(Debug, Default)]
+pub struct Held {
+    /// The sink this serve installed, when it installed one.
+    log: Option<&'static telemetry::Sink>,
+    /// The store's serve lock.
+    lock: Option<ServeLock>,
+    /// A duplicate of the listening socket; never accepted on.
+    port: Option<std::net::TcpListener>,
+}
+
+impl Held {
+    /// Whether this holds a serve lock and a port: a serve that got as far
+    /// as serving.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        self.lock.is_some() && self.port.is_some()
+    }
+
+    /// Closes the log, then releases the store, then the port.
+    pub fn release(mut self) {
+        if let Some(log) = self.log.take() {
+            // A failed sync or unlock is named by the sink itself, on stderr
+            // and in its health; the close happens either way.
+            let _closed = log.close();
+        }
+        self.release_in_order();
+    }
+
+    /// Closes the log and keeps the store and the port until the process
+    /// ends, for a process whose blocking work outlived the runtime's wait
+    /// (R3-14 repair 4, see [`end_served`]).
+    ///
+    /// The serve lock's descriptor and the kept socket are left open, never
+    /// closed by this process: its end stops every thread before it closes a
+    /// descriptor, so no instant exists in which the port is free and a thread
+    /// of this process still runs. The log is closed as [`Held::release`]
+    /// closes it, so its last line is synced; a later line is dropped and
+    /// counted.
+    pub fn keep_to_exit(mut self) {
+        if let Some(log) = self.log.take() {
+            let _closed = log.close();
+        }
+        std::mem::forget(self.lock.take());
+        std::mem::forget(self.port.take());
+    }
+
+    /// The store, then the port.
+    fn release_in_order(&mut self) {
+        drop(self.lock.take());
+        drop(self.port.take());
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.release_in_order();
+    }
+}
+
+/// `listener`, and a duplicate of its socket for [`Held`] to keep.
+///
+/// # Errors
+///
+/// The duplicate could not be made (no descriptor left), or the listener
+/// could not be put back on the runtime.
+fn keep_port(
+    listener: tokio::net::TcpListener,
+) -> std::io::Result<(tokio::net::TcpListener, std::net::TcpListener)> {
+    let listener = listener.into_std()?;
+    let kept = listener.try_clone()?;
+    Ok((tokio::net::TcpListener::from_std(listener)?, kept))
+}
+
+/// Ends a served process: the runtime first (at most `grace` for blocking
+/// work, see [`end_runtime`]), then the speed table's last counts
+/// ([`crate::speed::flush_at_exit`]: the requests the drain cut are counted
+/// when the runtime drops them), then `last_word` (the binary's exit line),
+/// told whether blocking work outlived the wait (R3-14 repair 5: the exit
+/// line said "everything went as asked" in the same stop that said, at
+/// `Error`, that work was abandoned),
+/// then the log, the store and the port, in that order ([`Held::release`]).
+/// Returns how many engine tasks were abandoned.
+///
+/// The exit line is said HERE, before the release, because after it the log
+/// may already be the successor's: a line written later would be dropped.
+///
+/// # Work that outlived the wait keeps the store and the port (R3-14 repair 4)
+///
+/// When the runtime's blocking threads did not all end inside the wait
+/// ([`Ended::outlived`]), tokio detaches them and they run on until the
+/// process ends: 0.15 to 0.5 s after the release on the operator's machine,
+/// with a scrub in flight. Releasing the store and the port in that gap let a
+/// successor start, and write, beside work the old process was still doing.
+/// So that end closes the log, as every end does, and leaves the store and
+/// the port to the process's own end ([`Held::keep_to_exit`]), which stops
+/// every thread before it closes a descriptor; it is said at `Error` first.
+pub fn end_served(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+    held: Held,
+    last_word: impl FnOnce(bool),
+) -> usize {
+    cli::cancel::request();
+    released_after(wait_then_end_said(runtime, grace), held, last_word)
+}
+
+/// [`end_served`] without asking engine work to stop, for the reason
+/// [`wait_then_end`] exists, and without waiting for it: in a test process
+/// every engine task running is another test's, and counting one would end
+/// this runtime as outlived for work it never had.
+#[cfg(test)]
+pub(crate) fn ended_then_released(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+    held: Held,
+    last_word: impl FnOnce(bool),
+) -> usize {
+    released_after(
+        wait_then_end_counting(runtime, grace, || 0),
+        held,
+        last_word,
+    )
+}
+
+/// What follows a runtime's end, in order: the speed table's last counts,
+/// the exit line, then the release, or the keep when work outlived the wait.
+fn released_after(ended: Ended, held: Held, last_word: impl FnOnce(bool)) -> usize {
+    let _lines = crate::speed::flush_at_exit();
+    last_word(ended.outlived);
+    if ended.outlived {
+        held.keep_to_exit();
+    } else {
+        held.release();
+    }
+    ended.engine
+}
+
+/// R3-14: a stop with a request still open keeps the port until the store is
+/// free, and counts the request it cut.
+#[cfg(test)]
+#[path = "stop_tests.rs"]
+mod stop_tests;
 
 /// probeapi-1, D-1200: slow, partial, silent, oversized and crowding clients
 /// against [`serve_limited`] — the deadline and the cap, driven in
@@ -17529,6 +17770,7 @@ mod head_deadline_tests {
             head_read_timeout: T,
             body_read_timeout: T,
             max_connections: cap,
+            drain_grace: T,
         }
     }
 
@@ -18333,6 +18575,23 @@ const SERVE_LOCK: &str = "serve.lock";
 /// a state to degrade through: `CLAUDE.md` §4 — degrade loudly and name the
 /// reason, or refuse.
 fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLock, String> {
+    take_serve_lock_stamping(store_root, addr, stamp_serve_lock)
+}
+
+/// [`take_serve_lock`] with its stamp step passed in: production passes
+/// [`stamp_serve_lock`]. A WRITE-FAILING SEAM, so the refusal of an
+/// unstampable lock is driven end to end on every host (R3-14, RA-184): it was
+/// driven through a lock name resolving to `/dev/full`, which macOS does not
+/// have, so the test failed on the operator's Mac before reaching its point.
+fn take_serve_lock_stamping(
+    store_root: &Path,
+    addr: std::net::SocketAddr,
+    stamp: impl FnOnce(
+        &store::flock::Flock<std::fs::File>,
+        std::net::SocketAddr,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<ServeLock, String> {
     // THE CONFIGURED ROOT MUST ALREADY EXIST. IT IS NEVER STARTUP SCRATCH.
     //
     // Recreating it is unsafe for an external-volume path: after hot unplug,
@@ -18426,7 +18685,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // was taken left the PREVIOUS holder's line in the file, and a refused
     // second instance quoted that dead pid as the one holding the store -- the
     // misattribution R9-api-cx-2 fixed, back through the error path.
-    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
+    if let Err(refusal) = stamp(&file, addr, &path) {
         drop(file);
         release_root(&key);
         return Err(refusal);
@@ -18662,7 +18921,14 @@ pub const DEGRADED: u8 = 3;
 /// running for the rest of the sweep — next to a second `api serve` the free
 /// lock let start. The wait is now bounded by this, and what is abandoned is
 /// said, never silent.
-pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// THREE SECONDS, NOT TEN (R3-14 repair 3): the serve's whole stop is
+/// [`crate::speed::DRAIN_GRACE`] plus this, and it must end inside
+/// [`crate::speed::REDEPLOY_WAIT`], or a redeploy finds the port still bound
+/// and nothing listens afterwards. Work still running at three seconds is
+/// abandoned and named exactly as it was at ten; an append cut short is safe
+/// by construction (the bar file commits its header after its records).
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Ends the process's runtime, waiting at most `grace` for blocking work.
 ///
@@ -18691,11 +18957,58 @@ pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration)
 /// Separate so a unit test can prove the bound without setting the
 /// process-wide stop, which would cancel the other tests' engine work.
 pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
+    wait_then_end_said(runtime, grace).engine
+}
+
+/// How a runtime ended (R3-14 repair 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ended {
+    /// Engine tasks still running when the wait ran out.
+    pub(crate) engine: usize,
+    /// Whether ending the blocking pool took all the wait that was left, so
+    /// a blocking thread may still be running, detached, with this process.
+    pub(crate) outlived: bool,
+}
+
+/// Whether `end`, given `left` to finish, took all of it.
+///
+/// `Runtime::shutdown_timeout` returns as soon as every thread of the
+/// blocking pool has ended, and only at its deadline when one has not; it
+/// does not say which. Its own deadline is set inside the call, after
+/// `started`, so a wait that ran out always measures at least `left`. A pool
+/// that ended just at the deadline counts as outlived: the cost of that is a
+/// store and a port freed by the process's end instead of before it.
+/// Tokio's own count of busy blocking threads is behind `tokio_unstable`
+/// (`RuntimeMetrics::num_idle_blocking_threads`), which this workspace does
+/// not build with.
+fn took_all_of(left: std::time::Duration, end: impl FnOnce()) -> bool {
+    let started = std::time::Instant::now();
+    end();
+    started.elapsed() >= left
+}
+
+/// [`wait_then_end`], and whether blocking work outlived the wait: that is
+/// said on stderr and in the log at `Error` before it returns.
+pub(crate) fn wait_then_end_said(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+) -> Ended {
+    wait_then_end_counting(runtime, grace, crate::sweeprun::engine_tasks_running)
+}
+
+/// [`wait_then_end_said`], with the count of running engine tasks given:
+/// the process's own in a served process, none in a test, where every engine
+/// task running is another test's.
+pub(crate) fn wait_then_end_counting(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+    running: impl Fn() -> usize,
+) -> Ended {
     let deadline = std::time::Instant::now() + grace;
-    while crate::sweeprun::engine_tasks_running() > 0 && std::time::Instant::now() < deadline {
+    while running() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let abandoned = crate::sweeprun::engine_tasks_running();
+    let abandoned = running();
     if abandoned > 0 {
         warn_line!(
             "STOPPING WITH {abandoned} ENGINE TASK(S) STILL RUNNING: the shutdown wait of \
@@ -18715,8 +19028,36 @@ pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::
             ),
         );
     }
-    runtime.shutdown_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
-    abandoned
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let outlived = took_all_of(left, || runtime.shutdown_timeout(left));
+    if outlived {
+        warn_line!(
+            "STOPPING WITH BLOCKING WORK STILL RUNNING: the runtime's threads did not all end \
+             inside the shutdown wait of {grace:?}, so they run on until this process ends. \
+             The store's serve lock and the port are kept until then and freed by the \
+             process's end, never before; the log closes now."
+        );
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Error,
+                "api.main",
+                "blocking work outlived the shutdown wait",
+            )
+            .with("engine_abandoned", telemetry::Value::Uint(abandoned as u64))
+            .with(
+                "grace_ms",
+                telemetry::Value::Uint(u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)),
+            )
+            .with(
+                "left_ms",
+                telemetry::Value::Uint(u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
+            ),
+        );
+    }
+    Ended {
+        engine: abandoned,
+        outlived,
+    }
 }
 
 /// Prints the report for `dir` and returns the exit code it earned.
@@ -18741,7 +19082,14 @@ fn reported(dir: &Path) -> u8 {
 /// Returns the exit code as a number rather than calling `exit`, so the whole
 /// thing — every arm of it — is callable from a test.
 pub async fn run(args: &[String], shutdown: Shutdown) -> u8 {
-    run_from(masters_dir(), args, shutdown).await
+    run_from(masters_dir(), args, shutdown, &mut Held::default()).await
+}
+
+/// [`run`], leaving in `held` what a serve kept (its serve lock and its port)
+/// for the caller to release after the runtime has ended: the binary passes
+/// it to [`end_served`] (R3-14). A command that never served leaves it empty.
+pub async fn run_held(args: &[String], shutdown: Shutdown, held: &mut Held) -> u8 {
+    run_from(masters_dir(), args, shutdown, held).await
 }
 
 /// [`run`], over a masters directory the environment may not have named.
@@ -18751,14 +19099,19 @@ pub async fn run(args: &[String], shutdown: Shutdown) -> u8 {
 /// machine with no `HOME` and no `BRUTEX_MASTERS`, which no test may create —
 /// `set_var` is `unsafe` under edition 2024 and this crate forbids `unsafe`.
 /// Taking the `Result` as an argument makes both arms drivable.
-async fn run_from(dir: Result<PathBuf, String>, args: &[String], shutdown: Shutdown) -> u8 {
+async fn run_from(
+    dir: Result<PathBuf, String>,
+    args: &[String],
+    shutdown: Shutdown,
+    held: &mut Held,
+) -> u8 {
     // A DIRECTORY THAT COULD NOT BE DERIVED IS NOT A DIRECTORY. `.` used to
     // stand in here, and the report it produced named two vendors as missing
     // rather than naming the environment that never pointed at them. `FAILED`
     // and not `DEGRADED`: nothing was read, so there is no output whose trust
     // is in question. D-0124.
     match dir {
-        Ok(dir) => run_in(&dir, args, shutdown).await,
+        Ok(dir) => run_in(&dir, args, shutdown, held).await,
         Err(why) => {
             warn_line!("{why}");
             FAILED
@@ -19168,8 +19521,111 @@ fn announce_log(logging: Result<&&'static telemetry::Sink, &String>, level_note:
 ///
 /// Taking the directory as an argument makes the answer a property of the
 /// files, which a test owns, rather than of the machine, which it does not.
-async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
-    run_in_over(dir, served_store_root(), args, shutdown).await
+async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown, held: &mut Held) -> u8 {
+    run_in_over(dir, served_store_root(), args, shutdown, held).await
+}
+
+/// Whether `args` name a serve: the one command that catches Ctrl-C and
+/// `SIGTERM` (R3-14 repair 5).
+///
+/// The binary registered both for EVERY command before parsing it (repair
+/// 4), so `api report`, which never polls a stop, held SIGINT and Ctrl-C no
+/// longer interrupted it. A report, a misuse and a non-text argument now keep
+/// the default disposition: Ctrl-C ends them at once, as before repair 4.
+#[must_use]
+pub fn catches_stops(args: &[String]) -> bool {
+    matches!(Command::parse(args), Ok(Command::Serve(_)))
+}
+
+/// What the start-up load ended as: see [`loaded_or_stopped`].
+#[derive(Debug)]
+pub(crate) enum Loading<T> {
+    /// The load finished before any stop was asked.
+    Loaded(T),
+    /// A stop was asked first, with its own result: `Err` when the signal
+    /// could not be waited for.
+    Stopped(std::io::Result<()>),
+    /// The load's thread ended without a value (it panicked): the reason.
+    Failed(String),
+}
+
+/// THE START-UP LOAD RACES THE STOP (R3-14 repair 5).
+///
+/// `Site::serving` reads the masters and the store for seconds (3 s at host
+/// load 20, about 18 s at load 109-125, measured on shadows of the real
+/// store), and it ran on the serve future before the stop future was first
+/// polled: a `SIGTERM` during it was answered only after the whole load, with
+/// the port already bound, so a redeploy that waits
+/// [`crate::speed::REDEPLOY_WAIT`] for the port found it still bound, was
+/// refused, and left nothing listening (the second agent's check 4,
+/// blocking 2).
+///
+/// The load now runs on the blocking pool and the stop is polled beside it,
+/// FIRST (`biased`), so a stop already asked wins over a load that also just
+/// finished. A stop during the load returns at once; the load's thread is
+/// left to the runtime's end, which waits [`SHUTDOWN_GRACE`] for it and then
+/// keeps the store and the port to the process's end
+/// ([`Held::keep_to_exit`]), so the whole stop is at most
+/// [`SHUTDOWN_GRACE`] plus the final writes, inside
+/// [`crate::speed::STOP_BOUND`]. One spawn and one select, once per process.
+pub(crate) async fn loaded_or_stopped<T: Send + 'static>(
+    load: impl FnOnce() -> T + Send + 'static,
+    shutdown: &mut Shutdown,
+) -> Loading<T> {
+    let loading = tokio::task::spawn_blocking(load);
+    tokio::select! {
+        biased;
+        asked = shutdown.as_mut() => Loading::Stopped(asked),
+        loaded = loading => match loaded {
+            Ok(value) => Loading::Loaded(value),
+            Err(why) => Loading::Failed(why.to_string()),
+        },
+    }
+}
+
+/// The exit of a serve stopped during its start-up load (R3-14 repair 5):
+/// said on the terminal and in the log, which is already open, so the stop
+/// is never a silence. A stop that was asked is [`OK`]: nothing was served
+/// and nothing was asked to be. A stop future that FAILED (the signal could
+/// not be waited for) is [`FAILED`], named: before this race it ended the
+/// serve's graceful shutdown at once and read as a clean stop.
+fn stopped_while_loading(asked: std::io::Result<()>) -> u8 {
+    match asked {
+        Ok(()) => {
+            let _said = telemetry::emit(
+                &telemetry::Event::info("api.serve", "stop asked during the start-up load")
+                    .with("served", telemetry::Value::Bool(false))
+                    .with("bound_ms", telemetry::Value::Uint(millis(SHUTDOWN_GRACE))),
+            );
+            say!(
+                "  stopped: asked during the start-up load, before any request was served; \
+                 the load is left to the process's end (at most {SHUTDOWN_GRACE:?})"
+            );
+            OK
+        }
+        Err(why) => {
+            let _said = telemetry::emit(
+                &telemetry::Event::error("api.serve", "the stop signal could not be waited for")
+                    .with("why", telemetry::Value::Str(&why.to_string())),
+            );
+            warn_line!(
+                "REFUSED — the stop signal could not be waited for: {why}. \
+                 No request was served."
+            );
+            FAILED
+        }
+    }
+}
+
+/// The exit of a serve whose start-up load ended with no value (its thread
+/// panicked): said on the terminal and in the log, and [`FAILED`].
+fn load_failed(why: &str) -> u8 {
+    let _said = telemetry::emit(
+        &telemetry::Event::error("api.serve", "the start-up load did not finish")
+            .with("why", telemetry::Value::Str(why)),
+    );
+    warn_line!("REFUSED — the start-up load did not finish: {why}. No request was served.");
+    FAILED
 }
 
 /// [`run_in`], over a store root the environment may not have named.
@@ -19189,7 +19645,8 @@ async fn run_in_over(
     dir: &Path,
     store: Result<PathBuf, String>,
     args: &[String],
-    shutdown: Shutdown,
+    mut shutdown: Shutdown,
+    held: &mut Held,
 ) -> u8 {
     match Command::parse(args) {
         Ok(Command::Report) => reported(dir),
@@ -19237,11 +19694,33 @@ async fn run_in_over(
                     Ok(lock) => lock,
                     Err(code) => return code,
                 };
+                // THE PORT IS KEPT AS LONG AS THE STORE IS HELD (R3-14): see
+                // `Held`. Refused rather than served without it, because a
+                // stop would then free the port while the store is held.
+                let (listener, kept_port) = match keep_port(listener) {
+                    Ok(kept) => kept,
+                    Err(why) => {
+                        warn_line!(
+                            "REFUSED — the listening socket could not be kept for the stop: \
+                             {why}. No request was served."
+                        );
+                        return FAILED;
+                    }
+                };
                 // EVERY SERVER CHILD STARTS FROM THE SAME CANONICAL ROOT THAT
                 // OWNS `serve.lock`. Keeping the configured symlink here would
                 // let a retarget after admission send later writers elsewhere
                 // while this process still held the old store's lock.
                 let store_root = one_server.root.clone();
+                // KEPT FOR THE CALLER FROM HERE ON (R3-14): every return
+                // below, a refusal included, leaves the store and the port to
+                // `end_served`, which frees them after the exit line and in
+                // order (log, store, port). Dropped here, the port went first.
+                *held = Held {
+                    log: None,
+                    lock: Some(one_server),
+                    port: Some(kept_port),
+                };
                 let log_dir = match served_log_dir(&store_root) {
                     Ok(dir) => dir,
                     Err(why) => {
@@ -19258,6 +19737,9 @@ async fn run_in_over(
                     dir: log_dir,
                     ..asked
                 });
+                // THE LOG THIS SERVE OPENED IS CLOSED BEFORE ITS PORT IS FREED
+                // (R3-14 repair 3): see `Held`.
+                held.log = logging.as_ref().ok().copied();
                 say!("brutex api listening on http://{addr}/");
                 // THE BUILD, ON THE BANNER AND IN THE FIRST EVENT (DB-B71).
                 say!("  build:   {}", build_label());
@@ -19283,7 +19765,21 @@ async fn run_in_over(
                 announce_front_end(&front);
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
-                let site = Loaded::new(Site::serving(dir, &store_root));
+                //
+                // RACED AGAINST THE STOP (R3-14 repair 5): the load takes
+                // seconds with the port already bound, and a stop asked during
+                // it is answered now, not after it. See `loaded_or_stopped`.
+                let (load_dir, load_root) = (dir.to_path_buf(), store_root.clone());
+                let site = match loaded_or_stopped(
+                    move || Site::serving(&load_dir, &load_root),
+                    &mut shutdown,
+                )
+                .await
+                {
+                    Loading::Loaded(site) => Loaded::new(site),
+                    Loading::Stopped(asked) => return stopped_while_loading(asked),
+                    Loading::Failed(why) => return load_failed(&why),
+                };
                 // THE READ'S OWN VERDICT, ON THE BANNER AND IN THE EXIT CODE.
                 //
                 // The masters are read HERE, one line above, and until now
@@ -19439,6 +19935,9 @@ async fn run_in_over(
                 // torn write leaves bytes past `n_valid` that the next run
                 // overwrites.
                 flying.abort();
+                // `held` still has the store and the port (R3-14): they are
+                // released after the runtime has ended, not here, where
+                // blocking work may still be writing. See `Held`.
                 code
             }
             Err(e) => {
@@ -22944,7 +23443,8 @@ mod tests {
             run_in(
                 &agreeing("bindrefused"),
                 &argv(&["serve", &taken.to_string()]),
-                fired()
+                fired(),
+                &mut Held::default(),
             )
             .await,
             FAILED,
@@ -23195,6 +23695,7 @@ mod tests {
             Ok(root.clone()),
             &argv(&["serve", "127.0.0.1:0"]),
             Box::pin(std::future::pending()),
+            &mut Held::default(),
         )
         .await;
         assert_eq!(code, FAILED, "a second server is a refusal to run");
@@ -23329,8 +23830,9 @@ mod tests {
     /// stamp's result was dropped, so a full disk left the previous holder's
     /// line for a refused instance to quote. Each arm of the decision is driven
     /// with the error the host gives, and the refusal is driven end to end
-    /// through a lock name that resolves to `/dev/full`, where every write
-    /// fails with ENOSPC and no length can be set.
+    /// through [`take_serve_lock_stamping`] with a stamp whose every write
+    /// fails with ENOSPC and whose length cannot be set -- what `/dev/full`
+    /// did on Linux, and on every host, macOS included (R3-14, RA-184).
     #[test]
     fn a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale() {
         let path = Path::new("/store/serve.lock");
@@ -23389,18 +23891,30 @@ mod tests {
             "{refused}"
         );
 
-        let root = crate::scratch::path("serve-lock-dev-full");
+        let root = crate::scratch::path("serve-lock-write-fails");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
-        let lock_path = root.join(SERVE_LOCK);
-        std::os::unix::fs::symlink("/dev/full", &lock_path).expect("the /dev/full name");
         let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
-        let refused = take_serve_lock(&root, addr).expect_err("an unstampable lock refuses");
+        let mut asked = 0;
+        let refused = take_serve_lock_stamping(&root, addr, |_held, at, path| {
+            asked += 1;
+            assert_eq!(at, addr, "the stamp is handed this instance's address");
+            stamp_outcome(
+                || Err(std::io::Error::from_raw_os_error(28)),
+                || Err(std::io::Error::from_raw_os_error(22)),
+                path,
+            )
+            .map(|_warning| ())
+        })
+        .expect_err("an unstampable lock refuses");
+        assert_eq!(asked, 1, "the stamp step ran once, with the lock held");
         assert!(refused.contains("could not be written"), "{refused}");
-        // The refusal released both the file lock and the in-process key: with
-        // a regular lock file at the name, the same store is taken at once.
-        std::fs::remove_file(&lock_path).expect("unlink");
+        assert!(refused.contains(SERVE_LOCK), "{refused}");
+        // The refusal released both the file lock and the in-process key: the
+        // same store is taken at once, and stamped for real.
         let taken = take_serve_lock(&root, addr).expect("the store is free again");
+        let stamp = std::fs::read_to_string(root.join(SERVE_LOCK)).expect("the stamp");
+        assert_eq!(stamp, format!("addr={addr} pid={}\n", std::process::id()));
         assert!(
             taken.held.is_some(),
             "a real file lock, not the in-process pass"
@@ -28344,6 +28858,7 @@ mod tests {
             )),
             &argv(&["serve", "127.0.0.1:0"]),
             Box::pin(std::future::pending()),
+            &mut Held::default(),
         )
         .await;
         assert_eq!(
@@ -28356,6 +28871,7 @@ mod tests {
             Err(String::from("REFUSED: no masters directory")),
             &argv(&["report"]),
             Box::pin(std::future::pending()),
+            &mut Held::default(),
         )
         .await;
         assert_eq!(refused, FAILED);
@@ -28396,7 +28912,13 @@ mod tests {
         // the files, which this test owns. Exact codes, both arms, deterministic
         // on every host.
         assert_eq!(
-            run_in(&agreeing("runreport"), &argv(&["report"]), fired()).await,
+            run_in(
+                &agreeing("runreport"),
+                &argv(&["report"]),
+                fired(),
+                &mut Held::default()
+            )
+            .await,
             OK,
             "two masters that agree is a clean universe"
         );
@@ -28408,7 +28930,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            run_in(&missing, &argv(&["report"]), fired()).await,
+            run_in(&missing, &argv(&["report"]), fired(), &mut Held::default()).await,
             DEGRADED,
             "a vendor that was never read is a refused universe"
         );
