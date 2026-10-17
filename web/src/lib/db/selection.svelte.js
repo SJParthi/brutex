@@ -399,9 +399,9 @@ export function selectionState(db) {
   let calendar = $state.raw(null);
   /**
    * THE SPECIAL SESSIONS THE SAME `/calendar.json` ANSWER RECORDS (DB-074):
-   * each special day with the windows that traded, for the time lists.
-   * `[]` until it answers.
-   * @type {import('./notes-controls.js').SpecialDay[]}
+   * its `special` list as served — each special day with the windows that
+   * traded — read by `specialsOf` for the time lists. `[]` until it answers.
+   * @type {any[]}
    */
   let calSpecial = $state.raw([]);
   let calWhy = $state('');
@@ -1880,15 +1880,23 @@ export function selectionState(db) {
    * calendar), O(special days) for the rest.
    */
   const daysInView = $derived({ lo: fromDay || heldDays.lo, hi: toDay || heldDays.hi });
-  const sessionRows = $derived.by(() => {
+  /** The minutes the loaded rows open on. */
+  const loadedMinutes = $derived.by(() => {
     const held = new Set();
     for (const b of db.barRows ?? []) {
       const t = timeLabel(b.ts);
       if (t !== '—') held.add(t);
     }
-    const step = Math.max(1, Math.round(Math.max(Number(rungSecs) || 60, 60) / 60));
-    const specials = specialsIn(calSpecial, daysInView.lo, daysInView.hi);
-    const extra = specialMinutes(specials, step, SESSION_OPEN_MINUTE).map((m) => m.key);
+    return held;
+  });
+  /** The rung's bar length in minutes, the grid's step (1 on 1s and 1min). */
+  const gridStep = $derived(Math.max(1, Math.round(Math.max(Number(rungSecs) || 60, 60) / 60)));
+  /** The special days in view, from the calendar answer's own list. */
+  const specialsHere = $derived(specialsIn(specialsOf({ special: calSpecial }), daysInView.lo, daysInView.hi));
+  /** The rung's grid, the loaded minutes and the special days' minutes in it. */
+  const rungGrid = $derived.by(() => {
+    const held = new Set(loadedMinutes);
+    for (const m of specialMinutes(specialsHere, gridStep, SESSION_OPEN_MINUTE)) held.add(m.key);
     /* THE DATED CLOSE (SC-CLOSE-18): a contract's grid runs to 15:39 on a
        span reaching 03 Aug 2026, a share's 15:15–15:29 is marked as the
        closing auction there; an index keeps 15:30. What the series is comes
@@ -1898,15 +1906,17 @@ export function selectionState(db) {
       : matched.length > 0 && /^[A-Z]+-CASH-/.test(String(matched[0]?.instrument ?? ''))
         ? 'cash'
         : 'index';
-    const grid = sessionGrid(rungSecs, [...held, ...extra], { venue, lo: daysInView.lo, hi: daysInView.hi });
-    return timeListRows(grid, {
-      specials,
-      regular: regularDaysIn(calendar, daysInView.lo, daysInView.hi),
-      held,
-      step,
-      open: SESSION_OPEN_MINUTE
-    });
+    return sessionGrid(rungSecs, held, { venue, lo: fromDay || heldDays.lo, hi: toDay || heldDays.hi });
   });
+  const sessionRows = $derived(
+    timeListRows(rungGrid, {
+      specials: specialsHere,
+      regular: regularDaysIn(calendar, daysInView.lo, daysInView.hi),
+      held: loadedMinutes,
+      step: gridStep,
+      open: SESSION_OPEN_MINUTE
+    })
+  );
 
   /**
    * One end of the time window, set from a picked minute (and, on the 1s rung,
@@ -2816,7 +2826,7 @@ export function selectionSeeds(db) {
         const cal = calendarOf(body);
         const reason = typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : '';
         db.calendar = cal;
-        db.calSpecial = specialsOf(body);
+        db.calSpecial = Array.isArray(body?.special) ? body.special : [];
         db.calWhy = cal
           ? ''
           : body?.status === 'building'
