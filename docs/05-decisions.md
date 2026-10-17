@@ -69507,6 +69507,235 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
 
+### D-4970 — A log-only import row is made only for the refusals no close of the kind-day owns, and a close's refusals are only those logged in its own run's window; a journal row is an instrument's when its filter NAMES the symbol as a whole name or is `*`, the newest such close winning; a run with no lifecycle event says where it looked — 2026-10-14
+
+**Implemented by** AF-02 (`api::imports::{merged, placed, next_start, Owners,
+subject_of}`, `api::imports::where_looked`, `api::imports::run_json`,
+`api::dayflags::{journal_rows, Names, refusals_of, import_json, Tally,
+other_first, closed_phrase}`, `Says::import_phrases`). **Number** chosen above
+every number in use in any worktree on 15 October 2026 (the ledger's head on
+feat/db-fix was D-4965, and numbers up to D-4969 were taken in other
+worktrees); this entry was D-4955 before repair round 1. On 16 October
+feat/db-fix holds D-4972, D-4973 and D-4978 and not D-4970, so the number
+stands; renumber at landing if the head has moved (A6).
+
+**What was observed** (assurance finding ingest-6, confirmed by two
+skeptics on 14 October 2026; reproduced by AF-02 on a fresh shadow of the real
+store, port 8701, before the change): `/imports.json?feed=gdfl&outcome=refused`
+returned four `*` rows, `refused`, read from the log, and `counts.refused` 4,
+while the journal holds no `refused` line at all. Two of them (options
+2026-04-16 and 2025-03-11) were phantoms: those days were closed `done` under
+`BANKNIFTY,NIFTY` (journal lines 11974, 11436) and under the 277-name key
+(19035, 18497), and `merged` probed only for a `*` line before inventing a
+`*` row for the very refusals those closes count as `vendor_refused=`.
+`/audit.json?feed=gdfl` counted them through the same walk. `/dayflags.json`
+then served the phantom as every options underlying's outcome: NSE-FNO-NIFTY,
+NSE-FNO-RELIANCE and an illiquid NIFTY strike read "refused at import
+(vendor)" on 2026-04-16 with `this_count` 0, because its rule
+`filter == inst.symbol` never matched a list; for the same reason every
+options day since the lists began read "no import journal line for this day"
+(NIFTY 2026-01-01 to 2026-04-15 throughout). The other two refused rows
+(options 2018-11-07 and 2019-10-27, the calendar's refusals) have no line
+under any filter and are DB-025's intended log-only rows.
+
+**Decided.**
+
+1. A log-only `*` row (`logged_only`) is made for the refusals of a kind-day
+   that NO CLOSE of that kind-day owns, and its `failures` counts those
+   distinct refusals. The importer's `refused` event carries no run id and no
+   filter (`pull::gdfl_import::note_failure`), so a refusal is placed by what
+   it is about and when it was logged (`imports::placed`, `Owners::owned`).
+   A close owns a refusal when (a) its filter names the refusal's subject:
+   `*` names every subject; a list names an underlying it holds as a whole
+   name; only `*` names a day-level refusal (the calendar, the census, an
+   empty `about`), which is about every instrument of the kind; a file no
+   decoder places (`subject_of` gives `Unknown`) is about no instrument, so
+   any close may own it; and (b) the refusal was not logged at or after the
+   start of the NEXT run that closed the same kind-day, under any filter
+   (that window is the later run's). A refusal logged BEFORE a naming close's
+   run is an earlier attempt's, and the close is that subject's later state:
+   history beside it (DB-B45), never a second row. A close with no `run=`, or
+   a refusal with no time, cannot be placed and keeps every refusal it names.
+   Every refusal stays beside each close of its kind-day as `logged`
+   evidence, as before. Carrying the run id on the event is the importer's
+   change, not this one's (a follow-up for `pull`).
+   *Corrected in repair round 2, before landing:* this item first read "No
+   journal line means no line of that kind and day under ANY filter; a
+   log-only row is made only then". The second agent showed that a whole-day
+   refusal of an earlier attempt that left no line (DB-025's shape), followed
+   by a close under `BANKNIFTY,NIFTY`, then vanished from every instrument the
+   list does not name: RELIANCE read `none`, "no import journal line for this
+   day", where it read "refused at import (calendar)" before AF-02, and
+   `counts.refused` dropped it, a fallback that hides a failure (CLAUDE.md
+   §4). The real store holds no such day today (every day-level logged
+   refusal also has a `*` row); the first pending Muhurat options re-import
+   run under a list (2018-11-07, 2019-10-27) would have made one. Both
+   phantoms (2026-04-16, 2025-03-11) still vanish: their refusals fall inside
+   the run of a close that names their file, or about no instrument inside a
+   close's window.
+2. A journal row is an instrument's when its filter names the instrument's
+   symbol as one whole comma-separated name: `NIFTY` is named by
+   `BANKNIFTY,NIFTY` and by the 277-name key, not by `NIFTYNXT50,BANKNIFTY`.
+   `*` names no symbol and covers every one. Of the rows that cover it (`*`,
+   or a list naming it), the NEWEST closing line wins, whichever filter wrote
+   it; a naming list beats `*` only on an equal line (a journal has none; the
+   tie is the log-only row's line 0). A list that does not name the symbol is
+   another underlying's and is skipped. Each distinct filter string is split
+   once per request and memoised; every other row is one hash probe.
+   *Corrected in repair round 1, before landing:* this item first read "any
+   naming row wins over `*`, older or newer". The second agent showed that
+   the importer skips a day by kind, day AND filter
+   (`pull::gdfl_import::admit`), so the first `*` import over the window
+   re-imports every options day a list closed (2,990 `BANKNIFTY,NIFTY` days
+   on the operator's journal), and the older list close then hid the newer
+   `*` one: a day re-imported clean still read the list's stale
+   `done_with_refusals`, and a newer `*` run left `incomplete` by this
+   instrument's own refusal read `done` with the refusal unsaid, a fallback
+   that hides a failure. The real store holds no such kind-day today (every
+   list close is newer than any `*` close of its day), so no reading of it
+   changes.
+3. A day the log alone names whose refusals are none of them about the
+   instrument (and none day-level: the calendar or the census, which
+   `about_this` gives every instrument) reads `none` on `/dayflags.json`,
+   `from: log`, with the other files' refusals in `refusals` and a sentence
+   naming the first; it is never this instrument's `refused`. A
+   `done_with_refusals` close whose refusals are all another file's says
+   "none about this instrument; the first is ...", as an incomplete one
+   already did (DB-G69). A `done_with_refusals` close with refusals of the
+   instrument's own says how many and names the first ("imported with 10
+   vendor refusal(s), 2 about this instrument; the first is ..."): the
+   phantom `*` row it replaced named the file, and the close must not say
+   less. A contract counts only its own file.
+   *Corrected in repair round 2, before landing:* a close's refusals are
+   only those logged in its own window, from its run's start to the start of
+   the next run that closed the same kind-day under any filter
+   (`dayflags::refusals_of` with `next_s`, from `JournalRows::closers`, placed
+   by `imports::placed`, the same function `/imports.json` uses, so the two
+   routes cannot disagree about whose a refusal is). And "none about this
+   instrument" is said only when the refusals placed in that window number
+   at least the close's `failures` (`Tally::whole`); otherwise the sentence
+   says how many it holds and where it looked: "imported with 1 vendor
+   refusal(s); 1 of them is in none of the logs this route reads (logs/cli,
+   logs/gdfl/indices, logs/gdfl/stocks, logs/gdfl/options, logs/gdfl/store)",
+   and "K about this instrument" becomes "at least K". The same bound and the
+   same rule hold for the `incomplete` arm (DB-G69). The second agent showed
+   that a close's own refusals logged to `logs/cli-batch` (a `cli` given
+   `BRUTEX_LOG_DIR`, unread) plus a later `ABCAPITAL,RELIANCE` run's refusal in
+   `logs/cli` made NIFTY's `BANKNIFTY,NIFTY` close read "none about this
+   instrument; the first is ABCAPITAL...": another run's file named as this
+   close's first, and its own refusal turned into "none".
+4. A run asked by `run=` whose lifecycle is in no directory the route reads
+   carries `lifecycle.says` ("no lifecycle event in logs/cli, logs/gdfl/...")
+   and `lifecycle.not_read`, the directories under `<store>/logs` that are
+   there and that no read covers (a `cli` given `BRUTEX_LOG_DIR`, such as the
+   operator's `logs/cli-batch`), at most 32 named and every one counted
+   (`lifecycle.not_read_total`, and "and K more" in the sentence). A directory
+   that is only the parent of read ones (`logs/gdfl`) is walked one level, so
+   an unread `logs/gdfl/<other>` is named too. One `read_dir` of `logs` and
+   one of each such parent, only for a run asked and found empty.
+   *Added in repair round 2* (the second agent's follow-up): a link to a
+   directory under `logs` is named like the directory it reaches (one `stat`,
+   links only); a directory that is there and cannot be listed is named with
+   its error ("logs (Not a directory (os error 20)) could not be listed"),
+   never read as "nothing unread"; entries the walk cannot read, and
+   directories whose name is not UTF-8, are counted ("K entries under logs
+   could not be named"); and a run id with no `run` line in the import
+   journal says "the import journal holds no `run` line of this id".
+5. A `done` close with refusals of the day about this instrument that are not
+   dated before its run (a close with no run id cannot place them) says so:
+   "closed done, yet the importer's log holds K refusal(s) of this day about
+   this instrument not placed in another run; the first is ...". A clean
+   close never leaves the instrument's own refusals in the JSON only
+   (repair round 1; the words "not dated before this run" became "not placed
+   in another run" in repair round 2, since a later closing run's window is
+   now another run too).
+6. A refusal about this instrument logged in a LATER closing run's window,
+   whose filter does not name it, is never the earlier close's own and is
+   never dropped: `refusals.later_this_count` and `later_this_first`, and the
+   sentence "the importer's log holds K refusal(s) about this instrument
+   logged after a later run closed this day for other files; the first is
+   ..." (repair round 2). `refusals.later_count` counts every distinct
+   refusal of the later windows.
+
+**Rejected.** Folding the refusals into "that run's row" by the `cli`
+attempt they were logged under: the attempt is known per kind-day, not per
+event, and two closes of one day can share no attempt at all (the two
+2026-04-16 closes were different runs); a guess by position would name a run
+the log does not. Ranking any naming list above `*` whatever their order
+(this entry's first form): it reads a stale list close over the newer `*`
+re-import that superseded it, which the importer's per-filter skip makes
+reachable on every list-only day (item 2). Calling a refusal unowned whenever
+it is dated before every close's run start, whatever the close's filter (one
+reading of the second agent's repair-2 wording): a calendar refusal before a
+`*` close is the 2024-03-02 shape that DB-B45 reads as history beside the
+newer close, and before AF-02 a `*` line suppressed the log-only row
+whatever its timing; that reading would add a `refused` row to such days on
+the real store. Here only a close that does not NAME the subject leaves an
+earlier refusal unowned, which is the second agent's other condition.
+
+**Store writes**: none. Read side only.
+
+**Proved by** `api::server::imports::filter_tests::a_day_closed_under_a_symbol_filter_with_logged_refusals_is_not_a_refused_row`,
+`api::server::imports::filter_tests::the_audit_summary_counts_that_day_once`,
+`api::server::imports::filter_tests::a_day_with_no_journal_line_under_any_filter_is_still_read_from_the_log`,
+`api::server::imports::filter_tests::a_run_logged_elsewhere_says_where_it_looked`,
+`api::server::imports::filter_tests::a_run_on_a_store_with_no_logs_says_where_it_looked`,
+`api::server::imports::filter_tests::every_filter_shape_suppresses_the_log_only_row_and_nothing_else`,
+`api::server::imports::filter_tests::a_month_of_filtered_closes_with_refusals_holds_no_phantom`,
+`api::server::dayflags::filter_tests::an_instrument_named_in_a_multi_name_filter_reads_that_filters_close`,
+`api::server::dayflags::filter_tests::a_refusal_about_another_underlying_never_marks_this_one_refused`,
+`api::server::dayflags::filter_tests::a_symbol_is_named_by_whole_names_and_its_newest_naming_close_wins`,
+`api::server::dayflags::filter_tests::the_filter_is_split_once_per_distinct_string_per_request`,
+`api::server::dayflags::filter_tests::a_close_with_this_instruments_own_refusals_names_the_first`,
+`api::server::dayflags::filter_tests::a_newer_whole_tree_close_wins_over_an_older_naming_list`,
+`api::server::dayflags::filter_tests::a_done_close_with_this_instruments_own_logged_refusal_says_it`,
+`api::server::imports::filter_tests::more_unread_directories_than_are_named_are_counted`,
+`api::server::imports::filter_tests::an_unread_directory_beside_read_ones_under_their_parent_is_named`,
+and repair round 2's
+`api::server::dayflags::filter_tests::a_later_list_runs_refusal_is_never_an_earlier_closes_own`,
+`api::server::dayflags::filter_tests::the_incomplete_arm_is_bounded_by_the_next_closing_run`,
+`api::server::dayflags::filter_tests::a_whole_day_refusal_no_close_owns_reaches_every_instrument_it_is_about`,
+`api::server::dayflags::filter_tests::the_logs_read_are_named_in_their_order`,
+`api::server::imports::filter_tests::a_refusal_no_close_of_the_day_owns_keeps_its_log_only_row`,
+`api::server::imports::filter_tests::a_refusal_is_placed_by_its_close_and_the_next_closing_run`,
+`api::server::imports::filter_tests::a_linked_directory_an_unlistable_logs_and_an_unknown_run_are_each_said`,
+and the existing `a_day_refused_whole_with_no_journal_line_is_read_from_the_log`,
+which stays green. Rows AF2-01 to AF2-12 of `docs/04-invariants.md` (the ids
+`IF-01..IF-06` this change first took are the indicator invariants' and were
+not reused). All twelve fail on the code before this change (eleven with the
+fix reverted and only the tests' module hooks kept; the twelfth with only its
+sentence reverted): logs `state/fix/af02/test-before-variant.log` and
+`state/fix/af02/test-before-arm.log` in the work tree. The repair round's
+four tests, and the changed 2026-04-09 case, fail on the first form
+(`ff636f58`) with the tests kept: `state/fix/af02/r1/before-filter.log`.
+Repair round 2's three fixture tests (`a_later_list_runs_refusal_is_never_an_earlier_closes_own`,
+`a_whole_day_refusal_no_close_owns_reaches_every_instrument_it_is_about`,
+`a_refusal_no_close_of_the_day_owns_keeps_its_log_only_row`) and the reworded
+`a_done_close_with_this_instruments_own_logged_refusal_says_it` fail on
+repair round 1's code (`9cb9de51`'s `imports.rs` and `dayflags.rs`, on this
+branch's merged base) with the tests kept, leaving out only the two unit
+tests that name the new functions: `state/fix/af02-r3/before-repair2.log`
+(15 pass, 4 fail). The incomplete arm's assertions were then inside the
+first of those tests, past the assertion that failed; split out since as
+`the_incomplete_arm_is_bounded_by_the_next_closing_run`, they were not run
+on its own against `9cb9de51`.
+
+**Measured** (`docs/06-limits.md`, "Import records on filtered days"): on
+fresh shadows of the operator's store, GET only, the change leaves every
+touched route's cost where it was. The two phantom rows are gone
+(`counts.refused` 4 to 2, the Muhurat rows kept), `/audit.json` agrees, and
+NSE-FNO-NIFTY reads 2026-04-15 and 2026-04-16 `done` from journal lines
+11972 and 11974 instead of "no import journal line" and "refused at import
+(vendor)". Repair round 2 (16 October, interleaved against `9cb9de51`, n =
+200 a route): p50 up 0.01 to 0.61 ms on every route (1 to 6 percent), the
+real store's `/imports.json` and `/audit.json` answers unchanged
+(`counts.refused` 2), and on the second agent's attack lines both blocking
+fixtures read right: NSE-FNO-NIFTY 2018-08-20 "imported with 1 vendor
+refusal(s); 1 of them is in none of the logs this route reads (...)", and
+NSE-FNO-RELIANCE 2018-08-21 `refused`, from the log, "refused at import
+(calendar)", with `/imports.json` 2018-08-20 to 2018-08-24 `counts.refused`
+1.
+
 ### D-4972 — `/bars.json` answers a window past the month's last bar from one record, the last; only a tail that is not the header's last bar keeps the full read (narrows D-1446, W1-api5-8) — 2026-10-16
 
 **Context** (AF-05, assurance finding p99-8, confirmed by two skeptics on 14
