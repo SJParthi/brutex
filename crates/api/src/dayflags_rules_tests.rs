@@ -1413,6 +1413,9 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
             let started = std::time::Instant::now();
             let _ = answer(&copy, &asked);
             cold.push(started.elapsed().as_micros());
+            // ITS OWN FIXTURE, RELEASED: twenty copies of a 100x store would
+            // otherwise fill a small scratch disk.
+            let _ = std::fs::remove_dir_all(&copy);
         }
         let _ = timed(&root, 1);
         for query in TIMED {
@@ -1485,6 +1488,7 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
                 sixty.0, sixty.1, sixty.2, sixty.3
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
     }
     // THE RATIO, IN HUNDREDTHS: integer arithmetic, no float cast.
     let base = warm_p50.first().copied().unwrap_or(1).max(1);
@@ -1633,4 +1637,5 @@ fn the_day_band_pages_for_a_profiler() {
             assert_eq!(body["days"].as_array().map(Vec::len), Some(92));
         }
     }
+    let _ = std::fs::remove_dir_all(&root);
 }
