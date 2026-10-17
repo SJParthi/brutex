@@ -803,8 +803,10 @@ fn lineage_json(root: &Path, feed: Vendor, inst: &Instrument) -> Value {
 /// The journal's rows for the page's days and the instrument's kind, keyed
 /// by day, and the last day the journal names for that kind.
 struct JournalRows {
-    /// One row a day: the instrument's own filter when the journal has one,
-    /// else the whole tree's (`*`).
+    /// One row a day: of the rows whose filter NAMES the instrument's symbol
+    /// (a one-name filter, or a comma list holding the whole name), the one
+    /// with the newest closing line; else the whole tree's (`*`). AF-02,
+    /// ingest-6: see [`Names`].
     by_day: HashMap<String, Value>,
     /// The last day any line names for this kind.
     last_day: Option<Day>,
@@ -814,6 +816,11 @@ struct JournalRows {
     /// the commit it was built from, oldest first. A logged refusal is
     /// attributed to the run that was running when it was logged (DB-B45).
     runs: Vec<RunLine>,
+    /// Each day's closing runs: the `run=` of every row of the kind and day,
+    /// under ANY filter, the instrument's or not. A logged refusal is a
+    /// close's only before the next of these started (AF-02 repair 2): a later
+    /// list close's refusal is never an earlier close's.
+    closers: HashMap<String, Vec<u64>>,
 }
 
 /// One `run` line of the import journal, as a refusal's attribution needs it.
@@ -861,10 +868,16 @@ fn journal_rows(
 ) -> Result<JournalRows, String> {
     let kind = inst.kind();
     let mut by_day: HashMap<String, Value> = HashMap::with_capacity(PAGE_DAYS as usize);
+    // Each kept row's rank: its closing line, then whether its filter names
+    // the symbol. A higher rank replaces a lower one: the newest close that
+    // covers the instrument is where its day stands.
+    let mut ranks: HashMap<String, (u64, bool)> = HashMap::with_capacity(PAGE_DAYS as usize);
+    let mut names = Names::new(inst.symbol.as_str());
     let mut page = 0usize;
     let mut journal = Value::Null;
     let mut last_day = None;
     let mut runs = Vec::new();
+    let mut closers: HashMap<String, Vec<u64>> = HashMap::with_capacity(PAGE_DAYS as usize);
     loop {
         let asked = super::imports::Asked {
             from: Some(first),
@@ -902,11 +915,35 @@ fn journal_rows(
             ) else {
                 continue;
             };
-            // THE INSTRUMENT'S OWN FILTER WINS over the whole tree's: a run
-            // given one symbol journals that symbol's day under its name.
-            let own = filter == inst.symbol;
-            if own || (filter == "*" && !by_day.contains_key(day)) {
-                by_day.insert(day.to_owned(), row.clone());
+            // EVERY CLOSE BOUNDS THE ONE BEFORE IT, whichever filter wrote it
+            // (AF-02 repair 2): at most the handful of runs that closed a day.
+            if let Some(run) = row.get("run").and_then(Value::as_u64) {
+                let ids = closers.entry(day.to_owned()).or_default();
+                if !ids.contains(&run) {
+                    ids.push(run);
+                }
+            }
+            // THE NEWEST CLOSE THAT COVERS THE INSTRUMENT IS WHERE IT STANDS.
+            // A run given symbols journals their day under its list of names
+            // (`BANKNIFTY,NIFTY`, the 277-name key), and a list naming this
+            // symbol is this instrument's close (AF-02, ingest-6); `*` is the
+            // whole tree's, and covers it too. Of the closes that cover it,
+            // the newest line wins, whichever filter wrote it: the importer
+            // skips a day by kind, day AND filter (`pull::gdfl_import::admit`),
+            // so a `*` run re-imports a day a list closed, and that later
+            // close is the day's current state, clean or failed. A naming
+            // list beats `*` only on an equal line (none in a journal; the
+            // tie is the log-only row's line 0). A filter that does not name
+            // the symbol is another underlying's and says nothing about this
+            // one.
+            let own = names.names(filter);
+            if !own && filter != "*" {
+                continue;
+            }
+            let rank = (row.get("line").and_then(Value::as_u64).unwrap_or(0), own);
+            if ranks.get(day).is_none_or(|kept| rank > *kept) {
+                let _was = ranks.insert(day.to_owned(), rank);
+                let _replaced = by_day.insert(day.to_owned(), row.clone());
             }
         }
         let pages = body.get("pages").and_then(Value::as_u64).unwrap_or(1);
@@ -920,7 +957,64 @@ fn journal_rows(
         last_day,
         journal,
         runs,
+        closers,
     })
+}
+
+/// Whether a journal filter names one symbol, decided once per distinct
+/// filter string per request (AF-02, ingest-6).
+///
+/// # Whole names, not text
+///
+/// A filter is the importer's scope: `*`, one name, or names joined by `,`
+/// (`BANKNIFTY,NIFTY`, the 277-name key the operator's batch writes). It
+/// names a symbol when one of its comma-separated names IS the symbol:
+/// `NIFTY` is named by `BANKNIFTY,NIFTY` and not by `NIFTYNXT50,BANKNIFTY`,
+/// whose text merely contains it. `*` names no symbol: it is the whole tree,
+/// and covers every symbol; of the closes that cover one, the newest line
+/// wins ([`journal_rows`]).
+///
+/// # Cost
+///
+/// A page of [`PAGE_DAYS`] days reads a handful of keys a day, and the
+/// operator's journal holds five distinct filters for options (`*`, the
+/// two-name list, two 277-name lists). The split, O(bytes of the filter), is
+/// paid once per distinct filter of the request; every other row is one hash
+/// probe of its filter text. A per-row split would cost the 2,200-byte list
+/// on every row of every page.
+struct Names<'s> {
+    /// The symbol asked about.
+    symbol: &'s str,
+    /// Each distinct filter seen in this request, and whether it names the
+    /// symbol.
+    seen: HashMap<String, bool>,
+}
+
+impl<'s> Names<'s> {
+    fn new(symbol: &'s str) -> Self {
+        Self {
+            symbol,
+            seen: HashMap::with_capacity(8),
+        }
+    }
+
+    /// Whether `filter` names the symbol: memoised.
+    fn names(&mut self, filter: &str) -> bool {
+        if let Some(named) = self.seen.get(filter) {
+            return *named;
+        }
+        #[cfg(test)]
+        SPLITS.with(|splits| splits.set(splits.get().saturating_add(1)));
+        let named = filter != "*" && filter.split(',').any(|name| name == self.symbol);
+        let _first = self.seen.insert(filter.to_owned(), named);
+        named
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Filters split on this thread, for the test that pins the memo.
+    static SPLITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What a logged refusal is about, as this instrument sees it.
@@ -978,6 +1072,23 @@ struct Refusals {
     superseded: Vec<Superseded>,
     /// How many distinct refusals earlier runs logged.
     superseded_count: usize,
+    /// How many distinct refusals a LATER run that closed the same kind-day
+    /// logged: that run's, never this close's (AF-02 repair 2).
+    later_count: usize,
+    /// How many of those are about this instrument: logged in a later
+    /// closing run's window whose filter does not name it, so no close of
+    /// the day owns them (`/imports.json` keeps their log-only `*` row).
+    later_this_count: usize,
+    /// The first of those.
+    later_this_first: Option<(String, String)>,
+}
+
+/// The second run `id` started, as its `run` line names it, else the id
+/// itself (a run's id is the second it started, D-3317).
+fn start_of(runs: &[RunLine], id: u64) -> u64 {
+    runs.iter()
+        .find(|run| run.id == id)
+        .map_or(id, |run| run.started)
 }
 
 /// One refusal an earlier run logged, attributed to its run where the
@@ -1015,18 +1126,33 @@ struct Superseded {
 /// 1791602895: the current reason is the filing, and the calendar refusal is
 /// history. A row with no `run=` (a line written before D-3317) keeps every
 /// refusal current: nothing says which run logged it.
-fn refusals_of(row: &Value, inst: &Instrument, day: Day, runs: &[RunLine]) -> Refusals {
+///
+/// # Bounded by the next close (AF-02 repair 2)
+///
+/// A refusal logged at or after `next_s`, the start of the next run that
+/// closed the same kind-day under any filter ([`JournalRows::closers`]), is
+/// that run's and never this close's: a later `ABCAPITAL,RELIANCE` run's
+/// refusal is not the first of an earlier `BANKNIFTY,NIFTY` close. It is
+/// counted as `later_count` and named nowhere else. The placing is
+/// `/imports.json`'s own ([`super::imports::placed`]), so the two routes
+/// cannot disagree about whose a refusal is.
+fn refusals_of(
+    row: &Value,
+    inst: &Instrument,
+    day: Day,
+    runs: &[RunLine],
+    next_s: Option<u64>,
+) -> Refusals {
     let mut distinct: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
     let mut history: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
+    let mut later: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let mut out = Refusals::default();
-    let started_ms = row.get("run").and_then(Value::as_u64).map(|id| {
-        runs.iter()
-            .find(|run| run.id == id)
-            .map_or(id, |run| run.started)
-            .saturating_mul(1_000)
-    });
+    let started_s = row
+        .get("run")
+        .and_then(Value::as_u64)
+        .map(|id| start_of(runs, id));
     for logged in row
         .get("logged")
         .and_then(Value::as_array)
@@ -1042,8 +1168,23 @@ fn refusals_of(row: &Value, inst: &Instrument, day: Day, runs: &[RunLine]) -> Re
         };
         let pair = (text("about"), text("why"));
         let at_ms = logged.get("at_ms").and_then(Value::as_u64);
-        let earlier = matches!((started_ms, at_ms), (Some(start), Some(at)) if at < start);
-        if earlier {
+        let placed = super::imports::placed(at_ms, started_s, next_s);
+        if placed == super::imports::Placed::After {
+            if later.insert(pair.clone()) {
+                out.later_count = out.later_count.saturating_add(1);
+                // ONE ABOUT THIS INSTRUMENT is said, never dropped: a later
+                // run closed the day for other files, and this refusal is in
+                // its window (an attempt that left no line naming this one).
+                if about_this(&pair.0, inst, day) {
+                    out.later_this_count = out.later_this_count.saturating_add(1);
+                    if out.later_this_first.is_none() {
+                        out.later_this_first = Some(pair);
+                    }
+                }
+            }
+            continue;
+        }
+        if placed == super::imports::Placed::Before {
             if !history.insert(pair.clone()) {
                 continue;
             }
@@ -1097,26 +1238,50 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "from": null, "line": null, "late": null, "max_back_s": null,
             "refusals": {
                 "this": [], "this_count": 0, "other_count": 0, "other_first": null,
-                "superseded": [], "superseded_count": 0,
+                "superseded": [], "superseded_count": 0, "later_count": 0,
+                "later_this_count": 0, "later_this_first": null,
             },
         });
     };
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
     let recounted = row.get("recounted").and_then(Value::as_bool) == Some(true);
+    // THE CLOSE'S OWN WINDOW: from its run's start to the start of the next
+    // run that closed the same kind-day, under any filter (AF-02 repair 2).
+    let next_s = row.get("run").and_then(Value::as_u64).and_then(|id| {
+        let ids = rows.closers.get(&day.to_string())?;
+        super::imports::next_start(
+            start_of(&rows.runs, id),
+            ids.iter().map(|other| start_of(&rows.runs, *other)),
+        )
+    });
+    let refusals = refusals_of(row, inst, day, &rows.runs, next_s);
+    // A DAY THE LOG ALONE NAMES, AND NOTHING IN IT ABOUT THIS INSTRUMENT:
+    // a run refused other files of the day and left no journal line (DB-025's
+    // shape), and nothing says this instrument's day was refused. It reads
+    // `none`, from the log, with the other files' refusals beside it (AF-02,
+    // ingest-6: a refusal about another underlying never marks this one
+    // refused). A day-level refusal (the calendar, the census) is about every
+    // instrument (`about_this`) and keeps `refused`.
+    let others_only =
+        field("outcome_from") == "log" && refusals.this_count == 0 && refusals.other_count > 0;
     let outcome = if recounted {
         Value::from("recounted")
+    } else if others_only {
+        Value::from("none")
     } else {
         field("outcome")
     };
-    let refusals = refusals_of(row, inst, day, &rows.runs);
     let pair = |(about, why): &(String, String)| json!({ "about": about, "why": why });
+    let unless_others_only = |key: &str| {
+        if others_only { Value::Null } else { field(key) }
+    };
     json!({
         "outcome": outcome,
         "reached": true,
-        "stage": field("stage"),
-        "reason": field("reason"),
+        "stage": unless_others_only("stage"),
+        "reason": unless_others_only("reason"),
         "files": field("files"),
-        "failures": field("failures"),
+        "failures": unless_others_only("failures"),
         "run": field("run"),
         "from": field("outcome_from"),
         "line": field("line"),
@@ -1135,6 +1300,9 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
                 "why": old.why,
             })).collect::<Vec<_>>(),
             "superseded_count": refusals.superseded_count,
+            "later_count": refusals.later_count,
+            "later_this_count": refusals.later_this_count,
+            "later_this_first": refusals.later_this_first.as_ref().map(pair),
         },
     })
 }
@@ -4066,6 +4234,165 @@ fn cut(text: &str) -> String {
     kept
 }
 
+/// The first refusal about another file of the day, as `about: why`, cut:
+/// what a day the import failed or refused for other files names (DB-G69;
+/// AF-02).
+fn other_first(import: &Value) -> Option<String> {
+    import
+        .get("refusals")
+        .and_then(|r| r.get("other_first"))
+        .filter(|first| !first.is_null())
+        .map(|first| {
+            let field = |key: &str| first.get(key).and_then(Value::as_str).unwrap_or_default();
+            cut(&format!("{}: {}", field("about"), field("why")))
+        })
+}
+
+/// The directories this route reads the importer's refusals from, as a
+/// sentence names them: `logs/cli`, then each GDFL kind's and the store
+/// lock's (`crate::logs::import_dirs`).
+fn logs_read() -> String {
+    crate::logs::import_dirs()
+        .map(|dir| format!("logs/{dir}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A close's `failures` against the refusals the logs this route reads
+/// place in its own window ([`refusals_of`]): this instrument's and other
+/// files'.
+///
+/// AF-02 repair 2: "none about this instrument" is said only when those
+/// number at least the close's `failures`. A `cli` given `BRUTEX_LOG_DIR`
+/// logs where it was told (`logs/cli-batch` for the operator's batch
+/// script), so a close can count refusals that no directory read holds;
+/// then the sentence says how many it holds and where it looked, and never
+/// that none was this instrument's.
+#[derive(Debug, Clone, Copy)]
+struct Tally {
+    /// The close's own count.
+    failures: u64,
+    /// Distinct refusals in its window about this instrument.
+    this: u64,
+    /// Distinct refusals in its window about another file of the kind-day.
+    other: u64,
+}
+
+impl Tally {
+    fn of(import: &Value) -> Self {
+        let refusals = |key: &str| {
+            import
+                .get("refusals")
+                .and_then(|r| r.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        Self {
+            failures: import.get("failures").and_then(Value::as_u64).unwrap_or(0),
+            this: refusals("this_count"),
+            other: refusals("other_count"),
+        }
+    }
+
+    /// The refusals the logs read place in the close's window.
+    fn seen(self) -> u64 {
+        self.this.saturating_add(self.other)
+    }
+
+    /// Whether the logs read hold every one the close counts.
+    fn whole(self) -> bool {
+        self.seen() >= self.failures
+    }
+
+    /// The ones the close counts that no directory read holds, and where it
+    /// looked.
+    fn unseen(self) -> String {
+        let missing = self.failures.saturating_sub(self.seen());
+        format!(
+            "{missing} of them {} in none of the logs this route reads ({})",
+            if missing == 1 { "is" } else { "are" },
+            logs_read()
+        )
+    }
+}
+
+/// A refusal about this instrument logged in a LATER closing run's window
+/// (AF-02 repair 2): never this close's, and never dropped. `None` when the
+/// later windows hold none about it.
+fn later_phrase(import: &Value) -> Option<String> {
+    let refusals = import.get("refusals")?;
+    let count = refusals
+        .get("later_this_count")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)?;
+    let field = |key: &str| {
+        refusals
+            .get("later_this_first")
+            .and_then(|first| first.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    Some(format!(
+        "the importer's log holds {count} refusal(s) about this instrument logged after a \
+         later run closed this day for other files; the first is {}",
+        cut(&format!("{}: {}", field("about"), field("why")))
+    ))
+}
+
+/// What a `done` or `done_with_refusals` close says of its refusals.
+///
+/// * A CLOSE WHOSE REFUSALS ARE ALL ANOTHER FILE'S says so, as an incomplete
+///   one does (DB-G69): the 277-name key's ten refusals on 2026-04-16 were
+///   about other underlyings, and NIFTY's own contracts were imported
+///   (AF-02, ingest-6). Only when the logs read hold all of them ([`Tally`]).
+/// * A CLOSE WITH REFUSALS OF THIS INSTRUMENT'S OWN names how many and the
+///   first, as a refused or incomplete one does: the phantom `*` row used to
+///   name it, and the close it gave way to must not say less (AF-02). When
+///   the logs read hold fewer than the close counts, the count is "at least".
+/// * A CLOSE WHOSE REFUSALS THE LOGS READ DO NOT HOLD says how many are
+///   missing and where it looked (AF-02 repair 2), never "none about this
+///   instrument", and never another run's refusal as its first: the window
+///   ends at the next closing run's start ([`refusals_of`]).
+/// * A CLEAN CLOSE NEVER LEAVES THIS INSTRUMENT'S OWN REFUSALS UNSAID (AF-02
+///   repair round 1): a refusal of the day about this instrument that no
+///   other run's window holds (a close with no run id cannot place it
+///   elsewhere) is said, never left in the JSON only.
+fn closed_phrase(import: &Value, outcome: &str, first_refusal: Option<&str>) -> Option<String> {
+    let tally = Tally::of(import);
+    if outcome == "done" {
+        return first_refusal.map(|first| {
+            format!(
+                "closed done, yet the importer's log holds {} refusal(s) of this day about this \
+                 instrument not placed in another run; the first is {first}",
+                tally.this
+            )
+        });
+    }
+    let head = format!("imported with {} vendor refusal(s)", tally.failures);
+    Some(match (first_refusal, other_first(import)) {
+        (Some(first), _) if tally.whole() => format!(
+            "{head}, {} about this instrument; the first is {first}",
+            tally.this
+        ),
+        (Some(first), _) => format!(
+            "{head}, at least {} about this instrument; the first is {first}; {}",
+            tally.this,
+            tally.unseen()
+        ),
+        (None, Some(other)) if tally.whole() => {
+            format!("{head}, none about this instrument; the first is {other}")
+        }
+        (None, Some(other)) => format!(
+            "{head}; {} of them in the logs this route reads, none of those about this \
+             instrument; the first is {other}; {}",
+            tally.seen(),
+            tally.unseen()
+        ),
+        (None, None) if tally.whole() => head,
+        (None, None) => format!("{head}; {}", tally.unseen()),
+    })
+}
+
 impl Says<'_> {
     /// The record's phrases, in a fixed order: the calendar, the import, the
     /// vendor's quality, Zerodha's ledger and junk, then the bars.
@@ -4207,7 +4534,6 @@ impl Says<'_> {
     fn import_phrases(&self, out: &mut Vec<String>) {
         let Some(import) = self.import else { return };
         let text = |key: &str| import.get(key).and_then(Value::as_str);
-        let count = |key: &str| import.get(key).and_then(Value::as_u64);
         let first_refusal = import
             .get("refusals")
             .and_then(|r| r.get("this"))
@@ -4238,22 +4564,25 @@ impl Says<'_> {
                 // WHAT FAILED, AND WHETHER IT WAS THIS INSTRUMENT'S FILE: a day
                 // incomplete for another contract still holds this one's bars
                 // (DB-G69).
-                let other_first = import
-                    .get("refusals")
-                    .and_then(|r| r.get("other_first"))
-                    .filter(|first| !first.is_null())
-                    .map(|first| {
-                        let field =
-                            |key: &str| first.get(key).and_then(Value::as_str).unwrap_or_default();
-                        cut(&format!("{}: {}", field("about"), field("why")))
-                    });
+                // "NONE ABOUT THIS INSTRUMENT" ONLY WHEN THE LOGS READ HOLD
+                // EVERY FAILURE, each placed in this close's own window (AF-02
+                // repair 2, [`Tally`]).
+                let other_first = other_first(import);
+                let tally = Tally::of(import);
                 let mut parts: Vec<String> =
                     text("reason").map(str::to_owned).into_iter().collect();
                 match (first_refusal, other_first) {
                     (Some(first), _) => parts.push(first),
-                    (None, Some(other)) => parts.push(format!(
+                    (None, Some(other)) if tally.whole() => parts.push(format!(
                         "{} failure(s), none about this instrument; the first is {other}",
-                        count("failures").unwrap_or(0)
+                        tally.failures
+                    )),
+                    (None, Some(other)) => parts.push(format!(
+                        "{} failure(s); {} of them in the logs this route reads, none of those \
+                         about this instrument; the first is {other}; {}",
+                        tally.failures,
+                        tally.seen(),
+                        tally.unseen()
                     )),
                     (None, None) => {}
                 }
@@ -4264,10 +4593,9 @@ impl Says<'_> {
                 };
                 out.push(format!("incomplete at import{stage}{detail}"));
             }
-            "done_with_refusals" => out.push(format!(
-                "imported with {} vendor refusal(s)",
-                count("failures").unwrap_or(0)
-            )),
+            outcome @ ("done_with_refusals" | "done") => {
+                out.extend(closed_phrase(import, outcome, first_refusal.as_deref()));
+            }
             "open" => out.push("import begun and not closed".to_owned()),
             "recounted" => out.push("closed by the census recount".to_owned()),
             "none"
@@ -4283,9 +4611,23 @@ impl Says<'_> {
                         "not reached by the import yet".to_owned()
                     },
                 );
+                // THE LOG NAMED THE DAY, AND ONLY OTHER FILES (AF-02): said,
+                // never as this instrument's refusal.
+                if let Some(other) = other_first(import) {
+                    out.push(format!(
+                        "the importer's log refused {} other file(s) of this day, none about \
+                         this instrument; the first is {other}",
+                        import
+                            .get("refusals")
+                            .and_then(|r| r.get("other_count"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                    ));
+                }
             }
             _ => {}
         }
+        out.extend(later_phrase(import));
         Self::history_and_late_phrases(import, out);
     }
 
@@ -4747,6 +5089,13 @@ fn rules_json() -> Value {
         "windows": "from and to are minute opens, both inclusive",
     })
 }
+
+/// AF-02 (ingest-6): a journal row is an instrument's when its filter names
+/// the symbol. Its own file, so the packages appending to `tests` merge
+/// beside it.
+#[cfg(test)]
+#[path = "dayflags_filter_tests.rs"]
+mod filter_tests;
 
 #[cfg(test)]
 #[allow(
@@ -5299,14 +5648,14 @@ mod tests {
             ],
         });
         let inst = instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
-        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs);
+        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs, None);
         assert_eq!(split.this, vec![("calendar".to_owned(), "new".to_owned())]);
         assert_eq!(split.superseded.len(), 1);
         assert_eq!(split.superseded[0].run, Some(10));
         assert_eq!(split.superseded[0].commit.as_deref(), Some("aaa"));
         // A row with no `run=` keeps every refusal current: nothing says which run logged it.
         let unrun = json!({ "logged": [{ "about": "calendar", "why": "old", "at_ms": 15_000 }] });
-        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs);
+        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs, None);
         assert_eq!(kept.this_count, 1);
         assert_eq!(kept.superseded_count, 0);
     }
@@ -6383,7 +6732,13 @@ mod tests {
             one["import"]["refusals"]["this"][0]["about"],
             "NIFTY28MAR1911500CE"
         );
-        says_has(one, "imported with 2 vendor refusal(s)");
+        // The close names how many of its refusals are this contract's and
+        // the first (AF-02, D-4970).
+        says_has(
+            one,
+            "imported with 2 vendor refusal(s), 1 about this instrument; the first is \
+             NIFTY28MAR1911500CE: line 4: not ten well-formed fields",
+        );
         assert_eq!(
             one["import"]["refusals"]["other_first"]["about"],
             "NIFTY28MAR1911600CE"

@@ -16961,6 +16961,27 @@ BUILT; what that costs until it is, is the disk item below.
   per file it lands, up to the 1,024 a month allows. On the operator's store
   on 12 Oct 2026 there were 24 revised months, all one-second GDFL months at
   revision 1 (`find bar-revisions-v1 -name '*.bin'`).
+- **L-IA-26, disk, restated 14 Oct 2026 (AF-07): the "24 revised months,
+  all at revision 1" above is stale by two orders of magnitude.** Measured
+  read-only on the operator's store after the 14 Oct imports by the two
+  checks of assurance finding ingest-8 (scripts and outputs in
+  `state/assurance-20261014/scratch/verify-ingest-8/`, outside the
+  repository): `audit/gdfl.repairs` holds 17,007 `repairing` and 17,007
+  `repair` lines (none left open) over **2,843 GDFL months**, up to
+  **generation 21** for one month (NSE-CASH-ACC 2024-05 among them), 791
+  months with 10 or more. `du -sk bar-revisions-v1` is 121,246,976 KiB =
+  **115.63 GiB** in 449,029 files: **GDFL 106.05 GiB**, **Zerodha 9.58 GiB**
+  (47,140 months, all generation 1, reason `refold_derived_rungs`). Of the
+  GDFL bytes **66.22 GiB are superseded generations that no reader serves**
+  and 39.83 GiB are served. The repairs wrote 1,005,847,649 rows to add
+  68,414,450, about 14.7 rows written per row added, of which 937,433,199
+  (about 13.7 per row added) were rows the month already held, copied
+  into the new generation: one day landed early in a month (a special
+  session imported by its own run) turns every later day of that month into
+  a whole-month generation, because a revision is never appended to
+  (`pull::gdfl_import`'s header). The once-per-month gather (D-4899) is
+  still **NOT BUILT**, and nothing prunes a superseded generation (that
+  would be a deletion, and is the operator's).
 - **L-IA-26, the read path is unchanged and O(1).** Opening a month served
   from a revision checks the revision's and the source's header counts
   against the same ceiling: two comparisons, no I/O beyond the open it
@@ -17142,6 +17163,59 @@ BUILT; what that costs until it is, is the disk item below.
 - **A 1day month the vendor answered empty stays owed**, so its instrument
   is withheld from every 1min pull by name until an empty daily answer is
   recorded durably (a decision is needed; DB-B27).
+- **WP-62's choices are recorded as D-4964 (AF-07, 15 Oct 2026); three of
+  them are policy, not measurement, and stay so.** `SETTLE_MARGIN_MINUTES` =
+  5 is UNVERIFIED as a sufficient wait (no charter source says when a
+  vendor's last candle of a session is final), and this machine's clock is
+  compared with no vendor's, so a clock running ahead by more than the
+  margin is not caught. `STORE_REFUSED_BREAKER` = 8 is NOT MEASURED against
+  a contended run (above). The empty-daily-answer question of DB-B27 is
+  still open: D-4964 point 5 records what the code does and names the
+  question; it decides nothing.
+- **The restart scan's 64-run edge has no behavioural test.**
+  `INTERRUPTED_RUNS` = 64 is held to D-4964 by
+  `core/tests/decision_citations.rs`'s figures test, which reads the
+  constant; no test opens a 65th run record before the scan and shows it is
+  the one not reported.
+
+### Decision citations: what the citation test reads, and what it cannot see (AF-07, D-4971)
+
+- **It reads `crates/` only.** `core/tests/decision_citations.rs` walks every
+  `.rs`, `.toml` and `.md` file under `crates/` (768 files when first
+  written, 772 after the merge with `feat/db-fix` of 15 Oct 2026, whose
+  `git ls-files -z crates | xargs -0 du -ck` gives 40,768 KiB) once
+  per run, O(bytes), and the ledger once through
+  `include_str!`. A number cited only in `docs/`, `web/`, `.github/` or a
+  commit message is not checked: `docs/02-store-format.md` and this file
+  cite numbers too.
+- **It checks that a number resolves, not what it means.** A comment citing
+  a number whose entry is about something else passes, as it always did;
+  gate 27b still checks only that a heading number is unique.
+- **A pending note is trusted.** A number named in a "Cited, never written"
+  note passes whatever the note says; the note is reviewed like any entry.
+- **Its heading reading is stricter than gate 27b's, by one boundary.** The
+  test reads an entry heading as gate 27b's pattern plus the citation's
+  trailing boundary, so `### D-00012` or `### D-0001x` heads nothing for it,
+  while gate 27b (`.github/gates_ledger.rs` `heading_number`, "its first
+  four digits only") counts each as D-0001. The ledger holds no such
+  heading (`grep -nE '^#{2,4} +D-[0-9]{4}[A-Za-z0-9_]' docs/05-decisions.md`
+  prints nothing), so both read the same numbers today. Gate 27b ignores
+  code fences; the test skips a fenced heading and closes a fence only on a
+  run of its own character at least as long with nothing after it
+  (CommonMark's rule). The ledger's 200 fence lines are all three backticks,
+  so the two fence rules read it alike. Tightening gate 27b to match is a
+  `.github/` change this package did not make.
+- **Wall time, measured.** The test prints its own elapsed time with
+  `--nocapture` (the ledger read, the walk, every file read and scanned).
+  The test binary run 40 times in a row, 15 Oct 2026, debug test profile
+  (`opt-level = 3`), on this Mac under other agents' builds, the crates
+  on WD_BLACK: n = 40, p50 178.5 ms, p99 = max 1,384.8 ms (the first, cold
+  run; with n under 100 the p99 is the slowest sample), min 141.9 ms. It
+  grows with the bytes under `crates/`, and is a test, on no request path.
+  Re-measured after AF-07's repair (the merged tree, 772 files, 889 numbers
+  cited): the test binary run 40 times in a row with `--exact
+  every_cited_decision_heads_an_entry_or_is_named_pending`, n = 40, min
+  111.2 ms, p50 120.0 ms, p99 = max 239.6 ms (the first, cold run).
 
 ### Pull runtime: every run left open, the scan's guesses, the leg it cannot see (AG-01, D-4976)
 
@@ -18189,3 +18263,143 @@ log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
 | L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 332 MB of new day files a trading day, three files a day | R4-08 |
 | L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
 | L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
+
+
+## Import records on filtered days — D-4970 (AF-02, ingest-6), 14 October 2026
+
+What AF-02 adds to `/imports.json`, `/audit.json` and `/dayflags.json`, and
+what it costs. None of it is a new walk: `/imports.json`'s day rows stay the
+walk of the asked range this file already names (`imports::walk`, O(rows in
+range)), and `/dayflags.json` reads one page of `PAGE_DAYS` days through it.
+
+| Id | Operation | Bound | Measured |
+|---|---|---|---|
+| L-AF2-1 | `imports::merged`: is a logged kind-day named by the journal under ANY filter | one range of that day's keys in the parsed journal, at most the closes of that day (the operator's busiest options day holds three keys: `*`, `BANKNIFTY,NIFTY`, the 277-name key), per logged day in the asked range; the logged days are the ring's, not the journal's | see the table below; `a_month_of_filtered_closes_with_refusals_holds_no_phantom` pins one row per close over 28 days under the 277-name key |
+| L-AF2-2 | `dayflags::Names`: does a row's filter NAME the symbol | the comma split, O(bytes of the filter), once per DISTINCT filter string per request (`the_filter_is_split_once_per_distinct_string_per_request`: 84 rows, 3 splits); every other row is one hash probe of its filter text, O(bytes) of hashing, the same order as the copy of that text the walk already makes for the row. **Not O(1) in the filter's length; bounded by it**: the 277-name key is about 2,200 bytes | the 277-name RELIANCE page costs what the 15-byte NIFTY page costs (table below) |
+| L-AF2-3 | `imports::where_looked`: where a run with no lifecycle event was looked for | one `read_dir` of `<store>/logs`, and (repair round 1) one of each directory that is only the PARENT of read ones (`logs/gdfl`; no read directory is deeper than two names, so the walk is at most two levels), only for a run asked by `run=` and found with no lifecycle event; O(entries of those directories): two on the operator's store on 15 October (`cli`, `cli-batch`; it holds no `logs/gdfl` yet, so no second level is read); at most 32 names returned (`MAX_NOT_READ_NAMED`), every one counted (`not_read_total`); repair round 2 adds one `stat` per LINK entry only, to see whether it reaches a directory (the operator's `logs` holds none) | `run=1791944932` below |
+| L-AF2-4 | `dayflags::journal_rows`: which covering close a day stands on (repair round 1: the newest line wins, whichever filter) | one comparison of `(line, names)` per covering row, the same one comparison per row the first form made of `(names, line)`; the rows are the page's, already walked | the repair round's table below: no change at p50 |
+| L-AF2-5 | `imports::merged` (repair round 2, replacing L-AF2-1's "any filter" probe): which of a logged kind-day's refusals NO close owns | per logged refusal in the asked range: its subject decoded once (`subject_of`, O(bytes of `about`)); then each close of its kind-day (one range of that day's keys, at most the distinct filters that closed it: three on the operator's busiest options day) checked by NAME (each distinct list filter split once per call, `Owners`, then one hash probe of the filter text, O(bytes of the filter) as in L-AF2-2) and by WINDOW (`placed`, and `next_start` over the same handful; each start one hash probe of `runs_by_id`). O(logged refusals in range × closes²); the refusals are the ring's, bounded by its size, not the journal's. **Not O(1) in the filter's length; bounded by it**, as L-AF2-2 | the repair-2 table below |
+| L-AF2-6 | `dayflags::import_json` (repair round 2): a close's window | `journal_rows` keeps each day's closing run ids (one `contains` over the day's handful per row with `run=`); a day's `next_s` is one `start_of` per closer, each a find over the answer's first page of runs (`RUNS_PAGE`, 20), then `refusals_of` places each `logged` line with one `placed` call, the same one comparison per line the first form made against the run start alone | the repair-2 table below |
+
+**Measured, 14 October 2026.** Each route asked 200 times of a release build
+of the code before this change (feat/db-fix 72c91a46 with the tests' module
+hooks only) and 200 times of this change, INTERLEAVED (each iteration asks
+both, alternating which goes first) so the shared machine's load falls on
+both alike; each server reads its own fresh shadow of the operator's store
+(bars through the link, GET only); `curl`'s `time_total`; load average 46 to
+51 throughout (log `state/fix/af02/ab/timings.txt` in the work tree; the
+script is `state/fix/af02/ab.sh`). p50 / p99 / max, ms:
+
+| Route | Before | After |
+|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` (the whole journal, 11,500 rows) | 21.34 / 129.72 / 1,101.19 | 17.26 / 103.69 / 128.72 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.40 / 8.88 / 9.46 | 1.35 / 6.63 / 11.70 |
+| `/audit.json?feed=gdfl` | 1.68 / 7.33 / 3,617.92 | 1.62 / 12.62 / 28.75 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (filter `BANKNIFTY,NIFTY`) | 1.78 / 24.05 / 397.88 | 1.68 / 13.00 / 22.54 |
+| the same for NSE-FNO-RELIANCE (the 277-name filter) | 1.53 / 16.40 / 22.45 | 1.69 / 6.32 / 7.00 |
+| NSE-FNO-NIFTY, April 2026 | 3.54 / 27.13 / 51.90 | 3.57 / 18.14 / 56.61 |
+| NSE-FNO-RELIANCE, April 2026 | 3.31 / 16.00 / 21.66 | 3.18 / 11.19 / 15.35 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 26.78 / 186.13 / 196.16 | 25.07 / 150.02 / 171.42 |
+
+The p99 and max columns are the loaded host's scheduler more than the
+routes: the same eight routes asked earlier that evening, one server at a
+time and not interleaved (load not recorded; the 15-minute average was 26
+at 21:20), gave a build of this change that differs only in one sentence
+p50 1.12 to 12.15 ms and p99 2.05 to 35.20 ms, and the before build p50
+0.96 to 12.96 ms and p99 1.92 to 17.39 ms (`state/fix/af02/after` and
+`before-same-shadow`).
+What the table does show is that the change adds nothing measurable at p50,
+and that the page whose rows carry the 2,200-byte filter costs no more than
+the page whose rows carry a 15-byte one. `/imports.json?outcome=refused` is
+the walk of the whole journal (L-AF2-1's probe runs once per logged day
+inside it), unchanged here and already named above as O(rows in range).
+
+**Repair round 1, measured 15 October 2026** (D-4970; the ranking is the
+newest covering line, a `done` close says this instrument's own refusals,
+and every unread log directory is counted). Two interleaved runs (each iteration asks both
+servers, alternating which goes first), n = 200 per route per build, each
+server over its own fresh shadow of the operator's store (bars through the
+link, GET only); `curl`'s `time_total`. Run 1: the build before AF-02
+(feat/db-fix 72c91a46 with the tests' module hooks only, `tgt/p-AF-02-before`)
+against the repair's release build (`cde73992`). Run 2: the first form's
+release build (`ff636f58`) against the same repair build. Load average 16 to
+19 (logs `state/fix/af02/r1/ab-orig/timings.txt` and
+`state/fix/af02/r1/ab-r1/timings.txt` in the work tree; the script is
+`state/fix/af02/r1/ab.sh`). p50 / p99 / max, ms:
+
+| Route | Before AF-02 | Repair (run 1) | First form `ff636f58` | Repair (run 2) |
+|---|---|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` | 12.79 / 32.01 / 37.02 | 12.09 / 23.60 / 28.80 | 8.03 / 9.45 / 39.78 | 8.03 / 9.30 / 9.61 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.03 / 5.30 / 6.16 | 1.02 / 4.07 / 4.85 | 1.13 / 3.18 / 3.29 | 1.11 / 2.25 / 4.69 |
+| `/audit.json?feed=gdfl` | 1.38 / 9.88 / 13.75 | 1.41 / 11.66 / 14.94 | 1.46 / 3.49 / 6.20 | 1.47 / 4.57 / 8.35 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (15-byte list) | 1.51 / 3.98 / 6.03 | 1.49 / 4.33 / 6.07 | 1.81 / 6.03 / 7.24 | 1.78 / 4.38 / 6.82 |
+| the same for NSE-FNO-RELIANCE (the 2,200-byte 277-name list) | 1.04 / 1.76 / 1.90 | 1.04 / 1.82 / 1.85 | 1.51 / 3.42 / 5.16 | 1.48 / 4.02 / 8.44 |
+| NSE-FNO-NIFTY, April 2026 | 1.72 / 2.99 / 3.64 | 1.78 / 3.30 / 4.86 | 3.04 / 5.96 / 8.09 | 2.88 / 10.39 / 13.25 |
+| NSE-FNO-RELIANCE, April 2026 | 1.64 / 2.72 / 2.79 | 1.68 / 2.73 / 2.75 | 1.70 / 3.24 / 4.64 | 1.69 / 4.99 / 13.15 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 13.12 / 20.13 / 26.43 | 12.94 / 20.32 / 23.49 | 14.14 / 22.65 / 29.55 | 14.10 / 23.19 / 29.06 |
+
+p50 is equal within 0.2 ms across the three builds on every route; the
+p99 and max columns move more between the two runs than between the builds
+in either, which is the shared host's scheduler (the same builds' p99 for
+the NIFTY month is 3.30 ms in run 1 and 10.39 ms in run 2). The per-request
+cost is bounded by the page's rows times the bytes of each row's filter: the
+split is paid once per distinct filter, but every row still hashes its
+filter's text (L-AF2-2), so the cost DOES grow with a filter's length, by one
+hash of it per row. *Corrected in repair round 2:* this sentence first said
+the cost "does not grow with a filter's length past the one memoised split",
+which the second agent showed is wrong in the bound; at this store's sizes
+the growth is not measurable: the RELIANCE pages, whose rows carry the
+2,200-byte 277-name filter, cost what the NIFTY pages carrying the 15-byte
+list cost. Interning each filter once per request (a per-row id from the
+journal parse) would make that probe O(1) per row; not done here.
+
+**Repair round 2, measured 16 October 2026** (D-4970: a close owns only the
+refusals of its own run's window, and an unowned refusal keeps its log-only
+row; L-AF2-5, L-AF2-6). Interleaved (each iteration asks both servers,
+alternating which goes first), n = 200 per route per build, `curl`'s
+`time_total`, GET only. Before: repair round 1's release build (`9cb9de51`,
+the second agent's copy `tgt/v-AF-02-r2b`); after: this round's (`91ef0094`,
+frozen at `tgt/af02-r3-after`). The real-store pair reads two fresh shadows
+of the operator's store (`AF-02-b3` on :8706, `AF-02` on :8701); the attack
+pair reads two fresh shadows with the second agent's invented lines appended
+(`state/fix/af02-r3/attack.sh`, its `af02-v4` script with only the shadow
+names changed: the two blocking fixtures and a 79,997-byte, 10,000-name
+filter naming NIFTY on every weekday of 2026 Q1; `AF-02-b3x` on :8708,
+`AF-02-a3x` on :8707). Load average 13 to 37 at the start (logs
+`state/fix/af02-r3/ab-real/timings.txt` and `ab-attack/timings.txt` in the
+work tree; the scripts are `state/fix/af02-r3/ab.sh` and `ab-attack.sh`).
+p50 / p99 / max, ms:
+
+| Route | Repair 1 `9cb9de51` | Repair 2 |
+|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` | 8.03 / 9.28 / 11.67 | 8.49 / 9.82 / 11.92 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 0.79 / 2.41 / 3.71 | 0.85 / 2.79 / 2.91 |
+| `/audit.json?feed=gdfl` | 0.98 / 1.48 / 2.84 | 0.99 / 1.87 / 3.46 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` | 1.06 / 1.72 / 1.91 | 1.13 / 2.88 / 3.96 |
+| the same for NSE-FNO-RELIANCE (the 277-name list) | 0.92 / 2.33 / 12.03 | 0.98 / 1.98 / 3.72 |
+| NSE-FNO-NIFTY, April 2026 | 2.26 / 4.53 / 4.84 | 2.39 / 6.10 / 6.26 |
+| NSE-FNO-RELIANCE, April 2026 | 1.68 / 2.71 / 2.99 | 1.75 / 3.06 / 5.16 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 11.71 / 14.10 / 17.41 | 12.32 / 14.71 / 17.75 |
+| attack: NSE-FNO-NIFTY, 2026 Q1, every row under the 79,997-byte filter | 5.67 / 7.83 / 55.66 | 5.76 / 10.01 / 22.01 |
+| attack: `/imports.json?feed=gdfl&kind=options&from=2026-01-01&to=2026-03-31` | 5.54 / 6.11 / 6.16 | 5.60 / 6.18 / 6.24 |
+| attack: NSE-FNO-NIFTY, 2018-08-20 to 2018-08-24 (the blocking fixtures) | 0.88 / 1.26 / 1.33 | 0.93 / 1.32 / 5.40 |
+
+Repair 2's p50 is above repair 1's on every route, by 0.01 to 0.61 ms (1 to
+6 percent), including `run=`, whose path changed only by where_looked's
+words; it is a cost and it is said, not hidden. `/imports.json?outcome=refused`
+(+0.46 ms, the whole journal) now decodes each logged refusal's subject and
+checks it against the handful of closes of its kind-day (L-AF2-5); the
+`/dayflags.json` pages place each `logged` line against one more bound
+(L-AF2-6). The 79,997-byte filter page costs what the 15-byte one costs
+per day asked (5.76 ms for Q1's 90 days, 64 of them weekdays closed under it, against 2.39 ms for April's 30), within the
+noise of the loaded host; the bound is still one hash of the filter's text
+per row (L-AF2-2), not O(1) in its length. On the real store the answers
+of `/imports.json` and `/audit.json` are unchanged apart from shadow paths
+and timestamps (`counts.refused` 2, the two Muhurat rows), and
+`/dayflags.json` changes only where a later closing run's refusals were
+counted as an earlier close's: NSE-FNO-NIFTY 2026-04-16 moves its ten
+277-name-run refusals from `other_count` to `later_count` (it closed `done`
+under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
+`incomplete` close counts 94 refusals in its own window, equal to its
+`failures=94`, where it counted 151 (57 move to `later_count`); neither
+sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
