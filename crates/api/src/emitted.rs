@@ -1990,7 +1990,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 5 -> 6 at R3-14 repair 4: `api.main blocking work outlived the shutdown
     // wait`, read back by `server::stop_tests::
     // blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end`.
-    const REACHED_IN_SPEED_TESTS: usize = 6;
+    // 6 -> 9 at R3-14 repair 5: `api.serve stop asked during the start-up
+    // load`, read back by `server::stop_tests::
+    // a_stop_during_a_slow_load_ends_within_the_stop_bound`; `api.serve the
+    // stop signal could not be waited for` and `api.serve the start-up load
+    // did not finish`, read back by
+    // `server::stop_tests::every_end_of_the_load_race_is_named`.
+    const REACHED_IN_SPEED_TESTS: usize = 9;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -2066,9 +2072,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 85 -> 86 at R3-14 repair 4: `api.main blocking work outlived the
     // shutdown wait`, named in `REACHED_IN_SPEED_TESTS`.
+    //
+    // 86 -> 89 at R3-14 repair 5: the start-up load race's three lines (a
+    // stop during the load, a stop future that failed, a load that
+    // panicked), named in `REACHED_IN_SPEED_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 86,
+        lib_sites, 89,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

@@ -569,6 +569,37 @@ pub fn state_of(exit: Option<&str>, log: &str) -> State {
     }
 }
 
+/// Whether `check` is one this plan declines: exactly [`declined_command`]'s
+/// form, a `printf` of its reason and `exit 125`.
+#[must_use]
+pub fn declined(check: &Check) -> bool {
+    check.command.starts_with("printf '%s\\n' ")
+        && check.command.ends_with(&format!("; exit {NOT_HERE}"))
+}
+
+/// [`state_of`] for `check`: exit 125 is NOT RUN HERE only for a check the
+/// plan DECLINED (R3-14 repair 5, the second agent's follow-up). A check
+/// that ran and happened to exit 125 (a test runner, a tool's own code) is
+/// RED, never a quiet "CI only".
+#[must_use]
+pub fn state_of_check(check: &Check, exit: Option<&str>, log: &str) -> State {
+    match state_of(exit, log) {
+        State::NotHere if !declined(check) => State::Red(NOT_HERE, failing_tests(log)),
+        state => state,
+    }
+}
+
+/// Whether `rows` read green: no row RED or NOT RUN, and at least one row
+/// GREEN. A run whose every row is NOT RUN HERE, or a plan with no row,
+/// proved nothing here and is not green (R3-14 repair 5).
+#[must_use]
+pub fn rows_green(states: &[&State]) -> bool {
+    states
+        .iter()
+        .all(|s| matches!(s, State::Green | State::NotHere))
+        && states.iter().any(|s| matches!(s, State::Green))
+}
+
 /// `secs` since the epoch as `YYYY-MM-DDTHH-MM-SSZ` (UTC), file-name safe.
 #[must_use]
 pub fn utc_stamp(secs: u64) -> String {
@@ -608,10 +639,16 @@ pub fn result(stamp: &str, rows: &[(Check, State, Option<u64>, String)]) -> Stri
         "{} checks: {} green, {red} red, {not_run} not run, {not_here} not run here (CI only). {}\n",
         rows.len(),
         rows.len() - red - not_run - not_here,
-        match (red + not_run, not_here) {
-            (0, 0) => "EVERY CHECK IS GREEN.",
-            (0, _) =>
+        match (
+            red + not_run,
+            not_here,
+            rows_green(&rows.iter().map(|r| &r.1).collect::<Vec<_>>())
+        ) {
+            (0, 0, true) => "EVERY CHECK IS GREEN.",
+            (0, _, true) =>
                 "EVERY CHECK RUN HERE IS GREEN; the rows marked NOT RUN HERE are proved by CI only.",
+            (0, _, false) =>
+                "NOT GREEN: NOTHING WAS PROVED HERE (no check ran green; every row is NOT RUN HERE, or the plan is empty).",
             _ => "NOT GREEN: see the rows marked RED and NOT RUN.",
         }
     );
@@ -679,7 +716,7 @@ fn verdict(dir: &Path) -> Result<(String, bool), String> {
         let secs = std::fs::read_to_string(dir.join(format!("{}.secs", check.name)))
             .ok()
             .and_then(|s| s.trim().parse().ok());
-        let state = state_of(exit.as_deref(), &log);
+        let state = state_of_check(&check, exit.as_deref(), &log);
         let tail = if matches!(state, State::Green | State::NotHere) {
             String::new()
         } else {
@@ -694,9 +731,7 @@ fn verdict(dir: &Path) -> Result<(String, bool), String> {
     let text = result(&stamp, &rows);
     let path = dir.join(format!("checks-{stamp}.md"));
     std::fs::write(&path, &text).map_err(|why| format!("{}: {why}", path.display()))?;
-    let green = rows
-        .iter()
-        .all(|r| matches!(r.1, State::Green | State::NotHere));
+    let green = rows_green(&rows.iter().map(|r| &r.1).collect::<Vec<_>>());
     Ok((format!("{}\n{text}", path.display()), green))
 }
 
@@ -1050,6 +1085,47 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("| NOT RUN HERE (CI only) |"), "{text}");
+    }
+
+    /// **EXIT 125 IS "CI ONLY" FOR A DECLINED CHECK ALONE, AND A RUN THAT
+    /// PROVED NOTHING HERE IS NOT GREEN** (R3-14 repair 5, the second
+    /// agent's follow-up). Fails before: a cargo step that exited 125 read
+    /// NOT RUN HERE, and a plan whose every row was NOT RUN HERE (or an empty
+    /// plan) read green.
+    #[test]
+    fn only_a_declined_check_is_ci_only_and_nothing_proved_is_not_green() {
+        let ran = Check {
+            name: "tests".to_owned(),
+            proves: "the suite".to_owned(),
+            command: "cargo test --workspace --locked".to_owned(),
+        };
+        let skipped = Check {
+            name: "mutants".to_owned(),
+            proves: "no surviving mutant".to_owned(),
+            command: declined_command("mutation testing takes hours"),
+        };
+        assert!(declined(&skipped) && !declined(&ran));
+        assert_eq!(
+            state_of_check(&skipped, Some("125\n"), ""),
+            State::NotHere,
+            "a declined check is CI only"
+        );
+        assert_eq!(
+            state_of_check(&ran, Some("125\n"), "test a::b ... FAILED\n"),
+            State::Red(125, vec!["a::b".to_owned()]),
+            "a check that ran and exited 125 is red"
+        );
+        assert_eq!(state_of_check(&ran, Some("0"), ""), State::Green);
+        let only_ci = vec![(skipped.clone(), State::NotHere, Some(0), String::new())];
+        let text = result("2026-10-17T00-00-00Z", &only_ci);
+        assert!(text.contains("NOTHING WAS PROVED HERE"), "{text}");
+        assert!(!text.contains("IS GREEN"), "{text}");
+        assert!(!rows_green(&[&State::NotHere]), "every row CI only");
+        assert!(!rows_green(&[]), "an empty plan");
+        assert!(rows_green(&[&State::Green, &State::NotHere]));
+        assert!(!rows_green(&[&State::Green, &State::NotRun]));
+        let empty = result("2026-10-17T00-00-00Z", &[]);
+        assert!(empty.contains("NOTHING WAS PROVED HERE"), "{empty}");
     }
 
     /// The shell words of `command` as `bash` would split them, quotes

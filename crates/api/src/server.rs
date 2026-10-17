@@ -17630,6 +17630,9 @@ fn keep_port(
 /// work, see [`end_runtime`]), then the speed table's last counts
 /// ([`crate::speed::flush_at_exit`]: the requests the drain cut are counted
 /// when the runtime drops them), then `last_word` (the binary's exit line),
+/// told whether blocking work outlived the wait (R3-14 repair 5: the exit
+/// line said "everything went as asked" in the same stop that said, at
+/// `Error`, that work was abandoned),
 /// then the log, the store and the port, in that order ([`Held::release`]).
 /// Returns how many engine tasks were abandoned.
 ///
@@ -17650,7 +17653,7 @@ pub fn end_served(
     runtime: tokio::runtime::Runtime,
     grace: std::time::Duration,
     held: Held,
-    last_word: impl FnOnce(),
+    last_word: impl FnOnce(bool),
 ) -> usize {
     cli::cancel::request();
     released_after(wait_then_end_said(runtime, grace), held, last_word)
@@ -17665,7 +17668,7 @@ pub(crate) fn ended_then_released(
     runtime: tokio::runtime::Runtime,
     grace: std::time::Duration,
     held: Held,
-    last_word: impl FnOnce(),
+    last_word: impl FnOnce(bool),
 ) -> usize {
     released_after(
         wait_then_end_counting(runtime, grace, || 0),
@@ -17676,9 +17679,9 @@ pub(crate) fn ended_then_released(
 
 /// What follows a runtime's end, in order: the speed table's last counts,
 /// the exit line, then the release, or the keep when work outlived the wait.
-fn released_after(ended: Ended, held: Held, last_word: impl FnOnce()) -> usize {
+fn released_after(ended: Ended, held: Held, last_word: impl FnOnce(bool)) -> usize {
     let _lines = crate::speed::flush_at_exit();
-    last_word();
+    last_word(ended.outlived);
     if ended.outlived {
         held.keep_to_exit();
     } else {
@@ -19520,6 +19523,109 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown, held: &mut Held
     run_in_over(dir, served_store_root(), args, shutdown, held).await
 }
 
+/// Whether `args` name a serve: the one command that catches Ctrl-C and
+/// `SIGTERM` (R3-14 repair 5).
+///
+/// The binary registered both for EVERY command before parsing it (repair
+/// 4), so `api report`, which never polls a stop, held SIGINT and Ctrl-C no
+/// longer interrupted it. A report, a misuse and a non-text argument now keep
+/// the default disposition: Ctrl-C ends them at once, as before repair 4.
+#[must_use]
+pub fn catches_stops(args: &[String]) -> bool {
+    matches!(Command::parse(args), Ok(Command::Serve(_)))
+}
+
+/// What the start-up load ended as: see [`loaded_or_stopped`].
+#[derive(Debug)]
+pub(crate) enum Loading<T> {
+    /// The load finished before any stop was asked.
+    Loaded(T),
+    /// A stop was asked first, with its own result: `Err` when the signal
+    /// could not be waited for.
+    Stopped(std::io::Result<()>),
+    /// The load's thread ended without a value (it panicked): the reason.
+    Failed(String),
+}
+
+/// THE START-UP LOAD RACES THE STOP (R3-14 repair 5).
+///
+/// `Site::serving` reads the masters and the store for seconds (3 s at host
+/// load 20, about 18 s at load 109-125, measured on shadows of the real
+/// store), and it ran on the serve future before the stop future was first
+/// polled: a `SIGTERM` during it was answered only after the whole load, with
+/// the port already bound, so a redeploy that waits
+/// [`crate::speed::REDEPLOY_WAIT`] for the port found it still bound, was
+/// refused, and left nothing listening (the second agent's check 4,
+/// blocking 2).
+///
+/// The load now runs on the blocking pool and the stop is polled beside it,
+/// FIRST (`biased`), so a stop already asked wins over a load that also just
+/// finished. A stop during the load returns at once; the load's thread is
+/// left to the runtime's end, which waits [`SHUTDOWN_GRACE`] for it and then
+/// keeps the store and the port to the process's end
+/// ([`Held::keep_to_exit`]), so the whole stop is at most
+/// [`SHUTDOWN_GRACE`] plus the final writes, inside
+/// [`crate::speed::STOP_BOUND`]. One spawn and one select, once per process.
+pub(crate) async fn loaded_or_stopped<T: Send + 'static>(
+    load: impl FnOnce() -> T + Send + 'static,
+    shutdown: &mut Shutdown,
+) -> Loading<T> {
+    let loading = tokio::task::spawn_blocking(load);
+    tokio::select! {
+        biased;
+        asked = shutdown.as_mut() => Loading::Stopped(asked),
+        loaded = loading => match loaded {
+            Ok(value) => Loading::Loaded(value),
+            Err(why) => Loading::Failed(why.to_string()),
+        },
+    }
+}
+
+/// The exit of a serve stopped during its start-up load (R3-14 repair 5):
+/// said on the terminal and in the log, which is already open, so the stop
+/// is never a silence. A stop that was asked is [`OK`]: nothing was served
+/// and nothing was asked to be. A stop future that FAILED (the signal could
+/// not be waited for) is [`FAILED`], named: before this race it ended the
+/// serve's graceful shutdown at once and read as a clean stop.
+fn stopped_while_loading(asked: std::io::Result<()>) -> u8 {
+    match asked {
+        Ok(()) => {
+            let _said = telemetry::emit(
+                &telemetry::Event::info("api.serve", "stop asked during the start-up load")
+                    .with("served", telemetry::Value::Bool(false))
+                    .with("bound_ms", telemetry::Value::Uint(millis(SHUTDOWN_GRACE))),
+            );
+            say!(
+                "  stopped: asked during the start-up load, before any request was served; \
+                 the load is left to the process's end (at most {SHUTDOWN_GRACE:?})"
+            );
+            OK
+        }
+        Err(why) => {
+            let _said = telemetry::emit(
+                &telemetry::Event::error("api.serve", "the stop signal could not be waited for")
+                    .with("why", telemetry::Value::Str(&why.to_string())),
+            );
+            warn_line!(
+                "REFUSED — the stop signal could not be waited for: {why}. \
+                 No request was served."
+            );
+            FAILED
+        }
+    }
+}
+
+/// The exit of a serve whose start-up load ended with no value (its thread
+/// panicked): said on the terminal and in the log, and [`FAILED`].
+fn load_failed(why: &str) -> u8 {
+    let _said = telemetry::emit(
+        &telemetry::Event::error("api.serve", "the start-up load did not finish")
+            .with("why", telemetry::Value::Str(why)),
+    );
+    warn_line!("REFUSED — the start-up load did not finish: {why}. No request was served.");
+    FAILED
+}
+
 /// [`run_in`], over a store root the environment may not have named.
 ///
 /// The third layer of the same split, for the same reason and for a branch this
@@ -19537,7 +19643,7 @@ async fn run_in_over(
     dir: &Path,
     store: Result<PathBuf, String>,
     args: &[String],
-    shutdown: Shutdown,
+    mut shutdown: Shutdown,
     held: &mut Held,
 ) -> u8 {
     match Command::parse(args) {
@@ -19657,7 +19763,21 @@ async fn run_in_over(
                 announce_front_end(&front);
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
-                let site = Loaded::new(Site::serving(dir, &store_root));
+                //
+                // RACED AGAINST THE STOP (R3-14 repair 5): the load takes
+                // seconds with the port already bound, and a stop asked during
+                // it is answered now, not after it. See `loaded_or_stopped`.
+                let (load_dir, load_root) = (dir.to_path_buf(), store_root.clone());
+                let site = match loaded_or_stopped(
+                    move || Site::serving(&load_dir, &load_root),
+                    &mut shutdown,
+                )
+                .await
+                {
+                    Loading::Loaded(site) => Loaded::new(site),
+                    Loading::Stopped(asked) => return stopped_while_loading(asked),
+                    Loading::Failed(why) => return load_failed(&why),
+                };
                 // THE READ'S OWN VERDICT, ON THE BANNER AND IN THE EXIT CODE.
                 //
                 // The masters are read HERE, one line above, and until now

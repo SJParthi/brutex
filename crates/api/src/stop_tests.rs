@@ -193,13 +193,19 @@ fn a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free() {
     // last minute is written; then the exit line, while everything is still
     // held; then the log, the store and the port are freed.
     let mut said_last = false;
-    let _abandoned = ended_then_released(runtime, std::time::Duration::from_secs(5), held, || {
-        assert!(
-            !log_is_free(&root) && !store_is_free(&root) && !port_is_free(addr),
-            "the exit line is said while the log, the store and the port are all held"
-        );
-        said_last = true;
-    });
+    let _abandoned = ended_then_released(
+        runtime,
+        std::time::Duration::from_secs(5),
+        held,
+        |outlived| {
+            assert!(!outlived, "nothing outlived this end");
+            assert!(
+                !log_is_free(&root) && !store_is_free(&root) && !port_is_free(addr),
+                "the exit line is said while the log, the store and the port are all held"
+            );
+            said_last = true;
+        },
+    );
     assert!(said_last, "the exit line was said");
     let lines: Vec<_> = crate::emitted::landed(mark, "api.speed", "minute ended")
         .into_iter()
@@ -397,9 +403,12 @@ fn blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end()
     let grace = std::time::Duration::from_millis(100);
     let began = std::time::Instant::now();
     let mut said_last = false;
-    let _abandoned = ended_then_released(runtime, grace, held, || said_last = true);
+    let _abandoned = ended_then_released(runtime, grace, held, |outlived| said_last = outlived);
     assert!(began.elapsed() >= grace, "the end waited out its grace");
-    assert!(said_last, "the exit line was said");
+    assert!(
+        said_last,
+        "the exit line was said, and told the work outlived the wait"
+    );
     assert!(
         !store_is_free(&root),
         "the store stays held while this process's blocking work still runs"
@@ -443,5 +452,210 @@ fn an_end_that_takes_all_its_time_is_outlived_and_a_quick_one_is_not() {
             outlived: false
         },
         "a runtime with nothing running ends inside its wait and is released"
+    );
+}
+
+/// **A STOP ASKED DURING THE START-UP LOAD ENDS WITHIN THE STOP BOUND**
+/// (R3-14 repair 5, the second agent's check 4, blocking 2).
+///
+/// The serve arm ran `Site::serving` before its stop future was first
+/// polled, so a `SIGTERM` during a load answered only after it: measured
+/// 2.6 to 18.2 s with the port bound, against `STOP_BOUND` 6 s and the
+/// redeploy's 10 s. Here the load is a stand-in that never ends while the
+/// test runs, and the stop is asked once it has started, as a TERM during it
+/// is: the race answers at once, and the end, which waits the real
+/// `SHUTDOWN_GRACE` for the load's thread, finishes inside `STOP_BOUND`
+/// with the store and the port kept for the process's end and the log
+/// closed.
+#[test]
+fn a_stop_during_a_slow_load_ends_within_the_stop_bound() {
+    let _shared = crate::emitted::sink();
+    let mark = crate::emitted::mark();
+    let root = crate::scratch::path("stop-during-load");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let (held, addr) = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("its address");
+        let lock = take_serve_lock(&root, addr).expect("a free store");
+        let (_listener, port) = keep_port(listener).expect("the port kept");
+        let held = Held {
+            log: Some(store_log(&root)),
+            lock: Some(lock),
+            port: Some(port),
+        };
+        (held, addr)
+    });
+    let (finish, until_finished) = std::sync::mpsc::channel::<()>();
+    let began = std::time::Instant::now();
+    let loading = runtime.block_on(async {
+        let (started, has_started) = tokio::sync::oneshot::channel::<()>();
+        let mut stop: Shutdown = Box::pin(async move {
+            // ASKED ONCE THE LOAD RUNS, as a TERM during it is.
+            let _started = has_started.await;
+            Ok(())
+        });
+        loaded_or_stopped(
+            move || {
+                let _sent = started.send(());
+                // A load far past the bound: it ends when the test lets it go.
+                let _released = until_finished.recv();
+                7_u8
+            },
+            &mut stop,
+        )
+        .await
+    });
+    let answered = began.elapsed();
+    assert!(
+        matches!(loading, Loading::Stopped(Ok(()))),
+        "the stop wins over a load still running: {loading:?}"
+    );
+    assert!(
+        answered < std::time::Duration::from_secs(1),
+        "the stop is answered during the load, not after it: {answered:?}"
+    );
+    assert_eq!(stopped_while_loading(Ok(())), OK, "an asked stop is clean");
+    let said = crate::emitted::landed(mark, "api.serve", "stop asked during the start-up load");
+    assert!(
+        said.iter()
+            .any(|record| field_of(record, "bound_ms") == 3_000),
+        "the stop during the load is in the log, with its bound: {said:?}"
+    );
+    let mut said_last = false;
+    let _abandoned = ended_then_released(runtime, SHUTDOWN_GRACE, held, |outlived| {
+        said_last = outlived;
+    });
+    let whole = began.elapsed();
+    assert!(
+        whole <= crate::speed::STOP_BOUND,
+        "the whole stop, signal to end, is inside STOP_BOUND {:?}: {whole:?}",
+        crate::speed::STOP_BOUND
+    );
+    assert!(
+        whole >= SHUTDOWN_GRACE,
+        "the end waited for the load's thread"
+    );
+    assert!(
+        said_last,
+        "the exit line was said, and told the load outlived the wait"
+    );
+    assert!(
+        !store_is_free(&root),
+        "the store stays held while the abandoned load still runs"
+    );
+    assert!(!port_is_free(addr), "and so does the port");
+    assert!(log_is_free(&root), "the log is closed");
+    drop(finish);
+}
+
+/// **A LOAD THAT FINISHES FIRST IS SERVED; A STOP ALREADY ASKED WINS; A
+/// STOP THAT FAILED AND A LOAD THAT PANICKED ARE EACH A NAMED FAILURE**
+/// (R3-14 repair 5): every arm of [`loaded_or_stopped`] and its two exits.
+#[tokio::test]
+async fn every_end_of_the_load_race_is_named() {
+    let _shared = crate::emitted::sink();
+    let mark = crate::emitted::mark();
+    let mut never: Shutdown = Box::pin(std::future::pending());
+    assert!(
+        matches!(
+            loaded_or_stopped(|| 7_u8, &mut never).await,
+            Loading::Loaded(7)
+        ),
+        "with no stop asked, the load's own value"
+    );
+    let mut asked: Shutdown = Box::pin(async { Ok(()) });
+    assert!(
+        matches!(
+            loaded_or_stopped(
+                || std::thread::sleep(std::time::Duration::from_millis(200)),
+                &mut asked
+            )
+            .await,
+            Loading::Stopped(Ok(()))
+        ),
+        "a stop already asked wins: it is polled first"
+    );
+    let mut broken: Shutdown = Box::pin(async { Err(std::io::Error::other("no signal handler")) });
+    let Loading::Stopped(failed) = loaded_or_stopped(|| 7_u8, &mut broken).await else {
+        panic!("a failed stop future is a stop, not a load");
+    };
+    assert_eq!(stopped_while_loading(failed), FAILED, "and it is a failure");
+    let said = crate::emitted::landed(mark, "api.serve", "the stop signal could not be waited for");
+    assert!(
+        said.iter()
+            .any(|record| crate::emitted::says(record, "why", "no signal handler")),
+        "named in the log: {said:?}"
+    );
+    let mut never: Shutdown = Box::pin(std::future::pending());
+    let Loading::Failed(why) = loaded_or_stopped(
+        || -> u8 { panic!("a stand-in load that panics") },
+        &mut never,
+    )
+    .await
+    else {
+        panic!("a load that panicked is a failure");
+    };
+    assert!(why.contains("panic"), "{why}");
+    assert_eq!(load_failed(&why), FAILED);
+    let said = crate::emitted::landed(mark, "api.serve", "the start-up load did not finish");
+    assert!(
+        said.iter()
+            .any(|record| crate::emitted::says(record, "why", "panic")),
+        "named in the log: {said:?}"
+    );
+}
+
+/// **THE SERVE ARM LOADS ONLY INSIDE THE RACE** (R3-14 repair 5). Fails
+/// before the repair: `run_in_over` called `Site::serving` directly, so the
+/// stop future was first polled only after the load.
+#[test]
+fn the_serve_arm_loads_only_inside_the_race() {
+    let source = include_str!("server.rs");
+    let start = source.find("async fn run_in_over(").expect("the serve arm");
+    let body = source.get(start..).expect("from the serve arm");
+    let body = body
+        .get(..body.find("\n}\n").expect("its end"))
+        .expect("its body");
+    assert_eq!(
+        body.matches("Site::serving(").count(),
+        1,
+        "the serve arm loads exactly once"
+    );
+    let race = body
+        .find("loaded_or_stopped(")
+        .expect("the serve arm races its load against the stop");
+    let load = body.find("Site::serving(").expect("the load");
+    let awaited = race
+        + body
+            .get(race..)
+            .and_then(|rest| rest.find(".await"))
+            .expect("awaited");
+    assert!(
+        race < load && load < awaited,
+        "the load is the closure handed to the race, not a call before it"
+    );
+}
+
+/// **ONLY A SERVE CATCHES CTRL-C AND SIGTERM** (R3-14 repair 5): a report,
+/// a misuse and a refused address keep the default disposition, so Ctrl-C
+/// ends them at once. Fails before the repair: every command caught both.
+#[test]
+fn only_a_serve_catches_stops() {
+    let words = |list: &[&str]| list.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    assert!(catches_stops(&words(&[])), "no command serves");
+    assert!(catches_stops(&words(&["serve"])));
+    assert!(catches_stops(&words(&["serve", "127.0.0.1:0"])));
+    assert!(!catches_stops(&words(&["report"])), "a report does not");
+    assert!(!catches_stops(&words(&["nonsense"])), "nor a misuse");
+    assert!(
+        !catches_stops(&words(&["serve", "0.0.0.0:80"])),
+        "nor a refused address"
     );
 }

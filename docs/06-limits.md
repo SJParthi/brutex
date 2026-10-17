@@ -15186,14 +15186,43 @@ bounds are all nonzero.
   for the process's own end to free: said as `api.main blocking work
   outlived the shutdown wait`. Measured on a shadow with a `/verify.json`
   scrub in flight, n = 3, polled every ~20 ms: pid gone at +6.17 to +6.22 s
-  after the `TERM`, the port refusing connections at +6.20 to +6.24 s, never
-  before the pid. Before this, the port was free 0.15 to 0.5 s before the
-  pid ended. Whether a blocking thread outlived the wait is read from how
-  long `Runtime::shutdown_timeout` took (it returns early only when every
-  thread has ended); tokio's own busy-thread count needs `tokio_unstable`.
-  The stop's signals are registered when the runtime is built, before the
-  masters and the store load; a `TERM` before that (the process's first
-  instants, unmeasured) still ends it with no line.
+  after the `TERM`, the port refusing connections at +6.20 to +6.24 s (an
+  `nc -z` poll). CORRECTED (repair 5): that poll fills the accept backlog,
+  so "never before the pid" was the poll's artefact. Read with `lsof`, the
+  `LISTEN` socket and `serve.lock` go 0.03 to 0.14 s before the pid is gone
+  (the second agent, check 4), and the `LISTEN` socket 0.03 to 0.06 s
+  before it here (n = 4, the load stops below), because a process's
+  descriptors close as it exits, before its parent reaps it. When work
+  outlived the wait, the port is freed by the process's exit itself, never
+  while a thread of it still runs; on a clean end, by `Held::release` after
+  the exit line, the last step before `main` returns. Before repair 4,
+  the port was free 0.15 to 0.5 s before the
+  pid ended, with blocking work still running. Whether a blocking thread
+  outlived the wait is read from how long `Runtime::shutdown_timeout` took (it
+  returns early only when every thread has ended); tokio's own busy-thread
+  count needs `tokio_unstable`. The exit line of such a stop is
+  `api.main exited cleanly` at `Warn` with `outlived: true`, never
+  "everything went as asked" (repair 5, STP-08); the code stays 0.
+  **A stop during the start-up load (R3-14 repair 5)** is inside the bound.
+  The load (`Site::serving`) runs on the blocking pool, raced against the
+  stop (`server::loaded_or_stopped`, stop polled first). A `TERM` during it
+  is answered at once (`api.serve stop asked during the start-up load`,
+  within 1 ms of the signal in the log), and the end waits
+  `SHUTDOWN_GRACE` for the load's thread, then leaves the store and the
+  port to the process's end. Before, the `TERM` was answered only after
+  the whole load: 2.6 to 18.2 s with the port bound, longer than the
+  redeploy's 10 s wait. MEASURED on this package's shadow (release build,
+  17 October 2026, load average 44 to 46 on 14 cores, `kill -0` and `lsof`
+  polled every ~20 ms; `tgt/p-R3-14/r5/loadterm.log`): TERMs at +0.53,
+  +0.91 and +1.51 s after the spawn (n = 3, during the load): pid gone
+  +3.09 to +3.12 s after the `TERM`, `LISTEN` socket gone +3.06 to +3.07 s.
+  A TERM at +3.01 s, as the load ended: pid gone +0.55 s. Only a serve
+  registers the signals (`server::catches_stops`, STP-07; by the code and
+  its test, not timed): `api report` keeps the default disposition, so
+  Ctrl-C ends it at once. NOT COVERED: a `TERM`
+  before the runtime is built, the process's first instants. One of two
+  `TERM`s sent +0.5 s after the spawn on this loaded machine landed there
+  and ended the process in 0.09 s with no line.
 - **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
   queue to another thread for the length of each landing, so the HTTP surface
   keeps answering; the landing itself is as costly as before (D-1446).

@@ -997,6 +997,15 @@ pub const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// held (`server::Held`), and freed in that order: a redeploy that waits for
 /// the port to close finds the store and the log free, never a refusal or a
 /// "log: NOT WRITABLE" from a process that is still ending.
+///
+/// A STOP DURING THE START-UP LOAD IS INSIDE THE BOUND TOO (R3-14 repair 5):
+/// the load races the stop (`server::loaded_or_stopped`), so the stop is
+/// answered at once and the end waits only `server::SHUTDOWN_GRACE` for the
+/// load's thread. Before, it was answered after the whole load (2.6 to
+/// 18.2 s measured). Asserted by
+/// `server::stop_tests::a_stop_during_a_slow_load_ends_within_the_stop_bound`.
+/// NOT covered: a signal before the runtime is built (the process's first
+/// instants), which still ends the process with no line.
 pub const STOP_BOUND: std::time::Duration =
     std::time::Duration::from_secs(DRAIN_GRACE.as_secs() + crate::server::SHUTDOWN_GRACE.as_secs());
 

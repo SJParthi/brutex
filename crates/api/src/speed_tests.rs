@@ -703,12 +703,17 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
     // minute after its graceful stop. The needles are split so this file
     // cannot match them.
     let main = include_str!("main.rs");
-    let asked = main.find(concat!("api::speed::", "stop_asked()"));
+    // ONLY FOR A SERVE (R3-14 repair 5): the call is behind
+    // `catches_stops`, and the future it returns is the one `run_held` gets.
+    let gated = main.find(concat!("if api::server::", "catches_stops(words)"));
+    let asked = main.find(concat!("Box::pin(api::speed::", "stop_asked())"));
     let entered = main.find(concat!("runtime.", "enter()"));
     let blocked = main.find(concat!("runtime.", "block_on("));
     assert!(
-        matches!((entered, asked, blocked), (Some(e), Some(a), Some(b)) if e < a && a < b)
-            && main.contains(concat!("Box::pin(", "stop)")),
+        matches!(
+            (gated, entered, asked, blocked),
+            (Some(g), Some(e), Some(a), Some(b)) if g < e && e < a && a < b
+        ) && main.contains(concat!("run_held(&args, ", "stop, &mut held)")),
         "the binary registers its stop inside the runtime before it serves, and stops on SIGTERM too"
     );
     // AND ENDS THROUGH `end_served`, which counts what the drain cut and
@@ -726,7 +731,7 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
         .and_then(|rest| rest.split_once("});"))
         .map_or("", |(call, _)| call);
     assert!(
-        call.contains(concat!("note_", "exit(code, count)")),
+        call.contains(concat!("note_", "exit(code, count, outlived)")),
         "the exit line is end_served's last word: {call}"
     );
     let server = include_str!("server.rs");

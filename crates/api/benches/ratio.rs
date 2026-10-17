@@ -87,6 +87,8 @@ mod provenance;
 mod reads;
 #[path = "ratio/served.rs"]
 mod served;
+#[path = "ratio/settings.rs"]
+mod settings;
 #[path = "ratio/sources.rs"]
 mod sources;
 #[path = "ratio/spot.rs"]
@@ -709,6 +711,7 @@ fn served_routes_are_flat() -> bool {
     ok &= calendar::calendars_are_flat(&mut stores);
     ok &= reads::reads_are_flat(&mut stores);
     ok &= db_page::page_reads_are_flat(&mut stores);
+    ok &= settings::settings_are_flat(&mut stores);
     for store in &stores {
         let _ignored = std::fs::remove_dir_all(&store.root);
     }
@@ -771,6 +774,7 @@ fn main() {
         calendar::ROUTES,
         reads::ROUTES,
         db_page::ROUTES,
+        settings::ROUTES,
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));

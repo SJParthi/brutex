@@ -20,7 +20,14 @@
 //! * A GROWTH BENCH is a route named in a `ROUTES: &[&str] = &[...]`
 //!   declaration of `crates/api/benches/ratio.rs` or of a file under
 //!   `crates/api/benches/ratio/`: the bench that times it at 1x, 10x and 100x
-//!   declares it.
+//!   declares it. A DECLARATION IS NOT TRUSTED ALONE (R3-14 repair 5, the
+//!   second agent's follow-up): outside every `ROUTES` list, some bench file
+//!   must request the route (a string or `format!` template starting
+//!   `"<route>` and then `"`, `?`, `#` or `{`), or [`TIMED_BY_CALL`] must name
+//!   the handler or lookup the bench calls instead, and that call must appear
+//!   in a bench file. This is a reading of the text, not of what runs: it
+//!   catches a declaration no bench body mentions, not a body that mentions a
+//!   route and times something else.
 //! * What is OWED is named here, with its owner and why: the whole route
 //!   section while the document has none ([`SECTION_OWED`]), a row
 //!   ([`ROWS_OWED`]) and a bench ([`BENCHES_OWED`]).
@@ -122,6 +129,7 @@ pub const BENCHES_OWED: &[Owed] = &[
             "/pull/run",
             "/pull/run/stop",
             "/pull/spot",
+            "/settings",
             "/universe/resolve",
         ],
     },
@@ -199,6 +207,76 @@ pub const BENCHES_OWED: &[Owed] = &[
         ],
     },
 ];
+
+/// The routes a bench times by CALLING the code behind them rather than by
+/// asking the router, each with the call's text as the bench writes it. A
+/// route here is benched only while that text appears in a bench file
+/// outside its `ROUTES` lists.
+pub const TIMED_BY_CALL: &[(&str, &str)] = &[
+    ("/dashboard", "dashboard_html("),
+    ("/instruments", "instruments_html_from("),
+    ("/bars/window.json", "window(root, asked)"),
+    ("/spot.json", "spot_at("),
+    ("/sources/bars.json", "timeline(root, asked)"),
+    ("/sources/day.json", "day_table(root, asked)"),
+    ("/logs.json", "api::logs::logs_json_over("),
+    ("/imports.json", "api::logs::imports_json_over("),
+    ("/greeks.json", "respond(root,"),
+];
+
+/// `source` with the contents of every `ROUTES` list blanked, so a route's
+/// name there is not read as a request.
+#[must_use]
+pub fn without_route_lists(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("ROUTES: &[&str] = &[") {
+        let open = at + "ROUTES: &[&str] = &[".len();
+        out.push_str(rest.get(..open).unwrap_or(""));
+        rest = rest.get(open..).unwrap_or("");
+        let end = rest.find(']').unwrap_or(rest.len());
+        rest = rest.get(end..).unwrap_or("");
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `text` requests `route`: a string literal or a `format!` template
+/// that starts with the route and then ends, or goes on with a query (`?`),
+/// a fragment (`#`) or a template argument (`{`). `/bars` is not requested
+/// by `"/bars/window.json"`.
+#[must_use]
+pub fn requests(text: &str, route: &str) -> bool {
+    let needle = format!("\"{route}");
+    text.match_indices(&needle).any(|(at, _)| {
+        matches!(
+            text.as_bytes().get(at + needle.len()),
+            Some(b'"' | b'?' | b'#' | b'{')
+        )
+    })
+}
+
+/// The declared routes no bench requests or calls: one finding each.
+#[must_use]
+pub fn unrequested(declared: &BTreeSet<String>, bodies: &str) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|route| {
+            let called = TIMED_BY_CALL
+                .iter()
+                .find(|(named, _)| named == route)
+                .is_some_and(|(_, call)| bodies.contains(call));
+            !requests(bodies, route) && !called
+        })
+        .map(|route| {
+            format!(
+                "{route}: declared in a `ROUTES` list, but no bench file requests it (no \
+                 `\"{route}` string outside the lists) and no TIMED_BY_CALL line names a call a \
+                 bench file makes"
+            )
+        })
+        .collect()
+}
 
 /// The routes the server's table registers, in table order, each once.
 ///
@@ -545,9 +623,9 @@ pub fn check(root: &Path) -> Result<(usize, usize, Vec<String>), String> {
     };
     let table = routes(&read(&root.join(SERVER))?)?;
     let rows = limits_rows(&read(&root.join(LIMITS))?);
-    let mut benched: BTreeSet<String> = bench_routes(&read(&root.join(BENCH))?)
-        .into_iter()
-        .collect();
+    let main_bench = read(&root.join(BENCH))?;
+    let mut benched: BTreeSet<String> = bench_routes(&main_bench).into_iter().collect();
+    let mut bodies = without_route_lists(&main_bench);
     let mut modules: Vec<_> = std::fs::read_dir(root.join(BENCH_DIR))
         .map_err(|why| format!("{BENCH_DIR}: {why}"))?
         .filter_map(Result::ok)
@@ -556,8 +634,18 @@ pub fn check(root: &Path) -> Result<(usize, usize, Vec<String>), String> {
         .collect();
     modules.sort();
     for module in modules {
-        benched.extend(bench_routes(&read(&module)?));
+        let text = read(&module)?;
+        benched.extend(bench_routes(&text));
+        bodies.push_str(&without_route_lists(&text));
     }
+    let mut stale: Vec<String> = TIMED_BY_CALL
+        .iter()
+        .filter(|(route, _)| !benched.contains(*route))
+        .map(|(route, _)| {
+            format!("{route}: a TIMED_BY_CALL line, but no `ROUTES` list declares it: stale")
+        })
+        .collect();
+    stale.extend(unrequested(&benched, &bodies));
     let ledger = Ledger {
         section: SECTION_OWED,
         rows: ROWS_OWED,
@@ -565,6 +653,7 @@ pub fn check(root: &Path) -> Result<(usize, usize, Vec<String>), String> {
     };
     let with_bench = table.iter().filter(|r| benched.contains(*r)).count();
     let mut found = findings(&table, rows.as_ref(), &benched, &ledger);
+    found.extend(stale);
     found.extend(unbenched_reads(
         &db_reads(&read(&root.join(LOGS))?)?,
         &benched,
@@ -706,6 +795,45 @@ pub fn audited_router_serving(site: S) -> Router {
     fn bench_lists_are_read() {
         let src = "pub(crate) const ROUTES: &[&str] = &[\"/a.json\", \"/c.json\"];\nconst ROUTES: &[&str] = &[\n    \"/d.json\",\n];";
         assert_eq!(bench_routes(src), ["/a.json", "/c.json", "/d.json"]);
+    }
+
+    /// **A DECLARED ROUTE NO BENCH REQUESTS OR CALLS IS RED** (R3-14 repair
+    /// 5, the second agent's follow-up). Fails before: a `ROUTES` line alone
+    /// made a route benched.
+    #[test]
+    fn a_declared_route_no_bench_requests_is_red() {
+        let src = "const ROUTES: &[&str] = &[\"/a.json\", \"/b.json\", \"/bars\"];\n\
+                   fn t() { ask(\"/a.json?x=1\"); ask(&format!(\"/bars/window.json?{q}\")); }";
+        let bodies = without_route_lists(src);
+        assert!(
+            !bodies.contains("\"/b.json\""),
+            "the list is blanked: {bodies}"
+        );
+        assert!(requests(&bodies, "/a.json"), "a literal with a query");
+        assert!(
+            !requests(&bodies, "/bars"),
+            "a longer path is not a request of its prefix"
+        );
+        assert!(requests("x(\"/c.json\")", "/c.json"), "a bare literal");
+        assert!(requests("format!(\"/c.json{q}\")", "/c.json"), "a template");
+        let declared: BTreeSet<String> = bench_routes(src).into_iter().collect();
+        let found = unrequested(&declared, &bodies);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found.iter().any(|f| f.starts_with("/b.json: ")),
+            "{found:?}"
+        );
+        assert!(found.iter().any(|f| f.starts_with("/bars: ")), "{found:?}");
+        let called: BTreeSet<String> = ["/dashboard".to_owned()].into_iter().collect();
+        assert!(
+            unrequested(&called, "let p = dashboard_html(&read);").is_empty(),
+            "a route timed by its TIMED_BY_CALL call is benched"
+        );
+        assert_eq!(
+            unrequested(&called, "nothing here").len(),
+            1,
+            "and not without the call"
+        );
     }
 
     #[test]
