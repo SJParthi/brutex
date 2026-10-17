@@ -2569,4 +2569,25 @@ mod cloud_mutant_tests {
         assert_eq!(table_entries_for(31 * 86_400 * 1_000_000, 1), 654);
         assert_eq!(table_entries_for(31 * 86_400 * 1_000_000, 60), 11);
     }
+
+    /// **A PUT PAST THE BUFFER'S END WRITES NOTHING, AND A TAKE PAST IT IS
+    /// ZEROS.**
+    ///
+    /// Covers the `None` arms of the byte primitives `put` and `take`: every
+    /// call site passes an offset inside a buffer sized for it, so only a
+    /// direct call reaches them. Their contract is that no offset panics: a
+    /// write that would run past the end (or start past it) changes no byte,
+    /// and a read that would is all zeros, never a short or shifted value.
+    #[test]
+    fn a_put_past_the_end_writes_nothing_and_a_take_past_it_is_zeros() {
+        let mut out = [7u8; 8];
+        super::put(&mut out, 6, &[1, 2, 3]);
+        super::put(&mut out, 9, &[1]);
+        assert_eq!(out, [7u8; 8], "nothing written");
+        super::put(&mut out, 5, &[1, 2, 3]);
+        assert_eq!(out, [7, 7, 7, 7, 7, 1, 2, 3], "a put that fits lands");
+        assert_eq!(super::take::<4>(&out, 6), [0u8; 4], "straddling the end");
+        assert_eq!(super::take::<2>(&out, 9), [0u8; 2], "past the end");
+        assert_eq!(super::take::<3>(&out, 5), [1, 2, 3], "a take that fits");
+    }
 }
