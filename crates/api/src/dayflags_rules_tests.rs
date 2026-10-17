@@ -1498,3 +1498,83 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// **A CLOSED DAY'S SCAN IS KEPT, THE DAY BEING WRITTEN IS NOT** (DB-B20's
+/// cost): the memo holds a day once a later bar follows it, by the file's
+/// inode, so a month that grows adds no entry and a day read before its last
+/// minute landed is read again with it.
+#[test]
+fn a_closed_days_scan_is_kept_and_the_open_day_is_read_again() {
+    let root = root_of("r3-13-scan-memo");
+    let key = "NSE-INDEX-NIFTY";
+    let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
+    let day_one: Vec<_> = (0..4)
+        .map(|m| bar("2024-10-01", at(m), [500; 4], 0))
+        .collect();
+    let day_two: Vec<_> = (0..2)
+        .map(|m| bar("2024-10-03", at(m), [600; 4], 0))
+        .collect();
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::MINUTE_1,
+        [day_one, day_two].concat(),
+    );
+    let open = || {
+        let inst = super::super::instrument_of(key, "").expect("a key");
+        match super::super::open_month(
+            &root,
+            Vendor::Zerodha,
+            &inst,
+            Timeframe::MINUTE_1,
+            YearMonth::new(2024, 10).expect("a month"),
+        ) {
+            super::super::Opened::File(file) => file,
+            _ => panic!("the month opens"),
+        }
+    };
+    let file = open();
+    let kept = |lo: u64, hi: u64| {
+        SCANS.get().is_some_and(|memo| {
+            memo.lock()
+                .unwrap()
+                .keys()
+                .any(|k| k.0 == file.path() && (k.2, k.3) == (lo, hi))
+        })
+    };
+    let closed = scan_day(&file, (0, 4), |_| false)
+        .expect("a scan")
+        .expect("in bound");
+    assert_eq!(closed.frozen_runs, 1);
+    assert!(kept(0, 4), "a closed day is kept");
+    // The open day — its month holds nothing after it — is read, not kept.
+    let open_day = scan_day(&file, (4, 6), |_| false)
+        .expect("a scan")
+        .expect("in bound");
+    assert_eq!(open_day.bars, 2);
+    assert!(!kept(4, 6), "the day being written is never kept");
+    // Past the bound, nothing is read and nothing is said.
+    assert_eq!(scan_day(&file, (0, MAX_SCAN_BARS + 1), |_| false), Ok(None));
+    // The day grows (the writer needs the month: the reader lets it go):
+    // read again, it carries the new minute.
+    drop(file);
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        key,
+        Timeframe::MINUTE_1,
+        vec![bar("2024-10-03", at(2), [600; 4], 0)],
+    );
+    let grown = scan_day(&open(), (4, 7), |_| false)
+        .expect("a scan")
+        .expect("in bound");
+    assert_eq!((grown.bars, grown.frozen_runs), (3, 1));
+    // The kept day answers from the memo, unchanged.
+    assert_eq!(
+        scan_day(&open(), (0, 4), |_| false).expect("a scan"),
+        Some(closed)
+    );
+    // Past the bound, nothing is read and nothing is said.
+    assert_eq!(scan_day(&file, (0, MAX_SCAN_BARS + 1), |_| false), Ok(None));
+}

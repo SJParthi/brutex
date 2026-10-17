@@ -181,7 +181,11 @@
   const listed = $derived(
     flagged.filter((/** @type {any} */ c) => !(c.kind === 'cas' && c.kinds.length === 1))
   );
-  const casDays = $derived(flagged.length - listed.length);
+  /** The lone closing-auction days, split by whether the share's dated flag
+      is 1 or no master holds it (SC-CLOSE-8, SC-CLOSE-9). */
+  const casLone = $derived(flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1));
+  const casDays = $derived(casLone.filter((/** @type {any} */ c) => c.cas === true).length);
+  const casUnheld = $derived(casLone.length - casDays);
   /** Of those, the days whose month keeps the auction print apart (SC-CLOSE-9). */
   const casApart = $derived(
     flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1 && c.auctionSidecar === true).length
@@ -208,7 +212,7 @@
       {#if db.dayBand}
         <span class="dbsum">{sessions} session day(s) · {flagged.length} flagged</span>
         <span class="dblegend">
-          {#each legend as k (k.kind)}
+          {#each legend as k (`${k.kind}|${k.word}`)}
             <span class="dbkey" data-tone={k.tone}><i aria-hidden="true"></i>{k.word} {k.n}</span>
           {/each}
         </span>
@@ -252,7 +256,7 @@
         {/each}
       </div>
 
-      {#if listed.length || casDays}
+      {#if listed.length || casDays || casUnheld}
         <ul class="dlist">
           {#each listed.slice(0, 12) as c (c.day)}
             <li data-tone={c.tone} class:open={openDay === c.day}>
@@ -276,6 +280,17 @@
                   : casApart > 0
                     ? `; ${casApart} of them keep the auction print apart in the month's sidecar, the rest hold it as an ordinary bar`
                     : '; no month holds an auction sidecar, so the print is an ordinary bar here'} (charter §9, D-3320).</span
+              >
+            </li>
+          {/if}
+          {#if casUnheld}
+            <!-- A FLAG NO MASTER HOLDS IS NEVER AN AUCTION (SC-CLOSE-8). -->
+            <li data-tone="info">
+              <span class="kw">closing-auction flag not held</span>
+              <span class="says"
+                >{casUnheld} session(s) of this share have no dated closing-auction flag held, so their
+                15:15–15:29 is unverified, neither an auction nor continuous trading (D-3320); the
+                notes below say why each master was not read.</span
               >
             </li>
           {/if}

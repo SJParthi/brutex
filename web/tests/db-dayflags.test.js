@@ -123,11 +123,17 @@ test('every vendor-fault and exchange-event field becomes its kind, in a fixed s
   assert.deepEqual(kindsOf(rec({ import: { outcome: 'none', reached: false }, held: { bars: null } })), ['not_reached']);
   assert.deepEqual(kindsOf(rec()), ['session']);
   // The auction phase is a share's: an index on the same day has none (D-3320).
-  // SC-CLOSE-9: only on a day the share's dated flag is 1; flag 0 or none held is a session.
+  // SC-CLOSE-9: an auction only on a day the share's dated flag is 1; flag 0 is a session; a flag no master holds is said as that.
   assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: true } } })), ['cas']);
   assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: false } } })), ['session']);
-  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: null, why: 'no master' } } })), ['session']);
-  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X' } })), ['session']);
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: null, why: 'no master' } } })), ['cas']);
+  assert.deepEqual(kindsOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X' } })), ['cas'], 'an older record, which names no flag');
+  const unheld = cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', calendar: { code: 'X', cas: { eligible: null } } }));
+  assert.equal(unheld.word, 'closing-auction window, flag not held');
+  const eligibleCell = cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', day: '2026-08-05', calendar: { code: 'X', cas: { eligible: true } } }));
+  assert.equal(eligibleCell.word, 'closing auction from 15:15');
+  // The legend counts the two apart, by the cell's own word.
+  assert.deepEqual(tally([unheld, eligibleCell, { ...unheld, day: '2026-08-06' }]).map((k) => [k.kind, k.word, k.n]), [['cas', 'closing-auction window, flag not held', 2], ['cas', 'closing auction from 15:15', 1]]);
   assert.deepEqual(kindsOf(rec({ instrument: 'NSE-INDEX-NIFTY', calendar: { code: 'X' } })), ['session']);
   // A null ledger field is not measured, never clean and never a fault.
   assert.deepEqual(kindsOf(rec({ quality: null, gaps: null, junk: null })), ['session']);

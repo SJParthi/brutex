@@ -491,12 +491,15 @@ pub(super) struct DayScan {
     pub(super) longest: Option<(i64, u64)>,
 }
 
-/// Each closed day's scan, by month file and the day's `[lo, hi)` rows and the
-/// file's committed count: a month that grows is scanned again, a month that
-/// does not is one probe a day.
+/// Each CLOSED day's scan — a day the month holds a later bar after — by month
+/// file, the file's inode and the day's `[lo, hi)` rows. The store appends in
+/// time order, so a closed day's rows never change under the same file; a new
+/// generation is a new file and a new inode, read afresh. The day still
+/// being written is never kept, so a month that grows adds no entry: the memo
+/// holds at most one entry per closed index day the process has shown.
 static SCANS: OnceLock<Mutex<ScanMemo>> = OnceLock::new();
 
-/// Scans by month file, `[lo, hi)` and committed count.
+/// Scans by month file, inode and `[lo, hi)`.
 type ScanMemo = HashMap<(PathBuf, u64, u64, u64), DayScan>;
 
 /// Folds one day's one-minute bars, oldest first: the extremes, and the runs
@@ -549,9 +552,9 @@ pub(super) fn fold_minutes(
     scan
 }
 
-/// One closed day's scan of `file`'s rows `[lo, hi)`, read once a day and
-/// kept: at most [`MAX_SCAN_BARS`] record reads, `None` past that or where a
-/// read fails (the caller names it).
+/// One day's scan of `file`'s rows `[lo, hi)`: at most [`MAX_SCAN_BARS`]
+/// record reads, `None` past that. A closed day is read once and kept
+/// ([`SCANS`]); the day still being written is read each time.
 ///
 /// # Errors
 ///
@@ -561,15 +564,17 @@ pub(super) fn scan_day(
     (lo, hi): (u64, u64),
     in_halt: impl Fn(i64) -> bool,
 ) -> Result<Option<DayScan>, String> {
+    use std::os::unix::fs::MetadataExt as _;
     if hi.saturating_sub(lo) > MAX_SCAN_BARS {
         return Ok(None);
     }
-    let key = (file.path().to_path_buf(), file.records(), lo, hi);
+    let key = (hi < file.records())
+        .then(|| std::fs::metadata(file.path()).ok())
+        .flatten()
+        .map(|meta| (file.path().to_path_buf(), meta.ino(), lo, hi));
     let memo = SCANS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(kept) = memo
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
+    if let Some(key) = &key
+        && let Some(kept) = memo.lock().unwrap_or_else(PoisonError::into_inner).get(key)
     {
         return Ok(Some(*kept));
     }
@@ -577,10 +582,12 @@ pub(super) fn scan_day(
         .map(|at| file.read_record(at).map_err(|why| why.to_string()))
         .collect::<Result<Vec<_>, String>>()?;
     let scan = fold_minutes(bars.into_iter(), in_halt);
-    let _was = memo
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, scan);
+    if let Some(key) = key {
+        let _was = memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, scan);
+    }
     Ok(Some(scan))
 }
 

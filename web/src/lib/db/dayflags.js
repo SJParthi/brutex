@@ -155,6 +155,9 @@ export const DAY_KINDS = [
 /** @type {Map<string, { kind: string, word: string, tone: string }>} */
 const KIND = new Map(DAY_KINDS.map((k) => [k.kind, k]));
 
+/** The word of a closing-auction day whose dated flag no master holds (SC-CLOSE-8). */
+export const CAS_UNHELD = 'closing-auction window, flag not held';
+
 /** The kinds that are facts about the day, not flags: an ordinary or closed
  *  day, a day outside a span, a trade-driven day with no trade. */
 const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'before_archive', 'no_trade', 'expired']);
@@ -261,8 +264,12 @@ export function kindsOf(rec, ctx = {}) {
   if (code === 'U') out.push('unmeasured');
   // THE CLOSING AUCTION ONLY ON A DAY THE SHARE'S DATED FLAG IS 1 (SC-CLOSE-9):
   // the calendar's `X` says the day has an auction for eligible shares, and
-  // `calendar.cas.eligible` says whether this share was one that day.
-  if (code === 'X' && segmentOf(rec?.instrument) === 'CASH' && rec?.calendar?.cas?.eligible === true) out.push('cas');
+  // `calendar.cas.eligible` says whether this share was one that day. Flag 0
+  // is an ordinary session. A flag no master holds keeps the kind — its
+  // 15:15-15:29 window is the day record's `unverified` phase, which the chart
+  // draws as such (`chart.js` `dayBands`) — and its WORD says the flag is not
+  // held (`cellOf`), never that the day has an auction.
+  if (code === 'X' && segmentOf(rec?.instrument) === 'CASH' && rec?.calendar?.cas?.eligible !== false) out.push('cas');
   if (session && !beyond && !expired && outcome === 'none' && rec?.import?.reached === false) out.push('not_reached');
   if (code === '.') out.push('closed');
   if (code === '-') out.push('outside');
@@ -286,7 +293,10 @@ function segmentOf(key) {
  */
 export function cellOf(rec, ctx = {}) {
   const kinds = kindsOf(rec, ctx);
-  const lead = KIND.get(kinds[0]) ?? { kind: kinds[0], word: kinds[0], tone: 'quiet' };
+  const known = KIND.get(kinds[0]) ?? { kind: kinds[0], word: kinds[0], tone: 'quiet' };
+  // A CLOSING-AUCTION DAY WHOSE FLAG NO MASTER HOLDS is said as that
+  // (SC-CLOSE-8, SC-CLOSE-9): never "closing auction from 15:15".
+  const lead = known.kind === 'cas' && rec?.calendar?.cas?.eligible !== true ? { ...known, word: CAS_UNHELD } : known;
   return {
     day: String(rec?.day ?? ''),
     code: String(rec?.calendar?.code ?? '-'),
@@ -448,10 +458,18 @@ export function deriveOf(lines) {
  * @param {ReturnType<typeof cellOf>[]} cells
  */
 export function tally(cells) {
-  /** @type {Map<string, number>} */
+  // BY KIND AND THE CELL'S OWN WORD: a closing-auction day whose flag is not
+  // held is counted apart from one whose flag is 1 (SC-CLOSE-9).
+  /** @type {Map<string, { n: number, word: string }[]>} */
   const by = new Map();
-  for (const c of cells) by.set(c.kind, (by.get(c.kind) ?? 0) + 1);
-  return DAY_KINDS.filter((k) => by.has(k.kind)).map((k) => ({ ...k, n: by.get(k.kind) ?? 0 }));
+  for (const c of cells) {
+    const words = by.get(c.kind) ?? [];
+    const seen = words.find((w) => w.word === c.word);
+    if (seen) seen.n += 1;
+    else words.push({ word: c.word, n: 1 });
+    by.set(c.kind, words);
+  }
+  return DAY_KINDS.filter((k) => by.has(k.kind)).flatMap((k) => (by.get(k.kind) ?? []).map((w) => ({ ...k, word: w.word, n: w.n })));
 }
 
 /**
