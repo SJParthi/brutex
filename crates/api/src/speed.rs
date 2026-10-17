@@ -1127,6 +1127,21 @@ pub(crate) struct AccessWindow {
     pub(crate) slowest: u64,
     /// Whether its served read was written.
     pub(crate) sampled: bool,
+    /// Reads whose body the connection cut for want of write progress
+    /// (AH-02, D-4975): each was counted at handler return and, when that was
+    /// in this window, taken back out of `served` ([`AccessWindows::cut`]).
+    pub(crate) cut: u64,
+}
+
+/// One `/db` read `logs::note_access` counted as served, carried on its
+/// response so that a cut of its body can take it back (`logs::note_cut`;
+/// AH-02, D-4975).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CountedServed {
+    /// The route it was counted under.
+    pub(crate) route: &'static str,
+    /// The `now_ms` it was counted at.
+    pub(crate) at_ms: u64,
 }
 
 /// What one read writes, decided by [`AccessWindows::account`].
@@ -1146,7 +1161,8 @@ pub(crate) struct AccessPlan {
 /// "Cost claims of the /db fix round that name no proof").
 #[derive(Debug, Default)]
 pub(crate) struct AccessWindows {
-    routes: std::collections::HashMap<&'static str, AccessWindow>,
+    /// Each route's window; read by `logs`' tests to see a route untouched.
+    pub(crate) routes: std::collections::HashMap<&'static str, AccessWindow>,
 }
 
 impl AccessWindows {
@@ -1167,8 +1183,13 @@ impl AccessWindows {
         if now_ms.saturating_sub(window.opened_ms) >= crate::logs::ACCESS_WINDOW_MS
             || now_ms < window.opened_ms
         {
-            let reads = window.served.saturating_add(window.refused);
-            if reads > u64::from(window.sampled) {
+            let reads = window
+                .served
+                .saturating_add(window.refused)
+                .saturating_add(window.cut);
+            // A cut is news even when it was the window's one sampled read:
+            // that read's line said `read served`.
+            if reads > u64::from(window.sampled) || window.cut > 0 {
                 plan.closed = Some(*window);
             }
             *window = AccessWindow {
@@ -1187,6 +1208,22 @@ impl AccessWindows {
         }
         window.slowest = window.slowest.max(micros);
         plan
+    }
+
+    /// One read [`Self::account`] counted as served whose body was then cut
+    /// (AH-02, D-4975): counted in `cut`, and taken back out of `served` when
+    /// the window that counted it is still the route's window. A window that
+    /// has since closed has already said its `served`; the cut is then said
+    /// by the window it happened in, beside a `served` it was never part of.
+    /// O(1): one probe of a table of at most [`crate::logs::DB_READS`] routes.
+    pub(crate) fn cut(&mut self, counted: CountedServed) {
+        let Some(window) = self.routes.get_mut(counted.route) else {
+            return;
+        };
+        if counted.at_ms >= window.opened_ms {
+            window.served = window.served.saturating_sub(1);
+        }
+        window.cut = window.cut.saturating_add(1);
     }
 }
 
