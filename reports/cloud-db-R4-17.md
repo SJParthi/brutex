@@ -6,7 +6,7 @@ Branch `cloud/db-R4-17-20261017`, cut from `origin/feat/db-fix` 3911d1b9.
 Prerequisites: none (R4-17.md); confirmed against
 `git log origin/feat/db-fix --merges --format=%s`, so nothing is missing.
 
-## Done (turn 1)
+## Done (turns 1-2)
 
 - Read `CLAUDE.md`, the README, `CONTEXT.md` and `R4-17.md`; mapped the owned files
   (`fetch.rs` `RowCause`, `identity_screen::screen`, `series_identity`, `cli series-identity`)
@@ -18,11 +18,15 @@ Prerequisites: none (R4-17.md); confirmed against
   `docs/00-charter.md`. The listing refusal can therefore be ON (it is not UNVERIFIED).
   What the PDF does not say (the MII CSV's abbreviated column names) is labelled there.
 
+- **`pull::listing`** (`listing.rs`, `listing_tests.rs`, one `pub mod` line in `lib.rs`): span per (NSE, symbol, ISIN) from the
+  newest receipted master, a newer master that does not check passed over BY NAME, epoch 0 and every other unstated
+  listing UNKNOWN (refuses nothing), inferred-from-vendor-span label for names in no master, removal day ends history
+  unless readmitted, O(1) `span`, `for_store` remembered only once a master loads. 9 tests pass.
+- Merged `origin/feat/db-fix` 62396df0 (AF-07: every cited decision number must head a ledger entry).
+
 ## Left
 
-1. `pull::listing` (`listing.rs`, `listing_tests.rs`): per (NSE, symbol, ISIN) span + source tag,
-   newest receipted master with named fallback, inferred-from-vendor-span label, epoch 0 unknown,
-   O(1) `span(key)`.
+1. (done above)
 2. `fetch.rs`: `RowCause::{NonPositivePrice, BeforeListing, InSessionJump}`; the history-ends result.
 3. `identity_screen.rs`: the day-rung arm (non-positive price, before listing; never by range) and the
    minute arm (non-positive, before listing, in-session jump).
@@ -42,7 +46,7 @@ labelled UNVERIFIED until that run is recorded beside it and in docs/06.
 
 ## Gate results
 
-Not run yet (no code changed this turn).
+Turn 2: `cargo test -p pull --lib --locked listing` 9/9 new tests pass. Full gates not run yet.
 
 ## NEEDS THE MAC
 

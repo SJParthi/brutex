@@ -184,6 +184,9 @@ pub mod http;
 pub mod ingest;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
+/// A CASH security's listing day and end of history, from the receipted NSE
+/// security master (R4-17).
+pub mod listing;
 pub mod manifest;
 /// Where an instrument master comes from, and what it takes to replace one.
 ///

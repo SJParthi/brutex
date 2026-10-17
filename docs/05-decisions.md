@@ -70635,3 +70635,67 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 `an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
+
+### D-4990 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
+
+**Decision.** `pull::listing` reads the listing day of a CASH security from the
+newest receipted NSE security master under `<store>/session-masters`
+(`ListgDt`, seconds from 1980-01-01: NSE Masters Data v1.6 §2.3 and §3.1.1,
+`docs/00-charter.md` "NSE Masters Data v1.6"), keyed by exactly
+`(NSE, symbol, ISIN)`, the ISIN being `brutex_core::universe::nse_isin`'s. A
+bar, minute or day, stamped on an IST day before that listing day is refused at
+landing by name (`fetch::RowCause::BeforeListing`, code `before_listing`).
+
+1. **The listing day, never "before the first day bar".** A minute before the
+   first day bar the vendor served, on or after a stated listing day, is the
+   security's own (DALBHARAT's 1,967 such minutes, per the R4-17 work package):
+   it is not refused as `before_first_day_bar` when a master states the
+   listing. Where no master states it, the first-day-bar rule of WP-13d stands.
+2. **Unknown refuses nothing.** `ListgDt` `0` (TATACONSUM, TMPV), blank,
+   absent, undecodable, after the master's own day, conflicting between rows or
+   contradicted by the master's own removal date leaves the listing UNKNOWN
+   (`listing::Unknown`, each with its own code), and nothing is refused on it.
+3. **Inferred is a label.** A name no master on disk holds (DHFL, JETAIRWAYS)
+   is given the vendor's own day-rung span, labelled
+   `inferred_from_vendor_span`; it refuses nothing, because the vendor's span
+   cannot accuse the vendor's rows.
+4. **A master that does not check is passed over by name.** The newest master
+   whose receipt or bytes fail is named with why, and the next newest is used.
+   A store with no master that checks answers "not in any master" for every
+   probe. Nothing is downloaded or repaired.
+5. **Remembered once a master loads.** `listing::for_store` loads one table per
+   store root per process and remembers it only when a master loaded (AF-03:
+   a failed load is never remembered). A newer master installed while a
+   process runs is not seen until it restarts; `docs/06-limits.md` names it.
+
+Rejected: decoding the master a second time in `listing` (a second epoch
+authority beside `cash_auction`); keying by symbol alone (a reused symbol is
+another company); treating `0` as 1980-01-01.
+
+Proof: `pull::listing::tests` (`the_newest_master_that_checks_is_used_and_a_bad_newer_one_is_named`,
+`a_bar_before_the_listing_day_is_refused_and_the_listing_day_is_kept`,
+`epoch_zero_listing_refuses_nothing`, `every_unknown_listing_names_why_and_refuses_nothing`,
+`a_name_absent_from_every_master_is_labelled_inferred`,
+`no_master_on_disk_answers_nothing_and_names_why`, `a_master_name_is_read_exactly`,
+`a_store_table_is_remembered_only_once_a_master_loads`).
+
+### D-4991 — A window after a CASH security's removal day that answers nothing is the end of its history, never a failure (R4-17; COR-07) — 2026-10-17
+
+**Decision.** When the master states a removal day (`RmvlDt`) with no
+readmission after it, a vendor answer for that security on a window that
+starts strictly after the removal day — a 404 or an empty window — lands
+nothing and is recorded in `fetch::fetch_and_land_listed`'s result as
+`history_ends{delisted_on}` (code `history_ends_delisted`), with one `info`
+event per instrument and window. It is not a failure (`docs/07-plan.md` §10
+rows 16 and 18).
+
+1. **Strictly after.** Whether `RmvlDt` is the last day traded or the first not
+   traded is UNVERIFIED (charter), so the removal day itself is never past the
+   end, and a window that includes it is judged as today.
+2. **Only on a master's word.** An inferred span never ends a history; a 404 for
+   a still-listed security, or one no master names, is a failure as today.
+3. **Readmission reopens.** A readmission after the removal means the history
+   did not end.
+
+Proof: `pull::listing::tests::history_ends_after_removal_unless_readmitted`;
+the landing side is proved by the tests R4-17 adds beside `fetch_and_land_listed`.
