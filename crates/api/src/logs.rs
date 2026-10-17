@@ -751,6 +751,11 @@ fn with_dirs(body: &str, halves: &[Half]) -> String {
     out.push_str(&dirs_json(halves));
     out.push(',');
     out.push_str(&reach_json(halves, telemetry::now_millis()));
+    out.push(',');
+    out.push_str(&picture_json(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    out.push(',');
+    out.push_str(&streams_json(audit.as_ref(), state.as_ref()));
     out.push('}');
     out
 }
@@ -845,6 +850,227 @@ fn reach_json(halves: &[Half], now: i64) -> String {
     out
 }
 
+/// `"picture":{...}`: the served sink's counters (R3-24) as JSON, or `null`
+/// for a process with no sink. Read from [`telemetry::Sink::picture`], a copy
+/// of a fixed-size table: no file is opened.
+fn picture_json(picture: Option<&telemetry::run_dirs::Picture>) -> String {
+    let Some(p) = picture else {
+        return "\"picture\":null".to_owned();
+    };
+    let mut out = String::from("\"picture\":{\"levels\":[");
+    for (n, level) in telemetry::LEVELS.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        out.push_str(&render::json_string(level.label()));
+    }
+    out.push_str("],\"minutes\":[");
+    for (n, (from, counts)) in p.minutes.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let counts: Vec<String> = counts.iter().map(u64::to_string).collect();
+        let _ = write!(out, r#"{{"from":{from},"counts":[{}]}}"#, counts.join(","));
+    }
+    out.push_str("],\"codes\":[");
+    for (n, (code, count)) in p.codes.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"code":{},"count":{count}}}"#,
+            render::json_string(code)
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"codes_replaced":{},"oldest_ms":{},"counted":{},"since_ms":{},"from":"counters"}}"#,
+        p.codes_replaced,
+        p.oldest_ms
+            .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
+        p.counted,
+        p.since_ms,
+    );
+    out
+}
+
+/// The served sink's picture, when this process writes a log.
+fn served_picture() -> Option<telemetry::run_dirs::Picture> {
+    telemetry::global().map(telemetry::Sink::picture)
+}
+
+/// `"audit_stream":{...},"state_stream":{...}`: both durable streams of the
+/// served sink, their counters and the roll's waiting deletes (R3-24: the
+/// waiting-delete counters are served on every answer, not only a keyed
+/// one).
+fn streams_json(
+    audit: Option<&telemetry::AuditHealth>,
+    state: Option<&telemetry::AuditHealth>,
+) -> String {
+    format!(
+        r#""audit_stream":{},"state_stream":{}"#,
+        audit_json_of(audit),
+        audit_json_of(state)
+    )
+}
+
+/// The page's line for both durable streams of the served sink: their size,
+/// and the index generations a roll renamed aside that wait to be deleted.
+fn streams_note(
+    audit: Option<&telemetry::AuditHealth>,
+    state: Option<&telemetry::AuditHealth>,
+) -> String {
+    let Some(audit) = audit else {
+        return "<p class=\"lead\">This process keeps no audit stream.</p>".to_owned();
+    };
+    let mut out = format!(
+        "<p class=\"{}\">Audit stream: file {} at {} byte(s), {} roll(s); {} index \
+         generation(s) wait to be deleted, {} deleted, {} delete(s) failed{}.",
+        if audit.is_loud() { "halt" } else { "lead" },
+        audit.serial,
+        audit.current_bytes,
+        audit.rotations,
+        audit.gone_waiting,
+        audit.reaped,
+        audit.reap_failures,
+        if audit.reaper_behind() {
+            " — the deletes are behind the rolls"
+        } else {
+            ""
+        },
+    );
+    if let Some(state) = state {
+        let _ = write!(
+            out,
+            " State stream (never rolls): {} byte(s), {} line(s) written by this process{}.",
+            state.current_bytes,
+            state.written,
+            if state.grown_past_loud() {
+                " — past its loud size: look at what writes it"
+            } else {
+                ""
+            },
+        );
+    }
+    if let Some(why) = audit.last_error.as_deref() {
+        let _ = write!(out, " Most recent failure: {}.", render::escape(why));
+    }
+    out.push_str("</p>");
+    out
+}
+
+/// The served sink's two durable streams' health.
+fn served_streams() -> (
+    Option<telemetry::AuditHealth>,
+    Option<telemetry::AuditHealth>,
+) {
+    telemetry::global().map_or((None, None), |sink| {
+        (sink.audit_health(), sink.state_health())
+    })
+}
+
+/// The colour each level's bar is drawn in, by rank.
+const LEVEL_FILL: [&str; 5] = ["#cbd5e1", "#94a3b8", "#4f46e5", "#d97706", "#dc2626"];
+
+/// The `/logs` picture (R3-24), drawn here from the served sink's counters:
+/// an hour of lines per minute, stacked by level, the codes written most and
+/// the ring's oldest line. Plain HTML and one inline SVG, no script. `None`
+/// draws the one line that says this process keeps no counters.
+fn picture_note(picture: Option<&telemetry::run_dirs::Picture>) -> String {
+    let Some(p) = picture else {
+        return "<p class=\"lead\">No picture: this process writes no log, so it counted \
+                nothing.</p>"
+            .to_owned();
+    };
+    const BAR: usize = 8;
+    const HIGH: u64 = 64;
+    let width = BAR * p.minutes.len();
+    let most = p
+        .minutes
+        .iter()
+        .map(|(_, counts)| counts.iter().sum::<u64>())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut bars = String::new();
+    for (n, (from, counts)) in p.minutes.iter().enumerate() {
+        let mut top = HIGH;
+        for (rank, count) in counts.iter().enumerate() {
+            if *count == 0 {
+                continue;
+            }
+            let tall = (count.saturating_mul(HIGH).div_ceil(most)).min(top);
+            top = top.saturating_sub(tall);
+            let _ = write!(
+                bars,
+                "<rect x=\"{}\" y=\"{top}\" width=\"{}\" height=\"{tall}\" fill=\"{}\">\
+                 <title>{} · {count} {}</title></rect>",
+                n.saturating_mul(BAR),
+                BAR.saturating_sub(1),
+                LEVEL_FILL.get(rank).copied().unwrap_or("#000"),
+                render::escape(&crate::server::ist_stamp(from.div_euclid(1_000))),
+                telemetry::LEVELS
+                    .get(rank)
+                    .map_or("?", |level| level.label()),
+            );
+        }
+    }
+    let mut legend = String::new();
+    for (rank, level) in telemetry::LEVELS.iter().enumerate() {
+        let total: u64 = p
+            .minutes
+            .iter()
+            .map(|(_, counts)| counts.get(rank).copied().unwrap_or(0))
+            .sum();
+        let _ = write!(
+            legend,
+            " <span style=\"color:{}\">■</span> {} {total};",
+            LEVEL_FILL.get(rank).copied().unwrap_or("#000"),
+            level.label(),
+        );
+    }
+    let mut codes = String::new();
+    for (code, count) in &p.codes {
+        let _ = write!(
+            codes,
+            "<tr><td class=\"mono\">{}</td><td>{count}</td></tr>",
+            render::escape(code)
+        );
+    }
+    format!(
+        "<section class=\"lead\"><b>The last hour, per minute</b> (from the sink's own \
+         counters, kept as it writes; no file read):{legend} peak {most} a minute.\
+         <svg role=\"img\" viewBox=\"0 0 {width} {HIGH}\" width=\"100%\" height=\"{HIGH}\" \
+         preserveAspectRatio=\"none\"><title>lines per minute by level</title>{bars}</svg>\
+         <br>Oldest line the ring holds: {oldest}. {counted} line(s) counted since {since}.\
+         {replaced}</section>{table}",
+        oldest = render::escape(&p.oldest_ms.map_or_else(
+            || "none".to_owned(),
+            |ms| crate::server::ist_stamp(ms.div_euclid(1_000))
+        )),
+        counted = p.counted,
+        since = render::escape(&crate::server::ist_stamp(p.since_ms.div_euclid(1_000))),
+        replaced = if p.codes_replaced > 0 {
+            format!(
+                " The code table is full and a new code took the least-counted one's place \
+                 {} time(s): a count may be over by the count it took over.",
+                p.codes_replaced
+            )
+        } else {
+            String::new()
+        },
+        table = if codes.is_empty() {
+            "<p class=\"lead\">No line carried a code.</p>".to_owned()
+        } else {
+            format!(
+                "<div class=\"hscroll\"><table class=\"codes\"><thead><tr><th>Code</th>\
+                 <th>Lines</th></tr></thead><tbody>{codes}</tbody></table></div>"
+            )
+        },
+    )
+}
+
 /// The page's reach line, and its one alert when there is one.
 fn reach_note(halves: &[Half], now: i64) -> String {
     let reach = reached(halves, now);
@@ -907,13 +1133,97 @@ fn dirs_note(halves: &[Half]) -> String {
 /// directory's own walk, so the limit, the caps and `missing` combine exactly
 /// as they did for two. At most 8 walks of at most [`SCAN_BYTES`] each.
 fn all_halves(halves: &[Half], query: &telemetry::Query) -> telemetry::Tail {
-    let mut walks = halves
-        .iter()
-        .map(|half| telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query));
+    all_halves_live(halves, query, telemetry::global())
+}
+
+/// [`all_halves`], the directory `live` writes answered from its copy in
+/// memory ([`live_tail`], R3-24) and every other directory from its files.
+fn all_halves_live(
+    halves: &[Half],
+    query: &telemetry::Query,
+    live: Option<&telemetry::Sink>,
+) -> telemetry::Tail {
+    let mut walks =
+        halves.iter().map(
+            |half| match live.filter(|sink| sink.dir() == half.path.as_path()) {
+                Some(sink) => live_tail(sink, &half.path, query),
+                None => telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query),
+            },
+        );
     let Some(first) = walks.next() else {
         return telemetry::Tail::default();
     };
     walks.fold(first, |so_far, next| merged(so_far, next, query.limit))
+}
+
+/// Whether the live tail keeps `record` for `query`: its floor, its run (the
+/// line's own stamp, as the ring's filter reads it), its target or beneath it,
+/// and its `since`. The rule `telemetry::Query` applies to a file's lines.
+fn live_admits(query: &telemetry::Query, record: &telemetry::Record) -> bool {
+    query
+        .min_level
+        .is_none_or(|floor| record.level.at_least(floor))
+        && query.run.is_none_or(|run| record.run == run)
+        && query
+            .target
+            .as_deref()
+            .is_none_or(|target| target_admits(&record.target, target))
+        && query
+            .since_unix_millis
+            .is_none_or(|since| record.at_unix_millis >= since)
+}
+
+/// The served directory's tail from the copy its sink keeps in memory
+/// (R3-24): the newest [`telemetry::run_dirs::RECENT_LINES`] lines, filtered,
+/// with no file opened and no byte read. A copy that cannot fill the page
+/// (a filter that admits fewer lines than asked) is not passed off as the
+/// whole answer: the files are read, exactly as before.
+///
+/// # Cost
+///
+/// One lock and a copy of at most [`telemetry::run_dirs::RECENT_LINES`]
+/// lines, then a decode of each outside the lock: a constant of this build,
+/// whatever the ring holds. Only the fallback reads the files.
+fn live_tail(
+    sink: &telemetry::Sink,
+    dir: &std::path::Path,
+    query: &telemetry::Query,
+) -> telemetry::Tail {
+    let (records, malformed) = sink.recent();
+    let kept: Vec<telemetry::Record> = records
+        .into_iter()
+        .filter(|record| live_admits(query, record))
+        .take(query.limit)
+        .collect();
+    if kept.len() < query.limit {
+        return telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, query);
+    }
+    // A GAP IN `seq` among the copies is a line the sink numbered and did not
+    // keep; under a filter a gap means nothing, as the file tail says.
+    let filtered = query.min_level.is_some()
+        || query.target.is_some()
+        || query.run.is_some()
+        || query.since_unix_millis.is_some();
+    let missing = (!filtered).then(|| {
+        kept.windows(2)
+            .map(|pair| {
+                pair.first().zip(pair.get(1)).map_or(0, |(newer, older)| {
+                    newer.seq.saturating_sub(older.seq).saturating_sub(1)
+                })
+            })
+            .sum::<u64>()
+    });
+    telemetry::Tail {
+        records: kept,
+        bytes_read: 0,
+        files_read: 0,
+        malformed,
+        hit_scan_cap: false,
+        reached_oldest: false,
+        partial_tail: false,
+        errors: Vec::new(),
+        missing,
+    }
 }
 
 /// [`json_over`] across every directory in `halves`.
@@ -1459,6 +1769,9 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
         let mut page = page_of_marked(&tail, asked, health, pair, &marks);
         page.push_str(&dirs_note(halves));
         page.push_str(&reach_note(halves, now));
+        page.push_str(&picture_note(served_picture().as_ref()));
+        let (audit, state) = served_streams();
+        page.push_str(&streams_note(audit.as_ref(), state.as_ref()));
         return page;
     }
     let (tail, _keyed, next, said) = keyed_walk_said(halves, asked);
@@ -1466,6 +1779,9 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
     let mut page = page_of_marked(&tail, asked, health, pair, &marks);
     page.push_str(&dirs_note(halves));
     page.push_str(&reach_note(halves, now));
+    page.push_str(&picture_note(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    page.push_str(&streams_note(audit.as_ref(), state.as_ref()));
     match next {
         Some(cursor) => {
             let _ = write!(
@@ -3776,15 +4092,12 @@ fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::
     out.push_str(&dirs_json(halves));
     out.push(',');
     out.push_str(&reach_json(halves, telemetry::now_millis()));
-    let _ = write!(
-        out,
-        r#","audit_stream":{}}}"#,
-        audit_json_of(
-            telemetry::global()
-                .and_then(telemetry::Sink::audit_health)
-                .as_ref()
-        ),
-    );
+    out.push(',');
+    out.push_str(&picture_json(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    out.push(',');
+    out.push_str(&streams_json(audit.as_ref(), state.as_ref()));
+    out.push('}');
     out
 }
 
@@ -4009,7 +4322,7 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         return "null".to_owned();
     };
     format!(
-        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{},"never_rolls":{},"loud_bytes":{}}}"#,
         render::json_string(&h.path.display().to_string()),
         h.serial,
         h.current_bytes,
@@ -4035,8 +4348,24 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
-        telemetry::AUDIT_MAX_FILE_BYTES,
-        telemetry::AUDIT_KEEP_FILES,
+        // THE STATE STREAM HAS NO ROLL BOUND (R3-24): `null`, never the
+        // audit stream's, and the size past which it is loud instead.
+        if h.never_rolls {
+            "null".to_owned()
+        } else {
+            telemetry::AUDIT_MAX_FILE_BYTES.to_string()
+        },
+        if h.never_rolls {
+            "null".to_owned()
+        } else {
+            telemetry::AUDIT_KEEP_FILES.to_string()
+        },
+        h.never_rolls,
+        if h.never_rolls {
+            telemetry::run_dirs::STATE_LOUD_BYTES.to_string()
+        } else {
+            "null".to_owned()
+        },
     )
 }
 
@@ -8284,5 +8613,228 @@ mod r3_24_tests {
             .is_none()
         );
         let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_picture_tests {
+    //! R3-24: the `/logs` picture from counters, the live tail from memory,
+    //! and both durable streams' health on every answer.
+
+    use super::{
+        Half, all_halves_live, asked, live_admits, picture_json, picture_note, streams_json,
+        streams_note,
+    };
+
+    fn sink_in(name: &str) -> (std::path::PathBuf, telemetry::Sink) {
+        let dir = crate::scratch::path(&format!("logs-r324p-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        (dir, sink)
+    }
+
+    /// **THE LOGS PICTURE IS READ FROM COUNTERS, NOT FROM FILES** (R3-24):
+    /// every ring file deleted under the sink, the picture still says how
+    /// many lines of each level were written, which codes most, and the
+    /// ring's oldest line, and the page draws it from the same counters.
+    #[test]
+    fn the_logs_picture_is_read_from_counters_not_from_files() {
+        let (dir, sink) = sink_in("picture");
+        let _ = sink.emit(&telemetry::Event::info("a", "one"));
+        let _ = sink.emit(&telemetry::Event::info("a", "two"));
+        let _ = sink.emit(&telemetry::Event::warn("a", "three").with("code", "late"));
+        for _ in 0..3 {
+            let _ = sink.emit(&telemetry::Event::error("a", "refused").with("code", "census_full"));
+        }
+        for path in telemetry::paths_newest_first(&dir, telemetry::DEFAULT_KEEP_FILES) {
+            let _gone = std::fs::remove_file(path);
+        }
+        assert!(
+            telemetry::tail(&dir, 8, &telemetry::Query::last(10))
+                .records
+                .is_empty(),
+            "premise: no file holds a line"
+        );
+        let picture = sink.picture();
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", picture_json(Some(&picture)))).expect("JSON");
+        let p = &json["picture"];
+        assert_eq!(p["from"], "counters");
+        assert_eq!(p["counted"], 6);
+        assert_eq!(p["levels"][4], "error");
+        let mut by_level = [0u64; 5];
+        for minute in p["minutes"].as_array().expect("minutes") {
+            for (sum, count) in by_level
+                .iter_mut()
+                .zip(minute["counts"].as_array().unwrap())
+            {
+                *sum += count.as_u64().unwrap();
+            }
+        }
+        assert_eq!(by_level, [0, 0, 2, 1, 3]);
+        assert_eq!(p["minutes"].as_array().unwrap().len(), 60);
+        assert_eq!(p["codes"][0]["code"], "census_full");
+        assert_eq!(p["codes"][0]["count"], 3);
+        assert!(p["oldest_ms"].is_i64(), "{p:#}");
+        let page = picture_note(Some(&picture));
+        assert!(page.contains("<svg"), "{page}");
+        assert!(page.contains("no file read"));
+        assert!(page.contains("census_full"));
+        assert!(page.matches("<rect").count() >= 2, "{page}");
+        assert!(page.contains("error 3;"), "{page}");
+        // A PROCESS WITH NO SINK says so, in both.
+        assert_eq!(picture_json(None), "\"picture\":null");
+        assert!(picture_note(None).contains("No picture"));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A full code table says a count may be over, and a page with no code
+    /// says that too.
+    #[test]
+    fn the_picture_says_when_its_code_table_replaced_one() {
+        let picture = telemetry::run_dirs::Picture {
+            codes_replaced: 2,
+            ..telemetry::run_dirs::Picture::default()
+        };
+        let page = picture_note(Some(&picture));
+        assert!(page.contains("took the least-counted one's place 2 time(s)"));
+        assert!(page.contains("No line carried a code"));
+        assert!(page.contains("Oldest line the ring holds: none"));
+    }
+
+    /// **THE LIVE TAIL IS A COPY FROM MEMORY, NOT A FILE SCAN** (R3-24): the
+    /// ring's file deleted, the served directory's newest lines still answer,
+    /// with no byte read; a filter the copy cannot fill reads the files, as
+    /// it always did.
+    #[test]
+    fn the_live_tail_is_a_copy_from_memory() {
+        let (dir, sink) = sink_in("live");
+        for n in 0..60u32 {
+            let _ = sink.emit(&telemetry::Event::info("a.b", "line").with("n", n));
+        }
+        std::fs::remove_file(telemetry::current_path(&dir)).expect("the ring file");
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let tail = all_halves_live(&halves, &asked("limit=50").query, Some(&sink));
+        assert_eq!(tail.records.len(), 50);
+        assert_eq!((tail.bytes_read, tail.files_read), (0, 0));
+        assert_eq!(
+            tail.records[0]
+                .field("n")
+                .and_then(telemetry::OwnedValue::as_u64),
+            Some(59)
+        );
+        assert_eq!(tail.missing, Some(0));
+        assert!(!tail.reached_oldest, "the copy is the newest lines only");
+        let filtered = all_halves_live(&halves, &asked("limit=5&level=info").query, Some(&sink));
+        assert_eq!(filtered.records.len(), 5);
+        assert_eq!(filtered.missing, None, "a gap means nothing under a filter");
+        // NOT ENOUGH IN THE COPY: the files answer, and the file is gone.
+        let narrow = all_halves_live(&halves, &asked("limit=5&level=error").query, Some(&sink));
+        assert!(narrow.records.is_empty());
+        // ANOTHER DIRECTORY is never answered from this sink's copy.
+        let other = [Half {
+            name: "cli",
+            path: dir.join("elsewhere"),
+        }];
+        assert!(
+            all_halves_live(&other, &asked("limit=5").query, Some(&sink))
+                .records
+                .is_empty()
+        );
+        // THE LIVE FILTER IS THE FILE TAIL'S: floor, run, target, since.
+        let record = &tail.records[0];
+        let query = |q: &str| asked(q).query;
+        assert!(live_admits(&query("level=info&target=a"), record));
+        assert!(!live_admits(&query("level=warn"), record));
+        assert!(!live_admits(&query("target=a.bc"), record));
+        assert!(!live_admits(&query("run=4"), record));
+        assert!(live_admits(
+            &telemetry::Query::last(1).since(record.at_unix_millis),
+            record
+        ));
+        assert!(!live_admits(
+            &telemetry::Query::last(1).since(record.at_unix_millis + 1),
+            record
+        ));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **BOTH DURABLE STREAMS ARE SERVED, WITH THE ROLL'S WAITING DELETES**
+    /// (R3-24): on the JSON and the page, loud when the reaper is behind or
+    /// the state stream has grown past its loud size.
+    #[test]
+    fn both_streams_and_their_waiting_deletes_are_served() {
+        let audit = telemetry::AuditHealth {
+            serial: 7,
+            current_bytes: 100,
+            rotations: 3,
+            gone_waiting: u64::from(telemetry::AUDIT_KEEP_FILES) + 1,
+            reaped: 4,
+            reap_failures: 1,
+            last_error: Some("a <failure>".to_owned()),
+            ..telemetry::AuditHealth::default()
+        };
+        let state = telemetry::AuditHealth {
+            never_rolls: true,
+            current_bytes: telemetry::run_dirs::STATE_LOUD_BYTES + 1,
+            written: 9,
+            ..telemetry::AuditHealth::default()
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", streams_json(Some(&audit), Some(&state))))
+                .expect("JSON");
+        assert_eq!(json["audit_stream"]["gone_waiting"], 17);
+        assert_eq!(json["audit_stream"]["reaper_behind"], true);
+        assert_eq!(json["state_stream"]["loud"], true);
+        assert_eq!(json["state_stream"]["written"], 9);
+        assert!(
+            json["state_stream"]["max_file_bytes"].is_null(),
+            "it never rolls"
+        );
+        assert!(json["state_stream"]["keep_files"].is_null());
+        assert_eq!(json["state_stream"]["never_rolls"], true);
+        assert_eq!(
+            json["state_stream"]["loud_bytes"],
+            telemetry::run_dirs::STATE_LOUD_BYTES
+        );
+        assert_eq!(
+            json["audit_stream"]["max_file_bytes"],
+            telemetry::AUDIT_MAX_FILE_BYTES
+        );
+        assert!(json["audit_stream"]["loud_bytes"].is_null());
+        let page = streams_note(Some(&audit), Some(&state));
+        assert!(page.starts_with("<p class=\"halt\">"), "{page}");
+        assert!(
+            page.contains(
+                "17 index generation(s) wait to be deleted, 4 deleted, 1 delete(s) failed"
+            )
+        );
+        assert!(page.contains("the deletes are behind the rolls"));
+        assert!(page.contains("past its loud size"));
+        assert!(page.contains("a &lt;failure&gt;"));
+        let quiet = streams_note(Some(&telemetry::AuditHealth::default()), None);
+        assert!(quiet.starts_with("<p class=\"lead\">"), "{quiet}");
+        assert!(!quiet.contains("behind"));
+        assert!(streams_note(None, None).contains("keeps no audit stream"));
+        let none: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", streams_json(None, None))).expect("JSON");
+        assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
     }
 }

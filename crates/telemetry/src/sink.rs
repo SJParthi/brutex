@@ -681,6 +681,9 @@ struct Inner {
     /// The flood ration's pairs (DB-A43). Behind the ring's lock, so a pair's
     /// count and the lines it admits are one order.
     flood: Flood,
+    /// What the picture counts and the live copy (R3-24), kept as each line
+    /// is written.
+    counters: Counters,
 }
 
 /// One `(target, message)` pair's place in the flood ration.
@@ -756,6 +759,200 @@ impl Flood {
             pair.held = pair.held.saturating_add(1);
             Rationed::Hold
         }
+    }
+}
+
+/// How many minutes the `/logs` picture counts, newest last: one hour
+/// (R3-24).
+pub const PICTURE_MINUTES: usize = 60;
+
+/// How many codes the `/logs` picture keeps by count (R3-24).
+pub const PICTURE_CODES: usize = 16;
+
+/// How many of the newest lines the sink keeps a copy of in memory, for the
+/// live tail (R3-24). Each is a buffer reused in place, so at most this many
+/// lines of at most the widest legal line (just over 41 KB) are held: about
+/// 21 MB in the worst case, a few hundred KB at the lines' usual width.
+pub const RECENT_LINES: usize = 512;
+
+/// What the sink counted as it wrote, for the `/logs` picture (R3-24): kept
+/// at write time in a fixed size, so the picture is read from counters and
+/// never from the files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Picture {
+    /// Per minute of the [`PICTURE_MINUTES`] ending at the minute asked
+    /// for, oldest first: the minute's first `ms` and the lines written in
+    /// it per level, by [`Level::rank`]. A minute nothing was written in is
+    /// all zeros.
+    pub minutes: Vec<(i64, [u64; 5])>,
+    /// The codes written most (a line's `code`, else its `reason`), most
+    /// first, at most [`PICTURE_CODES`].
+    pub codes: Vec<(String, u64)>,
+    /// How many times a new code took the place of the least-counted one
+    /// once the table was full. Past zero a count may be over by at most the
+    /// count it replaced (the space-saving rule): said, never hidden.
+    pub codes_replaced: u64,
+    /// The `ms` of the oldest line the ring still holds, as the sink saw
+    /// each file begin; `None` for a ring with no line.
+    pub oldest_ms: Option<i64>,
+    /// Lines counted since the sink opened.
+    pub counted: u64,
+    /// When the sink opened, `ms`.
+    pub since_ms: i64,
+}
+
+/// The counters behind a [`Picture`], and the live copy, behind the ring's
+/// lock: every update is O(1) or bounded by a constant of this module.
+#[derive(Debug)]
+struct Counters {
+    /// `(minute, counts)` by minute modulo [`PICTURE_MINUTES`]; a slot whose
+    /// minute is not the one being counted is reset first.
+    minutes: [(i64, [u64; 5]); PICTURE_MINUTES],
+    /// The code table, at most [`PICTURE_CODES`].
+    codes: Vec<(String, u64)>,
+    /// See [`Picture::codes_replaced`].
+    codes_replaced: u64,
+    /// Each ring file's first line's `ms`, newest file first: a roll pushes
+    /// an empty one at the front and drops the oldest.
+    ring_firsts: std::collections::VecDeque<Option<i64>>,
+    /// See [`Picture::counted`].
+    counted: u64,
+    /// See [`Picture::since_ms`].
+    since_ms: i64,
+    /// The newest lines, each a reused buffer, at most [`RECENT_LINES`].
+    recent: Vec<Vec<u8>>,
+    /// Where the next line goes in `recent`.
+    recent_next: usize,
+}
+
+impl Counters {
+    /// Counters for a sink opening on `dir`: each ring file's first line read
+    /// once, at most `keep` small reads, so the picture's oldest line is
+    /// right from the first answer.
+    fn open(dir: &Path, keep: u8) -> Self {
+        let mut ring_firsts: std::collections::VecDeque<Option<i64>> =
+            paths_newest_first(dir, keep)
+                .iter()
+                .map(|path| head_ms(path))
+                .collect();
+        ring_firsts.resize(usize::from(keep.max(1)), None);
+        Self::with_firsts(ring_firsts)
+    }
+
+    /// Counters for a sink around a target this crate did not open.
+    fn empty(keep: u8) -> Self {
+        let mut ring_firsts = std::collections::VecDeque::new();
+        ring_firsts.resize(usize::from(keep.max(1)), None);
+        Self::with_firsts(ring_firsts)
+    }
+
+    /// The common construction.
+    fn with_firsts(ring_firsts: std::collections::VecDeque<Option<i64>>) -> Self {
+        Self {
+            minutes: [(i64::MIN, [0; 5]); PICTURE_MINUTES],
+            codes: Vec::with_capacity(PICTURE_CODES),
+            codes_replaced: 0,
+            ring_firsts,
+            counted: 0,
+            since_ms: now_millis(),
+            recent: Vec::new(),
+            recent_next: 0,
+        }
+    }
+
+    /// Counts one line written at `at`, at `level`, carrying `code`, and keeps
+    /// its copy. O(1) but for the code table, a scan of at most
+    /// [`PICTURE_CODES`] entries, and the copy, one `memcpy` into a buffer
+    /// that already has the room once it has held a line as wide.
+    fn count(&mut self, at: i64, level: Level, code: Option<&str>, line: &[u8]) {
+        let minute = at.div_euclid(60_000);
+        let width = i64::try_from(PICTURE_MINUTES).unwrap_or(60);
+        let slot = usize::try_from(minute.rem_euclid(width)).unwrap_or(0);
+        if let Some((held, counts)) = self.minutes.get_mut(slot) {
+            if *held != minute {
+                *held = minute;
+                *counts = [0; 5];
+            }
+            if let Some(count) = counts.get_mut(usize::from(level.rank())) {
+                *count = count.saturating_add(1);
+            }
+        }
+        if let Some(first) = self.ring_firsts.front_mut()
+            && first.is_none()
+        {
+            *first = Some(at);
+        }
+        self.counted = self.counted.saturating_add(1);
+        if let Some(code) = code {
+            self.count_code(code);
+        }
+        if self.recent.len() < RECENT_LINES {
+            self.recent.push(line.to_vec());
+        } else if let Some(held) = self.recent.get_mut(self.recent_next) {
+            held.clear();
+            held.extend_from_slice(line);
+        }
+        self.recent_next = self.recent_next.saturating_add(1) % RECENT_LINES;
+    }
+
+    /// One more line of `code`: its own count, a free entry, or the place of
+    /// the least-counted code with that count and one (space-saving).
+    fn count_code(&mut self, code: &str) {
+        if let Some(entry) = self.codes.iter_mut().find(|(held, _)| held == code) {
+            entry.1 = entry.1.saturating_add(1);
+            return;
+        }
+        if self.codes.len() < PICTURE_CODES {
+            self.codes.push((code.to_owned(), 1));
+            return;
+        }
+        if let Some(least) = self.codes.iter_mut().min_by_key(|(_, count)| *count) {
+            *least = (code.to_owned(), least.1.saturating_add(1));
+            self.codes_replaced = self.codes_replaced.saturating_add(1);
+        }
+    }
+
+    /// The ring rolled: a new current file, the oldest dropped.
+    fn rolled(&mut self) {
+        self.ring_firsts.push_front(None);
+        let _dropped = self.ring_firsts.pop_back();
+    }
+
+    /// The picture at minute `now_minute` (`ms` / 60,000).
+    fn picture(&self, now_minute: i64) -> Picture {
+        let width = i64::try_from(PICTURE_MINUTES).unwrap_or(60);
+        let minutes = (now_minute.saturating_sub(width - 1)..=now_minute)
+            .map(|minute| {
+                let slot = usize::try_from(minute.rem_euclid(width)).unwrap_or(0);
+                let counts = self
+                    .minutes
+                    .get(slot)
+                    .filter(|(held, _)| *held == minute)
+                    .map_or([0; 5], |(_, counts)| *counts);
+                (minute.saturating_mul(60_000), counts)
+            })
+            .collect();
+        let mut codes = self.codes.clone();
+        codes.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        Picture {
+            minutes,
+            codes,
+            codes_replaced: self.codes_replaced,
+            oldest_ms: self.ring_firsts.iter().rev().find_map(|first| *first),
+            counted: self.counted,
+            since_ms: self.since_ms,
+        }
+    }
+
+    /// The newest lines' copies, newest first.
+    fn recent(&self) -> Vec<Vec<u8>> {
+        let held = self.recent.len();
+        (1..=held)
+            .filter_map(|back| {
+                let at = (self.recent_next + RECENT_LINES - back) % RECENT_LINES;
+                self.recent.get(at).cloned()
+            })
+            .collect()
     }
 }
 
@@ -980,6 +1177,12 @@ impl Sink {
             resumed.last_at,
         );
         sink.held_lock = Some(held);
+        // THE PICTURE'S OLDEST LINE IS THE RING'S FROM THE START (R3-24): each
+        // ring file's first line, read once here.
+        sink.inner
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .counters = Counters::open(&config.dir, config.keep_files);
         // THE AUDIT STREAM OPENS UNDER THE SAME DIRECTORY LOCK, so it has one
         // writer exactly as the ring does. A stream that cannot open is named
         // and the ring still serves: losing the long record must not cost the
@@ -1067,6 +1270,7 @@ impl Sink {
                 audit: None,
                 state: None,
                 flood: Flood::default(),
+                counters: Counters::empty(config.keep_files),
             }),
             written: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -1513,6 +1717,25 @@ impl Sink {
             Ok(()) => {
                 inner.bytes = inner.bytes.saturating_add(span);
                 inner.torn = false;
+                // THE PICTURE AND THE LIVE COPY (R3-24): each line written
+                // counted and copied, the flood's own line too, as it lands.
+                let led_by = usize::from(led);
+                if held_before > 0 {
+                    let held_line = inner
+                        .buf
+                        .get(led_by..own_from.saturating_sub(1))
+                        .unwrap_or(&[]);
+                    inner.counters.count(at, Level::Warn, None, held_line);
+                }
+                let own = inner.buf.get(own_from..).unwrap_or(&[]);
+                let own = own.strip_suffix(b"\n").unwrap_or(own);
+                let code = event
+                    .fields()
+                    .iter()
+                    .find(|(name, _)| *name == "code")
+                    .or_else(|| event.fields().iter().find(|(name, _)| *name == "reason"))
+                    .and_then(|&(_, value)| value.as_str());
+                inner.counters.count(at, event.level(), code, own);
                 drop(guard);
                 if let Some(why) = roll_failure {
                     self.report(&why);
@@ -1664,6 +1887,40 @@ impl Sink {
         guard.audit.as_ref().map(Audit::health)
     }
 
+    /// The `/logs` picture (R3-24): lines per minute by level over the last
+    /// [`PICTURE_MINUTES`], the codes written most, and the ring's oldest
+    /// line, from the counters this sink keeps as it writes. One lock and a
+    /// copy of a fixed-size table: no file is opened, whatever the ring holds.
+    #[must_use]
+    pub fn picture(&self) -> Picture {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.counters.picture(now_millis().div_euclid(60_000))
+    }
+
+    /// The newest lines this sink wrote, newest first, at most
+    /// [`RECENT_LINES`], decoded (R3-24): the live tail, read from the copy
+    /// the sink keeps as it writes and never from a file. The copies are
+    /// taken under the lock and decoded after it is released. A copy that
+    /// will not decode is counted in the second value and passed over.
+    #[must_use]
+    pub fn recent(&self) -> (Vec<Record>, u64) {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let lines = guard.counters.recent();
+        drop(guard);
+        let mut malformed = 0u64;
+        let records = lines
+            .iter()
+            .filter_map(|line| {
+                let decoded = Record::decode(line).ok();
+                if decoded.is_none() {
+                    malformed = malformed.saturating_add(1);
+                }
+                decoded
+            })
+            .collect();
+        (records, malformed)
+    }
+
     /// What the never-rolling state stream has done, and failed to do
     /// (R3-24): `None` exactly when [`Self::audit_health`] is. Its
     /// [`AuditHealth::never_rolls`] is set and its rotation and reaper counts
@@ -1738,6 +1995,7 @@ impl Sink {
             .reopen(&path)
             .map_err(|e| named(&path, "cannot open the next file", &e))?;
         inner.bytes = 0;
+        inner.counters.rolled();
         self.rotations.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -4359,6 +4617,7 @@ mod tests {
             audit: None,
             state: None,
             flood: super::Flood::default(),
+            counters: super::Counters::empty(1),
         };
 
         assert_eq!(
@@ -8867,5 +9126,285 @@ mod state_tests {
         assert_eq!(sink.audit_health().expect("an audit stream").written, 1);
         drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod picture_tests {
+    //! The `/logs` picture's counters and the live copy, kept as lines are
+    //! written (R3-24).
+
+    use super::{
+        Config, Counters, MIN_FILE_BYTES, PICTURE_CODES, PICTURE_MINUTES, RECENT_LINES, Sink,
+        current_path,
+    };
+    use crate::event::Event;
+    use crate::level::Level;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        crate::tests::sweep_stale_scratch();
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-telemetry-{}-picture-{name}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The counts of the newest minute that holds any, by level rank.
+    fn newest_counts(sink: &Sink) -> [u64; 5] {
+        sink.picture()
+            .minutes
+            .iter()
+            .rev()
+            .find(|(_, counts)| counts.iter().sum::<u64>() > 0)
+            .map(|(_, counts)| *counts)
+            .unwrap_or_default()
+    }
+
+    /// **EVERY LINE WRITTEN IS COUNTED BY MINUTE AND LEVEL, AND ITS CODE**,
+    /// as it is written; a filtered event is not; the ring's oldest line is
+    /// the first one written.
+    #[test]
+    fn the_picture_is_counted_as_lines_are_written() {
+        let dir = scratch("counted");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let _ = sink.emit(&Event::info("a", "one"));
+        let _ = sink.emit(&Event::info("a", "two"));
+        let _ = sink.emit(&Event::warn("a", "three").with("code", "late"));
+        let _ = sink.emit(&Event::error("a", "four").with("code", "census_full"));
+        let _ = sink.emit(&Event::error("a", "five").with("code", "census_full"));
+        let _ = sink.emit(&Event::error("a", "six").with("reason", "bad_row"));
+        let _ = sink.emit(&Event::debug("a", "filtered by the floor"));
+        let picture = sink.picture();
+        assert_eq!(picture.counted, 6);
+        assert_eq!(picture.minutes.len(), PICTURE_MINUTES);
+        let total: u64 = picture
+            .minutes
+            .iter()
+            .map(|(_, c)| c.iter().sum::<u64>())
+            .sum();
+        assert_eq!(total, 6, "{picture:?}");
+        // Within a test the six may straddle a minute; summed per level they
+        // are exact.
+        let by_level = picture.minutes.iter().fold([0u64; 5], |mut sum, (_, c)| {
+            for (s, n) in sum.iter_mut().zip(c) {
+                *s += n;
+            }
+            sum
+        });
+        assert_eq!(by_level, [0, 0, 2, 1, 3]);
+        assert_eq!(
+            picture.codes,
+            [
+                ("census_full".to_owned(), 2),
+                ("bad_row".to_owned(), 1),
+                ("late".to_owned(), 1)
+            ]
+        );
+        assert_eq!(picture.codes_replaced, 0);
+        let first = crate::tail(&dir, sink.keep_files(), &crate::tail::Query::last(10))
+            .records
+            .last()
+            .expect("a line")
+            .at_unix_millis;
+        assert_eq!(picture.oldest_ms, Some(first));
+        assert!(picture.since_ms <= first);
+        assert!(newest_counts(&sink).iter().sum::<u64>() > 0);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE PICTURE NEVER READS A FILE**: the ring's files deleted under
+    /// the sink leave every count where it was. And a reopened sink starts
+    /// its oldest line from the ring it finds, read once.
+    #[test]
+    fn the_picture_survives_its_files_and_a_reopen_reads_the_ring_once() {
+        let dir = scratch("no-files");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let _ = sink.emit(&Event::error("a", "kept").with("code", "x"));
+        let before = sink.picture();
+        std::fs::remove_file(current_path(&dir)).expect("the ring file");
+        assert_eq!(sink.picture(), before, "counted, never read back");
+        let _ = sink.emit(&Event::error("a", "after").with("code", "x"));
+        assert_eq!(sink.picture().counted, 2);
+        assert_eq!(sink.picture().codes, [("x".to_owned(), 2)]);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        // A REOPEN over a ring that is there reads its oldest line once.
+        let kept = scratch("reopen");
+        let first = {
+            let sink = Sink::open(&Config::new(&kept)).expect("opens");
+            let _ = sink.emit(&Event::info("a", "written by the last process"));
+            sink.picture().oldest_ms
+        };
+        let again = Sink::open(&Config::new(&kept)).expect("reopens");
+        let reopened = again.picture();
+        assert_eq!(reopened.counted, 0, "counts are this process's");
+        assert_eq!(reopened.oldest_ms, first, "the ring's oldest, read at open");
+        drop(again);
+        let _ignored = std::fs::remove_dir_all(&kept);
+    }
+
+    /// **A ROLL MOVES THE OLDEST LINE ON**: with two files kept, the first
+    /// line leaves when its file does, and the picture says so.
+    #[test]
+    fn a_roll_moves_the_oldest_line_on() {
+        let dir = scratch("rolls");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+        let _ = sink.emit(&Event::info("a", "first"));
+        let first = sink.picture().oldest_ms.expect("a line");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        for n in 0..60u32 {
+            let _ = sink.emit(&Event::info("a", "filler").with("n", n));
+        }
+        assert!(
+            sink.health().rotations >= 2,
+            "premise: the first file is gone"
+        );
+        let oldest = sink.picture().oldest_ms.expect("a line");
+        assert!(oldest > first, "{oldest} after {first}");
+        let on_disk = crate::tail(&dir, 2, &crate::tail::Query::last(1000))
+            .records
+            .last()
+            .expect("a line")
+            .at_unix_millis;
+        assert!(oldest <= on_disk, "never newer than the ring's oldest line");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE CODE TABLE IS FIXED IN SIZE**: past [`PICTURE_CODES`] codes a
+    /// new one takes the least-counted one's place with its count and one,
+    /// and the replacement is counted.
+    #[test]
+    fn the_code_table_is_fixed_in_size_and_says_when_it_replaced() {
+        let mut counters = Counters::empty(1);
+        for n in 0..PICTURE_CODES {
+            for _ in 0..=n {
+                counters.count(60_000, Level::Error, Some(&format!("code{n:02}")), b"x");
+            }
+        }
+        counters.count(60_000, Level::Error, Some("newcomer"), b"x");
+        let picture = counters.picture(1);
+        assert_eq!(picture.codes.len(), PICTURE_CODES);
+        assert_eq!(picture.codes_replaced, 1);
+        assert!(picture.codes.contains(&("newcomer".to_owned(), 2)));
+        assert!(!picture.codes.iter().any(|(code, _)| code == "code00"));
+        assert_eq!(
+            picture.codes[0],
+            (format!("code{:02}", PICTURE_CODES - 1), 16)
+        );
+        // A MINUTE OUT OF THE WINDOW counts nothing, and a slot reused for a
+        // later minute starts from zero.
+        assert!(
+            counters
+                .picture(1 + i64::try_from(PICTURE_MINUTES).unwrap())
+                .minutes
+                .iter()
+                .all(|(_, c)| c.iter().sum::<u64>() == 0)
+        );
+        counters.count(
+            (1 + i64::try_from(PICTURE_MINUTES).unwrap()) * 60_000,
+            Level::Info,
+            None,
+            b"y",
+        );
+        let later = counters.picture(1 + i64::try_from(PICTURE_MINUTES).unwrap());
+        assert_eq!(later.minutes.last().unwrap().1, [0, 0, 1, 0, 0]);
+        assert_eq!(
+            later.minutes[0].1, [0; 5],
+            "the minute an hour back is not this one"
+        );
+    }
+
+    /// **THE LIVE COPY IS THE NEWEST LINES, NEWEST FIRST, AT MOST
+    /// [`RECENT_LINES`]**, read from memory: the ring's file deleted under
+    /// the sink, the copy still answers.
+    #[test]
+    fn the_live_copy_is_the_newest_lines_newest_first() {
+        let dir = scratch("recent");
+        let sink = Sink::open(&Config::new(&dir).with_min_level(Level::Trace)).expect("opens");
+        let total = u32::try_from(RECENT_LINES).unwrap() + 40;
+        for n in 0..total {
+            let _ = sink.emit(&Event::trace("a", "line").with("n", n));
+        }
+        std::fs::remove_file(current_path(&dir)).expect("the ring file");
+        let (records, malformed) = sink.recent();
+        assert_eq!(malformed, 0);
+        assert_eq!(records.len(), RECENT_LINES);
+        let n = |at: usize| records[at].field("n").and_then(crate::OwnedValue::as_u64);
+        assert_eq!(n(0), Some(u64::from(total - 1)), "newest first");
+        assert_eq!(
+            n(RECENT_LINES - 1),
+            Some(u64::from(total) - RECENT_LINES as u64)
+        );
+        // A FLOOD'S OWN LINE is copied and counted with the line it leads.
+        let flood = scratch("recent-flood");
+        let rationed = Sink::open(&Config::new(&flood).with_flood_lines(1)).expect("opens");
+        let _ = rationed.emit(&Event::warn("f", "same"));
+        let _ = rationed.emit(&Event::warn("f", "same"));
+        std::thread::sleep(std::time::Duration::from_millis(1_050));
+        let _ = rationed.emit(&Event::warn("f", "same"));
+        let (copied, _) = rationed.recent();
+        assert_eq!(copied.len(), 3, "{copied:?}");
+        assert_eq!(copied[1].message, super::FLOOD_MESSAGE);
+        assert_eq!(rationed.picture().counted, 3);
+        drop(sink);
+        drop(rationed);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&flood);
+    }
+
+    /// A sink around a target this crate did not open counts too, from an
+    /// empty ring.
+    #[test]
+    fn a_target_sink_counts_from_nothing() {
+        let sink = Sink::with_target(
+            &Config::new(scratch("target")),
+            Box::new(super::tests_support::Discard),
+        )
+        .expect("a sink");
+        assert_eq!(sink.picture().oldest_ms, None);
+        let _ = sink.emit(&Event::info("a", "b"));
+        assert_eq!(sink.picture().counted, 1);
+        assert_eq!(sink.recent().0.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests_support {
+    //! A target that keeps nothing, for a sink this crate did not open.
+
+    /// Takes every write and keeps nothing.
+    #[derive(Debug)]
+    pub(super) struct Discard;
+
+    impl super::Target for Discard {
+        fn append(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn reopen(&mut self, _path: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

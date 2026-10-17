@@ -60,7 +60,10 @@ pub fn state_stream_of(dir: &Path) -> PathBuf {
 // Named here, beside the directories they describe, because the crate root's
 // re-export list is in `lib.rs`, which R3-24 does not own; a `pub use` there
 // would give each a shorter name and change nothing else.
-pub use crate::sink::{AUDIT_SPAN_FILE, AuditSpan, Reach, STATE_LOUD_BYTES, audit_span, reach_of};
+pub use crate::sink::{
+    AUDIT_SPAN_FILE, AuditSpan, PICTURE_CODES, PICTURE_MINUTES, Picture, RECENT_LINES, Reach,
+    STATE_LOUD_BYTES, audit_span, reach_of,
+};
 
 /// The directory, beneath a store root, that every log directory is under.
 pub const LOGS: &str = "logs";
