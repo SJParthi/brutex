@@ -593,8 +593,8 @@ pub enum Floor {
 }
 
 impl Floor {
-    /// The floor in bytes on a filesystem of `total` bytes. O(1), integer
-    /// only (`CLAUDE.md` §7): a percent floor rounds up, so it never
+    /// The floor in bytes on a filesystem of `total` bytes. O(1) (not timed:
+    /// UNVERIFIED, docs/06 L-R407-11), integer only (`CLAUDE.md` §7): a percent floor rounds up, so it never
     /// promises less than it says.
     #[must_use]
     pub fn bytes_of(self, total: u64) -> u64 {

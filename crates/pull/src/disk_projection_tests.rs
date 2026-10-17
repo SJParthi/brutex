@@ -363,10 +363,6 @@ fn df_output_is_read_by_its_capacity_column() {
     assert!(parse_df("Filesystem\n/dev/x 1 2 3 nope /\n").is_err());
     assert!(parse_df("a b 9%\n").is_err());
     assert!(parse_df("/dev/x one 2 3 4% /\n").is_err());
-    // The live meter reads the root filesystem of this machine.
-    let measured = Df.space(Path::new("/")).unwrap();
-    assert!(measured.total >= measured.free && measured.total > 0);
-    assert!(Df.space(Path::new("/no/such/brutex/dir")).is_err());
 }
 
 #[test]
@@ -388,7 +384,8 @@ fn within_is_integer_and_symmetric_about_the_actual() {
 /// file and writes nothing. Run with
 /// `BRUTEX_REAL_SAMPLE="<feed>/<kind>/<rung>=<bytes>:<days>;U:<name>@index|stock=<bytes>:<days>;..."`,
 /// `BRUTEX_REAL_PLAN="<feed>/<kind>/<rung>=<days>;U:<name>@index|stock=<days>;..."` and
-/// `BRUTEX_REAL_STORE=<the store root>`.
+/// `BRUTEX_REAL_DF` set to what `df -Pk` prints for the real store root (this
+/// crate starts no program, gate 0: the operator runs `df` and passes its text).
 #[test]
 #[ignore = "reads the operator's measured sizes and the real drive's df; run by hand"]
 fn real_delivery_sizes_project_through_the_module_and_meet_the_floor() {
@@ -465,8 +462,7 @@ fn real_delivery_sizes_project_through_the_module_and_meet_the_floor() {
         projection.unmeasured.is_empty(),
         "nothing NOT KNOWN in this plan"
     );
-    let store = std::path::PathBuf::from(read("BRUTEX_REAL_STORE"));
-    let space = Df.space(&store).unwrap();
+    let space = parse_df(&read("BRUTEX_REAL_DF")).unwrap();
     let verdict = floor_check(space, projection.bytes, DEFAULT_FLOOR);
     println!(
         "df: total {} free {}; floor {DEFAULT_FLOOR} = {} bytes; verdict {verdict:?}",

@@ -57,7 +57,8 @@ use std::time::Instant;
 mod tickstore_write;
 
 /// C-DP-01 and C-DP-02: one projected unit and the Dropbox status read,
-/// flat at 1x, 10x and 100x (R4-07, PERF-13, E2E-01).
+/// flat at 1x, 10x and 100x (R4-07, PERF-13, E2E-01), held to the ceiling
+/// by this harness, `crates/pull/benches/ratio.rs`.
 #[path = "ratio/disk_projection.rs"]
 mod disk_projection;
 

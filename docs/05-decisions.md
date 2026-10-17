@@ -71550,3 +71550,14 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+Repair round 1, gates 0 and 12 (2026-10-17): **`pull` starts no program.**
+Gate 0 (D-1603) refused `Command::new("/bin/df")` in `disk_projection.rs`, so
+the `Df` meter is removed: the fetch and every disk-writing step take the
+caller's `FreeSpace`, and the app's meter is the `/bin/df -Pk` that
+`/disk.json` already runs in `crates/api/src/disk_route.rs` (refused by gate 0
+on `feat/db-fix` too, outside this package), which the ingest chain (R4-11)
+wraps when it calls the fetch. The real-data check reads `df -Pk` text the
+operator passes (`BRUTEX_REAL_DF`). Every cost claim in this package's files
+names its proof (C-DP-01 and C-DP-02 by `crates/pull/benches/ratio.rs`) or
+says UNVERIFIED, recorded as docs/06 L-R407-11.

@@ -1539,7 +1539,8 @@ impl Memory {
 }
 
 /// The journal's last whole line that parses, read as bytes from its last
-/// 64 KiB: O(1) in the journal's length. The window's first, cut line is
+/// 64 KiB: O(1) in the journal's length (C-DP-02, run by
+/// `crates/pull/benches/ratio.rs`). The window's first, cut line is
 /// skipped and every line is decoded whole, so a window that starts inside
 /// a character reads the same; a torn line is passed over. When no whole
 /// line fits the window it is doubled, up to [`MAX_STATUS_WINDOW`]. `None`
@@ -2314,7 +2315,9 @@ type NameRefusal = (&'static str, String, bool);
 
 impl Names {
     /// The day a listed name is, or why it is refused (`Some`), or `None`
-    /// for a name that is not a zip at all (ignored, counted). O(1).
+    /// for a name that is not a zip at all (ignored, counted). O(1): two hash
+    /// probes and a fixed-width parse, not timed (UNVERIFIED, docs/06
+    /// L-R407-11).
     fn verdict(&self, file: &Listed) -> Result<DayIdentity, Option<NameRefusal>> {
         if let Some(why) = unsafe_name(&file.name) {
             return Err(Some(("name_unsafe", why.to_owned(), false)));

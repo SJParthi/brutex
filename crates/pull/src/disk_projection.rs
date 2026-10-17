@@ -41,9 +41,13 @@
 //! [`Totals::seal`] sorts each class's bytes a day once, O(u log u) over the
 //! held underlyings; every projected unit after that is one hash probe or one
 //! cached median, O(1), so a plan is O(its units) and independent of how many
-//! kinds and underlyings the totals hold (bench C-DP-01 at 1x, 10x and 100x).
-//! [`Df::space`] runs `/bin/df -Pk` once per call, the method `/disk.json`
-//! uses.
+//! kinds and underlyings the totals hold (bench C-DP-01, run by
+//! `crates/pull/benches/ratio.rs`, at 1x, 10x and 100x; R407-07).
+//!
+//! The free space comes from the caller's [`FreeSpace`]: this crate starts no
+//! program (gate 0, D-1603). The app's meter is the `/bin/df -Pk` that
+//! `/disk.json` already runs (`crates/api/src/disk_route.rs`), whose output
+//! [`parse_df`] reads; wiring it to the fetch is the ingest chain's (R4-11).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -198,7 +202,8 @@ impl Totals {
         Self::default()
     }
 
-    /// One kind's bytes and held instrument-days. O(1).
+    /// One kind's bytes and held instrument-days. O(1): one hash insert, not
+    /// timed on its own (UNVERIFIED, docs/06 L-R407-11).
     ///
     /// # Errors
     ///
@@ -219,7 +224,8 @@ impl Totals {
         Ok(())
     }
 
-    /// One option underlying's stored bytes and held days. O(1).
+    /// One option underlying's stored bytes and held days. O(1): one hash
+    /// insert, not timed on its own (UNVERIFIED, docs/06 L-R407-11).
     ///
     /// # Errors
     ///
@@ -311,7 +317,8 @@ impl Sealed {
         self.medians.get(class.slot()).copied().flatten()
     }
 
-    /// One unit's bytes a day and how that number was reached. O(1).
+    /// One unit's bytes a day and how that number was reached. O(1), timed
+    /// through [`project`] by C-DP-01 in `crates/pull/benches/ratio.rs`.
     #[must_use]
     pub fn per_day(&self, unit: &Unit) -> (u64, Basis) {
         match unit {
@@ -498,29 +505,6 @@ pub trait FreeSpace: Send + Sync {
     fn space(&self, path: &Path) -> Result<Space, String>;
 }
 
-/// The measurement `/disk.json` takes: one `/bin/df -Pk <path>`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Df;
-
-impl FreeSpace for Df {
-    fn space(&self, path: &Path) -> Result<Space, String> {
-        let output = std::process::Command::new("/bin/df")
-            .arg("-Pk")
-            .arg(path)
-            .output()
-            .map_err(|why| format!("/bin/df could not be run: {why}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "/bin/df -Pk {} answered {}: {}",
-                path.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        parse_df(&String::from_utf8_lossy(&output.stdout))
-    }
-}
-
 /// The filesystem in POSIX `df -Pk` output: a header line, then
 /// `<name> <1024-blocks> <used> <available> <capacity%> <mounted on>`; the
 /// capacity column is found by its `%`, so a mount point with spaces reads.
@@ -633,7 +617,8 @@ impl core::fmt::Display for FloorRefusal {
     }
 }
 
-/// Whether writing `projected` bytes on `space` keeps `floor` free. O(1).
+/// Whether writing `projected` bytes on `space` keeps `floor` free. O(1):
+/// integer arithmetic, not timed (UNVERIFIED, docs/06 L-R407-11).
 ///
 /// # Errors
 ///
@@ -659,7 +644,8 @@ pub fn floor_check(space: Space, projected: u64, floor: Floor) -> Result<Headroo
 
 /// [`floor_check`] for a whole projection, with the free space measured by
 /// `meter` at `path`: an unmeasured unit or an unmeasurable disk refuses by
-/// name, never passes. O(1) beyond the measurement.
+/// name, never passes. O(1) beyond the measurement: one [`floor_check`],
+/// not timed (UNVERIFIED, docs/06 L-R407-11).
 ///
 /// # Errors
 ///

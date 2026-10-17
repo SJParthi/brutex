@@ -3,7 +3,8 @@
 //! Dropbox fetch's status read (one journal tail) at 1x, 10x and 100x the
 //! journal's lines. Both must be flat: a projection is one hash probe or one
 //! cached median per unit, and the status read seeks to the journal's last
-//! 64 KiB whatever its length.
+//! 64 KiB whatever its length. The harness, `crates/pull/benches/ratio.rs`,
+//! runs both and fails on a breach.
 //!
 //! Every input is invented here; the journals are written into a new folder
 //! under the system temp directory, printed, and left there (this harness

@@ -2647,7 +2647,8 @@ mod repair_r1 {
         }
     }
 
-    /// The O(1) status read (C4): non-ASCII journal lines, the 64 KiB
+    /// The O(1) status read (C4; its cost is C-DP-02, run by
+    /// `crates/pull/benches/ratio.rs`): non-ASCII journal lines, the 64 KiB
     /// window starting on a UTF-8 continuation byte. Failed before the
     /// repair: `stream did not contain valid UTF-8`.
     #[test]
