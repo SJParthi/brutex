@@ -29,7 +29,7 @@
    */
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { fmt } from '$lib/db/notes-labels.js';
+  import { fmt, extremeAuctionFlag } from '$lib/db/notes-labels.js';
   import { windowQuery, paisaText } from '$lib/db/bars-plan.js';
   import { readWindowPage } from '$lib/database-pages.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
@@ -160,6 +160,15 @@
 
   /** The instant of an extreme, as the grid prints a bar's. @param {number} t */
   const when = (t) => `${dayLabel(t * 1000)} ${barTimeLabel(t * 1000, tfSecs)}`;
+  /* AN EXTREME IN THE CLOSING-AUCTION SESSION IS SAID (AH-03,
+     g-ui-dom-vs-json-3): the fold is faithful to the stored bars, and a
+     month imported before D-3320's rule holds the auction's print as one, so
+     a heaviest bar at 15:29 may be the auction's. The fold sends no phase;
+     the flag is the feed's window rule, and the bar's own phase decides. */
+  const feed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
+  const soleKey = $derived(db.barQueryPlan?.keys.length === 1 ? db.barQueryPlan.keys[0] : null);
+  /** @param {any} x */
+  const casFlag = (x) => extremeAuctionFlag(x, feed, x.key ?? soleKey, tfSecs);
 </script>
 
 {#if db.view === 'bars' && (db.barQueryPlan?.keys.length ?? 0) > 0}
@@ -192,10 +201,14 @@
             <li class="xf">
               <span class="xl">{e.label}</span>
               {#if x}
+                {@const cas = casFlag(x)}
                 <b class="xv">{extremeText(x, e.unit)}</b>
                 <span class="xw" title="{when(x.t)} IST{x.key ? ` · ${x.key}` : ''}"
                   >{when(x.t)}{#if several && x.key}<span class="xk"> · {x.key}</span>{/if}</span
                 >
+                {#if cas}
+                  <span class="xcas" title={cas.text}>{cas.short}</span>
+                {/if}
                 <button
                   class="btn ghost sm"
                   type="button"
@@ -278,6 +291,13 @@
     font-variant-numeric: tabular-nums;
     font-weight: var(--w-semi);
     color: var(--ink);
+  }
+  .xcas {
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    border: 1px solid currentColor;
+    border-radius: var(--r2, 3px);
+    padding: 0 var(--s2);
   }
   .xw {
     font-family: var(--mono);

@@ -21,6 +21,8 @@
  * compiler (`web/tests/db-dayflags.test.js`).
  */
 
+import { lineageLines } from './lineage-labels.js';
+
 /** The most days one `/dayflags.json` page holds (`dayflags::PAGE_DAYS`). */
 export const DAYFLAGS_PAGE_DAYS = 92;
 
@@ -51,7 +53,20 @@ export const DAY_KINDS = [
   { kind: 'store_gap', word: 'no bar on a session', tone: 'bad' },
   { kind: 'front', word: 'refused front', tone: 'bad' },
   { kind: 'degraded', word: 'degraded vendor day', tone: 'warn' },
+  // A MINUTE GAP IS A MINUTE MISSING: Zerodha's `gaps.missing`, the minutes
+  // a session owed that the vendor did not serve (D-3321). The GDFL quality
+  // ledger's seconds are not minutes, and two of its three counts are not
+  // missing time at all, so each has its own kind and word (AH-03,
+  // g-ui-dom-vs-json-7; DB-G96's "flag them" kept, its word amended — D-5333).
   { kind: 'gap', word: 'minute gap', tone: 'warn' },
+  // `quality.indices.holes_5s`: in-session index holes of 5 s or more.
+  { kind: 'hole', word: 'holes of 5 s or more', tone: 'warn' },
+  // `quality.stocks.shared_holes`: holes the stocks file shares across most
+  // traded shares (the server's phrase names the length and the share).
+  { kind: 'shared_hole', word: 'hole shared by most shares', tone: 'warn' },
+  // `quality.indices.dual_spread_s`: one second holding two values at least
+  // 10 bps apart — no time is missing (DB-G96).
+  { kind: 'dual', word: 'two values in one second', tone: 'warn' },
   { kind: 'junk', word: 'junk row', tone: 'warn' },
   { kind: 'incomplete_other', word: 'import incomplete for other files', tone: 'warn' },
   { kind: 'late', word: 'late rows deferred', tone: 'warn' },
@@ -85,6 +100,53 @@ const KIND = new Map(DAY_KINDS.map((k) => [k.kind, k]));
 const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'before_archive', 'no_trade']);
 
 /**
+ * The exchange calendar's session codes (`pull::calendar`, D-3319): a
+ * regular day, a regular day with a closing auction, a special session, a
+ * suspected halt, a session of unmeasured length. `.` is closed and `-` is
+ * outside the calendar's span; neither owes a bar.
+ */
+const SESSION_CODES = new Set(['R', 'X', 'P', 'H', 'U']);
+
+/**
+ * Is a calendar code a session? A Muhurat or other special session on a
+ * holiday is `P`, so it is one. O(1).
+ *
+ * @param {unknown} code
+ */
+export function isSessionCode(code) {
+  return typeof code === 'string' && SESSION_CODES.has(code);
+}
+
+/** The kinds that say time is missing on the day: Zerodha's missing minutes,
+ *  the index holes of 5 s or more, and the holes shared by most shares. A
+ *  second with two values is not one (D-5333). */
+const HOLE_KINDS = new Set(['gap', 'hole', 'shared_hole']);
+
+/**
+ * Does a cell say time is missing on its day? The chart draws its hole
+ * bands only on such a day (`chart.js` `holeBands`). O(kinds).
+ *
+ * @param {{ kinds: string[] }} cell
+ */
+export function isHoleDay(cell) {
+  return cell.kinds.some((k) => HOLE_KINDS.has(k));
+}
+
+/**
+ * HOW MANY OF THE BAND'S DAYS ARE SESSIONS, from the calendar code and never
+ * from the lead kind (AH-03, g-ui-dom-vs-json-6): a closed day that also
+ * read "not imported" was counted as a session (67 against the calendar's
+ * 65 for GDFL NIFTY 2026-07..09). O(1) per day.
+ *
+ * @param {{ code: string }[]} cells
+ */
+export function sessionCount(cells) {
+  let n = 0;
+  for (const c of cells) if (isSessionCode(c.code)) n++;
+  return n;
+}
+
+/**
  * The bars a held/peer object reports, or `null` when the feed holds no file
  * or the count could not be read.
  *
@@ -104,7 +166,10 @@ export function barsOf(held) {
  *   GDFL 2022-03-07's indices before D-3317, Zerodha's Muhurat holes.
  * - `front`: a day before a series' first `1day` bar that a pull refused
  *   (D-3315).
- * - `degraded`, `gap`, `junk`, `late`: the vendor-fault fields (D-3335).
+ * - `degraded`, `gap`, `hole`, `shared_hole`, `dual`, `junk`, `late`: the
+ *   vendor-fault fields (D-3335); `gap` is Zerodha's missing minutes only,
+ *   and the GDFL quality ledger's three counts each have their own kind
+ *   (AH-03, D-5333).
  * - `halt`, `special`, `unmeasured`, `cas`: the calendar's events (D-3319,
  *   D-3320). `cas` only for a share: an index has no auction phase.
  *
@@ -112,10 +177,13 @@ export function barsOf(held) {
  *   its last (GDFL's runs 2018-09-03 to 2026-09-24, `/feeds.json` `archive`,
  *   D-3338): no file can exist, so it is neither a store gap nor "not
  *   imported yet" (DB-G67, DB-G68).
- *
- * @param {any} rec one `/dayflags.json` day record
  * - `before_archive`: a day before the archive's first day when that day
  *   binds (`from_binds`, R3-05 repair 3): no file can exist, ever.
+ * - Both only for a SESSION that holds no bar (AH-03, D-5332): a closed day
+ *   is `closed` on either side of the span, and a day holding bars was
+ *   imported.
+ *
+ * @param {any} rec one `/dayflags.json` day record
  *
  * @param {{ archive?: { from: string, to: string, from_binds?: boolean, to_binds?: boolean } | null }} [ctx] the feed's archive span, where it has one
  * @returns {string[]}
@@ -124,14 +192,25 @@ export function kindsOf(rec, ctx = {}) {
   /** @type {string[]} */
   const out = [];
   const code = rec?.calendar?.code ?? '-';
-  const session = code === 'R' || code === 'X' || code === 'P' || code === 'H' || code === 'U';
+  const session = isSessionCode(code);
   const outcome = rec?.import?.outcome ?? null;
   const day = String(rec?.day ?? '');
   const archive = ctx.archive ?? null;
+  const held = barsOf(rec?.held);
   // BEFORE A FIRST DAY THAT BINDS no file can exist; anything else outside
   // the span (past a measured last day, which is a lower bound) is not
   // imported. An absent `from_binds` is a server that bound the first day.
-  const beyond = archive !== null && day !== '' && (day < archive.from || day > archive.to);
+  //
+  // ONLY A SESSION CAN BE OUTSIDE THE ARCHIVE (AH-03, g-ui-dom-vs-json-6):
+  // the span says where a vendor's FILES are, and a weekend or a holiday
+  // owes none on either side of it, so a closed day stays 'closed' (which
+  // the band did not count as a session) instead of leading with "not
+  // imported" and being counted as one — 26-27 Sep 2026 on GDFL, and every
+  // weekend of 2018-08 before the span. And a day that HOLDS bars was
+  // imported, whatever the span's measured last day says (that day is a
+  // lower bound, R3-05): GDFL's 25-30 Sep 2026 hold 22,500 bars each.
+  const beyond =
+    session && !(held !== null && held > 0) && archive !== null && day !== '' && (day < archive.from || day > archive.to);
   const before = beyond && day < /** @type {{ from: string }} */ (archive).from && archive?.from_binds !== false;
   if (outcome === 'refused') out.push('refused');
   // INCOMPLETE FOR ANOTHER FILE IS NOT THIS INSTRUMENT'S HOLE (DB-G69): a
@@ -142,7 +221,6 @@ export function kindsOf(rec, ctx = {}) {
     const others = Number(refusals?.this_count) === 0 && Number(refusals?.other_count) > 0;
     out.push(others ? 'incomplete_other' : 'incomplete');
   }
-  const held = barsOf(rec?.held);
   // A TRADE-DRIVEN SERIES HOLDS A BAR ONLY WHERE A TRADE PRINTED (D-3336 §2):
   // an option, or a share at one second. A session it holds nothing on is a
   // day nothing traded, never a store gap; a Zerodha minute series, which
@@ -162,9 +240,12 @@ export function kindsOf(rec, ctx = {}) {
   if (q && typeof q === 'object') {
     const idx = q.indices;
     const stk = q.stocks;
-    if ((idx && (Number(idx.holes_5s) > 0 || Number(idx.dual_spread_s) > 0)) || (stk && Number(stk.shared_holes) > 0)) {
-      out.push('gap');
-    }
+    // EACH QUALITY COUNT IS ITS OWN KIND (AH-03, g-ui-dom-vs-json-7): a hole
+    // of seconds, a hole the shares share, and a second with two values are
+    // three different facts, and none of them is a missing minute.
+    if (idx && Number(idx.holes_5s) > 0) out.push('hole');
+    if (stk && Number(stk.shared_holes) > 0) out.push('shared_hole');
+    if (idx && Number(idx.dual_spread_s) > 0) out.push('dual');
   }
   if (Array.isArray(rec?.junk) && rec.junk.length > 0) out.push('junk');
   if (Number(rec?.import?.late) > 0) out.push('late');
@@ -189,6 +270,28 @@ export function kindsOf(rec, ctx = {}) {
 function segmentOf(key) {
   const parts = typeof key === 'string' ? key.split('-') : [];
   return parts.length > 2 ? parts[1] : '';
+}
+
+/**
+ * A record's own phrases, as the server wrote them, with ONE label added:
+ * on an INDEX record the stocks file's closing-auction count is the whole
+ * stocks file's, every share's, and an index has no auction (D-3320), so the
+ * phrase the route builds from `quality.stocks.auction_prints` is prefixed
+ * "stocks file, all shares:" (AH-03, g-ui-dom-vs-json-7; the route carries
+ * the stocks line on an index record by design, D-3335 §3). The phrase is
+ * matched exactly as the route composes it from that very count, so no other
+ * phrase is touched. O(phrases).
+ *
+ * @param {any} rec
+ * @returns {string[]}
+ */
+function saysOf(rec) {
+  /** @type {string[]} */
+  const says = Array.isArray(rec?.says) ? rec.says.map(String) : [];
+  const n = rec?.quality?.stocks?.auction_prints;
+  if (segmentOf(rec?.instrument) !== 'INDEX' || !Number.isSafeInteger(n) || n <= 0) return says;
+  const phrase = `${n} closing-auction print(s), kept apart from trades`;
+  return says.map((s) => (s === phrase ? `stocks file, all shares: ${s}` : s));
 }
 
 /**
@@ -218,7 +321,7 @@ export function cellOf(rec, ctx = {}) {
     // REFUSALS AN EARLIER RUN LOGGED (DB-B45): history, with the run that
     // logged them where the journal records it — never the current reason.
     superseded: Array.isArray(rec?.import?.refusals?.superseded) ? rec.import.refusals.superseded : [],
-    says: Array.isArray(rec?.says) ? rec.says.map(String) : [],
+    says: saysOf(rec),
     flagged: kinds.some((k) => !QUIET.has(k))
   };
 }
@@ -260,22 +363,20 @@ export function bandOf(body, ctx = {}) {
  * record, or the reason no ledger could say (D-3331, DB-G72). `null` when
  * the answer carries none (an index, a share, Zerodha).
  *
+ * EVERY RECORD KIND IS KEPT (AH-03, g-ui-dom-vs-json-2): this used to word
+ * only `continues_as`, `renamed_from` and `stitched`, and dropped the
+ * re-key's `superseded_by` and `supersedes` and the decoder's `retired` and
+ * `stopped` in silence. The words are `lineage-labels.js`'s, the one place a
+ * lineage record becomes a sentence; a kind it has none for is counted and
+ * said. O(records) for one key.
+ *
  * @param {any} l `body.lineage`
- * @returns {{ present: boolean, lines: string[], why: string | null } | null}
+ * @returns {{ present: boolean, lines: string[], why: string | null, successor: string | null, retired: boolean, unknown: number } | null}
  */
 export function lineageOf(l) {
   if (!l || typeof l !== 'object') return null;
-  const records = Array.isArray(l.records) ? l.records : [];
-  /** @type {string[]} */
-  const lines = [];
-  for (const r of records) {
-    if (r?.kind === 'continues_as') lines.push(`renamed at the ${r.ex} ex-date, continues as ${r.key} (factor ${r.factor})`);
-    else if (r?.kind === 'renamed_from') lines.push(`renamed at the ${r.ex} ex-date from ${r.key} (factor ${r.factor})`);
-    else if (r?.kind === 'stitched') {
-      lines.push(`holds two exchange contracts: its name was reused at the ${r.ex} ex-date${r.after ? `, then holding the contract that was ${r.after}` : ''}`);
-    }
-  }
-  return { present: l.present === true, lines, why: typeof l.why === 'string' ? l.why : null };
+  const got = lineageLines(l.records);
+  return { present: l.present === true, ...got, why: typeof l.why === 'string' ? l.why : null };
 }
 
 /**
@@ -329,8 +430,11 @@ export function emptyWindowWhy(cells, from, to, label, most = 4) {
   const asked = cells.filter((c) => (!from || c.day >= from) && (!to || c.day <= to));
   if (asked.length === 0) return null;
   // EVERY ASKED DAY THAT IS A SESSION IS NAMED FIRST: that is where a bar
-  // was owed. A window of closed days is said to be closed.
-  const sessions = asked.filter((c) => c.kind !== 'closed' && c.kind !== 'outside');
+  // was owed. A window of closed days is said to be closed. A session is
+  // the CALENDAR'S word, never the lead kind's (AH-03, g-ui-dom-vs-json-6):
+  // a weekend past the archive's measured end led with "not imported" and
+  // was named as "No bar on any of 2 session day(s)".
+  const sessions = asked.filter((c) => isSessionCode(c.code));
   // A TRADE-DRIVEN WINDOW WITH NO TRADE IN IT is said as that, never as a hole.
   if (sessions.length > 0 && sessions.every((c) => c.kind === 'no_trade')) {
     return sessions.length === 1
@@ -339,9 +443,12 @@ export function emptyWindowWhy(cells, from, to, label, most = 4) {
   }
   if (sessions.length === 0) {
     const words = [...new Set(asked.map((c) => c.says[0] ?? c.word))];
-    return asked.length === 1
-      ? `No bar on ${label(asked[0].day)}: ${words.join('; ')}.`
-      : `No bar in ${asked.length} days: every one is closed (${words.join('; ')}).`;
+    if (asked.length === 1) return `No bar on ${label(asked[0].day)}: ${words.join('; ')}.`;
+    // EVERY ONE IS CLOSED only when the calendar says so of every one; a day
+    // past the calendar's span (`-`) is not known to be closed.
+    return asked.every((c) => c.code === '.')
+      ? `No bar in ${asked.length} days: every one is closed (${words.join('; ')}).`
+      : `No bar in ${asked.length} days: none is a session (${words.join('; ')}).`;
   }
   // A DAY THAT HOLDS BARS IS NOT WHY THE WINDOW IS EMPTY: its bars fall
   // outside the time-of-day window. Only the days holding none are named.

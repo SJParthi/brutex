@@ -654,10 +654,48 @@ export function auctionVerdict({ feed, segment, t, phase, tail = null, dayFacts 
   const auction = dayFacts?.auction ?? null;
   if (auction?.state === 'kept_apart') {
     const prints = Array.isArray(auction.prints) ? auction.prints : [];
+    // A DAY WITH NO FILED PRINT NEVER DENIES THE PRINT (AH-03,
+    // g-ui-dom-vs-json-3): "this month files the prints apart" is the month
+    // file's existence, not this day's record, so a day whose print was not
+    // diverted (a quote-bearing late row, FM-144) holds it among the bars.
+    if (prints.length === 0) {
+      const cmp = dayFacts?.close?.official_vs_gdfl_last_print;
+      const atClose = cmp && typeof cmp.bps === 'number' && cmp.bps === 0;
+      if (isLast === true && atClose) {
+        return {
+          tone: 'auction',
+          short: 'possibly the auction print',
+          text: `possibly the auction print, not filed apart for this day: this month files the auction's prints apart, yet none is filed for this day, and this bar is the closing-auction session's last print and equals the official day close (/sources/day.json: 0 bps). It is held as an ordinary one-second bar; calling it the auction's is an inference (charter §9), and so would be calling it a continuous trade (D-3320 item 3)`
+        };
+      }
+      const which =
+        isLast === true
+          ? `it is the session's last print, and ${cmp && typeof cmp.bps === 'number' ? `it is ${cmp.bps} bps from the official day close` : 'its comparison with the official day close was not read'}`
+          : isLast === false && last
+            ? `the session's last print is at ${secondLabel(last.t * 1000)}`
+            : "the session's last print was not read";
+      return {
+        ...base,
+        text: `a bar in the closing-auction session: this month files the auction's prints apart, but none is filed for this day, so whether this bar is the auction's print is not decided here (${which}; D-3320 item 3)`
+      };
+    }
+    // A PRINT ALSO STORED AS THIS SECOND'S BAR (AG-04's `also_in_bars`, read
+    // when the server sends it): the same trade twice, labelled, never
+    // called "not the auction's print".
+    const clock = secondLabel(t * 1000);
+    const doubled = prints.find((/** @type {any} */ p) => p?.also_in_bars === true && p?.at === clock);
+    if (doubled) {
+      return {
+        tone: 'auction',
+        short: 'auction print, also a bar',
+        text: `the closing auction's print at ${doubled.at} (₹${rupee(doubled.price)} × ${exact(doubled.quantity)}), filed apart AND also stored as this one-second bar: counted twice in any sum of the two, labelled and never subtracted (bars-1, D-3320 item 3)`
+      };
+    }
     const list = prints.map((/** @type {any} */ p) => `${p.at} at ₹${rupee(p.price)} × ${exact(p.quantity)}`).join('; ');
+    const unchecked = auction.checked === false ? `; the sidecar is not checksummed (${auction.unchecked_why ?? `version ${auction.version}`}), so its values are not vouched for` : '';
     return {
       ...base,
-      text: `an ordinary bar in the closing-auction session, not the auction's print: this month files the auction's print${prints.length === 1 ? '' : 's'} apart (${list || 'none on this day'}), never in a one-second bar (D-3320 item 3)`
+      text: `an ordinary bar in the closing-auction session, not the auction's print: this month files the auction's print${prints.length === 1 ? '' : 's'} apart (${list}), never in a one-second bar (D-3320 item 3)${unchecked}`
     };
   }
   if (auction?.state === 'unreadable') {
@@ -687,6 +725,140 @@ export function auctionVerdict({ feed, segment, t, phase, tail = null, dayFacts 
   return {
     ...base,
     text: "a bar in the closing-auction session; whether it is the auction's own print is decided by the day's auction record and last print, which were not read"
+  };
+}
+
+/**
+ * THE DAY BAND'S CLOSING-AUCTION SENTENCE, FROM THE DAY'S OWN RECORD (AH-03,
+ * g-ui-dom-vs-json-3). The band used to say "the auction print is kept apart
+ * from trades" for every closing-auction day of a share, while a month
+ * imported before D-3320's rule (`no_sidecar`) holds the print as an
+ * ordinary one-second bar and the bar's own mark said so — the page
+ * contradicted itself. Now:
+ *
+ * - no record read (`auction` `null`): the run's sentence names the session
+ *   and says the print's handling is each day's record, read on opening it;
+ * - `kept_apart` with prints: names them (and, when the server says, an
+ *   unchecked sidecar and a print also stored as a bar);
+ * - `kept_apart` with none: says none is filed for that day;
+ * - `no_sidecar`: the print, if any, is an ordinary one-second bar until the
+ *   month is re-imported (D-3320 item 4);
+ * - `unreadable`: says so, and claims nothing.
+ *
+ * O(prints) for one day — a handful at most.
+ *
+ * @param {any} feed `/feeds.json`'s feed (its `closing_auction`)
+ * @param {any} auction one day's `/sources/day.json` `auction`, or `null`
+ * - a day record READ whose `auction` is `null` (`read: true`): the server
+ *   files no auction for that share and day (not a share, or before the
+ *   closing auction runs: `sources.rs` `Auction::NotApplicable`), so
+ *   nothing is kept apart and nothing is claimed.
+ *
+ * @param {{ day?: string, sessions?: number, read?: boolean }} [on] the day
+ *   the record is for (`YYYY-MM-DD`), how many closing-auction sessions the
+ *   run holds, and whether `auction` is a day record's field as read
+ * @returns {{ tone: string, state: string, text: string }}
+ */
+export function auctionBandSentence(feed, auction, { day = '', sessions = 0, read = false } = {}) {
+  const a = feed?.closing_auction;
+  const cut = typeof a?.eligible_continuous_close === 'string' ? a.eligible_continuous_close : null;
+  const on = day ? `On ${dayLabel(day)}` : 'On this day';
+  if (read && auction === null) {
+    return {
+      tone: 'info',
+      state: 'not_applicable',
+      text: `${on} the day's record carries no auction (/sources/day.json: the closing auction does not apply to this series on this day), so no print is kept apart and none is claimed.`
+    };
+  }
+  if ((!auction || typeof auction !== 'object') && a?.handling === 'minutes_end_before_auction') {
+    // A FEED WHOSE MINUTES END BEFORE THE AUCTION (Zerodha, D-3320) holds no
+    // auction print in its bars on any day: the feed's own note says so, and
+    // no day record is read for it.
+    return {
+      tone: 'info',
+      state: 'minutes_end',
+      text: `${sessions} session(s) of this share are closing-auction days: an eligible share trades continuously${cut ? ` until ${cut}` : ''}, then in the closing auction to 15:30 (charter §9, D-3320). This feed's minutes end before the auction${typeof a.label === 'string' && a.label ? ` (${a.label})` : ''}, so no auction print is among its bars.`
+    };
+  }
+  if (!auction || typeof auction !== 'object') {
+    return {
+      tone: 'info',
+      state: 'unread',
+      text: `${sessions} session(s) of this share are closing-auction days: an eligible share trades continuously${cut ? ` until ${cut}` : ''}, then in the closing auction to 15:30 (charter §9, D-3320). Whether a day's auction print is kept apart from trades is that day's own auction record (/sources/day.json), not this run's: open a day to read it.`
+    };
+  }
+  if (auction.state === 'kept_apart') {
+    const prints = Array.isArray(auction.prints) ? auction.prints : [];
+    const unchecked = auction.checked === false ? ` The sidecar is not checksummed (${auction.unchecked_why ?? `version ${auction.version}`}), so its values are not vouched for.` : '';
+    if (prints.length === 0) {
+      return {
+        tone: 'warn',
+        state: 'kept_apart_none',
+        text: `${on} this month files the auction's prints apart, but none is filed for this day: if the closing-auction session's last print is the auction's, it sits among the one-second bars, and that bar says so (D-3320 item 3).${unchecked}`
+      };
+    }
+    const doubled = prints.filter((/** @type {any} */ p) => p?.also_in_bars === true).map((/** @type {any} */ p) => p.at);
+    const list = prints.map((/** @type {any} */ p) => `${p.at} at ₹${rupee(p.price)} × ${exact(p.quantity)}`).join('; ');
+    return {
+      tone: 'info',
+      state: 'kept_apart',
+      text: `${on} the auction's print${prints.length === 1 ? ' is' : 's are'} kept apart from trades, never in a one-second bar: ${list} (D-3320 item 3).${doubled.length ? ` ${doubled.length === 1 ? 'One is' : `${doubled.length} are`} also stored as a one-second bar at ${doubled.join(', ')}: counted twice in any sum of the two (bars-1).` : ''}${unchecked}`
+    };
+  }
+  if (auction.state === 'no_sidecar') {
+    return {
+      tone: 'warn',
+      state: 'no_sidecar',
+      text: `${on} the auction's print is not kept apart: this month was imported before D-3320's rule, so the print, if any, is held as an ordinary one-second bar until the month is re-imported (D-3320 item 4); the session's last print is marked on its bar.`
+    };
+  }
+  if (auction.state === 'unreadable') {
+    return {
+      tone: 'warn',
+      state: 'unreadable',
+      text: `${on} the auction record would not read${auction.why ? ` (${auction.why})` : ''}, so whether the auction's print is kept apart is not known.`
+    };
+  }
+  return {
+    tone: 'warn',
+    state: 'unknown',
+    text: `${on} the auction record's state "${String(auction.state)}" is not one this page knows, so nothing is claimed about the auction's print.`
+  };
+}
+
+/**
+ * IS AN EXTREME'S BAR IN THE CLOSING-AUCTION SESSION (AH-03,
+ * g-ui-dom-vs-json-3)? The extremes fold sends `{v, t, key}` and no phase,
+ * so the panel decides by the rule the page already reads the session's
+ * tail with: a CASH key, below the day rung, on or after the day the feed's
+ * closing auction began (`closing_auction.from`), and a time of day in
+ * `[eligible_continuous_close, 15:30)` (D-3320 item 2). Eligibility is per
+ * share and per day (charter §9), so the flag says the bar is in the
+ * session's WINDOW and that its own phase — on Go to — decides. Only a feed
+ * that files the print apart (`print_kept_apart`) is flagged: Zerodha's
+ * minutes of an eligible share end before the window by design. `null`
+ * when not in it. O(1).
+ *
+ * @param {{ t: number, v?: number, key?: string | null }} x one extreme
+ * @param {any} feed `/feeds.json`'s feed
+ * @param {string | null} key the extreme's series (its own `key`, or the
+ *   query's one series)
+ * @param {number | undefined} rungSecs the rung's length in seconds
+ * @returns {{ short: string, text: string } | null}
+ */
+export function extremeAuctionFlag(x, feed, key, rungSecs) {
+  const a = feed?.closing_auction;
+  if (!a || a.handling !== 'print_kept_apart' || typeof a.from !== 'string' || typeof a.eligible_continuous_close !== 'string') return null;
+  if (!Number.isFinite(x?.t) || segmentOfKey(key) !== 'CASH') return null;
+  if (!(Number.isFinite(rungSecs) && /** @type {number} */ (rungSecs) < 86_400)) return null;
+  if (istDay(x.t * 1000) < a.from) return null;
+  const [hh, mm] = a.eligible_continuous_close.split(':').map(Number);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  const of = (((x.t + 19_800) % 86_400) + 86_400) % 86_400;
+  if (of < hh * 3600 + mm * 60 || of >= 15 * 3600 + 30 * 60) return null;
+  return {
+    short: 'closing-auction session',
+    text: `this bar is in the closing-auction session's window (${a.eligible_continuous_close}–15:30, D-3320 item 2) on a day the auction applies: for an eligible share it is not continuous trading, and it may be the auction's print held as a one-second bar. Its own phase decides — Go to opens it and marks it`
   };
 }
 
