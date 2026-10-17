@@ -211,11 +211,13 @@ holds a disk error. The `gdfl_nfo` and `gdfl_tickstore` changes' seven
 mutants were all caught or unviable in `moved` (the nfo row reservation's
 `==` → `!=` by `allocation`'s `a_row_of_half_a_million_fields_is_refused_without_holding_them`).
 
-### Equivalent mutants (18, missed by construction)
+### Equivalent mutants (20, missed by construction)
 
-Re-confirmed missed under Gate 18's flags (run `survivors1`). Line numbers
-are the current file's; `request_minutes.rs` moved by 8 lines since the old
-report (`325` → `333`, `339` → `347`).
+The old pass's 18, re-confirmed missed under Gate 18's flags (run
+`survivors1`; `request_minutes.rs`'s two again in `rmrest`), and the last two
+rows, found in new `feat/db-fix` code. Line numbers are the current file's;
+`request_minutes.rs` moved by 8 lines since the old report (`325` → `333`,
+`339` → `347`).
 
 | File:line:col | Mutant | Why it is equivalent |
 |---|---|---|
@@ -237,6 +239,8 @@ report (`325` → `333`, `339` → `347`).
 | `gdfl_cm.rs:2306:70` | `>` → `>=` in `settle_auction` | An unknown-eligibility zero-book candidate refuses the file at its row, so a one-price band always has `booked ≥ 1` here. |
 | `gdfl_cm.rs:2313:34` | guard `self.booked > 0` → `true` | Differs only for a one-price band of zero-book prints alone: no row is in the band, `retain` takes nothing, the recomputed maximum equals the running one. |
 | `gdfl_cm.rs:2313:46` | `>` → `>=` | Same as `2313:34`. |
+| `gdfl_archive.rs:280:58` | `\|` → `^` in `central_directory` | The shifted two-byte date and the two-byte time share no bit: OR and XOR agree (new `feat/db-fix` code; run `newcode`). |
+| `gdfl_cm_auction.rs:535:73` | `<` → `<=` in `hold` | Two `Duration`s equal to the nanosecond: no test can arrange it, and either arm refuses one poll apart (new `feat/db-fix` code; run `movedafter`). |
 
 ## Coverage — lines AND branches, production only
 
