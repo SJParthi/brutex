@@ -71817,6 +71817,45 @@ this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
 one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
 gate-8 command.
 
+### D-5820 — A measurement in `docs/06-limits.md` that names a feat/db-fix commit says `main`'s squash merge does not keep it, and one that names a commit no pushed branch holds says so and names the commit on this branch with the same files — 2026-10-17
+
+BASE-CITED, found by the CLOUD-RUST1 merge-back on 17 October 2026 (its
+finding BASE-RED-CITED-COMMITS). `crates/store/tests/cited_commits.rs`
+(`every_commit_the_store_records_cite_is_on_main_or_says_why_not`) failed on
+feat/db-fix itself: `docs/06-limits.md` cited nine commits that
+`refs/remotes/origin/main` (4bbd37df, 2 October 2026) does not hold, none of
+them in `NOT_ON_MAIN` and none of their sentences giving a reason. Every one
+was the "before" build or the measured head of a package's p50/p99 table.
+
+**What is decided.** The rule the test already states is applied as it
+stands, by evidence for each commit; the test is not weakened and no history
+is rewritten. (1) A cited commit that is an ancestor of feat/db-fix is listed
+as `Off::Squashed`, and every sentence citing it gains the words "which
+`main`'s squash merge does not keep": `4756cce0` (AF-05, the R3-36 merge),
+`023d6ab8` (AF-06, the SC-2 merge), `079ad4af` (AG-01 and AG-03, the R3-16
+merge), `521066e6` (AF-04 in `a560c52dd` and AF-03, the SC-1 merge fix-up),
+`72c91a46` (AF-02, the WP-62 merge), `ff636f58` (AF-02's first form) and
+`9cb9de51` (AF-02 repair round 1). (2) A cited commit that is on no pushed
+branch is not re-cited to another commit, because the measurement was taken
+of that build and naming another would claim a build nobody timed. It is
+listed as `Off::Neither`, its sentence says it "is in neither `main`'s history
+nor this branch", and the sentence also names the feat/db-fix commit whose
+four AF-02 files (`imports.rs`, `dayflags.rs`, `imports_filter_tests.rs`,
+`dayflags_filter_tests.rs` under `crates/api/src`) are byte for byte the
+measured ones, checked by `git rev-parse <commit>:<file>` on both:
+`cde73992` (AF-02 repair round 1, only on the local
+`backup/af02-r1-wip-20261015`) with `9cb9de51`, and `91ef0094` (AF-02 repair
+round 2, only on the local `backup/AF-02-r2-wip`) with `867771784f`, which is
+listed as `Off::Squashed` like the others. The rest of each tree differs (the
+feat/db-fix work merged between them), so the timings stay those of the WIP
+build. `NOT_ON_MAIN` grows from 37 to 47.
+
+**Why.** A measurement cited to a commit a reader cannot fetch cannot be
+checked (`CLAUDE.md` §3 rule 6), and feat/db-fix reaches `main` by a squash
+merge (`auto-merge.yml`), which makes none of its commits an ancestor of
+`main`. The proof is the test itself: it failed on feat/db-fix `f9cdb5840`
+with the nine faults and passes with this change.
+
 ### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
 
 **Number** the first of the block D-5830..D-5849 assigned to BASE-GATE10;
