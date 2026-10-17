@@ -910,3 +910,88 @@ fn a_plan_that_cannot_be_written_fails_out_loud() {
         "{out}\n{again}"
     );
 }
+
+/// A series whose only refusal is a day bar fails on it, and a series whose
+/// only flag is a suspect minute passes, with its label planned; when that
+/// plan cannot be written the verb fails and says so.
+#[test]
+fn a_day_bar_alone_fails_and_a_suspect_minute_alone_passes_unless_its_plan_fails() {
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let root = Root::new();
+    let (days, minutes) = week_minutes(|_, _| (1, 1));
+    let mut day_bars: Vec<_> = days
+        .iter()
+        .map(|on| day_bar(*on, LEVEL - 1_000, LEVEL + 2_000))
+        .collect();
+    day_bars[2] = day_bar(days[2], 0, 0);
+    seed(
+        &root.0,
+        vendor,
+        "MAZDOCK",
+        store::path::Timeframe::DAY_1,
+        &day_bars,
+    );
+    seed(
+        &root.0,
+        vendor,
+        "MAZDOCK",
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    let (code, out) = root.run(&["MAZDOCK", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("QUARANTINE NEEDED: 1 day bar(s)"), "{out}");
+    assert!(!out.contains("month(s) hold"), "{out}");
+    assert!(
+        out.contains("2024-01-03 non_positive_price 1 day bar(s)"),
+        "{out}"
+    );
+
+    let suspect = |on: Day, m: i64| {
+        if on == days[1] && m == 600 {
+            (105, 100)
+        } else {
+            (1, 1)
+        }
+    };
+    let (_, minutes) = week_minutes(suspect);
+    let clean_days: Vec<_> = days
+        .iter()
+        .map(|on| day_bar(*on, LEVEL - 1_000, LEVEL + 2_000))
+        .collect();
+    for blocked in [false, true] {
+        let root = Root::new();
+        seed(
+            &root.0,
+            vendor,
+            "IRFC",
+            store::path::Timeframe::DAY_1,
+            &clean_days,
+        );
+        seed(
+            &root.0,
+            vendor,
+            "IRFC",
+            store::path::Timeframe::MINUTE_1,
+            &minutes,
+        );
+        if blocked {
+            fs::create_dir_all(root.0.join("audit")).unwrap();
+            fs::write(root.0.join("audit").join("series-identity"), b"a file").unwrap();
+        }
+        let (code, out) = root.run(&["IRFC", "--segment", "CASH"]);
+        assert!(out.contains("suspect_level 1"), "{out}");
+        if blocked {
+            assert_eq!(code, FAILED, "{out}");
+            assert!(out.contains("QUARANTINE PLAN NOT WRITTEN"), "{out}");
+        } else {
+            assert_eq!(code, OK, "{out}");
+            assert!(
+                out.contains("no stored bar would be refused at landing"),
+                "{out}"
+            );
+            let plan = fs::read_to_string(&plans(&root.0)[0].0).unwrap();
+            assert!(plan.contains("\tno_gdfl_witness\tlabel\t1\t"), "{plan}");
+        }
+    }
+}

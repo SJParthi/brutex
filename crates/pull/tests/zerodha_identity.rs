@@ -1205,6 +1205,75 @@ fn a_day_rung_that_will_not_open_refuses_nothing() {
         cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1)).len(),
         sent
     );
+    // The store scan names the month it could not open and judges nothing by it.
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "PIIND",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.unread.len(), 1, "{:?}", scan.unread);
+    assert!(scan.unread[0].1.starts_with("1day: "), "{:?}", scan.unread);
+    assert!(scan.day_verdicts.is_empty());
+    // An instrument that is no symbol is not judged here: the landing refuses
+    // it by name itself.
+    let done = land_cash(
+        &scratch.0,
+        "not a symbol",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(!done.failures.is_empty());
+    assert!(whys(&done, "refused for").is_empty(), "{:?}", done.failures);
+}
+
+/// A zero-price minute of a share or an index is refused by name on the
+/// minute arm, before any other rule (ING-01 c), and the rest lands.
+#[test]
+fn a_zero_price_minute_is_refused_by_name() {
+    let scratch = Scratch::new("zero-minute");
+    let (from, to, days) = week();
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    rows[40].low = 0;
+    rows[41] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[41]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "non_positive_price");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("2 row(s) refused"), "{}", named[0]);
+    assert_eq!(
+        cash_month(&scratch.0, "MAZDOCK", Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent - 2
+    );
 }
 
 /// A price the landing cannot hold (a rupee price that overflows paisa) is

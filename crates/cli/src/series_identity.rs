@@ -307,18 +307,15 @@ impl Witness<'_> {
 /// `pull::fold`. A month GDFL lacks, or cannot be read or folded, witnesses
 /// nothing.
 fn gdfl_minutes(root: &Path, ask: &Ask, symbol: &str, month: YearMonth) -> BTreeMap<i64, Bar> {
-    let Ok(path) = StorePath::new(parts(ask, Vendor::Gdfl, symbol, Timeframe::SECOND_1, month))
-    else {
-        return BTreeMap::new();
-    };
     let id = pull::ingest::repair_plan::symbol_id(symbol);
-    let Ok(file) = store::file::BarFile::open_existing(root, path, id) else {
-        return BTreeMap::new();
-    };
-    let seconds: Option<Vec<Bar>> = (0..file.header().n_valid)
-        .map(|i| file.read_record(i).ok())
-        .collect();
-    seconds
+    StorePath::new(parts(ask, Vendor::Gdfl, symbol, Timeframe::SECOND_1, month))
+        .ok()
+        .and_then(|path| store::file::BarFile::open_existing(root, path, id).ok())
+        .and_then(|file| {
+            (0..file.header().n_valid)
+                .map(|i| file.read_record(i).ok())
+                .collect::<Option<Vec<Bar>>>()
+        })
         .and_then(|seconds| {
             pull::fold::fold_from_bars(
                 &seconds,
