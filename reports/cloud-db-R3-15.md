@@ -197,11 +197,16 @@ Run in this cloud container (4 cores, runs as root, node 22.22.0, rustc 1.97.1).
 | `svelte-check` (gate W3, ceiling 0) | 7 errors | the same 7 errors, none in an R3-15 file |
 | `vite build` (gates W1, W4) | builds | builds, every page inside its budget, no unused CSS selector; `web/build` NOT committed here (NEEDS THE MAC 1) |
 
-The 27 Rust failures are the same on base and branch, in crates R3-15 does not touch, and all but
-two read as permission tests a root process cannot fail (`…unreadable…`, `…cannot be written…`,
-`…read-only…`, `…cannot be unlinked…`); the other two are
-`every_commit_the_store_records_cite_is_on_main_or_says_why_not` (this clone's history) and
-`pullrun::restart_tests::the_journals_own_extremes`. The full list:
+The 27 Rust failures are the same on base and branch, in crates R3-15 does not touch, and they
+are this container's, not the code's. **Proved, not inferred:** the same test binaries run with
+root's two permission-override capabilities dropped
+(`setpriv --bounding-set -dac_override,-dac_read_search --inh-caps -dac_override,-dac_read_search <binary> --exact <the 27 names>`,
+from each crate's directory) pass **25 of the 27** (api 12, cli 3, pull 3, store 3, telemetry 4).
+The two left: `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+asserts a new inode number and this container's filesystem handed the deleted file's inode
+straight back (`left: 2220892, right: 2220892`); `every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+finds commits cited in `docs/06-limits.md` that are on `feat/db-fix` and not yet ancestors of
+`origin/main` in this clone. Neither reads an R3-15 file. The full list:
 `every_commit_the_store_records_cite_is_on_main_or_says_why_not`,
 `gdfl_import::tests::a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`,
 `gdfl_import::tests::a_journal_that_cannot_be_written_fails_the_day_by_name`,
