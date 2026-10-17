@@ -579,3 +579,64 @@ fn with_no_log_installed_a_failure_still_reaches_the_page() {
     assert!(json.contains("2026-08-04"), "the failure's own day: {json}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A name in the universe that the engine does not track is never a spot
+/// target, whatever the target.** `ZZSMALL` is an NSE equity outside NIFTY
+/// Total Market and not an index, so `catalog::tracked` refuses it before
+/// the target is asked. Covers the false side of `spot_targets`'
+/// `catalog::tracked(entry.universe)` (server.rs:5513).
+#[test]
+fn an_untracked_name_is_never_a_spot_target() {
+    use super::tests::{DHAN_HEAD, GROWW_HEAD};
+    // A well-formed ISIN for an invented company: the check digit is
+    // computed by `Isin::new`'s own rule, so the row is a real equity row.
+    let small = (0..=9)
+        .find_map(|digit| brutex_core::isin::Isin::new(&format!("INE999Z0101{digit}")).ok())
+        .expect("one check digit verifies");
+    let groww = format!(
+        "{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
+         NSE,CASH,,ZZSMALL,EQ,EQ,{},,,NSE-ZZSMALL\n",
+        small.as_str()
+    );
+    let dir = super::tests::masters("cloudd-untracked", Some(&groww), Some(DHAN_HEAD));
+    let site = super::tests::site("cloudd-untracked", &dir);
+    let read = &site.universe().read;
+    let untracked = read
+        .merged
+        .by_key
+        .iter()
+        .find(|(key, _)| key.underlying.as_str() == "ZZSMALL")
+        .map(|(_, entry)| entry.universe)
+        .expect("the premise: ZZSMALL is in the universe");
+    assert!(
+        !crate::catalog::tracked(untracked),
+        "the premise: untracked"
+    );
+    for target in ["equities", "swept", "total"] {
+        let asked = ingest::parse_spot(
+            &format!("vendor=groww&target={target}&from=2026-08-03&to=2026-08-05"),
+            Day::new(2026, 8, 10).expect("a day"),
+        );
+        let Ok(asked) = asked else {
+            continue;
+        };
+        let names: Vec<String> = spot_targets(&asked, &site)
+            .iter()
+            .map(|key| key.underlying.as_str().to_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "ZZSMALL"),
+            "{target}: {names:?}"
+        );
+    }
+    let equities = ingest::parse_spot(
+        "vendor=groww&target=equities&from=2026-08-03&to=2026-08-05",
+        Day::new(2026, 8, 10).expect("a day"),
+    )
+    .expect("the equities target parses");
+    let names: Vec<String> = spot_targets(&equities, &site)
+        .iter()
+        .map(|key| key.underlying.as_str().to_owned())
+        .collect();
+    assert_eq!(names, ["RELIANCE"], "the tracked equity is still a target");
+}
