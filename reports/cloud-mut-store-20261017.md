@@ -300,10 +300,25 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
 
 - **Mutation runs**: finish B and C, then re-test every survivor on the
   final tree with the full suite (no skips but `cited_commits`). At 22:03:
-  - **Run B**, resumed twice (`--iterate`, on `af6423fe`'s tree): 283 of
-    the 530 left. 8 missed, every one an argued equivalent: `MAX_ROW_LEN`
-    ×3, `O_SYNC.is_none()`, `flush_all`, `writer_flags` ×2 and
-    `Code::worse`. 2 timeouts, the `first_at_or_after` pair above.
+  - **Run B, done.** Its last resume (`--iterate`, on `af6423fe`'s tree)
+    tested the 530 not already caught or unviable: 456 caught, 64
+    unviable, 8 missed, 2 timeouts.
+    - The 8 missed are all argued equivalents: `MAX_ROW_LEN` ×3,
+      `O_SYNC.is_none()`, `flush_all`, `writer_flags` ×2 and
+      `Code::worse`.
+    - The 2 timeouts are the `first_at_or_after` pair above.
+    - The other 715 of the 1,245 were caught or unviable in its earlier
+      legs.
+    - The 8, with the 6 that met the full disk, are being re-tested with
+      the full suite.
+  - **`last_before`'s widened bisection** (run C, timeouts): `a < b` → `<=`
+    never ends, and the midpoint's `+` → `*`, `/` → `%` and `-` → `+` end
+    late or not at all. Two base tests in `sealed_tests.rs` had no bound:
+    `a_widened_superblock_bisects_in_a_bounded_number_of_reads` and
+    `a_lookup_at_the_edge_of_a_superblock_and_a_block_is_exact`. They now
+    run on a worker given a minute (each takes 0.4 s), so the lib suite
+    fails in 64 to 128 s under those mutants (`1f102a94`). Run C was
+    restarted on that tree.
   - **Run C** (`sealed.rs`, `sealed_codec.rs`, 910 mutants): 412 done, 392
     caught, 17 unviable, 3 missed.
     - `Head::check` → `Ok(())` and its `||` → `&&`: run C skips
