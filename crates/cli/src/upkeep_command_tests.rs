@@ -1186,6 +1186,35 @@ fn a_misuse_is_refused_before_anything_is_opened() {
         );
     }
     assert!(!root.0.join("audit").exists() && !root.0.join("imports").exists());
+    // A span the wrong way round says so, for months and for days alike.
+    for arguments in [
+        &["run", "srt", "gdfl", "--from", "2019-05", "--to", "2019-04"][..],
+        &[
+            "run",
+            "recount",
+            "gdfl",
+            "--from",
+            "2019-11-14",
+            "--to",
+            "2019-11-01",
+        ],
+    ] {
+        let (_, out) = plain(&root.0, arguments);
+        assert!(out.contains(" is before --from "), "{arguments:?}: {out}");
+    }
+    // One day is a span: from and to may be the same day.
+    let one_day = Root::new();
+    let arguments = [
+        "run",
+        "recount",
+        "gdfl",
+        "--from",
+        "2019-11-14",
+        "--to",
+        "2019-11-14",
+    ];
+    let (code, out) = plain(&one_day.0, &arguments);
+    assert!(code != MISUSED && !out.contains(" is before "), "{out}");
     let store = || Err("no store here".to_owned());
     let host = Host {
         store: &store,
