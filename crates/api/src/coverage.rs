@@ -1359,20 +1359,29 @@ mod tests {
 
         let a = Coverage::build(&small, &Join::build(&small));
         let b = Coverage::build(&large, &Join::build(&large));
-        let time = |c: &Coverage| {
-            let rounds = 20_000;
-            // Warm, so the first measurement is not the one that paid for the
-            // page faults.
-            for _ in 0..rounds {
-                black_box(c.of(black_box(Vendor::Groww), black_box(SpotTarget::Nifty50)));
-            }
+        let rounds = 20_000;
+        let sample = |c: &Coverage| {
             let at = Instant::now();
             for _ in 0..rounds {
                 black_box(c.of(black_box(Vendor::Groww), black_box(SpotTarget::Nifty50)));
             }
             at.elapsed().as_nanos().max(1) / rounds
         };
-        let (fast, slow) = (time(&a), time(&b));
+        // Warm both, so no measurement is the one that paid for the page
+        // faults.
+        sample(&a);
+        sample(&b);
+        // THE FASTEST OF SEVEN SAMPLES A SIZE, TAKEN IN TURN (D-0800's method,
+        // D-5421): one sample a size let a single preemption on a loaded
+        // machine decide the ratio, and it failed on unchanged code under
+        // four parallel mutation runs. Interference only adds time, so each
+        // size's minimum is its least disturbed estimate; alternating spreads
+        // a slow stretch over both. The 4x ceiling is unchanged.
+        let (mut fast, mut slow) = (u128::MAX, u128::MAX);
+        for _ in 0..7 {
+            fast = fast.min(sample(&a));
+            slow = slow.min(sample(&b));
+        }
         let grew =
             format!("the lookup grew with the universe: {fast} ns against {slow} ns, {sizes}");
         assert!(slow <= fast.saturating_mul(4).max(4), "{grew}");
