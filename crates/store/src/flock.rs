@@ -170,7 +170,11 @@ enum Side {
 /// hash of the lock's path (no allocation per probe). One lock and one hash
 /// probe when a guard starts and one when it ends: O(1) expected per
 /// acquisition. Only those two constructors register, so the journals', the
-/// results files' and every other lock's path pays nothing.
+/// results files' and every other lock's path pays nothing. The registry's
+/// bookkeeping is proved by
+/// `crate::flock::tests::readers_in_this_process_are_counted_while_they_hold_the_month`;
+/// its cost is UNVERIFIED: no bench times an acquisition with it apart
+/// (`docs/06-limits.md` L-R308-02).
 static HOLDERS: Mutex<Option<HashMap<u64, Held>>> = Mutex::new(None);
 
 /// The registry key of a lock path.
@@ -433,8 +437,11 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// then reads "left no note" is not the only place it shows.
     ///
     /// One `fstat` and two `pwrite`-class calls on taking, and a truncate and
-    /// one `futimens` on letting go: O(1) per
-    /// acquisition.
+    /// one `futimens` on letting go: O(1) per acquisition. What the note holds,
+    /// and that letting go keeps the file's bytes and time, is proved by
+    /// `crate::flock::tests::a_released_noted_lock_keeps_its_bytes_and_its_modification_time`;
+    /// the cost is UNVERIFIED: no bench times a noted acquisition
+    /// (`docs/06-limits.md` L-R308-02).
     ///
     /// # Errors
     ///

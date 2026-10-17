@@ -1260,6 +1260,79 @@ async fn the_fold_day_flags_and_day_table_beside_a_writer_say_being_written() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A GAPS AUDIT BESIDE A WRITER NEVER COUNTS THE HELD MONTH ABSENT OR ITS
+/// MINUTES LOST** (R3-08 repair 2, verify-R3-08-r2 blocking 2; NEW-21). The
+/// audit folded the open's refusal into `absent_file`, and the calendar then
+/// owed the held month's every minute: a NIFTY 1s 2019-11 held by `lockf(1)`
+/// answered 200 with `months_absent` 1 and 7,560 minutes lost, no
+/// `Retry-After`, so the gaps page reported damage that was only a busy month
+/// and never asked again. Now:
+///
+/// * the writer as the audit's only fault: the being-written 503, counted so;
+/// * a real absence beside it (2023-11 has no file): 200, that month absent,
+///   the held one `being_written` with the holder's sentence, owing, holding
+///   and losing nothing, and counted in `months_being_written`, never in
+///   `months_absent`;
+/// * the writer gone: 200, nothing being written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gaps_audit_beside_a_writer_never_counts_the_held_month_absent() {
+    let (root, path, symbol_id) = one_month("gaps-beside-writer");
+    // 2023-12-01 09:15 IST onward: 600 invented bars over two days.
+    let _ = add_month(
+        &root,
+        (Vendor::Zerodha, store::path::Timeframe::MINUTE_1),
+        (2023, 12),
+        (19_692 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60, 60, 600),
+    );
+    let held_only = "/gaps.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                     &timeframe=1min&month=2023-12&to=2024-01";
+    let beside_absent = "/gaps.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                         &timeframe=1min&month=2023-11&to=2024-01";
+    let (writer, release) = hold(&root, path, symbol_id, "r3-08-gaps-writer");
+    live(&root, |addr| async move {
+        let before = tally_now("/gaps.json");
+        let (answer, _) = get(addr, held_only).await;
+        says_being_written("/gaps.json", &answer, "r3-08-gaps-writer", before);
+
+        let (answer, _) = get(addr, beside_absent).await;
+        assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
+        let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let json = body
+            .find('{')
+            .zip(body.rfind('}'))
+            .and_then(|(from, to)| body.get(from..=to))
+            .unwrap_or("");
+        let audit: serde_json::Value = serde_json::from_str(json).expect("gaps JSON");
+        assert_eq!(audit["months"], 3, "{json}");
+        assert_eq!(audit["months_absent"], 1, "only November is absent: {json}");
+        assert_eq!(audit["months_being_written"], 1, "{json}");
+        let january = &audit["month"][2];
+        assert_eq!(january["month"], "2024-01", "{january}");
+        assert!(january["absent_file"].is_null(), "{january}");
+        let why = january["being_written"].as_str().expect("the holder's sentence");
+        assert!(why.contains(store::flock::BEING_WRITTEN), "{january}");
+        assert!(why.contains("r3-08-gaps-writer"), "{january}");
+        assert_eq!(january["summary"], "being_written", "{january}");
+        assert_eq!(january["expected"], 0, "{january}");
+        assert_eq!(january["lost_minutes"], 0, "{january}");
+        assert_eq!(january["absent_minutes"], 0, "{january}");
+        assert!(
+            audit["month"][0]["absent_file"].is_string(),
+            "November's absence is still found: {json}"
+        );
+        assert!(audit["month"][0]["being_written"].is_null(), "{json}");
+
+        release.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        let (answer, _) = get(addr, held_only).await;
+        assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
+        assert!(answer.contains(r#""months_being_written":0"#), "{}", head_text(&answer));
+        assert!(!answer.contains("being written, ask again"), "{}", head_text(&answer));
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The being-written answer is for a read whose EVERY fault is a writer:
 /// none at all, or any other fault beside one, is no "ask again"; past
 /// [`crate::detail::being_written_answer`]'s naming bound the rest are
@@ -1514,6 +1587,48 @@ async fn pool_count(pool: &str, counter: &str) -> u64 {
         .find(|row| row["pool"] == pool)
         .and_then(|row| row[counter].as_u64())
         .expect("the pool and counter are served")
+}
+
+/// **EVERY ROUTE ROW `/pools.json` SERVES IS A PATH OR THE FRONT END'S ROW
+/// IT NAMES** (R3-08 repair 2, verify-R3-08-r2 blocking 1). A browser loads
+/// the page before its panel asks, so the fallback has already counted a row
+/// under [`crate::detail::FRONT_END`]; the page reader refused any row not
+/// starting with `/`, and the panel showed a fault and no table. The body now
+/// says which name is the front end's (`front_end`), and this is the contract
+/// `web/src/lib/read-pools.js` reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pools_answer_names_the_front_end_row_it_counts() {
+    let (root, _, _) = one_month("pools-front-end");
+    live(&root, |addr| async move {
+        let (page, _) = get(addr, "/ingest").await;
+        assert!(!status_of(&page).is_empty(), "{}", head_text(&page));
+        let (answer, _) = get(addr, "/pools.json").await;
+        assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
+        let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let json = body
+            .find('{')
+            .zip(body.rfind('}'))
+            .and_then(|(from, to)| body.get(from..=to))
+            .unwrap_or("");
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("pools JSON");
+        assert_eq!(parsed["front_end"], crate::detail::FRONT_END, "{json}");
+        let routes = parsed["routes"].as_array().expect("routes");
+        assert!(
+            routes
+                .iter()
+                .any(|row| row["route"] == crate::detail::FRONT_END),
+            "the page's own request is counted under the front end: {json}"
+        );
+        for row in routes {
+            let route = row["route"].as_str().expect("a route name");
+            assert!(
+                route.starts_with('/') || route == crate::detail::FRONT_END,
+                "{route} is neither a path nor the named front end: {json}"
+            );
+        }
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 // THE LOAD TESTS — `the_feed_list_stays_fast_while_32_clients_loop_each_route`

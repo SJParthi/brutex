@@ -456,7 +456,14 @@ impl GreeksAsk {
                 OpenRefusalKind::Absent => Err(("no_option_file", None)),
                 OpenRefusalKind::Unreadable => {
                     faults.push(refusal.message.clone());
-                    Err(("option_unreadable", Some(refusal.message)))
+                    // A WRITER'S HOLD IS NAMED AS ONE, never "unreadable"
+                    // (R3-08 repair 2, NEW-21).
+                    let why = if crate::detail::is_being_written(&refusal.message) {
+                        "option_being_written"
+                    } else {
+                        "option_unreadable"
+                    };
+                    Err((why, Some(refusal.message)))
                 }
             },
         };
@@ -474,8 +481,9 @@ impl GreeksAsk {
                 OpenRefusalKind::Invalid => return Err(refusal.message),
                 OpenRefusalKind::Absent => Err(Spot::NoFile),
                 OpenRefusalKind::Unreadable => {
+                    let spot = Spot::unopened(&refusal.message);
                     faults.push(refusal.message);
-                    Err(Spot::Unreadable)
+                    Err(spot)
                 }
             },
         };
@@ -539,6 +547,7 @@ impl GreeksAsk {
             Spot::OrderBroken => return Cell::refused("option_order_broken", None),
             Spot::NoFile => return Cell::refused("no_option_file", None),
             Spot::Unreadable => return Cell::refused("option_unreadable", None),
+            Spot::BeingWritten => return Cell::refused("option_being_written", None),
         };
         let found = match underlying {
             Ok(file) => read(file, self.asof),

@@ -44,9 +44,16 @@ export function poolTables(body) {
     if (missing) return { fault: `/pools.json pool ${row.pool} has no count for ${missing}.` };
     pools.push({ pool: row.pool, ...Object.fromEntries(POOL_FIELDS.map((f) => [f, row[f]])) });
   }
+  // THE FRONT END'S ROW (R3-08 repair 2): pages and assets match no route,
+  // so the server counts them under one name that is no path and says which
+  // (`front_end`). Taken from the body, never kept here: the row exists as
+  // soon as a browser has loaded the page that asks, and refusing it hid both
+  // tables behind a fault on every real server.
+  const frontEnd = typeof body.front_end === 'string' && body.front_end !== '' ? body.front_end : null;
   const routes = [];
   for (const [i, row] of body.routes.entries()) {
-    if (typeof row?.route !== 'string' || !row.route.startsWith('/')) return { fault: `/pools.json route row ${i} names no route.` };
+    const named = typeof row?.route === 'string' && (row.route.startsWith('/') || row.route === frontEnd);
+    if (!named) return { fault: `/pools.json route row ${i} names no route.` };
     const missing = ROUTE_FIELDS.find((f) => !count(row[f]));
     if (missing) return { fault: `/pools.json route ${row.route} has no count for ${missing}.` };
     const counts = Object.fromEntries(ROUTE_FIELDS.map((f) => [f, row[f]]));

@@ -54,6 +54,41 @@ test('garbage bodies are named by what is wrong', () => {
   assert.equal(poolTables(body({ routes: [route('bars.json')] })).fault, '/pools.json route row 0 names no route.');
 });
 
+// THE BODY A REAL SERVER SENDS ONCE A BROWSER HAS LOADED THE PAGE (R3-08
+// repair 2, verify-R3-08-r2 blocking 1): the fallback counted the page and its
+// assets under the front end's row before the panel asked, and the reader
+// refused that row, so the panel showed only a fault line. Shaped like the
+// shadow server's /pools.json after GET /ingest; the counts are invented.
+test('the front end row the server names is one more route row, never a fault', () => {
+  const served = body({
+    front_end: '(front end)',
+    pools: [pool('store-read'), pool('verify', { slots: 1 })],
+    routes: [route('(front end)', { answered: 31 }), route('/feeds.json'), route('/pools.json', { answered: 1 })]
+  });
+  const t = poolTables(served);
+  assert.equal(t.fault, null);
+  assert.deepEqual(
+    t.routes.map((r) => r.route),
+    ['(front end)', '/feeds.json', '/pools.json']
+  );
+  assert.equal(t.routes[0].asked, 31);
+  // ONLY THE NAME THE SERVER GAVE: another pathless row, or the same row from
+  // a body that names no front end, is still a fault.
+  assert.equal(
+    poolTables({ ...served, routes: [route('(front end)'), route('(other)')] }).fault,
+    '/pools.json route row 1 names no route.'
+  );
+  const { front_end: _, ...unnamed } = served;
+  assert.equal(poolTables(unnamed).fault, '/pools.json route row 0 names no route.');
+  assert.equal(poolTables({ ...served, front_end: '' }).fault, '/pools.json route row 0 names no route.');
+});
+
+test('the server names the front end row it counts, from the same constant', () => {
+  const src = readFileSync(new URL('../../crates/api/src/detail.rs', import.meta.url), 'utf8');
+  assert.match(src, /"front_end": FRONT_END,/);
+  assert.match(src, /map_or\(FRONT_END, axum::extract::MatchedPath::as_str\)/);
+});
+
 test('empty lists and an absent patience are kept as they are', () => {
   const { read_patience_ms: _, ...rest } = body({ pools: [], routes: [] });
   const t = poolTables(rest);

@@ -20,7 +20,7 @@
 //!
 //! * `asof=exact` (the default, D-2807): the close of the bar stamped at
 //!   exactly `t`, or a named absence (`no_spot_bar`, `no_spot_file`,
-//!   `spot_unreadable`, `spot_order_broken`).
+//!   `spot_unreadable`, `spot_being_written`, `spot_order_broken`).
 //! * `asof=prev` (opted in): the close of the underlying's LAST bar at or
 //!   before `t` within `t`'s own IST session (its IST trade day), with the
 //!   stamp it came from (`spot_t`) and its age (`spot_age_s`, `t - spot_t`).
@@ -176,6 +176,11 @@ pub enum Spot {
     NoFile,
     /// A record needed to answer would not read; the reason is in `faults`.
     Unreadable,
+    /// The month a record lies in was held by a writer past the read's
+    /// patience: BEING WRITTEN, not damaged (R3-08 repair 2, NEW-21). The
+    /// holder's sentence is in `faults`; when every fault is one, the route
+    /// answers the being-written 503 and the page asks again.
+    BeingWritten,
     /// The records around `t` are not strictly increasing (the zero-filled
     /// extent `store::file` documents), so neither a hit nor an absence can be
     /// stated without a scan this route does not do.
@@ -183,6 +188,20 @@ pub enum Spot {
 }
 
 impl Spot {
+    /// The answer for a month file that would not open, from the store's
+    /// refusal: [`Self::BeingWritten`] when a writer held it past the read's
+    /// patience, [`Self::Unreadable`] for anything else. The one place every
+    /// per-instant reader (`/spot.json`, `/greeks.json`, `/chain.json`) tells
+    /// a busy month from a damaged one (R3-08 repair 2, NEW-21).
+    #[must_use]
+    pub fn unopened(refusal: &str) -> Self {
+        if crate::detail::is_being_written(refusal) {
+            Self::BeingWritten
+        } else {
+            Self::Unreadable
+        }
+    }
+
     /// The close, in paisa, when one was found.
     #[must_use]
     pub const fn close(&self) -> Option<i64> {
@@ -212,6 +231,7 @@ impl Spot {
             Self::OffGrid => Some("t_off_grid"),
             Self::NoFile => Some("no_spot_file"),
             Self::Unreadable => Some("spot_unreadable"),
+            Self::BeingWritten => Some("spot_being_written"),
             Self::OrderBroken => Some("spot_order_broken"),
         }
     }
@@ -523,9 +543,10 @@ impl SpotAsk {
                 return match refusal.kind {
                     OpenRefusalKind::Invalid => Err(refusal.message),
                     OpenRefusalKind::Absent => Ok((outside_or(Spot::NoFile), Vec::new())),
-                    OpenRefusalKind::Unreadable => {
-                        Ok((outside_or(Spot::Unreadable), vec![refusal.message]))
-                    }
+                    OpenRefusalKind::Unreadable => Ok((
+                        outside_or(Spot::unopened(&refusal.message)),
+                        vec![refusal.message],
+                    )),
                 };
             }
         };

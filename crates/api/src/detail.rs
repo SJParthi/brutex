@@ -796,6 +796,11 @@ pub(crate) const FRONT_END: &str = "(front end)";
 
 /// Changes one route's tally. One lock and one hash probe: O(1) expected per
 /// request; the route's name is copied once, the first time it is seen.
+/// UNVERIFIED on its own: no bench times the tally apart. It runs inside every
+/// request `crates/api/tests/pool_load.rs` times (p99 per request at 16, 64
+/// and 256 clients), and its map is bounded by the route table
+/// (`crate::server::pool_table_tests::every_store_route_names_its_pool`);
+/// `docs/06-limits.md` L-R308-01.
 fn tally(route: &str, change: impl FnOnce(&mut RouteTally)) {
     let mut held = lock_through_poison(&ROUTES);
     let routes = held.get_or_insert_with(std::collections::HashMap::new);
@@ -981,6 +986,12 @@ pub(crate) async fn pools_json() -> (
         "wait_ms": ADMISSION_WAIT_MS,
         "max_waiting": MAX_WAITING,
         "read_patience_ms": READ_PATIENCE_MS,
+        // THE ONE ROUTE ROW THAT IS NO PATH, NAMED BY THE SERVER THAT COUNTS
+        // IT (R3-08 repair 2): every page and asset the fallback serves is
+        // tallied under [`FRONT_END`], so the row exists as soon as a browser
+        // has loaded the page that asks. The reader takes the name from here
+        // rather than keeping a copy of it.
+        "front_end": FRONT_END,
         "pools": pools,
         "routes": routes,
         "say": "since this process started; busy is a 429 (every slot of the pool stayed taken \

@@ -175,12 +175,32 @@ pub(super) async fn gaps_json(
             Ok(done) => done,
             Err(why) => return calendar_admission_refused(&why),
         };
+    if let Some((status, body)) = writers_only(&months) {
+        return (status, json(), body);
+    }
 
     (
         axum::http::StatusCode::OK,
         json(),
         gaps_body(&months, &span, &denominator, truncated_range, &inferred),
     )
+}
+
+/// WRITERS ONLY: ASK AGAIN (R3-08 repair 2, NEW-21). When every month of the
+/// span that would not open, and every session-evidence read that failed,
+/// met a writer, the audit is not an answer yet: the one being-written 503
+/// (`Retry-After`, counted `being_written`), which the gaps page asks again
+/// on. `None` when nothing met a writer, or when any other fault is beside a
+/// held month: that is answered as the audit it is, the held month named and
+/// counted apart (`months_being_written`), never absent and never lost.
+fn writers_only(months: &[AuditedMonth]) -> Option<(axum::http::StatusCode, String)> {
+    let faults: Vec<String> = months
+        .iter()
+        .flat_map(|m| [&m.being_written, &m.absent_file, &m.evidence_error])
+        .flatten()
+        .cloned()
+        .collect();
+    crate::detail::being_written_answer(&faults)
 }
 
 /// `/gaps.json?{query}` answered by the route's own handler over `site`: its
@@ -692,6 +712,9 @@ fn gaps_body(
     let held: u64 = months.iter().map(|m| u64::from(m.held)).sum();
     let lost: u64 = months.iter().map(|m| u64::from(m.lost)).sum();
     let absent_files = months.iter().filter(|m| m.absent_file.is_some()).count();
+    // HELD BY A WRITER, NOT ABSENT (R3-08 repair 2): counted apart, so a busy
+    // month never reads as a hole in the store.
+    let being_written = months.iter().filter(|m| m.being_written.is_some()).count();
     // HOW THE ANSWER WAS HAD, beside the answer (R3-06): months read off a
     // kept summary, months whose bars were read because none was usable (each
     // month row names why), and the bar records that cost. A store that keeps
@@ -761,7 +784,7 @@ fn gaps_body(
     };
 
     format!(
-        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"months_being_written":{being_written},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
         identity.json,
         months.len(),
         day_text(first_bound),
@@ -1184,6 +1207,13 @@ struct AuditedMonth {
     /// leaves exactly this. Returning it as a `400` would end the walk at the
     /// first hole and report the absence as a malformed request.
     absent_file: Option<String>,
+    /// The holder's sentence when a writer held this month past the read's
+    /// patience (R3-08, NEW-21): the month is BEING WRITTEN, which is neither
+    /// an absent file nor lost minutes. Such a month owes, holds and loses
+    /// nothing in this answer — it was not read — and is counted apart
+    /// (`months_being_written`); when writers are the audit's only faults the
+    /// route answers the being-written 503 instead and the page asks again.
+    being_written: Option<String>,
     /// Missing/corrupt dated session evidence is not a missing bar file.
     evidence_error: Option<String>,
     /// Records `bars::page` could not read, or `None` when no record was
@@ -1212,7 +1242,7 @@ impl AuditedMonth {
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{},"summary":"{}","summary_fallback":{},"bar_records_read":{}{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"being_written":{},"evidence_error":{},"summary":"{}","summary_fallback":{},"bar_records_read":{}{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
@@ -1224,6 +1254,9 @@ impl AuditedMonth {
                 .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.invalid_timestamps,
             self.absent_file
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.being_written
                 .as_ref()
                 .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
             self.evidence_error
@@ -1361,6 +1394,7 @@ fn audit_one(
         absent: 0,
         unmeasured: 0,
         absent_file,
+        being_written: None,
         evidence_error: None,
         unreadable: Some(0),
         truncated: false,
@@ -1400,6 +1434,22 @@ fn audit_one(
     // kept and the read answer are one computation.
     let needs_seconds = one_second && !trade_driven;
     let input = month_input(site, asked, month, needs_seconds);
+    // A WRITER'S HOLD IS NOT AN ABSENT FILE (R3-08 repair 2, NEW-21). Before
+    // this the open's refusal fell into `absent_file`, and the calendar then
+    // owed the month's every minute: a NIFTY 1s 2019-11 held by `lockf(1)`
+    // answered 200 with `months_absent` 1 and 7,560 minutes lost, and no
+    // `Retry-After`, so the gaps page reported damage that was only a busy
+    // month. Nothing of the month was read, so it owes, holds and loses
+    // nothing here; it is named, counted apart, and `gaps_json` answers the
+    // being-written 503 when writers are the audit's only faults.
+    if let Some(why) = &input.being_written {
+        return AuditedMonth {
+            being_written: Some(why.clone()),
+            unreadable: None,
+            summary: SummarySource::BeingWritten,
+            ..empty(None)
+        };
+    }
     let held = &input.summary;
     // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY: the
     // minutes a one-second month holds are its summary's minute index, which
@@ -1582,6 +1632,7 @@ fn audit_one(
         // verdict so "the file is damaged" cannot be read as "the vendor is
         // missing minutes" — opposite faults wanting opposite fixes.
         absent_file: input.absent_file,
+        being_written: None,
         evidence_error: None,
         // RECORDS, NOT SENTENCES: `page` coalesces a run of refusals into
         // one sentence (DB-B75) and counts every record.
@@ -1606,6 +1657,9 @@ enum SummarySource {
     Built,
     /// The month has no file; the summary is empty.
     AbsentFile,
+    /// A writer held the month past the read's patience; nothing was read
+    /// (R3-08, NEW-21).
+    BeingWritten,
 }
 
 impl SummarySource {
@@ -1614,6 +1668,7 @@ impl SummarySource {
             Self::Kept => "kept",
             Self::Built => "built",
             Self::AbsentFile => "absent_file",
+            Self::BeingWritten => "being_written",
         }
     }
 }
@@ -1629,6 +1684,9 @@ struct MonthInput {
     /// Records `bars::page` could not read; `None` when no record was read.
     unreadable: Option<u64>,
     absent_file: Option<String>,
+    /// The holder's sentence when a writer held the month past the read's
+    /// patience: never an absent file (R3-08, NEW-21).
+    being_written: Option<String>,
     /// The fold's refusal of a one-second month's rows, in its own words.
     fold_error: Option<String>,
 }
@@ -1651,13 +1709,22 @@ fn month_input(
     let file = match asked.open(site, month) {
         Ok(file) => file,
         Err(why) => {
+            // A WRITER'S HOLD IS NAMED APART FROM AN ABSENT FILE: the store's
+            // sentence says "being written, ask again" and who holds it
+            // (`crate::detail::is_being_written`, R3-08 repair 2).
+            let (being_written, absent_file) = if crate::detail::is_being_written(&why) {
+                (Some(why), None)
+            } else {
+                (None, Some(why))
+            };
             return MonthInput {
                 summary: store::month_summary::MonthSummary::new(0, asked.timeframe.secs(), month),
                 source: SummarySource::AbsentFile,
                 fallback: None,
                 records_read: 0,
                 unreadable: Some(0),
-                absent_file: Some(why),
+                being_written,
+                absent_file,
                 fold_error: None,
             };
         }
@@ -1693,6 +1760,7 @@ fn month_input(
                 // NOT READ, so not counted: see `AuditedMonth::unreadable`.
                 unreadable: None,
                 absent_file: None,
+                being_written: None,
                 fold_error: None,
             };
         }
@@ -1724,6 +1792,7 @@ fn month_input(
             .saturating_add(faults.records()),
         unreadable: Some(faults.records()),
         absent_file: None,
+        being_written: None,
         fold_error,
     }
 }

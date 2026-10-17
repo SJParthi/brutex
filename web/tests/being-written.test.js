@@ -7,7 +7,9 @@ import {
   BEING_WRITTEN_TRIES, askAgainDelay, askAgainWhileWritten, askWhileBeingWritten, isBeingWritten
 } from '../src/lib/being-written.js';
 import { refusalFrom } from '../src/lib/refusal.js';
-import { readSpots } from '../src/lib/moneyness.js';
+import { readRungs, readSpots } from '../src/lib/moneyness.js';
+import { monthVerdict } from '../src/lib/gap-verdict.js';
+import { readFileSync } from 'node:fs';
 import { readGreeks } from '../src/lib/greeks.js';
 
 const SENTENCE = 'being written, ask again: another writer holds /s/bars/x.lock (held by this process (pid 42, thread import-3))';
@@ -141,4 +143,51 @@ test('any other answer is handed back at once, unread, and a reader who leaves s
   await assert.rejects(askAgainWhileWritten(async () => { calls += 1; gone.abort(); return written(); }, '/x',
     { signal: gone.signal }, async (_ms, signal) => signal.throwIfAborted()));
   assert.equal(calls, 1);
+});
+
+// R3-08 repair 2 (verify-R3-08-r2 blocking 3): /db's chain read — the rung
+// of each option bar — met a writer on the underlying's month as a 206 with
+// every spot `spot_unreadable`, and never asked again. The server now answers
+// the being-written 503; the rung reader asks again, and past the tries the
+// holder's sentence is the rung's failure, never "unreadable".
+test('the chain rungs ask a month being written again; past the tries the holder is the detail', async () => {
+  const option = { instrument: OPTION, tf: '1s', ts: at * 1000, side: 'CE', strike: 9_900_000 };
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    if (calls < 3) return busy({ 'Retry-After': '1' });
+    return /** @type {any} */ ({ status: 200, json: async () => ({ chains: [{ at, spot: 9_876_543, spot_why: null, refusal: null,
+      atm: 9_900_000, step_local: 100_000, n_strikes: 1, pick: { rung: 'ATM', k: 0, why: null } }] }) });
+  };
+  const { rungs } = await readRungs('gdfl', [option], new AbortController().signal, request, 'exact', async () => {});
+  assert.equal(calls, 3);
+  assert.deepEqual([...rungs.values()].map((r) => [r.rung, r.why]), [['ATM', null]]);
+
+  let held = 0;
+  const always = async () => { held += 1; return busy(); };
+  const failed = await readRungs('gdfl', [option], new AbortController().signal, always, 'exact', async () => {});
+  assert.equal(held, BEING_WRITTEN_TRIES);
+  const [rung] = [...failed.rungs.values()];
+  assert.equal(rung.why, 'rung_request_failed');
+  assert.match(String(rung.detail), /being written, ask again.*pid 42/);
+  assert.doesNotMatch(String(rung.detail), /unreadable/);
+});
+
+// R3-08 repair 2 (verify-R3-08-r2 blocking 2): a gaps month a writer held is
+// named `being_written` by the server, owing and losing nothing; the verdict
+// says so and never "no file", and such a month keeps the audit from reading
+// as whole.
+test('a gaps month a writer held reads "being written", never "no file" or whole', () => {
+  const month = { expected: 0, lost_minutes: 0, unmeasured_minutes: 0, truncated: false, unreadable_records: null,
+    invalid_timestamps: 0, summary: 'being_written', absent_file: null, being_written: SENTENCE, evidence_error: null };
+  assert.deepEqual(monthVerdict(month), { word: 'being written', kind: 'absent' });
+  assert.deepEqual(monthVerdict({ ...month, being_written: null, absent_file: 'no such file' }), { word: 'no file', kind: 'absent' });
+});
+
+test('the gaps page and the provenance panel ask a month being written again', () => {
+  const gaps = readFileSync(new URL('../src/routes/gaps/+page.svelte', import.meta.url), 'utf8');
+  assert.match(gaps, /askAgainWhileWritten\(ask, url, \{ cache: 'no-store', ms: 60_000, signal: ticket\.signal \}\)/);
+  assert.match(gaps, /m\.being_written != null/);
+  const provenance = readFileSync(new URL('../src/routes/db/DbProvenance.svelte', import.meta.url), 'utf8');
+  assert.match(provenance, /askAgainWhileWritten\(ask, url\)/);
 });

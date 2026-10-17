@@ -49,6 +49,8 @@ export const GREEK_WHY = {
   no_option_bar: 'the option has no stored bar stamped at this instant.',
   no_option_file: 'the option’s month file is not in this feed’s store.',
   option_unreadable: 'the option’s bar for this instant would not read; the server named the fault.',
+  option_being_written:
+    'the option’s month was being written by an import or a repair when this was asked, so its bar was not read — not damage; ask again once the writer is done.',
   option_order_broken:
     'the option’s file is not strictly increasing around this instant, so its close cannot be stated without a scan.',
   no_spot_bar:
@@ -61,6 +63,8 @@ export const GREEK_WHY = {
     'the instant is not on this rung’s grid, so the spot bar before it may close after it; no earlier spot is taken for it (D-3328).',
   no_spot_file: 'the underlying’s month file at this rung is not in this feed’s store, so there is no spot to price against.',
   spot_unreadable: 'the underlying’s bar for this instant would not read; the server named the fault.',
+  spot_being_written:
+    'the underlying’s month was being written by an import or a repair when this was asked, so its bar was not read — not damage; ask again once the writer is done.',
   spot_order_broken:
     'the underlying’s file is not strictly increasing around this instant, so its close cannot be stated without a scan.',
   greeks_request_failed: 'the greeks request failed, so this bar’s greeks are unknown.',

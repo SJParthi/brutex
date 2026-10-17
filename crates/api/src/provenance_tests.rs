@@ -1287,11 +1287,14 @@ async fn the_route_answers_over_the_real_route_table() {
     served.await.unwrap().unwrap();
 }
 
-/// **A MONTH BEING WRITTEN IS A 409 THAT SAYS SO**: a landing holds the
-/// month's lock while it appends and the store refuses a reader meanwhile,
-/// which is neither an absent month nor a damaged one.
+/// **A MONTH BEING WRITTEN IS THE BEING-WRITTEN 503 THAT SAYS SO**: a landing
+/// holds the month's lock while it appends and the store refuses a reader
+/// meanwhile, which is neither an absent month nor a damaged one. It was a 409
+/// with no `being_written`, which `count_route` gives no `Retry-After` and the
+/// page never asks again on (R3-08 repair 2, NEW-21); it is now the 503 every
+/// store read answers, its body small enough for `count_route` to read.
 #[test]
-fn a_month_being_written_is_a_409_naming_the_writer() {
+fn a_month_being_written_is_the_being_written_503_naming_the_writer() {
     let root = root_of("locked");
     gdfl_journal(&root, NIFTY_MARCH);
     let path = path_of(
@@ -1305,7 +1308,19 @@ fn a_month_being_written_is_a_409_naming_the_writer() {
     let mut writer = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
     let _landed = writer.append(&seconds("2019-03-01", 2)).unwrap();
     let held = get(&root, GDFL_NIFTY);
-    assert_eq!(held.status, StatusCode::CONFLICT, "{}", held.body);
+    assert_eq!(held.status, StatusCode::SERVICE_UNAVAILABLE, "{}", held.body);
+    assert_eq!(held.body["being_written"], true, "{}", held.body);
+    assert!(
+        held.body["error"]
+            .as_str()
+            .unwrap()
+            .contains(store::flock::BEING_WRITTEN),
+        "{}",
+        held.body
+    );
+    let wire = held.body.to_string();
+    assert!(wire.contains(crate::detail::BEING_WRITTEN_FIELD), "{wire}");
+    assert!(wire.len() <= crate::detail::BEING_WRITTEN_BODY_MAX, "{}", wire.len());
     assert!(
         held.body["error"]
             .as_str()
