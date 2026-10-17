@@ -70986,3 +70986,88 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-5420 — An `at=` instant past the calendar's last year ranks after every row of a window, not before it — 2026-10-17
+
+**Number** taken above every ledger head on every remote branch on 17 Oct
+(the highest was D-5301). Amendment A6: the landing renumbers it from the
+head it lands on.
+
+**What was observed.** The cloud mutation pass on `crates/api` (half A,
+`reports/cloud-mut-api-a-20261016.md`) found the mutant `delete -` in
+`SeriesPlan::bucket_of` alive: turning its `-1` into `1` changed no test.
+`bucket_of` answered `-1`, "before the first month", for every day it could
+not name. That covered a day before the epoch, and also a day past
+`pull::session::MAX_YEAR` (9999), which `Day::from_days` refuses.
+`/bars/window.json` takes `at=` as any whole number of unix seconds that fits
+in microseconds, so `at=253402300800` (10000-01-01) reaches it, and that
+instant was ranked before every row: ascending its index was 0 instead of the
+total, and the page served for it was the wrong end of the window.
+
+**Decision.** A day before the epoch is `-1`, before every month, and a day
+past the calendar is `i64::MAX`, after every month. `rank` already answers
+any bucket at or past the last as past every row, so nothing else moves.
+
+**Rejected.** Refusing an `at=` past 9999 at the route: it changes the wire
+contract of `bars_route.rs`, and the instant is a well-formed question with a
+well-defined answer (after everything held). Clamping `at` to 9999-12-31: the
+same answer, by a second rule for one fact.
+
+**Proof.** `bars_series_rs::bars_series_an_instant_past_the_calendar_is_after_every_row`
+(`crates/api/tests/cloud_mutants_bars.rs`) failed before the fix with
+`left: Some(0), right: Some(2)`. Invariant MUT-A-01.
+
+### D-5421 — The universe-lookup timing test is the fastest of seven interleaved samples a size, as D-0800's is — 2026-10-17
+
+**Number** as D-5420.
+
+**What happened.** `coverage::tests::the_lookup_does_not_grow_with_the_universe`
+took ONE sample of 20,000 lookups a universe and failed on unchanged code
+while four mutation runs shared the machine (16 Oct pass, NOT DONE item 5).
+
+**Decision.** Both sizes are warmed, then sampled seven times in turn, and
+each keeps its minimum, exactly D-0800's method. The 4x ceiling and
+`Coverage::of` are unchanged: an index that went back to folding the merged
+map grows its minimum as surely as its single sample.
+
+**Rejected.** Skipping the test under load: a gate that steps aside when the
+machine is busy is the hidden fallback `CLAUDE.md` §4 bans. Raising the
+ceiling: it weakens the regression it exists to catch.
+
+**Limit.** It reduces the chance of a false failure and does not remove it;
+the ratio is a wall-clock measurement on a shared machine (§3 rule 6).
+
+### D-5422 — A mid-loop cancellation and the 24 M and 64 M row budgets are driven by test-only seams, on the `READ_HELD` precedent — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** Eighteen mutants in `crates/api` were left alive by
+the 16 Oct pass because no deterministic test could reach them: five differ
+only when a client goes away WHILE a loop runs (a flag set before the call
+is caught by the first look), and thirteen only past `MAX_SCAN_BARS`
+(24,000,000 rows read) or `MAX_EXTREMES_SCAN_BARS` (64,000,000 rows owed) in
+one request, about 0.9 GB and 2.4 GB of fixture.
+
+**Decision.** Three `#[cfg(test)]` seams, each compiled out of every non-test
+build:
+
+1. `bars::cancel_trip`: a flag from `Cancel::pair` reads "cancelled" from a
+   look a test chose, on the test's own thread. `Cancel::never` is untouched.
+2. `bars::sort::SCAN_BUDGET` and `EXTREMES_BUDGET`: thread-local lowerings of
+   the two budgets, read through `scan_budget()` and `extremes_budget()`,
+   exactly as `READ_HELD` lowers `MAX_READ_HELD` (D-3349). The production
+   values, the `pub const`s and the refusal sentences are unchanged.
+
+**Rejected.** Planting 24 M and 64 M rows: gigabytes of fixture a test. A
+second thread that sets the flag mid-loop: not deterministic, so a test that
+can pass on a broken stride. Making the budgets runtime parameters: it widens
+the production signature for a test. Leaving the eighteen as NOT DONE:
+`CLAUDE.md` §9 asks for no surviving mutant.
+
+**Proof.** `server::spot::cloud_mutant_tests::a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride`,
+`bars::cloud_mutant_tests::a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled`,
+`bars::cloud_mutant_tests::a_stretch_read_looks_at_its_client_once_a_stride`,
+`bars::sort::cloud_mutant_tests::a_value_page_is_served_to_the_scan_budget_and_refused_past_it`,
+`bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`,
+`bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget`.
+Invariants MUT-A-02 to MUT-A-05.

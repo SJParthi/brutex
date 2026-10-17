@@ -7435,3 +7435,16 @@ the gap audit in `crates/api/src/gaps_route.rs`. Every fixture is invented.
 | MS-11 | **`cli msum-build` writes only the named months' `.sum`, refuses a held month and a name that is not a file, and its dry run writes nothing** | `crates/cli/src/msum_builder_tests.rs` | |
 | MS-12 | **Every whole write of a month summary is a `store.sum` line, and extension is not**: a month's first `.sum` (reason `absent`), a month dense again and read whole (`dense_again`), a replaced or door-rebuilt summary are each one INFO "month summary written whole" naming the file, the reason and `n_valid`; the per-commit extension writes none | `a_first_summary_and_a_month_dense_again_are_logged_and_extension_is_silent`; `crates/store/tests/month_summary_log.rs` | |
 | MS-13 | **A kept month counts no record it did not read**: `/gaps.json` states `unreadable_records: null` for a month answered off its kept summary and a count for one whose bars were read; the page reads `null` as whole only beside `summary: "kept"` | `the_gap_audit_reads_no_bar_when_summaries_exist`, `what_it_says` in `crates/api/src/gaps_route.rs`; `web/tests/gap-verdict.test.js` "a kept month that read no record is whole" | |
+
+## Window reads at their edges: an instant past the calendar, a client gone mid-loop, the row budgets (cloud-mut-api-a; D-5420, D-5422)
+
+`crates/api/src/bars.rs`, `bars_series.rs`, `bars_sort.rs`, `spot.rs`. Every
+fixture is invented.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| MUT-A-01 | **An `at=` instant past the calendar's last year ranks after every row**; one before the epoch ranks before every row | `bars_series_rs::bars_series_an_instant_past_the_calendar_is_after_every_row` (`crates/api/tests/cloud_mutants_bars.rs`) | ✓ |
+| MUT-A-02 | **A client that goes away mid-read is seen at the next look of the stride, never sooner and never not at all**: a spot read looks every `CANCEL_EVERY` instants, a stretch read every `CANCEL_STRIDE` rows counted across the request's stretches | `server::spot::cloud_mutant_tests::a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride`, `bars::cloud_mutant_tests::a_stretch_read_looks_at_its_client_once_a_stride` | ✓ |
+| MUT-A-03 | **A client gone while the extremes are folded ends the request as `cancelled`, never as a page with its extremes withheld**, on the time-ordered and the open-interest-over-an-index paths | `bars::cloud_mutant_tests::a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled` | ✓ |
+| MUT-A-04 | **A value page that would read more rows than the scan budget is refused `scan_budget_exceeded` by name; exactly the budget is served** | `bars::sort::cloud_mutant_tests::a_value_page_is_served_to_the_scan_budget_and_refused_past_it` | ✓ |
+| MUT-A-05 | **The extremes budget counts only cut rows no earlier request folded**: past it the page is served with its extremes withheld by name, at it they are folded and held, and held they owe nothing | `bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`, `bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget` | ✓ |
