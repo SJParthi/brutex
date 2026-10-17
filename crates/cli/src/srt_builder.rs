@@ -146,8 +146,7 @@ impl Ask {
 
     /// The header's symbol id, as every writer folds it.
     pub(crate) fn symbol_id(&self) -> u32 {
-        let [a, b, c, d, ..] = brutex_core::universe::fnv1a(&self.symbol).to_le_bytes();
-        u32::from_le_bytes([a, b, c, d])
+        symbol_id(&self.symbol)
     }
 
     /// The series the arguments name: the spot series, one contract, or
@@ -243,7 +242,7 @@ impl Walk {
 }
 
 /// A feed word, as the store names vendors.
-fn vendor(word: &str) -> Result<Vendor, String> {
+pub(crate) fn vendor(word: &str) -> Result<Vendor, String> {
     Vendor::ALL
         .into_iter()
         .find(|vendor| vendor.as_str() == word)
@@ -258,7 +257,7 @@ fn vendor(word: &str) -> Result<Vendor, String> {
 }
 
 /// A `YYYY-MM` month, digits and widths exact.
-fn month(label: &str, word: &str) -> Result<(u16, u8), String> {
+pub(crate) fn month(label: &str, word: &str) -> Result<(u16, u8), String> {
     let digits = |part: &str, width: usize| {
         (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
             .then(|| part.parse::<u16>().ok())
@@ -731,6 +730,28 @@ fn summed(out: &mut String, receipt: &[Line], dry_run: bool) -> u8 {
         );
     }
     if clean { OK } else { FAILED }
+}
+
+/// One month built as an item of an upkeep run (R3-17, D-4997): the step
+/// this verb takes for it, and the receipt line this verb prints for it as the
+/// run's outcome, so the two never say different things.
+pub(crate) fn upkeep_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+) -> pull::upkeep::Outcome {
+    let line = build(root, path, symbol_id);
+    let label = path.month().to_string();
+    let mut text = String::new();
+    render_line(&mut text, &label, &line);
+    crate::upkeep_command::outcome(line.clean(), &label, &text)
+}
+
+/// The header's symbol id of `symbol`, as every writer folds it: the low 32
+/// bits of its FNV-1a.
+pub(crate) fn symbol_id(symbol: &str) -> u32 {
+    let [a, b, c, d, ..] = brutex_core::universe::fnv1a(symbol).to_le_bytes();
+    u32::from_le_bytes([a, b, c, d])
 }
 
 /// `cli srt-build`, against the CLI's store root (`BRUTEX_STORE`).

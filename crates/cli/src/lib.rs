@@ -104,6 +104,9 @@ mod srt_builder;
 mod tickstore_command;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuilder;
+/// `cli upkeep`: the store's catch-up steps as tracked runs, with a run id,
+/// progress, Stop and resume, under the import's locks (R3-17, D-4997).
+mod upkeep_command;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
 /// the store and the calendar with no vendor call (R3-18).
 mod zerodha_gaps_command;
@@ -610,6 +613,20 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
+       cli upkeep plan VENDOR [SCOPE] [--rung R] [--from YYYY-MM] [--to YYYY-MM]
+       cli upkeep run KIND VENDOR [SCOPE] [--rung R] [--from M] [--to M] [--workers N] [--all]
+       cli upkeep resume KIND VENDOR RUN [the run's arguments]
+       cli upkeep stop KIND VENDOR [RUN]
+       cli upkeep status KIND VENDOR
+                                   the store's catch-up steps as tracked runs
+                                   (KIND tix, srt, msum, recount --from DAY
+                                   --to DAY, or rekey [--underlying S,...]):
+                                   plan says what each month lacks and writes
+                                   nothing; run builds them on N workers under
+                                   the import's run locks, one line per item in
+                                   audit/upkeep.VENDOR.KIND.log; stop asks the
+                                   running run to stop between items; resume
+                                   skips what its chain closed clean (R3-17).
        cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED]
                                    read-only: every stored 1min bar of a series
                                    judged against its own stored 1day bars; the
@@ -2778,6 +2795,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["srt-build", arguments @ ..] if !arguments.is_empty() => {
             srt_builder::command(arguments, out)
         }
+        ["upkeep", arguments @ ..] if !arguments.is_empty() => {
+            upkeep_command::command(arguments, out)
+        }
         ["zerodha-gaps", arguments @ ..] if !arguments.is_empty() => {
             zerodha_gaps_command::command(arguments, out)
         }
@@ -2858,7 +2878,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 52] = [
+const COMMANDS: [&str; 53] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2907,6 +2927,7 @@ const COMMANDS: [&str; 52] = [
     "tickstore-write",
     "tix-rebuild",
     "top",
+    "upkeep",
     "verify",
     "watchdog",
     "zerodha-gaps",

@@ -480,6 +480,20 @@ pub(crate) fn command_with(
     if clean { OK } else { FAILED }
 }
 
+/// One month built as an item of an upkeep run (R3-17, D-4997): the step
+/// this verb takes for it, and the receipt line this verb prints for it as the
+/// run's outcome, so the two never say different things.
+pub(crate) fn upkeep_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+) -> pull::upkeep::Outcome {
+    let line = rebuild(root, path, symbol_id);
+    let mut text = String::new();
+    render_line(&mut text, path.month(), &line);
+    crate::upkeep_command::outcome(line.clean(), &path.month().to_string(), &text)
+}
+
 /// `cli tix-rebuild`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     // AN UNSTAMPED BUILD BUILDS NO INDEX (DB-B71, WP-81); `--dry-run` writes

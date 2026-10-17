@@ -41,7 +41,7 @@ use crate::{FAILED, MISUSED, OK};
 const SHOWN: usize = 50;
 
 /// A `YYYY-MM-DD` day.
-fn day(text: &str) -> Result<Day, String> {
+pub(crate) fn day(text: &str) -> Result<Day, String> {
     let number = |part: &str, width: usize| {
         (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
             .then(|| part.parse::<u16>().ok())
@@ -153,6 +153,42 @@ pub(crate) fn recount(arguments: &[&str], out: &mut String) -> u8 {
     // AN UNSTAMPED BUILD DOES NOT WRITE THE CENSUS (DB-B71, WP-81).
     let store = crate::store_write::root_for("census-recount", arguments);
     recount_with(arguments, &store, crate::commit_stamp(), out)
+}
+
+/// One span recounted as an item of an upkeep run (R3-17, D-4997): the same
+/// `census_store::recount` this verb runs, clean exactly when this verb's
+/// exit would be [`OK`], and its counts as the run's reason.
+pub(crate) fn upkeep_span(
+    root: &Path,
+    vendor: Vendor,
+    span: Span,
+    commit: Option<&str>,
+) -> pull::upkeep::Outcome {
+    match census_store::recount(root, vendor, span, commit) {
+        Ok(found) => {
+            let closed = found.journal.as_ref().map_or((0, 0), |journal| {
+                (journal.closed.len(), journal.left_open.len())
+            });
+            let why = format!(
+                "{} bar file(s) in range, {} holding no bar, {} unreadable; {} row(s) offered, \
+                 {} withdrawn, {} refused; {} import day(s) recounted, {} left open",
+                found.files_in_range,
+                found.files_empty,
+                found.unreadable,
+                found.offered,
+                found.withdrawn,
+                found.refused(),
+                closed.0,
+                closed.1
+            );
+            if found.clean() {
+                pull::upkeep::Outcome::clean("recounted", why)
+            } else {
+                pull::upkeep::Outcome::failed("NOT_CLEAN", why)
+            }
+        }
+        Err(why) => pull::upkeep::Outcome::failed("REFUSED", why),
+    }
 }
 
 /// `census-migrate`, with the store root passed in.

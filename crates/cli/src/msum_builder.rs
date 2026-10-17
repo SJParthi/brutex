@@ -400,6 +400,21 @@ fn summed(out: &mut String, receipt: &[Line], dry_run: bool) -> u8 {
     if clean { OK } else { FAILED }
 }
 
+/// One month built as an item of an upkeep run (R3-17, D-4997): the step
+/// this verb takes for it, and the receipt line this verb prints for it as the
+/// run's outcome, so the two never say different things.
+pub(crate) fn upkeep_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+) -> pull::upkeep::Outcome {
+    let line = build(root, path, symbol_id);
+    let label = path.month().to_string();
+    let mut text = String::new();
+    render_line(&mut text, &label, &line);
+    crate::upkeep_command::outcome(line.clean(), &label, &text)
+}
+
 /// `cli msum-build`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     // AN UNSTAMPED BUILD WRITES NO SUMMARY (DB-B71, WP-81): a `.sum` is a file

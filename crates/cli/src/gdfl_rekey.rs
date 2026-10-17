@@ -290,6 +290,90 @@ pub(crate) fn command_with(
     }
 }
 
+/// One underlying re-keyed as an item of an upkeep run (R3-17, D-4997): the
+/// survey, plan and apply this verb runs, narrowed to `underlying` (a day's
+/// strike ladder is one underlying's, so its plan is the same narrowed or
+/// not).
+///
+/// STRICTER THAN `--apply` ON ONE POINT: nothing is written for an underlying
+/// whose survey left a file unread or whose plan left a key unresolved — the
+/// rule the one-press chain applies (R4-11) — so an unattended run never
+/// moves half of a ladder it could not read whole. The item says so and is
+/// not clean; `cli gdfl-rekey --plan --underlying <it>` names each key.
+pub(crate) fn upkeep_underlying(root: &Path, underlying: Symbol) -> pull::upkeep::Outcome {
+    use pull::upkeep::Outcome;
+    let only = BTreeSet::from([underlying]);
+    let read = gdfl_rekey::withdrawn(root)
+        .and_then(|ledger| gdfl_rekey::survey(root, Some(&only)).map(|found| (ledger, found)));
+    let (ledger, found) = match read {
+        Ok(read) => read,
+        Err(why) => return Outcome::failed("REFUSED", format!("{why}; nothing was written")),
+    };
+    let plan = gdfl_rekey::plan(&found, &ledger);
+    let judged = format!(
+        "{} key(s) in {} month file(s): {} kept, {} to move, {} to retire",
+        plan.keys,
+        found.files,
+        plan.kept,
+        plan.moves.len(),
+        plan.retired.len()
+    );
+    if found.unreadable > 0 || !plan.unresolved.is_empty() {
+        return Outcome::failed(
+            "NOT_APPLIED",
+            format!(
+                "{judged}; {} file(s) unreadable and {} key(s) unresolved, so nothing was \
+                 written (`cli gdfl-rekey --plan --underlying {}` names each)",
+                found.unreadable,
+                plan.unresolved.len(),
+                underlying.as_str()
+            ),
+        );
+    }
+    if !plan.changes() {
+        return Outcome::clean("kept", format!("{judged}; nothing to change"));
+    }
+    match gdfl_rekey::apply(root, &found, &plan, &ledger) {
+        // A SECOND APPLY WRITES NOTHING, and says so: the moves are held, the
+        // ledger lines there and the keys withdrawn.
+        Ok(done)
+            if done.refused.is_empty()
+                && done.months_written == 0
+                && done.lines_written == 0
+                && done.withdrawal.is_none() =>
+        {
+            Outcome::clean(
+                "kept",
+                format!("{judged}; already applied, nothing was written"),
+            )
+        }
+        Ok(done) if done.refused.is_empty() => Outcome::clean(
+            "applied",
+            format!(
+                "{judged}; {} moved ({} month file(s) written, {} already held exactly), {} \
+                 ledger line(s) appended",
+                done.moved.len(),
+                done.months_written,
+                done.months_already,
+                done.lines_written
+            ),
+        ),
+        Ok(done) => Outcome::failed(
+            "REFUSED",
+            format!(
+                "{judged}; {} move(s) refused: {}",
+                done.refused.len(),
+                done.refused
+                    .iter()
+                    .map(|one| format!("{}: {}", one.key, one.why))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+        Err(why) => Outcome::failed("STOPPED", why),
+    }
+}
+
 /// `cli gdfl-rekey`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     // `--apply` BY AN UNSTAMPED BUILD IS REFUSED (DB-B71, WP-81); `--plan`

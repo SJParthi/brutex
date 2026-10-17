@@ -323,8 +323,9 @@ pub struct Ran {
     pub why: String,
     /// Bytes of a torn tail ended as a void line before the run began.
     pub torn: u64,
-    /// Whole seconds the items took.
-    pub seconds: u64,
+    /// Milliseconds the items took, wall clock: the run's own measurement of
+    /// its rate (items per second), on the host and the load it ran under.
+    pub millis: u64,
 }
 
 impl Ran {
@@ -1170,7 +1171,8 @@ fn drive(
         }
     });
     let shared = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
-    let seconds = started.elapsed().as_secs();
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let seconds = millis / 1_000;
     let (how, why) = ending(
         shared.fault.as_deref(),
         of.saturating_sub(shared.n),
@@ -1200,7 +1202,7 @@ fn drive(
         how,
         why,
         torn,
-        seconds,
+        millis,
     })
 }
 

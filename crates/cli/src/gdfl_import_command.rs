@@ -83,6 +83,8 @@ use crate::{FAILED, MISUSED, OK};
 /// The door around the importer (AF-01).
 #[path = "gdfl_import_guard.rs"]
 mod guard;
+/// The import's run lock, which `cli upkeep` takes too (R3-17, D-4997).
+pub(crate) use guard::{Holder, RunLock, escape};
 
 /// The tick store's root.
 pub(crate) const TICKSTORE_VAR: &str = "BRUTEX_GDFL_TICKSTORE";
