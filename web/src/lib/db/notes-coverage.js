@@ -389,16 +389,24 @@ export function headerRange(months, window) {
     const lo = months.length ? months.reduce((a, b) => (b < a ? b : a)) : '';
     const hi = months.length ? months.reduce((a, b) => (b > a ? b : a)) : '';
     return {
-      from: window.from ? dayLabel(window.from) : lo ? monthLabel(lo) ?? lo : '—',
-      to: window.to ? dayLabel(window.to) : hi ? monthLabel(hi) ?? hi : '—',
+      from: window.from ? dayLabel(window.from) : lo ? month(lo) : '—',
+      to: window.to ? dayLabel(window.to) : hi ? month(hi) : '—',
       word: 'in view'
     };
   }
   if (months.length === 0) return null;
   const sorted = [...months].sort();
-  const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  return { from: monthLabel(first) ?? first, to: monthLabel(last) ?? last, word: 'on disk' };
+  return { from: month(sorted[0]), to: month(sorted[sorted.length - 1]), word: 'on disk' };
+}
+
+/**
+ * A month key as words. `monthLabel` hands a string back for any string
+ * (verbatim when it does not parse), so the cast states what it returns.
+ *
+ * @param {string} ym
+ */
+function month(ym) {
+  return /** @type {string} */ (monthLabel(ym));
 }
 
 /**

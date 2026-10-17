@@ -476,7 +476,11 @@ export function judgeRow(row, ctx) {
   } else if (cover.missing === 0) {
     cover.state = 'full';
   } else {
-    const per = (future ? null : ledger.regular) ?? perSession ?? owed;
+    // ONE SESSION AT THIS ROW'S COUNT: an index's regular session, or the
+    // average of the span's own (a future's era, a ledger with no regular
+    // count). `perSession` is a number here: owed is above zero, so a day of
+    // the span was sized and `sessionsKnown` is at least one.
+    const per = /** @type {number} */ (future || ledger.regular === null ? perSession : ledger.regular);
     cover.state = cover.missing < per ? 'near' : 'gap';
   }
   if (cover.extra > 0) {
@@ -651,8 +655,8 @@ export function rollUpMonths(items) {
     if (c.state === 'full') m.full += 1;
     // THE WORST ROW, ORDER-INDEPENDENT: the most missing, ties broken on
     // the row's own identity rather than on which arrived first.
-    const miss = c.missing ?? 0;
-    const was = m.worst ? m.worst.cover.missing ?? 0 : -1;
+    const miss = c.missing;
+    const was = m.worst ? m.worst.cover.missing : -1;
     if (miss > was || (miss === was && m.worst && rowId(it) < rowId(m.worst))) m.worst = it;
   }
   return [...by.values()].map((m) => ({ ...m, ...monthVerdict(m) }));

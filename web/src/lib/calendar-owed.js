@@ -221,14 +221,20 @@ function pause(ms, signal) {
  * @returns {Promise<{ response: Response, body: any }>}
  */
 async function settledCalendar(url, request, signal, wait) {
-  for (let asked = 1; ; asked += 1) {
-    const response = await request(url, { cache: 'no-store', signal });
-    if (response.status !== 202) return { response, body: undefined };
-    const body = await response.json();
-    if (body?.status !== 'building' || asked >= CALENDAR_BUILDING_TRIES) return { response, body };
+  // ONE LOOP WITH ONE EXIT, so every path through it is a path a test can
+  // walk: an endless `for (;;)` left an unreachable tail behind its returns.
+  let response = await request(url, { cache: 'no-store', signal });
+  /** @type {any} */
+  let body;
+  for (let asked = 1; response.status === 202; asked += 1) {
+    body = await response.json();
+    if (body?.status !== 'building' || asked >= CALENDAR_BUILDING_TRIES) break;
     const hint = Number(body.retry_after_ms);
     await wait(Number.isFinite(hint) && hint >= 50 ? hint : 250, signal);
+    body = undefined;
+    response = await request(url, { cache: 'no-store', signal });
   }
+  return { response, body };
 }
 
 /**

@@ -26,7 +26,10 @@ import {
   headerRange,
   closeInWindow,
   contractTail,
-  refusedFrontOf
+  refusedFrontOf,
+  whyText,
+  noteText,
+  bytesText
 } from '../src/lib/db/notes-coverage.js';
 import { judgeRow } from '../src/lib/completeness.js';
 import { owedLedger, epochDayOfIso } from '../src/lib/calendar-owed.js';
@@ -178,6 +181,7 @@ test('the_header_prints_a_strike_as_a_price, and describes the window in view (R
   assert.deepEqual(headerRange(['2019-01', '2019-03'], { from: '2019-02-01', to: '' }), { from: '01 Feb 2019', to: 'Mar 2019', word: 'in view' });
   assert.deepEqual(headerRange(['2019-03', '2019-01'], { from: '', to: '2019-02-28' }), { from: 'Jan 2019', to: '28 Feb 2019', word: 'in view' });
   assert.deepEqual(headerRange([], { from: '', to: '2019-02-28' }), { from: '—', to: '28 Feb 2019', word: 'in view' });
+  assert.deepEqual(headerRange([], { from: '2019-02-01', to: '' }), { from: '01 Feb 2019', to: '—', word: 'in view' });
   // The newest close is this window's only if it falls in it.
   const at = Date.parse('2019-03-28T09:59:59Z');
   assert.equal(closeInWindow(at, null, istDay), 'in');
@@ -230,7 +234,7 @@ test("the drawer's totals agree with the rows it prints (R3-04, DB-014)", () => 
   assert.equal(t.bars, 7875 + 7835 + 7884);
   assert.equal(t.heldExact, false);
   assert.equal(coverTotals([]).coverage, null);
-  assert.equal(coverTotals(null).n, 0);
+  assert.equal(coverTotals(/** @type {any} */ (null)).n, 0);
   // A row with no calendar prints a dash and joins no sum.
   const none = { rows: 5, cover: judgeRow(rows[0], { ledger: null }) };
   assert.equal(missingText(none), '—');
@@ -264,4 +268,31 @@ test('a refused front is named beside the coverage figure, and the empty grid sa
   assert.match(COVERAGE, /const refusedFront = \$derived\(refusedFrontOf\(db\.dayBandCells, db\.dayBandInstrument \?\? ''\)\)/);
   assert.match(COVERAGE, /<span class="cs risk" title=\{db\.covRefusedFront\.text\}>/);
   assert.match(COVERAGE, /<p class="tgate">\{db\.covRefusedFront\.text\}<\/p>/);
+});
+
+test('the coverage words at their edges: an unknown code is named as one, bytes read as a quantity', () => {
+  assert.match(whyText('absent'), /^No file/);
+  assert.match(whyText(null), /none given/);
+  assert.match(whyText('zz_new'), /does not have a sentence for: zz_new/);
+  assert.match(noteText('surplus_unplaced'), /never called full or 100\.00%/);
+  assert.match(noteText('unheld_sessions'), /never pays for them/);
+  assert.match(noteText('zz_new'), /no sentence for: zz_new/);
+  assert.deepEqual([5e9, 5e6, 5e3, 12.4].map(bytesText), ['5.0 GB', '5.0 MB', '5.0 kB', '12 B']);
+  // An ordered held span is printed as it is.
+  assert.match(windowEmptyWhy({ matched: 1, listed: 0, window: { from: '2024-10-01', to: '2024-10-31' }, held: { lo: '2019-01-01', hi: '2019-03-28' } }), /holds 01 Jan 2019 → 28 Mar 2019/);
+  // The counted line's own notes: an unread auction flag, a store-wide hole, a derived month behind or partial.
+  const cover = (/** @type {Partial<import('../src/lib/completeness.js').Cover>} */ c) =>
+    /** @type {import('../src/lib/completeness.js').Cover} */ ({ basis: 'calendar', state: 'near', owed: 10, missing: 1, sessions: 1, heldSessions: 1, heldExact: true, notes: [], extra: 0, ...c });
+  const t = coverTotals([
+    { rows: 9, cover: cover({ state: 'unmeasured', missing: null, notes: ['cas_unresolved'] }) },
+    { rows: 9, cover: cover({ notes: ['cas_unresolved'] }) },
+    { rows: 9, cover: cover({ notes: ['store_wide'] }) },
+    { rows: 9, cover: cover({ notes: ['derived_behind'] }) },
+    { rows: 9, cover: cover({ notes: ['derived_partial'] }) }
+  ]);
+  assert.equal(t.unresolved, 1, 'only an unresolved row with no missing count is the flag\'s to decide');
+  assert.equal(t.storeWide, 1);
+  assert.equal(t.derivedLagging, 2);
+  assert.equal(t.missing, 4);
+  assert.equal(t.heldExact, true);
 });
