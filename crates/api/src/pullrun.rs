@@ -10191,6 +10191,35 @@ mod cloud_render_tests {
         assert_eq!(doc["atLeastOpen"], 5);
         assert_eq!(doc["unnamed"], 2);
     }
+
+    /// **A guessed answer whose guesses name no run says no run is guessed
+    /// at, and names none.** Covers the false side of `Guessed::words`'
+    /// `!self.guessed_runs.is_empty()` (pullrun.rs:1220).
+    #[test]
+    fn a_guessed_answer_naming_no_run_says_none_is_guessed() {
+        let guessed = Guessed {
+            why: "a guess decides it".to_owned(),
+            reading: None,
+            guessed_runs: Vec::new(),
+            sure: vec![other(7, Scope::Spot, None)],
+            doubted: Vec::new(),
+            unnamed: 0,
+            left_open: Vec::new(),
+        };
+        let words = guessed.words();
+        assert!(!words.contains("A guess names the run(s)"), "{words}");
+        assert!(
+            words.starts_with(
+                "NOT KNOWN which pull runs were left open, though at least 1 run(s) were"
+            ),
+            "{words}"
+        );
+        let mut keys = String::from("{\"first\":0");
+        guessed.json(&mut keys);
+        keys.push('}');
+        let doc: serde_json::Value = serde_json::from_str(&keys).expect("valid JSON");
+        assert_eq!(doc["guessedRuns"], serde_json::json!([]));
+    }
 }
 
 /// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
@@ -10339,6 +10368,30 @@ mod cloud_walk_tests {
         let newer = open_of("kite", 20_000, 20_010, 0xB);
         let close = close_of(Scope::Spot, "kite", 20_000, 20_010);
         let found = walk(&[(0, older), (1, newer), (3, close)]);
+        assert!(
+            matches!(found.guessed.as_slice(), [Guess::Pairing { close: 3, .. }]),
+            "{:?}",
+            found.guessed
+        );
+    }
+
+    /// **A close naming an ask that no open run of its key carries does not
+    /// settle the pairing by the ask.** Two runs of one key are open with
+    /// different asks and the close names a third: the ask picks no run, the
+    /// candidates share no ask, and the pairing is a guess as before. Covers
+    /// the false side of `Walker::by_candidates`' unique-ask match
+    /// (pullrun.rs:1954-1956).
+    #[test]
+    fn a_close_naming_an_ask_no_open_run_carries_is_not_settled_by_it() {
+        let close = noted(
+            close_of(Scope::Spot, "kite", 20_000, 20_010),
+            &crate::audit::ask_note("closed", 0xC),
+        );
+        let found = walk(&[
+            (0, open_of("kite", 20_000, 20_010, 0xA)),
+            (1, open_of("kite", 20_000, 20_010, 0xB)),
+            (3, close),
+        ]);
         assert!(
             matches!(found.guessed.as_slice(), [Guess::Pairing { close: 3, .. }]),
             "{:?}",
