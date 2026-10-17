@@ -65,10 +65,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// saying `commit=unstamped` cannot say which. It was listed as a reader while
 /// it wrote those two files.
 ///
+/// `tickstore-write` (R4-08) is one: it writes the tick store's day files and
+/// its log, which the importer reads as the vendor's days, and each log line
+/// names the commit that wrote them.
+///
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 11] = [
+pub(crate) const WRITERS: [&str; 12] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -77,6 +81,7 @@ pub(crate) const WRITERS: [&str; 11] = [
     "gdfl-rekey",
     "scrub-blocks",
     "srt-build",
+    "tickstore-write",
     "tix-rebuild",
     "zerodha-gaps",
     "zerodha-repair",
@@ -207,6 +212,8 @@ mod tests {
             "expression-search-stored",
             "expression-stored",
             "fold-audit",
+            // R3-32 (D-4996): prints a launchd agent; writes no file at all.
+            "launch-agent",
             "ledger-all",
             "ledger-v6",
             "ledger-v6-replay",
@@ -228,6 +235,9 @@ mod tests {
             "sweep-stored",
             "top",
             "verify",
+            // R3-32 (D-4996): one /health probe; it writes only its own state
+            // folder, which it refuses to place under the store root.
+            "watchdog",
         ];
         for verb in crate::COMMANDS {
             assert_ne!(
@@ -366,7 +376,12 @@ mod tests {
         }
         let shadowed = || Ok(shadow.clone());
         let owned = || Ok(real.clone());
-        let writing: [(&str, &[&str]); 11] = [
+        // `tickstore-write` (R4-08) never asks for this root: it writes the
+        // tick store under its own ROOT argument, and its own refusal of a
+        // linked folder there is `pull::tickstore_write`'s `linked_folder`
+        // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
+        // It is listed so the table stays every writer, once.
+        let writing: [(&str, &[&str]); 12] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -375,6 +390,7 @@ mod tests {
             ("gdfl-rekey", &["--apply"]),
             ("scrub-blocks", &[]),
             ("srt-build", &[]),
+            ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
             ("zerodha-gaps", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),

@@ -198,7 +198,7 @@ export function heldSpan(rows) {
  *
  * @param {any} feed a `/feeds.json` row, or nothing
  * @param {boolean} oow
- * @returns {{from: string, to: string, kind: 'archive' | 'window' | 'none', label: string}}
+ * @returns {{from: string, to: string, kind: 'archive' | 'window' | 'refused' | 'none', label: string}}
  */
 export function eraOf(feed, oow = false) {
   const archive = feed?.archive;
@@ -210,6 +210,12 @@ export function eraOf(feed, oow = false) {
     return oow
       ? { from: '', to: '', kind: 'window', label: 'every held month, including those outside your window' }
       : { from: window.from, to: window.to, kind: 'window', label: 'your window' };
+  }
+  // A WINDOW THE SERVER REFUSED (`why`, no days: the settings could not be
+  // read, or the window in force is inverted) is SAID, never read as a feed
+  // with no era (R3-05 repair 3, the second agent's follow-up).
+  if (window && typeof window.why === 'string') {
+    return { from: '', to: '', kind: 'refused', label: `the server refused your window: ${window.why}` };
   }
   return { from: '', to: '', kind: 'none', label: '' };
 }

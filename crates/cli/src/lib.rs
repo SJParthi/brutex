@@ -80,6 +80,8 @@ mod gdfl_rekey;
 /// `cli scrub-blocks`: every block of every census month read whole and checked,
 /// with a durable ledger of what would not verify (DB-B74, WP-81).
 mod scrub_blocks;
+/// `cli watchdog` and `cli launch-agent`: the app's supervisor and watchdog (R3-32, D-4996).
+pub mod watchdog_command;
 pub use scrub_blocks::{
     CursorLine as ScrubCursorLine, TOTAL_NAMES as SCRUB_TOTAL_NAMES,
     cursor_line as scrub_cursor_line, cursor_name as scrub_cursor_name,
@@ -95,6 +97,9 @@ pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 mod series_identity;
 /// `cli srt-build`: the `.srt` sort index for named months of a series (D-3349).
 mod srt_builder;
+/// `cli tickstore-write`: one GDFL day zip into the tick store as a verified
+/// `BRTXTS01` day file, by the function the chain runs (E2E-02, R4-08).
+mod tickstore_command;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuilder;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
@@ -500,6 +505,20 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    read. --ack acknowledges one; --older lists the
                                    older ones; --replace-damaged keeps a damaged
                                    queue and starts a new one; --file lists a kept one.
+       cli watchdog URL --state-dir DIR [--store DIR] [--timeout-ms N] [--notify open|record]
+                                   ask URL (the app's /health, http:// on an IP
+                                   or localhost) once, within 5 s; two probes in
+                                   a row with no answer are an outage, with one
+                                   notice page handed to `open`, and the first
+                                   answer after it one more. Each change is a
+                                   line of DIR/watchdog.log. Runs without a store
+                                   root (R3-32, docs/36 section 9).
+       cli launch-agent app API ADDR --store DIR --log-dir DIR [--env KEY=VALUE ...] [--throttle-seconds N] [--max-files N] [--keep-awake]
+       cli launch-agent watchdog CLI URL --state-dir DIR [--store DIR] [--interval-seconds N]
+                                   print the launchd agent that keeps the app
+                                   alive while the store root exists, or the one
+                                   that runs `cli watchdog` every N seconds (60).
+                                   Writes and installs nothing (docs/36 section 9).
        cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]
                                    GDFL one-second bars (indices, stocks, option
                                    contracts) into the store, from the tick store
@@ -562,6 +581,16 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    holds is refused. `*` walks every contract
                                    under the symbol. --dry-run writes nothing
                                    (D-3349).
+       cli tickstore-write ZIP ROOT [--run-id ID] [--workers N]
+                                   write one GDFL day zip into the tick store
+                                   under ROOT (an existing directory, never
+                                   made) as a BRTXTS01 day file where the
+                                   readers open it, every entry read back and
+                                   compared with the zip before it is held; a
+                                   held day is verified and left, a leftover
+                                   temporary is refused and left, nothing is
+                                   removed; one line of ROOT/tickstore-write.log
+                                   each run, naming the commit (E2E-02).
        cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
                                    build the .tix time index of every named
                                    month of one spot series (FROM, TO are
@@ -2708,6 +2737,12 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
         ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
+        ["watchdog", arguments @ ..] if !arguments.is_empty() => {
+            watchdog_command::command(arguments, out)
+        }
+        ["launch-agent", arguments @ ..] if !arguments.is_empty() => {
+            watchdog_command::launch_agent(arguments, out)
+        }
         ["gdfl-import", arguments @ ..] if arguments.len() >= 4 => {
             gdfl_import_command::command(arguments, out)
         }
@@ -2716,6 +2751,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["census-recount", arguments @ ..] if !arguments.is_empty() => {
             census_recount::recount(arguments, out)
+        }
+        ["tickstore-write", arguments @ ..] if !arguments.is_empty() => {
+            tickstore_command::command(arguments, out)
         }
         ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
             tix_rebuilder::command(arguments, out)
@@ -2806,7 +2844,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 48] = [
+const COMMANDS: [&str; 51] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2832,6 +2870,7 @@ const COMMANDS: [&str; 48] = [
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
+    "launch-agent",
     "ledger-all",
     "ledger-v6",
     "ledger-v6-replay",
@@ -2850,9 +2889,11 @@ const COMMANDS: [&str; 48] = [
     "sweep-all",
     "sweep-audited-stored",
     "sweep-stored",
+    "tickstore-write",
     "tix-rebuild",
     "top",
     "verify",
+    "watchdog",
     "zerodha-gaps",
     "zerodha-repair",
 ];

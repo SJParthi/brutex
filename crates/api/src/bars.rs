@@ -1555,6 +1555,11 @@ pub fn window_cancellable(
             cancel,
         )?);
     }
+    // A KEY THAT NAMES NO SERIES IS REFUSED BY NAME (AG-03, app-2): a plan
+    // that holds no month at all at this feed and rung has no life to be
+    // outside of, and counted as `months_outside_life` it read exactly like a
+    // held series asked for a month it never traded.
+    refuse_unknown_series(query, &plans, &out.superseded)?;
     let unplanned = tally(&mut out, &mut plans);
     note_holes(&plans);
     if let Some(at) = query.at {
@@ -1719,6 +1724,132 @@ fn root_is_a_directory(store_root: &std::path::Path) -> Result<(), String> {
             "store root {} is not a directory",
             store_root.display()
         ))
+    }
+}
+
+/// Keys an `unknown_series` refusal names in full; past it the rest are
+/// counted, so a window of [`MAX_SERIES`] keys that all name nothing is
+/// refused in a bounded sentence (AG-03).
+pub const MAX_NAMED_UNKNOWN: usize = 16;
+
+/// The `unknown_series` refusal, when any asked key names no series: its plan
+/// holds no month at all at this feed and rung (`held_all` is empty — the
+/// rung directory does not exist, or exists and holds no `.bin`).
+///
+/// # A held series outside its life is NOT this (D-3326, DB-065)
+///
+/// A series holding at least one month at this rung still answers a month
+/// before its first file or after its last as `months_outside_life`, and an
+/// index's missing month inside its feed's span as a hole (DB-B47): both are
+/// absences of a series that exists. A key with no month at all has no life
+/// to be outside of; answered `200` with `months_outside_life`, an unknown
+/// symbol, a pre-rename name (`ZOMATO`), a BSE key, a rung the feed never
+/// stores (gdfl `1min`) or a nonsense segment read exactly like a real series
+/// asked outside its range, and nothing told them apart (app-2).
+///
+/// # Every one is named, and none is dropped
+///
+/// A window with any such key is refused whole — never a partial answer that
+/// serves the held keys and hides the rest — naming up to
+/// [`MAX_NAMED_UNKNOWN`] of them and counting the others. Each named key
+/// carries its successor when one is known ([`successor_of`]).
+///
+/// # Cost
+///
+/// No probe of its own: `held_all` is the plan's memoised directory listing
+/// (one `stat` per key, already paid by [`SeriesPlan::build`]). One pass over
+/// the plans, bounded by [`MAX_SERIES`], with one comparison a plan against
+/// the re-key's next row; the alias lookup runs only for the named keys.
+///
+/// # Errors
+///
+/// The refusal sentence, opening with `unknown_series`.
+fn refuse_unknown_series(
+    query: &WindowQuery,
+    plans: &[SeriesPlan],
+    superseded: &[SupersededBy],
+) -> Result<(), String> {
+    let feed = query.vendor.as_str();
+    let rung = query.timeframe.as_str();
+    let mut count = 0_usize;
+    let mut named = String::new();
+    // THE RE-KEY'S ROWS ARE IN THE PLANS' ORDER, at most one a plan
+    // (`rekey_statuses` walks the asked keys in turn), so each plan's row is
+    // the next one or there is none: one comparison a plan, never a search.
+    let mut lineage = superseded.iter().peekable();
+    for plan in plans {
+        let moved_to = lineage
+            .next_if(|one| one.key == plan.key.text())
+            .map(|one| one.by.as_str());
+        if !plan.held_all.is_empty() {
+            continue;
+        }
+        count += 1;
+        if count > MAX_NAMED_UNKNOWN {
+            continue;
+        }
+        if count > 1 {
+            named.push_str(", ");
+        }
+        named.push_str(&plan.key.text());
+        if let Some(successor) = successor_of(query.vendor, &plan.key, moved_to) {
+            let _infallible = write!(named, " ({successor})");
+        }
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    if plans.len() == 1 {
+        return Err(format!(
+            "unknown_series: {named} names no series {feed} holds at {rung}"
+        ));
+    }
+    let verb = if count == 1 { "names" } else { "name" };
+    let rest = count.saturating_sub(MAX_NAMED_UNKNOWN);
+    let more = if rest == 0 {
+        String::new()
+    } else {
+        format!(", and {rest} more")
+    };
+    Err(format!(
+        "unknown_series: {count} of {} keys {verb} no series {feed} holds at {rung}: \
+         {named}{more}",
+        plans.len()
+    ))
+}
+
+/// What an unknown key is known as instead, when anything says so: the key
+/// the GDFL re-key's lineage moved it to (`moved_to`, said `now <key>`,
+/// D-3331), else — for a
+/// series' own price (no contract) on an NSE key of a feed whose store keys
+/// the alias table records — the key that table files the symbol's price
+/// series under (D-3332, the one table `/spot.json` resolves through):
+/// `now NSE-CASH-ETERNAL` for a renamed share, `filed as
+/// NSE-INDEX-NIFTYFINSERVICE` for an index asked by its F&O symbol.
+///
+/// No successor is guessed. A contract key gets only the lineage's: the
+/// alias table answers where a symbol's OWN price series lives, not where its
+/// options are filed. A symbol the table has no row for (`Via::Own`) gets
+/// none, and so does a BSE key or a feed outside
+/// [`brutex_core::alias::KEYED_FEEDS`]. The successor is the table's name for
+/// it; whether that key holds months at this rung is not probed.
+fn successor_of(vendor: Vendor, key: &SeriesKey, moved_to: Option<&str>) -> Option<String> {
+    use brutex_core::alias::Via;
+    if let Some(by) = moved_to {
+        return Some(format!("now {by}"));
+    }
+    if key.contract.is_some() || key.exchange != "NSE" || !brutex_core::alias::keys_feed(vendor) {
+        return None;
+    }
+    let underlying = brutex_core::alias::option_underlying(&key.symbol);
+    let filed = format!("NSE-{}-{}", underlying.segment.as_str(), underlying.key);
+    if filed == key.text() {
+        return None;
+    }
+    match underlying.via {
+        Via::Renamed(_) => Some(format!("now {filed}")),
+        Via::Index(_) => Some(format!("filed as {filed}")),
+        Via::Own => None,
     }
 }
 
@@ -3097,22 +3228,27 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A window over a store that holds nothing at all answers empty, with the
-    /// extremes still present when asked for.
+    /// A held series asked over months it has no file for answers empty,
+    /// counting them, with the extremes still present when asked for. A store
+    /// that holds no month of the series at all is REFUSED by name instead
+    /// (D-4966, AG-03, app-2): a key with no month has no life to be outside
+    /// of, and answered empty it read exactly like this held one.
     #[test]
     fn a_window_over_nothing_is_empty_and_says_how_many_months_were_absent() {
         let root = scratch("empty");
-        let got = legacy(
-            &root,
+        let (from, to) = (
             YearMonth::new(2026, 1).expect("m"),
             YearMonth::new(2026, 3).expect("m"),
-            SortKey::Ts,
-            false,
-            0,
-            50,
-            true,
-        )
-        .expect("an empty store is not an error");
+        );
+        let why = legacy(&root, from, to, SortKey::Ts, false, 0, 50, true)
+            .expect_err("a series the store holds no month of is refused");
+        assert_eq!(
+            why,
+            format!("unknown_series: NSE-{SEGMENT}-{SYMBOL} names no series dhan holds at 1min")
+        );
+        write_month(&root, YearMonth::new(2025, 12).expect("m"), 5, 1_000);
+        let got = legacy(&root, from, to, SortKey::Ts, false, 0, 50, true)
+            .expect("a held series over months it has no file for is not an error");
         assert_eq!(got.total, 0);
         assert_eq!(got.months_read, 0);
         assert_eq!(got.months_missing, 3);
@@ -3985,3 +4121,8 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+// A window key that names no series is refused by name (AG-03, app-2).
+#[cfg(test)]
+#[path = "bars_unknown_series_tests.rs"]
+mod unknown_series_tests;

@@ -575,3 +575,41 @@ fn a_held_answer_widened_to_the_record_reads_the_records_codes_beyond_it() {
     assert_eq!(not_widened("not json"), None);
     assert_eq!(not_widened(""), None);
 }
+
+/// **THE DERIVATIVES ROW: 375 / 22,500 BEFORE 2026-08-03, 385 / 23,100 FROM
+/// IT** (SC-CLOSE-16).
+///
+/// Before: `/calendar.json` served `owed` and `minuteOwed` with `regular` and
+/// `casEligible` only, so a page sizing an option's or future's day against
+/// the record had 375 for every day — ten minutes short from the day the
+/// derivatives close moved to 15:40 (NSE/FAOP/74467).
+#[test]
+fn the_derivatives_row_owes_385_minutes_from_the_1540_close_and_375_before() {
+    for (rung, before, after) in [
+        (Timeframe::MINUTE_1, 375, 385),
+        (Timeframe::SECOND_1, 22_500, 23_100),
+    ] {
+        let table = owed_table(rung);
+        let rows = table["derivatives"]
+            .as_array()
+            .expect("a derivatives array");
+        assert_eq!(rows.len(), 2, "{table}");
+        assert_eq!(rows[0]["from"], iso(pull::calendar::SOURCED_FIRST_DAY));
+        assert_eq!(rows[0]["to"], "2026-08-02", "{table}");
+        assert_eq!(rows[0]["regular"], before, "{table}");
+        assert_eq!(rows[0]["close"], "15:30");
+        assert_eq!(rows[1]["from"], "2026-08-03", "{table}");
+        assert_eq!(rows[1]["to"], iso(pull::calendar::SOURCED_LAST_DAY));
+        assert_eq!(rows[1]["regular"], after, "{table}");
+        assert_eq!(rows[1]["close"], "15:40");
+        assert!(
+            rows[1]["source"]
+                .as_str()
+                .is_some_and(|s| s.contains("NSE/FAOP/74467")),
+            "{table}"
+        );
+        assert_eq!(rows[1]["tradeDriven"], rung == Timeframe::SECOND_1);
+        // THE INDEX AND CASH ROWS ARE UNCHANGED.
+        assert_eq!(table["regular"], before, "{table}");
+    }
+}
