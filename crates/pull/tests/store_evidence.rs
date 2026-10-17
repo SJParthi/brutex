@@ -137,12 +137,108 @@ fn replay(root: &Path, segment: &str, symbol: &str, month: YearMonth) -> Replay 
         &scratch,
         plan,
     );
-    let ledger = fs::read_to_string(scratch.join("audit/zerodha.gaps")).unwrap_or_default();
+    let ledger = gap_ledger(&scratch);
     Replay {
         scratch,
         done,
         ledger,
     }
+}
+
+/// The gap ledger a replay wrote under `scratch`, refused by name when it is
+/// absent or unreadable. It was read with `unwrap_or_default`, so a replay
+/// that wrote no ledger read as one that named no gap, and every check below
+/// it passed (AF-07, law-7; `CLAUDE.md` section 4: no fallback that hides a
+/// failure).
+fn gap_ledger(scratch: &Path) -> String {
+    let path = scratch.join("audit").join("zerodha.gaps");
+    fs::read_to_string(&path).unwrap_or_else(|why| {
+        panic!(
+            "the replay wrote no readable gap ledger at {}: {why}",
+            path.display()
+        )
+    })
+}
+
+/// A ledger that is not there is a failure naming its file, never an empty
+/// ledger (AF-07, law-7). Runs without a store: an empty scratch directory is
+/// a replay that wrote nothing.
+#[test]
+#[should_panic(expected = "zerodha.gaps")]
+fn a_missing_gap_ledger_fails_naming_its_file() {
+    let scratch =
+        std::env::temp_dir().join(format!("brutex-EVIDENCE-NO-LEDGER-{}", std::process::id()));
+    fs::create_dir_all(&scratch).unwrap();
+    // The empty directory goes when the panic unwinds; nothing else is in it.
+    let _gone = Emptied(scratch.clone());
+    let _never = gap_ledger(&scratch);
+}
+
+/// Removes an empty directory when dropped, a panic's unwinding included.
+struct Emptied(PathBuf);
+
+impl Drop for Emptied {
+    fn drop(&mut self) {
+        let _best_effort = fs::remove_dir(&self.0);
+    }
+}
+
+/// What the gap ledger owes one day of a replayed month.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// The day's stored minutes fall short of the session it owes: one line.
+    Short { owed: u16, stored: usize },
+    /// A traded session whose length no record states: the replay withholds
+    /// the day and writes one `why=withheld_unmeasured_session` line for it.
+    Unsized { stored: usize },
+}
+
+/// The days of `month` the gap ledger must name, judged by the calendar the
+/// replay is planned with: `pull::calendar::Runtime::default()`, with a
+/// special session's recorded window in place of an unsized answer
+/// (`pull::session::with_recorded_window`, D-3319), as `request_minutes`
+/// plans each day. A day that is short of what it owes is `Short`; a day of a
+/// traded session no record sizes is `Unsized`; a day the calendar cannot
+/// attest at all (outside the record) owes no line and is not listed. Until
+/// AF-07's repair this read the calendar without the recorded window, so a
+/// Muhurat of 2020 to 2024 was skipped and its own gap line never asserted.
+fn owed_days(month: YearMonth, minutes: &[store::format::Bar]) -> Vec<(Day, Owed)> {
+    let first = Day::new(month.year(), month.month(), 1).unwrap();
+    let calendar = pull::calendar::Runtime::default();
+    let mut out = Vec::new();
+    let mut day = first;
+    while day.month() == first.month() {
+        let at = i64::from(day.days_from_epoch());
+        let stored = on_day(day, minutes);
+        match pull::session::with_recorded_window(at, calendar.kind_of(at)) {
+            pull::calendar::DayKind::Open(session) if stored < usize::from(session.bars()) => {
+                out.push((
+                    day,
+                    Owed::Short {
+                        owed: session.bars(),
+                        stored,
+                    },
+                ));
+            }
+            pull::calendar::DayKind::OpenLengthUnmeasured => {
+                out.push((day, Owed::Unsized { stored }));
+            }
+            pull::calendar::DayKind::Open(_)
+            | pull::calendar::DayKind::Closed
+            | pull::calendar::DayKind::Unmeasured => {}
+        }
+        day = day.succ().unwrap();
+    }
+    out
+}
+
+/// The ledger's `gap` lines naming `key` on `day`.
+fn gap_lines<'a>(ledger: &'a str, key: &str, day: Day) -> Vec<&'a str> {
+    let prefix = format!("gap {key} {day} ");
+    ledger
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
 }
 
 fn derive_line<'a>(ledger: &'a str, rung: &str) -> &'a str {
@@ -222,29 +318,93 @@ fn nifty_2026_09_derives_every_session() {
     assert!(derive_line(&replay.ledger, "5min").contains(" days=21 "));
 }
 
-/// DB-012 / DB-G33 / DB-G37: what a stored month around a Muhurat is
-/// missing, as the gap ledger names it day by day.
+/// DB-012 / DB-G33 / DB-G37: in a stored month around a Muhurat, every day
+/// the calendar and the stored minutes say the ledger owes ([`owed_days`]: a
+/// day short of its session, the Muhurat's recorded window included, and a
+/// traded session no record sizes) is named by exactly one `gap` line of the
+/// ledger the replay writes, and no other day is named at all. The ledger
+/// must exist: a replay that wrote none fails naming the file
+/// ([`gap_ledger`]). It printed the lines and asserted nothing until AF-07
+/// (law-7). Prints counts and the ledger's own lines, never a price.
 #[test]
 #[ignore = "reads the store named by BRUTEX_EVIDENCE_STORE"]
 fn the_gap_ledger_names_each_short_day_of_a_stored_month() {
     let root = store_root();
+    let calendar = pull::calendar::Runtime::default();
+    let mut checked = 0_usize;
+    let mut special = Vec::new();
     for (symbol, year, month) in [("NIFTY", 2020, 11), ("NIFTY", 2024, 11), ("NIFTY", 2021, 2)] {
         let ym = YearMonth::new(year, month).unwrap();
+        let minutes = read_month(&root, "INDEX", symbol, Timeframe::MINUTE_1, ym);
         let replay = replay(&root, "INDEX", symbol, ym);
-        let gaps: Vec<&str> = replay
+        let key = format!("NSE-INDEX-{symbol}");
+        let owed = owed_days(ym, &minutes);
+        let gaps = replay
             .ledger
             .lines()
-            .filter(|line| line.starts_with("gap "))
-            .collect();
+            .filter(|line| line.starts_with(&format!("gap {key} ")))
+            .count();
         eprintln!(
-            "{symbol} {ym}: {} gap line(s), {} receipt failure(s)",
-            gaps.len(),
+            "{symbol} {ym}: {} owed day(s), {gaps} gap line(s), {} receipt failure(s)",
+            owed.len(),
             replay.done.failures.len()
         );
-        for line in &gaps {
-            eprintln!("  {line}");
+        for (day, what) in &owed {
+            let named = gap_lines(&replay.ledger, &key, *day);
+            eprintln!("  {day} {what:?}: {named:?}");
+            assert_eq!(
+                named.len(),
+                1,
+                "{symbol} {day} ({what:?}) is named by the gap ledger {} time(s), not once",
+                named.len()
+            );
+            if let Owed::Unsized { .. } = what {
+                assert!(
+                    named[0].contains(" why=withheld_unmeasured_session "),
+                    "{symbol} {day} is a session no record sizes, and its line says otherwise: {}",
+                    named[0]
+                );
+            }
+            let at = i64::from(day.days_from_epoch());
+            let regular = matches!(
+                calendar.kind_of(at),
+                pull::calendar::DayKind::Open(session)
+                    if session == pull::calendar::Session::full()
+            );
+            if !regular {
+                special.push(*day);
+            }
+            checked += 1;
+        }
+        // NO OTHER DAY: a line naming a day the ledger does not owe is as
+        // wrong as a missing one.
+        let mut day = Day::new(year, month, 1).unwrap();
+        while day.month() == month {
+            let named = gap_lines(&replay.ledger, &key, day);
+            let expected = usize::from(owed.iter().any(|(owed_day, _)| *owed_day == day));
+            assert_eq!(
+                named.len(),
+                expected,
+                "{symbol} {day} is named by {} gap line(s); the calendar and the stored minutes \
+                 owe {expected}: {named:?}",
+                named.len()
+            );
+            day = day.succ().unwrap();
         }
         eprintln!("  {}", derive_line(&replay.ledger, "5min"));
+    }
+    // NOT VACUOUS: the three months were chosen because they hold short days,
+    // and the first two because each holds a Muhurat, whose own line is
+    // checked above (it was skipped before AF-07's repair).
+    eprintln!("{checked} day(s) checked; special sessions among them: {special:?}");
+    assert!(checked > 0, "no owed day in three months chosen for theirs");
+    for year in [2020, 2024] {
+        assert!(
+            special
+                .iter()
+                .any(|day| day.year() == year && day.month() == 11),
+            "no special session of {year}-11 was among the checked days: {special:?}"
+        );
     }
 }
 
