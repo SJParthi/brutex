@@ -800,9 +800,15 @@ test('the harness\'s command line is read and every misuse is named', () => {
     [[], /--base must be an origin/],
     [['--base', 'http://h:1', '--n', 'x'], /--n must be a whole number/],
     [['--base', 'http://h:1', '--pages', 'db'], /--pages is a comma list of paths/],
-    [['--base', 'http://h:1', '--idle-tabs', '65'], /--idle-tabs is a comma list/]
+    [['--base', 'http://h:1', '--pages', '/db,gaps'], /--pages is a comma list of paths/],
+    [['--base', 'http://h:1', '--idle-tabs', '65'], /--idle-tabs is a comma list/],
+    [['--base', 'http://h:1', '--idle-tabs', '1,0'], /--idle-tabs is a comma list/],
+    [['--base', 'http://h:1', '--idle-tabs', '1.5'], /--idle-tabs is a comma list/]
   ];
   for (const [argv, why] of bad) assert.throws(() => harness.parseArgs(argv), why);
+  assert.deepEqual(harness.parseArgs(['--base', 'http://h:1', '--idle-tabs', '64']).idleTabs, [64], '64 idle tabs is the most allowed');
+  assert.equal(harness.parseArgs(['--base', 'http://h:1']).noSandbox, false, 'the sandbox stays on unless asked');
+  assert.equal(harness.parseArgs(['--base', 'http://h:1', '--no-sandbox']).noSandbox, true);
   assert.ok(harness.INTERACTIONS.some((i) => i.name.includes('20,000-row')), 'the sort edge is LOCAL_SORT_BUDGET');
   assert.deepEqual(harness.INTERACTIONS.map((i) => i.name.split(' at ')[0]), ['picker click', 'feed switch', 'page turn of option cells', 'sort']);
 });
@@ -823,6 +829,8 @@ test('a page is judged against the four targets, each miss by name and figure', 
     '/db warm: 1 loads still had a request in flight after 30 s'
   ]);
   assert.match(harness.judge('/x', 'cold', [load({ fcp: null })]).row, /\| not painted \|.*\| FAILS \|$/);
+  assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 300 })]).failures, ['/x cold: 1 of 1 loads were not the page (HTTP 300)'], 'a redirect is not the page');
+  assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 299, longest: 50, fcp: 299.9 })]).failures, [], 'a pause of exactly 50 ms is no pause over 50 ms; 299 is 2xx');
 });
 
 test('an idle tab may ask only for the header-only up check; anything else is listed', () => {
