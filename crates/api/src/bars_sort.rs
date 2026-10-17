@@ -4606,12 +4606,12 @@ mod cloud_mutant_tests {
     /// **A PAGE IS FOUND INSIDE THE ONE BLOCK ITS FENCES BOUND: A DAMAGED
     /// BLOCK ELSEWHERE IN THE RUN IS NEVER READ.** One index run of 1,200
     /// rows, five blocks of 256 entries a column; the close column's third
-    /// block is damaged. The first page lies in the first block, so it is
-    /// served from the index whole, with no row read, no fault and the index
-    /// never set aside. Kills `< with >` and `> with <` in
-    /// `RunArray::bounds`, which the 16 Oct pass called cost-only: each
-    /// widened the search to the whole run, and the cost is a block read the
-    /// fences had ruled out — here, the damaged one.
+    /// block is damaged. The first page each way lies in the first or the
+    /// last block, so it is served from the index whole, with no row read, no
+    /// fault and the index never set aside. Aimed at `< with >` and `> with <`
+    /// in `RunArray::bounds` and `- with +` in `count_vkey_le`'s descending
+    /// upper bound, which the 16 Oct pass called cost-only: each makes the
+    /// search read blocks the fences had ruled out — here, the damaged one.
     #[test]
     fn a_damaged_block_the_fences_rule_out_is_never_read() {
         let root = scratch("fence-bounded");
@@ -4651,24 +4651,31 @@ mod cloud_mutant_tests {
         byte[0] ^= 0x04;
         std::os::unix::fs::FileExt::write_all_at(&file, &byte, at).expect("a byte");
         drop(file);
-        let got =
-            window(&root, &query(index(), month(1), month(1), SortKey::Close)).expect("answers");
-        let mut want: Vec<(i64, i64)> = rows.iter().map(|bar| (bar.close, bar.ts_micros)).collect();
-        want.sort_unstable();
-        want.truncate(37);
-        let served: Vec<(i64, i64)> = got
-            .bars
-            .iter()
-            .map(|row| (row.bar.close, row.bar.ts_micros))
-            .collect();
-        assert_eq!(served, want);
-        assert!(got.faults.is_empty(), "{:?}", got.faults);
-        let report = got.sort_index.expect("a value sort says what it used");
-        assert_eq!(
-            (report.indexed_rows, report.scanned_rows),
-            (1_200, 0),
-            "{report:?}"
-        );
+        for desc in [false, true] {
+            let key = |close: i64| if desc { -close } else { close };
+            let mut asked = query(index(), month(1), month(1), SortKey::Close);
+            asked.desc = desc;
+            let got = window(&root, &asked).expect("answers");
+            let mut want: Vec<(i64, i64)> = rows
+                .iter()
+                .map(|bar| (key(bar.close), bar.ts_micros))
+                .collect();
+            want.sort_unstable();
+            want.truncate(37);
+            let served: Vec<(i64, i64)> = got
+                .bars
+                .iter()
+                .map(|row| (key(row.bar.close), row.bar.ts_micros))
+                .collect();
+            assert_eq!(served, want, "desc {desc}");
+            assert!(got.faults.is_empty(), "desc {desc}: {:?}", got.faults);
+            let report = got.sort_index.expect("a value sort says what it used");
+            assert_eq!(
+                (report.indexed_rows, report.scanned_rows),
+                (1_200, 0),
+                "desc {desc}: {report:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
