@@ -1339,6 +1339,19 @@ fn a_silence_zerodha_shares_is_flagged_and_the_walk_waits_for_the_next_second() 
         unfilled.status,
         SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
     );
+    // A Zerodha minute with no volume, or one that is not evaluable, did not
+    // trade: the silence over it is still only flagged.
+    for minute in [
+        quiet(at(10, 12, 0), P, 0),
+        corrupt(at(10, 12, 0), P + 500, P + 10, P - 10, P, 500),
+    ] {
+        let mut day = hole_day(false);
+        day.zerodha.push(minute);
+        day.zerodha.sort_by_key(|m| m.ts_micros);
+        let out = second_slot(&day, long_plan(at(10, 9, 58)), STOP_ONLY);
+        assert_eq!(out.status, SlotStatus::Priced);
+        assert!(has(&out, TradeFlag::SilenceInTrade));
+    }
 }
 
 #[test]
