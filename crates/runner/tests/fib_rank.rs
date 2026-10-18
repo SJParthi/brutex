@@ -556,6 +556,24 @@ fn the_work_per_minute_is_the_same_at_every_minute_of_a_day() {
     assert!(spread <= 128 * 8, "{works:?}");
 }
 
+/// The work R-F-01 reads is exact: the pool, then five radix passes (34 key
+/// bits in bytes), each sweeping the pool three times and the buckets twice;
+/// a tie run adds its comparisons on top.
+#[test]
+fn the_work_of_one_minute_is_counted_exactly() {
+    let buckets = 1_u64 << vocab::fib_cube::RANK_RADIX_DIGIT_BITS;
+    let base = |pool: u64| pool + 5 * (3 * pool + 2 * buckets);
+    let mut rank = day(&[Some(10_000), Some(10_000), Some(10_000)]);
+    let before = rank.work();
+    rank.minute(OPEN, &[Some(10_100), Some(9_900), Some(10_000)])
+        .unwrap();
+    assert_eq!(rank.work() - before, base(3), "no tie run: no comparison");
+    let before = rank.work();
+    rank.minute(OPEN + 60, &[Some(10_100), Some(10_100), Some(10_000)])
+        .unwrap();
+    assert!(rank.work() - before > base(3), "a tie run of two compares");
+}
+
 #[test]
 fn every_misuse_is_refused_by_name_and_changes_nothing() {
     assert_eq!(MoverRank::new(0), Err(RankRefusal::PoolEmpty));

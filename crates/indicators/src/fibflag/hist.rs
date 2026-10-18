@@ -1116,8 +1116,12 @@ impl Reader<'_> {
         loop {
             let [byte] = self.take::<1>()?;
             let low = u64::from(byte) & GROUP_MASK;
-            let fits = shift < u64::from(u64::BITS)
-                && low.checked_shl(u32_of(index(shift))).unwrap_or(0) >> shift == low;
+            // A group fits when it shifts into place and back unchanged; a
+            // shift past the top bit does not shift at all.
+            let fits = u32::try_from(shift)
+                .ok()
+                .and_then(|at| low.checked_shl(at).map(|placed| placed >> at))
+                == Some(low);
             if !fits {
                 return Err(invalid("varint_too_long"));
             }
