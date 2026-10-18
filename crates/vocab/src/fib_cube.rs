@@ -1963,7 +1963,7 @@ pub enum OrderFlowReading {
 
 impl OrderFlowReading {
     /// The reading of one window call for a trade of `search`'s direction
-    /// (FM-F004). O(1): a few comparisons and one signed subtraction in
+    /// (FM-F004). No loop: a few comparisons and one signed subtraction in
     /// `i128`. A pure zero (classified volume, delta zero) is `balanced` and
     /// never pooled with a missing record.
     #[must_use]

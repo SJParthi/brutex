@@ -19481,3 +19481,35 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
 | L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
+
+### Gate 11 — FIB-1, declared (18 October 2026)
+
+~~~~text
+FIB-1 (D-6300..D-6318) met gate 11 in five files. Each occurrence was read
+before it was counted; `file old -> new`, the occurrences, and the bound.
+
+RULE 1 (`ALLOW_SEARCH`) -- vocab/src/fib_cube.rs 0 -> 5: R1 prescribes the
+  cut lookup `CutList::bucket` as one binary search over at most 253
+  generated cuts, at most eight exact comparisons in u128; `rank_bucket`
+  bisects at most 253 inner rank edges; `Generation::cuts` finds a scope's
+  list among one generation's lists (at most 13 measured rows x 118 widths
+  x 4 base-kind scopes); `check_cut_lists` asks whether a list's width is
+  one of at most 118 widths, once per version; `GenerationChain::at`
+  bisects a direction's versions, at most one born per walk-forward step.
+RULE 4 (`ALLOW_SORT`) -- runner/src/fib/identity.rs 0 -> 1:
+  `DataTree::of_unsorted` sorts one run's leaf listing once, before any
+  computation (one leaf per stock-month and per authority file), so the
+  root does not depend on the order a directory walk or workers listed
+  them (FM-F003).
+RULE 6 (`ALLOW_SCAN`) -- vocab/src/fib_cube.rs 0 -> 2: `Generation::new`
+  checks the entry variants (at most 254) and the other packages' named
+  lists once per version. runner/src/fib/mod.rs 0 -> 1:
+  `SchemaLedger::position` reads the run-time schema digests, one per
+  generation version of a run. cli/src/fib/mod.rs 0 -> 1: `--direction`
+  among one invocation's words.
+RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 4 -> 5: `fib`'s
+  `--out-store` among one invocation's words, beside the verbs' existing
+  `--dry-run` and `--apply`.
+`cli/src/fib/wire.rs` met rule 7 once and was changed instead: the
+  new-work authority words are a `matches!` over five literals.
+~~~~

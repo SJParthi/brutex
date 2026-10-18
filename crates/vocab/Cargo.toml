@@ -46,15 +46,17 @@ workspace = true
 # [dev-dependencies] tables stay empty, which is what the graph gates read. A
 # consumer taking this crate by git URL does not build benches.
 # ---------------------------------------------------------------------------
-[[bench]]
-name    = "ratio"
-harness = false
-test    = false
-
 # The FIB bench target (FIB-1, D-6318): the cell code and the containment test
 # of `fib_cube` through the shared FIB harness. Not a dependency: the tables
 # above stay empty.
+# Declared BEFORE `ratio`: gate 14 reads the last of two adjacent [[bench]]
+# tables (`bench_decls` in .github/gates_bounds.rs), and `ratio` is its row.
 [[bench]]
 name    = "fib_cube"
+harness = false
+test    = false
+
+[[bench]]
+name    = "ratio"
 harness = false
 test    = false

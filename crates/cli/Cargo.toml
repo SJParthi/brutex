@@ -152,15 +152,17 @@ workspace = true
 # the only entry point from which the sweep is reachable at all -- so the binary
 # an operator runs to produce a trading result had no measured bound of any kind.
 # ---------------------------------------------------------------------------
-[[bench]]
-name    = "ratio"
-harness = false
-test    = false
-
 # The FIB bench target (FIB-1, D-6318): the shared FIB harness and the row
 # modules under `benches/fib_rows/` its later packages fill. Not a
 # dependency; the [dependencies] table above is unchanged.
+# Declared BEFORE `ratio`: gate 14 reads the last of two adjacent [[bench]]
+# tables (`bench_decls` in .github/gates_bounds.rs), and `ratio` is its row.
 [[bench]]
 name    = "fib"
+harness = false
+test    = false
+
+[[bench]]
+name    = "ratio"
 harness = false
 test    = false

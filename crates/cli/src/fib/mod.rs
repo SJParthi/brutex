@@ -351,6 +351,10 @@ mod tests {
     #[test]
     fn every_new_work_authority_word_is_refused_until_built() {
         assert_eq!(wire::WORDS, ["cal1", "pit", "data1", "data2", "of1"]);
+        // The refusal's membership test is a match over the same five words.
+        for word in wire::WORDS {
+            assert!(wire::register(word).unwrap_err().contains("not built yet"));
+        }
         for word in wire::WORDS {
             assert_eq!(
                 wire::register(word),

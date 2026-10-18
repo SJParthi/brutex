@@ -1360,6 +1360,13 @@ const ALLOW_SEARCH: Allow = &[
     // 86,400). O(log n) per auction record of the asked day. Reason in
     // docs/06-limits.md, "Gate 11 — AG-04, declared after it merged".
     ("crates/api/src/sources.rs", 1),
+    // FIB-1, 18 Oct 2026: R1 prescribes the cut lookup as one binary search
+    // over at most 253 generated cuts (at most eight comparisons); the rank
+    // group over at most 253 inner edges, the cut list of a scope among a
+    // generation's lists, a width among at most 118 widths and a version
+    // among a chain's step-born versions are the same bounded bisection.
+    // Reason in docs/06-limits.md, "Gate 11 — FIB-1, declared".
+    ("crates/vocab/src/fib_cube.rs", 5),
 ];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
@@ -1624,6 +1631,10 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": one answer's cells, at most `CELLS_MOST` = 4,096.
     ("crates/api/src/census_rollup.rs", 1),
+    // FIB-1, 18 Oct 2026: `DataTree::of_unsorted` sorts one run's leaf
+    // listing once, before any computation (one leaf per stock-month and
+    // authority file); docs/06-limits.md, "Gate 11 — FIB-1, declared".
+    ("crates/runner/src/fib/identity.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1757,6 +1768,14 @@ const ALLOW_SCAN: Allow = &[
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
     // most `MAX_KIND_BYTES` = 64 bytes.
     ("crates/pull/src/rehearsal.rs", 1),
+    // FIB-1, 18 Oct 2026; docs/06-limits.md, "Gate 11 — FIB-1, declared":
+    // two checks of a generation's own lists, once per version (at most 254
+    // entry variants, the other packages' named lists); the schema ledger's
+    // digests, one per generation version; `--direction` among one
+    // invocation's words.
+    ("crates/vocab/src/fib_cube.rs", 2),
+    ("crates/runner/src/fib/mod.rs", 1),
+    ("crates/cli/src/fib/mod.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1865,7 +1884,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/logs.rs", 5),
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
-    ("crates/cli/src/store_write.rs", 4),
+    ("crates/cli/src/store_write.rs", 5), // 4 -> 5, FIB-1: `fib`'s `--out-store` among one invocation's words (docs/06-limits.md)
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),

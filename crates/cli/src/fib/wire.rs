@@ -20,7 +20,7 @@ pub(super) const WORDS: &[&str] = &["cal1", "pit", "data1", "data2", "of1"];
     )
 )]
 pub(super) fn register(word: &str) -> Result<(), String> {
-    if WORDS.contains(&word) {
+    if matches!(word, "cal1" | "pit" | "data1" | "data2" | "of1") {
         Err(format!(
             "authority `{word}` is not built yet: it arrives with FIB-10"
         ))

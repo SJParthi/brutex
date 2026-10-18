@@ -102,15 +102,17 @@ workspace = true
 # THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
 # dependencies and std. The [dependencies] table above is unchanged.
 # ---------------------------------------------------------------------------
-[[bench]]
-name    = "ratio"
-harness = false
-test    = false
-
 # The FIB bench target (FIB-1, D-6318): the shared harness in
 # `benches/fib_rows/harness.rs` and every FIB row this crate owns. Not a
 # dependency; the [dependencies] table above is unchanged.
+# Declared BEFORE `ratio`: gate 14 reads the last of two adjacent [[bench]]
+# tables (`bench_decls` in .github/gates_bounds.rs), and `ratio` is its row.
 [[bench]]
 name    = "fib"
+harness = false
+test    = false
+
+[[bench]]
+name    = "ratio"
 harness = false
 test    = false
