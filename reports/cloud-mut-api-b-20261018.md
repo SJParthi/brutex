@@ -130,6 +130,45 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
   (`p1b`). cargo-mutants 27.1.0 does not apply `-F` to "delete field"
   mutants, so nine of those were run again too; all nine were caught.
 
+## Phase 1 results
+
+| File | Mutants | Caught | Missed | Timeout | Unviable |
+|---|---:|---:|---:|---:|---:|
+| `autopilot.rs` | 371 | 305 | 7 (+1, see below) | 0 | 58 |
+| `pullrun.rs` | 466 | running | | | |
+| `server.rs` | 1,514 | queued | | | |
+
+`autopilot.rs` counts its first run with the 20 out-of-module kills replaced
+by their retried re-check (`p1b`). Of those 20, 13 were caught again by a
+test that calls the mutated code (the emit-site test, `hand_stop_tests`,
+`fno_boundary_tests`, `recovery_control`, and `pullrun`'s callers of
+`credential_fault_in_page`), and 6 now survive. One more,
+`autopilot.rs:2785:38`, was "caught" again only by
+`slow_readers_at_the_cap_are_served_whole_and_the_next_waits`, failing all
+three attempts under load. It is counted apart and re-run in phase 2 without
+that test. Every unviable mutant's log names a compile error: 55 `E0277`
+(the return type has no `Default`), one `E0080` (a constant shift that
+overflows) and two `||` inside a `let` chain.
+
+**Every `autopilot.rs` survivor is equivalent.** Each is a strict comparison
+turned non-strict where both arms give the same value on the tie:
+
+- `671:13` (`probe_secs`) and `1527:17` (`FeedState::backoff_secs`),
+  `>` → `>=`: when the shifted wait equals the ceiling, both arms return the
+  ceiling.
+- `863:25` and `864:22` (`month_span`), `941:32` (`next_window`'s
+  `resume < from`), `<` → `<=`: a max or a min of two `Day`s, which are the
+  same `Day` on a tie.
+- `2785:38` and `2802:27` (`frontier`), `>` → `>=` over `ordinal(..)`:
+  `ordinal` is `year·12 + month − 1`, injective, so a tie is the same month.
+- `3029:19` (`fly`), `waited > 0` → `>=`: with `waited == 0` the mutant calls
+  `nap(&site, 0)`, whose loop over `(1..=0)` is empty. It returns at its first
+  poll, sleeping and publishing nothing.
+
+The 17 Oct pass had found four of these (671:13, 863:25, 864:22, 1527:17) in
+its 214. Three of those four came back "caught" here before the retries,
+each by the flaky test.
+
 ## Left (in progress)
 
 - Phase 1: `autopilot.rs` (371), `pullrun.rs` (466), `server.rs` (1,509),
@@ -137,7 +176,10 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
   `pullrun.rs` and `server.rs` are running with retries.
 - New tests so far: `server_cloud_mutant_tests_e.rs` (5), for AH-02's
   `HeadDeadline` and `exchange_watch` arms that a coverage run of the merged
-  tree left unexecuted. `cargo clippy --workspace --all-targets -- -D
+  tree left unexecuted; `pullrun::cloud_tests_1018` (1), for the survivor
+  `pullrun.rs:996:24` (`unnamed > 0` → `>=` in `Interrupted::others_words`,
+  which would write "0 more run(s) … counted, not named"). That test fails on
+  the hand-applied mutant and passes on the original. `cargo clippy --workspace --all-targets -- -D
   warnings` is clean at `f9a7c020`.
 - Phase 2: every survivor and every mutant in code changed since phase 1's
   base (`audit.rs`'s `Journal::page` doc and `Journal::identity`, changed
