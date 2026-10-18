@@ -433,6 +433,12 @@ mod tests {
             (1_100, Some(0), 7)
         );
         assert!(!high.suspect_print);
+        let low = day.low().unwrap();
+        assert_eq!(
+            (low.price, low.index, low.close_ts_micros, low.suspect_print),
+            (1_000, Some(0), 7, false),
+            "the tied low stays the first candle's"
+        );
         day.step(&bar(2, 1_200, 990), 2, 9, true).unwrap();
         let (high, low) = (day.high().unwrap(), day.low().unwrap());
         assert_eq!((high.price, high.index), (1_200, Some(2)));
