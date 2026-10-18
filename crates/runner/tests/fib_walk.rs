@@ -3897,3 +3897,32 @@ fn the_event_walk_steps_a_long_silence_and_jumps_one_at_the_limit() {
     assert_eq!(slot.work(), 3);
     assert!(!has(&slot.outcome(), TradeFlag::SilenceInTrade));
 }
+
+/// A permille of exactly one unit is a whole: a give-back of all the open
+/// profit and a cap of each second's whole volume are valid, one more is not.
+#[test]
+fn a_whole_unit_of_permille_is_valid_and_one_more_is_refused() {
+    use runner::fib::walk::exits::{ExitSetRefusal, FillSet};
+    let give_back = |permille| ExitVariant {
+        trailing_take_profit: TrailingTakeProfit::GiveBack { permille },
+        ..ExitVariant::REFERENCE
+    };
+    assert_eq!(give_back(1_000).validate(), Ok(()));
+    assert_eq!(
+        give_back(1_001).validate(),
+        Err(ExitSetRefusal::InvalidValue {
+            component: "trailing_take_profit_give_back"
+        })
+    );
+    let cap = |permille| FillVariant {
+        window: EntryWindow::NextClose,
+        participation: Participation::Cap { permille },
+    };
+    assert!(FillSet::new(Search::Long, 1, vec![cap(1_000)]).is_ok());
+    assert_eq!(
+        FillSet::new(Search::Long, 1, vec![cap(1_001)]),
+        Err(ExitSetRefusal::InvalidValue {
+            component: "participation_cap"
+        })
+    );
+}
