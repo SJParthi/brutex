@@ -327,6 +327,12 @@ fn score_bytes(state: &Score) -> u64 {
     table_bytes(&state.table) + state.outcomes.len() as u64 * size_of::<Outcome>() as u64
 }
 
+/// One progress line on stderr, so a long stage is visible while the report
+/// itself is held until the end.
+fn progress(stage: &str) {
+    eprintln!("[fib-6 bench] {stage}");
+}
+
 /// The harness rows, run and reported. False when any row failed.
 fn harness_rows(host: &Host, out: &mut String) -> bool {
     let expand = Row {
@@ -372,13 +378,12 @@ fn harness_rows(host: &Host, out: &mut String) -> bool {
         bytes: score_bytes,
     };
     let mut ok = true;
-    for verdict in [
-        run(&expand, host, out),
-        run(&span, host, out),
-        run(&pool, host, out),
-    ] {
-        ok &= !verdict.fails();
-    }
+    progress("C-F6-01");
+    ok &= !run(&expand, host, out).fails();
+    progress("C-F6-02");
+    ok &= !run(&span, host, out).fails();
+    progress("C-F6-03");
+    ok &= !run(&pool, host, out).fails();
     ok
 }
 
@@ -435,6 +440,7 @@ fn throughput(host: &Host, out: &mut String) {
         "\nWALK THROUGHPUT (outside the harness: one run each, wall clock; FIB-12 projects from these)"
     );
     for rows in [10_000_u64, 1_000_000, 20_000_000] {
+        progress(&format!("build, {rows} rows"));
         let built = Instant::now();
         let table = table(rows, 2_000, 208);
         let build_ms = built.elapsed().as_millis();
@@ -461,6 +467,7 @@ fn throughput(host: &Host, out: &mut String) {
                     batch_budget_bytes: 4 << 30,
                 }
             };
+            progress(&format!("walk, {rows} rows, {threads} threads"));
             let mut count = Count(0);
             let start = Instant::now();
             let walked = pool.install(|| walk(&table, min, schedule, &mut count).unwrap());
@@ -481,6 +488,7 @@ fn throughput(host: &Host, out: &mut String) {
                 walked.spread.inline_for_budget
             );
         }
+        progress(&format!("per-mix times, {rows} rows"));
         if rows <= 1_000_000 {
             let outcomes = outcomes(&table);
             let calendar = calendar(&table);
@@ -533,6 +541,7 @@ fn shared_exits(out: &mut String) {
     );
     let base = table(100_000, 2_000, 208);
     for exits in [1_u8, 2, 4] {
+        progress(&format!("shared traversal, {exits} exits"));
         let partition = Partition {
             exits: 0..exits,
             ..base.partition().clone()
