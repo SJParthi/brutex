@@ -175,6 +175,14 @@ impl Report {
 /// measurement, however sound it is.
 #[must_use]
 pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
+    vendor_until(root, census, &crate::bars::Cancel::never())
+}
+
+/// [`vendor`], stopping between months once `cancel` is set — the reader left
+/// (R3-08, RA-130). A stopped check is REFUSED, never verified: it names how
+/// many of the held months it looked at before it stopped.
+#[must_use]
+pub fn vendor_until(root: &Path, census: &VendorCensus, cancel: &crate::bars::Cancel) -> Report {
     let mut report = Report {
         vendor: Some(census.vendor),
         ..Report::default()
@@ -226,6 +234,17 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     // needed. One hash probe per entry: O(1) per operation, no `log keys`
     // factor. See its header.
     for entry in manifest.newest() {
+        // STOPPED WHEN THE READER LEAVES (R3-08, RA-130): one flag read per
+        // month, and the walk that used to run 158 to 172 s for nobody ends.
+        if cancel.is_cancelled() {
+            report.refused = Some(format!(
+                "cancelled: the reader left after {} of {}'s held months were checked; \
+                 a stopped check verifies nothing",
+                report.tally.seen(),
+                census.vendor.as_str()
+            ));
+            return report;
+        }
         // THE SAME DERIVATION THE WRITER USED, so a mismatch is a real
         // disagreement rather than an artefact of asking wrongly.
         // `crates/pull/src/ingest.rs` computes it exactly this way.
@@ -267,17 +286,16 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     report
 }
 
-/// [`vendor`], off the async workers (WP-33c, DB-A35): on Tokio's blocking
-/// pool through [`crate::detail::run_store_read`], the admission every other
-/// store route takes, so a scrub never holds a runtime worker and at most
-/// [`crate::detail::MAX_STORE_READ_CONCURRENT`] store reads (a scrub among
-/// them) run at once. A full pool answers 429 naming the bound, a task that
-/// cannot be joined 503, both as `{"error": ...}`
-/// (`crate::detail::admission_refused`), never a queue.
+/// [`vendor`], off the async workers (WP-33c, DB-A35), in the verify pool of
+/// ONE ([`crate::detail::run_verify`], R3-08, RA-009) and stopped between
+/// months when the reader leaves ([`vendor_until`], RA-130). A second check
+/// waits [`crate::detail::ADMISSION_WAIT_MS`] and is answered 429 naming the
+/// bound, with `Retry-After`; a task that cannot be joined 503, both as
+/// `{"error": ...}` (`crate::detail::admission_refused`).
 ///
-/// A scrub holds its slot for its whole walk (one bar file opened per held
-/// month: 246,147 for GDFL on the operator's store), so while one runs the
-/// `/db` reads share one slot fewer. Said rather than hidden.
+/// A check holds its slot for its whole walk (one bar file opened per held
+/// month: 246,147 for GDFL on the operator's store), and since R3-08 that
+/// slot is its own: the `/db` reads keep every slot of theirs while one runs.
 ///
 /// # Errors
 ///
@@ -286,25 +304,35 @@ pub(crate) async fn vendor_off_worker(
     root: PathBuf,
     census: VendorCensus,
 ) -> Result<Report, (axum::http::StatusCode, String)> {
+    // ITS OWN POOL OF ONE, AND IT STOPS WHEN THE READER LEAVES (R3-08,
+    // RA-009, RA-130): a check no longer takes a page's store-read slot.
+    //
     // TIMED AS A CHECKING STAGE (R3-14, RA-014): `stage:vendor scrub` on
     // `/speed.json`; a full pool (429) counts busy, a scrub that could not be
     // joined (503) failed. THE SCRUB IS TIMED, NOT THE REQUEST (R3-14 repair
-    // 2): the work finishes the stage when it ends, so a client that leaves
-    // at one second no longer counts a three-minute scrub cancelled at one.
+    // 2): the work finishes the stage when it ends. A scrub whose reader left
+    // stops before its next month (R3-08) and finishes the stage cancelled —
+    // said by the report's own refusal, so a check that ended whole just as
+    // its reader left still counts answered.
     let stage = crate::speed::SharedStage::start("vendor scrub");
     let in_scrub = stage.clone();
-    let scrubbed = crate::detail::run_store_read(move || {
-        let report = vendor(&root, &census);
-        let _counted = in_scrub.finish(crate::speed::Outcome::Answered);
+    let scrubbed = crate::detail::run_verify(move |cancel| {
+        let report = vendor_until(&root, &census, cancel);
+        let outcome = if report
+            .refused
+            .as_deref()
+            .is_some_and(|why| why.starts_with("cancelled:"))
+        {
+            crate::speed::Outcome::Cancelled
+        } else {
+            crate::speed::Outcome::Answered
+        };
+        let _counted = in_scrub.finish(outcome);
         report
     })
     .await
     .map_err(|why| {
-        crate::detail::admission_refused(
-            "vendor scrub",
-            crate::detail::MAX_STORE_READ_CONCURRENT,
-            &why,
-        )
+        crate::detail::admission_refused("vendor scrub", crate::detail::MAX_VERIFY_CONCURRENT, &why)
     });
     // A SCRUB THAT ENDED HAS COUNTED ITSELF; one that never ran (a full
     // pool) or never ended (a panic) is counted here, by how it was refused.
