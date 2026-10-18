@@ -2004,6 +2004,25 @@ async fn the_pools_answer_names_the_front_end_row_it_counts() {
     live(&root, |addr| async move {
         let (page, _) = get(addr, "/ingest").await;
         assert!(!status_of(&page).is_empty(), "{}", head_text(&page));
+        // SEVERAL ROUTES TALLIED BEFORE THE ASK, so the order checked below
+        // is an order of many rows and not of one (repair 5): whatever each
+        // answers, its row is counted under the route as registered.
+        let asked = [
+            "/vocab.json",
+            "/feeds.json",
+            "/universes.json",
+            "/aliases.json",
+            "/settings.json",
+            "/disk.json",
+        ];
+        for route in asked {
+            let (answer, _) = get(addr, route).await;
+            assert!(
+                !status_of(&answer).is_empty(),
+                "{route}: {}",
+                head_text(&answer)
+            );
+        }
         let (answer, _) = get(addr, "/pools.json").await;
         assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
         let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
@@ -2038,6 +2057,23 @@ async fn the_pools_answer_names_the_front_end_row_it_counts() {
                 "{route} is neither a path nor the named front end: {json}"
             );
         }
+        // IN ROUTE ORDER, EACH ROUTE ONCE, WITH NO SORT ON THE READ (repair 5,
+        // verify-R3-08-r5 blocking 2): the tallies live in an ordered map, so
+        // the answer walks them in byte order of the route as registered.
+        let names: Vec<&str> = routes
+            .iter()
+            .map(|row| row["route"].as_str().unwrap_or(""))
+            .collect();
+        for route in asked {
+            assert!(
+                names.contains(&route),
+                "{route} was asked and is not tallied: {names:?}"
+            );
+        }
+        assert!(
+            names.windows(2).all(|pair| pair[0] < pair[1]),
+            "the routes are served in strictly increasing route order: {names:?}"
+        );
     })
     .await;
     let _ = std::fs::remove_dir_all(&root);

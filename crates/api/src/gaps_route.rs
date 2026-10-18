@@ -1293,7 +1293,13 @@ impl AuditedMonth {
     /// The destructuring has no `..`, so a field added to this type does not
     /// compile until it is classified here as damage or as not.
     ///
-    /// O(1): no read, a fixed number of fields.
+    /// O(1) in the store: no read and no walk, at most seven sentences, each
+    /// a copy of a string the month already holds or a fixed format of its
+    /// counts. The bound is by construction (the destructuring above); no
+    /// bench times this apart. What it returns for every fault at once is
+    /// checked by
+    /// `api::server::gaps_route::tests::every_fault_beside_a_held_month_is_answered_not_asked_again`
+    /// and invariant row R308-06.
     fn faults(&self) -> Vec<String> {
         let Self {
             month,

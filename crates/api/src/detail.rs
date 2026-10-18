@@ -787,23 +787,31 @@ pub(crate) const BEING_WRITTEN_BODY_MAX: usize = 16 * 1024;
 /// Every route's tally, keyed by the route as registered (`MatchedPath`), so
 /// the map holds at most one row per registered route plus [`FRONT_END`]:
 /// bounded by the route table, never by what clients type.
-static ROUTES: std::sync::Mutex<Option<std::collections::HashMap<String, RouteTally>>> =
-    std::sync::Mutex::new(None);
+///
+/// **An ordered map, so `/pools.json` walks it in route order and sorts
+/// nothing** (R3-08 repair 5, verify-R3-08-r5 blocking 2). It was a hash map
+/// that [`pools_json`] copied and sorted on every read, a sort gate 11 rule 4
+/// refuses on a request path; the order is now kept where the rows live, once
+/// per route ever, rather than redone per read.
+static ROUTES: std::sync::Mutex<std::collections::BTreeMap<String, RouteTally>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// The row requests that matched no registered route are counted under: the
 /// front end's pages and assets, served by the fallback.
 pub(crate) const FRONT_END: &str = "(front end)";
 
-/// Changes one route's tally. One lock and one hash probe: O(1) expected per
-/// request; the route's name is copied once, the first time it is seen.
+/// Changes one route's tally. One lock and one probe of the ordered map:
+/// O(log R) comparisons, where R is at most one row per registered route
+/// plus [`FRONT_END`] (96 today) and is fixed when the binary is built, so a
+/// constant per request that never grows with the store or with what clients
+/// type; the route's name is copied once, the first time it is seen.
 /// UNVERIFIED on its own: no bench times the tally apart. It runs inside every
 /// request `crates/api/tests/pool_load.rs` times (p99 per request at 16, 64
 /// and 256 clients), and its map is bounded by the route table
 /// (`crate::server::pool_table_tests::every_store_route_names_its_pool`);
 /// `docs/06-limits.md` L-R308-01.
 fn tally(route: &str, change: impl FnOnce(&mut RouteTally)) {
-    let mut held = lock_through_poison(&ROUTES);
-    let routes = held.get_or_insert_with(std::collections::HashMap::new);
+    let mut routes = lock_through_poison(&ROUTES);
     if let Some(row) = routes.get_mut(route) {
         change(row);
     } else {
@@ -818,8 +826,8 @@ fn tally(route: &str, change: impl FnOnce(&mut RouteTally)) {
 #[must_use]
 pub(crate) fn route_tally(route: &str) -> RouteTally {
     lock_through_poison(&ROUTES)
-        .as_ref()
-        .and_then(|routes| routes.get(route).copied())
+        .get(route)
+        .copied()
         .unwrap_or_default()
 }
 
@@ -956,17 +964,13 @@ pub(crate) async fn pools_json() -> (
             })
         })
         .collect();
-    let mut routes: Vec<(String, RouteTally)> = lock_through_poison(&ROUTES)
-        .as_ref()
-        .map(|routes| {
-            routes
-                .iter()
-                .map(|(route, row)| (route.clone(), *row))
-                .collect()
-        })
-        .unwrap_or_default();
-    // At most one row per registered route: a sort of a bounded list.
-    routes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    // In route order as kept: the map is ordered, so nothing is sorted here
+    // (repair 5). The rows are copied out under the lock and rendered after
+    // it, so no request's tally waits on the JSON.
+    let routes: Vec<(String, RouteTally)> = lock_through_poison(&ROUTES)
+        .iter()
+        .map(|(route, row)| (route.clone(), *row))
+        .collect();
     let routes: Vec<serde_json::Value> = routes
         .into_iter()
         .map(|(route, row)| {
