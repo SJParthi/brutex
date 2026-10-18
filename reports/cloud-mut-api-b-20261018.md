@@ -120,10 +120,15 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 ## Left (in progress)
 
 - Phase 1: `autopilot.rs` (371), `pullrun.rs` (466), `server.rs` (1,509),
-  every listed mutant on the merged tree. Running; at 08:37 UTC 118 tested:
-  108 caught, 1 missed (`autopilot.rs:863:25`, equivalent, as on 17 Oct), 9
-  unviable, each a compile error (`E0277`: the return type has no
-  `Default`).
+  every listed mutant on the merged tree. Running; at 09:30 UTC 327 tested:
+  293 caught, 1 missed (`autopilot.rs:863:25`, equivalent, as on 17 Oct),
+  33 unviable, each a compile error read from its log (30 `E0277`, the
+  return type has no `Default`; one `E0080`, a constant shift that
+  overflows; two `||` inside a `let` chain).
+- New tests so far: `server_cloud_mutant_tests_e.rs` (5), for AH-02's
+  `HeadDeadline` and `exchange_watch` arms that a coverage run of the merged
+  tree left unexecuted. `cargo clippy --workspace --all-targets -- -D
+  warnings` is clean at `f9a7c020`.
 - Phase 2: every survivor and every mutant in code changed since phase 1's
   base (`audit.rs`'s `Journal::page` doc and `Journal::identity`, changed
   since `bdcfa9bd`).
