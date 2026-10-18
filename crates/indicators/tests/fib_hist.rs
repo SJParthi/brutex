@@ -1481,3 +1481,31 @@ fn every_refusal_has_its_name() {
     let error: &dyn std::error::Error = &HistRefusal::CountFull;
     assert!(error.to_string().contains("count_full"));
 }
+
+/// L-FIB2-04: with no basis break announced, a new tick shows only once its
+/// days reach the old tick's — a coarser one on the tie (ties go to the
+/// larger), a finer one a day later.
+#[test]
+fn the_tick_lags_an_unannounced_change_by_the_days_it_had() {
+    let day = |tick: &mut ObservedTick, step: i64| {
+        tick.observe(700_000).unwrap();
+        tick.observe(700_000 + step).unwrap();
+        tick.commit_day().unwrap();
+    };
+    let mut coarser = ObservedTick::empty();
+    for _ in 0..4 {
+        day(&mut coarser, 5);
+    }
+    for n in 1..=4 {
+        day(&mut coarser, 50);
+        assert_eq!(coarser.tick(), Ok(if n < 4 { 5 } else { 50 }), "day {n}");
+    }
+    let mut finer = ObservedTick::empty();
+    for _ in 0..4 {
+        day(&mut finer, 5);
+    }
+    for n in 1..=5 {
+        day(&mut finer, 1);
+        assert_eq!(finer.tick(), Ok(if n < 5 { 5 } else { 1 }), "day {n}");
+    }
+}

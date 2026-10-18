@@ -3,11 +3,13 @@
 //! Two axes. The specification's: the committed TOTAL of one histogram at
 //! 10^2, 10^4 and 10^7 values — FIXED-STATE, because the bin table is a
 //! constant and a total adds no bin (the rows prove the time does not grow
-//! with it). And FM-F002's: the CELLS resident in a bank, from a cache-resident
-//! 128 to 12,800 (about 135 MB, past this host's last-level cache), each call
-//! landing in a pseudo-random cell, as a stock-day's candidates land in its
-//! bank; one stock's production bank is not measured yet (FIB-12's sample), so
-//! that axis prints EXTRAPOLATION.
+//! with it). And FM-F002's: the CELLS resident in ONE STOCK'S bank — the unit a
+//! worker folds, one stock-day at a time — from a cache-resident 50 to 5,000
+//! (about 41 MB, past every last-level-cache estimate the FIB probe has printed
+//! on the cloud hosts, 8 to 32 MiB), each call landing in a pseudo-random cell
+//! as a stock-day's candidates land in its bank. One stock's production bank is
+//! not measured yet (FIB-12's sample; about 1,900 cells by the generated
+//! dimensions FIB-1 seeds, an estimate), so that axis prints EXTRAPOLATION.
 
 use std::fmt::Write as _;
 
@@ -183,7 +185,7 @@ fn bank_rows(host: &Host, out: &mut String) -> bool {
         name: "HistBank::observe into a pseudo-random cell",
         class: Some(Class::WorstCase),
         axis: cells,
-        scales: [128, 1_280, 12_800],
+        scales: [50, 500, 5_000],
         setup: bank,
         op: |state, i| {
             let key = *spread(&state.keys, i);
@@ -201,7 +203,7 @@ fn bank_rows(host: &Host, out: &mut String) -> bool {
         name: "HistBank cell + OwnPast::mid_rank in a pseudo-random cell",
         class: Some(Class::WorstCase),
         axis: cells,
-        scales: [128, 1_280, 12_800],
+        scales: [50, 500, 5_000],
         setup: bank,
         op: |state, i| {
             let cell = state.bank.cell(spread(&state.keys, i)).unwrap();

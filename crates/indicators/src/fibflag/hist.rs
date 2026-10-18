@@ -70,13 +70,10 @@ pub const OCTAVES: u32 = i64::BITS - 1;
 /// [`HIST_SUB_BINS_PER_POWER`] sub-bins per octave up to the top bit.
 pub const BASE_BINS: usize = 1 + OCTAVES as usize * (1 << SUB_BITS);
 
-/// The bytes of one histogram that was never split: the struct and its three
-/// leaf arrays (committed and staged counts, the cumulative array). A bank's
-/// size is known before it is allocated ([`BankShape::unsplit_bytes`]).
-pub const UNSPLIT_CELL_BYTES: usize = size_of::<OwnPast>()
-    + BASE_BINS * size_of::<u32>()
-    + BASE_BINS * size_of::<u32>()
-    + (BASE_BINS + 1) * size_of::<u64>();
+/// The bytes of one histogram that was never split: the struct and its leaf
+/// array. A bank's size is known before it is allocated
+/// ([`BankShape::unsplit_bytes`]).
+pub const UNSPLIT_CELL_BYTES: usize = size_of::<OwnPast>() + BASE_BINS * size_of::<Leaf>();
 
 const _: () = assert!(UNSPLIT_CELL_BYTES > size_of::<OwnPast>());
 
@@ -329,6 +326,32 @@ impl SplitTable {
     }
 }
 
+/// One leaf of a histogram: everything a call reads or writes of it, together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Leaf {
+    /// Committed values in the leaves below this one. Rebuilt only by
+    /// [`OwnPast::commit_day`].
+    below: u64,
+    /// Committed values in this leaf.
+    committed: u32,
+    /// Values staged today in this leaf.
+    staged: u32,
+}
+
+impl Leaf {
+    /// A leaf holding nothing.
+    const EMPTY: Self = Self {
+        below: 0,
+        committed: 0,
+        staged: 0,
+    };
+
+    /// Committed values up to and including this leaf.
+    fn end(self) -> u64 {
+        self.below + u64::from(self.committed)
+    }
+}
+
 /// An own-past histogram of non-negative `i64` values (D-6320).
 ///
 /// A constant bin table covers the whole range — bin 0, then
@@ -343,13 +366,9 @@ impl SplitTable {
 pub struct OwnPast {
     /// The depth table, when any bin is split; `None` means one leaf per bin.
     split: Option<Box<SplitTable>>,
-    /// Committed counts, per leaf.
-    committed: Box<[u32]>,
-    /// Today's staged counts, per leaf.
-    staged: Box<[u32]>,
-    /// `cumulative[i]` = committed values in leaves below `i`; one more entry
-    /// than leaves. Rebuilt only by [`OwnPast::commit_day`].
-    cumulative: Box<[u64]>,
+    /// Per leaf: its committed and staged counts and the committed values
+    /// below it, in one line, so a call reads one place.
+    leaves: Box<[Leaf]>,
     /// Days committed.
     committed_days: u32,
     /// Values committed.
@@ -375,14 +394,7 @@ pub struct OwnPast {
 
 /// What equality compares of an [`OwnPast`]: every field but the work counter.
 type CompareKey<'a> = (
-    (
-        Option<&'a SplitTable>,
-        &'a [u32],
-        &'a [u32],
-        &'a [u64],
-        u32,
-        u64,
-    ),
+    (Option<&'a SplitTable>, &'a [Leaf], u32, u64),
     (u64, u64, u64, Option<u64>, Option<u64>, u64, u64),
 );
 
@@ -417,9 +429,7 @@ impl OwnPast {
     fn with_leaves(split: Option<Box<SplitTable>>, leaves: usize) -> Self {
         Self {
             split,
-            committed: vec![0; leaves].into_boxed_slice(),
-            staged: vec![0; leaves].into_boxed_slice(),
-            cumulative: vec![0; leaves + 1].into_boxed_slice(),
+            leaves: vec![Leaf::EMPTY; leaves].into_boxed_slice(),
             committed_days: 0,
             total: 0,
             staged_values: 0,
@@ -436,7 +446,7 @@ impl OwnPast {
     /// The leaves: [`BASE_BINS`] until a bin is split.
     #[must_use]
     pub fn leaves(&self) -> usize {
-        self.committed.len()
+        self.leaves.len()
     }
 
     /// Days committed: the stamp a candidate carries as a reference.
@@ -502,11 +512,7 @@ impl OwnPast {
                 + table.bins.len() * size_of::<(u32, u8)>()
                 + table.leaf_bin.len() * size_of::<u32>()
         });
-        size_of::<Self>()
-            + leaves * size_of::<u32>()
-            + leaves * size_of::<u32>()
-            + (leaves + 1) * size_of::<u64>()
-            + table
+        size_of::<Self>() + leaves * size_of::<Leaf>() + table
     }
 
     /// The leaf of a non-negative value.
@@ -572,16 +578,14 @@ impl OwnPast {
             return Err(HistRefusal::NegativeValue { value });
         };
         let leaf = self.leaf_of(value);
-        let committed = u64::from(self.committed.get(leaf).copied().unwrap_or(u32::MAX));
-        let room = self
-            .staged
-            .get_mut(leaf)
-            .filter(|staged| committed + u64::from(**staged) < u64::from(u32::MAX));
-        let Some(staged) = room else {
+        let room = self.leaves.get_mut(leaf).filter(|leaf| {
+            u64::from(leaf.committed) + u64::from(leaf.staged) < u64::from(u32::MAX)
+        });
+        let Some(leaf) = room else {
             self.refused_full = self.refused_full.saturating_add(1);
             return Err(HistRefusal::CountFull);
         };
-        *staged += 1;
+        leaf.staged += 1;
         self.staged_values += 1;
         self.staged_max = Some(self.staged_max.map_or(value, |max| max.max(value)));
         self.did(1);
@@ -610,11 +614,14 @@ impl OwnPast {
             .checked_add(1)
             .ok_or(HistRefusal::DaysFull)?;
         if self.staged_values > 0 {
-            for (count, staged) in self.committed.iter_mut().zip(self.staged.iter_mut()) {
-                *count = count.saturating_add(*staged);
-                *staged = 0;
+            let mut running = 0_u64;
+            for leaf in &mut self.leaves {
+                leaf.committed = leaf.committed.saturating_add(leaf.staged);
+                leaf.staged = 0;
+                leaf.below = running;
+                running += u64::from(leaf.committed);
             }
-            self.rebuild_cumulative();
+            self.total = running;
             self.did(u64::try_from(self.leaves()).unwrap_or(u64::MAX));
         }
         self.max = match (self.max, self.staged_max) {
@@ -634,7 +641,7 @@ impl OwnPast {
     /// mid-way, leaves the histogram as it was.
     pub fn discard_day(&mut self) {
         if self.staged_values > 0 {
-            self.staged.iter_mut().for_each(|staged| *staged = 0);
+            self.leaves.iter_mut().for_each(|leaf| leaf.staged = 0);
         }
         self.staged_values = 0;
         self.staged_censored = 0;
@@ -666,8 +673,10 @@ impl OwnPast {
         let value = non_negative(value)?;
         self.answerable()?;
         let leaf = self.leaf_of(value);
-        let below = self.cumulative.get(leaf).copied().unwrap_or(0);
-        let in_leaf = u64::from(self.committed.get(leaf).copied().unwrap_or(0));
+        let (below, in_leaf) = self
+            .leaves
+            .get(leaf)
+            .map_or((0, 0), |leaf| (leaf.below, u64::from(leaf.committed)));
         self.did(1);
         Ratio::mid_rank(below, in_leaf, self.total).map_err(HistRefusal::Cube)
     }
@@ -703,10 +712,9 @@ impl OwnPast {
             });
         }
         let mut probes = 0_u64;
-        let ends = self.cumulative.get(1..).unwrap_or_default();
-        let leaf = ends.partition_point(|end| {
+        let leaf = self.leaves.partition_point(|leaf| {
             probes += 1;
-            *end < rank
+            leaf.end() < rank
         });
         self.did(probes);
         Ok(i64::try_from(self.leaf_lower_edge(leaf)).unwrap_or(i64::MAX))
@@ -786,7 +794,8 @@ impl OwnPast {
             }
         }
         let raw_max = raw_values.iter().copied().max();
-        if *recount != *self.committed || raw_max != self.max {
+        let committed = self.leaves.iter().map(|leaf| leaf.committed);
+        if !recount.iter().copied().eq(committed) || raw_max != self.max {
             return Err(HistRefusal::SplitRawMismatch);
         }
         let mut depths = self
@@ -801,8 +810,8 @@ impl OwnPast {
         let mut rebuilt = Self::with_leaves(Some(Box::new(table)), leaves);
         for value in &raw_values {
             let leaf = rebuilt.leaf_of(*value);
-            if let Some(count) = rebuilt.committed.get_mut(leaf) {
-                *count = count.saturating_add(1);
+            if let Some(leaf) = rebuilt.leaves.get_mut(leaf) {
+                leaf.committed = leaf.committed.saturating_add(1);
             }
         }
         rebuilt.rebuild_cumulative();
@@ -817,19 +826,13 @@ impl OwnPast {
         Ok(())
     }
 
-    /// Rebuilds the cumulative array and the total from the committed counts.
+    /// Rebuilds every leaf's count below it, and the total, from the committed
+    /// counts.
     fn rebuild_cumulative(&mut self) {
         let mut running = 0_u64;
-        let counts = self
-            .committed
-            .iter()
-            .map(|count| Some(*count))
-            .chain(core::iter::once(None));
-        for (below, count) in self.cumulative.iter_mut().zip(counts) {
-            *below = running;
-            if let Some(count) = count {
-                running += u64::from(count);
-            }
+        for leaf in &mut self.leaves {
+            leaf.below = running;
+            running += u64::from(leaf.committed);
         }
         self.total = running;
     }
@@ -840,9 +843,7 @@ impl OwnPast {
         (
             (
                 self.split.as_deref(),
-                &*self.committed,
-                &*self.staged,
-                &*self.cumulative,
+                &*self.leaves,
                 self.committed_days,
                 self.total,
             ),
@@ -891,7 +892,10 @@ impl OwnPast {
         put_varint(out, self.max.unwrap_or(0));
         out.extend_from_slice(&self.refused_negative.to_le_bytes());
         out.extend_from_slice(&self.refused_full.to_le_bytes());
-        put_sparse(out, self.committed.iter().map(|count| u64::from(*count)));
+        put_sparse(
+            out,
+            self.leaves.iter().map(|leaf| u64::from(leaf.committed)),
+        );
         Ok(())
     }
 
@@ -932,14 +936,14 @@ impl OwnPast {
         past.refused_full = reader.u64()?;
         let counts = read_sparse(reader, leaves)?;
         let mut highest = None;
-        for (leaf, (count, value)) in past.committed.iter_mut().zip(counts).enumerate() {
+        for (at, (leaf, value)) in past.leaves.iter_mut().zip(counts).enumerate() {
             if value > u64::from(u32::MAX) {
                 return Err(invalid("counts"));
             }
             if value > 0 {
-                highest = Some(leaf);
+                highest = Some(at);
             }
-            *count = u32::try_from(value).unwrap_or(u32::MAX);
+            leaf.committed = u32::try_from(value).unwrap_or(u32::MAX);
         }
         past.rebuild_cumulative();
         if past.total != total || (total > 0 && past.committed_days == 0) {
