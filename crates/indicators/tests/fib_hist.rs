@@ -126,6 +126,7 @@ fn discard_leaves_the_bytes_identical() {
     for value in [7, 7, 700, 70_000_000] {
         past.observe(value).unwrap();
     }
+    assert_ne!(past, before, "a staged day is state until it is discarded");
     past.observe_censored();
     assert_eq!(
         past.encode(&mut Vec::new()),

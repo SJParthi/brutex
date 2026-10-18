@@ -2681,6 +2681,8 @@ mod tests {
         a.discard_day();
         assert!(a.work() > 0);
         assert_eq!(a, b, "the work counter is not state");
+        a.observe(5).unwrap();
+        assert_ne!(a, b, "a staged value is state");
         assert_eq!(gcd(0, 0), 0);
         assert_eq!(gcd_wide(12, 18), 6);
     }
