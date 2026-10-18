@@ -134,6 +134,13 @@ fn discard_leaves_the_bytes_identical() {
     past.discard_day();
     assert_eq!(past, before);
     assert_eq!(body(&past), bytes);
+    past.observe_censored();
+    assert_eq!(
+        past.encode(&mut Vec::new()),
+        Err(HistRefusal::StagedNotEmpty),
+        "a censored observation alone is a staged day"
+    );
+    past.discard_day();
     // A day that staged nothing and is discarded leaves it too.
     past.discard_day();
     assert_eq!(past, before);
@@ -662,6 +669,11 @@ fn the_tick_and_bank_bodies_round_trip_and_refuse_by_name() {
     let mut extra = bytes.clone();
     extra.push(0);
     assert_eq!(refused(&extra), "trailing");
+    let mut past_i64 = bytes[..len - 3].to_vec();
+    varint(&mut past_i64, 1);
+    varint(&mut past_i64, 1 << 63);
+    varint(&mut past_i64, 1);
+    assert_eq!(refused(&past_i64), "tick_order", "a gcd past i64");
     tick.observe(500_000).unwrap();
     assert_eq!(
         tick.encode(&mut Vec::new()),
@@ -1362,6 +1374,31 @@ fn width_passes_fit_the_budget_or_refuse_one_width_by_name() {
         },
     )
     .unwrap();
+    // Three long widths of 92 cells and one short of 82 within 138 cells:
+    // three passes do not hold them (the fourth width lands on a full pass),
+    // so a fourth pass is opened.
+    let four = BankShape::new(
+        Dims {
+            widths: vec![1, 2, 3],
+            styles: 2,
+            variants: 3,
+            levels: 2,
+        },
+        Dims {
+            widths: vec![5],
+            styles: 1,
+            variants: 2,
+            levels: 3,
+        },
+    )
+    .unwrap();
+    let fixed = 2 * cell;
+    let retried = plan_width_passes(&four, 1, fixed + 138 * cell).unwrap();
+    assert_eq!(retried.widths, [1, 2, 3, 5]);
+    assert_eq!(retried.pass_bytes.len(), 4, "a fourth pass");
+    let mut passes = retried.pass_of.clone();
+    passes.sort_unstable();
+    assert_eq!(passes, [0, 1, 2, 3], "one width a pass");
     let both = plan_width_passes(&narrow, 1, u64::MAX).unwrap();
     assert_eq!(both.widths, [1, 2]);
     let mirrored = BankShape::new(

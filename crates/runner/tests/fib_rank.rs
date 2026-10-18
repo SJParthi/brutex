@@ -267,6 +267,7 @@ fn pool_257_all_gainers_ranks_257() {
     );
     assert_eq!((RankWidth::U8.name(), RankWidth::U16.name()), ("u8", "u16"));
     assert_eq!(RankWidth::U8.max_rank(), 255);
+    assert_eq!(RankWidth::U16.max_rank(), u16::MAX);
 }
 
 #[test]

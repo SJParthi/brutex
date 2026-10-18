@@ -7713,3 +7713,54 @@ Every fixture is synthetic: invented generations, cells, pools and leaves.
 | FIB1-31 | **The FIB bench harness refuses a row with no class, no axis, a span below 100x or a cache-resident data axis, fails a spike declared WORST-CASE and passes it declared AMORTISED, prints the timer granularity, and runs a data row at one and at the production worker count** (FM-F001, FM-F002). | `harness_detects_amortised_spike`, `harness_prints_timer_granularity`, `harness_refuses_row_without_class`, `every_row_declares_axis_and_scale`, `a_data_row_runs_at_one_and_at_the_production_worker_count` | ✓ |
 | FIB1-32 | **Every decision number heads exactly one entry**, the five pins at their exact counts, and a fixture with two headings under one number is refused (FM-F008). | `every_decision_id_is_issued_once`, `a_fixture_with_one_number_issued_twice_is_refused` | ✓ |
 | FIB1-33 | **A code below 2^64 decodes in `u64` and one past it in `u128`, to the same digits** (C-F-02, C-F-04): 2^64 − 1 is fifteen in sixteen rows, 2^64 is a one in row 0's place, and the codes either side of 2^64 and a thousand spread above it round-trip. | `codes_either_side_of_two_to_the_sixty_four_decode_exactly` | ✓ |
+
+## The own-past histograms and the mover rank (FIB-2; D-6320 to D-6328)
+
+`indicators::fibflag::hist` (PART A) and `runner::fib::rank` (PART B). Proofs
+in `crates/indicators/tests/fib_hist.rs`, `crates/runner/tests/fib_rank.rs`
+and each file's own test module. Every fixture is synthetic: invented values,
+prices and pools; the rank's oracles (a std sort and a bitonic network) live in
+the tests only.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| FIB2-01 | **The own-past position is monotone in the value**: a larger value never has a smaller mid-rank or permille, and a permille never passes 1,000. | `permille_is_monotone_in_the_value` | ✓ |
+| FIB2-02 | **A value staged today changes no answer today**: every answer reads only committed days; the commit makes the day visible. | `same_day_observations_are_invisible_until_commit` | ✓ |
+| FIB2-03 | **A discarded day leaves the histogram and its checkpoint body identical**, censored observations included. | `discard_leaves_the_bytes_identical` | ✓ |
+| FIB2-04 | **No committed day answers `no_own_past`; the first committed day answers.** There is no typed warm-up. | `no_own_past_before_the_first_committed_day_and_an_answer_after_it` | ✓ |
+| FIB2-05 | **Committed days with no observation answer `no_observations`, never a default bucket**, and a consumer's candidates equal its rows plus its refusals (FM-F015). | `cell_with_committed_days_and_no_observations_answers_none` | ✓ |
+| FIB2-06 | **The constant bin table covers every non-negative `i64`**: 505 bins, no cap and no overflow bin; 0, 1, 2^40 and `i64::MAX` rank like any other value (golden). | `zero_one_two_to_the_forty_and_i64_max_rank_like_any_other_value`, `the_bin_table_is_the_seed_s`, `every_value_below_two_thousand_lands_at_or_above_its_leaf_s_edge` | ✓ |
+| FIB2-07 | **A value on a bin edge opens its bin.** | `a_value_exactly_on_a_bin_edge_opens_its_bin` | ✓ |
+| FIB2-08 | **The median is the lower middle value's bin edge**; quantiles outside `(0, 1]` and ranks outside `1..=total` are refused by name. | `the_median_query_is_the_lower_middle_bin_s_edge` | ✓ |
+| FIB2-09 | **`quantile(p)` is the lower edge of the leaf holding the nearest-rank value, within ten probes of the unsplit table** (FM-F012). | `quantile_is_lower_edge_and_bounded_probes` | ✓ |
+| FIB2-10 | **Counts are refused by name at their top, never wrapped, and a wide total keeps an exact permille** (FM-F020): `count_full` and `negative_value` are counted, `days_full` merges nothing, and a total of 4,294,968 matches brute force. | `a_total_of_4_294_968_matches_brute_force`, `a_full_bin_is_refused_by_name_and_counted`, `the_committed_day_count_is_refused_at_its_top` | ✓ |
+| FIB2-11 | **A split divides one bin by one more mantissa bit and rebuilds exactly from the raw values**, and is refused by name — changing nothing — for raw values that do not reproduce the counts and maximum, a bin one integer wide, or a staged day (R3). | `a_split_divides_a_bin_by_one_more_mantissa_bit_and_rebuilds_from_raw`, `a_split_is_refused_by_name_and_changes_nothing`, `a_split_table_that_cannot_count_its_leaves_is_none` | ✓ |
+| FIB2-12 | **Every checkpoint body round-trips byte-identically, is canonical, and refuses a damaged body by name** (FM-F013, a byte golden). | `sparse_snapshot_round_trip_and_golden`, `a_damaged_body_is_refused_by_name`, `a_damaged_depth_table_is_refused_by_name`, `the_tick_and_bank_bodies_round_trip_and_refuse_by_name`, `varints_are_canonical_and_bounded` | ✓ |
+| FIB2-13 | **The observed tick of a 5-paisa and a 1-paisa series**; a day of one distinct price has no gcd, a series with no such day has `no_tick`, and a non-positive price is refused and counted. | `the_tick_of_a_five_paisa_and_a_one_paisa_series` | ✓ |
+| FIB2-14 | **One odd-print day leaves the tick at 5** and is counted `odd_tick_day`; ties go to the larger gcd (FM-F014). | `one_odd_print_day_leaves_the_tick_at_five` | ✓ |
+| FIB2-15 | **5-paisa days, a basis break, then 50-paisa days give 50**; a break with a staged day is refused. | `five_paisa_days_a_break_then_fifty_paisa_days_give_fifty` | ✓ |
+| FIB2-16 | **An adjusted span uses the GDFL raw tick converted exactly by the factor pair, labelled unobservable**, and the report compares a tick with a reference only to count it. | `an_adjusted_span_uses_the_converted_raw_tick`, `the_tick_census_compares_with_a_reference_for_the_report_only` | ✓ |
+| FIB2-17 | **`MaxSecondGap` only grows at commits.** | `max_second_gap_only_grows_at_commits` | ✓ |
+| FIB2-18 | **A hole day and an overnight gap never raise the silence threshold, a halt splits a phase, and the first day is Unknown, never silent** (FM-F018). | `a_hole_day_and_an_overnight_gap_never_raise_the_threshold` | ✓ |
+| FIB2-19 | **The touch step is in basis points of the previous extreme, per direction**: a history at P and a base at 10P give the same touch count, and the short tolerance comes from low steps (FM-F017). | `a_history_at_p_and_a_base_at_ten_p_give_the_same_touch_count` | ✓ |
+| FIB2-20 | **A median whose censored observations reach the resolved ones is labelled censored** (FM-F016). | `the_censored_median_is_labelled_when_censored_reach_the_resolved` | ✓ |
+| FIB2-21 | **The bank indexes every cell exactly once**, refuses a key outside its measure's scope or past a dimension by name, and refuses a malformed shape. | `hist_bank_indexes_every_cell_exactly_once`, `a_cell_key_outside_its_scope_is_refused_by_name`, `a_bank_shape_that_is_not_well_formed_is_refused` | ✓ |
+| FIB2-22 | **Extending the shape — an exit variant, a width — leaves every existing histogram byte-identical**; a shape that drops a width or shrinks a dimension is refused (FM-F011). | `adding_a_variant_or_a_width_leaves_every_histogram_byte_identical` | ✓ |
+| FIB2-23 | **An exit measure's quantiles equal its sorted committed history, and a side with no committed observation refuses its components by name** (FM-F011). | `exit_measures_quantiles_equal_sorted_history_from_committed_days_only` | ✓ |
+| FIB2-24 | **The width passes fit the budget, each width in one pass; only a width that alone does not fit is refused** (`histbank_width_over_memory`). | `width_passes_fit_the_budget_or_refuse_one_width_by_name` | ✓ |
+| FIB2-25 | **No FIB-2 strategy file types a number but 0 and 1** (operator 16 Oct 11:24 IST). | `hist_types_no_number`, `rank_types_no_number` | ✓ |
+| FIB2-26 | **Identical moves rank by slot.** | `fifty_stocks_with_identical_moves_rank_by_slot` | ✓ |
+| FIB2-27 | **A member missing all morning is never ranked, is counted every minute, and ranks once it appears.** | `a_member_missing_all_morning_that_then_appears` | ✓ |
+| FIB2-28 | **A stale member is ranked on its last close, flagged and counted.** | `a_stale_member_is_ranked_on_its_last_close_and_counted` | ✓ |
+| FIB2-29 | **Pools of 1, 2, 3, 200, 256, 257 and 512 rank as a std sort and a bitonic network rank them; the network's padding never ranks.** | `pools_of_1_2_3_200_256_257_and_512_match_both_oracles` | ✓ |
+| FIB2-30 | **With 257 gainers the 257th ranks 257**: the rank width is chosen from the run's largest pool, and a rank beyond a width is refused by name (FM-F009). | `pool_257_all_gainers_ranks_257` | ✓ |
+| FIB2-31 | **An unchanged close is on neither side.** | `a_move_of_zero_is_on_neither_side` | ✓ |
+| FIB2-32 | **The side is the sign in paisa: 0.4 bp and 0.6 bp are both gainers, 0.6 first; an exact tie goes to the slot** (FM-F019). | `moves_of_0_4_bp_and_0_6_bp_are_both_gainers_0_6_first` | ✓ |
+| FIB2-33 | **A move past `i32` basis points refuses only its member, and every bad price is refused by name and counted** (FM-F021). | `a_move_out_of_range_refuses_only_its_member`, `bad_prices_are_refused_by_name_and_counted` | ✓ |
+| FIB2-34 | **A stock turns from gainer to loser intraday.** | `a_stock_turns_from_gainer_to_loser_intraday` | ✓ |
+| FIB2-35 | **The rank at minute m is unchanged when any later minute changes** (`CLAUDE.md` §3 rule 7). | `the_rank_at_minute_m_is_unchanged_when_any_later_minute_changes` | ✓ |
+| FIB2-36 | **The radix order equals a std sort and a bitonic network on 10,000 seeded random minutes** (FM-F010). | `radix_equals_std_sort_and_network`, `the_radix_is_stable_and_keeps_slot_order_inside_a_key` | ✓ |
+| FIB2-37 | **The fold is deterministic, and its work is the same at every minute of a day but for exact tie runs.** | `the_fold_is_deterministic`, `the_work_per_minute_is_the_same_at_every_minute_of_a_day` | ✓ |
+| FIB2-38 | **Every misuse is refused by name and changes nothing.** | `every_misuse_is_refused_by_name_and_changes_nothing` | ✓ |
+| FIB2-39 | **FM-F005's stamps: the rank's exact share of its side's count, and ranks beyond the first window counted per year** (D-6314). | `the_rank_share_is_exact_and_absent_when_unranked`, `ranks_beyond_the_first_window_are_counted_per_year` | ✓ |
+| FIB2-40 | **Every own-past refusal has its stable name.** | `every_refusal_has_its_name` | ✓ |

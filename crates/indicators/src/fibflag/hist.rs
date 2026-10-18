@@ -373,21 +373,22 @@ pub struct OwnPast {
     work: Cell<u64>,
 }
 
+/// What equality compares of an [`OwnPast`]: every field but the work counter.
+type CompareKey<'a> = (
+    (
+        Option<&'a SplitTable>,
+        &'a [u32],
+        &'a [u32],
+        &'a [u64],
+        u32,
+        u64,
+    ),
+    (u64, u64, u64, Option<u64>, Option<u64>, u64, u64),
+);
+
 impl PartialEq for OwnPast {
     fn eq(&self, other: &Self) -> bool {
-        self.split == other.split
-            && self.committed == other.committed
-            && self.staged == other.staged
-            && self.cumulative == other.cumulative
-            && self.committed_days == other.committed_days
-            && self.total == other.total
-            && self.staged_values == other.staged_values
-            && self.censored == other.censored
-            && self.staged_censored == other.staged_censored
-            && self.max == other.max
-            && self.staged_max == other.staged_max
-            && self.refused_negative == other.refused_negative
-            && self.refused_full == other.refused_full
+        self.compared() == other.compared()
     }
 }
 
@@ -609,22 +610,11 @@ impl OwnPast {
             .checked_add(1)
             .ok_or(HistRefusal::DaysFull)?;
         if self.staged_values > 0 {
-            let mut running = 0_u64;
-            for ((count, staged), below) in self
-                .committed
-                .iter_mut()
-                .zip(self.staged.iter_mut())
-                .zip(self.cumulative.iter_mut())
-            {
+            for (count, staged) in self.committed.iter_mut().zip(self.staged.iter_mut()) {
                 *count = count.saturating_add(*staged);
                 *staged = 0;
-                *below = running;
-                running += u64::from(*count);
             }
-            if let Some(last) = self.cumulative.last_mut() {
-                *last = running;
-            }
-            self.total = running;
+            self.rebuild_cumulative();
             self.did(u64::try_from(self.leaves()).unwrap_or(u64::MAX));
         }
         self.max = match (self.max, self.staged_max) {
@@ -830,14 +820,42 @@ impl OwnPast {
     /// Rebuilds the cumulative array and the total from the committed counts.
     fn rebuild_cumulative(&mut self) {
         let mut running = 0_u64;
-        for (count, below) in self.committed.iter().zip(self.cumulative.iter_mut()) {
+        let counts = self
+            .committed
+            .iter()
+            .map(|count| Some(*count))
+            .chain(core::iter::once(None));
+        for (below, count) in self.cumulative.iter_mut().zip(counts) {
             *below = running;
-            running += u64::from(*count);
-        }
-        if let Some(last) = self.cumulative.last_mut() {
-            *last = running;
+            if let Some(count) = count {
+                running += u64::from(count);
+            }
         }
         self.total = running;
+    }
+
+    /// Everything equality compares: the histogram and its counters, never
+    /// the bench's work counter.
+    fn compared(&self) -> CompareKey<'_> {
+        (
+            (
+                self.split.as_deref(),
+                &*self.committed,
+                &*self.staged,
+                &*self.cumulative,
+                self.committed_days,
+                self.total,
+            ),
+            (
+                self.staged_values,
+                self.censored,
+                self.staged_censored,
+                self.max,
+                self.staged_max,
+                self.refused_negative,
+                self.refused_full,
+            ),
+        )
     }
 
     /// Appends this histogram's checkpoint body (D-6325): [`OWN_PAST_MAGIC`],
@@ -2573,7 +2591,8 @@ mod tests {
             assert!(leaf >= previous, "leaves ascend with values");
             previous = leaf;
             let edge = past.leaf_lower_edge(leaf);
-            assert!(edge <= value && base_bin(edge) == leaf, "{value}");
+            assert!(edge <= value, "{value}");
+            assert_eq!(base_bin(edge), leaf, "{value}");
         }
     }
 
@@ -2609,6 +2628,16 @@ mod tests {
             at: 0,
         };
         assert_eq!(reader.varint(), Err(invalid("truncated")));
+        // Ten bytes that fit 64 bits and say another follows: the eleventh
+        // would start past the top bit.
+        let past_top = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x81, 0x00,
+        ];
+        let mut reader = Reader {
+            bytes: &past_top,
+            at: 0,
+        };
+        assert_eq!(reader.varint(), Err(invalid("varint_too_long")));
     }
 
     #[test]
