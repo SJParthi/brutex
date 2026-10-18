@@ -657,16 +657,19 @@ fn update_touch(
 /// the candle before, and its pokes past the day's extremes before it.
 fn record(given: &FibCandle, prior: Option<Prior>, linked: bool) -> Rec {
     let c = given.candle;
+    // A poke is the depth past the extreme before the candle (none when it
+    // did not pass it: the depth is then not positive) of a candle that closed
+    // back strictly inside it.
     let poke_long = prior.map_or(0, |p| {
-        if c.low < p.low && c.close > p.low {
-            p.low - c.low
+        if c.close > p.low {
+            (p.low - c.low).max(0)
         } else {
             0
         }
     });
     let poke_short = prior.map_or(0, |p| {
-        if c.high > p.high && c.close < p.high {
-            c.high - p.high
+        if c.close < p.high {
+            (c.high - p.high).max(0)
         } else {
             0
         }
@@ -1867,5 +1870,105 @@ mod instrumentation {
             + ((KINDS + ll) * ql + (KINDS + ls) * qs) * core::mem::size_of::<u16>()
             + snapshots * core::mem::size_of::<(usize, usize)>();
         assert_eq!(d.state_bytes(), expected);
+    }
+}
+
+#[cfg(test)]
+mod pokes_and_slides {
+    //! `record`'s pokes at their edges and `update_touch`'s slide, read
+    //! directly.
+
+    use super::*;
+    use crate::{Candle, OI_NULL};
+
+    fn given(high: i64, low: i64, close: i64) -> FibCandle {
+        FibCandle {
+            candle: Candle {
+                ts_micros: 0,
+                open: close,
+                high,
+                low,
+                close,
+                volume: 1,
+                open_interest: OI_NULL,
+            },
+            tf_minutes: 1,
+            complete: true,
+            missing_minutes: 0,
+            close_ts_micros: 60,
+        }
+    }
+
+    #[test]
+    fn a_poke_passes_the_extreme_and_closes_strictly_back_inside_it() {
+        let prior = Some(Prior {
+            high: 200,
+            low: 100,
+        });
+        let pokes = |high, low, close| {
+            let r = record(&given(high, low, close), prior, true);
+            (r.poke_long, r.poke_short)
+        };
+        assert_eq!(pokes(150, 90, 120), (10, 0), "below the low, back above it");
+        assert_eq!(
+            pokes(150, 90, 100),
+            (0, 0),
+            "closed AT the low: not back above"
+        );
+        assert_eq!(pokes(150, 90, 95), (0, 0), "closed below the low");
+        assert_eq!(pokes(150, 100, 120), (0, 0), "touched the low: no depth");
+        assert_eq!(
+            pokes(230, 150, 180),
+            (0, 30),
+            "above the high, back below it"
+        );
+        assert_eq!(pokes(230, 150, 200), (0, 0), "closed AT the high");
+        assert_eq!(pokes(230, 150, 210), (0, 0), "closed above the high");
+        assert_eq!(pokes(200, 150, 180), (0, 0), "touched the high: no depth");
+        assert_eq!(
+            pokes(250, 50, 150),
+            (50, 50),
+            "an engulfing candle pokes both ways"
+        );
+        let first = record(&given(250, 50, 150), None, false);
+        assert_eq!(
+            (first.poke_long, first.poke_short, first.linked),
+            (0, 0, false)
+        );
+        assert_eq!((first.close_ts, first.open), (60, 150));
+    }
+
+    #[test]
+    fn a_slide_visits_the_candles_that_leave_and_the_one_that_enters() {
+        let rec = |high| Rec {
+            open: 1,
+            high,
+            low: 1,
+            close: 1,
+            close_ts: 0,
+            linked: true,
+            poke_long: 0,
+            poke_short: 0,
+        };
+        let recs = [rec(10), rec(9), rec(10), rec(10), rec(8), rec(10)];
+        let tolerance = [0, 1_000];
+        let mut touch = Touch::new(2);
+        touch.reset(2);
+        let mut step =
+            |window| update_touch(&mut touch, &recs, TradeDir::Long, &tolerance, 10, window);
+        // A recount of [0, 2] against the edge 10: three candles visited.
+        assert_eq!(step((0, 2)), (true, 3));
+        // The edge stands; each candle the window advances by one: candle 0
+        // leaves and 3 enters, then 1 leaves and 4 enters (two visited each).
+        assert_eq!(step((1, 3)), (false, 2));
+        assert_eq!(step((2, 4)), (false, 2));
+        // The start jumps two while the end moves one: 2 and 3 leave, 5 enters.
+        assert_eq!(step((4, 5)), (false, 3));
+        // [4, 5] holds 8 and 10: one touch at 0 bp, and 8 is 20% below.
+        assert_eq!(touch.counts, [1, 1]);
+        let mut fresh = Touch::new(2);
+        fresh.reset(2);
+        update_touch(&mut fresh, &recs, TradeDir::Long, &tolerance, 10, (2, 4));
+        assert_eq!(fresh.counts, [2, 2], "10, 10 at 0 bp; 8 is not within 10%");
     }
 }
