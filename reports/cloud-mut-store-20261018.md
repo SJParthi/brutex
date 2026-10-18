@@ -434,6 +434,17 @@ alone.
 | `cargo deny check` | **green**: `advisories ok, bans ok, licenses ok, sources ok`, exit 0, cargo-deny 0.20.2. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` (DENY-1's bumps) |
 | CI job `language-purity`: every `run:` step but 1e (it moves `web/` aside) and 14 (it re-measures bounds), run through `.github/checks_all.rs`'s plan as the 17 Oct pass ran them | **32 of 32 green** on `0c1c19e2` (144 s), and 32 of 32 on the base `67c4e58d` (143 s), each in its own worktree. The 8 that were red on 17 Oct, on the base and the branch alike, have been fixed on `feat/db-fix` since |
 
+**The workspace** (CLAUDE.md §9's `cargo test --workspace --locked`, the
+17 Oct `## Left` list's "workspace test run"). Run on `0c1c19e2`, whose code
+is `24ca118c`'s: uninstrumented, `--no-fail-fast`, nothing skipped, the
+capabilities dropped, in 40 min.
+- 152 test targets and 13 doc-test runs;
+- **9,411 passed, 5 failed, 48 ignored**;
+- the one red target is `api --lib`: the 5
+  `server::head_deadline_body_tests` below, which fail identically on the
+  base `67c4e58d`. Every other target is green, `cli`'s pool test and
+  `store`'s `cited_commits` among them.
+
 **Run as plain root**, with every capability, `cargo test -p store --locked`
 fails 3 tests, all in `settings::tests`, in code outside this pass:
 - `a_directory_that_stops_being_readable_is_a_fault_not_nothing_new`;
