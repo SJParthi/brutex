@@ -185,7 +185,7 @@ each by the flaky test.
 ## Left (in progress)
 
 - Phase 1: `pullrun.rs` (466) and `server.rs` (1,514), running with retries
-  (12:19 UTC: `pullrun.rs` 444 of 466 tested, `server.rs` 79 of 1,514).
+  (12:39 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 128 of 1,514).
   `pullrun.rs` survivors so far: `996:24` and `2360:49`, each closed by a new
   test (below).
 - New tests so far, each measured failing on its hand-applied mutant and
