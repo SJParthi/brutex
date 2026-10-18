@@ -19786,7 +19786,58 @@ fib`).
 | L-FIB8-15 | Which "previous close" the operator means is UNVERIFIED | the last Zerodha minute close and NSE's official close differ | both computed: the folded minutes decide, the stored `1day` close is the labelled variant |
 | L-FIB8-16 | `pull::fold` does not restart at a special session's second window | D-3321's one grid for the derive stands, and a special session is never tradable | D-6446 |
 | L-FIB8-17 | Zerodha minute volume is read by one test | FM-F095 defines a padded minute by volume 0 (ZM-55) | volume decides nothing else |
-| L-FIB8-18 | A day of GDFL seconds is a dense slot table beside its bars | O(1) lookup needs a slot per second of the continuous window | 22,500 slots of 8 bytes and up to 22,500 bars of 56 bytes a day held (1,440,000 bytes a full day): C-F8-09 |
+| L-FIB8-18 | A day of GDFL seconds is a dense slot table and a dense range column beside its bars, and its deep-walk read is bound by memory bandwidth past the last-level cache | O(1) lookup needs a cell per second of the continuous window; a walk streams its column | 22,500 slots of 8 bytes, 22,500 ranges of 16 bytes and up to 22,500 bars of 56 bytes a day held (1,800,000 bytes a full day); the walk reads 16 bytes a second (D-6452): C-F8-09, NOT closed on this host (below) |
 | L-FIB8-19 | The suspect-wick test reads the committed widest wick only | permille 1000 among committed days is "wider than every one" | FIB-2's own-past histograms are not consulted; resolution (deep or DATA-1) is FIB-3/FIB-5's |
 | L-FIB8-20 | Expiry stamps are absent | no stored contract expiries or settled-expiry authority is read in the interim | labelled `expiry_source_not_loaded`; the F&O ban is always absent (UNVERIFIED) |
 | L-FIB8-21 | Branch coverage and mutation of FIB-8's files | the stable toolchain measures lines and regions; a `cli` mutant rebuilds the crate | see the report's coverage and mutant tables |
+| L-FIB8-22 | `SecondsDay::range` in a deep walk's order exceeds the 1.25x line on this host | one lookup a call at every scale (work 1); from one day held (in cache) to a hundred (180 MB) the walk streams 16 bytes a second from memory instead of from cache, p50 6.0 → 7.8 ns, p99 10.8 → 27.4 ns | 2.545x, within the shared 3.0x ceiling: printed FAIL (time), the bench exits 0. The full bar (`SecondsDay::at`, 64 bytes a second) measured 4.607x in the same order and is off the walk (D-6452). NOT closed here; the Mac's run decides it |
+| L-FIB8-23 | `DaySlots::slot_of`'s p99 ratio moves between runs of the same code | 0.987x (PASS) in one run and 1.937x (FAIL, time) in the next with no change to the row or to `authorities.rs`; p50 7.2 to 9.5 ns at every scale in both | the cause is UNVERIFIED: nothing measured here separates this host's scheduler from the call (as L-FIB1-13). NOT closed here |
+
+### Measured in this session: FIB-8's bench rows (`cargo bench -p cli --bench fib`)
+
+All on THIS HOST (4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`, 15 GiB,
+Linux 6.18, rustc 1.97.1, `bench` profile), nothing else running. Times are
+percentiles of batch means (2,000 batches of 1,000 calls), ps per call, p50 /
+p99 / max at each scale; the harness is FIB-1's
+(`crates/runner/benches/fib_rows/harness.rs`). The table is the third run, on
+the code of D-6452 (timer granularity 18 ns, last-level cache estimate 16,384
+KiB); the first two runs printed a granularity of 23 ns and an estimate of
+32,768 KiB.
+
+| ID | Row | Class | Scales | p50 / p99 / max ps | Work per call | Ratio | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-F8-01 | one minute of a 375-minute day input | AMORTISED, period 375 | 1 / 11 / 110 months | 350,860 / 624,755 / 1,819,030; 328,530 / 660,984 / 1,733,822; 343,801 / 582,900 / 738,355 | mean 0.999 (375 at each day's close) | mean 0.974x | PASS |
+| C-F8-02 | one minute of a 360-minute closing-auction day input | AMORTISED, period 360 | 1 / 11 / 110 months | 185,684 / 366,151 / 449,241; 210,209 / 450,286 / 2,068,218; 203,700 / 379,932 / 2,416,160 | mean 1.000 (360 at each close) | mean 1.078x | PASS |
+| C-F8-03 | `CalendarAuthority::tradable` (interim) | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 30,487 / 65,937 / 499,954; 29,435 / 52,153 / 72,629; 12,309 / 46,302 / 844,785 | 1 | p99 0.702x | PASS |
+| C-F8-04 | `DaySlots::slot_of`, `load_series_month`'s order | WORST-CASE | 25 / 250 / 2,500 members | 7,400 / 23,227 / 70,306; 7,222 / 42,420 / 63,365; 9,465 / 44,991 / 76,000 | 1 | p99 1.937x | **FAIL (time) on this host**, within the 3.0x ceiling (L-FIB8-23) |
+| C-F8-05 | the historical basis verdict (interim inputs) | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 1,008,207 / 1,396,170 / 4,524,916; 1,167,839 / 1,370,784 / 3,637,762; 842,467 / 1,409,459 / 2,073,379 | 1 | p99 1.009x | PASS |
+| C-F8-06 | the other interim authorities' answers | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 12,199 / 24,292 / 35,067; 12,204 / 24,332 / 70,652; 12,228 / 24,453 / 32,804 | 1 | p99 1.006x | PASS |
+| C-F8-07 | one `CandidateRecord` v1 encoded and decoded | WORST-CASE, fixed state | 1 / 10 / 100 records | 155,195 / 175,678 / 208,526; 145,907 / 168,213 / 772,203; 141,324 / 163,310 / 199,976 | 83 bytes | p99 0.929x | PASS |
+| C-F8-08 | one record of a sealed FIB file, dense ascending pass | AMORTISED, period 789 (one block) | 10,000 / 100,000 / 1,000,000 records | 210,158 / 528,252 / 2,521,694; 238,241 / 600,557 / 1,725,865; 229,729 / 546,845 / 2,206,106 | mean 83.06 / 83.04 / 83.04 bytes read (a block's 65,519 to 65,671 once per 789) | mean 1.082x | PASS (EXTRAPOLATION: no production file size measured) |
+| C-F8-11 | one record of a sealed FIB file, one a block, ascending | BOUNDED, one block and its checksum | 10,000 / 100,000 / 1,000,000 records | 174,903,714 / 240,175,264 / 255,229,638; 189,010,452 / 255,170,304 / 280,502,830; 190,300,784 / 252,924,740 / 278,167,709 | 65,519 bytes (p50) | p99 1.053x | BOUNDED (information); EXTRAPOLATION |
+| C-F8-09 | `SecondsDay::range`, a deep walk's order | WORST-CASE | 1 / 10 / 100 days | 6,043 / 10,767 / 42,477; 6,194 / 13,466 / 39,713; 7,838 / 27,405 / 64,338 | 1 | p99 2.545x | **FAIL (time) on this host**, within the 3.0x ceiling (L-FIB8-22) |
+| C-F8-10 | `ReferenceMonth::stamp`, trades in time order | WORST-CASE | 2 / 20 / 200 indices | 25,801 / 46,549 / 219,695; 24,607 / 49,201 / 154,407; 22,599 / 50,444 / 1,711,415 | 1 | p99 1.083x | PASS |
+
+At the production worker count (4), mean ps per call per worker at the
+largest scale: C-F8-01 270,928; C-F8-02 297,192; C-F8-04 15,776; C-F8-08
+280,315; C-F8-11 195,193,734; C-F8-09 6,103; C-F8-10 26,396.
+
+**The three runs of the rows that changed** (ratio of the largest scale to the
+smallest; mean time for AMORTISED, p99 time otherwise):
+
+| Row | Run 1: uniformly random lookups | Run 2: production order (FM-F002) | Run 3: D-6452 |
+|---|---|---|---|
+| C-F8-04 `slot_of` | 2.842x FAIL (time) | 0.987x PASS | 1.937x FAIL (time), the same code as run 2 |
+| C-F8-08 file read | 2.507x FAIL (time), EXPECTED, random ordinals | 1.126x PASS, AMORTISED, ascending | 1.082x PASS |
+| C-F8-09 a GDFL second | 9.754x FAIL, `at`, random (day, second) | 4.607x FAIL, `at`, a walk | 2.545x FAIL (time), `range`, a walk |
+| C-F8-10 reference stamp | 5.811x FAIL, random (day, minute, index) | 1.483x FAIL (time) | 1.083x PASS |
+| C-F8-07 codec (unchanged) | 1.282x FAIL (time) | 0.994x PASS | 0.929x PASS |
+| C-F8-02 360-minute day (unchanged) | 0.987x PASS | 1.318x FAIL (time) | 1.078x PASS |
+
+Runs 1 and 2 exited 1 (a row above the 3.0x ceiling); run 3 exited 0. Run 1's
+order was no production caller's: FM-F002 asks that "access order matches
+production", and FIB-8's callers read stock-month by stock-month, ascending, a
+walk at a time. Every row did one unit of work a call at every scale in every
+run; what grew was the cost of reaching memory past the cache, which the
+pointer-chase probe printed beside each run (about 4 ns a dependent load at
+512 KiB, 25 ns at 2 MiB, 300 ns at 256 MiB).
