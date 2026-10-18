@@ -1,14 +1,26 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
 # Cloud mutation and coverage pass B, finished — `crates/api`, 2026-10-18
 
 Branch `cloud/mut-api-b-20261018`, cut from `origin/cloud/mut-api-b-20261017`
-at `6a957d3e` (the 17 Oct pass's last push), with `origin/feat/db-fix` at
-`67c4e58d` merged in at `19e2c2f9`.
+at `6a957d3e` (the 17 Oct pass's last push). `origin/feat/db-fix` was merged
+in twice: `67c4e58d` at the start (`19e2c2f9`) and `7aa28d65` at the end
+(`fbdff6f7`). The last code commit is `cdc81a6b`.
 
 **This report holds no authority** (`CLAUDE.md` §10): it is evidence of what
 was measured on this date, on this machine. Every number below was measured
 in this session unless it says it was carried.
+
+**In short.** Phase 1 is finished for `autopilot.rs`, `pullrun.rs` and
+`server.rs`: 2,346 mutants, each against the whole `api` lib suite on the
+merged tree. Phase 2 re-ran every survivor on the newest source, and every
+mutant in code changed since phase 1's base. Every survivor is closed by one
+of the 19 new tests, argued equivalent in writing, or clock-bound and
+measured caught when the clock allows. No production source was changed.
+The final coverage run lists and reasons every remaining gap. fmt, clippy
+and deny are clean. `cargo test -p api` fails only on six `feat/db-fix`
+tests that are red on the base on this 4-core Linux host. Four 17 Oct tests
+were adapted to the two merges.
 
 ## Carried
 
@@ -48,7 +60,9 @@ repairs). It merged with **no textual conflict**. Of the scoped files it
 changed `server.rs` (a `count_route` layer in `admitted_gated`, the
 `/pools.json` route, the `pool_table_tests` module) and `emitted.rs` (one
 emit-site row). Again every `feat/db-fix` change is kept, and the manifests
-are byte-identical to it.
+are byte-identical to it. After it the branch differs from `feat/db-fix` in
+sixteen files: the 17 Oct pass's fourteen, `server_cloud_mutant_tests_e.rs`
+and this report.
 
 **One more semantic conflict**, resolved keeping both sides' intent
 (`cdc81a6b`). R3-08 sizes every pool by the core count under its `MAX_*`
@@ -479,37 +493,135 @@ environment never takes (a build with or without repository metadata), and
 in `_e` the day-rollover and settled-day arms of `ending_on`, which a run
 before the open does not take.
 
-## Left (in progress)
+## Phase 2
 
-- Phase 1: `pullrun.rs` (466) and `server.rs` (1,509), running with retries
-  (21:42 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 1509 of 1,509).
-  `pullrun.rs` survivors so far: `996:24` and `2360:49`, each closed by a new
-  test (below).
-- New tests so far, each measured failing on its hand-applied mutant and
-  passing on the original where it targets one:
-  `server_cloud_mutant_tests_e.rs` (5), for AH-02's `HeadDeadline` and
-  `exchange_watch` arms that a coverage run of the merged tree left
-  unexecuted; `pullrun::cloud_tests_1018` (3): `996:24` (`unnamed > 0` → `>=`
-  in `Interrupted::others_words`, which would write "0 more run(s) …
-  counted, not named"), `2360:49` (`weak > *oldest` → `>=` in `decorate`'s
-  `newer_may_be_open`) and its sibling `2371:58` (`*at > other.ordinal` →
-  `>=`, the `CLOSE_UNDECODED` doubt). Both `decorate` ties need an index
-  whose `runs` and `faults` files name one position, which this code never
-  writes. `decorate`'s own contract ("a record AFTER") is pinned by value
-  instead of argued from the index's consistency.
-- `cargo clippy --workspace --all-targets -- -D warnings` is clean at
-  `f9a7c020`.
-- Phase 2 (the newest source, the whole suite less the one opt-level-0
-  exclusion, retries): `audit.rs`'s five mutants in code changed since
-  `bdcfa9bd` (`Journal::identity`, `Journal::read_index`): **5 of 5 caught.**
-  The 17 Oct survivors of `audit.rs` (8) survive again and stay equivalent
-  (the `const` loops at 527 and 535, `Drops::peak`'s ties), and
-  `import_journal.rs:529:11` times out again (detected). Every phase-1
-  survivor: after phase 1.
-- The final coverage run; gates.
+Every phase-1 survivor and every mutant in code changed since phase 1's base,
+on the newest source. Retries 2, the whole `api` lib suite except the two
+mutation-run exclusions (Method), and a whole-suite opt-level-3 run for the
+`HeadDeadline` survivor. Phase 2 ran on the newest tree of its time
+(`0ab9fb01`, every test this pass adds). The second merge changed no scoped
+production code except `admitted_gated` and `route_table`, whose mutants were
+run after it.
+
+| Set | Mutants | Caught | Missed | Timeout | Unviable |
+|---|---:|---:|---:|---:|---:|
+| `audit.rs`, code changed since `bdcfa9bd` (`Journal::identity`, `Journal::read_index`) | 5 | 5 | 0 | 0 | 0 |
+| `audit.rs`, the 17 Oct survivors | 8 | 0 | 8, equivalent | 0 | 0 |
+| `import_journal.rs:529:11`, the 17 Oct timeout | 1 | 0 | 0 | 1, detected | 0 |
+| `autopilot.rs` survivors | 8 | 0 | 8, equivalent | 0 | 0 |
+| `pullrun.rs` survivors and its two flaky-killed | 4 | 3 | 1, equivalent | 0 | 0 |
+| `server.rs` survivors | 34 | 20 | 14, equivalent | 0 | 0 |
+| `server.rs`, the second merge's changes | 5 | 1 | 0 | 0 | 4 |
+
+The cargo-mutants 27.1.0 quirk (neither `-F` nor `-E` filters "delete field"
+mutants) re-ran those of each file too. Every one was caught or unviable, as
+in phase 1. `audit.rs:535:16` `==` was "caught" by the load-red test and was
+re-run without it: missed, equivalent. The carried `audit.rs` arguments hold:
+the four are the loops of `const _: () = { .. }` compile-time assertions at
+527 and 535, and the other four are `Drops::peak`'s running-maximum ties at
+652, 655, 658 and 661. `import_journal.rs:529:11` hangs as the 17 Oct report
+says.
+
+**Every survivor of this pass is therefore one of:** equivalent, argued above
+in writing (8 in `autopilot.rs`, 1 in `pullrun.rs`, 14 in `server.rs`, 8
+carried in `audit.rs`); caught by a test added in this pass (20 mutants: 3 in
+`pullrun.rs`, 17 in `server.rs`); or clock-bound and caught when the clock
+allows (3, measured both ways).
+
+## New tests
+
+19 tests, every one in a scoped file, and no production source changed.
+Each was run green on the original. Each that targets a mutant was measured
+failing on that mutant, applied by hand to the dev copy, before it was
+committed. The clock-bound one is the exception: on Sunday it could only be
+shown green, and phase 2 later measured its kill.
+
+`pullrun::cloud_tests_1018`:
+`a_refusal_whose_every_other_open_run_is_named_counts_none_unnamed`,
+`damage_casts_doubt_only_on_a_run_opened_before_it`,
+`a_newer_run_may_be_open_only_after_a_close_past_the_damage`.
+
+`server_cloud_mutant_tests_e.rs` (module `server::cloud_mutant_tests_e`):
+`a_client_that_ends_its_stream_mid_response_is_reported_once_as_its_close`,
+`a_read_that_fails_mid_response_is_reported_as_the_clients_close`,
+`a_read_that_fails_with_nothing_in_flight_reports_nothing`,
+`a_direct_write_while_the_head_clock_runs_starts_a_response`,
+`a_router_served_without_the_limited_listener_passes_through_the_watch`
+(these five for coverage of AH-02's arms),
+`a_window_ending_today_is_held_back_exactly_while_today_is_unsettled`,
+`a_damaged_month_names_its_unreadable_records_and_a_clean_one_names_none`,
+`a_head_ends_at_its_blank_line_in_either_spelling`,
+`a_write_that_moves_no_byte_does_not_end_a_stall`,
+`the_stop_counts_every_request_open_across_the_speed_table`,
+`a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more`,
+`ending_a_served_process_with_no_engine_work_abandons_none`,
+`a_stop_names_the_engine_work_it_abandons_and_only_then`,
+`the_entry_answers_a_command_it_cannot_parse_as_misused_and_keeps_nothing`,
+`a_serve_holds_only_with_both_its_lock_and_its_port`,
+`the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds`.
+
+Four 17 Oct tests were adapted to the two `feat/db-fix` merges (Merge,
+above), each keeping both sides' intent.
+`server::cloud_mutant_tests_a::a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved`
+and its `_d` twin follow AH-02. `a_scrub_that_cannot_be_admitted_answers_the_admission_refusal`
+and `the_index_map_reads_the_catalogue_from_the_masters_folder_on_each_request`
+follow R3-08.
+
+## Gates
+
+Final, on a real git checkout of `77aaefaa` (its crates are `cdc81a6b`'s, the
+last code commit), at the checked-in profile, as the non-root user:
+
+- `cargo fmt --all --check`: **clean** (also on every commit of this pass;
+  the one commit pushed before its format was fixed, `5d616ec3`, was amended
+  to `00b32d1d` on this branch within a minute, before anything else).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: **clean**,
+  exit 0, no warning.
+- `cargo deny check`: **green** (`advisories ok, bans ok, licenses ok,
+  sources ok`). No manifest, lockfile or `deny.toml` is touched; all three
+  are byte-identical to `feat/db-fix` `7aa28d65`.
+- `cargo test -p api --locked`: **red, and only on the base's own tests.** At
+  this host's stock `tcp_wmem` (4 MiB max), the lib target ran 2,574 passed,
+  6 failed, 8 ignored. The six are the five AH-02 `head_deadline_body_tests`
+  and `detail::tests::a_refused_admission_names_what_its_bound_and_why`, all
+  red on `feat/db-fix` itself (Red on the base). With `tcp_wmem` max 256 KiB
+  and `--no-fail-fast`, every target ran: lib 2,579 passed, 1 failed (the
+  eight-core `detail.rs` test), 8 ignored; `src/main.rs` 4 / 4;
+  `tests/binary.rs` 4 / 4; `tests/pool_load.rs` 5 / 5;
+  `tests/store_step_forms.rs` 3 / 3; doc-tests 1 / 1. No test this pass adds
+  or adapts fails at either setting.
+- The 19 new tests under `strace -f -e trace=connect`, with no proxy in the
+  environment: 7 `connect()` calls, every one to `127.0.0.1`. No test reads a
+  credential or reaches a vendor.
+
+## Left
+
+Nothing in this pass's scope. What remains needs the Mac or the operator
+(below).
 
 ## NEEDS THE MAC
 
-- Confirm the five `head_deadline_body_tests` above pass on macOS at
-  `67c4e58d`, and decide whether a stock Linux send buffer is a case the
-  server must meet (CI is Linux).
+- **The five AH-02 `head_deadline_body_tests`** (Red on the base): confirm
+  they pass on macOS at the base, and decide whether a stock Linux send
+  buffer (`tcp_wmem` max 4 MiB) is a case the server must meet. CI is
+  `ubuntu-24.04` and likely red on them (UNVERIFIED: no CI run was read).
+- **`detail::tests::a_refused_admission_names_what_its_bound_and_why`** (Red on
+  the base): it passes only with eight or more cores. GitHub's standard
+  Linux runners have fewer (UNVERIFIED for this repository's runners).
+- **The two R3-08 adaptations** were measured only here, at 4 cores. Re-run
+  them on the Mac, where the pools have their full eight slots.
+- **The new socket tests** (half-close, `SO_LINGER(0)` reset, the
+  `HeadDeadline` unit tests) were measured on Linux only. The 17 Oct pass's
+  reset test uses the same method.
+- **`a_window_ending_today_is_held_back_exactly_while_today_is_unsettled`**
+  asserts a different side by the hour, by design. It passed here in both
+  (Sunday, settled; Monday 02:30–04:51 IST, unsettled).
+- **For the operator's call, unchanged:** the carried 16 Oct finding still
+  holds on the merged tree. A vendor-named `Disposition::RetryBounded` under a
+  status outside 500–599 is laddered on `server_errors`, which is counted only
+  for 500–599 (server.rs:7021, 8207, 8359), so it waits 0 ms five times and
+  says the vendor failed "0 time(s)". Whether Dhan or Groww send those names
+  under a non-5xx status is **UNVERIFIED**. Also for information,
+  `pullrun.rs:2449:45`: at a tie no consistent index can produce, the count
+  filter drops the count while its comment says only damage after the oldest
+  opening record does (Phase 1 results). Nothing changed.
