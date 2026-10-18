@@ -1408,8 +1408,15 @@ impl Detector {
     }
 
     /// Pushes the candle into every lane and slides or recounts its touches.
+    ///
+    /// A generated lane keeps live touch counts only while it can be emitted
+    /// (its length between three candles and the maximal rest's); otherwise
+    /// they are dropped, and its next emittable candle recounts it once. The
+    /// rest grows by at most one candle a candle, so that recount is paid for
+    /// by the candles it took to grow: amortised O(1).
     fn advance_lanes(&mut self, index: u32, rec: &Rec, t: usize) {
         let Self {
+            micro,
             tape,
             rest,
             lanes,
@@ -1423,14 +1430,21 @@ impl Detector {
             ..
         } = self;
         let segment = *segment_start;
-        let windows = core::iter::once((&mut *rest, *rest_start)).chain(
+        let (micro3, rest_length) = (micro.1, t + 1 - *rest_start);
+        let windows = core::iter::once((&mut *rest, *rest_start, true)).chain(
             lanes.iter_mut().take(*active).map(|lane| {
                 let start = segment.max((t + 1).saturating_sub(lane.length));
-                (lane, start)
+                let emittable = lane.length > micro3 && lane.length < rest_length;
+                (lane, start, emittable)
             }),
         );
-        for (lane, start) in windows {
+        for (lane, start, emittable) in windows {
             *work += lane.push(index, rec, u32::try_from(start).unwrap_or(u32::MAX));
+            if !emittable {
+                lane.long.valid = false;
+                lane.short.valid = false;
+                continue;
+            }
             let edges = [
                 (TradeDir::Long, &*long, lane.high.front_or(rec.high)),
                 (TradeDir::Short, &*short, -lane.low.front_or(rec.low)),
@@ -1721,6 +1735,7 @@ mod tests {
         assert!(d.work() > 0);
         assert_eq!(d.refusals().get(Refusal::NoTouchTolerance), 4);
         assert!(d.state_bytes() > core::mem::size_of::<Detector>());
+        assert_eq!(d.extremes().high().map(|e| e.price), Some(7_300));
     }
 
     #[test]
