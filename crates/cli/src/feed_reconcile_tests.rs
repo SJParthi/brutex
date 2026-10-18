@@ -1755,7 +1755,16 @@ fn an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud() {
     let (code, text) = reconcile_month(&store.0, &out.0, "2025-05", &[]);
     assert_eq!(code, FAILED, "{text}");
     assert!(
-        text.contains("neither feed holds a share directory for 2025-05"),
+        text.contains("listed shares holds a bar of 2025-05 in either feed"),
+        "{text}"
+    );
+    assert!(contents(&out.0).0.is_empty(), "nothing written");
+    // A store with no share directory at all is refused before any read.
+    let bare = Dir::new("store");
+    let (code, text) = reconcile_month(&bare.0, &out.0, "2025-03", &[]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("neither feed holds a share directory for 2025-03"),
         "{text}"
     );
     assert!(contents(&out.0).0.is_empty(), "nothing written");

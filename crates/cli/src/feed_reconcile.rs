@@ -2882,6 +2882,19 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
                 },
             )
         })?;
+    // NO ROW, NO FILE: a listed share can hold only a directory (Zerodha's
+    // day bars are filed by a longer partition than the month), so a month
+    // where no listed share holds a bar of either feed is refused rather
+    // than published as an authority of no row (D-5178).
+    if results.iter().all(|result| result.lines.is_empty()) {
+        return Err(format!(
+            "refused: none of the {} listed shares holds a bar of {} in either feed under \
+             `{}`; nothing was written (D-5178)",
+            results.len(),
+            ask.month,
+            root.display()
+        ));
+    }
     // THE POOLED LAG, BEFORE EACH DAY: the carried count plus every share's
     // best lags of the earlier days of this month.
     let mut pooled_before = [[0_u32; LAG_BINS]; MAX_DAYS];

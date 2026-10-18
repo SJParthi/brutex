@@ -71842,7 +71842,10 @@ rule and a test:
    answer. A `--symbols` file repeats no unlisted share's carry line.
 3. **Refused, nothing written**: a `--symbols` key for which neither feed
    holds a share directory of the month (named in the refusal); a month for
-   which neither feed holds any share directory; a store root that is not a
+   which neither feed holds any share directory; a month where no listed
+   share holds a bar of either feed (a share can hold only a directory,
+   because Zerodha's day bars are filed by a longer partition than the
+   month); a store root that is not a
    directory; an `--out` inside the store anywhere but under its audit area
    `audit/` (compared on canonical paths). Each prints `FEED RECONCILE
    REFUSED` or `FAILED` with the reason and exits 1.
