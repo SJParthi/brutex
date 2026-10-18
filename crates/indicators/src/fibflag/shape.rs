@@ -279,3 +279,178 @@ fn micro(w: &Window, width: i128, out: &mut ShapeScores) {
     let pairs = i128::from(w.candles) - 1;
     out.set(Shape::Stair, permille(rises, pairs + pairs));
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes: a test \
+              that cannot panic cannot fail."
+)]
+mod tests {
+    use super::*;
+    use vocab::fib_cube::RowId;
+
+    /// A window of `candles` between `low` and `high` with every sum zero.
+    fn window(candles: u32, high: i64, low: i64) -> Window {
+        let bar = Bar { high, low };
+        Window {
+            candles,
+            first_index: 0,
+            high,
+            low,
+            close_high: high,
+            close_low: low,
+            sum_high: 0,
+            sum_low: 0,
+            sum_close: 0,
+            sum_x_high: 0,
+            sum_x_low: 0,
+            sum_x_close: 0,
+            sum_xx_close: 0,
+            sum_x: 0,
+            sum_xx: 0,
+            sum_xxx: 0,
+            sum_xxxx: 0,
+            sum_range: 0,
+            sum_body: 0,
+            range_first_half: 0,
+            range_last_half: 0,
+            close_first_third: 0,
+            close_last_third: 0,
+            inside_pairs: 0,
+            rising_lows: 0,
+            poke: 0,
+            holds_level0: false,
+            holds_level1: false,
+            first: bar,
+            middle: None,
+            last: bar,
+        }
+    }
+
+    #[test]
+    fn the_shapes_are_the_cube_s_and_each_kind_has_its_family() {
+        for shape in Shape::ALL {
+            let label = BASE_SHAPE_ROW.labels[usize::from(shape.cube_value())];
+            assert_eq!(RowId::BaseShape.value_of(label), Some(shape.cube_value()));
+        }
+        assert_eq!(Shape::ALL.len(), Shape::REST.len() + Shape::MICRO.len());
+        assert_eq!(Shape::family(BaseKind::Rest), Shape::REST);
+        assert_eq!(Shape::family(BaseKind::Micro2), Shape::MICRO);
+        assert_eq!(Shape::family(BaseKind::Micro3), Shape::MICRO);
+        let scores = scores(&window(2, 10, 0), BaseKind::Micro2);
+        assert_eq!(scores.all().len(), SHAPES);
+        assert_eq!(scores.get(Shape::InsidePair), scores.all()[10]);
+    }
+
+    #[test]
+    fn a_u_and_an_inverted_u_need_thirds() {
+        // Three candles, closes 9 / 1 / 9 in a width of 10: ends 9, middle 1.
+        let mut u = window(3, 10, 0);
+        u.close_first_third = 9;
+        u.close_last_third = 9;
+        u.sum_close = 19;
+        let s = scores(&u, BaseKind::Rest);
+        assert_eq!((s.get(Shape::U), s.get(Shape::InvertedU)), (800, 0));
+        u.sum_close = 18 + 9;
+        u.close_first_third = 1;
+        u.close_last_third = 1;
+        u.sum_close = 11;
+        let s = scores(&u, BaseKind::Rest);
+        assert_eq!((s.get(Shape::U), s.get(Shape::InvertedU)), (0, 800));
+        // Two candles have no thirds.
+        let two = window(2, 10, 0);
+        assert_eq!(scores(&two, BaseKind::Rest).get(Shape::U), 0);
+    }
+
+    #[test]
+    fn a_zero_width_rest_has_the_stated_limits() {
+        let flat = window(4, 50, 50);
+        let s = scores(&flat, BaseKind::Rest);
+        for (shape, limit) in [
+            (Shape::Flat, 1_000),
+            (Shape::TightCloses, 1_000),
+            (Shape::ShakeoutReclaim, 0),
+            (Shape::U, 0),
+            (Shape::InvertedU, 0),
+            (Shape::Triangle, 0),
+        ] {
+            assert_eq!(s.get(shape), limit, "{shape:?}");
+        }
+        for shape in Shape::MICRO {
+            assert_eq!(s.get(*shape), 0, "outside the family");
+        }
+    }
+
+    #[test]
+    fn a_ranged_rest_scores_its_edges_closes_ranges_and_pokes() {
+        let mut w = window(4, 100, 0);
+        // Highs 100, 90, 90, 80 and lows 0, 10, 10, 20: deviations 40 + 40.
+        w.sum_high = 360;
+        w.sum_low = 40;
+        w.close_high = 70;
+        w.close_low = 30;
+        w.range_first_half = 180;
+        w.range_last_half = 140;
+        w.inside_pairs = 3;
+        w.rising_lows = 2;
+        w.poke = 25;
+        let s = scores(&w, BaseKind::Rest);
+        assert_eq!(s.get(Shape::Flat), 900, "1000 - 80 x 1000 / 800");
+        assert_eq!(s.get(Shape::TightCloses), 600);
+        assert_eq!(s.get(Shape::Triangle), 223, "1000 - 140 x 1000 / 180");
+        assert_eq!(s.get(Shape::InsideCandles), 1_000);
+        assert_eq!(s.get(Shape::RisingLows), 666);
+        assert_eq!(s.get(Shape::ShakeoutReclaim), 250);
+        // A flat first half under a ranged last half: x / 0, no triangle.
+        w.range_first_half = 0;
+        assert_eq!(scores(&w, BaseKind::Rest).get(Shape::Triangle), 0);
+        // An expanding range: the squeeze passes 1000 and the triangle is 0.
+        w.range_first_half = 100;
+        w.range_last_half = 300;
+        assert_eq!(scores(&w, BaseKind::Rest).get(Shape::Triangle), 0);
+        // A window the detector never builds (one candle, one pair) is still
+        // scored without a panic: a share over zero pairs is a whole.
+        let mut one = window(1, 100, 0);
+        one.inside_pairs = 1;
+        assert_eq!(
+            scores(&one, BaseKind::Rest).get(Shape::InsideCandles),
+            1_000
+        );
+    }
+
+    #[test]
+    fn micro_scores_read_their_two_or_three_candles() {
+        let mut v = window(3, 100, 0);
+        v.first = Bar { high: 100, low: 40 };
+        v.middle = Some(Bar { high: 60, low: 0 });
+        v.last = Bar { high: 80, low: 30 };
+        let s = scores(&v, BaseKind::Micro3);
+        assert_eq!(
+            s.get(Shape::VBottom),
+            300,
+            "30 below the shallower neighbour"
+        );
+        assert_eq!(s.get(Shape::PartialU), 900);
+        assert_eq!(s.get(Shape::InsidePair), 0, "80 is above the middle's 60");
+        // first -> middle: neither higher; middle -> last: both higher.
+        assert_eq!(s.get(Shape::Stair), 500);
+        for shape in Shape::REST {
+            assert_eq!(s.get(*shape), 0, "outside the family");
+        }
+        let mut pair = window(2, 100, 0);
+        pair.first = Bar { high: 100, low: 0 };
+        pair.last = Bar { high: 90, low: 10 };
+        let s = scores(&pair, BaseKind::Micro2);
+        assert_eq!(s.get(Shape::VBottom), 0, "two candles have no middle");
+        assert_eq!(s.get(Shape::InsidePair), 1_000);
+        assert_eq!(s.get(Shape::Stair), 500, "a higher low, a lower high");
+        let flat = window(2, 70, 70);
+        let s = scores(&flat, BaseKind::Micro2);
+        assert_eq!(
+            (s.get(Shape::PartialU), s.get(Shape::InsidePair)),
+            (1_000, 1_000)
+        );
+        assert_eq!(s.get(Shape::Stair), 0);
+    }
+}

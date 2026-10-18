@@ -63,7 +63,7 @@ use vocab::fib_cube::{
     BASE_KIND_ROW, MICRO2_CANDLES, MICRO3_CANDLES, SHAPE_HALVES, SHAPE_THIRDS, max_width_minutes,
 };
 
-use super::extremes::{DayExtremes, Ladder, WithheldExtremes};
+use super::extremes::{DayExtremes, Ladder, Prior, WithheldExtremes};
 use super::measure::{self, Bar, Ratio, Window};
 use super::shape;
 use super::types::{
@@ -273,47 +273,41 @@ const NO_POWERS: Powers = Powers {
     xxxx: 0,
 };
 
-/// A monotonic deque of `(day index, key)` over a buffer of the ring's
-/// capacity: a candle is pushed once per clear, so the tail never passes it.
+/// A monotonic deque of `(day index, key)` in a buffer allocated once at the
+/// ring's capacity. A candle is pushed once per clear and an entry before the
+/// front stays in its slot until the clear, so the buffer never grows past the
+/// capacity and never reallocates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Monotone {
-    /// The slots.
-    slots: Box<[(u32, i64)]>,
+    /// The entries; those before `head` have expired.
+    slots: Vec<(u32, i64)>,
     /// The front.
     head: usize,
-    /// One past the back.
-    tail: usize,
     /// The front is the largest key (else the smallest).
     largest: bool,
 }
 
 impl Monotone {
-    /// An empty deque of `capacity` slots.
+    /// An empty deque with room for `capacity` candles.
     fn new(capacity: usize, largest: bool) -> Self {
         Self {
-            slots: vec![(0, 0); capacity].into_boxed_slice(),
+            slots: Vec::with_capacity(capacity),
             head: 0,
-            tail: 0,
             largest,
         }
     }
 
     /// Empties it without freeing.
-    const fn clear(&mut self) {
+    fn clear(&mut self) {
+        self.slots.clear();
         self.head = 0;
-        self.tail = 0;
     }
 
-    /// Pushes a key, dropping every key behind it that it dominates. Returns
-    /// the slots touched.
+    /// Pushes a key, dropping every live key behind it that it dominates.
+    /// Returns the slots touched.
     fn push(&mut self, index: u32, key: i64) -> u64 {
         let mut work = 1;
-        while let Some(&(_, back)) = self
-            .tail
-            .checked_sub(1)
-            .filter(|back| *back >= self.head)
-            .and_then(|back| self.slots.get(back))
-        {
+        while let Some(&(_, back)) = self.slots.last().filter(|_| self.slots.len() > self.head) {
             let dominated = if self.largest {
                 back <= key
             } else {
@@ -322,13 +316,10 @@ impl Monotone {
             if !dominated {
                 break;
             }
-            self.tail -= 1;
+            self.slots.pop();
             work += 1;
         }
-        if let Some(slot) = self.slots.get_mut(self.tail) {
-            *slot = (index, key);
-            self.tail += 1;
-        }
+        self.slots.push((index, key));
         work
     }
 
@@ -336,7 +327,7 @@ impl Monotone {
     /// entries dropped.
     fn expire(&mut self, start: u32) -> u64 {
         let mut work = 0;
-        while let Some(&(index, _)) = self.slots.get(self.head).filter(|_| self.head < self.tail) {
+        while let Some(&(index, _)) = self.slots.get(self.head) {
             if index >= start {
                 break;
             }
@@ -346,12 +337,20 @@ impl Monotone {
         work
     }
 
-    /// The front key: the window's largest (or smallest).
+    /// The front key, the window's largest (or smallest); `alone` for an
+    /// empty deque, which is the key of a window holding only that candle.
+    fn front_or(&self, alone: i64) -> i64 {
+        self.slots.get(self.head).map_or(alone, |&(_, key)| key)
+    }
+
+    /// The front key, when there is one.
     fn front(&self) -> Option<i64> {
-        self.slots
-            .get(self.head)
-            .filter(|_| self.head < self.tail)
-            .map(|&(_, key)| key)
+        self.slots.get(self.head).map(|&(_, key)| key)
+    }
+
+    /// The bytes its buffer holds.
+    fn bytes(&self) -> usize {
+        self.slots.capacity() * core::mem::size_of::<(u32, i64)>()
     }
 }
 
@@ -378,16 +377,23 @@ impl Touch {
             counts: Vec::with_capacity(levels),
         }
     }
+
+    /// No count, `levels` zeroes, within the room it was made with.
+    fn reset(&mut self, levels: usize) {
+        self.valid = false;
+        self.counts.clear();
+        self.counts.resize(levels, 0);
+    }
 }
 
 /// One rest window of the day: the maximal rest, or one generated length.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Lane {
-    /// `None` for the maximal rest, else the length in candles.
-    length: Option<usize>,
-    /// The long direction emits this length.
+    /// The generated length, in candles (unused by the maximal rest).
+    length: usize,
+    /// The long direction emits this window.
     long_uses: bool,
-    /// The short direction emits this length.
+    /// The short direction emits this window.
     short_uses: bool,
     /// The highest high.
     high: Monotone,
@@ -411,7 +417,7 @@ impl Lane {
     /// An unused lane over a ring of `capacity`.
     fn new(capacity: usize, long_levels: usize, short_levels: usize) -> Self {
         Self {
-            length: None,
+            length: 0,
             long_uses: false,
             short_uses: false,
             high: Monotone::new(capacity, true),
@@ -425,8 +431,17 @@ impl Lane {
         }
     }
 
+    /// Sets today's length and users and zeroes its counts.
+    fn reset(&mut self, length: usize, uses: (bool, bool), levels: (usize, usize)) {
+        self.clear();
+        self.length = length;
+        (self.long_uses, self.short_uses) = uses;
+        self.long.reset(levels.0);
+        self.short.reset(levels.1);
+    }
+
     /// Empties every deque and invalidates the touches.
-    const fn clear(&mut self) {
+    fn clear(&mut self) {
         self.high.clear();
         self.low.clear();
         self.close_high.clear();
@@ -453,16 +468,44 @@ impl Lane {
             + self.poke_short.expire(start)
     }
 
-    /// The raw extremes of its window.
-    fn extremes(&self) -> Extremes {
+    /// The raw extremes of its window, which ends at candle `last`.
+    fn extremes(&self, last: &Rec) -> Extremes {
         Extremes {
-            high: self.high.front().unwrap_or(0),
-            low: self.low.front().unwrap_or(0),
-            close_high: self.close_high.front().unwrap_or(0),
-            close_low: self.close_low.front().unwrap_or(0),
-            poke_long: self.poke_long.front().unwrap_or(0),
-            poke_short: self.poke_short.front().unwrap_or(0),
+            high: self.high.front_or(last.high),
+            low: self.low.front_or(last.low),
+            close_high: self.close_high.front_or(last.close),
+            close_low: self.close_low.front_or(last.close),
+            poke_long: self.poke_long.front_or(last.poke_long),
+            poke_short: self.poke_short.front_or(last.poke_short),
         }
+    }
+
+    /// Whether `direction` emits this window.
+    const fn uses(&self, direction: TradeDir) -> bool {
+        match direction {
+            TradeDir::Long => self.long_uses,
+            TradeDir::Short => self.short_uses,
+        }
+    }
+
+    /// `direction`'s touch counts.
+    const fn touch(&self, direction: TradeDir) -> &Touch {
+        match direction {
+            TradeDir::Long => &self.long,
+            TradeDir::Short => &self.short,
+        }
+    }
+
+    /// The bytes its buffers hold.
+    fn bytes(&self) -> usize {
+        self.high.bytes()
+            + self.low.bytes()
+            + self.close_high.bytes()
+            + self.close_low.bytes()
+            + self.poke_long.bytes()
+            + self.poke_short.bytes()
+            + (self.long.counts.capacity() + self.short.counts.capacity())
+                * core::mem::size_of::<u16>()
     }
 }
 
@@ -529,32 +572,34 @@ const fn view_bar(rec: &Rec, direction: TradeDir) -> Bar {
     }
 }
 
-/// Adds (or removes) the touches of `recs` against `edge` to `counts`.
-fn count_touches(
-    counts: &mut [u16],
+/// Adds (or removes) the touches of `recs` against `edge` to each level's
+/// count.
+fn count_touches<'c>(
+    counts: impl Iterator<Item = &'c mut u16>,
     recs: &[Rec],
     direction: TradeDir,
     edge: i64,
     tolerance: &[u64],
     add: bool,
 ) {
-    for rec in recs {
-        let high = view_high(rec, direction);
-        for (count, tolerance) in counts.iter_mut().zip(tolerance) {
-            if measure::touches(high, edge, *tolerance) {
-                *count = if add {
-                    count.saturating_add(1)
-                } else {
-                    count.saturating_sub(1)
-                };
-            }
-        }
+    for (count, tolerance) in counts.zip(tolerance) {
+        let hits = recs
+            .iter()
+            .filter(|rec| measure::touches(view_high(rec, direction), edge, *tolerance))
+            .count();
+        let hits = u16::try_from(hits).unwrap_or(u16::MAX);
+        *count = if add {
+            count.saturating_add(hits)
+        } else {
+            count.saturating_sub(hits)
+        };
     }
 }
 
 /// Slides or recounts one direction's touches over the window `[start, t]`
-/// whose highest view high is `edge`. Returns whether it recounted and the
-/// candles it visited.
+/// whose highest view high is `edge`: slid while the edge stands, recounted
+/// over the window when it moves (FM-F022). Returns whether it recounted and
+/// the candles it visited.
 fn update_touch(
     touch: &mut Touch,
     recs: &[Rec],
@@ -568,12 +613,19 @@ fn update_touch(
     let visited = if recount {
         touch.counts.fill(0);
         let all = recs.get(start..=t).unwrap_or(&[]);
-        count_touches(&mut touch.counts, all, direction, edge, tolerance, true);
+        count_touches(
+            touch.counts.iter_mut(),
+            all,
+            direction,
+            edge,
+            tolerance,
+            true,
+        );
         all.len()
     } else {
         let leaving = recs.get(touch.start..start).unwrap_or(&[]);
         count_touches(
-            &mut touch.counts,
+            touch.counts.iter_mut(),
             leaving,
             direction,
             edge,
@@ -582,7 +634,7 @@ fn update_touch(
         );
         let entering = recs.get(t..=t).unwrap_or(&[]);
         count_touches(
-            &mut touch.counts,
+            touch.counts.iter_mut(),
             entering,
             direction,
             edge,
@@ -597,26 +649,43 @@ fn update_touch(
     (recount, visited)
 }
 
+/// Candle `given` as the tape keeps it: its prices, whether it is linked to
+/// the candle before, and its pokes past the day's extremes before it.
+fn record(given: &FibCandle, prior: Option<Prior>, linked: bool) -> Rec {
+    let c = given.candle;
+    let poke_long = prior.map_or(0, |p| {
+        if c.low < p.low && c.close > p.low {
+            p.low - c.low
+        } else {
+            0
+        }
+    });
+    let poke_short = prior.map_or(0, |p| {
+        if c.high > p.high && c.close < p.high {
+            c.high - p.high
+        } else {
+            0
+        }
+    });
+    Rec {
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        close_ts: given.close_ts_micros,
+        linked,
+        poke_long,
+        poke_short,
+    }
+}
+
 /// One direction's values for the begun day.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirectionState {
-    /// `(length, lane)` of each generated rest length, ascending.
-    lengths: Vec<(usize, usize)>,
     /// The touch tolerance of each level `q`, in basis points.
     tolerance: Vec<u64>,
     /// The direction has a touch tolerance today.
     known: bool,
-}
-
-impl DirectionState {
-    /// Empty, with room for the run's generation.
-    fn new(lengths: usize, levels: usize) -> Self {
-        Self {
-            lengths: Vec::with_capacity(lengths),
-            tolerance: Vec::with_capacity(levels),
-            known: false,
-        }
-    }
 }
 
 /// The begun day.
@@ -630,13 +699,268 @@ struct Day {
     tick: i64,
 }
 
+/// The day's candles and every running sum over them: read-only while a
+/// candle's bases are emitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Tape {
+    /// The accepted candles.
+    recs: Vec<Rec>,
+    /// The exclusive prefix sums by day index.
+    prefix: Vec<Sums>,
+    /// The exclusive prefix sums of the powers of the day index.
+    powers: Box<[Powers]>,
+    /// The last index that made the day high at its close.
+    made_high: Option<usize>,
+    /// The last index that made the day low at its close.
+    made_low: Option<usize>,
+    /// The shape halves and thirds.
+    parts: (usize, usize),
+    /// The three-candle micro size: a window that long has a middle.
+    micro3: usize,
+}
+
+impl Tape {
+    /// Candles `s..=t`.
+    fn slice(&self, s: usize, t: usize) -> &[Rec] {
+        self.recs.get(s..=t).unwrap_or(&[])
+    }
+
+    /// Appends candle `rec`'s prefix sums.
+    fn push(&mut self, rec: Rec, previous: Option<&Rec>, index: u32) {
+        let last = self.prefix.last().copied().unwrap_or(NO_SUMS);
+        let x = i128::from(index);
+        let (open, high, low, close) = (
+            i128::from(rec.open),
+            i128::from(rec.high),
+            i128::from(rec.low),
+            i128::from(rec.close),
+        );
+        let flag =
+            |test: fn(&Rec, &Rec) -> bool| u32::from(previous.is_some_and(|p| test(&rec, p)));
+        self.prefix.push(Sums {
+            range: last.range + (high - low),
+            body: last.body + (close - open).abs(),
+            high: last.high + high,
+            low: last.low + low,
+            close: last.close + close,
+            x_high: last.x_high + x * high,
+            x_low: last.x_low + x * low,
+            x_close: last.x_close + x * close,
+            xx_close: last.xx_close + x * x * close,
+            inside: last.inside + flag(|r, p| r.high <= p.high && r.low >= p.low),
+            rise_low: last.rise_low + flag(|r, p| r.low > p.low),
+            fall_high: last.fall_high + flag(|r, p| r.high < p.high),
+        });
+        self.recs.push(rec);
+    }
+
+    /// The aggregates of day indices `s..=t` in `direction`'s view.
+    fn window(&self, direction: TradeDir, s: usize, t: usize, ext: &Extremes) -> Window {
+        let at = |i: usize| self.prefix.get(i).copied().unwrap_or(NO_SUMS);
+        let (halves, thirds) = self.parts;
+        let n = t + 1 - s;
+        let half = n / halves;
+        let third = n / thirds;
+        let sums = at(t + 1).minus(at(s));
+        let pairs = at(t + 1).minus(at(s + 1));
+        let powers = {
+            let p = |i: usize| self.powers.get(i).copied().unwrap_or(NO_POWERS);
+            let (end, begin) = (p(t + 1), p(s));
+            Powers {
+                x: end.x - begin.x,
+                xx: end.xx - begin.xx,
+                xxx: end.xxx - begin.xxx,
+                xxxx: end.xxxx - begin.xxxx,
+            }
+        };
+        let range_first_half = at(s + half).range - at(s).range;
+        let close_first = at(s + third).close - at(s).close;
+        let close_last = at(t + 1).close - at(t + 1 - third).close;
+        let holds_high = self.made_high.is_some_and(|i| i >= s);
+        let holds_low = self.made_low.is_some_and(|i| i >= s);
+        let bar = |i: usize| {
+            self.recs
+                .get(i)
+                .map_or(Bar { high: 0, low: 0 }, |r| view_bar(r, direction))
+        };
+        let long = Window {
+            candles: u32::try_from(n).unwrap_or(u32::MAX),
+            first_index: u32::try_from(s).unwrap_or(u32::MAX),
+            high: ext.high,
+            low: ext.low,
+            close_high: ext.close_high,
+            close_low: ext.close_low,
+            sum_high: sums.high,
+            sum_low: sums.low,
+            sum_close: sums.close,
+            sum_x_high: sums.x_high,
+            sum_x_low: sums.x_low,
+            sum_x_close: sums.x_close,
+            sum_xx_close: sums.xx_close,
+            sum_x: powers.x,
+            sum_xx: powers.xx,
+            sum_xxx: powers.xxx,
+            sum_xxxx: powers.xxxx,
+            sum_range: sums.range,
+            sum_body: sums.body,
+            range_first_half,
+            range_last_half: sums.range - range_first_half,
+            close_first_third: close_first,
+            close_last_third: close_last,
+            inside_pairs: pairs.inside,
+            rising_lows: pairs.rise_low,
+            poke: ext.poke_long,
+            holds_level0: holds_high,
+            holds_level1: holds_low,
+            first: bar(s),
+            middle: (n == self.micro3).then(|| bar(s + 1)),
+            last: bar(t),
+        };
+        match direction {
+            TradeDir::Long => long,
+            TradeDir::Short => Window {
+                high: -ext.low,
+                low: -ext.high,
+                close_high: -ext.close_low,
+                close_low: -ext.close_high,
+                sum_high: -sums.low,
+                sum_low: -sums.high,
+                sum_close: -sums.close,
+                sum_x_high: -sums.x_low,
+                sum_x_low: -sums.x_high,
+                sum_x_close: -sums.x_close,
+                sum_xx_close: -sums.xx_close,
+                close_first_third: -close_first,
+                close_last_third: -close_last,
+                rising_lows: pairs.fall_high,
+                poke: ext.poke_short,
+                holds_level0: holds_low,
+                holds_level1: holds_high,
+                ..long
+            },
+        }
+    }
+
+    /// The bytes its buffers hold.
+    fn bytes(&self) -> usize {
+        self.recs.capacity() * core::mem::size_of::<Rec>()
+            + self.prefix.capacity() * core::mem::size_of::<Sums>()
+            + core::mem::size_of_val(&*self.powers)
+    }
+}
+
+/// What one candle's bases are measured with.
+struct Context<'a> {
+    /// The day's candles and sums.
+    tape: &'a Tape,
+    /// The ladder after the candle folded.
+    ladder: &'a Ladder,
+    /// The direction being emitted.
+    direction: TradeDir,
+    /// That direction's values today.
+    state: &'a DirectionState,
+    /// What a zero-width base gets.
+    zero_width: ZeroWidthReading,
+}
+
 /// Where a base's touch counts come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TouchSource {
+#[derive(Clone, Copy, Debug)]
+enum Counted<'a> {
     /// Counted over its few candles directly (a micro base).
     Direct,
     /// A rest lane's running counts.
-    Lane(usize),
+    Running(&'a Touch),
+}
+
+/// What the detector emits and counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Out {
+    /// The candle's snapshots.
+    snapshots: Vec<BaseSnapshot>,
+    /// Their touch counts, end to end.
+    touches: Vec<u16>,
+    /// Each snapshot's slice of `touches`.
+    spans: Vec<(usize, usize)>,
+    /// Refusals, by reason.
+    refusals: RefusalCounts,
+    /// The other counts.
+    counts: DetectorCounts,
+}
+
+impl Out {
+    /// Measures and emits one base over day indices `span`.
+    fn emit(
+        &mut self,
+        ctx: &Context<'_>,
+        kind: BaseKind,
+        span: (usize, usize),
+        ext: &Extremes,
+        counted: Counted<'_>,
+    ) {
+        let (s, t) = span;
+        let direction = ctx.direction;
+        let window = ctx.tape.window(direction, s, t, ext);
+        let measures = measure::measure(&window, ctx.ladder, direction);
+        if measures.zero_width() {
+            if ctx.zero_width == ZeroWidthReading::Refuse {
+                self.refusals.record(Refusal::ZeroWidthBase);
+                return;
+            }
+            self.counts.zero_width_bases += 1;
+        }
+        if measures.squeeze == Ratio::OverZero {
+            self.counts.ratio_over_zero += 1;
+        }
+        let stamp = ctx.ladder.stamp();
+        self.counts.extreme_from_withheld_bucket += u64::from(stamp.extreme_from_withheld_bucket);
+        self.counts.frame_from_suspect_print += u64::from(stamp.frame_from_suspect_print);
+        let known = ctx.state.known;
+        let from = self.touches.len();
+        if known {
+            match counted {
+                Counted::Direct => {
+                    self.touches.resize(from + ctx.state.tolerance.len(), 0);
+                    count_touches(
+                        self.touches.iter_mut().skip(from),
+                        ctx.tape.slice(s, t),
+                        direction,
+                        window.high,
+                        &ctx.state.tolerance,
+                        true,
+                    );
+                }
+                Counted::Running(touch) => self.touches.extend_from_slice(&touch.counts),
+            }
+        } else {
+            self.refusals.record(Refusal::NoTouchTolerance);
+        }
+        self.spans.push((from, self.touches.len()));
+        let close_at = |i: usize| ctx.tape.recs.get(i).map_or(0, |r| r.close_ts);
+        let index = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
+        self.snapshots.push(BaseSnapshot {
+            kind,
+            direction,
+            high: ext.high,
+            low: ext.low,
+            candles: u16::try_from(t + 1 - s).unwrap_or(u16::MAX),
+            first_close_ts_micros: close_at(s),
+            last_close_ts_micros: close_at(t),
+            first_index: index(s),
+            last_index: index(t),
+            measures,
+            shape: shape::scores(&window, kind),
+            ladder: stamp,
+            touches_known: known,
+        });
+        self.counts.snapshots += 1;
+    }
+
+    /// The bytes its buffers hold.
+    fn bytes(&self) -> usize {
+        self.snapshots.capacity() * core::mem::size_of::<BaseSnapshot>()
+            + self.touches.capacity() * core::mem::size_of::<u16>()
+            + self.spans.capacity() * core::mem::size_of::<(usize, usize)>()
+    }
 }
 
 /// The bases one candle emitted, borrowed from the detector's buffers.
@@ -685,18 +1009,12 @@ pub struct Detector {
     params: DetectorParams,
     /// The operator's two micro sizes, in candles.
     micro: (usize, usize),
-    /// The shape halves and thirds.
-    parts: (usize, usize),
     /// The begun day.
     day: Option<Day>,
     /// The day's extremes.
     extremes: DayExtremes,
-    /// The day's accepted candles.
-    recs: Vec<Rec>,
-    /// The exclusive prefix sums by day index.
-    prefix: Vec<Sums>,
-    /// The exclusive prefix sums of the powers of the day index.
-    powers: Box<[Powers]>,
+    /// The day's candles and sums.
+    tape: Tape,
     /// The highest low of the maximal rest.
     overlap_low: Monotone,
     /// The lowest high of the maximal rest.
@@ -705,15 +1023,13 @@ pub struct Detector {
     segment_start: usize,
     /// The maximal rest's first index.
     rest_start: usize,
-    /// The last index that made the day high at its close.
-    made_high: Option<usize>,
-    /// The last index that made the day low at its close.
-    made_low: Option<usize>,
     /// The last accepted close instant.
     prev_close: Option<i64>,
     /// The close instant the next candle must have to be contiguous.
     next_close: Option<i64>,
-    /// The rest lanes; the first is the maximal rest.
+    /// The maximal rest's lane.
+    rest: Lane,
+    /// One lane per distinct generated rest length today, ascending.
     lanes: Vec<Lane>,
     /// Lanes in use today.
     active: usize,
@@ -721,16 +1037,8 @@ pub struct Detector {
     long: DirectionState,
     /// The short direction's day.
     short: DirectionState,
-    /// The candle's snapshots.
-    snapshots: Vec<BaseSnapshot>,
-    /// Their touch counts, end to end.
-    touches: Vec<u16>,
-    /// Each snapshot's slice of `touches`.
-    spans: Vec<(usize, usize)>,
-    /// Refusals, by reason.
-    refusals: RefusalCounts,
-    /// The other counts.
-    counts: DetectorCounts,
+    /// What it emits and counts.
+    out: Out,
     /// The structural work counter: deque slots and candles touched.
     work: u64,
 }
@@ -765,37 +1073,50 @@ impl Detector {
             };
             powers.push(running);
         }
-        let lanes = (0..=long_lengths + short_lengths)
+        let lanes = (0..long_lengths + short_lengths)
             .map(|_| Lane::new(capacity, long_levels, short_levels))
             .collect();
         let snapshots = KINDS + long_lengths + KINDS + short_lengths;
         let touches = (KINDS + long_lengths) * long_levels + (KINDS + short_lengths) * short_levels;
+        let micro = (size(MICRO2_CANDLES), size(MICRO3_CANDLES));
         Ok(Self {
             params,
-            micro: (size(MICRO2_CANDLES), size(MICRO3_CANDLES)),
-            parts: (size(SHAPE_HALVES), size(SHAPE_THIRDS)),
+            micro,
             day: None,
             extremes: DayExtremes::empty(),
-            recs: Vec::with_capacity(capacity),
-            prefix: Vec::with_capacity(capacity + 1),
-            powers: powers.into_boxed_slice(),
+            tape: Tape {
+                recs: Vec::with_capacity(capacity),
+                prefix: Vec::with_capacity(capacity + 1),
+                powers: powers.into_boxed_slice(),
+                made_high: None,
+                made_low: None,
+                parts: (size(SHAPE_HALVES), size(SHAPE_THIRDS)),
+                micro3: micro.1,
+            },
             overlap_low: Monotone::new(capacity, true),
             overlap_high: Monotone::new(capacity, false),
             segment_start: 0,
             rest_start: 0,
-            made_high: None,
-            made_low: None,
             prev_close: None,
             next_close: None,
+            rest: Lane::new(capacity, long_levels, short_levels),
             lanes,
             active: 0,
-            long: DirectionState::new(long_lengths, long_levels),
-            short: DirectionState::new(short_lengths, short_levels),
-            snapshots: Vec::with_capacity(snapshots),
-            touches: Vec::with_capacity(touches),
-            spans: Vec::with_capacity(snapshots),
-            refusals: RefusalCounts::zero(),
-            counts: DetectorCounts::zero(),
+            long: DirectionState {
+                tolerance: Vec::with_capacity(long_levels),
+                known: false,
+            },
+            short: DirectionState {
+                tolerance: Vec::with_capacity(short_levels),
+                known: false,
+            },
+            out: Out {
+                snapshots: Vec::with_capacity(snapshots),
+                touches: Vec::with_capacity(touches),
+                spans: Vec::with_capacity(snapshots),
+                refusals: RefusalCounts::zero(),
+                counts: DetectorCounts::zero(),
+            },
             work: 0,
         })
     }
@@ -809,13 +1130,13 @@ impl Detector {
     /// Refusals, by reason.
     #[must_use]
     pub const fn refusals(&self) -> &RefusalCounts {
-        &self.refusals
+        &self.out.refusals
     }
 
     /// The other counts.
     #[must_use]
     pub const fn counts(&self) -> &DetectorCounts {
-        &self.counts
+        &self.out.counts
     }
 
     /// The structural work counter (FM-F001): deque slots and candles touched.
@@ -834,41 +1155,24 @@ impl Detector {
     /// allocation, which no day changes.
     #[must_use]
     pub fn state_bytes(&self) -> usize {
-        let lane = |l: &Lane| {
-            [
-                &l.high,
-                &l.low,
-                &l.close_high,
-                &l.close_low,
-                &l.poke_long,
-                &l.poke_short,
-            ]
-            .iter()
-            .map(|m| core::mem::size_of_val(&*m.slots))
-            .sum::<usize>()
-                + (l.long.counts.capacity() + l.short.counts.capacity())
-                    * core::mem::size_of::<u16>()
-                + core::mem::size_of::<Lane>()
-        };
         core::mem::size_of::<Self>()
-            + self.recs.capacity() * core::mem::size_of::<Rec>()
-            + self.prefix.capacity() * core::mem::size_of::<Sums>()
-            + core::mem::size_of_val(&*self.powers)
-            + core::mem::size_of_val(&*self.overlap_low.slots)
-            + core::mem::size_of_val(&*self.overlap_high.slots)
-            + self.lanes.iter().map(lane).sum::<usize>()
-            + (self.long.lengths.capacity() + self.short.lengths.capacity())
-                * core::mem::size_of::<(usize, usize)>()
+            + self.tape.bytes()
+            + self.overlap_low.bytes()
+            + self.overlap_high.bytes()
+            + self.rest.bytes()
+            + self
+                .lanes
+                .iter()
+                .map(|lane| lane.bytes() + core::mem::size_of::<Lane>())
+                .sum::<usize>()
             + (self.long.tolerance.capacity() + self.short.tolerance.capacity())
                 * core::mem::size_of::<u64>()
-            + self.snapshots.capacity() * core::mem::size_of::<BaseSnapshot>()
-            + self.touches.capacity() * core::mem::size_of::<u16>()
-            + self.spans.capacity() * core::mem::size_of::<(usize, usize)>()
+            + self.out.bytes()
     }
 
     /// Counts a refusal and returns it.
     fn refuse(&mut self, why: Refusal) -> Refusal {
-        self.refusals.record(why);
+        self.out.refusals.record(why);
         why
     }
 
@@ -915,19 +1219,18 @@ impl Detector {
             return Err(self.refuse(why));
         }
         self.extremes = DayExtremes::empty();
-        self.recs.clear();
-        self.prefix.clear();
-        self.prefix.push(NO_SUMS);
+        self.tape.recs.clear();
+        self.tape.prefix.clear();
+        self.tape.prefix.push(NO_SUMS);
+        self.tape.made_high = None;
+        self.tape.made_low = None;
         self.overlap_low.clear();
         self.overlap_high.clear();
         self.segment_start = 0;
         self.rest_start = 0;
-        self.made_high = None;
-        self.made_low = None;
         self.prev_close = None;
         self.next_close = None;
         for (state, input) in [(&mut self.long, &day.long), (&mut self.short, &day.short)] {
-            state.lengths.clear();
             state.tolerance.clear();
             state
                 .tolerance
@@ -943,55 +1246,38 @@ impl Detector {
         Ok(())
     }
 
-    /// Lane 0 is the maximal rest; one lane per distinct generated length of
-    /// either direction follows, ascending.
+    /// The maximal rest's lane serves both directions; one lane follows per
+    /// distinct generated length of either direction, ascending, naming which
+    /// direction emits it.
     fn assign_lanes(&mut self, long: &[u16], short: &[u16]) {
-        let (long_levels, short_levels) = (self.long.tolerance.len(), self.short.tolerance.len());
-        let reset = |lane: &mut Lane, length, long_uses, short_uses| {
-            lane.clear();
-            lane.length = length;
-            lane.long_uses = long_uses;
-            lane.short_uses = short_uses;
-            lane.long.counts.clear();
-            lane.long.counts.resize(long_levels, 0);
-            lane.short.counts.clear();
-            lane.short.counts.resize(short_levels, 0);
-        };
-        if let Some(lane) = self.lanes.first_mut() {
-            reset(lane, None, true, true);
-        }
+        let levels = (self.long.tolerance.len(), self.short.tolerance.len());
+        self.rest.reset(0, (true, true), levels);
         let (mut a, mut b) = (
             long.iter().copied().peekable(),
             short.iter().copied().peekable(),
         );
-        let mut next = 1;
-        loop {
+        let merged = core::iter::from_fn(|| {
             let (x, y) = (a.peek().copied(), b.peek().copied());
             let length = match (x, y) {
                 (Some(x), Some(y)) => x.min(y),
                 (Some(only), None) | (None, Some(only)) => only,
-                (None, None) => break,
+                (None, None) => return None,
             };
-            let (long_uses, short_uses) = (x == Some(length), y == Some(length));
-            if long_uses {
+            let uses = (x == Some(length), y == Some(length));
+            if uses.0 {
                 a.next();
             }
-            if short_uses {
+            if uses.1 {
                 b.next();
             }
-            let length = usize::from(length);
-            if let Some(lane) = self.lanes.get_mut(next) {
-                reset(lane, Some(length), long_uses, short_uses);
-            }
-            if long_uses {
-                self.long.lengths.push((length, next));
-            }
-            if short_uses {
-                self.short.lengths.push((length, next));
-            }
-            next += 1;
+            Some((usize::from(length), uses))
+        });
+        let mut active = 0;
+        for (lane, (length, uses)) in self.lanes.iter_mut().zip(merged) {
+            lane.reset(length, uses, levels);
+            active += 1;
         }
-        self.active = next;
+        self.active = active;
     }
 
     /// Folds an extremes-only update of a bucket `pull::fold` withheld
@@ -1011,7 +1297,7 @@ impl Detector {
         if self.extremes.step_withheld(update).is_err() {
             return Err(self.refuse(Refusal::CorruptCandle));
         }
-        self.counts.withheld_updates += 1;
+        self.out.counts.withheld_updates += 1;
         Ok(())
     }
 
@@ -1028,7 +1314,69 @@ impl Detector {
             return Err(self.refuse(Refusal::DayNotBegun));
         };
         let given = &input.candle;
-        let refusal = if given.tf_minutes != self.params.tf_minutes {
+        if let Some(why) = self.check(day, given) {
+            return Err(self.refuse(why));
+        }
+        let t = self.tape.recs.len();
+        let index = u32::try_from(t).unwrap_or(u32::MAX);
+        let Ok(prior) = self.extremes.step(
+            &given.candle,
+            index,
+            given.close_ts_micros,
+            input.suspect_print,
+        ) else {
+            return Err(self.refuse(Refusal::CorruptCandle));
+        };
+        let linked = self.next_close == Some(given.close_ts_micros);
+        let rec = record(given, prior, linked);
+        if prior.is_none_or(|p| rec.high > p.high) {
+            self.tape.made_high = Some(t);
+        }
+        if prior.is_none_or(|p| rec.low < p.low) {
+            self.tape.made_low = Some(t);
+        }
+        let previous = self.tape.recs.last().filter(|_| linked).copied();
+        self.tape.push(rec, previous.as_ref(), index);
+        self.prev_close = Some(given.close_ts_micros);
+        self.next_close = Some(input.next_close_ts_micros);
+        if !linked {
+            self.segment_start = t;
+            self.rest_start = t;
+            self.overlap_low.clear();
+            self.overlap_high.clear();
+            self.rest.clear();
+            for lane in self.lanes.iter_mut().take(self.active) {
+                lane.clear();
+            }
+            if t > 0 {
+                self.out.counts.rest_resets += 1;
+            }
+        }
+        self.advance_rest(index, &rec);
+        self.advance_lanes(index, &rec, t);
+        self.out.snapshots.clear();
+        self.out.touches.clear();
+        self.out.spans.clear();
+        let ladder = self.extremes.ladder(day.tick);
+        match ladder {
+            Some(ladder) => {
+                for direction in [TradeDir::Long, TradeDir::Short] {
+                    self.emit_direction(direction, &rec, t, &ladder);
+                }
+            }
+            None => self.out.refusals.record(Refusal::NoLadder),
+        }
+        Ok(Emitted {
+            snapshots: &self.out.snapshots,
+            touches: &self.out.touches,
+            spans: &self.out.spans,
+            ladder,
+        })
+    }
+
+    /// Why `given` cannot fold into the begun `day`, if it cannot.
+    fn check(&self, day: Day, given: &FibCandle) -> Option<Refusal> {
+        if given.tf_minutes != self.params.tf_minutes {
             Some(Refusal::WidthMismatch)
         } else if !given.complete {
             Some(Refusal::PartialCandle)
@@ -1041,123 +1389,11 @@ impl Detector {
             .is_some_and(|prev| given.close_ts_micros <= prev)
         {
             Some(Refusal::OutOfOrder)
-        } else if self.recs.len() >= day.session {
+        } else if self.tape.recs.len() >= day.session {
             Some(Refusal::SessionLongerThanRing)
         } else {
             None
-        };
-        if let Some(why) = refusal {
-            return Err(self.refuse(why));
         }
-        let t = self.recs.len();
-        let index = u32::try_from(t).unwrap_or(u32::MAX);
-        let Ok(prior) = self.extremes.step(
-            &given.candle,
-            index,
-            given.close_ts_micros,
-            input.suspect_print,
-        ) else {
-            return Err(self.refuse(Refusal::CorruptCandle));
-        };
-        let c = given.candle;
-        let linked = self.next_close == Some(given.close_ts_micros);
-        let poke_long = prior.map_or(0, |p| {
-            if c.low < p.low && c.close > p.low {
-                p.low - c.low
-            } else {
-                0
-            }
-        });
-        let poke_short = prior.map_or(0, |p| {
-            if c.high > p.high && c.close < p.high {
-                c.high - p.high
-            } else {
-                0
-            }
-        });
-        if prior.is_none_or(|p| c.high > p.high) {
-            self.made_high = Some(t);
-        }
-        if prior.is_none_or(|p| c.low < p.low) {
-            self.made_low = Some(t);
-        }
-        let previous = self.recs.last().filter(|_| linked).copied();
-        let rec = Rec {
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-            close_ts: given.close_ts_micros,
-            linked,
-            poke_long,
-            poke_short,
-        };
-        self.push_sums(&rec, previous.as_ref(), index);
-        self.recs.push(rec);
-        self.prev_close = Some(given.close_ts_micros);
-        self.next_close = Some(input.next_close_ts_micros);
-        if !linked {
-            self.segment_start = t;
-            self.rest_start = t;
-            self.overlap_low.clear();
-            self.overlap_high.clear();
-            for lane in self.lanes.iter_mut().take(self.active) {
-                lane.clear();
-            }
-            if t > 0 {
-                self.counts.rest_resets += 1;
-            }
-        }
-        self.advance_rest(index, &rec);
-        self.advance_lanes(index, &rec, t);
-        self.snapshots.clear();
-        self.touches.clear();
-        self.spans.clear();
-        let Some(ladder) = self.extremes.ladder(day.tick) else {
-            self.refusals.record(Refusal::NoLadder);
-            return Ok(self.emitted(None));
-        };
-        for direction in [TradeDir::Long, TradeDir::Short] {
-            self.emit_direction(direction, t, &ladder);
-        }
-        Ok(self.emitted(Some(ladder)))
-    }
-
-    /// The emitted view of the buffers.
-    fn emitted(&self, ladder: Option<Ladder>) -> Emitted<'_> {
-        Emitted {
-            snapshots: &self.snapshots,
-            touches: &self.touches,
-            spans: &self.spans,
-            ladder,
-        }
-    }
-
-    /// Appends candle `rec`'s prefix sums.
-    fn push_sums(&mut self, rec: &Rec, previous: Option<&Rec>, index: u32) {
-        let last = self.prefix.last().copied().unwrap_or(NO_SUMS);
-        let x = i128::from(index);
-        let (open, high, low, close) = (
-            i128::from(rec.open),
-            i128::from(rec.high),
-            i128::from(rec.low),
-            i128::from(rec.close),
-        );
-        let flag = |test: fn(&Rec, &Rec) -> bool| u32::from(previous.is_some_and(|p| test(rec, p)));
-        self.prefix.push(Sums {
-            range: last.range + (high - low),
-            body: last.body + (close - open).abs(),
-            high: last.high + high,
-            low: last.low + low,
-            close: last.close + close,
-            x_high: last.x_high + x * high,
-            x_low: last.x_low + x * low,
-            x_close: last.x_close + x * close,
-            xx_close: last.xx_close + x * x * close,
-            inside: last.inside + flag(|r, p| r.high <= p.high && r.low >= p.low),
-            rise_low: last.rise_low + flag(|r, p| r.low > p.low),
-            fall_high: last.fall_high + flag(|r, p| r.high < p.high),
-        });
     }
 
     /// Advances the maximal rest's start while its candles share no price.
@@ -1173,280 +1409,343 @@ impl Detector {
 
     /// Pushes the candle into every lane and slides or recounts its touches.
     fn advance_lanes(&mut self, index: u32, rec: &Rec, t: usize) {
-        let (rest_start, segment_start) = (self.rest_start, self.segment_start);
-        for lane in self.lanes.iter_mut().take(self.active) {
-            let start = lane.length.map_or(rest_start, |length| {
-                segment_start.max((t + 1).saturating_sub(length))
-            });
-            self.work += lane.push(index, rec, u32::try_from(start).unwrap_or(u32::MAX));
-            // Both fronts exist: the candle was just pushed.
-            if let (Some(top), Some(bottom)) = (lane.high.front(), lane.low.front()) {
-                for (direction, uses, touch, state, edge) in [
-                    (
-                        TradeDir::Long,
-                        lane.long_uses,
-                        &mut lane.long,
-                        &self.long,
-                        top,
-                    ),
-                    (
-                        TradeDir::Short,
-                        lane.short_uses,
-                        &mut lane.short,
-                        &self.short,
-                        -bottom,
-                    ),
-                ] {
-                    if uses && state.known {
-                        let (recounted, visited) = update_touch(
-                            touch,
-                            &self.recs,
-                            direction,
-                            &state.tolerance,
-                            edge,
-                            (start, t),
-                        );
-                        let visited = u64::try_from(visited).unwrap_or(u64::MAX);
-                        let levels = u64::try_from(state.tolerance.len()).unwrap_or(u64::MAX);
-                        self.work += visited.saturating_mul(levels);
-                        if recounted {
-                            self.counts.touch_recounts += 1;
-                            self.counts.touch_recount_candles += visited;
-                        }
+        let Self {
+            tape,
+            rest,
+            lanes,
+            active,
+            long,
+            short,
+            out,
+            work,
+            rest_start,
+            segment_start,
+            ..
+        } = self;
+        let segment = *segment_start;
+        let windows = core::iter::once((&mut *rest, *rest_start)).chain(
+            lanes.iter_mut().take(*active).map(|lane| {
+                let start = segment.max((t + 1).saturating_sub(lane.length));
+                (lane, start)
+            }),
+        );
+        for (lane, start) in windows {
+            *work += lane.push(index, rec, u32::try_from(start).unwrap_or(u32::MAX));
+            let edges = [
+                (TradeDir::Long, &*long, lane.high.front_or(rec.high)),
+                (TradeDir::Short, &*short, -lane.low.front_or(rec.low)),
+            ];
+            for (direction, state, edge) in edges {
+                if lane.uses(direction) && state.known {
+                    let touch = match direction {
+                        TradeDir::Long => &mut lane.long,
+                        TradeDir::Short => &mut lane.short,
+                    };
+                    let (recounted, visited) = update_touch(
+                        touch,
+                        &tape.recs,
+                        direction,
+                        &state.tolerance,
+                        edge,
+                        (start, t),
+                    );
+                    let visited = u64::try_from(visited).unwrap_or(u64::MAX);
+                    let levels = u64::try_from(state.tolerance.len()).unwrap_or(u64::MAX);
+                    *work += visited.saturating_mul(levels);
+                    if recounted {
+                        out.counts.touch_recounts += 1;
+                        out.counts.touch_recount_candles += visited;
                     }
                 }
             }
         }
     }
 
-    /// Emits every base of one direction that ends at `t`.
-    fn emit_direction(&mut self, direction: TradeDir, t: usize, ladder: &Ladder) {
-        let (micro2, micro3) = self.micro;
+    /// Emits every base of one direction that ends at candle `t`, `last`.
+    fn emit_direction(&mut self, direction: TradeDir, last: &Rec, t: usize, ladder: &Ladder) {
+        let Self {
+            params,
+            micro,
+            tape,
+            rest,
+            lanes,
+            active,
+            long,
+            short,
+            out,
+            rest_start,
+            ..
+        } = self;
+        let ctx = Context {
+            tape,
+            ladder,
+            direction,
+            state: match direction {
+                TradeDir::Long => long,
+                TradeDir::Short => short,
+            },
+            zero_width: params.zero_width,
+        };
+        let (micro2, micro3) = *micro;
         for (kind, size) in [(BaseKind::Micro2, micro2), (BaseKind::Micro3, micro3)] {
             let Some(s) = (t + 1).checked_sub(size) else {
                 continue;
             };
-            let contiguous = self
-                .recs
-                .get(s + 1..=t)
-                .is_some_and(|tail| tail.iter().all(|r| r.linked));
-            if contiguous {
-                let ext = Extremes::of(self.recs.get(s..=t).unwrap_or(&[]));
-                self.emit(direction, kind, (s, t), ext, TouchSource::Direct, ladder);
+            let span = tape.slice(s, t);
+            if span.iter().skip(1).all(|r| r.linked) {
+                out.emit(&ctx, kind, (s, t), &Extremes::of(span), Counted::Direct);
             } else {
-                self.refusals.record(Refusal::GapInBase);
+                out.refusals.record(Refusal::GapInBase);
             }
         }
-        let rest = t + 1 - self.rest_start;
-        if rest < micro2 {
+        let length = t + 1 - *rest_start;
+        if length < micro2 {
             return;
         }
-        if let Some(lane) = self.lanes.first() {
-            let ext = lane.extremes();
-            self.emit(
-                direction,
-                BaseKind::Rest,
-                (self.rest_start, t),
-                ext,
-                TouchSource::Lane(0),
-                ladder,
-            );
-        }
-        // Taken out for the loop and put back after: `Vec::new` allocates
-        // nothing and the capacity comes back with the list.
-        let lengths = core::mem::take(match direction {
-            TradeDir::Long => &mut self.long.lengths,
-            TradeDir::Short => &mut self.short.lengths,
-        });
-        for &(length, lane) in &lengths {
-            if length > micro3
-                && length < rest
-                && let Some(ext) = self.lanes.get(lane).map(Lane::extremes)
-            {
-                let span = (t + 1 - length, t);
-                self.emit(
-                    direction,
-                    BaseKind::Rest,
-                    span,
-                    ext,
-                    TouchSource::Lane(lane),
-                    ladder,
-                );
+        let maximal = Counted::Running(rest.touch(direction));
+        out.emit(
+            &ctx,
+            BaseKind::Rest,
+            (*rest_start, t),
+            &rest.extremes(last),
+            maximal,
+        );
+        for lane in lanes.iter().take(*active) {
+            if lane.uses(direction) && lane.length > micro3 && lane.length < length {
+                let span = (t + 1 - lane.length, t);
+                let running = Counted::Running(lane.touch(direction));
+                out.emit(&ctx, BaseKind::Rest, span, &lane.extremes(last), running);
             }
         }
-        match direction {
-            TradeDir::Long => self.long.lengths = lengths,
-            TradeDir::Short => self.short.lengths = lengths,
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a test \
+              that cannot panic cannot fail."
+)]
+mod tests {
+    use super::*;
+    use crate::{Candle, OI_NULL};
+
+    const MINUTE: i64 = 60_000_000;
+
+    fn params(capacity: u16, lengths: u16, levels: u16) -> DetectorParams {
+        DetectorParams {
+            tf_minutes: 1,
+            generation_version: 7,
+            ring_capacity: capacity,
+            long_rest_lengths: lengths,
+            short_rest_lengths: lengths,
+            long_touch_levels: levels,
+            short_touch_levels: levels,
+            zero_width: ZeroWidthReading::Emit,
         }
     }
 
-    /// Measures and emits one base over day indices `span`.
-    fn emit(
-        &mut self,
-        direction: TradeDir,
-        kind: BaseKind,
-        span: (usize, usize),
-        ext: Extremes,
-        source: TouchSource,
-        ladder: &Ladder,
-    ) {
-        let (s, t) = span;
-        let window = self.window(direction, s, t, &ext);
-        let measures = measure::measure(&window, ladder, direction);
-        if measures.zero_width() {
-            if self.params.zero_width == ZeroWidthReading::Refuse {
-                self.refusals.record(Refusal::ZeroWidthBase);
-                return;
-            }
-            self.counts.zero_width_bases += 1;
-        }
-        if measures.squeeze == Ratio::OverZero {
-            self.counts.ratio_over_zero += 1;
-        }
-        let stamp = ladder.stamp();
-        self.counts.extreme_from_withheld_bucket += u64::from(stamp.extreme_from_withheld_bucket);
-        self.counts.frame_from_suspect_print += u64::from(stamp.frame_from_suspect_print);
-        let state = match direction {
-            TradeDir::Long => &self.long,
-            TradeDir::Short => &self.short,
-        };
-        let known = state.known;
-        let from = self.touches.len();
-        if known {
-            match source {
-                TouchSource::Direct => {
-                    let start = self.touches.len();
-                    self.touches.resize(start + state.tolerance.len(), 0);
-                    if let Some(counts) = self.touches.get_mut(start..) {
-                        count_touches(
-                            counts,
-                            self.recs.get(s..=t).unwrap_or(&[]),
-                            direction,
-                            window.high,
-                            &state.tolerance,
-                            true,
-                        );
-                    }
-                }
-                TouchSource::Lane(lane) => {
-                    if let Some(lane) = self.lanes.get(lane) {
-                        let touch = match direction {
-                            TradeDir::Long => &lane.long,
-                            TradeDir::Short => &lane.short,
-                        };
-                        self.touches.extend_from_slice(&touch.counts);
-                    }
-                }
-            }
-        } else {
-            self.refusals.record(Refusal::NoTouchTolerance);
-        }
-        self.spans.push((from, self.touches.len()));
-        let close_at = |i: usize| self.recs.get(i).map_or(0, |r| r.close_ts);
-        let index = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
-        self.snapshots.push(BaseSnapshot {
-            kind,
-            direction,
-            high: ext.high,
-            low: ext.low,
-            candles: u16::try_from(t + 1 - s).unwrap_or(u16::MAX),
-            first_close_ts_micros: close_at(s),
-            last_close_ts_micros: close_at(t),
-            first_index: index(s),
-            last_index: index(t),
-            measures,
-            shape: shape::scores(&window, kind),
-            ladder: stamp,
-            touches_known: known,
-        });
-        self.counts.snapshots += 1;
-    }
-
-    /// The aggregates of day indices `s..=t` in `direction`'s view.
-    fn window(&self, direction: TradeDir, s: usize, t: usize, ext: &Extremes) -> Window {
-        let at = |i: usize| self.prefix.get(i).copied().unwrap_or(NO_SUMS);
-        let (halves, thirds) = self.parts;
-        let n = t + 1 - s;
-        let half = n / halves;
-        let third = n / thirds;
-        let sums = at(t + 1).minus(at(s));
-        let pairs = at(t + 1).minus(at(s + 1));
-        let powers = {
-            let p = |i: usize| self.powers.get(i).copied().unwrap_or(NO_POWERS);
-            let (end, begin) = (p(t + 1), p(s));
-            Powers {
-                x: end.x - begin.x,
-                xx: end.xx - begin.xx,
-                xxx: end.xxx - begin.xxx,
-                xxxx: end.xxxx - begin.xxxx,
-            }
-        };
-        let range_first_half = at(s + half).range - at(s).range;
-        let close_first = at(s + third).close - at(s).close;
-        let close_last = at(t + 1).close - at(t + 1 - third).close;
-        let holds_high = self.made_high.is_some_and(|i| i >= s);
-        let holds_low = self.made_low.is_some_and(|i| i >= s);
-        let rec = |i: usize| self.recs.get(i).map(|r| view_bar(r, direction));
-        let zero = Bar { high: 0, low: 0 };
-        let candles = u32::try_from(n).unwrap_or(u32::MAX);
-        let first_index = u32::try_from(s).unwrap_or(u32::MAX);
-        let (first, last) = (rec(s).unwrap_or(zero), rec(t).unwrap_or(zero));
-        let middle = if n == self.micro.1 { rec(s + 1) } else { None };
-        let long = Window {
-            candles,
-            first_index,
-            high: ext.high,
-            low: ext.low,
-            close_high: ext.close_high,
-            close_low: ext.close_low,
-            sum_high: sums.high,
-            sum_low: sums.low,
-            sum_close: sums.close,
-            sum_x_high: sums.x_high,
-            sum_x_low: sums.x_low,
-            sum_x_close: sums.x_close,
-            sum_xx_close: sums.xx_close,
-            sum_x: powers.x,
-            sum_xx: powers.xx,
-            sum_xxx: powers.xxx,
-            sum_xxxx: powers.xxxx,
-            sum_range: sums.range,
-            sum_body: sums.body,
-            range_first_half,
-            range_last_half: sums.range - range_first_half,
-            close_first_third: close_first,
-            close_last_third: close_last,
-            inside_pairs: pairs.inside,
-            rising_lows: pairs.rise_low,
-            poke: ext.poke_long,
-            holds_level0: holds_high,
-            holds_level1: holds_low,
-            first,
-            middle,
-            last,
-        };
-        match direction {
-            TradeDir::Long => long,
-            TradeDir::Short => Window {
-                high: -ext.low,
-                low: -ext.high,
-                close_high: -ext.close_low,
-                close_low: -ext.close_high,
-                sum_high: -sums.low,
-                sum_low: -sums.high,
-                sum_close: -sums.close,
-                sum_x_high: -sums.x_low,
-                sum_x_low: -sums.x_high,
-                sum_x_close: -sums.x_close,
-                sum_xx_close: -sums.xx_close,
-                close_first_third: -close_first,
-                close_last_third: -close_last,
-                rising_lows: pairs.fall_high,
-                poke: ext.poke_short,
-                holds_level0: holds_low,
-                holds_level1: holds_high,
-                ..long
+    /// The candle at grid slot `slot` of IST day `day` (09:15 IST onwards).
+    fn candle(day: i64, slot: i64, ohlc: (i64, i64, i64, i64)) -> CandleInput {
+        let open_ts = day * 86_400_000_000 - 19_800_000_000 + 33_300_000_000 + slot * MINUTE;
+        let (open, high, low, close) = ohlc;
+        CandleInput {
+            candle: FibCandle {
+                candle: Candle {
+                    ts_micros: open_ts,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume: 1,
+                    open_interest: OI_NULL,
+                },
+                tf_minutes: 1,
+                complete: true,
+                missing_minutes: 0,
+                close_ts_micros: open_ts + MINUTE,
             },
+            next_close_ts_micros: open_ts + MINUTE + MINUTE,
+            suspect_print: false,
         }
+    }
+
+    /// Every buffer's address and capacity.
+    fn fingerprint(d: &Detector) -> Vec<(usize, usize)> {
+        let mut out = vec![
+            (d.tape.recs.as_ptr().addr(), d.tape.recs.capacity()),
+            (d.tape.prefix.as_ptr().addr(), d.tape.prefix.capacity()),
+            (d.tape.powers.as_ptr().addr(), d.tape.powers.len()),
+            (
+                d.overlap_low.slots.as_ptr().addr(),
+                d.overlap_low.slots.capacity(),
+            ),
+            (
+                d.overlap_high.slots.as_ptr().addr(),
+                d.overlap_high.slots.capacity(),
+            ),
+            (d.lanes.as_ptr().addr(), d.lanes.capacity()),
+            (
+                d.long.tolerance.as_ptr().addr(),
+                d.long.tolerance.capacity(),
+            ),
+            (
+                d.short.tolerance.as_ptr().addr(),
+                d.short.tolerance.capacity(),
+            ),
+            (d.out.snapshots.as_ptr().addr(), d.out.snapshots.capacity()),
+            (d.out.touches.as_ptr().addr(), d.out.touches.capacity()),
+            (d.out.spans.as_ptr().addr(), d.out.spans.capacity()),
+        ];
+        for lane in core::iter::once(&d.rest).chain(&d.lanes) {
+            for m in [
+                &lane.high,
+                &lane.low,
+                &lane.close_high,
+                &lane.close_low,
+                &lane.poke_long,
+                &lane.poke_short,
+            ] {
+                out.push((m.slots.as_ptr().addr(), m.slots.capacity()));
+            }
+            for touch in [&lane.long, &lane.short] {
+                out.push((touch.counts.as_ptr().addr(), touch.counts.capacity()));
+            }
+        }
+        out
+    }
+
+    /// FM-F023: after day one, no day moves or grows a buffer: every one is
+    /// allocated in `Detector::new` at the run's sizes and cleared each day.
+    /// (A counting allocator is the stronger proof; the workspace's one test
+    /// root allowed to implement `GlobalAlloc` cannot link this crate, see
+    /// `docs/06-limits.md` L-FIB3-06.)
+    #[test]
+    fn no_allocation_per_day() {
+        let mut d = Detector::new(params(48, 4, 3)).unwrap();
+        let mut seed: u64 = 0x00F1_B3A1;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let mut first = None;
+        for day in 0..=100 {
+            let lengths: [Vec<u16>; 2] = [
+                (4..12).filter(|_| next(3) == 0).take(4).collect(),
+                (4..12).filter(|_| next(3) == 0).take(4).collect(),
+            ];
+            let tolerance: Vec<u64> = (0..=next(3)).map(|q| q * 7).collect();
+            let input = DayInput {
+                ist_day: 20_500 + day,
+                session_candles: 48,
+                observed_tick: 1,
+                long: DirectionDay {
+                    rest_lengths: &lengths[0],
+                    touch_bp: Some(&tolerance),
+                },
+                short: DirectionDay {
+                    rest_lengths: &lengths[1],
+                    touch_bp: (day % 4 != 0).then_some(tolerance.as_slice()),
+                },
+            };
+            d.begin_day(&input).unwrap();
+            let mut mid: i64 = 98_765;
+            let mut slot = 0;
+            for i in 0..52 {
+                mid += i64::try_from(next(21)).unwrap() - 10;
+                let flat = next(5) == 0;
+                let (up, down) = if flat {
+                    (0, 0)
+                } else {
+                    (
+                        i64::try_from(next(9)).unwrap(),
+                        i64::try_from(next(9)).unwrap(),
+                    )
+                };
+                let ohlc = (mid, mid + up + 40 * i64::from(i == 0), mid - down, mid);
+                let _ = d.fold(&candle(20_500 + day, slot, ohlc));
+                if next(10) == 0 {
+                    let _ = d.fold(&candle(20_500 + day, slot + 1, (5, 1, 9, 5)));
+                }
+                slot += 1 + i64::from(next(12) == 0);
+            }
+            if day == 0 {
+                first = Some(fingerprint(&d));
+            } else {
+                assert_eq!(Some(fingerprint(&d)), first, "day {day} moved a buffer");
+            }
+        }
+        assert!(d.counts().snapshots > 10_000);
+        assert!(d.refusals().get(Refusal::SessionLongerThanRing) > 0);
+        assert!(d.refusals().get(Refusal::CorruptCandle) > 0);
+        assert!(d.counts().rest_resets > 0);
+    }
+
+    #[test]
+    fn the_accessors_name_what_was_given_and_done() {
+        let p = params(8, 1, 1);
+        let mut d = Detector::new(p).unwrap();
+        assert_eq!(*d.params(), p);
+        assert_eq!(d.work(), 0);
+        let day = DayInput {
+            ist_day: 20_500,
+            session_candles: 8,
+            observed_tick: 1,
+            long: DirectionDay {
+                rest_lengths: &[],
+                touch_bp: None,
+            },
+            short: DirectionDay {
+                rest_lengths: &[],
+                touch_bp: None,
+            },
+        };
+        d.begin_day(&day).unwrap();
+        let first = d
+            .fold(&candle(20_500, 0, (7_000, 7_300, 6_900, 7_200)))
+            .unwrap();
+        assert!(first.ladder().is_some());
+        assert!(first.snapshots().is_empty());
+        assert!(first.touches(0).is_empty(), "no such snapshot");
+        let second = d
+            .fold(&candle(20_500, 1, (7_000, 7_100, 6_950, 7_050)))
+            .unwrap();
+        assert_eq!(
+            second.ladder().map(|l| (l.high().price, l.low().price)),
+            Some((7_300, 6_900))
+        );
+        assert!(second.touches(0).is_empty(), "no tolerance: no count");
+        assert!(d.work() > 0);
+        assert_eq!(d.refusals().get(Refusal::NoTouchTolerance), 4);
+        assert!(d.state_bytes() > core::mem::size_of::<Detector>());
+    }
+
+    #[test]
+    fn a_monotone_deque_keeps_the_window_s_extreme() {
+        let mut largest = Monotone::new(8, true);
+        let mut smallest = Monotone::new(8, false);
+        assert_eq!(largest.front(), None);
+        assert_eq!(
+            largest.front_or(42),
+            42,
+            "an empty window is the candle alone"
+        );
+        for (index, key) in [(0, 5), (1, 3), (2, 4), (3, 4)] {
+            largest.push(index, key);
+            smallest.push(index, key);
+        }
+        assert_eq!((largest.front(), smallest.front()), (Some(5), Some(3)));
+        assert_eq!(largest.expire(1), 1);
+        assert_eq!(largest.front(), Some(4), "the later equal key survives");
+        assert_eq!(smallest.expire(2), 1);
+        assert_eq!(smallest.front(), Some(4));
+        assert_eq!(largest.expire(9), 1);
+        assert_eq!(largest.front(), None);
+        largest.clear();
+        assert_eq!(largest.push(0, 1), 1);
+        assert_eq!(largest.bytes(), 8 * core::mem::size_of::<(u32, i64)>());
     }
 }

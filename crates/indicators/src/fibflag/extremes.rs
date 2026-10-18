@@ -522,6 +522,11 @@ mod tests {
             2_000_000 - 618_618
         );
         assert_eq!(ladder.rung_view(TradeDir::Short, 0), -2_000_000);
+        assert_eq!((ladder.high().price, ladder.high().index), (3_001, Some(0)));
+        assert_eq!(
+            (ladder.low().price, ladder.low().close_ts_micros),
+            (2_000, 7)
+        );
         let stamp = ladder.stamp();
         assert_eq!((stamp.high, stamp.low), (3_001, 2_000));
         assert!(!stamp.extreme_from_withheld_bucket && !stamp.frame_from_suspect_print);

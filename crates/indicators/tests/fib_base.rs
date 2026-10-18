@@ -19,6 +19,7 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
+    clippy::many_single_char_names,
     reason = "the exception every test crate in this workspace takes: a test \
               that cannot panic cannot fail."
 )]
@@ -165,6 +166,9 @@ fn same(a: Exact, b: (i128, i128)) -> bool {
 
 /// A candle in a direction's view: `(open, high, low, close)`.
 type View = (i64, i64, i64, i64);
+
+/// A grid slot and its `(open, high, low, close)`.
+type Slot = (i64, (i64, i64, i64, i64));
 
 /// The view of a raw candle.
 fn view(c: &Candle, direction: TradeDir) -> View {
@@ -535,7 +539,7 @@ struct RandomDay {
     tick: i64,
     lengths: [Vec<u16>; 2],
     tolerances: [Option<Vec<u64>>; 2],
-    slots: Vec<(i64, (i64, i64, i64, i64))>,
+    slots: Vec<Slot>,
 }
 
 /// A random day: a slow walk, some flat candles, some holes, at most
@@ -587,7 +591,7 @@ fn random_day(rng: &mut Seeded, candles: u64, zero_runs: bool) -> RandomDay {
             None
         } else {
             Some(
-                (0..1 + rng.below(3))
+                (0..=rng.below(3))
                     .map(|_| rng.below(40))
                     .collect::<Vec<u64>>(),
             )
@@ -1097,7 +1101,7 @@ fn the_short_view_equals_the_long_view_on_negated_prices() {
     for day in 0..500 {
         let random = random_day(&mut rng, 40, day % 3 == 0);
         let reflect = 300_000;
-        let mirrored: Vec<(i64, (i64, i64, i64, i64))> = random
+        let mirrored: Vec<Slot> = random
             .slots
             .iter()
             .map(|&(slot, (o, h, l, c))| {
@@ -1105,7 +1109,7 @@ fn the_short_view_equals_the_long_view_on_negated_prices() {
             })
             .collect();
         let zero: &[u64] = &[0];
-        let run = |slots: &[(i64, (i64, i64, i64, i64))], long: &[u16], short: &[u16]| {
+        let run = |slots: &[Slot], long: &[u16], short: &[u16]| {
             let mut d = Detector::new(params(64, 6, 3)).unwrap();
             d.begin_day(&DayInput {
                 ist_day: 60_000 + day,
@@ -1405,7 +1409,7 @@ fn each_direction_reads_its_own_generated_values() {
     fold(&mut d, &input(20_100, 1, 0, (7_000, 7_400, 6_600, 7_100))).unwrap();
     let mut e = Vec::new();
     for slot in 1..8 {
-        let high = 7_200 - i64::try_from(slot).unwrap();
+        let high = 7_200 - slot;
         e = fold(&mut d, &input(20_100, 1, slot, (7_100, high, 7_000, 7_150))).unwrap();
     }
     let long: Vec<u16> = of(&e, BaseKind::Rest, TradeDir::Long)
@@ -1624,8 +1628,8 @@ fn the_detector_is_deterministic() {
 /// The per-(stock-day, width) state's fixed part, asserted when this test
 /// crate compiles; the buffers are sized once from the calendar and the
 /// generation (`Detector::state_bytes`).
-const _: () = assert!(core::mem::size_of::<Detector>() <= 1_024);
-const _: () = assert!(core::mem::size_of::<BaseSnapshot>() <= 512);
+const _: () = assert!(core::mem::size_of::<Detector>() <= 1_152);
+const _: () = assert!(core::mem::size_of::<BaseSnapshot>() <= 400);
 
 #[test]
 fn the_state_is_sized_once_from_the_calendar_and_the_generation() {

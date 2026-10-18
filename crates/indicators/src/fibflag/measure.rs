@@ -281,24 +281,68 @@ pub fn touches(high: i64, edge: i64, tolerance_bp: u64) -> bool {
     gap * u128::from(BP_PER_UNIT) <= u128::from(tolerance_bp) * scale
 }
 
+/// `i128` arithmetic that becomes `None` once a step leaves `i128` and stays
+/// `None`: one checked path for a whole formula instead of a `?` per step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Wide(Option<i128>);
+
+impl Wide {
+    /// A value.
+    const fn of(value: i128) -> Self {
+        Self(Some(value))
+    }
+
+    /// The exact rational `self / den`, or `None` past `i128` or unless
+    /// `den > 0`.
+    fn over(self, den: Self) -> Option<Exact> {
+        self.0
+            .zip(den.0)
+            .and_then(|(num, den)| Exact::new(num, den))
+    }
+}
+
+impl core::ops::Add for Wide {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0.zip(other.0).and_then(|(a, b)| a.checked_add(b)))
+    }
+}
+
+impl core::ops::Sub for Wide {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self(self.0.zip(other.0).and_then(|(a, b)| a.checked_sub(b)))
+    }
+}
+
+impl core::ops::Mul for Wide {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        Self(self.0.zip(other.0).and_then(|(a, b)| a.checked_mul(b)))
+    }
+}
+
 /// The least-squares slope of `y` over `x`, from the window's sums, or `None`
 /// below two candles or past `i128`. `y` is shifted by `shift` first, which
 /// leaves the slope exactly unchanged and keeps the products small.
 fn slope(w: &Window, total: i128, moment: i128, shift: i64) -> Option<Exact> {
-    let n = i128::from(w.candles);
-    let shift = i128::from(shift);
-    let y = total.checked_sub(n.checked_mul(shift)?)?;
-    let xy = moment.checked_sub(w.sum_x.checked_mul(shift)?)?;
-    let num = n.checked_mul(xy)?.checked_sub(w.sum_x.checked_mul(y)?)?;
-    let den = n
-        .checked_mul(w.sum_xx)?
-        .checked_sub(w.sum_x.checked_mul(w.sum_x)?)?;
-    Exact::new(num, den)
+    let (n, x, xx) = (
+        Wide::of(i128::from(w.candles)),
+        Wide::of(w.sum_x),
+        Wide::of(w.sum_xx),
+    );
+    let shift = Wide::of(i128::from(shift));
+    let y = Wide::of(total) - n * shift;
+    let xy = Wide::of(moment) - x * shift;
+    (n * xy - x * y).over(n * xx - x * x)
 }
 
-/// `a x b - c x d`, checked.
-fn cross(a: i128, b: i128, c: i128, d: i128) -> Option<i128> {
-    a.checked_mul(b)?.checked_sub(c.checked_mul(d)?)
+/// `a x b - c x d`.
+fn cross(a: Wide, b: Wide, c: Wide, d: Wide) -> Wide {
+    a * b - c * d
 }
 
 /// The `x squared` coefficient of the least-squares parabola through the
@@ -306,23 +350,22 @@ fn cross(a: i128, b: i128, c: i128, d: i128) -> Option<i128> {
 /// three candles or past `i128`. The closes are shifted by the base low,
 /// which leaves the coefficient exactly unchanged.
 fn curvature(w: &Window) -> Option<Exact> {
-    let n = i128::from(w.candles);
-    let shift = i128::from(w.low);
-    let (s1, s2, s3, s4) = (w.sum_x, w.sum_xx, w.sum_xxx, w.sum_xxxx);
-    let t0 = w.sum_close.checked_sub(n.checked_mul(shift)?)?;
-    let t1 = w.sum_x_close.checked_sub(s1.checked_mul(shift)?)?;
-    let t2 = w.sum_xx_close.checked_sub(s2.checked_mul(shift)?)?;
+    let n = Wide::of(i128::from(w.candles));
+    let shift = Wide::of(i128::from(w.low));
+    let (s1, s2, s3, s4) = (
+        Wide::of(w.sum_x),
+        Wide::of(w.sum_xx),
+        Wide::of(w.sum_xxx),
+        Wide::of(w.sum_xxxx),
+    );
+    let t0 = Wide::of(w.sum_close) - n * shift;
+    let t1 = Wide::of(w.sum_x_close) - s1 * shift;
+    let t2 = Wide::of(w.sum_xx_close) - s2 * shift;
     // det [[n, s1, s2], [s1, s2, s3], [s2, s3, s4]]
-    let den = n
-        .checked_mul(cross(s2, s4, s3, s3)?)?
-        .checked_sub(s1.checked_mul(cross(s1, s4, s2, s3)?)?)?
-        .checked_add(s2.checked_mul(cross(s1, s3, s2, s2)?)?)?;
+    let den = n * cross(s2, s4, s3, s3) - s1 * cross(s1, s4, s2, s3) + s2 * cross(s1, s3, s2, s2);
     // the same with the third column replaced by (t0, t1, t2)
-    let num = n
-        .checked_mul(cross(s2, t2, s3, t1)?)?
-        .checked_sub(s1.checked_mul(cross(s1, t2, t1, s2)?)?)?
-        .checked_add(t0.checked_mul(cross(s1, s3, s2, s2)?)?)?;
-    Exact::new(num, den)
+    let num = n * cross(s2, t2, s3, t1) - s1 * cross(s1, t2, t1, s2) + t0 * cross(s1, s3, s2, s2);
+    num.over(den)
 }
 
 /// Every raw measurement of `window` in `direction`'s view against `ladder`.
@@ -534,6 +577,12 @@ mod tests {
         let m = measure(&w, &ladder, TradeDir::Long);
         assert_eq!(m.fib_zone, 2, "rung 382");
         assert_eq!(m.relation, LevelRelation::Above);
+        assert!(!m.holds.extreme() && !m.zero_width());
+        let both = Holds {
+            level0: false,
+            level1: true,
+        };
+        assert!(both.extreme());
         assert_eq!(m.retrace, Exact::new(382_000, 1_001).unwrap());
         // |2,619,000 - (3,001,000 - 382,382)| / 1,001 = 382 / 1,001.
         assert_eq!(m.level_distance, Exact::new(382, 1_001).unwrap());
