@@ -269,7 +269,9 @@ fn pair_identity_changes_with_either_side_and_differs_from_both() {
     assert_eq!(pair.hex(), PAIR_GOLDEN);
 }
 
-const PAIR_GOLDEN: &str = "54ac18dc30df75baba2f98981f0da07b7a87f82f3cd60c47f839d4c1b6ad135a";
+// Re-pinned by FIB-8: its FIXED_NUMBERS row (`fib_file_block_bytes`, D-6444)
+// re-keys every pair identity, as the ledger golden says.
+const PAIR_GOLDEN: &str = "7db3ae6a9bdd2775befd61005ca61211a7c0edb29da72698a7d474c80b1355ec";
 
 fn leaf(n: u8) -> [u8; OUT_LEN] {
     [n; OUT_LEN]
