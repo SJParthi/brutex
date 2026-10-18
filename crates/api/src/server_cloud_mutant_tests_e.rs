@@ -769,3 +769,20 @@ async fn the_entry_answers_a_command_it_cannot_parse_as_misused_and_keeps_nothin
     assert_eq!(code, MISUSED);
     assert!(!held.holds(), "a command that never served keeps nothing");
 }
+
+/// **A serve holds its store only when it keeps both its lock and its port.**
+/// A `Held` with the port and no lock got as far as binding, not as far as
+/// serving the store, and does not hold; nor does one with neither. Kills
+/// `&&` turned to `||` in `Held::holds` (server.rs:18002): every `Held` a
+/// test built before kept both or neither.
+#[test]
+fn a_serve_holds_only_with_both_its_lock_and_its_port() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let half = Held {
+        log: None,
+        lock: None,
+        port: Some(port),
+    };
+    assert!(!half.holds(), "a port without the store's lock");
+    assert!(!Held::default().holds(), "neither");
+}
