@@ -46,6 +46,7 @@
   import { dayflagsUrl } from '$lib/db/dayflags.js';
   import { spotAgeText } from '$lib/db/notes-options.js';
   import { readWindowPage } from '$lib/database-pages.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { readGreeks, ivText, greekText, GREEK_WHY } from '$lib/greeks.js';
   import { dayLabel, monthLabel, barTimeLabel, istMonth } from '$lib/dates.js';
   import { archiveOf } from './DbDayFlags.svelte';
@@ -272,7 +273,8 @@
           return response;
         });
       } else {
-        const response = await counted(`${request.route}?${request.query}`, { cache: 'no-store', signal });
+        // A FOLDED RUNG BESIDE A WRITER ASKS AGAIN (R3-08, RA-117), as the window does.
+        const response = await askAgainWhileWritten(counted, `${request.route}?${request.query}`, { cache: 'no-store', signal });
         if (!response.ok) throw new Error(await refusalFrom(request.route, response));
         body = await response.json();
       }
@@ -309,7 +311,7 @@
       const span = flagSpan(page.bars, s.held.length === 0 ? s.bounds : undefined);
       if (span) {
         try {
-          const response = await counted(dayflagsUrl(s.feed, s.subject.key, span.from, span.to), { cache: 'no-store', signal });
+          const response = await askAgainWhileWritten(counted, dayflagsUrl(s.feed, s.subject.key, span.from, span.to), { cache: 'no-store', signal });
           if (!response.ok) throw new Error(await refusalFrom('/dayflags.json', response));
           const flags = await response.json();
           if (set !== s) return;

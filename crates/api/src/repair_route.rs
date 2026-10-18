@@ -87,13 +87,26 @@ pub(super) async fn repair_plan_json(
 ) -> JsonAnswer {
     let query = uri.query().unwrap_or("").to_owned();
     let root = site.store_root.clone();
-    // Store reads, off the async workers.
-    tokio::task::spawn_blocking(move || plan_answer(&root, &query))
+    // Store reads, off the async workers, IN THE BOUNDED STORE-READ POOL
+    // (R3-08, RA-088). It ran on a spare thread outside every pool: a burst
+    // started as many threads as it had requests, with no busy answer and no
+    // count on any page. Now it waits for a slot like every store read, is
+    // refused 429 with `Retry-After` past the wait, and is counted.
+    crate::detail::run_store_read(move || plan_answer(&root, &query))
         .await
         .unwrap_or_else(|why| {
-            answer(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({ "error": format!("the plan's task ended abnormally: {why}") }),
+            let (status, body) = crate::detail::admission_refused(
+                "a month repair plan",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (
+                status,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json; charset=utf-8",
+                )],
+                body,
             )
         })
 }
