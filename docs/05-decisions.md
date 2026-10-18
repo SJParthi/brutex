@@ -71812,6 +71812,182 @@ subsections under §37 and `lock_state`, the reader of these records.
 `the_progress_file_writes_each_closed_day_and_at_most_one_a_second_otherwise`,
 `a_progress_file_that_cannot_be_written_is_named_and_the_run_goes_on`.
 
+### D-4986 — The GDFL Dropbox fetch runs inside the app: one press lists, picks, downloads, verifies and hands on, never overwriting and never deleting (R4-07, E2E-01) — 2026-10-16
+
+Step 1 of the one-click chain is `pull::gdfl_dropbox::run`. The shared link
+lives in `~/.brutex/gdfl-dropbox.toml` (mode 600; group- or world-readable is
+the wait `dropbox_config_too_open`), read only there; a missing or malformed
+file is a journalled wait, never a default. The link never reaches a journal,
+log or page: a run names it by its print (the first 16 bytes of its SHA-256),
+and a link whose print differs from the journal's last is the wait
+`link_changed` until the operator writes `accept_link_print`.
+
+The listing is read to its end, every page of every folder (the shared-link
+listing is non-recursive, `docs/00-charter.md`); a cut listing is
+`listing_incomplete`, a renamed field `listing_shape_unknown`, a listing
+smaller than the last complete one for the same link `listing_shrank`, and a
+listing with no canonical GDFL day zip `link_holds_no_gdfl_day_zip`. A file is
+wanted when its name is a canonical day zip (`tickstore_write::DayIdentity`)
+the tick store does not hold and the import journal has not closed `done` for
+the whole scope; every other name is refused by name before any byte:
+`not_a_day_zip` (conflict copies, renames, case variants), `name_unsafe`,
+`names_collide`, `two_files_for_one_day`, `out_of_scope_exchange` (BSE, MCX,
+`CLAUDE.md` §1) and `content_duplicate` (a listed content hash or a verified
+SHA-256 another name already holds).
+
+Each run has its own staging folder `<store>/staging/gdfl-dropbox/<run>/`
+under one staging lock (`run_busy` names the holder). A download is a
+`create_new` part; a cut resumes by `Range` in the same run and on the next
+press (the part is found by its journal line and its length on disk), and
+appends only on a `206` that starts at the part's length and states the listed
+size; anything else starts a new part beside the old, so two versions are never
+stitched. A finished part is verified (size equal to the listing, the central
+directory read whole through `gdfl_archive`, every member's stated length
+under 64 MiB before it is inflated, every CRC-32) and only then renamed onto a
+name that does not exist, then handed to the tick-store writer (R4-08). A
+refused part stays where it is. `429` and `5xx` back off by name, honouring
+`Retry-After` up to a cap, at most five attempts, then refuse `throttled` or
+`server_error`; a `401` re-reads the token once and a second `401` is the wait
+`dropbox_token_dead`. The download client has connect and idle-read timeouts
+and no total timeout, no automatic decompression, and follows redirects only to
+Dropbox's hosts (`redirect_refused` otherwise). The journal
+`<store>/journal/gdfl-dropbox.journal` is append-only, one line per state
+change; its last line is the O(1) status read.
+
+Four more refusals, each with its own failing-first test (revised
+2026-10-17). The operator's Stop (`Fetch::stop`) is read before each file and
+between body chunks: the run ends `stopped`, the journal says
+`stopped stage=download` with the part's bytes, and the next press resumes
+that part by `Range`. A part write that fails with a full disk is `disk_full`
+(any other failure `staging_write_failed`); the part is kept and resumed. A
+held day (tick store or import `done`) whose listed content hash differs from
+the one this journal verified under its name is `redelivered`, named and never
+fetched over what is held: importing a correction is a new generation, the
+writer's step (FM-007's S1 half). The config's folder may not be writable by
+group or world, and the file must be the folder owner's
+(`dropbox_config_too_open`); a folder others can only read (the usual 0755
+`~/.brutex`) is kept, because the file's own 600 keeps the link unreadable and
+FM-242's stricter 0700 would refuse the operator's present setup for no gain in
+secrecy. A transport failure through a proxy names it by host only
+(`via_proxy=<host:port>`, never its credentials).
+
+The number: D-4979 and D-4980, the first draft's numbers, are taken by AG-04
+and R3-06 on their branches; D-4981..D-4985 by AH-01. D-4986 and D-4987 were
+free on every local branch on 2026-10-17; the main session renumbers at landing
+if that has changed.
+
+Rejected: listing the folder by scraping the shared page's HTML (a page shape
+nobody documents), and a total request timeout (a day zip is hundreds of
+megabytes). Tests: `crates/pull/src/gdfl_dropbox_tests.rs`.
+
+Repair round 1 (2026-10-17, after the second agent's check
+`round2/verify-R4-07-r1.json`), each locked here:
+
+1. **The first name of a hash is the original.** The journal's memory keeps
+   the first name a content hash or SHA-256 was verified under, and a file
+   refused `content_duplicate` by its SHA-256 is journalled with `of=<name>`;
+   while its listed revision is unchanged a later press refuses it at the
+   pick and never fetches, reads or hands it again (R407-14).
+2. **Every listing ends.** A page that lists nothing new or keeps its cursor
+   is a stall, and 8 in a row (`MAX_STALLED_PAGES`) are
+   `listing_incomplete`; an entry listed again at the same path and revision
+   is one file and a counted repeat; Stop is read before every page, while a
+   request waits and during a back-off sleep (polled every 50 ms); and one
+   press waits on `429` and `5xx` at most `Backoff::max_total`, 30 minutes,
+   in all (R407-15). Eight and thirty are this repository's own choices,
+   not Dropbox's: no vendor source states how many empty pages a listing
+   may return.
+3. **One torn write costs one line.** A whole line with a torn write's shape
+   (a prefix of this journal's own lines, at any byte, or a NUL tail) is
+   counted on `begin` as `torn=` and skipped; any other line is still
+   refused by its number (R407-16). The journal is read as bytes, so a cut
+   inside a character is a torn line, not an unreadable journal.
+4. **`status` reads bytes** and decodes whole lines, widening its window to
+   at most 4 MiB for a longer line and naming a tail with none (R407-17).
+5. **A journal that cannot be written stops the press** `journal_unwritable`
+   before the next byte, file or hand-off, and a press that lost a line is
+   never `complete` (R407-18).
+6. **Held and refused files are journalled once**, and a `picks` line counts
+   them on every press, in one write made durable once (R407-19). The
+   journal still grows by a constant a press and is read whole once a press
+   (L-R407-3); a checkpoint sidecar that would make that read O(state) is
+   not built.
+7. A permission refusal of the store root is `store_not_writable`, and a
+   redirect keeps the routes' scheme (R407-20).
+8. **Two first writers share the journal's folder.** Once a lost line
+   stops the press (item 5), the loser of a `create_dir` race on a fresh
+   store would end `journal_unwritable`; `File exists` with the folder
+   there is not a failure, and a lost line found with the store root gone
+   is named `store_lost` (R407-21).
+9. **A byte floor is at least 1 GB** (`store::settings::MIN_FLOOR_BYTES`),
+   recorded under D-4987 below (R407-22).
+
+### D-4987 — One disk projection and one free-space floor for every disk-writing step; the floor refuses before any byte (R4-07, PERF-13) — 2026-10-16
+
+`pull::disk_projection` is the shared answer to "how many bytes will this plan
+write, and may it start?" for the Dropbox fetch, the ingest chain (R4-11), the
+Zerodha plan (R4-23) and the GDFL preflight and `/disk.json` (R4-29). Bytes a
+day are measured, `bytes / held instrument-days` rounded up, from totals the
+caller fills from the census and the stored months; an option underlying with
+no stored month is projected from the median of the held underlyings of its
+class (index or stock options), and its line is labelled EXTRAPOLATION and
+named; a unit nothing measures is NOT KNOWN and refuses the plan
+(`projection_unknown`), never read as zero.
+
+The floor is the new setting `disk.floor` (`store::settings::Key::DiskFloor`,
+one reader `store::settings::disk_floor`: `<n>%` from 1 to 95, or a byte
+amount). Unset it is 15%, decided by measurement: `df -Pk` on the store's
+drive on 16 Oct 2026 read 7,813,821,744 KiB with 1,770,133,020 KiB free
+(22.6%), so 15% keeps 1.09 TiB free and leaves 0.56 TiB to write; the
+operator's 1 TB rule for the equities scope is the byte floor `1TB`.
+`floor_check` refuses `disk_floor` when the free bytes less the projection
+would fall below the floor, and every caller runs it BEFORE any file is read or
+written. **This supersedes, for the floor only, the design's "an extrapolation
+never refuses"** (`state/design/ingest-automation.md`, free space against the
+projected growth): a projection may be wrong by its tolerance, but a disk
+filled mid-write is the failure the append-only store cannot take back.
+
+Tolerance: a fixture projection must land within 10% of what is then written
+(`thirty_fixture_days_land_within_the_stated_tolerance`); the real options
+resume's first 30 days are compared with their projection within 20% by the
+store-steps check after the first real press (`RESUME_TOLERANCE_PERCENT`), and
+recorded there. The free space is measured with `/bin/df -Pk`, the method
+`/disk.json` uses (`std` has no `statvfs`, and `libc` is not taken for it,
+L-TSW-7).
+
+Re-measured 17 Oct 2026 07:53 IST: 1,740,640,996 KiB free of 7,813,821,744
+(22.3%), so the 15% floor leaves 0.53 TiB to write. Through this module, on
+sizes read only from the drive's own GDFL delivery (L-R407-9): a daily press
+(one options day zip, two capital-market files) projects 354 MB and passes;
+a from-scratch fetch of 2,000 options days and 3,995 market files projects
+708.5 GB and is refused `disk_floor`, 137.6 GB short. The median rule
+over-projects a small index on real data (L-R407-7: 4.9x for FINNIFTY), which
+the floor can afford and the label says.
+
+Repair round 1 (2026-10-17): **a byte floor is at least 1 GB**
+(`store::settings::MIN_FLOOR_BYTES`, 10^9 bytes). The second agent found
+`disk.floor = 15` read as fifteen bytes: a floor that protects nothing, and
+most likely a percent with its `%` left off. A smaller byte floor is refused by
+name, and a bare `1` to `95` is told to write `<n>%`. One gigabyte is this
+repository's own choice, not a vendor's: it is more than three times the
+largest file a press downloads, one GDFL options day zip (about 290 MB,
+L-R407-9). Rejected: accepting any non-zero
+byte count (the defect) and guessing that a bare small number means percent
+(a fallback that would hide which reading was taken). Test:
+`crates/store/src/settings_tests.rs::a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named`
+(R407-22).
+
+Repair round 1, gates 0 and 12 (2026-10-17): **`pull` starts no program.**
+Gate 0 (D-1603) refused `Command::new("/bin/df")` in `disk_projection.rs`, so
+the `Df` meter is removed: the fetch and every disk-writing step take the
+caller's `FreeSpace`, and the app's meter is the `/bin/df -Pk` that
+`/disk.json` already runs in `crates/api/src/disk_route.rs` (refused by gate 0
+on `feat/db-fix` too, outside this package), which the ingest chain (R4-11)
+wraps when it calls the fetch. The real-data check reads `df -Pk` text the
+operator passes (`BRUTEX_REAL_DF`). Every cost claim in this package's files
+names its proof (C-DP-01 and C-DP-02 by `crates/pull/benches/ratio.rs`) or
+says UNVERIFIED, recorded as docs/06 L-R407-11.
+
 ### D-5302 — A journal past 64 MiB is said on every whole load; the progress record's two spare counters carry the sink's lost lines (IA-1; RA-091, RA-202) — 2026-10-17
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
@@ -72364,3 +72540,113 @@ request sidecar (D-4902).
 `a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does`; cli
 `a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol`.
 Invariants IA1-06, IA1-12 and IA1-15 in `docs/04-invariants.md`.
+### D-5833 — R4-07 repair 2: a shrunk listing is accepted by an exact count the operator writes; a link's host is what a URL reader connects to; a free-space answer no filesystem gives is refused; the package's gate 11 and gate 1d accounts are settled — 2026-10-18
+
+Renumbered at the merge into feat/db-fix from D-5831 (and its sequel from D-5832 to D-5834): IA-1 had taken D-5831 first (amendment A6).
+
+The second agent's r2 check failed R4-07 on two gate regressions it added on
+a base already red elsewhere: gate 11 (15 new refusals) and gate 1d (194 new
+undeclared literals). Gate 11: the five `Range::contains` status and percent
+tests (`gdfl_dropbox.rs` three, `store/settings.rs` two) are written as
+`matches!` with the same range, the listing-pick map is pre-sized with
+`HashMap::with_capacity`, and the nine constructs left are each allowlisted
+in `.github/gates_ledger.rs` with the reason in docs/06's gate 11 sections:
+two bounded sorts (the listing, once a press, at most MAX_LISTED; a class
+median, once per sealed projection), four backward byte searches (one
+journal line, the journal's last line once a press, the status window, one
+df line) and three `HashSet` probes. Gate 1d: the words this package adds
+are declared in `.github/gates_tree.rs` as `R4_07_LITERAL` with what each
+kind is (journal verbs and fields, refusal codes, Dropbox HTTP API words,
+projection units, test words); none is a parameter-path segment.
+
+Three of the second agent's follow-ups are taken because they are in this
+package's files. `listing_shrank` names the count to accept, and the config
+key `accept_listing_count` accepts exactly that count once (the accepted
+listing is journalled complete, so the next press compares against it; any
+other count, a later shrink, or a value that is not a whole number is
+refused) — the operator decides that a smaller folder is fine, never the
+fetch (docs/06 L-R407-14). `check_link` ends the host where a URL reader
+does (`/`, `?`, `#`, `\`) and refuses a host that holds anything but
+letters, digits, `.` and `-` or an empty label, so `#`, `\`, `%`, `@` and
+`:` cannot hide another host. `floor_check` refuses a free-space answer
+with a total of 0 or more free than total as `free_space_unknown` before it
+computes a floor, for every caller. The rest of the follow-ups are named in
+docs/06 (L-R407-12, L-R407-13) or left to their owners. Invariants
+R407-23..R407-25.
+
+Two more follow-ups are taken in the same files. A zip an earlier press
+verified and staged that no longer verifies is no longer refused on every
+press: it is journalled `reverify_failed` once, kept in place (the fetch
+deletes and overwrites nothing; its bytes count in L-R407-13's staging), and
+fetched again into a new part of the running press under the same floor
+(R407-26). And a name owns its content hash and SHA-256 only once the writer
+has taken the file (`handed ok=true`), so a file the writer refused never
+makes the true day with the same bytes a `content_duplicate` (R407-27); the
+writer, not the fetch, judges the second name. Not taken, and why: fetching
+newest-first up to the floor when the whole plan does not fit (the second
+agent's options-backlog follow-up) would change D-4987's "the floor refuses
+before any byte" for a whole plan into a partial one, which is a decision for
+the R4-11 wiring with the operator's backlog in view, not a repair; the
+press keeps refusing `disk_floor` by name with the plan's bytes. Invariants
+R407-26, R407-27.
+
+The merge of R4-06 brought its no-deletion guard
+(`crates/pull/tests/no_scheduler_delete.rs`), whose DECLARED list names
+`gdfl_dropbox.rs` and requires it in LISTED once it exists. It is listed now,
+with its one `rename` site justified in ALLOWED, and that site is made what
+AUT-05 allows: a verified part is promoted to the day's name in the part's own
+folder (a part resumed from an earlier press's run folder is published there),
+never moved into the running press's folder (R407-28).
+
+### D-5834 — R4-07 repair 3: a shrunk listing is accepted by the token its refusal names, once and journalled (amends D-5833's count-keyed acceptance); a floor need past `u64::MAX` is refused by name; an upper-case Dropbox host is named as that — 2026-10-18
+
+The third check failed R4-07 on two blocking issues in repair 2's own code.
+
+**The count-keyed acceptance is replaced.** D-5833 let `accept_listing_count
+= N` accept a listing shrunk to N "once", but the check ran against whatever
+count stayed in the config: after an accepted shrink to N, a listing that grew
+and then shrank back to N, even by losing a file of the accepted listing,
+passed with no line naming it, and no line ever recorded an acceptance. A
+count cannot be made single-use: the same value in the config is a fresh
+acceptance or a stale one, and nothing can tell them apart. So the acceptance
+now names the refusal it answers. A `listing_shrank` press journals a
+`listing complete=false reason=listing_shrank was= count= shrink=<token>`
+line, the token being the first refusing press's run id and kept while the
+same shrink (`was`, `now`) stays pending, so the operator's copy of it stays
+good across daily presses. Only `accept_listing_shrink = "<token>"` naming the
+pending token accepts that shrink. The accepted listing line carries
+`accepted_shrink=<token> was=<was>`, and any complete listing line clears the
+pending shrink, so the token is used up and every later shrink is refused with
+a new one; a stale token left in the config is named in the refusal. The key
+`accept_listing_count` is retired: it is an unknown key, refused by name. It
+was never wired to a route or a page (R1-WIRING), so no operator config holds
+it. Considered and not taken: keying the acceptance to the `was -> now` pair
+(the A1 case is the same pair again, so a stale pair accepts it) and refusing
+a count already journalled as accepted (then the same count can never be
+accepted again by any config value). R407-25, L-R407-14.
+
+**The two branches no test reached now have tests.** `Memory::read`'s
+`reverify_failed` arm is proved where the re-fetch does not finish (the floor
+refuses it), and the pick's refusal of a SHA-256 duplicate only while its
+original still owns the bytes is proved over three presses where the writer
+refuses the original on the second. Each test fails with its branch mutated
+(R407-26, R407-27).
+
+**Three follow-ups taken.** `floor_check` adds the projection and the floor with
+`checked_add`, and a sum that would overflow is `FloorRefusal::NeedOverflows`
+(code `disk_floor`), never a saturated need compared as if it fit (R407-29).
+`check_link` names a host that is dropbox.com only in another case instead of
+calling it "not dropbox.com"; it does not fold the case, because the link is
+handed to Dropbox as written and how Dropbox reads an upper-case host is
+UNVERIFIED (R407-30). A torn journal line is closed so that it can never be
+read as whole: `append_line` closes a last line that has no newline with one
+NUL byte before the newline, and `parse_line` refuses any line holding a raw
+NUL, which no line this module writes holds (`quoted` escapes every control
+character). So a line cut at a field boundary, or inside a bare value (a
+`count=1` cut from `count=12`), is counted torn and never read, by
+`Memory::load` and by `status` alike. The cut was not always fail-safe: a
+complete listing line cut inside its count, closed by a press that wrote no
+listing line of its own, became the shrink check's baseline, and a later
+shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
+of the journal changes; a line closed before this change kept only its newline
+and reads as it did.

@@ -134,6 +134,8 @@ pub mod daycheck;
 /// alone, and an unsubscribed account was told to wait for tomorrow's
 /// credential.
 pub mod dhan;
+/// The shared disk projection and its free-space floor (PERF-13, R4-07).
+pub mod disk_projection;
 /// The day an option contract SETTLED when the vendor's name states another:
 /// measured re-datings and the calendar, one contract one series. D-3331.
 pub mod expiry_alias;
@@ -156,6 +158,9 @@ pub mod gdfl_archive;
 /// a `CmSource` and checked before the one-second fold sees them. D-0808,
 /// D-2800.
 pub mod gdfl_cm;
+/// The GDFL Dropbox fetch inside the app: list, pick, download, verify and
+/// hand on, never overwriting, never deleting (E2E-01, R4-07).
+pub mod gdfl_dropbox;
 /// The common GDFL import runtime: indices, stocks and option contracts
 /// folded to one-second and one-minute bars through the one ingest door,
 /// incremental by day. D-2802.
