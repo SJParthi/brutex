@@ -44,7 +44,9 @@
 //! A GET is one `stat` of the next generation's name (when nothing was
 //! saved) plus a fixed-size answer: O(1). `?history=N` reads N + 1 files,
 //! N at most [`MAX_HISTORY`]. The first request after start lists the
-//! settings directory once (named for `docs/06-limits.md`).
+//! settings directory once (named for `docs/06-limits.md`). Proof: gate 8's
+//! `/settings.json` rows at 2, 20 and 200 generations, run by
+//! `crates/api/benches/ratio.rs` (GF-1, gate 12).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};

@@ -1797,8 +1797,17 @@ jobs:
           pull/src/alerts_tests.rs:println!:5
           pull/src/calendar.rs:eprintln!:1
           pull/src/gdfl_lineage_tests.rs:println!:5
-          pull/src/gdfl_nfo_tests.rs:eprintln!:12
+          pull/src/gdfl_nfo_tests.rs:eprintln!:13
           pull/src/gdfl_wp12e_tests.rs:println!:3"
+          # FIVE MORE, the same kind, from WP-62 (merged after the 12 Oct
+          # run; declared by GF-1 on 14 Oct 2026). All are in api's
+          # `server.rs` `mod tests`, in two `#[ignore]`d tests run by hand:
+          # `pull_runtime_costs` prints the n, p50, p99 and max of the pull
+          # runtime's new operations (one `println!` in its `spread`), and
+          # `the_pull_order_on_a_real_census` prints the restart scan, the
+          # per-leg gate and the withheld names it read from a shadow store
+          # (four). No production path reaches either.
+          declared="$declared api/src/server.rs:println!:5"
           # TWO MORE FILES, the same kind, declared by WP-12f's fifth
           # round (14 Oct 2026), which ran this gate: test-only timings, each
           # inside a `#[cfg(test)]`-mounted module, printed beside what the
@@ -1813,6 +1822,25 @@ jobs:
           #     apart, whose ratio the test bounds.
           declared="$declared pull/src/gdfl_cm_admission_tests.rs:println!:1
           pull/src/gdfl_scope_tests.rs:println!:3"
+          # ONE MORE FILE, the same kind, from SC-2 (merged on 15 Oct 2026
+          # after GF-1's last run; declared by GF-1 on 16 Oct 2026, each
+          # read first). `store/src/sealed_tests.rs` is mounted under
+          # `#[cfg(test)]` by `store::sealed`; its two `println!` print the
+          # largest sealed month's size per bar and the p50/p99/max of a
+          # 100-row page of the smallest and the largest month, beside what
+          # the two tests assert. No production path reaches either.
+          declared="$declared store/src/sealed_tests.rs:println!:2"
+          # ONE MORE FILE, the same kind, from R4-08 (merged on 16 Oct 2026
+          # after GF-1's run of that day; declared by GF-1 the same day, each
+          # read first). `pull/src/tickstore_write_tests.rs` is mounted under
+          # `#[cfg(test)]` by `pull::tickstore_write`; its six `println!` are
+          # in the two `#[ignore]`d measurements run by hand on copies of
+          # real inputs: `measure_real_days_against_the_tools_files` (five:
+          # each day's sizes, MB/s and the rebuild and lookup p50/p99/max) and
+          # `measure_ruzstd_fastest_on_bar_months` (one: bytes a bar and a
+          # 256-bar frame's decode p50/p99/max). No production path reaches
+          # either.
+          declared="$declared pull/src/tickstore_write_tests.rs:println!:6"
           # ONE MORE, a test's skip notice, declared by R3-35 (17 Oct 2026),
           # which ran this gate: `pull/src/gdfl_import_split_tests.rs`
           # println! 1 says the importer split's line count was not taken,
@@ -1821,6 +1849,47 @@ jobs:
           # `store/tests/cited_commits.rs` says its own. Inside a
           # `#[cfg(test)]`-mounted module; no production path reaches it.
           declared="$declared pull/src/gdfl_import_split_tests.rs:println!:1"
+          # FOUR MORE FILES, the same kind, from AF-01, AG-01, R3-05 and R3-32
+          # (merged on 16 and 17 Oct 2026, none of which ran this gate;
+          # declared by GF-1 on 17 Oct 2026, each read first). All are in
+          # test code no production path reaches:
+          #   api/src/feeds_route.rs println! 2: in its `#[cfg(test)] mod
+          #     tests`, the held-span measurement's per-round walk, hit and
+          #     one-key append p50/p99/max (n=200) and its walk count.
+          #   api/src/pullrun_restart_tests.rs println! 2: `cost_spread`'s
+          #     n/p50/p99/max line and the guessed answer's byte sizes.
+          #   cli/src/gdfl_import_guard_tests.rs println! 2: the `#[ignore]`d
+          #     child process's "AF01 HELD" handshake its parent waits for,
+          #     and the run lock's per-operation n/p50/p99/max rows.
+          #   cli/src/watchdog_command_tests.rs eprintln! 2: the operator's
+          #     `#[ignore]`d kill drill telling them when to kill the app and
+          #     how long it took to come back.
+          # And pull/src/gdfl_nfo_tests.rs eprintln! 12 -> 13 above (CLOUD-ATTACKO1,
+          # D-5800, merged 17 Oct 2026; declared by GF-1): the `#[ignore]`d
+          # read-only real-day check `the_fixed_array_decodes_real_days_as_the_field_vector_did`
+          # reports each day's files, rows and both readers' times.
+          declared="$declared api/src/feeds_route.rs:println!:2
+          api/src/pullrun_restart_tests.rs:println!:2
+          cli/src/gdfl_import_guard_tests.rs:println!:2
+          cli/src/watchdog_command_tests.rs:eprintln!:2"
+          # FOUR MORE FILES, the same kind, from R3-09, R4-06 (two) and AH-02
+          # (merged on 17 Oct 2026, none of which ran this gate; declared by
+          # GF-1 on 18 Oct 2026, each read first). Every one is a file mounted
+          # only under `#[cfg(test)]`, so no production path reaches it and
+          # nothing is wrong when it prints:
+          #   api/src/census_warm_tests.rs eprintln! 1: the background
+          #     re-read's time after 100,200 new census entries, per server.
+          #   api/src/head_deadline_body_tests.rs eprintln! 2: the n, p50,
+          #     p99 and max of a write that moves bytes and of one that waits.
+          #   api/src/settings_route_tests.rs println! 1: the n=400 p50, p99
+          #     and max of the secret-shape detector per shape.
+          #   pull/src/rehearsal_tests.rs println! 3: the n=1000 p50, p99 and
+          #     max of `Gate::admit` over a 1-kind and a 10,001-kind list, and
+          #     the time a 1 MiB kind took to be refused.
+          declared="$declared api/src/census_warm_tests.rs:eprintln!:1
+          api/src/head_deadline_body_tests.rs:eprintln!:2
+          api/src/settings_route_tests.rs:println!:1
+          pull/src/rehearsal_tests.rs:println!:3"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -3703,7 +3772,7 @@ jobs:
           # raised in the same change, so a pin cannot fall behind silently.
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
-          pull   crates/pull/benches/ratio.rs   22 C-11 C-12 C-13 C-26 C-GI-01 C-GI-02 C-GI-03 C-RF-01 C-AL-01 C-AL-02
+          pull   crates/pull/benches/ratio.rs   26 C-11 C-12 C-13 C-26 C-GI-01 C-GI-02 C-GI-03 C-RF-01 C-AL-01 C-AL-02 C-FD-01 C-NFO-01
           store  crates/store/benches/ratio.rs  19 C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02 C-TIX-01 C-TIX-02 C-RP-01 C-VD-01 C-VD-02 C-VD-04
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27 C-LG-01 C-LG-02
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
@@ -4773,10 +4842,48 @@ jobs:
           # the distinct ones and holds them to CEILING.
           "$RUNNER_TEMP/gates-jobs" w4 /tmp/build.log "$CEILING"
 
+  macos:
+    # FM-236 (GF-1, D-4990): every other job runs on ubuntu-24.04, and the
+    # store's production host is macOS on APFS. A test under
+    # `#[cfg(target_os = "macos")]` is not compiled on Linux, and a test that
+    # branches on the platform takes its macOS branch only here, so a green
+    # Linux run proves neither. This job runs the whole workspace's tests on
+    # macOS, and `gates_platform ran` refuses unless every macOS row the
+    # inventory names passed in this run's own log, naming the host it ran
+    # on. A row compiled out on a host is counted NOT RUN there, never green.
+    name: Gate 31 — the macOS rows run on macOS
+    runs-on: macos-15
+    needs: language-purity
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Gate 31 — the macOS rows run on macOS
+        run: |
+          set -euo pipefail
+          # The rule and its limits are .github/gates_platform.rs, proved by
+          # its own tests before this step trusts it. `verdict` refuses a
+          # workflow with no macOS job that runs these tests and this check;
+          # `inventory` prints every row with the hosts it runs on.
+          tool="$RUNNER_TEMP/gates-platform"
+          rustc --edition=2024 --test -D warnings .github/gates_platform.rs -o "${tool}-tests"
+          "${tool}-tests"
+          rustc --edition=2024 -D warnings .github/gates_platform.rs -o "$tool"
+          "$tool" verdict .github/workflows/ci.yml
+          # The slow pool test asks nothing of the platform and runs in the
+          # Linux jobs; every other test of the workspace runs here.
+          cargo test --workspace --locked --no-fail-fast -- \
+            --skip the_pool_verb_prints_its_whole_page_on_a_generated_store \
+            2>&1 | tee "$RUNNER_TEMP/macos-tests.log"
+          "$tool" ran "$RUNNER_TEMP/macos-tests.log"
+
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-24.04
-    needs: [language-purity, build, coverage, complexity, mutant-plan, mutants, web]
+    needs: [language-purity, build, coverage, complexity, mutant-plan, mutants, web, macos]
     if: always()
     steps:
       - name: Verify every gate went green

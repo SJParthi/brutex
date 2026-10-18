@@ -62,7 +62,10 @@
 //! exist. The first refresh lists the directory once, O(generations) — a
 //! count that grows only when the operator saves, named for
 //! `docs/06-limits.md`. A refresh that finds new generations reads each once,
-//! at most [`MAX_STEP`] of them, each at most [`MAX_FILE_BYTES`].
+//! at most [`MAX_STEP`] of them, each at most [`MAX_FILE_BYTES`]. Proof:
+//! gate 8's `/settings.json` rows, which save 2, 20 and 200 generations
+//! through [`save`] and read them through a warm [`Reader`], run by
+//! `crates/api/benches/ratio.rs` (GF-1, gate 12).
 
 use std::fmt::{self, Write as _};
 use std::io::{ErrorKind, Write as _};

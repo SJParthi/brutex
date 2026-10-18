@@ -2271,7 +2271,7 @@ impl NotHeld {
     }
 
     /// Count a refused month's days, log its refusal, and hand it back.
-    fn month(
+    fn note_month(
         &mut self,
         refused: Failure,
         slice: &[store::format::Bar],
@@ -2989,7 +2989,7 @@ fn one(
             Err(refused) => {
                 refused_bars = refused_bars.saturating_add(slice.len());
                 let at = (store_root, month_parts(plan, &identity, timeframe, *ym));
-                failures.push(not_held.month(refused, slice, at, symbol_id));
+                failures.push(not_held.note_month(refused, slice, at, symbol_id));
                 continue;
             }
         };
@@ -5840,6 +5840,79 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A UNIX socket bound AT `path` itself, whatever `path`'s length.
+    ///
+    /// A socket address holds a short path (`sun_path`: 104 bytes on macOS,
+    /// 108 on Linux), and a scratch tree under a long TMPDIR is longer. The
+    /// bind goes through a symbolic link to `path`'s directory named in a
+    /// short directory, the temporary root or else `/tmp`: the kernel follows
+    /// the link, so the socket file is made in `path`'s own directory under
+    /// its own name, and only the address is the short spelling. The link is
+    /// removed at once; the socket file stays. A rename from a short
+    /// directory was the first way (GF-1), and it fails across volumes with
+    /// `EXDEV` whenever TMPDIR and `/tmp` differ. No short directory that can
+    /// hold the link is a panic naming each one tried and why, never a skip.
+    /// `socket_at_binds_where_a_direct_bind_cannot` pins it.
+    fn socket_at(path: &std::path::Path, tag: &str) -> std::os::unix::net::UnixListener {
+        let dir = path.parent().expect("a socket path inside a directory");
+        let file = path.file_name().expect("a socket path naming a file");
+        let mut tried = Vec::new();
+        for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+            let link = base.join(format!("brutex-sock-{}-{tag}", std::process::id()));
+            let _stale = std::fs::remove_file(&link);
+            if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
+                tried.push(format!("{}: {why}", link.display()));
+                continue;
+            }
+            let bound = std::os::unix::net::UnixListener::bind(link.join(file));
+            let _unlinked = std::fs::remove_file(&link);
+            match bound {
+                Ok(listener) => return listener,
+                Err(why) => tried.push(format!("{}: {why}", link.display())),
+            }
+        }
+        panic!(
+            "no short directory carries a socket to {}: {}",
+            path.display(),
+            tried.join("; ")
+        )
+    }
+
+    /// **A SOCKET IS BOUND AT A PATH TOO LONG FOR A SOCKET ADDRESS.** GF-1.
+    /// Bound directly, the path is refused with `InvalidInput` wherever
+    /// TMPDIR is; `socket_at` makes the socket at that very path, and no
+    /// link is left behind.
+    #[test]
+    fn socket_at_binds_where_a_direct_bind_cannot() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let root = scratch("LONG-SOCKET");
+        let dir = root.join("D".repeat(120));
+        std::fs::create_dir_all(&dir).expect("a deep directory");
+        let path = dir.join("dhan.man.lock");
+        let direct = std::os::unix::net::UnixListener::bind(&path);
+        assert!(
+            matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+            "the premise: this path does not fit a socket address: {direct:?}"
+        );
+        let listener = socket_at(&path, "LONG");
+        let found = std::fs::symlink_metadata(&path).expect("something at the path itself");
+        assert!(
+            found.file_type().is_socket(),
+            "the socket itself, not a link: {:?}",
+            found.file_type()
+        );
+        for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+            let link = base.join(format!("brutex-sock-{}-LONG", std::process::id()));
+            assert!(
+                std::fs::symlink_metadata(&link).is_err(),
+                "no link is left at {}",
+                link.display()
+            );
+        }
+        drop(listener);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// **A SOCKET AT THE LOCK'S NAME IS REFUSED, NOT RUN WITHOUT A LOCK.**
     /// v3b-1, D-1480. Opening a UNIX socket fails with ENXIO, a kind that is
     /// neither `PermissionDenied` nor `IsADirectory`, so it fell into the
@@ -5856,8 +5929,18 @@ mod tests {
         let root = scratch("LOCK-SOCKET");
         let census = root.join("manifest").join("dhan.man");
         let lock_path = census.with_extension("man.lock");
-        let listener = std::os::unix::net::UnixListener::bind(&lock_path)
-            .expect("the socket this test is about can be bound");
+        // A socket's name must fit `sun_path` (104 bytes on macOS, 108 on
+        // Linux), and under a long TMPDIR the lock path is longer: the bind
+        // failed there and the property was never reached (GF-1, gate 1e).
+        let listener = socket_at(&lock_path, "LOCK");
+        assert!(
+            std::os::unix::fs::FileTypeExt::is_socket(
+                &std::fs::symlink_metadata(&lock_path)
+                    .expect("something is at the lock's name")
+                    .file_type()
+            ),
+            "the premise: a UNIX socket sits at the lock's name"
+        );
         let opened = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)

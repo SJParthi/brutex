@@ -1809,7 +1809,12 @@ fn day_source(kind: ImportKind, day: Day, origin: &Origin) -> Result<DaySource, 
 /// the day's indices. The import says it of every day it files; a rescan
 /// says it only of the lines it wrote ([`quality::sampled_among`]), so a
 /// rescan that finds nothing new repeats nothing (D-4928 item 7).
-fn note_sampled(kind: ImportKind, day: Day, sampled: &[quality::Sampled], src: quality::Src) {
+pub(crate) fn note_sampled(
+    kind: ImportKind,
+    day: Day,
+    sampled: &[quality::Sampled],
+    src: quality::Src,
+) {
     let day = day.to_string();
     for sampled in sampled {
         let _dropped_when_filtered = telemetry::emit(&sampled_event(kind, &day, sampled, src));

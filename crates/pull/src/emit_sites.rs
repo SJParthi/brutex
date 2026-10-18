@@ -600,6 +600,16 @@ static SITES: &[Site] = &[
         drive: drive_index_volume_corrected,
     },
     Site {
+        // GF-1: the mutant that replaced `note_sampled` with `()` survived the
+        // round's mutation run; the event's shape was tested and its emit was
+        // not. Driven through the shipped helper, read back off the disk.
+        at: "crates/pull/src/gdfl_import.rs — note_sampled",
+        target: crate::gdfl_import::TARGET,
+        message: "index day is minute-sampled",
+        says: ("scope", Says::Holds("FIXTURE-SAMPLED-INDEX")),
+        drive: drive_minute_sampled_index_day,
+    },
+    Site {
         at: "crates/pull/src/http.rs:1416",
         target: "pull.decode",
         message: "bars carried a negative volume and were skipped",
@@ -1090,6 +1100,25 @@ fn drive_index_volume_corrected(_scratch: &Scratch) {
         .first()
         .expect("one bar was sent, so one decodes");
     assert_eq!(first.volume, 0, "recorded as the zero the column always is");
+}
+
+/// One minute-sampled index of one day (WP-11c, DB-A04), named by the shipped
+/// helper the import and a rescan both call. The scope is invented.
+fn drive_minute_sampled_index_day(_scratch: &Scratch) {
+    let day = crate::session::Day::new(2019, 5, 30).expect("a real date");
+    let sampled = crate::gdfl_import::quality::Sampled {
+        scope: "FIXTURE-SAMPLED-INDEX".to_owned(),
+        rows: 375,
+        seconds: 375,
+        session_s: 22_500,
+        ss_distinct: 1,
+    };
+    crate::gdfl_import::note_sampled(
+        crate::gdfl_import::ImportKind::Indices,
+        day,
+        std::slice::from_ref(&sampled),
+        crate::gdfl_import::quality::Src::Import,
+    );
 }
 
 /// A traded listing sends one good minute and one with a negative volume.

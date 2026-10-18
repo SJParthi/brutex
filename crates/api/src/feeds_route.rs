@@ -763,6 +763,9 @@ pub(crate) fn walks_of(path: &std::path::Path) -> u64 {
 /// A span only widens as entries are appended, because the store is
 /// append-only (`CLAUDE.md` §3 rule 8): a month once held stays held at its
 /// generation. A part re-read whole is walked whole.
+///
+/// Proof: `api::server::feeds_route::tests::held_span_growth_bench` (a hit
+/// and a one-key append at 1x, 10x and 100x keys, the walk counted).
 fn part_span(part: &census::Part) -> PartSpan {
     let generation = part.header().generation;
     // A PART WITH NO FILE (built in memory) has no identity to remember.
@@ -946,7 +949,9 @@ impl ImportReach {
     /// is neither lost nor "not imported" (R3-05 repair 3, the second
     /// agent's follow-up: `/gaps.json` for 2026-10 counted 16..31 October as
     /// 7,500 not-imported minutes on 15 October). Every feed, pulled or
-    /// imported. O(1).
+    /// imported. O(1): one comparison with the day read once
+    /// when the reach was built. UNVERIFIED: no test times it (GF-1, gate 12;
+    /// `docs/06-limits.md` L-GF1-33).
     pub(crate) fn not_yet(&self, day: i64) -> bool {
         self.today.is_some_and(|today| day > today)
     }
@@ -979,6 +984,8 @@ impl ImportReach {
 /// (`crate::server::import_journal::snapshot`), then [`journal_reach`]: O(1)
 /// while the journal does not move; plus O(log n + rows in `days`) for the
 /// open days — a month's rows, at most 31 days of three kinds.
+/// UNVERIFIED: no test times the reach at two journal sizes (GF-1, gate 12;
+/// `docs/06-limits.md` L-GF1-33); the bound is L-R305-3's.
 pub(crate) fn imported_to(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -2909,7 +2916,8 @@ mod tests {
     /// cost no more than 4x their 1x figure, each the quietest of three
     /// rounds of 200 (one round's p99 is three samples on a shared host);
     /// the walk is allowed to grow and is the cost named for
-    /// `docs/06-limits.md`.
+    /// `docs/06-limits.md`. Proof of `part_span`'s claim: this test,
+    /// `api::server::feeds_route::tests::held_span_growth_bench`.
     #[test]
     #[ignore = "a growth bench: cargo test --release -p api held_span_growth -- --ignored --nocapture"]
     fn held_span_growth_bench() {

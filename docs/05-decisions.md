@@ -71318,6 +71318,43 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
+
+**Implemented by** GF-1 (`.github/gates_platform.rs`, the `macos` job of
+`.github/workflows/ci.yml`, which `ci-ok` needs). **Finding** FM-236
+(CRIT-044): every CI job ran on `ubuntu-24.04` while the store's production
+host is macOS on APFS, so a test under `#[cfg(target_os = "macos")]` was never
+compiled in CI, and a test that branches on the platform never took its macOS
+branch there. A green run said nothing about either.
+
+**Decided.** (1) A `macos` job on `macos-15` runs `cargo test --workspace
+--locked` (the slow pool test, which asks nothing of the platform, stays in
+the Linux jobs). (2) Gate 31's inventory reads every tracked `.rs` under
+`crates/` and names each MACOS ROW: a test whose `cfg` conditions (its own,
+its blocks', its file's and the `mod` declarations leading to its file) run
+it on one of `linux` and `macos` and not the other, or whose body asks the
+platform. Each row is printed with `linux=runs|NOT RUN macos=runs|NOT RUN`,
+and each host's count of rows compiled out there is printed as NOT RUN, never
+green. (3) `verdict` refuses a workflow with no job on a `macos` runner, one
+that does not run `cargo test --workspace` and `gates_platform ran`, one that
+may fail without failing (`continue-on-error`, a false `if`), or one that
+`ci-ok` does not need; and refuses Linux-only rows with no ubuntu job testing
+the workspace. (4) `ran` reads the macOS job's own `cargo test` log and
+refuses unless every row that runs on that host passed in it, each named with
+the host it ran on.
+
+**Rejected.** A `#[cfg(target_os = "macos")]` test counted green from a Linux
+run (the defect); a signed local macOS receipt instead of a runner (it would
+prove one machine once, and nothing re-checks it on the next change); running
+only the named macOS tests (a test that branches on the platform is found by
+reading, and a missed one would then be silently skipped).
+
+**Limits** (`docs/06-limits.md` L-GF1-31, L-GF1-32): the inventory reads
+tokens and does not compile, so a test written by a macro is not seen and a
+non-platform predicate (`target_arch`, a feature) is taken to hold; the job
+has not yet run on GitHub, because no agent pushes. **Number**: the first
+number past those in use or taken in open worktrees on 16 October 2026
+(D-4990); the merge renumbers it if another lands first (amendment A6).
 
 ### D-4986 — The GDFL Dropbox fetch runs inside the app: one press lists, picks, downloads, verifies and hands on, never overwriting and never deleting (R4-07, E2E-01) — 2026-10-16
 
