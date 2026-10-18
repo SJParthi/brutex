@@ -4001,7 +4001,9 @@ judged it, IST local seconds since 1970 (`fetch::Refused::local_seconds`);
 8: the owning receipt's ordinal in its segment (`u32`); 12: the cause, 1
 `timestamp_refused`, 2 `cash_eligibility_unknown`, 3 `price_off_grid`, 4
 `off_grid_candle`, 5 `conflicting_candles`, 6 `before_first_day_bar`, 7
-`foreign_level` (append-only); 13..20 zero; 20: CRC-32C over bytes 0..20. A
+`foreign_level`, 8 `non_positive_price`, 9 `before_listing`, 10
+`in_session_jump` (append-only; 8 to 10 are R4-17's: D-4992, D-5835 and
+D-4993); 13..20 zero; 20: CRC-32C over bytes 0..20. A
 `kept=3` receipt's records are its first month's receipt's (`body_of`). The
 cause at 12 is the row's own, from `fetch::Refused::causes` (parallel to
 `local_seconds`, written by the one `note` every landing refuses through),

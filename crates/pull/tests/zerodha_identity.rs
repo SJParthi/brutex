@@ -1277,6 +1277,91 @@ fn a_day_rung_that_will_not_open_refuses_nothing_by_range() {
     assert!(whys(&done, "refused for").is_empty(), "{:?}", done.failures);
 }
 
+/// R4-17 repair 2 (the R4-17 check's PROBE-P1): a day month that will not
+/// open costs the range rule of its OWN days only. The answer spans
+/// 2024-01-29..2024-02-02 and January's day month is torn: February's foreign
+/// minutes are still refused by range against February's day bars, January's
+/// land unjudged (`no_day_rung`), and neither the landing nor the store scan
+/// refuses a January minute as before the first day bar on the word of
+/// February's. Before repair 2 the torn month emptied the book for the whole
+/// answer, so February's foreign minutes were stored with no failure; and the
+/// scan flagged every January minute `before_first_day_bar`.
+#[test]
+fn a_torn_day_month_costs_the_range_rule_of_its_own_days_only() {
+    let scratch = Scratch::new("torn-one-month");
+    let (from, to) = (day(2024, 1, 29), day(2024, 2, 2));
+    let feb: Vec<Day> = sessions(day(2024, 2, 1), to)
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
+    assert_eq!(feb.len(), 2, "the fixture February holds two sessions");
+    let done = land_cash(
+        &scratch.0,
+        "VBL",
+        (feb[0], feb[1]),
+        pull::vendor::Granularity::Day1,
+        feb.iter().copied().map(day_candle).collect(),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    unreadable_day_month(&scratch.0, "VBL", b"not a bar file");
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    let torn_day = day(2024, 1, 30);
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if (on == feb[0] || on == torn_day) && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 85, 100);
+        }
+    }
+    let done = land_cash(
+        &scratch.0,
+        "VBL",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "foreign_level");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
+    assert_eq!(done.failures.len(), 1, "nothing else: {:?}", done.failures);
+    let january = cash_month(&scratch.0, "VBL", Timeframe::MINUTE_1, (2024, 1));
+    let february = cash_month(&scratch.0, "VBL", Timeframe::MINUTE_1, (2024, 2));
+    assert_eq!(january.len() + february.len(), sent - 10);
+    assert!(
+        february.iter().all(|b| b.low >= LEVEL - 1_000),
+        "no foreign February minute stored"
+    );
+    assert_eq!(
+        january.iter().filter(|b| b.low < LEVEL - 1_000).count(),
+        10,
+        "January's foreign minutes have no witness that opens: they land, unjudged"
+    );
+    // The store scan judges the same way: it names the torn month and
+    // flags nothing, never January's minutes as before the first day bar.
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "VBL",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.unread.len(), 1, "{:?}", scan.unread);
+    assert!(scan.unread[0].1.starts_with("1day: "), "{:?}", scan.unread);
+    assert_eq!(scan.first_day, Some(i64::from(feb[0].days_from_epoch())));
+    assert!(scan.flagged.is_empty(), "{:?}", scan.flagged);
+    let january_tally = &scan.months[0].1;
+    assert_eq!(
+        january_tally.no_day_rung,
+        u64::try_from(january.len()).unwrap()
+    );
+}
+
 /// R4-17 repair 1, ING-01 c: a zero-price minute is refused by name even
 /// when the day rung will not open. That rule reads no day bar, so a torn
 /// day month is no reason to store a price of zero (it was stored, with no
@@ -1680,4 +1765,23 @@ fn a_day_rung_that_will_not_open_is_named_on_the_log_beside_its_refusals() {
             .any(|l| l.contains("\"cause\":\"non_positive_price\"") && l.contains("\"rows\":1")),
         "{lines:?}"
     );
+}
+
+/// R4-17's three refusal causes have their own append-only bytes in the
+/// refused-row record (`pull::response_keep`, `docs/02-store-format.md`):
+/// 8, 9 and 10, each read back as itself, and 11 names none. The record's
+/// writer (IA-8) and these causes met at the merge into `feat/db-fix`.
+#[test]
+fn every_r4_17_cause_has_its_own_refused_row_byte() {
+    use pull::fetch::RowCause;
+    use pull::response_keep::{cause_code, cause_of};
+    for (cause, code) in [
+        (RowCause::NonPositivePrice, 8),
+        (RowCause::BeforeListing, 9),
+        (RowCause::InSessionJump, 10),
+    ] {
+        assert_eq!(cause_code(cause), code, "{}", cause.code());
+        assert_eq!(cause_of(code), Some(cause), "{}", cause.code());
+    }
+    assert_eq!(cause_of(11), None);
 }

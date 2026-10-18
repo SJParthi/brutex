@@ -8,8 +8,10 @@
 //! `pull::series_identity::MinuteJudge::judge`, what the landing door runs per
 //! minute (a run step, the day arm's compares, one binary search over the day
 //! bars of the months the answer touches, the jump compare): its cost per
-//! minute must not grow with the answer. p50, p99 and max of single calls are
-//! printed beside each ratio.
+//! minute must not grow with the answer. C-ZI-03 (repair 2) is a minute of a
+//! day month that would not open, against a book told of 1, 10 and 100 such
+//! months: the day's month by arithmetic and one hash probe. p50, p99 and
+//! max of single calls are printed beside each ratio.
 //!
 //! Every input is invented here; the master is written into a new folder under
 //! the system temp directory, printed, and left there (this harness removes no
@@ -20,9 +22,10 @@ use std::hint::black_box;
 use std::io::Write as _;
 
 use pull::listing::{Listing, MASTER_DIR};
-use pull::series_identity::{DayBook, FirstDay, MinuteJudge, Rules};
+use pull::series_identity::{DayBook, FirstDay, MinuteJudge, Rules, Unchecked, Verdict};
 use pull::session::Day;
 use store::format::Bar;
+use store::path::YearMonth;
 
 use super::{cost_ps, ratio, refuse, spread};
 
@@ -180,7 +183,55 @@ fn minute_judge_is_flat() -> bool {
         & ratio("C-ZI-02 judge per minute, 100x answer", *one, *hundred)
 }
 
+/// C-ZI-03 (R4-17 repair 2): a minute of a day month that would not open,
+/// judged against a book told of 1, 10 and 100 such months. The verdict is the
+/// day's month by arithmetic and one hash probe, so its cost must stay flat
+/// as the torn months grow. Proof: this harness, `crates/pull/benches/ratio.rs`,
+/// which fails on the ratio.
+fn torn_month_judge_is_flat() -> bool {
+    let mut per_call = Vec::new();
+    for torn in [1_u16, 10, 100] {
+        // Every other month from 2000-01 is torn, so no two spans merge.
+        let months: Vec<YearMonth> = (0..torn)
+            .map(|i| {
+                let n = i * 2;
+                let month = u8::try_from(n % 12 + 1).unwrap_or_else(|_| refuse("a month"));
+                YearMonth::new(2_000 + n / 12, month).unwrap_or_else(|_| refuse("a month"))
+            })
+            .collect();
+        let middle = months
+            .get(months.len() / 2)
+            .copied()
+            .unwrap_or_else(|| refuse("a torn month"));
+        let day = |on: Day| i64::from(on.days_from_epoch());
+        let first = Day::new(2_000, 1, 1).unwrap_or_else(|_| refuse("a real day"));
+        let probe =
+            Day::new(middle.year(), middle.month(), 15).unwrap_or_else(|_| refuse("a real day"));
+        let book = DayBook::new(&[], FirstDay::On(day(first))).with_unread(&months);
+        if book.judge(day(probe), 1, 2) != Verdict::Unchecked(Unchecked::NoDayRung) {
+            refuse("a torn month's minute is no_day_rung");
+        }
+        per_call.push(cost_ps(200_000, || {
+            black_box(&book).judge(black_box(day(probe)), 1, 2)
+        }));
+        if torn == 100 {
+            spread(
+                "C-ZI-03 judge a torn month's minute, 100 torn",
+                20_000,
+                || {
+                    black_box(book.judge(black_box(day(probe)), 1, 2));
+                },
+            );
+        }
+    }
+    let [one, ten, hundred] = per_call.as_slice() else {
+        refuse("three sizes measured")
+    };
+    ratio("C-ZI-03 torn month's minute, 10x torn", *one, *ten)
+        & ratio("C-ZI-03 torn month's minute, 100x torn", *one, *hundred)
+}
+
 /// Gate 8's R4-17 rows.
 pub(crate) fn identity_is_flat() -> bool {
-    listing_probe_is_flat() & minute_judge_is_flat()
+    listing_probe_is_flat() & minute_judge_is_flat() & torn_month_judge_is_flat()
 }

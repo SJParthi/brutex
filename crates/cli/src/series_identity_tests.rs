@@ -235,11 +235,24 @@ fn arguments_that_name_no_series_are_misused_before_anything_is_opened() {
         &["NIFTY", "--feed", "nobody"],
         &["NIFTY", "--segment"],
         &["NIFTY", "--window", "x"],
+        // R4-17 repair 2: a flag first is never the instrument.
+        &["--dry-run"],
+        &["--segment", "CASH"],
+        &["-X"],
     ] {
         let (code, out) = root.run(bad);
         assert_eq!(code, MISUSED, "{bad:?}: {out}");
         assert!(out.contains(USAGE), "{bad:?}: {out}");
     }
+    let (_, out) = root.run(&["--dry-run"]);
+    assert!(
+        out.contains("`--dry-run` is a flag: name an instrument, or ALL, before any flag"),
+        "{out}"
+    );
+    assert!(
+        !root.0.join("audit").exists(),
+        "a misuse opens and writes nothing"
+    );
     let mut out = String::new();
     let code = command_with(&[], &|| Ok(PathBuf::new()), Some(STAMP), &mut out);
     assert_eq!(code, MISUSED);
@@ -941,6 +954,42 @@ fn a_plan_that_cannot_be_written_fails_out_loud() {
         again.contains("QUARANTINE PLAN NOT WRITTEN: "),
         "{out}\n{again}"
     );
+}
+
+/// R4-17 repair 2: a plan is never written through a symbolic link. A linked
+/// `audit/series-identity`, or a linked `audit`, is refused by name, the verb
+/// fails, and nothing lands where the link points.
+#[test]
+fn a_plan_is_never_written_through_a_linked_directory() {
+    use std::os::unix::fs::symlink;
+    let outside = Root::new();
+    for linked in [&["audit", "series-identity"][..], &["audit"]] {
+        let (store_root, _) = store();
+        let link = linked
+            .iter()
+            .fold(store_root.0.clone(), |path, part| path.join(part));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        // The fixture's landing already made `audit/` (its gap ledger): set
+        // it aside so the link takes its name.
+        if link.exists() {
+            fs::rename(&link, link.with_extension("aside")).unwrap();
+        }
+        symlink(&outside.0, &link).unwrap();
+        let (code, out) = store_root.run(&["NIFTY"]);
+        assert_eq!(code, FAILED, "{linked:?}: {out}");
+        assert!(
+            out.contains("QUARANTINE PLAN NOT WRITTEN: linked_plan_dir: "),
+            "{linked:?}: {out}"
+        );
+        assert!(
+            fs::read_dir(&outside.0).unwrap().next().is_none(),
+            "{linked:?}: nothing is written outside the store"
+        );
+        // The dry run names the plan it would write and touches nothing.
+        let (_, dry) = store_root.run(&["NIFTY", "--dry-run"]);
+        assert!(dry.contains("--dry-run; nothing written"), "{dry}");
+        assert!(fs::read_dir(&outside.0).unwrap().next().is_none());
+    }
 }
 
 /// A series whose only refusal is a day bar fails on it, and a series whose

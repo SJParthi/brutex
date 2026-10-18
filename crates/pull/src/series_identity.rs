@@ -71,7 +71,9 @@
 //! answer touches (at most 31 a month) and a fixed number of integer
 //! compares. [`audit`] is one such judgement per minute.
 
+use std::collections::HashSet;
 use store::format::Bar;
+use store::path::YearMonth;
 
 /// How far a minute's whole range may lie outside its served day's range, in
 /// basis points of the nearer bound, before it is refused as another series'.
@@ -163,8 +165,10 @@ pub fn jump_bps(close: i64, open: i64) -> Option<i64> {
 ///
 /// **What this cannot see.** When a run's FIRST minute is the foreign one, it
 /// becomes the reference and the security's own minutes after it are the ones
-/// refused — loudly and by name, never stored silently; the day rung's
-/// [`Cause::ForeignLevel`] judges the same minutes independently.
+/// refused, loudly and by name. The day rung's [`Cause::ForeignLevel`] judges
+/// the same minutes independently ONLY when it holds their day: with the day
+/// month absent or unreadable, that first minute is stored unflagged
+/// (D-4993 point 3, `docs/06-limits.md` R4-17).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct JumpRun {
     last_second: Option<i64>,
@@ -273,7 +277,8 @@ pub const fn non_positive(open: i64, high: i64, low: i64, close: i64) -> bool {
 /// Why a minute could not be judged. It lands, and it is counted here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unchecked {
-    /// The day rung holds nothing for the series: nothing to judge against.
+    /// The day rung holds nothing for the series, or the day month that
+    /// would witness this minute would not open: nothing to judge against.
     NoDayRung,
     /// The day rung holds an earlier day and not this one.
     NoDayBar,
@@ -319,6 +324,18 @@ pub struct DayBook {
     /// Ascending by day, one entry a day.
     days: Vec<DayRange>,
     first: FirstDay,
+    /// Every day month that would not open; `None` when none (no map is
+    /// made for the book of an answer whose months all opened).
+    unread: Option<HashSet<YearMonth>>,
+    /// The first IST day of the earliest of them, as days since the epoch.
+    unread_from: Option<i64>,
+}
+
+/// The first IST day of `month`, as days since the epoch; `i64::MIN`, the
+/// safe side, for a month no day can name (none, for a [`YearMonth`]).
+fn month_start(month: YearMonth) -> i64 {
+    crate::session::Day::new(month.year(), month.month(), 1)
+        .map_or(i64::MIN, |day| i64::from(day.days_from_epoch()))
 }
 
 impl DayBook {
@@ -345,7 +362,40 @@ impl DayBook {
             (FirstDay::NoDayRung, Some(range)) => FirstDay::On(range.day),
             (stated, None) => stated,
         };
-        Self { days, first }
+        Self {
+            days,
+            first,
+            unread: None,
+            unread_from: None,
+        }
+    }
+
+    /// The same book, told which day months would not open (R4-17 repair 2).
+    /// A minute of such a month is [`Unchecked::NoDayRung`], never judged by
+    /// range; and while one of them lies before the first day this book
+    /// read, no minute before that day is refused as
+    /// [`Cause::BeforeFirstDayBar`], since the month that would not open may
+    /// hold the series' first day. Every other minute is judged as before,
+    /// so one torn month costs the range rule of its own days only.
+    #[must_use]
+    pub fn with_unread(mut self, months: &[YearMonth]) -> Self {
+        // COLLECTED FROM AN EXACT-SIZE ITERATOR: the set is sized once.
+        self.unread = (!months.is_empty()).then(|| months.iter().copied().collect());
+        self.unread_from = months.iter().copied().map(month_start).min();
+        self
+    }
+
+    /// Whether `day` falls in a day month that would not open: the day's
+    /// month by calendar arithmetic and one hash probe, so the same cost with
+    /// one torn month or a hundred (C-ZI-03).
+    fn unread_holds(&self, day: i64) -> bool {
+        self.unread.as_ref().is_some_and(|torn| {
+            u32::try_from(day)
+                .ok()
+                .and_then(|days| crate::session::Day::from_days(days).ok())
+                .and_then(|on| on.year_month().ok())
+                .is_some_and(|month| torn.contains(&month))
+        })
     }
 
     /// The series' first served day, as this book knows it.
@@ -370,10 +420,19 @@ impl DayBook {
             return Verdict::Unchecked(Unchecked::NoDayRung);
         };
         if day < first {
+            // A MONTH THAT WOULD NOT OPEN, EARLIER THAN THE FIRST DAY READ,
+            // may hold the series' first day: nothing before it is refused.
+            if self.unread_from.is_some_and(|from| from < first) {
+                return Verdict::Unchecked(Unchecked::NoDayRung);
+            }
             return Verdict::Refused(Cause::BeforeFirstDayBar { first });
         }
         let Ok(at) = self.days.binary_search_by_key(&day, |range| range.day) else {
-            return Verdict::Unchecked(Unchecked::NoDayBar);
+            return Verdict::Unchecked(if self.unread_holds(day) {
+                Unchecked::NoDayRung
+            } else {
+                Unchecked::NoDayBar
+            });
         };
         let Some(range) = self.days.get(at) else {
             return Verdict::Unchecked(Unchecked::NoDayBar);
@@ -793,6 +852,108 @@ mod tests {
         // A held day earlier than the stated first corrects it.
         let book = DayBook::new(&[day_bar(30, 5, 6)], FirstDay::On(day(40)));
         assert_eq!(book.first(), FirstDay::On(day(30)));
+    }
+
+    /// R4-17 repair 2 (the check's PROBE-P1): a day month that would not
+    /// open costs the range rule of its own days only, and a refusal before
+    /// the first day read only while no such month lies before that day.
+    #[test]
+    fn a_day_month_that_would_not_open_costs_its_own_days_only() {
+        use store::path::YearMonth;
+        let on = |y: u16, m: u8, d: u8| {
+            i64::from(crate::session::Day::new(y, m, d).unwrap().days_from_epoch())
+        };
+        let midnight = |d: i64| bar((d * 86_400 - 19_800) * 1_000_000, 100_000, 110_000);
+        let month = |y: u16, m: u8| YearMonth::new(y, m).unwrap();
+        let unread = Verdict::Unchecked(Unchecked::NoDayRung);
+        // February 2024 read; January would not open.
+        let book = DayBook::new(
+            &[midnight(on(2024, 2, 1)), midnight(on(2024, 2, 2))],
+            FirstDay::NoDayRung,
+        )
+        .with_unread(&[month(2024, 1)]);
+        assert_eq!(book.first(), FirstDay::On(on(2024, 2, 1)));
+        // February still judges its own minutes by range.
+        assert_eq!(
+            book.judge(on(2024, 2, 1), 10_400, 10_500),
+            Verdict::Refused(Cause::ForeignLevel {
+                day_low: 100_000,
+                day_high: 110_000,
+            })
+        );
+        assert_eq!(book.judge(on(2024, 2, 2), 104_000, 105_000), Verdict::Held);
+        // Every day of the torn month, its first and its last, is unjudged.
+        for d in [on(2024, 1, 1), on(2024, 1, 30), on(2024, 1, 31)] {
+            assert_eq!(book.judge(d, 10_400, 10_500), unread);
+        }
+        // Before the torn month and before the first day read: that month
+        // may hold the series' first day, so nothing is refused on it.
+        assert_eq!(book.judge(on(2023, 12, 29), 10_400, 10_500), unread);
+        // After the last day read, outside every torn month: as before.
+        assert_eq!(
+            book.judge(on(2024, 2, 5), 1, 2),
+            Verdict::Unchecked(Unchecked::NoDayBar)
+        );
+        // A torn month AFTER the first day read leaves that refusal standing.
+        let later = DayBook::new(&[midnight(on(2024, 2, 1))], FirstDay::NoDayRung)
+            .with_unread(&[month(2024, 3)]);
+        assert_eq!(
+            later.judge(on(2024, 1, 31), 1, 2),
+            Verdict::Refused(Cause::BeforeFirstDayBar {
+                first: on(2024, 2, 1)
+            })
+        );
+        assert_eq!(later.judge(on(2024, 3, 1), 1, 2), unread);
+        assert_eq!(later.judge(on(2024, 3, 31), 1, 2), unread);
+        for d in [on(2024, 2, 29), on(2024, 4, 1)] {
+            assert_eq!(
+                later.judge(d, 1, 2),
+                Verdict::Unchecked(Unchecked::NoDayBar)
+            );
+        }
+        // Many torn months, repeated and out of order, December into January
+        // across the year: each is its own, and a month between them is not.
+        let many = DayBook::new(&[], FirstDay::On(on(2020, 1, 1))).with_unread(&[
+            month(2024, 1),
+            month(2024, 3),
+            month(2023, 12),
+            month(2024, 1),
+        ]);
+        assert_eq!(many.unread_from, Some(on(2023, 12, 1)));
+        for d in [
+            on(2023, 12, 1),
+            on(2024, 1, 31),
+            on(2024, 3, 1),
+            on(2024, 3, 31),
+        ] {
+            assert_eq!(many.judge(d, 1, 2), unread);
+        }
+        for d in [
+            on(2023, 11, 30),
+            on(2024, 2, 1),
+            on(2024, 2, 29),
+            on(2024, 4, 1),
+        ] {
+            assert_eq!(many.judge(d, 1, 2), Verdict::Unchecked(Unchecked::NoDayBar));
+        }
+        // A torn month before the first day read lifts the refusal before it;
+        // one on that very first month's start would not.
+        let earliest =
+            DayBook::new(&[], FirstDay::On(on(2024, 1, 1))).with_unread(&[month(2023, 12)]);
+        assert_eq!(earliest.judge(on(2023, 11, 1), 1, 2), unread);
+        let same = DayBook::new(&[], FirstDay::On(on(2024, 1, 1))).with_unread(&[month(2024, 1)]);
+        assert_eq!(
+            same.judge(on(2023, 12, 31), 1, 2),
+            Verdict::Refused(Cause::BeforeFirstDayBar {
+                first: on(2024, 1, 1)
+            })
+        );
+        // The first day of a month, and of the last month a store path names.
+        assert_eq!(super::month_start(month(2024, 2)), on(2024, 2, 1));
+        assert_eq!(super::month_start(month(9_999, 12)), on(9_999, 12, 1));
+        // No torn month: the book is the book it was.
+        let plain = DayBook::new(&[midnight(on(2024, 2, 1))], FirstDay::NoDayRung);
+        assert_eq!(plain.clone().with_unread(&[]), plain);
     }
 
     #[test]

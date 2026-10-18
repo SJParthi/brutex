@@ -31,8 +31,10 @@
 //! minute falls before every day bar of the touched months — or they hold none
 //! — one listing of the series' day directory, bounded by the months of its
 //! history (141 for 2015-01..2026-09), to find its first held month. Not O(1)
-//! in that one case; named for `docs/06-limits.md`. The listing probe is timed
-//! by `crates/pull/benches/ratio/identity.rs`.
+//! in that one case; named for `docs/06-limits.md`. The listing probe, the
+//! judge per minute and a torn month's minute are timed by gate 8's harness,
+//! `crates/pull/benches/ratio.rs` (C-ZI-01 to C-ZI-03, its `ratio/identity`
+//! module), which fails on a ratio past its ceiling.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -156,7 +158,11 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
         &|month| month_days(store_root, rung(Timeframe::DAY_1, month), symbol_id),
         rules,
     );
-    let book = DayBook::new(&days, FirstDay::NoDayRung);
+    // A DAY MONTH THAT WOULD NOT OPEN costs the range rule of its own days
+    // only, as at landing (R4-17 repair 2): every unread month so far is a day
+    // month, since the minute rung is read after this.
+    let torn: Vec<YearMonth> = series.unread.iter().map(|(month, _)| *month).collect();
+    let book = DayBook::new(&days, FirstDay::NoDayRung).with_unread(&torn);
     if let FirstDay::On(first) = book.first() {
         series.first_day = Some(first);
     }
@@ -278,8 +284,11 @@ fn scan_minutes(
 /// its own served day (WP-13d), and a CASH minute that jumps from the minute
 /// kept before it inside one continuous run ([`series_identity::JUMP_BPS`]).
 /// When the day rung of a touched month will not open, only the range rule
-/// is skipped (every range verdict `no_day_rung`, one warn naming why); the
-/// other three need no day bar and still refuse by name (ZI-11).
+/// is skipped, and only for that month's minutes and those before it while it
+/// precedes the first day read (each such verdict `no_day_rung`, one warn
+/// naming each month and why); the months that opened judge their own
+/// minutes by range, and the other three rules need no day bar and still
+/// refuse by name (ZI-11, ZI-16).
 ///
 /// Any other window — the day rung — is judged ONLY for a price at or below
 /// zero and for a CASH day before its listing, never by range: the day rung is
@@ -473,16 +482,14 @@ fn minute_arm(
     step: i64,
 ) -> (Vec<RawRow>, Refused) {
     let plan = witness.plan;
-    // A DAY RUNG THAT WILL NOT OPEN SKIPS THE RANGE RULES ONLY (R4-17 repair
-    // 1): every minute is judged against a book with no day bar, so each range
-    // verdict is `no_day_rung` and nothing is refused BY RANGE, while a price
-    // at or below zero, a CASH minute before its listing and a CASH
-    // in-session jump — none of which reads the day rung — are still refused
-    // by name. The warn names why the rung would not open.
-    let (book, unread) = match day_book(&kept, store_root, plan, identity) {
-        Ok(book) => (book, None),
-        Err(why) => (DayBook::new(&[], FirstDay::NoDayRung), Some(why)),
-    };
+    // A DAY MONTH THAT WILL NOT OPEN SKIPS THE RANGE RULES FOR ITS OWN DAYS
+    // ONLY (R4-17 repairs 1 and 2): a minute of that month, or one before it
+    // while it lies before the first day read, is `no_day_rung` and is never
+    // refused BY RANGE; the months that opened judge their own minutes as
+    // ever; and a price at or below zero, a CASH minute before its listing
+    // and a CASH in-session jump — none of which reads the day rung — are
+    // still refused by name. The warn names each month and why.
+    let (book, unread) = day_book(&kept, store_root, plan, identity);
     let judged = prices_judged(plan);
     let mut judge = MinuteJudge::new(&book, rules, step);
     let mut tally = Tally::default();
@@ -564,7 +571,7 @@ fn sentence(cause: Cause, row: usize, [open, high, low, close]: [i64; 4], listin
 }
 
 /// The `pull.identity` lines of an answer that was not wholly held: one
-/// `warn` when the day rung would not open, naming why; one `warn` per
+/// `warn` when a day month would not open, naming each and why; one `warn` per
 /// (cause, day) refused or suspect, each naming its count — after that warn
 /// too, since a rung that would not open stops only the range rules; one
 /// `info` when minutes were only left unjudged with every day rung read.
@@ -584,8 +591,9 @@ fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&s
         let _dropped_when_filtered = telemetry::emit(
             &base(
                 telemetry::Level::Warn,
-                "minutes not judged against their served day: the day rung would not open; \
-                 only the rules that need no day bar were applied",
+                "minutes of a day month whose rung would not open were not judged against \
+                 their served day: the day rung would not open for the month(s) named; \
+                 the rules that need no day bar were applied to them",
             )
             .with("why", telemetry::Value::Str(why))
             .with("no_day_rung", count(tally.no_day_rung)),
@@ -619,13 +627,44 @@ fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&s
 }
 
 /// The day bars of every month `rows` touch, and the series' first served day
-/// when a row falls before all of them.
+/// when a row falls before all of them; and, when a day month would not open,
+/// which and why.
+///
+/// A month that will not open is its own loss only (R4-17 repair 2): the
+/// months that did open still judge their own minutes by range, and the book
+/// is told which months it could not read ([`DayBook::with_unread`]), so
+/// neither a minute of the torn month nor a minute before a torn earlier
+/// month is refused on the word of the months that opened. Before this, one
+/// torn month emptied the book for every month of the answer.
 fn day_book(
     rows: &[RawRow],
     store_root: &Path,
     plan: Plan<'_>,
     identity: &Identity,
-) -> Result<DayBook, String> {
+) -> (DayBook, Option<String>) {
+    let mut torn: Vec<(YearMonth, String)> = Vec::new();
+    let book = day_book_read(rows, store_root, plan, identity, &mut torn);
+    if torn.is_empty() {
+        return (book, None);
+    }
+    let months: Vec<YearMonth> = torn.iter().map(|(month, _)| *month).collect();
+    let why = torn
+        .iter()
+        .map(|(month, why)| format!("{month}: {why}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    (book.with_unread(&months), Some(why))
+}
+
+/// [`day_book`]'s reading: every month that opens, and each that does not
+/// pushed onto `torn` with why.
+fn day_book_read(
+    rows: &[RawRow],
+    store_root: &Path,
+    plan: Plan<'_>,
+    identity: &Identity,
+    torn: &mut Vec<(YearMonth, String)>,
+) -> DayBook {
     let mut months: BTreeSet<YearMonth> = BTreeSet::new();
     let mut earliest: Option<i64> = None;
     for row in rows {
@@ -649,8 +688,19 @@ fn day_book(
         file: FileKind::Bars,
     };
     let mut days: Vec<Bar> = Vec::new();
+    let read = |month: YearMonth, torn: &mut Vec<(YearMonth, String)>| match month_days(
+        store_root,
+        parts(month),
+        identity.symbol_id,
+    ) {
+        Ok(bars) => Some(bars),
+        Err(why) => {
+            torn.push((month, why));
+            None
+        }
+    };
     for month in &months {
-        days.extend(month_days(store_root, parts(*month), identity.symbol_id)?);
+        days.extend(read(*month, torn).unwrap_or_default());
     }
     let book = DayBook::new(&days, FirstDay::NoDayRung);
     let before_all = match (book.first(), earliest) {
@@ -659,18 +709,20 @@ fn day_book(
         (FirstDay::On(_), None) => false,
     };
     let Some(any) = months.first().copied().filter(|_| before_all) else {
-        return Ok(book);
+        return book;
     };
     // The one listing: the series' first held day month, wherever it is.
-    let Some(first_month) = repair_plan::first_held_month(store_root, parts(any)) else {
-        return Ok(book);
+    let Some(first_month) = repair_plan::first_held_month(store_root, parts(any))
+        .filter(|month| torn.iter().all(|(read, _)| read != month))
+    else {
+        return book;
     };
-    let first = month_days(store_root, parts(first_month), identity.symbol_id)?
-        .first()
+    let first = read(first_month, torn)
+        .and_then(|bars| bars.first().copied())
         .map_or(FirstDay::NoDayRung, |bar| {
             FirstDay::On(ist_day(bar.ts_micros))
         });
-    Ok(DayBook::new(&days, first))
+    DayBook::new(&days, first)
 }
 
 /// One month of a rung, as every reader opens it; nothing when the month is

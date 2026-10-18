@@ -19646,6 +19646,25 @@ re-anchored, because re-anchoring would let a foreign block that starts a run
 land whole; telling the two apart needs a later minute than the one judged.
 None is on today's store (0 in-session jumps).
 
+**An unwitnessed first minute is stored (D-4993 point 3, repair 2).** When a
+run's FIRST minute is foreign and the day rung does not hold its day (the
+month absent, or a month that would not open), nothing witnesses that minute:
+it is stored with no flag of its own, and the share's own minutes after it
+are refused `in_session_jump` by name. The R4-17 check measured it on a
+fixture (a 0.6x first minute stored, 374 honest minutes refused); on real
+data it is the IPO-day phantom 09:15 minute, which WP-13d refuses as
+`foreign_level` only when the day bar is there. The refusals are loud; the
+stored minute is not. Deciding which side of an unwitnessed jump is foreign
+needs more than the minute judged, and is NOT DONE: the store scan run after
+the day rung lands judges that minute against its day and flags it.
+
+**A day month that will not open costs its own days only (repair 2,
+ZI-16).** A minute of that month, or a minute before it while it lies before
+the first day read, is `no_day_rung` and is not refused by range; the
+months of the same answer that opened judge their minutes as ever. Before
+repair 2 one torn month emptied the book for the whole answer, so a foreign
+minute of a readable month beside it was stored.
+
 **An index's zero lands (D-4992 point 3).** The day arm refuses a price
 BELOW zero on an index and holds exactly zero, because every zero-valued
 Zerodha INDEX day bar on the store (153) is `NIFTY50DIVPOINT`'s, an index that
@@ -19662,6 +19681,16 @@ write lock, private shadow):**
 | `ALL --segment INDEX` | 135 | 47,967,058 minutes | 6.86 s | 4 |
 | `ALL --segment CASH` | 208 | 153,548,887 minutes | 25.8 s | 4 |
 | `<SYMBOL> --segment CASH`, each share once, sequential, warm | 208 runs | about 740,000 minutes each | p50 0.297 s, p99 0.375 s, max 0.390 s (PIIND); 55.3 s in all | 1 |
+
+Re-measured after repair 2 (18 Oct 2026, the release build of the repair's
+final commit, the same shadow and kernel write lock, `--dry-run`): `ALL
+--segment CASH` 14.31 s wall, 507.7 MB peak RSS, the same counts
+(153,548,887 minutes; measured `foreign_level` 5,170, `no_gdfl_witness`
+2,813, `before_listing` 9,567, `zero_price` 9, 0 in-session jumps; no month
+NOT READ); `ALL --segment INDEX` 5.41 s, the same counts; each CASH share
+once, sequential, warm: n=208, p50 0.301 s, p99 0.333 s, max 0.403 s
+(PIIND), 60.4 s in all, 20 shares exit 1. No day month on the store fails
+to open, so repair 2 changes no count there.
 
 That is about 0.17 µs of wall clock per minute judged on 4 workers, the GDFL witness reads included. It
 is O(bars held), a scan, never a read path; `ALL` spreads the series over
@@ -19683,6 +19712,22 @@ release; every gate-8 ratio within its ceiling):
 |---|---|---|---|---|
 | C-ZI-01 listing probe, master of 300 → 3,000 rows | 57,985 ps | 58,127 ps (1.002x) | — | 42 / 84 / 209 ns at 300 rows; 42 / 84 / 250 ns at 3,000 rows (n=20,000) |
 | C-ZI-02 identity judge per minute, 1 → 10 → 100 sessions | 13,705 ps | 17,064 ps (1.245x) | 21,638 ps (1.578x) | 41 / 42 / 209 ns at 100 sessions (n=20,000) |
+
+**Repair 2, 18 Oct 2026, the same Mac and command, every gate-8 ratio within
+its ceiling.** C-ZI-03 is new: `DayBook::judge` on a minute of a day month
+that would not open, against a book told of 1, 10 and 100 such months (every
+other month from 2000-01, so none adjoin). The first form of repair 2 kept the
+torn months as sorted day spans and searched them: 1,380 ps → 2,893 ps
+(2.096x) → 4,483 ps (3.248x), a BREACH of the 3.0x ceiling, measured and
+replaced. The month is now found by calendar arithmetic and one hash probe:
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-02 identity judge per minute, 1 → 10 → 100 sessions | 12,833 ps | 15,140 ps (1.179x) | 20,568 ps (1.602x) | 0 / 42 / 208 ns at 100 sessions (n=20,000; the p50 is below the 41 ns clock tick) |
+| C-ZI-03 a torn month's minute, 1 → 10 → 100 torn months | 14,536 ps | 14,489 ps (0.996x) | 14,967 ps (1.029x) | 0 / 42 / 208 ns at 100 torn months (n=20,000; the p50 is below the 41 ns clock tick) |
+
+Telling the book which months are torn (`DayBook::with_unread`) is once per
+answer, O(torn months), and a landing's answer touches at most three.
 
 **C-ZI-02 is not O(1): the per-minute judgement is one binary search over the
 day bars of the months the answer touches, O(log days).** That is
@@ -19736,3 +19781,31 @@ only (`basis_mismatch` against `foreign_level`). No landing rule reads it.
 **History ends is not yet on the live pull.** `fetch::fetch_and_land_listed`
 returns it; the Zerodha broker run (`broker_run`, R4-14's) must call it with
 the share's span. Until then a window after delisting is reported as it was.
+
+### Gate 11 — R4-17, declared at its merge (R4-17 repair 2, 18 October 2026)
+
+~~~~text
+Gate 11 run on the merged tree (feat/db-fix at R4-07's merge, with R4-17) met five
+R4-17 occurrences; each was read before it was counted or removed.
+
+RULE 3 (`ALLOW_UNSIZED`) -- pull/src/listing.rs: the process table of loaded
+  listings (`listing::for_store`) was an unsized `HashMap`; it is now
+  `with_capacity(1)`, one store per process, so no allowance is added.
+  pull/src/series_identity.rs: repair 2's torn-month set was made empty in
+  every book; it is now `None` until a month is torn, and then collected
+  once from an exact-size iterator, so no allowance is added.
+RULE 4 (`ALLOW_SORT`) -- pull/src/listing.rs 0 -> 1: `Listing::load` orders
+  the receipted master files of one directory newest first, once per load
+  (once per store root per process); the directory holds one file a day of
+  receipts. cli/src/series_identity.rs 0 -> 1: a scan orders one series'
+  judged in-session jumps for its percentiles, O(j log j) over at most the
+  series' minutes, once per series per scan; a scan, never a read path.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/series_identity.rs 0 -> 1:
+  `DayBook::unread_holds` asks a `HashSet` of the torn day months whether
+  it holds a day's month: one hash probe (C-ZI-03, flat at 1.006x from 1
+  to 100 torn months).
+
+Two refusals on the same run are feat/db-fix's own, present there
+without R4-17 and not R4-17's files: rule 3 at
+pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
+~~~~

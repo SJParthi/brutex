@@ -340,7 +340,9 @@ fn removal_day(
 #[must_use]
 pub fn for_store(store_root: &Path) -> Arc<Listing> {
     static TABLES: OnceLock<Mutex<HashMap<PathBuf, Arc<Listing>>>> = OnceLock::new();
-    let tables = TABLES.get_or_init(|| Mutex::new(HashMap::new()));
+    // PRE-SIZED FOR ONE ROOT: a process serves one store; a test process
+    // that names more grows the table, amortised, once per root.
+    let tables = TABLES.get_or_init(|| Mutex::new(HashMap::with_capacity(1)));
     if let Some(held) = tables
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

@@ -72785,9 +72785,26 @@ against. Two things are refused by name, that row only:
    `before_listing` and `in_session_jump` (D-4993), none of which reads the
    day rung, refuse by name as on any other answer. One `pull.identity` warn
    names why the rung would not open, and each refusal keeps its own warn.
+   Point 4's "every minute is judged against a book with no day bar" was
+   the whole ANSWER, and repair 2 narrows it to the month (point 5).
+5. **A day month that will not open costs its own days only (repair 2, 18
+   Oct 2026; the R4-17 check's PROBE-P1).** One torn day month emptied the
+   book for every month of the answer, so in a window 2024-01-29..02-02 with
+   January torn, February's foreign first minute was STORED although
+   February's day bar was read and refuses it; and the store scan, which
+   had dropped the torn month from its book, refused every minute of a torn
+   FIRST month as `before_first_day_bar` on the word of the next month.
+   Now each touched month is read on its own and the book is told which
+   would not open (`DayBook::with_unread`): a minute of such a month is
+   `no_day_rung`; a minute before the first day read is refused as
+   `before_first_day_bar` only while no torn month lies before that day;
+   every other minute is judged as on any answer. The landing and the scan
+   share the rule. The warn names each torn month and why.
 
 Proof: `crates/pull/tests/zerodha_identity.rs`
-(`a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open`,
+(`a_torn_day_month_costs_the_range_rule_of_its_own_days_only`,
+`pull::series_identity::tests::a_day_month_that_would_not_open_costs_its_own_days_only`,
+`a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open`,
 `a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open`,
 `an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
 `a_day_rung_that_will_not_open_refuses_nothing_by_range`,
@@ -72820,9 +72837,18 @@ run of CASH minutes on the 1-minute grid. A minute whose open lies more than
 3. **The reference is the last KEPT minute**, so a block of foreign minutes is
    refused whole, not at its edges. A minute refused for any cause keeps the
    run continuous and never becomes the reference. When a run's FIRST minute is
-   the foreign one, the share's own minutes after it are refused instead:
-   loudly, by name, never stored silently. The day rung's `foreign_level`
-   judges the same minutes independently.
+   the foreign one, the share's own minutes after it are refused instead,
+   loudly and by name. The day rung's `foreign_level` judges the same minutes
+   independently ONLY WHEN THE DAY RUNG HOLDS THAT DAY (repair 2, 18 Oct
+   2026, correcting "never stored silently"): with the day month absent or
+   unreadable nothing witnesses the first minute, so a foreign first minute
+   is STORED with no flag of its own while the honest minutes after it are
+   refused as `in_session_jump`. Measured by the R4-17 check (PROBE-P2: a
+   phantom 0.6x first minute stored, 374 honest minutes refused); on real
+   data this is the IPO-day phantom 09:15 minute WP-13d refuses only when
+   the day bar is there. Named in `docs/06-limits.md` (R4-17);
+   the refusals are loud, the stored first minute is not, and choosing
+   which side of an unwitnessed jump is foreign is NOT DONE.
 4. **CASH 1-minute only.** That is the population the threshold is to be
    measured over. Indices are judged by the day rung (`foreign_level`), and
    options can legitimately move more than any such band.
@@ -72965,11 +72991,23 @@ a measured cause:
    the binary's `cli.lifecycle` started and finished pair. It now leaves one
    `cli.series_identity` record after every bar is judged — feed, segment,
    scope, exit, commit, each measured cause's count, the months that would
-   not open and the plan's path — `warn` when the run fails. Never per bar
-   or per series (gate 17).
+. **A plan is never written through a link, and a flag is never the
+   instrument (repair 2, 18 Oct 2026; the R4-17 check's PROBE-C1 and
+   PROBE-C4).** `create_dir_all` followed a symbolic link at
+   `audit/series-identity` (or `audit`) and the plan was written outside the
+   store. The plan directory is now made one step at a time and a step that
+   is a symbolic link is refused `linked_plan_dir`, by name, the run failing
+   and nothing written where the link points. The store-wide rule for links
+   below the store root (`store::safe_open`, R3-16) is not this verb's and
+   is NOT DONE here. And `cli series-identity --dry-run` alone took
+   `--dry-run` as the INSTRUMENT and ran in writing mode while the writer's
+   gate read the same arguments as a dry run; an instrument that begins with
+   `-` is now a misuse, refused before the store is named.
 
 Proof: `cli::series_identity::tests`
-(`every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan`,
+(`a_plan_is_never_written_through_a_linked_directory`,
+`arguments_that_name_no_series_are_misused_before_anything_is_opened`,
+`every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan`,
 `an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
 `a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absence`,
 `cli::store_write::tests::every_command_is_classified_as_a_store_writer_or_not`,

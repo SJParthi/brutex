@@ -119,6 +119,14 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let [first, flags @ ..] = arguments else {
         return Err("name an instrument, or ALL".to_owned());
     };
+    // A FLAG IS NEVER THE INSTRUMENT (R4-17 repair 2): `--dry-run` alone was
+    // taken as a symbol and run in writing mode, while the writer's gate read
+    // the same arguments as a dry run.
+    if first.starts_with('-') {
+        return Err(format!(
+            "`{first}` is a flag: name an instrument, or ALL, before any flag"
+        ));
+    }
     let instrument = if *first == "ALL" {
         None
     } else {
@@ -607,10 +615,10 @@ impl Plan {
         if run.ask.dry_run {
             return Ok(Written::DryRun(path));
         }
+        plan_dir(run.root)?;
         if path.is_file() {
             return Ok(Written::Plan(path));
         }
-        std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
         // ONE STAGING NAME PER PROCESS, the writer's own (`store::staging`).
         let staging = dir.join(format!(".series-identity.{}.staging", std::process::id()));
         let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
@@ -625,6 +633,39 @@ impl Plan {
             .map_err(|why| format!("{}: sync after the rename: {why}", dir.display()))?;
         Ok(Written::Plan(path))
     }
+}
+
+/// Make the plan directory under `root` one step at a time, refusing a step
+/// that is a symbolic link (R4-17 repair 2): a plan is written INSIDE the
+/// store, and `create_dir_all` would follow a linked `audit` or
+/// `audit/series-identity` and write the plan wherever it points. Any other
+/// step that is there is left to the staging write, which refuses a step
+/// that is not a directory by name.
+fn plan_dir(root: &Path) -> Result<(), String> {
+    let mut dir = root.to_path_buf();
+    for part in PLAN_DIR {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "linked_plan_dir: {} is a symbolic link; a plan is written only inside \
+                     the store, never through a link",
+                    dir.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&dir) {
+                    Err(why) if why.kind() != std::io::ErrorKind::AlreadyExists => {
+                        return Err(format!("{}: {why}", dir.display()));
+                    }
+                    _ => {}
+                }
+            }
+            Err(why) => return Err(format!("{}: {why}", dir.display())),
+        }
+    }
+    Ok(())
 }
 
 /// What [`Plan::write`] did.
