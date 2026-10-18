@@ -454,6 +454,7 @@ fn a_split_divides_a_bin_by_one_more_mantissa_bit_and_rebuilds_from_raw() {
     assert_eq!(past.max(), Some(1_021));
     let body = body(&past);
     assert_eq!(&body[8..12], &CODEC_V2.to_le_bytes(), "v2: a depth table");
+    assert_eq!((CODEC_V1, CODEC_V2), (1, 2), "the versions are pinned");
     assert_eq!(OwnPast::decode(&body).unwrap(), past);
 }
 
