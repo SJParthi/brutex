@@ -32,6 +32,7 @@
 //! measured.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -343,10 +344,10 @@ fn cell_index(year: u16, month: u8, indices: usize, ts_micros: i64, slot: usize)
 /// is absent with its reason; a minute with no bar is absent, `no_minute`.
 /// INDIA VIX is read through `vix`, GIFT NIFTY is always absent.
 #[must_use]
-pub fn build_reference(
+pub fn build_reference<S: BuildHasher>(
     (year, month): (u16, u8),
     sources: &[(String, IndexSource)],
-    previous: &HashMap<String, i64>,
+    previous: &HashMap<String, i64, S>,
     screen: &dyn IndexScreen,
     calendar: &dyn CalendarAuthority,
     vix: Option<&VixReferenceMonth>,
@@ -417,10 +418,10 @@ pub fn build_reference(
                         None => ReferenceCell::NoPrevious { close: bar.close },
                     },
                 };
-                if matches!(cell, ReferenceCell::Absent(_)) {
-                    if let Some(hole) = holes.get_mut(slot) {
-                        *hole += 1;
-                    }
+                if matches!(cell, ReferenceCell::Absent(_))
+                    && let Some(hole) = holes.get_mut(slot)
+                {
+                    *hole += 1;
                 }
                 if let Some(entry) = cells.get_mut(at) {
                     *entry = cell;
@@ -431,10 +432,11 @@ pub fn build_reference(
             }
             // The day closes: its last minute close becomes the previous
             // close when the day was tradable and the screen kept it.
-            if calendar.market(day).is_ok() && blank.is_none() {
-                if let Some(close) = today_last {
-                    last_tradable = Some(close);
-                }
+            if calendar.market(day).is_ok()
+                && blank.is_none()
+                && let Some(close) = today_last
+            {
+                last_tradable = Some(close);
             }
             today_last = None;
         }

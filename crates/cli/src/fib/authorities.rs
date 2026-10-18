@@ -334,6 +334,10 @@ pub trait CalendarAuthority {
     /// The market-wide verdict alone, for an instrument with no series (an
     /// index reference stamp). O(1).
     /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
+    ///
+    /// # Errors
+    ///
+    /// The day's exclusion reason, by code.
     fn market(&self, day: i64) -> Result<(), CalendarReason>;
     /// Whether the exchange traded at all on `day`: the calendar's own answer,
     /// which the previous traded session is read from. O(1).
@@ -361,7 +365,7 @@ impl InterimCalendar {
     /// The interim calendar, its digest taken over its answer on every day of
     /// the calendar's sourced spans: an edit of `pull::calendar` changes it.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         let mut table = Vec::new();
         let mut day = pull::calendar::SOURCED_FIRST_DAY;
         while day <= pull::calendar::SOURCED_LAST_DAY {
@@ -381,7 +385,10 @@ impl InterimCalendar {
 
 /// The H5 formula's market-wide answer for `day`: [`classify`] over
 /// `pull::calendar`'s three answers for it.
-#[must_use]
+///
+/// # Errors
+///
+/// Every [`classify`] reason.
 pub fn market_verdict(day: i64) -> Result<(), CalendarReason> {
     let halt = pull::calendar::halt_on(day).map(|_| {
         if day == pull::calendar::SYSTEMS_OUTAGE_DAY {
@@ -403,7 +410,11 @@ pub fn market_verdict(day: i64) -> Result<(), CalendarReason> {
 /// session kind. A special
 /// session is known in advance, an outage excepted; a halt, a short or
 /// unsized session and no answer are known only in hindsight.
-#[must_use]
+///
+/// # Errors
+///
+/// The first of halt, special session, closed, unmeasured, length
+/// unmeasured or not-full session that the day carries.
 pub fn classify(
     kind: DayKind,
     special: Option<SpecialKind>,
@@ -472,18 +483,17 @@ pub struct YearCounts<const N: usize> {
 impl<const N: usize> YearCounts<N> {
     /// No year counted yet.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn empty() -> Self {
         Self { years: Vec::new() }
     }
 
     /// Counts one at `position` in `year`. A position past `N` is ignored.
     pub fn add(&mut self, year: u16, position: usize) {
-        let at = match self.years.iter().rposition(|(seen, _)| *seen == year) {
-            Some(at) => at,
-            None => {
-                self.years.push((year, [0; N]));
-                self.years.len() - 1
-            }
+        let at = if let Some(at) = self.years.iter().rposition(|(seen, _)| *seen == year) {
+            at
+        } else {
+            self.years.push((year, [0; N]));
+            self.years.len() - 1
         };
         if let Some(count) = self
             .years
@@ -760,7 +770,7 @@ pub struct IdentityFactor {
 impl IdentityFactor {
     /// The identity factor.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::Factor, IDENTITY_FACTOR_LABEL, &[]),
         }
@@ -827,7 +837,7 @@ pub struct UncheckedSeconds {
 impl UncheckedSeconds {
     /// Unchecked seconds.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::SecondsTrust, UNCHECKED_SECONDS_LABEL, &[]),
         }
@@ -876,7 +886,7 @@ pub struct AbsentOrderFlow {
 impl AbsentOrderFlow {
     /// Absent order flow.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::OrderFlow, ABSENT_ORDER_FLOW_LABEL, &[]),
         }
@@ -938,7 +948,7 @@ pub struct SingleLanding {
 impl SingleLanding {
     /// The single-landing assumption.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::Landing, SINGLE_LANDING_LABEL, &[]),
         }
@@ -1134,7 +1144,7 @@ impl BasisVerdictAuthority for HistoricalBasis<'_> {
 }
 
 /// The class of a forward day's re-read previous session against the stored
-/// one (FIB-15 4.8): same | ratio_step | affine_step | revised | differs.
+/// one (FIB-15 4.8): `same` | `ratio_step` | `affine_step` | `revised` | `differs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReReadClass {
     /// Byte-equal bars.
@@ -1198,6 +1208,11 @@ impl ForwardBasis {
     /// The verdict for `day` given what the ingest stage read, updating the
     /// latch. A sealed rebuild (`rebuilt` in the read) clears an earlier
     /// latch before the day is judged.
+    ///
+    /// # Errors
+    ///
+    /// The FIB-15 4.8 refusal for the day, by name; `latched` while an
+    /// earlier differing re-read stands unrebuilt.
     pub fn judge(&mut self, day: i64, read: CorporateActions) -> Result<(), BasisRefusal> {
         // No source, or the day's list unread: refused or pending pool-wide,
         // which is no fact about this stock, so neither sets its latch.
@@ -1268,7 +1283,7 @@ pub struct UnwitnessedTail {
 impl UnwitnessedTail {
     /// No witness.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::TailWitness, UNWITNESSED_TAIL_LABEL, &[]),
         }
@@ -1337,7 +1352,7 @@ pub struct UnscreenedIndices {
 impl UnscreenedIndices {
     /// Every day unscreened.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::IndexScreen, UNSCREENED_LABEL, &[]),
         }
@@ -1398,7 +1413,7 @@ pub struct UnloadedExpiry {
 impl UnloadedExpiry {
     /// Every stamp absent.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn interim() -> Self {
         Self {
             version: interim(AuthorityKind::Expiry, UNLOADED_EXPIRY_LABEL, &[]),
         }
@@ -1529,15 +1544,15 @@ impl Authorities {
     /// Every [`DevelopmentPool::new`] refusal.
     pub fn interim(present: &dyn Fn(&str) -> bool) -> Result<Self, String> {
         Ok(Self {
-            calendar: Box::new(InterimCalendar::new()),
+            calendar: Box::new(InterimCalendar::interim()),
             pool: Box::new(DevelopmentPool::new(present)?),
-            factor: Box::new(IdentityFactor::new()),
-            seconds: Box::new(UncheckedSeconds::new()),
-            order_flow: Box::new(AbsentOrderFlow::new()),
-            landing: Box::new(SingleLanding::new()),
-            tail: Box::new(UnwitnessedTail::new()),
-            screen: Box::new(UnscreenedIndices::new()),
-            expiry: Box::new(UnloadedExpiry::new()),
+            factor: Box::new(IdentityFactor::interim()),
+            seconds: Box::new(UncheckedSeconds::interim()),
+            order_flow: Box::new(AbsentOrderFlow::interim()),
+            landing: Box::new(SingleLanding::interim()),
+            tail: Box::new(UnwitnessedTail::interim()),
+            screen: Box::new(UnscreenedIndices::interim()),
+            expiry: Box::new(UnloadedExpiry::interim()),
         })
     }
 

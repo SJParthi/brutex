@@ -774,7 +774,7 @@ pub fn check_widths(widths: &[u16]) -> Result<(), String> {
     Ok(())
 }
 
-/// The coarse doubling ladder 1, 2, 4, ... up to N_max (R7): `day-check`'s
+/// The coarse doubling ladder 1, 2, 4, ... up to `N_max` (R7): `day-check`'s
 /// widths when the caller names none.
 #[must_use]
 pub fn doubling_ladder() -> Vec<u16> {
@@ -824,9 +824,9 @@ pub fn build_month(
         days: Vec::new(),
         excluded: Vec::new(),
         counts: MonthCounts {
-            calendar: YearCounts::new(),
-            refusals: YearCounts::new(),
-            previous: YearCounts::new(),
+            calendar: YearCounts::empty(),
+            refusals: YearCounts::empty(),
+            previous: YearCounts::empty(),
             tradable_without_minutes: 0,
             admitted: 0,
             instrument_session_unchecked: 0,
@@ -1693,10 +1693,10 @@ pub fn seconds_of(bars: &[Candle], minute_days: &[i64], cash: &CashCloses) -> Se
     let mut taken: Option<SecondsTaken> = None;
     for bar in bars {
         let (day, second) = ist_day_second(bar.ts_micros);
-        if taken.as_ref().is_some_and(|held| held.day != day) {
-            if let Some(done) = taken.take() {
-                finish_seconds(done, cash, &mut month);
-            }
+        if taken.as_ref().is_some_and(|held| held.day != day)
+            && let Some(done) = taken.take()
+        {
+            finish_seconds(done, cash, &mut month);
         }
         let held = taken.get_or_insert_with(|| SecondsTaken {
             day,
@@ -1949,21 +1949,17 @@ pub fn run(root: &Path, request: &Request, authorities: &Authorities, out: &mut 
     }
 }
 
+/// Each index's source, and INDIA VIX's validated month when it is there.
+type Sources = (
+    Vec<(String, super::reference::IndexSource)>,
+    Option<crate::vix_reference::VixReferenceMonth>,
+);
+
 /// One month's reference sources: each index's Zerodha minutes through the
 /// named reference loader, INDIA VIX's validated month, the GIFT NIFTY slot.
 /// A month that is not there is absent, counted as holes; one that is there
 /// and refuses halts by name.
-fn reference_sources(
-    root: &Path,
-    when: (u16, u8),
-    indices: &[String],
-) -> Result<
-    (
-        Vec<(String, super::reference::IndexSource)>,
-        Option<crate::vix_reference::VixReferenceMonth>,
-    ),
-    Halt,
-> {
+fn reference_sources(root: &Path, when: (u16, u8), indices: &[String]) -> Result<Sources, Halt> {
     use super::reference::{GIFT_NIFTY, IndexSource, load_index_month};
     use crate::vix_reference::{VIX_REFERENCE_SYMBOL, VixReferenceMonth};
     let halt = |word: &'static str| move |detail: String| Halt { word, detail };
@@ -2220,8 +2216,10 @@ fn short_hex(digest: &[u8]) -> String {
     digest
         .iter()
         .take(size_of::<u64>())
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// One width's candles as `width:complete/folded/capacity`.
@@ -2288,58 +2286,7 @@ fn render_text(
         short_hex(&report.cash_digest)
     );
     for day in &month.days {
-        let verdict = match day.tradable.market {
-            Ok(()) => day.tradable.instrument.word().to_owned(),
-            Err(reason) => format!("excluded {reason}"),
-        };
-        let candles: Vec<String> = day.candles.iter().map(width_line).collect();
-        let _ = writeln!(
-            out,
-            "{} {verdict}; minutes {} (no-trade {}, zero-volume ranged {}, outside {}); {}; \
-             previous {} / {} (session / tradable){}; move {}; candles {}; suspect wicks {}; \
-             expiry {:?}; ban {}{}",
-            date(day.day),
-            day.counts.real,
-            day.counts.no_trade,
-            day.counts.zero_volume_with_range,
-            day.counts.outside_continuous,
-            day.refusal.map_or_else(
-                || if day.no_trades_after {
-                    "kept: no_trades_after".to_owned()
-                } else {
-                    "kept".to_owned()
-                },
-                |why| format!("refused {}", why.name())
-            ),
-            day.previous_session.word(),
-            day.previous_tradable.word(),
-            day.previous()
-                .carried()
-                .map_or_else(String::new, |carried| format!(
-                    " from {} close {} regime {}",
-                    date(carried.day),
-                    carried.close,
-                    carried.regime_last_minute
-                )),
-            day.candidate_refusal()
-                .unwrap_or_else(|| "known".to_owned()),
-            candles.join(" "),
-            day.suspect.len(),
-            day.stamps.expiry,
-            day.stamps.fno_ban,
-            day.exposure
-                .as_ref()
-                .map_or_else(String::new, |exposure| format!(
-                    "; halt exposure before second {}: {}",
-                    exposure.first_halted_second,
-                    exposure
-                        .candles
-                        .iter()
-                        .map(width_line)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )),
-        );
+        day_line(day, out);
     }
     let excluded: Vec<String> = month
         .excluded
@@ -2356,6 +2303,62 @@ fn render_text(
         }
     );
     render_counts(month, out);
+}
+
+/// One day's line of the day-check page.
+fn day_line(day: &DayInput, out: &mut String) {
+    let verdict = match day.tradable.market {
+        Ok(()) => day.tradable.instrument.word().to_owned(),
+        Err(reason) => format!("excluded {reason}"),
+    };
+    let candles: Vec<String> = day.candles.iter().map(width_line).collect();
+    let _ = writeln!(
+        out,
+        "{} {verdict}; minutes {} (no-trade {}, zero-volume ranged {}, outside {}); {}; \
+         previous {} / {} (session / tradable){}; move {}; candles {}; suspect wicks {}; \
+         expiry {:?}; ban {}{}",
+        date(day.day),
+        day.counts.real,
+        day.counts.no_trade,
+        day.counts.zero_volume_with_range,
+        day.counts.outside_continuous,
+        day.refusal.map_or_else(
+            || if day.no_trades_after {
+                "kept: no_trades_after".to_owned()
+            } else {
+                "kept".to_owned()
+            },
+            |why| format!("refused {}", why.name())
+        ),
+        day.previous_session.word(),
+        day.previous_tradable.word(),
+        day.previous()
+            .carried()
+            .map_or_else(String::new, |carried| format!(
+                " from {} close {} regime {}",
+                date(carried.day),
+                carried.close,
+                carried.regime_last_minute
+            )),
+        day.candidate_refusal()
+            .unwrap_or_else(|| "known".to_owned()),
+        candles.join(" "),
+        day.suspect.len(),
+        day.stamps.expiry,
+        day.stamps.fno_ban,
+        day.exposure
+            .as_ref()
+            .map_or_else(String::new, |exposure| format!(
+                "; halt exposure before second {}: {}",
+                exposure.first_halted_second,
+                exposure
+                    .candles
+                    .iter()
+                    .map(width_line)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )),
+    );
 }
 
 /// The month's counts, per year and reason.

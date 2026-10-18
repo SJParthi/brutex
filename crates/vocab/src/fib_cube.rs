@@ -4595,7 +4595,7 @@ mod tests {
         );
     }
 
-    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_608, 16_035_483_323_784_157_129);
+    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_668, 2_514_577_390_907_684_871);
 
     #[test]
     fn the_literal_scanner_skips_comments_strings_chars_and_fields() {

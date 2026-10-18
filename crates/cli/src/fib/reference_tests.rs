@@ -219,8 +219,8 @@ fn a_trade_key_joins_the_reference_table() {
         (2025, 3),
         &sources(monday, tuesday),
         &previous,
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         None,
     );
     assert_eq!(table.days, 31);
@@ -291,7 +291,7 @@ fn a_junk_day_stamps_absent_and_an_unflagged_fall_is_measured() {
         &sources,
         &none,
         &junk(i64::MIN),
-        &InterimCalendar::new(),
+        &InterimCalendar::interim(),
         None,
     );
     let fall = measured.stamp(instant(tuesday, hm(9, 15)), 0).unwrap();
@@ -316,7 +316,7 @@ fn a_junk_day_stamps_absent_and_an_unflagged_fall_is_measured() {
         &sources,
         &none,
         &junk(tuesday),
-        &InterimCalendar::new(),
+        &InterimCalendar::interim(),
         None,
     );
     assert_eq!(
@@ -342,8 +342,8 @@ fn a_session_the_gate_excludes_is_never_a_previous_close() {
         (2020, 2),
         &[("NIFTY".to_owned(), IndexSource::Minutes(nifty))],
         &previous,
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         None,
     );
     assert_eq!(
@@ -374,8 +374,8 @@ fn a_candidate_s_stride_is_unchanged_when_an_index_is_added() {
         (2025, 3),
         &wider,
         &none,
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         None,
     );
     wider.insert(2, ("NIFTYIT".to_owned(), IndexSource::Missing));
@@ -383,8 +383,8 @@ fn a_candidate_s_stride_is_unchanged_when_an_index_is_added() {
         (2025, 3),
         &wider,
         &none,
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         None,
     );
     assert_eq!(
@@ -409,8 +409,8 @@ fn the_reference_file_round_trips_and_joins_in_o1() {
         (2025, 3),
         &sources(monday, tuesday),
         &previous,
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         None,
     );
     let path = store.0.join("reference-2025-03.fib");
@@ -527,8 +527,8 @@ fn india_vix_is_stamped_exact_or_absent() {
         (2025, 3),
         &[(VIX_REFERENCE_SYMBOL.to_owned(), IndexSource::Vix)],
         &HashMap::new(),
-        &UnscreenedIndices::new(),
-        &InterimCalendar::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
         Some(&month),
     );
     assert_eq!(

@@ -80,12 +80,7 @@ fn interim() -> Authorities {
     Authorities::interim(&|_: &str| true).unwrap()
 }
 
-fn spec<'a>(
-    year: u16,
-    month: u8,
-    widths: &'a [u16],
-    reference: PreviousReference,
-) -> MonthSpec<'a> {
+fn spec(year: u16, month: u8, widths: &[u16], reference: PreviousReference) -> MonthSpec<'_> {
     MonthSpec {
         symbol: "SBIN",
         series: SeriesId(3),
@@ -146,7 +141,7 @@ impl TailWitness for Witness {
     }
 }
 
-fn witness(reading: TailReading) -> Box<Witness> {
+fn witness(reading: TailReading) -> Box<dyn TailWitness> {
     Box::new(Witness(version(AuthorityKind::TailWitness), reading))
 }
 
@@ -566,13 +561,13 @@ fn a_360_minute_day_and_the_regime_tag_reach_the_day_input() {
     );
     assert_eq!(next.previous().carried().unwrap().day, monday);
     // Without a master, the day's window is unverified and the day refused.
-    let bare = MonthSpec {
+    let masterless = MonthSpec {
         symbol: "TECHM",
         ..spec(2026, 8, &widths, PreviousReference::TradableDay)
     };
     let mut fresh = StockState::first_day();
     let month = build_month(
-        &bare,
+        &masterless,
         &full(monday, 5_679_000),
         &no_master(),
         &authorities,
@@ -643,7 +638,7 @@ fn a_duplicate_unsorted_or_corrupt_minute_refuses_only_its_day() {
     ] {
         let mut bars = Vec::new();
         for (n, on) in days.iter().chain([&next]).enumerate() {
-            let mut day = full(*on, 7_890_000 + n as i64 * 100);
+            let mut day = full(*on, 7_890_000 + i64::try_from(n).unwrap() * 100);
             if *on == days[4] {
                 let at = day
                     .iter()
@@ -907,7 +902,7 @@ fn padded_no_trade_minutes_are_holes_and_stale() {
         .find(|bar| minute_of(bar) == hm(10, 59))
         .unwrap()
         .close;
-    for bar in day.iter_mut() {
+    for bar in &mut day {
         let at = minute_of(bar);
         if (hm(11, 0)..=hm(11, 20)).contains(&at) {
             *bar = Candle {
@@ -1076,7 +1071,7 @@ fn a_tail_cut_is_refused_and_leaves_the_committed_past_as_it_was() {
     let days: Vec<i64> = (3..=7).map(|d| day_of(2025, 3, d)).collect();
     let mut first_four = Vec::new();
     for (n, on) in days[..4].iter().enumerate() {
-        first_four.extend(full(*on, 7_100_000 + n as i64 * 1_000));
+        first_four.extend(full(*on, 7_100_000 + i64::try_from(n).unwrap() * 1_000));
     }
     let mut snapshot = StockState::first_day();
     build(2025, 3, &[1], &first_four, &interim(), &mut snapshot);
@@ -1140,7 +1135,7 @@ fn a_per_instrument_refusal_refuses_that_stock_only() {
     let mut authorities = interim();
     authorities.calendar = Box::new(OneStockRefused(
         version(AuthorityKind::Calendar),
-        InterimCalendar::new(),
+        InterimCalendar::interim(),
         SeriesId(3),
         tuesday,
     ));
@@ -1487,7 +1482,7 @@ fn second(day: i64, of_day: u32, price: i64) -> Candle {
 
 #[test]
 fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
-    let (a, b, c, d, e) = (
+    let (mon, tue, wed, thu, fri) = (
         day_of(2025, 3, 3),
         day_of(2025, 3, 4),
         day_of(2025, 3, 5),
@@ -1496,20 +1491,20 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     );
     let open = 9 * 3_600 + 15 * 60;
     let mut bars = vec![
-        second(a, open - 1, 1_515_000),
-        second(a, open, 1_515_001),
-        second(a, open + 1, 1_515_002),
-        second(a, 10 * 3_600, 1_515_003),
-        second(b, open, 1_515_004),
-        second(b, open, 1_515_005),
-        second(c, open + 5, 1_515_006),
-        second(c, open + 4, 1_515_007),
+        second(mon, open - 1, 1_515_000),
+        second(mon, open, 1_515_001),
+        second(mon, open + 1, 1_515_002),
+        second(mon, 10 * 3_600, 1_515_003),
+        second(tue, open, 1_515_004),
+        second(tue, open, 1_515_005),
+        second(wed, open + 5, 1_515_006),
+        second(wed, open + 4, 1_515_007),
     ];
-    let mut off = second(d, open, 1_515_008);
+    let mut off = second(thu, open, 1_515_008);
     off.ts_micros += 1;
     bars.push(off);
-    let month = seconds_of(&bars, &[a, b, c, d, e], &no_master());
-    let kept = month.day(a).unwrap();
+    let month = seconds_of(&bars, &[mon, tue, wed, thu, fri], &no_master());
+    let kept = month.day(mon).unwrap();
     assert_eq!(kept.len(), 3);
     assert!(!kept.is_empty());
     assert_eq!(kept.at(open).unwrap().close, 1_515_001);
@@ -1528,13 +1523,13 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     assert_eq!(
         month.refused,
         [
-            (b, "seconds_duplicate"),
-            (c, "seconds_unsorted"),
-            (d, "seconds_corrupt")
+            (tue, "seconds_duplicate"),
+            (wed, "seconds_unsorted"),
+            (thu, "seconds_corrupt")
         ]
     );
-    assert_eq!(month.no_execution_seconds, [e]);
-    assert!(month.day(e).is_none());
+    assert_eq!(month.no_execution_seconds, [fri]);
+    assert!(month.day(fri).is_none());
     // A halt's seconds are not continuous.
     let halt = day_of(2020, 3, 13);
     let month = seconds_of(
@@ -1732,11 +1727,11 @@ fn a_rename_month_loads_as_one_series_with_continuous_state() {
     let new_days: Vec<i64> = (10..=13).map(|d| day_of(2025, 3, d)).collect();
     let mut old = Vec::new();
     for (n, on) in old_days.iter().enumerate() {
-        old.extend(full(*on, 2_020_000 + n as i64 * 100));
+        old.extend(full(*on, 2_020_000 + i64::try_from(n).unwrap() * 100));
     }
     let mut new = Vec::new();
     for (n, on) in new_days.iter().enumerate() {
-        new.extend(full(*on, 2_030_000 + n as i64 * 100));
+        new.extend(full(*on, 2_030_000 + i64::try_from(n).unwrap() * 100));
     }
     write_month(
         &store.0,

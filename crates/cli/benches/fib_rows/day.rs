@@ -21,11 +21,7 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 
-use cli::fib::authorities::{
-    Authorities, BasisVerdictAuthority as _, CalendarAuthority as _, DaySlots,
-    ExpiryAuthority as _, FactorAuthority as _, IndexScreen as _, Member, OrderFlowAuthority as _,
-    SecondsTrust as _, SeriesId, TailWitness as _,
-};
+use cli::fib::authorities::{Authorities, BasisVerdictAuthority as _, DaySlots, Member, SeriesId};
 use cli::fib::day::{
     MonthSpec, PreviousReference, SecondsMonth, StockState, build_month, doubling_ladder, instant,
     seconds_of,
@@ -198,7 +194,7 @@ fn auction_run(months: u64) -> DayRun {
 }
 
 fn day_op(run: &mut DayRun, i: u64) -> u64 {
-    if i % run.period != 0 {
+    if !i.is_multiple_of(run.period) {
         return run.minutes;
     }
     let at = usize::try_from(i / run.period).unwrap() % run.days.len();
@@ -484,7 +480,7 @@ fn table(indices: u64) -> Table {
         .map(|n| {
             let bars: Vec<Candle> = (0..31_i64)
                 .flat_map(|d| {
-                    (555..=929).map(move |at| minute(first + d, at, 2_000_000 + at as i64))
+                    (555..=929).map(move |at| minute(first + d, at, 2_000_000 + i64::from(at)))
                 })
                 .collect();
             (format!("INDEX{n:04}"), IndexSource::Minutes(bars))
@@ -512,6 +508,10 @@ fn table_op(state: &mut Table, i: u64) -> u64 {
 }
 
 /// The rows, run and reported. False when any row failed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "ten rows, each one literal; split, they would be ten one-call functions"
+)]
 pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     let mut verdicts = Vec::new();
     let regular = Row {

@@ -714,7 +714,6 @@ fn classify_month(
     )]
     let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
     match BarFile::open_existing(root, path, symbol_id) {
-        Ok(_) => LoadClass::Corrupt,
         Err(StoreError::Missing { .. }) => LoadClass::Missing,
         Err(StoreError::Locked { .. }) => LoadClass::Locked,
         Err(
@@ -729,7 +728,9 @@ fn classify_month(
             | StoreError::BarrierFailed { .. }
             | StoreError::ShortRead { .. },
         ) => LoadClass::Io,
-        Err(_) => LoadClass::Corrupt,
+        // Opened, so `load` refused the content, or any other store refusal:
+        // the bytes on disk are wrong.
+        _ => LoadClass::Corrupt,
     }
 }
 

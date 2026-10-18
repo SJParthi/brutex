@@ -103,7 +103,7 @@ fn pair(zerodha_close: i64, gdfl_close: i64, shape: FactorShape) -> FactorPair {
 /// shows its difference.
 #[test]
 fn the_interim_calendar_excludes_the_named_days_by_reason() {
-    let calendar = InterimCalendar::new();
+    let calendar = InterimCalendar::interim();
     let series = SeriesId(7);
     let reason = |on: i64| calendar.tradable(series, on).market.unwrap_err();
     let budget = reason(day(2020, 2, 1));
@@ -224,7 +224,7 @@ fn the_formula_names_a_short_session_and_an_outage_kind() {
 
 #[test]
 fn the_calendar_says_whether_the_exchange_traded() {
-    let calendar = InterimCalendar::new();
+    let calendar = InterimCalendar::interim();
     assert!(calendar.traded(day(2021, 2, 24)), "the outage day traded");
     assert!(calendar.traded(day(2025, 10, 21)), "a Muhurat traded");
     assert!(calendar.traded(day(2025, 3, 3)));
@@ -234,12 +234,16 @@ fn the_calendar_says_whether_the_exchange_traded() {
     assert_eq!(version.word, "interim");
     assert_eq!(version.label, INTERIM_CALENDAR_LABEL);
     assert!(version.interim);
-    assert_eq!(*version, InterimCalendar::new().version().clone(), "stable");
+    assert_eq!(
+        *version,
+        InterimCalendar::interim().version().clone(),
+        "stable"
+    );
 }
 
 #[test]
 fn year_counts_count_per_year_and_position() {
-    let mut counts: YearCounts<3> = YearCounts::new();
+    let mut counts: YearCounts<3> = YearCounts::empty();
     counts.add(2020, 0);
     counts.add(2020, 0);
     counts.add(2021, 2);
@@ -355,27 +359,27 @@ fn the_development_pool_is_the_fno_shares_labelled() {
 fn the_interim_answers_are_named_constants() {
     let series = SeriesId(3);
     let on = day(2025, 3, 3);
-    let factor = IdentityFactor::new();
+    let factor = IdentityFactor::interim();
     let identity = factor.factor(series, on).unwrap();
     assert_eq!(identity, factor.first_minute(series, on).unwrap());
     assert_eq!((identity.zerodha_close, identity.gdfl_close), (1, 1));
     assert!(!identity.measured, "the identity is never measured");
     assert!(!factor.covers(on));
     assert_eq!(factor.version().label, IDENTITY_FACTOR_LABEL);
-    let seconds = UncheckedSeconds::new();
+    let seconds = UncheckedSeconds::interim();
     assert_eq!(seconds.status(series, on), SecondsStatus::Unchecked);
     assert_eq!(seconds.version().word, "unchecked");
-    let flow = AbsentOrderFlow::new();
+    let flow = AbsentOrderFlow::interim();
     assert_eq!(flow.window(series, on, 0, 1), OrderFlowWindow::Off);
     assert_eq!(flow.version().word, "absent");
-    let landing = SingleLanding::new();
+    let landing = SingleLanding::interim();
     assert_eq!(landing.landing(series, on), Some(LandingId(0)));
     assert_eq!(landing.basis_break(series, on - 1, on), None);
-    let tail = UnwitnessedTail::new();
+    let tail = UnwitnessedTail::interim();
     assert_eq!(tail.after(series, on, 0), TailReading::Unknown);
-    let screen = UnscreenedIndices::new();
+    let screen = UnscreenedIndices::interim();
     assert_eq!(screen.screen("NIFTY", on), IndexDay::Unscreened);
-    let expiry = UnloadedExpiry::new();
+    let expiry = UnloadedExpiry::interim();
     assert_eq!(
         expiry.expiry(series, on),
         ExpiryStamp::Absent("expiry_source_not_loaded")
@@ -523,8 +527,8 @@ fn the_historical_basis_proof_follows_fm_f092() {
 fn the_basis_verdict_is_interim_when_either_input_is() {
     let measured_landings = landings(&[], None);
     let measured_factors = factors(&[], &[], 0);
-    let single = SingleLanding::new();
-    let identity = IdentityFactor::new();
+    let single = SingleLanding::interim();
+    let identity = IdentityFactor::interim();
     assert!(
         !HistoricalBasis::new(&measured_landings, &measured_factors)
             .version()
@@ -877,18 +881,24 @@ fn wrap<T>(kind: AuthorityKind, inner: T) -> Measured<T> {
 #[test]
 fn a_set_with_no_interim_authority_may_write_the_store() {
     let set = Authorities {
-        calendar: Box::new(wrap(AuthorityKind::Calendar, InterimCalendar::new())),
+        calendar: Box::new(wrap(AuthorityKind::Calendar, InterimCalendar::interim())),
         pool: Box::new(wrap(
             AuthorityKind::Pool,
             DevelopmentPool::new(&|_: &str| false).unwrap(),
         )),
-        factor: Box::new(wrap(AuthorityKind::Factor, IdentityFactor::new())),
-        seconds: Box::new(wrap(AuthorityKind::SecondsTrust, UncheckedSeconds::new())),
-        order_flow: Box::new(wrap(AuthorityKind::OrderFlow, AbsentOrderFlow::new())),
-        landing: Box::new(wrap(AuthorityKind::Landing, SingleLanding::new())),
-        tail: Box::new(wrap(AuthorityKind::TailWitness, UnwitnessedTail::new())),
-        screen: Box::new(wrap(AuthorityKind::IndexScreen, UnscreenedIndices::new())),
-        expiry: Box::new(wrap(AuthorityKind::Expiry, UnloadedExpiry::new())),
+        factor: Box::new(wrap(AuthorityKind::Factor, IdentityFactor::interim())),
+        seconds: Box::new(wrap(
+            AuthorityKind::SecondsTrust,
+            UncheckedSeconds::interim(),
+        )),
+        order_flow: Box::new(wrap(AuthorityKind::OrderFlow, AbsentOrderFlow::interim())),
+        landing: Box::new(wrap(AuthorityKind::Landing, SingleLanding::interim())),
+        tail: Box::new(wrap(AuthorityKind::TailWitness, UnwitnessedTail::interim())),
+        screen: Box::new(wrap(
+            AuthorityKind::IndexScreen,
+            UnscreenedIndices::interim(),
+        )),
+        expiry: Box::new(wrap(AuthorityKind::Expiry, UnloadedExpiry::interim())),
     };
     assert_eq!(set.refuse_for_out_store(), Ok(()));
     assert!(set.versions().iter().all(|version| !version.interim));

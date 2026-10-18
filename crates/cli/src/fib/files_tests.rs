@@ -374,6 +374,7 @@ fn every_fib_8_record_round_trips_through_its_file() {
 /// THE HEADER, BYTE FOR BYTE.
 #[test]
 fn the_header_is_byte_golden() {
+    use std::fmt::Write as _;
     let golden = Header {
         kind: Kind::Closes,
         record_version: 1,
@@ -410,7 +411,10 @@ fn the_header_is_byte_golden() {
     expected.extend_from_slice(&digest); // 121..153 header digest
     assert_eq!(bytes, expected);
     // The digest itself, pinned: any change of the layout changes it.
-    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let hex = digest[..8].iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
     assert_eq!(
         hex, GOLDEN_HEADER_DIGEST_PREFIX,
         "the header layout changed"
