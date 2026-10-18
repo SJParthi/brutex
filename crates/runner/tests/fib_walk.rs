@@ -4293,3 +4293,39 @@ fn a_locked_15_09_minute_leaves_a_stage_a_forced_exit_unpriceable() {
     assert_eq!(out.status, SlotStatus::Priced);
     assert_eq!(out.exit_value_paisa, i128::from(100 * (P - 210)));
 }
+
+/// BREAK fills only from the first bar whose high reaches the break level,
+/// one tick beyond the trigger's edge; RETEST only from the first bar whose
+/// low reaches the edge itself; neither reached in the window is
+/// `entry_never_triggered`.
+#[test]
+fn break_and_retest_fill_only_from_the_bar_that_reaches_their_level() {
+    let day = minute_day(&[
+        // High P + 104: one paisa short of the break level P + 105.
+        bar(at(10, 0, 0), P, P + 104, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 50, P + 105, P - 100, P + 50, 1_000),
+        quiet(at(10, 10, 0), P, 1_000),
+    ]);
+    let plan = |style, edge| Plan {
+        style,
+        trigger_edge: edge,
+        entry_window_end: at(10, 5, 0),
+        ..long_plan(at(10, 0, 0))
+    };
+    let broke = minute_slot(&day, plan(EntryStyle::Break, P + 100), STOP_ONLY);
+    assert_eq!(broke.first_entry_second, at(10, 1, 0));
+    assert_eq!(broke.entry_value_paisa, i128::from(100 * (P + 105)));
+    // Low P - 50 does not reach P - 100; 10:01's low does.
+    let retested = minute_slot(&day, plan(EntryStyle::Retest, P - 100), STOP_ONLY);
+    assert_eq!(retested.first_entry_second, at(10, 1, 0));
+    assert_eq!(retested.entry_value_paisa, i128::from(100 * (P + 105)));
+    let never = minute_slot(&day, plan(EntryStyle::Break, P + 105), STOP_ONLY);
+    assert_eq!(
+        never.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::NeverTriggered)
+    );
+    assert_eq!(never.status.name(), "entry_never_triggered");
+    // CLOSE needs no level: the first admitted bar fills.
+    let closed = minute_slot(&day, plan(EntryStyle::Close, P + 100), STOP_ONLY);
+    assert_eq!(closed.first_entry_second, at(10, 0, 0));
+}
