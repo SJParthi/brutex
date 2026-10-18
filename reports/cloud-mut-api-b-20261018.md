@@ -42,6 +42,34 @@ moves and counts nothing and its flush leaves the clock off; the real write
 reports, counts and delivers every byte, the clock stays off while the
 response is in flight, and its flush re-arms it a whole timeout ahead.
 
+**A second merge, at the end** (`fbdff6f7`). `origin/feat/db-fix` moved 46
+more commits during the pass, to `7aa28d65` (R3-07, R3-08 and their
+repairs). It merged with **no textual conflict**. Of the scoped files it
+changed `server.rs` (a `count_route` layer in `admitted_gated`, the
+`/pools.json` route, the `pool_table_tests` module) and `emitted.rs` (one
+emit-site row). Again every `feat/db-fix` change is kept, and the manifests
+are byte-identical to it.
+
+**One more semantic conflict**, resolved keeping both sides' intent
+(`cdc81a6b`). R3-08 sizes every pool by the core count under its `MAX_*`
+ceiling, and gives the vendor scrub its own pool of `MAX_VERIFY_CONCURRENT`
+instead of a store-read slot. Two 17 Oct tests
+(`server::cloud_mutant_tests_a::a_scrub_that_cannot_be_admitted_answers_the_admission_refusal`
+and `the_index_map_reads_the_catalogue_from_the_masters_folder_on_each_request`)
+started `MAX_STORE_READ_CONCURRENT` (8) holders and waited for every one. On
+this 4-core host the holders past the pool's size never started, so both
+tests **hung**, past 540 s, on the merged tree. On a host with eight or more
+cores they would have passed, and then the scrub would no longer have been
+refused by store-read holders. Now the index-map test holds every store-read
+slot this machine has (`Named::StoreRead.pool().max()`), and the scrub test
+holds every slot of the scrub's own pool (`run_verify`) and is refused by it,
+as before.
+
+Phase 2 covers upstream's changes too: the five mutants in the functions the
+second merge changed. `admitted_gated → Default::default()` is caught, and
+`route_table`'s four replacements are unviable (`E0433`, an unqualified
+`Router`).
+
 ## Red on the base, not this pass's
 
 **Five AH-02 tests fail on `feat/db-fix` `67c4e58d` on this Linux host**, at
@@ -79,6 +107,15 @@ measurement*, a Linux server could cut a steady reader slower than roughly
 130–140 KB/s. The operator's server runs on macOS. CI runs `ubuntu-24.04`,
 whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 **UNVERIFIED**: no CI run was read.
+
+**One more, from the second merge: a `feat/db-fix` test that needs eight
+cores.** `detail::tests::a_refused_admission_names_what_its_bound_and_why`
+fails on `7aa28d65`'s `detail.rs` (byte-identical on this branch) on this
+4-core host. It asserts the refusal names "at most 8". Since R3-08,
+`admission_refused` names the slots the pool has on this machine
+(`slots_under(8)` = min(cores, 8) = 4 here), and its own doc comment says
+so. It is red on any host with fewer than eight cores, and is not edited
+here.
 
 ## Method
 
