@@ -250,6 +250,15 @@ fn index(at: u64) -> usize {
     usize::try_from(at).unwrap_or(usize::MAX)
 }
 
+/// Applies `change` to the cell at `at`. Every caller's index is inside its
+/// buffer by construction and the workspace denies indexing, so the write is
+/// checked here, once: an index past the slice changes nothing.
+fn change_at<T>(cells: &mut [T], at: usize, change: impl FnOnce(&mut T)) {
+    if let Some(cell) = cells.get_mut(at) {
+        change(cell);
+    }
+}
+
 /// The base bin of a non-negative value: zero is bin 0; otherwise the top bit
 /// picks the octave and the next [`SUB_BITS`] bits the sub-bin.
 fn base_bin(value: u64) -> usize {
@@ -791,9 +800,9 @@ impl OwnPast {
         }
         let mut recount = vec![0_u32; self.leaves()];
         for value in &raw_values {
-            if let Some(count) = recount.get_mut(self.leaf_of(*value)) {
+            change_at(&mut recount, self.leaf_of(*value), |count| {
                 *count = count.saturating_add(1);
-            }
+            });
         }
         let raw_max = raw_values.iter().copied().max();
         let committed = self.leaves.iter().map(|leaf| leaf.committed);
@@ -804,17 +813,17 @@ impl OwnPast {
             .split
             .as_ref()
             .map_or_else(|| vec![0; BASE_BINS], |table| table.depths());
-        if let Some(depth) = depths.get_mut(base_bin(held)) {
+        change_at(&mut depths, base_bin(held), |depth| {
             *depth = u8::try_from(next).unwrap_or(u8::MAX);
-        }
+        });
         let table = SplitTable::of(&depths).ok_or(HistRefusal::LeavesExceedTable)?;
         let leaves = table.leaf_bin.len();
         let mut rebuilt = Self::with_leaves(Some(Box::new(table)), leaves);
         for value in &raw_values {
             let leaf = rebuilt.leaf_of(*value);
-            if let Some(leaf) = rebuilt.leaves.get_mut(leaf) {
+            change_at(&mut rebuilt.leaves, leaf, |leaf| {
                 leaf.committed = leaf.committed.saturating_add(1);
-            }
+            });
         }
         rebuilt.rebuild_cumulative();
         rebuilt.committed_days = self.committed_days;
@@ -2312,18 +2321,18 @@ pub fn plan_width_passes(
         let mut fits = true;
         for at in order {
             let cost = costs.get(at).copied().unwrap_or(0);
-            let (lightest, load) = loads
-                .iter_mut()
+            let lightest = loads
+                .iter()
                 .enumerate()
                 .min_by_key(|(_, load)| **load)
-                .map_or((0, None), |(pass, load)| (pass, Some(load)));
-            if let Some(load) = load {
+                .map_or(0, |(pass, _)| pass);
+            change_at(&mut loads, lightest, |load| {
                 *load += cost;
                 fits &= *load <= capacity;
-            }
-            if let Some(slot) = pass_of.get_mut(at) {
+            });
+            change_at(&mut pass_of, at, |slot| {
                 *slot = u16::try_from(lightest).unwrap_or(u16::MAX);
-            }
+            });
         }
         if fits {
             return Ok(WidthPasses {
@@ -2478,9 +2487,7 @@ impl HistBank {
                 moved.width = map.get(usize::from(width)).copied();
             }
             let at = shape.index(&moved)?;
-            if let Some(slot) = cells.get_mut(at) {
-                *slot = cell;
-            }
+            change_at(&mut cells, at, |slot| *slot = cell);
         }
         Ok(Self {
             shape,
@@ -2654,6 +2661,15 @@ mod tests {
         assert_eq!(&*table.leaf_bin, &[0, 1, 1, 2]);
         assert_eq!(table.bin(1), (1, 1));
         assert_eq!(table.bin(7), (index(u64::from(u32::MAX)), 0));
+    }
+
+    #[test]
+    fn a_checked_write_past_its_slice_changes_nothing() {
+        let mut cells = [0_u32, 0];
+        change_at(&mut cells, 1, |cell| *cell = 7);
+        assert_eq!(cells, [0, 7]);
+        change_at(&mut cells, 2, |cell| *cell = 9);
+        assert_eq!(cells, [0, 7], "an index past the slice is not written");
     }
 
     #[test]

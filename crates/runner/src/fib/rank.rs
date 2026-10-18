@@ -603,9 +603,7 @@ impl MoverRank {
             } else {
                 (&mut self.loser_rank, position - gainers)
             };
-            if let Some(cell) = ranks.get_mut(usize::from(*slot)) {
-                *cell = rank;
-            }
+            write_at(ranks, Some(usize::from(*slot)), rank);
         }
     }
 
@@ -790,9 +788,7 @@ fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usi
         let shift = pass * RANK_RADIX_DIGIT_BITS;
         counts.fill(0);
         for slot in order.iter() {
-            if let Some(count) = counts.get_mut(digit(*slot, shift)) {
-                *count += 1;
-            }
+            next_place(counts, digit(*slot, shift));
         }
         let mut start = 0;
         for count in counts.iter_mut() {
@@ -801,10 +797,7 @@ fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usi
             start += here;
         }
         for slot in order.iter() {
-            let place = next_place(counts, digit(*slot, shift));
-            if let Some(cell) = place.and_then(|at| scratch.get_mut(at)) {
-                *cell = *slot;
-            }
+            write_at(scratch, next_place(counts, digit(*slot, shift)), *slot);
         }
         order.copy_from_slice(scratch);
     }
@@ -813,12 +806,22 @@ fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usi
     PASSES * per_pass
 }
 
-/// The next free place of digit `digit` in this pass, taken.
+/// Takes the next place of digit `digit`: its counter before one is added to
+/// it. Counting a digit is taking a place and dropping it. `None` past the
+/// counters, which no digit reaches: it is masked to the buckets.
 fn next_place(counts: &mut [usize], digit: usize) -> Option<usize> {
-    let at = counts.get_mut(digit)?;
-    let place = *at;
-    *at += 1;
-    Some(place)
+    let place = counts.get(digit).copied();
+    write_at(counts, Some(digit), place.unwrap_or(0) + 1);
+    place
+}
+
+/// Writes `value` at `at`. Every caller's index is inside its buffer by
+/// construction and the workspace denies indexing, so the write is checked
+/// here, once: `None` or an index past the slice writes nothing.
+fn write_at<T>(cells: &mut [T], at: Option<usize>, value: T) {
+    if let Some(cell) = at.and_then(|at| cells.get_mut(at)) {
+        *cell = value;
+    }
 }
 
 /// Orders each run of equal keys in `order` by the exact move, `(c1 − p1) x
@@ -894,5 +897,19 @@ mod tests {
         let work = radix(&mut order, &mut scratch, &keys, &mut counts);
         assert_eq!(order, [2, 1, 3, 4, 0]);
         assert_eq!(work, 5 * (15 + 512));
+    }
+
+    #[test]
+    fn a_checked_write_past_its_slice_writes_nothing() {
+        let mut counts = [3, 5];
+        assert_eq!(next_place(&mut counts, 1), Some(5));
+        assert_eq!(counts, [3, 6]);
+        assert_eq!(next_place(&mut counts, 2), None, "past the counters");
+        assert_eq!(counts, [3, 6]);
+        write_at(&mut counts, None, 9);
+        write_at(&mut counts, Some(2), 9);
+        assert_eq!(counts, [3, 6], "nothing is written past the slice");
+        write_at(&mut counts, Some(0), 9);
+        assert_eq!(counts, [9, 6]);
     }
 }
