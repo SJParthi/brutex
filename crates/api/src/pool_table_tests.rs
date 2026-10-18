@@ -1520,6 +1520,221 @@ async fn a_gaps_audit_beside_a_writer_still_names_a_damaged_month() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// One way a one-second month is damaged beside a month a writer holds: how
+/// the damaged month is made under the test's own root, and whether its
+/// answer names the damage.
+struct OneSecondDamage {
+    /// The test root's name, and what the failure messages call the damage.
+    name: &'static str,
+    /// Makes gdfl NSE INDEX NIFTY 1s 2023-12 under the root, damaged.
+    make: fn(&Path),
+    /// Whether December's member of the audit names the damage.
+    named: fn(&serde_json::Value) -> bool,
+}
+
+/// Writes gdfl NSE INDEX NIFTY 1s 2023-12 under `root`: 300 invented bars a
+/// second apart from 2023-12-01 09:15 IST, at prices no market printed, the
+/// `n`th with volume `volume_of(n)`. The bars' path.
+fn one_second_december(root: &Path, volume_of: fn(i64) -> i64) -> PathBuf {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: store::path::Timeframe::SECOND_1,
+        month: store::path::YearMonth::new(2023, 12).expect("a legal month"),
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id is the cross-check `open` folds; any 32 bits serve"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let mut file = store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+    let open_s = 19_692 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60;
+    let rows: Vec<store::format::Bar> = (0..300)
+        .map(|at| store::format::Bar {
+            ts_micros: (open_s + at) * 1_000_000,
+            open: 1_000 + at,
+            high: 1_010 + at,
+            low: 990 + at,
+            close: 1_005 + at,
+            volume: volume_of(at),
+            open_interest: i64::MIN,
+        })
+        .collect();
+    file.append(&rows)
+        .expect("legal bars: the store admits any volume of at least zero");
+    root.join(path.to_string())
+}
+
+/// **A ONE-SECOND MONTH'S FOLD REFUSAL, A TORN KEPT SUMMARY AND AN IMPORT
+/// JOURNAL THAT WILL NOT READ ARE ANSWERED BESIDE A WRITER, NOT ASKED AGAIN**
+/// (R3-08 repair 4, verify-R3-08-r4 blocking and its follow-up; NEW-21).
+/// `writers_only` saw neither the fold's refusal (`fold_error`, rendered only
+/// inside the month's seconds members), nor a kept summary whose bytes could
+/// not be trusted (`summary_fallback` "torn: ..."), nor the GDFL import
+/// journal failing to read (`imported_to_from`): free, each was named; with
+/// another month held, the same request answered the being-written 503 and
+/// named the writer only (measured by the second agent's probes A and B:
+/// `VolumeOverflow { at: 1, .. }` and "torn" beside a held 2024-01). For
+/// each, over gdfl NIFTY 1s 2023-12..2024-01:
+///
+/// * free: 200, December's damage named;
+/// * January held: still 200 with no `Retry-After`, December's damage still
+///   named, January `being_written` with the holder's sentence, owing,
+///   holding and losing nothing, counted in `months_being_written`, never
+///   absent;
+/// * the writer gone: 200, nothing being written, the damage still named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_refusal_beside_a_writer_is_answered_not_asked_again() {
+    damage_beside_a_held_one_second_month(&OneSecondDamage {
+        name: "gaps-writer-beside-fold-refusal",
+        // TWO BARS IN ONE MINUTE WHOSE VOLUMES SUM PAST `i64::MAX`: each is a
+        // legal bar the store admits, and `pull::fold` refuses the minute
+        // (`VolumeOverflow`).
+        make: |root| {
+            let _ = one_second_december(root, |at| if at < 2 { i64::MAX / 2 + 1 } else { 0 });
+        },
+        named: |december| {
+            december["fold_error"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("VolumeOverflow"))
+        },
+    })
+    .await;
+}
+
+/// See [`a_fold_refusal_beside_a_writer_is_answered_not_asked_again`]: a kept
+/// summary whose bytes cannot be trusted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_torn_summary_beside_a_writer_is_answered_not_asked_again() {
+    damage_beside_a_held_one_second_month(&OneSecondDamage {
+        name: "gaps-writer-beside-torn-summary",
+        // SEVEN BYTES WHERE THE MONTH'S SUMMARY IS KEPT: shorter than its
+        // magic and section, so `torn`.
+        make: |root| {
+            let bars = one_second_december(root, |_| 0);
+            std::fs::write(store::month_summary::path_beside(&bars), b"spoiled")
+                .expect("spoil the test's own summary");
+        },
+        named: |december| {
+            december["summary_fallback"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("torn"))
+        },
+    })
+    .await;
+}
+
+/// See [`a_fold_refusal_beside_a_writer_is_answered_not_asked_again`]: the
+/// GDFL import journal, which says how far the import reached, will not read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unread_import_journal_beside_a_writer_is_answered_not_asked_again() {
+    damage_beside_a_held_one_second_month(&OneSecondDamage {
+        name: "gaps-writer-beside-unread-journal",
+        // A DIRECTORY WHERE THE GDFL IMPORT JOURNAL IS KEPT: its metadata
+        // reads and its bytes do not.
+        make: |root| {
+            let _ = one_second_december(root, |_| 0);
+            std::fs::create_dir_all(pull::gdfl_import::journal_path(root))
+                .expect("a directory at the test's own journal path");
+        },
+        named: |december| {
+            december["imported_to_from"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("the GDFL import journal cannot be read"))
+        },
+    })
+    .await;
+}
+
+/// The three tests above, for one `damage`.
+async fn damage_beside_a_held_one_second_month(damage: &OneSecondDamage) {
+    let (root, _, _) = one_month(damage.name);
+    let (january, january_id) = add_month(
+        &root,
+        (Vendor::Gdfl, store::path::Timeframe::SECOND_1),
+        (2024, 1),
+        (FIRST_BAR_S, 1, 300),
+    );
+    (damage.make)(&root);
+    let range = "/gaps.json?feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1s&month=2023-12&to=2024-01";
+    let what = damage.name;
+    let named = damage.named;
+    let audit_of = move |answer: &str, when: &str| -> serde_json::Value {
+        assert_eq!(
+            status_of(answer),
+            "200",
+            "{what}, {when}: answered, not asked again: {}",
+            head_text(answer)
+        );
+        assert!(
+            !head_of(answer).contains("retry-after"),
+            "{what}, {when}: {}",
+            head_text(answer)
+        );
+        let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let json = body
+            .find('{')
+            .zip(body.rfind('}'))
+            .and_then(|(from, to)| body.get(from..=to))
+            .unwrap_or("");
+        let audit: serde_json::Value = serde_json::from_str(json)
+            .unwrap_or_else(|why| panic!("{what}, {when}: gaps JSON: {why}: {json}"));
+        let december = &audit["month"][0];
+        assert_eq!(december["month"], "2023-12", "{what}, {when}: {december}");
+        assert!(
+            named(december),
+            "{what}, {when}: the damage is named: {december}"
+        );
+        assert!(
+            december["being_written"].is_null(),
+            "{what}, {when}: {december}"
+        );
+        assert_eq!(audit["months_absent"], 0, "{what}, {when}: {audit}");
+        audit
+    };
+    let writer_root = root.clone();
+    live(&root, |addr| async move {
+        let (answer, _) = get(addr, range).await;
+        let free = audit_of(&answer, "free");
+        assert_eq!(free["months_being_written"], 0, "{what}: {free}");
+
+        let holder = format!("{what}-writer");
+        let (writer, release) = hold(&writer_root, january, january_id, &holder);
+        let (answer, _) = get(addr, range).await;
+        release.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        let held = audit_of(&answer, "held");
+        assert_eq!(held["months"], 2, "{what}: {held}");
+        assert_eq!(held["months_being_written"], 1, "{what}: {held}");
+        let january = &held["month"][1];
+        assert_eq!(january["month"], "2024-01", "{what}: {january}");
+        let why = january["being_written"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{what}: the holder's sentence: {january}"));
+        assert!(
+            why.contains(store::flock::BEING_WRITTEN),
+            "{what}: {january}"
+        );
+        assert!(why.contains(&holder), "{what}: {january}");
+        assert!(january["absent_file"].is_null(), "{what}: {january}");
+        assert_eq!(january["expected"], 0, "{what}: {january}");
+        assert_eq!(january["held"], 0, "{what}: {january}");
+        assert_eq!(january["lost_minutes"], 0, "{what}: {january}");
+
+        let (answer, _) = get(addr, range).await;
+        let released = audit_of(&answer, "released");
+        assert_eq!(released["months_being_written"], 0, "{what}: {released}");
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The being-written answer is for a read whose EVERY fault is a writer:
 /// none at all, or any other fault beside one, is no "ask again"; past
 /// [`crate::detail::being_written_answer`]'s naming bound the rest are

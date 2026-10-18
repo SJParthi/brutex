@@ -956,9 +956,30 @@ pub(crate) struct ImportReach {
     /// Today, IST epoch days, read once when the reach was built; `None`
     /// when the clock could not be read (then no day is `not_yet`).
     pub(crate) today: Option<i64>,
+    /// Why the GDFL import journal would not read, when it would not: DAMAGE,
+    /// not a reach that says nothing (an absent journal reads as an empty
+    /// one). `from` says the same in its sentence; this is the typed copy a
+    /// caller tests, never a prefix of `from` (R3-08 repair 4: `/gaps.json`
+    /// beside a held month counts it as a fault, not "ask again").
+    pub(crate) journal_error: Option<String>,
 }
 
 impl ImportReach {
+    /// The reach when the GDFL import journal would not read (`why`): it
+    /// says nothing (no `to`, no open day), and the failure is named twice,
+    /// in `from`'s sentence and typed in `journal_error`, which a caller
+    /// counts as damage (R3-08 repair 4).
+    fn unread(why: &str, today: Option<i64>) -> Self {
+        let why = format!("the GDFL import journal cannot be read: {why}");
+        Self {
+            to: None,
+            from: why.clone(),
+            open: Vec::new(),
+            today,
+            journal_error: Some(why),
+        }
+    }
+
     /// Whether `day` (IST epoch days) is after today: a session that has
     /// not happened yet owes nothing, so a minute the calendar names there
     /// is neither lost nor "not imported" (R3-05 repair 3, the second
@@ -1015,6 +1036,7 @@ pub(crate) fn imported_to(
         from,
         open: Vec::new(),
         today,
+        journal_error: None,
     };
     if vendor != brutex_core::vendor::Vendor::Gdfl {
         return none(format!(
@@ -1027,7 +1049,7 @@ pub(crate) fn imported_to(
     let slot = segment_slot(segment);
     let snapshot = match crate::server::import_journal::snapshot(root) {
         Ok(snapshot) => snapshot,
-        Err(why) => return none(format!("the GDFL import journal cannot be read: {why}")),
+        Err(why) => return ImportReach::unread(&why, today),
     };
     let reach = journal_reach(root, &snapshot);
     let (Some(kind), Some(day)) = (
@@ -1113,6 +1135,7 @@ pub(crate) fn imported_to(
         from,
         open,
         today,
+        journal_error: None,
     }
 }
 
