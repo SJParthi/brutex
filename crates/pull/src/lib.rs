@@ -171,6 +171,10 @@ pub mod gdfl_nfo;
 /// another key (moved, as new files, the old key pointing at the new) or
 /// refuses (retired, by name). D-3331, D-3316; WP-12c.
 pub mod gdfl_rekey;
+/// The one GDFL run authority the cli and the api share: the request and its
+/// line, the plan and every refusal before a lock, the kinds run in order, the
+/// progress record and where a run logs. IA-1, D-4800.
+pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
@@ -220,6 +224,10 @@ pub mod rehearsal;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// Keeping the vendor's answer: each Zerodha body deflated in a per-month
+/// pack beside a 128-byte receipt, and every refused row with its cause
+/// (IA-8; D-4810, D-4859, D-4920).
+pub mod response_keep;
 /// The risk-free rate as a dated series -- the RBI 91-day Treasury Bill
 /// cut-off yield, as of the latest release strictly before the trade day,
 /// read from a table the operator supplies by path. D-2810.

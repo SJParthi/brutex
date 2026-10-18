@@ -211,6 +211,19 @@ impl ImportRefusal {
             _ => None,
         }
     }
+
+    /// Cuts the report a refusal carries to the failures it keeps by name
+    /// (D-4839), exactly as a finished run's report is cut: the receipt of a
+    /// run a refusal stopped lists the newest 1,024, never up to 2,047 (IA-1
+    /// repair 1). The same three variants as [`ImportRefusal::report`].
+    pub fn seal(&mut self) {
+        match self {
+            Self::CensusFull { done, .. }
+            | Self::CensusRefused { done, .. }
+            | Self::Durability { done, .. } => done.seal(),
+            _ => {}
+        }
+    }
 }
 
 /// [`ImportRefusal::UnderlyingSplit`]'s sentence: every old-symbol directory

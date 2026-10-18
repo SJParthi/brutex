@@ -1216,6 +1216,7 @@ impl AccessWindows {
     /// has since closed has already said its `served`; the cut is then said
     /// by the window it happened in, beside a `served` it was never part of.
     /// O(1): one probe of a table of at most [`crate::logs::DB_READS`] routes.
+    /// UNVERIFIED by a timing (`docs/06-limits.md` L-GF1-34).
     pub(crate) fn cut(&mut self, counted: CountedServed) {
         let Some(window) = self.routes.get_mut(counted.route) else {
             return;

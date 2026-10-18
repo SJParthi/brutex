@@ -728,7 +728,7 @@ pub enum RowCause {
     NonPositivePrice,
     /// A CASH bar, minute or day, on a day before its exact symbol+ISIN's
     /// listing day in the receipted NSE security master ([`crate::listing`],
-    /// R4-17, Z5, ING-01 d, D-4990). Never on an unknown listing.
+    /// R4-17, Z5, ING-01 d, D-5832). Never on an unknown listing.
     BeforeListing,
     /// A CASH minute whose open lies more than
     /// [`crate::series_identity::JUMP_BPS`] from the close of the minute kept
@@ -796,6 +796,11 @@ pub struct Refused {
     pub groups: Vec<RefusedRows>,
     /// IST-local epoch seconds of every refused row, in answer order.
     pub local_seconds: Vec<i64>,
+    /// Every refused row's own cause, parallel to `local_seconds` (DB-G46,
+    /// IA-8). The groups count one cause per day, and one day's rows of two
+    /// causes interleave, so a row's cause cannot be read back from them;
+    /// `response_keep::RefusedRow::all_of` reads the two lists together.
+    pub causes: Vec<RowCause>,
 }
 
 impl Refused {
@@ -815,6 +820,7 @@ impl Refused {
     ) {
         let day = u32::try_from(local_second.div_euclid(86_400)).ok();
         self.local_seconds.push(local_second);
+        self.causes.push(cause);
         for group in self.groups.iter_mut().rev() {
             if group.day != day {
                 break;
@@ -838,6 +844,7 @@ impl Refused {
     pub fn absorb(&mut self, other: Self) {
         self.groups.extend(other.groups);
         self.local_seconds.extend(other.local_seconds);
+        self.causes.extend(other.causes);
     }
 
     /// How many rows were refused.

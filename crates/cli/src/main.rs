@@ -67,14 +67,22 @@ fn main() -> std::process::ExitCode {
     // sweep, and refusing to compute because a directory is unwritable trades a
     // whole answer for an audit trail. `CLAUDE.md` §4 bans a fallback that
     // HIDES a failure; this one names it, above the report, on the same screen.
-    let where_events_went = cli::install_log();
+    //
+    // A RUN PROCESS LOGS TO ITS OWN DIRECTORY (IA-1, D-4862): `gdfl-import
+    // KIND` installs its sink in `logs/gdfl/<kind>` (v4) or `logs/gdfl/store`
+    // (v3), chosen from the verb and the census layout, so two kinds at once
+    // both log; every other verb keeps `install_log`. A run whose sink was
+    // refused then refuses before any lock (D-4903).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let where_events_went =
+        cli::gdfl_import_command::install_run_log(&args).unwrap_or_else(cli::install_log);
     cli::announce_unlogged(&where_events_went, &mut stderr);
 
     // `args_os`, never `args`: the latter panics on an argument that is not
     // valid UTF-8, exiting 101 before the line below can say where events
     // went. The library refuses such a word as a misuse instead. D-0998.
     let mut out = String::new();
-    let code = cli::run_durable_os(std::env::args_os().skip(1), &mut out);
+    let code = cli::run_durable_os(args, &mut out);
     // PRINTED ON SUCCESS TOO, and that is the change. It used to print only on
     // failure, so a run whose events landed somewhere `/logs` does not read
     // looked exactly like a run that was fully observable. `install_log`'s doc

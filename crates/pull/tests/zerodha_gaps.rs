@@ -1348,3 +1348,158 @@ fn a_torn_last_line_is_closed_before_the_stored_lines() {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GF-1 (16 Oct 2026): the two O(1) claims R3-18 made without a proof (gate 12)
+// ---------------------------------------------------------------------------
+
+/// `sample` sorted: p50, p99 and max.
+fn spread_of(mut sample: Vec<u128>) -> (u128, u128, u128) {
+    sample.sort_unstable();
+    let n = sample.len();
+    (sample[n / 2], sample[n * 99 / 100], sample[n - 1])
+}
+
+/// The median of `at` against the median of `base`, in thousandths, held
+/// under 3.0x: gate 8's ceiling (`benches/ratio.rs` `CEILING_PERMILLE`), at
+/// the median, the statistic one stall on a shared host cannot inflate.
+fn flat(what: &str, base: &[u128], at: &[u128]) {
+    const CEILING_PERMILLE: u128 = 3_000;
+    let (base_p50, base_p99, _) = spread_of(base.to_vec());
+    let (at_p50, at_p99, _) = spread_of(at.to_vec());
+    let permille = at_p50 * 1_000 / base_p50.max(1);
+    println!(
+        "{what}: p50 {permille} permille, p99 {} permille (printed)",
+        at_p99 * 1_000 / base_p99.max(1)
+    );
+    assert!(
+        permille <= CEILING_PERMILLE,
+        "{what}: the median costs {permille} permille of the base"
+    );
+}
+
+/// **WHAT A DAY OWES COSTS THE SAME ON EVERY DATE OF THE WINDOW (GF-1, gate
+/// 12).** `repair_plan::owed` claims O(1): one calendar answer, at most two
+/// dated-table walks of fixed length and one walk of the three-entry halt
+/// table. Its tables are dated, so a walk that grew with the date would cost
+/// more late in the window than early. For both segments, 120 calendar days
+/// from 2018-01-01, from 2022-01-01 and up to 2026-09-30 (the cash venue's
+/// closing-auction dates included), each answered first so every day is a
+/// session or a refusal it really is; then n = 200 rounds, INTERLEAVED, each
+/// timing one pass over each range. The per-call p50, p99 and max are
+/// printed, and the 2022 and 2026 medians are held under 3.0x of 2018's.
+/// Proof of `owed`'s claim: this file, `crates/pull/tests/zerodha_gaps.rs`.
+#[test]
+fn what_a_day_owes_costs_the_same_on_every_date_of_the_window() {
+    const N: usize = 200;
+    const DAYS: u32 = 120;
+    let last = day(2026, 9, 30).days_from_epoch();
+    let starts = [
+        ("2018", day(2018, 1, 1).days_from_epoch()),
+        ("2022", day(2022, 1, 1).days_from_epoch()),
+        ("2026", last - (DAYS - 1)),
+    ];
+    for segment in ["INDEX", "CASH"] {
+        for &(_, start) in &starts {
+            let sessions = (start..start + DAYS)
+                .filter(|&n| matches!(repair_plan::owed(segment, n), Owes::Windows(_)))
+                .count();
+            assert!(sessions > 60, "{segment} from {start}: {sessions} sessions");
+        }
+        let mut times: Vec<Vec<u128>> = vec![Vec::with_capacity(N); starts.len()];
+        for _ in 0..N {
+            for (&(_, start), out) in starts.iter().zip(times.iter_mut()) {
+                let at = std::time::Instant::now();
+                for number in start..start + DAYS {
+                    let _owes = std::hint::black_box(repair_plan::owed(
+                        std::hint::black_box(segment),
+                        number,
+                    ));
+                }
+                out.push(at.elapsed().as_nanos() / u128::from(DAYS));
+            }
+        }
+        for (&(label, _), sample) in starts.iter().zip(&times) {
+            let (p50, p99, max) = spread_of(sample.clone());
+            println!(
+                "repair_plan::owed {segment}, {DAYS} days from {label}: n={N} passes, per call p50={p50}ns p99={p99}ns max={max}ns"
+            );
+        }
+        flat(&format!("owed {segment} 2022 / 2018"), &times[0], &times[1]);
+        flat(&format!("owed {segment} 2026 / 2018"), &times[0], &times[2]);
+    }
+}
+
+/// A ledger of `lines` distinct `gap` lines under `root`: key `K<i % 97>` on
+/// the `i / 97`-th day from 2018-01-01, every reason invented.
+fn ledger_of(root: &Path, lines: u32) -> gap_backfill::Have {
+    use std::fmt::Write as _;
+    let first = day(2018, 1, 1).days_from_epoch();
+    let mut text = String::with_capacity(usize::try_from(lines).unwrap() * 40);
+    for i in 0..lines {
+        let on = Day::from_days(first + i / 97).unwrap();
+        writeln!(text, "gap K{} {on} why=invented", i % 97).unwrap();
+    }
+    let audit = root.join("audit");
+    fs::create_dir_all(&audit).unwrap();
+    fs::write(audit.join("zerodha.gaps"), text).unwrap();
+    let have = gap_backfill::ledgered(root, brutex_core::vendor::Vendor::Zerodha).unwrap();
+    assert_eq!(
+        have.len(),
+        usize::try_from(lines).unwrap(),
+        "every line one pair"
+    );
+    assert!(have.faults.is_empty(), "{:?}", have.faults);
+    have
+}
+
+/// **A LEDGER PROBE IS FLAT IN THE LEDGER'S LINES (GF-1, gate 12).**
+/// `gap_backfill::Have::holds` claims O(1) expected: one hash probe of the
+/// pairs read. Ledgers of 790 and 79,000 lines (the real one held about
+/// 79,000 on 9 Oct 2026, `docs/06-limits.md` L-R318-02); 256 probes a pass,
+/// half held in both and half held in neither, each answered right first;
+/// then n = 200 passes INTERLEAVED. The per-probe p50, p99 and max are
+/// printed, and the 100x median is held under 3.0x of the 1x median.
+/// Proof of `holds`'s claim: this file, `crates/pull/tests/zerodha_gaps.rs`.
+#[test]
+fn a_ledger_probe_is_flat_in_the_ledgers_lines() {
+    const N: usize = 200;
+    const PROBES: u32 = 256;
+    let small_root = Scratch::new("GF1-HOLDS-1X");
+    let large_root = Scratch::new("GF1-HOLDS-100X");
+    let small = ledger_of(&small_root.0, 790);
+    let large = ledger_of(&large_root.0, 79_000);
+    let first = day(2018, 1, 1).days_from_epoch();
+    let probes: Vec<(String, Day, bool)> = (0..PROBES)
+        .map(|p| {
+            let i = p * 3 % 790;
+            let on = Day::from_days(first + i / 97).unwrap();
+            if p % 2 == 0 {
+                (format!("K{}", i % 97), on, true)
+            } else {
+                ("ABSENT".to_owned(), on, false)
+            }
+        })
+        .collect();
+    for (key, on, held) in &probes {
+        assert_eq!(small.holds(key, *on), *held, "{key} {on}");
+        assert_eq!(large.holds(key, *on), *held, "{key} {on}");
+    }
+    let mut times: [Vec<u128>; 2] = [Vec::with_capacity(N), Vec::with_capacity(N)];
+    for _ in 0..N {
+        for (have, out) in [&small, &large].into_iter().zip(times.iter_mut()) {
+            let at = std::time::Instant::now();
+            for (key, on, _) in &probes {
+                let _held = std::hint::black_box(have.holds(std::hint::black_box(key), *on));
+            }
+            out.push(at.elapsed().as_nanos() / u128::from(PROBES));
+        }
+    }
+    for (label, sample) in ["790 lines", "79,000 lines"].iter().zip(&times) {
+        let (p50, p99, max) = spread_of(sample.clone());
+        println!(
+            "gap_backfill::Have::holds, {label}: n={N} passes, per probe p50={p50}ns p99={p99}ns max={max}ns"
+        );
+    }
+    flat("holds 100x / 1x", &times[0], &times[1]);
+}
