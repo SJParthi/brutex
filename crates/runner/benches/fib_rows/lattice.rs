@@ -439,16 +439,26 @@ fn throughput(host: &Host, out: &mut String) {
         out,
         "\nWALK THROUGHPUT (outside the harness: one run each, wall clock; FIB-12 projects from these)"
     );
-    for rows in [10_000_u64, 1_000_000, 20_000_000] {
+    // (rows, floor in permille of the rows, whether every visited mix is also
+    // scored and timed). The floors were calibrated in this session: at 1% a
+    // Zipf-skewed table of this shape visits about 1.7 million nodes and
+    // 1.2 x 10^9 row-touches per 10^4 rows, so 2 x 10^7 rows at 1% would be
+    // about 2.4 x 10^12 row-touches; 10% visits about 5,800 nodes at any scale.
+    for (rows, permille, timed) in [
+        (10_000_u64, 10_u64, true),
+        (10_000, 100, false),
+        (1_000_000, 100, true),
+        (20_000_000, 100, false),
+    ] {
         progress(&format!("build, {rows} rows"));
         let built = Instant::now();
         let table = table(rows, 2_000, 208);
         let build_ms = built.elapsed().as_millis();
-        let min = (rows / 100).max(1);
+        let min = (rows * permille / 1_000).max(1);
         let scratch_bytes = rows * FREE_ROWS as u64 * (4 + size_of::<Coords>() as u64);
         let _ = writeln!(
             out,
-            "  rows {rows}: table {} bytes, built in {build_ms} ms; floor {min} raw trades (1% of the rows); \
+            "  rows {rows}: table {} bytes, built in {build_ms} ms; floor {min} raw trades ({permille} permille of the rows); \
              scratch reserved per worker <= {scratch_bytes} bytes (21 regions x rows x 28 bytes, zeroed lazily)",
             table_bytes(&table)
         );
@@ -488,56 +498,60 @@ fn throughput(host: &Host, out: &mut String) {
                 walked.spread.inline_for_budget
             );
         }
-        progress(&format!("per-mix times, {rows} rows"));
-        if rows <= 1_000_000 {
-            let outcomes = outcomes(&table);
-            let calendar = calendar(&table);
-            let profiles = profiles_of(&table);
-            let mut visitor = Timed {
-                pass: OrderedPass::new(
-                    &table,
-                    &profiles,
-                    Rungs::new(Vec::new(), Vec::new()).unwrap(),
-                    vec![Gross; profiles.len()],
-                )
-                .unwrap(),
-                outcomes: &outcomes,
-                calendar: &calendar,
-                times_ns: Vec::new(),
-                supports: Vec::new(),
-            };
-            walk(&table, min, Schedule::Sequential, &mut visitor).unwrap();
-            let mut per_row: Vec<u64> = visitor
-                .times_ns
-                .iter()
-                .zip(&visitor.supports)
-                .map(|(t, s)| t * 1_000 / (s * profiles.len() as u64).max(1))
-                .collect();
-            per_row.sort_unstable();
-            let mut times = visitor.times_ns.clone();
-            times.sort_unstable();
-            let _ = writeln!(
-                out,
-                "    per visited mix, scored at {} profiles (sequential): {} mixes; ns per mix p50 {} p99 {} max {}; \
-                 ps per (row, profile) p50 {} p99 {} max {}",
-                profiles.len(),
-                times.len(),
-                nearest(&times, 1, 2),
-                nearest(&times, 99, 100),
-                times.last().copied().unwrap_or(0),
-                nearest(&per_row, 1, 2),
-                nearest(&per_row, 99, 100),
-                per_row.last().copied().unwrap_or(0)
-            );
+        if timed {
+            progress(&format!("per-mix times, {rows} rows"));
+            time_mixes(&table, min, out);
         }
     }
 }
 
+/// Scores and times every mix a sequential walk visits.
+fn time_mixes(table: &RowTable, min: u64, out: &mut String) {
+    let outcomes = outcomes(table);
+    let calendar = calendar(table);
+    let profiles = profiles_of(table);
+    let mut visitor = Timed {
+        pass: OrderedPass::new(
+            table,
+            &profiles,
+            Rungs::new(Vec::new(), Vec::new()).unwrap(),
+            vec![Gross; profiles.len()],
+        )
+        .unwrap(),
+        outcomes: &outcomes,
+        calendar: &calendar,
+        times_ns: Vec::new(),
+        supports: Vec::new(),
+    };
+    walk(table, min, Schedule::Sequential, &mut visitor).unwrap();
+    let mut per_row: Vec<u64> = visitor
+        .times_ns
+        .iter()
+        .zip(&visitor.supports)
+        .map(|(t, s)| t * 1_000 / (s * profiles.len() as u64).max(1))
+        .collect();
+    per_row.sort_unstable();
+    let mut times = visitor.times_ns.clone();
+    times.sort_unstable();
+    let _ = writeln!(
+        out,
+        "    per visited mix, scored at {} profiles (sequential): {} mixes; ns per mix p50 {} p99 {} max {}; \
+         ps per (row, profile) p50 {} p99 {} max {}",
+        profiles.len(),
+        times.len(),
+        nearest(&times, 1, 2),
+        nearest(&times, 99, 100),
+        times.last().copied().unwrap_or(0),
+        nearest(&per_row, 1, 2),
+        nearest(&per_row, 99, 100),
+        per_row.last().copied().unwrap_or(0)
+    );
+}
 /// FM-F054: the shared traversal at three exit counts.
 fn shared_exits(out: &mut String) {
     let _ = writeln!(
         out,
-        "\nSHARED TRAVERSAL AT THREE EXIT COUNTS (FM-F054; outside the harness, one run each, 100,000 rows, floor 1,000)"
+        "\nSHARED TRAVERSAL AT THREE EXIT COUNTS (FM-F054; outside the harness, one run each, 100,000 rows, floor 10,000)"
     );
     let base = table(100_000, 2_000, 208);
     for exits in [1_u8, 2, 4] {
@@ -586,7 +600,7 @@ fn shared_exits(out: &mut String) {
         )
         .unwrap();
         let start = Instant::now();
-        let walked = walk(&table, 1_000, Schedule::Sequential, &mut sink).unwrap();
+        let walked = walk(&table, 10_000, Schedule::Sequential, &mut sink).unwrap();
         let ms = start.elapsed().as_millis();
         let _ = writeln!(
             out,
