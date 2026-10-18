@@ -2666,10 +2666,11 @@ mod tests {
     #[test]
     fn a_checked_write_past_its_slice_changes_nothing() {
         let mut cells = [0_u32, 0];
-        change_at(&mut cells, 1, |cell| *cell = 7);
+        let seven = |cell: &mut u32| *cell = 7;
+        change_at(&mut cells, 2, seven);
+        assert_eq!(cells, [0, 0], "an index past the slice is not written");
+        change_at(&mut cells, 1, seven);
         assert_eq!(cells, [0, 7]);
-        change_at(&mut cells, 2, |cell| *cell = 9);
-        assert_eq!(cells, [0, 7], "an index past the slice is not written");
     }
 
     #[test]
