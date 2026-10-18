@@ -4329,3 +4329,22 @@ fn break_and_retest_fill_only_from_the_bar_that_reaches_their_level() {
     let closed = minute_slot(&day, plan(EntryStyle::Close, P + 100), STOP_ONLY);
     assert_eq!(closed.first_entry_second, at(10, 0, 0));
 }
+
+/// A stop `k` ticks beyond the base sits `k` ticks below the planned stop:
+/// two ticks out it is 98,985, so a low of 98,990 holds and 98,985 stops.
+#[test]
+fn a_stop_extra_ticks_beyond_the_base_sits_that_far_below_the_planned_stop() {
+    let wide = ExitVariant {
+        stop: StopLoss::BeyondBase { extra_ticks: 2 },
+        ..ExitVariant::REFERENCE
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), 99_000, 99_100, 98_990, 99_000, 1_000),
+        bar(at(10, 2, 0), 99_000, 99_100, 98_985, 99_000, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), wide);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_second, at(10, 2, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_985));
+}
