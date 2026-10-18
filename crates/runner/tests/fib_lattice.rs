@@ -1009,9 +1009,12 @@ fn outcomes_for(rows: u32, exits: u32, rng: &mut Seeded) -> Vec<Outcome> {
 
 /// The batches a parallel walk splits, found from the visited nodes alone:
 /// each (node, free row) whose node has at least `split_support` rows and two
-/// or more visited children fixing that row. Returns the tasks they spawn (one
-/// per child) and how many batches there are.
-fn batches(visited: &Collect, split_support: u64) -> (u64, u64) {
+/// or more visited children fixing that row, with the scratch bytes the
+/// specification gives it (each child's rows times the free rows still open
+/// below it, plus the node's rows for a prefix child that scans its own,
+/// times an index and a cell). Returns the tasks the batches within `budget`
+/// spawn (one per child) and how many batches pass the budget and run inline.
+fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64) {
     let free = free_rows();
     let last_fixed = |key: &MixKey| {
         free.iter()
@@ -1024,19 +1027,38 @@ fn batches(visited: &Collect, split_support: u64) -> (u64, u64) {
         .iter()
         .map(|(key, rows, ..)| (*key, rows.len() as u64))
         .collect();
-    let mut children: BTreeMap<(MixKey, usize), u64> = BTreeMap::new();
-    for (key, ..) in &visited.nodes {
+    let mut children: BTreeMap<(MixKey, usize), Vec<u64>> = BTreeMap::new();
+    for (key, rows, ..) in &visited.nodes {
         if let Some(id) = last_fixed(key) {
             let parent = with(*key, id, OPEN);
-            *children.entry((parent, id.index())).or_default() += 1;
+            let position = free.iter().position(|f| *f == id).unwrap();
+            children
+                .entry((parent, position))
+                .or_default()
+                .push(rows.len() as u64);
         }
     }
-    children
-        .iter()
-        .filter(|((parent, _), count)| **count > 1 && support[parent] >= split_support)
-        .fold((0, 0), |(tasks, batches), (_, count)| {
-            (tasks + count, batches + 1)
-        })
+    let entry = (size_of::<u32>() + size_of::<Coords>()) as u64;
+    let (mut tasks, mut inline) = (0, 0);
+    for ((parent, position), rows) in &children {
+        let parent_rows = support[parent];
+        if rows.len() < 2 || parent_rows < split_support {
+            continue;
+        }
+        let below = (free.len() - position - 1) as u64;
+        let own = if free[*position].row().kind == RowKind::Cumulative {
+            parent_rows
+        } else {
+            0
+        };
+        let bytes: u64 = rows.iter().map(|r| (r * below + own) * entry).sum();
+        if bytes > budget {
+            inline += 1;
+        } else {
+            tasks += rows.len() as u64;
+        }
+    }
+    (tasks, inline)
 }
 
 /// FM-F053: a work-stealing walk at 1, 4 and 12 threads hands every node to
@@ -1084,7 +1106,15 @@ fn work_stealing_equals_sequential_bytes() {
             .num_threads(threads)
             .build()
             .unwrap();
-        for (split_support, budget) in [(40, u64::MAX), (1, u64::MAX), (40, 1)] {
+        let mut mixed = false;
+        for (split_support, budget) in [
+            (40, u64::MAX),
+            (1, u64::MAX),
+            (40, 1),
+            (40, 100_000),
+            (40, 400_000),
+            (1, 1_000_000),
+        ] {
             let schedule = Schedule::Parallel {
                 split_support,
                 batch_budget_bytes: budget,
@@ -1097,22 +1127,21 @@ fn work_stealing_equals_sequential_bytes() {
                 "{threads} threads, {schedule:?}"
             );
             assert_eq!(spread.tally, walked.tally);
-            let (tasks, batches) = batches(&collected, split_support);
-            if budget == 1 {
-                assert_eq!(spread.spread.tasks, 0);
-                assert_eq!(spread.spread.inline_for_budget, batches);
-            } else {
-                assert_eq!(spread.spread.tasks, tasks);
-                assert_eq!(spread.spread.inline_for_budget, 0);
-            }
-            assert!(
-                tasks > batches && batches > 0,
-                "{tasks} tasks in {batches} batches"
+            let (tasks, inline) = batches(&collected, split_support, budget);
+            assert_eq!(
+                (spread.spread.tasks, spread.spread.inline_for_budget),
+                (tasks, inline),
+                "{threads} threads, {schedule:?}"
             );
+            mixed |= tasks > 0 && inline > 0;
             let mut nodes = Collect::default();
             pool.install(|| walk(&table, 6, schedule, &mut nodes).unwrap());
             assert_eq!(nodes, collected);
         }
+        assert!(
+            mixed,
+            "a budget between the batch sizes splits some batches and inlines others"
+        );
     }
 }
 
