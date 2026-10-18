@@ -1445,3 +1445,51 @@ fn the_edges_of_the_pass_are_named() {
         ScoreRefusal::ProfilesEmpty
     );
 }
+
+/// A model that charges sell orders only (1,000 units each, synthetic), so the
+/// side of each order shows in the net money.
+#[derive(Clone)]
+struct SellsOnly;
+
+impl ChargeModel for SellsOnly {
+    fn scale(&self) -> i128 {
+        1
+    }
+
+    fn add(&mut self, order: &Order) -> i128 {
+        if order.buy { 0 } else { 1_000 }
+    }
+
+    fn close_day(&mut self, _day: u32) -> i128 {
+        0
+    }
+}
+
+/// A long buys to enter and sells to exit; a short sells to enter and buys to
+/// exit: each trade pays for exactly one sell.
+#[test]
+fn a_trade_has_one_buy_and_one_sell() {
+    for (search, side) in [(Search::Long, 0), (Search::Short, 1)] {
+        let entries = [Entry {
+            slot: 0,
+            day: 100,
+            second: at(10, 0),
+            side,
+            outcome: trade(0, at(10, 0), at(10, 5)),
+        }];
+        let (table, outcomes) = case(search, &entries);
+        let profiles = [Profile {
+            variant: 0,
+            size: TradeSize::Small,
+        }];
+        let mut pass = OrderedPass::new(&table, &profiles, no_rungs(), vec![SellsOnly]).unwrap();
+        let card = pass
+            .score(&table, &[0], &outcomes, &fixture::calendar(100, 30))
+            .unwrap()[0]
+            .clone();
+        assert_eq!(
+            card.months[0].loss_money, -1_000,
+            "{search:?}: one sell charged"
+        );
+    }
+}
