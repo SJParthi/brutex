@@ -728,7 +728,7 @@ pub enum RowCause {
     NonPositivePrice,
     /// A CASH bar, minute or day, on a day before its exact symbol+ISIN's
     /// listing day in the receipted NSE security master ([`crate::listing`],
-    /// R4-17, Z5, ING-01 d, D-5832). Never on an unknown listing.
+    /// R4-17, Z5, ING-01 d, D-5835). Never on an unknown listing.
     BeforeListing,
     /// A CASH minute whose open lies more than
     /// [`crate::series_identity::JUMP_BPS`] from the close of the minute kept

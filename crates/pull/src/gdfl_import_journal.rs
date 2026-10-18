@@ -42,6 +42,24 @@ pub(crate) fn load_warning(path: &str, bytes: u64, lines: u64) -> Option<telemet
     })
 }
 
+/// Every `<kind> <day>` (`options 2019-07-01`) whose last closing line in
+/// the import journal under `store_root` is `done` for the whole scope
+/// (`*`): the days the GDFL Dropbox fetch does not download again (R4-07).
+/// One read of the journal, by its own reader.
+///
+/// # Errors
+///
+/// [`ImportRefusal::Journal`] for a journal that cannot be read or holds a
+/// line it never writes.
+pub fn done_whole_days(store_root: &Path) -> Result<HashSet<String>, ImportRefusal> {
+    let journal = Journal::load(journal_path(store_root))?;
+    Ok(journal
+        .done
+        .iter()
+        .filter_map(|key| key.strip_suffix(" *").map(str::to_owned))
+        .collect())
+}
+
 /// The version of the one-second bar definition (the row rule, the
 /// placement and the fold this module applies), written into every `done`
 /// and `incomplete` line as `definition=<n>` (D-2822). Bump it whenever a

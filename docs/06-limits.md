@@ -14508,6 +14508,20 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     finds nothing new and never on a GET.
 ~~~~
 
+~~~~text
+  pull/gdfl_dropbox.rs 1 -- R4-07 repair 2 (D-4986). `pick` orders one
+    press's listing by path before it picks, so two presses over one
+    listing name, hold and refuse in one order. O(f log f) for the f
+    listed files, at most MAX_LISTED (200,000; a larger listing is
+    refused `listing_incomplete` before this point), once a press and
+    never on a lookup or a request (L-R407-4).
+  pull/disk_projection.rs 1 -- R4-07 repair 2 (D-4987).
+    `Totals::seal` sorts each option class's measured bytes a day once
+    to take its median: O(u log u) over the held underlyings of the
+    class, once per sealed projection. A projection afterwards reads the
+    cached median (L-R407-1); no lookup sorts.
+~~~~
+
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
 
 ~~~~text
@@ -14955,6 +14969,22 @@ remove at a cost worth paying, so none was rewritten.
     and census_cache.rs entries above.
 ~~~~
 
+~~~~text
+  pull/gdfl_dropbox.rs 3 -- R4-07 repair 2 (D-4986). Three
+    `iter().rposition` calls, all backward byte searches and none a
+    membership search. `torn_shape` trims the NUL tail of ONE journal
+    line, bounded by that line. `Memory::load` finds the end of the last
+    whole line of the journal it has just read whole, once a press (the
+    read itself is L-R407-3; the search stops at the first newline from
+    the end). `status` finds the end of the last whole line inside its
+    tail window, which starts at 64 KiB and never passes
+    MAX_STATUS_WINDOW (4 MiB) (L-R407-2).
+  pull/disk_projection.rs 1 -- R4-07 repair 2 (D-4987). `parse_df`
+    finds the capacity column, the last word ending in `%`, among the
+    words of ONE `df -Pk` line: six columns plus the words of a mount
+    point, read once per free-space check by the caller.
+~~~~
+
 ### Gate 11 — rule 7: the ambiguous membership test
 
 ~~~~text
@@ -15118,6 +15148,18 @@ bounds are all nonzero.
     in `underlying_segment` is the FIXED `const` ARRAY case: five `&str`,
     the same array `core::instrument::is_sweepable` walks. Asked once per
     `/spot.json` request, never per instant.
+~~~~
+
+~~~~text
+  pull/gdfl_dropbox.rs 3 -- R4-07 repair 2 (D-4986). Three `HashSet`
+    probes, one per listed file, expected O(1): `pick` asks the import
+    journal's `done_whole_days` set (a `HashSet<String>` read once a
+    press) whether a day is done, and `record_picks` asks the press's
+    `Memory` whether a held name (`HashSet<String>`) or a refusal
+    (`HashSet<(name, rev, code)>`) was already journalled. Three
+    `Range::contains` status tests in the same file were written as
+    `matches!` instead, and the two in `store/settings.rs` likewise, so
+    no entry here covers them.
 ~~~~
 
 ### Gate 11 — the /db fix round and the ingest automation, declared together (GF-1, 13 October 2026)
@@ -19350,6 +19392,31 @@ always was.
 | L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
 | L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
 
+## The GDFL Dropbox fetch and the shared disk projection — D-4986, D-4987, 17 October 2026
+
+`pull::gdfl_dropbox` (E2E-01) and `pull::disk_projection` (PERF-13), R4-07.
+Bench `cargo bench -p pull --bench ratio` (release, C-DP-01 and C-DP-02,
+n = 200 sequential calls per size, one client, on a machine other agents were
+loading; invented inputs). The real-data figures were read only from the
+operator's drive on 17 October 2026.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R407-1 | A projection | none per unit: one hash probe or one cached median | O(plan units) after `Totals::seal`, which sorts each class's bytes a day once, O(u log u). C-DP-01, two units: p50 209 ns, p99 334 / 250 / 250 ns, max 3.7 / 1.0 / 0.75 µs at 100, 1,000 and 10,000 underlyings; ratio 1.02x at 10x and 100x | R4-07 |
+| L-R407-2 | The fetch's status read | none: one seek to the journal's last 64 KiB, read as bytes and decoded a whole line at a time (repair round 1, R407-17); the window doubles, to at most `MAX_STATUS_WINDOW` (4 MiB), only while no whole line ends in it, and past that the read is refused by name | C-DP-02, first run: p50 26.1 / 26.0 / 25.8 µs, p99 59.5 / 59.9 / 76.8 µs, max 89 / 183 / 142 µs at 1,000, 10,000 and 100,000 journal lines; ratio 1.05x and 1.04x. Repair round 1 re-run, 17 Oct 2026, journals with every third line non-ASCII (an en dash and accents), release, n = 200, while this package's test suites and other agents' builds loaded the machine: p50 46.7 / 49.5 / 48.0 µs, p99 261.7 / 165.5 / 471.7 µs, max 1.70 / 0.99 / 1.59 ms; ratio 1.050x and 1.009x (flat in the journal's length). The higher p99 is not separated from the load; NOT PROVED either way. A last line longer than 64 KiB costs one more read a doubling (at most 6) | R4-07 |
+| L-R407-3 | A press reads its whole journal once | it must know every earlier run's verified files, parts, link print and complete listing count, and no sidecar remembers them yet | O(journal lines) once a press, never once a file. **Growth a press is a constant once each held day has its line** (repair round 1, R407-19): held and refused files are journalled once each and one `picks` line counts them, in one write and one sync. Measured, 1,000 held day zips listed and held, zero downloads, debug test build, 17 Oct 2026, the second agent's probe `c6` run on the repaired code: press 1 adds 1,005 lines, presses 2 and 3 add 5 each and take 25 and 23 ms (before the repair: +1,004 lines and 6.8 to 8.4 s every press, one sync a line). The read itself stays O(lines): `Memory::load` p50 0.57 / 5.68 / 56.6 ms, p99 0.63 / 5.87 / 59.3 ms at 1,000 / 10,000 / 100,000 lines (n = 20 each, probe `c13`, about 100-byte lines, debug build, a loaded machine). This package's own measurement, `repair_r1::measure_the_journal_costs_of_a_press` (run by name with `--ignored --nocapture`; n = 31 each, debug build, about 220-byte `verified` lines with non-ASCII names, while the pull and api suites ran): presses 2 and 3 over 1,000 held days add 5 lines each and take 151 and 144 ms; `Memory::load` p50 1.82 / 14.4 / 152 ms, p99 3.10 / 20.4 / 174 ms, and `status` p50 58 / 60 / 73 µs, p99 213 / 107 / 122 µs, at 1,000 / 10,000 / 100,000 lines. EXTRAPOLATION, not measured: about eight lines a downloaded file and three files a trading day give about 48,000 lines for 2,000 days, plus 5 a press (10,000 for 2,000 daily presses), so about 60,000 lines and, by the two 100,000-line figures, about 35 to 95 ms of journal read a press in a debug build. A checkpoint sidecar that would make the read O(state) is not built | R4-07 |
+| L-R407-4 | A press lists the whole shared folder | whether a shared-link cursor survives between presses is UNVERIFIED (FM-037), so a daily press cannot ask for "only what is new" | O(listed entries) a press, every page followed; refused `listing_incomplete` past 200,000 files, 4,096 folders or depth 8. **Every listing ends** (repair round 1, R407-15): a page that adds no entry or keeps its cursor is a stall, `MAX_STALLED_PAGES` (8) in a row are `listing_incomplete`, and a page that progresses adds at least one entry, so one folder takes at most 9 pages an entry kept plus 8, and a press at most 9 × (200,000 + 4,096) + 8 × 4,096 pages (a bound, not a measurement). An entry listed again at the same path and revision is one file and a counted repeat. Measured on the fixture, debug test build: a server that answers `has_more` with no entry forever is refused after 8 pages (before the repair: 42,472 requests in 6 s and no end); with Stop pressed the press ends `stopped` with 0 requests. NOT MEASURED against Dropbox (fixture only: 2,501 entries over 4 pages) | R4-07 |
+| L-R407-5 | Verifying a downloaded zip reads it whole, twice | a member's CRC-32 is known only by inflating it, and the SHA-256 that refuses a renamed duplicate is a second pass | O(the file's bytes); every member's stated length is refused past 64 MiB before it is inflated. NOT MEASURED on a real 280 MB options day zip (fixture zips only) | R4-07 |
+| L-R407-6 | The free space is measured by running `/bin/df -Pk` | `std` has no `statvfs`, and `libc` is not taken for it (L-TSW-7) | one process a check: one for the plan and one before each file. Since repair round 1 the process is the CALLER's: `pull` starts no program (gate 0 refused `Command::new("/bin/df")` in `disk_projection.rs`, D-1603), takes a `FreeSpace`, and the app's meter is the `/bin/df -Pk` `/disk.json` already runs in `crates/api/src/disk_route.rs` (that line is itself refused by gate 0 on `feat/db-fix`, outside this package). Wiring it to the fetch is R4-11's | R4-07 |
+| L-R407-7 | An unstored option underlying is its class's MEDIAN, which can be far off | the median is of other underlyings, not of this one | over-projects a small index: the median of NIFTY's and BANKNIFTY's stored bytes a day (167.3 and 145.2 MB, 1s bars, 1,786 held options days) is 156.3 MB, 4.9x FINNIFTY's own 31.7 MB a day (44.97 GB over at most 1,419 days since 2021-01-11; its exact held days NOT PROVED). Labelled EXTRAPOLATION and named on every line; safe for the floor (it refuses early, never late); the ±20% tolerance holds for measured units only | R4-07 |
+| L-R407-8 | A yearly container (`Options/<YYYY>.zip`) is refused, not read | fetching only a grown container's new members by `Range` over its central directory is not built (FM-237) | refused by name `not_a_day_zip`, and a listing of nothing else is `link_holds_no_gdfl_day_zip`; the drive's own delivery is in that shape (`Options/2025.zip`, 70.2 GB, 250 inner day zips). **NOT DONE** | follow-on |
+| L-R407-9 | Disk use of a press | the bytes are the vendor's day zips | measured from the drive's delivery: options 289.8 MB a day zip (the 2025 and 2026 containers, 125.18 GB over 432 inner day zips), capital market 32.3 MB a file (128.92 GB over 3,995); a daily press about 354 MB in three files and three `.part` names, passing the 15% floor with 1.77 TB free of 8.00 TB; a from-scratch fetch of 2,000 options days and 3,995 market files is 708.5 GB and is refused `disk_floor`, 137.6 GB short (`df -Pk`, 17 October 2026) | R4-07 |
+| L-R407-10 | Stop is polled, not an event | a request in flight and a back-off sleep are raced against a 50 ms poll of the Stop flag (`STOP_POLL`); verifying a zip already downloaded and a journal sync are not interrupted | a Stop ends a wait within one poll (50 ms) and a press at the next check after a running verification or sync; one press waits on `429` and `5xx` at most `Backoff::max_total` (30 minutes) in all, then is refused `throttled` or `server_error` by name. Fixture-measured by `stop_ends_a_press_during_a_back_off_sleep` and `stop_ends_a_press_whose_request_is_never_answered`; not measured on a real zip | R4-07 |
+| L-R407-11 | Constant-time steps that no bench times on their own | each is constant by construction, and gate 12 refuses a cost claim that names no proof: `Totals::add_kind` and `Totals::add_underlying` (one hash insert each), `floor_check` and `Floor::bytes_of` (integer arithmetic), `check_plan` (one `floor_check` after the caller's measurement) and `Names::verdict` (two hash probes and a fixed-width parse) | O(1) each, UNVERIFIED by a timing: C-DP-01 times `project` (and so `per_day`) and C-DP-02 times `status`, both in `crates/pull/benches/ratio.rs`; nothing times these six alone. Repair round 1, gate 12 | R4-07 |
+| L-R407-12 | A press reads the GDFL IMPORT journal whole, once | `pick` asks `gdfl_import::done_whole_days` which days the importer has finished, and that journal has no index or checkpoint sidecar | O(lines of the import journal) once a press, never per file or per lookup; the second agent's r2 check read a 14 MB real journal in about 36 ms in a debug build (its measurement, not re-taken here). A checkpoint sidecar is the import journal owner's (R4-08/R4-22) and is NOT DONE. Repair round 2 | R4-07 |
+| L-R407-13 | Verified day zips stay in staging after the hand-off | the fetch deletes nothing (D-4986, R4-06's no-automatic-deletion rule), and nothing reclaims staging yet | UNVERIFIED extrapolation from the second agent's figure of about 354 MB a daily press: about 90-130 GB a year if every trading day is pressed. A staged copy that fails re-verification is kept beside its re-fetched copy (R407-26), so each such failure adds one file of staging bytes until the same reclaiming step. Reclaiming verified, handed-off staging is an operator step with an owner still to be named (the R4-11 wiring shows staging bytes); NOT DONE here. Repair round 2 | R4-07 |
+| L-R407-14 | `listing_shrank` is accepted by hand, one shrink at a time | which files a vendor rotates out is not knowable from the listing, so the fetch never decides that a smaller folder is fine | one config line (`accept_listing_shrink = "<token>"`) per shrink, the token named by that shrink's refusal; until it is written every press, the daily timer's too, is refused by name with the token to write, and a token accepts its one shrink once (journalled `accepted_shrink`), so each later shrink needs its own line (R407-25). Repair round 2; repair round 3 replaced the count-keyed `accept_listing_count`, which never expired and was never journalled | R4-07 |
+
 ## Automation guards: what R4-06 bounds and what it leaves open (R4-06, D-5320..D-5322)
 
 | ID | Limit | Why it is not closed | Bound | Package |
@@ -19545,7 +19612,7 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
 
 
-## R4-17: Zerodha series identity (D-5832 and D-4991 to D-4995)
+## R4-17: Zerodha series identity (D-5835 and D-4991 to D-4995)
 
 **`JUMP_BPS` = 3,000 was chosen first and MEASURED on the Mac, 17 Oct
 2026.** `cli series-identity ALL --segment CASH --feed zerodha --workers 4`

@@ -16,7 +16,7 @@
 //!
 //! For a minute, the day rung of the same key, whichever vendor served it; for
 //! a CASH share, besides, the listing day the receipted NSE security master
-//! states for its exact symbol and ISIN ([`crate::listing`], D-5832) and the
+//! states for its exact symbol and ISIN ([`crate::listing`], D-5835) and the
 //! minute kept before it in the same continuous run
 //! ([`crate::series_identity::JumpRun`]). A day bar has one witness only, the
 //! master: the day rung is never judged by range (D-4992). Nothing here names
@@ -312,7 +312,7 @@ pub(super) fn screen(
         listing: match (span, table.is_some()) {
             (Some(span), _) => span.source.code(),
             // A SHARE IN NO MASTER ON DISK (DHFL, JETAIRWAYS): its span is the
-            // vendor's own, labelled, and refuses nothing (D-5832).
+            // vendor's own, labelled, and refuses nothing (D-5835).
             (None, true) => crate::listing::Source::InferredFromVendorSpan.code(),
             (None, false) => NO_LISTING,
         },
@@ -551,7 +551,7 @@ fn sentence(cause: Cause, row: usize, [open, high, low, close]: [i64; 4], listin
         Cause::BeforeListing { listed_on } => format!(
             "row {row}: a bar on a day before this security's listing day (IST day \
              {listed_on}) in the NSE security master ({listing}): not this security's bar. \
-             Bar refused before fold or append (R4-17, D-5832)"
+             Bar refused before fold or append (R4-17, D-5835)"
         ),
         Cause::InSessionJump { reference, bps } => format!(
             "row {row}: an open of {open} paisa after a close of {reference} inside one \

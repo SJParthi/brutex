@@ -880,7 +880,7 @@ fn a_day_bar_before_listing_is_refused_by_name() {
 }
 
 /// IRFC's and KFINTECH's minutes years before their listing (Z5): refused as
-/// `before_listing`, not `before_first_day_bar`. DALBHARAT's (D-5832): minutes
+/// `before_listing`, not `before_first_day_bar`. DALBHARAT's (D-5835): minutes
 /// on or after the listing and before the vendor's first day bar are the
 /// share's own and land.
 #[test]

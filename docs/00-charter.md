@@ -1288,6 +1288,38 @@ record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
 
+## Dropbox API v2: what the GDFL Dropbox fetch relies on (R4-07, E2E-01; D-4986)
+
+Read 16 Oct 2026 from Dropbox's own published API specification, the Stone
+files of `github.com/dropbox/dropbox-api-spec`:
+
+| Source | What it states | Used for |
+|---|---|---|
+| `https://raw.githubusercontent.com/dropbox/dropbox-api-spec/master/files.stone`, route `list_folder` | `ListFolderArg.shared_link`: "A shared link to list the contents of"; with it, `path` is "relative to root of the shared link"; "Only non-recursive mode is supported for shared link." Attribute `scope = "files.metadata.read"`. | `pull::gdfl_dropbox` lists each folder in turn, non-recursive, with `path` relative to the link |
+| same file, `list_folder/continue` and `ListFolderResult` | `cursor`: "Pass the cursor into list_folder/continue"; `has_more`: "If true, then there are more entries available." | every page is read until `has_more` is false; a cut page is `listing_incomplete` |
+| `https://raw.githubusercontent.com/dropbox/dropbox-api-spec/master/shared_links.stone`, route `get_shared_link_file` | "Download the shared link's file from a user's Dropbox." `host="content"`, `style="download"`, `scope = "sharing.read"`; its argument is `GetSharedLinkMetadataArg` (`url`, `path`, `link_password`), `path` being "a specific file or sub-folder in this folder. A relative path should be used." | the download request's `Dropbox-API-Arg` `{url, path}` |
+
+**UNVERIFIED, and built around rather than assumed:**
+
+* Whether a shared folder can be listed or downloaded **without a token**. The
+  routes name OAuth scopes (`files.metadata.read`, `sharing.read`), which are
+  token scopes, and the Stone files read state no `auth` attribute for them.
+  So the fetch reads a token from Parameter Store (`CLAUDE.md` §8: vendor
+  `gdfl`, field `dropbox_token`) and never mints or refreshes one.
+* Whether the content host honours an HTTP `Range` request on
+  `get_shared_link_file`. A resume appends only on a `206` whose
+  `Content-Range` starts at the part's length and states the listed size;
+  any other answer restarts into a new part, so a server that ignores
+  `Range` costs a re-download and never a stitched file.
+* The error body of a file link (`error_summary` beginning `path/not_folder`)
+  and the `rev` field of `Dropbox-API-Result`: both are read when present and
+  never required.
+* The size of a listing page and whether a cursor survives between presses.
+
+The fetch is proved against a loopback fixture server only
+(`pull::gdfl_dropbox` tests); the first real request is the operator's press
+after the link is in `~/.brutex/gdfl-dropbox.toml`.
+
 ## NSE Masters Data v1.6 — read 17 Oct 2026 (R4-17: the listing rule)
 
 `CLAUDE.md` §3 rule 1 requires the listing rule `pull::listing` applies to
@@ -1298,7 +1330,7 @@ those bytes; the exchange may serve other bytes later.
 
 | Document | Date | URL | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
 |---|---|---|---|---|---|
-| NSE – Masters Data, CM, F&O, CD and COM Segments, Version 1.6 (NSE Data & Analytics) | 05 May 2025 | `https://nsearchives.nseindia.com/web/sites/default/files/inline-files/NSE-Masters%20Data-v1.6.pdf` | `a1e45b6de312ebf05298fac8a1c4fbe337b8339b7eb110ac75705925bd05487e` | §2.3 Units (p7): "All time fields are number of seconds from midnight January 1, 1980, unless specified otherwise." §3.1.1 `security.txt` (p9): "Listing Date LONG Numeric Date of listing.", "Expulsion Date LONG Numeric Date of expulsion.", "Re-Admission Date LONG Numeric Date of readmission." | `pull::cash_auction`'s lifecycle decode (unchanged), and `pull::listing`: a CASH bar dated before its exact symbol+ISIN's listing date is not that security's bar; a window after its expulsion date is the end of its history (D-5832, D-4991) |
+| NSE – Masters Data, CM, F&O, CD and COM Segments, Version 1.6 (NSE Data & Analytics) | 05 May 2025 | `https://nsearchives.nseindia.com/web/sites/default/files/inline-files/NSE-Masters%20Data-v1.6.pdf` | `a1e45b6de312ebf05298fac8a1c4fbe337b8339b7eb110ac75705925bd05487e` | §2.3 Units (p7): "All time fields are number of seconds from midnight January 1, 1980, unless specified otherwise." §3.1.1 `security.txt` (p9): "Listing Date LONG Numeric Date of listing.", "Expulsion Date LONG Numeric Date of expulsion.", "Re-Admission Date LONG Numeric Date of readmission." | `pull::cash_auction`'s lifecycle decode (unchanged), and `pull::listing`: a CASH bar dated before its exact symbol+ISIN's listing date is not that security's bar; a window after its expulsion date is the end of its history (D-5835, D-4991) |
 
 **What the document does NOT say, and so is labelled in the code.** v1.6
 describes `security.txt`; it does not name the MII CSV's abbreviated columns.

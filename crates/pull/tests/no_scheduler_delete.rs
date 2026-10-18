@@ -56,10 +56,14 @@ const DECLARED: [&str; 12] = [
 ];
 
 /// The declared members that exist at this head, read at compile time.
-const LISTED: [(&str, &str); 2] = [
+const LISTED: [(&str, &str); 3] = [
     (
         "crates/api/src/autopilot.rs",
         include_str!("../../api/src/autopilot.rs"),
+    ),
+    (
+        "crates/pull/src/gdfl_dropbox.rs",
+        include_str!("../src/gdfl_dropbox.rs"),
     ),
     (
         "crates/pull/src/tickstore_write.rs",
@@ -69,7 +73,7 @@ const LISTED: [(&str, &str); 2] = [
 
 /// The named exceptions: (module, the site's code line trimmed, how many
 /// times it may appear, why).
-const ALLOWED: [(&str, &str, usize, &str); 3] = [
+const ALLOWED: [(&str, &str, usize, &str); 4] = [
     (
         "crates/api/src/autopilot.rs",
         "let mut file = std::fs::File::create(path)?;",
@@ -92,6 +96,15 @@ const ALLOWED: [(&str, &str, usize, &str); 3] = [
         1,
         "publish renames the verified temporary to the day's final name in the \
          same folder, then fsyncs that folder",
+    ),
+    (
+        "crates/pull/src/gdfl_dropbox.rs",
+        "std::fs::rename(&part, &target)",
+        1,
+        "fetch_one promotes a verified `.part` to the day zip's name in the \
+         part's own run folder (`target` is `part.parent()` joined with the \
+         name), after refusing `name_taken` when that name exists; the staging \
+         lock keeps any second press out (R4-07, D-4986)",
     ),
 ];
 
