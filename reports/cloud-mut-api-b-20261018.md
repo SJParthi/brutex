@@ -120,7 +120,10 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 ## Left (in progress)
 
 - Phase 1: `autopilot.rs` (371), `pullrun.rs` (466), `server.rs` (1,509),
-  every listed mutant on the merged tree. Running.
+  every listed mutant on the merged tree. Running; at 08:37 UTC 118 tested:
+  108 caught, 1 missed (`autopilot.rs:863:25`, equivalent, as on 17 Oct), 9
+  unviable, each a compile error (`E0277`: the return type has no
+  `Default`).
 - Phase 2: every survivor and every mutant in code changed since phase 1's
   base (`audit.rs`'s `Journal::page` doc and `Journal::identity`, changed
   since `bdcfa9bd`).
