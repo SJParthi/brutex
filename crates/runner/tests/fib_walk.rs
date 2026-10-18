@@ -47,8 +47,16 @@ fn ts(second: u32) -> i64 {
     (DAY * 86_400 + i64::from(second) - 19_800) * 1_000_000
 }
 
-/// One bar.
+/// One bar, refused unless it is evaluable: a fixture typo must never pass as
+/// a corrupt bar.
 fn bar(second: u32, open: i64, high: i64, low: i64, close: i64, volume: i64) -> Candle {
+    let candle = corrupt(second, open, high, low, close, volume);
+    assert_eq!(candle.check_evaluable(), Ok(()), "fixture bar at {second}");
+    candle
+}
+
+/// One bar as given, evaluable or not.
+fn corrupt(second: u32, open: i64, high: i64, low: i64, close: i64, volume: i64) -> Candle {
     Candle::new(ts(second), open, high, low, close, volume, OI_NULL)
 }
 
@@ -780,4 +788,1182 @@ fn single_minute_legs_are_the_cost_crate_s_printed_extreme_fills() {
     .expect("fills");
     assert_eq!(i128::from(fills.buy().raw()) * 100, out.entry_value_paisa);
     assert_eq!(i128::from(fills.sell().raw()) * 100, out.exit_value_paisa);
+}
+
+// -------------------------------------------------------------- targets --
+
+/// A take-profit at one R: `P + 1,005`.
+const ONE_R: TakeProfit = TakeProfit::RMultiple { milli_r: 1_000 };
+
+#[test]
+fn a_minute_target_fills_only_when_the_minute_trades_through_it() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P, 1_000),
+        bar(at(10, 1, 0), P, 101_005, P, P, 1_000),
+        bar(at(10, 2, 0), P, 101_010, P, P, 1_000),
+    ]);
+    let variant = with_stop(ExitVariant {
+        take_profit: ONE_R,
+        ..ExitVariant::REFERENCE
+    });
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert_eq!(
+        out.exit_second,
+        at(10, 2, 0),
+        "a touch is not a trade-through"
+    );
+    assert_eq!(
+        out.exit_value_paisa,
+        i128::from(100 * 101_005),
+        "at the limit"
+    );
+    assert!(!has(&out, TradeFlag::TargetBookedAtWorst));
+}
+
+#[test]
+fn a_minute_limit_off_the_tick_grid_rests_at_the_next_tick_above() {
+    // Half an R is 502.5 paisa: the limit rests at Rs 1,005.05.
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P, 1_000),
+        bar(at(10, 1, 0), P, 100_505, P, P, 1_000),
+        bar(at(10, 2, 0), P, 100_506, P, P, 1_000),
+    ]);
+    let variant = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 500 },
+        ..STOP_ONLY
+    };
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_second, at(10, 2, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_505));
+}
+
+#[test]
+fn a_second_target_is_booked_at_the_touching_second_s_low() {
+    let day = second_day(&[
+        bar(at(10, 0, 5), 100_950, 101_010, 100_900, 100_950, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let variant = with_stop(ExitVariant {
+        take_profit: ONE_R,
+        ..ExitVariant::REFERENCE
+    });
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_900));
+    assert!(has(&out, TradeFlag::TargetBookedAtWorst));
+}
+
+#[test]
+fn a_target_and_a_stop_in_one_bar_is_the_stop_at_the_bar_s_low() {
+    let variant = with_stop(ExitVariant {
+        take_profit: ONE_R,
+        ..ExitVariant::REFERENCE
+    });
+    let both = bar(at(10, 1, 0), P, 101_100, 98_000, P, 1_000);
+    let day = minute_day(&[bar(at(10, 0, 0), P, P + 100, P - 50, P, 1_000), both]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_000));
+    assert!(has(&out, TradeFlag::FiredStopLoss));
+    assert!(has(&out, TradeFlag::FiredTakeProfit));
+    let day = second_day(&[
+        bar(at(10, 1, 0), P, 101_100, 98_000, P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_000));
+}
+
+#[test]
+fn a_target_touched_before_the_first_fill_leaves_the_entry_unfilled() {
+    let both = BookMark {
+        ask: true,
+        bid: true,
+        flagged_print: false,
+    };
+    let mut day = Day::seconds(vec![
+        bar(at(10, 0, 0), P, 101_100, P, P, 1_000),
+        quiet(at(10, 0, 1), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.marks = Some(vec![BookMark { ask: false, ..both }, both, both]);
+    let variant = ExitVariant {
+        take_profit: ONE_R,
+        ..STOP_ONLY
+    };
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(
+        out.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::TargetBeforeFill)
+    );
+}
+
+#[test]
+fn a_fill_beyond_the_target_runs_both_readings_and_is_flagged() {
+    let day = second_day(&[
+        bar(at(10, 0, 1), 100_500, 100_600, 100_400, 100_500, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    // A target of 0.05 R (Rs 1,000.5025) sits below the fill at Rs 1,001.00.
+    let variant = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 50 },
+        ..ExitVariant::REFERENCE
+    };
+    let fires = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert!(has(&fires, TradeFlag::EntryBeyondTarget));
+    assert_eq!(fires.exit_reason, ExitReason::TakeProfit);
+    assert_eq!(fires.exit_second, at(10, 0, 0), "it fires on the first bar");
+    assert_eq!(fires.exit_value_paisa, i128::from(100 * (P - 50)));
+    let void = walk_one(
+        &day,
+        &WalkProfile {
+            beyond_target: BeyondTarget::TargetVoid,
+            ..second_profile()
+        },
+        long_plan(at(10, 0, 0)),
+        variant,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert!(has(&void, TradeFlag::EntryBeyondTarget));
+    assert_eq!(void.exit_reason, ExitReason::Forced, "the target is void");
+}
+
+// --------------------------------------------------------------- trails --
+
+#[test]
+fn the_swing_trail_waits_for_its_confirming_close_and_applies_from_the_next_bar() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 2, 0), P + 100, 100_150, 100_020, P + 100, 1_000),
+        bar(at(10, 3, 0), P + 100, 100_300, 100_080, P + 100, 1_000),
+        bar(at(10, 4, 0), P + 100, 100_250, 100_010, P + 100, 1_000),
+    ]);
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 4, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_010));
+    // A buffer below the swing keeps the 10:04 low above the trail.
+    let buffered = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 6,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), buffered);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+}
+
+#[test]
+fn a_swing_across_a_withheld_candle_is_a_hole_never_a_trail() {
+    // FM-F045: lows of 100, (withheld), 90, 95 above a base.
+    let day = minute_day(&[
+        bar(at(10, 0, 0), 100_100, 100_200, 100_050, 100_100, 1_000),
+        bar(at(10, 1, 0), 100_150, 100_200, 100_100, 100_150, 1_000),
+        bar(at(10, 3, 0), 100_150, 100_200, 100_090, 100_150, 1_000),
+        bar(at(10, 4, 0), 100_150, 100_200, 100_095, 100_150, 1_000),
+        quiet(at(10, 6, 0), 100_150, 1_000),
+    ]);
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let exits = set_of(Search::Long, vec![variant]);
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    assert_eq!(index.trail_holes(), 1);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert!(has(&out, TradeFlag::TrailHole));
+    assert_eq!(out.exit_reason, ExitReason::Forced, "no swing at 90");
+}
+
+#[test]
+fn a_give_back_level_made_by_a_bar_applies_from_the_next_bar() {
+    let variant = ExitVariant {
+        trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 500 },
+        ..ExitVariant::REFERENCE
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P, 1_000),
+        bar(at(10, 1, 0), 100_700, 101_100, 100_600, 101_000, 1_000),
+        bar(at(10, 2, 0), 101_000, 102_100, 100_600, 102_000, 1_000),
+        bar(at(10, 3, 0), 101_500, 101_500, 101_000, 101_200, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingTakeProfit);
+    assert_eq!(
+        out.exit_second,
+        at(10, 3, 0),
+        "10:02's own level waits for 10:03"
+    );
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 101_000));
+    // A new-high minute whose low crosses the PRIOR level exits on it.
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P, 1_000),
+        bar(at(10, 1, 0), 100_700, 101_100, 100_600, 101_000, 1_000),
+        bar(at(10, 2, 0), 101_000, 102_100, 100_500, 102_000, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_second, at(10, 2, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_500));
+}
+
+#[test]
+fn an_r_step_earned_in_a_bar_is_not_hit_inside_that_bar() {
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::RStep { milli_r: 1_000 },
+        ..ExitVariant::REFERENCE
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P, 1_000),
+        bar(at(10, 1, 0), P, 101_100, 99_990, P, 1_000),
+        bar(at(10, 2, 0), P, 100_500, 99_995, P, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 2, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 99_995));
+}
+
+// ----------------------------------------------------------- exit fills --
+
+/// A long of 100 entered at 10:00:00, stopped at 10:01:00 by a one-share
+/// second followed by three lower seconds.
+fn spill_day(window_volume: i64) -> Day {
+    second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1),
+        bar(at(10, 1, 1), 98_990, 98_990, 98_980, 98_980, 30),
+        bar(at(10, 1, 2), 98_980, 98_980, 98_970, 98_970, 30),
+        bar(at(10, 1, 3), 98_970, 98_970, 98_960, 98_960, 100),
+        quiet(at(15, 9, 0), P, window_volume),
+    ])
+}
+
+#[test]
+fn a_stop_spills_by_volume_under_one_reading_and_leaves_whole_under_the_other() {
+    let day = spill_day(1_000);
+    let spill = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(
+        spill.exit_value_paisa,
+        i128::from(98_990 + 30 * 98_980 + 30 * 98_970 + 39 * 98_960)
+    );
+    assert_eq!(spill.exit_spill_seconds, 3);
+    let own = spill.own_exit.expect("one order, its spill inside it");
+    assert_eq!((own.filled_qty, own.last_fill_second), (100, at(10, 1, 3)));
+    let whole = walk_one(
+        &day,
+        &WalkProfile {
+            exit_fill: ExitFill::FirstTouchWhole,
+            ..second_profile()
+        },
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(whole.exit_value_paisa, i128::from(100 * 98_990));
+    assert_eq!(whole.exit_spill_seconds, 0);
+}
+
+#[test]
+fn a_spill_still_open_at_15_09_goes_to_the_forced_rules() {
+    let thin = second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = second_slot(&thin, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert!(has(&out, TradeFlag::ExitSpillToForced));
+    assert_eq!(out.own_exit.expect("own").filled_qty, 1);
+    assert_eq!(out.forced_exit.expect("forced").filled_qty, 99);
+    let starved = second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1),
+        quiet(at(15, 9, 0), P, 98),
+    ]);
+    let out = second_slot(&starved, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Unpriceable(UnpricedReason::ForcedThin)
+    );
+}
+
+#[test]
+fn a_time_exit_partly_filled_spills_and_the_rest_is_forced_in_three_orders() {
+    let day = second_day(&[
+        quiet(at(15, 8, 0), P, 30),
+        quiet(at(15, 8, 30), P, 20),
+        bar(at(15, 9, 0), P, P + 10, 99_700, P, 1_000),
+    ]);
+    let variant = ExitVariant {
+        time_exit: TimeExit::Clock {
+            second: at(15, 8, 0),
+        },
+        ..STOP_ONLY
+    };
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert_eq!(out.exit_reason, ExitReason::Time);
+    assert!(has(&out, TradeFlag::FiredTime));
+    assert!(has(&out, TradeFlag::ExitSpillToForced));
+    assert!(has(&out, TradeFlag::DhanSquareOff));
+    let own = out.own_exit.expect("the time exit's order");
+    let forced = out.forced_exit.expect("the square-off's order");
+    assert_eq!((own.filled_qty, own.last_fill_second), (50, at(15, 8, 30)));
+    assert_eq!(own.exit_value_paisa, i128::from(50 * (P - 10)));
+    assert_eq!(
+        (forced.filled_qty, forced.exit_value_paisa),
+        (50, i128::from(50 * 99_700))
+    );
+    assert_eq!(
+        out.exit_value_paisa,
+        own.exit_value_paisa + forced.exit_value_paisa
+    );
+}
+
+#[test]
+fn an_exit_during_a_spilling_entry_cancels_the_rest_and_r_uses_the_filled_qty() {
+    // FM-F036: 300 wanted, 100 filled, a stop in the next second.
+    let mut plan = long_plan(at(10, 0, 0));
+    plan.entry_ref = 33_333;
+    plan.base_edge = 33_000;
+    plan.trigger_edge = 33_333;
+    let day = Day::seconds(vec![
+        bar(at(10, 0, 0), 33_330, 33_340, 33_320, 33_330, 100),
+        bar(at(10, 0, 1), 33_330, 33_330, 32_990, 33_000, 1_000),
+        quiet(at(15, 9, 0), 33_000, 1_000),
+    ]);
+    let out = second_slot(&day, plan, STOP_ONLY);
+    assert_eq!(out.planned_qty, 300);
+    assert_eq!(out.filled_qty, 100);
+    assert!(has(&out, TradeFlag::EntryCancelledByExit));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 32_990));
+    assert_eq!(
+        r_long(&out),
+        RMultiple {
+            num: 100 * (32_990 - 33_340),
+            den: 100 * 338
+        }
+    );
+}
+
+// --------------------------------------------------------------- halts --
+
+/// A long entered at 10:00:00, quiet to 11:39:59, a halt over
+/// `[11:40, 12:00)`, then `after` from 12:00:00.
+fn halt_day(after: Candle) -> Day {
+    let mut day = second_day(&[
+        quiet(at(11, 39, 59), P, 1_000),
+        quiet(at(11, 50, 0), P + 2_000, 1_000),
+        after,
+        quiet(at(12, 0, 1), P - 500, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.halts = vec![HaltRange {
+        start_second: at(11, 40, 0),
+        end_second: at(12, 0, 0),
+    }];
+    day
+}
+
+#[test]
+fn an_entry_before_a_halt_is_kept_unpriced_and_one_after_it_is_not_tradable() {
+    let day = halt_day(quiet(at(12, 0, 0), P - 500, 1_000));
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Unpriceable(UnpricedReason::Halt));
+    assert!(has(&out, TradeFlag::Halt));
+    assert_eq!(out.filled_qty, 100);
+    assert_eq!(
+        out.mae_to_horizon_paisa,
+        (P + 100) - (P - 510),
+        "seen through the halt"
+    );
+    assert_eq!(
+        out.mfe_to_horizon_paisa, 0,
+        "the halted print is never read"
+    );
+    let late = second_slot(&day, long_plan(at(11, 45, 0)), STOP_ONLY);
+    assert_eq!(late.status, SlotStatus::NotTradable);
+    assert_eq!(late.status.name(), "not_tradable_after_halt_start");
+}
+
+#[test]
+fn under_the_resume_reading_a_gapped_stop_fills_at_the_first_print_after_the_halt() {
+    let day = halt_day(bar(at(12, 0, 0), 98_500, 98_600, 98_400, 98_500, 1_000));
+    let resume = WalkProfile {
+        halt_rule: HaltRule::ResumeAtFirstPrint,
+        ..second_profile()
+    };
+    let out = walk_one(
+        &day,
+        &resume,
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_second, at(12, 0, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_400));
+    assert!(has(&out, TradeFlag::GapThroughStop));
+    assert!(has(&out, TradeFlag::CircuitHalt));
+    // No fill inside the halted range: an entry window over it fills after.
+    let mut plan = long_plan(at(11, 39, 59));
+    plan.entry_window_end = at(12, 30, 0);
+    let late = walk_one(
+        &day,
+        &resume,
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(late.first_entry_second, at(11, 39, 59));
+    let mut plan = long_plan(at(11, 40, 30));
+    plan.entry_window_end = at(12, 30, 0);
+    let after = walk_one(
+        &day,
+        &resume,
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(after.first_entry_second, at(12, 0, 0), "11:50 is halted");
+}
+
+// ------------------------------------------------------------ feed data --
+
+/// A long entered at 10:09:58 with GDFL silent over 10:10 to 10:19 and a
+/// resume at 10:20:00 beyond the stop; `traded` says whether Zerodha traded
+/// those minutes. The committed past's longest silence is 30 seconds.
+fn hole_day(traded: bool) -> Day {
+    let mut day = Day::seconds(vec![
+        bar(at(10, 9, 58), P, P + 100, P - 50, P + 50, 10_000),
+        quiet(at(10, 9, 59), P, 1_000),
+        bar(at(10, 20, 0), 98_500, 98_600, 98_400, 98_500, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.max_gap = 30;
+    if traded {
+        for minute in 10..20 {
+            day.zerodha.push(quiet(at(10, minute, 0), P, 500));
+        }
+    }
+    day
+}
+
+#[test]
+fn a_silence_over_a_traded_zerodha_minute_is_an_execution_feed_hole() {
+    let out = second_slot(&hole_day(true), long_plan(at(10, 9, 58)), STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Unpriceable(UnpricedReason::ExecutionFeedHole)
+    );
+    assert_eq!(out.r_multiple(Search::Long), None, "no R, never the resume");
+    let mut plan = long_plan(at(10, 10, 0));
+    plan.entry_window_end = at(10, 11, 0);
+    let unfilled = second_slot(&hole_day(true), plan, STOP_ONLY);
+    assert_eq!(
+        unfilled.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::FeedHole)
+    );
+    assert_eq!(unfilled.status.name(), "entry_unfilled_feed_hole");
+}
+
+#[test]
+fn a_silence_zerodha_shares_is_flagged_and_the_walk_waits_for_the_next_second() {
+    let out = second_slot(&hole_day(false), long_plan(at(10, 9, 58)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert!(has(&out, TradeFlag::SilenceInTrade));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_400));
+    let mut plan = long_plan(at(10, 10, 0));
+    plan.entry_window_end = at(10, 11, 0);
+    let unfilled = second_slot(&hole_day(false), plan, STOP_ONLY);
+    assert_eq!(
+        unfilled.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
+    );
+}
+
+#[test]
+fn a_zero_low_second_inside_a_trade_is_corrupt_and_never_an_exit_at_zero() {
+    let day = second_day(&[
+        corrupt(at(10, 0, 5), 100, 100, 0, 100, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    assert_eq!(
+        day.index(&second_profile(), &exits)
+            .expect("indexes")
+            .corrupt_bars(),
+        1
+    );
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Unpriceable(UnpricedReason::CorruptBarInTrade)
+    );
+    assert_eq!(out.exit_value_paisa, 0);
+}
+
+#[test]
+fn a_flagged_print_fill_is_kept_and_an_outlier_second_is_flagged() {
+    let both = BookMark {
+        ask: true,
+        bid: true,
+        flagged_print: false,
+    };
+    let mut day = second_day(&[quiet(at(15, 9, 0), P, 1_000)]);
+    day.marks = Some(vec![
+        BookMark {
+            flagged_print: true,
+            ..both
+        },
+        both,
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert!(has(&out, TradeFlag::FlaggedPrintFill));
+    assert!(!has(&out, TradeFlag::CrossFeedOutlier));
+    // The 10:00 Zerodha minute's high moved below the fill: an outlier.
+    day.zerodha[0].high = P + 90;
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(has(&out, TradeFlag::CrossFeedOutlier));
+}
+
+#[test]
+fn a_touch_by_a_second_beyond_the_converted_minute_is_unwitnessed() {
+    let mut day = second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(
+        !has(&out, TradeFlag::TouchUnwitnessed),
+        "the minute saw 98,990"
+    );
+    day.zerodha[1].low = 99_000;
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(has(&out, TradeFlag::TouchUnwitnessed));
+}
+
+#[test]
+fn worse_of_both_is_refused_until_prec_15_and_seconds_only_ignores_the_minute() {
+    let mut day = second_day(&[
+        bar(at(10, 1, 0), P, P, 99_000, 99_000, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.zerodha[1].low = 98_995;
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let worse = WalkProfile {
+        cross_feed: CrossFeed::WorseOfBoth,
+        ..second_profile()
+    };
+    let refused = day.index(&worse, &exits).expect_err("not built");
+    assert_eq!(refused, WalkRefusal::CrossFeedNotBuilt);
+    assert_eq!(refused.name(), "cross_feed_not_built");
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(
+        out.exit_reason,
+        ExitReason::Forced,
+        "no second touched the stop"
+    );
+}
+
+// ---------------------------------------------------------------- clock --
+
+#[test]
+fn the_snapshot_edge_and_the_clock_lag_decide_the_first_admitted_second() {
+    let day = Day::seconds(vec![
+        quiet(at(10, 0, 0), P, 1_000),
+        quiet(at(10, 0, 1), P + 100, 1_000),
+        quiet(at(10, 0, 2), P + 200, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let opens = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(opens.first_entry_second, at(10, 0, 0));
+    let closes = WalkProfile {
+        snapshot_edge: SnapshotEdge::StampClosesInterval,
+        ..second_profile()
+    };
+    let out = walk_one(
+        &day,
+        &closes,
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(
+        out.first_entry_second,
+        at(10, 0, 1),
+        "the decision's stamp never fills"
+    );
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let mut shifted = day.clone();
+    shifted.lag = ClockLag::Measured(120);
+    let refused = shifted
+        .index(&second_profile(), &exits)
+        .expect_err("shifted");
+    assert_eq!(refused, WalkRefusal::ClockShifted { lag: 120 });
+    assert_eq!(refused.name(), "clock_shifted");
+    shifted.lag = ClockLag::Measured(2);
+    let restamp = WalkProfile {
+        clock_rule: ClockRule::Restamp,
+        ..second_profile()
+    };
+    let out = walk_one(
+        &shifted,
+        &restamp,
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(out.first_entry_second, at(10, 0, 2));
+    shifted.lag = ClockLag::Measured(-2);
+    let out = walk_one(
+        &shifted,
+        &restamp,
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(
+        out.first_entry_second,
+        at(10, 0, 0),
+        "a negative lag starts at c"
+    );
+    shifted.lag = ClockLag::Unmeasured;
+    assert_eq!(
+        shifted
+            .index(&second_profile(), &exits)
+            .expect_err("unmeasured"),
+        WalkRefusal::ClockLagUnmeasured
+    );
+    shifted.lag = ClockLag::TrustUnchecked;
+    let index = shifted.index(&second_profile(), &exits).expect("labelled");
+    assert!(index.seconds_trust_unchecked());
+    assert!(!index.book_observed());
+}
+
+// ------------------------------------------------------- exact factors --
+
+#[test]
+fn a_converted_level_that_would_round_either_way_is_compared_exactly() {
+    // A level of 1,000 decision paisa is 2,333.33 raw under the pair (3, 7):
+    // a second's high of 2,333 does not reach it; 2,334 does.
+    let mut plan = long_plan(at(10, 0, 0));
+    plan.entry_ref = 900;
+    plan.base_edge = 800;
+    plan.trigger_edge = 900;
+    plan.fib_zero = 700;
+    plan.fib_one = 1_000;
+    let mut day = Day::seconds(vec![
+        bar(at(10, 0, 0), 2_100, 2_110, 2_090, 2_100, 10_000),
+        bar(at(10, 0, 5), 2_300, 2_333, 2_300, 2_300, 10_000),
+        bar(at(10, 0, 6), 2_330, 2_334, 2_320, 2_330, 10_000),
+        quiet(at(15, 9, 0), 2_100, 10_000),
+    ]);
+    day.raw_tick = 1;
+    let factor = WalkProfile {
+        price_map: PriceMap::Factor {
+            zerodha_close: 3,
+            gdfl_close: 7,
+        },
+        ..second_profile()
+    };
+    let variant = ExitVariant {
+        take_profit: TakeProfit::FibRung {
+            rung_permille: 1_000,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let out = walk_one(
+        &day,
+        &factor,
+        plan,
+        variant,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(out.planned_qty, 4_761);
+    assert_eq!(out.decision_qty, 11_111);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert_eq!(out.exit_second, at(10, 0, 6));
+    assert_eq!((out.risk_num, out.risk_den), (105 * 7, 3));
+    // The stop: 800 x 7 / 3 = 1,866.67, less one raw tick = 1,865.67.
+    let stop_day = |low: i64| {
+        let mut d = Day::seconds(vec![
+            bar(at(10, 0, 0), 2_100, 2_110, 2_090, 2_100, 10_000),
+            bar(at(10, 0, 5), 2_000, 2_000, low, 2_000, 10_000),
+            quiet(at(15, 9, 0), 2_100, 10_000),
+        ]);
+        d.raw_tick = 1;
+        d
+    };
+    let walk = |low| {
+        walk_one(
+            &stop_day(low),
+            &factor,
+            plan,
+            STOP_ONLY,
+            FillVariant::STAGE_A,
+            TradeSize::Small,
+        )
+        .exit_reason
+    };
+    assert_eq!(walk(1_866), ExitReason::Forced);
+    assert_eq!(walk(1_865), ExitReason::StopLoss);
+}
+
+#[test]
+fn under_the_pair_one_four_the_deep_risk_is_four_decision_risks_and_the_stop_one_raw_tick_out() {
+    let factor = WalkProfile {
+        price_map: PriceMap::Factor {
+            zerodha_close: 1,
+            gdfl_close: 4,
+        },
+        ..second_profile()
+    };
+    let day = |low: i64| {
+        Day::seconds(vec![
+            bar(at(10, 0, 0), 400_000, 400_100, 399_900, 400_000, 1_000),
+            bar(at(10, 0, 5), 396_000, 396_000, low, 396_000, 1_000),
+            quiet(at(15, 9, 0), 400_000, 1_000),
+        ])
+    };
+    let walk = |low| {
+        walk_one(
+            &day(low),
+            &factor,
+            long_plan(at(10, 0, 0)),
+            STOP_ONLY,
+            FillVariant::STAGE_A,
+            TradeSize::Small,
+        )
+    };
+    let out = walk(395_995);
+    assert_eq!((out.risk_num, out.risk_den), (4 * 1_005, 1));
+    assert_eq!(out.risk_per_share_paisa, 1_005);
+    assert_eq!(out.planned_qty, 25);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(walk(395_996).exit_reason, ExitReason::Forced);
+}
+
+#[test]
+fn the_deep_quantity_is_spent_in_raw_shares_and_a_price_above_the_size_is_refused() {
+    let factor = WalkProfile {
+        price_map: PriceMap::Factor {
+            zerodha_close: 60_680,
+            gdfl_close: 242_700,
+        },
+        ..second_profile()
+    };
+    let mut plan = long_plan(at(10, 0, 0));
+    plan.entry_ref = 60_680;
+    plan.base_edge = 60_000;
+    plan.trigger_edge = 60_680;
+    let day = Day::seconds(vec![
+        quiet(at(10, 0, 0), 242_700, 10_000),
+        quiet(at(15, 9, 0), 242_700, 10_000),
+    ]);
+    let out = walk_one(
+        &day,
+        &factor,
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Large,
+    );
+    assert_eq!(out.planned_qty, 206, "not 824");
+    assert_eq!(out.decision_qty, 823, "floor(5,00,00,000 / 60,680)");
+    assert_eq!(out.filled_qty, 206);
+    let mut dear = long_plan(at(10, 0, 0));
+    dear.entry_ref = 20_000_000;
+    dear.base_edge = 19_000_000;
+    let day = minute_day(&[quiet(at(10, 0, 0), 20_000_000, 1_000)]);
+    let out = minute_slot(&day, dear, STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Refused(SlotRefusal::SizeBelowOneShare)
+    );
+    assert_eq!(out.filled_qty, 0);
+    let mut inverted = long_plan(at(10, 0, 0));
+    inverted.base_edge = P + TICK;
+    let out = minute_slot(&day, inverted, STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Refused(SlotRefusal::NonpositivePlannedRisk)
+    );
+}
+
+// ------------------------------------------- the reference and its seeds --
+
+#[test]
+fn the_reference_walk_closes_only_by_the_forced_exit_and_measures_its_peaks() {
+    let day = second_day(&[
+        quiet(at(10, 30, 0), P + 400, 1_000),
+        bar(at(11, 0, 0), P + 800, P + 900, P + 700, P + 800, 1_000),
+        bar(at(12, 0, 0), P + 800, P + 900, P + 600, P + 800, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = walk_one(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        ExitVariant::REFERENCE,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+    assert_eq!(out.mfe_second, at(11, 0, 0));
+    assert_eq!(out.last_peak_second, at(12, 0, 0));
+    assert_eq!(out.mfe_to_exit_paisa, 800);
+    assert_eq!(out.mfe_to_horizon_paisa, 800);
+}
+
+fn samples(values: &[(u32, u32)]) -> Vec<Sample> {
+    values
+        .iter()
+        .map(|&(month, value)| Sample { month, value })
+        .collect()
+}
+
+#[test]
+fn seed_rule_is_the_lower_nearest_rank_median() {
+    for values in [
+        vec![3_u32],
+        vec![1, 9],
+        vec![1, 4, 9],
+        vec![2, 3, 5, 8, 13, 21],
+    ] {
+        let s: Vec<Sample> = values
+            .iter()
+            .map(|&value| Sample { month: 0, value })
+            .collect();
+        let none: [Sample; 0] = [];
+        let seeds = SeedSamples {
+            far_edge_excursion_ticks: &none,
+            run_up_milli_r: &s,
+            giveback_permille: &none,
+            pullback_candles: &none,
+            poke_through_paisa: &none,
+            swing_size_milli_r: &none,
+            last_peak_clock_seconds: &none,
+            time_to_best_seconds: &none,
+        };
+        let set = seed_exit_set(Search::Long, 0, 1, &seeds).expect("seeds");
+        let median = vocab::fib_cube::lower_nearest_rank(&values, 1, 2).expect("a median");
+        assert!(
+            set.variants()
+                .iter()
+                .any(|v| v.take_profit == TakeProfit::RMultiple { milli_r: median }),
+            "{values:?}"
+        );
+    }
+}
+
+/// Every distribution with one learning value and, when `garbage`, wild
+/// values at months at and after W0 = 6.
+fn seed_samples(garbage: bool) -> [Vec<Sample>; 8] {
+    let late = |v| {
+        if garbage {
+            vec![(6, v), (9, v)]
+        } else {
+            Vec::new()
+        }
+    };
+    let one = |early: &[(u32, u32)], late_value| {
+        let mut all = early.to_vec();
+        all.extend(late(late_value));
+        all.sort_by_key(|&(_, v)| v);
+        samples(&all)
+    };
+    [
+        one(&[(0, 2), (1, 4), (2, 6)], 90),
+        one(&[(0, 900), (5, 1_500), (3, 2_400)], 99_000),
+        one(&[(0, 300), (1, 400)], 999),
+        one(&[(0, 1), (1, 2), (2, 3)], 50),
+        one(&[(0, 15), (1, 25)], 9_000),
+        one(&[(0, 600)], 77_000),
+        one(&[(0, at(14, 0, 0)), (1, at(14, 30, 0))], at(15, 0, 0)),
+        one(&[(0, 600), (4, 1_200)], 20_000),
+    ]
+}
+
+fn seeded(garbage: bool) -> ExitSet {
+    let s = seed_samples(garbage);
+    let seeds = SeedSamples {
+        far_edge_excursion_ticks: &s[0],
+        run_up_milli_r: &s[1],
+        giveback_permille: &s[2],
+        pullback_candles: &s[3],
+        poke_through_paisa: &s[4],
+        swing_size_milli_r: &s[5],
+        last_peak_clock_seconds: &s[6],
+        time_to_best_seconds: &s[7],
+    };
+    seed_exit_set(Search::Long, 6, 6, &seeds).expect("seeds")
+}
+
+#[test]
+fn the_seed_reads_only_the_learning_months_and_garbage_after_w0_changes_no_byte() {
+    let clean = seeded(false);
+    let dirty = seeded(true);
+    assert_eq!(clean.bytes(), dirty.bytes());
+    assert_eq!(clean.digest(), dirty.digest());
+    // 3 stops x 2 targets x 2 give-backs x 5 trails x 3 time exits.
+    assert_eq!(clean.count(), 180);
+    assert_eq!(clean.widths(), &[1, 2]);
+    let first = clean.variants()[0];
+    assert_eq!(first, ExitVariant::REFERENCE);
+    assert!(
+        clean
+            .variants()
+            .iter()
+            .any(|v| v.stop == StopLoss::BeyondBase { extra_ticks: 4 })
+    );
+    assert!(
+        clean
+            .variants()
+            .iter()
+            .any(|v| v.time_exit == TimeExit::Hold { seconds: 600 })
+    );
+    let fills =
+        seed_fill_set(Search::Long, 6, &samples(&[(0, 200), (1, 400), (7, 999)])).expect("fills");
+    assert_eq!(fills.variants().len(), 4);
+    assert!(
+        fills
+            .variants()
+            .iter()
+            .any(|f| f.participation == Participation::Cap { permille: 200 })
+    );
+}
+
+// ------------------------------------------- variants, passes, increments --
+
+/// Five variants of every component kind.
+fn five() -> ExitSet {
+    set_of(
+        Search::Long,
+        vec![
+            STOP_ONLY,
+            ExitVariant {
+                take_profit: ONE_R,
+                ..STOP_ONLY
+            },
+            ExitVariant {
+                trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 400 },
+                ..ExitVariant::REFERENCE
+            },
+            ExitVariant {
+                trailing_stop: TrailingStop::Swing {
+                    width: 1,
+                    buffer_paisa: 0,
+                },
+                ..STOP_ONLY
+            },
+            ExitVariant {
+                time_exit: TimeExit::Hold { seconds: 600 },
+                ..ExitVariant::REFERENCE
+            },
+        ],
+    )
+}
+
+/// A busy minute day with three plans.
+fn busy() -> (Day, Vec<Plan>) {
+    let mut bars = vec![quiet(at(9, 59, 0), P - 50, 1_000)];
+    let mut price = P;
+    for minute in 0..60 {
+        let swing = [40, -30, 70, -90, 120, -60][minute as usize % 6];
+        price += swing;
+        bars.push(bar(
+            at(10, minute, 0),
+            price,
+            price + 80,
+            price - 70,
+            price,
+            1_000,
+        ));
+    }
+    bars.push(quiet(at(15, 9, 0), P, 1_000));
+    let plans = [at(10, 0, 0), at(10, 7, 0), at(10, 31, 0)]
+        .into_iter()
+        .map(long_plan)
+        .collect();
+    (Day::minutes(bars), plans)
+}
+
+#[test]
+fn output_bytes_independent_of_budget() {
+    let (day, plans) = busy();
+    let exits = five();
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    let sizes = [TradeSize::Small, TradeSize::Large];
+    let mut runs = Vec::new();
+    for budget in [1, 2, 7] {
+        runs.push(
+            walk_all(
+                &index,
+                &plans,
+                &exits,
+                FillVariant::STAGE_A,
+                &sizes,
+                PassBudget::new(budget).expect("a budget"),
+            )
+            .expect("walks"),
+        );
+    }
+    assert_eq!(runs[0], runs[1]);
+    assert_eq!(runs[0], runs[2]);
+    assert_eq!(runs[0].len(), 15);
+    assert_eq!(exits.passes(PassBudget::new(2).expect("two")).len(), 3);
+    // Each pair equals its single-variant walk byte for byte.
+    for walked in &runs[0] {
+        let single = walk_pairs(
+            &index,
+            &plans,
+            &exits,
+            FillVariant::STAGE_A,
+            &sizes,
+            &[(walked.plan, walked.variant)],
+        )
+        .expect("walks");
+        assert_eq!(&single[0], walked);
+    }
+    assert!(PassBudget::new(0).is_none());
+}
+
+#[test]
+fn an_added_component_needs_no_code_and_an_incremental_rerun_walks_only_the_missing_pairs() {
+    let (day, plans) = busy();
+    let base = set_of(Search::Long, vec![STOP_ONLY]);
+    let grown = base
+        .extended(
+            7,
+            &[ExitVariant {
+                trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 250 },
+                ..STOP_ONLY
+            }],
+        )
+        .expect("an appended version");
+    assert_eq!(grown.version(), 2);
+    assert_eq!(grown.get(0), base.get(0), "an id keeps its variant");
+    let index = day.index(&minute_profile(), &grown).expect("indexes");
+    let sizes = [TradeSize::Small];
+    let wanted: Vec<(u32, u16)> = (0..3).flat_map(|p| [(p, 0), (p, 1)]).collect();
+    let have: Vec<(u32, u16)> = (0..3).map(|p| (p, 0)).collect();
+    let missing = missing_pairs(&wanted, &have);
+    assert_eq!(missing, vec![(0, 1), (1, 1), (2, 1)]);
+    let fresh = walk_pairs(
+        &index,
+        &plans,
+        &grown,
+        FillVariant::STAGE_A,
+        &sizes,
+        &missing,
+    )
+    .expect("walks");
+    let full = walk_pairs(
+        &index,
+        &plans,
+        &grown,
+        FillVariant::STAGE_A,
+        &sizes,
+        &wanted,
+    )
+    .expect("walks");
+    let full_new: Vec<&Walked> = full.iter().filter(|w| w.variant == 1).collect();
+    assert_eq!(fresh.iter().collect::<Vec<_>>(), full_new);
+    let old = walk_pairs(&index, &plans, &base, FillVariant::STAGE_A, &sizes, &have);
+    assert!(old.is_ok());
+}
+
+#[test]
+fn the_walk_refuses_a_deep_fill_at_stage_a_an_unknown_id_and_the_other_direction() {
+    let (day, plans) = busy();
+    let exits = five();
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    let sizes = [TradeSize::Small];
+    assert_eq!(
+        walk_pairs(
+            &index,
+            &plans,
+            &exits,
+            FillVariant::REFERENCE,
+            &sizes,
+            &[(0, 0)]
+        ),
+        Err(WalkRefusal::FillVariantDeepOnly)
+    );
+    assert_eq!(
+        walk_pairs(
+            &index,
+            &plans,
+            &exits,
+            FillVariant::STAGE_A,
+            &sizes,
+            &[(0, 9)]
+        ),
+        Err(WalkRefusal::VariantUnknown { id: 9 })
+    );
+    assert!(matches!(
+        walk_pairs(
+            &index,
+            &plans,
+            &exits,
+            FillVariant::STAGE_A,
+            &sizes,
+            &[(7, 0)]
+        ),
+        Err(WalkRefusal::PlanInvalid { plan: 7, .. })
+    ));
+    let mut short = plans[0];
+    short.direction = Search::Short;
+    assert_eq!(
+        walk_pairs(
+            &index,
+            &[short],
+            &exits,
+            FillVariant::STAGE_A,
+            &sizes,
+            &[(0, 0)]
+        ),
+        Err(WalkRefusal::DirectionMismatch { plan: 0 })
+    );
+}
+
+#[test]
+fn a_walk_is_deterministic() {
+    let (day, plans) = busy();
+    let exits = five();
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    let run = || {
+        walk_all(
+            &index,
+            &plans,
+            &exits,
+            FillVariant::STAGE_A,
+            &[TradeSize::Small],
+            PassBudget::new(3).expect("three"),
+        )
+        .expect("walks")
+    };
+    assert_eq!(run(), run());
 }

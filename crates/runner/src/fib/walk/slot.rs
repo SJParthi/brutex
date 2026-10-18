@@ -482,7 +482,7 @@ impl<'a> Stepper<'a> {
         }
         self.cursor += 1;
         if self.phase == Phase::Entering && bar.second >= self.entry_end {
-            self.close_window();
+            self.window_closed();
             if self.phase == Phase::Done {
                 return false;
             }
@@ -505,19 +505,53 @@ impl<'a> Stepper<'a> {
         if self.phase == Phase::Exiting {
             self.continue_exit(&bar, bar.volume);
         } else {
-            let volume_left = self.enter(&bar);
-            if self.phase == Phase::Done {
-                return false;
+            // A position held from earlier bars meets this bar's exits first:
+            // an exit cancels the unfilled entry remainder in this bar
+            // (FM-F036). A first fill in this bar meets them after it, so an
+            // entry and a stop in one bar stop in that bar.
+            let held = self.filled > 0;
+            if held {
+                self.evaluate_exits(&bar, bar.volume);
             }
-            if self.filled > 0 {
-                self.evaluate_exits(&bar, volume_left);
-                if self.phase != Phase::Exiting && self.phase != Phase::Done {
-                    self.update_levels(&bar);
+            if self.open_or_entering() {
+                let volume_left = self.enter(&bar);
+                if !held && self.filled > 0 {
+                    self.evaluate_exits(&bar, volume_left);
                 }
+            }
+            if self.open_or_entering() && self.filled > 0 {
+                self.update_levels(&bar);
             }
         }
         self.after_halt = false;
         self.phase != Phase::Done
+    }
+
+    /// Whether the slot is filling or holding, with no exit order open.
+    fn open_or_entering(&self) -> bool {
+        matches!(self.phase, Phase::Entering | Phase::Holding)
+    }
+
+    /// The entry window ended before this bar. In deep, an order that filled
+    /// nothing while the window ran into a feed hole is
+    /// `entry_unfilled_feed_hole`: its fate there is unknown (FM-F041).
+    fn window_closed(&mut self) {
+        if self.filled == 0 && self.day.resolution() == Resolution::Second {
+            let from = self
+                .previous
+                .map_or(self.entry_start, |p| p.saturating_add(1))
+                .max(self.entry_start);
+            let missing = self.entry_end.saturating_sub(from);
+            if missing > self.day.max_gap
+                && self
+                    .day
+                    .traded_between(from, self.entry_end.saturating_sub(1))
+            {
+                self.finish(SlotStatus::EntryUnfilled(UnfilledReason::FeedHole));
+                return;
+            }
+        }
+        self.close_window();
     }
 
     /// The entry's part of a bar: arm, then fill what the bar supplies.
@@ -912,7 +946,7 @@ impl<'a> Stepper<'a> {
             return;
         }
         if self.filled == 0 {
-            self.close_window();
+            self.window_closed();
             return;
         }
         if self.remaining > 0 {
