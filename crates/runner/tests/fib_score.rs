@@ -1546,3 +1546,29 @@ fn a_tied_trough_is_the_first_lowest_close() {
         "from day 101 to day 104"
     );
 }
+
+/// Two episodes of equal depth: the deepest is the FIRST, with its recovery.
+#[test]
+fn of_two_equal_episodes_the_first_is_the_deepest() {
+    // Day closes: 2, 0 (day 101), 3 (day 102), 1 (day 103, open).
+    let gains = [200, -200, 300, -200];
+    let entries: Vec<Entry> = gains
+        .iter()
+        .enumerate()
+        .map(|(d, g)| Entry {
+            slot: 0,
+            day: 100 + d as u32,
+            second: at(10, 0),
+            side: 0,
+            outcome: trade(*g, at(10, 0), at(10, 30)),
+        })
+        .collect();
+    let (table, outcomes) = case(Search::Long, &entries);
+    let d = score_small(&table, &outcomes).drawdown;
+    assert_eq!(d.max_drawdown_r, 2.0);
+    assert_eq!(
+        (d.max_drawdown_start_day, d.max_drawdown_recovery_day),
+        (Some(101), Some(102))
+    );
+    assert_eq!(d.underwater_now_days, 1);
+}

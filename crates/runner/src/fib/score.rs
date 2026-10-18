@@ -719,7 +719,7 @@ impl Streaks {
 ///
 /// An episode starts at the first day close below the running high and ends
 /// at the first later close at or above it; its trough is its first lowest
-/// close. Its length is in observed
+/// close, and of episodes equally deep the first is the deepest. Its length is in observed
 /// tradable days: recovery index minus start index, or, while open, the last
 /// close's index minus the start index plus one.
 #[derive(Clone, Copy, Debug, PartialEq)]
