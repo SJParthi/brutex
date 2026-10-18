@@ -70830,6 +70830,99 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
 
+### D-4975 — The head deadline runs only while no request is in flight: it restarts when a response is complete, not at its first written byte, and a response whose writes stop making progress is cut after the same timeout and logged as cut (amends D-1200 by addition) — 2026-10-15
+
+**Implemented by** AH-02 (`api::server`: `HeadDeadline`, `HeadState`,
+`Exchange`, `ExchangeOf`, `InFlight`, `WatchedBody`, `exchange_watch`, and one
+statement inserted in `serve_limited`; `api::logs`: `CountedServed`,
+`AccessWindows::cut`, `note_cut` and the `cut` count; tests in
+`crates/api/src/head_deadline_body_tests.rs` and one in `logs`).
+**Finding** g-ui-dom-vs-json-1 (14 Oct attack run, confirmed by two skeptics),
+and the (a) half of g-ui-dom-vs-json-14.
+
+**What was wrong.** D-1200 gave every connection a head-read deadline and
+restarted it "after every response written". `HeadDeadline::poll_write` and
+`poll_write_vectored` restarted it on a response's FIRST written byte, and
+hyper reads the socket while a body is still streaming (to notice a client that
+left), so the read after the deadline closed the connection mid-body. Every
+response the server could not hand to the kernel within `HEAD_READ_TIMEOUT`
+(10 s) of its first byte arrived cut: a `200` whose `Content-Length` promised
+the rest. Measured on :8080 by the finding: the 183,715,726-byte GDFL census at
+`--limit-rate 8M` stopped at 86,163,218 bytes after 10.28 s (curl exit 18), a
+GDFL NIFTY 1 s month at 3 MB/s and the Zerodha census at 1 MB/s the same way,
+and the browser showed `ERR_CONTENT_LENGTH_MISMATCH` on `/markets` and
+`/backtest` under load. The access log counted each as `read served`, status
+200; nothing recorded the cut.
+
+**Decided.**
+
+1. **Two clocks, never at once.** The HEAD clock runs only while no request is
+   in flight (`HeadState::Awaiting`): from accept, and again from the moment
+   the previous response is COMPLETE. The WRITE-STALL clock runs only while a
+   response is in flight and a write returns `Pending`: it starts at the first
+   such write, any write that moves a byte clears it, and when a write has made
+   no progress for the same timeout (`ConnectionLimits::head_read_timeout`,
+   10 s served) the connection is closed with the error
+   `response cut: no write progress for <ms> ms after <n> bytes`. A slow reader
+   is never cut while it keeps taking bytes; a stopped one is cut one timeout
+   after it stopped.
+2. **"Complete" is decided by the service and by hyper, not by the bytes.**
+   The socket cannot see where a response ends. `exchange_watch`, the outer
+   layer `serve_limited` adds, counts every request the service takes and every
+   response body hyper lets go of (written whole or abandoned) on per-connection
+   atomics the socket reads through axum's connect-info extension
+   (`into_make_service_with_connect_info::<ExchangeOf>`). hyper calls the
+   socket's `poll_flush` only once its own write buffer is empty. A response is
+   complete at a flush with every taken request finished and at least one byte
+   written since its head: only then does the next head's clock start. A head
+   hyper parses from its own buffer (pipelining) is seen as a request the
+   service took while the head clock ran, and stops that clock; any write while
+   the head clock runs is a response starting and stops it too.
+3. **A cut is logged once, as not delivered.** The cut writes one
+   `api.serve` "response cut" line at `warn`: method, path and query (through
+   `note_alphabet`), the status the handler chose, the declared length, the
+   bytes that went, `delivered` false and the stall in milliseconds. A client
+   that leaves mid-response (end of stream or a failed read or write while a
+   request is in flight) writes one `api.serve` "response closed by the client"
+   line at `info` instead, never a cut. At most one line per connection.
+   **A cut `/db` read is not counted served.** `logs::note_request` counts a
+   `/db` read at handler return, before its body goes, and marks the response
+   with that count (`logs::CountedServed`); the cut hands the mark to
+   `logs::note_cut`, which takes the read out of the window's `served` and
+   counts it in `cut`, and the window's `api.access reads counted` line says
+   `cut`. The cut line says `access_counted`.
+4. **What stays exactly as D-1200, D-1510 and D-1580 made it.** The idle
+   keep-alive closure (silent, one deadline after the response completed), the
+   `408` for a partial head, the leading-blank-line rule, the body deadline,
+   `MAX_CONNECTIONS` and the cap's queueing. Every test in
+   `server::head_deadline_tests` is unchanged and passes.
+
+**Cost.** O(1) per operation and counted, not argued: a write that moves bytes
+compares the state, adds and stores — no clock read, no timer touched; a write
+that waits reads the clock and resets the timer once per stall; a read or a
+flush loads two atomics; a request takes two atomic adds, two uncontended locks
+and one boxed body. `head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
+counts it over 400 moving and 200 waiting writes; the measured p50/p99/max and
+the shadow-server before/after numbers are in `docs/06-limits.md` under D-4975.
+
+**Not decided here.** A cut read whose access window closed before the cut
+(the stall is at least a timeout after the handler answered, and a window is
+60 s) was already said in that window's `served`; it is counted in the `cut`
+of the window it happened in, beside a `served` it was never part of. The
+window's one sampled `read served` line is written at handler return and is
+not taken back; the window's `cut` says so later. A client's own close
+mid-body stays counted served: the client chose to stop. A response body whose
+HANDLER pauses between chunks is not bounded by the stall clock (nothing is
+waiting to be written); no route in this build streams such a body. A graceful
+stop with a slow body in flight is R3-14's drain bound and is not exercised here. A
+reader that keeps the server's writes moving at least once a timeout holds its
+slot for as long as it reads, bounded only by `MAX_CONNECTIONS`; and a
+pipelined head whose first bytes arrived while the previous body was still
+being written, and which never completes, is closed silently at the deadline
+rather than answered `408` (the wrapper did not see those bytes; it used to,
+when the head clock wrongly ran during the body). Both are written down in
+`docs/06-limits.md` under D-4975.
+
 ### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
 
 The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
@@ -71752,6 +71845,45 @@ profile (out of memory, twice). Every number in `docs/06-limits.md` under
 this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
 one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
 gate-8 command.
+
+### D-5820 — A measurement in `docs/06-limits.md` that names a feat/db-fix commit says `main`'s squash merge does not keep it, and one that names a commit no pushed branch holds says so and names the commit on this branch with the same files — 2026-10-17
+
+BASE-CITED, found by the CLOUD-RUST1 merge-back on 17 October 2026 (its
+finding BASE-RED-CITED-COMMITS). `crates/store/tests/cited_commits.rs`
+(`every_commit_the_store_records_cite_is_on_main_or_says_why_not`) failed on
+feat/db-fix itself: `docs/06-limits.md` cited nine commits that
+`refs/remotes/origin/main` (4bbd37df, 2 October 2026) does not hold, none of
+them in `NOT_ON_MAIN` and none of their sentences giving a reason. Every one
+was the "before" build or the measured head of a package's p50/p99 table.
+
+**What is decided.** The rule the test already states is applied as it
+stands, by evidence for each commit; the test is not weakened and no history
+is rewritten. (1) A cited commit that is an ancestor of feat/db-fix is listed
+as `Off::Squashed`, and every sentence citing it gains the words "which
+`main`'s squash merge does not keep": `4756cce0` (AF-05, the R3-36 merge),
+`023d6ab8` (AF-06, the SC-2 merge), `079ad4af` (AG-01 and AG-03, the R3-16
+merge), `521066e6` (AF-04 in `a560c52dd` and AF-03, the SC-1 merge fix-up),
+`72c91a46` (AF-02, the WP-62 merge), `ff636f58` (AF-02's first form) and
+`9cb9de51` (AF-02 repair round 1). (2) A cited commit that is on no pushed
+branch is not re-cited to another commit, because the measurement was taken
+of that build and naming another would claim a build nobody timed. It is
+listed as `Off::Neither`, its sentence says it "is in neither `main`'s history
+nor this branch", and the sentence also names the feat/db-fix commit whose
+four AF-02 files (`imports.rs`, `dayflags.rs`, `imports_filter_tests.rs`,
+`dayflags_filter_tests.rs` under `crates/api/src`) are byte for byte the
+measured ones, checked by `git rev-parse <commit>:<file>` on both:
+`cde73992` (AF-02 repair round 1, only on the local
+`backup/af02-r1-wip-20261015`) with `9cb9de51`, and `91ef0094` (AF-02 repair
+round 2, only on the local `backup/AF-02-r2-wip`) with `867771784f`, which is
+listed as `Off::Squashed` like the others. The rest of each tree differs (the
+feat/db-fix work merged between them), so the timings stay those of the WIP
+build. `NOT_ON_MAIN` grows from 37 to 47.
+
+**Why.** A measurement cited to a commit a reader cannot fetch cannot be
+checked (`CLAUDE.md` §3 rule 6), and feat/db-fix reaches `main` by a squash
+merge (`auto-merge.yml`), which makes none of its commits an ancestor of
+`main`. The proof is the test itself: it failed on feat/db-fix `f9cdb5840`
+with the nine faults and passes with this change.
 
 ### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
 
