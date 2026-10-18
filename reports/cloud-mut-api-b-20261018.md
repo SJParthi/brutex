@@ -149,7 +149,7 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 |---|---:|---:|---:|---:|---:|
 | `autopilot.rs` | 371 | 305 | 7 (+1, see below) | 0 | 58 |
 | `pullrun.rs` | 466 | 432 (+2, see below) | 2 | 1 | 29 |
-| `server.rs` | 1,509 | queued | | | |
+| `server.rs` | 1,509 | 1,179 | 34 | 5 | 291 |
 
 `autopilot.rs` counts its first run with the 20 out-of-module kills replaced
 by their retried re-check (`p1b`). Of those 20, 13 were caught again by a
@@ -219,6 +219,118 @@ lock, and
 `pullrun::tests::an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be`
 hangs to the timeout instead of passing. Unviable: 22 `E0277`, five `E0080`
 (the constants at lines 70–84) and two `||` inside a `let` chain.
+
+**`server.rs`** ran with retries and with both load-red AH-02 tests left out
+(every server run started after the second exclusion). Every kill came from a
+test that drives the mutated code. Of its 34 survivors, **20 are real gaps
+or clock-bound cases, all caught in phase 2**, and **14 are equivalent**.
+
+Real gaps, each closed by a new test that fails on the hand-applied mutant
+and passes on the original (all in `server_cloud_mutant_tests_e.rs`):
+
+- `15421:20`, the `!` of `(!faults.is_empty()).then(..)` in
+  `held_bars_page`: a damaged month's `/bars` page would hide its fault
+  sentences, and a clean one would carry an empty trouble block.
+  `a_damaged_month_names_its_unreadable_records_and_a_clean_one_names_none`.
+- `17528:17`, `17532:17`, `17533:17`, the three line-end arms of
+  `HeadDeadline::observe` (AH-02). A head ending in `\r\n\r\n` was still
+  delivered a poll later by the service's own count, so no served test saw
+  the scan stop working. `a_head_ends_at_its_blank_line_in_either_spelling`
+  holds the scan byte by byte.
+- `17647:22`, `n > 0` → `>=` in `HeadDeadline::wrote`: an empty write would
+  restart a stopped reader's stall clock.
+  `a_write_that_moves_no_byte_does_not_end_a_stall`.
+- `17943:5` (×2), `open_requests` → `0` / `1`: the "stop started" line's
+  count. Its one serve test stops with exactly one request open and never
+  read the field.
+  `the_stop_counts_every_request_open_across_the_speed_table` (a child
+  process: the speed table is per process).
+- `18002:29`, `&&` → `||` in `Held::holds`: every `Held` a test built kept
+  both or neither. `a_serve_holds_only_with_both_its_lock_and_its_port`.
+- `18089:5` (×2), `end_served` → `0` / `1`: the binary's own end, driven by
+  no test because its cancel is process-wide.
+  `ending_a_served_process_with_no_engine_work_abandons_none` (a child
+  process). `→ 0` is caught by its last-word assertion: the mutant replaces
+  the whole body, so the last word is never said.
+- `18983:8`, the `!` of `if !clean` in `announce_universe`: the banner would
+  print a clean read's notes and the degraded exit.
+  `a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more`
+  (a child process: the banner is stdout).
+- `19521:18` (×3), `abandoned > 0` → `==` / `>=` / `<` in
+  `wait_then_end_counting`: the abandon line, said on a quiet stop or never.
+  `a_stop_names_the_engine_work_it_abandons_and_only_then`.
+- `19601:5` (×2), `run_held` → `0` / `1`: `main`'s entry, with `main` as its
+  only caller.
+  `the_entry_answers_a_command_it_cannot_parse_as_misused_and_keeps_nothing`.
+- `35956:17`, `&&` → `||` in `indexmap_reading`'s filter: shares and indexes
+  the feed does not hold would be handed to the join.
+  `the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds` (a
+  child process: the catalogue is read from the environment's masters
+  directory).
+
+**Clock-bound, and measured both ways.** `6723:25` (the match guard
+`asked.window.to() == today` → `true` / `false`) and `6723:43` (`==` → `!=`)
+in `finished_day_only`, which reads `SystemTime::now()` itself and has no
+clock seam. The mutants differ from the original only while today's NSE
+session is unsettled (an open day, before its close plus five minutes).
+Phase 1 reached them on Sunday 18 Oct, a closed day, and all three survived.
+No test held the " Today: …" reason for a window ending today, so this pass
+adds `a_window_ending_today_is_held_back_exactly_while_today_is_unsettled`. It
+asks the guard's own parts (the calendar of record, the venue's dated close,
+the minute of the day) before and after the call, and holds the answer to
+one of them. Phase 2 ran from 02:30 to 03:35 IST on Monday 19 Oct, an open
+day before its session. There the new test **caught** `→ false`, and the 17
+Oct pass's `a_window_past_today_is_refused_before_the_socket` caught `→ true`
+and `!=`. Any run on a settled day misses all three again. That is a property
+of the clock, not of the tests.
+
+Equivalent, each argued from the code (every one survived phase 2 too):
+
+- `4470:33` `>` → `>=` and `4476:30` `<` → `<=` in `failure_window`: a max
+  and a min of two `Day`s, the same `Day` on a tie.
+- `5726:59` `-` → `+` and `5726:93` `+` → `*` in
+  `observed_cash_source_days`: the expression only sizes
+  `days.try_reserve(count)`, a capacity hint. `to + from + 1` (at most about
+  5.9 million) reserves more and `to − from` one less (0 for a one-day
+  window). Both succeed, and the set's contents are unchanged.
+- `5743:36` `||` → `&&` in the same function: the mutant never skips an
+  out-of-window row, but `Window::verdict` converts the same epoch the same
+  way and answers `Ok(Some(BeforeWindow | AfterWindow))` for it, so the day is
+  not kept. The skip is a fast path.
+- `7198:13` `wait > 0` → `>=` in `await_budget`: with `wait == 0` the mutant
+  awaits a zero-length `tokio::time::sleep`, whose deadline has passed. It
+  completes at once (at most one cooperative yield).
+- `7984:19` (×2), `7985:15`, `7985:27`: the loop and sum of a
+  `const _: () = { .. }` compile-time assertion (the 429 ladder against
+  `MAX_CHUNK_BACKOFF_MS`). The mutant only skips or shrinks the check, which
+  still holds, and nothing at run time differs.
+- `17365:9`, `WatchedBody::is_end_stream` → `false`: hyper 1.11
+  (`proto/h1/dispatch.rs`, `poll_write`) reads it before the head (`true`
+  writes no body, `false` a body of `size_hint`'s exact length) and after
+  each data frame (to end with it). Every empty body this server answers
+  with also says `size_hint` exact 0, so the head carries `Content-Length: 0`
+  either way. The mutant adds one poll that answers `None`, and the
+  `InFlight` drop still comes before the flush that settles the head clock.
+  Re-run in phase 2 against the **whole** suite (both exclusions included)
+  at the checked-in opt-level 3 on an idle host, where the unmutated suite
+  passed 2,546 of 2,546: **missed**.
+- `18042:9` `Held::drop` → `()` and `18035:9` `Held::release_in_order` →
+  `()`: `Held`'s fields drop in declaration order after `Drop::drop`. `log`
+  is a `&'static Sink`, so dropping it does nothing; then `lock`, then
+  `port`. That is the order `release_in_order` gives, and at the same point
+  (the end of `release`, or of the drop).
+- `19517:54` `<` → `<=` in `wait_then_end_counting`'s wait loop: the two
+  differ only when the clock reads exactly the deadline (nanosecond
+  equality), where the mutant polls once more, 20 ms later.
+
+Timeouts, each a detection: `17197:20` (×2) and `17194:9` (`Slots::try_take`
+can never take a slot) and `17232:15` (the acceptor waits while a slot is
+free). Every served test hangs past the timeout. `7986:17` (`attempt *= 1`)
+timed out at **build**, because the compile-time `const` loop never ends; no
+binary exists to test. Unviable, each read from its log: 137 `E0433` (a
+mutant naming `Html::..` unqualified where the function names
+`axum::response::Html`), 118 `E0277`, 17 `||` inside a `let` chain, 6
+`E0015`, 5 `E0080`, 4 `E0369`, 3 `E0599`, 1 `E0505`.
 
 ## Left (in progress)
 
