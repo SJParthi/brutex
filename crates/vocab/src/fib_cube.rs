@@ -3978,11 +3978,17 @@ mod tests {
             CubeRefusal::ListBornAfterGeneration { at: 0 },
         );
         // Accepted shapes: repeated rank edges, no rank edge, the last second
-        // of the decision span's grid, one width at the hard top.
+        // of the decision span's grid, one width at the hard top, two other
+        // packages' lists in name order.
         let mut p = parts();
         p.rank_edges.clear();
         p.timeframes = vec![1, 2, 4, 118];
         p.cuts[time_at].cuts = vec![Ratio::whole(21_180)];
+        let first = p.others[0];
+        p.others.push(GeneratedList {
+            name: "touch_levels_z",
+            ..first
+        });
         let g = Generation::new(p).unwrap();
         assert_eq!(g.layout().radix(RowId::MoverRank), 1);
         assert_eq!(g.layout().radix(RowId::Timeframe), 4);
