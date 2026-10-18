@@ -56,7 +56,7 @@
   import { untrack } from 'svelte';
   import { MON, istMonth } from '$lib/dates.js';
   import { parseDay } from '$lib/db/input-check.js';
-  import { cutText, dayFieldWhy, dayTakes, dayStruckWhy, calendarNote, DAY_TEXT_MAX } from '$lib/db/notes-controls.js';
+  import { cutText, dayFieldWhy, dayTakes, dayStruckWhy, dayCellTitle, calendarNote, DAY_TEXT_MAX } from '$lib/db/notes-controls.js';
 
   let {
     /** `yyyy-mm-dd`, or `''` for "no bound". The caller owns it. */
@@ -758,13 +758,7 @@
                 class:flag={c.flag !== null}
                 disabled={!c.ok}
                 aria-current={c.iso === value ? 'date' : undefined}
-                title={c.ok
-                  ? c.flag !== null
-                    ? `Flagged: ${c.flag}`
-                    : c.shut
-                      ? 'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.'
-                      : undefined
-                  : c.struck}
+                title={dayCellTitle(c)}
                 onclick={() => pick(c.iso)}>{c.day}</button
               >
             {/each}

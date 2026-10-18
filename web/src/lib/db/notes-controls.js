@@ -455,6 +455,40 @@ export function dayStruckWhy(iso, o) {
   return null;
 }
 
+/** What a closed day's cell says on hover: it may still be picked. */
+export const CLOSED_DAY_TITLE =
+  'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.';
+
+/**
+ * THE TITLE OF ONE DAY CELL: every true thing about the day, never only the
+ * first (repair round 5). A day both struck and flagged said only why it was
+ * struck, so a refused or incomplete day outside the box's bounds hid its
+ * flag, and since flags are marked in every month the grid shows (DB-025)
+ * that is common. A closed day that is flagged said only its flag. The
+ * day's own standing comes first — why it cannot be picked, or that it is a
+ * closed day it can — then its flag. `undefined` for a day the box takes
+ * with nothing to say.
+ *
+ * @param {{ok: boolean, struck: string | null, shut: boolean, flag: string | null}} c
+ * @returns {string | undefined}
+ */
+export function dayCellTitle(c) {
+  const standing = c.ok ? (c.shut ? CLOSED_DAY_TITLE : null) : c.struck;
+  const flag = c.flag === null ? null : `Flagged: ${c.flag}`;
+  return [standing, flag].filter(Boolean).join(' ') || undefined;
+}
+
+/**
+ * Items said as one list: `A`, `A and B`, `A, B and C` (repair round 5:
+ * three halt days sharing a minute were joined "A and B and C").
+ *
+ * @param {string[]} items
+ * @returns {string}
+ */
+export function andList(items) {
+  return items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
 /**
  * THE SENTENCE UNDER THE CALENDAR'S GRID, NAMING EVERY KIND OF DAY IT STRIKES
  * (DB-045). It said "can be picked" over `min` and `max` and the caller's
@@ -754,7 +788,7 @@ export function timeListRows(grid, o) {
      minutes (the fold stamps a bucket at its start), so "at this minute"
      would be false of it. */
   const at = o.step > 1 ? `inside the ${o.step}-minute bar stamped here (a bar carries the first minute of its bucket on the 09:15 grid, pull::fold)` : 'at this minute';
-  const spans = (/** @type {Array<{from: number, to: number}>} */ ws) => ws.map((w) => `${clockOf(w.from)}–${clockOf(w.to)}`).join(' and ');
+  const spans = (/** @type {Array<{from: number, to: number}>} */ ws) => andList(ws.map((w) => `${clockOf(w.from)}–${clockOf(w.to)}`));
   /* A halt day's traded windows are not where its bars open — both stores hold bars inside its halt — so it says what traded and what was halted. */
   const said = (/** @type {SpecialDay} */ d) =>
     `${d.kind}, ${dayText(d.date)}: ${d.halted?.length ? `traded ${spans(d.windows)}, halted ${spans(d.halted)}${d.reopening?.length ? ` with the reopening call auction at ${spans(d.reopening)}` : ''}` : `bars open ${spans(d.windows)}`}`;
@@ -784,14 +818,14 @@ export function timeListRows(grid, o) {
          reader to guess which, and one suspected day among sourced ones is still said — a minute never
          carries less doubt than the record holds. */
       const doubted = s.filter((d) => d.suspected);
-      const which = doubted.map((d) => dayText(d.date)).join(' and ');
+      const which = andList(doubted.map((d) => dayText(d.date)));
       const whose = s.length === 1 ? 'it a suspected halt' : doubted.length === 1 ? `the halt of ${which} a suspected halt` : `the halts of ${which} suspected halts`;
       const doubt = doubted.length ? ` — the record calls ${whose}, UNVERIFIED (D-3320): no NSE circular is recorded` : '';
       out.push({
         key: row.key,
         name: row.name,
         detail: s.length === 1 ? `${what} · ${dayText(s[0].date)}` : `${what} · ${s.length} days in view`,
-        why: `${named(s)}. Halted ${at}${auction ? `, in the reopening call auction of ${auction.map((d) => dayText(d.date)).join(' and ')}` : ''}${doubt}. A halted minute is neither owed nor missing (D-3336 §1), and a print inside a halt is still a bar (pull::calendar); listed so a bar the store holds here can still be reached.`
+        why: `${named(s)}. Halted ${at}${auction ? `, in the reopening call auction of ${andList(auction.map((d) => dayText(d.date)))}` : ''}${doubt}. A halted minute is neither owed nor missing (D-3336 §1), and a print inside a halt is still a bar (pull::calendar); listed so a bar the store holds here can still be reached.`
       });
       continue;
     }

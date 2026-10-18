@@ -54,7 +54,8 @@ import {
   SEG_VIEW,
   VIEWS,
   dayWindowApplies,
-  dayFieldWhy
+  dayFieldWhy,
+  andList
 } from '../src/lib/db/notes-controls.js';
 import { sessionGrid, SESSION_OPEN_MINUTE, calendarOf } from '../src/lib/db/selection-model.js';
 import { bandOf } from '../src/lib/db/dayflags.js';
@@ -1330,6 +1331,26 @@ test('a_shared_halted_minute_names_its_suspected_day', () => {
   assert.ok(sure.why.endsWith(`. Halted at this minute. ${TAIL}`), sure.why);
   // One halt day alone is still "it".
   assert.ok(at930([suspected]).why.includes('Halted at this minute — the record calls it a suspected halt, UNVERIFIED (D-3320)'));
+
+  // REPAIR ROUND 5: three or more are one list, "A, B and C" — never "A and B and C" — in the doubt, in the
+  // reopening auction's days and in a day's own windows. Invented days: a third copy dated 2020-03-11 whose
+  // halt is cut in two, so it traded in three windows.
+  const three = [
+    { ...suspected, date: '2020-03-11', windows: [{ from: 555, to: 561 }, { from: 621, to: 700 }, { from: 710, to: 929 }], halted: [{ from: 562, to: 620 }, { from: 701, to: 709 }] },
+    { ...sourced, suspected: true },
+    suspected
+  ];
+  const at1010 = /** @type {any} */ (timeListRows(sessionGrid(60, [], {}), { specials: three, regular: 3, held: [], step: 1, open: SESSION_OPEN_MINUTE }).find((r) => r.key === '10:10'));
+  assert.equal(at1010.detail, 'reopening auction · 3 days in view');
+  assert.ok(at1010.why.includes('suspected halt, 11 Mar 2020: traded 09:15–09:21, 10:21–11:40 and 11:50–15:29, halted 09:22–10:20 and 11:41–11:49 with the reopening call auction at 10:06–10:20; '), at1010.why);
+  assert.ok(
+    at1010.why.includes(
+      '. Halted at this minute, in the reopening call auction of 11 Mar 2020, 12 Mar 2020 and 13 Mar 2020 — the record calls the halts of 11 Mar 2020, 12 Mar 2020 and 13 Mar 2020 suspected halts, UNVERIFIED (D-3320): no NSE circular is recorded. '
+    ),
+    at1010.why
+  );
+  assert.doesNotMatch(at1010.why, /\d{4} and \d{2} \w{3} \d{4} and /, 'no list of three is joined "and … and"');
+  assert.deepEqual(['', 'A', 'A and B', 'A, B and C', 'A, B, C and D'], [[], ['A'], ['A', 'B'], ['A', 'B', 'C'], ['A', 'B', 'C', 'D']].map(andList));
 });
 
 /**
@@ -1411,6 +1432,16 @@ test('a_link_that_leaves_a_side_out_opens_it_on_the_held_span', () => {
   const eraFrom = dbOf({ lo: '', hi: '' }, { to: '2024-11-01' });
   effect(eraFrom, { from: '', to: '2024-11-01', refused: { from: true, to: false } });
   assert.deepEqual([eraFrom.fromDay, eraFrom.toDay], ['2018-09-01', '2024-11-01']);
+  // REPAIR ROUND 5 (mutants K07, K08): a side the link NAMED and the era refuses — not one the address reader
+  // dropped — opens on the era's edge, the box's own bound and the day its note names. It is not left empty
+  // under a note saying it opened on a day; only a side the link left out waits for a held span.
+  const eraOut = dbOf({ lo: '', hi: '' }, { from: '2017-01-02', to: '2027-01-01' });
+  effect(eraOut, { from: '2017-01-02', to: '2027-01-01', refused: none });
+  assert.deepEqual([eraOut.fromDay, eraOut.toDay], ['2018-09-01', '2026-09-24']);
+  assert.equal(eraOut.linkNotes.length, 2);
+  assert.match(eraOut.linkNotes[0], /The From date opens on 01 Sep 2018 instead$/);
+  assert.match(eraOut.linkNotes[1], /The To date opens on 24 Sep 2026 instead$/);
+  assert.deepEqual(said(eraOut), [null, null]);
   // A linked side outside the held span is refused in words and opens on its edge.
   const outside = dbOf(HELD, { from: '2024-11-01', to: '2027-01-01' });
   effect(outside, { from: '2024-11-01', to: '2027-01-01', refused: none });

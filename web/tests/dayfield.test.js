@@ -21,6 +21,8 @@ import {
   dayFieldWhy,
   dayTakes,
   dayStruckWhy,
+  dayCellTitle,
+  CLOSED_DAY_TITLE,
   calendarNote,
   DAY_TEXT_MAX,
   SEARCH_TEXT_MAX
@@ -371,4 +373,59 @@ test('an_empty_box_nothing_was_typed_into_says_nothing', async () => {
     assert.match(String(refusal(html)), new RegExp(`^${props.label} "garbage" is not a date this field can read`), props.label);
     assert.match(html, /aria-invalid="true"/);
   }
+});
+
+test('an_emptied_box_never_speaks_of_the_day_it_no_longer_shows', async () => {
+  // REPAIR ROUND 5 (mutant V5-07, `o.typed ?? o.value` -> `o.typed || o.value`). A box the reader emptied
+  // shows nothing; the day it held is still its value until the page answers the change. That day is not
+  // said under the empty box: a link that put To on 01 Aug 2026, outside the held span, is refused while
+  // it is shown, and the moment the reader empties the box the refusal of a day no longer in it goes.
+  const out = { label: 'To date', value: '2026-08-01', ...HELD };
+  assert.match(String(dayFieldWhy({ typed: null, ...out })), /^To date 01 Aug 2026: Outside/, 'shown, it is refused');
+  for (const typed of ['', '   ']) assert.equal(dayFieldWhy({ typed, ...out }), null, `emptied (${JSON.stringify(typed)}), it says nothing`);
+  // The real box in that state: emptied, before the page has answered with the held span's end.
+  const props = { label: 'To date', value: '2026-08-01', min: HELD.min, max: HELD.max, empty: HELD.max, boundsReason: HELD.reason };
+  const shown = render(await dayField(), { props }).body;
+  assert.match(String(refusal(shown)), /^To date 01 Aug 2026: Outside/);
+  assert.match(shown, /aria-invalid="true"/);
+  const emptied = render(await inState('DayField.svelte', { drive: `type('');` }), { props }).body;
+  assert.equal(boxText(emptied), '', 'the box shows nothing');
+  assert.equal(refusal(emptied), null, 'and says nothing of the day it held');
+  assert.match(emptied, /aria-invalid="false"/);
+});
+
+test('a_struck_day_that_is_flagged_says_both_on_hover', async () => {
+  // REPAIR ROUND 5. A day both struck and flagged said only why it was struck, hiding its flag — common now
+  // that flags are marked in every month the grid shows (DB-025) — and a closed day that was flagged said
+  // only its flag. Each cell now says why it cannot be picked (or that it is a closed day it can), then its
+  // flag. The flag words are invented.
+  const FLAG = 'refused — an invented reason';
+  const flaggedDays = new Set(['2026-08-31', '2026-09-10', '2026-09-25', '2026-09-26']);
+  const closedDays = new Set(['2026-09-26', '2026-09-27']);
+  const DayField = await inState('DayField.svelte', { open: true });
+  const html = render(DayField, {
+    props: {
+      label: 'To date', value: '2026-09-30', min: HELD.min, max: HELD.max, after: '2026-09-20', afterLabel: 'From date', boundsReason: HELD.reason,
+      flagged: (/** @type {string} */ iso) => (flaggedDays.has(iso) ? FLAG : null),
+      closed: (/** @type {string} */ iso) => closedDays.has(iso)
+    }
+  }).body;
+  assert.match(html, /role="dialog"/, 'the calendar is open');
+  const cells = [...html.matchAll(/<button type="button" class="day[^"]*"([^>]*)>(\d+)<\/button>/g)].map((m) => ({ day: +m[2], title: unescaped(/\stitle="([^"]*)"/.exec(m[1])?.[1] ?? ''), off: /\sdisabled(\s|=|$)/.test(m[1]) }));
+  assert.equal(cells.length, 42, 'six weeks');
+  const order = 'Before the From date, 20 Sep 2026: a window ends on or after the day it starts.';
+  // cells[0] is 31 Aug (the Monday-first grid opens there); cells[d] is d Sep.
+  assert.deepEqual(cells[0], { day: 31, title: `${HELD.reason} Flagged: ${FLAG}`, off: true }, 'struck by the held span, and flagged');
+  assert.deepEqual(cells[10], { day: 10, title: `${order} Flagged: ${FLAG}`, off: true }, 'struck by the order, and flagged');
+  assert.deepEqual(cells[11], { day: 11, title: order, off: true }, 'struck, not flagged');
+  assert.deepEqual(cells[25], { day: 25, title: `Flagged: ${FLAG}`, off: false }, 'taken and flagged');
+  assert.deepEqual(cells[26], { day: 26, title: `${CLOSED_DAY_TITLE} Flagged: ${FLAG}`, off: false }, 'a closed day, flagged');
+  assert.deepEqual(cells[27], { day: 27, title: CLOSED_DAY_TITLE, off: false }, 'a closed day');
+  assert.deepEqual(cells[21], { day: 21, title: '', off: false }, 'an ordinary day says nothing');
+  assert.equal(cells.filter((c) => c.title.includes('Flagged: ')).length, flaggedDays.size, 'every flagged day says so, struck or not');
+  // The edges of the title itself: a struck day is never said to be a closed day that can be picked.
+  assert.equal(dayCellTitle({ ok: false, struck: 'Struck.', shut: true, flag: null }), 'Struck.');
+  assert.equal(dayCellTitle({ ok: false, struck: null, shut: false, flag: null }), undefined);
+  assert.equal(dayCellTitle({ ok: true, struck: null, shut: false, flag: null }), undefined);
+  assert.equal(dayCellTitle({ ok: true, struck: null, shut: false, flag: '' }), 'Flagged: ');
 });
