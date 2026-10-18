@@ -181,16 +181,10 @@ pub(super) fn stop_at_census(
     let kind = ctx.run.kind;
     let cause = Cause::open(Stage::Census, census_code(&room));
     let words = census_words(&why, &room);
-    failures.push(Staged {
-        cause,
-        failure: failure_on(day, &format!("{day} census"), words.clone()),
-    });
-    let _incomplete = close_day(
-        ctx,
-        (key, day),
-        (before, &report, max_back_s),
-        &mut failures,
-    );
+    // The one stop event is emitted before the failure is filed, so the
+    // failure has its event beside it (gate 19). `close_day` only reads the
+    // report, so the event's fields are what they were; its one event of its
+    // own, a journal line it could not append, now follows this one.
     let day_text = day.to_string();
     let event = stopped_event(
         (kind, day_text.as_str(), cause),
@@ -198,6 +192,16 @@ pub(super) fn stop_at_census(
         room.as_ref().ok(),
     );
     let _dropped_when_filtered = telemetry::emit(&event);
+    failures.push(Staged {
+        cause,
+        failure: failure_on(day, &format!("{day} census"), words),
+    });
+    let _incomplete = close_day(
+        ctx,
+        (key, day),
+        (before, &report, max_back_s),
+        &mut failures,
+    );
     report
         .failures
         .extend(failures.into_iter().map(|one| one.failure));

@@ -1855,11 +1855,26 @@ pub(crate) async fn recent(
     [(axum::http::HeaderName, &'static str); 1],
     String,
 ) {
-    let result = latest_view(&site);
+    // THE JOURNAL READ, IN THE BOUNDED STORE-READ POOL (R3-08): it read the
+    // recovery journal on the async worker every other route shares.
+    let result = journal_view(site).await;
     let headers = [(
         axum::http::header::CONTENT_TYPE,
         "application/json; charset=utf-8",
     )];
+    let result = match result {
+        Ok(read) => read,
+        // A FULL POOL IS A "COME BACK", NAMED: 429, and `never_framed` adds
+        // `Retry-After`. A task that could not be joined stays a 503.
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "a recovery journal read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            return (status, headers, body);
+        }
+    };
     match result {
         Ok(view) => (StatusCode::OK,headers,serde_json::json!({
             "view":"recent journal events, newest first; not current inventory; an active write may still be synchronizing",
@@ -1878,18 +1893,37 @@ pub(crate) async fn recent(
     }
 }
 
+/// [`latest_view`] off the async workers, in the bounded store-read pool
+/// (R3-08). The outer error is the pool's: every slot stayed taken for the
+/// admission wait, or the task could not be joined.
+async fn journal_view(site: Loaded) -> Result<Result<EventView, String>, crate::detail::RunError> {
+    crate::detail::run_store_read(move || latest_view(&site)).await
+}
+
 /// Server-rendered, read-only comparison view. No second frontend runtime or
 /// background loop; the existing run slot remains the single owner.
 pub(crate) async fn page(State(site): State<Loaded>) -> axum::response::Html<String> {
-    let held = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let progress = held.clone().unwrap_or_default();
-    drop(held);
-    let (records, predecessor) = match latest_view(&site) {
-        Ok(view) => (Ok(view.records), view.predecessor),
-        Err(why) => (Err(why), None),
+    // THE GUARD ENDS IN ITS OWN BLOCK, before the journal read is awaited: a
+    // `MutexGuard` alive across an `.await` makes the handler's future
+    // unsendable.
+    let progress = {
+        let held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.clone().unwrap_or_default()
+    };
+    let (records, predecessor) = match journal_view(site).await {
+        Ok(Ok(view)) => (Ok(view.records), view.predecessor),
+        Ok(Err(why)) => (Err(why), None),
+        Err(why) => (
+            Err(format!(
+                "the recovery journal was not read ({why:?}): at most {} store reads run at \
+                 once; ask again",
+                crate::detail::MAX_STORE_READ_CONCURRENT
+            )),
+            None,
+        ),
     };
     axum::response::Html(page_html(&progress, records, predecessor))
 }

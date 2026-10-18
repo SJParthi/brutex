@@ -524,8 +524,12 @@ async fn the_route_answers_from_the_store_read_pool_and_a_full_pool_is_a_named_4
         ),
         "{handler}"
     );
+    // THE NAMED STORE-READ POOL (R3-08): `cancellable` picks the pool by name
+    // and hands the request's flag to `cancellable_in`.
+    let bars_route = include_str!("bars_route.rs");
     assert!(
-        include_str!("bars_route.rs").contains("crate::detail::run_store_read(job).await"),
+        bars_route.contains("crate::detail::Named::StoreRead")
+            && bars_route.contains("crate::detail::cancellable_in(named, work).await"),
         "a cancellable read that is not heavy is admitted by the store-read pool"
     );
     let greeks = include_str!("optiongreeks.rs")

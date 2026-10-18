@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { askWhileBeingWritten, pause } from './being-written.js';
 import { istMonth } from './dates.js';
 import { parseKey } from './instrument.js';
 
@@ -58,6 +59,8 @@ export const SPOT_WHY = {
   no_spot_file:
     'the underlying’s month file at this rung is not in this feed’s store, so there is no spot to measure from.',
   spot_unreadable: 'the underlying’s bar for this instant would not read; the server named the fault.',
+  spot_being_written:
+    'the underlying’s month was being written by an import or a repair when this was asked, so its bar was not read — not damage; ask again once the writer is done.',
   spot_order_broken:
     'the underlying’s file is not strictly increasing around this instant, so neither its close nor its absence can be stated without a scan.',
   t_outside_month:
@@ -218,9 +221,10 @@ const int = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
  * @param {'exact'|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking a month being written again (R3-08)
  * @returns {Promise<Map<string, SpotAnswer>>}
  */
-export async function readSpots(feed, rows, signal, request = ask, asof = 'exact') {
+export async function readSpots(feed, rows, signal, request = ask, asof = 'exact', wait = pause) {
   /** @type {Map<string, {exchange: string, symbol: string, tf: string, month: string, times: Set<number>}>} */
   const groups = new Map();
   for (const r of rows) {
@@ -246,8 +250,8 @@ export async function readSpots(feed, rows, signal, request = ask, asof = 'exact
         timeframe: e.tf, month: e.month, t: chunk.join(',') });
       if (asof === 'prev') q.set('asof', 'prev');
       try {
-        const res = await request(`/spot.json?${q}`, { signal });
-        const body = await res.json();
+        // A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21).
+        const { res, body } = await askWhileBeingWritten(request, `/spot.json?${q}`, signal, wait);
         if (!Array.isArray(body?.spots) || body.spots.length !== chunk.length) {
           throw new Error(body?.error ?? `HTTP ${res.status}`);
         }
@@ -362,9 +366,10 @@ export function rungFrom(c, strike, side) {
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
  * @param {'exact'|'prev'} [asof]
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking again
  * @returns {Promise<{rungs: Map<string, RungAnswer>, ladders: Map<string, Ladder | {at: number, why: string, detail: string}>}>}
  */
-export async function readRungs(feed, rows, signal, request = ask, asof = 'exact') {
+export async function readRungs(feed, rows, signal, request = ask, asof = 'exact', wait = pause) {
   /** @typedef {{strike: number, side: 'CE'|'PE'}} Leg */
   /** @type {Map<string, {exchange: string, underlying: string, expiry: string, tf: string, at: Map<number, Map<string, Leg>>, contracts: Map<string, Leg & {times: Set<number>}>}>} */
   const groups = new Map();
@@ -399,8 +404,10 @@ export async function readRungs(feed, rows, signal, request = ask, asof = 'exact
     const chainOf = async (extra) => {
       const q = new URLSearchParams({ ...base, ...extra });
       if (asof === 'prev') q.set('asof', 'prev');
-      const res = await request(`/chain.json?${q}`, { signal });
-      const body = await res.json();
+      // A CHAIN WHOSE ONLY FAULT IS A WRITER IS ASKED AGAIN (R3-08 repair 2,
+      // NEW-21): the server answers the being-written 503, never a 206 with
+      // every spot unreadable; past the tries its sentence is the failure.
+      const { res, body } = await askWhileBeingWritten(request, `/chain.json?${q}`, signal, wait);
       if (!Array.isArray(body?.chains) || body.chains.length !== extra.at.split(',').length) {
         throw new Error(body?.error ?? `HTTP ${res.status}`);
       }

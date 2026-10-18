@@ -114,6 +114,10 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
         "/inspection.json",
         "the audited router's application-mode probe; not a sweep result or control",
     ),
+    (
+        "/pools.json",
+        "the read pools' counters, from memory (R3-08); not a sweep result or control",
+    ),
     // R3-14 (RA-014): the server's own speed table, and a page saying it
     // broke. Neither is a sweep result or control; a page report is written
     // to the audit stream by its own route, rationed (`page_report_route`).

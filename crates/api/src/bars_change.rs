@@ -365,7 +365,10 @@ impl Rules {
     /// IST day `days`'s master: the process-wide memo's when it loaded
     /// before, else read now. A refusal is remembered for this request only,
     /// with its reason (AF-03). Expected O(1) per bar: a hit in either memo
-    /// is one hash probe, and a miss reads the day once per request.
+    /// is one hash probe, and a miss reads the day once per request. Proof of
+    /// the once per request: CSL-05
+    /// (`api::bars::change::tests::a_failed_masters_load_is_not_remembered`);
+    /// the per-bar probe is not timed: UNVERIFIED.
     fn master(&self, days: u32) -> Option<Arc<pull::cash_session_cache::VerifiedLifecycleMaster>> {
         let memo = (self.masters.clone(), days);
         if let Some(kept) = MASTERS.get(&memo) {

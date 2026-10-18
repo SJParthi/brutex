@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { BEING_WRITTEN_TRIES, askAgainDelay, isBeingWritten } from './being-written.js';
 
 /* ======================================================================
    ONE PAGE OF THE BAR GRID, READ IN ONE REQUEST (D-3326)
@@ -75,7 +76,31 @@ export async function readWindowPage(query, limit, signal, request = ask, wait =
       await wait(250 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250), signal);
       continue;
     }
-    if (!response.ok) throw new Error(String(body?.error ?? `HTTP ${response.status}`));
+    /* A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21). A read
+       that meets an import worker, a month repair or an index build on its
+       month waits briefly on the server, then answers 503 with
+       `"being_written": true` and `Retry-After` — never "unreadable". The page
+       asks again after the server's own delay (one second when it names
+       none, never more than two), at most `BEING_WRITTEN_TRIES` requests;
+       past that the server's sentence, which names who holds the month, is
+       the failure. A 503 without the field is not a "come back" and is not
+       retried. The rule is `being-written.js`'s, shared with the spot and
+       Greeks cells. */
+    if (isBeingWritten(response, body) && attempt < BEING_WRITTEN_TRIES) {
+      await wait(askAgainDelay(response), signal);
+      continue;
+    }
+    /* THE LAST FAILURE IS THE SERVER'S SENTENCE. A being-written 503 names the
+       holder in `error`; a body from a server built before that carried it in
+       `faults` alone, and the grid showed "HTTP 503" (verify-R3-08-r1) — so a
+       being-written answer without `error` is quoted from `faults`, never
+       replaced by a bare status. */
+    if (!response.ok) {
+      const said = typeof body?.error === 'string' && body.error ? body.error
+        : isBeingWritten(response, body) && typeof body?.faults === 'string' && body.faults ? body.faults
+        : `HTTP ${response.status}`;
+      throw new Error(said);
+    }
     const offset = Number(body?.offset);
     if (!body || !Array.isArray(body.bars) || !Number.isSafeInteger(body.total) || body.total < 0 ||
         !Number.isSafeInteger(offset) || offset < 0 || body.bars.length > limit ||
