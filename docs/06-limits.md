@@ -19734,3 +19734,65 @@ RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 4 -> 5: `fib`'s
 `cli/src/fib/wire.rs` met rule 7 once and was changed instead: the
   new-work authority words are a `matches!` over five literals.
 ~~~~
+
+## The walker (FIB-5, D-6380 to D-6390)
+
+What `runner::fib::walk` and `runner::fib::codec` leave bounded, labelled or
+unmeasured. The measured rows (C-F5-01 to C-F5-07) follow this table.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FIB5-01 | `DayIndex::build` reads every bar, every second of the day and every candle at every swing width, and builds three sparse tables per side | an index is what makes every later step a fixed set of comparisons; it is built once per stock-day, never per slot | BOUNDED: O(bars x log bars + seconds of the day + candles x widths) per stock-day (C-F5-06) | FIB-5 |
+| L-FIB5-02 | The event walk stops at every event of a held position | a touch, a swing read, a time instant, a full-step bar, and every new high while a give-back or an R-step trails (each moves their level): a trending day under a give-back makes most bars events | BOUNDED: O(log bars x (1 + events)) per pair (C-F5-07); the every-bar walk stays O(1) per bar | FIB-5 |
+| L-FIB5-03 | Entry windows and spilling exits are stepped bar by bar, also by the event walk | a spill reads each second's volume in turn; FM-F030's binary search on a volume prefix was not built, so no binary search enters the walker | O(seconds of the window or the spill) per slot, one step each | FIB-5 |
+| L-FIB5-04 | Stage A's locked-minute proxy (high == low at the running day extreme) is UNVERIFIED | OF-1's circuit evidence is not wired; the proxy stands in for it, labelled `locked_minute_suspected` (FM-F042) | a flag and a wait, O(1) per minute | FIB-5 / FIB-10 |
+| L-FIB5-05 | The worse-of-both cross-feed reading is not built | it must call PREC-15's `runner::cross_feed`, which does not exist; the reading is refused by name `cross_feed_not_built` (FM-F046) | NOT DONE until PREC-15 | FIB-5 / PREC-15 |
+| L-FIB5-06 | A stage-A hold cannot reach the specification's 1,000 or 22,500 bars | a day holds 375 one-minute bars and the walker reads none from 15:10:00, so the longest hold is 354 minutes (09:15 to 15:09); C-F5-04 measures 3, 35 and 354 | the stated holds are unreachable at this resolution | FIB-5 |
+| L-FIB5-07 | A deep hold cannot reach 22,500 seconds | the session's 22,500 seconds include 15:10:00 to 15:29:59, which no exit reads; the longest hold is 21,240 seconds (09:15:00 to 15:09:00); C-F5-02 measures 10, 1,000 and 21,240 | — | FIB-5 |
+| L-FIB5-08 | The bench's days are synthetic and their production sizes unmeasured | FIB-12's sample supplies the production plans per stock-day; the rows print EXTRAPOLATION where no production size is known | the Mac re-measures at merge-back | FIB-5 / FIB-12 |
+| L-FIB5-09 | Deep fills assume the order fills within each second's printed volume without moving the price, and that a side present in the book is reachable | the operator's FILLS rule; FIB-15 labels the same assumption | labelled on every deep result; a day walked without OF-1's book marks says so (`DayIndex::book_observed`) | FIB-5 |
+| L-FIB5-10 | The participation cap applies to entry fills only | 17:15 item 4 seeds it from the entries' per-second participation; exits spill by each second's whole volume (FM-F035) | — | FIB-5 |
+| L-FIB5-11 | R is stored as an exact rational, never as an `f64` | a reader converts it once at full precision (CLAUDE.md section 7); no float enters the walker | — | FIB-5 / FIB-6 / FIB-7 |
+| L-FIB5-12 | `max_second_gap` counts MISSING seconds between two real seconds | the walker compares a silence's missing seconds with it; FIB-2's `MaxSecondGap` must be supplied in the same unit | — | FIB-5 / FIB-2 |
+| L-FIB5-13 | `Stepper::new` reads the exit set's swing widths and the eleven Fibonacci rungs once per slot | a slot's levels are frozen at the decision | O(widths + rungs) per slot, once | FIB-5 |
+| L-FIB5-14 | `missing_pairs` probes a hash set per wanted pair | an incremental rerun's work list | EXPECTED O(1) per pair, O(have + wanted) per call | FIB-5 |
+| L-FIB5-15 | `DayIndex` holds a second-to-bar map of every second of the day and three sparse tables per side | memory, not time: about the index's `bytes()` per stock-day (C-F5-06 prints it) | O(seconds of the day + bars x log bars) bytes per stock-day | FIB-5 |
+| L-FIB5-16 | The halt-day rule's "real loss may be larger; the position may carry overnight" is UNVERIFIED | NSE's close-out of a position held through a halt is not chartered (FIB-15 4.10) | labelled on every `halt_worst_seen` slot | FIB-5 / FIB-15 |
+
+### The walker's bench rows, measured (FIB-5)
+
+Measured 18 October 2026 on THIS HOST: the cloud container FIB-5 was built in
+(4 vCPUs, 15 GiB, Linux 6.18, rustc 1.97.1, the `bench` profile), branch
+`cloud/fib5-20261018` at the commit that added the event walk (the FIB-5
+report names it), `cargo bench -p runner --bench fib` alone after a 30-second
+pause (one-minute load average 0.62 before it). Timer granularity 25 ns; the
+pointer-chase probe's last-level-cache estimate 16,384 KiB on this run; every
+data row's largest working set (the ring of synthetic days, about 108 MB deep
+and 54 MB stage A) is above it. Every time is a percentile OF BATCH MEANS
+(2,000 batches of 1,000 calls after a warm-up), in picoseconds per call, p50 /
+p99 / max at each scale; the work counter is exact. Slots walk in production
+order (each to its exit, then the next) and every slot carries all five exit
+components, none reached before its hold ends. None of these is a Mac number:
+the Mac re-measures with the same command.
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-F5-01 | deep: one bar step of one slot, full-day hold | WORST-CASE | 1, 16, 256 active slots (8 days of 21,300 seconds) | 34,511 / 81,803 / 621,259; 33,228 / 95,161 / 1,150,523; 33,645 / 90,434 / 741,875 | 1 at every percentile | p99 time 1.105x, max time 1.194x, work 1.000x | PASS |
+| C-F5-02 | deep: one bar step of one slot, 16 slots | WORST-CASE | holds of 10, 1,000 and 21,240 seconds | 41,815 / 79,543 / 592,172; 35,629 / 99,553 / 133,443; 33,172 / 93,822 / 280,375 | 1 | p99 time 1.179x, max time 0.473x, work 1.000x | PASS |
+| C-F5-03 | stage A: one bar step of one slot, full-day hold | WORST-CASE | 1, 16, 256 active slots (100 days of 355 minutes) | 34,280 / 96,808 / 298,209; 33,585 / 94,016 / 235,933; 33,911 / 88,177 / 241,479 | 1 | p99 time 0.910x, max time 0.809x, work 1.000x | PASS |
+| C-F5-04 | stage A: one bar step of one slot, 16 slots | WORST-CASE | holds of 3, 35 and 354 minutes (L-FIB5-06) | 58,489 / 161,538 / 3,678,389; 61,290 / 110,721 / 3,122,576; 56,994 / 90,060 / 194,230 | 1 | p99 time 0.557x, max time 0.052x, work 1.000x | PASS |
+| C-F5-05 | deep: one bar step with the swing trail, full-day hold | AMORTISED (period 60) | 1, 16, 256 active slots | 30,322 / 73,073 / 109,261; 29,975 / 87,199 / 278,983; 30,384 / 65,889 / 185,867 | p50 1, p99.9 2, max 2, mean 1.003 | mean time 0.982x, p99 time 0.901x, max time 1.701x | PASS |
+| C-F5-07 | deep: one whole pair walked by events, full-day hold | BOUNDED, O(log bars x (1 + events)) per pair | 1, 16, 256 active slots | 42,116,661 / 66,262,755 / 71,198,840; 31,491,200 / 49,328,588 / 54,044,514; 31,046,785 / 48,342,419 / 54,087,341 | events p50 190, p99 405 / 250 / 250, mean 219.1 / 197.0 / 197.0 | p99 time 0.729x, work 0.617x | BOUNDED (L-FIB5-02): a whole-day pair in about 31 to 42 µs at p50, against 21,240 steps of C-F5-01 |
+
+At the production worker count (4), per worker: C-F5-01 44,089 / 40,906 /
+45,471 ps per call at the three scales (1 worker: 40,253 / 40,002 / 39,299);
+C-F5-02 54,241 / 45,279 / 44,285; C-F5-03 40,760 / 49,936 / 50,431; C-F5-04
+92,611 / 54,319 / 44,294; C-F5-05 39,479 / 39,692 / 38,740; C-F5-07 44,598,428
+/ 33,807,293 / 34,719,397.
+
+C-F5-06 (information, timed with `Instant` once per day of each ring, not a
+harness row): `DayIndex::build` of one deep stock-day of 21,300 seconds, min
+13,368,849 ns, p50 13,873,558 ns, max 13,947,909 ns over 8 builds, 13,556,832
+bytes per index; of one stage-A stock-day of 355 minutes, min 210,896 ns, p50
+417,022 ns, max 803,051 ns over 100 builds, 540,080 bytes per index (L-FIB5-01,
+L-FIB5-15).
