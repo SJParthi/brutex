@@ -574,6 +574,17 @@ pub enum FloorRefusal {
         /// Why.
         why: String,
     },
+    /// The projected bytes plus the floor exceed the largest byte count a
+    /// `u64` holds: no disk has that much free, and a sum that saturated is
+    /// never compared as if it fit (R407-29).
+    NeedOverflows {
+        /// The filesystem as measured.
+        space: Space,
+        /// The floor in bytes.
+        floor_bytes: u64,
+        /// The projected bytes.
+        projected: u64,
+    },
 }
 
 impl FloorRefusal {
@@ -581,7 +592,7 @@ impl FloorRefusal {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::DiskFloor { .. } => "disk_floor",
+            Self::DiskFloor { .. } | Self::NeedOverflows { .. } => "disk_floor",
             Self::ProjectionUnknown { .. } => "projection_unknown",
             Self::SpaceUnknown { .. } => "free_space_unknown",
         }
@@ -613,6 +624,18 @@ impl core::fmt::Display for FloorRefusal {
                 "free_space_unknown: {why}; the floor cannot be checked, so nothing was read or \
                  written"
             ),
+            Self::NeedOverflows {
+                space,
+                floor_bytes,
+                projected,
+            } => write!(
+                f,
+                "disk_floor: {projected} bytes to write plus the floor of {floor_bytes} exceed \
+                 {} bytes, more than any disk holds ({} free of {}); nothing was read or written",
+                u64::MAX,
+                space.free,
+                space.total
+            ),
         }
     }
 }
@@ -622,7 +645,10 @@ impl core::fmt::Display for FloorRefusal {
 ///
 /// # Errors
 ///
-/// [`FloorRefusal::DiskFloor`] when it would not.
+/// [`FloorRefusal::DiskFloor`] when it would not,
+/// [`FloorRefusal::NeedOverflows`] when the projection plus the floor
+/// exceed `u64::MAX` bytes, and [`FloorRefusal::SpaceUnknown`] for a meter
+/// answer no filesystem gives.
 pub fn floor_check(space: Space, projected: u64, floor: Floor) -> Result<Headroom, FloorRefusal> {
     // A meter answer no filesystem gives would make the floor 0 (a percent
     // of a 0 total) and pass: refused by name, never checked against.
@@ -635,7 +661,13 @@ pub fn floor_check(space: Space, projected: u64, floor: Floor) -> Result<Headroo
         });
     }
     let floor_bytes = floor.bytes_of(space.total);
-    let need = projected.saturating_add(floor_bytes);
+    let Some(need) = projected.checked_add(floor_bytes) else {
+        return Err(FloorRefusal::NeedOverflows {
+            space,
+            floor_bytes,
+            projected,
+        });
+    };
     if space.free < need {
         return Err(FloorRefusal::DiskFloor {
             space,

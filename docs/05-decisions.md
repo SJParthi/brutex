@@ -72018,3 +72018,57 @@ with its one `rename` site justified in ALLOWED, and that site is made what
 AUT-05 allows: a verified part is promoted to the day's name in the part's own
 folder (a part resumed from an earlier press's run folder is published there),
 never moved into the running press's folder (R407-28).
+
+### D-5832 — R4-07 repair 3: a shrunk listing is accepted by the token its refusal names, once and journalled (amends D-5831's count-keyed acceptance); a floor need past `u64::MAX` is refused by name; an upper-case Dropbox host is named as that — 2026-10-18
+
+The third check failed R4-07 on two blocking issues in repair 2's own code.
+
+**The count-keyed acceptance is replaced.** D-5831 let `accept_listing_count
+= N` accept a listing shrunk to N "once", but the check ran against whatever
+count stayed in the config: after an accepted shrink to N, a listing that grew
+and then shrank back to N, even by losing a file of the accepted listing,
+passed with no line naming it, and no line ever recorded an acceptance. A
+count cannot be made single-use: the same value in the config is a fresh
+acceptance or a stale one, and nothing can tell them apart. So the acceptance
+now names the refusal it answers. A `listing_shrank` press journals a
+`listing complete=false reason=listing_shrank was= count= shrink=<token>`
+line, the token being the first refusing press's run id and kept while the
+same shrink (`was`, `now`) stays pending, so the operator's copy of it stays
+good across daily presses. Only `accept_listing_shrink = "<token>"` naming the
+pending token accepts that shrink. The accepted listing line carries
+`accepted_shrink=<token> was=<was>`, and any complete listing line clears the
+pending shrink, so the token is used up and every later shrink is refused with
+a new one; a stale token left in the config is named in the refusal. The key
+`accept_listing_count` is retired: it is an unknown key, refused by name. It
+was never wired to a route or a page (R1-WIRING), so no operator config holds
+it. Considered and not taken: keying the acceptance to the `was -> now` pair
+(the A1 case is the same pair again, so a stale pair accepts it) and refusing
+a count already journalled as accepted (then the same count can never be
+accepted again by any config value). R407-25, L-R407-14.
+
+**The two branches no test reached now have tests.** `Memory::read`'s
+`reverify_failed` arm is proved where the re-fetch does not finish (the floor
+refuses it), and the pick's refusal of a SHA-256 duplicate only while its
+original still owns the bytes is proved over three presses where the writer
+refuses the original on the second. Each test fails with its branch mutated
+(R407-26, R407-27).
+
+**Three follow-ups taken.** `floor_check` adds the projection and the floor with
+`checked_add`, and a sum that would overflow is `FloorRefusal::NeedOverflows`
+(code `disk_floor`), never a saturated need compared as if it fit (R407-29).
+`check_link` names a host that is dropbox.com only in another case instead of
+calling it "not dropbox.com"; it does not fold the case, because the link is
+handed to Dropbox as written and how Dropbox reads an upper-case host is
+UNVERIFIED (R407-30). A torn journal line is closed so that it can never be
+read as whole: `append_line` closes a last line that has no newline with one
+NUL byte before the newline, and `parse_line` refuses any line holding a raw
+NUL, which no line this module writes holds (`quoted` escapes every control
+character). So a line cut at a field boundary, or inside a bare value (a
+`count=1` cut from `count=12`), is counted torn and never read, by
+`Memory::load` and by `status` alike. The cut was not always fail-safe: a
+complete listing line cut inside its count, closed by a press that wrote no
+listing line of its own, became the shrink check's baseline, and a later
+shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
+of the journal changes; a line closed before this change kept only its newline
+and reads as it did.
+

@@ -1252,9 +1252,14 @@ fn a_listing_whose_entries_field_is_renamed_is_refused_not_empty_and_a_listing_s
         panic!("{shrank:#?}")
     };
     assert_eq!(refusal.code, "listing_shrank");
+    // The token is the refusing press's run id (R407-25).
     assert_eq!(
         refusal.detail,
-        "was=2 now=1; to accept it, set accept_listing_count to 1 in the config"
+        format!(
+            "was=2 now=1 shrink={run}; to accept exactly this shrink once, set \
+             accept_listing_shrink to {run} in the config",
+            run = shrank.run
+        )
     );
 }
 
@@ -3107,12 +3112,19 @@ fn a_link_whose_host_hides_another_host_is_refused() {
 /// R4-07 repair 2 (second agent's follow-up): a vendor that rotates old
 /// files out of the folder shrinks the listing for good, and
 /// `listing_shrank` had no override, so every later press (the daily
-/// timer's too) was refused. `accept_listing_count` accepts exactly the
-/// count the operator records; the accepted listing is journalled complete,
-/// so the next press compares against it, and a further shrink is refused
-/// again even with the old acceptance still in the config.
+/// timer's too) was refused.
+///
+/// Repair 3 (third check, blocking 2): the count-keyed acceptance never
+/// expired and was never journalled, so a stale `accept_listing_count = 2`
+/// passed a LATER shrink back to two files after the listing grew, even one
+/// that lost a file of the accepted listing, with no line naming it. Now
+/// the refusal is journalled with a token, only `accept_listing_shrink`
+/// naming that token accepts that shrink, the accepted listing line names
+/// it (`accepted_shrink`, `was`), and the token is used up. Failed before:
+/// the stale acceptance gave `Complete` at the A1 and A1b steps below
+/// (second agent's probes a1/a1b, logs-R4-07-v3/mut/mC.log).
 #[test]
-fn a_shrunk_listing_is_accepted_only_at_the_count_the_operator_records() {
+fn a_shrunk_listing_is_accepted_once_by_the_token_its_refusal_names() {
     let server = Server::start(fake_with(&[
         ("/GFDLNFO_TICK_01082019.zip", day_zip(1, 1, 100)),
         ("/GFDLNFO_TICK_02082019.zip", day_zip(2, 1, 100)),
@@ -3129,42 +3141,144 @@ fn a_shrunk_listing_is_accepted_only_at_the_count_the_operator_records() {
             &mut Recorder::default(),
         )
     };
-    let with_count = |count: &str| {
+    let with_token = |token: &str| {
         Config::parse(&format!(
-            "link = \"{LINK}\"\naccept_listing_count = \"{count}\"\n"
+            "link = \"{LINK}\"\naccept_listing_shrink = \"{token}\"\n"
         ))
         .unwrap()
     };
-    let code = |report: &Report| match &report.outcome {
+    let refused = |report: &Report| match &report.outcome {
         Outcome::Refused(refusal) => (refusal.code, refusal.detail.clone()),
         other => panic!("{other:?}"),
     };
+    let lines = |word: &str| {
+        journal_text(&roots)
+            .lines()
+            .filter(|line| line.contains(word))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
     assert_eq!(run(config()).outcome, Outcome::Complete);
     server.fake.lock().unwrap().files.pop();
-    let (shrank, detail) = code(&run(config()));
+    let first = run(config());
+    let (shrank, detail) = refused(&first);
     assert_eq!(shrank, "listing_shrank");
-    assert!(detail.starts_with("was=3 now=2;"), "{detail}");
-    assert!(detail.contains("accept_listing_count to 2"), "{detail}");
-    // A different count accepts nothing.
-    assert_eq!(code(&run(with_count("1"))).0, "listing_shrank");
-    assert_eq!(code(&run(with_count("3"))).0, "listing_shrank");
-    // The recorded count accepts this listing once, and the next press
-    // without it compares against 2, not 3.
-    assert_eq!(run(with_count("2")).outcome, Outcome::Complete);
+    let token = first.run.clone();
+    assert_eq!(
+        detail,
+        format!(
+            "was=3 now=2 shrink={token}; to accept exactly this shrink once, set \
+             accept_listing_shrink to {token} in the config"
+        )
+    );
+    // The same shrink pressed again keeps its token: the operator's copy of
+    // the first refusal stays good while nothing changed.
+    let again = run(config());
+    assert_eq!(refused(&again).1, detail);
+    let listed_shrink = lines(&format!(" shrink={token}"))
+        .into_iter()
+        .filter(|line| line.starts_with("v=1 listing "))
+        .count();
+    assert_eq!(listed_shrink, 2, "one listing line a refused press");
+    // A token no refusal named accepts nothing, and says why.
+    let (code, detail) = refused(&run(with_token("1-2-3")));
+    assert_eq!(code, "listing_shrank");
+    assert!(
+        detail.ends_with(concat!(
+            "; accept_listing_shrink 1-2-3 answers no pending shrink of this link ",
+            "(each token accepts one shrink, once)"
+        )),
+        "{detail}"
+    );
+    assert!(detail.contains(&format!("shrink={token};")), "{detail}");
+    // The named token accepts this shrink, and the accepted listing says so.
+    assert_eq!(run(with_token(&token)).outcome, Outcome::Complete);
+    let accepted = lines(" accepted_shrink=");
+    assert_eq!(accepted.len(), 1, "{accepted:?}");
+    assert!(
+        accepted[0].contains(" complete=true count=2 ")
+            && accepted[0].ends_with(&format!(" accepted_shrink={token} was=3")),
+        "{}",
+        accepted[0]
+    );
+    // The next press compares against 2, not 3.
     assert_eq!(run(config()).outcome, Outcome::Complete);
-    // A further shrink is refused again, even with the old acceptance.
+    // A1: the listing grows to three and shrinks back to two. The stale
+    // token still in the config accepts nothing: a new token is named.
+    server
+        .fake
+        .lock()
+        .unwrap()
+        .file("/GFDLNFO_TICK_06082019.zip", day_zip(6, 1, 100));
+    assert_eq!(run(with_token(&token)).outcome, Outcome::Complete);
     server.fake.lock().unwrap().files.pop();
-    let (again, detail) = code(&run(with_count("2")));
-    assert_eq!(again, "listing_shrank");
-    assert!(detail.starts_with("was=2 now=1;"), "{detail}");
-    // The count is a whole number or the config is refused.
-    for bad in ["", "two", "-1", "+2", "2.0", " 2", "99999999999999999999"] {
+    let regrown = run(with_token(&token));
+    let (code, detail) = refused(&regrown);
+    assert_eq!(code, "listing_shrank", "{detail}");
+    assert!(
+        detail.starts_with(&format!("was=3 now=2 shrink={};", regrown.run)),
+        "{detail}"
+    );
+    assert_ne!(regrown.run, token);
+    assert_eq!(run(with_token(&regrown.run)).outcome, Outcome::Complete);
+    // A1b: grown again, then a file of the ACCEPTED listing goes: the count
+    // is two again and the used token is refused again.
+    server
+        .fake
+        .lock()
+        .unwrap()
+        .file("/GFDLNFO_TICK_06082019.zip", day_zip(6, 1, 100));
+    assert_eq!(run(config()).outcome, Outcome::Complete);
+    server.fake.lock().unwrap().files.remove(0);
+    let lost = run(with_token(&regrown.run));
+    assert_eq!(refused(&lost).0, "listing_shrank");
+    // A further shrink while one is pending is a new shrink with its own
+    // token; the pending one's token no longer accepts.
+    server.fake.lock().unwrap().files.pop();
+    let further = run(with_token(&lost.run));
+    let (code, detail) = refused(&further);
+    assert_eq!(code, "listing_shrank");
+    assert!(
+        detail.starts_with(&format!("was=3 now=1 shrink={};", further.run)),
+        "{detail}"
+    );
+    // Every acceptance is one searchable line.
+    assert_eq!(lines(" accepted_shrink=").len(), 2);
+    // The token has a run id's shape or the config is refused.
+    let long = "9".repeat(81);
+    for bad in [
+        "",
+        "two",
+        "-1",
+        "1-",
+        "1--2",
+        "+2",
+        " 2",
+        "1-a",
+        long.as_str(),
+    ] {
         let why = Config::parse(&format!(
-            "link = \"{LINK}\"\naccept_listing_count = \"{bad}\"\n"
+            "link = \"{LINK}\"\naccept_listing_shrink = \"{bad}\"\n"
         ))
         .unwrap_err();
-        assert!(why.contains("accept_listing_count"), "{bad:?}: {why}");
+        assert!(why.contains("is not a shrink token"), "{bad:?}: {why}");
     }
+    assert!(
+        Config::parse(&format!(
+            "link = \"{LINK}\"\naccept_listing_shrink = \"{}\"\n",
+            "9".repeat(80)
+        ))
+        .is_ok()
+    );
+    // The retired count key is an unknown key, refused by name.
+    let why = Config::parse(&format!(
+        "link = \"{LINK}\"\naccept_listing_count = \"2\"\n"
+    ))
+    .unwrap_err();
+    assert!(
+        why.contains("unknown key \"accept_listing_count\""),
+        "{why}"
+    );
 }
 
 /// R4-07 repair 2 (second agent's follow-up): a zip an earlier press
@@ -3358,4 +3472,246 @@ fn a_listed_hash_held_by_a_writer_refused_name_lets_the_next_press_fetch_the_oth
         memory.hashes
     );
     assert!(!memory.hashes.is_empty());
+}
+
+/// R4-07 repair 3 (third check, blocking 1a): `Memory::read`'s
+/// `reverify_failed` arm forgets the bad path, and no test failed without
+/// it: where the re-fetch finished in the same press, its newer `verified`
+/// line replaced the path anyway. Here the floor refuses the re-fetch, so
+/// only the arm keeps the next press from re-verifying the bad copy and
+/// journalling a second `reverify_failed` line. Failed with the arm
+/// disabled: two lines (the second agent's probe a5, mut/mA.log).
+#[test]
+fn a_reverify_failure_whose_refetch_the_floor_refused_is_not_reverified_next_press() {
+    let name = "GFDLNFO_TICK_01082019.zip";
+    let server = Server::start(fake_with(&[(&format!("/{name}"), day_zip(1, 1, 100))]));
+    let roots = roots("r3-reverify-floor");
+    let run = |meter: &Meter, handoff: &mut Recorder| {
+        press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            meter,
+            Ok(config()),
+            handoff,
+        )
+    };
+    let one = run(&Meter::roomy(), &mut Recorder::default());
+    assert_eq!(one.outcome, Outcome::Complete, "{one:#?}");
+    let staged = one.verified[0].path.clone();
+    let mut bytes = std::fs::read(&staged).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    std::fs::write(&staged, &bytes).unwrap();
+    let failures = || {
+        journal_text(&roots)
+            .lines()
+            .filter(|line| line.starts_with("v=1 reverify_failed "))
+            .count()
+    };
+    // Press 2: the re-verify fails and the floor refuses the re-fetch.
+    let total: u64 = 1 << 40;
+    let tight = Meter::new(total, Floor::Percent(15).bytes_of(total) + 10, 0);
+    let mut second = Recorder::default();
+    let two = run(&tight, &mut second);
+    let Outcome::Refused(refusal) = &two.outcome else {
+        panic!("{two:#?}")
+    };
+    assert_eq!(refusal.code, "disk_floor");
+    assert!(second.got.is_empty(), "{:?}", second.got);
+    assert_eq!(failures(), 1);
+    let memory = Memory::load(&journal_path(&roots.store)).unwrap();
+    assert!(
+        memory.verified.values().all(|path| *path != staged),
+        "{:?}",
+        memory.verified
+    );
+    // Press 3: the file is fetched fresh, never re-verified from the bad
+    // copy, and the bad copy is kept as it was.
+    let mut third = Recorder::default();
+    let three = run(&Meter::roomy(), &mut third);
+    assert_eq!(three.outcome, Outcome::Complete, "{three:#?}");
+    assert_eq!(third.got, vec![name.to_owned()]);
+    assert_ne!(three.verified[0].path, staged);
+    assert_eq!(failures(), 1, "the bad path is not re-verified");
+    assert_eq!(std::fs::read(&staged).unwrap(), bytes);
+}
+
+/// R4-07 repair 3 (third check, blocking 1b): the pick refuses a name an
+/// earlier press refused `content_duplicate` by its SHA-256 only while the
+/// name it duplicates still holds the bytes, and no test failed without
+/// that filter. Press 1: the writer takes A; B, the same bytes with no
+/// listed hash, is refused `of=A`. Press 2: A is offered again and the
+/// writer refuses it, so A owns nothing. Press 3 must fetch and hand B.
+/// Failed with the filter replaced by `|_of| true`: press 3 refused B at
+/// the pick and handed it nothing.
+#[test]
+fn a_duplicate_whose_original_the_writer_later_refused_is_fetched_and_handed() {
+    let a = "GFDLNFO_TICK_03072019.zip";
+    let b = "GFDLNFO_TICK_04072019.zip";
+    let same = day_zip(44, 2, 3_000);
+    let mut fake = fake_with(&[(&format!("/{a}"), same.clone()), (&format!("/{b}"), same)]);
+    for file in &mut fake.files {
+        file.hash = String::new();
+    }
+    let server = Server::start(fake);
+    let roots = roots("r3-dup-of-refused");
+    let mut first = Picky::default();
+    let one = press_picky(&server, &roots, &mut first);
+    assert_eq!(first.got, vec![a.to_owned()], "{one:#?}");
+    assert_eq!(codes(&one), vec![(b.to_owned(), "content_duplicate")]);
+    // Press 2 began with A owning the bytes, so B is refused at its pick.
+    let mut second = Picky {
+        refuse: vec![a],
+        ..Picky::default()
+    };
+    let two = press_picky(&server, &roots, &mut second);
+    assert_eq!(second.got, vec![a.to_owned()], "{two:#?}");
+    assert_eq!(codes(&two), vec![(b.to_owned(), "content_duplicate")]);
+    let memory = Memory::load(&journal_path(&roots.store)).unwrap();
+    assert!(memory.writer_refused.contains_key(a));
+    assert_eq!(
+        memory
+            .duplicates
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![a]
+    );
+    // Press 3: A owns nothing, so B is fetched and judged by the writer.
+    let mut third = Picky {
+        refuse: vec![a],
+        ..Picky::default()
+    };
+    let three = press_picky(&server, &roots, &mut third);
+    assert_eq!(third.got, vec![a.to_owned(), b.to_owned()], "{three:#?}");
+    assert!(codes(&three).is_empty(), "{:?}", codes(&three));
+    let memory = Memory::load(&journal_path(&roots.store)).unwrap();
+    assert!(
+        memory.hashes.values().all(|name| name == b),
+        "{:?}",
+        memory.hashes
+    );
+    assert!(!memory.hashes.is_empty());
+}
+
+/// R4-07 repair 3 (third check, follow-up p9): a host that is dropbox.com
+/// in another case was refused as "not dropbox.com". It is still refused
+/// (the link is handed to Dropbox as written), but by what it is.
+#[test]
+fn a_dropbox_host_in_upper_case_is_refused_by_name() {
+    for link in [
+        "https://WWW.DROPBOX.COM/sh/a",
+        "https://Dropbox.com/sh/a",
+        "https://www.dropbox.COM/sh/a?dl=0",
+    ] {
+        assert_eq!(
+            check_link(link),
+            Err(
+                "the link's host is dropbox.com written with upper-case letters; write the host \
+                 in lower case"
+                    .to_owned()
+            ),
+            "{link}"
+        );
+    }
+    for link in [
+        "https://WWW.DROPBOX.COM.evil.example/sh/a",
+        "https://EVIL.example/sh/a",
+        "https://WWW.DROPBOX.COM@evil.example/sh/a",
+    ] {
+        assert_eq!(
+            check_link(link),
+            Err("the link's host is not dropbox.com".to_owned()),
+            "{link}"
+        );
+    }
+}
+
+/// R4-07 repair 3 (third check, follow-up p4): a line torn at a field
+/// boundary or inside a bare value, closed by the next append with a bare
+/// newline, parsed as a whole, shorter line. A complete listing line cut
+/// inside its count (`count=1` of `count=13`), closed by a line that is no
+/// listing (a press refused before its listing), became the shrink check's
+/// baseline, and a later shrink passed against it. The closing append now
+/// writes a NUL first, so the cut line is counted torn and never read.
+/// Failed before the repair: `torn` 0, the baseline 1, and the shrink from
+/// three to two was Complete.
+#[test]
+fn a_line_torn_at_a_field_boundary_is_counted_torn_and_never_read() {
+    let server = Server::start(fake_with(&[
+        ("/GFDLNFO_TICK_01082019.zip", day_zip(1, 1, 100)),
+        ("/GFDLNFO_TICK_02082019.zip", day_zip(2, 1, 100)),
+        ("/GFDLNFO_TICK_05082019.zip", day_zip(5, 1, 100)),
+    ]));
+    let roots = roots("r3-torn-boundary");
+    let run = || {
+        press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        )
+    };
+    assert_eq!(run().outcome, Outcome::Complete);
+    let path = journal_path(&roots.store);
+    let listed = journal_text(&roots)
+        .lines()
+        .find(|line| line.starts_with("v=1 listing ") && line.contains(" complete=true count=3 "))
+        .unwrap()
+        .to_owned();
+    let print = parse_line(&listed).unwrap().get("link").unwrap().to_owned();
+    // The same line as a crash leaves it, cut inside its count.
+    let at = listed.find(" count=3 ").unwrap() + " count=".len();
+    let cut = format!("{}1", &listed[..at]);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(cut.as_bytes()).unwrap();
+    drop(file);
+    // The next append is no listing line.
+    append_line(&path, "v=1 end run=1-1-1").unwrap();
+    let memory = Memory::load(&path).unwrap();
+    // The folder loses a file: refused against three, never passed against
+    // the cut one.
+    server.fake.lock().unwrap().files.pop();
+    let shrunk = run();
+    let (code, detail) = match &shrunk.outcome {
+        Outcome::Refused(refusal) => (refusal.code.to_owned(), refusal.detail.clone()),
+        other => (format!("{other:?}"), String::new()),
+    };
+    // One assertion over all the cut line could change, so a failure shows
+    // every part of it: the torn count, the shrink baseline, the outcome.
+    assert_eq!(
+        (
+            memory.torn,
+            memory.complete.get(print.as_str()).copied(),
+            code.as_str()
+        ),
+        (1, Some(3), "listing_shrank"),
+        "{detail}"
+    );
+    assert!(detail.starts_with("was=3 now=2 "), "{detail}");
+    assert_eq!(status(&roots.store).unwrap().unwrap().verb, "end");
+    let closed = journal_text(&roots)
+        .lines()
+        .find(|line| line.starts_with(&cut))
+        .unwrap()
+        .to_owned();
+    assert_eq!(closed, format!("{cut}\0"));
+    assert_eq!(parse_line(&closed), None);
+    // A raw NUL anywhere refuses a line; a control character in a value is
+    // written escaped and reads back as itself.
+    assert_eq!(parse_line("v=1 end run=1-1-1\0"), None);
+    assert_eq!(parse_line("v=1 end run=1\0-1-1"), None);
+    let written = format!("v=1 end run=1-1-1 why={}", quoted("a\0b"));
+    assert!(!written.contains('\0'), "{written:?}");
+    assert_eq!(
+        parse_line(&written).unwrap().get("why"),
+        Some("a\0b"),
+        "{written:?}"
+    );
 }

@@ -523,3 +523,47 @@ fn a_meter_answer_with_no_total_or_more_free_than_total_is_refused_not_a_zero_fl
         "disk_floor"
     );
 }
+
+/// R4-07 repair 3 (third check, follow-up p5): the need was
+/// `projected.saturating_add(floor_bytes)`, so a plan whose sum saturated
+/// passed against a meter answering `u64::MAX` free of `u64::MAX` (probe
+/// a7). A need past `u64::MAX` is no disk's; it is refused by name.
+#[test]
+fn a_need_past_the_largest_byte_count_is_refused_by_name_never_saturated() {
+    let all = Space {
+        total: u64::MAX,
+        free: u64::MAX,
+    };
+    for (projected, floor) in [
+        (u64::MAX, Floor::Percent(95)),
+        (u64::MAX, Floor::Bytes(1)),
+        (1, Floor::Bytes(u64::MAX)),
+        (u64::MAX / 2 + 1, Floor::Bytes(u64::MAX / 2 + 1)),
+    ] {
+        let refused = floor_check(all, projected, floor).unwrap_err();
+        assert_eq!(refused.code(), "disk_floor", "{projected} {floor:?}");
+        assert!(
+            matches!(refused, FloorRefusal::NeedOverflows { projected: p, .. } if p == projected),
+            "{refused:?}"
+        );
+        assert!(
+            refused.to_string().contains(&format!(
+                "exceed {} bytes, more than any disk holds",
+                u64::MAX
+            )),
+            "{refused}"
+        );
+    }
+    // The largest need that fits is still an answer, either way.
+    let floor_bytes = Floor::Bytes(1).bytes_of(u64::MAX);
+    let fits = u64::MAX - floor_bytes;
+    assert!(floor_check(all, fits, Floor::Bytes(1)).is_ok());
+    let short = Space {
+        total: u64::MAX,
+        free: u64::MAX - 1,
+    };
+    assert!(matches!(
+        floor_check(short, fits, Floor::Bytes(1)),
+        Err(FloorRefusal::DiskFloor { short_by: 1, .. })
+    ));
+}

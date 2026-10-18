@@ -2549,11 +2549,18 @@ const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
 // reads. Repair round 2 adds, from its own follow-ups: the config key
 // `accept_listing_count`, the journal verb `reverify_failed`, the host label
 // `evil` of an invented foreign link a test refuses, and the scratch tags
-// `reverify`, `shrink-accept`, `r2-writer-sha` and `r2-writer-hash`.
+// `reverify`, `shrink-accept`, `r2-writer-sha` and `r2-writer-hash`. Repair
+// round 3 adds: the config key `accept_listing_shrink` (the retired
+// `accept_listing_count` stays, as the key a test refuses), the journal
+// fields `shrink`, `was` and `accepted_shrink` of a listing line, the scratch
+// tags `r3-reverify-floor`, `r3-dup-of-refused` and `r3-torn-boundary`, and
+// the invented shrink tokens `1-2-3`, `1-`, `1--2` and `1-a` a test refuses
+// or names as stale.
 // None names an account, an environment, a vendor credential or a
 // field of a parameter path.
 const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 15 4096 accept_link_print \
-     accept_listing_count evil r2-writer-hash r2-writer-sha reverify reverify_failed shrink-accept \
+     accept_listing_count accept_listing_shrink accepted_shrink shrink was 1-2-3 1- 1--2 1-a \
+     r3-reverify-floor r3-dup-of-refused r3-torn-boundary evil r2-writer-hash r2-writer-sha reverify reverify_failed shrink-accept \
      all_proxy bad-link bulk busy complete content-length content_duplicate \
      content_hash continue crash crc_mismatch cursor deleted detail disk_floor \
      download download_cut downloaded downloading dropbox-api-arg dropbox-cap \
@@ -4344,6 +4351,8 @@ mod tests {
             "zip_unreadable",
             "007",
             "accept_listing_count",
+            "accept_listing_shrink",
+            "r3-dup-of-refused",
             "reverify_failed",
             "r2-writer-sha",
         ] {

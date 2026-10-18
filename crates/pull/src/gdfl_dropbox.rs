@@ -11,7 +11,8 @@
 //!    folder ([`list`]). A listing cut part way is `listing_incomplete` and no
 //!    "up to date" claim is made; a listing smaller than the last complete
 //!    one for the same link is `listing_shrank` until the operator records
-//!    the new count as `accept_listing_count`; a listing holding no GDFL
+//!    the token that refusal names as `accept_listing_shrink`, which accepts
+//!    that one shrink once and is journalled; a listing holding no GDFL
 //!    day zip is `link_holds_no_gdfl_day_zip`.
 //! 3. Wants every canonical GDFL day zip ([`DayIdentity::of_zip_name`]) the
 //!    store does not hold: not in the tick store's day table
@@ -271,7 +272,7 @@ impl core::fmt::Display for Wait {
 pub struct Config {
     link: String,
     accept_link_print: Option<String>,
-    accept_listing_count: Option<u64>,
+    accept_listing_shrink: Option<String>,
 }
 
 impl core::fmt::Debug for Config {
@@ -323,8 +324,9 @@ impl Config {
     }
 
     /// Parses `key = "value"` lines; `#` starts a comment. Keys: `link`
-    /// (required), `accept_link_print` and `accept_listing_count` (a whole
-    /// number: the one smaller listing count the operator accepts).
+    /// (required), `accept_link_print` and `accept_listing_shrink` (the
+    /// token a `listing_shrank` refusal names: it accepts that one shrink,
+    /// once, R407-25).
     ///
     /// # Errors
     ///
@@ -333,7 +335,7 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut link = None;
         let mut accept = None;
-        let mut accept_count = None;
+        let mut accept_shrink = None;
         for (number, raw) in text.lines().enumerate() {
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -352,7 +354,7 @@ impl Config {
             let slot = match key.trim() {
                 "link" => &mut link,
                 "accept_link_print" => &mut accept,
-                "accept_listing_count" => &mut accept_count,
+                "accept_listing_shrink" => &mut accept_shrink,
                 other => return Err(format!("line {at}: unknown key {other:?}")),
             };
             if slot.replace(value.to_owned()).is_some() {
@@ -361,21 +363,16 @@ impl Config {
         }
         let link = link.ok_or_else(|| "no `link` line".to_owned())?;
         check_link(&link)?;
-        let accept_listing_count = match accept_count {
-            None => None,
-            Some(text) => Some(
-                text.parse::<u64>()
-                    .ok()
-                    .filter(|_| text.bytes().all(|b| b.is_ascii_digit()))
-                    .ok_or_else(|| {
-                        format!("accept_listing_count {text:?} is not a whole number")
-                    })?,
-            ),
-        };
+        if let Some(token) = accept_shrink.as_deref().filter(|t| !is_shrink_token(t)) {
+            return Err(format!(
+                "accept_listing_shrink {token:?} is not a shrink token: digits joined by '-', as \
+                 a listing_shrank refusal names it"
+            ));
+        }
         Ok(Self {
             link,
             accept_link_print: accept,
-            accept_listing_count,
+            accept_listing_shrink: accept_shrink,
         })
     }
 
@@ -385,6 +382,18 @@ impl Config {
     pub fn print(&self) -> String {
         print_of(&self.link)
     }
+}
+
+/// The longest shrink token: a [`run_id`] is three whole numbers and two `-`.
+const MAX_SHRINK_TOKEN: usize = 80;
+
+/// Whether `token` has a [`run_id`]'s shape: whole numbers joined by single
+/// `-`, at most [`MAX_SHRINK_TOKEN`] bytes.
+fn is_shrink_token(token: &str) -> bool {
+    token.len() <= MAX_SHRINK_TOKEN
+        && token
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The config's folder may not be writable by group or world, and the file
@@ -438,8 +447,18 @@ fn check_link(link: &str) -> Result<(), String> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
         && host.split('.').all(|label| !label.is_empty());
-    let dropbox = plain && (host == "dropbox.com" || host.ends_with(".dropbox.com"));
-    if !dropbox {
+    let is_dropbox = |host: &str| host == "dropbox.com" || host.ends_with(".dropbox.com");
+    if !(plain && is_dropbox(host)) {
+        // A host that is dropbox.com only in another case is named as that,
+        // not folded: the link is handed to Dropbox as written, and how
+        // Dropbox reads an upper-case host is UNVERIFIED.
+        if plain && is_dropbox(&host.to_ascii_lowercase()) {
+            return Err(
+                "the link's host is dropbox.com written with upper-case letters; write the host \
+                 in lower case"
+                    .to_owned(),
+            );
+        }
         return Err("the link's host is not dropbox.com".to_owned());
     }
     if link.len() > 2_048 || !link.bytes().all(|b| b.is_ascii_graphic()) {
@@ -1220,9 +1239,16 @@ impl Fields {
 }
 
 /// Parses one journal line: `v=1 <verb> key=value ...`, values bare or
-/// quoted. `None` for a line this module never writes.
+/// quoted. `None` for a line this module never writes, and for any line
+/// holding a raw NUL: no written line holds one ([`quoted`] escapes every
+/// control character), and [`append_line`] closes a torn line with one, so
+/// a line cut at a field boundary or inside a bare value is never read as
+/// whole (R407-31).
 #[must_use]
 pub fn parse_line(line: &str) -> Option<Fields> {
+    if line.contains('\0') {
+        return None;
+    }
     let mut fields = Fields::default();
     let mut chars = line.chars().peekable();
     let mut first = true;
@@ -1386,7 +1412,8 @@ fn torn_shape(line: &[u8]) -> bool {
 }
 
 /// Appends `line` (one or more whole lines, `\n` between them) to `path`,
-/// closing a torn last line first.
+/// closing a torn last line first with a NUL and a newline, so the torn
+/// line never parses ([`parse_line`]) wherever the cut fell (R407-31).
 fn append_line(path: &Path, line: &str) -> Result<(), String> {
     let refused = |why: std::io::Error| format!("{}: {why}", path.display());
     // ONE folder, never a chain: a store root that is gone (the drive was
@@ -1409,19 +1436,30 @@ fn append_line(path: &Path, line: &str) -> Result<(), String> {
         .append(true)
         .open(path)
         .map_err(refused)?;
-    let mut text = String::with_capacity(line.len() + 2);
+    let mut text = String::with_capacity(line.len() + 3);
     if file.metadata().map_err(refused)?.len() > 0 {
         let mut last = [0_u8; 1];
         file.seek(std::io::SeekFrom::End(-1)).map_err(refused)?;
         file.read_exact(&mut last).map_err(refused)?;
         if last != *b"\n" {
-            text.push('\n');
+            // A cut at a field boundary or inside a bare value would read
+            // as a whole, shorter line; the NUL marks it torn.
+            text.push_str("\0\n");
         }
     }
     text.push_str(line);
     text.push('\n');
     file.write_all(text.as_bytes()).map_err(refused)?;
     file.sync_data().map_err(refused)
+}
+
+/// A refused listing shrink: the counts it was refused at and the token
+/// that accepts it (the refusing press's run id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shrink {
+    was: u64,
+    now: u64,
+    token: String,
 }
 
 /// What earlier runs left that this one reads.
@@ -1431,6 +1469,11 @@ struct Memory {
     last_link: Option<String>,
     /// The file count of the last complete listing, per link print.
     complete: HashMap<String, u64>,
+    /// The shrink a link print's newest `listing_shrank` line names and no
+    /// complete listing has answered since: what `accept_listing_shrink`
+    /// must name to accept it. A complete listing line (an accepted shrink's
+    /// too) clears it, so an acceptance is used once (R407-25).
+    shrinks: HashMap<String, Shrink>,
     /// `(name, rev)` to the verified file's path.
     verified: HashMap<(String, String), PathBuf>,
     /// Listed or computed content hashes of verified files THE WRITER TOOK,
@@ -1518,12 +1561,25 @@ impl Memory {
         };
         match fields.verb.as_str() {
             "begin" => self.last_link = fields.get("link").map(str::to_owned),
-            "listing" if fields.get("complete") == Some("true") => {
-                if let (Some(link), Some(count)) = (
-                    fields.get("link"),
-                    fields.get("count").and_then(|c| c.parse().ok()),
+            "listing" => {
+                let Some(link) = fields.get("link") else {
+                    return;
+                };
+                let number = |key| fields.get(key).and_then(|c| c.parse().ok());
+                if fields.get("complete") == Some("true") {
+                    if let Some(count) = number("count") {
+                        self.complete.insert(link.to_owned(), count);
+                    }
+                    self.shrinks.remove(link);
+                } else if let (Some("listing_shrank"), Some(was), Some(now), Some(token)) = (
+                    fields.get("reason"),
+                    number("was"),
+                    number("count"),
+                    fields.get("shrink"),
                 ) {
-                    self.complete.insert(link.to_owned(), count);
+                    let token = token.to_owned();
+                    self.shrinks
+                        .insert(link.to_owned(), Shrink { was, now, token });
                 }
             }
             "part" => {
@@ -2088,37 +2144,86 @@ async fn listing(
     report.listed = files.len();
     report.pages = pages;
     let count = u64::try_from(files.len()).unwrap_or(u64::MAX);
-    // A vendor that rotates old files out shrinks the listing for good; the
-    // operator accepts exactly the new count once, and the accepted listing
-    // is journalled complete, so the next press compares against it and a
-    // further shrink is refused again.
-    if let Some(&was) = memory.complete.get(&print)
-        && count < was
-        && config.accept_listing_count != Some(count)
-    {
-        return Err(RunRefusal::new(
-            "listing_shrank",
-            format!(
-                "was={was} now={count}; to accept it, set accept_listing_count to {count} in \
-                 the config"
-            ),
-        )
-        .into());
-    }
+    let accepted = shrink_accepted(config, memory, &print, count, journal)?;
     let picked = pick(&files, fetch, memory)?;
+    let mut pairs = vec![
+        ("link", print),
+        ("complete", "true".to_owned()),
+        ("count", count.to_string()),
+        ("pages", pages.to_string()),
+        ("repeats", repeats.to_string()),
+        ("wanted", picked.wanted.len().to_string()),
+    ];
+    // The acceptance is journalled by name and used up: this complete line
+    // clears the pending shrink it answered, so the same token never
+    // accepts another (R407-25).
+    if let Some(shrink) = accepted {
+        pairs.push(("accepted_shrink", shrink.token));
+        pairs.push(("was", shrink.was.to_string()));
+    }
+    journal.line("listing", &pairs);
+    record_picks(&picked, memory, journal, report);
+    Ok(picked)
+}
+
+/// A listing smaller than the link's last complete one. A vendor that
+/// rotates old files out shrinks it for good, so the operator may accept it;
+/// which files went is not knowable from the listing, so the fetch never
+/// decides that itself. The refusal is journalled with a token (the first
+/// refusing press's run id, kept while the same shrink stays pending), and
+/// only `accept_listing_shrink` naming THAT token accepts THAT shrink, once:
+/// the accepted listing's line clears it, so a later shrink, even back to
+/// the same count after the listing grew, is refused with a new token.
+/// `Ok(Some)` names the accepted shrink; `Ok(None)` is no shrink.
+fn shrink_accepted(
+    config: &Config,
+    memory: &Memory,
+    print: &str,
+    count: u64,
+    journal: &mut Journal,
+) -> Result<Option<Shrink>, Stop> {
+    let Some(&was) = memory.complete.get(print).filter(|was| count < **was) else {
+        return Ok(None);
+    };
+    let pending = memory
+        .shrinks
+        .get(print)
+        .filter(|shrink| shrink.was == was && shrink.now == count);
+    if let Some(shrink) =
+        pending.filter(|shrink| config.accept_listing_shrink.as_deref() == Some(&*shrink.token))
+    {
+        return Ok(Some(shrink.clone()));
+    }
+    let token = pending.map_or_else(|| journal.run.clone(), |shrink| shrink.token.clone());
     journal.line(
         "listing",
         &[
-            ("link", print),
-            ("complete", "true".to_owned()),
+            ("link", print.to_owned()),
+            ("complete", "false".to_owned()),
+            ("reason", "listing_shrank".to_owned()),
+            ("was", was.to_string()),
             ("count", count.to_string()),
-            ("pages", pages.to_string()),
-            ("repeats", repeats.to_string()),
-            ("wanted", picked.wanted.len().to_string()),
+            ("shrink", token.clone()),
         ],
     );
-    record_picks(&picked, memory, journal, report);
-    Ok(picked)
+    let stale = config
+        .accept_listing_shrink
+        .as_deref()
+        .map(|old| {
+            format!(
+                "; accept_listing_shrink {old} answers no pending shrink of this link (each \
+                 token accepts one shrink, once)"
+            )
+        })
+        .unwrap_or_default();
+    Err(RunRefusal::new(
+        "listing_shrank",
+        format!(
+            "was={was} now={count} shrink={token}; to accept exactly this shrink once, set \
+             accept_listing_shrink to {token} in the config{stale}"
+        ),
+    )
+    .into())
 }
 
 /// THE PLAN'S FLOOR, BEFORE ANY FILE: the listed bytes of every wanted file
