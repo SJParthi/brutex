@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
 # Cloud mutation and coverage pass — `crates/pull`, 2026-10-17
 
@@ -70,7 +70,7 @@ survivors and timeouts were re-tested above.
 |---|---|
 | Branch coverage not measured | **Measured** (nightly `--branch`, opt-level 0, unprivileged): 854/876 branches (97.49%) and 4,721/4,786 lines (98.64%) on the final head; five files 100% of both; each remaining branch explained. |
 | Five timeouts remain timeouts | **All five caught** under Gate 18's flags: one already was under nextest, three by the old pass's fold watchdog run first, one by a new options-expiry watchdog run first. |
-| 18 equivalent mutants remain missed | **Re-confirmed missed under Gate 18's flags**, each still equivalent for the stated reason; one more found on new code (`gdfl_archive.rs:280:58`). 16 of the 19 sit on lines Gate 18 will plan for `feat/db-fix` → `main` (NEEDS THE MAC 1). |
+| 18 equivalent mutants remain missed | **Re-confirmed missed under Gate 18's flags**, each still equivalent for the stated reason; two more found on new code (`gdfl_archive.rs:280:58`, `gdfl_cm_auction.rs:535:73`). 17 of the 20 sit on lines Gate 18 will plan for `feat/db-fix` → `main` (NEEDS THE MAC 1). |
 | Uncovered production lines remain | Reduced: `cash_session_cache.rs:184–188` now counted (the uid-65534 child's own run); fourteen provokable refusal and host-error paths given tests (Tests added); every line still unreached listed with why. |
 | The container runs as root; three tests fail as root | `gdfl_tickstore`'s test now re-runs itself where permission binds and passes as root. The two in `gdfl_import` (not this part's files) still fail as root and pass as any ordinary user. Every run here was also made as an ordinary user. |
 | Not run: `cargo deny`, workspace clippy and tests | **Run** (Gates). |
@@ -78,23 +78,33 @@ survivors and timeouts were re-tested above.
 
 Also found and fixed in the re-applied tests: one test failed as any
 ordinary user whose temporary directory is longer than `/tmp` (the socket
-name overflowed `sun_path`; on a Mac it would always fail), and three
-undeclared gate-1d words.
+name overflowed `sun_path`; on a Mac it would always fail), and five
+gate-1d words the branch would have been the only source of (Gates).
 
 ## Left
 
-- The mutants of the code the merge brought into scope (run `moved`, 92
-  mutants), and the coverage and workspace tests on the merged head:
-  running at the time of this line.
-- Nothing else in scope. Everything that needs a decision is under NEEDS
-  THE MAC.
+Nothing in scope. Stated limits, so nothing reads as more than it is:
+
+- The eight files whose production code `feat/db-fix` did not change after
+  `c9e3472` (before the mid-pass merge: all but `request_minutes.rs` and
+  `gdfl_archive.rs`) were not re-mutated whole. Their kills are the old
+  pass's, against a suite every one of whose tests still exists; their
+  survivors and timeouts were all re-run here under Gate 18's flags.
+  `request_minutes.rs` was re-mutated whole (58 + 115), `gdfl_archive.rs`
+  on its changed lines, and the three files the merge changed on theirs.
+- Measured against `feat/db-fix` `297996d9`. Anything it gains in these ten
+  files after that commit is unmeasured.
+- Branch coverage is the nightly toolchain's (the pinned 1.97.1 cannot
+  measure it), at opt-level 0.
+
+Everything that needs a decision is under NEEDS THE MAC.
 
 ## Method
 
 | | |
 |---|---|
 | Tools | cargo-mutants **26.2.0** and cargo-nextest **0.9.145** (both CI's pins), cargo-deny **0.19.0** (CI's pin), cargo-llvm-cov 0.9.1, rustc 1.97.1 (pinned) and nightly 1.101.0 (2026-10-16) for branch coverage only |
-| Mutation flags | exactly Gate 18's: `--test-tool nextest --cargo-test-arg=--max-fail=1:immediate --cargo-test-arg=--test-threads=1 --no-shuffle --cap-lints true --cargo-arg=--locked --minimum-test-timeout 900 --timeout-multiplier 2`, `--jobs 2`; the dev profile overridden to opt-level 0, incremental, no debuginfo, for rebuild time (outcomes do not depend on it; timings do). The old pass ran `cargo test`; under nextest each test is its own process and the run stops at the first failure, which is what decides a hang (see Timeouts) |
+| Mutation flags | exactly Gate 18's: `--test-tool nextest --cargo-test-arg=--max-fail=1:immediate --cargo-test-arg=--test-threads=1 --no-shuffle --cap-lints true --cargo-arg=--locked --minimum-test-timeout 900 --timeout-multiplier 2`. One test thread, as Gate 18, in every run that decides a hang (`survivors1`, `timeouts2`, `fixed544`, `movedafter`); two where nothing hangs (`newcode`, `rmrest`, `moved`, `moveddisk`), which changes only how soon a catch is seen. `--jobs 2` (1 for `movedafter` and `moveddisk`, after the disk filled). The dev profile overridden to opt-level 0, incremental, no debuginfo, for rebuild time (outcomes do not depend on it; timings do). The old pass ran `cargo test`; under nextest each test is its own process and the run stops at the first failure, which is what decides a hang (see Timeouts) |
 | User | every mutation, coverage and workspace-test run is as an **unprivileged user** (`mut`, uid 30033) in a mirror of the tree, so permission-bit tests run their own path as on CI and the operator's machine; the container itself runs as root |
 | Coverage | `cargo +nightly llvm-cov -p pull --branch`, production lines and branches only (each file cut at its first `#[cfg(test)]` module) |
 
@@ -124,7 +134,8 @@ so the run hung. Two changes, no existing test edited:
   (old pass) runs the fold on its own thread and fails after ten seconds.
 - `.config/nextest.toml`: those two tests at `priority = 100`, the repo's
   own pattern for running a fast regression first (D-0693, D-0694). Order
-  only; gate 1's nextest scan allows exactly the keys used.
+  only; gate 1's nextest scan allows exactly the keys used. (A third, the
+  auction sidecar's lock-wait watchdog, joined it after the merge; below.)
 
 Run `timeouts2`, the same flags on the branch with both changes (baseline
 60 s build, 414 s test): **5 mutants, 5 caught, 0 timeouts.**
@@ -192,8 +203,8 @@ Of the 92, `moved` settled 87: **70 caught, 12 unviable** (each asks
 `Appended`, `NfoFile`, `Sidecar`, `Flock`), **4 missed and 1 timeout**.
 The other five — the four voided and the one never run (`242:5`
 `record_crc` → 1) — and the five survivors went to the runs below, after
-this pass's tests for the survivors, each under Gate 18's flags with one
-test thread:
+this pass's tests for the survivors, under Gate 18's flags (`movedafter`
+with one test thread, since it decides a hang; `moveddisk` with two):
 
 | Mutant | Run | Outcome |
 |---|---|---|
@@ -351,16 +362,17 @@ the old pass already used. No vendor byte is committed.
 | `cargo fmt --all --check` | **pass** |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings`, before the merge | **pass** (exit 0) |
 | the same, merged head (`--keep-going`) | **exit 101, one error, in `api`, identical on `feat/db-fix` `297996d9`**: `crates/api/src/logs.rs:1606` `note_request` has 104 lines (`too_many_lines`, limit 100). Every other crate, `pull` included, is clean. `crates/api` is byte-identical to `feat/db-fix`. |
-| `cargo test --workspace --locked --no-fail-fast`, as the unprivileged user | **exit 101: 159 test runs (unit, integration and doc) ok, 2 tests fail, both outside this branch's diff** (below); 38 min with two build jobs |
-| `cargo test -p pull --locked`, as the unprivileged user (inside the coverage run) | **pass**: every `pull` test, lib and integration |
-| `cargo test -p pull --locked`, as root | the two `gdfl_import` permission tests still fail as root, as on the base (`a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`, `a_journal_that_cannot_be_written_fails_the_day_by_name`); both pass as uid 65534. `gdfl_tickstore`'s third one passes as root now (repaired here). |
+| `cargo test --workspace --locked --no-fail-fast`, as the unprivileged user, merged head `873ec2b5` (every test of this pass; later commits are this report) | **exit 101: 159 test runs (unit, integration and doc) ok; 8 tests fail, none in `pull`, all in crates byte-identical to `feat/db-fix` `297996d9`** (below); 49 min with two build jobs. `pull`: lib 1,364 passed, 0 failed, and every integration binary ok. |
+| the same, before the merge (`2deb1ec5`) | exit 101: 159 runs ok; 2 failures, the first two below |
+| `cargo test -p pull --locked`, as the unprivileged user | **pass**, on the final head: inside the workspace run above, the final coverage run, and the baselines of every mutation run (the last, `moveddisk`, 1,804 tests) |
+| `cargo test -p pull --locked`, as root, final head | lib 1,362 passed, 2 failed, every integration binary ok: the two `gdfl_import` permission tests that fail as root on the base too (`a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`, `a_journal_that_cannot_be_written_fails_the_day_by_name`), both passing as any ordinary user. `gdfl_tickstore`'s third one passes as root now (repaired here). |
 | `cargo deny check` (0.19.0), merged head `0a636bbb` | **pass**: advisories, bans, licenses and sources ok; two duplicate-crate warnings (`getrandom`, `syn`). Identical on `origin/feat/db-fix` `297996d9`, whose lock carries part DENY-1's fix. `Cargo.toml`, `Cargo.lock` and `deny.toml` are byte-identical to `feat/db-fix`: never touched here. |
 | `cargo deny check`, before the merge (`f9cdb584` base) | red, identical to that base: RUSTSEC-2026-0344 (ruzstd) and RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls). |
-| Gate 1d (`gates_tree gate-1d`, built from the tree) | **red on the base** (141 undeclared words in `crates/pull` on `f9cdb584`); **this branch adds none**. The re-applied tests brought three (`store-root`, `proc`, `self`): the first is gone from the test, the other two are declared in `CLOUD_MUT_PULL_LITERAL` with their reason (`/proc/self/status`, the procfs file `read_limited`'s test needs). `gates_tree`'s own 48 tests pass. |
+| Gate 1d (`gates_tree gate-1d`, built from the tree) | **red on the base** (141 undeclared words in `crates/pull` on `f9cdb584`, 226 on `297996d9`); **this branch adds none** (226 on the head, the same words). The re-applied tests brought three (`store-root`, `proc`, `self`): the first is gone from the test, the other two are declared in `CLOUD_MUT_PULL_LITERAL` with their reason (`/proc/self/status`, the procfs file `read_limited`'s test needs). After the merge the new base dropped its own uses of `08` and `msg`, leaving the old tests as their only source (the invented row date `04/08/2026`, a telemetry key); both declared there too. `gates_tree`'s own 48 tests pass. |
 
-The two workspace failures, both identical on `feat/db-fix` (this branch
-changes no file of `cli` or `store`, and no non-test line any crate depends
-on):
+The workspace failures, all in code identical on `feat/db-fix` (this branch
+changes no file of `api`, `cli` or `store`, and no non-test line any crate
+depends on, so these test binaries are the base's own):
 
 - `cli` `boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`:
   fails as the unprivileged user (`published` 0, expected 1: "only a durably
@@ -373,6 +385,21 @@ on):
   `079ad4af`, `4756cce0`, `521066e6`, `72c91a46`, `91ef0094`, `9cb9de51`,
   `cde73992`, `ff636f58`) that are not ancestors of `origin/main`
   (`4bbd37df`). Fails the same in the real checkout.
+- After the merge only — `api` `server::head_deadline_body_tests` (AH-02,
+  just landed on `feat/db-fix`), five tests:
+  `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`,
+  `a_chunked_body_reaches_a_slow_reader_whole`,
+  `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`,
+  `slow_readers_at_the_cap_are_served_whole_and_the_next_waits`,
+  `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`: each
+  body is cut after about 5.37 MB of 8 MiB ("cut after 5374638 of 8388608",
+  `head_deadline_body_tests.rs:552`). Re-run alone, nothing else running:
+  the same five fail (7 of the module's 12 pass), as root and as the
+  ordinary user alike.
+- After the merge only — `store` `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`:
+  "it is a new file, not the old one cut", the two inode numbers equal
+  (1310754): this filesystem hands the freed inode straight back. Re-run
+  alone three times, as either user: fails every time.
 
 ## NEEDS THE MAC
 
@@ -410,6 +437,13 @@ on):
 3. **`store` `cited_commits` is red on `feat/db-fix` itself**: nine commits
    cited in `docs/06-limits.md` are not on `origin/main` and not in
    `NOT_ON_MAIN`.
+3a. **Three more base reds arrived with `feat/db-fix` `297996d9`**, none in
+   this part's files, each deterministic in this container (Gates):
+   `api`'s five `head_deadline_body_tests` (bodies cut at ~5.37 MB of
+   8 MiB), `api`'s `logs.rs` `note_request` over clippy's 100-line limit,
+   and `store`'s `staging` dead-writer test (an inode reused at once). The
+   first and last may be this container's network stack and filesystem;
+   the Mac's run decides.
 4. **Two root-only test failures in `gdfl_import`** (outside this part's
    files) pass as uid 65534 and as any ordinary user; nothing to do on a Mac.
 5. **A D-number, if wanted.** The nextest order override and the gate-1d
