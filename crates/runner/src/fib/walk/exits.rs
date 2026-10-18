@@ -417,8 +417,9 @@ impl ExitSetRefusal {
 }
 
 /// How many variants one walker pass walks: the measured bench budget that
-/// keeps one bar's work O(1) at p99 (13:05 item 4). Recorded in the run
-/// ledger, never in the identity: the bytes do not depend on it (FM-F032).
+/// keeps one bar's work O(1) at p99 (13:05 item 4; rows C-F5-01 to C-F5-03 of
+/// `crates/runner/benches/fib.rs`). Recorded in the run ledger, never in the
+/// identity: the bytes do not depend on it (FM-F032).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PassBudget(u16);
 

@@ -60,7 +60,8 @@ fn corrupt(second: u32, open: i64, high: i64, low: i64, close: i64, volume: i64)
     Candle::new(ts(second), open, high, low, close, volume, OI_NULL)
 }
 
-/// A quiet bar around `price`: ten paisa either side, so never flat.
+/// A quiet bar around `price`: ten paisa either side, so its high is above
+/// its low.
 fn quiet(second: u32, price: i64, volume: i64) -> Candle {
     bar(second, price, price + 10, price - 10, price, volume)
 }

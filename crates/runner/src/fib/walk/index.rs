@@ -879,7 +879,8 @@ fn run_starts(candles: &[FibCandle]) -> Vec<usize> {
 }
 
 /// For each index `e`, the least of the `w` values ending at `e`: a monotone
-/// deque of at most `w + 1` indices, amortised O(1) per value.
+/// deque of at most `w + 1` indices, amortised O(1) per value (the index
+/// build it is part of is row C-F5-06 of `crates/runner/benches/fib.rs`).
 fn window_minima(lows: &[i64], w: usize) -> Vec<i64> {
     let mut win_min = vec![i64::MAX; lows.len()];
     let mut deque: VecDeque<usize> = VecDeque::with_capacity(w.saturating_add(1));

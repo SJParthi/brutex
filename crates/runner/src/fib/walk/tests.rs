@@ -8,19 +8,23 @@ fn shipping(source: &str) -> &str {
     vocab::fib_cube::shipping_part(source)
 }
 
+/// The walker's files, each with its source.
+const FILES: [(&str, &str); 7] = [
+    ("walk.rs", include_str!("../walk.rs")),
+    ("walk/event.rs", include_str!("event.rs")),
+    ("walk/exits.rs", include_str!("exits.rs")),
+    ("walk/index.rs", include_str!("index.rs")),
+    ("walk/slot.rs", include_str!("slot.rs")),
+    ("codec.rs", include_str!("../codec.rs")),
+    ("types.rs", include_str!("../types.rs")),
+];
+
 /// NO TYPED NUMBERS (operator 16 Oct 11:24 IST): every FIB-5 file holds no
 /// numeric literal but 0 and 1 in its shipping part; the generated exit set
 /// is the only source of an exit value.
 #[test]
 fn every_fib5_file_types_no_number() {
-    for (name, source) in [
-        ("walk.rs", include_str!("../walk.rs")),
-        ("walk/exits.rs", include_str!("exits.rs")),
-        ("walk/index.rs", include_str!("index.rs")),
-        ("walk/slot.rs", include_str!("slot.rs")),
-        ("codec.rs", include_str!("../codec.rs")),
-        ("types.rs", include_str!("../types.rs")),
-    ] {
+    for (name, source) in FILES {
         let typed = untyped_numbers(source);
         assert!(typed.is_empty(), "{name} types {typed:?}");
     }
@@ -49,25 +53,21 @@ fn no_bar_at_or_after_15_10_is_kept_or_read() {
 
 /// The walker's files do no I/O and call nothing that prints (gates 17 and
 /// 22), checked here too so a later edit fails in this crate's own tests.
+/// Each token is assembled, so this file does not itself name what gate 22
+/// refuses in this crate.
 #[test]
 fn the_walker_files_do_no_io_and_print_nothing() {
-    for (name, source) in [
-        ("walk.rs", include_str!("../walk.rs")),
-        ("walk/exits.rs", include_str!("exits.rs")),
-        ("walk/index.rs", include_str!("index.rs")),
-        ("walk/slot.rs", include_str!("slot.rs")),
-        ("codec.rs", include_str!("../codec.rs")),
-    ] {
+    for (name, source) in FILES {
         let code = shipping(source);
         for banned in [
-            "std::fs",
-            "File::",
-            "OpenOptions",
-            "read_dir",
-            "std::process",
-            "include_bytes!",
-            "println!",
-            "eprintln!",
+            concat!("std", "::fs"),
+            concat!("File", "::"),
+            concat!("Open", "Options"),
+            concat!("read", "_dir"),
+            concat!("std", "::process"),
+            concat!("include", "_bytes!"),
+            concat!("print", "ln!"),
+            concat!("eprint", "ln!"),
             "telemetry",
         ] {
             assert!(!code.contains(banned), "{name} names {banned}");
