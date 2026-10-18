@@ -15,7 +15,7 @@
 //! | [`error`] | every refusal the table and tolerance can produce |
 //! | [`expression`] | versioned AND/OR/NOT programs over live positions, with unknown kept distinct |
 //! | [`expression_search`] | the resumable, checkpointed enumeration of that grammar |
-//! | [`fib_cube`] | the FIB cube schema v1 (24 rows, 90 values): a namespace separate from the condition table (D-5301) |
+//! | [`fib_cube`] | the FIB cube schema v1 (24 rows; definitional values fixed, generated values per run): a namespace separate from the condition table (D-6301) |
 //! | [`implication`] | which positions restate or exclude another, exactly |
 //!
 //! # The three rules this crate exists to keep
