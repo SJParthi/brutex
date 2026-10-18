@@ -19615,8 +19615,9 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 
 Measured 18 October 2026 on THIS HOST: the cloud container FIB-1 was built in
 (4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`, 15 GiB, Linux 6.18,
-rustc 1.97.1, the `bench` profile), branch `cloud/fib1-20261018` at `8b71fb41`,
-one bench target at a time after a 30-second pause, with no build or test
+rustc 1.97.1, the `bench` profile), branch `cloud/fib1-20261018` at the commit
+that added `C-F-04` (the FIB-1 report, `reports/cloud-fib1-20261018.md`, names
+it), one bench target at a time after a 30-second pause, with no build or test
 running beside it (one-minute load average 0.25 to 0.73 before each target).
 Timer granularity 21 to 23 ns; the pointer-chase probe's last-level-cache
 estimate 32,768 KiB on all four targets. Every time is a percentile OF BATCH
@@ -19641,14 +19642,15 @@ exited 0.
 | C-F-05 | `fib_identity` of one pooled run | BOUNDED, O(term bytes), once per run | 1, 10, 100 pool names (FIXED-STATE: the run's own terms) | 1,363,211 / 2,181,426 / 3,218,114; 1,800,418 / 2,323,003 / 4,267,820; 4,776,262 / 6,592,532 / 9,038,320 | 45, 162, 1,332 pool bytes | p99 time 3.022x against work 29.6x | BOUNDED: the bound is the claim (L-FIB1-01) |
 | C-F-06 | one Merkle Mountain Range append | BOUNDED, O(log n) merges, once per stock-month or authority leaf | 1,000, 10,000, 100,000 leaves already in the tree (FIXED-STATE: the peaks) | 349,071 / 380,067 / 914,405; 378,436 / 410,382 / 1,052,579; 390,942 / 413,072 / 988,167 | merges p50 0, p99 6, p99.9 9, max 20, 20, 21, mean 0.999, 0.999, 1.000 | p99 time 1.086x, max work 1.050x | BOUNDED (L-FIB1-02) |
 
-**C-F-02 across this session's runs.** Before `8b71fb41`, `decode` divided every
-row step in `u128`, two library calls; the row read 1.212x (PASS, at
-`780b5516`), then 2.245x and 1.441x (FAIL, at `00198cc0`), each with a flat p50
-and work 24. `8b71fb41` divides a code below 2^64 in `u64`: p50 fell from about
-90 ns to about 70 ns and the row read 0.599x and 0.928x (PASS, two runs before
-the commit, the same source) and 1.489x (FAIL, the table above). In those three
+**C-F-02 across this session's runs.** Until the commit that added `C-F-04`,
+`decode` divided every row step in `u128`, two library calls; the row read
+1.212x (PASS) on an earlier commit of the branch, then 2.245x and 1.441x (FAIL)
+on a later one with the same `decode`, each with a flat p50 and work 24. That
+commit divides a code below 2^64 in `u64`: p50 fell from about 90 ns to about
+70 ns and the row read 0.599x and 0.928x (PASS, two runs of the same source
+before it was committed) and 1.489x (FAIL, the table above). In those three
 runs of the `u64` path the largest scale's p99 sat below the smallest's twice
-and above it once.
+and above it once. The report names each commit.
 
 | ID | Limit | Why it is not O(1) / not closed | Bound | Package |
 |---|---|---|---|---|
