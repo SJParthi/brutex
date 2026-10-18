@@ -544,9 +544,8 @@ impl OwnPast {
         match &self.split {
             None => lower_edge(leaf, 0, 0),
             Some(table) => {
-                let bin = index(u64::from(
-                    table.leaf_bin.get(leaf).copied().unwrap_or(u32::MAX),
-                ));
+                let base = table.leaf_bin.get(leaf).copied().unwrap_or(u32::MAX);
+                let bin = index(u64::from(base));
                 let (first, depth) = table.bin(bin);
                 let child = u64::try_from(leaf.saturating_sub(first)).unwrap_or(u64::MAX);
                 lower_edge(bin, u32::from(depth), child)
@@ -2158,22 +2157,12 @@ impl BankShape {
         let kind = key.kind.map(|kind| u16::from(kind.cube_value()));
         let kind = field(key, "kind", kind, kinds, BASE_KINDS)?;
         let level_count = usize::from(dims.levels);
-        let level = field(
-            key,
-            "level",
-            key.level,
-            scope == Scope::WidthKindLevel,
-            level_count,
-        )?;
+        let levels = scope == Scope::WidthKindLevel;
+        let level = field(key, "level", key.level, levels, level_count)?;
         let style = field(key, "style", key.style, styles, usize::from(dims.styles))?;
         let variant_count = usize::from(dims.variants);
-        let variant = field(
-            key,
-            "variant",
-            key.variant,
-            scope == Scope::WidthStyleVariant,
-            variant_count,
-        )?;
+        let variants = scope == Scope::WidthStyleVariant;
+        let variant = field(key, "variant", key.variant, variants, variant_count)?;
         let offset = match scope {
             Scope::Stock | Scope::Width => width,
             Scope::WidthKind => width * BASE_KINDS + kind,
