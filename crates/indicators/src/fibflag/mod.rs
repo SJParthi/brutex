@@ -29,10 +29,7 @@ pub mod trigger;
 pub mod types;
 
 /// The vocabulary positions this module emits: none.
-#[must_use]
-pub const fn positions() -> [u16; 0] {
-    []
-}
+pub const POSITIONS: [u16; 0] = [];
 
 #[cfg(test)]
 mod tests {
@@ -40,7 +37,7 @@ mod tests {
 
     #[test]
     fn the_module_claims_no_vocabulary_position() {
-        assert!(super::positions().is_empty());
+        assert!(super::POSITIONS.is_empty());
     }
 
     /// NO TYPED NUMBERS (operator 16 Oct 11:24 IST): every FIB-1 file of this

@@ -206,6 +206,10 @@ mod tests {
         assert!(!flags.contains(TradeFlag::DhanSquareOff));
         assert!(flags.contains(TradeFlag::SilenceInTrade));
         assert_eq!(TradeFlags::NONE.with(TradeFlag::DhanSquareOff).0, 0b100);
+        let twice = TradeFlags::NONE
+            .with(TradeFlag::DhanSquareOff)
+            .with(TradeFlag::DhanSquareOff);
+        assert_eq!(twice.0, 0b100, "setting a flag again keeps it set");
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn modules() -> Vec<(&'static str, &'static str, usize)> {
         (
             "fibflag",
             "src/fibflag/mod.rs",
-            indicators::fibflag::positions().len(),
+            indicators::fibflag::POSITIONS.len(),
         ),
     ]
 }

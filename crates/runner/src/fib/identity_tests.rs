@@ -366,6 +366,9 @@ fn identity_independent_of_listing_and_worker_order() {
     }
     assert_eq!(appended, sorted);
     assert_eq!(appended.peaks(), sorted.peaks());
+    // Five leaves are a peak of four and a peak of one, the run manifest's peaks.
+    assert_eq!(sorted.peaks(), sorted.mmr().peaks());
+    assert_eq!(sorted.peaks().len(), 2);
     assert_eq!(appended.mmr().leaves(), 5);
     // One digest moves the root; so does one key.
     let mut moved = listed.clone();
