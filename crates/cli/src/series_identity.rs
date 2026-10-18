@@ -650,8 +650,8 @@ impl Plan {
         }
         // ONE STAGING NAME PER PROCESS, the writer's own (`store::staging`).
         let staging = dir.join(format!(".series-identity.{}.staging", std::process::id()));
-        let staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
-        publish(staged.file, &staging, &path, text.as_bytes())?;
+        let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
+        publish(&mut staged.file, &staging, &path, text.as_bytes())?;
         std::fs::File::open(&dir)
             .and_then(|handle| handle.sync_all())
             .map_err(|why| format!("{}: sync after the rename: {why}", dir.display()))?;
@@ -667,7 +667,7 @@ impl Plan {
 /// it (`store::staging`), and nothing reads it as a plan. The plan's name is
 /// never touched on a failure.
 fn publish(
-    mut file: std::fs::File,
+    file: &mut std::fs::File,
     staging: &Path,
     path: &Path,
     text: &[u8],

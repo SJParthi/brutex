@@ -1861,12 +1861,12 @@ fn a_link_at_the_plans_name_is_refused_never_followed_or_replaced() {
 fn a_failed_publish_names_the_staging_file_it_leaves() {
     let root = Root::new();
     let staging = root.0.join(".series-identity.test.staging");
-    let staged = store::staging::create(&staging).unwrap();
+    let mut staged = store::staging::create(&staging).unwrap();
     // A directory at the plan's name: `rename` of a file onto it fails.
     let taken = root.0.join("taken.plan");
     fs::create_dir_all(taken.join("inside")).unwrap();
 
-    let why = super::publish(staged.file, &staging, &taken, b"plan\n").unwrap_err();
+    let why = super::publish(&mut staged.file, &staging, &taken, b"plan\n").unwrap_err();
     assert!(why.starts_with(&taken.display().to_string()), "{why}");
     assert!(
         why.contains(&format!(
@@ -1884,9 +1884,9 @@ fn a_failed_publish_names_the_staging_file_it_leaves() {
 
     // And a publish that can rename leaves the plan, and no staging name.
     let staging = root.0.join(".series-identity.test2.staging");
-    let staged = store::staging::create(&staging).unwrap();
+    let mut staged = store::staging::create(&staging).unwrap();
     let free = root.0.join("free.plan");
-    super::publish(staged.file, &staging, &free, b"plan\n").unwrap();
+    super::publish(&mut staged.file, &staging, &free, b"plan\n").unwrap();
     assert_eq!(fs::read(&free).unwrap(), b"plan\n");
     assert!(fs::symlink_metadata(&staging).is_err());
 }
