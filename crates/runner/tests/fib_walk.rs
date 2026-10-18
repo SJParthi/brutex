@@ -2920,6 +2920,21 @@ fn an_impossible_day_is_refused_by_name() {
         d.halts = halts;
         assert_eq!(refusal(&d, &second_profile()), WalkRefusal::HaltsInvalid);
     }
+    // Half-open ranges that touch are disjoint: one ending at the second the
+    // next starts is accepted.
+    let mut touching = base.clone();
+    touching.halts = vec![
+        HaltRange {
+            start_second: 1,
+            end_second: 9,
+        },
+        HaltRange {
+            start_second: 9,
+            end_second: 12,
+        },
+    ];
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    assert!(touching.index(&second_profile(), &exits).is_ok());
     let mut d = base.clone();
     d.raw_tick = 0;
     assert_eq!(refusal(&d, &second_profile()), WalkRefusal::NonpositiveTick);
