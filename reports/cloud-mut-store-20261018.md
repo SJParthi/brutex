@@ -12,6 +12,31 @@ Scope, as that report sets it:
   sealed_codec, sort_index_writer, staging, time_index, verdict}.rs`;
 - `crates/telemetry/src/sink.rs`.
 
+## Summary
+
+- **The `## Left` list is done.**
+  - Runs B and C were already done on 17 Oct.
+  - Every carried survivor was re-tested on the final tree with the full
+    suite: **50 tested, 38 caught, 12 missed, 0 timeouts**. The 12 missed
+    are exactly the 12 argued equivalents, each argued again against the
+    current code.
+- **The three 17 Oct timeouts are now caught** under CI's gate flags.
+  - Measured: timeout before, caught after.
+  - The fix is two tests under a deadline (`24ca118c`).
+  - CI's verifier never credits a timeout, so these were real gaps.
+- **CI's own plan for this branch** (`--in-diff` against `feat/db-fix`):
+  **38 mutants, 22 caught, 16 unviable, 0 missed, 0 timeouts**.
+- **Coverage, the final run.** No production line or branch this branch
+  adds is uncovered. Every remaining gap in scope is listed with its
+  reason, and they are r5's set unchanged.
+- **Gates.** fmt clean, clippy clean, deny green, and
+  `cargo test -p store --locked` green (810/0) as an ordinary user runs it.
+  - Run as plain root, 3 `settings` tests fail, as on the base.
+  - **CI gate 20 would be red with this branch** (`sink.rs` 25 against 20,
+    `lib.rs` 0 against 6), measured on Linux. Its counts are not this
+    pass's files: see NEEDS THE MAC.
+- **No production line changed this session.**
+
 ## The merge
 
 `feat/db-fix` moved 38 commits past this work's base (`f9cdb584`). Two
@@ -34,9 +59,10 @@ mutant name and line below is the same on both sides of the merge.
 `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` dropped from the bounding set,
 `TMPDIR` a sticky world-writable directory so the uid-65534 permission
 children can make their scratch:
-- 809 passed, 0 failed, 4 ignored, 37 test targets, 81 s;
-- `cited_commits` alone: 6 passed. BASE-CITED's fix is on `feat/db-fix`,
-  so this test is no longer red here.
+- 809 passed, 0 failed, 4 ignored, 37 test targets, 81 s, with
+  `cited_commits`' history test skipped;
+- `cited_commits` alone: 6 passed, that test included. BASE-CITED's fix is
+  on `feat/db-fix`, so this test is no longer red here.
 
 The 4 ignored tests read real months or are release-mode measurements (see
 NEEDS THE MAC).
@@ -188,9 +214,11 @@ is the same 38 mutants, line for line.
   `write_durable`, `remove_tmp`, `genesis`, `publish`, `missing_below`,
   `Gathering::drop` and `refuse_link`.
 
-The patterns also matched 4 neighbours, which ran too:
-`first_at_or_after`'s `4325:31`, and `publish`'s `+=` mutants at
-`3269:17` and `3287:30`.
+That is 41 mutants. The patterns also matched 9 neighbours, which ran too:
+- `first_at_or_after`'s `4325:31`;
+- `missing_below`'s `4766:55` and `4767:12`;
+- `publish`'s guard forced false and its `==` made `!=` (`3285`);
+- `publish`'s four `+=` mutants (`3269:17`, `3287:30`).
 
 **How.** The gate's flags, in place on `24ca118c`, with nothing skipped,
 `cited_commits` included (in a worktree its history check runs):
@@ -241,14 +269,19 @@ deadline as shown above.
 - `staging::create` ×2: `a_look_the_host_refuses_is_a_stat_refusal_…` and
   `a_second_create_the_host_refuses_is_a_create_refusal_…`.
 - `feed_byte` ×2: `a_series_feed_byte_is_its_vendors_own`.
-- The verdict writer's 18:
+- The verdict writer's 17:
   - `write_durable` ×3: `a_refused_writes_temporary_gone_or_held_is_said_as_it_is`;
-  - `remove_tmp` ×4: `a_linked_temporary_gone_is_done_and_one_held_refuses_as_a_remove`
-    and `a_hard_link_at_a_staging_name_is_refused_…`;
+  - `remove_tmp` → `Ok(())`:
+    `a_day_at_the_last_generation_is_refused_never_wrapped`;
+  - `remove_tmp`'s guard ×3:
+    `a_linked_temporary_gone_is_done_and_one_held_refuses_as_a_remove`;
   - `genesis` ×3: `a_year_index_linked_first_is_read_and_any_other_refused_link_is_said`;
-  - `publish` ×8: `an_image_link_refused_otherwise_than_exists_is_never_stepped_past`,
-    `a_crash_between_link_and_commit_never_overwrites_an_image_unit` and
-    `a_day_at_the_last_generation_is_refused_never_wrapped`.
+  - `publish`'s `3269:17` ×2: `a_hard_link_at_a_staging_name_is_refused_…`
+    (`tests/verdict.rs`);
+  - `publish`'s guard forced true:
+    `an_image_link_refused_otherwise_than_exists_is_never_stepped_past`;
+  - `publish`'s guard forced false, its `==`, and `3287:30` ×2:
+    `a_crash_between_link_and_commit_never_overwrites_an_image_unit`.
 
 The 7 full-disk suspects of 17 Oct (`verdict.rs` 3081:5, 3084:21 ×2,
 3084:32, 3108:21 ×2, and `sealed.rs` 2156:9) are all among the caught.
