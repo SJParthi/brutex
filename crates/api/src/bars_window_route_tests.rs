@@ -2140,3 +2140,200 @@ fn the_event_and_stopped_records_parse_and_label_no_bar() {
     let torn = format!("{text}event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted\n");
     assert_eq!(bars::test_access::lineage_ledger_counts(&torn), (0, 1));
 }
+
+/// One invented bar a second from 09:15:00 IST for `seconds` seconds on each
+/// of `days` (year, month, date).
+fn seconds_of(days: &[(u16, u8, u8)], seconds: i64) -> Vec<Bar> {
+    let mut rows = Vec::new();
+    for &(year, mon, date) in days {
+        for at in 0..seconds {
+            rows.push(bar(
+                ist(year, mon, date, 9, 15, at),
+                1_000 + at % 17,
+                0,
+                OI_NULL,
+            ));
+        }
+    }
+    rows
+}
+
+/// **A NEW TIME-OF-DAY WINDOW COSTS WHAT A KEPT ONE COSTS** (R3-07,
+/// DB-B57). Each new From/To window cut every day of every month through two
+/// `.tix` lookups (16.9 to 83.2 ms a new window over NIFTY's 97 one-second
+/// months, against 0.7 to 1.2 ms kept). A month that keeps its summary is now
+/// cut from its time-of-day index with no bar file opened: every new window
+/// below is `indexed` month by month, none `located`, and its rows are
+/// exactly the rows the bound keeps; the same window again is `kept`. A month
+/// under 1,024 bars keeps no summary: it is `located`, and the reason is
+/// named on the answer, never silent.
+#[test]
+fn a_new_time_of_day_window_costs_what_a_kept_one_costs() {
+    let store = Store::new("r307-tod-window");
+    let rows = seconds_of(
+        &[(2024, 1, 2), (2024, 1, 3), (2024, 2, 1), (2024, 2, 2)],
+        600,
+    );
+    store.write(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        &rows,
+    );
+    let mut ask = query(
+        &["NSE-INDEX-NIFTY"],
+        Timeframe::SECOND_1,
+        month(2024, 1),
+        month(2024, 2),
+    );
+    let tod_of = |ts: i64| u32::try_from((ts / 1_000_000 + 19_800).rem_euclid(86_400)).expect("s");
+    let mut new_ms = Vec::new();
+    let mut kept_ms = Vec::new();
+    for k in 0_u32..24 {
+        let (from, to) = (33_300 + k * 23, 33_300 + k * 23 + 7 + k);
+        ask.filter.tod = Some((from, to));
+        let started = std::time::Instant::now();
+        let first = store.window(&ask);
+        new_ms.push(started.elapsed().as_secs_f64() * 1e3);
+        let report = first.tod_index.clone().expect("a time-of-day report");
+        assert_eq!(
+            (report.indexed, report.located, report.kept),
+            (2, 0, 0),
+            "window {from}..={to}: {report:?}"
+        );
+        assert_eq!(report.why, None);
+        let expected: Vec<i64> = rows
+            .iter()
+            .map(|row| row.ts_micros)
+            .filter(|&ts| (from..=to).contains(&tod_of(ts)))
+            .collect();
+        assert_eq!(
+            first.total,
+            u64::try_from(expected.len()).expect("n"),
+            "window {from}..={to}"
+        );
+        let got: Vec<i64> = first.bars.iter().map(|row| row.bar.ts_micros).collect();
+        assert_eq!(got, expected, "window {from}..={to}");
+        let started = std::time::Instant::now();
+        let again = store.window(&ask);
+        kept_ms.push(started.elapsed().as_secs_f64() * 1e3);
+        let report = again.tod_index.expect("a report");
+        assert_eq!((report.indexed, report.located, report.kept), (0, 0, 2));
+        assert_eq!(again.total, first.total);
+    }
+    new_ms.sort_by(f64::total_cmp);
+    kept_ms.sort_by(f64::total_cmp);
+    eprintln!(
+        "r307 tod windows n=24: new p50 {:.3} ms max {:.3} ms; kept p50 {:.3} ms max {:.3} ms",
+        new_ms[12], new_ms[23], kept_ms[12], kept_ms[23]
+    );
+    // A MONTH UNDER 1,024 BARS KEEPS NO SUMMARY: located, and said.
+    let small = seconds_of(&[(2024, 3, 1)], 50);
+    store.write(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        &small,
+    );
+    ask.to = month(2024, 3);
+    ask.filter.tod = Some((33_310, 33_319));
+    let mixed = store.window(&ask);
+    let report = mixed.tod_index.expect("a report");
+    assert_eq!((report.indexed, report.located), (2, 1), "{report:?}");
+    assert!(
+        report
+            .why
+            .as_deref()
+            .is_some_and(|why| why.contains("2024-03")),
+        "the located month is named: {report:?}"
+    );
+    assert_eq!(
+        mixed.total,
+        10 * 4 + 10,
+        "every kept row, located or indexed"
+    );
+}
+
+/// **CHANGE % IS ORDERED BY THE SERVER** (R3-07, DB-061). `sort=chg` orders
+/// every kept row by its change against the previous stored bar — the value
+/// the time-ordered page shows — so the largest change of the month is page
+/// one's first row, and every page is the slice of that one order, in both
+/// directions. A row whose change is refused by name (the month's first bar
+/// has no earlier stored bar) sorts last in both directions.
+#[test]
+fn change_percent_is_ordered_by_the_server() {
+    let store = Store::new("r307-chg");
+    let rows: Vec<Bar> = (0..40)
+        .map(|at| {
+            let close = 20_000 + ((at * 37) % 23) * 10 + if at == 17 { 900 } else { 0 };
+            bar(ist(2024, 1, 2, 9, 15 + at, 0), close, 0, OI_NULL)
+        })
+        .collect();
+    store.write(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::MINUTE_1,
+        &rows,
+    );
+    let mut ask = query(
+        &["NSE-INDEX-NIFTY"],
+        Timeframe::MINUTE_1,
+        month(2024, 1),
+        month(2024, 1),
+    );
+    let truth: Vec<(i64, Option<i64>)> = store
+        .window(&ask)
+        .bars
+        .iter()
+        .map(|row| (row.bar.ts_micros, row.chg))
+        .collect();
+    assert_eq!(truth.len(), 40);
+    assert_eq!(truth[0].1, None, "the first bar has no earlier stored bar");
+    assert!(
+        truth.iter().skip(1).all(|(_, chg)| chg.is_some()),
+        "{truth:?}"
+    );
+    for desc in [true, false] {
+        let mut order = truth.clone();
+        order.sort_by(|a, b| {
+            let by = match (a.1, b.1) {
+                (Some(x), Some(y)) if desc => y.cmp(&x),
+                (Some(x), Some(y)) => x.cmp(&y),
+                (x, y) => x.is_none().cmp(&y.is_none()),
+            };
+            by.then(a.0.cmp(&b.0))
+        });
+        ask.sort = bars::SortKey::Change;
+        ask.desc = desc;
+        for (offset, limit) in [(0, 5), (5, 5), (12, 9), (35, 10)] {
+            ask.offset = Some(offset);
+            ask.limit = limit;
+            let page = store.window(&ask);
+            assert_eq!(page.total, 40);
+            let got: Vec<(i64, Option<i64>)> = page
+                .bars
+                .iter()
+                .map(|row| (row.bar.ts_micros, row.chg))
+                .collect();
+            let end = (offset + limit).min(order.len());
+            assert_eq!(got, order[offset..end], "desc={desc} offset={offset}");
+        }
+        // THE NULL IS LAST WHICHEVER WAY THE ORDER RUNS.
+        assert_eq!(order.last().map(|row| row.1), Some(None));
+    }
+    // THE LARGEST CHANGE IS FOUND AGAIN: page one's first row, descending.
+    ask.desc = true;
+    ask.offset = Some(0);
+    ask.limit = 1;
+    let top = store.window(&ask);
+    let largest = truth.iter().filter_map(|row| row.1).max();
+    assert_eq!(top.bars[0].chg, largest);
+    assert_eq!(top.bars[0].bar.ts_micros, ist(2024, 1, 2, 9, 32, 0));
+    assert_eq!(bars::SortKey::parse("chg"), Some(bars::SortKey::Change));
+}
