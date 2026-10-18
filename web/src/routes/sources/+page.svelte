@@ -39,6 +39,7 @@
   import { onDestroy, untrack } from 'svelte';
   import { afterNavigate, goto } from '$app/navigation';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import {
     SOURCES_DEFAULTS,
@@ -120,7 +121,7 @@
     void owner.run(async (ticket) => {
       const started = performance.now();
       try {
-        const response = await ask(url, { signal: ticket.signal });
+        const response = await askAgainWhileWritten(ask, url, { signal: ticket.signal });
         /** @type {unknown} */
         let body = null;
         try {

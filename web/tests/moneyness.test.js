@@ -260,7 +260,7 @@ test('a missing spot or rung is the named reason in its cells, never a figure', 
   const refused = optionCells(row, undefined, new Map([[rungKey(row), { rung: null, k: null, why: 'census_behind', detail: 'behind 3 days', step: null, atm: null, n: null, spot: null }]]));
   assert.deepEqual([refused?.mny, refused?.mnyWhy, refused?.mnyDetail], [null, 'census_behind', 'behind 3 days']);
   assert.equal(optionCells(bar('NSE-INDEX-NIFTY', 1790000000), undefined, new Map()), null);
-  for (const why of ['no_spot_bar', 'no_spot_in_session', 'no_spot_file', 'spot_unreadable', 'spot_order_broken',
+  for (const why of ['no_spot_bar', 'no_spot_in_session', 'no_spot_file', 'spot_unreadable', 'spot_being_written', 'spot_order_broken',
     't_outside_month', 't_off_grid', 'spot_request_failed', 'spot_pending']) {
     assert.equal(typeof /** @type {Record<string, string>} */ (SPOT_WHY)[why], 'string', why);
   }

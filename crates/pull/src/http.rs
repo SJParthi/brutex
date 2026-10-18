@@ -3200,6 +3200,47 @@ impl HttpSource {
     /// not. [`FetchError::TransportFailed`] if the socket never produced an
     /// answer, or the answer was too large, or it did not decode.
     pub async fn window_async(&self, request: &BarRequest) -> Result<RawWindow, FetchError> {
+        // THE SAME REQUEST, THE BODY DROPPED HERE (D-4920). Every caller of
+        // this function is unchanged by IA-8: the body is handed back only by
+        // `window_answered_async`, which the keeper's caller moves to.
+        self.window_with_body(request)
+            .await
+            .map(|(window, _body, _status)| window)
+            .map_err(FetchError::from)
+    }
+
+    /// Fetches one window and hands back the body beside it, so the caller
+    /// that holds the store root can keep the vendor's answer
+    /// (`crate::response_keep`, IA-8, D-4859, D-4920).
+    ///
+    /// No header is returned: [`crate::response_keep::Answered`] has no field
+    /// that could carry one, so the credential cannot reach a pack.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::response_keep::Unanswered`]: exactly the [`FetchError`]
+    /// `window_async` returns, and — when a 2xx body arrived and was a refusal
+    /// or did not decode (a login wall, a maintenance page) — its first
+    /// [`crate::response_keep::REFUSED_HEAD_BYTES`] bytes with the status, so
+    /// the proof of what the vendor sent is not thrown away (RA-299).
+    pub async fn window_answered_async(
+        &self,
+        request: &BarRequest,
+    ) -> Result<crate::response_keep::Answered, crate::response_keep::Unanswered> {
+        let (window, body, status) = self.window_with_body(request).await?;
+        Ok(crate::response_keep::Answered::of(window, body, status))
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the body of `window_async` moved unchanged (D-4920); its \
+                  steps are each argued in place, and splitting them would \
+                  separate a guard from the comment that argues it"
+    )]
+    async fn window_with_body(
+        &self,
+        request: &BarRequest,
+    ) -> Result<(RawWindow, String, u16), crate::response_keep::Unanswered> {
         let (name, value) = self.header();
         let from = Self::on_the_wire(request.window.from(), self.spec.date_format);
         // THE RUNG'S OWN RANGE END. `range_end_for` is the feed's for every
@@ -3328,7 +3369,8 @@ impl HttpSource {
                 status,
                 detail,
                 named,
-            });
+            }
+            .into());
         }
 
         // THE CLAIM FIRST, AND THEN THE BYTES.
@@ -3347,7 +3389,8 @@ impl HttpSource {
                         "the vendor declares {declared} bytes and this build \
                          accepts at most {cap}. Refused before the body was read."
                     ),
-                });
+                }
+                .into());
             }
         }
 
@@ -3366,7 +3409,8 @@ impl HttpSource {
                      the rest was left on the socket. This build accepts at most \
                      {MAX_RESPONSE_BYTES}."
                 ),
-            });
+            }
+            .into());
         }
 
         // A REFUSAL UNDER A 200, WHICH BYPASSED EVERY GUARD THIS MODULE HAS.
@@ -3390,7 +3434,15 @@ impl HttpSource {
         //
         // Read through the WHOLE contract, so a code the vendor misfiled is
         // still read by its sentence — the rule D-0325 established.
-        let decoded = self.settle_answer(&text, status, Asked::of(request))?;
+        // THE REFUSED BODY'S HEAD TRAVELS WITH THE REFUSAL (RA-299): a 200
+        // that is a login wall is kept as evidence by the caller that keeps
+        // answers, instead of only being named.
+        let decoded = self
+            .settle_answer(&text, status, Asked::of(request))
+            .map_err(|error| crate::response_keep::Unanswered {
+                error,
+                refused: Some(crate::response_keep::RefusedAnswer::of(status, &text)),
+            })?;
 
         // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
         //
@@ -3398,7 +3450,7 @@ impl HttpSource {
         // `TransportFailed` it read as "the vendor was not reached" — false,
         // and it sent `with_retry` through its whole ladder re-asking for bytes
         // that will come back identical. See `FetchError::BodyNotUnderstood`.
-        decoded.map_err(|why| {
+        let window = decoded.map_err(|why| {
             // THE INNER SENTENCE, NOT THE INNER ERROR'S WHOLE DISPLAY.
             //
             // `decode_body` reports its faults as `TransportFailed`, whose
@@ -3435,8 +3487,12 @@ impl HttpSource {
             // So the body is written here, where it is still in hand, and the
             // sentence goes beside it rather than instead of it.
             self.keep_unreadable(&url, &text, &detail);
-            FetchError::BodyNotUnderstood { detail }
-        })
+            crate::response_keep::Unanswered {
+                error: FetchError::BodyNotUnderstood { detail },
+                refused: Some(crate::response_keep::RefusedAnswer::of(status, &text)),
+            }
+        })?;
+        Ok((window, text, status))
     }
 
     /// Record a body this build could not read, if the feed's budget has room.
@@ -8869,5 +8925,262 @@ mod tests {
             assert!(!shown.contains("stale"), "{shown}");
         }
         assert_eq!(format!("{stale:?}"), "CredentialPrint(<redacted>)");
+    }
+
+    // ── IA-8: the answer handed back beside its window (D-4920) ─────────────
+
+    /// One request through `window_answered_async` against a loopback that
+    /// answers `raw` (a whole HTTP response); the request the vendor saw.
+    fn answered_once(
+        raw: String,
+    ) -> (
+        Result<crate::response_keep::Answered, crate::response_keep::Unanswered>,
+        String,
+        HttpSpec,
+    ) {
+        let (url, seen, _) = listener(Some(raw));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..spec(PriceScale::Rupees)
+        };
+        let source = HttpSource::new(spec, Credential::token("IA8-TOKEN-SECRET".to_owned()))
+            .expect("a client builds");
+        let request = BarRequest {
+            instrument_id: String::new(),
+            listing: crate::vendor::Listing::Equity,
+            window: crate::session::Window::new(
+                crate::session::Day::new(2019, 6, 27).expect("a real day"),
+                crate::session::Day::new(2019, 6, 27).expect("a real day"),
+            )
+            .expect("a real window"),
+            granularity: crate::vendor::Granularity::Minute1,
+        };
+        let got = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(source.window_answered_async(&request));
+        let sent = seen
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the vendor was asked");
+        (got, sent, spec)
+    }
+
+    /// An invented answer: prices nobody traded at, stamps in 2019.
+    const IA8_BODY: &str = r#"{"open":[1.11,1.21],"high":[1.12,1.22],"low":[1.10,1.20],"close":[1.11,1.21],"volume":[3,4],"timestamp":[1561607100,1561607160]}"#;
+
+    fn ia8_scratch(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("brutex-ia8-http-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        root
+    }
+
+    fn ia8_landing() -> crate::response_keep::Landing<'static> {
+        crate::response_keep::Landing {
+            window: crate::session::Window::new(
+                crate::session::Day::new(2019, 6, 27).expect("a real day"),
+                crate::session::Day::new(2019, 6, 27).expect("a real day"),
+            )
+            .expect("a real window"),
+            first_stamp: 1_561_607_100,
+            last_stamp: 1_561_607_160,
+            rows_decoded: 2,
+            rows_landed: 2,
+            rows_refused: 0,
+            refused: &[],
+            run: 1,
+            rung: crate::vendor::Granularity::Minute1 as u8,
+            rules_version: 1,
+            door: crate::response_keep::Door::FromWindow,
+        }
+    }
+
+    fn every_byte_under(dir: &std::path::Path) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).expect("a directory").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.extend(std::fs::read(&path).expect("a kept file"));
+                }
+            }
+        }
+        out
+    }
+
+    /// IA-RK-01: a kept answer never holds a header or a token. The vendor
+    /// IS sent the token (or this test would prove nothing), and answers with
+    /// a cookie and a marked header; no byte of the pack, raw or inflated,
+    /// carries any of them.
+    #[test]
+    fn a_kept_answer_never_holds_a_header_or_token() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Set-Cookie: session=IA8-COOKIE-SECRET\r\nX-Marker: IA8-HEADER-MARK\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{IA8_BODY}",
+            IA8_BODY.len()
+        );
+        let (got, sent, _) = answered_once(raw);
+        assert!(
+            sent.contains("IA8-TOKEN-SECRET"),
+            "the token was sent: {sent}"
+        );
+        let answered = got.expect("a decodable answer");
+        assert_eq!(&*answered.body, IA8_BODY, "the body, byte for byte");
+        assert_eq!(answered.status, 200);
+        assert_eq!(
+            answered.digest,
+            brutex_core::blake3::hash(IA8_BODY.as_bytes())
+        );
+        let root = ia8_scratch("header");
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("a key");
+        let pack = crate::response_keep::Pack {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            key: &key,
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let placed = crate::response_keep::append(
+            &root,
+            pack,
+            crate::response_keep::Offered::Answer(&answered),
+            &ia8_landing(),
+        )
+        .expect("kept")
+        .first;
+        let month = store::path::YearMonth::new(2019, 6).expect("a month");
+        let mut every = every_byte_under(&root.join(crate::response_keep::KEEP_ROOT));
+        every.extend(
+            crate::response_keep::body(&root, pack, month, &placed.receipt)
+                .expect("the body back")
+                .into_bytes(),
+        );
+        let text = String::from_utf8_lossy(&every).to_ascii_lowercase();
+        for secret in [
+            "ia8-token-secret",
+            "ia8-cookie-secret",
+            "ia8-header-mark",
+            "set-cookie",
+            "authorization",
+            "x-marker",
+        ] {
+            assert!(!text.contains(secret), "{secret} reached a pack");
+        }
+    }
+
+    /// IA-RK-02: the kept answer decodes to the rows the pull handed the
+    /// landing, and `window_async` still returns exactly those rows.
+    #[test]
+    fn the_kept_answer_decodes_to_the_rows_the_pull_landed() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{IA8_BODY}",
+            IA8_BODY.len()
+        );
+        let (got, _, spec) = answered_once(raw.clone());
+        let answered = got.expect("a decodable answer");
+        assert_eq!(answered.window.rows.len(), 2);
+        let root = ia8_scratch("decode");
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("a key");
+        let pack = crate::response_keep::Pack {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            key: &key,
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let placed = crate::response_keep::append(
+            &root,
+            pack,
+            crate::response_keep::Offered::Answer(&answered),
+            &ia8_landing(),
+        )
+        .expect("kept")
+        .first;
+        let month = store::path::YearMonth::new(2019, 6).expect("a month");
+        let kept = crate::response_keep::body(&root, pack, month, &placed.receipt).expect("kept");
+        let decoded = decode_body(&kept, &spec, crate::vendor::Listing::Equity).expect("decodes");
+        assert_eq!(decoded, answered.window, "the kept body is the landed rows");
+
+        // The wrapper every existing caller uses is unchanged.
+        let (url, _seen, _) = listener(Some(raw));
+        let plain = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..spec
+        };
+        let source = HttpSource::new(plain, Credential::token("x".to_owned())).expect("a client");
+        let request = BarRequest {
+            instrument_id: String::new(),
+            listing: crate::vendor::Listing::Equity,
+            window: ia8_landing().window,
+            granularity: crate::vendor::Granularity::Minute1,
+        };
+        let window = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(source.window_async(&request))
+            .expect("the same rows");
+        assert_eq!(window, answered.window);
+    }
+
+    /// RA-299: a 200 that is a web page hands back its head with the
+    /// refusal, and the refusal itself is the one `window_async` names.
+    #[test]
+    fn a_refused_200_hands_back_its_head() {
+        let page = "<html><body>please sign in</body></html>";
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        );
+        let (got, _, _) = answered_once(raw);
+        let unanswered = got.expect_err("a web page is not an answer");
+        let head = unanswered
+            .refused
+            .clone()
+            .expect("the head travels with it");
+        assert_eq!(
+            (head.status, &*head.head, head.len),
+            (200, page, page.len() as u64)
+        );
+        assert!(
+            matches!(unanswered.error, FetchError::BodyNotUnderstood { .. }),
+            "{:?}",
+            unanswered.error
+        );
+        let error: FetchError = unanswered.into();
+        assert!(matches!(error, FetchError::BodyNotUnderstood { .. }));
+    }
+
+    /// §8 Z7 at the request: an answer declaring more than the cap is
+    /// refused before its body is read, and no head travels (nothing to keep).
+    #[test]
+    fn an_oversized_answer_hands_back_no_head() {
+        let declared = MAX_RESPONSE_BYTES.saturating_add(1);
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\n{{"
+        );
+        let (got, _, _) = answered_once(raw);
+        let unanswered = got.expect_err("refused");
+        assert!(
+            unanswered.refused.is_none(),
+            "nothing was read, nothing is kept"
+        );
+        assert!(
+            matches!(unanswered.error, FetchError::TransportFailed { ref detail } if detail.contains("Refused before the body was read")),
+            "{:?}",
+            unanswered.error
+        );
     }
 }

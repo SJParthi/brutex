@@ -32,6 +32,9 @@ const ROUTES = [
 	'/disk.json',
 	// WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES /db SHOWS (DB-B74, WP-81).
 	'/scrub.json',
+	// THE READ POOLS' COUNTS the /ingest pools panel reads (R3-08): answered,
+	// busy, being written and cancelled, per pool and per route.
+	'/pools.json',
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',

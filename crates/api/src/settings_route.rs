@@ -233,6 +233,10 @@ fn default_of(key: Key) -> (Option<String>, String) {
             None,
             "not set: the server derives the masters folder from HOME".to_owned(),
         ),
+        Key::DiskFloor => (
+            Some(pull::disk_projection::DEFAULT_FLOOR.to_string()),
+            pull::disk_projection::DEFAULT_FLOOR_SOURCE.to_owned(),
+        ),
     }
 }
 
@@ -413,6 +417,10 @@ pub const fn reader_of(key: Key) -> Result<&'static str, &'static str> {
         Key::SourceMasters => Err(
             "nothing reads a saved value yet: the server reads BRUTEX_MASTERS, else HOME, once \
              at start; owner: the masters loader",
+        ),
+        Key::DiskFloor => Err(
+            "nothing reads a saved value yet: pull::gdfl_dropbox checks the floor its caller \
+             passes before every file; owner: the ingest chain (R4-11), R4-23, R4-29",
         ),
     }
 }
@@ -670,12 +678,22 @@ pub(super) async fn settings_json(
         history = n;
     }
     let root = site.store_root.clone();
-    match tokio::task::spawn_blocking(move || answer(&root, history)).await {
+    // IN THE NAMED LIST POOL (R3-08, NEW-04): bounded, counted, and a full
+    // pool is a 429 the server gives `Retry-After`, never an unnamed thread.
+    match crate::detail::run_list(move || answer(&root, history)).await {
         Ok(body) => (StatusCode::OK, json_headers(), body.to_string()),
+        Err(why @ crate::detail::RunError::Saturated) => {
+            let (status, body) = crate::detail::admission_refused(
+                "/settings.json",
+                crate::detail::MAX_LIST_CONCURRENT,
+                &why,
+            );
+            (status, json_headers(), body)
+        }
         Err(why) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             json_headers(),
-            serde_json::json!({"refusal": format!("the settings read did not finish: {why}")})
+            serde_json::json!({"refusal": format!("the settings read did not finish: {why:?}")})
                 .to_string(),
         ),
     }

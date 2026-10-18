@@ -965,11 +965,13 @@ fn a_stage_times_its_work_not_the_request_that_started_it() {
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or("", |(body, _)| body);
     let shared = body.find(concat!("speed::SharedStage::", "start(\"vendor scrub\")"));
-    let scrub = body.find(concat!("let report = ", "vendor(&root, &census);"));
-    let counted = body.find(concat!(
-        "in_scrub.",
-        "finish(crate::speed::Outcome::Answered)"
+    // R3-08: the scrub is `vendor_until` with the reader's flag, and it
+    // finishes its stage answered or, when its reader left, cancelled.
+    let scrub = body.find(concat!(
+        "let report = ",
+        "vendor_until(&root, &census, cancel);"
     ));
+    let counted = body.find(concat!("in_scrub.", "finish(outcome)"));
     assert!(
         matches!((shared, scrub, counted), (Some(a), Some(b), Some(c)) if a < b && b < c),
         "the scrub's stage is finished by the scrub itself: {body}"

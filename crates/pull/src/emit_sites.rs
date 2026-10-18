@@ -502,6 +502,306 @@ impl Says {
 }
 
 /// One production `telemetry::emit`, and the production call that reaches it.
+/// Every segment of one month's pack holds `MAX_RECEIPTS` receipts, so the
+/// append is refused `receipts_full` and says so at `Error` (IA-8, §8 Z11).
+fn drive_keep_receipts_full(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let day = crate::session::Day::new(2019, 6, 27).expect("a day");
+    let month = store::path::YearMonth::new(2019, 6).expect("a month");
+    let receipt = keep::Receipt {
+        asked_from: 0,
+        asked_to: 0,
+        first_stamp: 0,
+        last_stamp: 0,
+        body_offset: 0,
+        deflated_len: 0,
+        raw_len: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        run: 1,
+        status: 200,
+        rung: 3,
+        kept: keep::Kept::NotKept,
+        reason: keep::Reason::PackFull,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+        segment: 0,
+        digest: [0; 32],
+        key_hash: 0,
+        body_of: 0,
+        refusals_from: 0,
+        refusals: 0,
+    }
+    .encode();
+    let full: Vec<u8> = (0..keep::MAX_RECEIPTS).flat_map(|_| receipt).collect();
+    for segment in 0..keep::MAX_SEGMENTS {
+        fs::write(keep::names(&dir, month, segment).receipts, &full).expect("a full segment");
+    }
+    let answered = keep::Answered::of(crate::fetch::RawWindow::default(), "{}".to_owned(), 200);
+    let landing = keep::Landing {
+        window: crate::session::Window::new(day, day).expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let refused = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    );
+    assert!(
+        matches!(refused, Err(keep::KeepError::ReceiptsFull { .. })),
+        "{refused:?}"
+    );
+}
+
+/// Every segment of one month's pack holds `REFUSAL_ROOM` refused-row
+/// records, so a window with five refused rows is refused `refusals_full`
+/// and says so at `Error`, counting the five (IA-8, DB-G46, verify round 1).
+fn drive_keep_refusals_full(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let day = crate::session::Day::new(2019, 6, 27).expect("a day");
+    let month = store::path::YearMonth::new(2019, 6).expect("a month");
+    let room = u32::try_from(keep::REFUSAL_ROOM).expect("the room is a u32");
+    for segment in 0..keep::MAX_SEGMENTS {
+        let receipt = keep::Receipt {
+            asked_from: 0,
+            asked_to: 0,
+            first_stamp: 0,
+            last_stamp: 0,
+            body_offset: 0,
+            deflated_len: 0,
+            raw_len: 0,
+            rows_decoded: 2,
+            rows_landed: 0,
+            rows_refused: 2,
+            run: 1,
+            status: 200,
+            rung: 3,
+            kept: keep::Kept::NotKept,
+            reason: keep::Reason::PackFull,
+            rules_version: 1,
+            door: keep::Door::FromWindow,
+            segment,
+            digest: [0; 32],
+            key_hash: 0,
+            body_of: 0,
+            refusals_from: room - 2,
+            refusals: 2,
+        }
+        .encode();
+        fs::write(keep::names(&dir, month, segment).receipts, receipt)
+            .expect("a segment whose refused rows are at the room");
+    }
+    let rows: Vec<keep::RefusedRow> = (0..5)
+        .map(|i| keep::RefusedRow {
+            local_second: 1_561_600_000 + 60 * i,
+            cause: crate::fetch::RowCause::OffGrid,
+        })
+        .collect();
+    let answered = keep::Answered::of(crate::fetch::RawWindow::default(), "{}".to_owned(), 200);
+    let landing = keep::Landing {
+        window: crate::session::Window::new(day, day).expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 5,
+        rows_landed: 0,
+        rows_refused: 5,
+        refused: &rows,
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let refused = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    );
+    assert!(
+        matches!(refused, Err(keep::KeepError::RefusalsFull { rows: 5, .. })),
+        "{refused:?}"
+    );
+}
+
+/// `full`'s segment 0 of the `underlying` pack holds `MAX_RECEIPTS`
+/// receipts, and a window from `from` to `to` is kept: the month rolls to
+/// segment 1 and says so at `Error`, naming the month's new receipts file
+/// (IA-8, IA-RK-03, repair round 2).
+fn drive_keep_roll(
+    scratch: &Scratch,
+    underlying: &str,
+    full: (u16, u8),
+    from: (u16, u8, u8),
+    to: (u16, u8, u8),
+) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        underlying,
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let dir = keep::pack_dir(&scratch.root, pack).expect("a pack directory");
+    fs::create_dir_all(&dir).expect("the pack directory");
+    let month = store::path::YearMonth::new(full.0, full.1).expect("a month");
+    let receipt = keep::Receipt {
+        asked_from: 0,
+        asked_to: 0,
+        first_stamp: 0,
+        last_stamp: 0,
+        body_offset: 0,
+        deflated_len: 0,
+        raw_len: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        run: 1,
+        status: 200,
+        rung: 3,
+        kept: keep::Kept::NotKept,
+        reason: keep::Reason::PackFull,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+        segment: 0,
+        digest: [0; 32],
+        key_hash: 0,
+        body_of: 0,
+        refusals_from: 0,
+        refusals: 0,
+    }
+    .encode();
+    let full_segment: Vec<u8> = (0..keep::MAX_RECEIPTS).flat_map(|_| receipt).collect();
+    fs::write(keep::names(&dir, month, 0).receipts, &full_segment).expect("a full segment");
+    let answered = keep::Answered::of(
+        crate::fetch::RawWindow::default(),
+        format!("{{\"invented\":\"{underlying}\"}}"),
+        200,
+    );
+    let landing = keep::Landing {
+        window: crate::session::Window::new(
+            crate::session::Day::new(from.0, from.1, from.2).expect("a day"),
+            crate::session::Day::new(to.0, to.1, to.2).expect("a day"),
+        )
+        .expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let outcome = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered),
+        &landing,
+    )
+    .expect("kept");
+    let rolled = std::iter::once(&outcome.first)
+        .chain(&outcome.further)
+        .find(|placed| placed.month == month)
+        .expect("the full month took a receipt");
+    assert_eq!((rolled.segment, rolled.rolled), (1, true), "{outcome:?}");
+}
+
+/// A window over June and July killed after June's receipt (the test seam
+/// refuses the July pointer's write), then an append of an August window:
+/// the August append finishes the window first and says so at `Error`
+/// (IA-8, IA-RK-21, repair round 3).
+fn drive_keep_finished(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "EMITFINISHED",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let landing = |from: (u16, u8, u8), to: (u16, u8, u8)| keep::Landing {
+        window: crate::session::Window::new(
+            crate::session::Day::new(from.0, from.1, from.2).expect("a day"),
+            crate::session::Day::new(to.0, to.1, to.2).expect("a day"),
+        )
+        .expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let answered =
+        |text: &str| keep::Answered::of(crate::fetch::RawWindow::default(), text.to_owned(), 200);
+    keep::FAULT.with(|f| f.set(Some(3)));
+    keep::FAULT_SKIP.with(|s| s.set(1));
+    let killed = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered("{\"invented\":\"window\"}")),
+        &landing((2019, 6, 28), (2019, 7, 2)),
+    );
+    keep::FAULT.with(|f| f.set(None));
+    keep::FAULT_SKIP.with(|s| s.set(0));
+    assert!(killed.is_err(), "{killed:?}");
+    keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered("{\"invented\":\"august\"}")),
+        &landing((2019, 8, 5), (2019, 8, 9)),
+    )
+    .expect("kept");
+}
+
 struct Site {
     /// The `telemetry::emit(` this row proves, as `file:line`.
     at: &'static str,
@@ -522,6 +822,68 @@ struct Site {
 /// Every `telemetry::emit` under `crates/pull/src` except the one the module
 /// header names, one row each.
 static SITES: &[Site] = &[
+    Site {
+        at: "crates/pull/src/response_keep.rs — a pack whose last segment is full",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("reason", Says::Holds("receipts_full")),
+        drive: drive_keep_receipts_full,
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — no segment can take the refused rows",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("reason", Says::Holds("refusals_full")),
+        drive: drive_keep_refusals_full,
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — the refused rows left unkept, counted",
+        target: "pull.keep",
+        message: "response not kept",
+        says: ("refused_rows", Says::Signs(5)),
+        drive: drive_keep_refusals_full,
+    },
+    Site {
+        // Silent until repair round 2 of IA-8: only the first month's roll
+        // was looked at, so a later month rolled with no event at all.
+        at: "crates/pull/src/response_keep.rs — a later month of the window rolls",
+        target: "pull.keep",
+        message: "response pack segment full; keeping goes on in the next segment",
+        says: ("pack", Says::Holds("/EMITROLLLATER/1min/2019-07.1.rsr")),
+        drive: |scratch| {
+            drive_keep_roll(
+                scratch,
+                "EMITROLLLATER",
+                (2019, 7),
+                (2019, 6, 28),
+                (2019, 7, 2),
+            );
+        },
+    },
+    Site {
+        // Absent until repair round 3 of IA-8: a window killed between its
+        // first month's receipt and a later pointer was never named.
+        at: "crates/pull/src/response_keep.rs — an interrupted window over months is finished",
+        target: "pull.keep",
+        message: "an interrupted window over months was finished by the next append",
+        says: ("state", Says::Holds("completed")),
+        drive: drive_keep_finished,
+    },
+    Site {
+        at: "crates/pull/src/response_keep.rs — the window's first month rolls",
+        target: "pull.keep",
+        message: "response pack segment full; keeping goes on in the next segment",
+        says: ("pack", Says::Holds("/EMITROLLFIRST/1min/2019-06.1.rsr")),
+        drive: |scratch| {
+            drive_keep_roll(
+                scratch,
+                "EMITROLLFIRST",
+                (2019, 6),
+                (2019, 6, 27),
+                (2019, 6, 27),
+            );
+        },
+    },
     Site {
         at: "ingest.rs off-grid candle refusal",
         target: "pull.file",

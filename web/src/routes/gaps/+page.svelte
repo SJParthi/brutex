@@ -61,6 +61,7 @@
   import { onDestroy, untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
@@ -88,8 +89,9 @@
    *   unreadable_records: number | null,
    *   invalid_timestamps?: number,
    *   absent_file: string | null,
+   *   being_written?: string | null,
    *   evidence_error?: string | null,
-   *   summary?: 'kept' | 'built' | 'absent_file',
+   *   summary?: 'kept' | 'built' | 'absent_file' | 'being_written',
    *   summary_fallback?: string | null,
    *   bar_records_read?: number,
    *   unmeasured_minutes: number,
@@ -104,6 +106,7 @@
    *   unmeasured_minutes: number,
    *   months: number,
    *   months_absent: number,
+   *   months_being_written?: number,
    *   summaries?: { kept: number, built: number, bar_records_read: number },
    *   truncated: boolean,
    *   calendar: {
@@ -260,7 +263,11 @@
          asked for — ~44,640 per month against at most ~11,625 stored bars — and
          121 months is a real ask. Giving up on a read that is working would
          report a wedged server that is not one. */
-      const response = await ask(url, { cache: 'no-store', ms: 60_000, signal: ticket.signal });
+      /* A MONTH BEING WRITTEN IS ASKED AGAIN (R3-08 repair 2, NEW-21): when
+         writers are the audit's only faults the server answers the
+         being-written 503 rather than a month counted absent and its minutes
+         lost; past the tries its sentence, naming the holder, is the failure. */
+      const response = await askAgainWhileWritten(ask, url, { cache: 'no-store', ms: 60_000, signal: ticket.signal });
       if (!ticket.current() || asked !== questionKey) return;
       /* TEXT FIRST, THEN PARSE. Calling `.json()` on a refusal is how a 404
          becomes `SyntaxError: Unexpected token '<'` — measured, against a
@@ -424,7 +431,10 @@
       <div class="cell {whole ? 'p' : b.months_absent > 0 ? 'x' : ''}">
         <span class="n">{fmt(b.months_absent)}</span>
         <span class="k">months with no file</span>
-        <span class="s">of {fmt(b.months)} looked at</span>
+        <span class="s">
+          of {fmt(b.months)} looked at{#if (b.months_being_written ?? 0) > 0}; {fmt(b.months_being_written)} more
+            being written when asked, not read and not counted{/if}
+        </span>
       </div>
       <div class="cell i">
         <span class="n">{fmt(b.held)}</span>
@@ -543,6 +553,11 @@
             <td class="num mono">{m.lost_minutes ? fmt(m.lost_minutes) : '—'}</td>
             <td><span class="tag {v.kind}">{v.word}</span></td>
             <td class="where">
+              {#if m.being_written != null}
+                <span class="dim">
+                  Being written when asked, so not read and not counted: {m.being_written || 'a writer held the month.'}
+                </span>
+              {/if}
               {#if m.absent_file != null}
                 <span class="dim">{m.absent_file || 'The month file is unavailable.'}</span>
               {/if}
