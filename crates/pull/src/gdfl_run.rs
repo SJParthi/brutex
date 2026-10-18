@@ -62,6 +62,22 @@ use crate::session::Day;
 #[path = "gdfl_run_scope.rs"]
 pub mod scope;
 
+/// The lock files, the claim, the request sidecar and the probe (IA-2).
+#[path = "gdfl_run_locks.rs"]
+pub mod locks;
+
+/// The store-wide runs ledger (IA-2; D-4847, D-4880).
+#[path = "gdfl_run_ledger.rs"]
+pub mod ledger;
+
+/// The whole stop (IA-2; D-4827, D-4853, D-4893).
+#[path = "gdfl_run_stop.rs"]
+pub mod stop;
+
+/// The child's half of the two-phase start (IA-2; round 4, BL-A).
+#[path = "gdfl_run_start.rs"]
+pub mod start;
+
 /// The telemetry target of this module's events.
 pub const TARGET: &str = "gdfl.run";
 
@@ -792,6 +808,97 @@ pub enum RunRefusal {
         /// The name, as shown.
         name: String,
     },
+    /// Another process holds a lock this run needs (D-4803, D-4849), after
+    /// the probe retry: its claim names the holder.
+    RunBusy {
+        /// The lock.
+        lock: String,
+        /// The holder's claim, as read; empty while it is being written.
+        holder: String,
+    },
+    /// A lock file could not be opened or taken (a link, a directory, a
+    /// special file or a second name at its name, a store root that is gone).
+    RunLockRefused {
+        /// The lock.
+        lock: String,
+        /// Why.
+        why: String,
+    },
+    /// A lock file was removed or replaced after it was opened (RA-285).
+    LockReplaced {
+        /// The lock.
+        lock: String,
+    },
+    /// A lock was held past `LOCK_WAIT` (D-4906).
+    LockStalled {
+        /// The lock.
+        lock: String,
+        /// How long this run waited, in milliseconds.
+        waited_ms: u64,
+    },
+    /// The census layout changed between the first look and the locks.
+    CensusLayoutChanged {
+        /// What it is now, in words.
+        why: String,
+    },
+    /// The census layout could not be read.
+    CensusUnreadable {
+        /// The census's words.
+        why: String,
+    },
+    /// Two records at the runs ledger's tail fail their CRC (round 4, SF-12):
+    /// no run of either feed starts until the operator has looked.
+    RunsLedgerDamaged {
+        /// The offset of the first bad record.
+        offset: u64,
+    },
+    /// The clock cannot be right (RA-292, RA-326).
+    ClockImplausible {
+        /// Why, with the clock.
+        why: String,
+    },
+    /// The runs ledger could not be read or written.
+    RunsLedgerUnwritten {
+        /// Why.
+        why: String,
+    },
+    /// The claim or the request sidecar could not be written.
+    ClaimUnwritten {
+        /// Why.
+        why: String,
+    },
+}
+
+impl From<locks::LockFault> for RunRefusal {
+    fn from(fault: locks::LockFault) -> Self {
+        use locks::LockFault as F;
+        match fault {
+            F::Busy { lock, holder } => Self::RunBusy { lock, holder },
+            F::Refused { lock, why } => Self::RunLockRefused { lock, why },
+            F::Replaced { lock } => Self::LockReplaced { lock },
+            F::Stalled { lock, waited_ms } => Self::LockStalled { lock, waited_ms },
+            fault @ F::LayoutChanged { .. } => Self::CensusLayoutChanged {
+                why: fault.to_string(),
+            },
+            F::Layout { why } => Self::CensusUnreadable { why },
+        }
+    }
+}
+
+impl From<ledger::RunsLedgerFault> for RunRefusal {
+    fn from(fault: ledger::RunsLedgerFault) -> Self {
+        use ledger::RunsLedgerFault as F;
+        match fault {
+            F::Damaged { offset } => Self::RunsLedgerDamaged { offset },
+            fault @ F::ClockImplausible { .. } => Self::ClockImplausible {
+                why: fault.to_string(),
+            },
+            F::Lock(fault) => fault.into(),
+            fault @ (F::Io { .. } | F::Entry { .. }) => Self::RunsLedgerUnwritten {
+                why: fault.to_string(),
+            },
+        }
+    }
 }
 
 impl RunRefusal {
@@ -811,6 +918,16 @@ impl RunRefusal {
             Self::Scope { .. } => "scope_unreadable",
             Self::SourceUnopened { .. } => "source_unopened",
             Self::SymbolInvalid { .. } => "symbol_invalid",
+            Self::RunBusy { .. } => "run_busy",
+            Self::RunLockRefused { .. } => "run_lock_refused",
+            Self::LockReplaced { .. } => "lock_replaced",
+            Self::LockStalled { .. } => "lock_stalled",
+            Self::CensusLayoutChanged { .. } => "census_layout_changed",
+            Self::CensusUnreadable { .. } => "census_unreadable",
+            Self::RunsLedgerDamaged { .. } => "runs_ledger_damaged",
+            Self::ClockImplausible { .. } => "clock_implausible",
+            Self::RunsLedgerUnwritten { .. } => "runs_ledger_unwritten",
+            Self::ClaimUnwritten { .. } => "claim_unwritten",
         }
     }
 
@@ -832,7 +949,7 @@ impl RunRefusal {
 
     /// Every code, in the order of the enum: the table a reader names a code
     /// by, and the test that no two variants share one.
-    pub const CODES: [&'static str; 12] = [
+    pub const CODES: [&'static str; 22] = [
         "request_line_invalid",
         "stored_with_options",
         "range_backwards",
@@ -845,6 +962,16 @@ impl RunRefusal {
         "scope_unreadable",
         "source_unopened",
         "symbol_invalid",
+        "run_busy",
+        "run_lock_refused",
+        "lock_replaced",
+        "lock_stalled",
+        "census_layout_changed",
+        "census_unreadable",
+        "runs_ledger_damaged",
+        "clock_implausible",
+        "runs_ledger_unwritten",
+        "claim_unwritten",
     ];
 }
 
@@ -876,7 +1003,13 @@ impl core::fmt::Display for RunRefusal {
                 "this run's events could not be recorded ({why}), and a run that writes the \
                  store does not run unlogged (D-4903): nothing was read or written"
             ),
-            Self::Unstamped { why } | Self::Scope { why } => f.write_str(why),
+            Self::Unstamped { why }
+            | Self::Scope { why }
+            | Self::CensusLayoutChanged { why }
+            | Self::CensusUnreadable { why }
+            | Self::ClockImplausible { why }
+            | Self::RunsLedgerUnwritten { why }
+            | Self::ClaimUnwritten { why } => f.write_str(why),
             Self::SourceUnset { var } => write!(
                 f,
                 "{var} is not set; it names where the GDFL data is read from and has no default"
@@ -888,6 +1021,28 @@ impl core::fmt::Display for RunRefusal {
                  most {cap} bytes): refused before any lock, as the importer would refuse \
                  it after one",
                 cap = brutex_core::symbol::SYMBOL_CAPACITY
+            ),
+            Self::RunBusy { lock, holder } if holder.is_empty() => write!(
+                f,
+                "another process holds {lock}; its claim is being written"
+            ),
+            Self::RunBusy { lock, holder } => write!(f, "{lock} is held: {holder}"),
+            Self::RunLockRefused { lock, why } => write!(f, "{lock}: {why}"),
+            Self::LockReplaced { lock } => write!(
+                f,
+                "{lock} was removed or replaced after it was opened, so a lock on it excludes \
+                 no one; nothing was written (no command deletes a lock file)"
+            ),
+            Self::LockStalled { lock, waited_ms } => write!(
+                f,
+                "{lock} was held for {waited_ms} ms, past the {} s bound (D-4906)",
+                locks::LOCK_WAIT.as_secs()
+            ),
+            Self::RunsLedgerDamaged { offset } => write!(
+                f,
+                "{}: two records at its tail fail their CRC, the first at byte {offset}; no \
+                 run starts until the operator has looked",
+                ledger::LEDGER
             ),
         }
     }
@@ -1141,9 +1296,31 @@ pub fn execute(plan: &Plan, observer: Option<&dyn Observer>) -> Vec<(ImportKind,
     ends
 }
 
-/// One kind of `plan`, as [`execute`] runs it.
+/// One kind of `plan`, as [`execute`] runs it: with no claim, so its id is
+/// the journal's own and nothing can stop it (a test's bare run).
 #[must_use]
 pub fn execute_kind(plan: &Plan, kind: &KindPlan, observer: Option<&dyn Observer>) -> KindEnd {
+    execute_with(plan, kind, observer, None)
+}
+
+/// One kind of `plan` under its claim (IA-2): its id is the runs ledger's,
+/// and its stop file is asked before each file and each day.
+#[must_use]
+pub fn execute_claimed(
+    plan: &Plan,
+    kind: &KindPlan,
+    observer: Option<&dyn Observer>,
+    claimed: &Claimed,
+) -> KindEnd {
+    execute_with(plan, kind, observer, Some(claimed))
+}
+
+fn execute_with(
+    plan: &Plan,
+    kind: &KindPlan,
+    observer: Option<&dyn Observer>,
+    claimed: Option<&Claimed>,
+) -> KindEnd {
     let run = Run {
         kind: kind.kind,
         from: plan.request.from,
@@ -1157,6 +1334,8 @@ pub fn execute_kind(plan: &Plan, kind: &KindPlan, observer: Option<&dyn Observer
         workers: plan.request.workers,
         durability: plan.request.durability,
         observer,
+        run: claimed.map(|claimed| claimed.run),
+        stop: claimed.map(|claimed| &claimed.stop),
     };
     let scope = || Arc::clone(&kind.scope);
     let ended = match (kind.source, kind.kind) {
@@ -1183,6 +1362,280 @@ pub fn execute_kind(plan: &Plan, kind: &KindPlan, observer: Option<&dyn Observer
         Ok(report) => KindEnd::Report(Box::new(report)),
         Err(refusal) => KindEnd::Refused(refusal),
     }
+}
+
+// ═══ The claim (IA-2) ═══════════════════════════════════════════════════════
+
+/// A run of one kind that holds its locks, its id from the runs ledger, its
+/// claim and its stop (D-4803, D-4804, D-4847, D-4880).
+#[derive(Debug)]
+pub struct Claimed {
+    /// Its locks.
+    pub locks: locks::RunLocks,
+    /// Its id.
+    pub run: u64,
+    /// Its kind.
+    pub kind: ImportKind,
+    /// Its claim, as written.
+    pub claim: locks::Claim,
+    /// Its stop.
+    pub stop: stop::StopControl,
+}
+
+impl Claimed {
+    /// Releases (D-4804): the claim truncated and synced, the stop file and
+    /// the request sidecar removed, the flocks released. A lock file that
+    /// was replaced under the run is said at `error` first (RA-285).
+    ///
+    /// # Errors
+    ///
+    /// Each step that failed, by name.
+    pub fn release(self) -> Result<(), String> {
+        if !self.locks.still_held() {
+            let lock = self.locks.claim_name().to_owned();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error(locks::TARGET, "lock replaced under a live run")
+                    .with("run", self.run)
+                    .with("lock", lock.as_str()),
+            );
+        }
+        self.locks.release()
+    }
+}
+
+/// Who claims, beside what the plan says (design §5.3).
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimAsk<'a> {
+    /// `cli` or `api`.
+    pub by: By,
+    /// The process.
+    pub pid: u32,
+    /// The host's name as the process knows it, or empty.
+    pub host: &'a str,
+    /// The run it resumes, or 0.
+    pub resumes: u64,
+    /// The day it resumes on.
+    pub resume_day: Option<Day>,
+    /// Whether the api may resume it; always false for the cli (D-4804).
+    pub auto_resume: bool,
+    /// Whether the operator acknowledged a legacy open day.
+    pub legacy_ack: bool,
+    /// Whether this build carries no commit stamp (allowed to write only by
+    /// `BRUTEX_ALLOW_UNSTAMPED_WRITE`, D-4894).
+    pub unstamped: bool,
+    /// How many times a busy lock is tried again (`locks::PROBE_RETRY` for
+    /// a press).
+    pub retry: u32,
+}
+
+/// The claim of `kind` of `plan` for `ask`, its run id still 0: every field
+/// bounded, the filter by count and digest, `auto_resume` 0 for the cli.
+#[must_use]
+pub fn claim_template(plan: &Plan, kind: &KindPlan, ask: &ClaimAsk<'_>) -> locks::Claim {
+    let by = match ask.by {
+        By::Cli => "cli",
+        By::Api => "api",
+    };
+    locks::Claim {
+        run: 0,
+        mode: "import".to_owned(),
+        kind: kind.kind.as_str().to_owned(),
+        batch: String::new(),
+        source: match kind.source {
+            SourceId::CmZip => "cm_zip",
+            SourceId::NfoZips => "nfo_zips",
+            SourceId::TickStore => "tickstore",
+        }
+        .to_owned(),
+        from: plan.request.from.to_string(),
+        to: plan.request.to.to_string(),
+        filter: locks::filter_field(&kind.only),
+        verify: "off".to_owned(),
+        restate: false,
+        repair: "0".to_owned(),
+        workers: u32::try_from(plan.request.workers.get()).unwrap_or(u32::MAX),
+        auto_resume: ask.auto_resume && ask.by == By::Api,
+        pid: ask.pid,
+        host: locks::host_field(ask.host),
+        exe: locks::exe_field(),
+        by: by.to_owned(),
+        started: 0,
+        resumes: ask.resumes,
+        resume_day: ask
+            .resume_day
+            .map_or_else(|| "-".to_owned(), |day| day.to_string()),
+        legacy_ack: ask.legacy_ack,
+        unstamped: ask.unstamped,
+        request: "-".to_owned(),
+    }
+}
+
+/// Claims a run (design §5.3): takes its locks (`kind` of `template`, with
+/// `retry`), then under the runs ledger lock allocates its id, writes its
+/// request sidecar when `sidecar` holds the request line, and writes its
+/// claim; then releases the ledger lock. `now` is the clock, UNIX seconds.
+///
+/// # Errors
+///
+/// [`RunRefusal`] by name: a busy, refused, replaced or stalled lock, a
+/// changed layout, a damaged ledger, an implausible clock, a claim that could
+/// not be written. Nothing is held on any of them, and an id allocated before
+/// a claim write that failed stays unused in the ledger.
+pub fn claim_with(
+    store: &Path,
+    mut template: locks::Claim,
+    retry: u32,
+    sidecar: Option<&str>,
+    now: u64,
+) -> Result<Claimed, RunRefusal> {
+    let kind = ImportKind::parse(&template.kind).map_err(|_| RunRefusal::ClaimUnwritten {
+        why: format!("{} is not a kind a run claims", template.kind),
+    })?;
+    let taken = locks::RunLocks::take(store, &template.kind, retry)?;
+    let mut hold = ledger::LedgerHold::take(store, locks::LOCK_WAIT)?;
+    let entry = ledger::Entry {
+        id: 0,
+        mode: template.mode.clone(),
+        kind: template.kind.clone(),
+        by: template.by.clone(),
+        pid: template.pid,
+        started: now,
+        resumes: template.resumes,
+    };
+    let run = hold.allocate(&entry)?;
+    template.run = run;
+    // The claim says when the run started (the caller's measure, when it
+    // gave one); the ledger record says when its id was given.
+    if template.started == 0 {
+        template.started = now;
+    }
+    template.batch = format!("{}:{run}", template.kind);
+    let unwritten = |why: String| RunRefusal::ClaimUnwritten { why };
+    let sidecar_path = taken.sidecar_path();
+    template.request = if let Some(line) = sidecar {
+        locks::write_sidecar(&sidecar_path, line).map_err(unwritten)?
+    } else {
+        // A claim that names no sidecar removes one a dead run left
+        // (D-4907), so no reader pairs it with this claim.
+        match std::fs::remove_file(&sidecar_path) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => return Err(unwritten(format!("{}: {why}", sidecar_path.display()))),
+        }
+        "-".to_owned()
+    };
+    taken
+        .write_claim(&template)
+        .map_err(|why| unwritten(format!("{}: {why}", taken.claim_name())))?;
+    drop(hold);
+    let event = telemetry::Event::info(locks::TARGET, "run claimed")
+        .with("run", run)
+        .with("kind", template.kind.as_str())
+        .with("by", template.by.as_str())
+        .with("lock", taken.claim_name())
+        .with("filter", template.filter.as_str())
+        .with("resumes", template.resumes);
+    let _dropped_when_filtered = telemetry::emit(&event);
+    let stop = stop::StopControl::new(taken.stop_path(), run);
+    Ok(Claimed {
+        locks: taken,
+        run,
+        kind,
+        claim: template,
+        stop,
+    })
+}
+
+/// A census verb's hold on the GDFL store (IA-2, D-4803; IA-GR-14): the
+/// store lock exclusive, its id from the runs ledger and its claim
+/// (`mode=census-migrate` or `census-recount`, `kind=census`, `by=cli`), so a
+/// press it blocks is told who holds the store.
+#[derive(Debug)]
+pub struct CensusHold {
+    /// The store lock.
+    pub locks: locks::RunLocks,
+    /// The verb's run id.
+    pub run: u64,
+}
+
+impl CensusHold {
+    /// Releases the claim and the lock.
+    ///
+    /// # Errors
+    ///
+    /// Each step that failed, by name.
+    pub fn release(self) -> Result<(), String> {
+        self.locks.release()
+    }
+}
+
+/// Takes the GDFL store lock of `store` exclusive for the census verb
+/// `mode`, with the probe retry (a probe never makes it refuse, round 4,
+/// N-4), allocates its id and writes its claim.
+///
+/// # Errors
+///
+/// [`RunRefusal`] by name: `run_busy` naming the run that holds the store,
+/// and every other refusal [`claim_with`] can give.
+pub fn claim_census(store: &Path, mode: &str) -> Result<CensusHold, RunRefusal> {
+    let taken = locks::RunLocks::take_store(store, locks::PROBE_RETRY)?;
+    let now = now_unix_s();
+    let mut hold = ledger::LedgerHold::take(store, locks::LOCK_WAIT)?;
+    let pid = std::process::id();
+    let run = hold.allocate(&ledger::Entry {
+        id: 0,
+        mode: mode.to_owned(),
+        kind: "census".to_owned(),
+        by: "cli".to_owned(),
+        pid,
+        started: now,
+        resumes: 0,
+    })?;
+    let claim = locks::Claim {
+        run,
+        mode: mode.to_owned(),
+        kind: "census".to_owned(),
+        batch: format!("census:{run}"),
+        source: "-".to_owned(),
+        from: "-".to_owned(),
+        to: "-".to_owned(),
+        filter: "*".to_owned(),
+        verify: "off".to_owned(),
+        restate: false,
+        repair: "0".to_owned(),
+        workers: 1,
+        auto_resume: false,
+        pid,
+        host: "-".to_owned(),
+        exe: locks::exe_field(),
+        by: "cli".to_owned(),
+        started: now,
+        resumes: 0,
+        resume_day: "-".to_owned(),
+        legacy_ack: false,
+        unstamped: false,
+        request: "-".to_owned(),
+    };
+    taken
+        .write_claim(&claim)
+        .map_err(|why| RunRefusal::ClaimUnwritten {
+            why: format!("{}: {why}", taken.claim_name()),
+        })?;
+    drop(hold);
+    let event = telemetry::Event::info(locks::TARGET, "run claimed")
+        .with("run", run)
+        .with("kind", "census")
+        .with("mode", mode)
+        .with("by", "cli")
+        .with("lock", taken.claim_name());
+    let _dropped_when_filtered = telemetry::emit(&event);
+    Ok(CensusHold { locks: taken, run })
+}
+
+/// The UNIX second now, as a claim and the ledger take it.
+#[must_use]
+pub fn clock_now() -> u64 {
+    now_unix_s()
 }
 
 // ═══ Where a run logs ═══════════════════════════════════════════════════════
@@ -2089,6 +2542,10 @@ impl Observer for ProgressFile {
                         RunState::Census
                     }
                     ImportRefusal::Durability { .. } => RunState::Durability,
+                    // A stop (IA-2, D-4853): its own state, never "refused";
+                    // a stop by the server's shutdown is `shutdown`.
+                    ImportRefusal::Stopped { by, .. } if by == "shutdown" => RunState::Shutdown,
+                    ImportRefusal::Stopped { .. } => RunState::Stopped,
                     _ => RunState::Refused,
                 }
             }
@@ -2101,3 +2558,7 @@ impl Observer for ProgressFile {
 #[cfg(test)]
 #[path = "gdfl_run_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gdfl_run_ia2_tests.rs"]
+mod ia2_tests;

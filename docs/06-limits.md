@@ -19610,3 +19610,55 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
 | L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
+
+## Locks, the runs ledger, claims and the stop (IA-2; D-4803, D-4847, D-4849, D-4853, D-4905, D-4906)
+
+What a run adds per file and per day for its locks, its id and its stop is
+O(1): one atomic load and one `metadata` of the stop file before each file
+it takes; the claim, the sidecar and the ledger record are each written once
+a run. **Measured** 18 Oct 2026 by `pull::gdfl_run::ia2_tests::ia2_timings`
+and `pull::gdfl_import::ia2_tests::journal_append_cost_is_flat_with_a_second_writer`
+(`cargo test -p pull --lib -- --ignored --nocapture`, dev profile at
+opt-level 3, a machine shared with other agents' builds), twice: on the
+internal APFS disk (the default temporary folder) and on WD_BLACK (the real
+store's drive, `TMPDIR` set to a folder on it). p50 / p99 / max:
+
+| Operation | n | internal disk | WD_BLACK |
+|---|---|---|---|
+| C-GR-07 stop check, no stop file | 10,000 | 0.83 / 1.54 / 45.1 µs | 0.46 / 0.63 / 69.3 µs |
+| C-GR-07 stop check, another run's stop file | 10,000 | 11.8 / 24.4 / 126.7 µs | 10.6 / 14.3 / 97.0 µs |
+| C-GR-08 run id allocation, ledger growing to 2,001 records | 2,000 | 9.03 / 25.0 / 486.3 ms | 2.26 / 7.63 / 26.3 ms |
+| C-GR-08 run id allocation over a torn tail | 200 | 9.54 / 18.1 / 22.7 ms | 2.98 / 6.83 / 7.64 ms |
+| C-GR-04 journal lock take and release, uncontended | 2,000 | 23.5 / 59.5 / 272.9 µs | 24.0 / 46.4 / 161.8 µs |
+| C-GR-01 one kind's claim (locks, id, claim, sidecar none) and release | 500 | 26.1 / 61.4 / 449.7 ms | 5.81 / 15.7 / 22.1 ms |
+| `lock_state` probe, one held lock | 2,000 | 26.1 / 59.1 / 305 µs | 16.4 / 39.0 / 178 µs |
+| FM-094 one journal append with a second writer between appends, 1,000-line journal | 300 | 12.0 / 18.0 / 26.9 ms | 2.50 / 8.00 / 11.9 ms |
+| the same, 20,000-line journal | 300 | 11.9 / 23.7 / 47.0 ms | 2.59 / 8.27 / 26.1 ms |
+
+The allocation and the append are one or two `F_FULLFSYNC`s; the internal
+disk's flush is the slower one here. The append is flat in the journal's
+length (1,000 against 20,000 lines: p50 equal within 0.1 ms on each disk),
+which is FM-094's fix.
+
+**Press-to-stopped on real data (RA-071, partly).** The release `cli`, under
+`rolock.sb`, importing real NIFTY options days of September 2020 from the
+tick store into a scratch store on WD_BLACK with 8 workers, and
+`cli gdfl-stop options` from a second process as soon as the day's `begin`
+line appeared: from the stop verb's start to the run's exit, n = 7, sorted
+215, 218, 224, 263, 274, 276, 472 ms (p50 263 ms, max 472 ms); each day
+closed `incomplete stage=run reason=stopped` after 74 to 177 of its about
+460 files. NOT MEASURED: 1 and 12 workers, the largest options day of the
+store, a stop during the day's flush or a merge; C-GR-01 for two and three
+kinds and with a held ledger lock; start-to-claimed on a cold drive
+(RA-069). The stop is asked before each file, so the wait is the slowest
+file in hand plus the day's flush and census publish: an argument there, not
+a figure.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-16 | Stop-file check | one `metadata` per file boundary and per day, and the stop line read (≤ 1 KiB) only when a file is at the name | ≤ 26,820 calls per options day; measured above (C-GR-07) | IA-2 |
+| L-IA-23 | Runs-ledger seeding | one pass over the journal for its largest `run` id, when the ledger is unborn | O(journal bytes), once per store; not timed on its own: it reads the journal once, as L-IA-2's load does (36.0 ms p50 for a copy of the real 14 MB journal), an extrapolation | IA-2 |
+| L-IA-25 | Probe retry | a press waits for a busy lock a probe may hold | ≤ 10 tries 10 ms apart, ≤ 100 ms, then `run_busy` naming the holder | IA-2 |
+| L-IA-53 | Journal append under the journal lock (D-4905) | the lines another writer appended since this run's last are read and counted under the lock, so the ordinal is the run's own | O(bytes appended by other writers since), bounded by the other kinds' lines of the same seconds; a journal shorter than known is read whole once and said at `error`; flat in the journal's length (FM-094 above) | IA-2 |
+| L-IA-54 | Waiting for the journal or runs-ledger lock (D-4906) | a holder stuck on a stalling drive holds it | ≤ `LOCK_WAIT` = 30 s in 10 ms tries, then `lock_stalled{lock}` with an error event; a journal append so refused is a journal refusal, a ledger allocation refuses the start | IA-2 |
+| L-IA-55 | Claim and sidecar sizes | the request names up to 256 filter names and a repair reason | the claim ≤ 1,024 bytes by construction (`a_claim_is_bounded_whatever_the_filter`), the sidecar ≤ 8 KiB + 32 | IA-2 |

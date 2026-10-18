@@ -77,6 +77,9 @@ pub mod gdfl_import_command;
 /// `cli gdfl-rekey`: stored GDFL option keys the decoder files elsewhere or
 /// refuses, moved as new files or retired by name (D-3331, D-3316; WP-12c).
 mod gdfl_rekey;
+/// `cli gdfl-stop`: a live GDFL run asked to stop at its next file boundary
+/// (IA-2, D-4827).
+mod gdfl_stop_command;
 /// `cli scrub-blocks`: every block of every census month read whole and checked,
 /// with a durable ledger of what would not verify (DB-B74, WP-81).
 mod scrub_blocks;
@@ -554,6 +557,11 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    options); writes imports/gdfl.dayflags only,
                                    and with --lineage (options) the lineage
                                    and lot ledgers (D-3331, D-3343).
+       cli gdfl-stop    (KIND | --run ID)
+                                   ask the live GDFL run of KIND (indices,
+                                   stocks, options), or run ID, to stop at its
+                                   next file boundary: one stop file beside its
+                                   lock, written before this answers (D-4827).
        cli gdfl-rekey   (--plan | --apply) [--underlying SYMBOL[,SYMBOL...]]
                                    judge every stored gdfl option key by the
                                    current decoder (settled expiry, strike
@@ -2790,6 +2798,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
+        ["gdfl-stop", arguments @ ..] if !arguments.is_empty() => {
+            gdfl_stop_command::command(arguments, out)
+        }
         ["gdfl-rekey", arguments @ ..] if !arguments.is_empty() => {
             gdfl_rekey::command(arguments, out)
         }
@@ -2858,7 +2869,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 52] = [
+const COMMANDS: [&str; 53] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2884,6 +2895,7 @@ const COMMANDS: [&str; 52] = [
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
+    "gdfl-stop",
     "launch-agent",
     "ledger-all",
     "ledger-v6",

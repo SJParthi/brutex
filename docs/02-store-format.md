@@ -4702,3 +4702,98 @@ window's days by its seconds; an ETA is always an extrapolation.
 
 **Proof.** `pull::gdfl_run::tests::the_progress_record_is_v1_byte_for_byte`
 asserts every offset above.
+
+### §37.2 — The lock files and the claim (IA-2; D-4803, D-4804, D-4849)
+
+**Paths.** `<store>/imports/gdfl.lock` (the store lock) on every census;
+`<store>/imports/gdfl.<kind>.lock` (`indices`, `stocks`, `options`) on a
+version-4 census only. A run holds the store lock **exclusive** on version 3
+and **shared** on version 4, then (version 4) its own kind lock exclusive; a
+census verb (`census-migrate`, `--seal`, `census-recount`) holds the store
+lock exclusive. The claim is in the kind lock on version 4 and in the store
+lock on version 3 and for a census verb (`pull::gdfl_run::locks::claim_lock`).
+A lock file is a regular file with exactly one name, opened
+`O_NOFOLLOW | O_NONBLOCK`; after its flock is taken its device and inode are
+compared with the name's (`lock_replaced`, RA-285).
+
+**The claim.** One ASCII line ending in a newline, at most 1,024 bytes,
+written at offset 0 after a truncate and synced (`sync_all`), under the runs
+ledger lock right after the run's id is allocated. Every field is present,
+once, in this order (`pull::gdfl_run::locks::CLAIM_FIELDS`); a reader refuses
+any other shape as `Unreadable`, never guesses, and a claim that does not
+read is never resumed automatically (D-4907):
+
+```
+claim run=<id> mode=<import|verify|deferred|completeness|census-migrate|census-recount|dayflags> kind=<indices|stocks|options|census> batch=<kind:id,...> source=<cm_zip|nfo_zips|tickstore|dayzips|-> from=<yyyy-mm-dd|-> to=<yyyy-mm-dd|-> filter=<*|n:16hex> verify=<inline|off> restate=<0|1> repair=<0|16hex> workers=<n> auto_resume=<0|1> pid=<n> host=<enc|-> exe=<dev:ino:mtime:len|-> by=<cli|api> started=<unix_s> resumes=<id|0> resume_day=<yyyy-mm-dd|-> legacy_ack=<0|1> unstamped=<0|1> request=<16hex|->
+```
+
+`filter=` is `*` or the count of names and the first 16 lower-case hex digits
+of the BLAKE3 of the sorted, comma-joined names. `host=` is the host's name
+with every byte outside ASCII letters, digits, `.` and `-` written `%XX`,
+cut on a whole escape at 64 bytes (RA-307); `-` when unknown. `auto_resume=`
+is always `0` when `by=cli` (the design's D-4848, IA-10a's). `request=` names the request sidecar's
+digest, or `-` when there is none. A released lock file is empty (0 bytes);
+a lock file holding a claim whose flock is free is an interrupted run.
+
+### §37.3 — The request sidecar (IA-2; D-4907)
+
+**Path.** Beside the claim's lock: `imports/gdfl.request` (v3) or
+`imports/gdfl.<kind>.request` (v4). Written when the request names a filter or
+a snapshot name: the request line (`pull::gdfl_run::Request::to_line`, at most
+8 KiB, D-4902), a space, `crc=` and 8 lower-case hex digits of the CRC-32C of
+the line, and a newline. Born at a staging name (`.request.tmp`, `O_EXCL`,
+`store::staging`), synced, renamed into place, its directory synced: never
+torn. The claim's `request=` is the first 16 hex digits of the BLAKE3 of the
+whole file. A reader that finds no file, no newline, a CRC that fails or
+another digest says `Stale` (`request_sidecar_stale`). Removed at release; a
+run whose claim says `request=-` removes one a dead run left.
+
+### §37.4 — The stop file (IA-2; D-4827, D-4853, D-4893)
+
+**Path.** Beside the claim's lock: `imports/gdfl.stop` (v3) or
+`imports/gdfl.<kind>.stop` (v4). One line,
+`stop run=<id> requested=<unix_s> by=<api|cli|operator|shutdown>` and a
+newline, born at a staging name (`.stop.tmp`), synced, renamed and its
+directory synced **before** the asker is answered. A second stop of the same
+run leaves the first file as it is (the first asker is kept). A run reads it
+(one `metadata`, and the line only when it exists) before each file it takes
+and before each day; a file naming another run is not its stop. Removed at
+release, and by the next run that takes the lock when it names no live claim.
+
+### §37.5 — The runs ledger (IA-2; D-4847, D-4880)
+
+**Path.** `<store>/audit/runs.ledger`, its lock `<store>/audit/runs.ledger.lock`.
+Append-only, fixed 128-byte ASCII records, one per run of either feed and any
+mode; no header.
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 114 | `<id> <mode> <kind> <by> <pid> <started>`, then ` resumes=<id>` when the run resumes one, padded with spaces. `mode` is one of `seed`, `import`, `verify`, `deferred`, `completeness`, `census-migrate`, `census-recount`, `dayflags`, `pull`, `pull-spot`, `pull-fno`, `pull-repair`, `zerodha-repair`, `zerodha-verify`, `verify-merge`; `kind` one of `indices`, `stocks`, `options`, `census`, `zerodha`, `-`; `by` one of `cli`, `api`, `-` |
+| 114 | 12 | `crc=` and 8 lower-case hex digits: CRC-32C of bytes 0..114 |
+| 126 | 1 | a space |
+| 127 | 1 | a newline |
+
+**Allocation.** Under the lock (taken within 30 s, else `lock_stalled`): the
+last whole record is read at ⌊len ÷ 128⌋ × 128 − 128; `id = max(now,
+last + 1)`; the new record is written at ⌊len ÷ 128⌋ × 128, over any torn
+tail, and synced. A last whole record whose CRC fails is written over (its id
+was never used: a claim is written only after the sync), its predecessor read
+for `last`; a file shorter than one record, or whose only record fails, is
+seeded again at 0 with `<n> seed - - 0 <now>`, `n` the largest `run` id of the
+GDFL journal; two bad records at the tail refuse `runs_ledger_damaged` with an
+error event and an alert keyed `runs_ledger_damaged:<offset>`, and nothing is
+written. A clock before the calendar's first day, more than 366 days past the
+last day its sources cover, or more than a day behind the newest record's
+start is refused `clock_implausible`.
+
+**Proof.** `pull::gdfl_run::ia2_tests::run_ids_never_repeat_whatever_the_clock_does`,
+`one_runs_ledger_serves_both_feeds_and_skips_a_torn_tail`,
+`a_garbage_runs_ledger_tail_is_named_never_read_as_an_id`,
+`an_implausible_clock_is_refused_and_lifts_no_id`,
+`a_claim_is_bounded_whatever_the_filter`,
+`a_stale_or_garbage_claim_or_sidecar_is_named_and_never_resumed`.
+
+**§41's holder record is retired for new runs.** Since IA-2 a cli run's run
+lock holds the claim above, not §41's `gdfl-lock v1` record; a lock file
+holding a v1 record an older build left is still read and named as a dead
+holder's (`pid=` and `run_started=`).

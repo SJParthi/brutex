@@ -18,6 +18,14 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
     store_root.join("imports").join("gdfl.journal")
 }
 
+/// The journal append lock beside the journal at `journal` (D-4803): every
+/// append to `imports/gdfl.journal` and to the ledgers beside it (the day,
+/// lineage, lots and scope ledgers) takes it, within `LOCK_WAIT` (D-4906).
+#[must_use]
+pub fn journal_lock_path(journal: &Path) -> PathBuf {
+    journal.with_file_name("gdfl.journal.lock")
+}
+
 /// The journal size past which a whole load says so out loud
 /// (`docs/06-limits.md` L-IA-2, RA-091): 64 MiB, about 4.8 times the
 /// real journal of 14 Oct 2026 (14,027,805 bytes in 23,270 lines). A run
@@ -264,16 +272,25 @@ pub(super) fn torn_fragment(fragment: &str) -> bool {
         }
         break;
     }
-    !rest.is_empty()
+    // A POWER CUT CAN LEAVE A FILE'S UNSYNCED EXTENSION AS ZEROS (FM-128;
+    // UNVERIFIED for APFS, which this rule does not need to know): a tail of
+    // NUL bytes, alone or after the start of a line, is a torn append, closed
+    // with the mark and said like any other ("closing a torn journal line"),
+    // never read as data. A NUL anywhere else is still foreign.
+    let unzeroed = rest.trim_end_matches('\0');
+    if unzeroed.len() < rest.len() && unzeroed.is_empty() {
+        return true;
+    }
+    !unzeroed.is_empty()
         && VERBS
             .into_iter()
-            .any(|verb| verb.starts_with(rest) || rest.starts_with(verb))
+            .any(|verb| verb.starts_with(unzeroed) || unzeroed.starts_with(verb))
 }
 
 /// Every verb the journal holds, each with the space after it: `refused`,
 /// `run` and `recounted` since D-3317 (`recounted` is written by `cli
 /// census-recount`, D-3316).
-const VERBS: [&str; 6] = [
+pub(super) const VERBS: [&str; 6] = [
     "begin ",
     "done ",
     "incomplete ",
@@ -281,6 +298,11 @@ const VERBS: [&str; 6] = [
     "run ",
     "recounted ",
 ];
+
+/// Every verb the journal holds, as a line's first field: the ONE verb table
+/// (IA-2, design §5.4), which `census_store`'s journal reader reads by, so no
+/// second copy can drift. [`VERBS`] is the same words with their space.
+pub const VERB_WORDS: [&str; 6] = ["begin", "done", "incomplete", "refused", "run", "recounted"];
 
 /// The journal, read once per run: the keys done under [`BAR_DEFINITION`]
 /// (and which of them closed with refusals), the keys begun and not
@@ -1075,7 +1097,7 @@ impl Journal {
                     let unrun: Vec<&str> = fields
                         .iter()
                         .copied()
-                        .filter(|field| !field.starts_with("run="))
+                        .filter(|field| !field.starts_with("run=") && !field.starts_with("at="))
                         .collect();
                     self.refused_close.insert(key.clone(), unrun.join(" "));
                 } else {
@@ -1147,6 +1169,19 @@ impl Journal {
         };
         // The journal always sits in `imports/` under the store root.
         std::fs::create_dir_all(self.path.with_file_name("")).map_err(refused)?;
+        // EVERY APPEND UNDER THE JOURNAL LOCK (IA-2; D-4803, D-4905, D-4906):
+        // two kinds' runs, a recount and the day ledger append to one
+        // directory, so the count of the lines another process appended, the
+        // torn-tail check and this run's write are one step no other writer
+        // can enter, and the ordinal [`Journal::append`] answers is the line
+        // this run wrote. Taken within `LOCK_WAIT`, never for ever.
+        let _held = crate::gdfl_run::locks::take_path_within(
+            &journal_lock_path(&self.path),
+            crate::gdfl_run::locks::LOCK_WAIT,
+        )
+        .map_err(|fault| ImportRefusal::Journal {
+            why: format!("{}: {fault}", self.path.display()),
+        })?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -1155,9 +1190,29 @@ impl Journal {
             .map_err(refused)?;
         let mut text = String::new();
         let at = file.metadata().map_err(refused)?.len();
-        if at != self.known.get().0 {
-            // Another process appended since this run last wrote: its lines
-            // are counted once, so the next line's number is the file's.
+        let (known_bytes, known_lines) = self.known.get();
+        if at > known_bytes {
+            // Another process appended since this run last wrote: only ITS
+            // bytes are read and counted (O(bytes appended since), FM-094),
+            // so the next line's number is the file's.
+            let mut bytes = Vec::with_capacity(usize::try_from(at - known_bytes).unwrap_or(0));
+            file.seek(std::io::SeekFrom::Start(known_bytes))
+                .map_err(refused)?;
+            file.read_to_end(&mut bytes).map_err(refused)?;
+            self.known.set((
+                known_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                known_lines.saturating_add(newlines(&bytes)),
+            ));
+        } else if at < known_bytes {
+            // Shorter than this run last knew it: not an append. Counted
+            // again whole, and said, never trusted.
+            let shown = self.path.display().to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error(TARGET, "journal shorter than this run last knew it")
+                    .with("journal", shown.as_str())
+                    .with("known", known_bytes)
+                    .with("found", at),
+            );
             let mut bytes = Vec::new();
             file.seek(std::io::SeekFrom::Start(0)).map_err(refused)?;
             file.read_to_end(&mut bytes).map_err(refused)?;
@@ -1224,6 +1279,14 @@ pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(refused)?;
     }
+    // Under the journal append lock, as every journal line is (IA-2, round
+    // 3 SF-10; D-4803, D-4906): two runs of two kinds append the day ledger
+    // and the lineage ledger at once on a v4 store.
+    let _held = crate::gdfl_run::locks::take_path_within(
+        &journal_lock_path(path),
+        crate::gdfl_run::locks::LOCK_WAIT,
+    )
+    .map_err(|fault| format!("{}: {fault}", path.display()))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)

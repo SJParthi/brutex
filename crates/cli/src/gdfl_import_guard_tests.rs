@@ -36,6 +36,8 @@ fn holder(kind: ImportKind) -> Holder {
         run_started: 1_700_000_000,
         kind,
         verb: verb_of(&["options", "zip", "2024-04-01", "2024-04-01"]),
+        claim: None,
+        sidecar: None,
     }
 }
 
@@ -235,7 +237,7 @@ fn a_killed_holders_lock_is_freed_and_its_death_named() {
     let taken = RunLock::take(&store, &holder(ImportKind::Options)).unwrap();
     let dead = taken.dead.clone().expect("the record stayed");
     assert!(
-        dead.contains("pid=4242") && dead.starts_with(HOLDER_V1),
+        dead.contains(" pid=4242 ") && dead.starts_with("claim run="),
         "{dead}"
     );
     taken.release().unwrap();
@@ -250,8 +252,11 @@ fn a_dead_holders_lock_is_taken_and_its_death_named() {
     let root = scratch("door-dead");
     let store = root.join("store");
     fs::create_dir_all(store.join("imports")).unwrap();
-    let left = holder(ImportKind::Options).record(GdflLayout::V3, 1);
-    fs::write(store.join("imports/gdfl.lock"), &left).unwrap();
+    // A holder record of the format an older build (AF-01) left: still
+    // read and named, its `run_started=` the holder's start.
+    let left = "gdfl-lock v1 pid=4242 run_started=1700000000 lock_taken_us=1 kind=options \
+                layout=v3 verb=gdfl-import\n";
+    fs::write(store.join("imports/gdfl.lock"), left).unwrap();
     let env = env_of(&[(NFO_ARCHIVES_VAR, years(&root))]);
     let (_, out) = run(
         &["options", "zip", "2024-04-06", "2024-04-07"],
@@ -1011,6 +1016,8 @@ fn a_vanished_source_root_is_named_source_lost() {
         origin: &origin,
         only: &[],
         args: &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        claim: None,
+        sidecar: None,
     })
     .unwrap();
     fs::remove_dir_all(&ts).unwrap();
@@ -1060,6 +1067,8 @@ fn a_source_root_that_vanishes_after_files_were_read_is_named_source_lost() {
             origin: &origin,
             only: &[],
             args: &["indices", "tickstore", "2019-01-01", "2019-01-04"],
+            claim: None,
+            sidecar: None,
         })
         .unwrap()
     };
@@ -1132,6 +1141,8 @@ fn every_day_already_refused_identically_still_fails_when_the_root_is_gone() {
         origin: &origin,
         only: &[],
         args: &args,
+        claim: None,
+        sidecar: None,
     })
     .unwrap();
     fs::remove_dir_all(&ts).unwrap();
@@ -1760,6 +1771,8 @@ fn a_full_disk_on_the_ledger_append_is_failed_and_named() {
         origin: &origin,
         only: &[],
         args: &[],
+        claim: None,
+        sidecar: None,
     })
     .unwrap();
     // The ledger's name taken by a directory: the append is refused.

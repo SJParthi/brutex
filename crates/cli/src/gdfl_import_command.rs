@@ -83,8 +83,8 @@ use std::sync::Mutex;
 
 use pull::gdfl_import::{Durability, ImportKind, ImportRefusal, Observer, Report, Workers};
 use pull::gdfl_run::{
-    self, KindEnd, KindPlan, Kinds, LogState, Plan, Process, ProgressFile, Request, RunRefusal,
-    SourceCache, SourceWord,
+    self, By, ClaimAsk, KindEnd, KindPlan, Kinds, LogState, Plan, Process, ProgressFile, Request,
+    RunRefusal, SourceCache, SourceWord,
 };
 use pull::session::Day;
 
@@ -436,7 +436,28 @@ pub(crate) fn command_in(
     };
     // THE DOOR (AF-01, D-4977; FM-060, FM-064, FM-086, FM-290): refused
     // here, before the importer writes a journal line, or held until the
-    // run returns.
+    // run returns. Its lock is the authority's claim (IA-2, D-4804): the
+    // locks by census layout, the id from the runs ledger, a claim that
+    // says `by=cli auto_resume=0` (D-4804), and the request sidecar when
+    // the run names a filter or a snapshot (D-4907).
+    let claim = gdfl_run::claim_template(
+        &plan,
+        kind,
+        &ClaimAsk {
+            by: By::Cli,
+            pid: std::process::id(),
+            host: "",
+            resumes: 0,
+            resume_day: None,
+            auto_resume: false,
+            legacy_ack: false,
+            unstamped: crate::commit_stamp().is_none(),
+            retry: pull::gdfl_run::locks::PROBE_RETRY,
+        },
+    );
+    let sidecar = (!plan.request.only.is_empty() || plan.request.snapshot.is_some())
+        .then(|| plan.request.to_line().ok())
+        .flatten();
     let door = match guard::Door::open(guard::Opening {
         kind: kind.kind,
         var: kind.source.var(),
@@ -444,6 +465,8 @@ pub(crate) fn command_in(
         origin: &kind.origin,
         only: &kind.only,
         args,
+        claim: Some(&claim),
+        sidecar: sidecar.as_deref(),
     }) {
         Ok(door) => door,
         Err(why) => {
@@ -460,7 +483,12 @@ pub(crate) fn command_in(
         progress: progress_of(&store, &plan, kind),
         run: Mutex::new(0),
     };
-    let end = gdfl_run::execute_kind(&plan, kind, Some(&told));
+    // Run under the claim: its id is the runs ledger's, and `cli gdfl-stop`
+    // stops it at the next file boundary (IA-2, D-4827).
+    let end = match door.claimed() {
+        Some(claimed) => gdfl_run::execute_claimed(&plan, kind, Some(&told), claimed),
+        None => gdfl_run::execute_kind(&plan, kind, Some(&told)),
+    };
     receipt((kind, source, &store, &plan.request), end, door, out)
 }
 

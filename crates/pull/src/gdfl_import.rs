@@ -377,7 +377,7 @@ use crate::session::{Day, IST_OFFSET_SECS};
 use crate::vendor::Granularity;
 use crate::vendor::{Listing, PriceScale, TimestampEncoding};
 
-pub use self::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, nfo_cause};
+pub use self::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, import_cause, nfo_cause};
 pub use self::census::CensusRoom;
 use self::census::StoreCensus;
 #[cfg(test)]
@@ -398,7 +398,8 @@ pub(crate) use self::journal::append_lines;
 #[cfg(test)]
 pub(crate) use self::journal::load_warning;
 pub use self::journal::{
-    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, definition_is_current, done_whole_days, journal_path,
+    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, VERB_WORDS, definition_is_current, done_whole_days,
+    journal_lock_path, journal_path,
 };
 #[cfg(test)]
 use self::journal::{closing_line, count_of, torn_fragment};
@@ -902,6 +903,14 @@ pub struct RunOptions<'a> {
     /// day. `None` tells no one. Called on the coordinating thread only,
     /// never from a worker, and never changes a byte the run leaves.
     pub observer: Option<&'a dyn Observer>,
+    /// The run's id from the store-wide runs ledger (IA-2, D-4847, D-4880),
+    /// allocated under the run's locks by `crate::gdfl_run`. `None` only for
+    /// a caller that holds no ledger (a test's bare reader): the id is then
+    /// the run's start raised past every id the journal holds, as before.
+    pub run: Option<u64>,
+    /// The run's stop (IA-2, D-4827, D-4853): asked before each file is
+    /// taken and before each day, never inside a file. `None` runs to the end.
+    pub stop: Option<&'a crate::gdfl_run::stop::StopControl>,
 }
 
 /// What a run tells whoever started it, as it goes (IA-1, design §5.1:
@@ -2619,7 +2628,6 @@ fn fold_lineage<S: NfoSource>(
             run,
             day,
             "lineage",
-            Stage::Journal,
             &ImportRefusal::Lineage { why },
         )),
     }
@@ -2743,6 +2751,9 @@ where
                 .ok()
                 .map(|day_file| contract_day_of(&day_file, index))
         },
+        // A warm-up reads and files nothing: the day's own filing asks the
+        // stop before each file it takes.
+        None,
     );
     match read {
         Ok(all) => all.into_iter().flatten().collect(),
@@ -3261,3 +3272,7 @@ mod r4_attack_tests;
 #[cfg(test)]
 #[path = "gdfl_import_split_tests.rs"]
 mod split_tests;
+
+#[cfg(test)]
+#[path = "gdfl_import_ia2_tests.rs"]
+mod ia2_tests;

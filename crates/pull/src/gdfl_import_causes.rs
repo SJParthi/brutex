@@ -169,6 +169,24 @@ pub enum ImportRefusal {
         /// Each old symbol with a directory, and the key it is filed under.
         held: Vec<(String, String)>,
     },
+    /// A stop was asked (IA-2; D-4827, D-4853): the run stopped at a file
+    /// boundary. The day it was in closed `incomplete stage=run
+    /// reason=stopped` when its `begin` was written, wrote no line when not,
+    /// and closed as it would have when the stop came after its last file.
+    /// A resume reads that day again and converges (D-2803).
+    Stopped {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day the run was in, or `None` when it stopped between days.
+        day: Option<Day>,
+        /// Who asked (`api`, `cli`, `operator`, `shutdown`), from the stop
+        /// file (D-4893).
+        by: String,
+        /// When it was asked, UNIX seconds.
+        requested: u64,
+        /// What the run did before it stopped.
+        done: Box<Report>,
+    },
 }
 
 impl ImportRefusal {
@@ -197,6 +215,7 @@ impl ImportRefusal {
             Self::Durability { .. } => "durability",
             Self::FilterRenamed { .. } => "filter_renamed",
             Self::UnderlyingSplit { .. } => "underlying_split",
+            Self::Stopped { .. } => "stopped",
         }
     }
 
@@ -207,7 +226,8 @@ impl ImportRefusal {
         match self {
             Self::CensusFull { done, .. }
             | Self::CensusRefused { done, .. }
-            | Self::Durability { done, .. } => Some(done),
+            | Self::Durability { done, .. }
+            | Self::Stopped { done, .. } => Some(done),
             _ => None,
         }
     }
@@ -220,7 +240,8 @@ impl ImportRefusal {
         match self {
             Self::CensusFull { done, .. }
             | Self::CensusRefused { done, .. }
-            | Self::Durability { done, .. } => done.seal(),
+            | Self::Durability { done, .. }
+            | Self::Stopped { done, .. } => done.seal(),
             _ => {}
         }
     }
@@ -347,8 +368,32 @@ impl core::fmt::Display for ImportRefusal {
                  matches no file"
             ),
             Self::UnderlyingSplit { held } => split_said(f, held),
+            Self::Stopped { .. } => stop_said(f, self),
         }
     }
+}
+
+/// [`ImportRefusal::Stopped`]'s sentence (IA-2): who asked and when, where
+/// the run ended and what it had done.
+fn stop_said(f: &mut core::fmt::Formatter<'_>, stopped: &ImportRefusal) -> core::fmt::Result {
+    let ImportRefusal::Stopped {
+        kind,
+        day,
+        by,
+        requested,
+        done,
+    } = stopped
+    else {
+        return f.write_str("stopped");
+    };
+    let at = day.map_or_else(|| "between two days".to_owned(), |day| format!("on {day}"));
+    write!(
+        f,
+        "a stop asked by {by} at {requested} (UNIX s) ended the {} run at a file boundary \
+         {at}, after {} day(s) imported; a resume reads that day again",
+        kind.as_str(),
+        done.days_imported
+    )
 }
 
 /// The tail every census refusal ends in: what was and was not published,
@@ -390,16 +435,21 @@ pub enum Stage {
     /// a named reader rule, or the copy of them (a CRC or length that does
     /// not match, a container that is not one, a read that failed).
     Vendor,
+    /// The run itself: a stop (D-4853), a day that could not be made durable
+    /// (D-4901), a refusal before any day. Added last (IA-2), so no word or
+    /// position of an earlier stage moved.
+    Run,
 }
 
 impl Stage {
     /// Every stage, in order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Census,
         Self::Journal,
         Self::File,
         Self::Calendar,
         Self::Vendor,
+        Self::Run,
     ];
 
     /// The word a journal `stage=` writes.
@@ -411,6 +461,7 @@ impl Stage {
             Self::File => "file",
             Self::Calendar => "calendar",
             Self::Vendor => "vendor",
+            Self::Run => "run",
         }
     }
 }
@@ -546,6 +597,44 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
             Cause::open(Stage::File, "contract_unrenderable")
         }
         NfoRefusal::Source(inner) => cm_cause(inner),
+    }
+}
+
+/// The cause of an import refusal (IA-2, design §5.8, test IA-GR-16):
+/// exhaustive on purpose, with no `_` arm, so a new variant is a compile
+/// error here until its stage, code and close are decided, and every call
+/// site stages a variant the one way this says (`note_staged` takes no
+/// stage of its own). No import refusal closes a day: the store, the journal,
+/// the census and the run are never the vendor's own bytes.
+#[must_use]
+pub const fn import_cause(why: &ImportRefusal) -> Cause {
+    let code = why.code();
+    match why {
+        // A file the importer read and could not turn into bars, or the
+        // store would not take.
+        ImportRefusal::VolumeOverflow { .. }
+        | ImportRefusal::Fold { .. }
+        | ImportRefusal::FilterName { .. }
+        | ImportRefusal::StampPastTheDay { .. }
+        | ImportRefusal::Filing { .. }
+        | ImportRefusal::Provenance { .. } => Cause::open(Stage::File, code),
+        // A ledger beside the journal that would not take a line.
+        ImportRefusal::Journal { .. }
+        | ImportRefusal::DayLedger { .. }
+        | ImportRefusal::Lineage { .. } => Cause::open(Stage::Journal, code),
+        ImportRefusal::CensusFull { .. } | ImportRefusal::CensusRefused { .. } => {
+            Cause::open(Stage::Census, code)
+        }
+        // The source holds no file of a trading day: a vendor fact another
+        // copy can change, closed `refused`.
+        ImportRefusal::DayNotHeld { .. } => Cause::open(Stage::Vendor, code),
+        // The run itself (D-4853, D-4901).
+        ImportRefusal::KindUnknown { .. }
+        | ImportRefusal::RangeBackwards { .. }
+        | ImportRefusal::Durability { .. }
+        | ImportRefusal::FilterRenamed { .. }
+        | ImportRefusal::UnderlyingSplit { .. }
+        | ImportRefusal::Stopped { .. } => Cause::open(Stage::Run, code),
     }
 }
 

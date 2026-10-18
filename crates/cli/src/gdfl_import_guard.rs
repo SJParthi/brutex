@@ -66,20 +66,19 @@
 //! `run_busy` says the record is the holder's "as written", never more.
 
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
-use brutex_core::vendor::Vendor;
 use pull::gdfl_archive::{day_zip_name, zip_entries};
 use pull::gdfl_cm::{CmKind, folder_day};
 use pull::gdfl_import::{ImportKind, Origin, Report, SourceKind};
-use pull::ingest::census_store::{Location, locate};
-use store::flock::Flock;
+use pull::gdfl_run::locks::{self, Claim};
+use pull::gdfl_run::{self, Claimed, RunRefusal};
 use store::open_flags::O_NOFOLLOW_NONBLOCK;
-use telemetry::run_dirs::{self, GdflLayout};
+use telemetry::run_dirs::GdflLayout;
 
 /// Another run of the kind holds its lock.
 pub(crate) const RUN_BUSY: &str = "run_busy";
@@ -116,10 +115,6 @@ pub(crate) const SOURCES_V1: &str = "v1";
 /// thousand lines of the usual length. A key whose last line is further back
 /// is reported as having no earlier line in the window, by name.
 pub(crate) const TAIL_WINDOW: u64 = 1 << 20;
-/// The first word of a holder record of format version 1.
-pub(crate) const HOLDER_V1: &str = "gdfl-lock v1";
-/// The most bytes of a holder record that are read.
-pub(crate) const RECORD_CAP: usize = 4096;
 /// The most bytes of the verb line a holder record keeps.
 pub(crate) const VERB_CAP: usize = 512;
 /// A tick store's specification, which its root holds.
@@ -309,31 +304,59 @@ pub(crate) fn source_root(
 
 // ═══ 2. The run lock ════════════════════════════════════════════════════════
 
-/// Who takes the run lock, as its record names it.
+/// Who takes the run lock (IA-2): what its claim says (D-4804).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Holder {
     /// This process.
     pub(crate) pid: u32,
-    /// When the run started, UNIX seconds (`Origin::started`).
+    /// When the run started, UNIX seconds (`Origin::started`): the clock the
+    /// runs ledger gives the run's id by (D-4847).
     pub(crate) run_started: u64,
     /// The kind the run imports.
     pub(crate) kind: ImportKind,
-    /// The verb line, escaped and cut to [`VERB_CAP`] bytes.
+    /// The verb line, escaped and cut to [`VERB_CAP`] bytes: said on the
+    /// receipt and in the run's events, never in the bounded claim.
     pub(crate) verb: String,
+    /// The claim the plan built (`pull::gdfl_run::claim_template`), its id
+    /// still 0; `None` claims with this holder's own fields alone.
+    pub(crate) claim: Option<Claim>,
+    /// The request line the request sidecar keeps (D-4907): a run under a
+    /// filter or a snapshot name, which the claim names only by digest.
+    pub(crate) sidecar: Option<String>,
 }
 
 impl Holder {
-    /// The holder record, one line, taken at `lock_taken` (UNIX
-    /// microseconds) on `layout` (`docs/02-store-format.md` §41).
-    pub(crate) fn record(&self, layout: GdflLayout, lock_taken: u64) -> String {
-        format!(
-            "{HOLDER_V1} pid={} run_started={} lock_taken_us={lock_taken} kind={} layout={} verb={}\n",
-            self.pid,
-            self.run_started,
-            self.kind.as_str(),
-            layout_word(layout),
-            self.verb
-        )
+    /// The claim this holder writes, its run id still 0.
+    pub(crate) fn template(&self) -> Claim {
+        let mut claim = self.claim.clone().unwrap_or_else(|| Claim {
+            run: 0,
+            mode: "import".to_owned(),
+            kind: self.kind.as_str().to_owned(),
+            batch: String::new(),
+            source: "-".to_owned(),
+            from: "-".to_owned(),
+            to: "-".to_owned(),
+            filter: "*".to_owned(),
+            verify: "off".to_owned(),
+            restate: false,
+            repair: "0".to_owned(),
+            workers: 1,
+            auto_resume: false,
+            pid: self.pid,
+            host: "-".to_owned(),
+            exe: locks::exe_field(),
+            by: "cli".to_owned(),
+            started: self.run_started,
+            resumes: 0,
+            resume_day: "-".to_owned(),
+            legacy_ack: false,
+            unstamped: false,
+            request: "-".to_owned(),
+        });
+        if claim.started == 0 {
+            claim.started = self.run_started;
+        }
+        claim
     }
 }
 
@@ -360,38 +383,7 @@ pub(crate) fn verb_of(args: &[&str]) -> String {
 
 /// `v3` or `v4`.
 const fn layout_word(layout: GdflLayout) -> &'static str {
-    match layout {
-        GdflLayout::V3 => "v3",
-        GdflLayout::V4 => "v4",
-    }
-}
-
-/// UNIX microseconds now; 0 for a clock before 1970, which names itself in
-/// the record rather than stopping the run.
-fn now_micros() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
-}
-
-/// The census layout of `store`, which decides the lock: the census's own
-/// answer (`pull::ingest::census_store::locate`), never a guess.
-///
-/// # Errors
-///
-/// [`STORE_LOST`] for a store root that is gone, else [`RUN_LOCK_REFUSED`]
-/// with the census's words.
-pub(crate) fn layout_of(store: &Path) -> Result<GdflLayout, Finding> {
-    match locate(store, Vendor::Gdfl) {
-        Ok(Location::Single(_)) => Ok(GdflLayout::V3),
-        Ok(Location::Partitioned(_)) => Ok(GdflLayout::V4),
-        Err(why) => Err(lost_store(store).unwrap_or_else(|| {
-            Finding::new(
-                RUN_LOCK_REFUSED,
-                format!("the census layout that decides the run lock cannot be read: {why}"),
-            )
-        })),
-    }
+    locks::layout_word(layout)
 }
 
 /// What is at `path`, in a word, for a refusal: never followed.
@@ -405,26 +397,8 @@ fn what_is_at(path: &Path) -> String {
     }
 }
 
-/// Reads at most [`RECORD_CAP`] bytes from the start of `file`, as text
-/// [`escape`]d: the bytes at the lock's name are whatever was left there (a
-/// record of another format, random bytes, a terminal control sequence), and
-/// the receipt prints them as one line that can forge none.
-fn record_of(file: &File) -> io::Result<String> {
-    let mut buf = vec![0; RECORD_CAP];
-    let mut filled = 0;
-    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-        let n = file.read_at(rest, filled as u64)?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    buf.truncate(filled);
-    let kept = buf.trim_ascii_end();
-    Ok(escape(kept))
-}
-
-/// The named field of a holder record, or `?`.
+/// The named field of a claim (or of a holder record an older build left),
+/// or `?`.
 fn field<'a>(record: &'a str, name: &str) -> &'a str {
     record
         .split(' ')
@@ -432,173 +406,132 @@ fn field<'a>(record: &'a str, name: &str) -> &'a str {
         .unwrap_or("?")
 }
 
-/// The run lock this process holds, and what it found when it took it.
+/// When the holder a record names started: a claim's `started=`, or an older
+/// holder record's `run_started=`.
+fn started_of(record: &str) -> &str {
+    match field(record, "started") {
+        "?" => field(record, "run_started"),
+        started => started,
+    }
+}
+
+/// A refusal of the run's claim, as the door names it: the guard's codes for
+/// a busy lock, a lock that cannot be taken and a lost store, and the
+/// authority's own code for every other (`pull::gdfl_run::RunRefusal`).
+fn refused_finding(store: &Path, refused: &RunRefusal) -> Finding {
+    match refused {
+        RunRefusal::RunBusy { lock, holder } if holder.is_empty() => Finding::new(
+            RUN_BUSY,
+            format!("another run holds {lock}; its holder has not written its claim yet"),
+        ),
+        RunRefusal::RunBusy { lock, holder } => Finding::new(
+            RUN_BUSY,
+            format!(
+                "another {} run holds {lock}: pid {} started {} (UNIX s), run {}, by {}, as its \
+                 claim was last written (a holder that took the lock from a dead one rewrites \
+                 it within the same moment); claim: {holder}",
+                field(holder, "kind"),
+                field(holder, "pid"),
+                started_of(holder),
+                field(holder, "run"),
+                field(holder, "by"),
+            ),
+        ),
+        RunRefusal::RunLockRefused { .. } => {
+            lost_store(store).unwrap_or_else(|| Finding::new(RUN_LOCK_REFUSED, refused.to_string()))
+        }
+        RunRefusal::CensusUnreadable { why } => lost_store(store).unwrap_or_else(|| {
+            Finding::new(
+                RUN_LOCK_REFUSED,
+                format!("the census layout that decides the run lock cannot be read: {why}"),
+            )
+        }),
+        other => lost_store(store).unwrap_or_else(|| Finding::new(other.code(), other.to_string())),
+    }
+}
+
+/// The run lock this process holds, and what it found when it took it: the
+/// authority's claim (IA-2, `pull::gdfl_run::claim_with`), so a cli run and
+/// an api child take the same locks by the census layout, the same id from
+/// the runs ledger and write the same claim (IA-GR-03).
 #[derive(Debug)]
 pub(crate) struct RunLock {
-    /// The held lock; `None` once released.
-    flock: Option<Flock<File>>,
-    /// The lock's name beneath the store, `imports/gdfl.<kind>.lock` or
-    /// `imports/gdfl.lock`.
-    pub(crate) name: &'static str,
+    /// The claimed run; `None` once released.
+    claimed: Option<Claimed>,
+    /// The lock that holds the claim: `imports/gdfl.<kind>.lock` (v4) or
+    /// `imports/gdfl.lock` (v3).
+    pub(crate) name: String,
     /// The census layout that chose it.
     pub(crate) layout: GdflLayout,
-    /// The record a holder left without releasing: it died (the kernel freed
-    /// its lock, the record stayed).
+    /// The claim a holder left without releasing: it died (the kernel freed
+    /// its lock, the claim stayed).
     pub(crate) dead: Option<String>,
+    /// The run's id from the runs ledger (D-4847).
+    pub(crate) run: u64,
 }
 
 impl RunLock {
-    /// Takes the lock of `holder.kind` on `store`'s layout without waiting,
-    /// and writes the holder's record into it.
+    /// Takes the locks of `holder.kind` on `store`'s layout (the probe retry,
+    /// D-4849), takes the run's id from the runs ledger, and writes its claim.
     ///
     /// # Errors
     ///
-    /// [`RUN_BUSY`] naming the holder's pid and start, [`STORE_LOST`] for a
-    /// store root that is gone, and [`RUN_LOCK_REFUSED`] for a link, a
-    /// directory or a special file at the lock's name, or the host's refusal.
+    /// [`RUN_BUSY`] naming the holder's claim, [`STORE_LOST`] for a store
+    /// root that is gone, [`RUN_LOCK_REFUSED`] for a link, a directory or a
+    /// special file at the lock's name, and the authority's own code for a
+    /// replaced or stalled lock, a changed layout, a damaged runs ledger or
+    /// an implausible clock.
     pub(crate) fn take(store: &Path, holder: &Holder) -> Result<Self, Finding> {
-        let layout = layout_of(store)?;
-        let dir = run_dirs::for_gdfl(holder.kind.as_str(), layout).ok_or_else(|| {
-            Finding::new(
-                RUN_LOCK_REFUSED,
-                format!(
-                    "{} has no run lock in telemetry::run_dirs",
-                    holder.kind.as_str()
-                ),
-            )
-        })?;
-        let path = store.join(dir.lock);
-        let refused = |what: String| {
-            lost_store(store).unwrap_or_else(|| {
-                Finding::new(RUN_LOCK_REFUSED, format!("{}: {what}", shown(&path)))
-            })
-        };
-        // `imports/` alone is made, never the store root above it: a root
-        // whose volume went is `store_lost`, never born again empty on the
-        // mount point's parent.
-        if let Some(parent) = path.parent() {
-            match fs::create_dir(parent) {
-                Ok(()) => {}
-                Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
-                Err(why) => return Err(refused(format!("its folder: {why}"))),
-            }
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o644)
-            .custom_flags(O_NOFOLLOW_NONBLOCK)
-            .open(&path)
-            .map_err(|why| {
-                refused(if fs::symlink_metadata(&path).is_err() {
-                    format!("cannot be created ({why})")
-                } else {
-                    format!("is {} and cannot be opened ({why})", what_is_at(&path))
-                })
-            })?;
-        let found = file.metadata().map_err(|why| refused(why.to_string()))?;
-        if !found.is_file() {
-            return Err(refused(format!(
-                "is {}, not a regular file",
-                what_is_at(&path)
-            )));
-        }
-        // A second name of the lock file (a hard link) is refused before a
-        // byte is written: the record's `set_len(0)` and write would truncate
-        // and overwrite whatever file the other name is (X1).
-        if found.nlink() != 1 {
-            return Err(refused(format!(
-                "has {} names (a hard link to another file); never truncated or written \
-                 through, so that file is left as it was",
-                found.nlink()
-            )));
-        }
-        let reader = file.try_clone().map_err(|why| refused(why.to_string()))?;
-        let flock = match Flock::try_lock(file, path.clone()) {
-            Ok(flock) => flock,
-            Err(TryLockError::WouldBlock) => {
-                let record = record_of(&reader).unwrap_or_else(|why| format!("unreadable ({why})"));
-                // The holder's kind is the one its record names: on v3 one
-                // lock serialises every kind, so it need not be this run's.
-                let words = if record.is_empty() {
-                    format!(
-                        "another run holds {}; its holder has not written its record yet",
-                        dir.lock
-                    )
-                } else {
-                    format!(
-                        "another {} run holds {}: pid {} started {} (UNIX s), as its record was \
-                         last written (a holder that took the lock from a dead one rewrites it \
-                         within the same moment); record: {record}",
-                        field(&record, "kind"),
-                        dir.lock,
-                        field(&record, "pid"),
-                        field(&record, "run_started"),
-                    )
-                };
-                return Err(Finding::new(RUN_BUSY, words));
-            }
-            Err(TryLockError::Error(why)) => return Err(refused(format!("flock: {why}"))),
-        };
-        drop(reader);
-        let dead = record_of(&flock).map_err(|why| refused(why.to_string()))?;
-        let dead = (!dead.is_empty()).then_some(dead);
+        let claimed = gdfl_run::claim_with(
+            store,
+            holder.template(),
+            locks::PROBE_RETRY,
+            holder.sidecar.as_deref(),
+            // The ledger asks the clock now (its `clock_implausible` check is
+            // about the machine, not the run); the claim keeps the run's start.
+            gdfl_run::clock_now(),
+        )
+        .map_err(|refused| refused_finding(store, &refused))?;
+        let dead = claimed.locks.dead().map(str::to_owned);
         if let Some(record) = &dead {
             let _noted = telemetry::emit(
                 &telemetry::Event::warn(TARGET, "previous holder died")
-                    .with("lock", dir.lock)
+                    .with("lock", claimed.locks.claim_name())
                     .with("record", record.as_str()),
             );
         }
-        let record = holder.record(layout, now_micros());
-        flock
-            .set_len(0)
-            .and_then(|()| flock.write_all_at(record.as_bytes(), 0))
-            .and_then(|()| flock.sync_data())
-            .map_err(|why| refused(format!("the holder record: {why}")))?;
         Ok(Self {
-            flock: Some(flock),
-            name: dir.lock,
-            layout,
+            name: claimed.locks.claim_name().to_owned(),
+            layout: claimed.locks.layout(),
             dead,
+            run: claimed.run,
+            claimed: Some(claimed),
         })
     }
 
-    /// Clears the record and releases the lock, saying so if either fails.
+    /// The claimed run, until released.
+    pub(crate) const fn claimed(&self) -> Option<&Claimed> {
+        self.claimed.as_ref()
+    }
+
+    /// Releases the claim and the locks (D-4804), saying so if a step fails.
     ///
     /// # Errors
     ///
     /// [`RUN_LOCK_UNRELEASED`], naming the lock and the host's refusal.
     pub(crate) fn release(mut self) -> Result<(), Finding> {
-        let Some(flock) = self.flock.take() else {
+        let Some(claimed) = self.claimed.take() else {
             return Ok(());
         };
-        let cleared = flock.set_len(0);
-        let released = flock.release();
-        match (cleared, released) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(why), _) => Err(Finding::new(
+        claimed.release().map_err(|why| {
+            Finding::new(
                 RUN_LOCK_UNRELEASED,
                 format!(
-                    "{}: the holder record was not cleared ({why}); the next run will read this run as died",
+                    "{}: {why}; the next run will read this run as died",
                     self.name
                 ),
-            )),
-            (Ok(()), Err(why)) => Err(Finding::new(RUN_LOCK_UNRELEASED, why.to_string())),
-        }
-    }
-}
-
-impl Drop for RunLock {
-    /// A run that returns without [`RunLock::release`] (an early refusal)
-    /// still clears its record: only a holder that died leaves one. The
-    /// lock itself is unlocked by `Flock`'s own drop.
-    fn drop(&mut self) {
-        if let Some(flock) = &self.flock {
-            let _cleared = flock.set_len(0);
-        }
+            )
+        })
     }
 }
 
@@ -1312,6 +1245,11 @@ pub(crate) struct Opening<'a> {
     pub(crate) only: &'a [String],
     /// The verb's words after `gdfl-import`.
     pub(crate) args: &'a [&'a str],
+    /// The claim the plan built (`pull::gdfl_run::claim_template`).
+    pub(crate) claim: Option<&'a Claim>,
+    /// The request line the request sidecar keeps, for a run under a filter
+    /// or a snapshot name (D-4907).
+    pub(crate) sidecar: Option<&'a str>,
 }
 
 impl Door {
@@ -1337,6 +1275,8 @@ impl Door {
             run_started: origin.started,
             kind: at.kind,
             verb: verb_of(at.args),
+            claim: at.claim.cloned(),
+            sidecar: at.sidecar.map(str::to_owned),
         };
         let lock = RunLock::take(at.store, &holder)?;
         let entry = Entry {
@@ -1375,6 +1315,11 @@ impl Door {
         })
     }
 
+    /// The run's claim (its id, locks and stop), until the door closes.
+    pub(crate) const fn claimed(&self) -> Option<&Claimed> {
+        self.lock.claimed()
+    }
+
     /// Ends the run: prints the door's lines on the receipt, finds what the
     /// run's end means, appends the run's line, releases the lock, and prints
     /// one exit line per finding. `end` is the run's own end when it was not
@@ -1388,17 +1333,18 @@ impl Door {
     ) -> bool {
         let _ = writeln!(
             out,
-            "  run lock            {} ({}; pid {})",
+            "  run lock            {} ({}; pid {}; run {} of the runs ledger)",
             self.lock.name,
             layout_word(self.lock.layout),
-            std::process::id()
+            std::process::id(),
+            self.lock.run
         );
         if let Some(record) = &self.lock.dead {
             let _ = writeln!(
                 out,
                 "  previous holder     died: pid {} started {} (record present, lock free): {record}",
                 field(record, "pid"),
-                field(record, "run_started")
+                started_of(record)
             );
         }
         if let Some(fault) = &self.fault {

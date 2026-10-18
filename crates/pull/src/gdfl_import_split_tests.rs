@@ -381,7 +381,7 @@ const SAID: [&str; 5] = [
 
 /// Every file the runs leave and its digest, taken on the unsplit importer
 /// and on the split.
-const LEFT: [(&str, &str); 67] = [
+const LEFT: [(&str, &str); 68] = [
     (
         "bars/gdfl/NSE/CASH/RELIANCE/1s/2024-04.bin",
         "3a3bb183760e4e4ca59a7c5af3a35bf854d624200fb0e9026da106bf1dce4432",
@@ -629,6 +629,11 @@ const LEFT: [(&str, &str); 67] = [
     (
         "imports/gdfl.journal",
         "092de752457d5a24633f4ffb4c772e1ca82cf37a8bf251d34309a5a374b5f84d",
+    ),
+    // IA-2 (D-4803): the journal append lock every append takes, empty.
+    (
+        "imports/gdfl.journal.lock",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     ),
     (
         "imports/gdfl.lineage",

@@ -1142,7 +1142,7 @@ fn a_days_close_follows_its_failures() {
     );
     assert_eq!(
         Stage::ALL.map(Stage::as_str),
-        ["census", "journal", "file", "calendar", "vendor"]
+        ["census", "journal", "file", "calendar", "vendor", "run"]
     );
     let counts = Counts {
         files: 2,
@@ -4512,6 +4512,8 @@ fn run_durable(
         workers: Workers::new(workers).unwrap(),
         durability,
         observer: None,
+        run: None,
+        stop: None,
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -4730,6 +4732,8 @@ fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
             workers: Workers::new(workers).unwrap(),
             durability: Durability::DEFAULT,
             observer: None,
+            run: None,
+            stop: None,
         };
         run_cm_from(&source, &run, options).unwrap()
     };

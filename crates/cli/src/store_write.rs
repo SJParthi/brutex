@@ -213,6 +213,10 @@ mod tests {
             "expression-search-stored",
             "expression-stored",
             "fold-audit",
+            // IA-2 (D-4894, exempt by name): a stop must never be refused,
+            // and the one stop file it writes beside a run's lock changes no
+            // bar, census entry or journal line.
+            "gdfl-stop",
             // R3-32 (D-4996): prints a launchd agent; writes no file at all.
             "launch-agent",
             "ledger-all",
