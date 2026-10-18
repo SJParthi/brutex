@@ -35,6 +35,7 @@ import { catalogue } from '../index.svelte.js';
 import { UNIVERSES, EVERYTHING, tokensOf, LEGACY_BLIND, censusKeyOf, SEG_VIEW, VIEWS } from './notes-controls.js';
 import { fmt, txt, tfCmp, TF_SECS } from './notes-labels.js';
 import { parseKey } from '../instrument.js';
+import { lifeCutBySupersession, supersessionOf } from './lineage-labels.js';
 import { monthLabel, dayLabel, istDay, timeLabel } from '../dates.js';
 import { strikeText } from './decoration.js';
 import { replaceState, pushState } from '$app/navigation';
@@ -1652,7 +1653,16 @@ export function selectionState(db) {
         `its first stored bar is on ${dayLabel(a.from)}, the vendor archive's first day, so its life may have begun before the archive`
       );
     }
-    if (span.hi && span.hi < expiry) {
+    // A SUPERSESSION EXPLAINS THE CUT WHEN THE WINDOW ANSWER NAMES ONE
+    // (AH-03, g-ui-dom-vs-json-2): a chosen key the re-key files under
+    // another expiry (`superseded_by` on /bars/window.json) holds part of the
+    // contract's life, and "it may not have traded, or the census is behind"
+    // named the wrong cause for NIFTY's split 2023-06-29 keys. The words are
+    // `lineage-labels.js`'s; O(superseded entries on one answer).
+    const superseded = span.hi && span.hi < expiry ? lifeCutBySupersession(supersessionOf(db.barState?.answer)) : '';
+    if (superseded) {
+      out.push(`its last stored bar is on ${dayLabel(span.hi)}, before its expiry on ${dayLabel(expiry)} — ${superseded}`);
+    } else if (span.hi && span.hi < expiry) {
       if (a?.to && expiry > a.to) {
         out.push(
           `it expires ${dayLabel(expiry)}, after the archive's measured last day (${dayLabel(a.to)}), so its final sessions are not imported`
