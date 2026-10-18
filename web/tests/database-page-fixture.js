@@ -44,6 +44,7 @@ export const DB_PAGE_FILES = [
   '../src/lib/db/decoration.js',
   '../src/lib/db/notes-coverage.js',
   '../src/lib/db/dayflags.js',
+  '../src/lib/db/lineage-labels.js',
   '../src/lib/db/chart.js',
   '../src/lib/db/scrub.js',
   '../src/lib/db/notes-labels.js'
