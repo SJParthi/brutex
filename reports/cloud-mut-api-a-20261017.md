@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
 # cloud-mut-api-a-20261017 — the api half-A mutation and coverage pass, carried onto the newest `feat/db-fix` and finished
 
@@ -17,7 +17,7 @@ half B's seven files. Outside `crates/api/src`, this pass edits only its new
 `tests/cloud_mutants_bars.rs` tests, `coverage.rs`'s timing test,
 `docs/04-invariants.md`, `docs/05-decisions.md` and this report.
 
-## Done so far
+## Done
 
 1. **Carried the 16 Oct pass onto `feat/db-fix` `f9cdb584`.**
    `git diff c9e3472e5 origin/cloud/mut-api-a-20261016 -- . ':(exclude)reports' | git apply -3`:
@@ -396,23 +396,42 @@ request, where no seam reaches.**
 |---|---|---|
 | `bars_sort.rs` | 1459–1461 (1458) | The value bisection found a value no row holds. Fences and blocks are both checked, and a fixture that passes every checksum and still contradicts itself would need a hand-built `.srt`; the planting helper builds an index only from rows. |
 
-## Gates (so far)
+## Gates
+
+Code was last changed in `63fae782` (a test); every commit after it
+changes this report only. The workspace tests ran at `53e5d158`, and fmt,
+clippy and deny at `6a03fcbb`.
 
 | Gate | Result |
 |---|---|
-| `cargo fmt --all --check` | pass, at every commit |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass (exit 0) at `33dc17d1`; to be run again at the end |
-| `cargo test -p api --locked --no-fail-fast`, as root, at `33dc17d1` | lib 2,179 passed, 12 failed (the twelve above), 8 ignored; `tests/cloud_mutants_bars.rs` 58 passed; `src/main.rs` 4; `tests/binary.rs` 4; doc-tests 1 |
-| the twelve as uid 65534 | 12 passed |
-| `cargo deny check` | **same as the base**: on `f9cdb584` and on this branch, `advisories FAILED` on exactly RUSTSEC-2026-0344 (`ruzstd`) and RUSTSEC-2026-0346 to 0349 (`rustls`), with the same two duplicate warnings (`getrandom`, `syn`); `bans`, `licenses`, `sources` ok. No manifest or lock file is touched. |
+| `cargo fmt --all --check` | pass (exit 0) |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass (exit 0), no warning |
+| `cargo test --workspace --locked --no-fail-fast`, as `root` | exit 101: 9,240 passed, 28 failed, 47 ignored. **None of the 28 is this branch's**, as the next rows show. |
+| the 12 `api` permission tests | pass as uid 65534 |
+| 13 more permission tests: `cli` 3, `pull` 3, `store` 3, `telemetry` 4 | pass as uid 65534. None of those crates is touched by this branch. |
+| `store` `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported` | fails as `root` and as uid 65534, and **fails identically on the base `f9cdb584`**. It asserts that a file re-created under the same name gets a new inode number; this machine's ext4 reuses the freed number at once (three runs, three failures). |
+| `store` `tests/cited_commits.rs` `every_commit_the_store_records_cite_is_on_main_or_says_why_not` | **fails identically on the base**: the same nine commits cited in `docs/06-limits.md` are not ancestors of this clone's `refs/remotes/origin/main`. This branch does not touch `docs/06-limits.md`. |
+| `cli` `step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte` | **fails identically on the base**: "Step 3 Candidate successor reopen refused: cannot open candidate file …/source/candidate-universe-rows-v1.bin". In the gate run the sweeper also removed its scratch root (*Conduct*). Run again alone with the sweeper stopped, it failed the same way here (384 s) and on the base (366 s). |
+| `api` end to end as uid 65534 | library 2,237 passed, 0 failed, 8 ignored; `tests/cloud_mutants_bars.rs` 59; `src/main.rs` 4; `tests/binary.rs` 4 |
+| `cargo deny check` | **same as the base**: on `f9cdb584` and on this branch, `advisories FAILED` on exactly RUSTSEC-2026-0344 (`ruzstd`) and RUSTSEC-2026-0346 to 0349 (`rustls`), with the same duplicate warnings. `bans`, `licenses`, `sources` ok. No manifest or lock file is touched (part DENY-1 owns it). |
+
+`crates/api` is the only crate this branch changes, and nothing depends on
+`api`, so no other crate's test binary is built from changed source.
 
 ## Left
 
-- Stage 2 for `bars_sort.rs` (20) and `bars_series.rs` (27), and the reason
-  for every mutant that survives it (see *Mutation*).
-- `cargo test --workspace --locked` (building), the final clippy, then the final report.
-- Done since the last commit: the six `gaps_route.rs` timeouts were run
-  again against the fixed pool test and all six were caught.
+Nothing in this pass's scope. What is not green is stated where it is
+measured and is not hidden:
+
+- **Coverage is 99.00 % of lines and 95.43 % of branches, not 100 %.**
+  Every unrun line and branch is named, with the reason no test reaches
+  it.
+- **36 mutants survive.** Each is equivalent, with its reason. One more,
+  `bars_sort.rs:2147:35`, is counted as detected but is caught only by the
+  clock.
+- **The workspace test gate is red** on 28 tests: 25 permission tests that
+  pass unprivileged, and three that fail identically on the base.
+- **`cargo deny` is red**, exactly as on the base (DENY-1's).
 
 ## The 16 Oct NOT DONE list, item by item
 
@@ -442,10 +461,10 @@ request, where no seam reaches.**
 ## Conduct
 
 **Two lapses against the brief's language rule.** The brief forbids one
-interpreted language by name. No file this branch
-tracks, and no file written in this session, uses it or names it. Twice,
-though, a shell command I ran touched it. Both are disclosed here, without
-the name:
+interpreted language by name. No file this branch tracks, and no file I
+wrote in this session, uses it or names it. Twice, though, a shell command I
+ran touched it, and the session's own transcript records both commands. Both
+are disclosed here, without the name:
 
 1. Earlier in the session, one shell command carried a shell variable whose
    name was that language's name. It was only a variable name: no
@@ -479,4 +498,25 @@ ran. The sweeper was stopped and the test was run again (*Gates*).
 - **Decision numbers.** D-5420 to D-5423 were taken above every remote
   ledger head (D-5301) on 17 Oct. Local branches may hold more; amendment
   A6 renumbers at landing.
-- Nothing in `bars_route.rs`, `facets.rs` or `livejson.rs` yet.
+- **Nothing in `bars_route.rs`, `facets.rs` or `livejson.rs`.** No finding
+  of this pass lies in them, and none of them was edited.
+- **Seen outside this pass's files, red on the base too, not fixed here**
+  (each is someone else's file):
+  - `cli`
+    `step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`
+    fails on `f9cdb584` with "cannot open candidate file
+    …/source/candidate-universe-rows-v1.bin". It looks like a real defect in
+    the test or its fixture, not the machine.
+  - `store`
+    `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+    assumes a re-created file never gets its predecessor's inode number,
+    which ext4 does not promise.
+  - `store` `tests/cited_commits.rs` depends on the clone's
+    `refs/remotes/origin/main` holding nine commits that `docs/06-limits.md`
+    cites.
+  - `bars_window_route_tests::day_and_time_of_day_bounds_filter_every_month_on_the_server`
+    pages until a page comes back empty, with no bound, so a wrong page
+    hangs it rather than failing it (`bars.rs:1952:5`, *Mutation*).
+- **`gaps_route.rs:1406:13` is a dead store** (`held` is set, then
+  overwritten with the same value at line 1435). Whether to drop the field
+  from that literal is the owner's call; it changes no answer.
