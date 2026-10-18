@@ -1244,6 +1244,16 @@ impl Layout {
             return Err(CubeRefusal::CodeOutOfRange { code });
         }
         let mut coords: Coords = [0; ROW_COUNT];
+        // A code that fits 64 bits is divided in 64 bits: one hardware divide
+        // per row, where `u128` costs two library calls (C-F-02).
+        if let Ok(mut rest) = u64::try_from(code) {
+            for (slot, radix) in coords.iter_mut().zip(self.radices).rev() {
+                let radix = u64::from(radix);
+                *slot = u8::try_from(rest % radix).unwrap_or(OPEN);
+                rest /= radix;
+            }
+            return Ok(coords);
+        }
         let mut rest = code;
         for (slot, radix) in coords.iter_mut().zip(self.radices).rev() {
             let radix = u128::from(radix);
@@ -3648,6 +3658,40 @@ mod tests {
         let mut r = *at_64.radices();
         r[16] = 2;
         assert_eq!(Layout::of(r).unwrap().key_width(), KeyWidth::Bits128);
+    }
+
+    /// A CODE PAST 2^64 DECODES THROUGH `u128` AND ONE BELOW IT THROUGH `u64`,
+    /// to the same digits either way: the codes either side of 2^64 and a
+    /// thousand spread above it round-trip, and 2^64 itself is a one in row
+    /// 0's place.
+    #[test]
+    fn codes_either_side_of_two_to_the_sixty_four_decode_exactly() {
+        let mut radices = [1; ROW_COUNT];
+        for slot in radices.iter_mut().take(17) {
+            *slot = 16;
+        }
+        let l = Layout::of(radices).unwrap();
+        let full = l.paper_full_cells();
+        assert_eq!(full, 1_u128 << 68);
+        let edge = u128::from(u64::MAX);
+        let mut below = [0; ROW_COUNT];
+        below[1..17].fill(15);
+        assert_eq!(l.decode(edge).unwrap(), below);
+        let mut past = [0; ROW_COUNT];
+        past[0] = 1;
+        assert_eq!(l.decode(edge + 1).unwrap(), past);
+        let mut last = [0; ROW_COUNT];
+        last[..17].fill(15);
+        assert_eq!(l.decode(full - 1).unwrap(), last);
+        let spread =
+            (0..1_000_u128).map(|k| edge + 1 + (k * 0x9E37_79B9_7F4A_7C15) % (full - edge - 1));
+        for code in [0, edge - 1, edge, edge + 1, edge + 2, full - 1]
+            .into_iter()
+            .chain(spread)
+        {
+            let cell = l.decode(code).unwrap();
+            assert_eq!(l.encode(&cell).unwrap(), code, "{code}");
+        }
     }
 
     #[test]

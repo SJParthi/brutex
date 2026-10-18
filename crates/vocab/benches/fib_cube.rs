@@ -2,7 +2,10 @@
 //! the containment test of `vocab::fib_cube`, through the shared FIB harness
 //! (`crates/runner/benches/fib_rows/harness.rs`).
 //!
-//! All three rows are FIXED-STATE: one call reads one cell (or one mix and one
+//! `C-F-02` decodes codes below 2^64, which `Layout::decode` divides in `u64`;
+//! `C-F-04` decodes codes past 2^64 on a wider layout, the `u128` path.
+//!
+//! All four rows are FIXED-STATE: one call reads one cell (or one mix and one
 //! cell) and the layout, whatever the pool of inputs it is drawn from, so they
 //! are exempt from the cache rule (FM-F002) and labelled so. The scale is the
 //! number of distinct inputs the calls cycle through, 100 to 10,000, all inside
@@ -30,8 +33,21 @@ use vocab::fib_cube::{
 };
 
 /// A synthetic layout: every measured row three buckets, ten rank groups,
-/// four widths, six exit variants, the three entry styles.
+/// four widths, six exit variants, the three entry styles. Its codes fit 64
+/// bits.
 fn layout() -> Layout {
+    layout_with(3, 10)
+}
+
+/// The same layout with sixteen buckets in every measured row: its codes pass
+/// 2^64.
+fn wide_layout() -> Layout {
+    layout_with(16, 1)
+}
+
+/// `values` buckets in every measured row; the time-of-day cuts are `step`
+/// candles of the width apart.
+fn layout_with(values: u64, step: u64) -> Layout {
     let widths = [1, 2, 4, 8];
     let mut cuts = Vec::new();
     for id in RowId::ALL {
@@ -44,10 +60,9 @@ fn layout() -> Layout {
                     row: id,
                     timeframe: Some(minutes),
                     base_kind: None,
-                    cuts: vec![
-                        Ratio::whole(u64::from(minutes) * 60 * 10),
-                        Ratio::whole(u64::from(minutes) * 60 * 20),
-                    ],
+                    cuts: (1..values)
+                        .map(|k| Ratio::whole(u64::from(minutes) * 60 * step * k))
+                        .collect(),
                 });
             }
         } else {
@@ -55,7 +70,9 @@ fn layout() -> Layout {
                 row: id,
                 timeframe: None,
                 base_kind: None,
-                cuts: vec![Ratio::new(1, 3).unwrap(), Ratio::new(2, 3).unwrap()],
+                cuts: (1..values)
+                    .map(|k| Ratio::new(k, values).unwrap())
+                    .collect(),
             });
         }
     }
@@ -131,6 +148,29 @@ fn pool(n: u64) -> Pool {
     }
 }
 
+/// Codes past 2^64: the wide layout's cells with the most significant row at
+/// its last value, so every code is at least three quarters of the cells.
+fn wide_pool(n: u64) -> Pool {
+    let layout = wide_layout();
+    assert!(layout.paper_full_cells() > 4 * u128::from(u64::MAX));
+    let cells: Vec<Coords> = (0..n)
+        .map(|i| {
+            let mut c = cell(&layout, i);
+            c[0] = layout.radices()[0] - 1;
+            c
+        })
+        .collect();
+    let codes: Vec<u128> = cells.iter().map(|c| layout.encode(c).unwrap()).collect();
+    assert!(codes.iter().all(|&code| code > u128::from(u64::MAX)));
+    Pool {
+        layout,
+        cells,
+        codes,
+        mixes: Vec::new(),
+        rows: 0,
+    }
+}
+
 fn at(pool: &Pool, i: u64) -> usize {
     (i % pool.cells.len() as u64) as usize
 }
@@ -176,6 +216,20 @@ fn main() {
         work: rows_visited,
         bytes: pool_bytes,
     };
+    let wide_decode = Row {
+        id: "C-F-04",
+        name: "Layout::decode of one code past 2^64",
+        class: Some(Class::WorstCase),
+        axis: Some(fixed()),
+        scales: [100, 1_000, 10_000],
+        setup: wide_pool,
+        op: |p, i| {
+            p.rows += ROW_COUNT as u64;
+            u64::from(p.layout.decode(p.codes[at(p, i)]).unwrap()[0])
+        },
+        work: rows_visited,
+        bytes: pool_bytes,
+    };
     let containment = Row {
         id: "C-F-03",
         name: "contains of one cell in one mix",
@@ -195,6 +249,7 @@ fn main() {
     for verdict in [
         run(&encode, &host, &mut out),
         run(&decode, &host, &mut out),
+        run(&wide_decode, &host, &mut out),
         run(&containment, &host, &mut out),
     ] {
         ok &= !verdict.fails();
