@@ -2,7 +2,7 @@
 
 Depends on: FIB-13, FIB-14, FIB-7, FIB-9, FIB-10, FIB-11, FIB-12; outside parts: CHG-1, CHG-2, CAL-1, PIT-1, DATA-1, DATA-2, OF-1, R4-06, R4-07, R4-11, R4-12, R4-26
 
-Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof and its requirements; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 IST universe = today's F&O stocks only; 15:57 IST four decisions: span 2018-09-03.., exam partly seen, WINNER word, one-account check). Operator blocks at the end supersede earlier text.
+Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 universe = today's F&O stocks; 15:57 four decisions; 16:11 IST minimum returns are gate numbers). Operator blocks at the end supersede earlier text.
 
 # FIB-15: Live proof: a daily forward paper-trading record of each frozen long + short setup on newly delivered data, with the same code and full charges, judged by the Winner Gate and the downside checks, with an automatic brake
 
@@ -897,4 +897,18 @@ OPERATOR 18 Oct 2026 ~15:57 IST - FOUR DECISIONS FROM THE ASSURANCE RESEARCH (op
 (C) THE WORD WINNER (FIB-ATK-04). A setup that passes gate B on its walk-forward months is a "walk-forward passer (selected on these months)", never a WINNER. It is called WINNER only when (i) it beats the luck test: the permutation draws under the same procedure and trial count pass fewer pairs than the real run, and (ii) it passes the exam under every walk-forward scheme. Reports, pages and APIs use these two words exactly.
 
 (D) ONE-ACCOUNT CHECK (FIB-ATK-08). Besides the per-trade gate, every passer and pair is replayed as ONE ACCOUNT with the operator's capital and leverage, given as run inputs (18 Oct: Rs 10,00,000 capital, intraday leverage up to 5x; both recorded in the run identity, never typed in a strategy file). Every trade in time order needs its margin (notional / the leverage allowed for that stock on that day; the per-stock leverage is UNVERIFIED until a chartered broker margin source is recorded, until then the operator's 5x ceiling is used and labelled) from the free margin at its entry second; a trade that does not fit is skipped and counted 'blocked_by_margin', never resized silently. The account's day-by-day net (after the entire precise charges) must pass the Winner Gate clauses and the five downside checks too; the per-trade figures and the account figures are shown side by side. Cost: O(1) per trade with a running free-margin counter and a per-second release queue.
+
+
+OPERATOR 18 Oct 2026 ~16:11 IST - MINIMUM RETURNS ARE GATE NUMBERS (option B; operator: "I believe option B is better"). These become fixed Winner Gate numbers beside the existing ones (FIB-07 owns the definitions; FIXED_NUMBERS.WinnerGate gains these five rows; no other typed number is added).
+(1) Measured on the ONE-ACCOUNT replay of the long + short pair (decision (D) of the four decisions: the operator's capital Rs 10,00,000 and intraday leverage up to 5x as run inputs), net of the entire precise charges, on the UNSEEN months, under EVERY walk-forward scheme of the family.
+(2) Return of a period = the period's net P&L divided by the account capital (Rs 10,00,000), simple, not compounded (the operator's numbers are simple sums: 1.5% a week x 4 = 6% a month; 6% x 12 = 72%, rounded up to 75% a year).
+(3) The AVERAGE return over all unseen periods of each length must reach:
+    - per tradable day   >= 0.30%   (1.5% / 5 trading days)
+    - per week           >= 1.50%
+    - per month          >= 6.00%
+    - per quarter        >= 18.00%  (6% x 3)
+    - per year           >= 75.00%
+  A partial period at a span edge (clipped week, part month, part year) is pro-rated by its tradable days, the same rule as the 500-trades clause. These are averages, never "every single period": the every-year-positive clause, the 70% unseen-months clause and the five downside checks still govern the bad periods.
+(4) A pair below any of the five minimums is refused by name ("below the operator's minimum weekly return: 0.9% < 1.5%"), with all five measured averages shown, so the closest misses stay visible.
+(5) Changing any of these numbers is an operator decision made BEFORE a run, recorded as a new gate version, and counted in the luck check.
 
