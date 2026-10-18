@@ -373,10 +373,11 @@ mutant naming `Html::..` unqualified where the function names
 
 `cargo llvm-cov nextest -p api --lib --branch` (`RUSTC_BOOTSTRAP=1` for
 `--branch` only; measurement, nothing committed needs it), the whole `api`
-lib suite on the dev copy at the newest tree (`0ab9fb01`'s sources), `api`
-at opt-level 0, 22:26–22:40 UTC (03:56–04:10 IST Monday, an open NSE day
-before its session). 2,545 of 2,546 tests passed. The one failure is the
-opt-level-0 artifact named under Method, whose lines executed all the same.
+lib suite on the dev copy at the merged tree (`cdc81a6b`), `api`
+at opt-level 0, 23:18–23:21 UTC (04:48–04:51 IST Monday, an open NSE day
+before its session). 2,578 of 2,580 tests passed. The two failures are the
+opt-level-0 artifact named under Method and the eight-core `detail.rs` test
+red on the base, whose lines executed all the same.
 A branch is counted untaken only if no instantiation of it took that side;
 the text report lists one record per instantiation, and they are summed.
 Production lines only: the inline `#[cfg(test)]` modules are left out.
@@ -388,7 +389,7 @@ Production lines only: the inline `#[cfg(test)]` modules are left out.
 | `autopilot.rs` | 29 | 7 | 29 / 8 | 29 / 7 |
 | `pullrun.rs` | 3 | 6 | 3 / 6 | 3 / 6 |
 | `server.rs` | 192 | 19 | 206 / 22 | 222 / 23 |
-| `emitted.rs` | 0 | 37 (test-only) | 0 / 0 | 0 / 37 |
+| `emitted.rs` | 0 | 38 (test-only) | 0 / 0 | 0 / 37 |
 | `scratch.rs` | 0 | 0 | 0 / 0 | 0 / 0 |
 
 `server.rs` gained 16 unexecuted lines in the merge (AH-02's
@@ -425,28 +426,28 @@ never opened); B 9279 / L 9280–9285 and L 9693, 9697, 9699
 archive feeds declare an FNO layout); B 11213 / L 11214–11215, B 11681 /
 L 11682, L 12561 (a `Day` and a `YearMonth` span 1970..=9999, and a window
 has a day); B 12631 / L 12632–12637 (`window.verdict` converts the same stamp
-first); L 15299 (`contract_param` re-reads a query already accepted); B 36057
-/ L 36058, B 36064 / L 36065 (the vocabulary is dense and far below
+first); L 15299 (`contract_param` re-reads a query already accepted); B 36061
+/ L 36062, B 36068 / L 36069 (the vocabulary is dense and far below
 `u16::MAX`).
 
 **`server.rs`, not driven, by rule:** L 8828–8969 (`read_credential`,
-`credentialed_source`: AWS Parameter Store, `CLAUDE.md` §8); B 35257 /
-L 35274–35360 (the `/universe` crawl of NSE's index pages from
+`credentialed_source`: AWS Parameter Store, `CLAUDE.md` §8); B 35261 /
+L 35278–35364 (the `/universe` crawl of NSE's index pages from
 `INDEX_HOST`; no test reaches a non-loopback host, so it needs a
 crawl-source seam); L 11605 (`fno_report` after a chain discovery: discovery
 URLs come from the shipped descriptor, not the wire's base URL, so it needs a
-discovery-URL seam); B 19864 / L 19866, 19870–19885 and L 20407
+discovery-URL seam); B 19868 / L 19870, 19874–19889 and L 20411
 (`open_unless_suppressed` past its suppression, and a browser that opened:
-none in a test); B 20337 / L 20338–20341 (the autopilot's start banner needs
+none in a test); B 20341 / L 20342–20345 (the autopilot's start banner needs
 a writable serve with `BRUTEX_AUTOPILOT=run` over the real credential
 source).
 
 **`server.rs`, not driven: host resources, a thread, the wall clock, a
-race:** L 20166–20170 (`local_addr()` failing after a bind) and
-L 20211–20216 (`keep_port` with no descriptor left), which need descriptor
-exhaustion that would starve every other test; L 20290 (`Loading::Failed`,
-the start-up load's thread panicked); B 20421 / L 20422 and B 20427 /
-L 20428 (`warm_at_start`, `census_cache::start`: a thread that cannot be
+race:** L 20170–20174 (`local_addr()` failing after a bind) and
+L 20215–20220 (`keep_port` with no descriptor left), which need descriptor
+exhaustion that would starve every other test; L 20294 (`Loading::Failed`,
+the start-up load's thread panicked); B 20425 / L 20426 and B 20431 /
+L 20432 (`warm_at_start`, `census_cache::start`: a thread that cannot be
 spawned); L 10339–10342 and L 14272–14275 (`ist_day(now)` failing: a host
 clock outside 1970..=9999); B 6495 / L 6496 (the 17 Oct report's race: a
 member-failure append refused while the closing append right after it
@@ -456,10 +457,10 @@ phase 1's Sunday hours the opposite side was the one untaken, and
 `a_window_ending_today_is_held_back_exactly_while_today_is_unsettled` takes
 whichever the hour allows.
 
-**`emitted.rs`** (37 lines with a side untaken, as in this session's first
+**`emitted.rs`** (38 lines with a side untaken; 37 in this session's first
 run; the 17 Oct report counted none for it): every one is the false side of
 an operand of the `&&` chain in one of the emit-site table's `mine:`
-predicates (checked line by line: 37 lines in 26 predicates). The module is
+predicates (checked line by line: 38 lines in 27 predicates). The module is
 test-only (`#[cfg(test)]` in `lib.rs`, so cargo-mutants lists no mutant in
 it). A false side would be the predicate meeting a record that matches its
 earlier operands and not that one, and each case's own record is the one it
