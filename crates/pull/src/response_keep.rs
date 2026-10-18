@@ -27,7 +27,11 @@
 //! same validation and the same contract segment), so two contracts of one
 //! underlying keep two packs. A window's body goes into its FIRST month's pack;
 //! every further month it covers gets a receipt only (`kept=3`) that names
-//! where the body is.
+//! where the body is. Such a window is all-or-detectable: an `open` record in
+//! the directory's [`WINDOWS_NAME`] comes before its first receipt and a
+//! `closed` record, its commit, after its last pointer; the next append
+//! finishes one an interrupted append left open ([`unfinished`] names it
+//! meanwhile; repair round 3).
 //!
 //! # The rules
 //!
@@ -61,14 +65,17 @@
 //!   refusal or did not decode (a login wall, a maintenance page) keeps its
 //!   first [`REFUSED_HEAD_BYTES`] bytes with its status, `kept=4`.
 //!
-//! # Cost (`docs/06-limits.md` L-IA-6, L-IA-48 to L-IA-51)
+//! # Cost (`docs/06-limits.md` L-IA-6, L-IA-48 to L-IA-52)
 //!
 //! An append is O(body) to deflate, one read of the newest segment's receipts
 //! (at most [`MAX_RECEIPTS`] × 128 B = 128 KiB, the bound the duplicate check
 //! also uses), at most [`MAX_SEGMENTS`] `stat`s to find that segment, two or
 //! three positional writes and as many syncs (the refused rows only when the
-//! landing refused any; a directory sync when a file is born), plus one
-//! receipt per further month the window covers. Nothing depends on how many
+//! landing refused any; a directory sync when a file takes its first bytes),
+//! plus one receipt per further month the window covers and, for a window
+//! over months, two 64-byte window-journal records. Every append also reads
+//! the journal's last one or two records (one `stat`, at most 128 bytes) and
+//! finishes a window an interrupted append left open (L-IA-52). Nothing depends on how many
 //! packs the store holds: C-RK-01
 //! (`pull::bench::keep_lookup_is_flat`) and C-RK-02
 //! (`pull::bench::keep_append_is_flat`) measure both at 1x, 10x and 100x
@@ -702,7 +709,7 @@ pub enum KeepError {
         /// Milliseconds waited before the refusal.
         waited_ms: u64,
     },
-    /// [`MAX_PARKED_WAITERS`] earlier waits on this lock ran out and their
+    /// At least [`MAX_PARKED_WAITERS`] earlier waits on this lock ran out and their
     /// waiters are still parked on a holder that has not let go since; this
     /// append waited for nothing.
     LockWaitersParked {
@@ -722,6 +729,13 @@ pub enum KeepError {
     NotRegular {
         /// The name.
         path: PathBuf,
+    },
+    /// The pack's window journal already holds [`MAX_WINDOW_RECORDS`]
+    /// records, so a window over months cannot be made all-or-detectable;
+    /// nothing is written (repair round 3).
+    WindowsFull {
+        /// The journal.
+        journal: PathBuf,
     },
     /// The body is larger than `http::MAX_RESPONSE_BYTES` (§8 Z7).
     TooLarge {
@@ -762,6 +776,7 @@ impl KeepError {
             Self::LockStalled { .. } | Self::LockWaitersParked { .. } => "lock_stalled",
             Self::Damaged { .. } => "pack_damaged",
             Self::NotRegular { .. } => "not_a_regular_file",
+            Self::WindowsFull { .. } => "windows_full",
             Self::TooLarge { .. } => "source_refused",
             Self::BodyMismatch { .. } => "body_mismatch",
             Self::NotKept { .. } => "body_not_kept",
@@ -794,7 +809,7 @@ impl std::fmt::Display for KeepError {
             ),
             Self::LockWaitersParked { lock, parked } => write!(
                 f,
-                "lock_stalled: {} has {parked} earlier waits still parked on a holder that has not let go (at most {MAX_PARKED_WAITERS}); nothing written",
+                "lock_stalled: {} has {parked} abandoned waits still parked on a holder that has not let go (new waits are refused once {MAX_PARKED_WAITERS} are parked; waits already in flight then can add more); nothing written",
                 lock.display()
             ),
             Self::LockStalled { lock, waited_ms } => write!(
@@ -811,6 +826,11 @@ impl std::fmt::Display for KeepError {
             Self::NotRegular { path } => {
                 write!(f, "not_a_regular_file: {}", path.display())
             }
+            Self::WindowsFull { journal } => write!(
+                f,
+                "windows_full: {} holds {MAX_WINDOW_RECORDS} records; a window over months is not kept; nothing written",
+                journal.display()
+            ),
             Self::TooLarge { len } => write!(
                 f,
                 "source_refused: a body of {len} bytes is past {} bytes; nothing kept",
@@ -896,10 +916,162 @@ fn lock_path(dir: &Path) -> PathBuf {
 /// The lock file's name in every pack directory.
 pub const LOCK_NAME: &str = "keep.lock";
 
+/// The window journal's name in every pack directory (§36, repair round 3):
+/// one `open` record before a window over months writes its first month's
+/// receipt, one closing record after its last further month's pointer.
+pub const WINDOWS_NAME: &str = "windows.rsw";
+/// One window-journal record's length on disk.
+pub const WINDOW_RECORD_LEN: usize = 64;
+/// The most records one pack's window journal holds (64 MiB of them). A
+/// window over months that would need more is refused `windows_full` before
+/// anything is written; a window inside one month needs none.
+pub const MAX_WINDOW_RECORDS: u64 = MAX_PACK_BYTES / WINDOW_RECORD_LEN as u64;
+
+/// What a window-journal record says about its window over months.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    /// Written before the first month's receipt. While no writer holds the
+    /// pack lock, an `Open` last record is an interrupted window: its first
+    /// month's receipt may stand with no pointer in a later month.
+    Open,
+    /// Written after the last further month's pointer: the window is whole.
+    Closed,
+    /// Written by the next append, which found the window open with its
+    /// first month's receipt committed and wrote every missing pointer.
+    Completed,
+    /// Written by the next append, which found the window open with no first
+    /// month's receipt: nothing was kept for it and nothing points at it.
+    Abandoned,
+}
+
+impl WindowState {
+    /// The byte on disk.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Open => 1,
+            Self::Closed => 2,
+            Self::Completed => 3,
+            Self::Abandoned => 4,
+        }
+    }
+
+    /// The value of a byte on disk, or `None` for one no writer writes.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Open),
+            2 => Some(Self::Closed),
+            3 => Some(Self::Completed),
+            4 => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+
+    /// The word events and pages use.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Completed => "completed",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// One 64-byte window-journal record (`docs/02-store-format.md` §36),
+/// little-endian: which window over months, where its first month's receipt
+/// goes, and how far it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowRecord {
+    /// Offset 0: the receipt's `asked_from`.
+    pub asked_from: i64,
+    /// Offset 8: the receipt's `asked_to`; its IST month is the window's last.
+    pub asked_to: i64,
+    /// Offset 16: the receipt's `digest`.
+    pub digest: [u8; 32],
+    /// Offset 48: the receipt's `run`.
+    pub run: u32,
+    /// Offsets 52 (year, `u16`) and 54 (month): the window's first month.
+    pub month: YearMonth,
+    /// Offset 55: the segment of the first month the receipt goes to.
+    pub segment: u8,
+    /// Offset 56 (`u16`): the receipt's ordinal there (below
+    /// [`MAX_RECEIPTS`]).
+    pub ordinal: u16,
+    /// Offset 58: the state.
+    pub state: WindowState,
+    /// Offset 59: for [`WindowState::Completed`], the pointers the next
+    /// append wrote (saturating at 255); 0 otherwise.
+    pub written: u8,
+}
+
+impl WindowRecord {
+    /// The 64 bytes, CRC-32C over bytes 0..60 at offset 60.
+    #[must_use]
+    pub fn encode(&self) -> [u8; WINDOW_RECORD_LEN] {
+        let mut out = [0_u8; WINDOW_RECORD_LEN];
+        let mut at = 0;
+        let mut put = |bytes: &[u8]| {
+            if let Some(slot) = out.get_mut(at..at + bytes.len()) {
+                slot.copy_from_slice(bytes);
+            }
+            at += bytes.len();
+        };
+        put(&self.asked_from.to_le_bytes());
+        put(&self.asked_to.to_le_bytes());
+        put(&self.digest);
+        put(&self.run.to_le_bytes());
+        put(&self.month.year().to_le_bytes());
+        put(&[self.month.month(), self.segment]);
+        put(&self.ordinal.to_le_bytes());
+        put(&[self.state.code(), self.written]);
+        let crc = store::crc::crc32c(out.get(..60).unwrap_or_default());
+        if let Some(slot) = out.get_mut(60..) {
+            slot.copy_from_slice(&crc.to_le_bytes());
+        }
+        out
+    }
+
+    /// Reads 64 bytes back, or `None` when the CRC or a coded byte is wrong.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; WINDOW_RECORD_LEN] = bytes.try_into().ok()?;
+        let crc = u32::from_le_bytes(take(bytes, 60)?);
+        if store::crc::crc32c(bytes.get(..60)?) != crc {
+            return None;
+        }
+        Some(Self {
+            asked_from: i64::from_le_bytes(take(bytes, 0)?),
+            asked_to: i64::from_le_bytes(take(bytes, 8)?),
+            digest: take(bytes, 16)?,
+            run: u32::from_le_bytes(take(bytes, 48)?),
+            month: YearMonth::new(u16::from_le_bytes(take(bytes, 52)?), *bytes.get(54)?).ok()?,
+            segment: *bytes.get(55)?,
+            ordinal: u16::from_le_bytes(take(bytes, 56)?),
+            state: WindowState::from_code(*bytes.get(58)?)?,
+            written: *bytes.get(59)?,
+        })
+    }
+
+    /// Whether `receipt` is the first month's receipt this record names.
+    fn names(&self, receipt: &Receipt) -> bool {
+        receipt.asked_from == self.asked_from
+            && receipt.asked_to == self.asked_to
+            && receipt.digest == self.digest
+            && receipt.run == self.run
+    }
+}
+
 /// The months a window covers, first to last.
 fn months_of(window: Window) -> Result<Vec<YearMonth>, KeepError> {
-    let first = window.from().year_month()?;
-    let last = window.to().year_month()?;
+    months_from(window.from().year_month()?, window.to().year_month()?)
+}
+
+/// The months from `first` to `last`, both kept: the one walk the append and
+/// the finishing of an interrupted window both take.
+fn months_from(first: YearMonth, last: YearMonth) -> Result<Vec<YearMonth>, KeepError> {
     let mut out = vec![first];
     let mut at = first;
     while at < last {
@@ -1451,7 +1623,11 @@ fn parked_on(lock: &Path) -> usize {
 }
 
 /// Writes `bytes` at `at`, cuts the file there (a torn tail past it goes),
-/// and syncs.
+/// and syncs. A write at offset 0 is a file's first trusted bytes, whether the
+/// file was born here or holds only a torn tail an interrupted append left:
+/// its directory is synced too, so the name survives a power loss with its
+/// bytes. One rule for every pack file, a `.rsb` or `.rsx` born after its
+/// month's `.rsr` included (verify r2 follow-up).
 fn write_synced(path: &Path, at: u64, bytes: &[u8]) -> Result<(), KeepError> {
     let Some(file) = open_regular(path, true)? else {
         return Err(KeepError::NotRegular {
@@ -1459,7 +1635,9 @@ fn write_synced(path: &Path, at: u64, bytes: &[u8]) -> Result<(), KeepError> {
         });
     };
     #[cfg(test)]
-    if FAULT.with(std::cell::Cell::get) == Some(path_kind(path)) {
+    if FAULT.with(std::cell::Cell::get) == Some(path_kind(path))
+        && FAULT_SKIP.with(|skip| skip.replace(skip.get().saturating_sub(1))) == 0
+    {
         return Err(KeepError::Io {
             op: "write",
             path: path.to_path_buf(),
@@ -1469,7 +1647,44 @@ fn write_synced(path: &Path, at: u64, bytes: &[u8]) -> Result<(), KeepError> {
     file.write_all_at(bytes, at)
         .and_then(|()| file.set_len(at + bytes.len() as u64))
         .and_then(|()| file.sync_data())
-        .map_err(|why| KeepError::io("write", path, &why))
+        .map_err(|why| KeepError::io("write", path, &why))?;
+    if at == 0 {
+        sync_parent(path)?;
+    }
+    Ok(())
+}
+
+/// Syncs the directory holding `path`, so an entry born in it is durable.
+fn sync_parent(path: &Path) -> Result<(), KeepError> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    #[cfg(test)]
+    DIR_SYNCS.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|why| KeepError::io("sync the directory", dir, &why))
+}
+
+/// Creates the pack directory and every missing parent, syncing the parent
+/// of each one it creates, so a power loss cannot take the directory a synced
+/// pack file was written into (verify r2 follow-up). At most the path's
+/// depth of `lstat`s.
+fn create_dir_synced(dir: &Path) -> Result<(), KeepError> {
+    let mut missing = Vec::new();
+    let mut at = Some(dir);
+    while let Some(one) = at {
+        if fs::symlink_metadata(one).is_ok() {
+            break;
+        }
+        missing.push(one);
+        at = one.parent();
+    }
+    fs::create_dir_all(dir).map_err(|why| KeepError::io("create", dir, &why))?;
+    for born in missing.iter().rev() {
+        sync_parent(born)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1477,6 +1692,7 @@ fn path_kind(path: &Path) -> u8 {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rsb") => 1,
         Some("rsx") => 2,
+        Some("rsw") => 4,
         _ => 3,
     }
 }
@@ -1485,6 +1701,12 @@ fn path_kind(path: &Path) -> u8 {
 thread_local! {
     /// Test-only: refuse the next writes to one kind of file as a full disk.
     pub(crate) static FAULT: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+    /// Test-only: how many writes of the `FAULT` kind go through before it
+    /// refuses. A refused write stands for a kill at that point: nothing
+    /// after it is written (repair round 3).
+    pub(crate) static FAULT_SKIP: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Test-only: every directory synced on this thread, in order.
+    pub(crate) static DIR_SYNCS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn deflate(raw: &[u8]) -> Result<Vec<u8>, KeepError> {
@@ -1587,32 +1809,18 @@ fn note_not_kept(root: &Path, pack: Pack<'_>, landing: &Landing<'_>, why: &KeepE
     );
 }
 
-fn append_unlogged(
-    root: &Path,
+/// The receipt every month of one append starts from: the landing's counts
+/// and identity, the offered bytes' lengths and BLAKE3.
+fn template_of(
     pack: Pack<'_>,
-    offered: Offered<'_>,
     landing: &Landing<'_>,
-) -> Result<Outcome, KeepError> {
-    let dir = pack_dir(root, pack)?;
-    let months = months_of(landing.window)?;
-    let (raw, kind, status, whole_len) = match offered {
-        Offered::Answer(answer) => (answer.body.as_bytes(), Kept::Kept, answer.status, 0),
-        Offered::Refused(refused) => (
-            refused.head.as_bytes(),
-            Kept::RefusedHead,
-            refused.status,
-            i64::try_from(refused.len).unwrap_or(i64::MAX),
-        ),
-    };
+    (raw, kind, status, whole_len): (&[u8], Kept, u16, i64),
+    deflated: &[u8],
+) -> Receipt {
     let raw_len = raw.len() as u64;
-    if raw_len > crate::http::MAX_RESPONSE_BYTES as u64 {
-        return Err(KeepError::TooLarge { len: raw_len });
-    }
-    let deflated = deflate(raw)?;
-    fs::create_dir_all(&dir).map_err(|why| KeepError::io("create", &dir, &why))?;
     let (asked_from, asked_to) = asked_span(landing.window);
     let refused_count = u32::try_from(landing.refused.len()).unwrap_or(u32::MAX);
-    let template = Receipt {
+    Receipt {
         asked_from,
         asked_to,
         first_stamp: if kind == Kept::RefusedHead {
@@ -1644,12 +1852,45 @@ fn append_unlogged(
         body_of: 0,
         refusals_from: 0,
         refusals: 0,
+    }
+}
+
+fn append_unlogged(
+    root: &Path,
+    pack: Pack<'_>,
+    offered: Offered<'_>,
+    landing: &Landing<'_>,
+) -> Result<Outcome, KeepError> {
+    let dir = pack_dir(root, pack)?;
+    let months = months_of(landing.window)?;
+    let (raw, kind, status, whole_len) = match offered {
+        Offered::Answer(answer) => (answer.body.as_bytes(), Kept::Kept, answer.status, 0),
+        Offered::Refused(refused) => (
+            refused.head.as_bytes(),
+            Kept::RefusedHead,
+            refused.status,
+            i64::try_from(refused.len).unwrap_or(i64::MAX),
+        ),
     };
+    let raw_len = raw.len() as u64;
+    if raw_len > crate::http::MAX_RESPONSE_BYTES as u64 {
+        return Err(KeepError::TooLarge { len: raw_len });
+    }
+    let deflated = deflate(raw)?;
+    create_dir_synced(&dir)?;
+    let template = template_of(pack, landing, (raw, kind, status, whole_len), &deflated);
     let mut months = months.into_iter();
     let first_month = months
         .next()
         .ok_or(KeepError::Path(PathError::EmptySegment { field: "month" }))?;
     let _held = lock(&dir)?;
+    // AN INTERRUPTED WINDOW OVER MONTHS IS FINISHED BEFORE ANYTHING ELSE, under
+    // the same lock: a writer killed between its first month's receipt and a
+    // later month's pointer left that receipt with no pointer, for good, and
+    // the next append carried on as if the pack were whole (verify r3). Every
+    // append looks, so nothing has been appended since the interrupted one.
+    let journal = dir.join(WINDOWS_NAME);
+    let next_record = finish_window(root, pack, &dir, &journal)?;
     // EVERY LATER MONTH IS ASKED FIRST whether it can take its pointer: one
     // whose last segment holds `MAX_RECEIPTS` receipts used to be refused
     // `receipts_full` ("nothing written") only after the first month's body,
@@ -1659,25 +1900,253 @@ fn append_unlogged(
     let chosen = months
         .map(|month| Ok((month, choose_segment(&dir, month, 0)?)))
         .collect::<Result<Vec<_>, KeepError>>()?;
-    let first = place_body(&dir, first_month, &deflated, template, landing.refused)?;
+    let over_months = !chosen.is_empty();
+    if over_months && next_record + 2 > MAX_WINDOW_RECORDS {
+        return Err(KeepError::WindowsFull { journal });
+    }
+    let record = |segment: u8, ordinal: u32, state: WindowState| WindowRecord {
+        asked_from: template.asked_from,
+        asked_to: template.asked_to,
+        digest: template.digest,
+        run: template.run,
+        month: first_month,
+        segment,
+        ordinal: u16::try_from(ordinal).unwrap_or(u16::MAX),
+        state,
+        written: 0,
+    };
+    // THE OPEN RECORD IS WRITTEN AFTER THE FIRST MONTH HAS CHOSEN WHERE ITS
+    // RECEIPT GOES AND BEFORE ITS FIRST BYTE: a refusal before that point
+    // still writes nothing, and the record names the exact place a finishing
+    // append looks for the receipt.
+    let mut open = |segment: u8, ordinal: u32| -> Result<(), KeepError> {
+        if over_months {
+            write_window(
+                &journal,
+                next_record,
+                &record(segment, ordinal, WindowState::Open),
+            )?;
+        }
+        Ok(())
+    };
+    let first = place_body(
+        &dir,
+        first_month,
+        &deflated,
+        template,
+        landing.refused,
+        &mut open,
+    )?;
     let mut further = Vec::with_capacity(chosen.len());
     for (month, segment) in chosen {
-        let mut pointer = first.receipt;
-        if pointer.kept == Kept::NotKept {
-            // NO BODY TO POINT AT: the reason stands, and the refused rows
-            // are read from the first month's receipt: its month from
-            // `asked_from`, its segment and ordinal from `segment` and
-            // `body_of`, which the first receipt already carries.
-            pointer.refusals_from = 0;
-            pointer.refusals = 0;
-        } else {
-            pointer.kept = Kept::InFirstMonth;
-            pointer.reason = Reason::LaterMonth;
-            pointer.body_of = first.ordinal;
-        }
-        further.push(place_receipt_only(month, segment, pointer)?);
+        further.push(place_receipt_only(month, segment, pointer_to(&first))?);
+    }
+    // THE CLOSING RECORD IS THE WINDOW'S COMMIT: until it is on disk, the
+    // next append finishes whatever pointer is missing.
+    if over_months {
+        write_window(
+            &journal,
+            next_record + 1,
+            &record(first.segment, first.ordinal, WindowState::Closed),
+        )?;
     }
     Ok(Outcome { first, further })
+}
+
+/// The pointer a further month gets to the first month's receipt: the one
+/// rule the append and the finishing of an interrupted window both use.
+fn pointer_to(first: &Placed) -> Receipt {
+    let mut pointer = first.receipt;
+    if pointer.kept == Kept::NotKept {
+        // NO BODY TO POINT AT: the reason stands, and the refused rows
+        // are read from the first month's receipt: its month from
+        // `asked_from`, its segment and ordinal from `segment` and
+        // `body_of`, which the first receipt already carries.
+        pointer.refusals_from = 0;
+        pointer.refusals = 0;
+    } else {
+        pointer.kept = Kept::InFirstMonth;
+        pointer.reason = Reason::LaterMonth;
+        pointer.body_of = first.ordinal;
+    }
+    pointer
+}
+
+/// The window journal's trusted tail: the index the next record is written
+/// at, and the last record a reader may trust. One `stat` and at most two
+/// 64-byte reads, whatever the journal's length.
+///
+/// # Errors
+///
+/// [`KeepError::Damaged`] when the record before a torn last one fails its
+/// CRC too, or the journal is longer than [`MAX_WINDOW_RECORDS`] records.
+fn read_windows(path: &Path) -> Result<(u64, Option<WindowRecord>), KeepError> {
+    let Some(file) = open_regular(path, false)? else {
+        return Ok((0, None));
+    };
+    let len = file
+        .metadata()
+        .map_err(|why| KeepError::io("stat", path, &why))?
+        .len();
+    let whole = len / WINDOW_RECORD_LEN as u64;
+    if whole > MAX_WINDOW_RECORDS {
+        return Err(KeepError::Damaged {
+            path: path.to_path_buf(),
+            ordinal: MAX_WINDOW_RECORDS,
+        });
+    }
+    let read_at = |index: u64| {
+        let mut bytes = [0_u8; WINDOW_RECORD_LEN];
+        file.read_exact_at(&mut bytes, index * WINDOW_RECORD_LEN as u64)
+            .map_err(|why| KeepError::io("read", path, &why))?;
+        Ok::<_, KeepError>(WindowRecord::decode(&bytes))
+    };
+    let Some(last) = whole.checked_sub(1) else {
+        return Ok((0, None));
+    };
+    if let Some(record) = read_at(last)? {
+        return Ok((whole, Some(record)));
+    }
+    // THE LAST WHOLE RECORD MAY BE TORN, as the last receipt may: the next
+    // record is written over it, and the one before it was synced first.
+    let Some(before) = last.checked_sub(1) else {
+        return Ok((0, None));
+    };
+    match read_at(before)? {
+        Some(record) => Ok((last, Some(record))),
+        None => Err(KeepError::Damaged {
+            path: path.to_path_buf(),
+            ordinal: before,
+        }),
+    }
+}
+
+fn write_window(path: &Path, index: u64, record: &WindowRecord) -> Result<(), KeepError> {
+    write_synced(path, index * WINDOW_RECORD_LEN as u64, &record.encode())
+}
+
+/// The pack's window over months that an interrupted append left open, if
+/// any: its first month, the segment and ordinal of that month's receipt,
+/// and its asked span. While no writer holds the pack lock, `Some` means a
+/// first month's receipt may stand with a later month missing its pointer;
+/// the next append under the lock finishes it and says so (repair round 3).
+///
+/// # Errors
+///
+/// As [`pack_dir`], and [`KeepError::Damaged`] for a damaged journal.
+pub fn unfinished(root: &Path, pack: Pack<'_>) -> Result<Option<WindowRecord>, KeepError> {
+    let dir = pack_dir(root, pack)?;
+    let (_next, last) = read_windows(&dir.join(WINDOWS_NAME))?;
+    Ok(last.filter(|record| record.state == WindowState::Open))
+}
+
+/// Finishes the window over months an interrupted append left open, under
+/// the pack lock, and returns where the journal's next record goes.
+///
+/// The open record names where the first month's receipt was to go. Nothing
+/// has been appended since (every append comes through here first), so that
+/// segment holds exactly `ordinal` receipts when the receipt was never
+/// written, and the receipt the record names at `ordinal` when it was. In
+/// the second case every further month whose newest receipt is not the
+/// pointer to it gets that pointer now, exactly as the interrupted append
+/// would have written it. Either way a closing record is written and an
+/// audited error event names the window, so the interruption is never
+/// silent.
+///
+/// # Errors
+///
+/// Any refusal of the writes, and [`KeepError::Damaged`] when the first
+/// month does not hold what the open record says it can.
+fn finish_window(
+    root: &Path,
+    pack: Pack<'_>,
+    dir: &Path,
+    journal: &Path,
+) -> Result<u64, KeepError> {
+    let (next, last) = read_windows(journal)?;
+    let Some(open) = last.filter(|record| record.state == WindowState::Open) else {
+        return Ok(next);
+    };
+    let damaged = || KeepError::Damaged {
+        path: journal.to_path_buf(),
+        ordinal: next.saturating_sub(1),
+    };
+    let at = names(dir, open.month, open.segment);
+    let state = read_segment(&at)?;
+    let ordinal = u32::from(open.ordinal);
+    let mut placed = Vec::new();
+    let finished = if state.count() == ordinal {
+        WindowState::Abandoned
+    } else {
+        let receipt = state
+            .receipts
+            .get(usize::from(open.ordinal))
+            .copied()
+            .filter(|receipt| open.names(receipt))
+            .ok_or_else(damaged)?;
+        let first = Placed {
+            month: open.month,
+            segment: open.segment,
+            ordinal,
+            receipt,
+            rolled: false,
+        };
+        let pointer = pointer_to(&first);
+        let months = months_from(open.month, month_of_unix(open.asked_to)?)?;
+        for month in months.into_iter().skip(1) {
+            let index = newest_segment(dir, month);
+            let names_of = names(dir, month, index);
+            let held = read_segment(&names_of)?;
+            if held.receipts.last() == Some(&pointer) {
+                continue;
+            }
+            let chosen = roll_if_full(dir, month, 0, 0, (index, names_of, held))?;
+            placed.push(place_receipt_only(month, chosen, pointer)?);
+        }
+        WindowState::Completed
+    };
+    let closing = WindowRecord {
+        state: finished,
+        written: u8::try_from(placed.len()).unwrap_or(u8::MAX),
+        ..open
+    };
+    write_window(journal, next, &closing)?;
+    note_finished(root, pack, &closing, &placed);
+    Ok(next + 1)
+}
+
+/// The audited event for a window an interrupted append left open, and one
+/// roll event per pointer it wrote into a new segment.
+fn note_finished(root: &Path, pack: Pack<'_>, closing: &WindowRecord, placed: &[Placed]) {
+    let key = pack.key.to_string();
+    let month = closing.month.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error(
+            "pull.keep",
+            "an interrupted window over months was finished by the next append",
+        )
+        .with("instrument", telemetry::Value::Str(&key))
+        .with("timeframe", telemetry::Value::Str(pack.timeframe.as_str()))
+        .with("month", telemetry::Value::Str(&month))
+        .with(
+            "segment",
+            telemetry::Value::Uint(u64::from(closing.segment)),
+        )
+        .with(
+            "ordinal",
+            telemetry::Value::Uint(u64::from(closing.ordinal)),
+        )
+        .with("state", telemetry::Value::Str(closing.state.word()))
+        .with(
+            "pointers_written",
+            telemetry::Value::Uint(placed.len() as u64),
+        ),
+    );
+    for one in placed {
+        if one.rolled {
+            note_rolled(root, pack, &key, one);
+        }
+    }
 }
 
 /// The month's newest segment, rolled forward when it cannot take one more
@@ -1748,12 +2217,16 @@ fn roll_if_full(
     Ok((index, at, state, false))
 }
 
+/// Keeps the first month's body, rows and receipt. `open` is called once, with
+/// the segment and ordinal the receipt goes to, after every refusal that writes
+/// nothing and before the first byte is written.
 fn place_body(
     dir: &Path,
     month: YearMonth,
     deflated: &[u8],
     template: Receipt,
     refused: &[RefusedRow],
+    open: &mut dyn FnMut(u8, u32) -> Result<(), KeepError>,
 ) -> Result<Placed, KeepError> {
     let index = newest_segment(dir, month);
     let newest = names(dir, month, index);
@@ -1774,6 +2247,7 @@ fn place_body(
         receipt.body_offset = held.body_offset;
         receipt.deflated_len = held.deflated_len;
         let ordinal = state.count();
+        open(index, ordinal)?;
         return write_refusals_then_receipt(
             &newest, &state, ordinal, receipt, refused, index, month, false,
         );
@@ -1789,6 +2263,7 @@ fn place_body(
     let mut receipt = template;
     receipt.segment = segment;
     receipt.body_of = ordinal;
+    open(segment, ordinal)?;
     if state.body_end + deflated.len() as u64 > MAX_PACK_BYTES {
         receipt.kept = Kept::NotKept;
         receipt.reason = Reason::PackFull;
@@ -1853,15 +2328,13 @@ fn write_refusals_then_receipt(
         receipt.refusals_from = state.refusals_end;
         receipt.refusals = u32::try_from(refused.len()).unwrap_or(u32::MAX);
     }
-    let new_file = state.receipts.is_empty();
+    // A receipt at ordinal 0 is its file's first: `write_synced` syncs the
+    // directory then, as it does for every pack file's first bytes.
     write_synced(
         &at.receipts,
         u64::from(ordinal) * RECEIPT_LEN as u64,
         &receipt.encode(),
     )?;
-    if new_file {
-        sync_dir(at)?;
-    }
     Ok(Placed {
         month,
         segment,
@@ -1869,15 +2342,6 @@ fn write_refusals_then_receipt(
         receipt,
         rolled,
     })
-}
-
-fn sync_dir(at: &Names) -> Result<(), KeepError> {
-    let Some(dir) = at.receipts.parent() else {
-        return Ok(());
-    };
-    File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|why| KeepError::io("sync the directory", dir, &why))
 }
 
 fn place_receipt_only(

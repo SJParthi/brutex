@@ -10,7 +10,7 @@
               each holding every arm of its row."
 )]
 
-//! IA-RK-03..13 (IA-RK-01 and -02 are in `http.rs`) and the matrix rows of
+//! IA-RK-03..22 (IA-RK-01 and -02 are in `http.rs`) and the matrix rows of
 //! §8 Z7 and Z11 for the kept answers
 //! (IA-8). Every body here is invented: the prices cannot be mistaken for a
 //! real print (CLAUDE.md, no vendor row in the repository).
@@ -1613,9 +1613,15 @@ fn waiters_parked_on_a_held_pack_lock_are_bounded() {
     );
     let why = refused.unwrap_err();
     assert_eq!(why.word(), "lock_stalled");
+    // The count it names and the bound are two numbers, said apart: the
+    // message once read "(at most 4)" beside twelve parked (verify r3).
     assert!(why.to_string().contains(&format!(
-        "has {MAX_PARKED_WAITERS} earlier waits still parked"
+        "has {MAX_PARKED_WAITERS} abandoned waits still parked"
     )));
+    assert!(why.to_string().contains(&format!(
+        "new waits are refused once {MAX_PARKED_WAITERS} are parked"
+    )));
+    assert!(!why.to_string().contains("at most"));
     assert!(why.to_string().contains("nothing written"));
     assert_eq!(
         parked_on(&lock_file),
@@ -2022,4 +2028,451 @@ fn a_later_months_unkept_pointer_names_the_first_months_receipt() {
     assert_eq!(owner, outcome.first.receipt);
     let found = refused_rows(scratch.root(), pack(&key), home, stored.body_of, &owner).unwrap();
     assert_eq!(found, rows);
+}
+
+/// Every trusted receipt of `month`, segment by segment, flattened.
+fn held_in(root: &Path, key: &InstrumentKey, month: YearMonth) -> Vec<Receipt> {
+    receipts(root, pack(key), month)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, segment)| segment.receipts)
+        .collect()
+}
+
+/// The window journal's records, every whole one decoded (`None` = torn).
+fn journal_of(root: &Path, key: &InstrumentKey) -> Vec<Option<WindowRecord>> {
+    let path = pack_dir(root, pack(key)).unwrap().join(WINDOWS_NAME);
+    fs::read(path)
+        .unwrap_or_default()
+        .chunks_exact(WINDOW_RECORD_LEN)
+        .map(WindowRecord::decode)
+        .collect()
+}
+
+/// Runs one append with the test seam refusing write number `skip` (from 0)
+/// of file kind `kind`: a kill at that point, nothing after it written.
+fn killed_at(
+    root: &Path,
+    key: &InstrumentKey,
+    (kind, skip): (u8, u32),
+    text: &str,
+    window: &Landing<'_>,
+) -> Result<Outcome, KeepError> {
+    FAULT.with(|f| f.set(Some(kind)));
+    FAULT_SKIP.with(|s| s.set(skip));
+    let result = append(root, pack(key), Offered::Answer(&answered(text)), window);
+    FAULT.with(|f| f.set(None));
+    FAULT_SKIP.with(|s| s.set(0));
+    result
+}
+
+fn july_month() -> YearMonth {
+    YearMonth::new(2019, 7).unwrap()
+}
+
+/// IA-RK-21 (verify-IA-8-r3 blocking 1): a writer killed between a window's
+/// first month's receipt and a later month's pointer left that receipt with
+/// no pointer in the later month, for good: nothing named it and the next
+/// append carried on. Now the pack's window journal holds an `open` record
+/// from before the first receipt; a reader names the open window, and the
+/// next append, under the pack lock, writes the missing pointer exactly as
+/// the killed one would have, closes the record `completed` and says so.
+/// BEFORE the fix the August append left July with no receipt at all.
+#[test]
+fn a_window_over_months_killed_after_its_first_receipt_is_finished_by_the_next() {
+    let scratch = Scratch::new("ia8-killed-window");
+    let key = nifty();
+    let text = invented(70);
+    let window = landing(day(2019, 6, 28), day(2019, 7, 2));
+    let killed = killed_at(scratch.root(), &key, (3, 1), &text, &window);
+    assert!(
+        matches!(
+            killed,
+            Err(KeepError::Io {
+                kind: io::ErrorKind::StorageFull,
+                ..
+            })
+        ),
+        "the July pointer's write is the kill: {killed:?}"
+    );
+    let june = held_in(scratch.root(), &key, june_month());
+    assert_eq!(june.len(), 1, "June's receipt was committed");
+    assert_eq!(june[0].kept, Kept::Kept);
+    assert!(
+        held_in(scratch.root(), &key, july_month()).is_empty(),
+        "and July has no pointer: the orphan the checker found"
+    );
+    // DETECTABLE BEFORE ANY REPAIR: a reader names the open window by month,
+    // segment and ordinal.
+    let open = unfinished(scratch.root(), pack(&key)).unwrap().unwrap();
+    assert_eq!(
+        (open.month, open.segment, open.ordinal, open.state),
+        (june_month(), 0, 0, WindowState::Open)
+    );
+    assert_eq!(
+        (open.asked_from, open.asked_to),
+        (june[0].asked_from, june[0].asked_to)
+    );
+    // The next append, of an unrelated month, finishes it first.
+    let august = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(71))),
+        &landing(day(2019, 8, 5), day(2019, 8, 9)),
+    )
+    .unwrap();
+    assert!(august.further.is_empty());
+    let july = held_in(scratch.root(), &key, july_month());
+    let [pointer] = july.as_slice() else {
+        panic!("July holds exactly the missing pointer: {july:?}");
+    };
+    assert_eq!(
+        (
+            pointer.kept,
+            pointer.reason,
+            pointer.segment,
+            pointer.body_of
+        ),
+        (Kept::InFirstMonth, Reason::LaterMonth, 0, 0)
+    );
+    assert_eq!(
+        body(scratch.root(), pack(&key), july_month(), pointer).unwrap(),
+        text,
+        "it leads to June's body"
+    );
+    assert_eq!(unfinished(scratch.root(), pack(&key)).unwrap(), None);
+    let journal = journal_of(scratch.root(), &key);
+    assert_eq!(
+        journal.len(),
+        2,
+        "open, then the finishing record: {journal:?}"
+    );
+    let closing = journal[1].unwrap();
+    assert_eq!(
+        (closing.state, closing.written),
+        (WindowState::Completed, 1)
+    );
+    assert_eq!(
+        (closing.month, closing.segment, closing.ordinal),
+        (june_month(), 0, 0)
+    );
+}
+
+/// IA-RK-21, every kill point of a window over three months, and the same
+/// window repeated (a `kept=2` first receipt with the same span, body and
+/// run as an earlier whole one). After the next append each further month
+/// holds exactly one pointer per committed first receipt and the journal's
+/// last record says what was found.
+#[test]
+fn every_kill_point_of_a_window_over_months_is_finished_or_named_abandoned() {
+    type KillRow = ((u8, u32), bool, WindowState, u8, usize, usize);
+    let window = landing(day(2019, 6, 28), day(2019, 8, 2));
+    let august = YearMonth::new(2019, 8).unwrap();
+    // (kind, writes let through, repeat first, state, pointers written,
+    //  first-month receipts after, pointers per further month after)
+    let rows: [KillRow; 6] = [
+        ((3, 0), false, WindowState::Abandoned, 0, 0, 0),
+        ((3, 1), false, WindowState::Completed, 2, 1, 1),
+        ((3, 2), false, WindowState::Completed, 1, 1, 1),
+        ((4, 1), false, WindowState::Completed, 0, 1, 1),
+        ((3, 1), true, WindowState::Completed, 2, 2, 2),
+        ((3, 0), true, WindowState::Abandoned, 0, 1, 1),
+    ];
+    for (point, repeat, state, written, firsts, pointers) in rows {
+        let scratch = Scratch::new("ia8-kill-points");
+        let key = nifty();
+        let text = invented(72);
+        if repeat {
+            append(
+                scratch.root(),
+                pack(&key),
+                Offered::Answer(&answered(&text)),
+                &window,
+            )
+            .unwrap();
+        }
+        let killed = killed_at(scratch.root(), &key, point, &text, &window);
+        assert!(killed.is_err(), "{point:?} {repeat}: {killed:?}");
+        assert!(
+            unfinished(scratch.root(), pack(&key)).unwrap().is_some(),
+            "{point:?} {repeat}: the open window is named"
+        );
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(73))),
+            &landing(day(2019, 9, 2), day(2019, 9, 6)),
+        )
+        .unwrap();
+        let journal = journal_of(scratch.root(), &key);
+        let last = journal.last().copied().flatten().unwrap();
+        assert_eq!(
+            (last.state, last.written),
+            (state, written),
+            "{point:?} {repeat}: {journal:?}"
+        );
+        assert_eq!(unfinished(scratch.root(), pack(&key)).unwrap(), None);
+        let june = held_in(scratch.root(), &key, june_month());
+        assert_eq!(june.len(), firsts, "{point:?} {repeat}: {june:?}");
+        for month in [july_month(), august] {
+            let held = held_in(scratch.root(), &key, month);
+            assert_eq!(held.len(), pointers, "{point:?} {repeat} {month}: {held:?}");
+            // Pointer n names first receipt n: none is missing, none doubled.
+            for (n, pointer) in held.iter().enumerate() {
+                assert_eq!(
+                    (pointer.kept, pointer.segment, pointer.body_of as usize),
+                    (Kept::InFirstMonth, 0, n),
+                    "{point:?} {repeat} {month}"
+                );
+                assert_eq!(
+                    body(scratch.root(), pack(&key), month, pointer).unwrap(),
+                    text
+                );
+            }
+        }
+    }
+}
+
+/// The journal under the torn-tail rule: a partial record and a whole last
+/// record whose CRC fails are an interrupted write, written over by the
+/// next; a bad record before the last is damage, refused by name and never
+/// written over.
+#[test]
+fn a_torn_window_journal_is_written_over_and_a_damaged_one_refused() {
+    let scratch = Scratch::new("ia8-torn-journal");
+    let key = nifty();
+    let window = landing(day(2019, 6, 28), day(2019, 7, 2));
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(74))),
+        &window,
+    )
+    .unwrap();
+    let path = pack_dir(scratch.root(), pack(&key))
+        .unwrap()
+        .join(WINDOWS_NAME);
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        2 * WINDOW_RECORD_LEN as u64
+    );
+    // A partial record, then a whole one that fails its CRC.
+    for junk in [vec![0xA5_u8; 10], vec![0xA5_u8; WINDOW_RECORD_LEN]] {
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&junk).unwrap();
+        drop(file);
+        assert_eq!(unfinished(scratch.root(), pack(&key)).unwrap(), None);
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(
+                75 + u32::try_from(junk.len()).unwrap(),
+            ))),
+            &window,
+        )
+        .unwrap();
+        let journal = journal_of(scratch.root(), &key);
+        assert!(journal.iter().all(Option::is_some), "{journal:?}");
+        assert_eq!(
+            journal.last().copied().flatten().unwrap().state,
+            WindowState::Closed
+        );
+    }
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        6 * WINDOW_RECORD_LEN as u64
+    );
+    // Damage to the record before a torn last one: refused, nothing more
+    // written. (A reader trusts the last two records only: what is before
+    // them is history no append reads.)
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[WINDOW_RECORD_LEN * 5] ^= 0xFF;
+    fs::write(&path, &bytes).unwrap();
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&[0xA5_u8; WINDOW_RECORD_LEN]).unwrap();
+    drop(file);
+    let july_before = held_in(scratch.root(), &key, july_month()).len();
+    let refused = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(90))),
+        &window,
+    );
+    assert_eq!(
+        refused,
+        Err(KeepError::Damaged {
+            path: path.clone(),
+            ordinal: 5
+        })
+    );
+    assert_eq!(refused.unwrap_err().word(), "pack_damaged");
+    assert_eq!(
+        held_in(scratch.root(), &key, july_month()).len(),
+        july_before
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        7 * WINDOW_RECORD_LEN as u64
+    );
+}
+
+/// A journal with no room for a window's two records refuses the window
+/// over months `windows_full` before anything is written; a window inside
+/// one month needs no record and is kept. The journal here is sparse: one
+/// whole `closed` record at its last place but one.
+#[test]
+fn a_full_window_journal_refuses_a_window_over_months_by_name() {
+    let scratch = Scratch::new("ia8-windows-full");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(WINDOWS_NAME);
+    let closed = WindowRecord {
+        asked_from: 1,
+        asked_to: 2,
+        digest: [3; 32],
+        run: 4,
+        month: june_month(),
+        segment: 0,
+        ordinal: 0,
+        state: WindowState::Closed,
+        written: 0,
+    };
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let last = (MAX_WINDOW_RECORDS - 2) * WINDOW_RECORD_LEN as u64;
+    std::os::unix::fs::FileExt::write_all_at(&file, &closed.encode(), last).unwrap();
+    drop(file);
+    let refused = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(91))),
+        &landing(day(2019, 6, 28), day(2019, 7, 2)),
+    );
+    assert_eq!(
+        refused,
+        Err(KeepError::WindowsFull {
+            journal: path.clone()
+        })
+    );
+    let why = refused.unwrap_err();
+    assert_eq!(why.word(), "windows_full");
+    assert!(why.to_string().contains("nothing written"));
+    assert!(held_in(scratch.root(), &key, june_month()).is_empty());
+    assert!(held_in(scratch.root(), &key, july_month()).is_empty());
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        (MAX_WINDOW_RECORDS - 1) * WINDOW_RECORD_LEN as u64
+    );
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(92))),
+        &june(),
+    )
+    .unwrap();
+    assert_eq!(held_in(scratch.root(), &key, june_month()).len(), 1);
+}
+
+/// A window-journal record round-trips, and a flipped bit or a state byte
+/// no writer writes is refused.
+#[test]
+fn a_window_record_round_trips_and_a_flipped_bit_is_refused() {
+    for state in [
+        WindowState::Open,
+        WindowState::Closed,
+        WindowState::Completed,
+        WindowState::Abandoned,
+    ] {
+        assert_eq!(WindowState::from_code(state.code()), Some(state));
+        let record = WindowRecord {
+            asked_from: -5,
+            asked_to: 1_562_088_599,
+            digest: [9; 32],
+            run: u32::MAX,
+            month: YearMonth::new(2026, 12).unwrap(),
+            segment: MAX_SEGMENTS - 1,
+            ordinal: 1_023,
+            state,
+            written: 255,
+        };
+        let bytes = record.encode();
+        assert_eq!(WindowRecord::decode(&bytes), Some(record));
+        for bit in [0, 8 * 58, 8 * 63] {
+            let mut flipped = bytes;
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            assert_eq!(WindowRecord::decode(&flipped), None, "bit {bit}");
+        }
+        assert_eq!(WindowRecord::decode(&bytes[1..]), None);
+    }
+    assert_eq!(WindowState::from_code(0), None);
+    assert_eq!(WindowState::from_code(5), None);
+    let words: Vec<_> = [
+        WindowState::Open,
+        WindowState::Closed,
+        WindowState::Completed,
+        WindowState::Abandoned,
+    ]
+    .map(WindowState::word)
+    .to_vec();
+    assert_eq!(words, ["open", "closed", "completed", "abandoned"]);
+}
+
+/// Verify r2 follow-up: every directory the keeper creates is synced into
+/// its parent, and every pack file's first bytes sync its directory, a
+/// `.rsb` born after its month's `.rsr` included. BEFORE the fix the July
+/// append below synced no directory: July's `.rsr` already held the pointer,
+/// so only a receipts file born empty was followed by a directory sync.
+#[test]
+fn every_directory_created_and_every_first_write_syncs_its_parent() {
+    let scratch = Scratch::new("ia8-dir-sync");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    DIR_SYNCS.with(|s| s.borrow_mut().clear());
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(93))),
+        &landing(day(2019, 6, 28), day(2019, 7, 2)),
+    )
+    .unwrap();
+    let synced = DIR_SYNCS.with(std::cell::RefCell::take);
+    // Each created directory's parent, root to pack.
+    let mut created = Vec::new();
+    let mut at = dir.as_path();
+    while at != scratch.root() {
+        created.push(at.parent().unwrap().to_path_buf());
+        at = at.parent().unwrap();
+    }
+    created.reverse();
+    assert!(
+        synced.len() >= created.len(),
+        "every created directory's parent is synced: {synced:?}"
+    );
+    assert_eq!(&synced[..created.len()], created.as_slice(), "{synced:?}");
+    assert!(
+        synced[created.len()..].iter().all(|d| *d == dir),
+        "{synced:?}"
+    );
+    // June's .rsb and .rsr, July's .rsr, and the journal: four first writes.
+    assert_eq!(synced.len() - created.len(), 4, "{synced:?}");
+    let july = names(&dir, july_month(), 0);
+    assert!(july.receipts.exists() && !july.bodies.exists());
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(94))),
+        &landing(day(2019, 7, 8), day(2019, 7, 12)),
+    )
+    .unwrap();
+    assert!(july.bodies.exists());
+    let synced = DIR_SYNCS.with(std::cell::RefCell::take);
+    assert_eq!(
+        synced,
+        std::slice::from_ref(&dir),
+        "July's late .rsb synced its directory"
+    );
 }

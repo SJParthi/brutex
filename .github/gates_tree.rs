@@ -2500,8 +2500,18 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
 // months and a contract prefix (`2019-12`, `2020-01`, `2020-02`,
 // `2019-06-27-`), and the marked header, cookie and token a test proves never
 // reach a pack (`ia8-*-secret`, `ia8-header-mark`, `set-cookie`, `x-marker`).
+// (5) Repair rounds 2 and 3 (verify-IA-8-r3 blocking 2; each read before it
+// was listed): the window journal's file word `rsw` (`windows.rsw`, and the
+// fault seam's name for it), its refusal `windows_full`, its closing states
+// `completed` and `abandoned`, the event field `pointers_written`; and
+// test-only words: the scratch tags `healthy-contention`, `unkept-pointer`,
+// `ia8-dir-sync`, `ia8-kill-points`, `ia8-killed-window`, `ia8-torn-journal`
+// and `ia8-windows-full`, and the invented bodies `window` and `august` of
+// the emit-site drive.
 // None names an account, an organisation or an environment.
-const KEPT_ANSWER_LITERAL: &str = "keep-lock 2019-06-27- 2019-12 2020-01 2020-02 body_mismatch body_not_kept create decode deflate \
+const KEPT_ANSWER_LITERAL: &str = "keep-lock 2019-06-27- 2019-12 2020-01 2020-02 abandoned august body_mismatch body_not_kept \
+     completed create decode deflate healthy-contention ia8-dir-sync ia8-kill-points ia8-killed-window ia8-torn-journal \
+     ia8-windows-full pointers_written rsw unkept-pointer window windows_full \
      detail disk doors dup duplicate_body ia8-causes ia8-cookie-secret ia8-header-mark ia8-session ia8-token-secret \
      io later_month lock_stalled not_a_regular_file odd-dir oversize pack pack_damaged \
      pack_full path_refused race receipts_full refusals_full refused_answer refused_rows responses rsb rsx set-cookie \

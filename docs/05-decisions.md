@@ -67892,6 +67892,25 @@ decides under when it finally gets the lock, so the two can never both think
 the other holds it. And every roll is an audited error event naming the
 month and the new segment's receipts file: a later month of a window that
 rolled used to roll with no event at all.
+Repair round 3 (18 Oct 2026) makes a window over months all-or-detectable. The
+third check killed a 20-thread writer five times on one pack and left two June
+receipts with no July pointer, every file CRC-whole, named by nothing and
+repaired by nothing. The choice: a 64-byte journal record per pack directory
+(`windows.rsw`), `open` before the first month's receipt and `closed` after the
+last pointer, so **the closing record is the commit of a window over months**
+(a window inside one month still commits with its receipt). The next append,
+under the pack lock and before anything else, finishes an open window: every
+missing pointer is written exactly as the interrupted append would have
+(`completed`), or, with no first receipt, the record is closed `abandoned`;
+both are an audited error event, and `response_keep::unfinished` names an open
+window to a reader meanwhile. Rejected: a flag in the first receipt (a receipt
+is never rewritten once trusted, so the flag could not be cleared without an
+in-place write), and repair by a reader (a reader takes no lock and writes
+nothing). The journal's look is one `stat` and at most 128 bytes per append
+(L-IA-52); a journal with no room for two more records refuses a window over
+months `windows_full` with nothing written. Every pack file's first write and
+every directory the keeper creates now syncs its parent; that is tested as a
+call, and its survival of a power loss is NOT PROVED.
 
 **Proof.** `the_kept_answer_decodes_to_the_rows_the_pull_landed`,
 `a_kept_answer_never_holds_a_header_or_token` (`crates/pull/src/http.rs`),
@@ -67904,9 +67923,15 @@ rolled used to roll with no event at all.
 `a_receipt_naming_lengths_past_the_caps_is_damage_to_the_writer`,
 `a_window_over_months_writes_nothing_when_a_later_month_is_full`,
 `healthy_contention_on_one_pack_waits_rather_than_refusing`,
-`only_an_abandoned_waiter_is_counted_as_parked`
-(`crates/pull/src/response_keep_tests.rs`), and the two roll rows of
-`every_emit_site_in_this_crate_reaches_a_file` (`crates/pull/src/emit_sites.rs`).
+`only_an_abandoned_waiter_is_counted_as_parked`,
+`a_window_over_months_killed_after_its_first_receipt_is_finished_by_the_next`,
+`every_kill_point_of_a_window_over_months_is_finished_or_named_abandoned`,
+`a_torn_window_journal_is_written_over_and_a_damaged_one_refused`,
+`a_full_window_journal_refuses_a_window_over_months_by_name`,
+`every_directory_created_and_every_first_write_syncs_its_parent`
+(`crates/pull/src/response_keep_tests.rs`), and the two roll rows and the
+finished-window row of `every_emit_site_in_this_crate_reaches_a_file`
+(`crates/pull/src/emit_sites.rs`).
 
 ### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
 

@@ -747,6 +747,61 @@ fn drive_keep_roll(
     assert_eq!((rolled.segment, rolled.rolled), (1, true), "{outcome:?}");
 }
 
+/// A window over June and July killed after June's receipt (the test seam
+/// refuses the July pointer's write), then an append of an August window:
+/// the August append finishes the window first and says so at `Error`
+/// (IA-8, IA-RK-21, repair round 3).
+fn drive_keep_finished(scratch: &Scratch) {
+    use crate::response_keep as keep;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "EMITFINISHED",
+    )
+    .expect("a key");
+    let pack = keep::Pack {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: &key,
+        timeframe: store::path::Timeframe::MINUTE_1,
+    };
+    let landing = |from: (u16, u8, u8), to: (u16, u8, u8)| keep::Landing {
+        window: crate::session::Window::new(
+            crate::session::Day::new(from.0, from.1, from.2).expect("a day"),
+            crate::session::Day::new(to.0, to.1, to.2).expect("a day"),
+        )
+        .expect("a window"),
+        first_stamp: 0,
+        last_stamp: 0,
+        rows_decoded: 0,
+        rows_landed: 0,
+        rows_refused: 0,
+        refused: &[],
+        run: 1,
+        rung: 3,
+        rules_version: 1,
+        door: keep::Door::FromWindow,
+    };
+    let answered =
+        |text: &str| keep::Answered::of(crate::fetch::RawWindow::default(), text.to_owned(), 200);
+    keep::FAULT.with(|f| f.set(Some(3)));
+    keep::FAULT_SKIP.with(|s| s.set(1));
+    let killed = keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered("{\"invented\":\"window\"}")),
+        &landing((2019, 6, 28), (2019, 7, 2)),
+    );
+    keep::FAULT.with(|f| f.set(None));
+    keep::FAULT_SKIP.with(|s| s.set(0));
+    assert!(killed.is_err(), "{killed:?}");
+    keep::append(
+        &scratch.root,
+        pack,
+        keep::Offered::Answer(&answered("{\"invented\":\"august\"}")),
+        &landing((2019, 8, 5), (2019, 8, 9)),
+    )
+    .expect("kept");
+}
+
 struct Site {
     /// The `telemetry::emit(` this row proves, as `file:line`.
     at: &'static str,
@@ -804,6 +859,15 @@ static SITES: &[Site] = &[
                 (2019, 7, 2),
             );
         },
+    },
+    Site {
+        // Absent until repair round 3 of IA-8: a window killed between its
+        // first month's receipt and a later pointer was never named.
+        at: "crates/pull/src/response_keep.rs — an interrupted window over months is finished",
+        target: "pull.keep",
+        message: "an interrupted window over months was finished by the next append",
+        says: ("state", Says::Holds("completed")),
+        drive: drive_keep_finished,
     },
     Site {
         at: "crates/pull/src/response_keep.rs — the window's first month rolls",

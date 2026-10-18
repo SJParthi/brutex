@@ -3956,6 +3956,7 @@ row" (finding F7, DB-G46).
     <yyyy-mm>.rsx         24-byte refused-row records, appended
     <yyyy-mm>.<n>.rs[brx] segment n, 1..=7, once segment n-1 is full
     keep.lock             the directory's one lock (flock, exclusive)
+    windows.rsw           64-byte window-journal records, appended (windows over months only)
 ```
 
 The directory is the bar path's own (`store::path::StorePath::for_key`
@@ -4015,6 +4016,58 @@ overwrites. A receipt before the last that fails its CRC is damage: refused
 `pack_damaged`, never overwritten. A body read back is inflated to at most its
 raw length plus one byte and checked against the length and BLAKE3 of its
 receipt (`body_mismatch` otherwise).
+
+**A window over months, and which write is its commit (repair round 3).** A
+window inside one month commits with its receipt. A window over months writes,
+in this order and each synced: an `open` record in the pack directory's
+`windows.rsw`, naming the first month and the segment and ordinal its receipt
+goes to (written after every refusal that writes nothing, before the first
+byte); the first month's body, refused rows and receipt; one pointer per
+further month, first to last; then a `closed` record. **The `closed` record is
+the window's commit.** Until it is on disk the window is detectable: while no
+writer holds `keep.lock`, a last trusted record that is `open` is an
+interrupted window (`response_keep::unfinished` names it by first month,
+segment, ordinal and asked span), and **the next append, under the lock and
+before anything else, finishes it**: when the first month's segment holds
+exactly `ordinal` receipts, the receipt was never written and the record is
+closed `abandoned`; when it holds the receipt the record names (same asked
+span, BLAKE3 and run), every further month whose newest receipt is not the
+pointer to it gets that pointer, exactly as the interrupted append would have
+written it, and the record is closed `completed` with how many it wrote. Both
+are an audited `Error` event ("an interrupted window over months was finished
+by the next append", with month, segment, ordinal, state and
+`pointers_written`). Anything else in the first month is `pack_damaged`.
+Because every append finishes first, nothing has been appended since the
+interrupted one, so "the newest receipt" and "exactly `ordinal`" are exact.
+Before this, a writer killed between the first receipt and a pointer left
+that receipt with no pointer in the later month, for good, and every file
+stayed CRC-whole, so the torn-tail rule never saw it (verify-IA-8-r3: 2 of
+184 June receipts after five `SIGKILL`s).
+
+**Window-journal record (64 bytes, little-endian).** 0: asked from (`i64`);
+8: asked to (`i64`; its IST month is the window's last); 16: BLAKE3 of the
+body, as the receipt's offset 72; 48: run id (`u32`); 52: the first month's
+year (`u16`); 54: its month; 55: the segment of the first month the receipt
+goes to; 56: its ordinal there (`u16`, below 1,024); 58: state, 1 `open`, 2
+`closed`, 3 `completed` (closed by the next append), 4 `abandoned` (closed by
+the next append; no first receipt was written); 59: for `completed`, the
+pointers the next append wrote (saturating at 255), else 0; 60: CRC-32C over
+bytes 0..60. The torn-tail rule is the receipts': a partial record, or a whole
+last record whose CRC fails, is written over by the next record; a record
+before that which fails its CRC is `pack_damaged`. A reader reads the last two
+records only (one `stat`, at most 128 bytes), whatever the journal's length.
+At most 1,048,576 records (64 MiB); a window over months that needs two more
+than remain is refused `windows_full` with nothing written. A window inside
+one month writes no record.
+
+**Directory syncs.** Every write at offset 0 of a pack file (its first
+trusted bytes, whether the file was born there or held only a torn tail) is
+followed by a sync of the pack directory, a `.rsb` or `.rsx` first written
+after its month's `.rsr` included; and the parent of every directory the keeper
+creates is synced, root to pack. That the calls are made is tested
+(`every_directory_created_and_every_first_write_syncs_its_parent`, through a
+test-only record of the directories synced); that they survive a power loss is
+NOT PROVED: no test cuts the power.
 
 **One writer per pack directory.** `keep.lock` is taken exclusively around
 "read the receipts, write the body, write the receipt" and every further
