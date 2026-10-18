@@ -73281,7 +73281,7 @@ file's closing-auction count is carried on an INDEX record by design
 ### D-6400 — The FIB lattice: a BUC iceberg cube over one partition, whose visited set equals Apriori's frequent set under the chain rule (FIB-6) — 2026-10-18
 
 **Number** the first of FIB-6's block D-6400..D-6419 (the specification's
-D-5400..D-5419, moved by D-6311). `grep` over `docs/05-decisions.md` on
+block, moved up by 1,000 by D-6311). `grep` over `docs/05-decisions.md` on
 18 Oct 2026 found no heading in D-6400..D-6419.
 
 **What is decided.** `runner::fib::lattice` builds D-6302's lattice. A
