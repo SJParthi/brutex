@@ -1518,3 +1518,31 @@ fn a_zero_net_never_climbs_the_winners_ladder() {
         .clone();
     assert_eq!((card.months[0].losses, card.rung_net[0]), (1, 0));
 }
+
+/// Two equal troughs in one episode: the trough is the FIRST lowest close, so
+/// the recovery is counted from it.
+#[test]
+fn a_tied_trough_is_the_first_lowest_close() {
+    // Day closes: 1, -1 (day 101), 0, -1 (day 103, a tie), 2 (day 104).
+    let gains = [100, -200, 100, -100, 300];
+    let entries: Vec<Entry> = gains
+        .iter()
+        .enumerate()
+        .map(|(d, g)| Entry {
+            slot: 0,
+            day: 100 + d as u32,
+            second: at(10, 0),
+            side: 0,
+            outcome: trade(*g, at(10, 0), at(10, 30)),
+        })
+        .collect();
+    let (table, outcomes) = case(Search::Long, &entries);
+    let d = score_small(&table, &outcomes).drawdown;
+    assert_eq!(d.max_drawdown_r, 2.0);
+    assert_eq!(d.max_drawdown_trough_day, Some(101));
+    assert_eq!(
+        d.max_drawdown_recovery_days,
+        Some(3),
+        "from day 101 to day 104"
+    );
+}

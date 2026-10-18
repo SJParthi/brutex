@@ -718,7 +718,8 @@ impl Streaks {
 /// The drawdown of the day-close equity in R (D-6403): information.
 ///
 /// An episode starts at the first day close below the running high and ends
-/// at the first later close at or above it. Its length is in observed
+/// at the first later close at or above it; its trough is its first lowest
+/// close. Its length is in observed
 /// tradable days: recovery index minus start index, or, while open, the last
 /// close's index minus the start index plus one.
 #[derive(Clone, Copy, Debug, PartialEq)]
