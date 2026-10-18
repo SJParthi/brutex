@@ -1489,12 +1489,16 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
         day_of(2025, 3, 6),
         day_of(2025, 3, 7),
     );
+    let (negative_day, negative_volume_day) = (day_of(2025, 3, 10), day_of(2025, 3, 11));
     let open = 9 * 3_600 + 15 * 60;
+    let mut wide = second(mon, 10 * 3_600, 1_515_003);
+    wide.high = 1_515_033;
+    wide.low = 1_514_973;
     let mut bars = vec![
         second(mon, open - 1, 1_515_000),
         second(mon, open, 1_515_001),
         second(mon, open + 1, 1_515_002),
-        second(mon, 10 * 3_600, 1_515_003),
+        wide,
         second(tue, open, 1_515_004),
         second(tue, open, 1_515_005),
         second(wed, open + 5, 1_515_006),
@@ -1503,7 +1507,18 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     let mut off = second(thu, open, 1_515_008);
     off.ts_micros += 1;
     bars.push(off);
-    let month = seconds_of(&bars, &[mon, tue, wed, thu, fri], &no_master());
+    // The store's sanity rules refuse a negative price and a negative volume.
+    let mut negative = second(negative_day, open, 1_515_009);
+    negative.low = -1;
+    bars.push(negative);
+    let mut negative_volume = second(negative_volume_day, open, 1_515_010);
+    negative_volume.volume = -1;
+    bars.push(negative_volume);
+    let month = seconds_of(
+        &bars,
+        &[mon, tue, wed, thu, fri, negative_day, negative_volume_day],
+        &no_master(),
+    );
     let kept = month.day(mon).unwrap();
     assert_eq!(kept.len(), 3);
     assert!(!kept.is_empty());
@@ -1516,6 +1531,25 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     );
     assert_eq!(kept.at(open - 1), None);
     assert_eq!(kept.at(u32::MAX), None);
+    // The range column answers what the bar answers, and nothing where it
+    // has no bar.
+    assert_eq!(
+        kept.range(10 * 3_600),
+        Some(SecondRange {
+            high: 1_515_033,
+            low: 1_514_973
+        })
+    );
+    assert_eq!(
+        kept.range(open),
+        Some(SecondRange {
+            high: 1_515_001,
+            low: 1_515_001
+        })
+    );
+    assert_eq!(kept.range(open + 2), None, "no value, never zero");
+    assert_eq!(kept.range(open - 1), None);
+    assert_eq!(kept.range(u32::MAX), None);
     assert_eq!(
         month.outside_continuous, 1,
         "09:14:59 is the opening auction"
@@ -1525,7 +1559,9 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
         [
             (tue, "seconds_duplicate"),
             (wed, "seconds_unsorted"),
-            (thu, "seconds_corrupt")
+            (thu, "seconds_corrupt"),
+            (negative_day, "seconds_corrupt"),
+            (negative_volume_day, "seconds_corrupt")
         ]
     );
     assert_eq!(month.no_execution_seconds, [fri]);

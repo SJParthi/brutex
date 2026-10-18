@@ -1612,10 +1612,43 @@ pub struct SecondsDay {
     pub day: i64,
     first_second: u32,
     slots: Vec<Option<u32>>,
+    /// Each second's range, dense over the window: the deep walk's whole
+    /// read, sixteen bytes a second instead of a slot and a bar (L-FIB8-18).
+    ranges: Vec<SecondRange>,
     bars: Vec<Candle>,
 }
 
+/// One GDFL second's price range, paisa: what a worst-price fill reads (a
+/// buy fills at the high, a sell at the low).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecondRange {
+    /// The second's highest price.
+    pub high: i64,
+    /// Its lowest price.
+    pub low: i64,
+}
+
+/// The range column's mark for a second with no bar. No kept bar carries it
+/// (the loader refuses a negative price, `seconds_corrupt`), and
+/// [`SecondsDay::range`] answers it `None`: no value, never zero.
+const NO_SECOND: SecondRange = SecondRange {
+    high: i64::MIN,
+    low: i64::MIN,
+};
+
 impl SecondsDay {
+    /// The second-of-day `second`'s range, or `None`: no value. O(1): one
+    /// read of the dense range column.
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
+    #[must_use]
+    pub fn range(&self, second: u32) -> Option<SecondRange> {
+        let offset = usize::try_from(second.checked_sub(self.first_second)?).ok()?;
+        self.ranges
+            .get(offset)
+            .copied()
+            .filter(|range| *range != NO_SECOND)
+    }
+
     /// The second-of-day `second`'s bar, or `None`: no value. O(1): one
     /// slot read and one bar read.
     /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
@@ -1706,7 +1739,14 @@ pub fn seconds_of(bars: &[Candle], minute_days: &[i64], cash: &CashCloses) -> Se
         if held.refusal.is_some() {
             continue;
         }
-        if bar.ts_micros.rem_euclid(micros_per_second()) != 0 {
+        // Off the second grid, or a bar the store's own sanity rules refuse:
+        // the minute input's rule, one door for both (and no price can be
+        // the range column's empty mark).
+        let sane = {
+            let stored = bar_of(*bar);
+            stored.ohlc_is_sane() && stored.counts_are_sane()
+        };
+        if bar.ts_micros.rem_euclid(micros_per_second()) != 0 || !sane {
             held.refusal = Some("seconds_corrupt");
             continue;
         }
@@ -1763,15 +1803,20 @@ fn finish_seconds(taken: SecondsTaken, cash: &CashCloses, month: &mut SecondsMon
     let first_second = u32::from(window.first) * minute_seconds();
     let span = usize::try_from(u32::from(window.minutes()) * minute_seconds()).unwrap_or(0);
     let mut slots = vec![None; span];
+    let mut ranges = vec![NO_SECOND; span];
     let mut bars = Vec::with_capacity(taken.bars.len());
     for bar in taken.bars {
         let second = ist_day_second(bar.ts_micros).1;
-        let slot = second
+        let offset = second
             .checked_sub(first_second)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .and_then(|offset| slots.get_mut(offset));
-        if let Some(slot) = slot {
+            .and_then(|offset| usize::try_from(offset).ok());
+        let cells = offset.and_then(|at| slots.get_mut(at).zip(ranges.get_mut(at)));
+        if let Some((slot, range)) = cells {
             *slot = u32::try_from(bars.len()).ok();
+            *range = SecondRange {
+                high: bar.high,
+                low: bar.low,
+            };
             bars.push(bar);
         } else {
             month.outside_continuous += 1;
@@ -1784,6 +1829,7 @@ fn finish_seconds(taken: SecondsTaken, cash: &CashCloses, month: &mut SecondsMon
         day: taken.day,
         first_second,
         slots,
+        ranges,
         bars,
     });
 }

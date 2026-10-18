@@ -125,7 +125,7 @@ fn every_decision_id_is_issued_once() {
     }
     // FIB-8's block (D-6440..D-6459, D-6311's move) is present once each up
     // to the last entry FIB-8 issued.
-    for n in 6440..=6451 {
+    for n in 6440..=6452 {
         let number = format!("D-{n}");
         assert_eq!(counts.get(number.as_str()), Some(&1), "{number}");
     }

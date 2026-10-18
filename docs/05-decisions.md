@@ -73561,3 +73561,27 @@ declared by their headers.
 
 **Proof.** `halt_day_input_admits_only_pre_halt_decisions`,
 `downside_records_fixed_stride`, `v1_kinds_decode_after_block`.
+
+### D-6452 — The deep walk reads a dense range column of each GDFL second, and the seconds loader refuses an insane bar (FIB-8) — 2026-10-18
+
+**What is decided.** `SecondsDay` keeps, beside its slot table and its bars, a
+dense column of each second's `SecondRange { high, low }` over the day's
+continuous window, and `SecondsDay::range` reads it in one O(1) access. The
+deep walk reads only that column: a worst-price fill needs a second's high (a
+buy) or low (a sell), and nothing else of the bar. A second with no bar holds a
+mark no kept price can carry (`i64::MIN`) and is answered `None` — no value,
+never zero. `SecondsDay::at` still answers the whole bar.
+
+The loader now refuses a day `seconds_corrupt` when any of its bars fails the
+store's own sanity rules (`ohlc_is_sane`, `counts_are_sane`), the rule the
+minute input already applies, so no kept bar is negative and the mark is
+unambiguous.
+
+**Why.** Measured in this session, a deep walk through `at` streams a slot and
+a 56-byte bar, 64 bytes a second: in a walk's order its p99 rose 4.607x from one
+day held (cache-resident) to a hundred (past the last-level cache), above the
+shared 3.0x ceiling, with one lookup a call at every scale. The range column is
+16 bytes a second. The numbers are in `docs/06-limits.md` (C-F8-09, L-FIB8-18).
+
+**Proof.** `the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal`;
+`crates/cli/benches/fib.rs` (C-F8-09).

@@ -13,7 +13,7 @@
 //! | C-F8-06 | every other interim authority's answer | WORST-CASE | fixed state |
 //! | C-F8-07 | one candidate record encoded and decoded | WORST-CASE | fixed state |
 //! | C-F8-08 | one record of a sealed FIB file (FM-F091), dense ascending pass | AMORTISED, period one block | records in the file |
-//! | C-F8-09 | one GDFL second looked up (`SecondsDay::at`) in a deep walk | WORST-CASE | days of seconds held |
+//! | C-F8-09 | one GDFL second's range looked up (`SecondsDay::range`) in a deep walk | WORST-CASE | days of seconds held |
 //! | C-F8-10 | one reference stamp joined (FM-F087), trades in time order | WORST-CASE | indices in the table |
 //! | C-F8-11 | one record of a sealed FIB file, one a block, ascending | BOUNDED, one block | records in the file |
 //!
@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use cli::fib::authorities::{Authorities, BasisVerdictAuthority as _, DaySlots, Member, SeriesId};
 use cli::fib::day::{
-    MonthSpec, PreviousReference, SecondsMonth, StockState, build_month, doubling_ladder, instant,
-    seconds_of,
+    MonthSpec, PreviousReference, SecondRange, SecondsMonth, StockState, build_month,
+    doubling_ladder, instant, seconds_of,
 };
 use cli::fib::files::{CandidateRecord, FibFile, Header, Kind, Put, Record as _, Scope};
 use cli::fib::reference::{IndexSource, ReferenceMonth, build_reference};
@@ -541,8 +541,8 @@ fn seconds_op(state: &mut Seconds, i: u64) -> u64 {
     state.lookups += 1;
     state.walk.1 = second + 1;
     state.month.days[at]
-        .at(second)
-        .map_or(0, |bar| u64::try_from(bar.close).unwrap())
+        .range(second)
+        .map_or(0, |range| u64::try_from(range.low).unwrap())
 }
 
 /// A month's reference table of `indices` indices, and the trade being
@@ -755,7 +755,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     verdicts.push(run(&sparse_file, host, out));
     let second = Row {
         id: "C-F8-09",
-        name: "SecondsDay::at, one GDFL second in a deep walk's order",
+        name: "SecondsDay::range, one GDFL second's range in a deep walk's order",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "days of continuous seconds held",
@@ -768,7 +768,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         bytes: |state| {
             state.days.len() as u64
                 * 22_500
-                * (size_of::<Candle>() + size_of::<Option<u32>>()) as u64
+                * (size_of::<Candle>() + size_of::<Option<u32>>() + size_of::<SecondRange>()) as u64
         },
     };
     verdicts.push(run(&second, host, out));
