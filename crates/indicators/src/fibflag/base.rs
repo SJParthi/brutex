@@ -1805,7 +1805,11 @@ mod instrumentation {
     /// (the lowest close) and writes six (seven). Candle 2, with the window
     /// starting at it, pops one (the highest close) and writes six, then
     /// expires two highs, two lows, one highest close, one lowest close and
-    /// two of each poke: 7 + 10 = 17.
+    /// two of each poke: 7 + 10 = 17. Candle 3, the window starting at it,
+    /// pops one (the lowest close), writes six, and expires one of each but the
+    /// lowest close: 7 + 5 = 12. (Under precedence a `+` turned `*` multiplies
+    /// two neighbouring terms, so the pushes give every neighbouring pair a
+    /// product that differs from its sum.)
     #[test]
     fn a_lane_push_counts_every_slot_it_touches() {
         let mut lane = Lane::new(8, 1, 1);
@@ -1813,12 +1817,13 @@ mod instrumentation {
             lane.push(0, &rec(10, 5, 7, 3), 0),
             lane.push(1, &rec(9, 6, 5, 2), 0),
             lane.push(2, &rec(8, 7, 6, 1), 2),
+            lane.push(3, &rec(7, 8, 5, 0), 3),
         ];
-        assert_eq!(works, [6, 7, 17]);
-        let last = rec(8, 7, 6, 1);
+        assert_eq!(works, [6, 7, 17, 12]);
+        let last = rec(7, 8, 5, 0);
         let e = lane.extremes(&last);
-        assert_eq!((e.high, e.low, e.close_high, e.close_low), (8, 7, 6, 6));
-        assert_eq!((e.poke_long, e.poke_short), (1, 1));
+        assert_eq!((e.high, e.low, e.close_high, e.close_low), (7, 8, 5, 5));
+        assert_eq!((e.poke_long, e.poke_short), (0, 0));
     }
 
     #[test]
