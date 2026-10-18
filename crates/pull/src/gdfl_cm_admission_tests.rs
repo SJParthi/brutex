@@ -1663,8 +1663,12 @@ fn the_auction_sidecar_is_append_only_and_idempotent() {
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), auction::HEADER_LEN + auction::RECORD_LEN);
     assert_eq!(&bytes[..8], b"BRTXAUC1");
-    assert_eq!(&bytes[8..12], &[1, 0, 32, 0]);
-    let records = auction::parse(&bytes).unwrap();
+    assert_eq!(
+        &bytes[8..12],
+        &[2, 0, 32, 0],
+        "a new sidecar is version 2 (AG-04)"
+    );
+    let records = auction::parse(&bytes).unwrap().records;
     assert_eq!(records, vec![auction::Record::of(d1, &one[0])]);
     // 15:28:07 IST on 2026-09-23 is 09:58:07 UTC.
     let midnight_utc = i64::from(d1.days_from_epoch()) * 86_400;
@@ -1688,6 +1692,7 @@ fn the_auction_sidecar_is_append_only_and_idempotent() {
     assert_eq!(
         auction::parse(&std::fs::read(&path).unwrap())
             .unwrap()
+            .records
             .len(),
         2
     );
@@ -1749,7 +1754,9 @@ fn an_eligible_shares_print_is_filed_in_the_sidecar_never_as_a_bar() {
     assert!(bars.iter().any(|b| sod_of(b, d) == at(15, 20, 0)));
     let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
     let sidecar = auction::path(&store, &key, d).unwrap();
-    let records = auction::parse(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let records = auction::parse(&std::fs::read(&sidecar).unwrap())
+        .unwrap()
+        .records;
     assert_eq!(records.len(), 2);
     assert_eq!(
         (records[0].price_paisa, records[0].quantity, records[0].rows),

@@ -2627,7 +2627,7 @@
    * the two ceilings is binding.
    */
   const archiveCeils = $derived(
-    activeSpan.binds && activeSpan.to !== null && activeSpan.to < clockCeiling
+    activeSpan.binds && activeSpan.bindsTo && activeSpan.to !== null && activeSpan.to < clockCeiling
   );
   const maxDay = $derived(archiveCeils ? /** @type {string} */ (activeSpan.to) : clockCeiling);
   /**
@@ -8007,7 +8007,7 @@
         <ImportPanel
           summary={importSummary}
           store={journals.body?.store ?? null}
-          archiveTo={activeSpan.kind === 'archive' ? activeSpan.to : null}
+          archiveTo={activeSpan.kind === 'archive' && activeSpan.bindsTo ? activeSpan.to : null}
           optionsLeft={journals.extras?.optionsLeft ?? null}
           notDone={journals.extras?.notDone ?? null}
           notDoneError={journals.extras?.notDoneError ?? null}
@@ -8864,7 +8864,9 @@
                             class="ltrack"
                             role="img"
                             aria-label={lane.archive
-                              ? `${lane.feed} is imported from an archive that /feeds.json measures from ${dayLabel(lane.archive.from)} to ${dayLabel(lane.archive.to)}: ${Math.round(lane.archive.livePct)}% of the window. Nothing outside that span can be imported.`
+                              ? lane.archive.openEnd
+                                ? `${lane.feed} is imported from an archive that /feeds.json measures from ${dayLabel(lane.archive.from)}, delivered through at least ${dayLabel(lane.archive.to)}: ${Math.round(lane.archive.livePct)}% of the window. Nothing before ${dayLabel(lane.archive.from)} can be imported; a later day may be delivered and not imported yet.`
+                                : `${lane.feed} is imported from an archive that /feeds.json measures from ${dayLabel(lane.archive.from)} to ${dayLabel(lane.archive.to)}: ${Math.round(lane.archive.livePct)}% of the window. Nothing outside that span can be imported.`
                               : !lane.known
                               ? `${lane.feed} states no reach at ${lane.rung}. This is a folder of bought files, so what it covers is whatever is in it — not a claim this page can make for it.`
                               : lane.whole
@@ -8895,7 +8897,7 @@
                           </span>
                           <span class="lat" class:dim={lane.whole || (!lane.known && !lane.archive)} data-lane-reach={lane.archive ? 'archive' : lane.known ? 'floor' : 'unstated'}>
                             {lane.archive
-                              ? `archive ${dayLabel(lane.archive.from)} – ${dayLabel(lane.archive.to)}`
+                              ? `archive ${dayLabel(lane.archive.from)} – ${lane.archive.openEnd ? 'at least ' : ''}${dayLabel(lane.archive.to)}`
                               : !lane.known
                               ? 'reach not stated'
                               : lane.whole
@@ -9722,7 +9724,7 @@
           <ImportPanel
             summary={importSummary}
             store={journals.body?.store ?? null}
-            archiveTo={activeSpan.kind === 'archive' ? activeSpan.to : null}
+            archiveTo={activeSpan.kind === 'archive' && activeSpan.bindsTo ? activeSpan.to : null}
             optionsLeft={journals.extras?.optionsLeft ?? null}
             notDone={journals.extras?.notDone ?? null}
             notDoneError={journals.extras?.notDoneError ?? null}

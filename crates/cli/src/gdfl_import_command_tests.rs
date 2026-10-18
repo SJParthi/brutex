@@ -14,16 +14,27 @@ fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| (*w).to_owned()).collect()
 }
 
-fn scratch(tag: &str) -> PathBuf {
+pub(super) fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("brutex-cli-gdfl-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
+/// `dir` made a tick store the door accepts (AF-01): a directory with a
+/// `FORMAT.md` at its root. The words are invented; no day file is in it.
+pub(super) fn tick_store(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("FORMAT.md"),
+        b"# synthetic tick store (cli test)\n",
+    )
+    .unwrap();
+}
+
 /// The environment `pairs` name, and the deliberate allowance a test build
 /// needs: a test binary is often built from a dirty tree, so it carries no
 /// commit stamp, and an import refuses that unless allowed (DB-B71).
-fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> + use<> {
+pub(super) fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> + use<> {
     let mut pairs: Vec<(String, OsString)> = pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone().into_os_string()))
@@ -56,7 +67,7 @@ fn an_unstamped_build_is_refused_a_store_write_unless_allowed() {
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
     let ts = root.join("ts");
-    std::fs::create_dir_all(&ts).unwrap();
+    tick_store(&ts);
     let ts_var = ts.into_os_string();
     let bare = move |var: &str| (var == TICKSTORE_VAR).then(|| ts_var.clone());
     let mut out = String::new();
@@ -198,13 +209,17 @@ fn gdfl_import_refuses_a_store_whose_bars_folder_is_a_link() {
 /// reading door it is refused `tick_store_malformed` naming the link, the
 /// run exits FAILED, and the day is not reported as one the source does not
 /// hold; the NIFTY options reader is refused the same way. A day with no
-/// name at all is still "not in source", exit 0.
+/// name at all is still "not in source", and since the GDFL import door
+/// (AF-01, GD-01, GD-02) the tick store carries the `FORMAT.md` the door
+/// asks of its root, and that run, which read no file while it owed the
+/// day, exits FAILED `no_file_read` rather than OK.
 #[test]
 fn a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held() {
     let root = scratch("dangling-day");
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
     let ts = root.join("ts");
+    tick_store(&ts);
     let day = pull::session::Day::new(2024, 4, 1).unwrap();
     let tick_store = pull::gdfl_tickstore::TickStore::new(&ts);
     let options = pull::gdfl_nfo::NfoTickStore::new(&ts);
@@ -245,7 +260,11 @@ fn a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held() {
             &|| Ok(store.clone()),
             &mut out,
         );
-        assert_eq!(code, OK, "{kind}: {out}");
+        assert_eq!(code, FAILED, "{kind}: {out}");
+        assert!(
+            out.contains("GDFL IMPORT FAILED: no_file_read: "),
+            "{kind}: {out}"
+        );
         assert!(
             out.contains("days not in source  1 2024-04-01"),
             "{kind}: {out}"
@@ -254,20 +273,87 @@ fn a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The smallest zip there is: an end record and nothing else (22 bytes).
+pub(super) fn empty_zip() -> Vec<u8> {
+    let mut bytes = vec![0x50, 0x4b, 0x05, 0x06];
+    bytes.extend_from_slice(&[0; 18]);
+    bytes
+}
+
+/// A zip of STORED `members` (name, bytes), written the way the vendor's
+/// outer archive is: local headers, the central directory, the end record.
+/// The members here are invented; no vendor byte is in any of them.
+pub(super) fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let u16le = |n: usize| u16::try_from(n).unwrap().to_le_bytes();
+    let u32le = |n: usize| u32::try_from(n).unwrap().to_le_bytes();
+    let mut out = Vec::new();
+    let mut directory = Vec::new();
+    for (name, bytes) in members {
+        let crc = pull::gdfl_archive::crc32(bytes).to_le_bytes();
+        let offset = out.len();
+        out.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&crc);
+        out.extend_from_slice(&u32le(bytes.len()));
+        out.extend_from_slice(&u32le(bytes.len()));
+        out.extend_from_slice(&u16le(name.len()));
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(bytes);
+        directory.extend_from_slice(&[0x50, 0x4b, 0x01, 0x02, 20, 0, 20, 0, 0, 0, 0, 0]);
+        directory.extend_from_slice(&[0, 0, 0, 0]);
+        directory.extend_from_slice(&crc);
+        directory.extend_from_slice(&u32le(bytes.len()));
+        directory.extend_from_slice(&u32le(bytes.len()));
+        directory.extend_from_slice(&u16le(name.len()));
+        directory.extend_from_slice(&[0; 12]);
+        directory.extend_from_slice(&u32le(offset));
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let at = out.len();
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0]);
+    out.extend_from_slice(&u16le(members.len()));
+    out.extend_from_slice(&u16le(members.len()));
+    out.extend_from_slice(&u32le(directory.len()));
+    out.extend_from_slice(&u32le(at));
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// A capital-market outer zip the door accepts for `kind`, holding one day
+/// zip of that tree on 1 January 2019 whose own bytes are `inner`: none of
+/// the days these tests ask for.
+pub(super) fn cm_archive(kind: pull::gdfl_cm::CmKind, inner: &[u8]) -> Vec<u8> {
+    let day = Day::new(2019, 1, 1).unwrap();
+    let name = pull::gdfl_archive::day_zip_name(kind, day);
+    stored_zip(&[(name.as_str(), inner)])
+}
+
+/// **A RUN THAT READ NO FILE NEVER EXITS OK (AF-01; FM-060, ingest-7).**
+/// This test used to be `an_empty_source_reports_every_day_it_does_not_hold`,
+/// and it pinned exit `OK` for all four pairs: a typo in the root's variable,
+/// an empty staging folder or a vanished second volume read as success. Now
+/// every pair whose root is what its source needs but holds none of the
+/// range's days still lists the two days, and exits `FAILED` with
+/// `no_file_read`; the existing-but-empty 22-byte capital-market zip, which
+/// holds no day zip of either tree, is refused before any day as
+/// `source_root_unknown`.
 #[test]
-fn an_empty_source_reports_every_day_it_does_not_hold() {
+fn a_run_that_read_no_file_never_exits_ok() {
     let root = scratch("empty");
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
-    // The smallest zip there is: an end record and nothing else.
-    let mut empty_zip = vec![0x50, 0x4b, 0x05, 0x06];
-    empty_zip.extend_from_slice(&[0; 18]);
+    let ts = root.join("ts");
+    tick_store(&ts);
+    let years = root.join("years");
+    std::fs::create_dir_all(&years).unwrap();
+    std::fs::write(years.join("2019.zip"), empty_zip()).unwrap();
     let cm = root.join("cm.zip");
-    std::fs::write(&cm, empty_zip).unwrap();
+    std::fs::write(&cm, cm_archive(pull::gdfl_cm::CmKind::Stocks, &empty_zip())).unwrap();
     let env = env_of(&[
-        (TICKSTORE_VAR, root.join("ts")),
+        (TICKSTORE_VAR, ts),
         (CM_ARCHIVE_VAR, cm),
-        (NFO_ARCHIVES_VAR, root.join("years")),
+        (NFO_ARCHIVES_VAR, years),
     ]);
     for (source, kind) in [
         ("tickstore", "indices"),
@@ -282,13 +368,38 @@ fn an_empty_source_reports_every_day_it_does_not_hold() {
             &|| Ok(store.clone()),
             &mut out,
         );
-        assert_eq!(code, OK, "{out}");
+        assert_eq!(code, FAILED, "{source} {kind}: {out}");
         assert!(
             out.contains("days not in source  2 2024-04-01 2024-04-02"),
             "{out}"
         );
         assert!(out.contains("1s only"), "{out}");
+        assert!(
+            out.contains("GDFL IMPORT FAILED: no_file_read: the run owed 2 days"),
+            "{out}"
+        );
     }
+    // The 22-byte zip: refused before any day, the journal untouched.
+    let before = std::fs::read(pull::gdfl_import::journal_path(&store)).unwrap();
+    let empty = root.join("empty.zip");
+    std::fs::write(&empty, empty_zip()).unwrap();
+    let mut out = String::new();
+    let code = command_with(
+        &["stocks", "zip", "2024-04-01", "2024-04-02", "NIFTY"],
+        &env_of(&[(CM_ARCHIVE_VAR, empty)]),
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("GDFL IMPORT REFUSED: source_root_unknown: BRUTEX_GDFL_CM_ARCHIVE=")
+            && out.contains("holds no day zip of its tree"),
+        "{out}"
+    );
+    assert_eq!(
+        std::fs::read(pull::gdfl_import::journal_path(&store)).unwrap(),
+        before
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -297,6 +408,7 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
     let root = scratch("failed");
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
+    tick_store(&root.join("ts"));
     let env = env_of(&[
         (TICKSTORE_VAR, root.join("ts")),
         (CM_ARCHIVE_VAR, root.join("absent.zip")),
@@ -315,6 +427,8 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
         out.contains("failures            1") && out.contains("calendar"),
         "{out}"
     );
+    // A range that runs backwards is refused before the lock as a misuse,
+    // with the other garbage (AF-01, GD-09): exit MISUSED, never a run.
     let mut out = String::new();
     let code = command_with(
         &["indices", "tickstore", "2024-04-02", "2024-04-01"],
@@ -322,9 +436,9 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
         &|| Ok(store.clone()),
         &mut out,
     );
-    assert_eq!(code, FAILED);
+    assert_eq!(code, MISUSED, "{out}");
     assert!(
-        out.contains("GDFL IMPORT REFUSED") && out.contains("backwards"),
+        out.contains("refused: range_backwards: ") && out.contains("backwards"),
         "{out}"
     );
     let mut out = String::new();
@@ -369,7 +483,7 @@ fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
     let store = root.join("store");
     std::fs::create_dir_all(&store).unwrap();
     let ts = root.join("ts");
-    std::fs::create_dir_all(&ts).unwrap();
+    tick_store(&ts);
     let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
     let mut out = String::new();
     let code = command_with(
@@ -384,7 +498,8 @@ fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
         &|| Ok(store.clone()),
         &mut out,
     );
-    assert_eq!(code, OK, "{out}");
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("GDFL IMPORT FAILED: no_file_read: "), "{out}");
     for part in [
         "days not in source  1 2024-04-01",
         "days done, refused  0",
@@ -400,7 +515,8 @@ fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
         run.starts_with("run ")
             && run.contains(" source=tickstore ")
             && run.contains(" archive_bytes=0 ")
-            && run.contains(" format_sha256=unmeasured"),
+            && run.contains(" format_sha256=")
+            && !run.contains(" format_sha256=unmeasured"),
         "{journal}"
     );
     let commit = crate::commit_stamp().unwrap_or("unstamped");
@@ -431,7 +547,7 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
     // A file in the tree is not an underlying.
     std::fs::write(tree.join("README"), b"not a directory").unwrap();
     let ts = root.join("ts");
-    std::fs::create_dir_all(&ts).unwrap();
+    tick_store(&ts);
     let env = env_of(&[(TICKSTORE_VAR, ts)]);
     assert_eq!(
         stored_option_underlyings(&store).unwrap(),
@@ -449,7 +565,9 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
         &|| Ok(store.clone()),
         &mut out,
     );
-    assert_eq!(code, OK, "{out}");
+    // The stored scope is said, and a run that read no file is never OK.
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("GDFL IMPORT FAILED: no_file_read: "), "{out}");
     assert!(
         out.contains("stored (D-3333): 7 index rows and ")
             && out.contains("3 option underlyings read from "),

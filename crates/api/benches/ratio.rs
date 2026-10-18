@@ -45,10 +45,56 @@
 //! crate root's bare `mod census;` resolves beside it, to `benches/census.rs`,
 //! where cargo would also take it for a bench target of its own.
 
+/// THE ROUTES THIS BENCH TIMES AT 1x, 10x AND 100x (R3-14, RA-064), read by
+/// `.github/gates_routes.rs`, which fails the build when a served route has
+/// neither a bench nor a line there naming who owes one: the two pages this
+/// file times itself (`/dashboard`, `/instruments`), and the routes of the
+/// modules below that other packages own and that declare nothing
+/// themselves -- `window` (`/bars/window.json`), `spot` (`/spot.json`),
+/// `sources` (`/sources/bars.json`, `/sources/day.json`) and `logs_dirs`
+/// (`/logs.json` keyed, C-LG-01; `/imports.json`'s runs page, C-LG-02). A
+/// module this package adds declares its own `ROUTES`.
+const ROUTES: &[&str] = &[
+    "/dashboard",
+    "/instruments",
+    "/bars/window.json",
+    "/spot.json",
+    "/sources/bars.json",
+    "/sources/day.json",
+    "/logs.json",
+    "/imports.json",
+];
+
+#[path = "ratio/calendar.rs"]
+mod calendar;
 #[path = "ratio/census.rs"]
 mod census;
+#[path = "ratio/chain.rs"]
+mod chain;
+#[path = "ratio/dayflags.rs"]
+mod dayflags;
+#[path = "ratio/db_page.rs"]
+mod db_page;
+#[path = "ratio/gaps.rs"]
+mod gaps;
+#[path = "ratio/greeks.rs"]
+mod greeks;
 #[path = "ratio/logs_dirs.rs"]
 mod logs_dirs;
+#[path = "ratio/months.rs"]
+mod months;
+#[path = "ratio/options.rs"]
+mod options;
+#[path = "ratio/provenance.rs"]
+mod provenance;
+#[path = "ratio/reads.rs"]
+mod reads;
+#[path = "ratio/rollup.rs"]
+mod rollup;
+#[path = "ratio/served.rs"]
+mod served;
+#[path = "ratio/settings.rs"]
+mod settings;
 #[path = "ratio/sources.rs"]
 mod sources;
 #[path = "ratio/spot.rs"]
@@ -568,12 +614,139 @@ fn search_is_measured_and_named(f: &Fixtures) {
     }
 }
 
+/// The most one request may cost the app's own speed table at p99, ns:
+/// finding its row, starting its timer and adding its time and outcome
+/// (R3-14, `api::speed`).
+const SPEED_ADD_CEILING_NS: u128 = 1_000;
+
+/// Requests timed one by one for the speed table's p99.
+const SPEED_ADD_N: usize = 1_000_000;
+
+/// p50, p99 and the max of `times`, sorted in place.
+fn spread_ns(times: &mut [u128]) -> (u128, u128, u128) {
+    times.sort_unstable();
+    let at = |q: usize| {
+        let i = (times.len() * q).div_ceil(100).max(1) - 1;
+        times.get(i).copied().unwrap_or(0)
+    };
+    (at(50), at(99), times.last().copied().unwrap_or(0))
+}
+
+/// **THE APP'S OWN SPEED TABLE COSTS UNDER A MICROSECOND A REQUEST AT p99**
+/// (R3-14). What `logs::note_request` adds to every request: one read-locked
+/// probe for its row by matched path, a timer, and one bucket add, one
+/// outcome add and the maxima. Timed one request at a time, n = 1,000,000,
+/// over a table of 90 rows like the server's, every request on a different
+/// row than the last; gated at p99 against [`SPEED_ADD_CEILING_NS`].
+///
+/// Printed beside it, not gated: eight threads adding to ONE row at once,
+/// 125,000 each, the worst sharing the counters can see. Their p99 rises with
+/// the cores' contention on one cache line, which is a property of the
+/// machine's load, not of the store, and the line says so.
+fn the_speed_table_costs_under_a_microsecond_a_request() -> bool {
+    use api::speed::{Kind, Outcome, Pending, ROUTE_CAP, Speed};
+    let table = Speed::new(0, ROUTE_CAP);
+    let names: Vec<String> = (0..90).map(|i| format!("/route-{i}.json")).collect();
+    for name in &names {
+        let _made = table.row(name, Kind::Route, 0);
+    }
+    let mut times = Vec::with_capacity(SPEED_ADD_N);
+    for i in 0..SPEED_ADD_N {
+        let name = names.get(i % names.len()).map_or("/", String::as_str);
+        let start = Instant::now();
+        let pending = Pending::start(table.row(black_box(name), Kind::Route, 0));
+        pending.finish(black_box(120), Outcome::Answered);
+        times.push(start.elapsed().as_nanos());
+    }
+    let (p50, p99, max) = spread_ns(&mut times);
+    let ok = p99 <= SPEED_ADD_CEILING_NS;
+    println!(
+        "  speed add, one at a time: n={SPEED_ADD_N} p50 {p50} ns p99 {p99} ns max {max} ns \
+         (ceiling {SPEED_ADD_CEILING_NS} ns at p99)  {}",
+        if ok { "ok" } else { "BREACH" }
+    );
+    let shared = std::sync::Barrier::new(8);
+    let mut all: Vec<u128> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::with_capacity(SPEED_ADD_N / 8);
+                    shared.wait();
+                    for _ in 0..SPEED_ADD_N / 8 {
+                        let start = Instant::now();
+                        let pending =
+                            Pending::start(table.row(black_box("/route-0.json"), Kind::Route, 0));
+                        pending.finish(black_box(120), Outcome::Answered);
+                        mine.push(start.elapsed().as_nanos());
+                    }
+                    mine
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap_or_default())
+            .collect()
+    });
+    let (p50, p99, max) = spread_ns(&mut all);
+    println!(
+        "  speed add, 8 threads on one row: n={} p50 {p50} ns p99 {p99} ns max {max} ns \
+         (printed, not gated: one cache line shared by 8 cores)",
+        all.len()
+    );
+    let counted = table
+        .report(1)
+        .rows
+        .iter()
+        .map(|r| r.since_start.n)
+        .sum::<u64>();
+    if counted != (SPEED_ADD_N + SPEED_ADD_N / 8 * 8) as u64 {
+        refuse(&format!("the speed table counted {counted} requests"));
+    }
+    ok
+}
+
+/// Every `/db` route the `served` stores answer, at 1x, 10x and 100x.
+fn served_routes_are_flat() -> bool {
+    let mut stores = served::stores();
+    let mut ok = true;
+    ok &= dayflags::days_are_flat(&mut stores);
+    ok &= chain::chains_are_flat(&mut stores);
+    ok &= options::lists_are_flat(&mut stores);
+    ok &= provenance::provenance_is_flat(&mut stores);
+    ok &= calendar::calendars_are_flat(&mut stores);
+    ok &= reads::reads_are_flat(&mut stores);
+    ok &= db_page::page_reads_are_flat(&mut stores);
+    ok &= settings::settings_are_flat(&mut stores);
+    ok &= rollup::rollups_are_flat(&mut stores);
+    for store in &stores {
+        let _ignored = std::fs::remove_dir_all(&store.root);
+    }
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/api");
+    println!("  routes timed here: {}", ROUTES.join(" "));
     println!(
         "  ratio ceiling {RATIO_CEILING_PERMILLE} permille · \
          marginal ceiling {MARGINAL_CEILING_PS} ps/instrument"
     );
+    // ONE FAMILY OF ROWS, NAMED, FOR A BUILDER'S OWN LOOP: `--served-only`
+    // runs the `/db` routes as served and nothing else, and says the run is
+    // not a gate result (it exits 2 whatever the rows say).
+    if std::env::args().any(|arg| arg == "--served-only") {
+        let ok = served_routes_are_flat();
+        println!(
+            "PARTIAL RUN (--served-only): the served /db rows only, {} -- not a gate result",
+            if ok {
+                "all within the ceiling"
+            } else {
+                "A RATIO BREACHED ITS CEILING"
+            }
+        );
+        std::process::exit(2);
+    }
     let started = Instant::now();
     let f = Fixtures {
         small: read_of(SMALL),
@@ -594,8 +767,27 @@ fn main() {
     ok &= census::probes_are_flat();
     ok &= window::seeks_are_flat();
     ok &= spot::probes_are_flat();
+    ok &= gaps::answers_are_flat();
     ok &= sources::pages_are_flat();
     ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
+    ok &= greeks::cells_are_flat();
+    ok &= served_routes_are_flat();
+    ok &= the_speed_table_costs_under_a_microsecond_a_request();
+    let by_modules = [
+        greeks::ROUTES,
+        dayflags::ROUTES,
+        chain::ROUTES,
+        options::ROUTES,
+        provenance::ROUTES,
+        calendar::ROUTES,
+        reads::ROUTES,
+        db_page::ROUTES,
+        settings::ROUTES,
+        rollup::ROUTES,
+    ]
+    .concat();
+    println!("  routes timed by modules: {}", by_modules.join(" "));
+    ok &= months::rows_are_measured();
     if ok {
         println!("all ratios within the ceiling");
     } else {

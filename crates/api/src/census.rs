@@ -272,30 +272,53 @@ impl Tail {
 
 /// The keys appended after a generation, oldest first, each as often as it
 /// was appended: what [`Part::changed_since`] answers.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// `older` holds the entries appended after that generation and before the
+/// part's base was loaded, read back from the file itself by position when a
+/// `since` is older than the base (R3-09, RA-008): after a restart, or a tail
+/// read whole again past its floor. Empty otherwise.
+#[derive(Debug, Clone, Default)]
 pub struct Since<'a> {
+    older: Vec<(u64, EntryKey)>,
     settled: &'a [(u64, EntryKey)],
     fresh: &'a [(u64, EntryKey)],
 }
 
-impl<'a> Since<'a> {
+impl Since<'_> {
     /// Each appended entry: the generation that published it, and its key.
-    pub fn iter(&self) -> impl Iterator<Item = &'a (u64, EntryKey)> + 'a {
-        self.settled.iter().chain(self.fresh)
+    pub fn iter(&self) -> impl Iterator<Item = &(u64, EntryKey)> + '_ {
+        self.older.iter().chain(self.settled).chain(self.fresh)
     }
 
     /// How many entries were appended.
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.settled.len().saturating_add(self.fresh.len())
+    pub fn len(&self) -> usize {
+        self.older
+            .len()
+            .saturating_add(self.settled.len())
+            .saturating_add(self.fresh.len())
     }
 
     /// Whether nothing was appended.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.settled.is_empty() && self.fresh.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.older.is_empty() && self.settled.is_empty() && self.fresh.is_empty()
+    }
+
+    /// How many of them were read back from the file below the base.
+    #[must_use]
+    pub fn read_back(&self) -> usize {
+        self.older.len()
     }
 }
+
+/// The most entries a `since` older than the base reads back from the file
+/// ([`Part::changed_since`]). Past it the `since` is refused `410` as before,
+/// loudly, and the reader re-asks its selection: an answer that size is a
+/// whole read by another name. Four tail floors: a refresh after 100,000 new
+/// entries, the figure RA-008 names, is answered (R3-09). Named for
+/// `docs/06-limits.md`.
+pub const SINCE_READ_BACK_MOST: u64 = TAIL_FLOOR * 4;
 
 /// One manifest file of a vendor's census: the single file of versions 1 to
 /// 3, or one segment's current epoch at version 4 (D-3316).
@@ -410,19 +433,50 @@ impl Part {
     /// answer is a binary search per level and two slices: O(log tail +
     /// answer). A generation before the base was loaded is not held any more,
     /// and neither is one past the newest.
+    ///
+    /// # Below the base, from the file (R3-09, RA-008)
+    ///
+    /// A generation older than the base -- a reader that held the census
+    /// across a restart, or across a tail read whole again past its floor --
+    /// is answered from the FILE: an append-only file publishes its entry at
+    /// ordinal `i` at generation `lineage + i + 1`, so the entries after
+    /// `generation` are the ones from ordinal `generation - lineage`, read
+    /// by position ([`Self::read_back`]), O(answer) and never the whole file.
+    /// Refused (`None`) when the file is not the one the base was read from,
+    /// when the generation is before this file's lineage or is the lineage of
+    /// an epoch that began as a compaction or a migration (its first entries
+    /// were written at once and a reader of the epoch before cannot be told
+    /// which keys moved), or when more than [`SINCE_READ_BACK_MOST`] entries
+    /// would be read back.
     #[must_use]
     pub fn changed_since(&self, generation: u64) -> Option<Since<'_>> {
+        self.changed_since_within(generation, SINCE_READ_BACK_MOST)
+    }
+
+    /// [`Self::changed_since`], reading back at most `most` entries below
+    /// the base: the bound passed in, so a test pins both sides of it
+    /// without writing a quarter of a million entries.
+    fn changed_since_within(&self, generation: u64, most: u64) -> Option<Since<'_>> {
         let base = self.base.header().generation;
         let newest = self.header().generation;
-        if generation < base || generation > newest {
+        if generation > newest {
             return None;
         }
+        let older = if generation < base {
+            self.read_back(generation, most)?
+        } else {
+            Vec::new()
+        };
         let Some(tail) = &self.tail else {
-            return Some(Since::default());
+            return Some(Since {
+                older,
+                ..Since::default()
+            });
         };
         let after =
             |changes: &[(u64, EntryKey)]| changes.partition_point(|(at, _)| *at <= generation);
         Some(Since {
+            older,
             settled: tail
                 .settled
                 .changes
@@ -436,10 +490,121 @@ impl Part {
         })
     }
 
-    /// The oldest generation [`Self::changed_since`] still answers for.
+    /// The oldest generation [`Self::changed_since`] still answers for: the
+    /// base's, or, where the file can be read back (R3-09), the lowest
+    /// generation [`Self::read_back`] takes.
     #[must_use]
     pub fn since_floor(&self) -> u64 {
-        self.base.header().generation
+        self.since_floor_within(SINCE_READ_BACK_MOST)
+    }
+
+    /// [`Self::since_floor`] under a read-back bound of `most` entries. The
+    /// base's own generation once another file stands at the path (one
+    /// `stat`): nothing below the base is answered from a file the base was
+    /// not read from, so the floor never names one that would be refused.
+    fn since_floor_within(&self, most: u64) -> u64 {
+        let base = self.base.header();
+        let same_file = || {
+            std::fs::metadata(&self.path)
+                .ok()
+                .and_then(|meta| FileId::of(&meta))
+                .is_some_and(|id| Some(id) == self.file)
+        };
+        match self.read_back_lineage() {
+            Some(lowest) if cfg!(unix) && same_file() => {
+                lowest.max(base.generation.saturating_sub(most))
+            }
+            _ => base.generation,
+        }
+    }
+
+    /// The lowest generation a read-back answers for, or `None` when this
+    /// part cannot read back at all (no file identity: built in memory, or a
+    /// recovered census whose base is not the file's lineage).
+    fn read_back_lineage(&self) -> Option<u64> {
+        let base = self.base.header();
+        self.file?;
+        if self.base.degraded_reason().is_some() {
+            return None;
+        }
+        let lineage = base.generation.checked_sub(base.n_valid)?;
+        // AN EPOCH THAT BEGAN AS A COMPACTION OR A MIGRATION wrote its first
+        // entries at once, under one header at `lineage + entries`, and its
+        // `lineage` is the generation the epoch before it ended on: a reader
+        // holding exactly that generation read ANOTHER file, and which keys
+        // moved since cannot be read from this one. A genesis epoch (lineage
+        // zero) has no epoch before it.
+        Some(if self.epoch.is_some() && lineage > 0 {
+            lineage.checked_add(1)?
+        } else {
+            lineage
+        })
+    }
+
+    /// The entries this part's file published after `generation` and up to
+    /// the base: what [`Self::changed_since`] answers below the base.
+    ///
+    /// Checks first, as [`extend`] does, that the file is the one the base
+    /// was read from (the same device and inode, not degraded) and still
+    /// holds the first entry this part read; then reads the entries by
+    /// position and decodes each with its checksum, refusing on any that does
+    /// not decode or names another segment. O(answer): one open, one `stat`,
+    /// one 128-byte read and the answer's own bytes.
+    #[cfg(unix)]
+    fn read_back(&self, generation: u64, most: u64) -> Option<Vec<(u64, EntryKey)>> {
+        use std::os::unix::fs::FileExt as _;
+        let base = self.base.header();
+        if generation < self.read_back_lineage()? {
+            return None;
+        }
+        let lineage = base.generation.checked_sub(base.n_valid)?;
+        let from = generation.checked_sub(lineage)?;
+        let to = base.n_valid;
+        if from >= to {
+            return Some(Vec::new());
+        }
+        if to - from > most {
+            return None;
+        }
+        let id = self.file?;
+        let file = open_without_waiting(&self.path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || FileId::of(&meta)? != id {
+            return None;
+        }
+        let layout = Layout::for_version(base.format_version).ok()?;
+        let stride = layout.entry_stride();
+        if let Some(first) = self.first_entry.as_deref() {
+            let mut again = vec![0u8; first.len()];
+            if file.read_exact_at(&mut again, HEADER_LEN).is_err() || again.as_slice() != first {
+                return None;
+            }
+        }
+        let start = HEADER_LEN.checked_add(from.checked_mul(stride)?)?;
+        let end = HEADER_LEN.checked_add(to.checked_mul(stride)?)?;
+        if meta.len() < end {
+            return None;
+        }
+        let mut bytes = vec![0u8; usize::try_from(end - start).ok()?];
+        file.read_exact_at(&mut bytes, start).ok()?;
+        let width = layout.entry_stride_len();
+        let mut older = Vec::with_capacity(usize::try_from(to - from).ok()?);
+        for (ordinal, chunk) in (from..to).zip(bytes.chunks_exact(width)) {
+            let key = layout.decode_entry(chunk).ok()?.entry.key;
+            if base.segment.is_some_and(|segment| key.segment != segment) {
+                return None;
+            }
+            older.push((lineage.checked_add(ordinal)?.checked_add(1)?, key));
+        }
+        #[cfg(test)]
+        manifest_reads::note_read_back(&self.path, to - from);
+        Some(older)
+    }
+
+    /// No positional read off Unix: a `since` below the base is refused.
+    #[cfg(not(unix))]
+    fn read_back(&self, _generation: u64, _most: u64) -> Option<Vec<(u64, EntryKey)>> {
+        None
     }
 
     /// Whether `self` and `other` stand on the SAME whole read of one file:
@@ -453,6 +618,80 @@ impl Part {
     #[must_use]
     pub fn extends_same_read(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.base, &other.base)
+    }
+
+    /// Whether `self` continues the FILE `other` was read from, whether or
+    /// not by the same whole read: the same path, epoch, segment, device and
+    /// inode, lineage and first entry, and the entry `other` read last still
+    /// the same bytes at its ordinal. A census read whole again past its tail
+    /// floor continues its file, and every generation `other` published is
+    /// answered by [`Self::changed_since`] from it (read back below its
+    /// base). What a derived index moved forward across a whole re-read
+    /// checks, so it moves by the entries appended instead of being built
+    /// again over every key (R3-09).
+    ///
+    /// The same evidence the tail read takes ([`extend`]: the first and the
+    /// last entry already read, read again). Cost: pointer comparisons when
+    /// `self` extends `other`'s read; otherwise one open, one `stat` and one
+    /// entry's read.
+    #[must_use]
+    pub fn continues_file(&self, other: &Self) -> bool {
+        if self.extends_same_read(other) {
+            return true;
+        }
+        let lineage = |part: &Self| {
+            let header = part.base.header();
+            header.generation.checked_sub(header.n_valid)
+        };
+        let same = self.segment == other.segment
+            && self.epoch == other.epoch
+            && self.path == other.path
+            && self.file.is_some()
+            && self.file == other.file
+            && lineage(self).is_some()
+            && lineage(self) == lineage(other)
+            && self.base.degraded_reason().is_none()
+            && other.base.degraded_reason().is_none()
+            && self.first_entry.is_some()
+            && self.first_entry == other.first_entry;
+        same && self.still_holds_last_of(other)
+    }
+
+    /// Whether the file still holds, at the ordinal `other` read last, the
+    /// bytes `other` read there. See [`Self::continues_file`].
+    #[cfg(unix)]
+    fn still_holds_last_of(&self, other: &Self) -> bool {
+        use std::os::unix::fs::FileExt as _;
+        let header = other.header();
+        let Some(last) = other.last_entry.as_deref() else {
+            return header.n_valid == 0;
+        };
+        let Ok(layout) = Layout::for_version(header.format_version) else {
+            return false;
+        };
+        let at = header
+            .n_valid
+            .checked_sub(1)
+            .and_then(|ordinal| ordinal.checked_mul(layout.entry_stride()))
+            .and_then(|offset| HEADER_LEN.checked_add(offset));
+        let Some(at) = at else {
+            return false;
+        };
+        let Ok(file) = open_without_waiting(&self.path) else {
+            return false;
+        };
+        let identity = file.metadata().ok().and_then(|meta| FileId::of(&meta));
+        if identity.is_none() || identity != self.file {
+            return false;
+        }
+        let mut again = vec![0u8; last.len()];
+        file.read_exact_at(&mut again, at).is_ok() && again.as_slice() == last
+    }
+
+    /// No positional read off Unix: never continued.
+    #[cfg(not(unix))]
+    fn still_holds_last_of(&self, _other: &Self) -> bool {
+        false
     }
 
     /// Whether `self` and `other` are the same read: one file, one whole
@@ -3105,8 +3344,40 @@ pub(crate) mod manifest_reads {
     /// Every successful manifest byte read, in order, by path.
     static READ: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
+    /// Every read of any kind -- whole, by its tail, or read back below a
+    /// base -- by path, with the name of the thread that made it: what
+    /// decides whether a REQUEST thread read the census, or only the threads
+    /// that warm and re-read it (R3-09, `census_cache::start`).
+    static BY_THREAD: std::sync::Mutex<Vec<(PathBuf, &'static str, String)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// Record one read of `path` of `kind` by the calling thread.
+    fn note_thread(path: &Path, kind: &'static str) {
+        let name = std::thread::current()
+            .name()
+            .map_or_else(|| "(unnamed)".to_owned(), str::to_owned);
+        BY_THREAD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_path_buf(), kind, name));
+    }
+
+    /// Every read of a path under `root`, oldest first: the path, `whole`,
+    /// `tail` or `read-back`, and the name of the thread that made it.
+    #[must_use]
+    pub(crate) fn threads_under(root: &Path) -> Vec<(PathBuf, &'static str, String)> {
+        BY_THREAD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(read, _, _)| read.starts_with(root))
+            .cloned()
+            .collect()
+    }
+
     /// Record one whole-manifest read of `path`.
     pub(crate) fn note(path: &Path) {
+        note_thread(path, "whole");
         READ.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(path.to_path_buf());
@@ -3133,8 +3404,33 @@ pub(crate) mod manifest_reads {
     /// Every tail read: the path, and the entries it decoded.
     static TAILS: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
 
+    /// Every read-back below a base: the path, and the entries it decoded.
+    static READ_BACK: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Record one read-back of `path` that decoded `entries` entries.
+    pub(crate) fn note_read_back(path: &Path, entries: u64) {
+        note_thread(path, "read-back");
+        READ_BACK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_path_buf(), entries));
+    }
+
+    /// Every read-back of `path` this process made: the entries each decoded.
+    #[must_use]
+    pub(crate) fn read_backs_of(path: &Path) -> Vec<u64> {
+        READ_BACK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(read, _)| read.as_path() == path)
+            .map(|(_, entries)| *entries)
+            .collect()
+    }
+
     /// Record one tail read of `path` that decoded `entries` appended entries.
     pub(crate) fn note_tail(path: &Path, entries: u64) {
+        note_thread(path, "tail");
         TAILS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3155,13 +3451,5 @@ pub(crate) mod manifest_reads {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a test that cannot panic cannot fail, and these lints exist to \
-              keep panics out of the crate rather than out of its tests"
-)]
 #[path = "census_tail_tests.rs"]
 mod tail_tests;

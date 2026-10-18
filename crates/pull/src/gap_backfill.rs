@@ -92,7 +92,9 @@ pub struct Have {
 }
 
 impl Have {
-    /// Whether the ledger holds a line for `key` on `day`. O(1) expected.
+    /// Whether the ledger holds a line for `key` on `day`. O(1) expected: one
+    /// hash probe. Proof: `crates/pull/tests/zerodha_gaps.rs`
+    /// (`a_ledger_probe_is_flat_in_the_ledgers_lines`, 790 against 79,000 lines).
     #[must_use]
     pub fn holds(&self, key: &str, day: Day) -> bool {
         self.pairs

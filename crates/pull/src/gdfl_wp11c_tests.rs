@@ -455,3 +455,94 @@ fn a_rescan_that_writes_no_new_line_names_no_sampled_day_again() {
     assert!(among(ImportKind::Indices, on, &[]).is_empty());
     assert!(among(ImportKind::Indices, on, &["not a flags line".to_owned()]).is_empty());
 }
+
+/// GF-1: `DayLedger::halt` replaced by `None` and by `Some((0, 0))` survived:
+/// nothing read the accessor. A ledger of 2020-03-13 carries the halt the
+/// calendar records for its venue, and an ordinary day carries none.
+#[test]
+fn a_day_ledger_carries_the_halt_its_calendar_records() {
+    for kind in [ImportKind::Indices, ImportKind::Stocks, ImportKind::Options] {
+        let on = day(2020, 3, 13);
+        let session = crate::gdfl_cm::session_of(on).unwrap();
+        let ledger = quality::DayLedger::new(kind, on, session);
+        let halt = quality::halt_window(kind, on);
+        assert!(
+            halt.is_some_and(|(from, resume)| from < resume),
+            "{kind:?}: {halt:?}"
+        );
+        assert_eq!(ledger.halt(), halt, "{kind:?}");
+        let ordinary = day(2020, 3, 12);
+        let session = crate::gdfl_cm::session_of(ordinary).unwrap();
+        assert_eq!(
+            quality::DayLedger::new(kind, ordinary, session).halt(),
+            None,
+            "{kind:?}"
+        );
+    }
+}
+
+/// GF-1: `len > max` mutated to `len >= max` in `DayLedger::take` survived.
+/// Two files of one index whose runs of an unchanged price (`flat_max`) are
+/// equally long: the line keeps the run met first, in file order, exactly as
+/// one file alone would.
+#[test]
+fn an_equally_long_later_flat_run_does_not_replace_the_first() {
+    let on = day(2020, 3, 12);
+    let first = quality::FileQuality {
+        flat_max: Some((100, 50)),
+        ..quality::FileQuality::default()
+    };
+    let later = quality::FileQuality {
+        flat_max: Some((7_200, 50)),
+        ..quality::FileQuality::default()
+    };
+    let ledger = || {
+        quality::DayLedger::new(
+            ImportKind::Indices,
+            on,
+            crate::gdfl_cm::session_of(on).unwrap(),
+        )
+    };
+    let mut alone = ledger();
+    alone.take("FIXTURE-INDEX", &first);
+    let mut both = ledger();
+    both.take("FIXTURE-INDEX", &first);
+    both.take("FIXTURE-INDEX", &later);
+    let alone = alone.lines(true);
+    let both = both.lines(true);
+    assert_eq!(
+        field(&both[0].1, "flat_max_at"),
+        field(&alone[0].1, "flat_max_at"),
+        "{both:?}"
+    );
+    assert_eq!(field(&both[0].1, "flat_max_s"), "50");
+}
+
+/// GF-1: `a < b` mutated to `a <= b` in `halted_spans` survived: both of its
+/// callers add up `[from, to)` lengths, to which an empty part adds nothing,
+/// so no measure could tell them apart. The function's own answer can: a
+/// session window that ends exactly where the halt starts, or starts exactly
+/// where it resumes, shares no second with it and is no part of it. A window
+/// the halt cuts through is cut to the halt, and no halt is no part at all.
+#[test]
+fn a_window_that_only_touches_the_halt_is_no_part_of_it() {
+    let halt = Some((3_600, 7_200));
+    assert_eq!(
+        quality::halted_spans(&[(0, 3_600), (7_200, 9_000)], halt),
+        Vec::<(u32, u32)>::new(),
+        "touching at either end is no shared second"
+    );
+    assert_eq!(
+        quality::halted_spans(&[(0, 3_601), (7_199, 9_000)], halt),
+        vec![(3_600, 3_601), (7_199, 7_200)],
+        "one shared second at either end is a part"
+    );
+    assert_eq!(
+        quality::halted_spans(&[(0, 9_000)], halt),
+        vec![(3_600, 7_200)]
+    );
+    assert_eq!(
+        quality::halted_spans(&[(0, 9_000)], None),
+        Vec::<(u32, u32)>::new()
+    );
+}

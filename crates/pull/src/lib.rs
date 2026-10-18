@@ -209,6 +209,9 @@ pub mod rate;
 /// one is fixed by tomorrow's credential and the other is not fixed by
 /// anything this repository can do. Generic over feeds; `kite` is a row.
 pub mod refusal;
+/// The rehearse-then-run gate: a store-writing kind starts by itself only when
+/// its `config/store-steps.toml` step holds a current rehearsal (AUT-05).
+pub mod rehearsal;
 /// One pass over the exchange's directory, and the dated snapshot it produces.
 ///
 /// Every file in a pass is the same age, and a snapshot is published whole or
@@ -230,6 +233,9 @@ pub mod series_identity;
 pub mod session;
 pub mod ssm;
 pub mod tenor;
+/// The tick-store writer in pure Rust: one GDFL day zip to one verified
+/// `BRTXTS01` day file, never overwriting, never removing (E2E-02, R4-08).
+pub mod tickstore_write;
 pub mod totp;
 /// Joining the exchange's published constituents against a vendor's master.
 ///

@@ -74,6 +74,11 @@ pub mod format;
 pub mod generation;
 pub mod header;
 pub mod layout;
+/// A month's summary — its minute and second index, extremes, bars per day
+/// and the input faults a gap audit refuses on — kept in a `.sum` sibling
+/// while the month is written and in the `.sbar` summary section once sealed,
+/// so a gap audit reads one summary a month and no bar (R3-06, D-4980).
+pub mod month_summary;
 /// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
 pub mod open_flags;
 pub mod path;
@@ -93,6 +98,7 @@ pub mod sealed;
 /// Codec 1 of a sealed month: one frame of at most 256 bars as seven
 /// bit-packed column streams, bit for bit for any seven `i64` (D-4939, SC-1).
 pub mod sealed_codec;
+pub mod settings;
 pub mod sort_index;
 /// A writer's temporary file, created `O_EXCL` so a name that already exists
 /// (a hard link planted there, a dead writer's leftover) is never opened,

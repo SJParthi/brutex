@@ -2480,6 +2480,19 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
      wp16-order wp16-order-durable wp16-torn-open wp16-workers x019-03-28 years zero-padded \
      zero_ltp zip";
 
+// WP-62 AFTER THE ROUND'S FULL-GATE RUN (GF-1, 14 Oct 2026). WP-62's runtime
+// repairs merged after the 12 Oct run and ran no CI gate, so its four new
+// literals were met here undeclared. Each was read first. `1421286` and
+// `1421400` are ordinals of two records of the store's own `audit/pull.journal`,
+// cited as the evidence of the calendar's two measured short days
+// (2019-08-02, 2022-03-07) and asserted by the test that reads them.
+// `calendar_past_record` is a coverage code of `request_minutes` (`Why::
+// PastRecord`, DB-B25): a receipt's and an event's reason word for a day past
+// the calendar of record. `request-before-record` is the label of one case of
+// `tests/derive.rs`. None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const WP62_LITERAL: &str = "1421286 1421400 calendar_past_record request-before-record";
+
 // WP-12f, THE GDFL CAPITAL-MARKET SCOPE (D-4878; 14 Oct 2026). The package's
 // rounds added literals under crates/pull and ran no CI gate; its fifth round
 // ran gate 1d and declares them here, each read before it was listed. Four
@@ -2504,9 +2517,146 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
      wp12f-owed-cost wp12f-reach wp12f-restated-auction wp12f-restated-member \
      wp12f-restated-names wp12f-restated-open wp12f-retry wp12f-series wp12f-sparse \
      wp12f-told wp12f-torn wp12f-widen";
+// R3-35 (D-4979): the importer split's two proofs in
+// `pull/src/gdfl_import_split_tests.rs`. `r3-35-bytes` is the byte test's
+// scratch-directory tag; `git`, `cat-file` and `blob` are the words of the
+// `git cat-file blob <id>` the line test reads the split's and the unsplit
+// file's blobs with, as `store/tests/cited_commits.rs` runs `git`. None names
+// an account, an environment, a vendor credential or a field of a parameter
+// path.
+const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
+
+// THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
+// (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
+// (the shared file doors: the tick store's day-name refusals), SC-1 (codec 1,
+// whose allocation test lives in pull's tests) and the alert queue's
+// replacement tests added these literals under crates/pull and ran no gate
+// 1d. Each was read before it was listed, in three kinds. (1) Words of a
+// refusal's or an event's text: `cache` ("existing cache lock", "existing
+// cache retained"), `retained`, `dangling`, `pipe` and `unplugged` (a day
+// name that is a dangling link, a FIFO, or a volume unplugged mid-read).
+// (2) Test labels and scratch tags: `observer`, `race`, `ready` (the lock
+// tests' thread roles and their hand-off word; `ready` is also met inside
+// `already`), `decode_frame` and `decode_stamps` (the allocation test's
+// names for the two codec calls it counts). (3) A test runner's flag the
+// lock and import tests print in their run hints: `--test-threads`.
+// None names an account, an environment, a vendor credential or a field of
+// a parameter path.
+const MERGED_AFTER_GF1_LITERAL: &str = "--test-threads cache dangling decode_frame decode_stamps \
+     observer pipe race ready retained unplugged";
+
+// THE PACKAGES MERGED ON 16 OCTOBER 2026, AFTER GF-1'S RUN OF THAT DAY
+// (GF-1, 16 Oct 2026). R4-08 (the tick-store writer, `pull::tickstore_write`,
+// its tests and its bench) and R3-18 (the Zerodha repair plan's short
+// sessions and the stored-month gap ledger, `pull::ingest::gap_backfill` and
+// `tests/zerodha_gaps.rs`) added these literals under crates/pull and ran no
+// gate 1d. Each was read before it was listed, in five kinds. (1) The
+// writer's refusal codes and log and event field names, each the
+// `snake_case` word its `Display`, its log line or its `telemetry` event
+// prints: `block_overlap` .. `zip_unavailable`, `csv_bytes`, `raw_fallbacks`,
+// `stored_bytes`, `millis`, `writer`, `minutes`, `raced`, `stored_short`, and
+// the step words of a write failure (`create`, `fsync`, `rename`). (2) Test
+// labels and scratch folder tags the writer's tests and the gap tests pass
+// as a run id or a folder name: the `tsw-*` tags, `writer-a`/`writer-b`,
+// `linked-*`, `via-link`, `rt-1`, `nfo-1`, `a-file`, `after-crash`,
+// `2026-10-14_a`, `lockdir`, `logdir`, `in`, `ours`, `share`, `typo`,
+// `flip`, `blind`, `bad`, `bad-crc`, `dated`, `hex`, `stamped`, `opened`,
+// `unlocked`, `folder`, `measure`, `staging_linked`. (3) Invented field
+// values a fixture decodes: `-17`, `1e5`, `12345678901234567`,
+// `123456789012345678`, `ff`, `deadbeef`, the `12` of an invented
+// `31/12/1999` CSV date, `2019-10` (a month the gap test asserts) and the
+// bench labels `10x` and `100x`. (4) Crate names the no-C test refuses in
+// pull's manifest and its `dependencies` section word: `zstd`, `zstd-sys`,
+// `zstd-safe`, `zstd_sys`, `zstd_safe`, `memmap2`, `libc`. (5) LOCAL
+// filesystem directory names in the hand-run measurement's guard that
+// refuses to write under the operator's store (`brutex`, `fresh-20260919`,
+// `tickstore-data`): directories on this Mac, never a Parameter Store path.
+// And one of GF-1's own, from the cost test it added to
+// `tests/zerodha_gaps.rs` the same day: `2022`, the label of the year whose
+// days it times.
+// None names an account, an environment, a vendor credential or a field of
+// a parameter path.
+const MERGED_16_OCT_LITERAL: &str = "-17 100x 10x 12 12345678901234567 123456789012345678 \
+     1e5 2019-10 2026-10-14_a a-file after-crash bad bad-crc blind block_overlap brutex \
+     commit_invalid create csv_bytes dated day_locked day_too_large deadbeef dependencies \
+     duplicate_entry encode_failed ff flip folder fresh-20260919 fsync held_day_differs hex \
+     in inner_folder_mismatch libc linked-cm linked-month linked-root linked_folder \
+     lock_failed lockdir logdir measure member_corrupt member_too_large memmap2 millis \
+     minutes name_not_canonical name_not_utf8 name_too_long nfo-1 no_file_in_day \
+     not_regular_file opened ours raced raw_fallbacks rename root_missing rt-1 \
+     run_id_invalid share staging_linked stale_temp stamped stored_bytes stored_short \
+     temp_not_created temp_raced tickstore-data tsw-big tsw-bounds tsw-changed tsw-commit \
+     tsw-crc tsw-cut tsw-dirs tsw-empty tsw-entries tsw-flip tsw-folder tsw-full tsw-hex \
+     tsw-linkcm tsw-linked tsw-linkmonth tsw-linkroot tsw-lock tsw-lockdir tsw-logdir \
+     tsw-name tsw-nfo tsw-noroot tsw-other tsw-pipe tsw-race tsw-rerun tsw-rt tsw-run \
+     tsw-share tsw-tmp tsw-two tsw-zipcut typo unlocked verify_failed via-link write_failed \
+     writer writer-a writer-b zip_corrupt_on_verify zip_refused zip_unavailable zstd \
+     zstd-safe zstd-sys zstd_safe zstd_sys 2022";
+
+// THE PACKAGES MERGED ON 16 AND 17 OCTOBER 2026 AFTER GF-1'S LAST RUN
+// (GF-1, 17 Oct 2026). R3-06 (the month summary and the gap audit that reads
+// it) added `gaps::tests::a_recorded_halt_is_not_owed_by_any_classifier_door`,
+// whose four classifier doors are labelled by name in its assertion
+// messages: `table` (the dated table, an NSE cash stock), `derivatives` (the
+// derivatives venue's hours) and `cash` (the cash door); the fourth, `spot
+// index`, holds a space and is prose. Test labels only, read before they
+// were listed: none names an account, an environment, a vendor credential or
+// a field of a parameter path.
+const MERGED_17_OCT_LITERAL: &str = "cash derivatives table";
+
+// DENY-1 AND AG-04, MERGED ON 17 OCTOBER 2026 AFTER GF-1'S RUN OF THAT DAY
+// (GF-1, 17 Oct 2026), each read before it was listed. DENY-1: `ruzstd`, the
+// crate name `tickstore_write_tests` reads out of `Cargo.lock` and names in
+// the writer's stamp, and `lake`, the crate directory in the `#[path]` that
+// mounts `lake`'s zstd fixture into those tests. AG-04: the scratch
+// directory names of `gdfl_cm_auction_v2_tests` (`ag04-` and the case), and
+// the record fields it flips a bit in (`time`, `price`, `quantity`,
+// `checksum`). None names an account, an environment, a vendor credential or
+// a field of a parameter path.
+const MERGED_17_OCT_B_LITERAL: &str = "ag04-concurrent ag04-dirsync ag04-flip ag04-full \
+     ag04-garbage ag04-head ag04-header-only ag04-lock ag04-max ag04-order \
+     ag04-same-second ag04-swap ag04-torn ag04-v1-append checksum lake price \
+     quantity ruzstd time";
+
+// R4-06, MERGED ON 17 OCTOBER 2026 AFTER GF-1'S RUN OF THAT DAY (GF-1, 18
+// Oct 2026): the rehearse-then-run gate (`pull::rehearsal`, its tests, the
+// `drive_rehearsal` site of `emit_sites.rs`) and `tests/no_scheduler_delete.rs`.
+// Each was read before it was listed, in four kinds. (1) The keys, tables and
+// states of the repository's own store-step list, `config/store-steps.toml`
+// (`step`, `id`, `state`, `pending`, `withdrawn`, `prerequisites`,
+// `operator_yes`, `check`, `rehearsed_ms`, `rehearsed_bytes`,
+// `rehearsed_commit`, `writer_changed`, `snapshot`, `package`, `merged`,
+// `false`, and `config`, the list's own directory), and the gate's part and
+// refusal words (`dry_run`, `last_bulk_write_unknown`, `not_rehearsed`,
+// `not_ready`, `operator_pending`, `step_closed`, `never_automatic`,
+// `list_unreadable`, `not_evaluated`, `passed`, `failed`, `part`). (2) Two
+// compile-time word lists: `NEVER_AUTOMATIC`, the words that make a kind one
+// no scheduler starts (`delete`, `remove`, `prune`, `retire`, `credential`,
+// `password`), and `PERSON_ONLY`, the words that make an operator item a
+// person's decision (`approv`, `approval`, `yes`, `decision`, `owner`,
+// `sign-off`). Neither is a field of a parameter path: they are matched
+// inside a step's kind or item text to REFUSE an automatic start. (3) Test
+// labels and invented kinds and commits: `abc1234`, `checks`, `maybe`,
+// `kind-9999`, `no-such-dir`, `run-17`, `run-18`, `run-19`,
+// `tick-day-import`, `gap-fill`, `prune-logs`, `retire-raw-months`,
+// `credential-rotate`, `token-refresh`, `emit-site-fixture-kind`. (4) The
+// names `tests/no_scheduler_delete.rs` searches the scheduler's source for,
+// and its planted counter-example's text: `rm`, `-rf`, `rmdir`, `unlink`,
+// `unlinkat`, `remove_file`, `remove_dir`, `remove_dir_all`, `set_len`,
+// `truncate`, `ftruncate`. None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks config \
+     credential credential-rotate decision delete dry_run emit-site-fixture-kind failed false \
+     ftruncate gap-fill id kind-9999 last_bulk_write_unknown list_unreadable maybe merged \
+     never_automatic no-such-dir not_evaluated not_ready not_rehearsed operator_pending \
+     operator_yes owner package part passed password pending prerequisites prune prune-logs \
+     rehearsed_bytes rehearsed_commit rehearsed_ms remove remove_dir remove_dir_all remove_file \
+     retire retire-raw-months rm rmdir run-17 run-18 run-19 set_len sign-off snapshot state \
+     step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
+     writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 61] = [
+const DECLARED: [&str; 68] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2567,7 +2717,14 @@ const DECLARED: [&str; 61] = [
     GDFL_JOINED_PIECE,
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
+    WP62_LITERAL,
     WP12F_LITERAL,
+    MERGED_AFTER_GF1_LITERAL,
+    MERGED_16_OCT_LITERAL,
+    MERGED_17_OCT_LITERAL,
+    MERGED_17_OCT_B_LITERAL,
+    MERGED_17_OCT_C_LITERAL,
+    R3_35_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

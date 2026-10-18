@@ -273,6 +273,78 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A UNIX socket bound AT `path` itself, whatever `path`'s length.
+    ///
+    /// A socket address holds a short path (`sun_path`: 104 bytes on macOS,
+    /// 108 on Linux), and a scratch tree under a long TMPDIR is longer. A
+    /// short name under the temporary root renamed into the tree was the
+    /// first way (GF-1), and under a long enough TMPDIR the short name was
+    /// too long as well. The bind goes through a symbolic link to `path`'s
+    /// directory, named in the temporary root or else `/tmp`: the kernel
+    /// follows the link, so the socket file is made in `path`'s own
+    /// directory under its own name and only the address is the short
+    /// spelling. The link is removed at once. No short directory that can
+    /// hold the link is an error naming each one tried and why, never a skip.
+    /// `socket_at_binds_where_a_direct_bind_cannot` pins it.
+    fn socket_at(path: &Path, tag: &str) -> Result<std::os::unix::net::UnixListener, String> {
+        let dir = path.parent().ok_or("a socket path inside a directory")?;
+        let file = path.file_name().ok_or("a socket path naming a file")?;
+        let mut tried = Vec::new();
+        for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+            let link = base.join(format!("brutex-sock-{}-{tag}", std::process::id()));
+            let _stale = std::fs::remove_file(&link);
+            if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
+                tried.push(format!("{}: {why}", link.display()));
+                continue;
+            }
+            let bound = std::os::unix::net::UnixListener::bind(link.join(file));
+            let _unlinked = std::fs::remove_file(&link);
+            match bound {
+                Ok(listener) => return Ok(listener),
+                Err(why) => tried.push(format!("{}: {why}", link.display())),
+            }
+        }
+        Err(format!(
+            "no short directory carries a socket to {}: {}",
+            path.display(),
+            tried.join("; ")
+        ))
+    }
+
+    /// A socket is bound at a path too long for a socket address (GF-1):
+    /// bound directly the path is refused with `InvalidInput` wherever TMPDIR
+    /// is, and `socket_at` makes the socket at that very path, leaving no link.
+    #[test]
+    fn socket_at_binds_where_a_direct_bind_cannot() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::FileTypeExt as _;
+        let scratch = crate::search_checkpoint::tests::Scratch::new()?;
+        let dir = scratch.0.join("d".repeat(120));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("socket");
+        let direct = std::os::unix::net::UnixListener::bind(&path);
+        assert!(
+            matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+            "the premise: this path does not fit a socket address: {direct:?}"
+        );
+        let _listener = socket_at(&path, "long")?;
+        let found = std::fs::symlink_metadata(&path)?;
+        assert!(
+            found.file_type().is_socket(),
+            "the socket itself, not a link: {:?}",
+            found.file_type()
+        );
+        for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+            let link = base.join(format!("brutex-sock-{}-long", std::process::id()));
+            assert!(
+                std::fs::symlink_metadata(&link).is_err(),
+                "no link is left at {}",
+                link.display()
+            );
+        }
+        Ok(())
+    }
+
     /// The ledger door: a socket and a directory refuse by name, a symlink to
     /// a regular file is followed exactly as the store's own read door follows
     /// it, and an absent file keeps its `NotFound` kind for the callers that
@@ -287,7 +359,15 @@ mod tests {
             options
         };
         let socket = scratch.0.join("socket");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        // A socket's name must fit `sun_path` (104 bytes on macOS), and a long
+        // TMPDIR put this one past it (GF-1, gate 1e on macOS).
+        let _listener = socket_at(&socket, "door")?;
+        assert!(
+            std::os::unix::fs::FileTypeExt::is_socket(
+                &std::fs::symlink_metadata(&socket)?.file_type()
+            ),
+            "the premise: a UNIX socket is at the path"
+        );
         assert!(regular(&mut reading(), &socket).is_err());
         let refusal = regular(&mut reading(), &scratch.0)
             .err()

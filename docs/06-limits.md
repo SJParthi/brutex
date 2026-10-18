@@ -891,20 +891,33 @@ credential and the pull would spend its retries on the wrong problem" — and
 nothing in `crates/pull/src` ever constructed it. A doc comment describing a
 protection nobody wrote is worse than no protection, so the variant is gone.
 
-**What that leaves.** If a `ParameterStore` implementation ever returns
-ciphertext, `read` wraps it in a `Secret`, the vendor rejects it,
-`reread_after_rejection` reads the same ciphertext again, and the pull halts
-with `CredentialHalt::DeadToken` — "the vendor rejected this credential and the
-re-read returned the same value; it is dead and nothing here mints one". That is
-loud, and it names the wrong cause. `CLAUDE.md` §4 is about not failing
-silently; this fails noisily with a wrong diagnosis, which is a smaller fault
-and is written down rather than left to be discovered.
+**Restated for the path that ships (AH-02, g-zerodha-universe-census-6).** The
+port above (`SecretSource`, `CredentialReader::reread_after_rejection`) still
+has no caller outside `cfg(test)`. The live credential is read by
+`crates/api/src/server.rs`'s `read_credential` through
+`pull::ssm::get_parameter`, whose request body is `pull::ssm::body(name, true)`
+— `WithDecryption` true — once per field (the `access-token`, and Zerodha's
+`api-key` as well). The live re-read is `crates/api/src/credential_law.rs`'s
+`Watch::reread` (D-0948), called by `broker_run_by`, `fno_land` and
+`roll_every`. The limit is the same on that path: nothing checks that the value
+is not ciphertext.
+
+**What that leaves.** If Parameter Store ever returned ciphertext, the vendor
+would reject it, `Watch::reread` would read the same ciphertext again, compare
+the fingerprints, find them equal, and stop the run with
+`CredentialStop::SameValue` — "the vendor rejected the access-token and the one
+re-read returned the same value". That is loud, and it names the wrong cause.
+The masters refresh (`mastersrun::credentialed_zerodha`) does no re-read at all
+(D-0948, "Not changed"): there the vendor's refusal is reported as it came.
+`CLAUDE.md` §4 is about not failing silently; this fails noisily with a wrong
+diagnosis, which is a smaller fault and is written down rather than left to be
+discovered.
 
 **Why it is not fixed instead.** Recognising a KMS blob means knowing its
 prefix and its length, which is an external fact about a vendor's format, and
 `CLAUDE.md` §3 rule 1 permits no claim about a vendor that is not traceable to a
-source recorded in `docs/00-charter.md`. There is no such source. The change
-that first makes a live call is the change that can record one, and until then
+source recorded in `docs/00-charter.md`. There is no such source, and the live
+call that could have recorded one arrived without it. Until one is recorded
 this is a limit rather than an invention.
 
 ---
@@ -2248,6 +2261,11 @@ CI runs `ubuntu-24.04` on x86_64 with glibc's libm while development is aarch64
 macOS with Apple's, so two libms are already in play in this project. **No
 measurement was taken on glibc** — this machine has no x86_64 toolchain — and
 nothing here should be read as one.
+
+One CI job is the exception, and it adds no third libm: gate 31's `macos` job
+(`runs-on: macos-15`, D-4990) runs the workspace's tests on macOS, whose libm
+is Apple's, so that the tests which run only on macOS run somewhere. Every
+other job, and every glibc statement in this section, is `ubuntu-24.04`.
 
 **The discrete outputs are target-dependent too, and that is the sharper
 hazard.** Which `GreeksError` variant is returned, which `Method` finished, and
@@ -10404,6 +10422,23 @@ released while counting; both count the same snapshot. Not timed.
 
 ## A sorted or extremes window reads every bar in its range — D-0733, 29 September 2026
 
+**Superseded: the read this section describes is no longer in the code
+(AF-05, p99-11, D-4972).** The quotes below are `bars::window` as D-0733 found
+it on 29 September. Since then it has changed in two steps:
+- D-3326 (WP-31) replaced the whole-window read. A sorted window streams
+  each kept row once and holds at most `offset + limit` rows, refused past
+  its budget.
+- D-3349 (WP-39) serves a value sort and `extremes=1` from the months'
+  `.srt` sort indexes and their run summaries. Neither reads a row that an
+  index run orders.
+
+`reserved_window`, `read_in_time` and `seek_page` are gone, and
+`api::bars::tests::the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source`
+fails if any of them comes back. What still grows with the range is a month
+with no `.srt`, and the time-of-day sort, which reads every kept row and is
+refused past `MAX_SCAN_BARS` = 24,000,000. W1-api5-4 under D-1446 states
+both, with the latency measured on 16 October 2026.
+
 **This was stated only in code comments (W1-api1-3).** `GET /bars/window.json`
 ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
 `bars::window`. Quoted from that function:
@@ -10443,9 +10478,16 @@ comparisons instead.
 compares every offset from 0 to past the end against sorting everything and
 slicing, over primary values each repeated three times.
 
-**Not changed, and why.** The reads, the resident rows and the partition stay
-proportional to the range: no store index answers "the largest closes", and
-`total`, `extremes_of` and the change fold each need every row. Not timed.
+**Not changed then, and why — no longer true (AF-05).** This said: "The
+reads, the resident rows and the partition stay proportional to the range:
+no store index answers 'the largest closes', and `total`, `extremes_of` and
+the change fold each need every row. Not timed." That reason went away when
+the `.srt` sort index came in (D-3349). It now answers the largest closes and
+the extremes from its runs.
+On the 16 October store, a value sort over a range whose months all have a
+`.srt` reads no row by row. Over the 97-month NIFTY one-second range, where
+12 months have no `.srt`, it reads 5,092,020 rows at p50 381 ms. W1-api5-4
+holds the table.
 ### Unpinned saved-ranking requests discover their checkpoint every time (D-0904)
 
 An `/index-stop-ranking.json` request without a pinned checkpoint cannot
@@ -11934,6 +11976,35 @@ would close this.
   that sweep is still running. The log cannot say, so this is the refusal, not
   a defect; it is reached when more than 4 MiB of other records followed the
   newest sweep's marker.
+- **The 4 MiB walk now runs only when the CLI log changed (AF-06, D-4978).**
+  `/backtest/run.json` remembers the last walk's evidence under the stamp of
+  every file in the log's set: device, inode, length, modification and change
+  time, eight `stat`s. An unchanged log is judged again at the poll's own
+  `now` without a read, and the answer's `cli_log.answered_from` says
+  `memory`. A grown, rolled, truncated or replaced log is walked again under
+  the same cap, so a miss still costs up to `SCAN_BYTES`, the handler time
+  measured beside the invocation journal's own entry below. Two bounds are
+  stated rather than closed. First, a
+  same-length rewrite in place landing on the same modification and change
+  time to the nanosecond would be served from memory. The CLI log is
+  append-only and rolls by rename, so it never does this. `REWALK_AFTER`
+  re-walks an unchanged log every 5 minutes on the monotonic clock, which
+  caps such a miss at 5 minutes and costs at most 12 walks an hour per
+  process. Second, the memory holds one directory's walk, so two stores'
+  polls alternating would walk every time. This process serves one store.
+  Launch admission (`claim_execution`) still walks afresh on purpose.
+  Polls that miss at the same moment make one walk, not one each: a miss
+  takes a walk gate and looks at the memory again under a fresh stamp before
+  it walks, so the polls queued behind the first walk are answered from it,
+  and a poll that hits memory never takes the gate
+  (`concurrent_polls_after_a_change_make_one_walk`: eight polls that all
+  missed, one walk, seven answers from memory). A missing poll waits for at
+  most the walks queued ahead of it, each capped at `SCAN_BYTES`.
+  Measured on 15 Oct 2026 by the method in the invocation journal's entry
+  below: a poll answered
+  from memory has a handler p50 of 0.26 ms, p99 5.73 ms and max 8.80 ms
+  (n = 200). A walk, cold or after `REWALK_AFTER`, still took 47.52 to
+  71.68 ms. Those were 3 of the 223 polls that shadow server answered.
 - **Admission latency is unchanged; who waits for it changed.** Admission
   still does file-system work with no constant bound (canonicalization, the
   lease, a log walk of up to 8 MiB, launch preparation, an audit `begin` with
@@ -12083,13 +12154,17 @@ read from the source.
 
 An audit (cluster B6) found eleven paths in `crates/api` whose cost grows with
 the store or the universe and which this register did not name. Three were
-changed. The rest are written here, each with the function that pays it.
+changed then. Two more changed later and are under **Changed** now:
+W1-api5-3 (D-3327) and W1-api5-8 (D-4972). The rest are written here, each
+with the function that pays it.
 `api::server::cost_limits_tests` reads every bullet below and checks that the
 code still has the shape the bullet describes, so a bullet goes stale only
 with a failing build. Notation: `E` is census entries across every vendor,
 `E_v` one vendor's, `U` the merged universe (about 2,780 keys), `n` bars in
-the range a request names. **No latency below is measured** (`CLAUDE.md` §3
-rule 6); every bound is read from the source.
+the range a request names. **No latency below is measured unless its bullet
+gives the measurement** (`CLAUDE.md` §3 rule 6). AF-05 measured W1-api5-3,
+W1-api5-4 and W1-api5-8 on 16 October 2026; every other bound is read from
+the source.
 
 ### Changed
 
@@ -12112,18 +12187,179 @@ rule 6); every bound is read from the source.
   an offset at or past the end compares nothing. Before, it partitioned at
   `offset + limit` and ordered everything before that; the query string does
   not cap `offset`. `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`
-  counts the comparisons. **What remains:** a request whose sort is not `ts`,
-  or that asks `extremes=1`, still reads every bar in its month range (one
-  `read_record` per bar), folds the change over them, and holds them all in
-  memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
-  `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  counts the comparisons.
+
+  **What remains, rewritten to what the code does and measured (AF-05,
+  p99-11, D-4972).** This said that a sort other than `ts`, or `extremes=1`,
+  "still reads every bar in its month range ... O(n) reads and O(n) memory".
+  Three changes made that untrue:
+  - D-3326 (WP-31) streams a non-time sort once and holds at most
+    `offset + limit` rows.
+  - D-3349 (WP-39) serves a VALUE sort (`o h l c v oi`) from the months'
+    `.srt` sort indexes (`sort::page`).
+  - The same package serves `extremes=1` from the indexes' run summaries
+    (`sort::extremes_of`).
+
+  So neither a value sort nor `extremes=1` reads a row that an index run
+  orders. When every month in the range has a `.srt`, the answer reports
+  `scan_rows` 0. The 14 October assurance run read that over 44,102,990 rows
+  in 101 runs.
+
+  Two cases still read rows:
+  - **A month with no `.srt`**, or the rows appended after its `.srt`, is read
+    row by row through `scan`. The answer's `scanned_why` names each such
+    month, and its `build` field names the `cli srt-build` command that would
+    index them. See L-WP81-8, L-SC-3 and the D-4933 small-month section.
+  - **The time-of-day sort** (`sort=tod`) reads every kept row through
+    `scan`: O(n) reads, with memory bounded by the page's depth. Past
+    `MAX_SCAN_BARS` = 24,000,000 rows it is refused by name with
+    `scan_budget_exceeded`, before any row is read.
+
+  The `ts` sort without extremes is the bounded seek path and is unchanged.
+  The figure this bullet gave, "about 1.9 million at `MAX_WINDOW_MONTHS` =
+  240", is for a one-minute range. A one-second range of 97 months is about
+  44 million rows.
+
+  The measurements below were taken on 16 October 2026:
+  - **Store:** a shadow of the operator's store, with its bars linked
+    read-only.
+  - **Build:** the release `api` of feat/db-fix 4756cce0, which `main`'s
+    squash merge does not keep.
+  - **Request:** `/bars/window.json?feed=gdfl&timeframe=1s&key=NSE-INDEX-NIFTY&limit=200`.
+  - **Method:** n = 200 sequential GETs per row, on a host shared with other
+    agents' builds.
+
+  | Ask | Rows in range | Read row by row | p50 | p99 | max |
+  |---|---|---|---|---|---|
+  | `sort=c`, 2018-09..2026-09 | 44,032,544 | 5,092,020 | 381.46 ms | 498.69 ms | 666.75 ms |
+  | `sort=v`, same | 44,032,544 | 5,092,020 | 366.13 ms | 668.43 ms | 1,014.76 ms |
+  | `sort=c&extremes=1`, same | 44,032,544 | 5,092,020 | 446.58 ms | 816.12 ms | 1,291.30 ms |
+  | `sort=ts&extremes=1`, same | 44,032,544 | 0 | 2.64 ms | 9.57 ms | 14.48 ms |
+  | `sort=tod`, 2026-08..2026-09 | 944,941 | 944,941 | 69.29 ms | 112.93 ms | 144.51 ms |
+  | `sort=tod`, 2018-09..2026-09 (n = 20) | 44,032,544 | 0: 400 `scan_budget_exceeded` | 2.26 ms | 8.37 ms | 8.37 ms |
+
+  **The value-sort rows are not O(1) today, and the reason is in the store,
+  not in the code.** On 16 October, 12 of the 97 months have no `.srt` on disk:
+  2018-11, 2019-10, 2020-11, 2021-02, 2021-11, 2022-03, 2022-10, 2023-11,
+  2024-03, 2024-05, 2024-11 and 2025-10. The answer names all twelve. Those
+  5,092,020 rows are read whole on every request, and that read is the 381 ms.
+  Building the twelve indexes is a store write: `cli srt-build gdfl
+  NSE/INDEX/NIFTY 1s 2018-11 2025-10`, which is the command the answer's
+  `build` field gives.
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
   census, so a `show=gaps` request pays O(keys log keys) for the axis, the cost
   §32 records for startup, on top of `census_now`'s. The default held-only view
   does not pay it.
+
+* **W1-api5-3 — `instruments_json`, kept per census read (D-3327; rewritten
+  and measured by AF-05, p99-11, D-4972).** This bullet described the route
+  as it was before D-3327. On every request it ran a filter over the merged
+  universe (O(U)), then `census_now`, then `bars_by_symbol`, which walked
+  every entry of every vendor's census (O(E)), then a sort (O(T log T)).
+  D-3327 (WP-30) changed the route, but the bullet stayed as it was. What
+  the route does now:
+  - It builds the body once per (feed census read, universe parse), on the
+    store-read pool, and keeps it (`site.census_wire.kept`).
+  - That build filters the universe (O(U)). It counts each listing's held
+    months from the facet index: `held_by_listing` reads `facets::index`,
+    which keeps one node per instrument. It then sorts the tracked listing
+    (O(T log T), with T about 800).
+  - A request whose census and universe have not moved is served the kept
+    body. `bars_by_symbol`, the per-request walk, is gone.
+
+  **What remains:** the first request after the census or the universe moves
+  rebuilds the body. The facet index also pays for the entries appended since
+  it last moved, O(log) each. A cold index makes one pass over the segment's
+  keys, once per whole census read.
+
+  Measured warm on 16 October 2026: a shadow of the operator's store, the
+  release `api` of 4756cce0, which `main`'s squash merge does not keep,
+  n = 200 sequential GETs per feed.
+
+  | Feed | Census entries (E) | Body | p50 | p99 | max |
+  |---|---|---|---|---|---|
+  | default | — | 229,630 bytes | 1.06 ms | 1.76 ms | 1.83 ms |
+  | gdfl | E = 2,098,428 | 103,414 bytes | 1.05 ms | 1.69 ms | 2.03 ms |
+  | zerodha | E = 251,270 | 278,516 bytes | 1.02 ms | 1.88 ms | 2.63 ms |
+
+  The warm cost is flat across an 8.4x difference in E. A second run later the
+  same day, n = 200 rounds of one GET to this build and one to the AF-05 build
+  in turn, gave p50 1.92-2.39 ms and p99 13.82-19.64 ms on every feed and on
+  both builds alike: the host was busier, and E still made no difference. A
+  rebuild, the first request after a census move, is not timed here.
+* **W1-api5-8 — `bars_json` past the last bar: one record (AF-05, p99-8,
+  D-4972, narrowing D-1446).** When `from=` lies after the month's last
+  stored bar, the time lookup returns `n_valid`. That landing used to fall
+  back to reading the whole month to answer `[]`: O(n_valid) reads, which is
+  517,373 records on gdfl NIFTY 1s 2026-07. Now `past_the_last_bar` reads the
+  last record, once. If that record is the header's last bar (its stamp is
+  non-zero and equal to `last_ts_micros`) and it is older than `from`, the
+  answer is `[]` with no further read. The total cost is the lookup plus one
+  record. Through a ready `.tix` the lookup reads nothing for a stamp past the
+  header's (D-2329); through the bisection it reads O(log n_valid) records.
+  Why one record is enough: every batch the writer commits begins after the
+  header's last stamp (`Header::advance`), so no record can be later.
+
+  The full read, at O(n_valid) reads, is kept only for a tail that does not
+  read back as the header's last bar:
+  - zero-filled records from a newly allocated extent (stamp 0);
+  - a record its checksum refuses.
+
+  For those files, reading the month is what answers correctly and what names
+  the faults. A file cut short of what its header names is not read at all:
+  the store refuses it at the open, and the route answers 400 naming it. `api::server::bars_route::tests::a_window_past_the_last_bar_reads_one_record`
+  counts one record read and no record range.
+  `a_zero_filled_tail_still_takes_the_full_read` shows a zeroed tail starting
+  the full read and answering 206, and a cut file refused at the open.
+
+  Measured on 16 October 2026 on two shadows of the operator's store, each
+  with its bars linked read-only: before is the release `api` of feat/db-fix
+  4756cce0, which `main`'s squash merge does not keep, after is this change.
+  Method: n = 200 rounds of one GET to each
+  build in turn (n = 20 for `limit=2`, whose before answer is 71 MB), on a
+  host shared with other agents' builds. Every month is `/bars.json` with the
+  named `from=` and `to=`; the answers are byte for byte the same on both
+  builds except the two refusals.
+
+  | Selection | Answer | before p50 / p99 / max | after p50 / p99 / max |
+  |---|---|---|---|
+  | gdfl NIFTY 1s 2026-07, past the end (2026-08-01) | `[]` | 41.35 / 59.88 / 73.76 ms | 1.06 / 5.05 / 6.29 ms |
+  | gdfl NIFTY 1s 2026-07, past the end (2030-01-01) | `[]` | 40.75 / 57.08 / 72.72 ms | 1.12 / 2.56 / 3.36 ms |
+  | gdfl NIFTY 1s 2026-07, before the start (2026-06-30) | `[]` | 1.07 / 2.13 / 2.95 ms | 1.07 / 1.95 / 2.40 ms |
+  | gdfl NIFTY 1s 2026-07, one day (2026-07-15) | 3,105,001 bytes | 5.71 / 8.21 / 9.07 ms | 5.65 / 8.30 / 9.19 ms |
+  | gdfl NIFTY 1s 2026-07, the last day (2026-07-31) | 3,105,001 bytes | 5.90 / 9.94 / 14.97 ms | 5.87 / 9.36 / 10.37 ms |
+  | gdfl NIFTY 2020-09-24 11500 CE 1s, the day after expiry | `[]` | 17.50 / 29.01 / 35.65 ms | 1.24 / 5.88 / 8.73 ms |
+  | gdfl NIFTY 2020-09-24 11500 CE 1s, expiry day | 363,592 bytes | 2.47 / 8.48 / 24.66 ms | 2.54 / 8.95 / 11.71 ms |
+  | gdfl NIFTY 2018-09-27 10000 CE 1s (illiquid), the day after expiry | `[]` | 1.79 / 13.75 / 28.77 ms | 1.26 / 10.15 / 15.60 ms |
+  | gdfl BANKNIFTY 1s 2026-07, past the end | `[]` | 38.48 / 66.11 / 82.43 ms | 1.29 / 7.88 / 12.65 ms |
+  | gdfl RELIANCE CASH 1s 2026-07, past the end | `[]` | 24.85 / 43.39 / 48.59 ms | 1.53 / 9.51 / 13.31 ms |
+  | zerodha NIFTY 1min 2026-07, whole month | 1,190,251 bytes | 3.11 / 5.71 / 10.11 ms | 3.01 / 7.77 / 8.36 ms |
+  | zerodha NIFTY 1min 2026-07, past the end | `[]` | 1.51 / 3.37 / 5.86 ms | 0.92 / 3.73 / 3.93 ms |
+  | zerodha NIFTY 1day 2026-07, past the end | `[]` | 1.00 / 12.67 / 19.59 ms | 1.00 / 8.31 / 21.07 ms |
+  | gdfl NIFTY 1s 2026-07, `limit=2` (n = 20) | before 200, 71,397,475 bytes; after 400 by name | 114.55 / 146.16 / 146.16 ms | 0.86 / 1.35 / 1.35 ms |
+
+  Past the end now lands at the before-the-start figure (p50 1.06-1.53 ms
+  against 1.07 ms), on every feed, rung and segment above. The one-day and
+  whole-month answers are unchanged: their cost is the rows they carry. The
+  same run timed `/bars/window.json` with `from=2024-3&to=2024-003`: 200 with
+  6,855 rows before, 400 `"2024-3" is not a YYYY-MM month for "from"` after
+  (D-4973).
+
+  Repeated the same afternoon on two FRESH shadows, with the final build of
+  this change against the same before build, by the same method (n = 200
+  rounds; n = 20 for `limit=2`). Past the end: gdfl NIFTY 1s 2026-07 p50
+  0.72 ms and 0.61 ms (2026-08-01, 2030-01-01) against 37.32 ms and
+  32.24 ms before; the 11500 CE day after expiry 0.82 ms against 14.90 ms;
+  BANKNIFTY 1.27 ms against 40.16 ms; RELIANCE 0.69 ms against 22.07 ms.
+  Before the start: 0.58 ms on both builds. Every past-end p99 was at or
+  under 16.47 ms after, against up to 62.16 ms before. On the small zerodha
+  months (1min and 1day, NIFTY 2026-07) the two builds are within this
+  host's noise: p50 1.19 and 1.18 ms after against 2.24 and 1.17 ms before,
+  p99 12.41 and 11.54 ms after against 7.95 and 9.32 ms before. `limit=2` answered 400 in
+  1.06 ms p50, against 200 with 71,397,475 bytes in 155.94 ms before. Every
+  answer other than the refusals was byte for byte the same on both builds.
 
 ### Documented, not changed
 
@@ -12143,10 +12379,6 @@ rule 6); every bound is read from the source.
   section says this is paid "once per manifest change". **While a pull is
   landing, that is every request:** each body rewrites a manifest, so every
   census-backed route a console polls during a backfill misses.
-* **W1-api5-3 — `instruments_json`.** Per request: a filter over every key of
-  the merged universe (O(U)), `census_now`, then `bars_by_symbol`, which
-  walks every entry of every vendor's census (O(E)) into a map pre-sized to
-  that count, then a sort of the tracked listing (O(T log T), T about 800).
 * **W1-api5-5 — `calendar_json`.** Per request, both branches:
   `held_entries` over the asked feed's census (O(E_v log E_v)); the exchange
   branch then does, per spot series, one `calendar_of::cached` probe, three
@@ -12161,13 +12393,6 @@ rule 6); every bound is read from the source.
   bar file per held entry, reading its header and two records: O(E_v) file
   opens per request. The route doc said "O(1) per entry ... nothing is read
   whole"; corrected to name the log walk.
-* **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
-  month's last stored bar, the bisection returns `n_valid` and the fallback
-  reads the whole month to answer `[]`: O(n_valid) reads instead of
-  O(log n_valid). It is kept because the same landing is how a header naming
-  zero-filled records shows itself, and reading the month is what answers
-  that file correctly; a cheaper test that tells the two apart needs a
-  monotonicity proof the record cannot give.
 * **W1-api5-9 — `indexmap_json`.** Per request: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
   universe is filtered to the index symbols: O(file bytes + U).
@@ -12202,8 +12427,9 @@ rule 6); every bound is read from the source.
   `/boolean-statistics.json`, `/boolean-admission.json`,
   `/boolean-qualification.json`, `/boolean-qualified-search.json`,
   `/boolean-campaign.json`, `/boolean-qualified-campaign.json`,
-  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json` and
-  `/live.json`, several of them polled by the console, so the journal grows
+  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json`,
+  `/live.json` and `/settings` (R3-05: every settings change attempt, saved or
+  refused), several of them polled by the console, so the journal grows
   while the operator only watches.
 - **The code work per request is fixed; the filesystem's is not.** `begin`
   is one index append, one file create and about seven `fsync`s (two directory
@@ -12227,6 +12453,102 @@ rule 6); every bound is read from the source.
   load rather than later. Before D-1445 the terminal was refused, the dropped
   attempt wrote `Cancelled` with status 0 synchronously on a Tokio worker, and
   the handler's real answer was replaced by a 503.
+- **Timed for the first time (AF-06, D-4978, 15 Oct 2026), and still NOT
+  DONE.** Measured on two private shadows of the real store, back to back,
+  release builds, load average 34 to 67 on the shared Mac. One shadow ran
+  the build before AF-06, whose answer has no `cli_log` member; the other
+  ran the AF-06 build. Each route got n = 200 sequential GETs with `curl`.
+  Each request was joined to its own journal file by the
+  `x-brutex-request-audit` header. The handler time is the terminal's
+  `elapsed_micros`; the rest is client time minus handler time, which is the
+  journal's begin and terminal syncs plus HTTP. Percentiles are
+  nearest-rank, in ms:
+
+  | Route | Build | client p50 / p99 / max | handler p50 / p99 / max | journal + HTTP p50 / p99 / max |
+  |---|---|---|---|---|
+  | `/backtest/run.json` | before | 48.23 / 105.01 / 141.58 | 16.51 / 34.51 / 45.25 | 30.78 / 77.81 / 112.63 |
+  | `/backtest/run.json` | AF-06 | 66.09 / 128.39 / 182.46 | 0.26 / 5.73 / 8.80 | 64.88 / 127.64 / 182.22 |
+  | `/live.json` | before | 28.93 / 71.83 / 112.62 | 0.11 / 6.07 / 17.39 | 28.17 / 71.69 / 95.23 |
+  | `/live.json` | AF-06 | 63.74 / 149.81 / 284.12 | 0.13 / 4.20 / 5.98 | 63.12 / 147.34 / 283.96 |
+  | `/backtest.json` | before | 31.83 / 85.00 / 99.82 | 0.09 / 3.60 / 7.61 | 31.63 / 77.38 / 99.56 |
+  | `/backtest.json` | AF-06 | 51.52 / 111.73 / 151.72 | 0.09 / 0.74 / 1.40 | 51.30 / 111.62 / 151.64 |
+  | `/backtest/run.json` | AF-06 r1 | 7.98 / 18.17 / 30.96 | 0.20 / 0.58 / 1.77 | 7.78 / 17.92 / 29.18 |
+  | `/live.json` | AF-06 r1 | 7.95 / 20.95 / 35.18 | 0.09 / 1.10 / 3.36 | 7.86 / 20.88 / 35.10 |
+  | `/backtest.json` | AF-06 r1 | 7.91 / 14.42 / 23.09 | 0.06 / 0.35 / 0.48 | 7.84 / 14.35 / 22.61 |
+
+  AF-06 changed only the `/backtest/run.json` handler: p50 16.51 to 0.26 ms
+  and p99 34.51 to 5.73 ms. The client time did not fall. The journal part
+  was slower in the second window, when the api test suite was compiling on
+  the same machine, and AF-06 does not touch the journal. On these three
+  routes the journal is now nearly the whole cost of a poll. The AF-06 r1
+  rows were taken later the same day (load average 50) on a fresh shadow
+  over feat/db-fix 023d6ab8, which `main`'s squash merge does not keep,
+  with the r1 build (single-flight walk gate in
+  place): the memory path stays under a millisecond at p99, and the journal
+  part was about 8 ms at p50 in that window. The journal's own time moves
+  with the machine's load and the journal's code, which AF-06 does not
+  change.
+
+  **Still NOT DONE, owner R3-14:** taking these three polled read-only GETs
+  out of the per-request journal. It needs `operation_audit.rs`'s `AUDITED`
+  array, which R3-05 is editing, and R3-14's per-route minute line. Until
+  then the journal part above is the floor of every poll. AF-06 lowers how
+  many polls one open `/backtest` tab makes. Two headless Chrome tabs were
+  opened on `/backtest`, one per shadow, over the same 720 s (01:23:31Z to
+  01:35:31Z). The status was `unknown` throughout. Journal files added:
+
+  | Build | Journal files | `/backtest/run.json` among them | Rate |
+  |---|---|---|---|
+  | before | 354 | 352, every 2.0 to 2.3 s | 1,770 an hour, for as long as the tab is open |
+  | AF-06 | 12 | 10, at 0, 2, 6, 14, 30, 62, 122, 182, 242 and 302 s, then stopped | 12 per page load, none after 302 s |
+
+  The other two files on each side are the page's one-time `/backtest.json`
+  and `/engine/boolean-launch.json`. After the tenth unchanged `unknown`, the
+  AF-06 page shows the server's reason and a Refresh control. The status was
+  `unknown` for the whole window, so the AF-06 r1 repair (2 s kept while a
+  sweep is in flight, a flipping lease still counted towards the stop) does
+  not change these rows; while a sweep runs, a tab polls every 2 s exactly as
+  the before build did. Chrome's
+  `--dump-dom` with `--virtual-time-budget=420000` shows that note
+  (`data-status-poll="stopped"`).
+
+  **Re-measured on 16 Oct 2026 with the final AF-06 build** (its server
+  code is the r1 repair's; only the page and these ledgers changed after
+  it) against the before build of the r1 report, which has no AF-06 code.
+  Each ran on its own fresh private shadow of the real store, at load
+  average 94 to 120 on the shared Mac. The method is the one above: n = 200
+  sequential GETs per route, each joined to its journal record by
+  `x-brutex-request-audit` and read back through `/backtest/audit.json`
+  pages, nearest-rank, in ms, 0 unjoined, every answer 200:
+
+  | Route | Build | client p50 / p99 / max | handler p50 / p99 / max | journal + HTTP p50 / p99 / max |
+  |---|---|---|---|---|
+  | `/backtest/run.json` | before | 38.26 / 72.09 / 102.95 | 18.16 / 35.56 / 61.45 | 19.98 / 41.50 / 51.65 |
+  | `/backtest/run.json` | AF-06 | 14.49 / 50.18 / 69.99 | 0.15 / 4.21 / 47.65 | 14.27 / 32.48 / 48.69 |
+  | `/live.json` | before | 15.47 / 30.23 / 36.46 | 0.10 / 2.99 / 4.23 | 15.40 / 28.84 / 33.47 |
+  | `/live.json` | AF-06 | 16.00 / 42.92 / 47.96 | 0.11 / 2.88 / 3.69 | 15.84 / 41.89 / 47.62 |
+  | `/backtest.json` | before | 10.42 / 36.71 / 58.27 | 0.06 / 0.34 / 0.56 | 10.21 / 36.63 / 57.96 |
+  | `/backtest.json` | AF-06 | 14.41 / 20.39 / 31.78 | 0.07 / 0.66 / 2.74 | 14.34 / 19.94 / 29.12 |
+
+  The AF-06 `/backtest/run.json` max is the one walk in that window:
+  `REWALK_AFTER` had passed, and `cli_log.walks` went from 3 to 4 while the
+  other polls were answered from memory. One headless Chrome tab per shadow
+  stayed on `/backtest` for 600 s, with the status `unknown` throughout.
+  Before: 291 journal files, 289 of them `/backtest/run.json`, about every
+  2.07 s (1,734 an hour). AF-06: 11 files, 9 of them `/backtest/run.json`
+  at 9.6, 13.7, 21.7, 37.8, 69.9, 129.9, 189.9, 250.0 and 310.0 s after the
+  tab opened, then none.
+
+  The page's first status read at load is missing from both journals, and
+  that comes from this journal, not from AF-06. The page sends
+  `/backtest.json`, `/backtest/run.json` and `/engine/boolean-launch.json`
+  at once on load. Sent at once 15 times on the AF-06 shadow, 11 of those
+  45 GETs were answered 429 with `invocation audit busy: another operation
+  holds the journal lock`, 3 of them `/backtest/run.json`. The page takes a
+  refused read as an `unknown` answer and counts it towards the stop. So a
+  tab whose first read was refused stops after 9 journaled reads, not 10.
+  This refusal is R3-14's and R3-05's to remove with the rest of the
+  per-request journal on polled reads.
 
 ## The store admits a bar by month and grid, not by session — D-0915, 2 October 2026
 
@@ -13025,19 +13347,22 @@ not:
   attacksweep-1b). Leading blank lines before a request line used to be read
   as a complete head and held a slot the same way; since D-1580 they are
   skipped and the deadline keeps running (attacksweep-1).
-- **A pipelined second request can be cut.** The deadline restarts after a
-  response is written. If a client pipelined a complete second head in the
-  same read as the first, it was already buffered by hyper when the clock
-  restarted, so a handler for that second request that takes longer than the
-  deadline may see its connection closed before it answers. Browsers do not
-  pipeline. Not measured.
+- **A pipelined second request can be cut.** *Restated by D-4975 (AH-02):
+  no longer true.* The deadline used to restart at a response's first written
+  byte, so a head hyper had already buffered could have its slow handler cut.
+  The service now counts every request it takes, a pipelined one included, and
+  no head clock runs while one is in flight; `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`
+  sends a second head mid-body to a handler taking three deadlines and both
+  responses arrive whole. What is left is in the D-4975 section below.
 - **HTTP/2 is not compiled in** (`axum`'s `http2` feature is off and `h2` is
   not in `Cargo.lock`). If it is enabled, the head scan does not understand
   HTTP/2 frames and this guard must be revisited.
 - **Cost.** Taking and giving back a slot is one atomic compare-and-swap and
   one `Notify`. The head scan is O(1) per byte read, one match on a two-state
-  counter. Re-arming the deadline after a write is one timer reset. Not timed:
-  no bench row covers these paths.
+  counter. *Restated by D-4975:* the deadline is no longer re-armed by a
+  write; a write that moves bytes touches no timer, a write that waits resets
+  it once per stall, and the head clock is reset once per completed response.
+  Those per-write costs are now counted and timed: see the D-4975 section.
 - **The `408` is best effort.** It is one non-blocking `try_write` of 188
   bytes into the socket; a client that is not reading may never see it. The
   connection closes either way.
@@ -13179,6 +13504,16 @@ and the workflow file past the size GitHub will start (D-1451), so they live
 here now, verbatim and in the gate's order. Each part names the rule whose
 `allow_*` list it explains; the list itself, and the counts the gate enforces,
 stay in `ci.yml`. A change to a count changes its reason here in the same commit.
+
+### Gate 11 — rule 1. docs/07 layer 4: never `binary_search`.
+
+~~~~text
+  api/feeds_route.rs 1 -- R3-05 repair 4. `ImportReach::not_imported`
+    bisects the days of the asked month whose whole-tree import began
+    and never closed: at most 31 entries (one month's days), ascending
+    as `imported_to` builds them, so O(log 31) per minute run of a
+    `/gaps.json` month. Never a search of a store or of the journal.
+~~~~
 
 ### Gate 11 — rule 2. CLAUDE.md section 7, BOTH HALVES OF IT.
 
@@ -13707,13 +14042,17 @@ a mute button.
                 reproducibility — an unordered backfill resumes
                 somewhere different after every restart. The sort
                 is not the cost of that function.
-    server.rs   instruments_json sorts per request, over the
-                TRACKED universe (~800 by decision) and not the
-                master, which its own comment states and which the
-                type-ahead's bound depends on. It is the one entry
-                here that is per request and not the layer-12
-                exception, and it is the one to look at first if
-                this list is ever audited again.
+    instruments_route.rs  instruments_json sorts the TRACKED
+                universe (~800 by decision), not the master, and
+                since D-3327 only when its kept body is rebuilt:
+                once per (feed census read, universe parse). A
+                request whose census and universe have not moved
+                is served the kept body and sorts nothing. Measured
+                warm by AF-05 on 16 October 2026: p50 about 1.05 ms
+                and p99 under 1.9 ms on every feed (D-1446,
+                W1-api5-3). This line said "sorts per request" and
+                called it the one per-request entry here; that
+                stopped being true with D-3327.
 `select_nth_unstable`, `BinaryHeap` and `collect::<BTreeSet/Map>` were
 outside rule 4 and are the same class: a selection, a heap and an ordered
 collect each cost at least O(n) in what they consume. All three have zero
@@ -14160,6 +14499,15 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     section is written in record order and needs no sort of its own.
 ~~~~
 
+~~~~text
+  store/settings.rs 1 -- R3-05 repair 4. `list_numbers` sorts the
+    generation numbers named in one store's settings directory:
+    O(g log g) for g generations on disk (one per operator save), once
+    when a reader first lists and once per save, so that a save never
+    lands in a hole in the numbers (L-R305-6). Never on a refresh that
+    finds nothing new and never on a GET.
+~~~~
+
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
 
 ~~~~text
@@ -14595,6 +14943,14 @@ remove at a cost worth paying, so none was rewritten.
     above: once per file, never per record.
 ~~~~
 
+~~~~text
+  api/feeds_route.rs 1 -- R3-05. `census_row`'s fallback `find` for one
+    feed's row over the per-vendor census read, taken only when the row
+    is not at its vendor's index: bounded by `Vendor::ALL`, as the
+    server.rs, calendar_route.rs, instruments_route.rs, store_route.rs
+    and census_cache.rs entries above.
+~~~~
+
 ### Gate 11 — rule 7: the ambiguous membership test
 
 ~~~~text
@@ -14760,6 +15116,258 @@ bounds are all nonzero.
     `/spot.json` request, never per instant.
 ~~~~
 
+### Gate 11 — the /db fix round and the ingest automation, declared together (GF-1, 13 October 2026)
+
+~~~~text
+WHY THESE ARE HERE AT ONCE. The /db fix round (WP-01 .. WP-81) and the
+ingest-automation packages (IA-11a, IA-11r) ran cargo, clippy and the web
+gates but not this workflow, so the round's full-gate run (12 October,
+state/fix/round2/gate.json) found gate 11 refusing 87 (rule, file) pairs
+at once; the merge the round started from passed it. GF-1 read every new
+occurrence before counting it. Each entry below is `file old -> new`
+and the occurrences the raise covers, with the bound that holds them.
+A raise is a counted, named cost, not an O(1) proof: where the bound is
+the data rather than a table, the line says so and the cost is listed
+in "Costs the round's gate 11 entries name" below, for the operator's
+O(1)-at-p99 rule to judge.
+
+RULE 1 (`ALLOW_SEARCH`) -- every one is a search of a vector that is
+sorted where it is built, O(log n), never a scan:
+  api/src/audit.rs 0 -> 1 (WP-33c) -- `vendor_before`: the run records
+    of one audit index, sorted by ordinal as read; O(log runs).
+  api/src/census.rs 0 -> 1 (WP-30) -- `changed_since`: a census tail's
+    change list is appended in generation order; O(log changes).
+  api/src/chain.rs 0 -> 1 (WP-32) -- `put`: the sorted expiry days of
+    one underlying, kept sorted by inserting at the search's own slot;
+    O(log expiries), at most a few hundred per underlying.
+  cli/src/scrub_blocks.rs 0 -> 1 (WP-81) -- the resume cursor of a
+    scrub pass: one search of the sorted month paths instead of one
+    comparison per month, once per pass.
+  pull/src/gdfl_import_quality.rs 0 -> 5 (WP-11b, WP-11c) -- `gaps_in`
+    and `measure_file`: the sorted, deduplicated held seconds of one
+    file of one day (at most 22,500 plus a special session); two
+    searches per session span and per halt span, once per file.
+  pull/src/gdfl_lineage.rs 0 -> 1 (WP-12b) -- `single_near`: one sorted
+    strike ladder of one (expiry, side) on one ex-date; once per
+    contract on a lineage day.
+  pull/src/series_identity.rs 0 -> 2 (WP-13d) -- `holds` and `judge`:
+    the day ranges of one series, sorted and deduplicated in `new`;
+    O(log days held).
+  store/src/provenance.rs 0 -> 1 (WP-38a) -- `covering`: at most
+    `MAX_RECORDS` records, in bar order by construction.
+
+RULE 2 (`ALLOW_FLOAT`) -- a model value, not a price:
+  pull/src/pricing.rs 36 -> 37 (WP-32) -- `below_discounted_intrinsic`
+    hands back the two `f64`s `greeks::GreeksError::PriceBelowIntrinsic`
+    carries (the model's price and its discounted intrinsic) so the
+    chain can name the refusal; no paisa is computed from them.
+
+RULE 3 (`ALLOW_UNSIZED`) -- no size is known where the map is made:
+  api/src/audit_json.rs 0 -> 1, api/src/import_journal.rs 0 -> 1,
+  api/src/imports.rs 0 -> 1, api/src/logs.rs 0 -> 1, api/src/dayflags.rs
+  0 -> 1, api/src/calendar_build.rs 0 -> 1 (WP-33a, WP-33c, WP-54,
+    WP-36) -- process-wide memo caches made once in a `OnceLock`, keyed
+    by a file path or a feed of the store; one entry per file the
+    server reads, so the key space is the store's own file count for
+    those journals, not the request stream.
+  api/src/bars.rs 0 -> 1 (WP-39) -- `seek`'s `unopened_at`: one entry
+    per month of one window that could not be opened; empty on a sound
+    store.
+  api/src/bars_series.rs 0 -> 1 (WP-52) -- the `old` half of a
+    two-generation cache whose `young` half is pre-sized to 1,024; `old`
+    is only ever the previous `young`, swapped in whole.
+  api/src/store_route.rs 0 -> 1 (WP-56) -- `delta_entries`'s `seen`: the
+    keys of one delta since a generation, bounded by that delta.
+  api/src/sweeprun.rs 0 -> 1 (WP-34) -- the finished command runs of
+    one lifecycle read, bounded by the records that read holds.
+  pull/src/gdfl_cm.rs 0 -> 1 (WP-12a) -- `share_at` of one day's swept
+    CM archive, filled once per day as shares are met.
+  pull/src/gdfl_import.rs 0 -> 1 (WP-11b) -- `imported_days`: the
+    journal's (day, filter) closes, read once per rescan, never per row.
+  pull/src/gdfl_import_lineage.rs 0 -> 7 (WP-11b, WP-12e) -- the
+    per-underlying lineage state (`forward`, `back`, `stopped`,
+    `restarted`) made once per underlying per run, and `load`'s three
+    sets made once per run from the lineage ledger.
+  pull/src/gdfl_import_quality.rs 0 -> 1 (WP-11b) -- `Ledger::load`'s
+    newest line per key, read once per import or rescan.
+  pull/src/gdfl_lineage.rs 0 -> 6 (WP-12b, WP-12e) -- `day_lot`,
+    `detect` and `detect_unchanged_lot`: tallies of ONE underlying's
+    contracts on ONE ex-date (a few thousand at most), once per such
+    day, never per tick.
+  pull/src/gdfl_nfo.rs 0 -> 1 (WP-12b) -- `strike_median`: once per
+    opened NFO day folder, behind a `OnceLock`, one entry per underlying.
+  telemetry/src/sink.rs 0 -> 1 (WP-33a) -- the audit sink's open file
+    handles, one per audit dimension posting file it writes.
+
+RULE 4 (`ALLOW_SORT`) -- each sort's input and when it runs:
+  api/src/audit.rs 0 -> 3 (WP-33c) -- `read_index` and
+    `refusal_ordinals`: an audit index file's run records and fault
+    ordinals, sorted once when the index file is read.
+  api/src/calendar_record.rs 0 -> 1 (WP-35) -- `specials_json`: the
+    special-session days inside the asked range, from a compiled table.
+  api/src/census.rs 2 -> 3 (WP-30) -- `newest`: a census tail's rows,
+    sorted by key once per census read. O(t log t) in the tail's rows.
+  api/src/dayflags.rs 0 -> 1 (WP-54) -- `runs_of`: the run lines of one
+    `/imports.json` answer, a bounded page.
+  api/src/disk_route.rs 0 -> 1 (WP-81) -- the census epochs of one feed,
+    at most once in 30 s (L-WP81-4).
+  api/src/facets.rs 0 -> 1 (WP-56b) -- `rows_answer`: the rows of one
+    facet selection, in /store.json's order. O(k log k) in the rows the
+    selection names.
+  api/src/gaps_route.rs 1 -> 2 (WP-35) -- `second_audit`: one day's held
+    seconds, sorted per day of the asked range (at most one session's
+    seconds per day).
+  api/src/imports.rs 0 -> 1 (WP-33a) -- `merged`: the journal rows of
+    the asked day range, in day then kind order. O(r log r) in r rows.
+  api/src/logs.rs 1 -> 4 (WP-33c, IA-11r) -- `keyed_walk`: one page's
+    ring rows and index rows, each at most `limit` before the sort is
+    truncated to `limit`; `pace_of`: at most `RATE_WINDOW` - 1 = 30 gaps.
+  api/src/store_route.rs 0 -> 1 (WP-56) -- `delta_entries`: the rows of
+    one census delta, in the whole body's order. O(d log d) in d rows.
+  cli/src/scrub_blocks.rs 0 -> 1 (WP-81) -- `addressed`: the months of
+    one scrub pass, once per pass, an operator command.
+  pull/src/gdfl_import.rs 0 -> 1 (WP-11a) -- `measure_zips`: the years a
+    vendor folder holds, once per import.
+  pull/src/gdfl_import_lineage.rs 0 -> 2 (WP-11b) -- one underlying's
+    contracts before and after one ex-date, once per such day.
+  pull/src/gdfl_import_quality.rs 0 -> 1 (WP-11b) -- `first_trade_p50`:
+    `select_nth_unstable` over one day's first trades, O(n) once per day.
+  pull/src/gdfl_lineage.rs 0 -> 1 (WP-12b) -- one strike ladder per
+    (expiry, side) of one underlying on one ex-date.
+  pull/src/gdfl_nfo.rs 0 -> 1 (WP-12c) -- `lower_median`: one
+    underlying's strikes of one day, once per NFO folder (`OnceLock`).
+  pull/src/repair_plan.rs 0 -> 1 (WP-13d) -- the months a repair plan
+    names, once per plan, an operator command.
+  pull/src/series_identity.rs 0 -> 1 (WP-13d) -- the day ranges of one
+    series, once when its identity is built.
+
+RULE 6 (`ALLOW_SCAN`) -- a linear search, and its bound:
+  BOUNDED BY A COMPILED TABLE OR A FIXED SHAPE -- api/src/audit.rs 0 -> 1
+    (`Vendor::ALL`), api/src/calendar_route.rs 1 -> 2 and
+    api/src/gaps_route.rs 0 -> 1 and api/src/census.rs 0 -> 1 and
+    api/src/feeds_route.rs 0 -> 1 (one census row per `Vendor::ALL`
+    entry, or one part per segment), api/src/import_journal.rs 0 -> 3
+    (`ImportKind::ALL`; `nth_of`, a walk of one run id's own lines; and
+    one line splitter, below), api/src/imports.rs 0 -> 2 (`DayOutcome::ALL`,
+    `ImportKind::ALL`), api/src/server.rs 5 -> 6 (WP-61 `seat_holder`:
+    one progress row per feed), pull/src/expiry_alias.rs 0 -> 4
+    (`EARLY_SETTLEMENTS` and `ALIASES`, compiled tables of a few rows),
+    pull/src/vendor.rs 8 -> 9 (WP-13a: a vendor's per-segment basis, a
+    compiled table), telemetry/src/run_dirs.rs 0 -> 1 (`GDFL_KINDS`),
+    telemetry/src/sink.rs 1 -> 3 (one record's own fields),
+    pull/src/gdfl_import.rs 0 -> 1 (`decisive`: one day's failures, at
+    most one per stage and file), api/src/dayflags.rs 0 -> 2 (one
+    answer's run lines; one day's pull refusals).
+  ONE LINE OF BYTES -- api/src/import_journal.rs and api/src/logs.rs and
+    api/src/scrub_route.rs and cli/src/scrub_blocks.rs: `position` or
+    `rposition` of b'\n' in the bytes appended since the last read (at
+    most the read step, 16 MiB for the scrub ledger), the line splitter
+    of an incremental tail; api/src/disk_route.rs 0 -> 1: the words of
+    one `df -Pk` line.
+  ONE ANSWER'S OWN LIST -- api/src/calendar_record.rs 0 -> 2
+    (`held_span`: the day counts of one calendar record), api/src/chain.rs
+    0 -> 2 (the months one chain request opened, and one expiry's stored
+    strike ladder), api/src/bars_sort.rs 0 -> 1 (`view`: the sort indexes
+    set aside during one window request), pull/src/gdfl_lineage.rs
+    0 -> 2 (one ex-date's lineage pairs), api/src/scrub_route.rs's third,
+    `index_rebuilds`, is `#[cfg(test)]` and never built into the server.
+  BOUNDED BY THE DATA -- api/src/logs.rs 0 -> 2: `attempt_of_importer_run`,
+    O(attempts held in one log read), listed below; the other is
+    `read_appended`'s line splitter, above.
+
+RULE 7 (`ALLOW_MEMBER`) -- what each `.contains(&` is:
+  RANGE, two comparisons -- api/src/calendar_record.rs 0 -> 1,
+    api/src/disk_route.rs 0 -> 2 (month 1..=12, day 1..=days),
+    api/src/gaps_route.rs (two of 0 -> 3: a day range and a halt's
+    second range), pull/src/calendar.rs 1 -> 2 (WP-54: a halt's second
+    range), pull/src/alerts.rs (one of 0 -> 2: `listed`'s
+    `(1..first).contains`, an ordinal older than the window, written as
+    a range by GF-1 so that no comparison of it is an equivalent
+    mutant).
+  HASH PROBE OR ORDERED-SET PROBE -- api/src/chain.rs 0 -> 1, api/src/
+    gaps_route.rs (the third: `printed`), api/src/sweeprun.rs (WP-34's
+    `finished`), pull/src/alerts.rs (the other of 0 -> 2: `carried`, a `BTreeSet`),
+    pull/src/gdfl_import.rs 0 -> 3 (`open_days`, `runs`, `imported`;
+    `fresh_run` steps at most once per `run` line), pull/src/
+    gdfl_import_lineage.rs 0 -> 1, pull/src/gdfl_lineage.rs 0 -> 4 (three
+    `before_keys` `HashSet` probes; the fourth, `unpaired`, is one
+    ex-date's unpaired contracts).
+  COMPILED TABLE -- api/src/calendar_route.rs 0 -> 2 (`REFERENCES`),
+    api/src/logs.rs (`DB_READS`, `known` query names), api/src/sweeprun.rs
+    5 -> 8 (`COMMAND_TARGETS`; and `names`, the distinct command names of
+    the older unfinished commands of one read), cli/src/
+    gdfl_import_command.rs 0 -> 2 and cli/src/store_write.rs 0 -> 4 (one
+    command line's arguments; `WRITERS`), costs/src/lot.rs 0 -> 1
+    (`old_expiries`, a compiled `&'static [TradeDay]`), pull/src/
+    census_store.rs 0 -> 1 (`READER_FEATURES`), pull/src/http.rs 0 -> 1
+    (one bar's four prices), telemetry/src/sink.rs 0 -> 5 (the audit
+    dimension and lifecycle word tables).
+  ONE ANSWER'S OWN LIST -- api/src/imports.rs 0 -> 2 (the attempts of
+    one (kind, day)), api/src/logs.rs (one attempt's importer runs and
+    one (day, kind)'s attempts, built while one log is read), api/src/
+    repair_route.rs 0 -> 1 (`str::contains` of a needle in one journal
+    line of the asked page), pull/src/gdfl_import_quality.rs 0 -> 1
+    (`sampled_among`: the lines one rescan wrote for one day).
+
+COSTS THE ROUND'S GATE 11 ENTRIES NAME (not O(1); for docs/06-limits.md
+and the O(1)-at-p99 rule): `census::newest` O(t log t) per census read
+in the tail's rows; `facets::rows_answer` O(k log k) in a selection's
+rows; `store_route::delta_entries` O(d log d) in a delta's rows;
+`imports::merged` O(r log r) in the asked range's rows; `gaps_route::
+second_audit` one per-day sort of a day's seconds per asked day;
+`logs::attempt_of_importer_run` O(attempts). Each is measured, if at
+all, by its own package's p50/p99 rows in this file; GF-1 measured none
+of them and claims none of them as O(1).
+~~~~
+
+### Gate 11 — WP-62's pull runtime, merged after the round's run (GF-1, 14 October 2026)
+
+~~~~text
+WP-62 (the pull runtime and its six repairs) merged into feat/db-fix
+after the 12 October full-gate run and ran no CI gate, so the gate met
+15 new occurrences in three files. GF-1 read each before counting it;
+`file old -> new`, the occurrences, and the bound that holds them.
+Most sit in the restart scan, which runs ONCE PER PROCESS at site load
+and whose reads WP-62 bounds in "Pull runtime: the restart scan, the
+store probe, the pull order (WP-62)" above: the newest 800 records
+(`INTERRUPTED_SCAN`), the 64 newest run records before them
+(`INTERRUPTED_RUNS`) and at most 64 re-read faults, so every list the
+walk builds holds at most 928 entries. None is on a route's request
+path.
+
+RULE 1 (`ALLOW_SEARCH`) -- api/src/pullrun.rs 0 -> 3: `older_runs`
+  searches the index's `runs` list for the scan's first ordinal and its
+  `fault_ordinals` twice for the span the walk re-reads. Both lists are
+  sorted as the index is written; O(log n) in a list that is NOT bounded
+  by a constant (every run record and fault ever written, which that
+  section already names), once per process.
+RULE 4 (`ALLOW_SORT`) -- api/src/pullrun.rs 1 -> 3: `restart_scan_waiting`
+  sorts the scan's undecodable records (at most 928) and `older_runs` the
+  ordinals it re-reads (at most 64 + 64), once per process.
+  api/src/server.rs 7 -> 8: `spot_ask` sorts the named members of one
+  spot request, once per run; bounded by the request (at most the
+  universe of instruments a request may name).
+RULE 6 (`ALLOW_SCAN`) -- api/src/pullrun.rs 1 -> 4: `Walker::closed`
+  finds the run a close directly follows and else the newest open run of
+  its scope, window and source (`position`, `rposition`) among the open
+  runs the walk holds (at most 928); `own_vendors` finds a feed in
+  `pull::vendor::Feed::ALL`, a compiled table. api/src/server.rs 6 -> 7:
+  `ladder_withheld`'s `find` of one vendor's census among the per-vendor
+  censuses, bounded by `Vendor::ALL`. pull/src/calendar.rs 0 -> 1:
+  `short_day_on` walks the compiled two-entry `SHORT_DAYS`.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/pullrun.rs 3 -> 7: `Walker::opened`
+  asks the walk's closed ordinals (at most 928) whether a restated head's
+  run was closed; `rows_of` and `own_vendors` ask the run's own store
+  vendors, at most one per feed of `Feed::ALL`; `stop_of` asks one pass's
+  outcomes, one per leg group of the run, for `Halted`, as the three
+  `Retry` probes beside it already were.
+
+None of these is claimed O(1) here. Measured only where WP-62 measured
+them (`api::server::tests::pull_runtime_costs`, an ignored test run by
+hand; its figures are in WP-62's report): UNVERIFIED as a gated
+measurement.
+~~~~
+
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
 
 * **A cleared header checksum flag is refused at version 3 (D-1528, closed for
@@ -14805,8 +15413,8 @@ bounds are all nonzero.
   rung's level-wise engine sweep over bars already loaded, or one
   candidate's exit grid, runs to its end, because gate 17 keeps the inner
   loops of `vocab`, `engine`, `indicators` and `runner` call-free. If that
-  stretch outlasts `SHUTDOWN_GRACE` (10 s) the task is abandoned and named,
-  as D-1582 states. How long such a stretch takes on real data is
+  stretch outlasts `SHUTDOWN_GRACE` (3 s since R3-14 repair 3; 10 s before)
+  the task is abandoned and named, as D-1582 states. How long such a stretch takes on real data is
   unmeasured.
 - **Cross-site failed-request log lines are rationed (D-1583).** For requests
   whose `Sec-Fetch-Site` names another site, at most
@@ -14833,11 +15441,65 @@ bounds are all nonzero.
   refuse a duplicate key themselves; any other route's body is checked
   whatever its `Content-Type` says (P5-06, D-2659). `member` and `leg` are
   list fields and may repeat and are not counted.
-- **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
-  (D-1582).** A sweep, descent or command still running then is abandoned
-  with the process — named on stderr and in the log — and its invocation
-  audit stays non-terminal. `cli` has no cancellation point inside a sweep;
-  threading one through it is not done.
+- **Shutdown waits at most `server::SHUTDOWN_GRACE` (3 s; 10 s until R3-14
+  repair 3) for engine tasks (D-1582).** A sweep, descent or command still
+  running then is abandoned with the process — named on stderr and in the
+  log — and its invocation audit stays non-terminal. `cli` has no
+  cancellation point inside a sweep; threading one through it is not done.
+- **A served stop (Ctrl-C or `SIGTERM`) ends within `speed::STOP_BOUND`,
+  6 s (R3-14 repair 3):** at most `speed::DRAIN_GRACE` (3 s) for requests
+  still open, which are then cut and counted as cancelled, and
+  `SHUTDOWN_GRACE` (3 s) for blocking work. The bound must stay inside
+  `speed::REDEPLOY_WAIT` (10 s, what the operator's redeploy waits for the
+  port) with half of itself to spare, which a test asserts. Throughout, the
+  process holds its log (`<store>/telemetry/events.lock`), the store's
+  `serve.lock` and its port, and frees them in that order after its exit
+  line, so a free port means a free store and a free log. A redeploy tool
+  that waits less than the bound for the port is not covered; waiting for
+  the old process's pid to end is the form that needs no number.
+  **Blocking work still running when `SHUTDOWN_GRACE` runs out (R3-14
+  repair 4)** is detached by tokio and runs on until the process ends, so
+  that end closes the log as usual but leaves the serve lock and the port
+  for the process's own end to free: said as `api.main blocking work
+  outlived the shutdown wait`. Measured on a shadow with a `/verify.json`
+  scrub in flight, n = 3, polled every ~20 ms: pid gone at +6.17 to +6.22 s
+  after the `TERM`, the port refusing connections at +6.20 to +6.24 s (an
+  `nc -z` poll). CORRECTED (repair 5): that poll fills the accept backlog,
+  so "never before the pid" was the poll's artefact. Read with `lsof`, the
+  `LISTEN` socket and `serve.lock` go 0.03 to 0.14 s before the pid is gone
+  (the second agent, check 4), and the `LISTEN` socket 0.03 to 0.06 s
+  before it here (n = 4, the load stops below), because a process's
+  descriptors close as it exits, before its parent reaps it. When work
+  outlived the wait, the port is freed by the process's exit itself, never
+  while a thread of it still runs; on a clean end, by `Held::release` after
+  the exit line, the last step before `main` returns. Before repair 4,
+  the port was free 0.15 to 0.5 s before the
+  pid ended, with blocking work still running. Whether a blocking thread
+  outlived the wait is read from how long `Runtime::shutdown_timeout` took (it
+  returns early only when every thread has ended); tokio's own busy-thread
+  count needs `tokio_unstable`. The exit line of such a stop is
+  `api.main exited cleanly` at `Warn` with `outlived: true`, never
+  "everything went as asked" (repair 5, STP-08); the code stays 0.
+  **A stop during the start-up load (R3-14 repair 5)** is inside the bound.
+  The load (`Site::serving`) runs on the blocking pool, raced against the
+  stop (`server::loaded_or_stopped`, stop polled first). A `TERM` during it
+  is answered at once (`api.serve stop asked during the start-up load`,
+  within 1 ms of the signal in the log), and the end waits
+  `SHUTDOWN_GRACE` for the load's thread, then leaves the store and the
+  port to the process's end. Before, the `TERM` was answered only after
+  the whole load: 2.6 to 18.2 s with the port bound, longer than the
+  redeploy's 10 s wait. MEASURED on this package's shadow (release build,
+  17 October 2026, load average 44 to 46 on 14 cores, `kill -0` and `lsof`
+  polled every ~20 ms; `tgt/p-R3-14/r5/loadterm.log`): TERMs at +0.53,
+  +0.91 and +1.51 s after the spawn (n = 3, during the load): pid gone
+  +3.09 to +3.12 s after the `TERM`, `LISTEN` socket gone +3.06 to +3.07 s.
+  A TERM at +3.01 s, as the load ended: pid gone +0.55 s. Only a serve
+  registers the signals (`server::catches_stops`, STP-07; by the code and
+  its test, not timed): `api report` keeps the default disposition, so
+  Ctrl-C ends it at once. NOT COVERED: a `TERM`
+  before the runtime is built, the process's first instants. One of two
+  `TERM`s sent +0.5 s after the spawn on this loaded machine landed there
+  and ended the process in 0.09 s with no line.
 - **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
   queue to another thread for the length of each landing, so the HTTP surface
   keeps answering; the landing itself is as costly as before (D-1446).
@@ -15821,6 +16483,44 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+- **The backtest page's 2-second poll is no longer a fixed 2 s for ever
+  (AF-06, D-4978).** `web/src/lib/status-poll.js` keeps the page's own 2 s
+  while a sweep is in flight, makes the next check 2 s after any change of
+  answer, doubles the wait to 60 s while a settled, idle or `unknown` answer
+  is unchanged, sends nothing while the tab is hidden, and stops after 10
+  `unknown` answers in a row (a lease that flips between them still counts)
+  with the reason and a Refresh control. That stop is shown on the page
+  only. **NOT DONE, owner R3-14:** nothing on the server records that a tab
+  stopped asking, because a stop is the absence of a request and the api
+  has no route for a page's own events; R3-14's per-route minute line would
+  show it as the route's count falling to zero. The `/backtest/run.json` CLI-log
+  walk it triggers is now remembered while the log is unchanged (D-0954,
+  above). The `/logs.json` walk the page makes while a sweep runs
+  (`fetchLive`) is NOT remembered and is still O(file) per call. It runs
+  only while a sweep is `running`, every 2 s, as it did before AF-06: the
+  rung progress, the best rows so far and the finish are read on that tick,
+  and a browser sweep's status body does not change until the run ends, so
+  backing off there made the live view and the finish up to 60 s old (the
+  AF-06 r1 blocking finding, repaired). Its cost is bounded by the run: a
+  browser sweep ends with its task, and a CLI sweep silent for
+  `STALE_AFTER_MILLIS` (15 min) is answered `unknown`, which backs off and
+  stops. Measured on the AF-06 shadow on 15 Oct 2026 with one headless
+  Chrome tab on `/backtest` while a CLI sweep ran (a `command started`
+  marker appended to the shadow's cloned CLI log, its `command finished`
+  appended 70 s later): `/backtest/run.json` was asked 34 times, every 2.0
+  to 2.1 s, and `/live.json` 32 times; the first check after the finish came
+  0.48 s after it, and the page stopped asking at 72.5 s, because it does not
+  re-poll a finished run. The helper before this repair, given the same
+  constant answer, asks at 0, 2, 6, 14, 30, 62 and 122 s (the node probe in
+  the AF-06 r1 report), so that finish would have been seen about 52 s late.
+  The price is the old one: 66 journal files in those 70 s, about 3,400 an
+  hour per open tab while a CLI sweep runs (a browser sweep adds one
+  `/logs.json` per tick); taking them out of the journal is R3-14's
+  (D-1445, below).
+  The first timing of a CLI-log walk on the real log is under D-1445: the
+  `/backtest/run.json` handler, which is that walk plus a constant, had p50
+  16.51 ms and p99 34.51 ms before AF-06 (n = 200). Answered from memory,
+  it had p50 0.26 ms and p99 5.73 ms.
 
 ## GDFL import at one second (D-2802 to D-2806)
 
@@ -16592,6 +17292,27 @@ BUILT; what that costs until it is, is the disk item below.
   per file it lands, up to the 1,024 a month allows. On the operator's store
   on 12 Oct 2026 there were 24 revised months, all one-second GDFL months at
   revision 1 (`find bar-revisions-v1 -name '*.bin'`).
+- **L-IA-26, disk, restated 14 Oct 2026 (AF-07): the "24 revised months,
+  all at revision 1" above is stale by two orders of magnitude.** Measured
+  read-only on the operator's store after the 14 Oct imports by the two
+  checks of assurance finding ingest-8 (scripts and outputs in
+  `state/assurance-20261014/scratch/verify-ingest-8/`, outside the
+  repository): `audit/gdfl.repairs` holds 17,007 `repairing` and 17,007
+  `repair` lines (none left open) over **2,843 GDFL months**, up to
+  **generation 21** for one month (NSE-CASH-ACC 2024-05 among them), 791
+  months with 10 or more. `du -sk bar-revisions-v1` is 121,246,976 KiB =
+  **115.63 GiB** in 449,029 files: **GDFL 106.05 GiB**, **Zerodha 9.58 GiB**
+  (47,140 months, all generation 1, reason `refold_derived_rungs`). Of the
+  GDFL bytes **66.22 GiB are superseded generations that no reader serves**
+  and 39.83 GiB are served. The repairs wrote 1,005,847,649 rows to add
+  68,414,450, about 14.7 rows written per row added, of which 937,433,199
+  (about 13.7 per row added) were rows the month already held, copied
+  into the new generation: one day landed early in a month (a special
+  session imported by its own run) turns every later day of that month into
+  a whole-month generation, because a revision is never appended to
+  (`pull::gdfl_import`'s header). The once-per-month gather (D-4899) is
+  still **NOT BUILT**, and nothing prunes a superseded generation (that
+  would be a deletion, and is the operator's).
 - **L-IA-26, the read path is unchanged and O(1).** Opening a month served
   from a revision checks the revision's and the source's header counts
   against the same ceiling: two comparisons, no I/O beyond the open it
@@ -16773,6 +17494,206 @@ BUILT; what that costs until it is, is the disk item below.
 - **A 1day month the vendor answered empty stays owed**, so its instrument
   is withheld from every 1min pull by name until an empty daily answer is
   recorded durably (a decision is needed; DB-B27).
+- **WP-62's choices are recorded as D-4964 (AF-07, 15 Oct 2026); three of
+  them are policy, not measurement, and stay so.** `SETTLE_MARGIN_MINUTES` =
+  5 is UNVERIFIED as a sufficient wait (no charter source says when a
+  vendor's last candle of a session is final), and this machine's clock is
+  compared with no vendor's, so a clock running ahead by more than the
+  margin is not caught. `STORE_REFUSED_BREAKER` = 8 is NOT MEASURED against
+  a contended run (above). The empty-daily-answer question of DB-B27 is
+  still open: D-4964 point 5 records what the code does and names the
+  question; it decides nothing.
+- **The restart scan's 64-run edge has no behavioural test.**
+  `INTERRUPTED_RUNS` = 64 is held to D-4964 by
+  `core/tests/decision_citations.rs`'s figures test, which reads the
+  constant; no test opens a 65th run record before the scan and shows it is
+  the one not reported.
+
+### Decision citations: what the citation test reads, and what it cannot see (AF-07, D-4971)
+
+- **It reads `crates/` only.** `core/tests/decision_citations.rs` walks every
+  `.rs`, `.toml` and `.md` file under `crates/` (768 files when first
+  written, 772 after the merge with `feat/db-fix` of 15 Oct 2026, whose
+  `git ls-files -z crates | xargs -0 du -ck` gives 40,768 KiB) once
+  per run, O(bytes), and the ledger once through
+  `include_str!`. A number cited only in `docs/`, `web/`, `.github/` or a
+  commit message is not checked: `docs/02-store-format.md` and this file
+  cite numbers too.
+- **It checks that a number resolves, not what it means.** A comment citing
+  a number whose entry is about something else passes, as it always did;
+  gate 27b still checks only that a heading number is unique.
+- **A pending note is trusted.** A number named in a "Cited, never written"
+  note passes whatever the note says; the note is reviewed like any entry.
+- **Its heading reading is stricter than gate 27b's, by one boundary.** The
+  test reads an entry heading as gate 27b's pattern plus the citation's
+  trailing boundary, so `### D-00012` or `### D-0001x` heads nothing for it,
+  while gate 27b (`.github/gates_ledger.rs` `heading_number`, "its first
+  four digits only") counts each as D-0001. The ledger holds no such
+  heading (`grep -nE '^#{2,4} +D-[0-9]{4}[A-Za-z0-9_]' docs/05-decisions.md`
+  prints nothing), so both read the same numbers today. Gate 27b ignores
+  code fences; the test skips a fenced heading and closes a fence only on a
+  run of its own character at least as long with nothing after it
+  (CommonMark's rule). The ledger's 200 fence lines are all three backticks,
+  so the two fence rules read it alike. Tightening gate 27b to match is a
+  `.github/` change this package did not make.
+- **Wall time, measured.** The test prints its own elapsed time with
+  `--nocapture` (the ledger read, the walk, every file read and scanned).
+  The test binary run 40 times in a row, 15 Oct 2026, debug test profile
+  (`opt-level = 3`), on this Mac under other agents' builds, the crates
+  on WD_BLACK: n = 40, p50 178.5 ms, p99 = max 1,384.8 ms (the first, cold
+  run; with n under 100 the p99 is the slowest sample), min 141.9 ms. It
+  grows with the bytes under `crates/`, and is a test, on no request path.
+  Re-measured after AF-07's repair (the merged tree, 772 files, 889 numbers
+  cited): the test binary run 40 times in a row with `--exact
+  every_cited_decision_heads_an_entry_or_is_named_pending`, n = 40, min
+  111.2 ms, p50 120.0 ms, p99 = max 239.6 ms (the first, cold run).
+
+### Pull runtime: every run left open, the scan's guesses, the leg it cannot see (AG-01, D-4976)
+
+- **The restart scan's walk is bounded by what it reads, now as before.**
+  It reads at most `INTERRUPTED_SCAN` = 800 records and `INTERRUPTED_RUNS` =
+  64 run records through the index whatever the journal's length; the walk
+  over them is O(records read x runs open) (each close looks at the open
+  list once), at most 864 x 864 steps on a journal every record of which is a
+  run record, and its guesses hold at most (864 / 2)^2 candidate ordinals
+  (1.5 MB) on the same adversarial journal. Once per process, at site load.
+  Measured (`restart_tests::restart_cost_with_64_open_runs`, release, this
+  machine under the shared build load, n = 200 each): `restart_scan` over an
+  8,001-record journal with 64 runs open p50 423 us, p99 922 us, max 953 us
+  (re-runs 427/844/925 and 420/713/723; the feat/db-fix code on the same
+  journal, naming one run: 321/821/1,073, 343/787/804, 359/863/920); with 1
+  run open 250/532/534 us (feat/db-fix 283/588/749); `status_json` carrying
+  64 open runs p50 141 us, p99 286 us, max 365 us (re-runs 145/303/759 and
+  146/352/363; feat/db-fix, carrying one run, 5/9/10 us). Final code (16
+  October, `cargo test -p api --lib restart_cost -- --ignored`, test profile
+  optimized + debuginfo, n = 200 each, shared build load): 64 open p50
+  476 us, p99 1,469 us, max 1,673 us; 1 open 333/650/753 us; `status_json`
+  with 64 open 141/341/495 us (`state/fix/logs-AG-01-r3/cost.log`); re-run
+  on the final tree (16 October 16:50, same command, load average about 45):
+  64 open 444/669/726 us, 1 open 305/494/757 us, `status_json` with 64 open
+  141/162/213 us (`state/fix/logs-AG-01-r4/cost.log`); and again at 17:00
+  with the timing split into two tests, load average about 65: 64 open
+  529/1,702/4,019 us, 1 open 353/4,625/18,629 us, `status_json` with 64 open
+  206/5,735/8,705 us (`cost2.log`; the tail is the machine's load, the
+  medians move by a fifth). Built per GET of
+  `/pull/run.json`, so a page read costs at most this with 64 runs open,
+  whatever the journal's length. Before-numbers: a scratch tree of
+  feat/db-fix 079ad4af, which `main`'s squash merge does not keep, with the
+  same journal shapes
+  (`state/fix/logs-AG-01/before-tests2.log`, `cost-rerun.log`).
+- **`/pull/run.json` grows with the runs left open, bounded at 64.** The
+  run read last keeps its keys; `alsoOpen` names at most 63 more
+  (`OPEN_NAMED` = 64 in all, about 400 bytes each) and its sentence about as
+  much again, so the document is at most about 60 KB larger with 64 runs
+  open, and unchanged in size but for `"openCount":1,"runRecordsUnread":0,
+  "alsoOpen":[]` and the `restart.unjournalledFeeds` list with one or none.
+  More than 64 open runs among the records read are counted, not named;
+  `/audit` lists them. Measured (final code, 16 October) on two fresh
+  shadows of the real store (4,217,222 journal records; the real journal
+  leaves no run open, so both answer "clean"), 300 sequential GETs each,
+  interleaved with the feat/db-fix restart code (`tgt/p-AG-01-beforebin`;
+  `pullrun.rs` is unchanged on feat/db-fix since it was built) under the
+  shared build load, curl `time_total`: this build n = 300 p50 0.806 ms,
+  p99 5.774 ms, max 21.923 ms; feat/db-fix n = 300 p50 0.815 ms, p99
+  6.574 ms, max 21.958 ms; every answer 200
+  (`state/fix/logs-AG-01-r3/times-real.txt`). The 15 October figures were
+  n = 400 p50 0.888, p99 3.163, max 9.110 ms against 0.864/3.499/16.861.
+- **A run left open behind the 64 run records read is counted, not
+  reported** (`runRecordsUnread`): the index names how many run records lie
+  behind those read, and the document says how many; what they hold is not
+  read.
+- **The scan answers NOT KNOWN where its pairing is a guess** (D-4976): a
+  close that does not directly follow a record of its run and could end more
+  than one open run of its scope, window and source whose asks are not one
+  (or are one and the close is NOT STARTED); and a restated head of a run not
+  read behind a close of its scope, window and source that ended no run read.
+  It reads NOT KNOWN until a run it could have left open closes, or the
+  records lie behind the scan. The operator's journal (14 October: 4,217,222
+  records, 39 run records, no restatement) holds neither shape.
+- **Narrowing the WP-62 bullet "Both pull routes write an opening record
+  (repair 5): the spot route since D-3341":** the spot route over an
+  ARCHIVE-FOLDER feed (`Transport::LocalArchive`: TrueData and Global
+  Datafeeds today) writes NO opening record: `server::local_answer` lands the
+  leg and writes only its closing record (`landed_answer(.., None)`). A leg
+  cut short is therefore never reported by the restart scan, whatever its
+  answer; every answer now says so in its words and in
+  `restart.unjournalledFeeds`. NOT DONE (code-2's real fix, `server.rs`,
+  after AF-04, owner R4-02): an opening record, through a thread, for an
+  archive-folder leg. Reach today: the operator's journal holds 0 such runs
+  (GDFL lands through `cli gdfl-import` and its own imports journal).
+- **Narrowing the WP-62 bullet "Every close this build writes for a run that
+  opened goes through the run's thread":** false for the expired-F&O walk.
+  `server::fno_opened` opens it and every arm closes it with a plain
+  `journal.append` (`FnoPage::say` / `recorded_fact`), and its close carries
+  no ask. Two walks of one underlying and window on two feeds share scope,
+  window and source. Since D-4976 Decided 7 a close of either, while both are
+  open and their asks are not one, is NOT KNOWN naming both, whether or not
+  it directly follows a record of one of them (an F&O walk's position proves
+  nothing): never the wrong walk, but never the right one either. NOT DONE
+  (code-4's root, `server.rs`, after AF-04, owner R4-02): F&O walks opening
+  and closing through `open_run` / `close_run` carrying their ask, after
+  which their close is proved by position as a spot run's is.
+- **Two runs of ONE ask in flight at once are still not told apart when
+  their close is not behind its run** (as the WP-62 rows said before
+  D-4976, kept by D-4976 Decided 2). Every candidate names the same ask and
+  the close is not NOT STARTED: the walk ends the newest and supersedes the
+  older, so the answer is "clean". If the close was truly the OLDER run's,
+  the newer one was cut short and reads superseded, although only an older
+  run is ever superseded. The same pull (feed, identity policy, target,
+  instruments, rung and window) was made and finished by one of them, so
+  its days were fetched; what is not said is that the other run was cut
+  short. Reach: two api processes, or a server run and a `cli` pull, of one
+  ask at once, with a close written outside the run's thread (an F&O walk's
+  plain close, or a close written before D-4950). Pinned unchanged by
+  `api::pullrun::tests::damage_before_the_reported_run_that_a_later_window_pairing_may_need_is_said`.
+  Closes once every close goes through its run's thread (R4-02, above).
+- **A guessed NOT KNOWN carries its known half, bounded** (D-4976
+  Decided 8). `restart.reading` is the walk's reading (at most 64 runs, as
+  `interrupted` is), `sureOpen` and `doubtedOpen` at most 64 runs between
+  them (each a subset of the reading, disjoint; D-4976 Decided 9),
+  `guessedRuns` at most 64 ordinals and `leftOpen` at most 64 counts, so the
+  guessed document is at most about twice an interrupted one's. Each sure
+  run and each counted pairing is one ERROR line, so a guessed start writes
+  at most 128 ERROR lines and one WARN line. Finding the counts looks, for
+  each live pairing guess, at the records after it once and at the guesses
+  before it once: at most 864 x 864 record comparisons on a journal every
+  record of which is a run record, once per process at site load. Measured by the second
+  check on the code before the guessed answer carried its known half (its
+  probe P5, n = 200): 432 opens of one key with distinct asks then 432
+  closes, every close but the first a pairing guess, `restart_scan` p50
+  1.1 ms, p99 11.1 ms, max 11.6 ms. Re-measured on the final code, which
+  adds one pass over each live pairing's later records
+  (`restart_tests::restart_cost_of_the_walks_worst_case`, test profile optimized +
+  debuginfo, n = 200 each, 16 October, load average about 45,
+  `state/fix/logs-AG-01-r4/cost.log`): that same shape (864 run records of
+  one F&O key, answer clean) p50 1,081 us, p99 1,231 us, max 1,236 us; the
+  largest guessed answer (432 walks of one key open and one close of it, so
+  431 counted as surely open) p50 255 us, p99 382 us, max 907 us, and
+  `status_json` carrying it p50 114 us, p99 188 us, max 201 us, its words
+  4,063 bytes and its document 33,227 bytes. Again at 17:00, load average
+  about 65 (`cost2.log`): 1,419/11,784/25,711 us, 299/7,142/9,970 us and
+  139/1,244/1,789 us; the p99 under that load is the scheduler's, and both
+  runs stay bounded (the scan runs once per process at site load; the
+  document is built per GET). A count is WITHHELD, not guessed, wherever a later close of the
+  guessed runs' scope, window and source, a damaged record after the oldest
+  of them, an earlier guess of their key or an unreadable index could move
+  it; the runs are then named as guessed and not counted. A run of the
+  reading beyond the 64 named is neither sure nor guessed: it is counted
+  (`unnamed`).
+- **A journal holding only a torn record reads "clean"** and the words do
+  not say a torn tail was seen (`Journal::look` counts whole records; a
+  write cut mid-record leaves a tail no record decodes from). A process that
+  died writing an opening record did not go on to run the pull, so "clean"
+  is not false, but the tail is not mentioned. NOT DONE (owner: the next
+  package that owns `api::audit::Journal::look`).
+- **A duplicate closing record** (one run's close written twice) closes
+  nothing when no other run of its scope, window and source is open; when
+  exactly one other is, it is read as that run's close (the weak path, as
+  before D-4976). NOT PROVED that any writer can write a close twice.
+- **The restart answer and its open list are not shown on a page.**
+  `/pull/run.json` carries them and `/logs` carries the ERROR lines; the
+  `/ingest` page does not render `restart` or `interrupted` (NOT DONE; owner
+  the `/ingest` page's next package).
 
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
@@ -17268,6 +18189,164 @@ months' own p50, p99 or max.
 | L-R316-05 | A test server over a linked store still accepts a write request | `state/fix/serve.sh` does not set `BRUTEX_READ_ONLY=1`, and `api::server::WriteGate` has no linked-store arm | every `cli` writing verb refuses such a root up front (D-4951); a write the `api` starts reaches the month writer, which refuses the linked `bars` component (`Symlinked`, CE-62) before a byte, but by its own word and after the request began. The arm belongs to `server.rs` (R4-02); the variable to the main session's tooling | R3-16 |
 | L-R316-06 | `store::staging::create` over a dead writer's leftover grows with the leftover's size | the helper makes the same four host calls whatever the leftover holds and reads none of its bytes, but the host's `unlink` frees the leftover's blocks, and that is the host's work, proportional to what was left | measured 14 Oct 2026, release, WD_BLACK, loaded machine (C-SF-03, `tgt/p-R3-16/bench1.log`): over a 0-byte leftover p50 63.6 us, p99 452.1 us, max 312.1 ms (n=10,000) alone and 60.8 / 1,571.6 us / 70.2 ms beside 2,000 names; over a freshly written 4 MiB leftover p50 1.88 ms, p99 12.65 ms, max 14.76 ms alone and 1.35 / 4.16 / 9.89 ms beside 2,000 names (n=200), 22x to 30x the 0-byte p50. Bounded by the largest file a writer stages under that name (a verdict image is at most `MAX_IMAGE_LEN`); C-SF-03 prints this ratio and holds only the directory ratio to the ceiling, so it claims no flatness the host does not give. Paid once per leftover, never per lookup | R3-16 |
 
+## Settings, served spans and ceilings — R3-05, 14 October 2026
+
+**L-R305-1. A `/settings.json` GET is one `stat` when nothing was saved.**
+`store::settings::Reader::refresh` stats the NEXT generation's name; while it
+is absent the answer is the generation already held plus a fixed-size body:
+O(1), independent of how many generations exist. Not constant: the FIRST
+refresh after a start lists `<store>/settings/v1/` once, O(generations), a
+count that grows only when the operator saves; a refresh that finds new
+generations reads each once, at most `MAX_STEP` (4,096) of them per refresh
+(the rest wait, and the answer says `stopped`), each at most 64 KiB.
+`?history=N` reads N + 1 files, N at most 50.
+REPAIR 3 (15 October 2026): while a generation NEWER than the one in force
+did not read, every refresh reads each such generation again, newest first
+(at most `MAX_FAULTS`, 16, reads of at most 64 KiB), so a live reader and a
+fresh one agree; none when the settings are clean. Every read goes through
+`store::safe_open::open_read_len` (D-4951): a name that is a link, FIFO,
+socket, device or directory is a named fault after one `open` and one
+`fstat`, never a wait. The server's readers lock guards only the map of
+readers (a copy out, a copy back); no `stat` or read happens under it, and
+`/feeds.json` reads the settings on the blocking pool. MEASURED with a
+fault on the record (a FIFO at generation 1 of a shadow of the real store,
+release build, 15 October 2026, host load about 50, n = 200 sequential
+keep-alive GETs): `/feeds.json` p50 0.28 ms, p99 1.23 ms, max 1.41 ms;
+`/settings.json` p50 0.11 ms, p99 0.30 ms, max 0.49 ms. A day after today
+(IST) is evidence of nothing: `/feeds.json`'s journal or census span that
+names one sets neither end of `archive`, and `/gaps.json` counts a missing
+minute there as `not_yet_minutes`, out of the loss and of what was owed.
+MEASURED BY THE SECOND AGENT (verify round 4, 15 October 2026, release
+build of this package's round-3 commit on its own shadow of the real store holding 60 settings
+generations, n = 200 sequential GETs,
+`state/fix/round2/logs-verify-R3-05-r4/bench-seq-60gens.txt`):
+`/settings.json` p50 0.14 ms, p99 1.44 ms, max 2.41 ms;
+`/settings.json?history=50` p50 2.28 ms, p99 31.9 ms, max 36.84 ms (51
+files read again: O(N), N at most 50); `/feeds.json` p50 0.67 ms, p99
+6.48 ms, max 10.52 ms. REPAIR 4: the successor of a generation is
+`checked_add(1)`, so a generation named `u64::MAX` makes a refresh step
+once and say `exhausted` (before: 4,096 re-reads of that one file on every
+refresh and a false `stopped` reason).
+
+**L-R305-2. `/feeds.json`'s held and archive spans walk the census once per
+census generation.** `feeds_route::held_spans` folds every key of the
+feed's census into per-segment first and last days the first time it sees a
+generation: O(keys). A request at the same generation is one map probe; an
+appended generation folds only the appended tail. The growth bench
+`feeds_route::tests::held_span_growth_bench` (1x, 10x, 100x keys) holds the
+hit and the one-key append within 4x of their 1x figure and counts one walk
+per scale; the walk itself is allowed to grow and is this row. MEASURED, 14
+October 2026 about 12:15 IST, `cargo test --release -p api --lib
+held_span_growth -- --ignored --nocapture`, one thread, an `Instant` pair
+around each call, host load about 55 (a shared host's numbers are not a gate;
+the ratio is): the walk 0.15 ms at 1,000 keys, 0.59 ms at 10,000, 16.2 ms at
+100,000, once per census generation; the hit's p99 125 ns at each scale (the
+quietest of three rounds of n = 200; max 20.5 us); the one-key append's p99
+1,208 ns, 2,208 ns and 3,291 ns (2.7x at 100x; max 11.5 us). An earlier run
+at host load 337 gave a single-round append p99 of 166 us at 100,000 keys
+(max 1.1 ms) with one walk, which is why the gate takes the quietest round.
+THE WALK ON THE OPERATOR'S STORE, measured by the second agent at 14 October
+2026 (R3-05 verify round 2, shadow of the real store): 664 ms for a census
+part of about 2.1 million keys and 82 ms for one of about 251,000; the third
+check (verify round 3, 15 October 2026) measured 2.04 s for the same first
+`/feeds.json` on its shadow, so the walk is AT LEAST 0.66 s to 2.04 s on this
+host and is not bounded by either figure. It is paid
+on the first `/feeds.json` after every server start, and again whenever the
+census reader re-reads a part whole (a part that cannot name its appended
+keys), because the memory lives in the process. LATENT, NOT FIXED: the memory
+is keyed by census part path, so it grows by one entry per census epoch file
+and walks a rotated part whole. REPAIR 4 (15 October 2026): the walk, and the
+census read before it, run on the blocking pool (`feeds_route::feeds_body`
+under `spawn_blocking`), never on a runtime worker, so a cold `/feeds.json`
+no longer stalls unrelated routes while it walks; the walk's own cost is
+unchanged and is still this row. NOT MEASURED after the move: the stall of
+another route during a cold walk (the second agent's follow-up names it).
+
+**L-R305-3. The import's reach walks the GDFL import journal once per journal
+change.** `feeds_route::journal_reach` (read by `/gaps.json`'s `imported_to`
+and `not-imported` class, and by `/feeds.json`'s `archive` evidence) is one
+map probe while the journal's length and line count are unchanged. After it
+grows, it walks the journal's rows newest first until each of the three
+kinds' furthest CLOSED day and the last day an import wrote bars on are
+found, and oldest first until the first written day is: a few rows when the
+kinds stand on one day; at most the journal's rows (its 2026-09-30 line is
+line 16,844 on 14 October 2026), once per journal change. The reach is the
+FURTHEST day whose import CLOSED for a kind, never its newest line (a re-run
+of an old day would move it backwards) and never a day begun and not closed
+(R3-05 repair 2). `/gaps.json` also lists the month's days begun and never
+closed: O(log n + rows in the month), at most 31 days of three kinds, and
+only the asked days AT OR BEFORE the reach — a month beginning past it scans
+nothing (repair 4: before, such a month asked the journal for a reversed
+span and the process aborted). REPAIR 4: a closed line for a day after today
+(IST) is not the reach; when the furthest closed day of the kind is after
+today, `imported_to` walks the journal newest first from today to the first
+closed row of the kind — O(rows between that row and today), once per
+request, and only while the journal names a future day, which an import
+never writes on its own. REPAIR 5: `/feeds.json`'s `archive` journal evidence does the same
+for the last WRITTEN day (`feeds_route::written_at_or_before`): while that
+day is after today it walks the journal's rows newest first to the first
+written row at or before today, O(rows after that row), once per request,
+and only while the journal names a future day. `ImportReach::not_imported` finds a day among the
+open days by a bisection of at most 31 entries (gate 11 rule 1, allowlisted
+with that bound).
+
+**L-R305-6. A settings save lists the settings directory once.**
+`store::settings::save` lists `<store>/settings/v1/` before it lands —
+O(generations), a count that grows only when the operator saves — so that a
+generation planted past a HOLE in the numbers refuses the save as stale
+against the true highest, rather than the save landing in the hole and being
+superseded on the next restart (repair 4). The listing is sorted (gate 11
+rule 4, allowlisted with this bound: the generations on disk, once per save
+and once per reader start). NOT CLOSED: a reader that only refreshes (one
+`stat` of the next name) does not see a generation past a hole until it
+lists again, at its next save or a restart; the hole itself is named in
+`/settings.json` (`holes`, `degraded`) whenever the directory was listed.
+Durability: a save syncs the generation's bytes, then the settings
+directory, its parent and the store root, so the first save's new
+directories survive a crash.
+
+**L-R305-5. `/feeds.json`'s `archive` is the vendor's archive AS MEASURED, and
+no delivered-folder inventory is read on that path.** It is the widest of
+three pieces of evidence: the descriptor's dated measurement (`pull::vendor`
+`Descriptor::archive`, 2018-09-03 to 2026-09-24 as measured on 7 October
+2026), the first and last day the import journal says an import wrote bars
+on, and the store's held span. Its last day is a LOWER BOUND (`to_binds:
+false`): a day the vendor delivered after the last evidence is invisible to
+this route until an import writes it, so `/ingest` does not cap its form
+there and `/db` words such a day `not imported`. Reading the delivered
+folder itself is `/folder.json`'s, O(members), on demand; an inventory the
+daily ingest chain keeps would let this route name the delivered end, and is
+not built (owner: the ingest chain, R4-07 and R4-11).
+
+**L-R305-4. `/calendar.json`'s derivatives rows are bounded by the session
+table.** One row per era of `pull::vendor::Venue::NseDerivatives`'s dated
+hours (two today: 375 minutes to 2026-08-02, 385 from 2026-08-03), at most
+nine, each found by one bisection of the record's span: bounded by the
+table, independent of the request.
+
+MEASURED at the route, 14 October 2026 about 11:00 IST: the release `api` of
+this package on port 8474 over a fresh shadow of the real store, `curl`
+`time_total` per GET on a fresh connection, on the shared host under other
+agents' builds (a shared host's numbers are not a gate). p50 / p99 / max ms:
+
+| Route | 1 client, n = 200 | 60 clients, n = 600 |
+|---|---|---|
+| `/feeds.json` | 1.01 / 5.75 / 10.23 | 29.35 / 80.73 / 108.42; again 17.98 / 43.74 / 59.99 |
+| `/settings.json` | 0.76 / 1.62 / 2.14 | 17.85 / 56.68 / 65.53; again 24.46 / 54.61 / 79.40 |
+| `/calendar.json?feed=gdfl` | 0.79 / 4.03 / 7.05 | 18.87 / 48.24 / 61.21 |
+| `/gaps.json` NIFTY 2026-09-29 25000 CE, 1s, 2026-09 | 7.99 / 16.41 / 24.26 | 319 answered, 281 refused 429 by admission |
+| `/gaps.json` NIFTY spot 1s 2026-09 | 60.02 / 177.03 / 305.85 | 126 answered, 474 refused 429 by admission |
+| a 404 (`/robots.txt`), the harness's floor | — | 12.12 / 38.80 / 51.12 |
+
+The first `/settings.json` after a start (cold): 1.32, 1.39 and 23.31 ms over
+three restarts. **NOT MET at 60 clients:** the package's target is p99 under
+10 ms; with 60 `curl` processes on this host the floor of a request that does
+no work is 38.8 ms at p99, so the 60-client figures measure the host and the
+harness, not the route, and the target is NOT PROVED either way there.
+**NOT MEASURED:** both routes while an import writes (a shadow over the real
+store's bars takes GET only). `/gaps.json` is a month fold (its own rows in
+this file); this package added one journal probe to it.
+
 ## The /ingest page (R4-01, D-4952)
 
 | ID | Limit | Why it is not closed | Bound | Package |
@@ -17282,7 +18361,8 @@ months' own p50, p99 or max.
 
 Measured 15 October 2026 on a release build over a shadow of the real store
 (`state/fix/shadow.sh AF-04`, port 8703; the "before" build is feat/db-fix at
-521066e6 on port 8704), 200 sequential GETs per row after one warm-up, curl
+521066e6, which `main`'s squash merge does not keep, on port 8704), 200
+sequential GETs per row after one warm-up, curl
 `time_total`, loaded shared machine, while another `cargo` build ran.
 Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 `before.txt`, `after.txt`.
@@ -17293,6 +18373,94 @@ Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 | L-AF4-02 | A contract asked for with `segment=` and `exchange=` omitted | placed by one census hash probe per exchange (`facets::EXCHANGES`, two today) of the asked feed's census — never the spot walk, which sorts the whole census | after: `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE&timeframe=1s&month=2024-03` p50 1.02 ms, p99 2.52 ms, max 3.21 ms (n=200). Before, the same URL took the spot walk and answered NIFTY INDEX's bars in p50 534.53 ms, p99 942.15 ms, max 1,132.80 ms. The spot walk itself is unchanged and still costs that for a SPOT name asked without `segment=` (pre-existing, D-0686's section); it grows with the census, and is not this package's | AF-04 |
 | L-AF4-03 | Months spelt otherwise on routes this change does not own | `/bars/window.json` (`bars_route.rs` `WindowAsk::parse`, AF-05's file), `sources.rs` `month_of_text` and `dayflags.rs` `bound` still split on `-` and parse each half: `bars_route.rs` checks no length, so `2024-3` and `02024-03` still read as March on `/bars/window.json`; the other two check the halves' lengths, so `2024-+3` still reads as March there | AF-05 switches `bars_route.rs` to `bars::month_of_text`; `sources.rs` and `dayflags.rs` have no owner named — one-line delegations to the same parser | AF-04 (named), AF-05 |
 
+## The GDFL import door: what one run of `cli gdfl-import` adds — D-4977, 14 October 2026
+
+`crates/cli/src/gdfl_import_guard.rs` (AF-01). The door runs once per run,
+never per day, per file or per bar: one source-root check, one lock take with
+its holder record, one tail read of `imports/gdfl.sources`, and at the end one
+root probe (two `stat` calls, at the end of EVERY run since the 15 October
+repair), one ledger append and one release.
+Measured by `cli::gdfl_import_command::guard::tests::door_costs_on_a_real_layout`
+(ignored; run by hand), release build, n = 200 sequential calls of each,
+`Instant` around each call, first on 14 October 2026 and again on 15 October
+2026 on the repaired build (the figures below are the 15 October run, log
+`tgt/p-AF-01/r2-bench.log`; the 14 October log is `tgt/p-AF-01/bench.log`),
+against the AF-01 shadow's `imports/` clone (`state/fix/shadow.sh AF-01`, the
+real store's census, v4) and the real source roots read-only: the tick store
+`/Volumes/WD_BLACK/brutex/tickstore-data`, the options folder
+`/Volumes/WD_BLACK/Options` (nine `<yyyy>.zip`) and the 128.9 GB
+capital-market outer zip. The machine was shared
+with other agents' builds; the figures are not from a quiet host.
+
+| Id | Operation | Why it is not a constant | Bound and measurement | Owner |
+|---|---|---|---|---|
+| L-AF01-1 | Source-root check, options folder | lists the folder until the first regular `<yyyy>.zip` | O(entries before the first year zip), one directory; a folder of junk with no year zip is listed whole before it is refused. Measured p50 17 µs, p99 220 µs, max 741 µs | AF-01 |
+| L-AF01-2 | Source-root check, capital-market outer zip | reads the archive's central directory once (`pull::gdfl_archive::zip_entries`), as `Origin::measure` already does a moment earlier | O(members), at most 64 MiB of central directory read (`pull::gdfl_archive`'s `CENTRAL_CAP`; a larger one is refused as malformed). Measured p50 285 µs, p99 497 µs, max 1,626 µs on the real archive. Tick store (one `FORMAT.md` metadata read): p50 3 µs, p99 7 µs, max 988 µs | AF-01 |
+| L-AF01-3 | Tail read of `imports/gdfl.sources` | scans the last window newest first until the key's baseline | at most `TAIL_WINDOW` = 1 MiB read and scanned (about five thousand lines), never the whole file, through `store::safe_open::open_read_len`; a key whose baseline is older than the window is named so on the receipt. Measured on a 2 MiB ledger whose window holds no line of the key (the worst case: the whole window scanned): p50 2,213 µs, p99 2,829 µs, max 3,354 µs | AF-01 |
+| L-AF01-4 | Run lock take, holder record written and made durable, released | one `open`, one `fstat` (regular file, one name), one `flock`, one `set_len` + `write` + `sync_data`, one census `locate` | constant per run; the `fsync` is the disk's. Measured p50 1,018 µs, p99 15,237 µs, max 25,154 µs (the p99 is the shared disk's `fsync` under other agents' builds). Ledger append + `sync_data`: p50 1,007 µs, p99 1,963 µs, max 2,952 µs. End probe of both roots (two `stat`s, now at the end of every run): p50 1 to 2 µs, p99 1 to 3 µs, max 4 to 6 µs | AF-01 |
+
+**Not bounded here, named for their owners.** The journal append lock, a run
+id chosen under a lock (FM-126) and the importer's O(journal) re-read after a
+foreign append are IA-2's. Which skipped days a changed archive changed needs
+a per-file comparison against `.prv`'s `source_crc32` (IA-6, IA-GV-24); the
+door's digest covers the whole archive, so a grown archive at the same path is
+named as changed too.
+
+| Id | Operation | Why it is not a constant | Bound and measurement | Owner |
+|---|---|---|---|---|
+| L-AF01-5 | A changed, grown or re-delivered archive (a wedge, not a cost) | the door compares one digest of the whole archive (for options, of every `<yyyy>.zip` in the folder) with the key's baseline, and no line of a run on a changed archive is ever the baseline (D-4977 item 5): there is no door yet that says which done days changed or accepts the new archive | until IA-6's per-file comparison against `.prv`'s `source_crc32` (IA-GV-24) or R3-22's restate door (R4-21) is built, every run of the key that skips a done day ends `FAILED` `source_changed_since_last_run`, loudly and on every run; runs over days not yet done still import and exit by their own work, writing `source_changed_unchecked`. The ledger keys on the source root as the host resolves it (`realpath`, D-4977 item 8), so a link or a doubled slash to the same archive is the same key (X7); a re-delivery at a NEW path (a new download folder) is a first run of a new key and compares with nothing, which is what IA-6's per-file comparison exists for. Only the original archive restored at the path clears it today. Not a time cost: nothing to measure | IA-6 · R3-22 · R4-21 |
+
+**Re-measured on 16 October 2026 on the door as first committed (its Rust before repair round 2; the round-2 figures are the paragraph after this one),** which
+adds one step the figures above do not hold: the ledger key is the source root
+as the host resolves it (one `canonicalize`, D-4977 item 8). Same method (the
+ignored `door_costs_on_a_real_layout`, release, n = 200 sequential calls of
+each, `Instant` around each call), against a fresh shadow
+(`state/fix/shadow.sh AF-01-r3`, census v4) and the same real source roots read
+only, on a host running about a dozen other agents' builds; log
+`tgt/p-AF-01/r3/bench2.log`. Key path resolved: tick store p50 5 µs, p99 9 µs,
+max 29 µs; options folder p50 4 µs, p99 7 µs, max 14 µs; capital-market zip
+p50 5 µs, p99 9 µs, max 30 µs (constant per run: one path walk). Root check:
+tick store p50 1 µs, p99 5 µs, max 29 µs; options folder p50 17 µs, p99 41 µs,
+max 975 µs; capital-market zip p50 335 µs, p99 2,413 µs, max 2,605 µs. End
+probe of both roots: p50 1 µs, p99 1 µs, max 4 to 7 µs. Lock take + record +
+release: p50 4,315 µs, p99 16,068 µs, max 18,098 µs. Ledger tail read of a
+2 MiB ledger whose 1 MiB window holds no line of the key: p50 2,641 µs, p99
+32,678 µs, max 59,449 µs (the window bound is unchanged; the p99 against the
+15 October 2,829 µs is the loaded host's page cache and disk, not more bytes
+read). Ledger append + `sync_data`: p50 4,454 µs, p99 11,838 µs, max
+14,672 µs. Every figure is once per run, never per day, file or bar.
+
+**Re-measured on 16 October 2026 after repair round 2** (verify-AF-01-r2),
+whose Rust adds two steps to the append and none to any other row: the
+ledger is opened to read as well as to append, and one `fstat` and a
+one-byte `pread` of its last byte decide at the append whether it ends torn
+(D-4977 item 11); the tail read also names a window of 1 MiB with no
+newline as one torn line, which reads no more bytes. Same method (the
+ignored `door_costs_on_a_real_layout`, release, n = 200 sequential calls of
+each, `Instant` around each call), against a fresh shadow
+(`state/fix/shadow.sh AF-01`, census v4, so the lock is
+`imports/gdfl.options.lock`) and the same real source roots read only, on a
+host running other agents' builds; log `tgt/p-AF-01/r6/bench.log`.
+Lock take, record and release: p50 1,194 µs, p99 6,028 µs, max 6,262 µs. Root check:
+tick store p50 1 µs, p99 11 µs, max 1,513 µs; options folder p50 17 µs, p99
+110 µs, max 2,005 µs; capital-market zip p50 333 µs, p99 603 µs, max
+1,681 µs. Key path resolved: p50 4 to 5 µs, p99 13 to 29 µs, max 18 to
+106 µs. End probe of both roots: p50 1 µs, p99 1 to 18 µs, max 2 to 24 µs.
+Ledger tail read of a 2 MiB ledger whose 1 MiB window holds no line of the
+key: p50 2,478 µs, p99 2,946 µs, max 3,676 µs. Ledger append (the one-byte
+read included) + `sync_data`: p50 1,089 µs, p99 3,379 µs, max 3,787 µs.
+That build differs from the committed one only by two edits clippy asked
+for (`Finding::new` skips the copy when nothing needs escaping; a byte-string
+comparison). The committed build was measured again the same way (log
+`tgt/p-AF-01/r7/bench.log`) while the cli test suite compiled beside it:
+lock take, record and release p50 3,055 µs, p99 12,236 µs, max 22,532 µs;
+capital-market zip root check p50 331 µs, p99 1,700 µs, max 45,446 µs; tail
+read p50 2,426 µs, p99 66,949 µs, max 103,804 µs; append p50 1,447 µs, p99
+9,872 µs, max 20,670 µs; every other row within the figures above. The
+bytes each step reads are unchanged and capped (the tail at the window);
+the wider spread is the loaded host's disk. Every figure is once per run,
+never per day, file or bar.
+
 ## Cash-session masters: shared readers, a named wait, a decode per request — D-4963, 14 October 2026
 
 `pull::cash_session_cache` and `api`'s bars window (AF-03, finding p99-2). A
@@ -17302,7 +18470,8 @@ alone only to re-check and publish. The figures below were taken on 14 October
 2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
 linked read-only under the kernel lock, session masters cloned) served by two
 release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
-`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`feat/db-fix` holds them at 521066e6, which `main`'s squash merge does not
+keep (so its code is that head's), AFTER is
 `fix/db-AF-03`. GET requests only, timed client-side
 around each whole response (`state/fix/round2/af03-evidence/measure.py`,
 results `before.jsonl` and `after.jsonl` beside it), on a machine shared with
@@ -17375,6 +18544,160 @@ These are store-level
 calls, not routes: the end-to-end figures of the design's §5.4 need the read
 door (SC-3) and are not measured here.
 
+## Responses are never cut mid-body: the head clock against write progress — D-4975, 16 October 2026
+
+`api::server::HeadDeadline` and `exchange_watch` (AH-02, g-ui-dom-vs-json-1).
+The head clock runs only while no request is in flight and restarts when a
+response is complete; a response in flight is bounded by a write-stall clock
+of the same duration (`HEAD_READ_TIMEOUT`, 10 s served). What that leaves:
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AH02-01 | A reader that keeps taking bytes is never cut, however slow | that is the decision: a slow reader is a reader, and cutting it was the finding | a reader must let one write make progress at least once a timeout; it holds its slot for as long as it reads, bounded only by `MAX_CONNECTIONS` (256), which still queues the next client (`slow_readers_at_the_cap_are_served_whole_and_the_next_waits`) | AH-02 |
+| L-AH02-02 | A stopped reader is cut one timeout after the kernel last took a byte, not one timeout after it stopped reading | the stall clock starts at the first write that returns `Pending`, which is when the client's receive buffer and the server's send buffer are both full; the kernel can still grow a full send buffer, and a write it then takes is progress | measured on the shadow (below): the reader stopped about 5 s into the census and the cut came 15.7 s after that (±1 s, a one-second client clock), with 41,821,788 of 183,715,726 bytes written; one `api.serve` "response cut" line, `delivered` false | AH-02 |
+| L-AH02-03 | A handler that pauses between body chunks is not bounded by the stall clock | nothing is waiting to be written, so no write returns `Pending` | no route in this build streams such a body; a future one needs its own bound | AH-02 |
+| L-AH02-04 | A pipelined head whose first bytes arrived while the previous body was still being written, and which never completes, is closed silently at the deadline rather than answered `408` | the wrapper does not scan bytes read while a request is in flight; hyper holds them | the close comes one deadline after the previous response completed, as for an idle socket | AH-02 |
+| L-AH02-05 | A cut `/db` read is taken out of `served` only while the access window that counted it is still open | `logs::note_access` counts at handler return, before a byte of the body goes; a window closed in between (a window is 60 s, a cut is at least a timeout after the answer) has already said its `served`, and the window's one sampled `read served` line is not taken back | the cut is counted in the `cut` of the window it happened in, said by that window's `reads counted` line; the "response cut" line, at `warn`, carries `access_counted`; `a_cut_db_read_is_taken_back_out_of_its_served_count`, `a_cut_read_leaves_served_for_cut_in_the_window_that_counted_it` | AH-02 |
+| L-AH02-06 | A graceful stop while a slow body is in flight | R3-14's drain bound; not merged when this landed | not exercised here | R3-14 |
+
+L-R401-05 (the GDFL census never reaching a browser on the shadow) named this
+cut as its cause; that cause is removed by D-4975, and the row is R4-01's to
+restate when its page is re-measured.
+
+**Measured 16 October 2026** on release builds over two fresh shadows of the
+real store (`state/fix/shadow.sh AH-02` on port 8904 serving this change's
+build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, which
+`main`'s squash merge does not keep, whose
+`HeadDeadline` is the one this change replaces), load average 22-51 from other
+agents' builds, `curl` with `--noproxy`, GET only. The full-speed rows
+alternate one before and one after request, so both builds saw the same load.
+Times are curl's `time_total`.
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` (56,031 bytes) | 200 each | 0.56 / 2.52 / 3.53 ms | 0.47 / 1.96 / 3.62 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 (1,086,751 bytes) | 200 each | 3.10 / 15.60 / 43.54 ms | 3.03 / 9.85 / 11.01 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` (183,715,726 bytes) | 200 each | 26.59 / 62.83 / 5,610 ms | 26.19 / 121.28 / 4,703 ms |
+
+Each census max is the first request, which builds the census body; the
+others are served from its cache. At full speed nothing reaches the head
+deadline, so the two builds are the same there, which is the point: the change
+costs a request two atomic adds, two uncontended locks and one boxed body, and
+nothing per byte.
+
+Slow readers, n = 20 each, ten at a time. Each read takes at least 20 s by
+construction (the body over the rate), which is why n is 20 and not 200:
+
+| Read | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: curl exit 18, 85,254,653-86,871,405 of 183,715,726 bytes, 10.2-10.4 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.9 s each |
+| GDFL NIFTY 1 s 2026-09 `/bars.json`, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,304,327-35,066,723 of 65,204,449 bytes, 10.6-11.2 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.7 s each |
+
+**Re-measured on the merged build**, 16 October 2026 from 22:17 IST: this
+change merged onto feat/db-fix at `bf84e1f3` (`AH-02` on 8904, telemetry
+beneath the shadow) against feat/db-fix at `bf84e1f3` itself (`AH-02-before`
+on 8905), a commit `main`'s squash merge does not keep, two fresh shadows,
+load average 31-87, the same method. The slow
+reads ran five at a time, four rounds, so the `/bars.json` admission cap
+refused none of them; ten at a time it answered some `429` (105 bytes,
+`Retry-After: 1`) on both builds, which is that cap and not this change:
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` | 200 each | 0.85 / 8.21 / 9.67 ms | 0.70 / 10.18 / 13.99 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 | 200 each | 3.71 / 10.67 / 20.28 ms | 3.78 / 13.24 / 44.83 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` | 200 each | 30.13 / 247.49 / 16,561 ms | 30.59 / 254.36 / 18,398 ms |
+
+| Slow read, n = 20 each | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: exit 18, 85,327,705-86,449,497 of 183,715,726 bytes, 10.17-10.30 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.89-21.92 s |
+| GDFL NIFTY 1 s 2026-09, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,213,435-35,043,179 of 65,204,449 bytes, 10.57-11.14 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.71-20.75 s |
+
+A reader at `--limit-rate 100` on the GDFL census (`&probe=ah02-stop`), the
+after build first and then the before build: the after build wrote one
+`api.serve` "response cut" line 15 s after the request (`bytes_written`
+1,569,132, `status` 200, `declared_length` 183,715,726, `access_counted`
+true), and the next `/store.json` read closed that access window as `served`
+2, `refused` 0, `cut` 1; the before build wrote no line at all. The client
+cannot see the cut within its 45 s: the kernel still holds more than a
+megabyte it has not read at 100 bytes a second. Over the whole run the after
+shadow's telemetry holds exactly that one "response cut" line and no
+"response closed by the client" line; the before shadow's holds none, though
+it cut 45 reads.
+
+NIFTY first, then the shared path: each selection read once on both builds at
+once, at its size over 18 s (at least 1 KiB/s). Before: GDFL NIFTY 1 s
+2026-09, GDFL NIFTY 2020-09-24 11500 CE 1 s, GDFL BANKNIFTY 1 s 2026-09, GDFL
+RELIANCE cash 1 s 2026-09 and the Zerodha census were all cut (exit 18 at
+10.7-12.9 s, 10,371,519-38,957,155 bytes); Zerodha NIFTY 1min and 1day
+2026-09 and the illiquid NIFTY 2020-09-24 9950 PE 1 s arrived whole, because
+they fit in the kernel's buffers. After: all eight arrived whole (exit 0,
+size = `Content-Length`). The run on the pre-merge build at 17:23 gave the
+same split. After this run the branch was merged once more onto feat/db-fix at
+`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll), which `main`'s
+squash merge does not keep; neither touches
+`HeadDeadline`, `exchange_watch` or `logs`, so these rows were not re-taken
+on that merge, and the `/bars.json` rows are AF-05's to re-measure.
+
+**Re-measured on the final merged build**, 17 October 2026 from 09:31 IST:
+this change merged onto feat/db-fix at `62396df0` (branch head `1ff03397`,
+`AH-02` on 8901) against the release build of feat/db-fix at `bf84e1f3`
+(`AH-02-before` on 8902; its `HeadDeadline`, `serve_limited` and `logs` are the
+same as `62396df0`'s), three commits `main`'s squash merge does not keep, two
+fresh shadows, load average 23-41, the same method
+and scripts (`tgt/ah02-final-logs/`). The branch's later merge of R3-32 touches
+only `cli`'s watchdog verbs and the ledgers.
+
+| Read | n | before p50 / p99 / max | after p50 / p99 / max |
+|---|---|---|---|
+| `GET /health` | 200 each | 0.48 / 1.25 / 1.35 ms | 0.41 / 0.85 / 1.54 ms |
+| `GET /bars.json` Zerodha NIFTY 1min 2026-09 | 200 each | 2.19 / 4.88 / 7.79 ms | 2.07 / 3.80 / 5.42 ms |
+| `GET /store.json?feed=gdfl&encoding=census-tuples-v1` | 200 each | 18.32 / 27.19 / 3,563.87 ms | 18.16 / 29.36 / 33.34 ms |
+
+The before census max is its first request building the body; the after
+build's body had been built by the stop probe below before this row ran.
+
+| Slow read, n = 20 each, five at a time | before | after |
+|---|---|---|
+| GDFL census, `--limit-rate 8M` | 20 of 20 cut: exit 18, 85,148,053-86,870,229 of 183,715,726 bytes, 10.15-10.36 s | 20 of 20 whole: exit 0, 183,715,726 bytes = `Content-Length`, 21.90-21.92 s |
+| GDFL NIFTY 1 s 2026-09, `--limit-rate 3M` | 20 of 20 cut: exit 18, 33,165,219-34,956,875 of 65,204,449 bytes, 10.57-11.13 s | 20 of 20 whole: exit 0, 65,204,449 bytes = `Content-Length`, 20.73-20.76 s |
+
+A stopped reader (`--limit-rate 100`, `&probe=ah02-final-stop`, curl's own
+45 s limit) on the after build: one `api.serve` "response cut" line
+(`bytes_written` 1,561,056, `status` 200, `declared_length` 183,715,726,
+`access_counted` true), and the route's next window closed as `served` 205,
+`refused` 0, `cut` 1. NIFTY first, then the shared path, each selection once on
+both builds at once at its size over 18 s: before, GDFL NIFTY 1 s 2026-09
+(38,322,811 of 65,204,449 bytes), NIFTY 2020-09-24 11500 CE 1 s (9,955,883 of
+14,673,427), BANKNIFTY 1 s 2026-09 (39,040,663 of 65,204,449), RELIANCE cash
+1 s 2026-09 (17,998,843 of 28,406,128) and the Zerodha census (11,502,489 of
+16,141,798) were cut, exit 18; Zerodha NIFTY 1day and 1min 2026-09 and the
+illiquid NIFTY 2020-09-24 9950 PE 1 s (4,321 bytes) arrived whole. After: all
+eight whole, exit 0, size = `Content-Length`. The per-write test on this head:
+a write that moves 1 KiB, n = 400, p50 1.166 µs, p99 30.958 µs, max 66.25 µs
+(4 waits, 4 timer resets); a write that waits, n = 200, p50 42 ns, p99 916 ns,
+max 2.417 µs.
+
+**Per write, counted and timed** by
+`head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
+(the test profile, which is opt-level 3 here; `--nocapture`; `Instant` around
+each `poll_write` of 1 KiB on a real loopback socket, so each time includes
+the `write` system call), measured 16 October 2026 at load average 30-60 from
+other agents' builds:
+
+| Write | n | p50 | p99 | max |
+|---|---|---|---|---|
+| moves 1 KiB (no clock read, no timer touched) | 400 | 1.375 µs | 304.75 µs | 941.458 µs |
+| waits (the stall clock already running: one compare, one timer poll) | 200 | 42 ns | 3 µs | 8.125 µs |
+
+The moving write's p99 and max are the socket's own `write` under that load,
+not this wrapper: the wrapper adds a compare, an add and a store to it. In
+the waiting row tokio answers `Pending` from its readiness flag with no system
+call, so that row is the wrapper's own cost. The same run saw 4 waits and 4 timer resets among the 400 moving
+writes, one per stall. The counts are the
+assertions: no moving write touches the timer or starts a stall, the first
+waiting write resets it once, and 200 more waiting polls move neither.
+
 ## The stored-month gap ledger and the repair plan's short sessions (R3-18)
 
 | ID | Limit | Why it is not closed | Bound | Package |
@@ -17383,3 +18706,778 @@ door (SC-3) and are not measured here.
 | L-R318-02 | `cli zerodha-gaps` reads the whole ledger once per run | the ledger is append-only and keyed by line, with no index of `(key, day)` | O(ledger lines) once per run (about 79,000 lines, 9 MB, on 9 Oct 2026), then per series O(lines appended since that read) under the ledger's lock, and per short session at most its owed minutes read from the month | R3-18 |
 | L-R318-03 | The ledger's lock is advisory | `flock(2)` holds off only writers that take it; every writer in this tree does (`request_minutes::append_named_picking`, which `append_ledger` and `append_named` call), but a running build from before this change does not | until every process that appends to `audit/<feed>.gaps` or `audit/<feed>.repairs` runs a build with this change, run `cli zerodha-gaps --apply` only while no pull or repair runs against that store | R3-18 |
 | L-R318-04 | A ledger append waits for the lock's holder | an append that reads what others wrote cannot let a second writer in between its read and its write | one holder's read of the lines appended since its last read, one write and one `sync_data`; a holder that hangs inside its sync holds every ledger writer of that feed | R3-18 |
+| L-R318-05 | `gap_backfill::Have::holds`, one ledger probe | none: it is one `HashSet` probe of the pairs read, O(1) expected (an adversarial worst case is not claimed); the key is copied once per probe to build the probe's tuple | measured by GF-1 (16 Oct 2026, `crates/pull/tests/zerodha_gaps.rs` `a_ledger_probe_is_flat_in_the_ledgers_lines`, the dev profile at opt-level 3, a loaded machine): n = 200 passes of 256 probes, half held, per probe at 790 lines p50 40 ns, p99 385 ns, max 430 ns; at 79,000 lines p50 39 ns, p99 1,007 ns, max 1,208 ns; median ratio 0.975 (held under 3.0x), p99 ratio 2.6 printed, not asserted on a shared machine | R3-18, GF-1 |
+| L-R318-06 | `repair_plan::owed`, what one day owes | none: one calendar answer, at most two dated-table walks of fixed length and the three-entry halt table, all compile-time | measured by GF-1 (16 Oct 2026, `crates/pull/tests/zerodha_gaps.rs` `what_a_day_owes_costs_the_same_on_every_date_of_the_window`, the dev profile at opt-level 3): n = 200 passes over 120 calendar days from 2018-01-01, 2022-01-01 and to 2026-09-30, per call, INDEX p50 26 / 18 / 20 ns, p99 30 / 21 / 22 ns, max 78 / 85 / 25 ns; CASH p50 27 / 19 / 21 ns, p99 30 / 21 / 23 ns, max 31 / 67 / 25 ns; 2022 and 2026 medians 0.69 to 0.78 of 2018's (held under 3.0x) | R3-18, GF-1 |
+
+## Window keys that name no series (AG-03, D-4966)
+
+Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af, which
+`main`'s squash merge does not keep (before), and `fix/db-AG-03` (after),
+each serving its own fresh shadow of the real
+store (bars linked read-only, `state/fix/shadow.sh`, `serve.sh`), GET only,
+n = 300 sequential requests per case on one keep-alive connection
+(`curl -K`, `%{time_total}`), two rounds in opposite order on the loaded
+shared machine. Figures are p50 / p99 / max in ms, round 1 then round 2;
+summaries in `tgt/p-AG-03/evidence/{before,after,before2,after2}/summary.tsv`.
+Every held selection probed (ten timed, 63 byte-compared: NIFTY zerodha 1min
+to 1day, NIFTY gdfl 1s spot and 46 NIFTY option months 2018-09 to 2026,
+BANKNIFTY, RELIANCE, a deep-in-the-money strike, a held share outside its
+life, a contract after its expiry) answered byte for byte the same before
+and after.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG03-01 | `unknown_series` is a `400`, not a distinct `404` | the window's status mapping is `bars_route.rs` (AF-05's file); the refusal leaves through its existing `refuse()` path | every such refusal opens with the code `unknown_series`, so a client tells it from the route's other `400`s by its prefix. A `404` is a follow-on after AF-05. **NOT DONE** | AG-03 → AF-05 |
+| L-AG03-02 | Knowing a key names a series costs one directory `stat` per key, O(keys) a request | a key names a series only if its rung directory lists a month file, and nothing smaller than that listing says so; the plan already pays it (`held_months`, memoised by the directory's stamp) and the refusal adds no probe | at most `MAX_SERIES` = 1,024 keys. The refusal adds one pass over the plans and a successor lookup for at most `MAX_NAMED_UNKNOWN` = 16 keys (the alias table: at most three probes and one hop per applied change), and one comparison a plan against the re-key's next superseded row, the rows being in the plans' order, and its sentence is under 1,024 bytes. **Held key, unchanged within noise**: zerodha NIFTY 1min before 0.443 / 1.092 / 1.959 and 0.484 / 1.829 / 2.679, after 0.487 / 1.032 / 3.695 and 0.520 / 1.705 / 2.652; a gdfl 1s NIFTY option month before 0.467 / 1.954 / 5.388 and 0.547 / 1.744 / 1.912, after 0.490 / 1.096 / 2.705 and 0.523 / 2.665 / 3.857. Over the ten held cases p50 was 0.130 to 0.583 before and 0.087 to 0.584 after; round 1 after had three p99 spikes (BANKNIFTY 7.45, RELIANCE 3.10, a refusal 5.29) that round 2 did not repeat (1.08, 1.38, 0.64), the host's scheduler and not the route. **Unknown key** (`NSE-INDEX-NOTASYMBOL`) before `200` 0.145 / 0.630 / 1.512 and 0.079 / 0.625 / 1.414, after `400` 0.294 / 1.284 / 3.322 and 0.098 / 2.963 / 4.153; **alias key** (`NSE-CASH-ZOMATO`) before 0.090 / 1.182 / 2.910 and 0.075 / 0.319 / 0.708, after 0.149 / 1.196 / 2.296 and 0.073 / 0.636 / 0.984; **no `feed=`** before 0.123 / 0.942 / 1.807 and 0.069 / 0.307 / 0.404, after 0.100 / 3.017 / 3.626 and 0.070 / 0.743 / 0.951. **1,024 unknown contracts in one window** (the O(keys) case at its bound): before `200`, 54,594 bytes, 11.480 / 24.921 / 43.468 and 11.199 / 21.426 / 45.319; after `400`, 641 bytes, 10.209 / 16.735 / 17.989 and 10.196 / 15.127 / 16.997 | AG-03 |
+| L-AG03-03 | A successor is named from a table, not probed, and a contract key gets only the lineage's | whether the successor holds months at this rung would be one more `stat` per named key; and the alias table answers where a symbol's OWN price series lives, not where its options are filed | the successor is the table's sourced name (D-3332) or the re-key's recorded one (D-3331), labelled `now` (a rename or a re-key) or `filed as` (an index asked by its F&O symbol or under the wrong segment); a BSE key, a feed outside `KEYED_FEEDS` and a symbol with no row get none, so nothing is guessed | AG-03 |
+| L-AG03-04 | A window with no `feed=` is now refused under Dhan | the route defaults the feed to Dhan (RT-DB-01, R4-02's rule), which holds nothing; before this it answered `total 0, months_outside_life 1` for NIFTY 2024-03 | it is refused `unknown_series: NSE-INDEX-NIFTY names no series dhan holds at 1min`, which makes app-8's window symptom loud; the default itself is R4-02's to change | R4-02 |
+| L-AG03-05 | `/bars.json` still refuses a key that names nothing only through the month it cannot open | `/bars.json` is a one-month read and this package changed the window only | its `400` names the path it looked for (`.../2024-03.bin does not exist`), the same refusal a held series' absent month gets, so it is loud but not labelled `unknown_series`. **NOT DONE** | follow-on |
+| L-AG03-06 | The `held_months` comment in `bars_series.rs` still reads "an absence, not a refusal" for every directory that does not exist | `bars_series.rs` is AF-04's file and this package reads `held_all` without editing it | D-4966 narrows the comment to series that hold at least one month; rewording it falls to the package that next edits `bars_series.rs`. **NOT DONE** | AF-04 follow-on |
+
+## The tick-store writer: one day zip to one verified day file — D-4967, 14 October 2026
+
+`pull::tickstore_write` and `cli tickstore-write` (R4-08, E2E-02). Measured on
+read-only copies of three real September 2026 day zips (quiet: indices
+2026-09-25; median: stocks 2026-09-28; heavy: options 2026-09-29), written
+into a scratch root, on a machine other agents were loading
+(`pull::tickstore_write::tests::measure_real_days_against_the_tools_files`,
+log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-TSW-1 | Writing a day reads, encodes, writes and reads back every byte | the day file must hold every entry and be compared with the zip before it is held | O(the day's CSV bytes), by design. Measured: indices 9.6 s (527 MB of CSV, 55 MB/s), stocks 17.5 s (429 MB, 24 MB/s), options 60.5 s (2.56 GB, 42 MB/s), on up to eight threads, write and verify together. Through `cli tickstore-write` (release, 15 October, a lighter load): 4.2 s, 6.7 s and 23.9 s for the same three days, the files byte-identical to the first run's. Bench C-TSW-01 (release, invented options days of 40, 400 and 4,000 members, 15 October): 55.8 ms, 93.2 ms and 588.5 ms a day, a fixed part of about 52 ms a day (the lock, the folders, the fsyncs, the threads); the MARGINAL cost a member from 10x to 100x is 1.32x the marginal cost from 1x to 10x (the first form divided by the whole 1x day, fixed part included, and could hardly fail), within the 3.0x ceiling | R4-08 |
+| L-TSW-2 | A rerun on a held day verifies it whole | "a held, verified day writes nothing" is only known by comparing it again | O(the day's bytes), the same pass as L-TSW-1 without the encode: the tool's options day verified in 13.1 s (195 MB/s), stocks 4.2 s, indices 3.3 s; this writer's three days held again on 15 October in 4.8 s, 1.0 s and 0.9 s (options, stocks, indices). A chain that records a verified day (E2E-03) need not re-verify it | R4-08 |
+| L-TSW-3 | Memory | members are encoded in memory before the day's file is created, so a bad member writes nothing | the day's compressed blocks, refused past 4 GiB (`day_too_large`, about 16 times the heaviest measured day's 256 MB), plus one member per thread, each refused past 2 GiB before it is read (`member_too_large`; the largest measured member is 14.5 MB) | R4-08 |
+| L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | **Re-measured under `ruzstd` 0.9.1** (D-5090 point 8; 17 October 2026, the same three read-only day zips and the same test, log `state/fix/deny-1-logs/tsw-measure-ruzstd-0.9.1-20261017.log`, each file verified entry for entry against its zip): 1.57 to 2.04 times the tool's bytes for the same day (indices 16,385,730 B against 8,042,422, stocks 59,143,634 against 37,566,114, options 253,387,791 against 151,027,298). Under 0.8.2 (14 October) the same days were 16,400,878, 60,066,755 and 255,904,074 B (1.60 to 2.04 times): 0.9.1's Raw fallback stores 1.0% fewer bytes over the three days, never more. About 329 MB a trading day against 197 MB, about 33 GB more a year (EXTRAPOLATION from three days; 332 MB and 34 GB under 0.8.2). Why, read from `ruzstd`'s source and unchanged in 0.9.1: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more (`MIN_MATCH_LEN`, `encoding/match_generator.rs`) over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08, DENY-1 |
+| L-TSW-5 | One entry rebuilt | a file is decoded whole | O(the file's bytes), the reader's (`gdfl_tickstore::rebuild`), unchanged: from this writer's options day p50 0.30 ms, p99 81 ms, max 275 ms (n = 20,054), from the tool's p50 0.30 ms, p99 93 ms; indices files (3.7 MB each) p50 125 ms, p99 260 ms (n = 141) | R4-08 |
+| L-TSW-6 | Point lookup on a written day | none: it is O(1) | the readers' listing, one probe: p50 41 ns, p99 125 ns, max 0.34 ms (scheduler), n = 200,540 on the options day and 36,820 on the stocks day; the tool's own figure was 208 ns p99. Bench C-TSW-02 on a written 4,000-member day: p50 41 ns, p99 42 ns, max 167 ns, n = 20,000; flat at 10x and 100x members (1.03x, 1.04x) | R4-08 |
+| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
+| L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
+| L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
+
+### Gate 11 — the packages merged on 14 and 15 October, after GF-1's last run (GF-1, 16 October 2026)
+
+~~~~text
+SC-2, AF-03, AF-04 and WP-12f merged into feat/db-fix after GF-1's run
+of 14 October and ran no gate 11, so the gate met 7 new occurrences in
+four files. GF-1 read each before counting it; `file old -> new`, the
+occurrences, and the bound that holds them.
+
+RULE 1 (`ALLOW_SEARCH`) -- store/src/sealed.rs 0 -> 2: the sealed
+  month's time lookup bisects ONE FRAME's stamps (`partition_point`, at
+  most `block_rows` = 256, a format constant) and, past the time table,
+  a window of at most `BISECT_IN_ONE_READ` + 1 = 65 directory entries
+  read in one read (D-4965 item 6). Both lists are bounded by constants
+  of the format, never by the month.
+RULE 3 (`ALLOW_UNSIZED`) -- api/src/bars_change.rs 0 -> 1: `Rules`'
+  `refused` map, this request's refused master loads by IST day. Empty
+  until a load is refused, which is the failure path; at most one insert
+  per IST day the request spans (CSL-05). No growth on the success path.
+RULE 6 (`ALLOW_SCAN`) -- store/src/sealed.rs 0 -> 2: `extremes.iter()
+  .position` over the six `EXTREME_NAMES` and `checks.iter().find` over
+  the audit's six named checks: both compiled arrays. api/src/server.rs
+  7 -> 8: the `/bars` contract locator's `find` of the asked feed's
+  census among the per-vendor censuses `census_now` holds (AF-04),
+  bounded by `Vendor::ALL`.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/gdfl_import.rs 3 -> 4:
+  `end_auction_keys` asks whether every share of a filter is among the
+  shares of the run's `--only` list (WP-12f repair 7): once per day's
+  close, over the operator's own filter (a handful of names), never per
+  file, row or tick.
+
+None of these is claimed O(1) here and none is on a request's per-bar
+or per-row path except the sealed lookups, whose bounds are the format's.
+Not timed by GF-1; SC-2 times the sealed page and lookup (its own row
+above), AF-03 and WP-12f did not time these sites.
+~~~~
+
+### Gate 11 — R4-08 and R3-18, declared after they merged (GF-1, 16 October 2026)
+
+~~~~text
+R3-18 and R4-08 merged into feat/db-fix on 16 October after GF-1's run of
+that day and ran no gate 11, so the gate met 7 new occurrences in three
+files. GF-1 read each before counting it; `file old -> new`, the
+occurrences, and the bound that holds them.
+
+RULE 4 (`ALLOW_SORT`) -- cli/src/zerodha_gaps_command.rs 0 -> 1: `cli
+  zerodha-gaps ALL` sorts the symbol directory names it listed, once per
+  run, O(s log s) over the series of one segment, so two runs walk them
+  in one order. A verb, never a request path.
+  pull/src/gap_backfill.rs 0 -> 1: per held month, the days the plan
+  names (absent sessions and short ones) are put in date order before
+  the month's lines are found: at most one entry per calendar day of the
+  month, 31, never the ledger or the store.
+  pull/src/tickstore_write.rs 0 -> 2: the worker threads' results are
+  put back in member order, O(m log m) over the day's members, once per
+  day written (inside L-TSW-1's O(the day's bytes)); and the day
+  folder's leftover `<day>.bts.tmp*` names are sorted so the refusal
+  names them in one order: the leftovers of one day, normally none.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/gap_backfill.rs 0 -> 1: `Have::holds`
+  is a `HashSet` probe (O(1) expected, timed by
+  `a_ledger_probe_is_flat_in_the_ledgers_lines`, L-R318-05).
+  pull/src/tickstore_write.rs 0 -> 2: `run_id_ok`'s `(1..=64).contains`
+  is a literal Range; `columnar`'s `line.contains(&b'\r')` tests one CSV
+  line for a stray carriage return inside the encode that already reads
+  every byte of the member once (L-TSW-1), never a lookup.
+
+None of these is on a request's per-bar or per-row path. The two writer
+sites are inside the write L-TSW-1 bounds by the day's bytes; the sorts
+are bounded by a month's days, a day's members or one segment's series.
+~~~~
+
+### Gate 11 — the packages merged on 16 and 17 October, declared after they merged (GF-1, 17 October 2026)
+
+~~~~text
+AF-01, AF-02, AG-01, R3-32 and R3-35 merged into feat/db-fix after GF-1's
+run of 16 October. feat/db-fix carries none of the round's gate 11
+allowances (they land with GF-1), so none of them could run the gate
+green on its own tree, and the merged tree met 14 new occurrences in six
+files and 4 that R3-35's split moved out of `gdfl_import.rs`. GF-1 read
+each before counting it; `file old -> new`, the occurrences, and the
+bound that holds them.
+
+RULE 4 (`ALLOW_SORT`) -- api/src/imports.rs 1 -> 2: `where_looked` sorts
+  the names of the directories under `logs/` that no importer writes,
+  once per `/imports.json` run answer that names where it looked: the
+  log directories of one store (one per program that logs), then cut to
+  `MAX_NOT_READ_NAMED` = 32 names and the rest counted.
+RULE 6 (`ALLOW_SCAN`) -- api/src/imports.rs 2 -> 3: `started_of` finds the
+  `started` field among one journal `run` line's own fields, a line the
+  importer writes with a fixed field set.
+  cli/src/gdfl_import_guard.rs 0 -> 2: the tail read finds the first and
+  the last newline of one window of the sources ledger, at most
+  `TAIL_WINDOW` = 1 MiB (L-AF01-3), never the whole file.
+  cli/src/watchdog_command.rs 0 -> 1: `value_of` finds one flag among the
+  pairs a verb's own command line parsed, at most one pair per word the
+  operator typed.
+  pull/src/gdfl_import_day.rs 0 -> 1 and pull/src/gdfl_import.rs 1 -> 0:
+  R3-35's move-only split (`the_split_moves_lines_and_changes_none`)
+  carried the one allowed occurrence into the day file; same line, same
+  bound as before the split.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags.rs 0 -> 1: the closers of one
+  day of the page, a list of the handful of runs that closed it (AF-02
+  repair 2), probed once per row of that day.
+  api/src/pullrun.rs 7 -> 9: AG-01's restart walk probes its `closed`
+  list (one entry per closing record the walk read, at most
+  `INTERRUPTED_SCAN` + `INTERRUPTED_RUNS` = 864, once per process, the
+  bound "The restart scan's walk is bounded by what it reads" states) and
+  a `BTreeSet` of the guessed ordinals twice (a tree probe, O(log n)).
+  cli/src/watchdog_command.rs 0 -> 3: a verb's compile-time flag and
+  switch tables (a few words each) per argument word, and the two-entry
+  `OWN_ENV` table per `--env` pair.
+  pull/src/gdfl_import_journal.rs 0 -> 3 and pull/src/gdfl_import.rs 4 -> 1:
+  R3-35's split carried three allowed occurrences into the journal file;
+  same lines, same bounds as before the split.
+
+None of these is on a request's per-bar or per-row path except the
+dayflags closers, bounded by the runs that closed one day.
+~~~~
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-33 | Three O(1) claims merged on 16 and 17 October name no timing | `feeds_route::ImportReach::not_yet` (one comparison), `feeds_route::imported_to` (one probe while the journal does not move) and `store::month_summary`'s per-bar fold carry no test that times them at two sizes; gate 12 asked for a proof and none exists, so each says UNVERIFIED rather than citing a test that does not measure it | not_yet: one `i64` comparison; imported_to: L-R305-3's bound; the fold: a constant amount of work per bar by reading, NOT MEASURED | R3-05, R3-06; named by GF-1 |
+
+### Gate 11 — AG-04, declared after it merged (GF-1, 17 October 2026)
+
+~~~~text
+AG-04 (the closing-auction sidecar version 2) merged into feat/db-fix on
+17 October 2026 after GF-1's run of that day had made gate 11 green, and
+feat/db-fix carries none of GF-1's allowances, so it met one new
+occurrence. GF-1 read it before counting it.
+
+RULE 1 (`ALLOW_SEARCH`) -- api/src/sources.rs 0 -> 1: `auction_of`, for
+  `/sources/day.json`, asks of each auction record of the asked day
+  whether a 1s bar holds the same second, price and quantity, by one
+  `binary_search_by_key` over that day's 1s bars of the one instrument
+  asked, ascending by time (at most 86,400). O(log n) per record of that
+  day; the month's other records are only compared with the day's bounds.
+~~~~
+
+### Gate 11 — R3-09 and R4-06, declared after they merged (GF-1, 18 October 2026)
+
+~~~~text
+R3-09 (the census caches warmed at start, `/census/rollup.json`) and R4-06
+(the rehearse-then-run gate) merged into feat/db-fix on 17
+October 2026 after GF-1's run of that day had made gate 11 green; feat/db-fix
+carries none of GF-1's allowances, so the merged tree met 11 new
+occurrences in four files. GF-1 read each before counting it; `file old ->
+new`, the occurrences, and the bound that holds them.
+
+RULE 3 (`ALLOW_UNSIZED`) -- pull/src/rehearsal.rs 0 -> 1: `Gate::from_list`
+  keeps the keys of the one table it is reading in an unsized `HashSet`,
+  to refuse a key written twice. The list is `config/store-steps.toml`,
+  committed to the repository and read once per gate built; a table has
+  a few dozen keys, and the set is cleared at each table.
+RULE 4 (`ALLOW_SORT`) -- api/src/census_rollup.rs 0 -> 1: the roll-up
+  orders one answer's (month, rung) cells newest month first; the cells
+  are at most `CELLS_MOST` = 4,096 and refused by name past it
+  (`rollup_too_many`), never the census.
+RULE 5c (`ALLOW_DISARM`) -- api/src/census_cache.rs: R3-09 put its test
+  module's panic-lint allow on the `mod` line; GF-1 moved it into
+  `census_warm_tests.rs` as an inner attribute, as every other test file
+  carries it, so no allowance is added.
+RULE 6 (`ALLOW_SCAN`) -- pull/src/rehearsal.rs 0 -> 1: `Gate::admit` asks
+  whether a kind holds any of the eight `NEVER_AUTOMATIC` words; the kind
+  is at most `MAX_KIND_BYTES` = 64 bytes and refused unread past it, so the
+  scan is at most 8 x 64 byte comparisons per start.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/census_cache.rs 0 -> 3: the list of
+  feeds whose answers are derived (one entry per feed `start` was given),
+  probed once per background read of a feed's census.
+  api/src/census_rollup.rs 0 -> 1: a query parameter's name against the
+  route's four-name table, once per parameter of one request.
+  api/src/settings_route.rs 0 -> 1: building the credential-field list
+  (four charter fields plus each feed's key field) once per process,
+  inside its `OnceLock`.
+  pull/src/rehearsal.rs 0 -> 2: `is_commit`'s two Ranges, a length in
+  `7..=40` and a byte in `b'a'..=b'f'`.
+
+None of these is on a request's per-bar or per-row path; the roll-up's
+sort is bounded by the cells of one answer.
+~~~~
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-34 | Three O(1) claims merged on 17 October name no timing | `server::exchange_watch` (AH-02: one atomic add each way, two uncontended locks, one boxed body), `speed::AccessWindows::cut` (AH-02: one probe of the routes table) and `facets::emptied` (R3-09: one `mem::replace` by an empty index) carry no test that times them at two sizes; gate 12 asked for a proof and none exists, so each says UNVERIFIED rather than citing a test that does not measure it | each is a constant amount of work per call by reading, NOT MEASURED | AH-02, R3-09; named by GF-1 |
+
+## The macOS rows (GF-1, D-4990)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-31 | Gate 31 reads, it does not compile | its inventory reads tokens: `cfg` conditions on a test, its blocks, its file and the `mod` declarations to its file, through `#[path]` | a test written by a macro (`macro_rules!` or a proc macro) is not seen; a predicate the platform does not decide (`target_arch`, `feature`, `test`) is taken to hold on both hosts, so the two Linux-arch tests of `store/tests/open_flags.rs` both read `linux=runs` though each runs on one arch only. What it guarantees: every test it names as running on macOS passed in the macOS job's own log (`gates_platform ran`), and a row compiled out on a host is printed NOT RUN there | GF-1 |
+| L-GF1-32 | The `macos` job has not run on GitHub yet | agents never push; its steps were run on this Mac (M4 Pro, macOS, APFS) instead: the tool's tests, `verdict` on the workflow, and `ran` on the `cargo test` logs of the crates that hold the rows | the first push runs it; until then the evidence is the local run named in `state/fix/round2/gate-20261013.json` | GF-1 |
+## `/gaps.json` and the month summary (R3-06; D-4980; DB-A30)
+
+**The bound.** `/gaps.json` is O(months asked) per request, capped at 12
+one-second months and 240 minute months (`asked_range`), audited on the
+calendar pool (at most 8 at once; a ninth is answered 429 `calendar derivation
+not admitted (Saturated)`, never queued silently). A month whose `.sum` is kept
+reads one summary and no bar record; its cost is one open, one read of the
+section (771 to 1,629 bytes for a minute month, 52 to 66 KB for a dense
+one-second month, at most 340,912 bytes), one pass over its minutes and, for a
+spot index at one second, one pass over each day's owed seconds (at most 86,400
+a day). None of it moves with the bars a month holds. A month with no usable
+summary (none kept, under 1,024 bars, torn, stale, sparse seconds an index
+audit needs, input the fold may refuse) reads its bars whole, O(bars), and the
+answer says `"summary":"built"`, why, and how many records it read.
+
+**Measured** (16 October 2026, load average 42 to 59 on 14 cores; release
+build of `fix/db-R3-06`; nearest-rank over the 200 answers):
+
+| Selection | Read from | n | clients | p50 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|
+| GDFL NIFTY 1 s, 2018-09..2019-08 (5,167,003 bars) | 12 kept summaries, 0 bar records | 200 | 1 | 66.7 ms | 145.1 ms | 201.9 ms |
+| the same | the real store, no `.sum`: 5,167,003 bar records | 200 | 1 | 682.9 ms | 1,494.5 ms | 1,859.2 ms |
+| Zerodha NIFTY 1 min, 2024-10..2026-09 (24 months) | kept | 200 | 1 | 5.9 ms | 36.6 ms | 63.1 ms |
+| Zerodha NIFTY 1 min, 2006-10..2026-09 (240 months, 105 held) | kept | 200 | 1 | 29.9 ms | 86.7 ms | 103.2 ms |
+| the same | the real store: 796,027 bar records | 200 | 1 | 94.7 ms | 157.4 ms | 204.0 ms |
+| GDFL NIFTY 1 s, 12 months | kept | 600 asked, 238 admitted | 60 | 285.4 ms | 481.0 ms | 502.0 ms |
+| Zerodha NIFTY 1 min, 240 months | kept | 600 asked, 377 admitted | 60 | 227.4 ms | 392.2 ms | 486.0 ms |
+
+The rest of the 60-client requests were the pool's named 429. Cold (the first
+request after a server start, page cache not dropped): 60.0 ms and 67.6 ms
+kept against 718.5 ms and 326.2 ms read from the bars. Gate 8
+(`crates/api/benches/ratio/gaps.rs`, n=200): a kept one-second month of 1,024,
+10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x).
+
+**The span row compares like with like (R3-06 repairs).** It first held a
+2006-01..2007-12 span to a tenth of 2006-01..2025-12, and those are different
+months: the calendar of record vouches for days from 2018-01-01, so all 24
+base months were unmeasured days and 96 of the 240 measured ones, which cost
+more to audit. It breached at 11.1x and 17.6x and passed at 0.9x and 5.1x,
+by load. The first repair asked the 240 months whole and as the ten 24-month
+tiles that cover them and held the whole's p99 to 1.5x the tiles' own p99s
+added up; that compared one 40 ms answer with ten 4 ms ones, and a stall of
+the machine lands in a tenth as many of the short ones, so under load 68 to
+120 it breached at 1.504x with the medians at 0.990x. The row now runs 600
+rounds; each asks the whole once and every tile once, in an order that
+alternates by round, and the round's ten tile times are SUMMED into one
+sample, so both samples cover the same months and about the same wall time.
+The whole's p99 was held to 1.5x the p99 of those sums (now the median at
+1.5x and the p99 at 2x, below). Measured 17 October
+2026 (release bench build of `fix/db-R3-06` after its merge of R3-05, n=600 a row,
+load average 16 to 30 on 14 cores, other agents' builds queued beside it):
+tiles from 2006 to 2016 p50 3.35 to 3.39 ms and from 2018 to 2024 p50 4.42
+to 4.51 ms (the era difference, measured), p99 5.4 to 7.5 ms; the ten summed
+per round p50 39.48 ms, p99 52.21 ms, max 83.10 ms; the whole p50 39.21 ms,
+p99 51.27 ms, max 841.67 ms: p99 0.981x (ceiling 1.5x), p50 0.993x. The
+same gate run's kept one-second months of 1,024, 10,240 and 102,400 bars:
+p99 3.03, 3.15 and 3.21 ms (1.037x and 1.059x).
+Re-measured on a clone after the repair (Zerodha NIFTY 1 min 2006-10..2026-09,
+105 months held, and GDFL NIFTY 1 s 2018-09..2019-08, `.sum` built by
+`cli msum-build`; curl `time_total`, n=200 sequential, one client, load
+average 84 to 107): Zerodha NIFTY 1 min 2024-10..2026-09 kept p50 6.9 ms,
+p99 15.7 ms, max 17.2 ms; 2006-10..2026-09 p50 25.1 ms, p99 52.6 ms, max
+72.4 ms; GDFL NIFTY 1 s 2018-09..2019-08 p50 79.2 ms, p99 143.9 ms, max
+150.0 ms. Every kept month answered `unreadable_records: null`; a 1 s month
+with no `.sum` (2019-09) read 392,147 records and answered `0`; every one of
+the 117 summaries `msum-build` wrote is one `store.sum` INFO line.
+
+**The one-second rows and the span's tail (R3-06 repair 1, second pass).**
+The one-second kept rows timed all of one size's answers before the next
+size's, so a stall of the machine landed in one row alone: on that build at
+load 16 to 37 the 10,240-bar row printed p99 46.6 ms between 5.8 ms on either
+side (8.1x, BREACH) with its p50 at 3.6 ms against 3.3 ms. They now run 600
+rounds that each ask every size once, the first size rotating. The span's
+p99 ratio, like with like, still moved with the load (0.981x, 1.014x, 0.980x
+at load 16 to 30; 1.283x at load 50 to 80) while its medians held at 0.938x
+to 1.006x, because both p99s are the sixth-largest of 600 and which side a
+stall lands in at that rank is chance. So the median is asserted at 1.5x and
+the p99 at 2x, both evaluated; a term in the months squared is ten times at
+both. Measured 17 October 2026 (release bench builds of `fix/db-R3-06` after
+merging `feat/db-fix` after AF-07, n=600 a row, 14 cores, this package's
+own clippy and test runs and other agents' builds beside them):
+
+| Gate 8 run | load | 1 s kept p99, 1,024 / 10,240 / 102,400 bars | ratios | span whole p50 / p99 | tile sums p50 / p99 | p50 ratio | p99 ratio |
+|---|---|---|---|---|---|---|---|
+| 1 (1.5x p99 ceiling) | 50 to 80 | 2.63 / 2.61 / 2.68 ms | 0.992x, 1.022x | 31.27 / 93.11 ms | 33.30 / 72.57 ms | 0.938x | 1.283x |
+| 2 (1.5x p99 ceiling) | 21 to 30 | 2.66 / 2.63 / 2.73 ms | 0.989x, 1.028x | 20.57 / 30.52 ms | 20.60 / 31.13 ms | 0.998x | 0.980x |
+| 3 (as built) | 12 to 16 | 2.89 / 2.79 / 2.88 ms | 0.965x, 0.997x | 29.28 / 37.03 ms | 29.09 / 37.97 ms | 1.006x | 0.975x |
+| 4 (as built) | 10 to 31 | 2.38 / 2.37 / 2.48 ms | 0.994x, 1.040x | 23.46 / 34.15 ms | 23.92 / 35.90 ms | 0.980x | 0.951x |
+
+On a fresh private clone (`shadow/R3-06-r4sum`: GDFL NIFTY 1 s 2018-09..2019-09
+and every Zerodha NIFTY 1 min month cloned, `.sum` built by `cli msum-build`
+for 2018-09..2019-08 and the 105 held minute months; curl `time_total`,
+sequential, one client, load average 16 to 19): GDFL NIFTY 1 s 12 months kept
+p50 36.2 ms, p99 39.1 ms, max 42.8 ms (n=200) against p50 406.5 ms, p99
+447.3 ms, max 525.4 ms read from the bars (n=100, 5,167,003 records);
+Zerodha NIFTY 1 min 2006-10..2026-09 kept p50 17.8 ms, p99 19.2 ms, max
+40.7 ms against p50 62.5 ms, p99 81.2 ms, max 147.3 ms (n=200 each, 796,027
+records); 2024-10..2026-09 kept p50 3.4 ms, p99 4.4 ms, max 4.4 ms (n=200).
+The kept and the bar-read answers were identical apart from how they were
+read (and, for the span, the shadow root in the `absent_file` sentences) for
+the 1 s year, the 240-month span, the 2020-03 halt month (expected 7,758,
+both halts suspected) and 2019-09 with no `.sum` (392,147 records read on both).
+
+**Not measured**: `/gaps.json` with an import writing the months it reads (no
+import may run against a shadow whose bars are the real store's); the
+summary read at 10x and 100x the store's month COUNT (a summary is found by
+path arithmetic, one open, so the count is not on the path, but that is not a
+measurement); whether the writer's `.sum` step costs less than its `.srt` step
+(the `.srt` step has no seam to time alone: a 375-bar commit onto a 1x, 10x and
+100x month measured p50 124 to 135 ms, p99 221 to 257 ms with all its steps,
+and the `.sum` step's own work p50 32 to 37 ms, p99 68 to 95 ms, n=100 each, at
+load average above 40).
+
+**The writer's step is not O(1) on every commit (R3-06 repair).** It is
+`O(batch)` when it extends the kept summary, and `O(n_valid)` -- every
+committed row read again, at most 2,678,400 for a one-second month of 31 whole
+days -- on a month's first summary, on a summary refused as torn, foreign or
+rewritten, and on EVERY commit that takes a one-second month back over the
+half line of the density rule (D-4980 item 4). A month whose density moves
+back and forth across that line can pay it on every second commit; it is not
+amortised, and hysteresis that would amortise it was refused because the bytes
+would then depend on how the commits were batched. Each such write is a
+`store.sum` INFO line ("month summary written whole", reason `absent`,
+`dense_again`, ...), so how often it happens is read off the log rather than
+assumed. The rebuild's cost is the rebuild door's: `cli msum-build` wrote 12
+NIFTY 1 s months (5,167,003 bars) in 0.56 s, about 47 ms a month.
+
+**A cost the summary does not remove, owned elsewhere.** A cash stock's minute
+month on or after 2026-08-03 builds its dated cash-session schedule from the
+local NSE masters on every request (`server::audit_cash_schedule_window`):
+Zerodha RELIANCE 1 min 2026-08 answers in 1.87 s and 2026-09 in 0.38 s with
+its summary kept and no bar read, and a 2018-01..2026-09 span in 2.5 to 2.7 s
+either way, against 10 ms for 2018-01..2021-12. O(days of the month) master
+reads per request, not O(1); the fix (a schedule kept per month and master
+stamp) belongs to the owner of that function (R4-20's sequenced edit).
+
+**Disk** (measured on the clone): one `.sum` and one inode per month of 1,024
+bars or more while it is unsealed, none once sealed. GDFL cash and index 1 s
+months average 58.8 KB (60 KiB on disk); minute and option months 1.2 to
+1.6 KB (one 4 KiB block). Projected for the store: 29,482 GDFL cash and index
+1 s months x 60 KiB = 1.69 GiB, and at most 270,589 other months x 4 KiB =
+1.03 GiB; at most 300,071 inodes (D-4933's count of months at 1,024 bars or
+more), about 2.7 GiB in all until sealing moves the bytes into the `.sbar`.
+
+## Import records on filtered days — D-4970 (AF-02, ingest-6), 14 October 2026
+
+What AF-02 adds to `/imports.json`, `/audit.json` and `/dayflags.json`, and
+what it costs. None of it is a new walk: `/imports.json`'s day rows stay the
+walk of the asked range this file already names (`imports::walk`, O(rows in
+range)), and `/dayflags.json` reads one page of `PAGE_DAYS` days through it.
+
+| Id | Operation | Bound | Measured |
+|---|---|---|---|
+| L-AF2-1 | `imports::merged`: is a logged kind-day named by the journal under ANY filter | one range of that day's keys in the parsed journal, at most the closes of that day (the operator's busiest options day holds three keys: `*`, `BANKNIFTY,NIFTY`, the 277-name key), per logged day in the asked range; the logged days are the ring's, not the journal's | see the table below; `a_month_of_filtered_closes_with_refusals_holds_no_phantom` pins one row per close over 28 days under the 277-name key |
+| L-AF2-2 | `dayflags::Names`: does a row's filter NAME the symbol | the comma split, O(bytes of the filter), once per DISTINCT filter string per request (`the_filter_is_split_once_per_distinct_string_per_request`: 84 rows, 3 splits); every other row is one hash probe of its filter text, O(bytes) of hashing, the same order as the copy of that text the walk already makes for the row. **Not O(1) in the filter's length; bounded by it**: the 277-name key is about 2,200 bytes | the 277-name RELIANCE page costs what the 15-byte NIFTY page costs (table below) |
+| L-AF2-3 | `imports::where_looked`: where a run with no lifecycle event was looked for | one `read_dir` of `<store>/logs`, and (repair round 1) one of each directory that is only the PARENT of read ones (`logs/gdfl`; no read directory is deeper than two names, so the walk is at most two levels), only for a run asked by `run=` and found with no lifecycle event; O(entries of those directories): two on the operator's store on 15 October (`cli`, `cli-batch`; it holds no `logs/gdfl` yet, so no second level is read); at most 32 names returned (`MAX_NOT_READ_NAMED`), every one counted (`not_read_total`); repair round 2 adds one `stat` per LINK entry only, to see whether it reaches a directory (the operator's `logs` holds none) | `run=1791944932` below |
+| L-AF2-4 | `dayflags::journal_rows`: which covering close a day stands on (repair round 1: the newest line wins, whichever filter) | one comparison of `(line, names)` per covering row, the same one comparison per row the first form made of `(names, line)`; the rows are the page's, already walked | the repair round's table below: no change at p50 |
+| L-AF2-5 | `imports::merged` (repair round 2, replacing L-AF2-1's "any filter" probe): which of a logged kind-day's refusals NO close owns | per logged refusal in the asked range: its subject decoded once (`subject_of`, O(bytes of `about`)); then each close of its kind-day (one range of that day's keys, at most the distinct filters that closed it: three on the operator's busiest options day) checked by NAME (each distinct list filter split once per call, `Owners`, then one hash probe of the filter text, O(bytes of the filter) as in L-AF2-2) and by WINDOW (`placed`, and `next_start` over the same handful; each start one hash probe of `runs_by_id`). O(logged refusals in range × closes²); the refusals are the ring's, bounded by its size, not the journal's. **Not O(1) in the filter's length; bounded by it**, as L-AF2-2 | the repair-2 table below |
+| L-AF2-6 | `dayflags::import_json` (repair round 2): a close's window | `journal_rows` keeps each day's closing run ids (one `contains` over the day's handful per row with `run=`); a day's `next_s` is one `start_of` per closer, each a find over the answer's first page of runs (`RUNS_PAGE`, 20), then `refusals_of` places each `logged` line with one `placed` call, the same one comparison per line the first form made against the run start alone | the repair-2 table below |
+
+**Measured, 14 October 2026.** Each route asked 200 times of a release build
+of the code before this change (feat/db-fix 72c91a46, which `main`'s squash
+merge does not keep, with the tests' module hooks only) and 200 times of this
+change, INTERLEAVED (each iteration asks
+both, alternating which goes first) so the shared machine's load falls on
+both alike; each server reads its own fresh shadow of the operator's store
+(bars through the link, GET only); `curl`'s `time_total`; load average 46 to
+51 throughout (log `state/fix/af02/ab/timings.txt` in the work tree; the
+script is `state/fix/af02/ab.sh`). p50 / p99 / max, ms:
+
+| Route | Before | After |
+|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` (the whole journal, 11,500 rows) | 21.34 / 129.72 / 1,101.19 | 17.26 / 103.69 / 128.72 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.40 / 8.88 / 9.46 | 1.35 / 6.63 / 11.70 |
+| `/audit.json?feed=gdfl` | 1.68 / 7.33 / 3,617.92 | 1.62 / 12.62 / 28.75 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (filter `BANKNIFTY,NIFTY`) | 1.78 / 24.05 / 397.88 | 1.68 / 13.00 / 22.54 |
+| the same for NSE-FNO-RELIANCE (the 277-name filter) | 1.53 / 16.40 / 22.45 | 1.69 / 6.32 / 7.00 |
+| NSE-FNO-NIFTY, April 2026 | 3.54 / 27.13 / 51.90 | 3.57 / 18.14 / 56.61 |
+| NSE-FNO-RELIANCE, April 2026 | 3.31 / 16.00 / 21.66 | 3.18 / 11.19 / 15.35 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 26.78 / 186.13 / 196.16 | 25.07 / 150.02 / 171.42 |
+
+The p99 and max columns are the loaded host's scheduler more than the
+routes: the same eight routes asked earlier that evening, one server at a
+time and not interleaved (load not recorded; the 15-minute average was 26
+at 21:20), gave a build of this change that differs only in one sentence
+p50 1.12 to 12.15 ms and p99 2.05 to 35.20 ms, and the before build p50
+0.96 to 12.96 ms and p99 1.92 to 17.39 ms (`state/fix/af02/after` and
+`before-same-shadow`).
+What the table does show is that the change adds nothing measurable at p50,
+and that the page whose rows carry the 2,200-byte filter costs no more than
+the page whose rows carry a 15-byte one. `/imports.json?outcome=refused` is
+the walk of the whole journal (L-AF2-1's probe runs once per logged day
+inside it), unchanged here and already named above as O(rows in range).
+
+**Repair round 1, measured 15 October 2026** (D-4970; the ranking is the
+newest covering line, a `done` close says this instrument's own refusals,
+and every unread log directory is counted). Two interleaved runs (each iteration asks both
+servers, alternating which goes first), n = 200 per route per build, each
+server over its own fresh shadow of the operator's store (bars through the
+link, GET only); `curl`'s `time_total`. Run 1: the build before AF-02
+(feat/db-fix 72c91a46, which `main`'s squash merge does not keep, with the
+tests' module hooks only, `tgt/p-AF-02-before`) against the repair's release
+build (`cde73992`, a work-in-progress commit of the AF-02 branch that is in
+neither `main`'s history nor this branch; its `imports.rs`, `dayflags.rs`,
+`imports_filter_tests.rs` and `dayflags_filter_tests.rs` under
+`crates/api/src` are byte for byte those of `9cb9de51`, which `main`'s squash
+merge does not keep). Run 2: the first form's release build (`ff636f58`,
+which `main`'s squash merge does not keep) against the same repair build.
+Load average 16 to
+19 (logs `state/fix/af02/r1/ab-orig/timings.txt` and
+`state/fix/af02/r1/ab-r1/timings.txt` in the work tree; the script is
+`state/fix/af02/r1/ab.sh`). p50 / p99 / max, ms (`main`'s squash merge does
+not keep `ff636f58`):
+
+| Route | Before AF-02 | Repair (run 1) | First form `ff636f58` | Repair (run 2) |
+|---|---|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` | 12.79 / 32.01 / 37.02 | 12.09 / 23.60 / 28.80 | 8.03 / 9.45 / 39.78 | 8.03 / 9.30 / 9.61 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.03 / 5.30 / 6.16 | 1.02 / 4.07 / 4.85 | 1.13 / 3.18 / 3.29 | 1.11 / 2.25 / 4.69 |
+| `/audit.json?feed=gdfl` | 1.38 / 9.88 / 13.75 | 1.41 / 11.66 / 14.94 | 1.46 / 3.49 / 6.20 | 1.47 / 4.57 / 8.35 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (15-byte list) | 1.51 / 3.98 / 6.03 | 1.49 / 4.33 / 6.07 | 1.81 / 6.03 / 7.24 | 1.78 / 4.38 / 6.82 |
+| the same for NSE-FNO-RELIANCE (the 2,200-byte 277-name list) | 1.04 / 1.76 / 1.90 | 1.04 / 1.82 / 1.85 | 1.51 / 3.42 / 5.16 | 1.48 / 4.02 / 8.44 |
+| NSE-FNO-NIFTY, April 2026 | 1.72 / 2.99 / 3.64 | 1.78 / 3.30 / 4.86 | 3.04 / 5.96 / 8.09 | 2.88 / 10.39 / 13.25 |
+| NSE-FNO-RELIANCE, April 2026 | 1.64 / 2.72 / 2.79 | 1.68 / 2.73 / 2.75 | 1.70 / 3.24 / 4.64 | 1.69 / 4.99 / 13.15 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 13.12 / 20.13 / 26.43 | 12.94 / 20.32 / 23.49 | 14.14 / 22.65 / 29.55 | 14.10 / 23.19 / 29.06 |
+
+p50 is equal within 0.2 ms across the three builds on every route; the
+p99 and max columns move more between the two runs than between the builds
+in either, which is the shared host's scheduler (the same builds' p99 for
+the NIFTY month is 3.30 ms in run 1 and 10.39 ms in run 2). The per-request
+cost is bounded by the page's rows times the bytes of each row's filter: the
+split is paid once per distinct filter, but every row still hashes its
+filter's text (L-AF2-2), so the cost DOES grow with a filter's length, by one
+hash of it per row. *Corrected in repair round 2:* this sentence first said
+the cost "does not grow with a filter's length past the one memoised split",
+which the second agent showed is wrong in the bound; at this store's sizes
+the growth is not measurable: the RELIANCE pages, whose rows carry the
+2,200-byte 277-name filter, cost what the NIFTY pages carrying the 15-byte
+list cost. Interning each filter once per request (a per-row id from the
+journal parse) would make that probe O(1) per row; not done here.
+
+**Repair round 2, measured 16 October 2026** (D-4970: a close owns only the
+refusals of its own run's window, and an unowned refusal keeps its log-only
+row; L-AF2-5, L-AF2-6). Interleaved (each iteration asks both servers,
+alternating which goes first), n = 200 per route per build, `curl`'s
+`time_total`, GET only. Before: repair round 1's release build (`9cb9de51`,
+which `main`'s squash merge does not keep; the second agent's copy
+`tgt/v-AF-02-r2b`); after: this round's (`91ef0094`, frozen at
+`tgt/af02-r3-after`, a work-in-progress commit of the AF-02 branch that is in
+neither `main`'s history nor this branch; its `imports.rs`, `dayflags.rs`,
+`imports_filter_tests.rs` and `dayflags_filter_tests.rs` under
+`crates/api/src` are byte for byte those of `867771784f`, which `main`'s
+squash merge does not keep). The real-store pair reads two fresh shadows
+of the operator's store (`AF-02-b3` on :8706, `AF-02` on :8701); the attack
+pair reads two fresh shadows with the second agent's invented lines appended
+(`state/fix/af02-r3/attack.sh`, its `af02-v4` script with only the shadow
+names changed: the two blocking fixtures and a 79,997-byte, 10,000-name
+filter naming NIFTY on every weekday of 2026 Q1; `AF-02-b3x` on :8708,
+`AF-02-a3x` on :8707). Load average 13 to 37 at the start (logs
+`state/fix/af02-r3/ab-real/timings.txt` and `ab-attack/timings.txt` in the
+work tree; the scripts are `state/fix/af02-r3/ab.sh` and `ab-attack.sh`).
+p50 / p99 / max, ms (`main`'s squash merge does not keep `9cb9de51`):
+
+| Route | Repair 1 `9cb9de51` | Repair 2 |
+|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` | 8.03 / 9.28 / 11.67 | 8.49 / 9.82 / 11.92 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 0.79 / 2.41 / 3.71 | 0.85 / 2.79 / 2.91 |
+| `/audit.json?feed=gdfl` | 0.98 / 1.48 / 2.84 | 0.99 / 1.87 / 3.46 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` | 1.06 / 1.72 / 1.91 | 1.13 / 2.88 / 3.96 |
+| the same for NSE-FNO-RELIANCE (the 277-name list) | 0.92 / 2.33 / 12.03 | 0.98 / 1.98 / 3.72 |
+| NSE-FNO-NIFTY, April 2026 | 2.26 / 4.53 / 4.84 | 2.39 / 6.10 / 6.26 |
+| NSE-FNO-RELIANCE, April 2026 | 1.68 / 2.71 / 2.99 | 1.75 / 3.06 / 5.16 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 11.71 / 14.10 / 17.41 | 12.32 / 14.71 / 17.75 |
+| attack: NSE-FNO-NIFTY, 2026 Q1, every row under the 79,997-byte filter | 5.67 / 7.83 / 55.66 | 5.76 / 10.01 / 22.01 |
+| attack: `/imports.json?feed=gdfl&kind=options&from=2026-01-01&to=2026-03-31` | 5.54 / 6.11 / 6.16 | 5.60 / 6.18 / 6.24 |
+| attack: NSE-FNO-NIFTY, 2018-08-20 to 2018-08-24 (the blocking fixtures) | 0.88 / 1.26 / 1.33 | 0.93 / 1.32 / 5.40 |
+
+Repair 2's p50 is above repair 1's on every route, by 0.01 to 0.61 ms (1 to
+6 percent), including `run=`, whose path changed only by where_looked's
+words; it is a cost and it is said, not hidden. `/imports.json?outcome=refused`
+(+0.46 ms, the whole journal) now decodes each logged refusal's subject and
+checks it against the handful of closes of its kind-day (L-AF2-5); the
+`/dayflags.json` pages place each `logged` line against one more bound
+(L-AF2-6). The 79,997-byte filter page costs what the 15-byte one costs
+per day asked (5.76 ms for Q1's 90 days, 64 of them weekdays closed under it, against 2.39 ms for April's 30), within the
+noise of the loaded host; the bound is still one hash of the filter's text
+per row (L-AF2-2), not O(1) in its length. On the real store the answers
+of `/imports.json` and `/audit.json` are unchanged apart from shadow paths
+and timestamps (`counts.refused` 2, the two Muhurat rows), and
+`/dayflags.json` changes only where a later closing run's refusals were
+counted as an earlier close's: NSE-FNO-NIFTY 2026-04-16 moves its ten
+277-name-run refusals from `other_count` to `later_count` (it closed `done`
+under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
+`incomplete` close counts 94 refusals in its own window, equal to its
+`failures=94`, where it counted 151 (57 move to `later_count`); neither
+sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
+
+## The app under launchd and its watchdog — D-4996, 14 October 2026
+
+`cli watchdog` and `cli launch-agent` (R3-32; `docs/36-ops-runbook.md` §9).
+Measured on 14 October 2026 against a release build serving a private shadow
+of the store on 127.0.0.1:8501 (`state/fix/serve.sh`), n = 200 sequential
+runs each, on the shared machine with other builds running.
+
+| Id | Limit | Why | Bound, measured | Owner |
+|---|---|---|---|---|
+| L-WD-1 | One probe waits at most its limit | a stopped or hung app must not hold the probe past the next one | connect, request and status line inside `--timeout-ms` (5,000 by default); no name is resolved, so no resolver can stretch it. The probe itself: p50 0 ms, p99 6 ms, max 7 ms; `GET /health` by `curl`: p50 0.76 ms, p99 5.08 ms, max 6.53 ms; one whole `cli watchdog` process (start, probe, state, exit): p50 11.1 ms, p99 19.1 ms, max 22.3 ms | R3-32 |
+| L-WD-2 | A run's cost does not grow with its history | the log is appended to and never read, a notice page is created by name and the folder never listed (`a_run_never_lists_the_notices_or_reads_the_log`) | one state read of under 200 bytes, one read of at most 42 bytes at the start of `watchdog.lock` (and, only when the state cannot be saved, one 41-byte write there), at most four appended lines, at most one new page, one rename | R3-32 |
+| L-WD-3 | The notice is at most two probes late | an outage is two unanswered probes in a row, so a restart inside one interval is a `blip` | at most 2 × `StartInterval` (120 s at 60 s) after the last answer, tested with a fake clock; a probe missed while the Mac sleeps is not run (`man launchd.plist`, `StartInterval`) | R3-32 |
+| L-WD-4 | The watchdog's files grow | every change is kept; nothing is deleted | `watchdog.log`: one line of about 200 bytes per change; `launchd.log`: the report line of each run, about 60 bytes, so about 86 KB a day (computed from the measured line, not from a day's run); one page per notice | R3-32 |
+| L-WD-5 | A refusal at start is retried by launchd, not by the api | the api has no wait mode (FM-196) | at most one start a `ThrottleInterval` (10 s by default) while the store root exists; none while it is absent (`PathState`); UNVERIFIED on this Mac until the operator loads the agent | R3-32 |
+| L-WD-6 | The watchdog goes SILENT when its own directory cannot be written | a notice is saved before it is sent (at most once per outage, R332-12), so a state that cannot be saved — a full Mac disk, a read-only or damaged state directory, a non-file at `watchdog.state.tmp` — withholds every notice rather than repeating it | one `notice-withheld` line a minute in `watchdog.log` when the log can still be appended to, the run's refusal in `launchd.log` (the same directory) and exit 1 in `launchctl print`; no page and no `open`. Nothing outside the directory says so: the health page's last-restart tile (R3-33) is the second witness | R3-32, R3-33 |
+| L-WD-7 | A run killed inside `open` may have shown nothing | the notice is counted as sent once its run saved `pending` (R332-12), so a run killed before `open` showed the page leaves the operator unwarned for that outage | the next run's `notify-unknown` line names it with the minute it was sent; the page is in `notices/` under that minute's name | R3-32 |
+| L-WD-8 | Waiting for the lock | a spawn duplicates the lock's descriptor until its `exec` | at most `LOCK_WAIT` (1 s) of 5, 10, 20, 40, 80 then 100 ms pauses, then refused by name (R332-11) | R3-32 |
+| L-WD-9 | The drive check needs the drive | the store root's device can be read only while it is mounted | rendered with the drive away, an agent carries a `NOT CHECKED` comment and only the by-name check was made; the verb at run time refuses the same drive whenever the root can be looked at (R332-16). One `stat` per missing path component | R3-32 |
+
+## zstd decoding inside the 128 MiB window ceiling — D-5090, 17 October 2026
+
+`lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd`, the
+workspace's two zstd decode call sites, both on `ruzstd` 0.9.1 with the window
+ceiling named (`MAX_ZSTD_WINDOW`, 128 MiB). Neither is on a per-request path
+that was O(1) before: a frame is decoded whole, O(its decoded bytes), as it
+always was.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-ZST-1 | One decode can hold about twice its declared window, whatever length the caller promised | `ruzstd`'s decoder keeps the whole declared window before it hands a byte out, so the call sites' `take(want + 1)` bounds what is RETURNED, not what is decoded | about twice the 128 MiB ceiling per decode (the window it keeps and the buffer it grew to hold it), where 0.8.2 had no bound. Measured 17 Oct 2026 with the second agent's harness (`tgt/verify-DENY-1-r1-harness`, mode `bomb09`): a 4,105-byte crafted frame (1,024 RLE blocks, declared window 128 MiB) asked for 16 bytes is refused after 20 ms at peak RSS 273,203,200 / 273,334,272 / 273,317,888 bytes (n = 3, `/usr/bin/time -l`). Real frames declare at most 4 MiB (1,929,357 frames, D-5090 point 5). Closing it — refusing a frame whose stated content size is not the promise before decoding — is NOT built (D-5090 point 9) | DENY-1 |
+| L-ZST-2 | The frame's own content checksum is not checked | `ruzstd`'s `StreamingDecoder` (0.8.2 and 0.9.1 alike) reads the checksum field and compares nothing; `FrameDecoder` only exposes the two values | the tick store: the index CRC-32 is checked on every open (`gdfl_tickstore::read_index`) and the writer checks every entry's CRC-32 before a day is held (TSW-01); whether every READ path checks an entry's CRC-32 is NOT CHECKED here. `lake`: no checksum or page CRC is compared on a zstd page body, so a body that decodes to the promised length with other bytes is not caught at this layer; `lake` has no runtime caller (D-5090 point 5) | DENY-1 |
+
+## The /db address (R3-01, D-5301)
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R301-1 | A linked page past the end of the answer costs a second `/bars/window.json` read | the first read is the only way to learn the total, and the last page is read once it is known | at most one extra read per opened address (the second agent counted it on `page=999999999` on 16 Oct, `verify-R3-01-r1.json`); a page that exists costs one read | R3-01 |
+| L-R301-2 | Whether a typed name is held is answered from a set folded once per census load | the set is built from the census rows as they arrive | O(census rows) once per census load, already the cost of reading the census; each question after that is one `Set` probe (it was a `db.deco.some` scan per change until R3-01 repair 1) | R3-01 |
+| L-R301-3 | A press older than `GESTURE_MS` (30 s) is not the cause of the next address write | a write with no recent choice must be told apart from a seed or a clamp, and nothing else on the page says which caused it | such a write is a `replace`: the address stays exact and only that step's own Back entry is lost. Every pick on /db moves the selection in the press's own task, so this is a bound, not a measured case | R3-01 |
+
+## The importer's file split: the chain that is left (R3-35, D-4979)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
+| L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
+
+## Automation guards: what R4-06 bounds and what it leaves open (R4-06, D-5320..D-5322)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R406-01 | The secret-shape detector is O(value length), not O(1) | it must read every word of a value to know none is a token or a parameter path; the parameter-path test collects each word through `read_as` | **capped at `MAX_VALUE_BYTES` = 4,096 bytes**; a longer value is `over_cap` unread. Measured 17 Oct on this Mac at load average 36 to 50, n = 400 each, a standalone `rustc -C opt-level=3` probe (the workspace dev and test profile's level) of `crates/core/src/secret_shape.rs` calling `shape_of` with three fields: 4,096 bytes of path words `/a/b/c/d` p50 44.4 µs, p99 393 µs, max 591 µs; one 4,096-byte value of `-`-broken letter runs p50 20.5 µs, p99 106 µs, max 3.97 ms (one outlier under load); 1,365 full-width letters (4,095 bytes) p50 8.9 µs, p99 93.9 µs, max 270 µs; 4,097 bytes p50 0 ns, p99 42 ns; a 10-byte date p50 125 ns, p99 209 ns. Unoptimised (opt-level 0) the path words take 471 µs, 2.51 ms and 38.1 ms (p50, p99, max). Run once per settings save, never per bar | R4-06 |
+| L-R406-02 | Every edit of `config/store-steps.toml` rebuilds `pull` and every crate above it | `pull::rehearsal::LIST` is the list compiled in (`include_str!`), so the build that starts a kind obeys the list it was built with and an edit under a running app changes nothing it starts (D-5320 item 5) | a recorded rehearsal reaches a running starter only through a new build and a redeploy; the rebuild is `pull`, `api`, `cli` (not measured here) | R4-06 |
+| L-R406-03 | A rehearsal is judged current by commit TIME, not ancestry | the running app has no repository to ask, and a `git merge-base` per start would be a process launch per start (D-5320 item 4) | a rehearsal on a commit later in time that does not contain the writer's change reads as current. The stamps are written at landing from the branch that lands; a commit stamp must name 7 to 40 lower-case hex digits and lie in 1970..now, so a forged or future stamp is refused, but a real commit on another branch is not | R4-06 |
+| L-R406-04 | `no_scheduler_delete` is a text scan of the listed modules only | a deletion reached through a helper in an unlisted module, a macro that expands to one, or a function pointer to one is not text the scan reads | the listed modules are the plan's declared scheduler modules that exist (two at this head, `autopilot.rs` and `tickstore_write.rs`); `Command` is refused outright, so the commonest indirect deletion, a spawned `rm`, is caught; a scheduler that must spawn names its site in `ALLOWED` | R4-06 |
+| L-R406-05 | An attested operator item is matched by its exact words, item by item | the attested items are the starter's and the operator items the step's; neither is indexed | O(operator items × attested items) per start, both a property of the list and the starter, not of the data (the largest step holds three operator items). An item with no recorded yes is lower-cased once and read against `PERSON_ONLY` (seven words) before any attestation is compared, O(item length), also a property of the list. Measured 17 Oct (repair 1b) at load average 9 to 18, n = 1,000, three runs of a standalone `rustc --test -C opt-level=3` build of `rehearsal.rs` with a telemetry stub and a timing loop over `admit` on the real list's longest items: the Kite-token item attested and admitted p50 500 ns, p99 1,541 to 1,834 ns, max 4.7 to 37 µs; the S-33 approval item attested and refused `operator_pending` p50 333 ns, p99 375 to 458 ns, max 2.8 to 25 µs | R4-06 |
+| L-R406-06 | The gate's own cost | one hash lookup, a fixed number of comparisons, the step's operator items, three stamp reads | measured 17 Oct at load average 36 to 50, n = 1,000, three runs of a standalone `rustc --test -C opt-level=3` build of `rehearsal.rs` with a telemetry stub (`the_gate_is_one_lookup_per_start`): 1 kind (one operator item met by a recorded yes) p50 458 to 500 ns, p99 625 to 667 ns, max 3.5 to 28 µs; 10,001 kinds p50 291 to 292 ns, p99 333 to 375 ns, max 541 to 625 ns; a 1 MiB kind refused unread in 500, 709 and 750 ns over three runs (n = 1 each; before this change the same kind took 29 ms, the second agent's figure, O(kind length)) | R4-06 |
+
+## The O(1) attack merged back: what is now flat, what is bounded, and what is still named — D-5800 to D-5804, 17 October 2026
+
+Every number in this section was taken on the operator's Mac (M4 Pro, 14
+cores). The host was shared with other builds the whole time, with a load
+average between 17 and 43 on 14 cores. Every p99 here is therefore an upper
+figure for this host, not a quiet-machine figure. Bench rows ran under
+`[profile.bench]` (fat LTO, one codegen unit) by `cargo bench -p <crate>
+--locked --bench ratio`. All three crates printed "all ratios within the
+ceiling", with no BREACH. Single-call spreads are p50 / p99 / max.
+
+### Measured flat (asserted)
+
+| Row | 1x | 10x | 100x | min-of-trials ratio |
+|---|---|---|---|---|
+| C-NFO-01 `gdfl_nfo::read_file` per file, 1k / 10k / 100k rows (D-5800) | 0.172 / 0.567 / 1.447 ms | 1.706 / 3.303 / 4.942 ms | 17.594 / 20.980 / 25.033 ms | 162.1 ns per row; 1.002x, 1.021x |
+| C-FD-01 `fold_from_snapshots` to 1min, 1k / 10k / 100k snapshots | 2.04 / 2.13 / 2.17 µs | 19.67 / 20.50 / 21.96 µs | 207.2 / 864.9 / 940.8 µs | 2,014 ps per bar; 0.947x, 0.971x |
+| C-MO-01 open + read + `.tix` beside 1 / 10 / 100 months | 91.2 / 124.6 / 140.3 µs | 85.8 / 153.8 / 203.0 µs | 98.0 / 280.4 / 584.0 µs | 0.797x, 0.729x |
+| `/spot.json` at the last month, 1 / 10 / 100 held months | 62.1 / 121.9 / 1,278.6 µs | 65.5 / 288.5 / 872.8 µs | 61.5 / 102.0 / 375.0 µs | 1.050x, 1.013x |
+| warm `/store` page, 1k / 10k / 100k census entries | 179.0 / 547.0 / 688.4 µs | 177.3 / 1,163.5 / 20,420.3 µs | 178.5 / 2,771.5 / 7,099.7 µs | 1.072x, 1.077x |
+
+C-MO-02 (reader handle, strided rows, at 1,024 / 10,240 / 102,400 bars):
+`read_record` 5.29 / 6.08 / 7.79, 6.46 / 37.42 / 68.13 and 4.58 / 5.54 /
+7.42 µs; the `.tix` lookup 0.67 / 1.04 / 66.5, 0.63 / 0.96 / 52.0 and 0.50 /
+0.88 / 65.8 µs. The 10,240-bar `read_record` p99 is the high one here, as it
+was on the cloud host (`cloud/attack-o1-20261016`). It is not explained:
+UNVERIFIED.
+
+**The warm `/store` page's p50 and its asserted ratio are flat, but its p99
+is not**: 0.55, 1.16 and 2.77 ms at 1k, 10k and 100k entries. On this loaded
+host that may be scheduling noise, or a cost that grows with the census. It
+is UNVERIFIED which, and it is named here rather than called O(1) at p99.
+Owner: whoever next touches `store_html`; the check is the same row on a
+quiet host.
+
+### Measured on the shadow, before and after, on real data
+
+Release builds, served over private shadows of the real store
+(`state/fix/shadow.sh`): this branch on :9303, and `feat/db-fix` at the AF-07
+merge (this package's base) on :9304. Each round sent one GET to each server in turn,
+n = 200 rounds, curl `time_total`. Every body was byte-identical between the
+two servers (equal SHA-256): F3 and F4 change no answer.
+
+| Selection | after (this branch) | before (the base, `feat/db-fix` at the AF-07 merge) |
+|---|---|---|
+| `/bars.json` NIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.64 / 10.16 / 15.56 ms | 9.60 / 11.18 / 12.02 ms |
+| `/bars.json` NIFTY INDEX Zerodha 1min, 2024-01 whole month (1,138,501 B) | 2.18 / 2.84 / 15.35 ms | 2.32 / 3.02 / 3.29 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1010000-CE` 1s, 2018-09 (17,043 B) | 0.65 / 1.02 / 2.42 ms | 0.64 / 0.96 / 1.61 ms |
+| `/bars.json` NIFTY FNO `2018-09-27-1000000-PE` 1s, 2018-09 (1,189,571 B) | 3.42 / 4.61 / 5.33 ms | 3.61 / 4.71 / 4.89 ms |
+| `/bars.json` BANKNIFTY INDEX GDFL 1s, 2026-09-01 (6,210,001 B) | 8.56 / 11.18 / 13.40 ms | 9.42 / 11.63 / 12.46 ms |
+| `/bars.json` RELIANCE CASH GDFL 1s, 2026-09-01 (3,197,131 B) | 5.72 / 7.83 / 10.78 ms | 6.36 / 7.63 / 9.00 ms |
+| `/census/facets.json?feed=gdfl&segment=FNO` (underlyings) | 0.92 / 2.38 / 4.18 ms | 1.28 / 1.85 / 3.21 ms |
+| `…&underlying=NIFTY` (422 expiries) | 1.25 / 3.29 / 5.01 ms | 2.92 / 8.85 / 24.37 ms |
+| `…&underlying=BANKNIFTY` | 1.15 / 2.94 / 5.07 ms | 2.59 / 5.68 / 8.86 ms |
+| `…&underlying=RELIANCE` | 0.98 / 3.86 / 10.27 ms | 1.24 / 3.87 / 13.03 ms |
+| `/live.json` (the real store holds no live file) | 5.06 / 18.79 / 72.58 ms | 4.88 / 29.18 / 63.44 ms |
+
+On the shadow, the NIFTY underlyings row says `contracts` 70,445, and the
+NIFTY expiries answer's `contracts` sum to 70,445. The 2018-09-27,
+2020-09-24 and 2026-09-29 expiries answer `contracts` / `strikes` 151 / 86,
+200 / 115 and 251 / 144. Those equal the contract directories on disk and
+their distinct strikes. `/live.json`'s cost on an empty census is the
+per-request invocation journal (D-1445, D-4978), not the encoding. Its
+refusal past the ceiling is proved by the unit test only. The real store
+has no `results/live` directory, so no shadow can reach it without writing
+live files.
+
+### Bounded, not constant, and named
+
+- **D-5800, the options reader.** The newline count that sizes the row
+  vector is one more pass over each file's bytes (O(bytes) per file, O(1)
+  per row; C-NFO-01 is flat per row with it). The reservation is at most
+  `fetch::MAX_ROWS` × 32 B = 32 MB. A body of blank lines can ask that much
+  for rows it never fills, and the cap is the bound. On real days, read-only
+  from the tick store, in a debug build (not a production figure), the
+  NIFTY, BANKNIFTY and RELIANCE option files decoded in these times, against
+  the field vector's: 913 ms against 1,200 ms on 2018-09-03 (3,751,736 rows),
+  339 against 446 ms on 2023-11-12 (1,281,196 rows), and 2,278 against
+  2,968 ms on 2026-08-03 (8,867,328 rows). The rows were equal on every file
+  (AO1-06).
+- **D-5801, `/live.json`.** Encoding is cut at `MAX_RESPONSE_BYTES` plus one
+  run (at most 256 rows). The census `refresh` still reads the live
+  directory on every poll (O(live files), at most `LIVE_ENTRY_LIMIT`
+  4,096) and clones each run twice (`cli/src/live.rs`, the two `run.clone()`
+  calls). Not fixed here.
+- **D-5802, `/bars.json`.** The cost is O(bars in the window), by design. A
+  request with no `from`/`to` reads and encodes the whole month, which is
+  about 2.7 M rows for a one-second month. That is neither refused nor
+  paged: named, not fixed.
+- **D-5803, `/census/facets.json`.** The underlyings answer is
+  O(underlyings of the segment) and the expiries answer is O(expiries of
+  one underlying), 422 for NIFTY. Each row is now O(1). The rebuild on a
+  census move is unchanged.
+
+### Printed, never asserted: O(months) and O(entries) by the route's own doc (D-5804)
+
+| Row | 1 month | 10 months | 100 months | per extra month (min-of-trials) |
+|---|---|---|---|---|
+| `/bars/window.json` seek, first page | 60.0 / 170.5 / 314.5 µs | 90.6 / 337.6 / 590.2 µs | 410.0 / 5,117.3 / 7,502.6 µs | 3.46 µs |
+| `/bars/window.json` seek, last page | 59.5 / 3,316.0 / 8,535.0 µs | 88.3 / 331.0 / 1,938.2 µs | 395.6 / 2,108.2 / 4,549.8 µs | 3.77 µs |
+| `/bars/window.json` `sort=c`, first page | 120.3 / 283.1 / 687.8 µs | 330.4 / 1,746.5 / 3,267.4 µs | 2,934.6 / 16,413.8 / 24,560.0 µs | 31.86 µs |
+| `/bars/window.json` `at=` | 78.4 / 131.3 / 387.0 µs | 100.8 / 540.9 / 789.5 µs | 418.3 / 3,186.3 / 12,514.9 µs | 3.55 µs |
+| `/verify.json` scrub (one entry per month) | 48.0 / 140.4 / 166.1 µs | 506.5 / 5,304.2 / 14,573.5 µs | 7,399.6 / 39,275.3 / 54,500.8 µs | 93.9 µs per entry |
+| `/store` page (rows drawn = months) | 22.7 / 80.5 / 393.1 µs | 30.9 / 94.2 / 233.4 µs | 100.0 / 347.7 / 459.3 µs | 0.79 µs per row |
+
+The window rows are capped by `MAX_WINDOW_MONTHS` (240). At the cap, the
+`sort=c` first page is about 7.6 ms at p50 by the per-month figure. That is
+an EXTRAPOLATION, not a measurement. The scrub over GDFL's 246,147 held
+entries at 93.9 µs each would be about 23 s, also an EXTRAPOLATION, and
+`/verify.json` has no cap on entries. C-MO-03 (96 one-bar commits a month):
+p50 40.9 / 48.1 / 43.0 ms, p99 158.5 / 179.8 / 90.5 ms and max 287.8 /
+554.7 / 96.8 ms at 1,024 / 10,240 / 102,400 bars. The slowest commits were
+#64, #65, #31; #17, #18, #93; and #31, #62, #72. The `.srt` compaction
+cadence (#31, #62, #93) stands out from the device's flush time only at
+102,400 bars, where #31 and #62 cost 96.8 and 90.5 ms against a 43.0 ms
+p50. The cloud host saw it at every size. The compaction grows with the
+month: named, not fixed.
+
+### The attack's other HIGH rows: NOT fixed by this package
+
+These are the rows of `cloud/attack-o1-20261016`'s report marked HIGH and
+not fixed there. Each is named here with what grows; none was re-measured
+here unless a table above says so, and each is UNVERIFIED as a latency.
+
+| Row | Where (as read on the cloud's base) | What grows |
+|---|---|---|
+| R11 | `/bars.json` with no `from`/`to` | the whole month per request |
+| R13 | `/gaps.json` NSE CASH, `audit_cash_schedule` per month | every CAS day's master decoded per month per request |
+| R25 | `provenance.rs` `read_runs` | the first call walks the whole pull journal under one lock |
+| R27 | `/verify.json` | one open per held entry (measured above: 93.9 µs per entry) |
+| R28 | `/bars` page with no `exchange`/`segment` | `held_entries` per vendor, inline on the async worker |
+| C1 | `census_cache.rs` `manifest_stamps` → `current_epoch` | one `read_dir` of a segment's epoch files per census-backed request; epochs are never deleted |
+| C6 | `store_route.rs` `behind_in` | every GDFL journal row on any journal change |
+| C24 | `ingest_refusals.rs` | the run and fault index read again for every symbol |
+| E1 | `/backtest.json` | up to `limit` ledger runs read inline on a Tokio worker |
+| E4 | every audited route | one invocation-journal file per request, with no rotation |
+| H9 | `.srt` compaction inside `append` | O(n log n) in the month on one commit in about 31 (C-MO-03 above) |
+| H20 | `runner/src/trade.rs` trade walk | unreserved pushes in the per-candidate loop, under a doc that says "no allocation" |
+
+## Gate 10's front-end test names (BASE-GATE10, D-5830)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-G10W-1 | Only a front-end test name of the bare-name shape is resolved: snake case with three or more underscores, backticked in the cell before a status glyph | a sentence-named test (`'a seed, a clamp and a restore ...'`) cannot be told from a backticked prose phrase by its shape, so a rule reading every backticked phrase would refuse prose all over this file | of the 1,403 literal names the tree declares on 17 Oct (145 files), 26 have the shape and are checked; the other 1,377, and `pauses_while_hidden` (two underscores), are not. A `✓` row citing them is accepted on its `.test.js` mention and can go stale with the gate green, as before D-5830 | BASE-GATE10 |
+| L-G10W-2 | A front-end name resolves anywhere among the runner's files, not in the file the row names; the listing does not check that `test` is `node:test`'s binding | the bare-name rule binds a Rust name the same way (D-1606), and the rows cite files as `` `web/tests/x.test.js`: `name` ``, a form no reference rule reads | a name declared in two files satisfies a row naming either; a file that rebinds `test` to something else would still list its calls | BASE-GATE10 |
+| L-G10W-3 | The listing is linear in the bytes of the tracked front-end test files, and the lexer's regex-or-division choice after `}` is a heuristic | a CI step reads every file it lists once; after `}` a `/` is taken to open a regular expression (a block ends there far more often than an object literal is divided) | measured 17 Oct 2026, n = 200 sequential runs, built as CI builds it, a loaded machine: listing 1,627,386 bytes p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the whole check p50 192.4 ms, p99 229.3 ms, max 250.2 ms. A misread `/` reads to the end of its line and is refused there by line number (`unterminated regular expression`), so the failure is loud; a misread that closes on the same line is not detected | BASE-GATE10 |
+
+## The `.auc` sidecar's version 2 and `/sources/day.json`'s auction, band and restart labels (AG-04, D-4997)
+
+Measured 17 October 2026 in two rounds, each with release builds of
+`feat/db-fix` (before) and `fix/db-AG-04` (after). Round 1 (the figures in
+the rows below): before `feat/db-fix` 94320a4e, which `main`'s squash merge
+does not keep, after the change at 54f547be, which is in neither `main`'s
+history nor this row's branch, because AG-04 was squashed before it merged;
+`sources.rs`, `gdfl_cm_auction.rs`, `calendar.rs` and `cash_session_cache.rs`
+of that before build are those this change starts from. Round 2, after the
+branch took `feat/db-fix` 62396df0 (AF-02's `dayflags.rs`, which this route
+calls, among it): before 62396df0, which `main`'s squash merge does not keep,
+after the branch at fef92d53 (the change merged with 62396df0), which is in
+neither `main`'s history nor this row's branch, because AG-04 was squashed
+before it merged; its figures are the last sentence of L-AG04-01 and
+L-AG04-02. The branch's later merge of R3-32 changed only `cli`'s watchdog
+verbs, none of which this route reaches, and was not timed again. Each build served its own
+fresh shadow of the real store (bars linked read-only through
+`state/fix/shadow.sh` and `serve.sh`, under the kernel write lock), and only
+GET requests were sent. Timing used n = 200 requests per side per case,
+interleaved: one request to before, then one to after, each a fresh `curl`,
+reading `%{time_total}`. The shared machine's load average was 12 to 25.
+Figures are p50 / p99 / max in ms. Scripts and raw times are in the AG-04
+report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG04-01 | One `/sources/day.json` share day reads the month's `.auc` whole on a miss | the sidecar is one small file a month, and its records are in day order but carry no index | a handful of records a day, at most a month of them (the largest real sidecar is 656 bytes, 20 records: ZYDUSLIFE 2026-08). It is read once per (generations, sidecar stamp, day) under the shared lock, and a warm day costs one more `stat`. One binary search of the day's seconds per print. The band count and the restart measure are one pass over the seconds the day facts already read; the route read them before this change, so no new read was added. **Warm, interleaved** (one warm-up request per side first): 360ONE 2026-09-01 (a print also in a bar) before 1.181 / 3.548 / 17.085, after 1.181 / 2.330 / 2.917. RELIANCE 2020-03-23 (halt, carry) before 1.177 / 1.540 / 2.021, after 1.198 / 1.734 / 2.598. ABBOTINDIA 2024-05-18 (drill, carry) before 1.041 / 1.721 / 1.921, after 1.061 / 1.602 / 1.842. ABBOTINDIA 2024-03-02 (drill) before 1.099 / 2.113 / 3.448, after 1.098 / 2.396 / 3.806. RELIANCE 2026-09-22 (ordinary auction-era day) before 1.148 / 1.384 / 1.429, after 1.174 / 1.444 / 1.483. NIFTY spot 2020-03-23 before 1.126 / 2.623 / 3.934, after 1.122 / 2.258 / 7.022. NIFTY 26 Mar 2020 8500 CE on 2020-03-23 before 1.153 / 2.216 / 4.034, after 1.201 / 2.809 / 4.141. NIFTY 26 Mar 2020 10000 PE, month 2020-03 (an illiquid strike) before 2.796 / 4.888 / 5.240, after 2.869 / 4.497 / 5.613. NIFTY spot month 2026-09 before 2.916 / 3.506 / 3.833, after 2.946 / 3.302 / 5.540. BANKNIFTY spot 2020-03-23 before 1.061 / 1.634 / 2.103, after 1.067 / 1.639 / 1.771. 360ONE month page 2026-09 (30 days) before 3.320 / 4.086 / 4.687, after 3.612 / 4.125 / 4.294; the body grew from about 90 kB to about 120 kB. The NIFTY and BANKNIFTY bodies are byte-identical before and after once the new labels are removed. **First touch, 200 distinct share-days** (10 shares x 20 days of 2026-09, one request each, interleaved on fresh servers): all 200 before 2.528 / 11.509 / 269.321, after 1.989 / 74.816 / 304.320; the 180 after each day's master was loaded before 2.522 / 11.509 / 11.943, after 1.941 / 3.681 / 73.004 (L-AG04-02 is the difference). **Round 2, warm** (load average 17 to 24): 360ONE 2026-09-01 before 1.070 / 1.704 / 1.857, after 1.093 / 1.515 / 1.554; RELIANCE 2020-03-23 before 1.111 / 1.581 / 1.701, after 1.128 / 1.590 / 3.181; ABBOTINDIA 2024-05-18 before 1.080 / 4.638 / 7.167, after 1.067 / 4.047 / 7.815; RELIANCE 2026-09-22 before 1.135 / 1.687 / 4.066, after 1.150 / 1.809 / 2.424; RELIANCE 2024-05-17 (an ordinary day) before 1.097 / 2.001 / 2.996, after 1.095 / 1.855 / 2.025; NIFTY spot 2020-03-23 before 1.114 / 2.040 / 2.628, after 1.125 / 1.808 / 4.444; NIFTY 26 Mar 2020 8500 CE on 2020-03-23 before 1.131 / 2.121 / 2.753, after 1.153 / 2.124 / 13.284; NIFTY 26 Mar 2020 10000 PE, month 2020-03 before 2.837 / 3.368 / 3.464, after 2.842 / 3.402 / 4.043; BANKNIFTY spot 2020-03-23 before 1.052 / 1.742 / 1.753, after 1.054 / 1.640 / 2.059; 360ONE month 2026-09 before 3.471 / 4.043 / 4.148, after 3.739 / 4.465 / 5.044. The bodies are identical before and after once the new labels and the cache counters are removed. **Round 2, first touch** (the same 200 share-days, fresh servers): before 3.088 / 15.492 / 262.873, after 2.476 / 77.841 / 325.873; the 180 after the first share's 20 days before 3.208 / 15.492 / 15.725, after 2.289 / 6.102 / 77.722 | AG-04 |
+| L-AG04-02 | The first request that needs a day's closing-auction eligibility loads that day's NSE master | eligibility is the dated master's flag (charter §9), read through `pull::cash_session_cache::read_local_lifecycle`. One load decodes about 1.2 MB of gzip | it happens once per IST day per process, and only on a share-day with a stored second inside the band (a day with none is `not_read` and asks no master, `a_day_with_no_second_inside_the_band_loads_no_master`): a load that succeeds is kept, and a refusal is read again next time (AF-03's rule). It is bounded by the masters on disk: 42 on 16 October, one more each trading day. **Measured** (17 October, final build): a first-touch request that loads its day's master takes about 70 to 100 ms more than one that does not; over the 200 first-touch share-days of L-AG04-01 that is p99 74.816 ms after against 11.509 before (max 304.320 against 269.321, both the process's first request). Once each day's master is loaded the same route measures 1.941 / 3.681 p50 / p99. Round 2 (the merged branch): first touch p99 77.841 ms after against 15.492 before, and 2.289 / 6.102 p50 / p99 once the masters were loaded. `bars_change.rs` keeps its own memo of the same masters, so a process can load a day twice, once per route. One shared memo is a follow-on for the owner of `bars_change.rs` (AF-03). **NOT DONE** | AG-04 → AF-03 follow-on |
+| L-AG04-03 | Every sidecar on the real store is version 1, unchecked | version 1 files are append-only and never rewritten; only a new file is version 2 | 227 files, 1,213 records (16 October): every one is served with `checked: false` and the reason. They become version 2 only as new generations (WP-80's remake). **NOT DONE**, a store step | WP-80 |
+| L-AG04-04 | The definition-2 months still hold the auction print as a bar | restating them is WP-12f's CMP-07 path (D-4878 item 10) and WP-80's remake, which is NOT READY in this build | labelled, never subtracted. On the shadow of 16 October, 616 GDFL CASH share-months of 2026-08 and 2026-09 showed 8,790 eligible share-days (the masters' own count), 8,463 with stored seconds inside `[15:15:00, 15:35:00)` (15,996 seconds, 2,475,795,628 shares, 211 shares), and 420 sidecar prints also stored as a bar (235 in August, 185 in September). Acceptance after the remake: `also_in_bars` 0 and `auction_band_bars.count` 0 on every eligible share-day. **NOT DONE** | WP-12f → WP-80 |
+| L-AG04-05 | No S7 check refuses an eligible share's second inside the auction band | the import-side check is IA-6's | `/sources/day.json` names every such day (`auction_band_bars`). **NOT DONE** | IA-6 |
+| L-AG04-06 | A torn `.auc` tail from a killed process is refused but not repaired | repair, and the torn-tail rule, are IA-16's (FM-099) | every reader and the next append refuse it by name with the torn record's ordinal. A failed write the appender sees is cut back under its lock (AG04-06). **NOT DONE** | IA-16 |
+| L-AG04-07 | No per-share-day volume reconciliation against Zerodha and the bhavcopy | IA-6p (FM-078, FM-286) | `also_in_bars`, `auction_band_bars` and `restart_carry` are the labels it will read. **NOT DONE** | IA-6p |
+| L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
+| L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
+| L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |

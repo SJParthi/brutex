@@ -184,9 +184,14 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
             "`census::MAX_MANIFEST_BYTES`",
         ],
     );
-    let miss = item(CENSUS_CACHE, "pub(super) fn census_now_stamping(");
+    // R3-09 MOVED the all-vendor read into `census_now_kept`, which both the
+    // production path and the test seam `census_now_stamping` call; the read
+    // there hands back which rows were served from a kept read.
+    let miss = item(CENSUS_CACHE, "fn census_now_kept(");
     assert!(
-        miss.contains("let mut censuses = read(&site.store_root);"),
+        miss.contains("let (mut censuses, kept_under) = read(&site.store_root);")
+            && item(CENSUS_CACHE, "pub(super) fn census_now_stamping(")
+                .contains("census_now_kept(site, stamp,"),
         "{miss}"
     );
     assert!(
@@ -196,12 +201,17 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
     );
     assert!(
         item(CENSUS_CACHE, "pub(crate) fn census_now_stamped(")
-            .contains("vendor_slot(site, vendor, vendor_stamp(root, vendor), true)"),
+            .contains("vendor_slot_fresh(site, vendor, vendor_stamp(root, vendor), true)"),
         "each vendor is read through its own cell"
     );
+    // R3-09: the miss is rebuilt by `rebuild` (a cold vendor's first reader,
+    // or the background re-read), through `fresh_read`, which extends the
+    // vendor's previous read.
     assert!(
-        item(CENSUS_CACHE, "fn vendor_slot(")
-            .contains("census::read_vendor_after(root, vendor, previous)"),
+        item(CENSUS_CACHE, "fn vendor_slot_fresh(").contains("rebuild(&site.store_root, cell,")
+            && item(CENSUS_CACHE, "fn rebuild(").contains("let census = fresh_read(")
+            && item(CENSUS_CACHE, "fn fresh_read(")
+                .contains("census::read_vendor_after(root, vendor, previous)"),
         "and a miss extends the vendor's previous read"
     );
     assert!(
@@ -210,21 +220,28 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
     );
 }
 
-/// W1-api5-3, AS D-3327 LEFT IT. The bullet names the walk this route made on
-/// every request: the universe, every census entry, and a sort. D-3327 (WP-30)
-/// builds the body once per (feed census read, universe parse) on the
-/// store-read pool, from the facet index's one node per instrument, and keeps
-/// it. The bullet is WP-99's to rewrite; the words are held to it until then.
+/// W1-api5-3, REWRITTEN TO WHAT THE CODE DOES (AF-05, p99-11, D-4972). The
+/// bullet named a walk this route made on every request: the universe, every
+/// census entry (`bars_by_symbol`, O(E)), and a sort. D-3327 (WP-30) builds
+/// the body once per (feed census read, universe parse) on the store-read
+/// pool, from the facet index's one node per instrument, and keeps it; the
+/// pin held the old words until the bullet was rewritten. It now names the
+/// kept body, the facet index, that the walk is gone, and the flat warm
+/// latency AF-05 measured across an 8.4x difference in E.
 #[test]
-fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
+fn w1_api5_3_the_instrument_list_is_kept_per_census_read_and_counted_from_the_facet_index() {
     names(
         "W1-api5-3",
         &[
             "`instruments_json`",
-            "O(U)",
+            "`site.census_wire.kept`",
+            "`held_by_listing`",
+            "`facets::index`",
             "`bars_by_symbol`",
-            "O(E)",
+            "is gone",
             "O(T log T)",
+            "E = 2,098,428",
+            "n = 200",
         ],
     );
     let route = item(INSTRUMENTS_ROUTE, "pub(super) async fn instruments_json(");
@@ -247,16 +264,31 @@ fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
     );
 }
 
+/// W1-api5-4, REWRITTEN TO WHAT THE CODE DOES (AF-05, p99-11, D-4972). The
+/// bullet said every non-`ts` sort and every `extremes=1` "still reads every
+/// bar in its month range". Measured, a value sort and the extremes read no
+/// row an index run orders (`scan_rows` 0 over 44 million one-second rows);
+/// the time-of-day sort still reads every kept row and is refused by name
+/// past `MAX_SCAN_BARS`; a month without a `.srt` is scanned (L-WP81-8,
+/// L-SC-3). The bullet now says each of those, and the source below still
+/// has the shape that makes each true.
 #[test]
-fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
+fn w1_api5_4_a_value_sort_reads_from_the_index_and_a_time_of_day_sort_still_reads_its_range() {
     names(
         "W1-api5-4",
         &[
             "`bars::window`",
             "`page_of`",
             "O(limit log limit)",
-            "O(n) reads and O(n) memory",
-            "`MAX_WINDOW_MONTHS` = 240",
+            "`sort::page`",
+            "`scan_rows` 0",
+            "44,032,544",
+            "`sort=tod`",
+            "every kept row",
+            "`MAX_SCAN_BARS` = 24,000,000",
+            "`scan_budget_exceeded`",
+            "L-WP81-8",
+            "L-SC-3",
             "the_page_orders_only_itself_wherever_the_offset_lands",
         ],
     );
@@ -266,7 +298,7 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
     // the page. D-3349 (WP-39): a VALUE sort is served from the months' sort
     // indexes (`sort::page`), reading only rows no index run orders, under the
     // same caps; `scan` remains the time-of-day sort's, which still reads
-    // every kept row. WP-99 rewrites the bullet with WP-39's measurements.
+    // every kept row. AF-05 rewrote the bullet with those measurements.
     let scan = item(BARS, "fn scan(");
     assert!(
         window.contains("sort::page(")
@@ -290,6 +322,7 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         "nothing outside the page is ordered: {window}"
     );
     assert!(BARS.contains("pub const MAX_WINDOW_MONTHS: usize = 240;"));
+    assert!(BARS.contains("pub const MAX_SCAN_BARS: u64 = 24_000_000;"));
 }
 
 #[test]
@@ -376,23 +409,49 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
     );
 }
 
+/// W1-api5-8, CHANGED BY AF-05 (p99-8, D-4972, narrowing D-1446). A window
+/// past the last bar read the whole month to answer `[]`; it now reads the
+/// last record once and answers from it, and only a tail that is not the
+/// header's last bar keeps the full read. The bullet names both costs and
+/// the test that counts them; the source keeps the decision and the
+/// fallback.
 #[test]
-fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
+fn w1_api5_8_a_window_past_the_last_bar_reads_one_record() {
     names(
         "W1-api5-8",
         &[
             "`bars_json`",
+            "`past_the_last_bar`",
+            "one record",
             "`n_valid`",
-            "O(n_valid) reads",
             "zero-filled records",
+            "O(n_valid) reads",
+            "a_window_past_the_last_bar_reads_one_record",
+            "a_zero_filled_tail_still_takes_the_full_read",
+            "n = 200",
         ],
     );
     // THE BODY MOVED ONTO THE BLOCKING POOL (D-3326, DB-066): the handler
-    // admits it and `month_answer` reads the month, with the same fallback.
+    // admits it and `month_answer` reads the month.
     let route = item(BARS_ROUTE, "fn month_answer(");
+    let (before, after) = route
+        .split_once("past_the_last_bar(")
+        .expect("the past-the-end decision is taken in `month_answer`");
     assert!(
-        route.contains(".filter(|&index| index < held)\n        .unwrap_or(0);"),
-        "a bisection that lands past the end falls back to the whole month: {route}"
+        before.contains("file.first_at_or_after(at)")
+            && after.contains("file.read_record(")
+            && after.contains(r#"return Ok((axum::http::StatusCode::OK, "[]".to_owned()));"#),
+        "decided after the lookup, from one record read, answering `[]`: {route}"
+    );
+    assert!(
+        after.contains("let begins = landed.filter(|&index| index < held).unwrap_or(0);"),
+        "every other landing past the end still falls back to the whole month: {route}"
+    );
+    let decision = item(BARS_ROUTE, "fn past_the_last_bar(");
+    assert!(
+        decision.contains("held.checked_sub(1).filter(|_| landed >= held)")
+            && decision.contains("stamp != 0 && stamp == header_last_ts && stamp < from"),
+        "only the header's own last bar, older than `from`, answers `[]`: {decision}"
     );
 }
 

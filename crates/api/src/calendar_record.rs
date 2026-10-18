@@ -534,7 +534,95 @@ fn owed_table(rung: Timeframe) -> serde_json::Value {
         "rung": rung.as_str(),
         "regular": owed_json(ORDINARY, &regular_minutes(), rung),
         "casEligible": cas,
+        "derivatives": derivatives_owed(rung),
     })
+}
+
+/// The derivatives venue's regular-session owed bars at `rung`, one row per
+/// era of its dated hours inside the record's span (SC-CLOSE-16).
+///
+/// The derivatives close moved from 15:30 to 15:40 on 2026-08-03
+/// (NSE/FAOP/74467), so a futures or options series owes 375 minutes a
+/// regular day before it and 385 from it. Neither the dates nor the counts
+/// are written here: the eras are bisected out of
+/// `pull::vendor::Venue::NseDerivatives`'s own session table and each count
+/// is [`owed_at`] over that era's minutes, so a later dated row appears as a
+/// third era with no edit to this file.
+///
+/// At `1s` the figure is the session's length in seconds: a ceiling, not a
+/// count owed, because an option or future holds a bar only where it traded
+/// (D-3336 §2) — `tradeDriven` says so on the row.
+///
+/// Cost: at most `MAX_LATER_SESSION_ROWS + 1` eras, each one bisection of
+/// the record's span (`O(log days)` table walks of a three-row table):
+/// bounded by the table, independent of the request's span.
+fn derivatives_owed(rung: Timeframe) -> serde_json::Value {
+    let venue = pull::vendor::Venue::NseDerivatives;
+    let hours = |day: i64| {
+        civil(day)
+            .and_then(|civil| venue.hours_on(civil).ok())
+            .map(|session| {
+                (
+                    session.open_minute(),
+                    session.close_minute(),
+                    session.source(),
+                )
+            })
+    };
+    let (first, last) = (
+        pull::calendar::SOURCED_FIRST_DAY,
+        pull::calendar::SOURCED_LAST_DAY,
+    );
+    let mut rows = Vec::new();
+    let mut from = first;
+    // EACH ERA IS CONTIGUOUS: a dated row applies from its date onward until
+    // the next, so the first day whose hours differ is found by bisection.
+    while from <= last && rows.len() <= 8 {
+        let here = hours(from);
+        let to = if hours(last) == here {
+            last
+        } else {
+            let (mut low, mut high) = (from, last);
+            while low < high {
+                let mid = low + (high - low) / 2;
+                if hours(mid) == here {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            low - 1
+        };
+        let row = match here {
+            Some((open, close, source)) => {
+                let minutes: Vec<u16> = (open..close)
+                    .filter_map(|minute| u16::try_from(minute).ok())
+                    .collect();
+                // A DAY OF THE ERA WITH NO HALT: the count is a regular day's.
+                let day = (from..=to)
+                    .find(|day| pull::calendar::halt_on(*day).is_none())
+                    .unwrap_or(from);
+                serde_json::json!({
+                    "from": iso(from),
+                    "to": iso(to),
+                    "open": u16::try_from(open).map(clock).ok(),
+                    "close": u16::try_from(close).map(clock).ok(),
+                    "regular": owed_at(day, &minutes, rung, venue),
+                    "tradeDriven": rung == Timeframe::SECOND_1,
+                    "source": source,
+                })
+            }
+            None => serde_json::json!({
+                "from": iso(from),
+                "to": iso(to),
+                "regular": serde_json::Value::Null,
+                "why": "the derivatives session table carries no verified hours for these days",
+            }),
+        };
+        rows.push(row);
+        from = to + 1;
+    }
+    serde_json::Value::Array(rows)
 }
 
 /// Every special or halt day of `from..=to` the record sizes, as JSON.

@@ -600,6 +600,16 @@ static SITES: &[Site] = &[
         drive: drive_index_volume_corrected,
     },
     Site {
+        // GF-1: the mutant that replaced `note_sampled` with `()` survived the
+        // round's mutation run; the event's shape was tested and its emit was
+        // not. Driven through the shipped helper, read back off the disk.
+        at: "crates/pull/src/gdfl_import.rs — note_sampled",
+        target: crate::gdfl_import::TARGET,
+        message: "index day is minute-sampled",
+        says: ("scope", Says::Holds("FIXTURE-SAMPLED-INDEX")),
+        drive: drive_minute_sampled_index_day,
+    },
+    Site {
         at: "crates/pull/src/http.rs:1416",
         target: "pull.decode",
         message: "bars carried a negative volume and were skipped",
@@ -831,6 +841,13 @@ static SITES: &[Site] = &[
         message: "the shared secret will not decode",
         says: ("fault", Says::Holds("too-long")),
         drive: drive_totp,
+    },
+    Site {
+        at: "crates/pull/src/rehearsal.rs note_refused",
+        target: "pull.rehearsal",
+        message: "kind refused to start by itself",
+        says: ("part", Says::Holds("entry")),
+        drive: drive_rehearsal,
     },
     Site {
         at: "crates/pull/src/work.rs:193",
@@ -1085,6 +1102,25 @@ fn drive_index_volume_corrected(_scratch: &Scratch) {
     assert_eq!(first.volume, 0, "recorded as the zero the column always is");
 }
 
+/// One minute-sampled index of one day (WP-11c, DB-A04), named by the shipped
+/// helper the import and a rescan both call. The scope is invented.
+fn drive_minute_sampled_index_day(_scratch: &Scratch) {
+    let day = crate::session::Day::new(2019, 5, 30).expect("a real date");
+    let sampled = crate::gdfl_import::quality::Sampled {
+        scope: "FIXTURE-SAMPLED-INDEX".to_owned(),
+        rows: 375,
+        seconds: 375,
+        session_s: 22_500,
+        ss_distinct: 1,
+    };
+    crate::gdfl_import::note_sampled(
+        crate::gdfl_import::ImportKind::Indices,
+        day,
+        std::slice::from_ref(&sampled),
+        crate::gdfl_import::quality::Src::Import,
+    );
+}
+
 /// A traded listing sends one good minute and one with a negative volume.
 ///
 /// The row goes; the window stays. Before this the whole window was refused,
@@ -1252,6 +1288,20 @@ fn drive_totp(_scratch: &Scratch) {
         crate::totp::base32_decode(&over).is_err(),
         "one past the bound is refused rather than truncated"
     );
+}
+
+/// An automatic start of a kind no store step names (AUT-05).
+fn drive_rehearsal(_scratch: &Scratch) {
+    let refused = crate::rehearsal::may_start_by_itself(
+        "emit-site-fixture-kind",
+        &crate::rehearsal::Facts {
+            last_bulk_write: crate::rehearsal::LastBulkWrite::NoneRecorded,
+            now: 1_800_000_000,
+            attested: Vec::new(),
+        },
+    )
+    .expect_err("no step names this kind");
+    assert_eq!(refused.code(), "not_rehearsed");
 }
 
 /// A selection carrying one blank name and one repeat.

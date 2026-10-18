@@ -189,7 +189,7 @@ impl BarFile {
     /// sort step verified would be served from memory after the file was cut
     /// under the handle, where the caller's own read would have been refused
     /// (`store::write`'s short-read tests hold that).
-    fn untouched<T>(&self, work: impl FnOnce() -> T) -> T {
+    pub(super) fn untouched<T>(&self, work: impl FnOnce() -> T) -> T {
         let saved = {
             let held = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
             VerifiedBlock {
@@ -347,7 +347,7 @@ impl BarFile {
     /// `.srt` is its revision's, and building the original's would report a
     /// month indexed that no reader reads. The links are still refused from
     /// the store root down.
-    fn open_to_sort(
+    pub(super) fn open_to_sort(
         store_root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,

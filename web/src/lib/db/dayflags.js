@@ -62,7 +62,16 @@ export const DAY_KINDS = [
   { kind: 'cas', word: 'closing auction from 15:15', tone: 'info' },
   { kind: 'not_reached', word: 'not imported yet', tone: 'quiet' },
   { kind: 'no_trade', word: 'no trade (trade-driven)', tone: 'quiet' },
-  { kind: 'outside_archive', word: "outside the vendor's archive", tone: 'quiet' },
+  // `/feeds.json` `archive` is the vendor's archive AS MEASURED (R3-05): its
+  // last day is a dated lower bound, so a day past it is not imported, never
+  // a vendor hole or "outside the vendor's archive" — the files may be
+  // delivered and waiting (SC-CLOSE-2).
+  { kind: 'outside_archive', word: 'not imported', tone: 'quiet' },
+  // A day before a BINDING first day (`archive.from_binds`, which the server
+  // serves `true`: no file before it exists) is outside the vendor's
+  // archive, not "not imported": no import can ever reach it (R3-05 repair
+  // 3, the second agent's follow-up; it was worded "not imported" too).
+  { kind: 'before_archive', word: "before the vendor's archive", tone: 'quiet' },
   { kind: 'closed', word: 'closed', tone: 'quiet' },
   { kind: 'outside', word: "outside the calendar's span", tone: 'quiet' },
   { kind: 'session', word: 'session', tone: 'ok' }
@@ -73,7 +82,7 @@ const KIND = new Map(DAY_KINDS.map((k) => [k.kind, k]));
 
 /** The kinds that are facts about the day, not flags: an ordinary or closed
  *  day, a day outside a span, a trade-driven day with no trade. */
-const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'no_trade']);
+const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'before_archive', 'no_trade']);
 
 /**
  * The bars a held/peer object reports, or `null` when the feed holds no file
@@ -105,7 +114,10 @@ export function barsOf(held) {
  *   imported yet" (DB-G67, DB-G68).
  *
  * @param {any} rec one `/dayflags.json` day record
- * @param {{ archive?: { from: string, to: string } | null }} [ctx] the feed's archive span, where it has one
+ * - `before_archive`: a day before the archive's first day when that day
+ *   binds (`from_binds`, R3-05 repair 3): no file can exist, ever.
+ *
+ * @param {{ archive?: { from: string, to: string, from_binds?: boolean, to_binds?: boolean } | null }} [ctx] the feed's archive span, where it has one
  * @returns {string[]}
  */
 export function kindsOf(rec, ctx = {}) {
@@ -116,7 +128,11 @@ export function kindsOf(rec, ctx = {}) {
   const outcome = rec?.import?.outcome ?? null;
   const day = String(rec?.day ?? '');
   const archive = ctx.archive ?? null;
+  // BEFORE A FIRST DAY THAT BINDS no file can exist; anything else outside
+  // the span (past a measured last day, which is a lower bound) is not
+  // imported. An absent `from_binds` is a server that bound the first day.
   const beyond = archive !== null && day !== '' && (day < archive.from || day > archive.to);
+  const before = beyond && day < /** @type {{ from: string }} */ (archive).from && archive?.from_binds !== false;
   if (outcome === 'refused') out.push('refused');
   // INCOMPLETE FOR ANOTHER FILE IS NOT THIS INSTRUMENT'S HOLE (DB-G69): a
   // day the import left incomplete over another contract's file still holds
@@ -133,7 +149,8 @@ export function kindsOf(rec, ctx = {}) {
   // sends a candle for every minute of a session, is not one.
   const segment = segmentOf(rec?.instrument);
   const tradeDriven = segment === 'FNO' || (segment === 'CASH' && rec?.held?.rung === '1s');
-  if (beyond) out.push('outside_archive');
+  if (before) out.push('before_archive');
+  else if (beyond) out.push('outside_archive');
   if (session && !beyond && held === 0 && outcome !== 'refused' && !(outcome === 'incomplete' && out.includes('incomplete'))) {
     out.push(tradeDriven ? 'no_trade' : 'store_gap');
   }
@@ -338,7 +355,7 @@ export function emptyWindowWhy(cells, from, to, label, most = 4) {
   // that never published the day.
   const named = empty
     .slice(0, most)
-    .map((c) => `${label(c.day)}: ${c.kind === 'outside_archive' || !c.says.length ? c.word : c.says.join('; ')}`);
+    .map((c) => `${label(c.day)}: ${c.kind === 'outside_archive' || c.kind === 'before_archive' || !c.says.length ? c.word : c.says.join('; ')}`);
   const rest = empty.length - named.length;
   const lead = empty.length === 1 ? 'No bar on' : `No bar on any of ${empty.length} session day(s) —`;
   return `${lead} ${named.join(' · ')}${rest > 0 ? ` · and ${rest} more, each in the day band above` : ''}.`;

@@ -1334,7 +1334,33 @@ struct Allowlists {
 }
 
 /// Rule 1. docs/07 layer 4: never `binary_search`.
-const ALLOW_SEARCH: Allow = &[("crates/store/src/file.rs", 1)];
+const ALLOW_SEARCH: Allow = &[
+    ("crates/store/src/file.rs", 1),
+    // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
+    // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
+    // — the /db fix round and the ingest automation, declared together".
+    ("crates/api/src/audit.rs", 1),
+    ("crates/api/src/census.rs", 1),
+    ("crates/api/src/chain.rs", 1),
+    ("crates/cli/src/scrub_blocks.rs", 1),
+    ("crates/pull/src/gdfl_import_quality.rs", 5),
+    ("crates/pull/src/gdfl_lineage.rs", 1),
+    ("crates/pull/src/series_identity.rs", 2),
+    ("crates/store/src/provenance.rs", 1),
+    ("crates/api/src/pullrun.rs", 3), // 0 -> 3, WP-62 after the round, GF-1 (docs/06-limits.md)
+    ("crates/store/src/sealed.rs", 2), // 0 -> 2, SC-2 merged after GF-1, GF-1 16 Oct (docs/06-limits.md)
+    // R3-05 repair 4: `ImportReach::not_imported` bisects the asked month's
+    // days whose import began and never closed, at most 31 (one month's
+    // days), ascending as `imported_to` builds them. O(log 31) per minute
+    // run. Reason in docs/06-limits.md, gate 11 rule 1 and L-R305-3.
+    ("crates/api/src/feeds_route.rs", 1),
+    // AG-04, merged 17 Oct 2026 (declared by GF-1): `/sources/day.json`
+    // asks whether each closing-auction print of the day is also a 1s bar,
+    // bisecting that day's ascending seconds of one instrument (at most
+    // 86,400). O(log n) per auction record of the asked day. Reason in
+    // docs/06-limits.md, "Gate 11 — AG-04, declared after it merged".
+    ("crates/api/src/sources.rs", 1),
+];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
 const ALLOW_FLOAT: Allow = &[
@@ -1347,7 +1373,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/greeks/src/error.rs", 17),
     ("crates/greeks/src/solver.rs", 14),
     ("crates/greeks/src/moneyness.rs", 6),
-    ("crates/pull/src/pricing.rs", 36),
+    ("crates/pull/src/pricing.rs", 37), // 36 -> 37, GF-1 (docs/06-limits.md)
     ("crates/pull/src/riskfree.rs", 2),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
@@ -1439,6 +1465,31 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/index_stop_store.rs", 1),
     ("crates/api/src/recovery_journal.rs", 1),
     ("crates/pull/src/http.rs", 1),
+    // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
+    // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
+    // — the /db fix round and the ingest automation, declared together".
+    ("crates/api/src/audit_json.rs", 1),
+    ("crates/api/src/bars.rs", 1),
+    ("crates/api/src/bars_series.rs", 1),
+    ("crates/api/src/calendar_build.rs", 1),
+    ("crates/api/src/dayflags.rs", 1),
+    ("crates/api/src/import_journal.rs", 1),
+    ("crates/api/src/imports.rs", 1),
+    ("crates/api/src/logs.rs", 1),
+    ("crates/api/src/store_route.rs", 1),
+    ("crates/api/src/sweeprun.rs", 1),
+    ("crates/pull/src/gdfl_cm.rs", 1),
+    ("crates/pull/src/gdfl_import.rs", 1),
+    ("crates/pull/src/gdfl_import_lineage.rs", 7),
+    ("crates/pull/src/gdfl_import_quality.rs", 1),
+    ("crates/pull/src/gdfl_lineage.rs", 6),
+    ("crates/pull/src/gdfl_nfo.rs", 1),
+    ("crates/telemetry/src/sink.rs", 1),
+    ("crates/api/src/bars_change.rs", 1), // 0 -> 1, AF-03 merged after GF-1, GF-1 16 Oct (docs/06-limits.md)
+    // GF-1, 18 Oct 2026: R4-06, merged after GF-1's run of 17 Oct; reason in
+    // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
+    // merged": the keys of one table of the committed step list.
+    ("crates/pull/src/rehearsal.rs", 1),
 ];
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -1453,7 +1504,7 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/bars.rs", 3),
     ("crates/api/src/calendar_of.rs", 3),
     ("crates/api/src/constituents.rs", 3),
-    ("crates/api/src/logs.rs", 1),
+    ("crates/api/src/logs.rs", 4), // 1 -> 4, GF-1 (docs/06-limits.md)
     ("crates/cli/src/frontier.rs", 1),
     ("crates/cli/src/global_replay_v3.rs", 1),
     ("crates/cli/src/knobs.rs", 1),
@@ -1462,16 +1513,16 @@ const ALLOW_SORT: Allow = &[
     ("crates/cli/src/live.rs", 2),
     ("crates/api/src/coverage.rs", 1),
     ("crates/api/src/indexmap.rs", 1),
-    ("crates/api/src/pullrun.rs", 1),
+    ("crates/api/src/pullrun.rs", 3), // 1 -> 3, WP-62 after the round, GF-1 (docs/06-limits.md)
     // 12 until the WP-01 seam moved five of these sorts out of server.rs
     // verbatim, with the routes that make them, and the count with them:
     // `calendar_route.rs` 3 (`spot_months_by_identity`'s months and
     // `calendar_json_reading`'s keys and months), `gaps_route.rs` 1
     // (`peer_calendar_reading`'s keys) and `instruments_route.rs` 1
     // (`instruments_json`'s listing). The total is unchanged.
-    ("crates/api/src/server.rs", 7),
+    ("crates/api/src/server.rs", 8), // 7 -> 8, WP-62 after the round, GF-1 (docs/06-limits.md)
     ("crates/api/src/calendar_route.rs", 3),
-    ("crates/api/src/gaps_route.rs", 1),
+    ("crates/api/src/gaps_route.rs", 2), // 1 -> 2, GF-1 (docs/06-limits.md)
     ("crates/api/src/instruments_route.rs", 1),
     // 8 since D-1728: `first_accepted_in_order` sorts only each selected
     // window of `top` keys, never the whole input (D-2105 carried the count
@@ -1486,7 +1537,7 @@ const ALLOW_SORT: Allow = &[
     ("crates/indicators/src/evaluator.rs", 1),
     ("crates/api/src/autopilot.rs", 1),
     ("crates/api/src/catalog.rs", 2),
-    ("crates/api/src/census.rs", 2),
+    ("crates/api/src/census.rs", 3), // 2 -> 3, GF-1 (docs/06-limits.md)
     ("crates/api/src/master.rs", 1),
     ("crates/api/src/merge.rs", 4),
     ("crates/api/src/render.rs", 1),
@@ -1506,6 +1557,12 @@ const ALLOW_SORT: Allow = &[
     // order; O(n log n) per image written (L-IA-4), never on a lookup. Its
     // reason is in docs/06-limits.md, gate 11 rule 4 (D-4861).
     ("crates/store/src/verdict.rs", 1),
+    // R3-05 repair 4: `store::settings::list_numbers` sorts the generation
+    // numbers of one settings directory, O(g log g) for g generations on
+    // disk, once per reader start and once per save; never on a refresh or
+    // a GET that finds nothing new. Reason in docs/06-limits.md, gate 11
+    // rule 4 and L-R305-6.
+    ("crates/store/src/settings.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
     ("crates/pull/src/ingest.rs", 1),
     ("crates/api/src/recovery.rs", 2),
@@ -1538,6 +1595,35 @@ const ALLOW_SORT: Allow = &[
     // directories in name order so two runs print the same receipt. Never on
     // a request path.
     ("crates/cli/src/srt_builder.rs", 1),
+    // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
+    // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
+    // — the /db fix round and the ingest automation, declared together".
+    ("crates/api/src/audit.rs", 3),
+    ("crates/api/src/calendar_record.rs", 1),
+    ("crates/api/src/dayflags.rs", 1),
+    ("crates/api/src/disk_route.rs", 1),
+    ("crates/api/src/facets.rs", 1),
+    ("crates/api/src/imports.rs", 2), // 1 -> 2, AF-02 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
+    ("crates/api/src/store_route.rs", 1),
+    ("crates/cli/src/scrub_blocks.rs", 1),
+    ("crates/pull/src/gdfl_import.rs", 1),
+    ("crates/pull/src/gdfl_import_lineage.rs", 2),
+    ("crates/pull/src/gdfl_import_quality.rs", 1),
+    ("crates/pull/src/gdfl_lineage.rs", 1),
+    ("crates/pull/src/gdfl_nfo.rs", 1),
+    ("crates/pull/src/repair_plan.rs", 1),
+    ("crates/pull/src/series_identity.rs", 1),
+    // GF-1, 16 Oct 2026: R4-08 and R3-18, merged after GF-1's run of that
+    // day, read occurrence by occurrence; reasons in docs/06-limits.md,
+    // "Gate 11 — R4-08 and R3-18, declared after they merged". Each is a
+    // write-time or verb-time order, never a request path's.
+    ("crates/cli/src/zerodha_gaps_command.rs", 1),
+    ("crates/pull/src/gap_backfill.rs", 1),
+    ("crates/pull/src/tickstore_write.rs", 2),
+    // GF-1, 18 Oct 2026: R3-09, merged after GF-1's run of 17 Oct; reason in
+    // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
+    // merged": one answer's cells, at most `CELLS_MOST` = 4,096.
+    ("crates/api/src/census_rollup.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1583,7 +1669,7 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/booleanjson.rs", 2),
     ("crates/api/src/expressionsearchjson.rs", 1),
     ("crates/api/src/indexstoprankingjson.rs", 1),
-    ("crates/api/src/pullrun.rs", 1),
+    ("crates/api/src/pullrun.rs", 4), // 1 -> 4, WP-62 after the round, GF-1 (docs/06-limits.md)
     // D-3313: `leading_hollow` and `store_holds_nothing_in`, request-bounded
     // scans over one window's chunks and the floor-to-first-bar months
     // (`docs/06-limits.md`, the before-first-bar section). 11 until the WP-01
@@ -1593,9 +1679,14 @@ const ALLOW_SCAN: Allow = &[
     // `instruments_route.rs` 2 and `store_route.rs` 2, and `census_cache.rs` 1,
     // the one `verify_json` made, now behind `VendorCensusNow::census`. The
     // total is unchanged.
-    ("crates/api/src/server.rs", 5),
-    ("crates/api/src/calendar_route.rs", 1),
+    ("crates/api/src/server.rs", 8), // 5 -> 6 -> 7, GF-1; 7 WP-62 after the round, GF-1; 7 -> 8 AF-04 merged after GF-1, GF-1 16 Oct (docs/06-limits.md)
+    ("crates/api/src/calendar_route.rs", 2), // 1 -> 2, GF-1 (docs/06-limits.md)
     ("crates/api/src/census_cache.rs", 1),
+    // R3-05: `feeds_route::census_row`'s fallback, a `find` for one feed's
+    // row over the per-vendor census read when the row is not at its
+    // vendor's index; bounded by `Vendor::ALL`, as the five above. Reason in
+    // docs/06-limits.md, gate 11 rules 6 and 7.
+    ("crates/api/src/feeds_route.rs", 1),
     ("crates/api/src/instruments_route.rs", 2),
     ("crates/api/src/store_route.rs", 2),
     ("crates/api/src/store_wire.rs", 1),
@@ -1623,14 +1714,49 @@ const ALLOW_SCAN: Allow = &[
     ("crates/pull/src/resolve.rs", 1),
     ("crates/pull/src/rolling.rs", 3),
     ("crates/pull/src/ssm.rs", 1),
-    ("crates/pull/src/vendor.rs", 8),
+    ("crates/pull/src/vendor.rs", 9), // 8 -> 9, GF-1 (docs/06-limits.md)
     ("crates/runner/src/exit_grid_policy.rs", 1),
     ("crates/runner/src/grid.rs", 2),
     ("crates/runner/src/research_family.rs", 1),
     ("crates/runner/src/signal_candle_stop.rs", 1),
     ("crates/runner/src/validate.rs", 5),
     ("crates/telemetry/src/record.rs", 1),
-    ("crates/telemetry/src/sink.rs", 1),
+    ("crates/telemetry/src/sink.rs", 3), // 1 -> 3, GF-1 (docs/06-limits.md)
+    // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
+    // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
+    // — the /db fix round and the ingest automation, declared together".
+    ("crates/api/src/audit.rs", 1),
+    ("crates/api/src/bars_sort.rs", 1),
+    ("crates/api/src/calendar_record.rs", 2),
+    ("crates/api/src/census.rs", 1),
+    ("crates/api/src/chain.rs", 2),
+    ("crates/api/src/dayflags.rs", 2),
+    ("crates/api/src/disk_route.rs", 1),
+    ("crates/api/src/gaps_route.rs", 1),
+    ("crates/api/src/import_journal.rs", 3),
+    ("crates/api/src/imports.rs", 3), // 2 -> 3, AF-02 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
+    ("crates/api/src/logs.rs", 2),
+    ("crates/api/src/scrub_route.rs", 3),
+    ("crates/cli/src/scrub_blocks.rs", 1),
+    ("crates/pull/src/expiry_alias.rs", 4),
+    ("crates/pull/src/gdfl_lineage.rs", 2),
+    ("crates/telemetry/src/run_dirs.rs", 1),
+    ("crates/pull/src/calendar.rs", 1), // 0 -> 1, WP-62 after the round, GF-1 (docs/06-limits.md)
+    ("crates/store/src/sealed.rs", 2), // 0 -> 2, SC-2 merged after GF-1, GF-1 16 Oct (docs/06-limits.md)
+    // GF-1, 17 Oct 2026: AF-01, R3-32 and R3-35, merged after GF-1's run of
+    // 16 Oct; reasons in docs/06-limits.md, "Gate 11 — the packages merged
+    // on 16 and 17 October, declared after they merged": the first and last
+    // newline of a tail window `TAIL_WINDOW` bounds, one parsed flag of a
+    // verb's own arguments, and R3-35's move of the one `gdfl_import.rs`
+    // site into the day file (its `gdfl_import.rs` entry is gone with it).
+    ("crates/cli/src/gdfl_import_guard.rs", 2),
+    ("crates/cli/src/watchdog_command.rs", 1),
+    ("crates/pull/src/gdfl_import_day.rs", 1),
+    // GF-1, 18 Oct 2026: R4-06, merged after GF-1's run of 17 Oct; reason in
+    // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
+    // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
+    // most `MAX_KIND_BYTES` = 64 bytes.
+    ("crates/pull/src/rehearsal.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1650,7 +1776,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/merge.rs", 2),
     ("crates/api/src/server.rs", 2),
     ("crates/api/src/spot.rs", 1),
-    ("crates/api/src/sweeprun.rs", 5),
+    ("crates/api/src/sweeprun.rs", 8), // 5 -> 8, GF-1 (docs/06-limits.md)
     ("crates/cli/src/batch.rs", 1),
     ("crates/cli/src/candidate_universe.rs", 1),
     ("crates/cli/src/execution_capability.rs", 1),
@@ -1677,7 +1803,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/costs/src/day.rs", 2),
     ("crates/engine/src/lib.rs", 1),
     ("crates/greeks/src/solver.rs", 1),
-    ("crates/pull/src/calendar.rs", 1),
+    ("crates/pull/src/calendar.rs", 2), // 1 -> 2, GF-1 (docs/06-limits.md)
     ("crates/pull/src/fnowork.rs", 1),
     ("crates/pull/src/pricing.rs", 2),
     ("crates/runner/src/closed.rs", 1),
@@ -1709,7 +1835,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/indexstopqualificationjson.rs", 1),
     ("crates/api/src/index_consistency_projection.rs", 1),
     ("crates/cli/src/index_stop_search_reader.rs", 1),
-    ("crates/api/src/pullrun.rs", 3),
+    ("crates/api/src/pullrun.rs", 9), // 3 -> 7, WP-62 after the round, GF-1; 7 -> 9 AG-01 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
     ("crates/cli/src/selection_v6_source.rs", 1),
     ("crates/api/src/booleanjson.rs", 1),
     ("crates/cli/src/audited_range.rs", 1),
@@ -1727,6 +1853,52 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/engine/src/resume.rs", 1),
     ("crates/cli/src/index_stop_store.rs", 1),
     ("crates/indicators/src/column.rs", 1),
+    // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
+    // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
+    // — the /db fix round and the ingest automation, declared together".
+    ("crates/api/src/calendar_record.rs", 1),
+    ("crates/api/src/calendar_route.rs", 2),
+    ("crates/api/src/chain.rs", 1),
+    ("crates/api/src/disk_route.rs", 2),
+    ("crates/api/src/gaps_route.rs", 3),
+    ("crates/api/src/imports.rs", 2),
+    ("crates/api/src/logs.rs", 5),
+    ("crates/api/src/repair_route.rs", 1),
+    ("crates/cli/src/gdfl_import_command.rs", 2),
+    ("crates/cli/src/store_write.rs", 4),
+    ("crates/costs/src/lot.rs", 1),
+    ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
+    ("crates/pull/src/census_store.rs", 1),
+    ("crates/pull/src/gdfl_import.rs", 1), // 3 -> 4, WP-12f merged after GF-1, GF-1 16 Oct; 4 -> 1, three moved to gdfl_import_journal.rs by R3-35, GF-1 17 Oct (docs/06-limits.md)
+    ("crates/pull/src/gdfl_import_lineage.rs", 1),
+    ("crates/pull/src/gdfl_import_quality.rs", 1),
+    ("crates/pull/src/gdfl_lineage.rs", 4),
+    ("crates/pull/src/http.rs", 1),
+    ("crates/telemetry/src/sink.rs", 5),
+    // GF-1, 16 Oct 2026: R4-08 and R3-18, merged after GF-1's run of that
+    // day; reasons in docs/06-limits.md, "Gate 11 — R4-08 and R3-18,
+    // declared after they merged": a hash probe, a literal Range, and one
+    // line's terminator test inside an encode that already reads every byte.
+    ("crates/pull/src/gap_backfill.rs", 1),
+    ("crates/pull/src/tickstore_write.rs", 2),
+    // GF-1, 17 Oct 2026: AF-02, AG-01, R3-32 and R3-35, merged after GF-1's
+    // run of 16 Oct; reasons in docs/06-limits.md, "Gate 11 — the packages
+    // merged on 16 and 17 October, declared after they merged": a closers
+    // list of one day, a tree probe and the restart walk's closed list, a
+    // verb's compile-time flag and environment tables, and R3-35's move of
+    // three `gdfl_import.rs` sites into the journal file (4 -> 1 above).
+    ("crates/api/src/dayflags.rs", 1),
+    ("crates/cli/src/watchdog_command.rs", 3),
+    ("crates/pull/src/gdfl_import_journal.rs", 3),
+    // GF-1, 18 Oct 2026: R3-09 and R4-06, merged after GF-1's run of
+    // 17 Oct; reasons in docs/06-limits.md, "Gate 11 — R3-09 and R4-06,
+    // declared after they merged": the derived-feed list (one entry
+    // per feed `start` was given), a route's four-name parameter table, the
+    // credential-field list built once, and two literal Ranges.
+    ("crates/api/src/census_cache.rs", 3),
+    ("crates/api/src/census_rollup.rs", 1),
+    ("crates/api/src/settings_route.rs", 1),
+    ("crates/pull/src/rehearsal.rs", 2),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {
@@ -3453,9 +3625,10 @@ mod tests {
     #[test]
     fn gate11_allowlists_carry_the_counts_the_merged_code_needs() {
         // D-1958, D-1932 and the zero-work counts, carried by D-1938; pricing.rs
-        // gains D-2830's thirteen widenings on the merge of the GDFL line.
+        // gains D-2830's thirteen widenings on the merge of the GDFL line, and
+        // WP-32's `below_discounted_intrinsic` (GF-1, docs/06-limits.md).
         let count = |l: Allow, f: &str| l.iter().find(|(p, _)| *p == f).map(|(_, n)| *n);
-        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(36));
+        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(37));
         assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
         assert_eq!(
             count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),

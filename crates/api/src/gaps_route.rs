@@ -56,19 +56,29 @@ use pull::session::Day;
 /// does not know. Counting calls all three a loss. `classify` consults the
 /// calendar per day and only `vendor-hole` is a loss.
 ///
-/// # Cost, stated rather than claimed
+/// # Cost, stated rather than claimed (DB-A30, R3-06)
 ///
-/// One pass over the month's bars and one over its minutes: ~44,640 minutes for
-/// a 31-day month against at most ~11,625 stored one-minute bars, both walked
-/// by a single forward cursor that never rewinds. That is **not O(1)** and is
-/// not claimed to be — `CLAUDE.md` §3 rule 4 names the five operations that
-/// must be constant (bar lookup, condition lookup, mask evaluation, duplicate
-/// rejection, result append) and a completeness audit is none of them. It is
-/// linear in the month, bounded by a constant month, and asked once per
-/// instrument-month by an operator rather than in any loop. `MAX_GAPS` bounds
-/// the answer's SIZE, and `Ledger::truncated` says so out loud when it bites —
-/// a truncated ledger that read like a complete one would report a store
-/// healthier than it is.
+/// **Per month asked: one month summary read, and no bar record**, when the
+/// month keeps one that describes its committed header
+/// (`store::month_summary`): one open, one read of at most a few tens of
+/// kilobytes, one CRC, then one pass over the month's minutes (at most 44,640)
+/// and, for a spot index at one second, over each day's owed seconds (at most
+/// 86,400 a day). None of it moves with the bars a month holds, so a NIFTY
+/// one-second month of 400,000 bars costs what one of 1,024 does. A month
+/// with no usable summary (none kept, torn, stale, under 1,024 bars, sparse
+/// seconds an index audit needs, input the fold may refuse) has its bars read
+/// whole, as before, and the answer names why (`summary_fallback`) and how
+/// many records it read (`bar_records_read`); a page that sees `built` sees
+/// the slow path, never a silent one.
+///
+/// **Per request, linear in the months asked**, capped at 12 one-second
+/// months and 240 minute months (`asked_range`) and audited off the async
+/// workers on the calendar pool. `MAX_GAPS` bounds the answer's SIZE, and
+/// `Ledger::truncated` says so out loud when it bites -- a truncated ledger
+/// that read like a complete one would report a store healthier than it is.
+/// That is not O(1) per request and is not claimed to be: it is O(months
+/// asked), each month O(1) in its bars, and gate 8 (`benches/ratio/gaps.rs`)
+/// holds both shapes.
 pub(super) async fn gaps_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -171,6 +181,24 @@ pub(super) async fn gaps_json(
         json(),
         gaps_body(&months, &span, &denominator, truncated_range, &inferred),
     )
+}
+
+/// `/gaps.json?{query}` answered by the route's own handler over `site`: its
+/// status code and body, nothing else. The door gate 8 times
+/// (`crates/api/benches/ratio/gaps.rs`, R3-06), which cannot name the private
+/// handler; no second code path.
+pub async fn gaps_answer(site: Loaded, query: &str) -> (u16, String) {
+    let uri = match format!("/gaps.json?{query}").parse::<axum::http::Uri>() {
+        Ok(uri) => uri,
+        Err(why) => {
+            return (
+                400,
+                format!(r#"{{"error":{}}}"#, render::json_string(&why.to_string())),
+            );
+        }
+    };
+    let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+    (code.as_u16(), body)
 }
 
 /// The identity a `/gaps.json` answer audited, rendered: the address the
@@ -643,6 +671,19 @@ fn gaps_body(
     let held: u64 = months.iter().map(|m| u64::from(m.held)).sum();
     let lost: u64 = months.iter().map(|m| u64::from(m.lost)).sum();
     let absent_files = months.iter().filter(|m| m.absent_file.is_some()).count();
+    // HOW THE ANSWER WAS HAD, beside the answer (R3-06): months read off a
+    // kept summary, months whose bars were read because none was usable (each
+    // month row names why), and the bar records that cost. A store that keeps
+    // no summaries answers the same numbers and says it read every bar.
+    let summaries_kept = months
+        .iter()
+        .filter(|m| m.summary == SummarySource::Kept)
+        .count();
+    let summaries_built = months
+        .iter()
+        .filter(|m| m.summary == SummarySource::Built)
+        .count();
+    let records_read: u64 = months.iter().map(|m| m.records_read).sum();
     let rows = months
         .iter()
         .map(AuditedMonth::render)
@@ -699,7 +740,7 @@ fn gaps_body(
     };
 
     format!(
-        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
         identity.json,
         months.len(),
         day_text(first_bound),
@@ -1124,8 +1165,13 @@ struct AuditedMonth {
     absent_file: Option<String>,
     /// Missing/corrupt dated session evidence is not a missing bar file.
     evidence_error: Option<String>,
-    /// Records `bars::page` could not read.
-    unreadable: usize,
+    /// Records `bars::page` could not read, or `None` when no record was
+    /// read because the month's kept summary answered: rendered `null`,
+    /// NOT `0`. A kept summary was built from a full read of the committed
+    /// records when it was written, but damage to a record after that is not
+    /// seen without reading the bars, and a `0` would claim a check this
+    /// answer never made (R3-06 repair).
+    unreadable: Option<usize>,
     /// Whether `MAX_GAPS` stopped this month's walk.
     truncated: bool,
     /// The runs, already rendered.
@@ -1133,13 +1179,19 @@ struct AuditedMonth {
     /// A `1s` month's own members, already rendered with a leading comma, or
     /// empty for a minute month.
     seconds: String,
+    /// Where its summary came from (R3-06).
+    summary: SummarySource,
+    /// Why no kept summary was used, when one was not.
+    fallback: Option<String>,
+    /// Bar records read to answer it: zero when its summary was kept.
+    records_read: u64,
 }
 
 impl AuditedMonth {
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{}{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{},"summary":"{}","summary_fallback":{},"bar_records_read":{}{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
@@ -1147,7 +1199,8 @@ impl AuditedMonth {
             self.absent,
             self.unmeasured,
             self.truncated,
-            self.unreadable,
+            self.unreadable
+                .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.invalid_timestamps,
             self.absent_file
                 .as_ref()
@@ -1155,6 +1208,11 @@ impl AuditedMonth {
             self.evidence_error
                 .as_ref()
                 .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.summary.word(),
+            self.fallback
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.records_read,
             self.seconds,
             self.runs,
         )
@@ -1183,10 +1241,27 @@ async fn audit_cash_schedule(
 /// `halted` (sourced) or `halt-suspected` (UNVERIFIED, D-3320) rather than
 /// `outside-window`; a minute with no print in a trade-driven series (a `1s`
 /// share or option, D-3336 §2) is `no-print` rather than `vendor-hole`; and a
-/// minute after a contract's expiry day is `expired`.
-fn run_word(gap: &pull::gaps::Gap, trade_driven: bool, expiry: Option<i64>) -> &'static str {
+/// minute after a contract's expiry day is `expired`; and a missing minute
+/// on a day past the last one whose import of the segment's kind closed, or
+/// on a day whose import began and never closed, is `not-imported` — the
+/// import has not written it, which says nothing about the vendor (R3-05,
+/// CMP-04, SC-CLOSE-2).
+fn run_word(
+    gap: &pull::gaps::Gap,
+    trade_driven: bool,
+    expiry: Option<i64>,
+    reach: &super::feeds_route::ImportReach,
+) -> &'static str {
     if expiry.is_some_and(|last| gap.day > last) {
         return "expired";
+    }
+    // A DAY THAT HAS NOT HAPPENED YET owes nothing: neither a loss nor "not
+    // imported" (R3-05 repair 3).
+    if gap.reason == pull::gaps::Reason::VendorHole && reach.not_yet(gap.day) {
+        return NOT_YET_WORD;
+    }
+    if gap.reason == pull::gaps::Reason::VendorHole && reach.not_imported(gap.day) {
+        return NOT_IMPORTED_WORD;
     }
     if gap.reason == pull::gaps::Reason::OutsideWindow
         && let Some(halt) = pull::calendar::halt_on(gap.day)
@@ -1204,6 +1279,13 @@ fn run_word(gap: &pull::gaps::Gap, trade_driven: bool, expiry: Option<i64>) -> &
     }
     gap.reason.word()
 }
+
+/// The run word for a day the import has not reached (R3-05, CMP-04).
+const NOT_IMPORTED_WORD: &str = "not-imported";
+
+/// The word for a missing minute on a day after today (IST): the session
+/// has not happened, so the minute is neither owed nor lost (R3-05 repair 3).
+const NOT_YET_WORD: &str = "not-yet";
 
 /// The last session day of a contract: the expiry date its segment opens
 /// with (`YYYY-MM-DD-…`), or `None` for a spot series or a contract whose
@@ -1259,10 +1341,13 @@ fn audit_one(
         unmeasured: 0,
         absent_file,
         evidence_error: None,
-        unreadable: 0,
+        unreadable: Some(0),
         truncated: false,
         runs: String::new(),
         seconds: String::new(),
+        summary: SummarySource::AbsentFile,
+        fallback: None,
+        records_read: 0,
     };
 
     let Ok(first_day) = pull::session::Day::new(month.year(), month.month(), 1) else {
@@ -1276,31 +1361,35 @@ fn audit_one(
     let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
     let trade_driven = one_second && asked.segment != "INDEX";
     let expiry = expiry_of(asked.contract.as_ref());
+    // HOW FAR THE IMPORT HAS REACHED for this feed's segment, and the days
+    // of this month whose import began and never closed, from the GDFL
+    // import journal: a cached probe, O(1) while the journal does not move
+    // (R3-05).
+    let reach = super::feeds_route::imported_to(
+        &site.store_root,
+        asked.vendor,
+        &asked.segment,
+        (first, last),
+    );
 
-    // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
-    // `n_valid` seeks of known length and nothing scans.
-    let (rows, faults, absent_file) = match asked.open(site, month) {
-        Ok(file) => {
-            let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-            let (rows, faults) = bars::page(&file, 0, n);
-            (rows, faults, None)
-        }
-        Err(why) => (Vec::new(), crate::fault_log::FaultLog::default(), Some(why)),
-    };
-    // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY. A fold
-    // that refuses (rows out of order) is input this audit cannot certify: it
-    // says why and claims nothing.
-    let (stamps, fold_error): (Vec<i64>, Option<String>) = if one_second {
-        match pull::fold::fold_from_bars(
-            &rows,
-            pull::fold::Bucket::MINUTE,
-            pull::fold::Bucket::SECOND,
-        ) {
-            Ok(minutes) => (minutes.iter().map(|bar| bar.ts_micros).collect(), None),
-            Err(why) => (Vec::new(), Some(format!("{why:?}"))),
-        }
+    // ONE SUMMARY A MONTH, AND NO BAR, when the month keeps one that
+    // describes its committed header (R3-06, D-4980, DB-A30); otherwise its
+    // bars are read and summarised by the same library call, and the answer
+    // names why. Every fact below is read off the summary either way, so the
+    // kept and the read answer are one computation.
+    let needs_seconds = one_second && !trade_driven;
+    let input = month_input(site, asked, month, needs_seconds);
+    let held = &input.summary;
+    // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY: the
+    // minutes a one-second month holds are its summary's minute index, which
+    // is what `pull::fold` makes of rows in order. Rows the fold refuses (a
+    // stamp before the one before it, a negative volume) are input this audit
+    // cannot certify: it says why, in the fold's own words, and claims nothing.
+    let fold_error = input.fold_error.clone();
+    let stamps: Vec<i64> = if fold_error.is_some() {
+        Vec::new()
     } else {
-        (rows.iter().map(|bar| bar.ts_micros).collect(), None)
+        held.minute_stamps()
     };
     // A MARKET SESSION AND AN INDEX-PUBLICATION WINDOW ARE NOT THE SAME FACT.
     // On 2021-02-24 SEBI proves 220 normal-market minutes, but also records
@@ -1310,6 +1399,14 @@ fn audit_one(
     // CASH and derivative series keep the verified exchange-session calendar.
     let mut ledger = if fold_error.is_some() {
         pull::gaps::Ledger::default()
+    } else if !one_second && held.counts.invalid > 0 {
+        // OFF THE MINUTE GRID OR NOT STRICTLY INCREASING: what `pull::gaps`
+        // refuses to classify, counted from the summary rather than re-read.
+        pull::gaps::Ledger {
+            held: u32::try_from(held.counts.folded).unwrap_or(u32::MAX),
+            invalid_timestamps: held.counts.invalid,
+            ..pull::gaps::Ledger::default()
+        }
     } else if trade_driven && asked.segment == "CASH" {
         // NOTHING IS OWED, so the dated cash schedule decides nothing: a
         // minute of the exchange session with no print is `no-print`.
@@ -1326,6 +1423,17 @@ fn audit_one(
     } else {
         pull::gaps::classify_against(&stamps, first, last, calendar)
     };
+    // `held` IS WHAT A FULL READ STATES: a minute month's rows, a one-second
+    // month's folded minutes, a row outside the month included, though the
+    // minute index the classifier walked holds only the month's own days.
+    if fold_error.is_none() {
+        let held_rows = if one_second {
+            u64::from(held.counts.held_minutes)
+        } else {
+            held.counts.folded
+        };
+        ledger.held = u32::try_from(held_rows).unwrap_or(u32::MAX);
+    }
 
     // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
     // measured absences were four contiguous events; a per-minute list is the
@@ -1333,7 +1441,7 @@ fn audit_one(
     let words: Vec<&'static str> = ledger
         .gaps
         .iter()
-        .map(|gap| run_word(gap, trade_driven, expiry))
+        .map(|gap| run_word(gap, trade_driven, expiry, &reach))
         .collect();
     let runs = ledger
         .gaps
@@ -1368,9 +1476,52 @@ fn audit_one(
     // the loss and from what was owed; a closed day renamed `expired` was
     // never either.
     let expired_lost = minutes_of("expired", true);
-    let mut lost_minutes = ledger.lost_minutes().saturating_sub(expired_lost);
-    ledger.expected = ledger.expected.saturating_sub(expired_lost);
+    // A DAY THE IMPORT HAS NOT REACHED IS NOT A LOSS EITHER (CMP-04): its
+    // minutes leave the loss and the owed count exactly as `expired` does,
+    // and each run still names it.
+    let not_imported = minutes_of(NOT_IMPORTED_WORD, true);
+    // NOR IS A DAY THAT HAS NOT HAPPENED YET (R3-05 repair 3): out of the
+    // loss, out of what was owed, and out of `not_imported_minutes` too.
+    let not_yet = minutes_of(NOT_YET_WORD, true);
+    let mut lost_minutes = ledger
+        .lost_minutes()
+        .saturating_sub(expired_lost)
+        .saturating_sub(not_imported)
+        .saturating_sub(not_yet);
+    ledger.expected = ledger
+        .expected
+        .saturating_sub(expired_lost)
+        .saturating_sub(not_imported)
+        .saturating_sub(not_yet);
     let mut members = halts_member(&stamps, first, last);
+    // THE DAYS THE IMPORT HAS NOT REACHED, COUNTED APART (CMP-04): neither
+    // lost nor owed, and shown beside the day the census says the import
+    // reached for this feed's segment — `null` when the census cannot say, in
+    // which case nothing was renamed.
+    members.push_str(r#","not_imported_minutes":"#);
+    members.push_str(&not_imported.to_string());
+    members.push_str(r#","not_yet_minutes":"#);
+    members.push_str(&not_yet.to_string());
+    members.push_str(r#","imported_to":"#);
+    members.push_str(
+        &reach
+            .to
+            .map_or_else(|| "null".to_owned(), |day| render::json_string(&iso(day))),
+    );
+    members.push_str(r#","imported_to_from":"#);
+    members.push_str(&render::json_string(&reach.from));
+    // THE DAYS WHOSE IMPORT BEGAN AND NEVER CLOSED, inside the reach: not
+    // imported, never lost.
+    members.push_str(r#","import_open_days":["#);
+    members.push_str(
+        &reach
+            .open
+            .iter()
+            .map(|day| render::json_string(&iso(*day)))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    members.push(']');
     if one_second {
         let no_print = minutes_of("no-print", false);
         // THE SESSION MINUTES AFTER EXPIRY, not every minute of those days:
@@ -1383,7 +1534,7 @@ fn audit_one(
             ledger.expected = 0;
         }
         members += &one_second_members(
-            &rows,
+            held,
             first,
             last,
             calendar,
@@ -1392,6 +1543,7 @@ fn audit_one(
             min_run,
             fold_error.as_deref(),
             (no_print, expired),
+            &reach,
         );
     }
 
@@ -1408,14 +1560,150 @@ fn audit_one(
         // audit did not see, so it is scored as a HOLE. Reported beside the
         // verdict so "the file is damaged" cannot be read as "the vendor is
         // missing minutes" — opposite faults wanting opposite fixes.
-        absent_file,
+        absent_file: input.absent_file,
         evidence_error: None,
         // RECORDS, NOT SENTENCES: `page` coalesces a run of refusals into
         // one sentence (DB-B75) and counts every record.
-        unreadable: usize::try_from(faults.records()).unwrap_or(usize::MAX),
+        unreadable: input
+            .unreadable
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         truncated: ledger.truncated,
         runs,
         seconds: members,
+        summary: input.source,
+        fallback: input.fallback,
+        records_read: input.records_read,
+    }
+}
+
+/// Where a month's summary came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummarySource {
+    /// Kept beside the month and describing its committed header: no bar read.
+    Kept,
+    /// Built from the month's bars, read whole, because none was usable.
+    Built,
+    /// The month has no file; the summary is empty.
+    AbsentFile,
+}
+
+impl SummarySource {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::Built => "built",
+            Self::AbsentFile => "absent_file",
+        }
+    }
+}
+
+/// One month's input to the audit: its summary, and how it was had.
+struct MonthInput {
+    summary: store::month_summary::MonthSummary,
+    source: SummarySource,
+    /// Why no kept summary was used, when one was not.
+    fallback: Option<String>,
+    /// Bar records read to answer: zero when the summary was kept.
+    records_read: u64,
+    /// Records `bars::page` could not read; `None` when no record was read.
+    unreadable: Option<u64>,
+    absent_file: Option<String>,
+    /// The fold's refusal of a one-second month's rows, in its own words.
+    fold_error: Option<String>,
+}
+
+/// The month's summary: kept and usable, or built from its bars with the
+/// reason named (R3-06, D-4980).
+///
+/// A kept summary is used when it describes the committed header (one
+/// comparison), its stamps are ones the audit can certify, and it keeps the
+/// seconds a spot index's one-second audit needs. Anything else reads the
+/// bars: a month under 1,024 bars (at most 1,023 records, D-4933), a month
+/// whose summary is absent, torn, stale or foreign, and a month whose input
+/// the audit refuses, so the refusal is stated from the rows themselves.
+fn month_input(
+    site: &Loaded,
+    asked: &Addressed,
+    month: store::path::YearMonth,
+    needs_seconds: bool,
+) -> MonthInput {
+    let file = match asked.open(site, month) {
+        Ok(file) => file,
+        Err(why) => {
+            return MonthInput {
+                summary: store::month_summary::MonthSummary::new(0, asked.timeframe.secs(), month),
+                source: SummarySource::AbsentFile,
+                fallback: None,
+                records_read: 0,
+                unreadable: Some(0),
+                absent_file: Some(why),
+                fold_error: None,
+            };
+        }
+    };
+    let header = file.header();
+    let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
+    let fallback = match store::month_summary::read_beside(file.path(), &header, month) {
+        // INPUT THE FOLD MAY REFUSE: a stamp before the one before it, a
+        // negative volume, a volume summed past `i64::MAX` (any minute's
+        // bucket overflowing makes the month's saturate) or a row outside the
+        // month (where an anchor can overflow). The refusal, if any, is the
+        // fold's, in its own words, read from the rows.
+        Ok(kept)
+            if one_second
+                && (kept.counts.decreasing > 0
+                    || kept.counts.negative_volume > 0
+                    || kept.counts.outside_month > 0
+                    || kept.extremes.volume == i64::MAX) =>
+        {
+            "the month holds rows the fold may refuse; its answer is read from the bars".to_owned()
+        }
+        Ok(kept) if needs_seconds && !kept.tracks_seconds() => {
+            "the kept summary holds no seconds index (fewer than half the seconds it spans \
+             are held, D-4980); an index's seconds are read from the bars"
+                .to_owned()
+        }
+        Ok(kept) => {
+            return MonthInput {
+                summary: kept,
+                source: SummarySource::Kept,
+                fallback: None,
+                records_read: 0,
+                // NOT READ, so not counted: see `AuditedMonth::unreadable`.
+                unreadable: None,
+                absent_file: None,
+                fold_error: None,
+            };
+        }
+        Err(why) => why.to_string(),
+    };
+    // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
+    // `n_valid` seeks of known length and nothing scans.
+    let n = usize::try_from(header.n_valid).unwrap_or(usize::MAX);
+    let (rows, faults) = bars::page(&file, 0, n);
+    let fold_error = one_second
+        .then(|| {
+            pull::fold::fold_from_bars(
+                &rows,
+                pull::fold::Bucket::MINUTE,
+                pull::fold::Bucket::SECOND,
+            )
+            .err()
+            .map(|why| format!("{why:?}"))
+        })
+        .flatten();
+    MonthInput {
+        summary: store::month_summary::MonthSummary::build(&header, month, &rows),
+        source: SummarySource::Built,
+        fallback: Some(fallback),
+        // EVERY RECORD THE AUDIT READ, the ones the file refused included:
+        // the cost of the slow path is the reads it made, not the rows it kept.
+        records_read: u64::try_from(rows.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(faults.records()),
+        unreadable: Some(faults.records()),
+        absent_file: None,
+        fold_error,
     }
 }
 
@@ -1470,10 +1758,11 @@ fn halts_member(stamps: &[i64], first: i64, last: i64) -> String {
 #[expect(
     clippy::too_many_arguments,
     reason = "the month's rows and days, its calendar, and the four facts that decide \
-              what a second owes: trade-driven, expiry, the listing bound, a fold refusal"
+              what a second owes: trade-driven, expiry, the listing bound, a fold refusal, \
+              and how far the import has reached"
 )]
 fn one_second_members(
-    rows: &[store::format::Bar],
+    held: &store::month_summary::MonthSummary,
     first: i64,
     last: i64,
     calendar: Option<&pull::calendar::Calendar>,
@@ -1482,10 +1771,11 @@ fn one_second_members(
     min_run: u32,
     fold_error: Option<&str>,
     (no_print, expired): (u32, u32),
+    reach: &super::feeds_route::ImportReach,
 ) -> String {
     let fold_error = fold_error.map_or_else(|| "null".to_owned(), render::json_string);
     if trade_driven {
-        let days = trade_days(rows, first, last, calendar, expiry);
+        let days = trade_days(held, first, last, calendar, expiry);
         let without = days
             .without
             .iter()
@@ -1501,7 +1791,16 @@ fn one_second_members(
             expiry.map_or_else(|| "null".to_owned(), |day| format!(r#""{}""#, iso(day))),
         );
     }
-    let audit = second_audit(rows, first, last, calendar, min_run);
+    let mut audit = second_audit(held, first, last, calendar, min_run);
+    // A RUN ON A DAY THE IMPORT HAS NOT REACHED is named so, never a vendor
+    // hole (R3-05, CMP-04).
+    for run in &mut audit.runs {
+        if reach.not_yet(run.day) {
+            run.reason = NOT_YET_WORD;
+        } else if reach.not_imported(run.day) {
+            run.reason = NOT_IMPORTED_WORD;
+        }
+    }
     let listed = audit
         .runs
         .iter()
@@ -1591,16 +1890,12 @@ struct TradeDays {
 /// Sessions held and not held by a trade-driven month (D-3336 §2): a session
 /// is a day `calendar` sizes, on or before `expiry`.
 fn trade_days(
-    rows: &[store::format::Bar],
+    held: &store::month_summary::MonthSummary,
     first: i64,
     last: i64,
     calendar: Option<&pull::calendar::Calendar>,
     expiry: Option<i64>,
 ) -> TradeDays {
-    let mut printed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-    for bar in rows {
-        printed.insert(ist_second(bar.ts_micros).0);
-    }
     let mut days = TradeDays {
         sessions: 0,
         held: 0,
@@ -1615,7 +1910,7 @@ fn trade_days(
             continue;
         }
         days.sessions = days.sessions.saturating_add(1);
-        if printed.contains(&day) {
+        if held.bars_on(day) > 0 {
             days.held = days.held.saturating_add(1);
         } else {
             days.without.push(day);
@@ -1669,24 +1964,21 @@ struct SecondAudit {
 /// missing second is counted; runs at least `min_run` seconds long are listed,
 /// and every day names its longest run whatever its length.
 ///
-/// One pass over the month's rows and one over its owed seconds: O(month).
+/// The seconds held come off the month summary's seconds index, distinct and
+/// in order, so no bar is read (R3-06): one pass over each day's owed
+/// seconds, 86,400 a day, whatever the bars per month.
 fn second_audit(
-    rows: &[store::format::Bar],
+    summary: &store::month_summary::MonthSummary,
     first: i64,
     last: i64,
     calendar: Option<&pull::calendar::Calendar>,
     min_run: u32,
 ) -> SecondAudit {
-    let mut by_day: std::collections::BTreeMap<i64, Vec<u32>> = std::collections::BTreeMap::new();
-    for bar in rows {
-        let (day, second) = ist_second(bar.ts_micros);
-        by_day.entry(day).or_default().push(second);
-    }
     let mut audit = SecondAudit::default();
     for day in first..=last {
-        let mut held: Vec<u32> = by_day.remove(&day).unwrap_or_default();
-        held.sort_unstable();
-        held.dedup();
+        // A SUMMARY WITHOUT SECONDS NEVER REACHES HERE: `month_input` reads
+        // the bars for a spot index whose kept summary holds none.
+        let held: Vec<u32> = summary.seconds_on(day).unwrap_or_default();
         let kind = calendar.map_or_else(
             || pull::calendar::exchange_kind_of(day),
             |calendar| calendar.kind_of(day),
@@ -1743,7 +2035,7 @@ fn second_audit(
     // held outside any owed second rather than dropped.
     audit.outside = audit
         .outside
-        .saturating_add(by_day.values().map(|seconds| seconds.len() as u64).sum());
+        .saturating_add(u64::from(summary.counts.outside_month));
     audit
 }
 
@@ -2693,6 +2985,326 @@ mod tests {
         );
     }
 
+    /// The 2018-09 NIFTY 1s month audited over a store holding only the 3rd
+    /// (less a 34-second hole), with `journal` as the GDFL import journal.
+    async fn audited_with_journal(name: &str, journal: Option<&str>) -> serde_json::Value {
+        audited_month_with_journal(name, journal, "2018-09").await
+    }
+
+    /// [`audited_with_journal`]'s store and journal, with `asked` (a month
+    /// such as `2018-09`) the month the route is asked for.
+    async fn audited_month_with_journal(
+        name: &str,
+        journal: Option<&str>,
+        asked: &str,
+    ) -> serde_json::Value {
+        let root = store_root(name);
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let day = i64::from(day(2018, 9, 3).days_from_epoch());
+        let hole = (12 * 3_600 + 21 * 60 + 40)..(12 * 3_600 + 21 * 60 + 74);
+        let stamps: Vec<i64> = (33_300..55_800)
+            .filter(|second| !hole.contains(second))
+            .map(|second| second_of(day, second))
+            .collect();
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::SECOND_1,
+            month,
+            &stamps,
+        );
+        if let Some(lines) = journal {
+            let path = pull::gdfl_import::journal_path(&root);
+            std::fs::create_dir_all(path.parent().expect("imports/")).expect("mkdir");
+            std::fs::write(&path, lines).expect("the journal");
+        }
+        let site = std::sync::Arc::new(Site::serving(&masters(name, None, None), &root));
+        let (code, body) = gaps(
+            &site,
+            &format!(
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month={asked}&min_run=1"
+            ),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{asked}: {body}");
+        body["month"][0].clone()
+    }
+
+    /// The runs of `audited` on session minutes: not `closed`, not
+    /// `outside-window`.
+    fn owed_runs(audited: &serde_json::Value) -> Vec<serde_json::Value> {
+        audited["gaps"]
+            .as_array()
+            .expect("minute runs")
+            .iter()
+            .filter(|run| run["reason"] != "closed" && run["reason"] != "outside-window")
+            .cloned()
+            .collect()
+    }
+
+    /// **A DAY THE IMPORT HAS NOT REACHED IS `not-imported`, NEVER A VENDOR
+    /// HOLE, AND IS NOT COUNTED LOST** (R3-05, CMP-04, SC-CLOSE-2).
+    ///
+    /// Before: the GDFL import journal named 2018-09-03 as the last indices
+    /// day, yet every later session of the month was `vendor-hole` — 17
+    /// whole days of 375 lost minutes blamed on the vendor for an import that
+    /// had not run, while `/dayflags.json` said "not reached by the import
+    /// yet". The 3rd's own 34-second hole is still a vendor hole.
+    #[tokio::test]
+    async fn a_day_the_import_has_not_reached_is_not_imported_and_not_lost() {
+        // THE NEWEST LINE RE-RUNS AN OLDER DAY: the reach is the furthest day
+        // the journal names, never its newest line's (the operator's journal
+        // ends its indices on a re-run of 2025-10-21 with 2026-09-24 reached).
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-08-31 *\n\
+            done indices 2018-08-31 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-not-imported", Some(journal)).await;
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["expected"], 375, "the 3rd alone is owed: {audited}");
+        // COUNTED APART, beside the day the import reached and its source.
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        assert_eq!(audited["imported_to"], "2018-09-03", "{audited}");
+        assert!(
+            audited["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("import journal") && from.contains("indices")),
+            "{audited}"
+        );
+        // EVERY OWED MINUTE PAST THE 3RD IS `not-imported`: one whole-session
+        // run on each of the 17 sessions after it, and no `vendor-hole`.
+        let owed = owed_runs(&audited);
+        assert_eq!(owed.len(), 17, "{audited}");
+        assert!(
+            owed.iter()
+                .all(|run| run["reason"] == "not-imported" && run["minutes"] == 375),
+            "{audited}"
+        );
+        let seconds = audited["second_runs"].as_array().expect("second runs");
+        assert_eq!(seconds[0]["date"], "2018-09-03");
+        assert_eq!(
+            seconds[0]["reason"], "vendor-hole",
+            "the 3rd's own hole: {audited}"
+        );
+        assert!(
+            seconds[1..]
+                .iter()
+                .all(|run| run["reason"] == "not-imported"),
+            "{audited}"
+        );
+    }
+
+    /// **A MONTH THAT BEGINS TWO OR MORE DAYS PAST THE IMPORT'S REACH IS
+    /// ANSWERED, NEVER A PANIC** (R3-05 repair 4, the second agent's
+    /// blocking finding). Before: the open-day scan asked the journal for
+    /// `first of the month ..= the reach`, a reversed span; `BTreeMap::range`
+    /// panicked and `panic = "abort"` took the whole API down — on 15 October
+    /// 2026 for `month=2026-11` and for every contract expiring in November
+    /// or later. A month beginning the day after the reach (the boundary that
+    /// held) gave an empty span instead.
+    #[tokio::test]
+    async fn a_month_begun_two_or_more_days_past_the_reach_is_answered_never_a_panic() {
+        // THE REACH IS 29 AUGUST: SEPTEMBER BEGINS THREE DAYS PAST IT.
+        let journal = "begin indices 2018-08-29 *\n\
+            done indices 2018-08-29 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-past-reach", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-08-29", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(
+            audited["not_yet_minutes"], 0,
+            "2018 has happened: {audited}"
+        );
+        // EVERY SESSION AFTER THE 3RD (WHICH HOLDS ITS BARS) IS NOT IMPORTED.
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        let owed = owed_runs(&audited);
+        assert_eq!(owed.len(), 17, "{audited}");
+        assert!(
+            owed.iter().all(|run| run["reason"] == "not-imported"),
+            "{audited}"
+        );
+        // A FAR MONTH, AND THE LAST ONE THE ROUTE NAMES: answered, nothing
+        // lost and nothing not imported — those sessions have not happened.
+        for asked in ["2099-01", "9999-12"] {
+            let far =
+                audited_month_with_journal(&format!("gaps-far-{asked}"), Some(journal), asked)
+                    .await;
+            assert_eq!(far["lost_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["not_imported_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["imported_to"], "2018-08-29", "{asked}: {far}");
+        }
+    }
+
+    /// **A CLOSED JOURNAL LINE FOR A DAY AFTER TODAY IS NOT THE IMPORT'S
+    /// REACH** (R3-05 repair 4, the second agent's follow-up 3). Before: a
+    /// `done` line for 2099-01-01 made the reach 2099, so every day of
+    /// September 2018 the import never reached was a lost `vendor-hole` —
+    /// 17 sessions blamed on the vendor. Now the reach is the furthest closed
+    /// day at or before today, and the passed-over line is named.
+    #[tokio::test]
+    async fn a_closed_line_after_today_is_not_the_reach() {
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-future-line", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-09-03", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        assert!(
+            audited["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("2099-01-01") && from.contains("passed over")),
+            "{audited}"
+        );
+        // ONLY A FUTURE LINE: no reach at all, said, and nothing renamed.
+        let only_future = "begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let alone = audited_with_journal("gaps-future-only", Some(only_future)).await;
+        assert_eq!(alone["imported_to"], serde_json::Value::Null, "{alone}");
+        assert_eq!(alone["not_imported_minutes"], 0, "{alone}");
+        assert!(
+            alone["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("after today")),
+            "{alone}"
+        );
+    }
+
+    /// **A DAY THAT HAS NOT HAPPENED YET IS `not-yet`: NEITHER LOST NOR NOT
+    /// IMPORTED** (R3-05 repair 3, the second agent's follow-up). Before:
+    /// `/gaps.json` for October 2026, asked on 15 October, counted 16..31
+    /// October as 7,500 not-imported minutes; for a pulled feed, whose reach
+    /// says nothing, the same minutes were lost `vendor-hole`. The rule is
+    /// one path for every feed: an imported reach and a pulled one.
+    #[test]
+    fn a_day_after_today_is_not_yet_never_lost_or_not_imported() {
+        let day = |d: u8| {
+            i64::from(
+                pull::session::Day::new(2026, 10, d)
+                    .expect("a real date")
+                    .days_from_epoch(),
+            )
+        };
+        let gap = |on: i64| pull::gaps::Gap {
+            day: on,
+            from: 555,
+            to: 929,
+            reason: pull::gaps::Reason::VendorHole,
+        };
+        let imported = super::super::feeds_route::ImportReach {
+            to: Some(day(14)),
+            from: "test".to_owned(),
+            open: Vec::new(),
+            today: Some(day(15)),
+        };
+        let pulled = super::super::feeds_route::ImportReach {
+            to: None,
+            from: "pulled".to_owned(),
+            open: Vec::new(),
+            today: Some(day(15)),
+        };
+        for reach in [&imported, &pulled] {
+            assert_eq!(run_word(&gap(day(16)), false, None, reach), NOT_YET_WORD);
+            assert_eq!(run_word(&gap(day(31)), true, None, reach), NOT_YET_WORD);
+            assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
+            assert!(!reach.not_yet(day(15)));
+        }
+        // TODAY ITSELF, past the reach: not imported (the day has begun).
+        assert_eq!(
+            run_word(&gap(day(15)), false, None, &imported),
+            NOT_IMPORTED_WORD
+        );
+        assert_eq!(run_word(&gap(day(15)), false, None, &pulled), "vendor-hole");
+        // NO CLOCK: nothing is `not-yet`; the reach decides as before.
+        let unclocked = super::super::feeds_route::ImportReach {
+            today: None,
+            ..imported.clone()
+        };
+        assert_eq!(
+            run_word(&gap(day(16)), false, None, &unclocked),
+            NOT_IMPORTED_WORD
+        );
+    }
+
+    /// **A DAY WHOSE IMPORT BEGAN AND NEVER CLOSED IS `not-imported`, NEVER
+    /// LOST** — in the middle of the reach and at its end (R3-05 repair 2,
+    /// the second agent's follow-up 1).
+    ///
+    /// Before: the reach was the furthest day ANY line named, a `begin` with
+    /// no closing line included, so the trailing open 6th moved the reach to
+    /// the 6th and both open days were `vendor-hole`, 750 minutes lost. Now
+    /// the reach is the furthest CLOSED day (the 5th), the open 4th inside
+    /// it is named, and only the 5th — closed and holding nothing — is owed
+    /// and lost.
+    #[tokio::test]
+    async fn a_day_begun_and_never_closed_is_not_imported_and_not_lost() {
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-09-04 *\n\
+            begin indices 2018-09-05 *\n\
+            done indices 2018-09-05 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-09-06 *\n";
+        let audited = audited_with_journal("gaps-open-day", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-09-05", "{audited}");
+        assert_eq!(
+            audited["import_open_days"],
+            serde_json::json!(["2018-09-04"]),
+            "{audited}"
+        );
+        assert_eq!(audited["lost_minutes"], 375, "the 5th alone: {audited}");
+        assert_eq!(audited["expected"], 2 * 375, "the 3rd and 5th: {audited}");
+        assert_eq!(audited["not_imported_minutes"], 16 * 375, "{audited}");
+        let owed = owed_runs(&audited);
+        assert_eq!(
+            owed.iter()
+                .filter(|run| run["reason"] == "not-imported")
+                .count(),
+            16,
+            "the open 4th and the 15 sessions after the 5th: {audited}"
+        );
+        assert_eq!(
+            owed.iter()
+                .filter(|run| run["reason"] == "vendor-hole")
+                .count(),
+            1,
+            "only the closed, empty 5th is a vendor hole: {audited}"
+        );
+    }
+
+    /// **WITHOUT AN IMPORT JOURNAL FOR THE SEGMENT'S KIND, NOTHING IS
+    /// RENAMED**, and the month says why (R3-05, CMP-04): no journal at all,
+    /// or one that names only another kind (options through 2020-09-16),
+    /// leaves the same 17 days `vendor-hole` and lost — the census's held
+    /// span is never taken as the import's reach.
+    #[tokio::test]
+    async fn without_a_journal_for_the_kind_nothing_is_renamed_and_the_month_says_why() {
+        let options_only = "begin options 2020-09-16 *\n";
+        for (name, journal) in [
+            ("gaps-no-journal", None),
+            ("gaps-other-kind", Some(options_only)),
+        ] {
+            let audited = audited_with_journal(name, journal).await;
+            assert!(audited["imported_to"].is_null(), "{name}: {audited}");
+            assert!(
+                audited["imported_to_from"]
+                    .as_str()
+                    .is_some_and(|why| !why.is_empty()),
+                "{name}: {audited}"
+            );
+            assert_eq!(audited["not_imported_minutes"], 0, "{name}: {audited}");
+            assert_eq!(audited["lost_minutes"], 17 * 375, "{name}: {audited}");
+            let owed = owed_runs(&audited);
+            assert_eq!(owed.len(), 17, "{name}: {audited}");
+            assert!(
+                owed.iter().all(|run| run["reason"] == "vendor-hole"),
+                "{name}: {audited}"
+            );
+        }
+    }
+
     /// Record one month of one series in `vendor`'s census, as a landing would.
     #[expect(clippy::too_many_arguments, reason = "one census entry's fields")]
     fn record_census(
@@ -2925,5 +3537,432 @@ mod tests {
             queued["reason"].as_str().unwrap().contains("it is queued"),
             "{queued}"
         );
+    }
+
+    // ---- R3-06: the month summary (D-4980, DB-A30, DB-G47) ----
+
+    /// The stamps of every minute `owed` lists on `day`.
+    fn minutes_of(day: i64, owed: &[u16]) -> Vec<i64> {
+        owed.iter()
+            .map(|minute| second_of(day, i64::from(*minute) * 60))
+            .collect()
+    }
+
+    /// The bar file of one series' month under `root`.
+    fn bars_path(
+        root: &std::path::Path,
+        vendor: Vendor,
+        segment: &str,
+        symbol: &str,
+        rung: store::path::Timeframe,
+        month: store::path::YearMonth,
+    ) -> std::path::PathBuf {
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor,
+            exchange: "NSE",
+            segment,
+            symbol,
+            contract: None,
+            timeframe: rung,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        path.to_path_buf(root)
+    }
+
+    /// `body` without the members that say HOW it was had, so a kept and a
+    /// built answer can be compared for WHAT they say.
+    fn what_it_says(mut body: serde_json::Value) -> serde_json::Value {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("summaries");
+        }
+        if let Some(months) = body["month"].as_array_mut() {
+            for month in months {
+                if let Some(object) = month.as_object_mut() {
+                    // HOW, NOT WHAT: a kept month read no record and counts
+                    // none (`null`); a built one counts what it read. Each is
+                    // checked against its source, then set aside.
+                    let unread = object.remove("unreadable_records");
+                    let kept =
+                        object.get("summary").and_then(serde_json::Value::as_str) == Some("kept");
+                    assert_eq!(
+                        unread.as_ref().is_some_and(serde_json::Value::is_null),
+                        kept,
+                        "unreadable_records is null exactly when the summary was kept: {unread:?}"
+                    );
+                    object.remove("summary");
+                    object.remove("summary_fallback");
+                    object.remove("bar_records_read");
+                }
+            }
+        }
+        body
+    }
+
+    /// **THE GAP AUDIT READS NO BAR WHEN SUMMARIES EXIST** (R3-06, DB-A30).
+    ///
+    /// Counted twice, two ways. The answer counts the bar records it read,
+    /// and says zero. And the proof that does not trust that count: every
+    /// record in the middle of both months is then overwritten with garbage
+    /// in place (the test's own store), and the answer does not move by one
+    /// byte and still counts no record it did not read (`null`) -- a reader
+    /// that read a bar would have read garbage. Only when the summary itself is spoiled are the
+    /// bars read, named as the fallback, and the garbage shows.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture, the kept answer, the garbage proof and the spoiled \
+                  fallback, in the order the doc states them"
+    )]
+    async fn the_gap_audit_reads_no_bar_when_summaries_exist() {
+        let root = store_root("gaps-summary-no-bar");
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let monday = i64::from(day(2018, 9, 3).days_from_epoch());
+        let hole = (12 * 3_600 + 21 * 60 + 40)..(12 * 3_600 + 21 * 60 + 74);
+        let seconds: Vec<i64> = (monday..monday + 2)
+            .flat_map(|day| (33_300..55_800).map(move |second| (day, second)))
+            .filter(|(_, second)| !hole.contains(second))
+            .map(|(day, second)| second_of(day, second))
+            .collect();
+        let minutes: Vec<i64> = (monday..monday + 5)
+            .flat_map(|day| {
+                let owed = crate::calendar_of::record::owed_minutes(day).unwrap_or_default();
+                minutes_of(day, &owed)
+            })
+            .filter(|stamp| (stamp / 60_000_000) % 97 != 0)
+            .collect();
+        let one_second = store::path::Timeframe::SECOND_1;
+        let one_minute = store::path::Timeframe::MINUTE_1;
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            one_second,
+            month,
+            &seconds,
+        );
+        write_rows(
+            &root,
+            Vendor::Zerodha,
+            "INDEX",
+            "NIFTY",
+            None,
+            one_minute,
+            month,
+            &minutes,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-summary-no-bar", None, None),
+            &root,
+        ));
+        let asks = [
+            (
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09",
+                bars_path(&root, Vendor::Gdfl, "INDEX", "NIFTY", one_second, month),
+                seconds.len(),
+            ),
+            (
+                "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2018-09",
+                bars_path(&root, Vendor::Zerodha, "INDEX", "NIFTY", one_minute, month),
+                minutes.len(),
+            ),
+        ];
+        for (query, bars, rows) in asks {
+            let (code, kept) = gaps(&site, query).await;
+            assert_eq!(code, axum::http::StatusCode::OK, "{kept}");
+            assert_eq!(kept["month"][0]["summary"], "kept", "{query}: {kept}");
+            assert_eq!(kept["month"][0]["bar_records_read"], 0, "{query}");
+            assert!(kept["month"][0]["summary_fallback"].is_null(), "{query}");
+            assert_eq!(kept["summaries"]["kept"], 1, "{query}");
+            assert_eq!(kept["summaries"]["bar_records_read"], 0, "{query}");
+            // NOT READ, SO NOT CLAIMED: a kept answer read no record and
+            // says so with `null`, never a `0` it did not count.
+            assert!(
+                kept["month"][0]["unreadable_records"].is_null(),
+                "{query}: {kept}"
+            );
+            assert!(kept["lost_minutes"].as_u64().is_some(), "{query}: {kept}");
+
+            // GARBAGE IN EVERY MIDDLE RECORD: the answer cannot move.
+            let layout = store::layout::Layout::CURRENT;
+            let last = u64::try_from(rows).expect("rows") - 600;
+            let from = layout.offset_of(100).expect("an offset");
+            let to = layout.offset_of(last).expect("an offset");
+            let mut image = std::fs::read(&bars).expect("the bar file");
+            for byte in image
+                .get_mut(
+                    usize::try_from(from).expect("offset")..usize::try_from(to).expect("offset"),
+                )
+                .expect("the records are in the file")
+            {
+                *byte = 0xA5;
+            }
+            std::fs::write(&bars, &image).expect("spoil the test's own records");
+            let (_, spoiled_bars) = gaps(&site, query).await;
+            assert_eq!(
+                spoiled_bars, kept,
+                "{query}: a kept summary answers without reading one bar"
+            );
+
+            // A SPOILED SUMMARY IS NAMED, THE BARS ARE READ, AND THE DAMAGE SHOWS.
+            // The magic and five bytes: shorter than any section, so `torn`.
+            let beside = store::month_summary::path_beside(&bars);
+            std::fs::write(&beside, b"BRUTEXU1 torn").expect("spoil the test's own summary");
+            let (_, built) = gaps(&site, query).await;
+            let audited = &built["month"][0];
+            assert_eq!(audited["summary"], "built", "{query}: {built}");
+            assert_eq!(
+                audited["bar_records_read"],
+                u64::try_from(rows).expect("rows")
+            );
+            assert_eq!(built["summaries"]["built"], 1, "{query}");
+            assert!(
+                audited["summary_fallback"]
+                    .as_str()
+                    .is_some_and(|why| why.starts_with("torn")),
+                "{query}: {audited}"
+            );
+            assert!(
+                audited["unreadable_records"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0),
+                "{query}: the garbage the summary never read is read now: {audited}"
+            );
+        }
+    }
+
+    /// **A KEPT SUMMARY'S ANSWER IS THE FULL READ'S ANSWER, IN EVERY EXTREME**
+    /// (R3-06). Each month below is asked twice: once off the summary its
+    /// writer kept, once with that summary spoiled so the bars are read whole
+    /// and summarised by the same library call. What the two say must be
+    /// identical -- only how it was had may differ.
+    #[tokio::test]
+    async fn a_kept_summary_answers_what_a_full_read_answers_in_every_extreme() {
+        let root = store_root("gaps-summary-equal");
+        let september = store::path::YearMonth::new(2018, 9).expect("a month");
+        let march = store::path::YearMonth::new(2020, 3).expect("a month");
+        let monday = i64::from(day(2018, 9, 3).days_from_epoch());
+        let one_second = store::path::Timeframe::SECOND_1;
+        let one_minute = store::path::Timeframe::MINUTE_1;
+        let owed = |day: i64| crate::calendar_of::record::owed_minutes(day).unwrap_or_default();
+        // Holes of one minute, of a run, and of whole days.
+        let holed: Vec<i64> = (monday..monday + 12)
+            .filter(|day| day % 5 != 0)
+            .flat_map(|day| minutes_of(day, &owed(day)))
+            .filter(|stamp| (stamp / 60_000_000) % 41 != 0)
+            .collect();
+        // The halt month, every owed minute held but the halt's.
+        let first_march = i64::from(day(2020, 3, 1).days_from_epoch());
+        let halted: Vec<i64> = (first_march..first_march + 31)
+            .flat_map(|day| minutes_of(day, &owed(day)))
+            .collect();
+        // A one-second index month: one dense day, one sparse afternoon, a
+        // print in a minute the calendar does not owe.
+        let dense: Vec<i64> = (33_300..55_800)
+            .map(|second| second_of(monday, second))
+            .chain(
+                (40_000..41_000)
+                    .step_by(3)
+                    .map(|s| second_of(monday + 1, s)),
+            )
+            .chain(std::iter::once(second_of(monday + 1, 60_000)))
+            .collect();
+        // A sparse one-second index month: its summary keeps no seconds.
+        let sparse: Vec<i64> = (0..1_100)
+            .map(|k| second_of(monday + 1 + k / 300, 33_300 + (k % 300) * 70))
+            .collect();
+        let series: [(
+            Vendor,
+            &str,
+            store::path::Timeframe,
+            store::path::YearMonth,
+            &[i64],
+        ); 5] = [
+            (Vendor::Zerodha, "NIFTY", one_minute, september, &holed),
+            (Vendor::Zerodha, "BANKNIFTY", one_minute, march, &halted),
+            (Vendor::Gdfl, "NIFTY", one_second, september, &dense),
+            (Vendor::Gdfl, "BANKNIFTY", one_second, september, &sparse),
+            (Vendor::Gdfl, "FINNIFTY", one_second, march, &halted),
+        ];
+        for (vendor, symbol, rung, month, stamps) in series {
+            write_rows(&root, vendor, "INDEX", symbol, None, rung, month, stamps);
+        }
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-summary-equal", None, None),
+            &root,
+        ));
+        for (vendor, symbol, rung, month, stamps) in series {
+            let query = format!(
+                "feed={}&exchange=NSE&segment=INDEX&symbol={symbol}&timeframe={}&month={month}",
+                vendor.as_str(),
+                rung.as_str()
+            );
+            let (code, kept) = gaps(&site, &query).await;
+            assert_eq!(code, axum::http::StatusCode::OK, "{query}: {kept}");
+            let bars = bars_path(&root, vendor, "INDEX", symbol, rung, month);
+            let source = kept["month"][0]["summary"].clone();
+            if rung == one_second && symbol != "NIFTY" {
+                // AN INDEX AUDIT NEEDS SECONDS A SPARSE SUMMARY DOES NOT KEEP:
+                // named, and read from the bars. Both the sparse afternoon
+                // (BANKNIFTY) and the halt month held at one print a minute
+                // (FINNIFTY) hold under half the seconds they span (D-4980).
+                assert_eq!(source, "built", "{query}: {kept}");
+                assert!(
+                    kept["month"][0]["summary_fallback"]
+                        .as_str()
+                        .is_some_and(|why| why.contains("no seconds index")),
+                    "{kept}"
+                );
+            } else {
+                assert_eq!(source, "kept", "{query}: {kept}");
+            }
+            if rung == one_minute {
+                // A MINUTE MONTH HOLDS ITS ROWS.
+                assert_eq!(kept["month"][0]["held"], stamps.len() as u64, "{query}");
+            }
+            std::fs::write(store::month_summary::path_beside(&bars), b"spoiled")
+                .expect("spoil the test's own summary");
+            let (_, built) = gaps(&site, &query).await;
+            assert_eq!(built["month"][0]["summary"], "built", "{query}");
+            assert_eq!(
+                what_it_says(kept),
+                what_it_says(built),
+                "{query}: the kept and the read answer say the same"
+            );
+        }
+    }
+
+    /// **A RECORDED HALT IS NOT OWED, ON EVERY ROUTE** (R3-06, DB-G47).
+    ///
+    /// `/calendar.json` owes a halt day what `calendar_record::owed_minutes`
+    /// lists and `/dayflags.json` what `pull::calendar::phases_of` calls
+    /// continuous; `/gaps.json` must owe exactly that on every door it audits
+    /// with -- the spot index's, the derivatives venue's, the folded one-second
+    /// index's -- and lose nothing on a series that holds every owed minute.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one halt day asked on every door the audit owes with, each \
+                  beside the calendar route it must agree with"
+    )]
+    async fn a_recorded_halt_is_not_owed_on_every_route() {
+        let root = store_root("gaps-halt-every-route");
+        let march = store::path::YearMonth::new(2020, 3).expect("a month");
+        let first = i64::from(day(2020, 3, 1).days_from_epoch());
+        let halts: Vec<i64> = pull::calendar::HALTS
+            .iter()
+            .map(|halt| halt.day)
+            .filter(|halt| (first..first + 31).contains(halt))
+            .collect();
+        assert_eq!(halts.len(), 2, "2020-03-13 and 2020-03-23");
+        for halt in &halts {
+            let record = crate::calendar_of::record::owed_minutes(*halt).expect("a sized day");
+            for venue in [
+                pull::vendor::Venue::NseIndex,
+                pull::vendor::Venue::NseCash,
+                pull::vendor::Venue::NseDerivatives,
+            ] {
+                let phases = pull::calendar::phases_of(
+                    venue,
+                    *halt,
+                    pull::calendar::CasEligibility::Unknown,
+                );
+                assert_eq!(
+                    usize::from(phases.minutes(pull::calendar::Phase::Continuous)),
+                    record.len(),
+                    "{venue:?} {}: /dayflags.json and /calendar.json owe one count",
+                    iso(*halt)
+                );
+            }
+        }
+        let owed = |day: i64| crate::calendar_of::record::owed_minutes(day).unwrap_or_default();
+        let held: Vec<i64> = (first..first + 26)
+            .flat_map(|day| minutes_of(day, &owed(day)))
+            .collect();
+        let seconds: Vec<i64> = held
+            .iter()
+            .filter(|stamp| halts.contains(&ist_second(**stamp).0))
+            .flat_map(|minute| (0..60).map(move |s| minute + s * 1_000_000))
+            .collect();
+        let owed_total: u64 = (first..first + 31).map(|day| owed(day).len() as u64).sum();
+        let owed_halts: u64 = halts.iter().map(|day| owed(*day).len() as u64).sum();
+        write_rows(
+            &root,
+            Vendor::Zerodha,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::MINUTE_1,
+            march,
+            &held,
+        );
+        write_rows(
+            &root,
+            Vendor::Zerodha,
+            "FNO",
+            "NIFTY",
+            Some("2020-03-26-1000000-CE"),
+            store::path::Timeframe::MINUTE_1,
+            march,
+            &held,
+        );
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::SECOND_1,
+            march,
+            &seconds,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-halt-every-route", None, None),
+            &root,
+        ));
+        for query in [
+            "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2020-03",
+            "feed=zerodha&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2020-03-26-1000000-CE&timeframe=1min&month=2020-03",
+            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2020-03",
+        ] {
+            let (code, body) = gaps(&site, query).await;
+            assert_eq!(code, axum::http::StatusCode::OK, "{query}: {body}");
+            let audited = &body["month"][0];
+            let runs = audited["gaps"].as_array().expect("runs");
+            for halt in &halts {
+                let lost_on_halt: u64 = runs
+                    .iter()
+                    .filter(|run| run["day"] == *halt && run["reason"] == "vendor-hole")
+                    .map(|run| run["minutes"].as_u64().unwrap_or(0))
+                    .sum();
+                assert_eq!(lost_on_halt, 0, "{query} {}: {runs:?}", iso(*halt));
+            }
+            let halts_listed = audited["halts"].as_array().expect("halts");
+            assert_eq!(halts_listed.len(), 2, "{query}: {audited}");
+            if query.contains("1min") && !query.contains("contract") {
+                // EVERY OWED MINUTE OF THE MONTH: the halt days' owed exactly
+                // the record's, the days after the 26th lost whole.
+                assert_eq!(audited["expected"], owed_total, "{query}");
+                assert_eq!(
+                    audited["lost_minutes"],
+                    owed_total - held.len() as u64,
+                    "{query}"
+                );
+            } else if query.contains("contract") {
+                // NOTHING IS OWED AFTER THE 26th EXPIRY, AND NOTHING LOST.
+                assert_eq!(audited["lost_minutes"], 0, "{query}: {audited}");
+                assert_eq!(audited["expected"], held.len() as u64, "{query}");
+            } else {
+                // ONE-SECOND, FOLDED: the halt days alone are held.
+                assert_eq!(
+                    audited["lost_minutes"],
+                    owed_total - owed_halts,
+                    "{query}: {audited}"
+                );
+            }
+        }
     }
 }
