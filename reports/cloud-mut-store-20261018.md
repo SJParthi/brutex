@@ -265,5 +265,20 @@ code ends where each file's first `#[cfg(test)]` begins: `file.rs` 5990,
 
 These are `panic!` arms of helpers, `assert!` messages and short-circuits,
 deadlines that pass only when a body never returns, and doubles' methods a
-test does not call. **No production line or branch this branch added is
-uncovered.**
+test does not call.
+
+**Intersected with this branch's own lines** (every line it adds over
+`feat/db-fix`, 4,367 of them), the uncovered set is test code alone:
+- in the scoped files: `verdict.rs` 4219, 4227, 4637, 4974, `file.rs`
+  branch 10107 and `sink.rs` branch 6934;
+- in the branch's test files:
+  - `file_fault_tests.rs` lines 320, 657, 696, 869;
+  - `file_fault_tests.rs` branches 315, 334, 650-661, 755, 845, 879, 912,
+    949;
+  - `verdict_tests.rs` 568, 813, 879, 950-951;
+  - `safe_open_tests.rs` 459;
+  - `staging_tests.rs` 133, 196, 228.
+
+Each of those is a `panic!` arm, an `assert!` short-circuit, or a match
+guard that is false only when the test fails. **No production line or branch
+this branch added is uncovered.**
