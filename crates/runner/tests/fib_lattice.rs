@@ -649,6 +649,7 @@ fn month_block_order_equals_full_sort() {
             (0..all.len() as u32).collect::<Vec<u32>>().as_slice()
         );
         assert_eq!(table.layout(), generation.layout());
+        assert_eq!(table.is_empty(), all.is_empty());
     }
 }
 
@@ -826,6 +827,7 @@ fn a_table_refuses_by_name_and_a_refused_month_changes_nothing() {
     );
     table.push_month(2, &[], &[]).unwrap();
     assert_eq!(table.len(), 1, "an empty month adds no row");
+    assert!(!table.is_empty());
     assert_eq!(table.pool(), 2);
     assert_eq!(table.months(), 3);
     assert_eq!(table.variants(), 2);
