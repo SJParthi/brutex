@@ -3941,6 +3941,194 @@ foreign extents, tails and insufficient whole-publication admission refuse.
 The independent reference pins never become a source/run,
 search, qualification or ranking identity.
 
+## §36 — Kept vendor answers, format v1 (D-4810, D-4859, D-4920)
+
+Written by `pull::response_keep` (IA-8). Every body a broker answered for a
+bar window is kept, deflated, beside a fixed receipt, so a stored minute can
+be checked against what the vendor actually sent, and a stored hole is told
+apart as "not asked", "the vendor sent nothing" or "the landing refused the
+row" (finding F7, DB-G46).
+
+```text
+<store>/responses/<vendor>/<EXCH>/<SEG>/<SYMBOL>[/<contract>]/<tf>/
+    <yyyy-mm>.rsb         deflated bodies (RFC 1951, flate2), appended
+    <yyyy-mm>.rsr         128-byte receipts, appended
+    <yyyy-mm>.rsx         24-byte refused-row records, appended
+    <yyyy-mm>.<n>.rs[brx] segment n, 1..=7, once segment n-1 is full
+    keep.lock             the directory's one lock (flock, exclusive)
+    windows.rsw           64-byte window-journal records, appended (windows over months only)
+```
+
+The directory is the bar path's own (`store::path::StorePath::for_key`
+validates every segment, and `Contract::of` renders the contract), under
+`responses/` instead of `bars/`. **The design wrote `<SEG>/<SYMBOL>`; the
+exchange level is kept** because the bar path has it, so one rule builds both
+paths. A window's body goes into its **first** month's pack; every further
+month the window covers gets a receipt only (`kept=3`). The month is the IST
+month of the asked day.
+
+**Receipt (128 bytes, little-endian, no header; a reader trusts receipts only).**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | asked from: IST midnight of the window's first day (unix s) |
+| 8 | 8 | asked to: the last second of its last day (unix s) |
+| 16 | 8 | first decoded row's stamp (unix s; 0 = none). For `kept=4`: the refused answer's whole length in bytes, and the same for a `kept=2` receipt whose `body_of` is a `kept=4` head (a refused answer repeated: the duplicate keeps the head's meaning of this field) |
+| 24 | 8 | last decoded row's stamp (unix s; 0 = none) |
+| 32 | 8 | body offset in the `.rsb` |
+| 40 | 4 | deflated length |
+| 44 | 4 | raw length |
+| 48 | 4 | rows decoded |
+| 52 | 4 | rows the landing appended |
+| 56 | 4 | rows the landing refused by name (D-3351) |
+| 60 | 4 | run id from the runs ledger (D-4880) |
+| 64 | 2 | HTTP status |
+| 66 | 1 | rung asked (`pull::vendor::Granularity` as a byte) |
+| 67 | 1 | `kept`: 0 not kept, 1 kept here, 2 the same body as receipt `body_of` of this segment, 3 the body is in the window's first month's pack, 4 the head of a refused answer is kept here |
+| 68 | 1 | reason: 0 kept, 1 `pack_full`, 2 `storage_full`, 3 `duplicate_body`, 4 `later_month`, 5 `refused_answer` |
+| 69 | 1 | landing rules version (D-4843) |
+| 70 | 1 | door: 1 `from_window`, 2 `repair_window` |
+| 71 | 1 | the segment holding the body and the refused rows (the design's reserved byte; this receipt's own segment except for a further month's pointer, `kept=3` or `kept=0`, where it is the first month's receipt's segment) |
+| 72 | 32 | BLAKE3 of the raw body kept (of the head, for `kept=4`) |
+| 104 | 8 | `store::verdict::key_hash` of the instrument key's canonical name |
+| 112 | 4 | `body_of`: the ordinal of the receipt that holds the body (its own for `kept=1` and `4`); for a further month's pointer, `kept=3` or `kept=0`, the first month's receipt (month from offset 0, segment from offset 71) |
+| 116 | 4 | the first refused-row record this receipt owns, as a record index into the `.rsx` (the design's reserved bytes 116..124, DB-G46) |
+| 120 | 4 | how many records it owns (≤ offset 56; 0 when the caller passed the count only) |
+| 124 | 4 | CRC-32C over bytes 0..124 |
+
+**Refused-row record (24 bytes, DB-G46).** 0: the row's stamp as the landing
+judged it, IST local seconds since 1970 (`fetch::Refused::local_seconds`);
+8: the owning receipt's ordinal in its segment (`u32`); 12: the cause, 1
+`timestamp_refused`, 2 `cash_eligibility_unknown`, 3 `price_off_grid`, 4
+`off_grid_candle`, 5 `conflicting_candles`, 6 `before_first_day_bar`, 7
+`foreign_level` (append-only); 13..20 zero; 20: CRC-32C over bytes 0..20. A
+`kept=3` receipt's records are its first month's receipt's (`body_of`). The
+cause at 12 is the row's own, from `fetch::Refused::causes` (parallel to
+`local_seconds`, written by the one `note` every landing refuses through),
+never re-derived from the per-(day, cause) groups (`RefusedRow::all_of`).
+
+**Order and torn writes (D-4865).** Body, then refused rows, then receipt;
+each written at the place the trusted receipts name, cut there, and synced
+(`F_FULLFSYNC` on macOS). Bytes past what the last valid receipt vouches for,
+a receipt file whose length is not a multiple of 128, and a whole last
+receipt whose CRC fails are an interrupted append that the next append
+overwrites. A receipt before the last that fails its CRC is damage: refused
+`pack_damaged`, never overwritten. A body read back is inflated to at most its
+raw length plus one byte and checked against the length and BLAKE3 of its
+receipt (`body_mismatch` otherwise).
+
+**A window over months, and which write is its commit (repair round 3).** A
+window inside one month commits with its receipt. A window over months writes,
+in this order and each synced: an `open` record in the pack directory's
+`windows.rsw`, naming the first month and the segment and ordinal its receipt
+goes to (written after every refusal that writes nothing, before the first
+byte); the first month's body, refused rows and receipt; one pointer per
+further month, first to last; then a `closed` record. **The `closed` record is
+the window's commit.** Until it is on disk the window is detectable: while no
+writer holds `keep.lock`, a last trusted record that is `open` is an
+interrupted window (`response_keep::unfinished` names it by first month,
+segment, ordinal and asked span), and **the next append, under the lock and
+before anything else, finishes it**: when the first month's segment holds
+exactly `ordinal` receipts, the receipt was never written and the record is
+closed `abandoned`; when it holds the receipt the record names (same asked
+span, BLAKE3 and run), every further month whose newest receipt is not the
+pointer to it gets that pointer, exactly as the interrupted append would have
+written it, and the record is closed `completed` with how many it wrote. Both
+are an audited `Error` event ("an interrupted window over months was finished
+by the next append", with month, segment, ordinal, state and
+`pointers_written`). Anything else in the first month is `pack_damaged`.
+Because every append finishes first, nothing has been appended since the
+interrupted one, so "the newest receipt" and "exactly `ordinal`" are exact.
+Before this, a writer killed between the first receipt and a pointer left
+that receipt with no pointer in the later month, for good, and every file
+stayed CRC-whole, so the torn-tail rule never saw it (verify-IA-8-r3: 2 of
+184 June receipts after five `SIGKILL`s).
+
+**Window-journal record (64 bytes, little-endian).** 0: asked from (`i64`);
+8: asked to (`i64`; its IST month is the window's last); 16: BLAKE3 of the
+body, as the receipt's offset 72; 48: run id (`u32`); 52: the first month's
+year (`u16`); 54: its month; 55: the segment of the first month the receipt
+goes to; 56: its ordinal there (`u16`, below 1,024); 58: state, 1 `open`, 2
+`closed`, 3 `completed` (closed by the next append), 4 `abandoned` (closed by
+the next append; no first receipt was written); 59: for `completed`, the
+pointers the next append wrote (saturating at 255), else 0; 60: CRC-32C over
+bytes 0..60. The torn-tail rule is the receipts': a partial record, or a whole
+last record whose CRC fails, is written over by the next record; a record
+before that which fails its CRC is `pack_damaged`. A reader reads the last two
+records only (one `stat`, at most 128 bytes), whatever the journal's length.
+At most 1,048,576 records (64 MiB); a window over months that needs two more
+than remain is refused `windows_full` with nothing written. A window inside
+one month writes no record.
+
+**Directory syncs.** Every write at offset 0 of a pack file (its first
+trusted bytes, whether the file was born there or held only a torn tail) is
+followed by a sync of the pack directory, a `.rsb` or `.rsx` first written
+after its month's `.rsr` included; and the parent of every directory the keeper
+creates is synced, root to pack. That the calls are made is tested
+(`every_directory_created_and_every_first_write_syncs_its_parent`, through a
+test-only record of the directories synced); that they survive a power loss is
+NOT PROVED: no test cuts the power.
+
+**One writer per pack directory.** `keep.lock` is taken exclusively around
+"read the receipts, write the body, write the receipt" and every further
+month's receipt: one `try_lock` uncontended, otherwise a blocking `flock` on
+one waiter thread bounded by 30 s, then refused `lock_stalled` (the D-4924
+bound; D-4920). A 10 ms `try_lock` poll was tried first and starved: under
+load the second of two landings was refused after 2,128 tries while the first
+never paused. A waiter whose caller's wait ran out stays parked in `flock` until the
+holder lets go; once four such abandoned waiters (`MAX_PARKED_WAITERS`) are
+parked on a lock, the next contended append is refused `lock_stalled` at
+once, naming how many are parked, so a holder that never lets go leaves at
+most four threads behind, plus any waits already in flight when the fourth
+was abandoned. A waiter whose caller is still inside its wait is never
+counted: twenty healthy appends of one pack all wait and are all kept (repair
+round 2).
+One lock per (vendor, instrument,
+timeframe) rather than the critic's one per month (`<pack>.rsr.lock`): a
+month lock would add a file to every one of the store's instrument-months, and
+landings of one instrument are serial anyway.
+
+**Caps and rolls.** A segment holds at most 64 MiB of deflated bodies,
+1,024 receipts and 2,796,202 refused-row records (`REFUSAL_ROOM`: 64 MiB of
+24-byte records in its `.rsx`). A segment that cannot take the next window's
+receipt, body or refused rows rolls to the next (an audited error event
+names the month and the new segment's receipts file, for the window's first
+month and for every further month alike); a repeated body whose rows do not fit its segment rolls too, rather than
+writing a `kept=2` receipt with no record of them. In the last of eight
+segments a body that does not fit writes a receipt `kept=0 reason=pack_full`
+(its refused rows are still written); with 1,024 receipts there, or with no
+room in its `.rsx` for the window's refused rows, nothing is written and the
+append is refused `receipts_full` or `refusals_full` naming the file, its
+audited error event "response not kept" counting the rows left unkept
+(`refused_rows`). A window that refused more rows than any segment holds is
+refused `refusals_full` at once, without spending a segment on a roll. A
+refused row is never dropped while its receipt says it was refused (verify
+round 1 of IA-8 found exactly that: the receipt written `rows_refused=5`,
+`refusals=0`, and `Ok`). A window that refused more rows than any segment holds is refused
+before any roll a full receipts file or a full body file would take, so no
+empty segment is handed rows it cannot hold (repair round 1). A window over
+months asks every later month for room for its pointer receipt before the
+first month keeps anything, so `receipts_full` there writes nothing, as it
+says. A body over
+`MAX_RESPONSE_BYTES` (64 MiB) is refused `source_refused` with nothing kept.
+A body whose BLAKE3 a receipt of the newest segment holds is not written
+again: `kept=2 reason=duplicate_body`.
+
+**A receipt's lengths are claims, checked before a read.** A reader refuses
+a receipt whose body would end past 64 MiB or inflate past
+`MAX_RESPONSE_BYTES` (`body_mismatch`), and one whose records would end past
+`REFUSAL_ROOM` (`pack_damaged`), before it allocates anything for them: no
+writer writes either, and a CRC-valid receipt could otherwise ask for 4 GiB
+of body or 96 GiB of records. The writer reads every receipt of the segment it appends to
+and refuses a CRC-valid one naming a body past 64 MiB or records past
+`REFUSAL_ROOM` as `pack_damaged`, with nothing written: such a claim used to
+roll the month for no writer's reason, and at the edge of a u32 or a u64 its
+sum overflowed into a small end that sent the next append over records
+already kept.
+
+**Never a header or a token.** The keeper takes the body text and nothing
+else (`pull::response_keep::Answered` has no header field).
+
 ## §38 — The alert queue, format v1 (D-4883, D-4893, D-4895)
 
 `<store>/audit/alerts`. One file, append-only, little-endian, packed (no field
@@ -4460,3 +4648,57 @@ that grows only when the operator saves (`docs/06-limits.md` L-R305-6).
 
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
 line above is a `v2` directory beside this one, never a rewrite of `v1`.
+
+## §37 — A GDFL run's progress record, format v1 (D-4904)
+
+**Path.** `<store>/imports/gdfl.<kind>.progress` on a version-4 census,
+`<store>/imports/gdfl.progress` on version 3 (`pull::gdfl_run::progress_path`).
+Written by the one process that runs that kind (IA-1); IA-2 adds the claim,
+request sidecar, stop file and runs-ledger subsections under this number.
+
+**Shape.** Exactly 4,096 bytes, rewritten whole by one positional write at
+offset 0, at the run's begin, at every day whose day counts changed,
+otherwise at most once a second, and at the run's end. Never appended to.
+All integers little-endian. The offsets are the definition.
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXPG` |
+| 8 | 2 | version, u16 = 1 |
+| 10 | 1 | state: 1 running, 2 stopping, 3 finished, 4 stopped, 5 shutdown, 6 source_lost, 7 disk_full, 8 refused, 9 census, 10 durability; 0 never written. Numbers are never reused |
+| 11 | 1 | mode: 1 import |
+| 12 | 1 | kind: 1 indices, 2 stocks, 3 options |
+| 13 | 1 | source: 1 `cm_zip`, 2 `nfo_zips`, 3 tickstore |
+| 14 | 1 | by: 1 cli, 2 api |
+| 15 | 1 | census layout: 3 or 4; 0 not known |
+| 16 | 8 | run: the journal's run id (0 before the first day) |
+| 24 | 4 | pid |
+| 28 | 4 | workers |
+| 32 | 4 | from, `yyyymmdd` |
+| 36 | 4 | to, `yyyymmdd` |
+| 40 | 4 | the day now, `yyyymmdd` (0 before the first) |
+| 44 | 4 | the day now's index in the range, from 0 |
+| 48 | 4 | the range's calendar days |
+| 52 | 1 | refusal slots used, 0 to 8 |
+| 53 | 3 | zero |
+| 56 | 176 | 22 u64 counters, in this order: files read, files not wanted, files refused, rows, seconds written, failures named, days imported, days done with refusals, days incomplete, days all refused, days already done, days closed (calendar), days not in source, days refused, elapsed seconds (monotonic clock), started (UNIX s), updated (UNIX s), events stamped with a held clock (`telemetry::Health::clock_held`), days in the rate's window, the window's seconds, events the run's sink dropped (`telemetry::Health::dropped`) and the sink's failed rolls (`telemetry::Health::rotation_failures`), both since the sink opened (RA-202: a run whose log loses lines half-way says so beside its counters) |
+| 232 | 24 | zero |
+| 256 | 2,816 | 8 refusal slots of 352 bytes, oldest first |
+| 3,072 | 1,020 | zero |
+| 4,092 | 4 | CRC-32C (Castagnoli) of bytes 0..4,092 |
+
+**A slot** (352 bytes, from its start): day `yyyymmdd` u32 (0); the lengths
+of stage, code, about and why, one byte each (4..8); stage, 8 bytes (8);
+code, 32 bytes (16); about, 64 bytes (48); why, 240 bytes (112). Each text
+is UTF-8 cut on a whole character to its field; the rest of a field is zero.
+
+**What a reader does.** A length other than 4,096, another magic, another
+version (`progress: format <n> unknown`: never guessed), a slot count above
+8 or a slot text that is not UTF-8 within its field are faults named by
+`pull::gdfl_run::ProgressFault`. A CRC that does not match is a torn read
+during a write: the reader reads once more, then names it
+(`Progress::read`). The rate and ETA are a reader's integer division of the
+window's days by its seconds; an ETA is always an extrapolation.
+
+**Proof.** `pull::gdfl_run::tests::the_progress_record_is_v1_byte_for_byte`
+asserts every offset above.

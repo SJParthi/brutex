@@ -107,8 +107,6 @@ pub(crate) const SOURCE_CHANGED: &str = "source_changed_since_last_run";
 pub(crate) const SOURCE_CHANGED_UNCHECKED: &str = "source_changed_unchecked";
 /// `imports/gdfl.sources` could not be read or appended.
 pub(crate) const SOURCES_LEDGER: &str = "sources_ledger_unwritten";
-/// The range runs backwards.
-pub(crate) const RANGE_BACKWARDS: &str = "range_backwards";
 
 /// The ledger of what each run read, beneath `<store>/imports`.
 pub(crate) const SOURCES: &str = "gdfl.sources";
@@ -160,21 +158,6 @@ impl std::fmt::Display for Finding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.words)
     }
-}
-
-/// The range, refused before anything is opened when it runs backwards.
-///
-/// # Errors
-///
-/// [`RANGE_BACKWARDS`], naming both days.
-pub(crate) fn range(from: pull::session::Day, to: pull::session::Day) -> Result<(), Finding> {
-    if from > to {
-        return Err(Finding::new(
-            RANGE_BACKWARDS,
-            format!("the range runs backwards: {from} is after {to}"),
-        ));
-    }
-    Ok(())
 }
 
 // ═══ 1. The source root ═════════════════════════════════════════════════════

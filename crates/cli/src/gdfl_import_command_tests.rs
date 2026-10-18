@@ -5,6 +5,7 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "a test that cannot panic cannot fail"
 )]
 
@@ -538,6 +539,11 @@ fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
 /// refused before anything is read.
 #[test]
 fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
+    // Moved with the scope into the one run authority (IA-1, D-4800).
+    use pull::gdfl_run::scope::{
+        of as scope_of, option_underlyings as stored_option_underlyings, options_tree,
+        stored_filter,
+    };
     let root = scratch("stored");
     let store = root.join("store");
     let tree = options_tree(&store);
@@ -760,4 +766,307 @@ fn the_receipt_counts_the_adjustments_and_the_ledger_lines_they_wrote() {
         none.contains("  adjustments found   0 (ex-date events; imports/gdfl.lineage)\n"),
         "{none}"
     );
+}
+
+/// **NO RUN WORKS UNLOGGED** (IA-GR-44's cli half, D-4903): a process whose
+/// sink was refused is refused `log_unavailable` after the misuse checks and
+/// before any lock, root or scope: no `imports/` is made, no line is said.
+#[test]
+fn a_run_whose_sink_was_refused_refuses_before_any_lock() {
+    let root = scratch("unlogged");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    tick_store(&ts);
+    let env = env_of(&[(TICKSTORE_VAR, ts)]);
+    let log = LogState::Refused("events.lock is held by pid 4242".to_owned());
+    let said = Mutex::new(Vec::<String>::new());
+    let say = |line: &str| said.lock().unwrap().push(line.to_owned());
+    let mut out = String::new();
+    let code = command_in(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        (&env, &|| Ok(store.clone())),
+        (&log, &say),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.starts_with("GDFL IMPORT REFUSED: log_unavailable: ")
+            && out.contains("events.lock is held by pid 4242"),
+        "{out}"
+    );
+    assert!(
+        !store.join("imports").exists(),
+        "no lock, no journal: {out}"
+    );
+    assert!(said.lock().unwrap().is_empty());
+    // A misuse is still a misuse first, whatever the log.
+    let mut out = String::new();
+    let code = command_in(
+        &["options", "tickstore", "2024-04-01", "2024-04-01", STORED],
+        (&env, &|| Ok(store.clone())),
+        (&log, &say),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.starts_with("refused: stored_with_options: "), "{out}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A run says a line a day through the one stderr writer it is handed, its
+/// begin and its end, and leaves its progress record (D-4904) beside the
+/// store's lock, finished, with the range's days in it.
+#[test]
+fn a_run_says_a_line_a_day_and_leaves_its_progress_record() {
+    let root = scratch("told");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    tick_store(&ts);
+    let env = env_of(&[(TICKSTORE_VAR, ts)]);
+    let log = LogState::Installed(store.join("logs").join("gdfl").join("store"));
+    let said = Mutex::new(Vec::<String>::new());
+    let say = |line: &str| said.lock().unwrap().push(line.to_owned());
+    let mut out = String::new();
+    let _ = command_in(
+        &[
+            "indices",
+            "tickstore",
+            "2024-04-01",
+            "2024-04-02",
+            "--snapshot",
+            "pre-1",
+        ],
+        (&env, &|| Ok(store.clone())),
+        (&log, &say),
+        &mut out,
+    );
+    let said = said.lock().unwrap().clone();
+    assert_eq!(said.len(), 4, "{said:?}");
+    assert!(said[0].starts_with("gdfl-import indices: run ") && said[0].ends_with(" begun"));
+    assert!(
+        said[1].starts_with("gdfl-import indices 2024-04-01: imported 0 done before 0 not held 1")
+    );
+    assert!(
+        said[2].starts_with("gdfl-import indices 2024-04-02: imported 0 done before 0 not held 2")
+    );
+    assert!(said[3].ends_with(" finished"), "{said:?}");
+    // No version-4 census here: the store lock's progress file.
+    let progress =
+        pull::gdfl_run::Progress::read(&store.join("imports").join("gdfl.progress")).unwrap();
+    assert_eq!(progress.state, pull::gdfl_run::RunState::Finished.code());
+    assert_eq!(
+        (progress.layout, progress.day_total, progress.days_not_held),
+        (3, 2, 2)
+    );
+    assert_eq!(progress.by, 1, "the cli");
+    // A snapshot flag with no name after it is a misuse.
+    let mut out = String::new();
+    let code = command_in(
+        &[
+            "indices",
+            "tickstore",
+            "2024-04-01",
+            "2024-04-02",
+            "--snapshot",
+        ],
+        (&env, &|| Ok(store.clone())),
+        (&log, &|_: &str| {}),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.contains("--snapshot takes a NAME"), "{out}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Where a run verb logs (D-4862): any other verb, and a word that is not a
+/// kind, keep `install_log`; a `BRUTEX_LOG_DIR` naming another directory is
+/// refused without installing anything; the run's own directory installs.
+#[test]
+fn a_run_logs_to_its_own_directory_or_says_why_not() {
+    let words = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+    assert_eq!(install_run_log(&words(&["sweep", "6", "100"])), None);
+    assert_eq!(
+        install_run_log(&words(&["gdfl-import", "futures", "zip"])),
+        None
+    );
+    assert_eq!(install_run_log(&words(&["gdfl-import"])), None);
+    let dir = Path::new("/srv/store/logs/gdfl/indices");
+    let installs = std::cell::Cell::new(0);
+    let install = |at: &Path| {
+        assert_eq!(at, dir);
+        installs.set(installs.get() + 1);
+        Ok(())
+    };
+    let other = run_log_answer(
+        Some(OsString::from("/srv/store/logs/cli-batch")),
+        dir,
+        &install,
+    );
+    assert!(
+        other.starts_with(crate::UNLOGGED) && other.contains("Unset BRUTEX_LOG_DIR"),
+        "{other}"
+    );
+    assert_eq!(installs.get(), 0, "nothing installed elsewhere");
+    let own = run_log_answer(Some(dir.as_os_str().to_owned()), dir, &install);
+    assert!(
+        own.starts_with("events -> /srv/store/logs/gdfl/indices"),
+        "{own}"
+    );
+    let none = run_log_answer(None, dir, &install);
+    assert!(none.contains("D-4862"), "{none}");
+    assert_eq!(installs.get(), 2);
+    let refused = run_log_answer(None, dir, &|_: &Path| {
+        Err("sink already installed".to_owned())
+    });
+    assert_eq!(
+        refused,
+        format!("{}: sink already installed", crate::UNLOGGED)
+    );
+}
+
+/// **ONE DIRECTORY, TWO SPELLINGS** (IA-1, D-4862): the store root is
+/// canonical, so a `BRUTEX_LOG_DIR` naming the run's own directory through a
+/// link (as `/var` names `/private/var` on macOS) is the run's directory,
+/// also before it exists; a link to another tree, a `..` out of it and a
+/// sibling kind's directory are refused by name and install nothing.
+#[test]
+fn a_log_directory_spelled_through_a_link_is_the_runs_own() {
+    let root = scratch(&format!("log-spelling-{}", std::process::id()));
+    let (real, other) = (root.join("real"), root.join("other"));
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let (link, other_link) = (root.join("link"), root.join("other-link"));
+    if !link.exists() {
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+    }
+    if !other_link.exists() {
+        std::os::unix::fs::symlink(&other, &other_link).unwrap();
+    }
+    let kind = |base: &Path, name: &str| base.join("logs").join("gdfl").join(name);
+    let dir = kind(&std::fs::canonicalize(&real).unwrap(), "indices");
+    assert!(!dir.exists(), "not made before the run");
+    let installs = std::cell::Cell::new(0);
+    let install = |at: &Path| {
+        assert_eq!(at, dir);
+        installs.set(installs.get() + 1);
+        Ok(())
+    };
+    let through = kind(&link, "indices");
+    let said = run_log_answer(Some(through.into_os_string()), &dir, &install);
+    assert!(said.starts_with("events -> "), "{said}");
+    assert_eq!(installs.get(), 1);
+    let refused = [
+        kind(&other_link, "indices"),
+        kind(&link, "indices").join("..").join("stocks"),
+        kind(&real, "stocks"),
+    ];
+    for named in refused {
+        let said = run_log_answer(Some(named.clone().into_os_string()), &dir, &install);
+        assert!(
+            said.starts_with(crate::UNLOGGED) && said.contains("Unset BRUTEX_LOG_DIR"),
+            "{}: {said}",
+            named.display()
+        );
+    }
+    assert_eq!(installs.get(), 1, "nothing installed elsewhere");
+}
+
+/// **EVERY FAILURE COUNTED, THE NEWEST LISTED** (D-4839): a receipt of more
+/// failures than a report keeps says the whole count, how many are not
+/// listed and each stage and code's count.
+#[test]
+fn the_receipt_says_how_many_failures_it_does_not_list() {
+    let mut report = Report::default();
+    let cause = pull::gdfl_import::Cause::open(pull::gdfl_import::Stage::Vendor, "malformed_row");
+    for i in 0..1_100 {
+        report.name(
+            cause,
+            pull::ingest::Failure {
+                instrument: format!("F{i}"),
+                why: "invented".to_owned(),
+                month: None,
+                day: None,
+            },
+        );
+    }
+    report.seal();
+    let mut out = String::new();
+    render(
+        &mut out,
+        ImportKind::Options,
+        "zip",
+        Path::new("/s"),
+        &report,
+    );
+    assert!(out.contains("  failures            1100\n"), "{out}");
+    assert!(
+        out.contains("(76 more not listed; the newest 1024 are;"),
+        "{out}"
+    );
+    assert!(out.contains("    vendor/malformed_row: 1100\n"), "{out}");
+    assert!(
+        out.contains("    F1099: invented") && !out.contains("    F75: "),
+        "{out}"
+    );
+}
+
+/// **`--snapshot` NEVER TAKES A FLAG AS ITS NAME** (IA-1 repair 1, the
+/// verifier's blocking finding): `--snapshot --stored` once took `--stored`
+/// as the snapshot's name, dropped the stored scope and ran the swept surface
+/// under no filter with exit 0. A flag-shaped word after `--snapshot`, a
+/// `--snapshot` with nothing after it, a second `--snapshot` and a flag the
+/// verb does not have are each refused as a misuse before the store is asked
+/// for, so before any lock or read; and the flags keep their meaning
+/// wherever a NAME sits among them.
+#[test]
+fn a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol() {
+    let ts = scratch("snapshot-flag");
+    tick_store(&ts);
+    let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
+    let head = ["indices", "tickstore", "2024-04-01", "2024-04-01"];
+    let needs_a_name = "--snapshot takes a NAME after it";
+    let cases: [(&[&str], &str); 10] = [
+        (&["--snapshot", "--stored"], needs_a_name),
+        (&["--snapshot", "--retry-refused"], needs_a_name),
+        (&["--snapshot", "--snapshot", "pre-1"], needs_a_name),
+        (&["--snapshot", "-x"], needs_a_name),
+        (&["--snapshot", "-"], needs_a_name),
+        (&["NIFTY", "--snapshot"], needs_a_name),
+        (&["--snapshot", "a", "--snapshot", "b"], "given twice"),
+        (&["--stord"], "is not a flag of gdfl-import"),
+        (&["-s", "NIFTY"], "is not a flag of gdfl-import"),
+        (&["--snapshot", ".."], "snapshot_invalid"),
+    ];
+    for (rest, says) in cases {
+        let args: Vec<&str> = head.iter().chain(rest).copied().collect();
+        let mut out = String::new();
+        let code = command_with(
+            &args,
+            &env,
+            &|| Err("the store was asked for".to_owned()),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{args:?}: {out}");
+        assert!(out.starts_with("refused: "), "{args:?}: {out}");
+        assert!(out.contains(says), "{args:?}: {out}");
+        assert!(!out.contains("the store was asked for"), "{args:?}: {out}");
+    }
+    let flags = [
+        "--stored",
+        "--snapshot",
+        "pre-1",
+        "NIFTY",
+        "--retry-refused",
+        "BANKNIFTY",
+    ];
+    let request = asked(
+        ("indices", "tickstore", "2024-04-01", "2024-04-01", &flags),
+        &env,
+    )
+    .unwrap();
+    assert!(request.stored && request.retry_refused, "{request:?}");
+    assert_eq!(request.snapshot.as_deref(), Some("pre-1"));
+    assert_eq!(request.only, ["NIFTY", "BANKNIFTY"]);
+    std::fs::remove_dir_all(ts).unwrap();
 }

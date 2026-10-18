@@ -392,10 +392,16 @@ pub use self::day::{drive, drive_from};
 #[cfg(test)]
 use self::filing::symbol_id_of;
 use self::filing::{BeginGate, JobRead, ReadJob, on_workers, take_quality};
+pub(crate) use self::journal::Journal;
+pub use self::journal::Refreshed;
 pub(crate) use self::journal::append_lines;
-pub use self::journal::{BAR_DEFINITION, definition_is_current, journal_path};
 #[cfg(test)]
-use self::journal::{Journal, closing_line, count_of, torn_fragment};
+pub(crate) use self::journal::load_warning;
+pub use self::journal::{
+    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, definition_is_current, done_whole_days, journal_path,
+};
+#[cfg(test)]
+use self::journal::{closing_line, count_of, torn_fragment};
 
 /// The telemetry target every event of this module carries.
 pub const TARGET: &str = "gdfl.import";
@@ -891,7 +897,45 @@ pub struct RunOptions<'a> {
     /// leaves do not depend on it either
     /// (`gdfl_import_tests::the_durability_unit_changes_no_byte_a_run_leaves`).
     pub durability: Durability,
+    /// Who is told how the run goes, day by day (IA-1, design §5.1): the
+    /// progress file `crate::gdfl_run::ProgressFile` and the cli's line a
+    /// day. `None` tells no one. Called on the coordinating thread only,
+    /// never from a worker, and never changes a byte the run leaves.
+    pub observer: Option<&'a dyn Observer>,
 }
+
+/// What a run tells whoever started it, as it goes (IA-1, design §5.1:
+/// "the observer is the progress file").
+///
+/// Every call is made on the run's coordinating thread, between days: one
+/// `Option` test a day when no one observes, and nothing inside a file or a
+/// worker, so the observer can never slow a file or reorder a write. A run
+/// that refuses before its first day is told only [`Observer::finished`].
+pub trait Observer: Sync + std::fmt::Debug {
+    /// The run has its journal id and is about to read its first day (or
+    /// the days of its first month it owes, before them).
+    fn begun(&self, kind: ImportKind, run: u64);
+    /// Day `index` (from 0) of the `total` calendar days of the run's range
+    /// is about to be asked of the journal and the calendar.
+    fn day_begun(&self, kind: ImportKind, day: Day, at: (usize, usize));
+    /// The day is passed, whatever became of it (closed, skipped as done,
+    /// declined by the calendar, not held): `report` is the run's so far.
+    fn day_passed(&self, kind: ImportKind, day: Day, report: &Report);
+    /// The run's last word: its whole report (sealed, [`Report::seal`]), or
+    /// the refusal that stopped it.
+    fn finished(&self, kind: ImportKind, end: Result<&Report, &ImportRefusal>);
+}
+
+/// How many failures a [`Report`] keeps by name: the newest (the design's
+/// D-4839). Every failure past them is still counted, in
+/// [`Report::failures_total`] and by its stage and code in
+/// [`Report::failures_by_cause`], and its name is in the journal's closing
+/// line and the audit stream.
+pub const FAILURES_KEPT: usize = 1_024;
+
+/// How many of the newest failures a [`Report`] keeps with their cause, for
+/// the progress record's refusal slots (D-4904 as built: 8 slots).
+pub const RECENT_KEPT: usize = 8;
 
 /// When an import's writes are made durable (WP-16, DB-N25, D-3353).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1479,6 +1523,60 @@ pub struct Report {
     /// bars are in [`Report::seconds_committed`], and it writes no `.prv`
     /// record (a revision carries none).
     pub months_repaired: usize,
+    /// Every failure the run named, kept by name in `failures` or not: the
+    /// count a caller decides `FAILED` by (D-4839). `failures` holds at most
+    /// [`FAILURES_KEPT`] of them, the newest.
+    pub failures_total: usize,
+    /// Every failure the run named, counted by its stage word and code
+    /// (D-4839): one entry per distinct pair, so a systematic refusal of
+    /// every file of a day is one line with its count.
+    pub failures_by_cause: std::collections::BTreeMap<(&'static str, &'static str), usize>,
+    /// The newest [`RECENT_KEPT`] failures with their causes, oldest first:
+    /// what the progress record's refusal slots show (D-4904).
+    pub recent: Vec<(Cause, Failure)>,
+}
+
+impl Report {
+    /// Names one failure of the run (D-4839): counted in
+    /// [`Report::failures_total`] and [`Report::failures_by_cause`], kept by
+    /// name among the newest [`FAILURES_KEPT`], and among the newest
+    /// [`RECENT_KEPT`] with its cause. O(1) amortised: `failures` grows to
+    /// twice the bound and then drops its older half in one move, and
+    /// [`Report::seal`] cuts it to the bound at the run's end, so no failure
+    /// costs a move of the whole list.
+    pub fn name(&mut self, cause: Cause, failure: Failure) {
+        self.failures_total = self.failures_total.saturating_add(1);
+        let counted = self
+            .failures_by_cause
+            .entry((cause.stage.as_str(), cause.code))
+            .or_insert(0);
+        *counted = counted.saturating_add(1);
+        if self.recent.len() == RECENT_KEPT {
+            self.recent.remove(0);
+        }
+        self.recent.push((cause, failure.clone()));
+        if self.failures.len() >= 2 * FAILURES_KEPT {
+            self.failures.drain(..FAILURES_KEPT);
+        }
+        self.failures.push(failure);
+    }
+
+    /// Cuts `failures` to the newest [`FAILURES_KEPT`] (D-4839). Called once
+    /// at the end of every run; idempotent.
+    pub fn seal(&mut self) {
+        if let Some(over) = self.failures.len().checked_sub(FAILURES_KEPT)
+            && over > 0
+        {
+            self.failures.drain(..over);
+        }
+    }
+
+    /// The failures named and no longer kept by name (D-4839): what the
+    /// receipt says "and N more" of.
+    #[must_use]
+    pub const fn failures_unlisted(&self) -> usize {
+        self.failures_total.saturating_sub(self.failures.len())
+    }
 }
 
 /// What one run is asked to do.

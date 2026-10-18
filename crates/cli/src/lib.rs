@@ -73,7 +73,7 @@ mod columns_tests;
 /// `cli gdfl-dayflags`: the GDFL day ledger of days already imported (D-3335).
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
-mod gdfl_import_command;
+pub mod gdfl_import_command;
 /// `cli gdfl-rekey`: stored GDFL option keys the decoder files elsewhere or
 /// refuses, moved as new files or retired by name (D-3331, D-3316; WP-12c).
 mod gdfl_rekey;
