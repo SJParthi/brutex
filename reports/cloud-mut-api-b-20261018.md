@@ -149,7 +149,7 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 |---|---:|---:|---:|---:|---:|
 | `autopilot.rs` | 371 | 305 | 7 (+1, see below) | 0 | 58 |
 | `pullrun.rs` | 466 | running | | | |
-| `server.rs` | 1,514 | queued | | | |
+| `server.rs` | 1,509 | queued | | | |
 
 `autopilot.rs` counts its first run with the 20 out-of-module kills replaced
 by their retried re-check (`p1b`). Of those 20, 13 were caught again by a
@@ -184,8 +184,8 @@ each by the flaky test.
 
 ## Left (in progress)
 
-- Phase 1: `pullrun.rs` (466) and `server.rs` (1,514), running with retries
-  (12:39 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 128 of 1,514).
+- Phase 1: `pullrun.rs` (466) and `server.rs` (1,509), running with retries
+  (13:00 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 189 of 1,509).
   `pullrun.rs` survivors so far: `996:24` and `2360:49`, each closed by a new
   test (below).
 - New tests so far, each measured failing on its hand-applied mutant and
