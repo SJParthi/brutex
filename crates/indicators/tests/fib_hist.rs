@@ -317,9 +317,9 @@ fn quantile_is_lower_edge_and_bounded_probes() {
     assert_eq!(bound, 10);
 }
 
-/// The work counter the bench rows read is exact: one unit per stage, query
-/// and discard, and the leaves plus one for a commit — the leaves only on a
-/// day that staged a value.
+/// The work counter the bench rows read is exact: one unit per stage, query,
+/// commit and discard, plus the leaves when a commit or a discard meets a
+/// staged value.
 #[test]
 fn the_work_counter_counts_each_operation() {
     let leaves = u64::try_from(BASE_BINS).unwrap();
@@ -342,7 +342,18 @@ fn the_work_counter_counts_each_operation() {
     past.observe_censored();
     past.discard_day();
     past.mid_rank(5).unwrap();
-    assert_eq!(past.work(), leaves + 6);
+    assert_eq!(
+        past.work(),
+        leaves + 6,
+        "a censored-only day clears no leaf"
+    );
+    past.observe(7).unwrap();
+    past.discard_day();
+    assert_eq!(
+        past.work(),
+        leaves + leaves + 8,
+        "discarding a staged value clears every leaf"
+    );
 }
 
 /// FM-F020: a total past `u32::MAX / 1000` keeps an exact permille (the

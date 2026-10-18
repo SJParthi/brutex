@@ -649,10 +649,12 @@ impl OwnPast {
     }
 
     /// Drops today's staged values: a non-tradable day, or a day that failed
-    /// mid-way, leaves the histogram as it was.
+    /// mid-way, leaves the histogram as it was. It clears every leaf only when
+    /// a value was staged, and counts that work.
     pub fn discard_day(&mut self) {
         if self.staged_values > 0 {
             self.leaves.iter_mut().for_each(|leaf| leaf.staged = 0);
+            self.did(u64::try_from(self.leaves()).unwrap_or(u64::MAX));
         }
         self.staged_values = 0;
         self.staged_censored = 0;
