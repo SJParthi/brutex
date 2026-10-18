@@ -175,7 +175,7 @@ pub(super) async fn gaps_json(
             Ok(done) => done,
             Err(why) => return calendar_admission_refused(&why),
         };
-    if let Some((status, body)) = writers_only(&months) {
+    if let Some((status, body)) = writers_only(&months, &denominator) {
         return (status, json(), body);
     }
 
@@ -186,20 +186,62 @@ pub(super) async fn gaps_json(
     )
 }
 
-/// WRITERS ONLY: ASK AGAIN (R3-08 repair 2, NEW-21). When every month of the
-/// span that would not open, and every session-evidence read that failed,
-/// met a writer, the audit is not an answer yet: the one being-written 503
-/// (`Retry-After`, counted `being_written`), which the gaps page asks again
-/// on. `None` when nothing met a writer, or when any other fault is beside a
-/// held month: that is answered as the audit it is, the held month named and
-/// counted apart (`months_being_written`), never absent and never lost.
-fn writers_only(months: &[AuditedMonth]) -> Option<(axum::http::StatusCode, String)> {
-    let faults: Vec<String> = months
-        .iter()
-        .flat_map(|m| [&m.being_written, &m.absent_file, &m.evidence_error])
-        .flatten()
-        .cloned()
-        .collect();
+/// WRITERS ONLY: ASK AGAIN (R3-08 repairs 2 and 3, NEW-21). When the audit's
+/// every fault is a month that met a writer, it is not an answer yet: the one
+/// being-written 503 (`Retry-After`, counted `being_written`), which the gaps
+/// page asks again on. `None` when nothing met a writer, or when ANY other
+/// fault is beside a held month: that is answered as the audit it is, the
+/// held month named and counted apart (`months_being_written`), never absent
+/// and never lost, and the fault named where it lies.
+///
+/// # What counts as another fault
+///
+/// Everything the answer would name as damage, and nothing it reports as a
+/// finding: a month that would not open, session evidence that would not
+/// read, records that would not read (`unreadable_records` above zero),
+/// timestamps off the grid or out of order (`invalid_timestamps`), and a peer
+/// whose calendar would not read (`calendar.unreadable`). Repair 2 collected
+/// only the first two, so a month that OPENED with a damaged block was no
+/// fault here, and its 73 unreadable records were hidden behind "being
+/// written, ask again" for as long as the writer held another month
+/// (verify-R3-08-r3). Lost minutes are what the audit is for, not a fault:
+/// beside a writer they are said once the held month is read, as before.
+/// A month its kept summary answered read no record (`unreadable` null), so
+/// it names no damage and is no fault.
+///
+/// O(months in the span), which the span's own cap bounds; no read.
+fn writers_only(
+    months: &[AuditedMonth],
+    denominator: &Denominator,
+) -> Option<(axum::http::StatusCode, String)> {
+    let mut faults: Vec<String> = Vec::new();
+    for audited in months {
+        faults.extend(
+            [
+                &audited.being_written,
+                &audited.absent_file,
+                &audited.evidence_error,
+            ]
+            .into_iter()
+            .flatten()
+            .cloned(),
+        );
+        if let Some(records) = audited.unreadable.filter(|records| *records > 0) {
+            faults.push(format!("{}: {records} unreadable records", audited.month));
+        }
+        if audited.invalid_timestamps > 0 {
+            faults.push(format!(
+                "{}: {} invalid timestamps",
+                audited.month, audited.invalid_timestamps
+            ));
+        }
+    }
+    faults.extend(
+        denominator
+            .unreadable
+            .iter()
+            .map(|peer| format!("the calendar of {peer} would not read")),
+    );
     crate::detail::being_written_answer(&faults)
 }
 
@@ -4095,5 +4137,126 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One audited month as `audit_one` would leave it, clean: read whole,
+    /// nothing absent, nothing damaged.
+    fn audited(month: u8) -> AuditedMonth {
+        AuditedMonth {
+            month: store::path::YearMonth::new(2019, month).expect("a legal month"),
+            expected: 375,
+            held: 375,
+            invalid_timestamps: 0,
+            lost: 0,
+            absent: 0,
+            unmeasured: 0,
+            absent_file: None,
+            being_written: None,
+            evidence_error: None,
+            unreadable: Some(0),
+            truncated: false,
+            runs: String::new(),
+            seconds: String::new(),
+            summary: SummarySource::Built,
+            fallback: None,
+            records_read: 375,
+        }
+    }
+
+    /// One month a writer held past the read's patience, as `audit_one`
+    /// leaves it: nothing read, owed, held or lost.
+    fn writing(month: u8) -> AuditedMonth {
+        AuditedMonth {
+            expected: 0,
+            held: 0,
+            being_written: Some(format!(
+                "/s/bars/x.lock: {}: another writer holds /s/bars/x.lock",
+                store::flock::BEING_WRITTEN
+            )),
+            unreadable: None,
+            summary: SummarySource::BeingWritten,
+            records_read: 0,
+            ..audited(month)
+        }
+    }
+
+    /// **EVERY FAULT BESIDE A HELD MONTH IS ANSWERED, NOT ASKED AGAIN** (R3-08
+    /// repair 3; NEW-21). `writers_only` named the months that would not open
+    /// and the evidence that would not read, and nothing else: records that
+    /// would not read, timestamps off the grid, and a peer whose calendar
+    /// would not read were no fault to it, so each was hidden behind the
+    /// being-written 503 for as long as a writer held another month. Each
+    /// fault on its own beside a held month is now the 200, and a month that
+    /// is only clean, or answered by its kept summary (`unreadable` null: no
+    /// record read, so no damage seen), is still the 503.
+    #[test]
+    fn every_fault_beside_a_held_month_is_answered_not_asked_again() {
+        // THE WRITER AS THE ONLY FAULT: ask again.
+        let kept = AuditedMonth {
+            unreadable: None,
+            summary: SummarySource::Kept,
+            records_read: 0,
+            ..audited(10)
+        };
+        for beside in [audited(10), kept] {
+            let (status, body) = writers_only(&[beside, writing(11)], &Denominator::table())
+                .expect("a writer beside a clean month is asked again");
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert!(body.contains(crate::detail::BEING_WRITTEN_FIELD), "{body}");
+        }
+
+        // EACH OTHER FAULT ON ITS OWN BESIDE THE WRITER: answered.
+        for (what, beside) in [
+            (
+                "unreadable records",
+                AuditedMonth {
+                    unreadable: Some(73),
+                    ..audited(12)
+                },
+            ),
+            (
+                "invalid timestamps",
+                AuditedMonth {
+                    invalid_timestamps: 2,
+                    ..audited(12)
+                },
+            ),
+            (
+                "an absent file",
+                AuditedMonth {
+                    absent_file: Some("no such file".to_owned()),
+                    ..audited(12)
+                },
+            ),
+            (
+                "unread session evidence",
+                AuditedMonth {
+                    evidence_error: Some("a torn receipt".to_owned()),
+                    ..audited(12)
+                },
+            ),
+        ] {
+            assert!(
+                writers_only(&[writing(11), beside], &Denominator::table()).is_none(),
+                "{what} beside a held month is answered as the audit it is"
+            );
+        }
+        let peers = Denominator {
+            unreadable: vec!["gdfl:BANKNIFTY".to_owned()],
+            ..Denominator::table()
+        };
+        assert!(
+            writers_only(&[writing(11)], &peers).is_none(),
+            "a peer whose calendar would not read is named, not asked again"
+        );
+
+        // NOTHING HELD: no "ask again" at all, damaged or not.
+        let damaged = AuditedMonth {
+            unreadable: Some(1),
+            ..audited(12)
+        };
+        assert!(writers_only(&[audited(10)], &Denominator::table()).is_none());
+        assert!(writers_only(&[damaged], &Denominator::table()).is_none());
+        assert!(writers_only(&[], &Denominator::table()).is_none());
     }
 }

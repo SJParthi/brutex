@@ -1411,6 +1411,115 @@ async fn a_gaps_audit_beside_a_writer_never_counts_the_held_month_absent() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A DAMAGED MONTH BESIDE A WRITER IS ANSWERED, NOT ASKED AGAIN** (R3-08
+/// repair 3, verify-R3-08-r3 blocking; NEW-21). `writers_only` collected only
+/// the months that would not open and the session evidence that would not
+/// read, so a month that OPENED but held records that would not read was no
+/// fault to it: on a shadow of the real store, gdfl NIFTY 1s 2019-10..2020-01
+/// with one byte of 2020-01 flipped answered 200 naming 73 unreadable records
+/// and a lost minute, and the same request with 2019-11 held by `lockf(1)`
+/// answered the being-written 503, naming the writer only. The damage stayed
+/// hidden for as long as the writer held its month. Now:
+///
+/// * free: 200, December's unreadable records named;
+/// * January held: still 200, December's unreadable records still named,
+///   January `being_written` with the holder's sentence, owing, holding and
+///   losing nothing, counted in `months_being_written`, never absent;
+/// * the writer gone: 200, nothing being written, the damage still named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gaps_audit_beside_a_writer_still_names_a_damaged_month() {
+    let (root, path, symbol_id) = one_month("gaps-writer-beside-damage");
+    // 2023-12-01 09:15 IST onward: 600 invented bars over two days.
+    let (december, _) = add_month(
+        &root,
+        (Vendor::Zerodha, store::path::Timeframe::MINUTE_1),
+        (2023, 12),
+        (19_692 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60, 60, 600),
+    );
+    // ONE BYTE FLIPPED INSIDE RECORD 100, in this test's own scratch file:
+    // the checksum block that covers it (records 73..146) no longer verifies.
+    let file = root.join(december.to_string());
+    let mut bytes = std::fs::read(&file).expect("December's bars");
+    let at = usize::try_from(store::format::HEADER_LEN + 100 * store::format::RECORD_STRIDE + 8)
+        .expect("an offset inside the file");
+    bytes[at] ^= 0xff;
+    std::fs::write(&file, &bytes).expect("the damaged copy");
+    let range = "/gaps.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2023-12&to=2024-01";
+    let audit_of = |answer: &str| -> serde_json::Value {
+        let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let json = body
+            .find('{')
+            .zip(body.rfind('}'))
+            .and_then(|(from, to)| body.get(from..=to))
+            .unwrap_or("");
+        serde_json::from_str(json).unwrap_or_else(|why| panic!("gaps JSON: {why}: {json}"))
+    };
+    let damage_named = |audit: &serde_json::Value, when: &str| {
+        let december = &audit["month"][0];
+        assert_eq!(december["month"], "2023-12", "{when}: {december}");
+        let unreadable = december["unreadable_records"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{when}: December's records were read: {december}"));
+        assert!(unreadable > 0, "{when}: the damage is named: {december}");
+        assert!(december["being_written"].is_null(), "{when}: {december}");
+        assert!(december["absent_file"].is_null(), "{when}: {december}");
+    };
+    let writer_root = root.clone();
+    live(&root, |addr| async move {
+        let (answer, _) = get(addr, range).await;
+        assert_eq!(status_of(&answer), "200", "free: {}", head_text(&answer));
+        let free = audit_of(&answer);
+        damage_named(&free, "free");
+        assert_eq!(free["months_being_written"], 0, "{free}");
+
+        let (writer, release) = hold(&writer_root, path, symbol_id, "r3-08-gaps-damage-writer");
+        let (answer, _) = get(addr, range).await;
+        assert_eq!(
+            status_of(&answer),
+            "200",
+            "damage beside a writer is answered, not asked again: {}",
+            head_text(&answer)
+        );
+        assert!(
+            !head_of(&answer).contains("retry-after"),
+            "{}",
+            head_text(&answer)
+        );
+        let held = audit_of(&answer);
+        damage_named(&held, "held");
+        assert_eq!(held["months"], 2, "{held}");
+        assert_eq!(held["months_being_written"], 1, "{held}");
+        assert_eq!(held["months_absent"], 0, "{held}");
+        let january = &held["month"][1];
+        assert_eq!(january["month"], "2024-01", "{january}");
+        let why = january["being_written"]
+            .as_str()
+            .expect("the holder's sentence");
+        assert!(why.contains(store::flock::BEING_WRITTEN), "{january}");
+        assert!(why.contains("r3-08-gaps-damage-writer"), "{january}");
+        assert!(january["absent_file"].is_null(), "{january}");
+        assert_eq!(january["expected"], 0, "{january}");
+        assert_eq!(january["held"], 0, "{january}");
+        assert_eq!(january["lost_minutes"], 0, "{january}");
+
+        release.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        let (answer, _) = get(addr, range).await;
+        assert_eq!(
+            status_of(&answer),
+            "200",
+            "released: {}",
+            head_text(&answer)
+        );
+        let released = audit_of(&answer);
+        damage_named(&released, "released");
+        assert_eq!(released["months_being_written"], 0, "{released}");
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The being-written answer is for a read whose EVERY fault is a writer:
 /// none at all, or any other fault beside one, is no "ask again"; past
 /// [`crate::detail::being_written_answer`]'s naming bound the rest are
@@ -1723,6 +1832,75 @@ async fn the_pools_answer_names_the_front_end_row_it_counts() {
 // and the closed loop at 16, 64 and 256 clients — are in `tests/pool_load.rs`:
 // they fill the process-wide pools for seconds, which in this process would
 // refuse the store reads of every test running beside them.
+
+/// **A WHOLE MONTH OF EXACTLY THE ROW CAP IS SERVED WHOLE** (R3-08 repair 3,
+/// RA-060; verify-R3-08-r3 follow-up "no test serves exactly 60,000 rows").
+/// The cap is the most one answer serves, not one past it: an invented GDFL
+/// NIFTY one-second month of exactly
+/// [`crate::server::bars_route::MAX_MONTH_ANSWER_ROWS`] rows is a 200 with
+/// every row, and one row more is the named refusal
+/// (`a_whole_month_past_the_row_cap_is_refused_by_name`). A `>=` in the cap's
+/// comparison refuses this month, and this test is what says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_whole_month_of_exactly_the_row_cap_is_served_whole() {
+    /// One NSE session in seconds, 09:15:00 to 15:30:00 IST.
+    const SESSION: i64 = 22_500;
+    let root = crate::scratch::path("pool-table-row-cap-exact");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("masters")).expect("an owned root");
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: store::path::Timeframe::SECOND_1,
+        month: store::path::YearMonth::new(2024, 1).expect("a legal month"),
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id is the cross-check `open` folds; any 32 bits serve"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let mut file =
+        store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+    let cap = i64::try_from(crate::server::bars_route::MAX_MONTH_ANSWER_ROWS).expect("small");
+    // 2, 3 and 4 January 2024, from 09:15:00 IST, one invented bar a second:
+    // `0..cap` is exactly the cap, where the refusal's test writes `0..=cap`.
+    let rows: Vec<store::format::Bar> = (0..cap)
+        .map(|n| {
+            let day = 19_724 + n / SESSION;
+            let open = (day * 86_400 - 19_800 + 9 * 3_600 + 15 * 60) * 1_000_000;
+            store::format::Bar {
+                ts_micros: open + (n % SESSION) * 1_000_000,
+                open: 1_000,
+                high: 1_010,
+                low: 990,
+                close: 1_005,
+                volume: 0,
+                open_interest: i64::MIN,
+            }
+        })
+        .collect();
+    file.append(&rows).expect("legal bars");
+    drop(file);
+    let month = "/bars.json?feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s\
+                 &month=2024-01";
+    live(&root, |addr| async move {
+        let (whole, _) = get(addr, month).await;
+        assert_eq!(status_of(&whole), "200", "{}", head_text(&whole));
+        assert!(!whole.contains("too_many_rows"), "{}", head_text(&whole));
+        assert_eq!(
+            whole.matches("\"t\":").count(),
+            crate::server::bars_route::MAX_MONTH_ANSWER_ROWS,
+            "every row of a month at the cap is served"
+        );
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
 
 /// **A WHOLE MONTH PAST THE ROW CAP IS REFUSED BY NAME, BEFORE A RECORD IS
 /// READ, AND POINTED AT THE PAGED ROUTE** (R3-08, RA-060). An invented GDFL
