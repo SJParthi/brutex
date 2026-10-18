@@ -225,12 +225,15 @@ fn zero_one_two_to_the_forty_and_i64_max_rank_like_any_other_value() {
     assert_eq!(past.value_at_rank(3).unwrap(), 1 << 40);
     assert_eq!(past.leaves(), BASE_BINS);
     assert_eq!(past.refused_full(), 0);
+    assert_eq!(past.refused_negative(), 0);
     let mut negative = OwnPast::empty();
     assert_eq!(
         negative.observe(-1),
         Err(HistRefusal::NegativeValue { value: -1 })
     );
     assert_eq!(negative.refused_negative(), 1);
+    assert!(negative.observe(i64::MIN).is_err());
+    assert_eq!(negative.refused_negative(), 2, "each refusal is counted");
     assert_eq!(
         negative.mid_rank(-1),
         Err(HistRefusal::NegativeValue { value: -1 })
