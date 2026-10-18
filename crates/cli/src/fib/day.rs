@@ -2065,7 +2065,8 @@ pub fn reference_check(
             )
         })
     };
-    let none = std::collections::HashMap::with_capacity(0);
+    // No month before carries no close; sized for the closes a month carries.
+    let none = std::collections::HashMap::with_capacity(indices.len());
     let previous = match month_before(when) {
         Some(before) => build(before, &none)?.carried,
         None => none.clone(),
