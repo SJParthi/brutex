@@ -1509,3 +1509,107 @@ fn the_tick_lags_an_unannounced_change_by_the_days_it_had() {
         assert_eq!(finer.tick(), Ok(if n < 5 { 5 } else { 1 }), "day {n}");
     }
 }
+
+/// Every body cut short anywhere — inside the header, a counter, a varint, the
+/// depth table, a tick entry or a bank cell — is refused, never read as a
+/// shorter histogram.
+#[test]
+fn every_truncated_body_is_refused() {
+    let raw = [1_000, 1_010, 5, 300];
+    let mut split = committed(&raw);
+    split.split(1_000, &raw).unwrap();
+    let mut tick = ObservedTick::empty();
+    for price in [500_000, 500_005, 500_015] {
+        tick.observe(price).unwrap();
+    }
+    tick.commit_day().unwrap();
+    let mut tick_body = Vec::new();
+    tick.encode(&mut tick_body).unwrap();
+    let mut bank = HistBank::new(shape());
+    bank.observe(&CellKey::stock(Measure::AbsMoveBp), 40)
+        .unwrap();
+    bank.commit_day().unwrap();
+    let mut bank_body = Vec::new();
+    bank.encode(&mut bank_body).unwrap();
+    for whole in [body(&committed(&raw)), body(&split)] {
+        for cut in 0..whole.len() {
+            assert!(OwnPast::decode(&whole[..cut]).is_err(), "cut at {cut}");
+        }
+        assert!(OwnPast::decode(&whole).is_ok());
+    }
+    for cut in 0..tick_body.len() {
+        assert!(
+            ObservedTick::decode(&tick_body[..cut]).is_err(),
+            "cut at {cut}"
+        );
+    }
+    for cut in (0..bank_body.len()).step_by(7).chain(0..64) {
+        assert!(HistBank::decode(&bank_body[..cut]).is_err(), "cut at {cut}");
+    }
+    assert!(HistBank::decode(&bank_body).is_ok());
+}
+
+#[test]
+fn a_tick_series_at_its_day_count_top_refuses_the_commit() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(TICK_MAGIC);
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    varint(&mut bytes, 0);
+    let mut tick = ObservedTick::decode(&bytes).unwrap();
+    tick.observe(10_000).unwrap();
+    tick.observe(10_005).unwrap();
+    assert_eq!(tick.commit_day(), Err(HistRefusal::DaysFull));
+    assert_eq!(tick.committed_days(), u32::MAX, "nothing committed");
+}
+
+#[test]
+fn counts_and_positions_that_overflow_are_refused_by_name() {
+    let refused_past = |bytes: &[u8]| match OwnPast::decode(bytes) {
+        Err(HistRefusal::SnapshotInvalid { what }) => what,
+        other => panic!("{other:?}"),
+    };
+    // A sparse list whose second zero-run carries the position past u64.
+    let good = body(&committed(&[0, 5]));
+    let mut far = good[..good.len() - 5].to_vec();
+    varint(&mut far, 2);
+    varint(&mut far, 0);
+    varint(&mut far, 1);
+    varint(&mut far, u64::MAX);
+    varint(&mut far, 1);
+    assert_eq!(refused_past(&far), "sparse");
+    // A tick body whose entries' days overflow a u32.
+    let mut tick = Vec::new();
+    tick.extend_from_slice(TICK_MAGIC);
+    tick.extend_from_slice(&1_u32.to_le_bytes());
+    tick.extend_from_slice(&u32::MAX.to_le_bytes());
+    tick.extend_from_slice(&0_u32.to_le_bytes());
+    tick.extend_from_slice(&0_u64.to_le_bytes());
+    varint(&mut tick, 2);
+    varint(&mut tick, 5);
+    varint(&mut tick, u64::from(u32::MAX));
+    varint(&mut tick, 10);
+    varint(&mut tick, 1);
+    assert_eq!(
+        ObservedTick::decode(&tick),
+        Err(HistRefusal::SnapshotInvalid { what: "tick_days" })
+    );
+    // A bank shape whose style, variant or level count passes u16.
+    for field in 0..3 {
+        let mut bank = Vec::new();
+        bank.extend_from_slice(BANK_MAGIC);
+        bank.extend_from_slice(&1_u32.to_le_bytes());
+        varint(&mut bank, 1);
+        varint(&mut bank, 1);
+        for at in 0..3 {
+            varint(&mut bank, if at == field { 70_000 } else { 1 });
+        }
+        assert_eq!(
+            HistBank::decode(&bank),
+            Err(HistRefusal::SnapshotInvalid { what: "shape" }),
+            "field {field}"
+        );
+    }
+}

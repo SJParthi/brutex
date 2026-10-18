@@ -801,11 +801,9 @@ fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usi
             start += here;
         }
         for slot in order.iter() {
-            if let Some(at) = counts.get_mut(digit(*slot, shift)) {
-                if let Some(place) = scratch.get_mut(*at) {
-                    *place = *slot;
-                }
-                *at += 1;
+            let place = next_place(counts, digit(*slot, shift));
+            if let Some(cell) = place.and_then(|at| scratch.get_mut(at)) {
+                *cell = *slot;
             }
         }
         order.copy_from_slice(scratch);
@@ -813,6 +811,14 @@ fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usi
     let len = order.len();
     let per_pass = u64::try_from(len + len + len + BUCKETS + BUCKETS).unwrap_or(u64::MAX);
     PASSES * per_pass
+}
+
+/// The next free place of digit `digit` in this pass, taken.
+fn next_place(counts: &mut [usize], digit: usize) -> Option<usize> {
+    let at = counts.get_mut(digit)?;
+    let place = *at;
+    *at += 1;
+    Some(place)
 }
 
 /// Orders each run of equal keys in `order` by the exact move, `(c1 − p1) x
