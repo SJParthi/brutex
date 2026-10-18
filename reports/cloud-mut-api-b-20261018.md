@@ -116,15 +116,25 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
   on the checked-in profile in phase 2.
 - `--timeout 600 --build-timeout 1200`. A disk watchdog logs free space every
   minute and removes `/tmp/brutex-<pid>-*` fixtures whose process is gone.
+- **A flaky test killed mutants it cannot see, so every run retries.** The
+  first `autopilot.rs` run had no retries. Three mutants the 17 Oct pass had
+  argued equivalent came back "caught", and the log of each named its killer:
+  `server::head_deadline_body_tests::slow_readers_at_the_cap_are_served_whole_and_the_next_waits`,
+  an AH-02 timing test that serves a router with no autopilot in it. Under
+  three workers' load it failed on seven `autopilot.rs` mutants, and one
+  `census_cache` timing test failed on one more. A real kill fails on every
+  attempt, and a flake does not. So the workers were stopped (their sources
+  checked byte-identical to the tree they launched from) and restarted with
+  nextest `--retries=2`. Every `autopilot.rs` mutant whose killer was a test
+  outside `autopilot`'s own modules (20 of them) was run again that way
+  (`p1b`). cargo-mutants 27.1.0 does not apply `-F` to "delete field"
+  mutants, so nine of those were run again too; all nine were caught.
 
 ## Left (in progress)
 
 - Phase 1: `autopilot.rs` (371), `pullrun.rs` (466), `server.rs` (1,509),
-  every listed mutant on the merged tree. Running; at 09:30 UTC 327 tested:
-  293 caught, 1 missed (`autopilot.rs:863:25`, equivalent, as on 17 Oct),
-  33 unviable, each a compile error read from its log (30 `E0277`, the
-  return type has no `Default`; one `E0080`, a constant shift that
-  overflows; two `||` inside a `let` chain).
+  every listed mutant on the merged tree. `autopilot.rs` is done (below);
+  `pullrun.rs` and `server.rs` are running with retries.
 - New tests so far: `server_cloud_mutant_tests_e.rs` (5), for AH-02's
   `HeadDeadline` and `exchange_watch` arms that a coverage run of the merged
   tree left unexecuted. `cargo clippy --workspace --all-targets -- -D
