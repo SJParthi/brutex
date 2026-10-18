@@ -187,6 +187,12 @@ here.
 | `autopilot.rs` | 371 | 305 | 7 (+1, see below) | 0 | 58 |
 | `pullrun.rs` | 466 | 432 (+2, see below) | 2 | 1 | 29 |
 | `server.rs` | 1,509 | 1,179 | 34 | 5 | 291 |
+| **total** | **2,346** | **1,916** (+3) | **43** | **6** | **378** |
+
+The three counted apart were "caught" only by the load-red AH-02 timing test.
+Each was re-run without it: `autopilot.rs:2785:38` and `pullrun.rs:2449:45`
+missed (both equivalent), and `pullrun.rs:2371:58` was caught by a test this
+pass adds.
 
 `autopilot.rs` counts its first run with the 20 out-of-module kills replaced
 by their retried re-check (`p1b`). Of those 20, 13 were caught again by a
