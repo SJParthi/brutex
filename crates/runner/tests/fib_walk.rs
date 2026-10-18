@@ -3528,6 +3528,60 @@ fn the_event_walk_matches_on_a_trending_day_with_a_give_back_and_jumps_the_hold(
     assert!(by_events.work() < 40, "{}", by_events.work());
 }
 
+/// The work of one slot walked both ways, after checking the outcomes agree.
+fn work_both(day: &Day, profile: &WalkProfile, variant: ExitVariant) -> (u64, u64) {
+    let exits = set_of(Search::Long, vec![variant]);
+    let index = day.index(profile, &exits).expect("indexes");
+    let plan = long_plan(at(10, 0, 0));
+    let mut forward = runner::fib::walk::Stepper::new(
+        &index,
+        &plan,
+        0,
+        &variant,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    )
+    .expect("a slot");
+    let mut by_events = forward.clone();
+    forward.run();
+    by_events.run_events();
+    assert_eq!(forward.outcome(), by_events.outcome());
+    (forward.work(), by_events.work())
+}
+
+/// A stage-A target's resting limit and a trail that moves on new highs are
+/// found by the high table's descent: the event walk still jumps the hold.
+#[test]
+fn the_event_walk_jumps_under_a_minute_target_and_a_new_high_trail() {
+    let mut rng = Seeded(0x41_6E);
+    let far = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 900_000 },
+        ..STOP_ONLY
+    };
+    let minutes = trending(&mut rng, Resolution::Minute, 300, 0, 5);
+    let (forward, events) = work_both(&minutes, &minute_profile(), far);
+    assert!(forward > 300, "{forward}");
+    assert!(events < 40, "{events}");
+    // An R-step that no gain reaches: only the day's record highs are events.
+    let step = ExitVariant {
+        trailing_stop: TrailingStop::RStep { milli_r: 900_000 },
+        ..STOP_ONLY
+    };
+    let seconds = trending(&mut rng, Resolution::Second, 3_000, 0, 5);
+    let (forward, events) = work_both(&seconds, &second_profile(), step);
+    assert!(forward > 3_000, "{forward}");
+    assert!(events * 10 < forward, "{events} of {forward}");
+    // Every later second only TIES the entry second's high: a tie is no new
+    // high, so the whole hold is one jump.
+    let ties: Vec<Candle> = (0..3_000)
+        .map(|k| bar(at(10, 0, 1) + k, P, P + 100, P - 40, P, 100))
+        .chain([quiet(at(15, 9, 0), P, 1_000)])
+        .collect();
+    let (forward, events) = work_both(&second_day(&ties), &second_profile(), step);
+    assert!(forward > 3_000, "{forward}");
+    assert!(events < 10, "{events}");
+}
+
 // ------------------------------------------------ the index's last paths --
 
 #[test]
