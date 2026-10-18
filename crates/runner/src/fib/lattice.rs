@@ -794,7 +794,10 @@ impl Tally {
         for (mine, theirs) in [
             (&mut self.frequent, &other.frequent),
             (&mut self.equivalent_to_parent, &other.equivalent_to_parent),
-            (&mut self.equivalent_to_sibling, &other.equivalent_to_sibling),
+            (
+                &mut self.equivalent_to_sibling,
+                &other.equivalent_to_sibling,
+            ),
             (&mut self.infrequent, &other.infrequent),
         ] {
             for (a, b) in mine.iter_mut().zip(theirs) {
@@ -1242,13 +1245,31 @@ impl Walker<'_> {
             }
             for child in ready {
                 if let Source::Prefix { group, .. } = child.source {
-                    self.prefix_inline(at, row, group, next, bufs.scratch, bufs.deeper, visitor, out);
+                    self.prefix_inline(
+                        at,
+                        row,
+                        group,
+                        next,
+                        bufs.scratch,
+                        bufs.deeper,
+                        visitor,
+                        out,
+                    );
                 }
             }
             return;
         }
         for group in wanted {
-            self.prefix_inline(at, row, group, next, bufs.scratch, bufs.deeper, visitor, out);
+            self.prefix_inline(
+                at,
+                row,
+                group,
+                next,
+                bufs.scratch,
+                bufs.deeper,
+                visitor,
+                out,
+            );
         }
     }
 
@@ -1463,7 +1484,10 @@ impl Survivors {
 
     /// Checks one survivor key against the table's layout and partition.
     fn check(table: &RowTable, key: &MixKey) -> Result<(), LatticeRefusal> {
-        table.layout.validate_mix(key).map_err(LatticeRefusal::Mix)?;
+        table
+            .layout
+            .validate_mix(key)
+            .map_err(LatticeRefusal::Mix)?;
         let partition = &table.partition;
         if partition.search.admits_mix(key).is_err() {
             return Err(LatticeRefusal::SideOutsideSearch {
@@ -1527,9 +1551,7 @@ fn stable_edges(edges: &[Edge], nodes: usize) -> Vec<Edge> {
     let order: Vec<u32> = (0..edges.len())
         .filter_map(|at| u32::try_from(at).ok())
         .collect();
-    let field = |pick: fn(&Edge) -> usize| {
-        move |at: u32| edges.get(at as usize).map_or(0, pick)
-    };
+    let field = |pick: fn(&Edge) -> usize| move |at: u32| edges.get(at as usize).map_or(0, pick);
     let by_value = stable_by(&order, COUNT_STRIDE, field(|e| usize::from(e.value)));
     let by_row = stable_by(&by_value, ROW_COUNT, field(|e| usize::from(e.row)));
     let by_parent = stable_by(&by_row, nodes, field(|e| e.parent as usize));

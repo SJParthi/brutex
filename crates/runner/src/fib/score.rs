@@ -53,7 +53,7 @@
               money stays i128 and is converted only to form a ratio"
 )]
 
-use vocab::fib_cube::{BP_PER_UNIT, MixKey, OPEN, RowId, SIDE_ROW, Ratio, Search};
+use vocab::fib_cube::{BP_PER_UNIT, MixKey, OPEN, Ratio, RowId, SIDE_ROW, Search};
 
 use super::lattice::{Node, RowTable, RowView, Visitor, Wanted};
 use super::types::{SlotOutcome, TradeFlag, TradeSize};
@@ -170,7 +170,12 @@ pub fn profiles_of(table: &RowTable) -> Vec<Profile> {
         .partition()
         .exits
         .clone()
-        .flat_map(|variant| SIZES.iter().map(move |size| Profile { variant, size: *size }))
+        .flat_map(|variant| {
+            SIZES.iter().map(move |size| Profile {
+                variant,
+                size: *size,
+            })
+        })
         .collect()
 }
 
@@ -1171,7 +1176,8 @@ impl<C: ChargeModel> OrderedPass<C> {
         if table.pool() as usize > self.pool {
             return Err(ScoreRefusal::TableMismatch { what: "pool" });
         }
-        if table.partition().search != self.search || table.partition().exits.start != self.first_exit
+        if table.partition().search != self.search
+            || table.partition().exits.start != self.first_exit
         {
             return Err(ScoreRefusal::TableMismatch { what: "partition" });
         }
@@ -1179,7 +1185,9 @@ impl<C: ChargeModel> OrderedPass<C> {
         self.epoch += 1;
         let mut today: Option<(u32, u32, DayKeys)> = None;
         for row in rows {
-            let view = table.row(*row).ok_or(ScoreRefusal::RowOutOfTable { row: *row })?;
+            let view = table
+                .row(*row)
+                .ok_or(ScoreRefusal::RowOutOfTable { row: *row })?;
             if today.is_none_or(|(day, _, _)| day != view.day) {
                 if let Some((day, month, keys)) = today {
                     self.close_day(day, month, &keys);
@@ -1227,7 +1235,8 @@ impl<C: ChargeModel> OrderedPass<C> {
             })?;
         let at = lane * self.pool + view.slot as usize;
         let block = self.block.get(at).copied().unwrap_or(NO_BLOCK);
-        let blocked = block.epoch == self.epoch && block.day == view.day && view.second <= block.until;
+        let blocked =
+            block.epoch == self.epoch && block.day == view.day && view.second <= block.until;
         let Some(card) = self.cards.get_mut(lane) else {
             return Ok(());
         };
@@ -1303,9 +1312,13 @@ impl<C: ChargeModel> OrderedPass<C> {
         }
         let long = self.search == Search::Long;
         let gross = if long {
-            outcome.exit_value_paisa.checked_sub(outcome.entry_value_paisa)
+            outcome
+                .exit_value_paisa
+                .checked_sub(outcome.entry_value_paisa)
         } else {
-            outcome.entry_value_paisa.checked_sub(outcome.exit_value_paisa)
+            outcome
+                .entry_value_paisa
+                .checked_sub(outcome.exit_value_paisa)
         }
         .ok_or(ScoreRefusal::MoneyOverflow { row })?;
         let order = |buy, value_paisa, broker_square_off| Order {
@@ -1395,7 +1408,12 @@ impl<C: ChargeModel> OrderedPass<C> {
                 stats.sum_loss_r += r;
                 stats.loss_money = stats.loss_money.saturating_add(trade.net);
             }
-            let side = usize::from(view.coords.get(RowId::Side.index()).copied().unwrap_or(OPEN));
+            let side = usize::from(
+                view.coords
+                    .get(RowId::Side.index())
+                    .copied()
+                    .unwrap_or(OPEN),
+            );
             if let Some(side) = stats.per_side.get_mut(side) {
                 side.trades += 1;
                 side.sum_r += r;
@@ -1621,8 +1639,12 @@ impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
         }
         for card in cards {
             let variant = card.profile.variant;
-            let asked =
-                only.is_none() || self.asked.get(usize::from(variant)).copied().unwrap_or(false);
+            let asked = only.is_none()
+                || self
+                    .asked
+                    .get(usize::from(variant))
+                    .copied()
+                    .unwrap_or(false);
             let Some(mix) = node.mix(variant).filter(|_| asked) else {
                 continue;
             };
