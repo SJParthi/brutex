@@ -1501,6 +1501,8 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
         wide,
         second(tue, open, 1_515_004),
         second(tue, open, 1_515_005),
+        // A refused day's later seconds are passed over.
+        second(tue, open + 1, 1_515_011),
         second(wed, open + 5, 1_515_006),
         second(wed, open + 4, 1_515_007),
     ];
@@ -1514,9 +1516,22 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     let mut negative_volume = second(negative_volume_day, open, 1_515_010);
     negative_volume.volume = -1;
     bars.push(negative_volume);
+    // A day whose every second is before the open keeps nothing: no
+    // execution seconds.
+    let preopen_day = day_of(2025, 3, 12);
+    bars.push(second(preopen_day, 9 * 3_600, 1_515_012));
     let month = seconds_of(
         &bars,
-        &[mon, tue, wed, thu, fri, negative_day, negative_volume_day],
+        &[
+            mon,
+            tue,
+            wed,
+            thu,
+            fri,
+            negative_day,
+            negative_volume_day,
+            preopen_day,
+        ],
         &no_master(),
     );
     let kept = month.day(mon).unwrap();
@@ -1551,8 +1566,8 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
     assert_eq!(kept.range(open - 1), None);
     assert_eq!(kept.range(u32::MAX), None);
     assert_eq!(
-        month.outside_continuous, 1,
-        "09:14:59 is the opening auction"
+        month.outside_continuous, 2,
+        "09:14:59 is the opening auction, 09:00:00 the pre-open"
     );
     assert_eq!(
         month.refused,
@@ -1564,7 +1579,7 @@ fn the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal() {
             (negative_volume_day, "seconds_corrupt")
         ]
     );
-    assert_eq!(month.no_execution_seconds, [fri]);
+    assert_eq!(month.no_execution_seconds, [fri, preopen_day]);
     assert!(month.day(fri).is_none());
     // A halt's seconds are not continuous.
     let halt = day_of(2020, 3, 13);
@@ -2017,4 +2032,339 @@ fn request_with_reference() -> Request {
         "interim",
     ])
     .unwrap()
+}
+
+// ------------------------------------------------------------- the rest --
+
+#[test]
+fn every_refusal_and_reference_names_its_word() {
+    let days: Vec<&str> = DayRefusal::ALL.iter().map(|why| why.name()).collect();
+    assert_eq!(
+        days,
+        [
+            "duplicate_minute",
+            "unsorted",
+            "corrupt_minute",
+            "tail_cut",
+            "tail_unwitnessed",
+            "session_unverified",
+            "fold_refused",
+            "rename_overlap_conflict"
+        ]
+    );
+    let closes: Vec<&str> = CloseRefusal::ALL.iter().map(|why| why.name()).collect();
+    assert_eq!(
+        closes,
+        [
+            "first_day",
+            "not_adjacent",
+            "previous_day_refused",
+            "not_positive",
+            "basis_unproven",
+            "basis_unreliable"
+        ]
+    );
+    assert_eq!(PreviousReference::TradedSession.word(), "traded-session");
+    assert_eq!(PreviousReference::TradableDay.word(), "tradable-day");
+}
+
+/// A minute of an earlier day that arrives among a later day's minutes is a
+/// disorder of the day it arrives in; the day it belongs to stands.
+#[test]
+fn a_minute_of_an_earlier_day_is_a_disorder_of_the_day_it_arrives_in() {
+    let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut bars = full(monday, 1_818_000);
+    let late = full(tuesday, 1_818_100);
+    bars.push(late[0]);
+    bars.push(minute(monday, hm(15, 29), 1_818_050));
+    bars.extend_from_slice(&late[1..]);
+    let mut state = StockState::first_day();
+    let month = build(2025, 3, &[1], &bars, &interim(), &mut state);
+    assert!(input(&month, monday).admitted());
+    assert_eq!(input(&month, tuesday).refusal, Some(DayRefusal::Unsorted));
+}
+
+/// A fold the one fold authority refuses (its volume sum overflows) refuses
+/// a tradable day by name, and leaves a halt day with no exposure.
+#[test]
+fn a_fold_the_authority_refuses_refuses_the_day_by_name() {
+    let heavy = |day: i64, base: i64| -> Vec<Candle> {
+        full(day, base)
+            .into_iter()
+            .map(|bar| Candle {
+                volume: i64::MAX / 2 + 1,
+                ..bar
+            })
+            .collect()
+    };
+    let monday = day_of(2025, 3, 3);
+    let mut state = StockState::first_day();
+    let month = build(
+        2025,
+        3,
+        &[1, 2],
+        &heavy(monday, 1_919_000),
+        &interim(),
+        &mut state,
+    );
+    let day = input(&month, monday);
+    assert_eq!(day.refusal, Some(DayRefusal::FoldRefused));
+    assert!(day.candles.is_empty());
+    let halt = day_of(2020, 3, 13);
+    let mut state = StockState::first_day();
+    let month = build(
+        2020,
+        3,
+        &[1, 2],
+        &heavy(halt, 1_919_100),
+        &interim(),
+        &mut state,
+    );
+    let day = input(&month, halt);
+    assert!(day.exposure.is_none(), "{:?}", day.exposure);
+    assert!(day.candles.is_empty());
+}
+
+/// A carried close that is not positive is never a previous close.
+#[test]
+fn a_zero_previous_close_is_not_positive() {
+    let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut bars = full(monday, 2_020_200);
+    if let Some(last) = bars.last_mut() {
+        *last = Candle {
+            open: 0,
+            high: 0,
+            low: 0,
+            close: 0,
+            ..*last
+        };
+    }
+    bars.extend(full(tuesday, 2_020_300));
+    let mut state = StockState::first_day();
+    let month = build(2025, 3, &[1], &bars, &interim(), &mut state);
+    assert_eq!(input(&month, tuesday).previous().word(), "not_positive");
+    assert_eq!(
+        month
+            .counts
+            .previous
+            .get(2025, CloseRefusal::NotPositive.index()),
+        1
+    );
+}
+
+/// The store root is resolved after the words, and its refusal fails the
+/// command by name; an empty store reads as `store_key_absent`.
+#[test]
+fn day_check_resolves_its_store_root_after_its_words() {
+    let words = [
+        "SBIN",
+        "2025-03",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ];
+    let mut out = String::new();
+    assert_eq!(
+        command_at(&words, &mut out, &|| Err(
+            "synthetic: no store here".to_owned()
+        )),
+        crate::FAILED
+    );
+    assert!(out.contains("synthetic: no store here"), "{out}");
+    let store = Scratch::new("command");
+    let root = store.0.clone();
+    let mut out = String::new();
+    assert_eq!(
+        command_at(&words, &mut out, &move || Ok(root.clone())),
+        crate::OK,
+        "{out}"
+    );
+    assert!(
+        out.contains("through the stored door (store_key_absent)"),
+        "{out}"
+    );
+}
+
+/// The first month there is (1970-01) has no month before it: no carried
+/// close, and a reference table with nothing carried.
+#[test]
+fn the_first_month_has_no_month_before_it() {
+    let store = Scratch::new("epoch");
+    let table = reference_check(&store.0, (1970, 1), &interim()).unwrap();
+    assert!(table.carried.is_empty());
+    let check = day_check(
+        &store.0,
+        "SBIN",
+        SeriesId(3),
+        (1970, 1),
+        PreviousReference::TradableDay,
+        &interim(),
+    )
+    .unwrap();
+    assert!(check.previous_month.starts_with("absent"));
+    assert_eq!(check.loaded, "store_key_absent");
+}
+
+/// A tail witness that keeps one day's early end and cuts every other's.
+struct KeptOn(AuthorityVersion, i64);
+
+impl TailWitness for KeptOn {
+    fn version(&self) -> &AuthorityVersion {
+        &self.0
+    }
+    fn after(&self, _: SeriesId, day: i64, _: u32) -> TailReading {
+        if day == self.1 {
+            TailReading::NoTradesAfter
+        } else {
+            TailReading::TradesAfter
+        }
+    }
+}
+/// A calendar that admits every day.
+struct Always(AuthorityVersion);
+
+impl CalendarAuthority for Always {
+    fn version(&self) -> &AuthorityVersion {
+        &self.0
+    }
+    fn tradable(&self, _: SeriesId, _: i64) -> Tradable {
+        Tradable {
+            market: Ok(()),
+            instrument: InstrumentSession::Admitted,
+        }
+    }
+    fn market(&self, _: i64) -> Result<(), CalendarReason> {
+        Ok(())
+    }
+    fn traded(&self, _: i64) -> bool {
+        true
+    }
+}
+
+/// The day-check page over a month with a carried close from the month
+/// before, a refused day, a day kept by its tail witness and a halt day's
+/// exposure, in text and JSON; and a calendar with no exclusion.
+#[test]
+fn day_check_renders_refusals_witnessed_tails_and_halt_exposure() {
+    let store = Scratch::new("render");
+    let key = cash_key("SBIN");
+    let february: Vec<Candle> = [27, 28]
+        .into_iter()
+        .flat_map(|d| full(day_of(2020, 2, d), 2_121_000))
+        .collect();
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        (2020, 2),
+        &february,
+    );
+    let mut march = full(day_of(2020, 3, 2), 2_121_100);
+    march.extend(minutes(day_of(2020, 3, 3), hm(9, 15), hm(14, 0), 2_121_200));
+    march.extend(minutes(
+        day_of(2020, 3, 4),
+        hm(9, 15),
+        hm(14, 56),
+        2_121_300,
+    ));
+    march.extend(full(day_of(2020, 3, 13), 2_121_400));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        (2020, 3),
+        &march,
+    );
+    let mut authorities = interim();
+    authorities.tail = Box::new(KeptOn(
+        version(AuthorityKind::TailWitness),
+        day_of(2020, 3, 4),
+    ));
+    let request = parse(&[
+        "SBIN",
+        "2020-03",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ])
+    .unwrap();
+    let mut out = String::new();
+    assert_eq!(
+        run(&store.0, &request, &authorities, &mut out),
+        crate::OK,
+        "{out}"
+    );
+    assert!(
+        out.contains("previous month read for the carried close"),
+        "{out}"
+    );
+    assert!(out.contains("refused tail_cut"), "{out}");
+    assert!(out.contains("kept: no_trades_after"), "{out}");
+    assert!(out.contains("; halt exposure before second "), "{out}");
+    assert!(out.contains("count 2020 refused tail_cut 1"), "{out}");
+    let json_request = Request {
+        json: true,
+        ..request.clone()
+    };
+    let mut json = String::new();
+    assert_eq!(
+        run(&store.0, &json_request, &authorities, &mut json),
+        crate::OK
+    );
+    assert!(json.contains("\"refused\":\"tail_cut\""), "{json}");
+    assert!(json.contains("\"no_trades_after\":true"), "{json}");
+    assert!(json.contains("\"excluded\":null"), "{json}");
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
+    // A calendar that excludes nothing, and that is no interim authority.
+    let mut open = interim();
+    open.calendar = Box::new(Always(version(AuthorityKind::Calendar)));
+    let mut out = String::new();
+    assert_eq!(run(&store.0, &request, &open, &mut out), crate::OK, "{out}");
+    assert!(out.contains("excluded days: none"), "{out}");
+    assert!(out.contains("] a synthetic authority of the test"), "{out}");
+}
+
+/// Every refusal of the widths, through the month builder.
+#[test]
+fn a_month_with_refused_widths_halts_as_month_refused() {
+    let mut state = StockState::first_day();
+    let refused = build_month(
+        &spec(2025, 3, &[2, 1], PreviousReference::TradableDay),
+        &[],
+        &no_master(),
+        &interim(),
+        &mut state,
+    )
+    .map_err(halt_as("month_refused"))
+    .unwrap_err();
+    assert_eq!(refused.word, "month_refused");
+    assert!(refused.detail.starts_with("widths_refused"), "{refused}");
+}
+
+/// Every load class names its word; a month that is no month is not
+/// sweepable, by the class (D-6449).
+#[test]
+fn every_load_class_names_its_word() {
+    let words: Vec<&str> = [
+        LoadClass::Missing,
+        LoadClass::Locked,
+        LoadClass::Io,
+        LoadClass::NotSweepable,
+        LoadClass::Corrupt,
+    ]
+    .iter()
+    .map(|class| class.word())
+    .collect();
+    assert_eq!(
+        words,
+        ["missing", "locked", "io", "not_sweepable", "corrupt"]
+    );
+    let store = Scratch::new("thirteen");
+    let (class, why) =
+        stored::load_with_class(&store.0, Vendor::Zerodha, "SBIN", "1min", 2025, 13).unwrap_err();
+    assert_eq!(class, LoadClass::NotSweepable, "{why}");
 }

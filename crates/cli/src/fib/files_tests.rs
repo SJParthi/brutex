@@ -1069,3 +1069,35 @@ fn files_rs_types_no_number() {
 fn read_like<R: Record>(file: &mut FibFile, index: u64, _like: &R) -> R {
     file.read(index).unwrap()
 }
+
+/// A segment file sealed before its index entry (a crash between the two)
+/// is refused, never overwritten; a header shorter than its fixed part is
+/// `header_short`.
+#[test]
+fn an_orphan_segment_and_a_short_header_are_refused() {
+    let scratch = Scratch::new("orphan");
+    let rows = [RowRecord {
+        series: SeriesId(1),
+        year: 2092,
+        month: 1,
+        ordinal: 0,
+        coords: [1; ROW_COUNT],
+    }];
+    append_segment(&scratch.0, 3, (2092, 1), RUN, SCHEMA, &rows).unwrap();
+    fs::write(
+        segment_path(&scratch.0, 3, 2092, 2),
+        b"synthetic orphan segment",
+    )
+    .unwrap();
+    let refused = append_segment(&scratch.0, 3, (2092, 2), RUN, SCHEMA, &rows).unwrap_err();
+    assert_eq!(refused.word, "already_sealed", "{refused:?}");
+    assert_eq!(
+        read_segment_index(&segment_index_path(&scratch.0, 3))
+            .unwrap()
+            .len(),
+        1,
+        "no entry names a refused segment"
+    );
+    let short = parse_header(&MAGIC[..MAGIC.len() / 2], &[]).unwrap_err();
+    assert_eq!(short.word, "header_short");
+}

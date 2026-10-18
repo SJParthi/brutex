@@ -702,10 +702,11 @@ fn classify_month(
     let (Ok(timeframe), Ok(key)) = (rung(rung_name), swept_index(underlying)) else {
         return LoadClass::NotSweepable;
     };
-    let Ok(ym) = YearMonth::new(year, month) else {
-        return LoadClass::NotSweepable;
-    };
-    let Ok(path) = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars) else {
+    // No such month, or no path for the key: either way not sweepable.
+    let path = YearMonth::new(year, month)
+        .ok()
+        .and_then(|ym| StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars).ok());
+    let Some(path) = path else {
         return LoadClass::NotSweepable;
     };
     #[expect(
