@@ -456,7 +456,7 @@ fn garbage_kind_or_dates_are_refused_before_the_lock() {
         let (code, out) = run(&args, &env, &store);
         assert_eq!(code, MISUSED, "{symbols:?}: {out}");
         assert!(
-            out.contains("refused: an empty SYMBOL names no instrument"),
+            out.contains("refused: symbol_empty: an empty SYMBOL names no instrument"),
             "{out}"
         );
     }
@@ -1799,7 +1799,15 @@ fn the_lost_codes_are_the_words_the_store_and_the_alerts_already_use() {
         ),
         "no_file_read+failed"
     );
-    assert!(range(Day::new(2024, 4, 1).unwrap(), Day::new(2024, 4, 1).unwrap()).is_ok());
+    // The range rule moved into the one run authority (IA-1, D-4800): a
+    // one-day range is no misuse.
+    let same = Day::new(2024, 4, 1).unwrap();
+    let one_day = pull::gdfl_run::Request::new(
+        pull::gdfl_run::Kinds::one(ImportKind::Indices),
+        pull::gdfl_run::SourceWord::TickStore,
+        (same, same),
+    );
+    assert_eq!(one_day.misuse(), None);
 }
 
 // ═══ 6. What the door costs ═════════════════════════════════════════════════

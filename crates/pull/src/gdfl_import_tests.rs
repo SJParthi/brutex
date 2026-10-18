@@ -4511,6 +4511,7 @@ fn run_durable(
         retry_refused: false,
         workers: Workers::new(workers).unwrap(),
         durability,
+        observer: None,
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -4728,6 +4729,7 @@ fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
             retry_refused: false,
             workers: Workers::new(workers).unwrap(),
             durability: Durability::DEFAULT,
+            observer: None,
         };
         run_cm_from(&source, &run, options).unwrap()
     };

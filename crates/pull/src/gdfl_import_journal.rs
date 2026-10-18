@@ -18,6 +18,30 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
     store_root.join("imports").join("gdfl.journal")
 }
 
+/// The journal size past which a whole load says so out loud
+/// (`docs/06-limits.md` L-IA-2, RA-091): 64 MiB, about 4.8 times the
+/// real journal of 14 Oct 2026 (14,027,805 bytes in 23,270 lines). A run
+/// reads the whole file once at its start and the api's reader once per
+/// start (O(lines)); past this size that read is no longer the one L-IA-2
+/// measured, so every load past it is one named `warn`, never a silent
+/// slowdown. The load itself goes on: refusing a run for a long history
+/// would trade an import for a figure.
+pub const JOURNAL_LOAD_WARN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The `warn` a whole load of `bytes` in `lines` whole lines of the journal
+/// at `path` owes: `Some` only past [`JOURNAL_LOAD_WARN_BYTES`].
+#[must_use]
+pub(crate) fn load_warning(path: &str, bytes: u64, lines: u64) -> Option<telemetry::Event<'_>> {
+    (bytes > JOURNAL_LOAD_WARN_BYTES).then(|| {
+        telemetry::Event::warn(TARGET, "journal past its stated load size")
+            .with("journal", path)
+            .with("bytes", bytes)
+            .with("lines", lines)
+            .with("bound", JOURNAL_LOAD_WARN_BYTES)
+            .with("limit", "L-IA-2")
+    })
+}
+
 /// The version of the one-second bar definition (the row rule, the
 /// placement and the fold this module applies), written into every `done`
 /// and `incomplete` line as `definition=<n>` (D-2822). Bump it whenever a
@@ -246,7 +270,7 @@ const VERBS: [&str; 6] = [
 /// `done` line names another definition (D-2821, D-2822), and the run ids its
 /// `run` lines hold (D-3317).
 #[derive(Debug, Default)]
-pub(super) struct Journal {
+pub(crate) struct Journal {
     pub(super) path: PathBuf,
     pub(super) done: HashSet<String>,
     pub(super) open: HashSet<String>,
@@ -321,6 +345,69 @@ pub(super) struct Journal {
     /// one hash probe a day and one a name the asking key names
     /// ([`restated_past_append`]).
     pub(super) auction_restated: HashMap<String, AuctionRestated>,
+    /// The bytes of whole lines read (IA-1): where [`Journal::refresh`]
+    /// starts. A torn tail is not among them.
+    loaded: u64,
+    /// The device and inode of the file read, when one was (IA-1): another
+    /// file at the name is read again whole, never folded onto this one.
+    identity: Option<Identity>,
+    /// A refresh met a line it refused part way through its new lines: the
+    /// next refresh reads the whole file again (IA-1).
+    poisoned: bool,
+}
+
+/// What a load owes a torn last line (IA-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Torn {
+    /// The run's own load: closed with [`TORN`] before the next line
+    /// (D-2814).
+    Close,
+    /// A reader's: kept back unread, nothing written.
+    KeepBack,
+}
+
+/// Which file a journal was read from: its device and inode (IA-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+}
+
+impl Identity {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+}
+
+/// What one [`Journal::refresh`] did (IA-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Nothing was appended since the last read.
+    Unchanged,
+    /// Only a torn tail was appended: kept back until its newline arrives.
+    TornKept,
+    /// This many whole lines were read.
+    Read {
+        /// The whole lines read.
+        lines: u64,
+    },
+    /// This many whole lines were read, and a torn tail after them kept back.
+    ReadTornKept {
+        /// The whole lines read.
+        lines: u64,
+    },
+    /// The file was shorter than what was read, another file, gone, or a
+    /// refresh had refused a line: read again whole, and said in a `warn`.
+    Reloaded {
+        /// The bytes of whole lines now read.
+        was: u64,
+        /// The file's length when it was found shorter or other.
+        now: u64,
+    },
 }
 
 /// How the closes under 4 after a restated key of the auction era ended it
@@ -435,17 +522,38 @@ impl Journal {
     /// `vendor_refused=` or `months=` that is not one count as this journal
     /// writes it, refuses the run (D-2814).
     pub(super) fn load(path: PathBuf) -> Result<Self, ImportRefusal> {
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(why) => {
-                return Err(ImportRefusal::Journal {
-                    why: format!("{}: {why}", path.display()),
-                });
+        Self::open(path, Torn::Close)
+    }
+
+    /// Reads the journal at `path` as [`Journal::load`] does, and writes
+    /// nothing: a torn last line is kept back unread until its newline
+    /// arrives, never closed (IA-1). What a reader that is not the run (the
+    /// api's plan, `crate::gdfl_run::JournalReader`) loads, and refreshes
+    /// with [`Journal::refresh`].
+    pub(crate) fn read_only(path: PathBuf) -> Result<Self, ImportRefusal> {
+        Self::open(path, Torn::KeepBack)
+    }
+
+    /// [`Journal::load`] and [`Journal::read_only`], by what a torn tail is
+    /// owed.
+    fn open(path: PathBuf, torn: Torn) -> Result<Self, ImportRefusal> {
+        let refused = |why: std::io::Error| ImportRefusal::Journal {
+            why: format!("{}: {why}", path.display()),
+        };
+        let (text, identity) = match std::fs::File::open(&path) {
+            Ok(mut file) => {
+                use std::io::Read as _;
+                let identity = file.metadata().map_err(refused)?;
+                let mut text = String::new();
+                file.read_to_string(&mut text).map_err(refused)?;
+                (text, Some(Identity::of(&identity)))
             }
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
+            Err(why) => return Err(refused(why)),
         };
         let mut journal = Self {
             path,
+            identity,
             ..Self::default()
         };
         journal.known.set((
@@ -453,50 +561,74 @@ impl Journal {
             newlines(text.as_bytes()),
         ));
         let (whole, tail) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
-        let shown = journal.path.display().to_string();
-        let foreign = |line: &str| ImportRefusal::Journal {
-            why: format!("{shown}: not a journal line: {line:?}"),
-        };
         // Every whole line is judged BEFORE anything is written, and a torn
         // tail must be the start of a line the journal writes: a foreign file
         // is refused on every run and never touched. Closing first let a
         // one-line foreign file be refused once and then, its line now
         // "torn", read as an empty journal by every later run (D-2814).
         if !tail.is_empty() && !torn_fragment(tail) {
-            return Err(foreign(tail));
+            return Err(journal.foreign(tail));
         }
-        for line in whole.split('\n').filter(|line| !line.is_empty()) {
-            if let Some(fragment) = line.strip_suffix(TORN) {
-                if torn_fragment(fragment) {
-                    continue;
-                }
-                return Err(foreign(line));
-            }
-            let fields: Vec<&str> = line.split(' ').collect();
-            journal
-                .read_line(fields.as_slice())
-                .map_err(|()| foreign(line))?;
-        }
-        if !tail.is_empty() {
+        journal.read_lines(whole)?;
+        journal.loaded = u64::try_from(text.len() - tail.len()).unwrap_or(u64::MAX);
+        if !tail.is_empty() && torn == Torn::Close {
             // Closed with a mark, never a bare newline: a bare one made the
             // torn fragment a whole line that the NEXT load refused as
             // foreign, so one crash mid-write stopped every later run
             // (D-2814).
             journal.write(None)?;
         }
-        // Once, O(open keys): the days left open, whatever filter began them.
-        journal.open_days = journal
+        journal.derive();
+        let shown = journal.path.display().to_string();
+        let (bytes, lines) = journal.known.get();
+        if let Some(said) = load_warning(&shown, bytes, lines) {
+            let _dropped_when_filtered = telemetry::emit(&said);
+        }
+        Ok(journal)
+    }
+
+    /// The refusal of `line` as not one this journal writes (D-2814).
+    fn foreign(&self, line: &str) -> ImportRefusal {
+        ImportRefusal::Journal {
+            why: format!("{}: not a journal line: {line:?}", self.path.display()),
+        }
+    }
+
+    /// Reads every whole line of `whole` (no trailing newline): a line a
+    /// load closed with [`TORN`] is passed over, any other line is read or
+    /// refuses.
+    fn read_lines(&mut self, whole: &str) -> Result<(), ImportRefusal> {
+        for line in whole.split('\n').filter(|line| !line.is_empty()) {
+            if let Some(fragment) = line.strip_suffix(TORN) {
+                if torn_fragment(fragment) {
+                    continue;
+                }
+                return Err(self.foreign(line));
+            }
+            let fields: Vec<&str> = line.split(' ').collect();
+            self.read_line(fields.as_slice())
+                .map_err(|()| self.foreign(line))?;
+        }
+        Ok(())
+    }
+
+    /// The indexes the lines are folded into after a load: the open days,
+    /// the filters that closed each day done and the shares each day's
+    /// months may hold a bar definition 4 no longer builds of. O(open keys
+    /// + done keys + the era's restated keys), once a load.
+    fn derive(&mut self) {
+        // The days left open, whatever filter began them.
+        self.open_days = self
             .open
             .iter()
             .filter_map(|key| key.rsplit_once(' ').map(|(day, _only)| day.to_owned()))
             .collect();
-        // Once, O(done keys): which filters closed each day done, in order
-        // whatever order the set hands them in. A member key
-        // (`<filter>+<member>`) is its base key's and is not one. Pre-sized:
-        // a done key names at most one day.
+        // Which filters closed each day done, in order whatever order the set
+        // hands them in. A member key (`<filter>+<member>`) is its base key's
+        // and is not one. Pre-sized: a done key names at most one day.
         let mut closed_by: HashMap<String, std::collections::BTreeSet<String>> =
-            HashMap::with_capacity(journal.done.len());
-        for key in &journal.done {
+            HashMap::with_capacity(self.done.len());
+        for key in &self.done {
             if let Some((day, only)) = key.rsplit_once(' ')
                 && !only.contains('+')
             {
@@ -506,43 +638,203 @@ impl Journal {
                     .insert(only.to_owned());
             }
         }
-        journal.closed_by = closed_by;
-        // Once, O(the era's restated keys): the shares each day's months may
-        // hold a bar definition 4 no longer builds of (D-4878 item 10).
+        self.closed_by = closed_by;
+        // The shares each day's months may hold a bar definition 4 no longer
+        // builds of (D-4878 item 10). The keys are kept, not taken, so a
+        // refresh that reads a later close under 4 ends them as a load would.
         let mut auction_restated: HashMap<String, AuctionRestated> =
-            HashMap::with_capacity(journal.auction_keys.len());
-        for (of_day, filters) in std::mem::take(&mut journal.auction_keys) {
-            let mut restated = AuctionRestated::default();
-            for (filter, ended) in filters {
-                if ended.named {
-                    continue;
-                }
-                let shares = shares_of(&filter).map(|names| names.map(str::to_owned).collect());
-                match (shares, ended.whole.is_empty()) {
-                    (None, true) => restated.every = true,
-                    (Some(shares), true) => restated.names.extend::<Vec<String>>(shares),
-                    (None, false) => restated.whole_every.push(ended.whole),
-                    (Some(shares), false) => {
-                        for share in shares {
-                            restated
-                                .whole_named
-                                .entry(share)
-                                .or_default()
-                                .push(ended.whole.clone());
-                        }
-                    }
-                }
-            }
-            if restated.every
-                || !restated.names.is_empty()
-                || !restated.whole_named.is_empty()
-                || !restated.whole_every.is_empty()
-            {
-                auction_restated.insert(of_day, restated);
+            HashMap::with_capacity(self.auction_keys.len());
+        for (of_day, filters) in &self.auction_keys {
+            if let Some(restated) = restated_of(filters) {
+                auction_restated.insert(of_day.clone(), restated);
             }
         }
-        journal.auction_restated = auction_restated;
-        Ok(journal)
+        self.auction_restated = auction_restated;
+    }
+
+    /// [`Journal::derive`] for the `<kind> <day>`s a refresh's new lines
+    /// named, and no other: what each such day's open keys, done filters and
+    /// restated shares now are. O(days × the open keys) and O(1) a day for
+    /// the rest, so a refresh's cost follows what was appended, not the
+    /// journal's length (`docs/06-limits.md` L-IA-2).
+    fn derive_days(&mut self, days: &HashSet<String>) {
+        for of_day in days {
+            let opened = self.open.iter().any(|key| {
+                key.rsplit_once(' ')
+                    .is_some_and(|(day, _only)| day == of_day.as_str())
+            });
+            if opened {
+                self.open_days.insert(of_day.clone());
+            } else {
+                self.open_days.remove(of_day);
+            }
+            match self.auction_keys.get(of_day).and_then(restated_of) {
+                Some(restated) => {
+                    self.auction_restated.insert(of_day.clone(), restated);
+                }
+                None => {
+                    self.auction_restated.remove(of_day);
+                }
+            }
+        }
+    }
+
+    /// Notes in `closed_by` whether `key` (a base key) is done now.
+    fn note_closed_by(&mut self, key: &str) {
+        let Some((day, only)) = key.rsplit_once(' ') else {
+            return;
+        };
+        if only.contains('+') {
+            return;
+        }
+        if self.done.contains(key) {
+            self.closed_by
+                .entry(day.to_owned())
+                .or_default()
+                .insert(only.to_owned());
+        } else if let Some(filters) = self.closed_by.get_mut(day) {
+            filters.remove(only);
+            if filters.is_empty() {
+                self.closed_by.remove(day);
+            }
+        }
+    }
+
+    /// Reads what was appended since this journal last read (IA-1, the
+    /// design's §5.1 `Journal::refresh`): the bytes from the last whole line
+    /// read to the end of the file, O(new bytes) to read and parse, then the
+    /// indexes of [`Journal::derive`] again when a line was read. Writes
+    /// nothing.
+    ///
+    /// - A torn tail (no newline yet) is kept back unread, and read whole
+    ///   once its newline arrives ([`Refreshed::TornKept`]).
+    /// - A file shorter than what was read, or another file at the name
+    ///   (its device or inode changed: a restore, a copy over it), is read
+    ///   again whole and said in a `warn` naming both lengths
+    ///   ([`Refreshed::Reloaded`]): never folded onto what the old file said.
+    /// - A file that is gone is an empty journal, read again whole the same
+    ///   way.
+    ///
+    /// The bytes and lines last known ([`Journal::append`]'s line numbers)
+    /// are kept true: they are the file's whole lines as read.
+    ///
+    /// # Errors
+    ///
+    /// [`ImportRefusal::Journal`] for a file that cannot be read, or a new
+    /// whole line that is not one this journal writes (D-2814); the journal
+    /// is then as it was before the call.
+    pub(crate) fn refresh(&mut self) -> Result<Refreshed, ImportRefusal> {
+        use std::io::{Read as _, Seek as _};
+        // The path's words, taken once, so a refusal borrows no part of `self`.
+        let shown = self.path.display().to_string();
+        let refused = |why: std::io::Error| ImportRefusal::Journal {
+            why: format!("{shown}: {why}"),
+        };
+        let mut file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                return self.reload(0);
+            }
+            Err(why) => return Err(refused(why)),
+        };
+        let meta = file.metadata().map_err(refused)?;
+        let now = meta.len();
+        let other = self.identity.is_some_and(|was| was != Identity::of(&meta));
+        if self.poisoned || now < self.loaded || other {
+            return self.reload(now);
+        }
+        if now == self.loaded {
+            return Ok(Refreshed::Unchanged);
+        }
+        file.seek(std::io::SeekFrom::Start(self.loaded))
+            .map_err(refused)?;
+        let mut text = String::new();
+        file.take(now - self.loaded)
+            .read_to_string(&mut text)
+            .map_err(refused)?;
+        let Some((whole, tail)) = text.rsplit_once('\n') else {
+            if torn_fragment(&text) {
+                return Ok(Refreshed::TornKept);
+            }
+            return Err(self.foreign(&text));
+        };
+        if !tail.is_empty() && !torn_fragment(tail) {
+            return Err(self.foreign(tail));
+        }
+        // A REFUSED LINE POISONS, IT IS NEVER HALF-FOLDED INTO A LATER
+        // ANSWER: the lines before it are already read, so the journal is
+        // marked, the caller is refused, and the next refresh reads the file
+        // again whole (which refuses the same line, by name, until it is
+        // gone). No copy of the indexes is taken to roll back, so a refresh
+        // stays O(new bytes) to read.
+        self.poisoned = true;
+        self.read_lines(whole)?;
+        self.poisoned = false;
+        // THE INDEXES OF THE DAYS THE NEW LINES NAMED, AND NO OTHER.
+        let mut days = HashSet::new();
+        for line in whole.split('\n') {
+            let mut fields = line.split(' ');
+            let (Some(verb), Some(kind), Some(on), Some(only)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if verb == "run" {
+                continue;
+            }
+            let of_day = format!("{kind} {on}");
+            self.note_closed_by(&format!("{of_day} {only}"));
+            days.insert(of_day);
+        }
+        self.derive_days(&days);
+        let read = newlines(whole.as_bytes()).saturating_add(1);
+        self.loaded = self
+            .loaded
+            .saturating_add(u64::try_from(whole.len() + 1).unwrap_or(u64::MAX));
+        let (_, lines) = self.known.get();
+        self.known.set((self.loaded, lines.saturating_add(read)));
+        self.identity = Some(Identity::of(&meta));
+        Ok(if tail.is_empty() {
+            Refreshed::Read { lines: read }
+        } else {
+            Refreshed::ReadTornKept { lines: read }
+        })
+    }
+
+    /// The journal read again whole from its path, after a refresh found it
+    /// shorter or another file (or gone), said in one `warn`.
+    fn reload(&mut self, now: u64) -> Result<Refreshed, ImportRefusal> {
+        let shown = self.path.display().to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                TARGET,
+                "journal shorter than read, or another file: read again whole",
+            )
+            .with("journal", shown.as_str())
+            .with("was_bytes", self.loaded)
+            .with("now_bytes", now),
+        );
+        let was = self.loaded;
+        *self = Self::read_only(self.path.clone())?;
+        Ok(Refreshed::Reloaded { was, now })
+    }
+
+    /// The bytes of whole lines this journal has read: where the next
+    /// [`Journal::refresh`] starts.
+    pub(crate) const fn loaded(&self) -> u64 {
+        self.loaded
+    }
+
+    /// Whether `key` (`<kind> <day> <filter>`) is closed `done` under this
+    /// build's bar definition: one hash probe.
+    pub(crate) fn is_done(&self, key: &str) -> bool {
+        self.done.contains(key)
+    }
+
+    /// How many runs its `run` lines name, and how many keys are begun and
+    /// not closed.
+    pub(crate) fn runs_and_open(&self) -> (usize, usize) {
+        (self.runs.len(), self.open.len())
     }
 
     /// Notes that a key under `only` of a share's day of the auction era may
@@ -989,4 +1281,35 @@ pub(super) fn run_line(id: u64, started: u64, origin: Option<&Origin>) -> String
         origin.source.digest_field(),
         origin.digest_hex(),
     )
+}
+
+/// The shares one day's months may hold a bar definition 4 no longer builds
+/// of, from its restated keys (D-4878 item 10); `None` when no key stands.
+fn restated_of(filters: &HashMap<String, Ended>) -> Option<AuctionRestated> {
+    let mut restated = AuctionRestated::default();
+    for (filter, ended) in filters {
+        if ended.named {
+            continue;
+        }
+        let shares = shares_of(filter).map(|names| names.map(str::to_owned).collect());
+        match (shares, ended.whole.is_empty()) {
+            (None, true) => restated.every = true,
+            (Some(shares), true) => restated.names.extend::<Vec<String>>(shares),
+            (None, false) => restated.whole_every.push(ended.whole.clone()),
+            (Some(shares), false) => {
+                for share in shares {
+                    restated
+                        .whole_named
+                        .entry(share)
+                        .or_default()
+                        .push(ended.whole.clone());
+                }
+            }
+        }
+    }
+    (restated.every
+        || !restated.names.is_empty()
+        || !restated.whole_named.is_empty()
+        || !restated.whole_every.is_empty())
+    .then_some(restated)
 }
