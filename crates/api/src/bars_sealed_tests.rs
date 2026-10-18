@@ -227,6 +227,7 @@ fn a_damaged_sealed_frame_is_named_row_by_row_on_a_page() {
 fn the_sealed_route_limits_time_answers_and_name_first_requests() {
     const LIMITS: &str = include_str!("../../../docs/06-limits.md");
     const LINEAGE: &str = include_str!("bars_change.rs");
+    const SORT_INDEX: &str = include_str!("../../store/src/sort_index.rs");
     let row = |id: &str| {
         LIMITS
             .lines()
@@ -258,5 +259,23 @@ fn the_sealed_route_limits_time_answers_and_name_first_requests() {
     assert!(
         LINEAGE.contains("let ledger = Arc::new(parse_ledger(&text));"),
         "bars_change.rs no longer parses the whole lineage ledger on a new stamp: L-SC-25 is stale"
+    );
+    // A cost paid on EVERY request is not a first request's, and a shadow's
+    // artefact is not the form's (the final re-check): on the standard linked
+    // shadow the sorted pages over 97 months read the rows of the months whose
+    // repair revision the shadow cannot see, because `shadow.sh` does not clone
+    // `bar-generations-v1` and the original `.bin` has no `.srt`. The row says
+    // so in the words the answer uses, and those words are still the store's.
+    for named in [
+        "every request",
+        "`bar-generations-v1`",
+        "the month has no .srt sort index",
+        "`.srt`",
+    ] {
+        assert!(first.contains(named), "L-SC-25 names {named}: {first}");
+    }
+    assert!(
+        SORT_INDEX.contains(r#"Self::Absent => f.write_str("the month has no .srt sort index")"#),
+        "store::sort_index no longer names a month with no .srt so: L-SC-25 quotes stale words"
     );
 }
