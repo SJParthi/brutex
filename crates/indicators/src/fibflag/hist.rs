@@ -994,7 +994,8 @@ fn put_varint(out: &mut Vec<u8>, mut value: u64) {
         let low = value & GROUP_MASK;
         value >>= HIST_CHECKPOINT_GROUP_BITS;
         let more = if value == 0 { 0 } else { CONTINUE };
-        let [byte, ..] = (low | more).to_le_bytes();
+        // A sum rather than an or: the continue bit sits above the group.
+        let [byte, ..] = (low + more).to_le_bytes();
         out.push(byte);
         if value == 0 {
             return;

@@ -162,6 +162,11 @@ fn a_member_missing_all_morning_that_then_appears() {
     assert_eq!(rank.gainer_rank(0), 2);
     assert_eq!(rank.loser_rank(2), 1);
     assert_eq!(rank.totals().missing, 120);
+    assert_eq!(
+        (rank.totals().minutes, rank.totals().ranked),
+        (121, 120 * 2 + 3),
+        "every minute folded, every ranked member-minute counted"
+    );
     assert_eq!(rank.state(3), None, "outside the pool");
 }
 
