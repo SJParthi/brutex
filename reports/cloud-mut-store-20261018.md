@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
 # Cloud mutation and coverage pass: store (2026-10-18)
 
@@ -36,9 +36,11 @@ Scope, as that report sets it:
     `api`'s slow-reader tests, red identically on the base (not this pass's
     code).
   - The CI `language-purity` job: 32 of 32 green.
-  - **CI gate 20 would be red with this branch** (`sink.rs` 25 against 20,
-    `lib.rs` 0 against 6), measured on Linux. Its counts are not this
-    pass's files: see NEEDS THE MAC.
+  - **CI gate 20 is red on Linux, on the base and on this branch.**
+    - The base reads `sink.rs` 62 and `lib.rs` 0.
+    - The branch reads `sink.rs` 25 and `lib.rs` 0.
+    - `ci.yml` declares 20 and 6.
+    - Its counts are not this pass's files: see NEEDS THE MAC.
 - **No production line changed this session.**
 
 ## The merge
@@ -433,7 +435,7 @@ alone.
 | gate | result |
 |---|---|
 | `cargo fmt --all --check` | **clean** (exit 0) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | **clean**: exit 0, no warning, 2 min 31 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean**: exit 0, no lint, on `813419d1` (2 min 31 s) and again on the final head (1 min 36 s) |
 | `cargo test -p store --locked` | **green: 810 passed, 0 failed, 4 ignored, nothing skipped, 37 targets** (exit 0, 2 min 58 s), with `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` dropped, as an ordinary user runs it. See the root caveat below |
 | `cargo deny check` | **green**: `advisories ok, bans ok, licenses ok, sources ok`, exit 0, cargo-deny 0.20.2. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` (DENY-1's bumps) |
 | CI job `language-purity`: every `run:` step but 1e (it moves `web/` aside) and 14 (it re-measures bounds), run through `.github/checks_all.rs`'s plan as the 17 Oct pass ran them | **32 of 32 green** on `0c1c19e2` (144 s), and 32 of 32 on the base `67c4e58d` (143 s), each in its own worktree. The 8 that were red on 17 Oct, on the base and the branch alike, have been fixed on `feat/db-fix` since |
@@ -486,17 +488,32 @@ does. Linux is the platform CI measures on.
   - The 25 lines `sink.rs` then leaves uncovered are exactly the 25 of the
     per-binary union above.
 
-| file | declared in `ci.yml` | measured, this branch |
-|---|---:|---:|
-| `clock.rs` | 1 | 1 |
-| `level.rs` | 1 | 1 |
-| `lib.rs` | 6 | **0** |
-| `record.rs` | 1 | 1 |
-| `sink.rs` | 20 | **25** |
-| `tail.rs` | 3 | 3 |
+| file | declared in `ci.yml` | measured, base `67c4e58d` | measured, this branch |
+|---|---:|---:|---:|
+| `clock.rs` | 1 | 1 | 1 |
+| `level.rs` | 1 | 1 | 1 |
+| `lib.rs` | 6 | **0** | **0** |
+| `record.rs` | 1 | 1 | 1 |
+| `sink.rs` | 20 | **62** | **25** |
+| `tail.rs` | 3 | 3 | 3 |
 
-**So gate 20 would be red with this branch**: `sink.rs` 25 against 20, and
-`lib.rs` 0 against 6.
+The base was measured the same way: its workspace profile, then its own
+binaries of the four crates re-run (110 profiles). Read root-only first, it
+gave `sink.rs` 236 and `lib.rs` 2 (the branch: 199 and 2).
+- **Gate 20 is red on the base already**, on Linux: `sink.rs` 62 against
+  20, and `lib.rs` 0 against 6.
+- **This branch lowers `sink.rs` from 62 to 25**, 37 fewer uncovered
+  lines. It adds no uncovered line of its own.
+- `lib.rs` is 0 on both.
+
+The base's first attempt at this measurement was killed by the out-of-memory
+killer while it ran beside the workspace test build, two `rustc` processes
+in the memory cgroup (`dmesg`). It was run again alone.
+
+**So gate 20 is red with this branch as it is on the base**: `sink.rs` 25
+against 20, and `lib.rs` 0 against 6. This is measured as root, with the
+children's profiles added back. CI's own run, as an ordinary user, is the
+authority.
 - The 25 `sink.rs` lines are 3413 (production, a posting path with no
   parent; see Coverage) and test code: 3604, 3606-3607, 3706-3716 (9
   lines), 3995, 4032-4035, 4365, 4584, 4968, 6552, 6882, 6941, 7792.
@@ -504,8 +521,6 @@ does. Linux is the platform CI measures on.
 - The declared counts live in `.github/workflows/ci.yml`, and their prose in
   `docs/06-limits.md` §54. Both are outside this pass's files (see NEEDS THE
   MAC).
-
-(The base, measured the same way, is in progress: below when it lands.)
 
 **What else the workspace run showed.** It ran 152 test targets in 142
 min, instrumented, beside a mutation run. Two targets failed:
@@ -563,7 +578,8 @@ No new locked choice, so there is no new D-number. The deadline is the
 - **CI gate 20's declared counts** (`.github/workflows/ci.yml`) and
   `docs/06-limits.md` §54. Measured here on Linux, as CI measures: with this
   branch, `sink.rs` 25 (declared 20) and `lib.rs` 0 (declared 6).
-  - The comparison against the base is in the section above.
+  - The base `67c4e58d` reads `sink.rs` 62 and `lib.rs` 0, so the gate is red
+    there too, and this branch brings `sink.rs` closer.
   - Re-measure on the merged head, set the counts, and correct §54's prose
     in the same commit, as the gate's own message asks.
   - These are not this pass's files.
@@ -578,9 +594,9 @@ No new locked choice, so there is no new D-number. The deadline is the
 - **The macOS rows.** This container is Linux on ext4, run as root with the
   capabilities dropped.
   - The `cfg(target_os = "macos")` arms of `file.rs`, `safe_open.rs` and
-    `open_flags.rs` are other targets' arms here, so they are neither covered
-    nor mutated on this host. Among them are `writer_flags`, an equivalent
-    here.
+    `open_flags.rs` are other targets' arms here. They are not compiled, so
+    they are not covered, and a mutant in one cannot be told apart on this
+    host (`writer_flags`' two, above).
   - GF-1's `macos` CI job runs the suite there.
 
 ## Follow-ups for other owners
