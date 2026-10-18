@@ -191,7 +191,7 @@ so every survivor below is re-tested on the final tree.
   Measured under the mutant: every store test binary ends, and those two
   fail in 21 s (`11d407e7`).
 
-### Coverage (run r3, on `402b9349`)
+### Coverage (final run r5, on `55956acf`)
 
 Measured with `cargo llvm-cov` (`--branch`, `RUSTC_BOOTSTRAP=1`) over
 `cargo test -p store -p telemetry`, as root with the capabilities dropped.
@@ -202,48 +202,49 @@ skipped).
 | file | lines | missed | branches | missed |
 |---|---:|---:|---:|---:|
 | `store/src/emits.rs` | 285 | 6 | 2 | 0 |
-| `store/src/file.rs` | 4,426 | 65 | 358 | 24 |
+| `store/src/file.rs` | 4,437 | 64 | 358 | 20 |
 | `store/src/flock.rs` | 75 | 0 | 8 | 0 |
 | `store/src/path.rs` | 206 | 0 | 30 | 0 |
 | `store/src/safe_open.rs` | 177 | 8 | 22 | 2 |
 | `store/src/sealed.rs` | 1,434 | 0 | 274 | 4 |
 | `store/src/sealed_codec.rs` | 646 | 0 | 90 | 0 |
-| `store/src/sort_index_writer.rs` | 388 | 0 | 62 | 1 |
+| `store/src/sort_index_writer.rs` | 388 | 0 | 62 | 0 |
 | `store/src/staging.rs` | 109 | 0 | 14 | 0 |
-| `store/src/time_index.rs` | 742 | 0 | 80 | 10 |
+| `store/src/time_index.rs` | 744 | 0 | 80 | 9 |
 | `store/src/verdict.rs` | 2,685 | 6 | 310 | 14 |
-| `telemetry/src/sink.rs` | 4,450 | 31 | 338 | 20 |
+| `telemetry/src/sink.rs` | 4,463 | 25 | 340 | 20 |
 
-The base, measured the same way: `file.rs` 83 lines and 28 branches,
-`verdict.rs` 18 and 33, `sort_index_writer.rs` 10 and 4, `staging.rs` 2
-and 2, `sink.rs` 34 and 29.
+The base, measured the same way, missed:
 
-`af6423fe` then covered these:
-- the sealed-batch answers at `file.rs` 4580, 4890 and
-  `sort_index_writer.rs` 591;
-- the small-month `.tix` branch at `file.rs` 3201;
-- the seam's arm at `file.rs` 6059-6060;
-- `time_index.rs` 618;
-- `sink.rs` 918 and the `Refusing` double's lines 8661-8666.
+| file | lines | branches |
+|---|---:|---:|
+| `file.rs` | 83 | 28 |
+| `verdict.rs` | 18 | 33 |
+| `sort_index_writer.rs` | 10 | 4 |
+| `staging.rs` | 2 | 2 |
+| `sink.rs` | 34 | 29 |
 
-A final run on the final tree confirms them.
+Every uncovered line and branch left is one of these: an arm no input can
+reach (each below, with its reason), an arm for another target, or test
+code that runs only when a test fails. The production ones, at their r5
+line numbers:
 
 **Uncovered production lines, each unreachable, with its reason:**
 - **`file.rs` defensive re-borrows**, after the caller checked the same
-  value: lines and branches 3344-3345, 3358-3359, 3462-3463, 3541-3542,
-  3552-3553, 3569-3570, 3572-3573. Each is a
+  value: lines and branches 3349-3350, 3363-3364, 3467-3468, 3546-3547,
+  3557-3558, 3574-3575, 3577-3578. Each is a
   `let Some(tix) = self.tix.as_ref() else`.
-- **`file.rs` 3370-3380 and 3488-3502**: `time_index::extend` refusing
+- **`file.rs` 3375-3385 and 3493-3507**: `time_index::extend` refusing
   `OffGrid` or `Outside`. Admission has already refused those bars on the
   same grid (`Geometry::new` uses `Admission`'s `OPEN_ANCHOR_MICROS` and the
   same month bounds). `Err(other)` there is unreachable, because the stamps
   iterator never errs.
-- **`file.rs` 3483-3486**: `SharedSlot` at the threshold. An intraday slot
+- **`file.rs` 3488-3491**: `SharedSlot` at the threshold. An intraday slot
   holds one bar, and a daily month never reaches 1,024 bars.
-- **`file.rs` 2582, 2588, 3791, 3801-3803**: geometry refusals of a block
+- **`file.rs` 2582, 2588, 3796, 3806-3808**: geometry refusals of a block
   range computed from the same layout, and a buffer that a `const`
   assertion sizes.
-- **`file.rs` 3936-3937, 3988-3989, 4419-4422**:
+- **`file.rs` 3941-3942, 3993-3994, 4424-4427**:
   - the overlap walk past `held_through`;
   - an empty month at `suffix_that_follows`, which admission refuses
     first;
@@ -258,15 +259,15 @@ A final run on the final tree confirms them.
 - **`sink.rs` 3410/3413**: a posting path with no parent.
 
 **Uncovered production branches with no uncovered line:**
-- **`file.rs` 3251**: `set_tix_state` on a handle with no `tix`. Every
+- **`file.rs` 3256**: `set_tix_state` on a handle with no `tix`. Every
   caller has read `self.tix` as `Some` first.
-- **`file.rs` 3674**, the cache's second key (`cache.n_valid != n_valid`
+- **`file.rs` 3679**, the cache's second key (`cache.n_valid != n_valid`
   with the same block): every commit sets the cached block to `NO_BLOCK`
   (2549), so a changed count always comes with a changed block. The second
   key keeps the two saying the same thing, as its own comment says.
-- **`file.rs` 5144**: `O_SYNC.is_none()`, true only on targets without a
+- **`file.rs` 5154**: `O_SYNC.is_none()`, true only on targets without a
   verified `O_SYNC`.
-- **`file.rs` 5238**: the parent walk ending by `None`. It ends at the
+- **`file.rs` 5248**: the parent walk ending by `None`. It ends at the
   root's parent, which `starts_with(root)` refuses, for every root that has
   a parent. Only `/` or an empty root ends it by `None`, and no caller
   passes either.
@@ -288,13 +289,27 @@ A final run on the final tree confirms them.
   never empty.
 
 **Test code.** These lines and branches run only when a test fails:
-- the `panic!` arms of test helpers and `assert!` short-circuits (`file.rs`
-  test lines, `verdict.rs` 4219 and 4227, `time_index.rs` 921, 1057,
-  1058 and 1105, `emits.rs` 788-792 and 801);
+- the `panic!` arms of test helpers and `assert!` short-circuits:
+  - `file.rs` test lines after 5980;
+  - `verdict.rs` 4219, 4227, 4637 and 4974;
+  - `time_index.rs` 921, 1057, 1058 and 1105;
+  - `emits.rs` 788-792 and 801;
+  - `sink.rs` test lines after 3511;
 - doubles' methods a test does not call (`sink.rs` 3706-3716).
 
-Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
-`other => panic!` arms of the `corrupt_why` and `unknown` helpers.
+Of all the test code left uncovered, these are this branch's own (its
+added lines, intersected with r5's report):
+- `verdict.rs` 4219 and 4227: the `other => panic!` arms of the
+  `corrupt_why` and `unknown` helpers.
+- `verdict.rs` 4637 and 4974: one short-circuit side each of two `.find`
+  predicates in the re-applied cloud tests, which no probe of those tests
+  takes.
+- `file.rs` 10095: an assertion's `matches!` guard, false only when it
+  fails.
+- `sink.rs` 6934: the `reaped()` deadline, passed only when the reaper
+  never finishes.
+
+No production line or branch this branch added is uncovered.
 
 ## Left
 
