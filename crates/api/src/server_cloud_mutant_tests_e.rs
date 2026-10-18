@@ -602,3 +602,70 @@ fn the_stop_counts_every_request_open_across_the_speed_table() {
         "{stdout}"
     );
 }
+
+/// **The banner says why a universe was not read whole, and says nothing
+/// more of a clean one.** A read whose only fault is one decline nobody chose
+/// prints its status, each of its notes, and the exit it has earned; a clean
+/// read prints its status alone. Run in a child process, because the banner
+/// is this process's standard output. Kills deleting the `!` of `if !clean`
+/// in `announce_universe` (server.rs:18983), which printed a clean read's
+/// notes and the degraded exit, and kept a degraded read's to itself.
+#[test]
+fn a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more() {
+    const CHILD: &str = "BRUTEX_CLOUDE_ANNOUNCE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let read = |notes: Vec<String>, non_routine| {
+            Read::new(
+                crate::merge::Merged::default(),
+                notes,
+                Vec::new(),
+                0,
+                0,
+                non_routine,
+            )
+        };
+        println!();
+        println!("CLOUDE-CLEAN-BEGIN");
+        assert!(announce_universe(&read(Vec::new(), 0)));
+        println!("CLOUDE-CLEAN-END");
+        println!("CLOUDE-DEGRADED-BEGIN");
+        assert!(!announce_universe(&read(
+            vec!["CLOUDE one master did not read".to_owned()],
+            1
+        )));
+        println!("CLOUDE-DEGRADED-END");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    let between = |begin: &str, end: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .skip_while(|line| *line != begin)
+            .skip(1)
+            .take_while(|line| *line != end)
+            .map(str::to_owned)
+            .collect()
+    };
+    let clean = between("CLOUDE-CLEAN-BEGIN", "CLOUDE-CLEAN-END");
+    assert_eq!(clean, ["  universe: ok"], "{stdout}");
+    let degraded = between("CLOUDE-DEGRADED-BEGIN", "CLOUDE-DEGRADED-END");
+    assert_eq!(
+        degraded.first().map(String::as_str),
+        Some("  universe: DEGRADED")
+    );
+    assert!(
+        degraded
+            .iter()
+            .any(|line| line == "            CLOUDE one master did not read"),
+        "{stdout}"
+    );
+    assert!(
+        degraded
+            .last()
+            .is_some_and(|line| line.contains("this process will exit")),
+        "{stdout}"
+    );
+}
