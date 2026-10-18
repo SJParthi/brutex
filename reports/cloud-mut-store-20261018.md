@@ -120,9 +120,11 @@ Clean, they take 0.004 s and 0.017 s.
 
 | mutant | before (`318a3555`) | after (`24ca118c`) |
 |---|---|---|
-| `first_at_or_after` `<=` | (below) | **caught**: the overlap test fails at its 20.2 s deadline, 33rd of 799 |
-| `first_at_or_after` `%` | (below) | **caught**: the same test, 20.2 s, 33rd |
-| `audited` `<=` | (below) | **caught**: `a_file_on_disk_reads_the_same_as_its_bytes` fails at its 60.2 s deadline, 172nd |
+| `first_at_or_after` `<=` | timeout: SIGTERM at 296 s on the overlap test, 33rd of 799 | **caught**: the overlap test fails at its 20.2 s deadline, 33rd of 799 |
+| `first_at_or_after` `%` | timeout: SIGTERM at 296 s, the same test | **caught**: the same test, 20.2 s, 33rd |
+| `audited` `<=` | timeout: SIGTERM at 280 s on `a_file_on_disk_reads_the_same_as_its_bytes`, 172nd | **caught**: that test fails at its 60.2 s deadline, 172nd |
+
+Each side's unmutated baseline passed first (105 s and 104 s of tests).
 
 Under plain `cargo test` (libtest, which waits for every test in a binary)
 all three stay timeouts, because 36, 24 and 11 tests still loop with no
