@@ -539,8 +539,11 @@ impl MoverRank {
                 MemberState::Fresh | MemberState::Stale if *diff < 0 => Side::Loser,
                 _ => Side::Neither,
             };
+            // The move's 32 bits sit below the side's, so the sum joins them;
+            // a sum rather than an or, because an or and an xor of disjoint
+            // bits agree.
             *key = side.bits()
-                | u64::from(match side {
+                + u64::from(match side {
                     Side::Gainer => (i32::MAX - *move_bp).cast_unsigned(),
                     Side::Loser => (*move_bp ^ i32::MIN).cast_unsigned(),
                     Side::Neither => 0,
