@@ -373,9 +373,14 @@ pub(super) fn held_months(dir: &Path) -> Result<Arc<[YearMonth]>, String> {
     for entry in entries {
         let entry = entry.map_err(|why| format!("cannot list {}: {why}", dir.display()))?;
         let name = entry.file_name();
+        // EITHER FORM OF A MONTH (SC-3, D-4965): the raw `.bin` or the
+        // sealed `.sbar`; the set holds a month in both forms once.
         if let Some(month) = name
             .to_str()
-            .and_then(|name| name.strip_suffix(".bin"))
+            .and_then(|name| {
+                name.strip_suffix(FileKind::Bars.extension())
+                    .or_else(|| name.strip_suffix(FileKind::SealedBars.extension()))
+            })
             .and_then(month_of_text)
         {
             months.insert(month);

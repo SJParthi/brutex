@@ -2769,22 +2769,45 @@ fn walk_rung(
     dir: &Path,
     walk: &mut Walk<'_>,
 ) -> Result<(), String> {
+    // The stem of the last month counted from its raw `.bin`: the listing is
+    // sorted by name and `.bin` sorts before `.sbar`, so a month held in BOTH
+    // forms is counted once, from its `.bin`, with no extra `stat`.
+    let mut counted_raw: Option<String> = None;
     for (path, name) in sorted_dir(dir)? {
         // A month's siblings — `.crc`, `.lock`, `.tix`, `.ovl` — are expected
         // here and are not strays; only the bars are counted.
-        let Some(stem) = name.strip_suffix(FileKind::Bars.extension()) else {
-            if !FileKind::ALL
-                .iter()
-                .any(|kind| name.ends_with(kind.extension()))
-            {
-                stray(walk.found, path);
+        //
+        // EITHER FORM IS A MONTH (SC-3, D-4965). A `.sbar` with no `.bin`
+        // beside it — the raw form retired, or a seal whose raw month is gone
+        // — is a month like any other: the read door opens it, and a damaged
+        // one is named unreadable below. It was passed over as a sibling
+        // (verify-SC-2-r1), neither counted nor a stray.
+        let (stem, sealed) = match (
+            name.strip_suffix(FileKind::Bars.extension()),
+            name.strip_suffix(FileKind::SealedBars.extension()),
+        ) {
+            (Some(stem), _) => (stem, false),
+            (None, Some(stem)) => (stem, true),
+            (None, None) => {
+                if !FileKind::ALL
+                    .iter()
+                    .any(|kind| name.ends_with(kind.extension()))
+                {
+                    stray(walk.found, path);
+                }
+                continue;
             }
-            continue;
         };
+        if sealed && counted_raw.as_deref() == Some(stem) {
+            continue;
+        }
         let Some(month) = month_named(stem) else {
             stray(walk.found, path);
             continue;
         };
+        if !sealed {
+            counted_raw = Some(stem.to_owned());
+        }
         walk.found.files_seen += 1;
         if !walk.span.holds(month) {
             continue;

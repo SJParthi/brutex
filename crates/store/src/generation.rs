@@ -241,11 +241,24 @@ pub fn pointer_path(root: &Path, path: StorePath<'_>) -> PathBuf {
 /// # Errors
 ///
 /// Whatever [`served`] refuses.
+///
+/// # The form, too (SC-3, D-4965)
+///
+/// When the served generation holds the month SEALED, this is its `.sbar`,
+/// the file the read door opens first (`BarFile::open_existing`), so a
+/// month sealed after a cache entry was made is a new key — and a stamp of
+/// the immutable sealed file — never a stale hit on the raw form's. One
+/// `lstat` more than before; the raw `.bin` when no `.sbar` is there.
 pub fn served_bars_path(root: &Path, path: StorePath<'_>) -> Result<PathBuf, StoreError> {
     let served = served(root, path)?;
-    Ok(path
-        .with_file(FileKind::Bars)
-        .to_path_buf(&served.root(root)))
+    let served_root = served.root(root);
+    let sealed = path
+        .with_file(FileKind::SealedBars)
+        .to_path_buf(&served_root);
+    if fs::symlink_metadata(&sealed).is_ok_and(|meta| meta.is_file()) {
+        return Ok(sealed);
+    }
+    Ok(path.with_file(FileKind::Bars).to_path_buf(&served_root))
 }
 
 /// Which generation of `path`'s month is served. Any non-bar path is served

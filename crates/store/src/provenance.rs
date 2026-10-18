@@ -1109,10 +1109,20 @@ pub fn read(root: &Path, path: StorePath<'_>) -> Result<Found, ProvenanceError> 
             }
         })?;
     let root = &served.root(root);
+    // A SEALED MONTH CARRIES ITS PROVENANCE (SC-3, design §4.2.4 and §4.4):
+    // the `.prv` image byte for byte, packed inside the `.sbar`. The door
+    // asks the sealed form first, as the bar door does.
+    if let Some(found) = sealed(root, path)? {
+        return Ok(found);
+    }
     let at = path.with_file(FileKind::Provenance).to_path_buf(root);
     let file = match crate::open_flags::open_read_no_follow(&at) {
         Ok(file) => file,
-        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(Found::Absent),
+        // A RETIREMENT MAY HAVE RUN BETWEEN THE TWO OPENS: the sealed form
+        // once more, then absent.
+        Err(why) if why.kind() == ErrorKind::NotFound => {
+            return Ok(sealed(root, path)?.unwrap_or(Found::Absent));
+        }
         Err(why) => return Err(opened(&at, why)),
     };
     let bytes = whole(&file, &at)?;
@@ -1122,6 +1132,53 @@ pub fn read(root: &Path, path: StorePath<'_>) -> Result<Found, ProvenanceError> 
         }),
         Scan::Born(sidecar) => Ok(Found::Present(sidecar)),
     }
+}
+
+/// The provenance of `path`'s month from its SEALED form under `root` (the
+/// served generation's root), or `None` when there is no `.sbar` there.
+///
+/// One `open`, two 512-byte head reads (the first takes the head's own symbol
+/// id; the path digest the second checks binds the head to the whole store
+/// path, which is the stronger check, `refuse_misfiled`'s), and one read of
+/// the packed section. A sealed month sealed without a `.prv` is
+/// [`Found::Absent`], exactly as its raw form was.
+///
+/// # Errors
+///
+/// The open's refusal, and the sealed month's own refusal (head, path,
+/// section CRC or length) as [`ProvenanceError::Io`] naming the `.sbar`;
+/// then whatever [`scan`] refuses of the unpacked image.
+fn sealed(root: &Path, path: StorePath<'_>) -> Result<Option<Found>, ProvenanceError> {
+    use crate::sealed::{HEAD_LEN, Head, SealedMonth};
+    const _: () = assert!(HEAD_LEN == 512);
+    let at = path.with_file(FileKind::SealedBars).to_path_buf(root);
+    let file = match crate::open_flags::open_read_no_follow(&at) {
+        Ok(file) => file,
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(why) => return Err(opened(&at, why)),
+    };
+    let refused = |why: crate::sealed::SealedError| {
+        io_error(
+            &at,
+            "reading the sealed month's provenance",
+            io::Error::other(why.to_string()),
+        )
+    };
+    let mut head = [0u8; 512];
+    file.read_exact_at(&mut head, 0)
+        .map_err(|why| io_error(&at, "reading the sealed month's head", why))?;
+    let symbol_id = Head::decode(&head).map_err(refused)?.symbol_id;
+    let month =
+        SealedMonth::open(file, path.with_file(FileKind::Bars), symbol_id).map_err(refused)?;
+    let Some(image) = month.provenance().map_err(refused)? else {
+        return Ok(Some(Found::Absent));
+    };
+    Ok(Some(match scan(&image, path, &at)? {
+        Scan::Unborn => Found::Unborn {
+            bytes: len_u64(image.len()),
+        },
+        Scan::Born(sidecar) => Found::Present(sidecar),
+    }))
 }
 
 /// Records one landing beside the month it appended to, after its bars are

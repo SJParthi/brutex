@@ -1108,6 +1108,26 @@ ranges, the extremes, the table, the provenance and the summary against the
 head: O(the month), once, for a seal and a scrub, never for a request
 (`docs/06-limits.md` L-SC-16).
 
+**Reading: one door for both forms (D-5899, SC-3).** Every reader opens a bar
+month through `BarFile::open_existing`, which resolves the served generation
+(D-3350) and then opens `<yyyy-mm>.sbar`; on `ENOENT` the raw
+`<yyyy-mm>.bin`; when that is `ENOENT` too, or its shared lock is refused,
+`.sbar` once more (a retirement may have run between the two). At most three
+opens, no listing. A sealed month takes no lock, opens no `.crc`, `.tix` or
+`.srt`, and is served from the handle's one cached block — a frame decoded into
+56-byte record images — so `read_record`, the bisection, `already_stored`, a
+page (`BarFile::read_range`) and a sorted page (`BarFile::read_rows_at`) see
+the same record bytes from either form. Time lookups use the sealed time
+table. A sealed month that fails any check is `StoreError::SealedRefused`,
+naming the block or field; it is never answered from the `.bin` instead.
+`provenance::read` reads the packed section first; `generation::served_bars_path`
+names the `.sbar` when there is one; the month listings (`store::catalog`,
+the census recount, `api`'s held months) count a month in either form once.
+The audited door (`open_existing_audited`) decodes the sealed form whole, then
+audits the raw form, and refuses unless the two have one header and one
+records BLAKE3; a sealed month with no raw form beside it has no strict
+receipt and says so.
+
 ### 8.6 `.sum` — month summary, version 1 (D-4980)
 
 What a reader needs to know about a month without reading its bars (R3-06):

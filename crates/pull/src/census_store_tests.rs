@@ -1543,3 +1543,100 @@ fn elsewhere_file(root: &Path) -> PathBuf {
     std::fs::write(&at, b"x").expect("written");
     at
 }
+
+/// One-second NIFTY spot bars at 09:15 IST on the 3rd of `month`, with
+/// invented prices no index has ever printed.
+fn sealed_fixture_bars(month: YearMonth, count: i64) -> Vec<store::format::Bar> {
+    let open = month.ist_bounds_micros().0 + (2 * 86_400 + 555 * 60) * 1_000_000;
+    (0..count)
+        .map(|k| store::format::Bar {
+            ts_micros: open + k * 1_000_000,
+            open: 3_100_000_000 + k,
+            high: 3_100_000_500 + k,
+            low: 3_099_999_500 + k,
+            close: 3_100_000_000 + k,
+            volume: 1 + k,
+            open_interest: store::format::OI_NULL,
+        })
+        .collect()
+}
+
+fn sealed_fixture_path(month: YearMonth) -> store::path::StorePath<'static> {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month,
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a store path")
+}
+
+/// The month's raw form under `root`, and its sealed bytes.
+fn sealed_fixture(root: &Path, month: YearMonth, count: i64) -> Vec<u8> {
+    #[expect(clippy::cast_possible_truncation, reason = "the census's own fold")]
+    let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let path = sealed_fixture_path(month);
+    let mut writer =
+        store::file::BarFile::open_or_create(root, path, symbol_id).expect("a raw month");
+    writer
+        .append(&sealed_fixture_bars(month, count))
+        .expect("bars land");
+    drop(writer);
+    let raw = store::file::BarFile::open_existing(root, path, symbol_id).expect("reads");
+    let bars = raw.read_range(0, raw.records()).expect("every row");
+    store::sealed::build(path, &raw.header(), &bars, None, None)
+        .expect("seals")
+        .to_bytes()
+}
+
+/// A MONTH IN EITHER FORM IS A MONTH, COUNTED ONCE (SC-3, verify-SC-2-r1):
+/// raw only, both forms, and the sealed form alone are three months; a
+/// damaged lone `.sbar` is unreadable and named, never passed over as a
+/// sibling.
+#[test]
+fn a_sealed_month_is_counted_once_and_a_lone_one_is_a_month() {
+    let scratch = Scratch::new("SEALED");
+    let root = scratch.root();
+    let elsewhere = Scratch::new("SEALED-ELSEWHERE");
+    let (raw, both, alone, broken) = (ym(2031, 1), ym(2031, 2), ym(2031, 3), ym(2031, 4));
+    let _ = sealed_fixture(root, raw, 3);
+    let sealed = sealed_fixture(root, both, 300);
+    let path = sealed_fixture_path(both).with_file(store::path::FileKind::SealedBars);
+    std::fs::write(path.to_path_buf(root), &sealed).expect("both forms");
+    for (month, damage) in [(alone, false), (broken, true)] {
+        let mut bytes = sealed_fixture(elsewhere.root(), month, 5);
+        if damage {
+            bytes[40] ^= 0x01;
+        }
+        let at = sealed_fixture_path(month)
+            .with_file(store::path::FileKind::SealedBars)
+            .to_path_buf(root);
+        std::fs::create_dir_all(at.parent().expect("a rung")).expect("a rung");
+        std::fs::write(&at, bytes).expect("a lone sealed month");
+    }
+    let span = Span {
+        from: Day::new(2031, 1, 1).expect("a day"),
+        to: Some(Day::new(2031, 4, 30).expect("a day")),
+    };
+    let done = super::recount(root, Vendor::Gdfl, span, None).expect("a recount");
+    assert_eq!(
+        done.files_seen, 4,
+        "four months, the one in both forms once"
+    );
+    assert_eq!(done.files_in_range, 4);
+    assert_eq!(done.not_store_names, 0, "no sealed file is a stray");
+    assert_eq!(done.unreadable, 1, "the damaged sealed month");
+    assert_eq!(done.months_unreadable, vec![broken]);
+    assert!(
+        done.unreadable_named[0]
+            .1
+            .contains("sealed month is refused"),
+        "{:?}",
+        done.unreadable_named
+    );
+    assert_eq!(done.offered, 3, "raw, both forms and sealed alone");
+}

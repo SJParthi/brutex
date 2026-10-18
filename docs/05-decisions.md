@@ -72850,3 +72850,55 @@ file's closing-auction count is carried on an INDEX record by design
 `web/tests/db-dayflags-closed.test.js` (`a_two_valued_second_is_not_a_minute_gap`,
 `a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
 `web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
+
+### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.4, §6; its proposed D-4929, renumbered here at landing: the ledger's
+head was D-5834 on `feat/db-fix` and D-5884 on unmerged branches) gives a
+closed month a second form, the sealed `.sbar` of D-4965. SC-3 is the read
+half of that decision.
+
+**The door.** `BarFile::open_existing` resolves the served generation, then
+opens `<yyyy-mm>.sbar`; on `ENOENT` the raw `.bin`; when the `.bin` is absent
+too, or its shared lock is refused, `.sbar` once more, because a retirement
+(design §4.7, SC-9, off until the operator's decision) may have run between
+the two opens. At most three opens and no directory listing, so the cost of
+choosing a form is constant. Overlay and greeks files have no sealed form.
+
+**Same bytes, same cache.** A sealed handle holds the raw month's committed
+header (the head copies it), takes no lock (an immutable file published by
+rename has no writer), and fills the handle's one cached block with a decoded
+frame's 56-byte record images: the cache grows from 4,088 to 14,336 bytes
+(`CACHED_BLOCK_LEN`; the raw verify path keeps its 4,088-byte stack buffers,
+D-0914). `read_record`, the bisection, `already_stored`, every page and every
+run identity see the same records from either form. `read_range` (the page
+path: one read of adjacent directory entries, one of adjacent frames) and
+`read_rows_at` (the sorted page path: each frame decoded once) are new on
+`BarFile` for both forms. Time lookups use the sealed time table
+(`TimeLookup::Sealed`); `index_existing` answers `Reindexed::Sealed` and
+writes nothing.
+
+**Never the other form instead.** A sealed month that fails any check is
+`StoreError::SealedRefused` naming the `.sbar`, its stable reason and the block
+or field. Answering from the `.bin` would be the hidden fallback `CLAUDE.md` §4
+bans: the door opened the sealed form, and the sealed form is what is reported.
+A page reader that meets a refused frame reads record by record so each
+refused row is named in the fault log.
+
+**Provenance, listings, the audited door.** `provenance::read` reads the
+packed section of a sealed month first (and once more after a `.prv` that is
+absent). `generation::served_bars_path` names the `.sbar` when the served
+generation holds one, so every cache keyed by it changes key when a month is
+sealed. `store::catalog`, the census recount and `api`'s held months count a
+month in either form once; a lone `.sbar` is a month, and a damaged one is
+named unreadable, never passed over as a sibling (verify-SC-2-r1). The audited
+door decodes the sealed form whole, audits the raw form, and refuses unless
+both state one header and one records BLAKE3; a sealed month with no raw form
+beside it has no strict receipt and says so.
+
+**Not decided here.** The write door (`StoreError::Sealed`, `AlreadyPresent`
+for a re-offer) is SC-4's; `.srt` v2 is SC-5's; sealing is SC-6's; retiring the
+raw form is SC-9's and needs the operator's decision. Until SC-6 lands nothing
+in the store writes a `.sbar`, so this door changes no answer the live app
+gives today.

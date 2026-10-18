@@ -647,6 +647,19 @@ fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, FaultLo
 /// [`slots`], noting what would not read in the caller's log.
 fn slots_into(file: &BarFile, skip: usize, take: usize, faults: &mut FaultLog) -> Vec<Option<Bar>> {
     let n = file.header().n_valid;
+    // A SEALED MONTH'S PAGE IS ONE RANGE READ (SC-3, design §4.4): the
+    // adjacent directory entries and frames, once each. When any of it is
+    // refused, the walk below reads record by record so each refused row is
+    // NAMED in the fault log, never dropped and never served from elsewhere.
+    if file.form() == store::file::Form::Sealed
+        && let (Ok(first), Ok(end)) = (
+            u64::try_from(skip),
+            u64::try_from(skip.saturating_add(take)),
+        )
+        && let Ok(read) = file.read_range(first.min(n), end.min(n).saturating_sub(first.min(n)))
+    {
+        return read.into_iter().map(Some).collect();
+    }
     let mut rows = Vec::with_capacity(take.min(PAGE_BARS));
     for i in skip..skip.saturating_add(take) {
         let Ok(index) = u64::try_from(i) else {
@@ -4126,3 +4139,8 @@ mod window_tests {
 #[cfg(test)]
 #[path = "bars_unknown_series_tests.rs"]
 mod unknown_series_tests;
+
+// Every bar route over sealed and raw months alike (SC-3, D-4965).
+#[cfg(test)]
+#[path = "bars_sealed_tests.rs"]
+mod sealed_tests;

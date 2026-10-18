@@ -290,6 +290,20 @@ const MAX_BLOCK_LEN: usize = 4_088;
 const _: () = assert!(MAX_BLOCK_LEN as u64 == crate::format::BLOCK_LEN);
 const _: () = assert!(MAX_BLOCK_LEN == 4_088);
 
+/// The handle's cached block, in bytes: one raw checksum block (73 records,
+/// [`MAX_BLOCK_LEN`]) or one sealed frame decoded to its record images (256
+/// records, 14,336 bytes). Store-compression design §4.4 and §9 (SC-3): the
+/// cache holds a block's records as 56-byte images WHATEVER THE FILE'S FORM,
+/// so `read_record`, the bisection, `already_stored` and every page see the
+/// same bytes from a `.bin` and a `.sbar`. The design names this number
+/// `MAX_BLOCK_LEN`; it is a second constant here because the raw verify path
+/// keeps its 4,088-byte stack buffers (D-0914, `store::cold_read`), which a
+/// sealed frame never touches. D-4965 (the sealed month), SC-3.
+const CACHED_BLOCK_LEN: usize = 14_336;
+
+const _: () = assert!(CACHED_BLOCK_LEN == crate::sealed_codec::BLOCK_ROWS as usize * RECORD_LEN);
+const _: () = assert!(CACHED_BLOCK_LEN >= MAX_BLOCK_LEN);
+
 const _: () = {
     let mut rest = Layout::KNOWN;
     while let [layout, tail @ ..] = rest {
@@ -328,8 +342,9 @@ struct VerifiedBlock {
     start: u64,
     /// How many leading bytes of `bytes` were read and verified.
     len: usize,
-    /// The verified block, as read in one `pread`.
-    bytes: [u8; MAX_BLOCK_LEN],
+    /// The verified block, as read in one `pread`, or a sealed frame's
+    /// records as decoded (SC-3).
+    bytes: [u8; CACHED_BLOCK_LEN],
 }
 
 impl VerifiedBlock {
@@ -339,7 +354,7 @@ impl VerifiedBlock {
         n_valid: 0,
         start: 0,
         len: 0,
-        bytes: [0u8; MAX_BLOCK_LEN],
+        bytes: [0u8; CACHED_BLOCK_LEN],
     };
 
     /// The verified bytes of the record at file offset `at`, `width` long, or
@@ -853,6 +868,21 @@ pub enum StoreError {
         /// `store path`.
         field: &'static str,
     },
+    /// The month's SEALED form (`.sbar`, D-4965) was refused by the read
+    /// door: a head, directory entry, time-table entry or frame that fails
+    /// its check, a file of another length than its head states, or a head
+    /// written for another path, symbol, rung or month (SC-3). Never served
+    /// in part, never answered from the raw form instead: the sealed form is
+    /// the one the door opened, and serving another would be the hidden
+    /// fallback `CLAUDE.md` §4 bans.
+    SealedRefused {
+        /// The `.sbar` that was refused.
+        path: PathBuf,
+        /// [`crate::sealed::SealedError::reason`]: a stable word.
+        reason: &'static str,
+        /// The refusal in full, naming the block, entry or field.
+        detail: String,
+    },
 }
 
 /// How an offered overlap disagrees with the records a month holds.
@@ -1219,8 +1249,27 @@ impl fmt::Display for StoreError {
                 sidecar,
                 field,
             } => write_misfiled(f, path, sidecar, field),
+            refusal @ Self::SealedRefused { .. } => write_sealed_refused(f, refusal),
         }
     }
+}
+
+/// [`StoreError::SealedRefused`]'s sentence (SC-3, D-5899).
+fn write_sealed_refused(f: &mut fmt::Formatter<'_>, refusal: &StoreError) -> fmt::Result {
+    let StoreError::SealedRefused {
+        path,
+        reason,
+        detail,
+    } = refusal
+    else {
+        return Ok(());
+    };
+    write!(
+        f,
+        "{}: the sealed month is refused ({reason}): {detail}; it is not served, in part or \
+         from its raw form instead",
+        path.display()
+    )
 }
 
 impl std::error::Error for StoreError {}
@@ -1409,6 +1458,18 @@ pub struct BarFile {
     /// it — the writer's and `Self::month_summary_existing`; `None` for every
     /// reader, which never writes. R3-06, D-4980.
     msum: Option<summary_writer::SummarySidecar>,
+    /// The month's SEALED form (`.sbar`, D-4965), when the read door opened
+    /// it instead of the raw `.bin` (SC-3, store-compression design §4.4).
+    ///
+    /// `Some` exactly when [`Self::open_existing`] found `<yyyy-mm>.sbar` in
+    /// the served generation's directory: `bars` is then that file, the
+    /// header is the raw month's committed header the sealed head copies
+    /// ([`crate::sealed::Head::bar_header`]), no lock is held (an immutable
+    /// file published by rename has no writer to wait for), and there is no
+    /// `.crc`, `.tix` or `.srt` writer: [`Self::read_row`] fills the block
+    /// cache from one decoded frame and [`Self::first_at_or_after`] asks the
+    /// sealed time table. `None` for every raw month and every writer.
+    sealed: Option<crate::sealed::SealedMonth<File>>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1462,6 +1523,11 @@ pub enum TimeLookup {
     /// also written to the log as a `store.tix` warning, once per file and
     /// kind of reason (D-3340).
     Bisection(Why),
+    /// Through a sealed month's own time table, or its directory when it has
+    /// at most 64 blocks: at most two table entries, one directory read and
+    /// one frame's stamps per lookup (SC-3, design §4.2.3). A sealed month
+    /// needs no `.tix`.
+    Sealed,
 }
 
 /// What [`BarFile::index_existing`] found beside one month, and what it left.
@@ -1484,6 +1550,10 @@ pub enum Reindexed {
     /// a finding (D-4933). The commit that brings it to the threshold writes
     /// its index whole.
     BelowThreshold,
+    /// The served generation holds the month SEALED (`.sbar`): its own time
+    /// table answers every lookup, so no `.tix` is needed and nothing was
+    /// written (SC-3, design §4.4; D-4965).
+    Sealed,
 }
 
 /// One month through [`BarFile::index_existing`].
@@ -1909,11 +1979,38 @@ impl BarFile {
 
     /// [`Self::open_existing`] for the files under `root` exactly, with no
     /// generation resolved: the original month, or one revision's own files.
+    ///
+    /// # One door for both forms (SC-3, D-4965; design §3 and §4.4)
+    ///
+    /// A bar month opens `<yyyy-mm>.sbar` first; on `ENOENT` the raw
+    /// `<yyyy-mm>.bin`; when that is `ENOENT` too, or its shared lock is
+    /// refused, `.sbar` once more — a retirement may have run between the two
+    /// (`sealed_door`). At most three opens and no listing. Both forms hold
+    /// the same records bit for bit, so a reader may be handed either at any
+    /// instant. Overlay and greeks files have no sealed form.
     fn open_existing_at(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Self, StoreError> {
+        if path.file() != FileKind::Bars {
+            return Self::open_raw_at(root, path, symbol_id);
+        }
+        if let Some(sealed) = Self::open_sealed_at(root, path, symbol_id)? {
+            return Ok(sealed);
+        }
+        #[cfg(test)]
+        sealed_door_tests::between_opens();
+        match Self::open_raw_at(root, path, symbol_id) {
+            Err(refusal) if sealed_door::may_be_retired(&refusal, root, path) => {
+                Self::open_sealed_at(root, path, symbol_id)?.ok_or(refusal)
+            }
+            other => other,
+        }
+    }
+
+    /// The raw form's door: `.bin`, its shared lock, `.crc`, `.prv` check.
+    fn open_raw_at(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Self, StoreError> {
         // BARS OR A SIDECAR BESIDE THEM, and nothing else. A `.crc` or a
         // `.lock` opened here would be read as records at whichever geometry
         // its first bytes happened to name.
@@ -2048,6 +2145,15 @@ impl BarFile {
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
         refuse_links_below(store_root, &bars_path)?;
+        // A SEALED MONTH NEEDS NO `.tix` (SC-3, design §4.4): its own time
+        // table answers every lookup. Nothing is opened for writing, and the
+        // links were refused first, as for any month this door is asked of.
+        if let Some(sealed) = Self::open_sealed_at(root, path, symbol_id)? {
+            return Ok(IndexedMonth {
+                n_valid: sealed.header.n_valid,
+                outcome: Reindexed::Sealed,
+            });
+        }
         // READ-ONLY AND NEVER CREATED. `open_read` has no `create`, so a month
         // that is not there is `ENOENT`, named, before the lock is touched.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
@@ -2114,6 +2220,10 @@ impl BarFile {
         // THE GENERATION EVERY READER OPENS is the one audited (D-3350).
         let served = crate::generation::served(root, path).map_err(|why| why.to_string())?;
         let root = &served.root(root);
+        // BOTH FORMS ARE AUDITED WHEN BOTH ARE THERE (SC-3, design §4.4): the
+        // sealed form decoded whole against its head, then the raw form, then
+        // the two compared by the BLAKE3 of their records.
+        let sealed = sealed_door::audit_sealed(root, path, symbol_id)?;
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
         let lock = Flock::try_lock_shared(
@@ -2149,7 +2259,9 @@ impl BarFile {
                 file.bars_path.display()
             ));
         }
-        file.audit_checksums(max_bytes)
+        let audited = file.audit_checksums(max_bytes)?;
+        sealed_door::agree(sealed.as_ref(), &audited)?;
+        Ok(audited)
     }
 
     /// The checks both doors perform, once.
@@ -2494,6 +2606,7 @@ impl BarFile {
             batch,
             srt: None,
             msum: None,
+            sealed: None,
             _lock: lock,
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
@@ -3100,6 +3213,9 @@ impl BarFile {
     /// included when the answer is the bisection.
     #[must_use]
     pub fn time_lookup(&self) -> TimeLookup {
+        if self.sealed.is_some() {
+            return TimeLookup::Sealed;
+        }
         match self.tix_state() {
             None => TimeLookup::Bisection(Why::NotBars),
             Some(TixState::Ready(_)) => TimeLookup::Indexed,
@@ -3113,6 +3229,13 @@ impl BarFile {
     /// its overlap diagnosis — so none of them can drift onto the slow path
     /// while another stays on the fast one.
     fn locate<R: Row>(&self, ts: i64) -> Result<u64, StoreError> {
+        // A SEALED MONTH CARRIES ITS OWN TIME TABLE (SC-3, design §4.2.3):
+        // one table read, one directory read, one frame's stamps.
+        if let Some(sealed) = self.sealed.as_ref() {
+            return sealed
+                .first_at_or_after(ts)
+                .map_err(|why| sealed_door::refusal(&self.bars_path, &why));
+        }
         let n_valid = self.header.n_valid;
         let bisect = || first_at_or_after(n_valid, ts, |index| self.read_row::<R>(index));
         // An empty month answers 0 by either path and reads nothing; asking
@@ -3665,9 +3788,13 @@ impl BarFile {
         // has to go for none of them to serve an unverified byte. A sealed file
         // is served from the verified block's own bytes (D-1433); an unsealed
         // one has nothing to verify against and reads its record directly.
-        match self.crc_path.as_deref() {
-            Some(sidecar) => self.read_verified(sidecar, index, at, image)?,
-            None => read_fully(&self.bars, &self.bars_path, at, image)?,
+        //
+        // A SEALED MONTH IS THE THIRD ARM (SC-3): its block is one frame,
+        // decoded and checked into the same cache, and served the same way.
+        match (self.sealed.as_ref(), self.crc_path.as_deref()) {
+            (Some(sealed), _) => self.read_sealed(sealed, index, at, image)?,
+            (None, Some(sidecar)) => self.read_verified(sidecar, index, at, image)?,
+            (None, None) => read_fully(&self.bars, &self.bars_path, at, image)?,
         }
         refused(W::read_from(image), &self.bars_path)
     }
@@ -9885,3 +10012,13 @@ mod sidecar_checksum_tests;
 #[cfg(test)]
 #[path = "small_month_tests.rs"]
 mod small_month_tests;
+
+/// The read door's sealed arm (SC-3, D-4965): `.sbar` first, the frame
+/// cache, the page and sorted-page reads, and the audited door's sealed half.
+#[path = "file_sealed.rs"]
+mod sealed_door;
+pub use sealed_door::Form;
+
+#[cfg(test)]
+#[path = "file_sealed_tests.rs"]
+mod sealed_door_tests;

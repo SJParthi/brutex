@@ -110,7 +110,8 @@ pub struct Census {
     /// month is not a row here; it is also not an error, and reporting it as one
     /// would make a correctly-populated F&O store look broken.
     pub with_contract: u64,
-    /// The file was not `.bin` — a checksum, an overlay or a lock sibling.
+    /// The file was neither `.bin` nor `.sbar` — a checksum, an overlay or a
+    /// lock sibling.
     pub other_kind: u64,
     /// The first segment named no feed this build knows.
     pub unknown_vendor: u64,
@@ -138,6 +139,10 @@ pub struct Census {
     /// rather than read with the name dropped, which shortened the path by one
     /// level and filed it at another depth. D-0768.
     pub non_utf8: u64,
+    /// Of [`Census::spot`], the files that were a month's SEALED form
+    /// (`.sbar`, SC-3, D-4965). Counted inside `spot`, not beside it: a month
+    /// held in both forms is two files and one [`Held`].
+    pub sealed: u64,
     /// An entry below `bars/` that is neither a regular file, a directory nor
     /// a symbolic link: a FIFO, a socket or a device node. The store's writer
     /// makes none, so it is not a month whatever its name. D-0769.
@@ -435,9 +440,18 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
         return;
     };
-    let Some(stem) = file.strip_suffix(FileKind::Bars.extension()) else {
-        out.census.other_kind = out.census.other_kind.saturating_add(1);
-        return;
+    // EITHER FORM OF A MONTH (SC-3, D-4965): the raw `.bin` or the sealed
+    // `.sbar`. A month held in both is one [`Held`] after the walk's dedup.
+    let (stem, sealed) = match (
+        file.strip_suffix(FileKind::Bars.extension()),
+        file.strip_suffix(FileKind::SealedBars.extension()),
+    ) {
+        (Some(stem), _) => (stem, false),
+        (None, Some(stem)) => (stem, true),
+        (None, None) => {
+            out.census.other_kind = out.census.other_kind.saturating_add(1);
+            return;
+        }
     };
     let Some(vendor) = Vendor::ALL.into_iter().find(|k| k.as_str() == *v) else {
         out.census.unknown_vendor = out.census.unknown_vendor.saturating_add(1);
@@ -456,6 +470,9 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         return;
     };
     out.census.spot = out.census.spot.saturating_add(1);
+    if sealed {
+        out.census.sealed = out.census.sealed.saturating_add(1);
+    }
     out.held.push(Held {
         vendor,
         exchange: (*exchange).to_owned(),
