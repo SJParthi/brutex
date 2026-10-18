@@ -2642,6 +2642,38 @@ const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 
      tolerance two_files_for_one_day unplug value verdict verified wait waited_ms \
      waiting wanted zip_holds_no_member zip_unreadable";
 
+// R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
+// the package's own and none a path segment of any store or credential: the
+// refusal codes `before_listing`, `in_session_jump`, `non_positive_price`
+// and `history_ends_delisted`; the listing labels `nse_security_master`,
+// `inferred_from_vendor_span`, `no_checked_master`, `no_listing`,
+// `not_consulted` and the seven `listing_*` unknowns; the event fields
+// `delisted_on`, `master`, `master_sha256`, `in_use`, `passed_over` and
+// `label`, and `target` and `level` as the tests read a log line; the token
+// guard's (`crates/pull/tests/token_identity.rs`) key-shape words
+// `kite_token`, `exchange_token`, `security_id`, `fininstrmid`, `for_key`,
+// `option_key`, `parse_option_key`, `struct`, `enum`, `impl`, `for`, `type`
+// and `rs`; and the invented scratch-directory tags of its tests in
+// `crates/pull/tests/zerodha_identity.rs` and `pull::listing::tests`
+// (`columns`, `newest`, `removal`, `unknowns`, `macos`, `overflow`, `server`,
+// `halt`, `interleave`, `day-before-listing` .. `zero-unread-day`,
+// `no-such-directory`, and repair 3's `passed-over-master`,
+// `no-master-checks` and `none-checks`).
+// Declared at R4-17 repair 3: gate 1d had never been run on the package.
+// Repair 4 adds the passed-over code `undated_master_name` (a master-shaped
+// name that states no calendar day) and its test tag `undated`.
+const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range delisted_on enum \
+     epoch-zero epoch-zero-landing exchange_token fininstrmid for for_key halt history-ends \
+     history_ends_delisted identity-log identity-log-unread impl in_session_jump in_use \
+     index-no-jump inferred-landing inferred_from_vendor_span interleave jump-unread-day \
+     kite_token label late-removal level listing-unread-day listing_after_master listing_blank \
+     listing_column_absent listing_conflicting listing_contradictory listing_epoch_zero \
+     listing_invalid macos master master_sha256 minute-before-listing newest no-master-checks \
+     no-such-directory no_checked_master no_listing non_positive_price none-checks not-text \
+     not_consulted nse_security_master option-zero option_key overflow parse_option_key \
+     passed-over-master passed_over removal rs security_id server struct target torn-one-month \
+     type undated undated_master_name unknowns unread-day zero-minute zero-unread-day";
+
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
 // (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
 // (the shared file doors: the tick store's day-name refusals), SC-1 (codec 1,
@@ -2772,7 +2804,7 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 70] = [
+const DECLARED: [&str; 71] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2843,6 +2875,7 @@ const DECLARED: [&str; 70] = [
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
     R4_07_LITERAL,
+    R4_17_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

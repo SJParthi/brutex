@@ -2405,7 +2405,7 @@ fn forms_from(source: &str, verbs: &BTreeSet<String>) -> Result<BTreeMap<String,
         return Err("the cli's write rule does not begin with `match verb {`".to_owned());
     }
     let mut forms = BTreeMap::new();
-    for line in lines {
+    while let Some(line) = lines.next() {
         if line == LAST {
             return Ok(forms);
         }
@@ -2418,7 +2418,19 @@ fn forms_from(source: &str, verbs: &BTreeSet<String>) -> Result<BTreeMap<String,
             )
         };
         let (left, right) = line.split_once(" => ").ok_or_else(unread)?;
-        let form = form_of(right).ok_or_else(unread)?;
+        // THE BLOCK FORM `cargo fmt` WRITES when an arm passes the line width
+        // (R4-17 added `series-identity` to the `--dry-run` arm): `=> {`, one
+        // body line of a form read above, then `}` alone. Nothing else is
+        // read inside a block.
+        let form = if right == "{" {
+            let body = lines.next().ok_or_else(unread)?;
+            if lines.next() != Some("}") {
+                return Err(unread());
+            }
+            form_of(&format!("{body},")).ok_or_else(unread)?
+        } else {
+            form_of(right).ok_or_else(unread)?
+        };
         for verb in left.split(" | ") {
             let verb = verb
                 .strip_prefix('"')
@@ -3871,6 +3883,23 @@ disk = "unknown until rehearsed"
             .expect("reads");
         assert_eq!(two.forms.len(), 2);
         assert!(!two.writes("b", &["--dry-run"]));
+        // The block form `cargo fmt` writes for a long arm reads the same.
+        let block = rule("        \"a\" | \"b\" => {\n            !arguments.contains(&\"--dry-run\")\n        }\n        other => WRITERS.contains(&other),\n")
+            .expect("the block form reads");
+        assert_eq!(block.forms.len(), 2);
+        assert!(!block.writes("a", &["--dry-run"]));
+        assert!(block.writes("b", &["x"]));
+        // A block of two lines, or one not closed alone, is not read.
+        for arms in [
+            "        \"a\" => {\n            let x = 1;\n            !arguments.contains(&\"--dry-run\")\n        }\n        other => WRITERS.contains(&other),\n",
+            "        \"a\" => {\n            arguments.len() > 2\n        }\n        other => WRITERS.contains(&other),\n",
+        ] {
+            let refused = rule(arms).expect_err("refused");
+            assert!(refused.contains("an arm this gate does not read"), "{refused}");
+        }
+        // And the cli's real `series-identity` arm is the block form.
+        assert!(!table.writes("series-identity", &["ALL", "--dry-run"]));
+        assert!(table.writes("series-identity", &["ALL"]));
         for (arms, why) in [
             (
                 "        \"a\" => arguments.len() > 2,\n        other => WRITERS.contains(&other),\n",

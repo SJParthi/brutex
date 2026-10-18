@@ -616,23 +616,73 @@ impl Plan {
             return Ok(Written::DryRun(path));
         }
         plan_dir(run.root)?;
-        if path.is_file() {
-            return Ok(Written::Plan(path));
+        // A PLAN AT ITS DIGEST NAME IS CHECKED, NEVER TRUSTED (R4-17 repair
+        // 3): the name carries 8 bytes of the digest, so a file there with
+        // other bytes is damage or another writer's, and is refused by name,
+        // never taken for this run's plan or rewritten. It is read through
+        // the store's one reading door (R4-17 repair 4): a symbolic link at
+        // the name, dangling or not, is refused and never followed, and a
+        // directory or a pipe there is named; before, a link to a file with
+        // the plan's bytes passed for the plan, and a dangling one was
+        // silently replaced by the rename.
+        match store::safe_open::open_read_len(&path) {
+            Ok((mut held, len)) => {
+                let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+                std::io::Read::read_to_end(&mut held, &mut bytes)
+                    .map_err(|why| format!("{}: {why}", path.display()))?;
+                if bytes != text.as_bytes() {
+                    return Err(format!(
+                        "plan_mismatch: {} holds {} bytes that are not this run's {}-byte \
+                         plan; it is left as it is and nothing is written",
+                        path.display(),
+                        bytes.len(),
+                        text.len()
+                    ));
+                }
+                return Ok(Written::Plan(path));
+            }
+            Err(why) if why.is_missing() => {}
+            Err(why) => {
+                return Err(format!(
+                    "plan_name_taken: {why}; it is left as it is and nothing is written"
+                ));
+            }
         }
         // ONE STAGING NAME PER PROCESS, the writer's own (`store::staging`).
         let staging = dir.join(format!(".series-identity.{}.staging", std::process::id()));
-        let mut staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
-        staged
-            .file
-            .write_all(text.as_bytes())
-            .and_then(|()| staged.file.sync_all())
-            .and_then(|()| std::fs::rename(&staging, &path))
-            .map_err(|why| format!("{}: {why}", path.display()))?;
+        let staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
+        publish(staged.file, &staging, &path, text.as_bytes())?;
         std::fs::File::open(&dir)
             .and_then(|handle| handle.sync_all())
             .map_err(|why| format!("{}: sync after the rename: {why}", dir.display()))?;
         Ok(Written::Plan(path))
     }
+}
+
+/// Fill the run's own staging file, sync it, and rename it to `path`. A
+/// step that fails NAMES the staging file it leaves (R4-17 repair 4: the
+/// refusal named only the plan's path, so the file left behind was said
+/// nowhere). Nothing is deleted: no code here removes a file (no automatic
+/// deletion, `docs/06-limits.md`), a later run of the same process id clears
+/// it (`store::staging`), and nothing reads it as a plan. The plan's name is
+/// never touched on a failure.
+fn publish(
+    mut file: std::fs::File,
+    staging: &Path,
+    path: &Path,
+    text: &[u8],
+) -> Result<(), String> {
+    file.write_all(text)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(staging, path))
+        .map_err(|why| {
+            format!(
+                "{}: {why}; the run's staging file {} is left at that name (never read as a \
+                 plan; nothing deletes it: remove it by hand)",
+                path.display(),
+                staging.display()
+            )
+        })
 }
 
 /// Make the plan directory under `root` one step at a time, refusing a step
@@ -716,10 +766,11 @@ const EVENT_TARGET: &str = "cli.series_identity";
 /// The run's one `cli.series_identity` event: what was scanned, its exit,
 /// every measured cause's count, how many months would not open and where
 /// the plan is. Once per run, after every bar was judged, never in a loop
-/// (gate 17); `warn` for a run that fails.
+/// (gate 17); `warn` for a run that fails. `master` is [`master_word`]'s:
+/// the file a CASH scan's listing was read from, or why there was none.
 fn run_event(
     run: &Run<'_>,
-    scope: &str,
+    (scope, master): (&str, &str),
     code: u8,
     plan: &str,
     counts: &BTreeMap<Measured, u64>,
@@ -739,6 +790,7 @@ fn run_event(
             .with("feed", telemetry::Value::Str(run.ask.feed.as_str()))
             .with("segment", telemetry::Value::Str(run.ask.segment))
             .with("scope", telemetry::Value::Str(scope))
+            .with("master", telemetry::Value::Str(master))
             .with("exit", telemetry::Value::Uint(u64::from(code)))
             .with("commit", telemetry::Value::Str(run.commit))
             .with("causes", telemetry::Value::Str(&causes))
@@ -828,18 +880,77 @@ fn verdicts(out: &mut String, scan: &SeriesScan) {
 
 /// A CASH share's in-session jump distribution: the measurement
 /// `JUMP_BPS` is to be recorded from.
+///
+/// TWO COUNTS, NOT ONE (R4-17 repair 3): the distribution holds every judged
+/// jump, a minute's that another rule refused first (by range) included, so
+/// "beyond" is counted on it; `tripped` is the minutes refused AS
+/// `in_session_jump`. The line used to print `tripped` as "beyond
+/// `JUMP_BPS`" beside a maximum far past it.
 fn jump_line(out: &mut String, scan: &SeriesScan, tripped: u64) {
     let sorted = jumps(scan);
+    // ONE PASS over the distribution the percentiles already sorted: O(j),
+    // once per series per scan, beside that O(j log j) sort (docs/06).
+    let beyond = sorted.iter().filter(|bps| **bps > JUMP_BPS).count();
     let _ = writeln!(
         out,
-        "  in-session jumps: {} judged; p50 {} p99 {} p999 {} max {} bps; {tripped} beyond JUMP_BPS {JUMP_BPS} \
-         (measured on the store 2026-10-17: docs/06-limits.md R4-17)",
+        "  in-session jumps: {} judged; p50 {} p99 {} p999 {} max {} bps; {beyond} beyond JUMP_BPS {JUMP_BPS}, \
+         {tripped} minute(s) refused as in_session_jump (a jump whose minute a range rule refused \
+         first is counted under that rule) (measured on the store 2026-10-17: docs/06-limits.md R4-17)",
         sorted.len(),
         percentile(&sorted, 500),
         percentile(&sorted, 990),
         percentile(&sorted, 999),
         sorted.last().copied().unwrap_or(0),
     );
+}
+
+/// The master a CASH scan's listing rests on, by file and SHA-256, and every
+/// newer master passed over with why; or that none checks and the listing
+/// rule is off (R4-17 repair 3: a passed-over master was named nowhere).
+fn master_lines(
+    out: &mut String,
+    master: Option<&(String, String)>,
+    passed_over: &[(String, String)],
+) {
+    match master {
+        Some((file, sha256)) => {
+            let _ = writeln!(out, "  master: {file} sha256 {sha256}");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  master: NONE CHECKS ({}): the listing rule is OFF for every share — no bar is \
+                 refused before its listing and no history ends on delisting",
+                pull::listing::NO_CHECKED_MASTER
+            );
+        }
+    }
+    for (file, why) in passed_over {
+        let _ = writeln!(out, "  master PASSED OVER: {file}: {why}");
+    }
+}
+
+/// The master lines of the `ALL` table's heading, from the same table every
+/// series of the run is judged against; answers [`master_word`]'s word.
+fn store_master_lines(out: &mut String, root: &Path, ask: &Ask) -> String {
+    let table = pull::listing::for_store(root);
+    let master = table
+        .in_use()
+        .map(|(file, sha256)| (file.to_owned(), pull::listing::sha256_hex(sha256)));
+    master_lines(out, master.as_ref(), table.passed_over());
+    master_word(ask, master.as_ref())
+}
+
+/// What the run's event names as its master: the file, `no_checked_master`,
+/// or `not_consulted` for a segment no listing applies to.
+fn master_word(ask: &Ask, master: Option<&(String, String)>) -> String {
+    if ask.segment != "CASH" {
+        return "not_consulted".to_owned();
+    }
+    master.map_or_else(
+        || pull::listing::NO_CHECKED_MASTER.to_owned(),
+        |(file, _)| file.clone(),
+    )
 }
 
 /// What the run writes, for its heading.
@@ -883,6 +994,9 @@ fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
         scan.listed_on
             .map_or_else(|| "unknown".to_owned(), day_text)
     );
+    if ask.segment == "CASH" {
+        master_lines(out, scan.master.as_ref(), &scan.passed_over);
+    }
     let _ = writeln!(
         out,
         "  minutes {}: held {}, before_first_day_bar {}, foreign_level {}, suspect_level {}, \
@@ -913,7 +1027,15 @@ fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
     let plan_said = plan_word(&written);
     let written = plan_line(out, written);
     let code = one_verdict(out, &scan, &sum, written);
-    run_event(run, symbol, code, &plan_said, &counts, scan.unread.len());
+    let master = master_word(ask, scan.master.as_ref());
+    run_event(
+        run,
+        (symbol, &master),
+        code,
+        &plan_said,
+        &counts,
+        scan.unread.len(),
+    );
     code
 }
 
@@ -1118,6 +1240,11 @@ fn all(run: &Run<'_>, out: &mut String) -> u8 {
         symbols.len(),
         root.display()
     );
+    let master = if ask.segment == "CASH" {
+        store_master_lines(out, root, ask)
+    } else {
+        master_word(ask, None)
+    };
     let _ = writeln!(
         out,
         "  instrument              minutes  before_first_day_bar  foreign_level  suspect_level  unjudged  refused-months  1day-from  1min-from  jumps  jump-p99  jump-p999  jump-max  day-refused  listing"
@@ -1166,7 +1293,14 @@ fn all(run: &Run<'_>, out: &mut String) -> u8 {
     let plan_said = plan_word(&written);
     bad |= !plan_line(out, written);
     let code = if bad { FAILED } else { OK };
-    run_event(run, "ALL", code, &plan_said, &plan.counts, unread);
+    run_event(
+        run,
+        ("ALL", &master),
+        code,
+        &plan_said,
+        &plan.counts,
+        unread,
+    );
     code
 }
 

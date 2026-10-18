@@ -585,6 +585,11 @@ fn nse_seconds(on: Day) -> u64 {
 /// Install an invented, receipted NSE master dated 2026-08-03 under `root`
 /// stating, for each symbol, its listing and removal days (`None` is `0`).
 fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
+    install_master_on(root, day(2026, 8, 3), rows);
+}
+
+/// [`install_master`], dated `on`.
+fn install_master_on(root: &Path, on: Day, rows: &[(&str, Option<Day>, Option<Day>)]) {
     use std::fmt::Write as _;
     use std::io::Write as _;
     let mut csv = String::from(
@@ -609,7 +614,7 @@ fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
     let bytes = encoder.finish().unwrap();
     let masters = root.join(pull::listing::MASTER_DIR);
     fs::create_dir_all(&masters).unwrap();
-    pull::cash_session_cache::install(&masters, day(2026, 8, 3), &bytes).expect("fixture master");
+    pull::cash_session_cache::install(&masters, on, &bytes).expect("fixture master");
 }
 
 /// The local minute of the day of a fixture row, and its day.
@@ -1658,8 +1663,17 @@ fn the_screen_names_each_refused_cause_and_day_on_the_log() {
         "{}",
         lines[0]
     );
+    // NO MASTER ON DISK IS ITS OWN LABEL (R4-17 repair 3): this store holds
+    // no master, so nothing is known of KFINTECH's listing — never the
+    // `inferred_from_vendor_span` of a name every master omits — and the line
+    // names no master in use.
     assert!(
-        lines[0].contains("\"listing\":\"inferred_from_vendor_span\""),
+        lines[0].contains("\"listing\":\"no_checked_master\""),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"master\":\"no_checked_master\""),
         "{}",
         lines[0]
     );
@@ -1784,4 +1798,190 @@ fn every_r4_17_cause_has_its_own_refused_row_byte() {
         assert_eq!(cause_of(code), Some(cause), "{}", cause.code());
     }
     assert_eq!(cause_of(11), None);
+}
+
+/// Every `pull.listing` line the sink holds for the scratch store tagged `tag`.
+fn listing_lines(sink: &telemetry::Sink, tag: &str) -> Vec<String> {
+    let needle = format!("brutex-IDENTITY-{tag}-{}", std::process::id());
+    sink.paths()
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|line| line.contains("\"target\":\"pull.listing\"") && line.contains(&needle))
+        .collect()
+}
+
+/// A master's file bytes with one byte appended: its receipt no longer binds them.
+fn damage_master(root: &Path, file: &str) {
+    let path = root.join(pull::listing::MASTER_DIR).join(file);
+    let mut bytes = fs::read(&path).expect("the fixture master");
+    bytes.push(b'X');
+    fs::write(&path, bytes).expect("damage the fixture master");
+}
+
+/// R4-17 repair 3 (the spec's "a master with a bad receipt: refused, falls
+/// back to the previous receipted master, named"): a newer master whose bytes
+/// do not check is passed over BY NAME on `/logs` — one `warn` naming the
+/// file, why, and the master that answers instead — the older master answers
+/// and its refusal names that file, and every `pull.identity` line names the
+/// master in use and the SHA-256 of its bytes. Before this the fallback was
+/// silent: the name lived only in a method nothing read.
+#[test]
+fn a_master_that_does_not_check_is_named_on_the_log_and_the_older_one_answers() {
+    use sha2::Digest as _;
+    let sink = log_sink();
+    let tag = "passed-over-master";
+    let scratch = Scratch::new(tag);
+    let symbol = "WIPRO";
+    let (from, to, days) = week();
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, Some(days[2]), None)],
+    );
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 4),
+        &[(symbol, Some(days[2]), None)],
+    );
+    damage_master(&scratch.0, "NSE_CM_security_04082026.csv.gz");
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(
+        named.len(),
+        2,
+        "the older master answers: {:?}",
+        done.failures
+    );
+    assert!(
+        named[0].contains("NSE_CM_security_03082026.csv.gz"),
+        "the refusal names the master it rests on: {}",
+        named[0]
+    );
+
+    let said = listing_lines(sink, tag);
+    assert_eq!(said.len(), 1, "one warn per master passed over: {said:?}");
+    assert!(said[0].contains("\"level\":\"warn\""), "{}", said[0]);
+    assert!(
+        said[0].contains("\"master\":\"NSE_CM_security_04082026.csv.gz\""),
+        "{}",
+        said[0]
+    );
+    assert!(
+        said[0].contains("\"in_use\":\"NSE_CM_security_03082026.csv.gz\""),
+        "{}",
+        said[0]
+    );
+    assert!(
+        !said[0].contains("\"why\":\"\""),
+        "why is said: {}",
+        said[0]
+    );
+    assert!(said[0].contains("\"why\":\""), "{}", said[0]);
+
+    let bytes = fs::read(
+        scratch
+            .0
+            .join(pull::listing::MASTER_DIR)
+            .join("NSE_CM_security_03082026.csv.gz"),
+    )
+    .unwrap();
+    // Hex written here by hand, not by `pull::listing::sha256_hex`: the
+    // expectation must not come from the code it checks.
+    let sha256 =
+        sha2::Sha256::digest(&bytes)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                // `write!` to a `String` cannot fail.
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    let identity = identity_lines(sink, symbol);
+    assert!(!identity.is_empty(), "the refusals are on the log");
+    for line in &identity {
+        assert!(
+            line.contains("\"master\":\"NSE_CM_security_03082026.csv.gz\""),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("\"master_sha256\":\"{sha256}\"")),
+            "{line}"
+        );
+    }
+}
+
+/// R4-17 repair 3: when no master under the store checks, every CASH share is
+/// labelled `no_checked_master` — never `inferred_from_vendor_span`, the label
+/// of a name a master that checked omits — and one `warn` says the listing
+/// rule is off, besides the one naming the master passed over. A table with
+/// no master is loaded again on every call (AF-03), and what it found is said
+/// once, not once per answer.
+#[test]
+fn with_no_master_that_checks_every_share_is_labelled_so_and_a_warn_says_the_rule_is_off() {
+    let sink = log_sink();
+    let tag = "no-master-checks";
+    let scratch = Scratch::new(tag);
+    let symbol = "ITC";
+    let (from, to, days) = week();
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, Some(days[2]), None)],
+    );
+    damage_master(&scratch.0, "NSE_CM_security_03082026.csv.gz");
+    for _ in 0..2 {
+        let rows = days.iter().copied().map(day_candle).collect();
+        let done = land_cash(
+            &scratch.0,
+            symbol,
+            (from, to),
+            pull::vendor::Granularity::Day1,
+            rows,
+        );
+        // THE RULE IS OFF, AND SAID TO BE: nothing is refused on a damaged
+        // master's word.
+        assert!(
+            whys(&done, "before_listing").is_empty(),
+            "{:?}",
+            done.failures
+        );
+    }
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.listing, "no_checked_master");
+    assert_eq!(scan.listed_on, None);
+
+    let said = listing_lines(sink, tag);
+    let off: Vec<&String> = said
+        .iter()
+        .filter(|line| line.contains("\"label\":\"no_checked_master\""))
+        .collect();
+    assert_eq!(off.len(), 1, "said once for three loads: {said:?}");
+    assert!(off[0].contains("\"level\":\"warn\""), "{}", off[0]);
+    assert!(off[0].contains("\"passed_over\":1"), "{}", off[0]);
+    let passed: Vec<&String> = said
+        .iter()
+        .filter(|line| line.contains("\"master\":\"NSE_CM_security_03082026.csv.gz\""))
+        .collect();
+    assert_eq!(passed.len(), 1, "{said:?}");
+    assert!(passed[0].contains("\"in_use\":\"none\""), "{}", passed[0]);
 }

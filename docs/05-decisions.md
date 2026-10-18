@@ -72911,6 +72911,52 @@ landing by name (`fetch::RowCause::BeforeListing`, code `before_listing`).
    store root per process and remembers it only when a master loaded (AF-03:
    a failed load is never remembered). A newer master installed while a
    process runs is not seen until it restarts; `docs/06-limits.md` names it.
+6. **Said out loud (amended at R4-17 repair 3, by addition).** Point 4's
+   "named with why" was true only of `Listing::passed_over()`, which no
+   production code read: a damaged newest master was skipped silently, and
+   with no master that checks every CASH share wore
+   `inferred_from_vendor_span` — the label of a name a checked master omits —
+   so the listing rule was off for every share and nothing said why (the
+   verifier's finding, CLAUDE.md §4). Now: `listing::for_store` emits one
+   `warn` `pull.listing` event per master passed over (`master`, `why`,
+   `in_use`, `masters`) and one `warn` when none checks (`label`
+   `no_checked_master`, `passed_over`). A store with no master that checks —
+   none on disk, a directory that will not list, every master damaged — labels
+   every CASH share `no_checked_master` (`listing::Source::NoCheckedMaster`,
+   `Listing::absent`). The refusal of a bar before its listing names the
+   master file; every `pull.identity` event names the master and its SHA-256
+   (`master`, `master_sha256`; `no_checked_master` or `not_consulted` when
+   there is none). `cli series-identity` prints the master in use with its
+   SHA-256 and every master passed over with why, on one series and in the
+   `ALL` heading, and its run event names the master. The exit code does not
+   change: falling back to an older master is the spec's chosen behaviour
+   ("falls back to the previous receipted master, named"), and with no master
+   a landing refuses no bar before its listing either, so the scan's verdict
+   about what a landing refuses stays true — the degradation is loud, with
+   its reason, not a refusal. Because a table with no master is loaded again
+   on every call (AF-03), its warns are said once per distinct finding per
+   store per process, not once per answer: the same finding said on every
+   landing answer would bury `/logs`, and every `pull.identity` line of those
+   answers still carries the label. Rejected: failing every CASH landing when
+   no master checks (it would stop the pull of every share over a missing
+   reference file the landing does not need to store bars); remembering the
+   warned state across processes (a new process is a new reader and says it
+   again).
+7. **A master-shaped name that states no day is said too (amended at R4-17
+   repair 4, 19 Oct 2026, by addition; the R4-17 check's follow-up).**
+   `Listing::load` dropped a name with a master's prefix and suffix whose
+   middle is not a calendar day (`NSE_CM_security_31022026.csv.gz`, seven
+   digits, a letter among eight) before any read, so a master saved
+   under a mistyped date answered nothing and no line said so. Such a name is
+   now passed over BY NAME with the code `undated_master_name`
+   (`listing::UNDATED_MASTER`), never read, after every dated master passed
+   over, whether or not a dated master answers; it reaches `/logs` and the
+   `cli series-identity` heading through point 6's lines. One sort orders both
+   (an undated name sorts after every dated one), so gate 11's single declared
+   sort of `listing.rs` is unchanged. A name without the shape (a receipt, an
+   `NSE_FO_` file) is still not a master and not named. The operator's store
+   holds 42 masters, each named by a valid day, and 42 receipts (listed
+   read-only on 19 Oct 2026), so nothing it serves changes. Invariant ZI-23.
 
 Rejected: decoding the master a second time in `listing` (a second epoch
 authority beside `cash_auction`); keying by symbol alone (a reused symbol is
@@ -72921,7 +72967,17 @@ Proof: `pull::listing::tests` (`the_newest_master_that_checks_is_used_and_a_bad_
 `epoch_zero_listing_refuses_nothing`, `every_unknown_listing_names_why_and_refuses_nothing`,
 `a_name_absent_from_every_master_is_labelled_inferred`,
 `no_master_on_disk_answers_nothing_and_names_why`, `a_master_name_is_read_exactly`,
-`a_store_table_is_remembered_only_once_a_master_loads`).
+`a_store_table_is_remembered_only_once_a_master_loads`). Point 6:
+`a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use`
+(`pull::listing::tests`),
+`a_master_that_does_not_check_is_named_on_the_log_and_the_older_one_answers`,
+`with_no_master_that_checks_every_share_is_labelled_so_and_a_warn_says_the_rule_is_off`
+(`crates/pull/tests/zerodha_identity.rs`),
+`the_heading_names_the_master_in_use_and_every_master_passed_over`,
+`a_store_with_no_master_that_checks_says_the_listing_rule_is_off`
+(`cli::series_identity::tests`); invariants ZI-18 and ZI-19. Point 7:
+`a_master_shaped_name_that_states_no_day_is_passed_over_by_name`
+(`pull::listing::tests`); invariant ZI-23.
 
 ### D-4991 — A window after a CASH security's removal day that answers nothing is the end of its history, never a failure (R4-17; COR-07) — 2026-10-17
 
@@ -73204,7 +73260,9 @@ a measured cause:
    the binary's `cli.lifecycle` started and finished pair. It now leaves one
    `cli.series_identity` record after every bar is judged — feed, segment,
    scope, exit, commit, each measured cause's count, the months that would
-. **A plan is never written through a link, and a flag is never the
+   not open and the plan's path — `warn` when the run fails. Never per bar
+   or per series (gate 17).
+8. **A plan is never written through a link, and a flag is never the
    instrument (repair 2, 18 Oct 2026; the R4-17 check's PROBE-C1 and
    PROBE-C4).** `create_dir_all` followed a symbolic link at
    `audit/series-identity` (or `audit`) and the plan was written outside the
@@ -73216,9 +73274,42 @@ a measured cause:
    `--dry-run` as the INSTRUMENT and ran in writing mode while the writer's
    gate read the same arguments as a dry run; an instrument that begins with
    `-` is now a misuse, refused before the store is named.
+9. **A plan at its name is checked, never trusted (repair 3, 18 Oct 2026;
+   the R4-17 check's follow-up on `Plan::write`).** A file already at the
+   plan's digest name was taken for this run's plan unread; the name carries
+   only 8 bytes of the digest. It is now read and compared with the plan's
+   bytes: equal is the plan, written once as before; anything else is
+   refused `plan_mismatch`, by name, the file left as it is and the run
+   failing. Repair 2's edit of point 7 above had dropped its last two lines
+   and point 8's number; both are restored here, word for word from
+   `37fce1a9e^`. A dead process's staging file of another pid is still not
+   reclaimed: `store::staging::create` clears only a leftover at the writer's
+   own name, so such a file stays as litter (never read as a plan: its name
+   begins with `.` and ends `.staging`); NOT DONE, `docs/06-limits.md`.
+   Invariant ZI-21.
+10. **The digest name is read through the store's reading door, and a failed
+    publish names what it leaves (repair 4, 19 Oct 2026; the R4-17 check's
+    follow-ups on `Plan::write`).** Point 9's check asked `is_file`, which
+    follows a link: a symbolic link at the plan's name pointing at a file
+    with this run's bytes passed for the plan, and a dangling one was not a
+    file, so the rename silently replaced the link. The name is now opened by
+    `store::safe_open::open_read_len` (`O_NOFOLLOW | O_NONBLOCK`, the kind
+    asked of the handle): nothing there is the one answer that writes; a
+    regular file is compared as in point 9; a link (dangling or not), a
+    directory, a pipe or any other kind is refused `plan_name_taken`, naming
+    what is there, left as it is, and the run fails. A write, sync or rename
+    that fails after the staging file exists now names that staging file in
+    the refusal, as left at that name; it is NOT deleted, because no code of
+    this verb deletes a file (`docs/06-limits.md`), and a later run of the
+    same process id clears it (`store::staging`). Rejected: removing the
+    run's own staging name on a failed rename (the verifier's suggestion
+    read one way) — it would be the verb's first deletion, against this
+    package's own stated rule, for a file that costs one plan's bytes and is
+    never read as a plan. Invariant ZI-22.
 
 Proof: `cli::series_identity::tests`
-(`a_plan_is_never_written_through_a_linked_directory`,
+(`a_plan_at_its_name_with_other_bytes_is_refused_never_trusted`,
+`a_plan_is_never_written_through_a_linked_directory`,
 `arguments_that_name_no_series_are_misused_before_anything_is_opened`,
 `every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan`,
 `an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
@@ -73233,7 +73324,11 @@ Proof: `cli::series_identity::tests`
 `the_all_table_is_the_same_bytes_on_one_worker_and_on_many`,
 `a_worker_count_is_named_or_the_machines_and_never_above_one_per_series`,
 `a_day_month_that_will_not_open_fails_the_run_with_no_minute_rung`,
-and the WP-13d tests kept).
+and the WP-13d tests kept). Point 10:
+`a_link_at_the_plans_name_is_refused_never_followed_or_replaced`,
+`a_failed_publish_names_the_staging_file_it_leaves`; and the jump line at its
+threshold, `a_jump_of_exactly_the_threshold_is_judged_and_not_counted_beyond_it`
+(invariant ZI-20).
 
 ### D-4995 — No store path and no census key is built from a vendor's instrument token, checked from the source (R4-17; CON-13) — 2026-10-17
 

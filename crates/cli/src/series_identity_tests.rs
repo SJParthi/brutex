@@ -530,6 +530,11 @@ fn nse_seconds(on: Day) -> u64 {
 }
 
 fn install_master(root: &Path, symbol: &str, listed: Day) {
+    install_master_on(root, day(2026, 8, 3), symbol, listed);
+}
+
+/// [`install_master`], dated `on`.
+fn install_master_on(root: &Path, on: Day, symbol: &str, listed: Day) {
     use std::io::Write as _;
     let isin = brutex_core::universe::nse_isin(symbol).unwrap();
     let csv = format!(
@@ -541,8 +546,7 @@ fn install_master(root: &Path, symbol: &str, listed: Day) {
     encoder.write_all(csv.as_bytes()).unwrap();
     let masters = root.join(pull::listing::MASTER_DIR);
     fs::create_dir_all(&masters).unwrap();
-    pull::cash_session_cache::install(&masters, day(2026, 8, 3), &encoder.finish().unwrap())
-        .unwrap();
+    pull::cash_session_cache::install(&masters, on, &encoder.finish().unwrap()).unwrap();
 }
 
 /// The fixture week's sessions and every honest minute of them.
@@ -597,7 +601,13 @@ fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
     assert!(out.contains("in_session_jump 0"), "{out}");
     // 1,875 minutes in five sessions: every one but each session's first is judged.
     assert!(out.contains("in-session jumps: 1870 judged"), "{out}");
-    assert!(out.contains("listing: inferred_from_vendor_span"), "{out}");
+    // NO MASTER ON DISK: its own label, and the heading says the rule is off
+    // (R4-17 repair 3), never the label of a name a checked master omits.
+    assert!(out.contains("listing: no_checked_master"), "{out}");
+    assert!(
+        out.contains("master: NONE CHECKS (no_checked_master)"),
+        "{out}"
+    );
     assert!(out.contains("no quarantine plan: nothing flagged"), "{out}");
     assert!(plans(&clean.0).is_empty());
 
@@ -635,7 +645,10 @@ fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
         out.contains("2024-01-03 in_session_jump 10 minute(s)"),
         "{out}"
     );
-    assert!(out.contains("10 beyond JUMP_BPS 3000"), "{out}");
+    assert!(
+        out.contains("10 beyond JUMP_BPS 3000, 10 minute(s) refused as in_session_jump"),
+        "{out}"
+    );
     assert!(
         out.contains("QUARANTINE NEEDED: 1 month(s) hold 10 minute(s)"),
         "{out}"
@@ -1488,10 +1501,392 @@ fn every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan() {
         "{one:?}"
     );
     assert!(says(one, "plan", ".plan"), "{one:?}");
+    // THE MASTER THE LISTING RESTS ON, BY FILE (R4-17 repair 3).
+    assert!(
+        says(one, "master", "NSE_CM_security_03082026.csv.gz"),
+        "{one:?}"
+    );
     let every = mine
         .iter()
         .find(|record| says(record, "scope", "ALL"))
         .expect("the ALL run");
     assert!(says(every, "plan", "dry run, not written: "), "{every:?}");
     assert!(says(every, "causes", "zero_price 1,"), "{every:?}");
+}
+
+/// A minute rung for `symbol` over the fixture week with day bars that hold
+/// every honest minute, and the master files `masters` dated as given, each
+/// listing it on the week's first session.
+fn listed_store(symbol: &str, masters: &[Day]) -> Root {
+    let root = Root::new();
+    let (days, minutes) = week_minutes(|_, _| (1, 1));
+    let narrow = |on: Day| day_bar(on, LEVEL - 1_000, LEVEL + 2_000);
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        symbol,
+        store::path::Timeframe::DAY_1,
+        &days.iter().copied().map(narrow).collect::<Vec<_>>(),
+    );
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        symbol,
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    for on in masters {
+        install_master_on(&root.0, *on, symbol, days[0]);
+    }
+    root
+}
+
+/// A master's bytes with one appended: its receipt no longer binds them.
+fn damage_master(root: &Path, file: &str) {
+    let path = root.join(pull::listing::MASTER_DIR).join(file);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.push(b'X');
+    fs::write(&path, bytes).unwrap();
+}
+
+/// The SHA-256 a fixture master's receipt binds, as its receipt writes it.
+fn receipt_sha256(root: &Path, file: &str) -> String {
+    let receipt = root
+        .join(pull::listing::MASTER_DIR)
+        .join(format!("{file}.receipt"));
+    fs::read_to_string(receipt)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256=").map(str::to_owned))
+        .expect("a receipt binds a sha256")
+}
+
+/// R4-17 repair 3: the heading names the master the listing rests on, by file
+/// and SHA-256, and every newer master passed over with why — one series and
+/// `ALL` alike — and the run's `/logs` holds one `pull.listing` warn naming the
+/// master passed over. Before this a damaged newest master was skipped
+/// silently and an older one used.
+#[test]
+fn the_heading_names_the_master_in_use_and_every_master_passed_over() {
+    use crate::ledger_all::tests::{mark, says, sink};
+    let from = mark();
+    let symbol = "WIPRO";
+    let root = listed_store(symbol, &[day(2026, 8, 3), day(2026, 8, 4)]);
+    damage_master(&root.0, "NSE_CM_security_04082026.csv.gz");
+    let sha256 = receipt_sha256(&root.0, "NSE_CM_security_03082026.csv.gz");
+    assert_eq!(sha256.len(), 64);
+    let in_use = format!("  master: NSE_CM_security_03082026.csv.gz sha256 {sha256}\n");
+
+    let (code, out) = root.run(&[symbol, "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("listing: nse_security_master; listed on 2024-01-01"),
+        "{out}"
+    );
+    assert!(out.contains(&in_use), "{out}");
+    assert!(
+        out.contains("  master PASSED OVER: NSE_CM_security_04082026.csv.gz: "),
+        "{out}"
+    );
+    let (code, all) = root.run(&["ALL", "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{all}");
+    assert!(all.contains(&in_use), "{all}");
+    assert!(
+        all.contains("  master PASSED OVER: NSE_CM_security_04082026.csv.gz: "),
+        "{all}"
+    );
+
+    let sink = sink();
+    let dir = sink.path().parent().unwrap().to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("pull.listing");
+    let here = root.0.display().to_string();
+    let said: Vec<telemetry::Record> = telemetry::tail(&dir, sink.keep_files(), &query)
+        .records
+        .into_iter()
+        .filter(|record| record.seq >= from && says(record, "masters", &here))
+        .collect();
+    assert_eq!(said.len(), 1, "one warn per master passed over: {said:?}");
+    assert_eq!(said[0].level, telemetry::Level::Warn, "{said:?}");
+    assert!(
+        says(&said[0], "master", "NSE_CM_security_04082026.csv.gz"),
+        "{said:?}"
+    );
+    assert!(
+        says(&said[0], "in_use", "NSE_CM_security_03082026.csv.gz"),
+        "{said:?}"
+    );
+}
+
+/// R4-17 repair 3: with every master damaged nothing is known of any share's
+/// listing. The label is `no_checked_master`, never `inferred_from_vendor_span`
+/// (the label of a name a master that checked omits), the heading says the
+/// listing rule is off and names the master passed over, and the run's event
+/// names no master.
+#[test]
+fn a_store_with_no_master_that_checks_says_the_listing_rule_is_off() {
+    use crate::ledger_all::tests::{mark, says, sink};
+    let from = mark();
+    let symbol = "ITC";
+    let root = listed_store(symbol, &[day(2026, 8, 3)]);
+    damage_master(&root.0, "NSE_CM_security_03082026.csv.gz");
+    let (code, out) = root.run(&[symbol, "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("listing: no_checked_master; listed on unknown"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  master: NONE CHECKS (no_checked_master): the listing rule is OFF"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  master PASSED OVER: NSE_CM_security_03082026.csv.gz: "),
+        "{out}"
+    );
+    let (code, all) = root.run(&["ALL", "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{all}");
+    assert!(all.contains("master: NONE CHECKS"), "{all}");
+    assert!(all.contains("no_checked_master"), "{all}");
+
+    let sink = sink();
+    let dir = sink.path().parent().unwrap().to_path_buf();
+    let records = |target: &str| {
+        let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target(target);
+        telemetry::tail(&dir, sink.keep_files(), &query)
+            .records
+            .into_iter()
+            .filter(|record| record.seq >= from)
+            .collect::<Vec<telemetry::Record>>()
+    };
+    // A dry run that flags nothing names no plan path, so the one-series run
+    // is told apart by its scope: no other series-identity test scans ITC.
+    let runs: Vec<telemetry::Record> = records("cli.series_identity")
+        .into_iter()
+        .filter(|record| says(record, "scope", symbol))
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(says(&runs[0], "master", "no_checked_master"), "{runs:?}");
+    let here = root.0.display().to_string();
+    let off: Vec<telemetry::Record> = records("pull.listing")
+        .into_iter()
+        .filter(|record| {
+            says(record, "masters", &here) && says(record, "label", "no_checked_master")
+        })
+        .collect();
+    assert_eq!(off.len(), 1, "said once for this store: {off:?}");
+    assert_eq!(off[0].level, telemetry::Level::Warn, "{off:?}");
+}
+
+/// R4-17 repair 3 (the verifier's follow-up on the jump line): a block of
+/// minutes at another basis UNDER A NARROW DAY BAR is refused by range
+/// (`foreign_level`) before the jump rule is reached, yet each of its jumps
+/// is in the distribution. The line counts jumps beyond `JUMP_BPS` on the
+/// distribution and the minutes refused AS `in_session_jump` apart; it used
+/// to print the second as the first, "0 beyond `JUMP_BPS`" beside a maximum
+/// far past it.
+#[test]
+fn the_jump_line_counts_jumps_beyond_the_threshold_apart_from_jump_refusals() {
+    let root = Root::new();
+    let narrow = |on: Day| day_bar(on, LEVEL - 1_000, LEVEL + 2_000);
+    let (days, minutes) = week_minutes(|on, m| {
+        if on == day(2024, 1, 3) && (600..=609).contains(&m) {
+            (8_990, 82_165)
+        } else {
+            (1, 1)
+        }
+    });
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        "PIIND",
+        store::path::Timeframe::DAY_1,
+        &days.iter().copied().map(narrow).collect::<Vec<_>>(),
+    );
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        "PIIND",
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    let (code, out) = root.run(&["PIIND", "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("foreign_level 10"), "{out}");
+    assert!(out.contains("in_session_jump 0"), "{out}");
+    assert!(
+        out.contains("10 beyond JUMP_BPS 3000, 0 minute(s) refused as in_session_jump"),
+        "{out}"
+    );
+}
+
+/// R4-17 repair 3 (the verifier's follow-up on `Plan::write`): a file at the
+/// plan's digest name whose bytes are not this run's plan is refused by name
+/// (`plan_mismatch`), left as it is, and fails the run; before, any file at
+/// that name was taken for the plan unread.
+#[test]
+fn a_plan_at_its_name_with_other_bytes_is_refused_never_trusted() {
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
+    let (code, out) = root.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    let written = plans(&root.0);
+    assert_eq!(written.len(), 1, "{out}");
+    let mut damaged = fs::read(&written[0].0).unwrap();
+    damaged.extend_from_slice(b"not this run's\n");
+    fs::write(&written[0].0, &damaged).unwrap();
+
+    let (code, again) = root.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{again}");
+    assert!(
+        again.contains("QUARANTINE PLAN NOT WRITTEN: plan_mismatch: "),
+        "{again}"
+    );
+    assert!(
+        again.contains(&written[0].0.display().to_string()),
+        "the file is named: {again}"
+    );
+    assert_eq!(fs::read(&written[0].0).unwrap(), damaged, "left as it is");
+    assert_eq!(plans(&root.0).len(), 1, "nothing else is written");
+}
+
+/// R4-17 repair 4 (the verifier's follow-up on the jump line's threshold): a
+/// jump of EXACTLY `JUMP_BPS` is judged, lands (the landing rule refuses only
+/// one beyond it) and is not counted beyond it. No other test held a jump of
+/// exactly the threshold, so `> JUMP_BPS` turned into `>=` passed every test.
+#[test]
+fn a_jump_of_exactly_the_threshold_is_judged_and_not_counted_beyond_it() {
+    let root = Root::new();
+    let week = sessions(day(2024, 1, 1), day(2024, 1, 5));
+    // 1,000,000 to 1,300,000 paisa and back: 3,000 bps each way, exactly.
+    let raised = LEVEL * 13 / 10;
+    let price = move |on: Day, m: i64| {
+        if on == day(2024, 1, 3) && m == 600 {
+            raised
+        } else {
+            LEVEL
+        }
+    };
+    let minutes: Vec<_> = week
+        .iter()
+        .flat_map(|(on, minutes)| {
+            minutes.iter().map(move |m| {
+                let at = price(*on, *m);
+                as_bar(&RawRow {
+                    open: at,
+                    high: at,
+                    low: at,
+                    close: at,
+                    ..candle(*on, *m, 1)
+                })
+            })
+        })
+        .collect();
+    let days: Vec<_> = week
+        .iter()
+        .map(|(on, _)| day_bar(*on, LEVEL - 1_000, raised + 2_000))
+        .collect();
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        "PIIND",
+        store::path::Timeframe::DAY_1,
+        &days,
+    );
+    seed(
+        &root.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        "PIIND",
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    let (code, out) = root.run(&["PIIND", "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("in_session_jump 0"), "{out}");
+    assert!(
+        out.contains(" max 3000 bps;"),
+        "the two jumps are judged: {out}"
+    );
+    assert!(
+        out.contains("; 0 beyond JUMP_BPS 3000, 0 minute(s) refused as in_session_jump"),
+        "{out}"
+    );
+}
+
+/// R4-17 repair 4 (the verifier's follow-up on `Plan::write`): a symbolic
+/// link at the plan's digest name is refused by name and left as it is,
+/// whether it points at a file holding exactly this run's plan or at
+/// nothing. Before, the first passed for the plan (the check followed the
+/// link) and the second was silently replaced by the rename.
+#[test]
+fn a_link_at_the_plans_name_is_refused_never_followed_or_replaced() {
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
+    let (code, out) = root.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    let written = plans(&root.0);
+    assert_eq!(written.len(), 1, "{out}");
+    let plan = written[0].0.clone();
+    let aside = root.0.join("plan-aside");
+    fs::rename(&plan, &aside).unwrap();
+    std::os::unix::fs::symlink(&aside, &plan).unwrap();
+
+    for case in ["a link to this run's own bytes", "a dangling link"] {
+        if case == "a dangling link" {
+            fs::rename(&aside, root.0.join("plan-aside-moved")).unwrap();
+        }
+        let (code, again) = root.run(&[symbol, "--segment", "CASH"]);
+        assert_eq!(code, FAILED, "{case}: {again}");
+        assert!(
+            again.contains(
+                "QUARANTINE PLAN NOT WRITTEN: plan_name_taken: read_not_regular (symlink)"
+            ),
+            "{case}: {again}"
+        );
+        assert!(
+            again.contains(&plan.display().to_string()),
+            "{case}: the name is said: {again}"
+        );
+        let meta = fs::symlink_metadata(&plan).unwrap();
+        assert!(meta.file_type().is_symlink(), "{case}: left as it is");
+        assert_eq!(fs::read_link(&plan).unwrap(), aside, "{case}: unchanged");
+    }
+}
+
+/// R4-17 repair 4 (the verifier's follow-up on `Plan::write`): when the
+/// rename that publishes a plan fails, the refusal names the run's own
+/// staging file it leaves, which holds the synced plan and is not deleted
+/// (no code here deletes a file); the name it could not take is left as it
+/// is. Before, the refusal named only the plan's path.
+#[test]
+fn a_failed_publish_names_the_staging_file_it_leaves() {
+    let root = Root::new();
+    let staging = root.0.join(".series-identity.test.staging");
+    let staged = store::staging::create(&staging).unwrap();
+    // A directory at the plan's name: `rename` of a file onto it fails.
+    let taken = root.0.join("taken.plan");
+    fs::create_dir_all(taken.join("inside")).unwrap();
+
+    let why = super::publish(staged.file, &staging, &taken, b"plan\n").unwrap_err();
+    assert!(why.starts_with(&taken.display().to_string()), "{why}");
+    assert!(
+        why.contains(&format!(
+            "the run's staging file {} is left at that name",
+            staging.display()
+        )),
+        "{why}"
+    );
+    assert_eq!(
+        fs::read(&staging).unwrap(),
+        b"plan\n",
+        "left, never deleted"
+    );
+    assert!(taken.join("inside").is_dir(), "the taken name is untouched");
+
+    // And a publish that can rename leaves the plan, and no staging name.
+    let staging = root.0.join(".series-identity.test2.staging");
+    let staged = store::staging::create(&staging).unwrap();
+    let free = root.0.join("free.plan");
+    super::publish(staged.file, &staging, &free, b"plan\n").unwrap();
+    assert_eq!(fs::read(&free).unwrap(), b"plan\n");
+    assert!(fs::symlink_metadata(&staging).is_err());
 }

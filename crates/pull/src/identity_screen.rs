@@ -78,6 +78,13 @@ pub struct SeriesScan {
     /// Where its listing came from: [`crate::listing::Source::code`], or
     /// `no_listing` for a series no listing applies to.
     pub listing: &'static str,
+    /// For a CASH share, the master its listing was read from: its file and
+    /// the lower-case hex SHA-256 its receipt binds. `None` when no master
+    /// checks, and for a series no listing applies to.
+    pub master: Option<(String, String)>,
+    /// For a CASH share, every newer master passed over, each with why,
+    /// newest first ([`crate::listing::Listing::passed_over`]).
+    pub passed_over: Vec<(String, String)>,
     /// The master's listing day, as IST days since the epoch, when a refusal
     /// rests on it.
     pub listed_on: Option<i64>,
@@ -135,11 +142,19 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
         day_months: repair_plan::held_months(store_root, rung(Timeframe::DAY_1, parts.month)),
         minute_months: repair_plan::held_months(store_root, rung(Timeframe::MINUTE_1, parts.month)),
         first_day: None,
-        listing: match (held, cash) {
+        listing: match (held, table.as_deref()) {
             (Some(found), _) => found.source.code(),
-            (None, true) => crate::listing::Source::InferredFromVendorSpan.code(),
-            (None, false) => NO_LISTING,
+            (None, Some(listing)) => listing.absent().code(),
+            (None, None) => NO_LISTING,
         },
+        master: table.as_deref().and_then(|listing| {
+            listing
+                .in_use()
+                .map(|(file, sha256)| (file.to_owned(), crate::listing::sha256_hex(sha256)))
+        }),
+        passed_over: table
+            .as_deref()
+            .map_or_else(Vec::new, |listing| listing.passed_over().to_vec()),
         listed_on,
         months: Vec::new(),
         day_verdicts: Vec::new(),
@@ -318,13 +333,15 @@ pub(super) fn screen(
     let witness = Witness {
         instrument,
         plan,
-        listing: match (span, table.is_some()) {
+        listing: match (span, table.as_deref()) {
             (Some(span), _) => span.source.code(),
             // A SHARE IN NO MASTER ON DISK (DHFL, JETAIRWAYS): its span is the
-            // vendor's own, labelled, and refuses nothing (D-5839).
-            (None, true) => crate::listing::Source::InferredFromVendorSpan.code(),
-            (None, false) => NO_LISTING,
+            // vendor's own, labelled, and refuses nothing (D-5839) — unless
+            // no master checks at all, which is its own label (repair 3).
+            (None, Some(listing)) => listing.absent().code(),
+            (None, None) => NO_LISTING,
         },
+        master: MasterSeen::of(table.as_deref()),
     };
     // AN INDEX'S ZERO IS ITS OWN (NIFTY50DIVPOINT restarts from zero, D-4992).
     let zero_held = identity.segment.as_str() == "INDEX" && plan.contract.is_none();
@@ -364,6 +381,39 @@ struct Witness<'a> {
     plan: Plan<'a>,
     /// [`crate::listing::Source::code`] of the span in force, or [`NO_LISTING`].
     listing: &'static str,
+    /// Which master the listing rested on, if one was consulted.
+    master: MasterSeen<'a>,
+}
+
+/// The master an answer's listing rested on, as its events name it.
+#[derive(Debug, Clone, Copy)]
+enum MasterSeen<'a> {
+    /// A series no listing applies to: no master was consulted.
+    NotConsulted,
+    /// A CASH share of a store with no master that checks.
+    NoneChecks,
+    /// The master in use: its file and the SHA-256 its receipt binds.
+    InUse(&'a str, &'a [u8; 32]),
+}
+
+impl<'a> MasterSeen<'a> {
+    /// What the store's table says, or [`Self::NotConsulted`] without one.
+    fn of(table: Option<&'a crate::listing::Listing>) -> Self {
+        match table.map(crate::listing::Listing::in_use) {
+            None => Self::NotConsulted,
+            Some(None) => Self::NoneChecks,
+            Some(Some((file, sha256))) => Self::InUse(file, sha256),
+        }
+    }
+
+    /// The file an event names: the master's, or why there is none.
+    const fn file(self) -> &'a str {
+        match self {
+            Self::NotConsulted => "not_consulted",
+            Self::NoneChecks => crate::listing::NO_CHECKED_MASTER,
+            Self::InUse(file, _) => file,
+        }
+    }
 }
 
 /// The listing label of a series no listing applies to, or none was found for.
@@ -448,7 +498,7 @@ fn day_arm(
             row_cause(cause),
             (cursor, row.timestamp),
             stamp_local_second(row.timestamp, plan.encoding),
-            || sentence(cause, cursor, ohlc, witness.listing),
+            || sentence(cause, cursor, ohlc, witness),
         );
     }
     if tally.refused() > 0 {
@@ -516,7 +566,7 @@ fn minute_arm(
             continue;
         };
         refused.note(row_cause(cause), (cursor, row.timestamp), second, || {
-            sentence(cause, cursor, ohlc, witness.listing)
+            sentence(cause, cursor, ohlc, witness)
         });
     }
     if unread.is_some() || tally.refused() + tally.suspect_level + tally.unchecked() > 0 {
@@ -537,7 +587,15 @@ const fn row_cause(cause: Cause) -> RowCause {
 }
 
 /// The first refused row of a (cause, day), in words a receipt can carry.
-fn sentence(cause: Cause, row: usize, [open, high, low, close]: [i64; 4], listing: &str) -> String {
+fn sentence(
+    cause: Cause,
+    row: usize,
+    [open, high, low, close]: [i64; 4],
+    witness: &Witness<'_>,
+) -> String {
+    let listing = witness.listing;
+    // THE MASTER BY NAME: a listing refusal rests on one file's word.
+    let master = witness.master.file();
     match cause {
         Cause::BeforeFirstDayBar { first } => format!(
             "row {row}: a minute on a day before the first day bar this series was served \
@@ -557,7 +615,7 @@ fn sentence(cause: Cause, row: usize, [open, high, low, close]: [i64; 4], listin
         ),
         Cause::BeforeListing { listed_on } => format!(
             "row {row}: a bar on a day before this security's listing day (IST day \
-             {listed_on}) in the NSE security master ({listing}): not this security's bar. \
+             {listed_on}) in the NSE security master {master} ({listing}): not this security's bar. \
              Bar refused before fold or append (R4-17, D-5839)"
         ),
         Cause::InSessionJump { reference, bps } => format!(
@@ -581,10 +639,20 @@ fn note(witness: &Witness<'_>, tally: &Tally, first: FirstDay, unread: Option<&s
         FirstDay::NoDayRung => -1,
     };
     let count = telemetry::Value::Uint;
+    // THE MASTER IN USE, BY FILE AND SHA-256 (R4-17 repair 3): the label alone
+    // never said which master a refusal or a label rested on. Once per event,
+    // never per row.
+    let master = witness.master.file();
+    let sha256 = match witness.master {
+        MasterSeen::InUse(_, sha256) => crate::listing::sha256_hex(sha256),
+        MasterSeen::NotConsulted | MasterSeen::NoneChecks => String::new(),
+    };
     let base = |level, message| {
         telemetry::Event::new(level, "pull.identity", message)
             .with("instrument", telemetry::Value::Str(witness.instrument))
             .with("listing", telemetry::Value::Str(witness.listing))
+            .with("master", telemetry::Value::Str(master))
+            .with("master_sha256", telemetry::Value::Str(&sha256))
             .with("first_day", telemetry::Value::Int(first_day))
     };
     if let Some(why) = unread {

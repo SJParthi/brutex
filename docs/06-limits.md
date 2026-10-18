@@ -19777,7 +19777,11 @@ rung, so its per-minute cost grows as O(log days held), about 2,000 for
 installed while a process runs is not seen until that process restarts. The
 direction is safe: a missing new listing refuses nothing, and a missing new
 removal leaves a 404 the failure it was. A newer master whose receipt fails
-is passed over by name. Loading is one directory listing and one master parse
+is passed over by name: one `warn` `pull.listing` line per master passed over and
+one when none checks (R4-17 repair 3, D-5839 point 6; before that repair the
+name lived only in a method nothing read). A master-shaped name that states
+no calendar day is passed over by name too and never read (repair 4, D-5839
+point 7): no parse, one line per such name. Loading is one directory listing and one master parse
 (O(rows), about 4 MB of gzip), paid once per process **only when a master
 loads.** A store whose `session-masters/` holds no master that checks is
 loaded again on every call, so every CASH landing and every CASH series of a
@@ -19790,6 +19794,33 @@ whose resolution depends on the volume's file system, and a stale "no master"
 turns the listing refusal off. Bounded, not O(1). On the 17 Oct shadow scans
 of the operator's store a master loaded (DALBHARAT's and IRFC's listings were
 read from it), so that store did not pay this then.
+
+**A store with no master that checks says so once per finding, not once per
+answer** (R4-17 repair 3). Its table is loaded again on every call (above),
+and `listing::for_store` remembers, per store root, what the last load found
+(whether a master loaded, and each master passed over with why) so the same
+finding is not said again: one `Mutex<HashMap>` probe and, when a master is
+passed over, one comparison of that list per load, O(masters on disk), inside
+the load that already reads each of them. The memory is one entry per store
+root the process names. A new process says it again. Every `pull.identity`
+line of those answers carries `listing` and `master` = `no_checked_master`,
+so no answer judged without a listing is unlabelled.
+
+**A dead run's staging file under `audit/series-identity` is not reclaimed**
+(R4-17 repair 3, D-4994 point 9; NOT DONE). `Plan::write` stages under a
+name holding its own process id, and `store::staging::create` clears only a
+leftover at the writer's own name, so a run killed between the create and
+the rename leaves `.series-identity.<pid>.staging` until a later run has the
+same pid. It is never read as a plan (its name begins with `.` and ends
+`.staging`); it costs its bytes on disk, at most one plan's size per killed
+run. Reclaiming another pid's file needs a liveness check this verb does not
+hold. A file AT the plan's digest name is now read and compared with the
+plan's bytes before it is taken for the plan: O(plan bytes), once per run,
+on the writing path only. Since repair 4 (D-4994 point 10) that name is opened
+through `store::safe_open` (a link there is refused `plan_name_taken`, never
+followed or replaced; the `stat` of the name became the handle's `fstat`,
+so the calls per run are as before), and a write, sync or rename that fails after staging NAMES the staging
+file it leaves in the refusal; it is still not deleted.
 
 **The store scan is O(bars held), and a scan, not a read path.** Each
 flagged minute's measured cause reads GDFL's 1s month of that share once and

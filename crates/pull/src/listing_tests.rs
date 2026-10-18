@@ -18,7 +18,8 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 use super::{
-    BEFORE_LISTING, HISTORY_ENDS, Listing, MASTER_DIR, Source, Span, Unknown, for_store, master_day,
+    BEFORE_LISTING, HISTORY_ENDS, Listing, MASTER_DIR, Source, Span, UNDATED_MASTER, Unknown,
+    for_store, master_day, master_shaped,
 };
 use crate::session::Day;
 
@@ -321,6 +322,86 @@ fn a_master_name_is_read_exactly() {
     }
 }
 
+/// R4-17 repair 4 (the verifier's follow-up): a name with a master's prefix
+/// and suffix that states no calendar day is passed over BY NAME and never
+/// read, whether or not a dated master answers; before, it was dropped at the
+/// listing unsaid. A name without the shape is not a master and is not named.
+#[test]
+fn a_master_shaped_name_that_states_no_day_is_passed_over_by_name() {
+    for (name, shaped) in [
+        ("NSE_CM_security_31022026.csv.gz", true),
+        ("NSE_CM_security_0409202x.csv.gz", true),
+        ("NSE_CM_security_.csv.gz", true),
+        ("NSE_CM_security_04092026.csv.gz", true),
+        ("NSE_CM_security_.csv", false),
+        ("NSE_CM_security.csv.gz", false),
+        ("NSE_CM_security_04092026.csv.gz.receipt", false),
+        ("NSE_FO_security_04092026.csv.gz", false),
+    ] {
+        assert_eq!(master_shaped(name), shaped, "{name}");
+    }
+
+    let root = Root::new("undated");
+    std::fs::create_dir_all(root.masters()).expect("the masters directory");
+    for odd in [
+        "NSE_CM_security_31022026.csv.gz",
+        "NSE_CM_security_0409202x.csv.gz",
+        "NSE_CM_security_04092026.csv",
+    ] {
+        std::fs::write(root.masters().join(odd), b"x").expect("an odd name");
+    }
+    // No dated master: none checks, and both undated names are said.
+    let alone = Listing::load(&root.masters());
+    assert_eq!(alone.in_use(), None);
+    assert_eq!(alone.absent(), Source::NoCheckedMaster);
+    let named: Vec<&str> = alone
+        .passed_over()
+        .iter()
+        .map(|(file, _)| file.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        [
+            "NSE_CM_security_31022026.csv.gz",
+            "NSE_CM_security_0409202x.csv.gz"
+        ]
+    );
+    for (_, why) in alone.passed_over() {
+        assert!(why.starts_with(UNDATED_MASTER), "{why}");
+        assert!(why.contains("never read"), "{why}");
+    }
+
+    // A dated master that checks answers, and the undated names are still
+    // said, after it; an OLDER dated master is neither read nor passed over.
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
+    install(
+        &root.0,
+        day(2026, 8, 4),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
+    let table = Listing::load(&root.masters());
+    assert_eq!(
+        table.master(),
+        Some(("NSE_CM_security_04082026.csv.gz", day(2026, 8, 4)))
+    );
+    let named: Vec<&str> = table
+        .passed_over()
+        .iter()
+        .map(|(file, _)| file.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        [
+            "NSE_CM_security_31022026.csv.gz",
+            "NSE_CM_security_0409202x.csv.gz"
+        ]
+    );
+}
+
 #[test]
 fn a_store_table_is_remembered_only_once_a_master_loads() {
     let root = Root::new("remembered");
@@ -412,4 +493,73 @@ fn a_name_that_is_not_text_is_not_a_master() {
     let table = Listing::load(&root.masters());
     assert_eq!(table.master().map(|(_, on)| on), Some(day(2026, 8, 3)));
     assert!(table.passed_over().is_empty());
+}
+
+/// R4-17 repair 3: a share no master holds is labelled by what the table
+/// knows — `inferred_from_vendor_span` beside a master that checked,
+/// `no_checked_master` when none did (none on disk, a directory that will not
+/// list, or every one damaged) — and the master in use is named by file and
+/// by the SHA-256 its receipt binds.
+#[test]
+fn a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use() {
+    let root = Root::new("none-checks");
+    let empty = Listing::load(&root.masters());
+    assert_eq!(empty.absent(), Source::NoCheckedMaster);
+    assert_eq!(empty.absent().code(), "no_checked_master");
+    assert_eq!(empty.in_use(), None);
+    let unlisted = Listing::load(&root.0.join("no-such-directory"));
+    assert_eq!(unlisted.absent().code(), "no_checked_master");
+
+    install(
+        &root.0,
+        day(2026, 8, 3),
+        &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
+    );
+    let checked = Listing::load(&root.masters());
+    assert_eq!(checked.absent(), Source::InferredFromVendorSpan);
+    let (file, sha256) = checked.in_use().expect("the master in use");
+    assert_eq!(file, "NSE_CM_security_03082026.csv.gz");
+    let receipt = std::fs::read_to_string(
+        root.masters()
+            .join("NSE_CM_security_03082026.csv.gz.receipt"),
+    )
+    .expect("the fixture receipt");
+    let bound = receipt
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256="))
+        .expect("a receipt binds a sha256");
+    assert_eq!(super::sha256_hex(sha256), bound);
+
+    // Its bytes no longer match the receipt: no master checks now.
+    let gz = root.masters().join("NSE_CM_security_03082026.csv.gz");
+    let mut bytes = std::fs::read(&gz).expect("the fixture master");
+    bytes.push(b'X');
+    std::fs::write(&gz, bytes).expect("damage the fixture master");
+    let damaged = Listing::load(&root.masters());
+    assert_eq!(damaged.absent().code(), "no_checked_master");
+    assert_eq!(damaged.in_use(), None);
+    assert_eq!(damaged.passed_over().len(), 1);
+    assert_eq!(
+        damaged.passed_over()[0].0,
+        "NSE_CM_security_03082026.csv.gz"
+    );
+    assert_eq!(damaged.span("NSE", "ALPHA", Some(ALPHA)), None);
+}
+
+#[test]
+fn a_sha256_prints_as_sixty_four_lower_case_hex_digits() {
+    let mut sha256 = [0_u8; 32];
+    sha256[0] = 0xab;
+    sha256[31] = 0x0f;
+    let hex = super::sha256_hex(&sha256);
+    assert_eq!(hex.len(), 64);
+    assert!(
+        hex.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{hex}"
+    );
+    // Byte by byte, most significant digit first: the first byte and the last.
+    assert_eq!(u8::from_str_radix(&hex[..2], 16), Ok(0xab), "{hex}");
+    assert_eq!(u8::from_str_radix(&hex[2..4], 16), Ok(0), "{hex}");
+    assert_eq!(u8::from_str_radix(&hex[62..], 16), Ok(0x0f), "{hex}");
 }
