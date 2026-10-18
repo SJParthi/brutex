@@ -731,20 +731,17 @@ impl<'a> Stepper<'a> {
     /// The silence before this bar, inside the slot's window or trade
     /// (FM-F041). True when the slot finished.
     fn silence(&mut self, bar: &SideBar) -> bool {
-        let (missing, hole) = if self.previous.is_some() {
-            (bar.gap_missing, bar.is(Bit::GapHole))
+        // The missing seconds run from the previous real second, once one
+        // was read, else from the window's start, up to this bar.
+        let from = if self.previous.is_some() {
+            bar.second.saturating_sub(bar.gap_missing)
         } else {
-            let missing = bar.second.saturating_sub(self.entry_start);
-            let hole = missing > 0
-                && self
-                    .day
-                    .traded_between(self.entry_start, bar.second.saturating_sub(1));
-            (missing, hole)
+            self.entry_start
         };
-        if missing <= self.day.max_gap {
+        if bar.second.saturating_sub(from) <= self.day.max_gap {
             return false;
         }
-        if hole {
+        if self.day.traded_between(from, bar.second.saturating_sub(1)) {
             let status = if self.filled == 0 {
                 SlotStatus::EntryUnfilled(UnfilledReason::FeedHole)
             } else {

@@ -7,9 +7,9 @@
 //!
 //! * every bar below 15:10:00 IST (a later bar is dropped here and never read
 //!   by any exit, FM-F039), with its prices on the exact common denominator
-//!   (D-6383), its book sides, its print flag, its halt state, the silence
-//!   before it, and whether that silence covers a traded Zerodha minute
-//!   (FM-F041);
+//!   (D-6383), its book sides, its print flag, its halt state and the silence
+//!   before it; with a prefix count of the traded Zerodha minutes, whether a
+//!   silence covers one is two reads (FM-F041);
 //! * the forced window's summary: its usable seconds, the seconds a position
 //!   can exit into, their summed volume and their worst price (FM-F048), or
 //!   stage A's 15:09 minute;
@@ -58,8 +58,6 @@ pub(super) enum Bit {
     EntryLocked,
     /// Stage A: an exit here would sell into a locked minute.
     ExitLocked,
-    /// The silence before this bar covers a traded Zerodha minute (deep).
-    GapHole,
     /// The bar's own Zerodha minute traded (deep).
     Witnessed,
 }
@@ -427,7 +425,6 @@ impl DayIndex {
             book,
             halts: &halts,
             present: &present,
-            present_before: &present_before,
             raw_scale,
             decision_scale,
             tick,
@@ -575,8 +572,6 @@ struct Shared<'a> {
     halts: &'a [HaltRange],
     /// Each minute's Zerodha low and high, when it traded.
     present: &'a [Option<(i64, i64)>],
-    /// The traded minutes before each minute.
-    present_before: &'a [u32],
     /// The raw scale.
     raw_scale: i128,
     /// The decision scale.
@@ -738,13 +733,6 @@ impl Shared<'_> {
         let gap_missing = running
             .previous
             .map_or(0, |p| second.saturating_sub(p).saturating_sub(1));
-        let gap_hole = self.deep
-            && gap_missing > 0
-            && running.previous.is_some_and(|p| {
-                let read = |m: usize| self.present_before.get(m).copied().unwrap_or(0);
-                let from = minute_of(p.saturating_add(1));
-                read(minute_of(second.saturating_sub(1)).saturating_add(1)) > read(from)
-            });
         running.previous = Some(second);
         let minute = self.present.get(minute_of(second)).copied().flatten();
         let (witness_lo, witness_hi) = match minute {
@@ -766,7 +754,6 @@ impl Shared<'_> {
         bits = set(bits, Bit::Flagged, mark.flagged_print);
         bits = set(bits, Bit::EntryLocked, locked && running.hi == Some(hi));
         bits = set(bits, Bit::ExitLocked, locked && running.lo == Some(lo));
-        bits = set(bits, Bit::GapHole, gap_hole);
         bits = set(bits, Bit::Witnessed, minute.is_some());
         Ok(SideBar {
             second,
