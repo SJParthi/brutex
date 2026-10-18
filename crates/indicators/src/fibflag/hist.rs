@@ -47,6 +47,7 @@
 //! in a plain field.
 
 use core::cell::Cell;
+use core::cmp::Ordering;
 use core::mem::size_of;
 
 use vocab::fib_cube::{
@@ -1508,11 +1509,11 @@ impl TickCensus {
 
     /// Compares one series with `reference` and counts the answer.
     pub fn record(&mut self, series: &ObservedTick, reference: i64) -> TickComparison {
-        let comparison = match series.tick() {
+        let comparison = match series.tick().map(|tick| tick.cmp(&reference)) {
             Err(_) => TickComparison::NoTick,
-            Ok(tick) if tick == reference => TickComparison::Equal,
-            Ok(tick) if tick < reference => TickComparison::Finer,
-            Ok(_) => TickComparison::Coarser,
+            Ok(Ordering::Equal) => TickComparison::Equal,
+            Ok(Ordering::Less) => TickComparison::Finer,
+            Ok(Ordering::Greater) => TickComparison::Coarser,
         };
         let count = match comparison {
             TickComparison::Equal => &mut self.equal,
