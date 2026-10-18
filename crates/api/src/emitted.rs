@@ -236,7 +236,9 @@ struct Case {
 /// runs' own stop generation moving on the operator's Stop.
 /// 39 -> 40 at R4-06 (SEC-07): `api.settings secret-shaped value refused`, a
 /// credential-shaped setting refused by key, class and length.
-const ROWS: usize = 40;
+/// 40 -> 41 at R3-07 (DB-065): `api.bars absent month counted`, an absent
+/// month named once at INFO where it was a warning a request.
+const ROWS: usize = 41;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -592,22 +594,56 @@ fn cases() -> Vec<Case> {
             drive: {
                 let root = root.clone();
                 Box::new(move || {
+                    // A REFUSED ADDRESS (R3-07): an absent month is counted
+                    // and named once at INFO (the row below), so the warning
+                    // is driven by a symbol past the path segment's cap.
                     let why = crate::bars::open(
                         &root,
                         Vendor::Dhan,
                         "NSE",
                         "CASH",
-                        "EMITGONE",
+                        "EMITGONE-SYMBOL-PAST-ITS-CAP",
                         Timeframe::MINUTE_1,
                         YearMonth::new(2026, 8).expect("a real month"),
                         None,
                     )
-                    .expect_err("an empty store holds no month, and never creates one");
+                    .expect_err("a symbol past the cap is refused before any file");
                     assert!(why.contains("EMITGONE"), "{why}");
                 })
             },
             mine: Box::new(|record| {
                 says(record, "symbol", "EMITGONE") && says(record, "timeframe", "1min")
+            }),
+        });
+    }
+    // crates/api/src/bars.rs — an absent month, counted and named once
+    // (R3-07, DB-065).
+    {
+        let root = fixture("emit-bar-absent");
+        cases.push(Case {
+            site: "bars.rs api.bars absent month counted",
+            target: "api.bars",
+            message: "absent month counted",
+            level: telemetry::Level::Info,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    let why = crate::bars::open(
+                        &root,
+                        Vendor::Dhan,
+                        "NSE",
+                        "CASH",
+                        "EMITABSENT",
+                        Timeframe::MINUTE_1,
+                        YearMonth::new(2026, 8).expect("a real month"),
+                        None,
+                    )
+                    .expect_err("an empty store holds no month, and never creates one");
+                    assert!(why.contains("EMITABSENT"), "{why}");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "symbol", "EMITABSENT") && says(record, "path", "emit-bar-absent")
             }),
         });
     }
@@ -2131,9 +2167,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // in flight, `server::HeadDeadline::report`, named above
     // `REACHED_IN_SERVER_TESTS`. (That branch counted 78 -> 79; the
     // package's site is added here.)
+    //
+    // 94 -> 95 at R3-07 (DB-065): `api.bars absent month counted`, a row in
+    // the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 94,
+        lib_sites, 95,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

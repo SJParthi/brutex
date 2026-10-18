@@ -292,7 +292,8 @@ fn w1_api5_4_a_value_sort_reads_from_the_index_and_a_time_of_day_sort_still_read
             "the_page_orders_only_itself_wherever_the_offset_lands",
         ],
     );
-    let window = item(BARS, "pub fn window_cancellable(");
+    // R3-07: the body is `window_admitted`; `window_cancellable` calls it.
+    let window = item(BARS, "pub fn window_admitted(");
     // D-3326 (WP-31): a non-time sort streamed every kept row once through
     // `scan`, holding at most `offset + limit` of them, and still ordered only
     // the page. D-3349 (WP-39): a VALUE sort is served from the months' sort
