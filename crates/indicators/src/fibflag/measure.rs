@@ -563,6 +563,8 @@ mod tests {
         assert!(touches(19_998, 19_999, 1));
         assert!(!touches(19_997, 19_999, 1));
         assert!(touches(19_999, 19_999, 0), "the edge itself");
+        assert!(touches(9_999, 10_000, 1), "exactly at the tolerance");
+        assert!(!touches(9_998, 10_000, 1));
         assert!(!touches(19_998, 19_999, 0));
         assert!(touches(-19_998, -19_999, 1), "a short view's negative edge");
         assert!(!touches(-19_997, -19_999, 1));
@@ -595,6 +597,19 @@ mod tests {
         assert_eq!(
             measure(&spans, &ladder, TradeDir::Long).relation,
             LevelRelation::Spans
+        );
+        // A range of 1,000 puts rung 382 on 2,618 exactly: a base whose low or
+        // whose high is on it spans it.
+        let whole = self::ladder(3_000, 2_000);
+        let on_low = window(&[(2_630, 2_640, 2_618, 2_630), (2_630, 2_640, 2_619, 2_630)]);
+        let on_high = window(&[(2_610, 2_618, 2_600, 2_610), (2_610, 2_617, 2_601, 2_610)]);
+        let edges = [on_low, on_high].map(|w| {
+            let m = measure(&w, &whole, TradeDir::Long);
+            (m.fib_zone, m.relation)
+        });
+        assert_eq!(
+            edges,
+            [(2, LevelRelation::Spans), (2, LevelRelation::Spans)]
         );
     }
 
