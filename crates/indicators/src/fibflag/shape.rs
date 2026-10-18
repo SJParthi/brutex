@@ -332,8 +332,22 @@ mod tests {
 
     #[test]
     fn the_shapes_are_the_cube_s_and_each_kind_has_its_family() {
-        for shape in Shape::ALL {
-            let label = BASE_SHAPE_ROW.labels[usize::from(shape.cube_value())];
+        let named = [
+            (Shape::U, "u"),
+            (Shape::InvertedU, "inverted_u"),
+            (Shape::Flat, "flat"),
+            (Shape::Triangle, "triangle"),
+            (Shape::InsideCandles, "inside_candles"),
+            (Shape::TightCloses, "tight_closes"),
+            (Shape::RisingLows, "rising_lows"),
+            (Shape::ShakeoutReclaim, "shakeout_reclaim"),
+            (Shape::VBottom, "v_bottom"),
+            (Shape::PartialU, "partial_u"),
+            (Shape::InsidePair, "inside_pair"),
+            (Shape::Stair, "stair"),
+        ];
+        assert_eq!(named.map(|(shape, _)| shape), Shape::ALL);
+        for (shape, label) in named {
             assert_eq!(RowId::BaseShape.value_of(label), Some(shape.cube_value()));
         }
         assert_eq!(Shape::ALL.len(), Shape::REST.len() + Shape::MICRO.len());
