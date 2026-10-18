@@ -13,7 +13,8 @@
 //!
 //! The walk runs on the side's MIRRORED bars, so this file reads like a long:
 //! a buy pays the bar's high, a sell gets its low, a stop sits below and a
-//! target above. A real price is the side's `sign` times a stored one.
+//! target above. A real price is a stored one negated back on the short side
+//! (`SideIndex::real`).
 
 use brutex_core::price::PAISA_PER_RUPEE;
 use indicators::fibflag::types::EntryStyle;
@@ -97,11 +98,11 @@ impl Order {
     }
 
     /// The order as an outcome reports it, real-signed.
-    fn report(self, sign: i64) -> Option<ExitOrder> {
+    fn report(self, side: &SideIndex) -> Option<ExitOrder> {
         (self.qty > 0).then(|| ExitOrder {
             last_fill_second: self.last_second,
             filled_qty: self.qty,
-            exit_value_paisa: self.value * i128::from(sign),
+            exit_value_paisa: side.real(self.value),
         })
     }
 }
@@ -148,8 +149,9 @@ fn levels(
     plan: &Plan,
     variant: &ExitVariant,
 ) -> Result<Levels, WalkRefusal> {
-    let sign = side.sign;
-    let mirror = |z: i64| i128::from(z) * i128::from(sign);
+    // A plan's levels are real; the side's are mirrored, which `real`
+    // undoes and so also does.
+    let mirror = |z: i64| side.real(i128::from(z));
     let g = day.decision_scale;
     let entry = mirror(plan.entry_ref) * g;
     let planned_stop = mirror(plan.base_edge) * g - day.tick;
@@ -1098,8 +1100,7 @@ impl<'a> Stepper<'a> {
     /// The slot's outcome, in exact integers, real-signed.
     #[must_use]
     pub fn outcome(&self) -> SlotOutcome {
-        let sign = self.side.sign;
-        let real = |v: i128| v * i128::from(sign);
+        let real = |v: i128| self.side.real(v);
         let (first_second, first_price, horizon_best, horizon_worst) = match self.first {
             Some((second, price, at)) => (
                 second,
@@ -1131,14 +1132,14 @@ impl<'a> Stepper<'a> {
             planned_qty: self.planned_qty,
             risk_num: self.levels.risk / scale,
             risk_den: self.day.zerodha_close,
-            first_entry_price_paisa: first_price.saturating_mul(sign),
+            first_entry_price_paisa: self.side.real_price(first_price),
             mfe_second: self.mfe_second,
             last_peak_second: self.last_peak_second,
             entry_wait_seconds: first_second.saturating_sub(self.entry_start),
             exit_spill_seconds: self.spill_seconds,
             max_participation_permille: self.max_participation,
-            own_exit: self.own.report(sign),
-            forced_exit: self.forced.report(sign),
+            own_exit: self.own.report(self.side),
+            forced_exit: self.forced.report(self.side),
         }
     }
 }

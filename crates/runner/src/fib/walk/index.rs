@@ -158,8 +158,8 @@ pub(super) struct SwingList {
 /// One side of the day.
 #[derive(Clone, Debug)]
 pub(super) struct SideIndex {
-    /// `1` for a long, `-1` for a short: a real price is `sign x` a stored one.
-    pub(super) sign: i64,
+    /// Whether this is the short side, whose prices are stored negated.
+    pub(super) short: bool,
     /// The bars, mirrored.
     pub(super) bars: Vec<SideBar>,
     /// The best buy-side price of the usable bars from each index on, raw
@@ -174,6 +174,22 @@ pub(super) struct SideIndex {
     pub(super) swings: Vec<SwingList>,
     /// The event walk's tables (FM-F030).
     pub(super) events: Events,
+}
+
+impl SideIndex {
+    /// A stored value in real sign: negated back on the short side.
+    pub(super) const fn real(&self, value: i128) -> i128 {
+        if self.short { -value } else { value }
+    }
+
+    /// A stored raw price in real sign.
+    pub(super) const fn real_price(&self, price: i64) -> i64 {
+        if self.short {
+            price.saturating_neg()
+        } else {
+            price
+        }
+    }
 }
 
 /// One stock-day, indexed once for every slot the walker steps (FM-F030).
@@ -622,7 +638,6 @@ impl Shared<'_> {
         holes: &mut u64,
     ) -> Result<SideIndex, WalkRefusal> {
         let long = direction == Search::Long;
-        let sign: i64 = if long { 1 } else { -1 };
         let mut running = Running {
             halt_end: 0,
             halt_start: 0,
@@ -644,7 +659,7 @@ impl Shared<'_> {
             }
         }
         Ok(SideIndex {
-            sign,
+            short: !long,
             bars,
             best_from,
             worst_from,
