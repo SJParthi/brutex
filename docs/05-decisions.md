@@ -71823,3 +71823,430 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-6300 — The Fib Flag Breakout engine: the funnel, and every equity result labelled research (FIB-1) — 2026-10-18
+
+**Number** the first of FIB-1's block, moved from D-5300..D-5319 to
+D-6300..D-6319 by D-6311 (D-5301 and D-5320..D-5322 are already issued on
+`feat/db-fix`). `grep` over `docs/05-decisions.md` of every pushed branch on
+18 Oct 2026 found no heading in D-6300..D-6579 or D-6600..D-6619.
+
+**What is decided.** The Fib Flag Breakout engine is built in fourteen
+packages (FIB-1 .. FIB-14) as one FUNNEL. STAGE A finds every candidate —
+every base, trigger and stop — on Zerodha minutes and walks it on Zerodha
+one-minute bars; each candidate lands in exactly one full cell of the FIB cube
+schema (`vocab::fib_cube`, D-6301). A BUC iceberg cube grows mixes by trade
+count only (D-6302) and GATE A — the Winner Gate on NET trades, CHG-1's precise
+charges, at Rs 1,00,000 and Rs 5,00,000 — judges every visited mix on every
+walk-forward learning window `[0, m)`; without a charge model there is no gate,
+only a labelled plumbing run. STAGE DEEP re-walks only the rows of gate-A
+survivors on GDFL one-second bars at the worst price of each second, re-judges
+them and walk-forwards them (GATE B). The newest months are a sealed exam,
+opened once, only after the operator's yes.
+
+**The surface.** Step 1 (operator, 18 Oct 2026): the cash prices of the F&O
+stocks are traded; indices are context only (reference stamps, D-6305); options
+and futures are a later step and nothing is built for them now.
+
+**The label.** Equities stay labelled research: gross of every charge until
+FIB-11 wires the precise charges (`runner::fib::charges::is_wired` is false),
+never Selection V6 or execution authority (`CLAUDE.md` §1, D-0509, D-0681).
+
+**Long and short are separate searches** (operator 16 Oct 16:04 IST): every
+mix is one direction, every generated number is per direction, only geometry is
+mirrored; the winner is a PAIR of one long and one short setup judged by the
+17:11 IST rule (quality per side, quantity per pair).
+
+**FIB-1 builds the foundation only**: the schema, the identity, the shared
+types, the bench harness and a stub for every file a later package fills, so
+that no later package edits another package's file. Code: `vocab::fib_cube`,
+`runner::fib`, `runner::winner_gate`, `indicators::fibflag`, `cli::fib`, the
+four FIB bench targets.
+
+### D-6301 — FIB cube schema v1: 24 rows in a namespace of its own; the code fixes rows, kinds and definitional lists, the run generates the rest (FIB-1) — 2026-10-18
+
+**What is decided.** `vocab::fib_cube` is the FIB cube schema, version
+`FIB_CUBE_VERSION = 1`, 24 rows in this canonical order (the row index is the
+row's identity forever): side, mover_rank (cumulative), move_so_far, fib_zone,
+level_distance, level_relation, base_holds_extreme, exit (partition), weekday,
+time_of_day, base_kind, base_shape, base_tightness, base_length, edge_touches,
+squeeze, trigger_body, trigger_close_location, trigger_order_flow, stop_size,
+room_to_stop, entry_style (partition), attempt, timeframe (partition).
+
+**Why each row.** The operator's 15 Oct sixteen-row PRIORITY RUN (side, mover
+rank, move so far, Fib level of the rest, exit, weekday, time of day, rest
+shape, rest width, rest length, edge touches, squeeze, breakout candle, entry
+style, attempt, timeframe) with the 16 Oct rows: rule (c) level_distance,
+level_relation, base_holds_extreme, base_kind and the four micro shapes; rule
+(d) trigger_close_location, trigger_order_flow, stop_size, room_to_stop and the
+two mirror side values. breakout_candle became trigger_body (measured on the
+body) and rest_width became base_tightness.
+
+**What the code fixes** (17:15 IST item c): rows, kinds, order and the
+DEFINITIONAL lists — side (4), fib_zone (7), level_relation (3),
+base_holds_extreme (2), weekday (5), base_kind (3), base_shape (12),
+trigger_order_flow (5, D-6313) and the entry-style names (close, break,
+retest). `descriptor()` hashes those and nothing else; `runner::fib::
+KNOWN_SCHEMAS` pins its BLAKE3, so an edit without a version bump fails the
+build.
+
+**What the run generates** (D-6312): every measured row's values, every
+partition list (exit variants, entry-style variants, widths). The labels a
+measured row carries (low/mid/high, on/near/far, few/many, yes/no,
+tight/normal/wide, small/normal/big, short/normal/long, first/second_plus,
+rank_g1/rank_g2) are SEED labels only: never thresholds, never hashed.
+
+**Why not `vocab::table`.** It holds 370 of the mask's 384 positions and its
+rows carry condition-table semantics, including the indicator rows the operator
+banned as conditions; widening `vocab::mask::WORDS` re-keys every recorded run
+(`CLAUDE.md` §3 rule 8). The cube uses the low positions of a
+`ConditionMask` only for FIB-6's support oracle and is never decoded through the
+condition table (docs/03-vocabulary.md, "FIB cube schema v1").
+
+**Append-only.** A new row or a new definitional value is a new schema version
+and v1 cells stay decodable; a generated cut is never a schema change.
+
+### D-6302 — The FIB lattice is a BUC iceberg cube in `runner`, walked to extinction by trade count with no depth parameter (FIB-1) — 2026-10-18
+
+FIB-6 builds the lattice as a BUC iceberg cube in `runner::fib::lattice`: a
+second counting strategy beside `engine`'s Apriori ladder, whose frequent set
+equals Apriori's on the same rows (FIB-6 proves it against
+`vocab::fib_cube::Layout::to_mask` rows). It grows one-direction mixes by trade
+count only — win rate is not monotone, so it never prunes on it — and walks to
+extinction with no depth, k or max-level parameter (`CLAUDE.md` §6). `engine`
+and `CLAUDE.md` §6 are unchanged; gate 22 is unchanged because the lattice lives
+in `runner`, which is a caller, not a pinned crate. FIB-1 declares the module
+(`runner::fib::lattice`, a stub).
+
+### D-6303 — The POOL-RUN identity: nine terms read for a pool, under its own domain tag (FIB-1) — 2026-10-18
+
+**What is decided.** A FIB run is identified by
+`runner::fib::identity::fib_identity(&FibRun)`: the eight-byte domain tag
+`BTXFIBP1`, then `CLAUDE.md` §3 rule 3's nine terms in its order, each with the
+one-byte tag and `u32` little-endian length framing of `runner::identity`'s
+private `term`, re-implemented byte for byte and pinned by
+`the_term_framing_is_runner_identity_s` (the nine terms of a single-instrument
+run streamed through it give `runner::identity::identity` exactly).
+
+| term | read for a pooled run |
+|---|---|
+| mask | every value the run's layout offers (`Layout::offered_mask`) |
+| direction | Long or Short; `Search` makes Undirected unrepresentable |
+| instrument | the POOL: the PIT membership digest and the traded-surface rule, or the development label and its sorted, unique names (`Pool::bytes`) |
+| timeframe | `zerodha:` and every width tried in every version (`timeframe_word`) |
+| params | `fib_params` over the profile in its documented order, then the per-run schema digest (D-6315) and the generation root (D-6312) |
+| data_digest | the data tree's root (D-6316) |
+| vocab_version | `FIB_CUBE_VERSION` |
+| commit | the build's commit |
+| feed | D-6304 |
+
+**Why not `runner::identity::Run`.** It carries exactly one `InstrumentKey`
+and a cross-sectional run has none; a placeholder key would be invention
+(`CLAUDE.md` §3 rule 1). The domain tag means no FIB identity can equal a
+single-instrument identity (`fib_identity_differs_from_runner_identity_for_any_single_instrument_run`).
+`RunId` gains one crate-private constructor, `from_digest`, for this module's
+two domains; the nine-term encoding of `runner::identity` is untouched, so no
+recorded run re-keys.
+
+**Cost.** BOUNDED, O(term bytes), once per run (C-F-05).
+
+### D-6304 — Feeds by level for the Fib run: Zerodha minutes decide, GDFL seconds execute (FIB-1) — 2026-10-18
+
+Rule (a) of 16 Oct: minutes always come from Zerodha (one-minute bars; every
+wider candle is folded from them by `pull::fold`, anchored at 09:15); GDFL is
+used only at the seconds level (fills at the worst price of each second, order
+flow per GDFL second summed into each Zerodha minute window). The identity's
+`feed` term is `zerodha+gdfl` for a deep run (`FEED_DEEP`: decision feed plus
+execution feed) and `zerodha`, plus `+<word>` when an order-flow source is used,
+for stage A (`stage_a_feed`). This refines D-0802 for this run and supersedes
+the 15 Oct "test both price bases".
+
+### D-6305 — Reference stamps are never coordinates and never identity terms (FIB-1) — 2026-10-18
+
+NIFTY, BANKNIFTY, every stored index and INDIA VIX are stamped on a candidate
+as reference only (FIB-8's `cli::fib::reference`): never a cube coordinate,
+never a term of the run identity, never ranked. GIFT NIFTY is absent for want of
+a source recorded in `docs/00-charter.md`. VWAP, pivots, CPR, the opening range
+and previous-day levels are reference stamps too (rule h): no indicator is a
+condition of this engine.
+
+### D-6306 — FIB output layout `results/fib-v1/<run-id>/` and the store-write rule (FIB-1) — 2026-10-18
+
+`cli fib` writes the store ONLY with `--out-store`, under
+`<store>/results/fib-v1/<run-id>/` (`cli::fib::results_dir`) and through
+`store_write::root_for`, so an unstamped build is refused before it opens
+anything (DB-B71). `store_write::writes_the_store("fib", args)` is true exactly
+when `args` holds `--out-store`, and `fib` is in `WRITERS` (it is one in that
+form only). Every other form writes only to an `--out` directory OUTSIDE the
+store root; an `--out` inside it is refused by name as `out_inside_store`
+(`cli::fib::refuse_out_inside_store`, compared by component after making both
+paths absolute, without touching the disk).
+
+### D-6307 — The `cli fib` sub-verbs and their owners (FIB-1) — 2026-10-18
+
+`cli fib SUBVERB`: `day-check` (FIB-8), `run`, `deep`, `sample`, `verify`
+(FIB-9), `net` (FIB-11), `plan` (FIB-12), `wf`, `exam` (FIB-13), `report`
+(FIB-14); `authorities`, `reference`, `files` are FIB-8's modules and `wire`
+FIB-10's (its `register` refuses `cal1`, `pit`, `data1`, `data2` and `of1` by
+name until built). Until its package lands, each sub-verb refuses by name —
+`fib <verb> is not built yet: it arrives with FIB-n` — and exits FAILED (a
+refusal, never a silent no-op, `CLAUDE.md` §4). An unknown sub-verb is a misuse
+naming every sub-verb; `cli fib` alone is a misuse naming `fib` as a command
+with the wrong arity. `fib` is in `COMMANDS` (53, sorted), `USAGE`, the
+dispatch and `is_sweep_command`.
+
+### D-6308 — No new docs/ file for the Fib run (FIB-1) — 2026-10-18
+
+The Fib run's records live in the existing documents: the file kinds in
+`docs/02-store-format.md` (FIB-8), the schema in `docs/03-vocabulary.md`, the
+invariants in `docs/04-invariants.md`, the decisions here and the measurements
+in `docs/06-limits.md`. `CLAUDE.md` §10 gives authority to fourteen named
+documents and none past them; a new file would carry no stated authority.
+
+### D-6309 — The only fixed numbers (operator 16 Oct 11:24 and 17:15 IST): `vocab::fib_cube::FIXED_NUMBERS` (FIB-1) — 2026-10-18
+
+**What is decided.** `FIXED_NUMBERS` is the one ledger of every number the FIB
+strategy path may type, each row `(name, value, category, decision id)`; every
+other value is generated from each stock's own past, per direction. Its
+categories (17:15 IST item a):
+
+* **WinnerGate** — the only numbers that DECIDE: win rate 510 permille,
+  average win 2x average loss, profit factor 2, largest win 2x largest loss,
+  500 trades a year counted across the long + short pair (a partial year
+  pro-rated by its tradable days), every year's net above 0 paisa, each side's
+  unseen-month net above 0 paisa, 700 permille of unseen months positive. The
+  clauses with no number of their own — the learned loss floor, leave-one-out
+  over day, week, fortnight, month and quarter, the unseen months passing
+  together — are `GATE_CLAUSES`, which the FIXED_NUMBERS digest covers.
+* **OperatorSessionTime** — 09:15:00 anchor, the forced window
+  [15:09:00, 15:10:00), auto-exit by 15:10:00.
+* **TradeSize** — Rs 1,00,000 and Rs 5,00,000.
+* **OperatorPatternSize** — micro bases of 2 and 3 candles (rule c).
+* **FibonacciRatio** — 0.236 .. 1.0, pinned to `indicators::fib::RUNGS` by
+  `fib_zone_rungs_are_the_first_seven_of_indicators_fib_rungs`.
+* **Unit** — bp, permille, seconds per minute and day, micros per second,
+  months per gate year, days per week, months per quarter and half-year.
+* **Representation** — the histogram's 8 sub-bins per power of two as a SEED
+  only (R3), the schema row count, the digest width, the mid-rank scale and the
+  pair's two sides (D-6312).
+
+**Why each is not a free parameter.** The gate numbers are the operator's
+confirmed definition of a winner (16 Oct 11:12, 13:07, 13:57, 17:11 IST); the
+session times, sizes and pattern sizes are the operator's; ratios and units are
+definitions; representation entries set a width or a resolution, never a
+threshold.
+
+**Deleted (17:15 IST item a, item j)** and refused by the source scan if typed
+again: the 0.2% minimum stop (13:07 IST), 100 trades a year (13:57 IST), the
+own exits 15:07:00 and 15:08:00, the report columns 5R, 10R, 20R and top 5% MFE
+(replaced by R4's ladders), every coarse bucket count, the 2^40 histogram cap
+(R3), the typed timeframes 3/5/15 (R7), the 2.5x room reading and the 14-day
+fortnight (FIB-7 settles the fortnight's reading, FM-F064).
+
+**The gate year** is 12 calendar months: the exam is the trailing gate year
+and the one-gate-year walk-forward reading runs beside R6's two-quarter W0, both
+counted. The FIXED_NUMBERS ledger is APPEND-ONLY: a later package that must type
+a representation number appends its row under its own decision id.
+
+**Proof.** `fixed_numbers_names_every_literal_of_this_file_and_refuses_every_deleted_one`
+reads `fib_cube.rs` itself; every FIB-1 file of `runner::fib`,
+`indicators::fibflag` holds no literal but 0 and 1
+(`every_fib1_file_of_runner_types_no_number`,
+`every_fib1_file_of_fibflag_types_no_number`).
+
+### D-6310 — The FIB-GATE package is absorbed by FIB-7, so the Winner Gate has one owner (FIB-1) — 2026-10-18
+
+The FIB-GATE part of `state/fib-run-20261016/gate-package.json` (16 Oct 11:22)
+is absorbed by FIB-7 (operator 08:50 IST): the application-wide Winner Gate is
+`runner::winner_gate`, deliberately outside `runner::fib` because the operator
+applies it to every strategy, combination and stock. FIB-1 creates it as a stub.
+FIB-GATE's block D-5600..D-5619 (moved to D-6600..D-6619 by D-6311) stays
+unused.
+
+### D-6311 — FM-F008: every FIB decision block moves up by 1,000, and the ledger is read back by a test (FIB-1) — 2026-10-18
+
+**Finding.** FM-F008: the FIB plan's blocks D-5300..D-5579 collide. On
+`feat/db-fix` D-5301 (`/db`'s address contract, R3-01) and D-5320..D-5322
+(R4-06) are issued; on the pushed branch `cloud/mut-api-a-20261017`
+D-5420..D-5423 are; the PREC plan's blocks are said to use the same range
+(D-5420, D-5520).
+
+**What is decided.** Every FIB decision id in D-5300..D-5619 moves up by
+exactly 1,000, as one recorded edit: FIB-1 D-6300..D-6319, FIB-2 D-6320..D-6339,
+FIB-3 D-6340..D-6359, FIB-4 D-6360..D-6379, FIB-5 D-6380..D-6399, FIB-6
+D-6400..D-6419, FIB-7 D-6420..D-6439, FIB-8 D-6440..D-6459, FIB-9
+D-6460..D-6479, FIB-10 D-6480..D-6499, FIB-11 D-6500..D-6519, FIB-12
+D-6520..D-6539, FIB-13 D-6540..D-6559, FIB-14 D-6560..D-6579, and FIB-GATE's
+unused D-5600..D-5619 to D-6600..D-6619. Every cross-reference moves with it:
+D-5300 is D-6300, D-5309 is D-6309, D-5380 is D-6380, D-5423 is D-6423,
+D-5543 is D-6543. A later package reading a D-53xx..D-55xx id in its
+specification uses the id 1,000 above.
+
+**Why +1,000.** One rule a reader applies in their head; on 18 Oct 2026 no
+pushed branch's `docs/05-decisions.md` holds a heading in D-6300..D-6579 or
+D-6600..D-6619 (the nearest is D-6017 on `cloud/mut-store-*`).
+
+**What this cannot see.** The PREC plan's own text is not in this repository,
+so "free in both plans" is UNVERIFIED here; the Mac checks it at merge-back.
+
+**The ledger test.** `crates/core/tests/decisions.rs`
+`every_decision_id_is_issued_once` reads `docs/05-decisions.md` and refuses a
+number heading two entries, except the five pinned at their exact counts
+(D-0076, D-0077, D-0078, D-0370, D-0372, gate 27b's `DECISION_PINS`); its
+fixture with two D-5520 headings is refused.
+
+### D-6312 — The 17:15 IST NOTHING TYPED rules as FIB-1 builds them: generated values in a versioned Generation (FIB-1) — 2026-10-18
+
+**R1 (stamps and versions).** A `Generation` is one version of one direction's
+generated lists: its version number and birth step, the widths, the mover-rank
+inner edges, one `CutList` per measured row and scope (row, width, base kind),
+the exit variant set and the entry-style variants as `(version, digest, count)`,
+and every other package's generated list as `(name, version, birth step,
+digest)` so it enters the identity without this schema knowing its shape. A
+`GenerationChain` holds a direction's versions; step m reads only the newest
+born at or before m (`GenerationChain::at`); a version is born at a later step
+than the one before. The identity hashes the ordered chain of version digests
+(`runner::fib::identity::generation_root`). Stamps are compared exactly: a
+stamp's own-past position is the mid-rank pair `Ratio::mid_rank` = (2 x below +
+in bin, 2 x total), a raw measurement is `Ratio::whole`, and a lookup
+(`CutList::bucket`) is one binary search over at most 253 cuts (at most eight
+comparisons), cross-multiplied in `u128`; a value on a cut goes up.
+
+**R2 (seed).** `lower_nearest_rank(sorted, 1, 2)` is the seed cut's rule; a
+row whose past holds one value has an empty cut list and one bucket. The SPLIT,
+KEEP, MERGE and STOP steps are FIB-13's (`runner::fib::refine`).
+
+**R5 (min support).** `MinSupport` computes Q(w) = 500 x (tradable days in w /
+tradable days in a gate year) exactly, `F1 = ceil(Q / 2)` and
+`F2 = max(1, ceil(Q) - M)`; never a flag, never 100, never 500 per side.
+
+**R7 (timeframe).** `max_width_minutes()` = (15:09:00 - 09:15:00) / 60 /
+(MICRO2 + 1) = 118, derived; a generation's widths are strictly increasing in
+1..=118, and a time-of-day cut is a positive whole number of its width's
+candles inside the 21,240-second decision span.
+
+**Items g to k.** Paper counts are computed per generation in `u128` and
+labelled paper only; the cell key is the `Coords` byte array. `tercile` stays
+only to decode v1 cells and `median` is gone. Direction is Long or Short only.
+"About 2.5x" is the operator's chart reading only, never a cut, filter or
+split. "Rank by the smallest stop" orders reports only, ties by `MixKey`, and
+never selects (FIB-14).
+
+**Representation entries** added: `mid_rank_scale` = 2 (the pair doubles its
+counts so a half bin is an integer) and `pair_sides` = 2.
+
+### D-6313 — FM-F004: `trigger_order_flow` has five values, and an absent order flow is never pooled with a true zero (FIB-1) — 2026-10-18
+
+Row 18 is `{with, against, balanced, unclassified, absent}`, both paper counts
+recomputed with radix 5. `OrderFlowReading::of(window, direction)` reads one
+OF-1 window call: no record → `absent:no_record`; coverage below the window →
+`absent:partial`; classified volume zero with unclassified volume → 
+`unclassified`; classified volume with order flow delta zero → `balanced`;
+otherwise `with` or `against` by the sign of the order flow delta against the
+trade. Two absences the finding left unnamed are named rather than folded into
+another value: a covered window with no volume at all is `absent:empty`, and a
+run with no order-flow source (`--order-flow absent`) is `absent:off`, which
+makes the row constant. Each reading has its counted name; O(1).
+
+### D-6314 — FM-F005: only the inner rank edges are generated, and every ranked decision has a group (FIB-1) — 2026-10-18
+
+`rank_bucket(rank, edges)` takes the generated INNER edges (non-decreasing,
+each at least rank one): group k is `rank <= edges[k]`, and group
+`edges.len()` is every ranked decision, so a later, larger pool drops no ranked
+decision (`rank_bucket(57, [3, 8, 20]) == Some(3)`). Rank 0 is unranked and the
+only rank with no group. Repeated edges are kept and recorded in the
+Generation; the equal nested group is equivalent to the one before
+(`rank_group_is_equivalent`) and the lattice skips it and counts the skip
+(`Generation::equivalent_rank_groups`). Edges use the lower nearest-rank
+quantile. The rank as a permille of the day's ranked count and the per-year
+`beyond_w0_range` information count are FIB-2's stamps.
+
+### D-6315 — FM-F006: a per-run descriptor sets the key width, the radices and the mask positions, and is recorded (FIB-1) — 2026-10-18
+
+The exit row's radix is the run's exit set's count, and every generated row's
+radix is its generation's. `Generation::new` validates the PER-RUN DESCRIPTOR
+(static rows + exit set + generation) and refuses by name a row beyond the
+value type (`row_values_exceed_u8`, past 254 values, so a free row's choices
+still count in a `u8` beside `OPEN`) and a radix product beyond the widest key
+(`radix_product_exceeds_key`, past `u128`). The key width — 64 bits when every
+code fits, else 128 — is chosen from the descriptor and is part of
+`Generation::run_descriptor`, whose BLAKE3 is the schema digest
+(`runner::fib::run_schema_digest`) carried in the identity's params and
+recorded in the append-only `runner::fib::SchemaLedger`; `KNOWN_SCHEMAS` stays
+for compiled versions. Paper counts and mask positions are computed at run
+time; a partial-mix count past `u128` is refused as `paper_count_exceeds_u128`.
+
+**One reading taken.** Total values beyond the mask's 384 positions is refused
+by `Layout::to_mask`, `mix_mask` and `offered_mask` as
+`fib_mask_exceeds_words` (17:15 IST item g), and NOT by the descriptor: the mask
+serves only FIB-6's oracle, and a generation refined past 384 values must still
+encode its cells.
+
+### D-6316 — FM-F003: the data digest is an append-only Merkle Mountain Range in month-major order (FIB-1) — 2026-10-18
+
+`runner::fib::identity::Mmr` keeps perfect trees as peaks, merges equal heights
+on append (O(log n) merges), bags the peaks right to left for the root and
+returns the peaks for the run manifest; an odd leaf simply stays a peak, so
+there is no odd-leaf rule to choose. Every node is hashed under `BTXFIBM1` with
+its kind (leaf, parent, bag, empty). `DataTree` keys each leaf by
+`(year-month, leaf kind, series id)`: one leaf per stock-month (Zerodha minutes
+for stage A, signal plus execution for deep) and one per authority file.
+
+**One reading taken.** FM-F003 lists the key as "(leaf kind, series id,
+year-month), month-major". Ordered by kind first, a new month would land among
+the old leaves and rebuild the tree; so the ORDER is month-major —
+`LeafKey`'s fields are `year_month, kind, series` and its derived order is
+lexical on them — which lets a new month only append. A leaf at or before the
+last one is refused (`leaf_out_of_order`); `DataTree::of_unsorted` sorts a
+listing first, so the root does not depend on listing or worker order.
+`merkle(&[[u8; 32]])` is the same range over plain leaves, order-dependent; the
+generation chain uses it.
+
+### D-6317 — FM-F007: the pair identity, and `fib run` refuses a run without a direction (FIB-1) — 2026-10-18
+
+`pair_identity(long, short, pairing-rule version, FIXED_NUMBERS digest)` is a
+`RunId` under its own domain tag `BTXFIBQ1`, its four terms tagged by position:
+it changes with either side and with the rule version and the ledger, and
+differs from both runs' identities. `fixed_numbers_digest()` is the BLAKE3 of
+`vocab::fib_cube::fixed_numbers_bytes()`. `cli fib run` requires
+`--direction long` or `--direction short` and otherwise is refused by name as
+`direction_required` (a misuse). A single pass that searches both directions
+records both run identities and the pair identity before pairing; that form is
+FIB-9's to add.
+
+### D-6318 — FM-F001, FM-F002: the FIB bench harness declares a class, an axis and a work counter per row (FIB-1) — 2026-10-18
+
+**What is decided.** One harness, `crates/runner/benches/fib_rows/harness.rs`,
+included by `#[path]` into the four FIB bench targets
+(`vocab/benches/fib_cube.rs`, `indicators/benches/fibflag.rs`,
+`runner/benches/fib.rs`, `cli/benches/fib.rs`) and into
+`runner/tests/fib_harness.rs`, so its self-tests run under `cargo test`. Every
+row declares a CLASS (WORST-CASE; AMORTISED with its period; EXPECTED; BOUNDED
+with its bound) and an AXIS (FIXED-STATE, exempt and labelled; or a data unit
+with its production size), three scales spanning at least 100x, and a
+structural work counter on its own state (no static, no atomic; gate 17) read
+around every call into a fixed histogram, exact below 65,536 and per power of
+two above. It prints the timer granularity, times batches of 1, 10, 100 and
+1,000 calls, labels every time percentile as one of batch means, and prints a
+`RATIO` row per row. A data row's largest working set must exceed the
+last-level cache a pure-Rust pointer-chase probe measured (the largest size
+whose load costs under half of a 256 MiB load), runs at 1 worker and at the
+production worker count, and prints EXTRAPOLATION below production size.
+
+**Verdicts.** WORST-CASE: each scale's max work within 1.25x of its p50 work (a
+larger max contradicts the class and FAILS), p99 and max work ratios within
+1.25x, the p99 time ratio within 1.25x. AMORTISED: one full period at every
+scale, mean work and mean time ratios within 1.25x. EXPECTED: p99 work and time
+ratios within 1.25x. BOUNDED: the bound is the claim; ratios are information.
+
+**Two tiers, stated.** A time ratio above 1.25x is a printed FAIL against the
+specification's line; the process exits non-zero on a refusal, a structural
+failure, or a time ratio above the 3.0x shared-runner ceiling every other bench
+in the workspace uses, because gate 8 runs every bench on a shared CI runner.
+The work verdicts are exact and decide; a timer max over two million calls is
+the operating system's, so the max criterion is applied to work.
+
+**Self-tests** (`tests/fib_harness.rs`): `harness_detects_amortised_spike`,
+`harness_prints_timer_granularity`, `harness_refuses_row_without_class`,
+`every_row_declares_axis_and_scale`,
+`a_data_row_runs_at_one_and_at_the_production_worker_count`.

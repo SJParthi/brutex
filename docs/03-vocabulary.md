@@ -801,3 +801,49 @@ three bearish bars over a run in which 31 never fired once. It now stores an
 
 The rule is recorded here because it was a semantic decision living only in a code
 comment, and masks are built on it.
+
+## FIB cube schema v1 (D-6301)
+
+**A separate namespace. It is never part of the condition bit table above.**
+`vocab::fib_cube` is the schema the Fib Flag Breakout engine's candidates land
+in: 24 rows, by row index, each a categorical, cumulative or partition row.
+Its row and value indices are its own identity; they are not condition
+positions, and no FIB value ever sets, reuses or renumbers a bit of this
+table (`CLAUDE.md` §3 rule 8). The mask `Layout::to_mask` builds places a cell
+in the low positions of a `ConditionMask` for FIB-6's support oracle only, and
+**such a mask must never be decoded through `vocab::table`**: position 0 there
+is a FIB value, not `ema_bullish`.
+
+| Row | Index | Kind | Values |
+|---|---:|---|---|
+| `side` | 0 | categorical | long_with_gainer, short_with_loser, short_mirror_on_gainer, long_mirror_on_loser |
+| `mover_rank` | 1 | cumulative | generated nested groups (`rank <= edge`), the widest every ranked decision |
+| `move_so_far` | 2 | categorical | generated (seed labels low, mid, high) |
+| `fib_zone` | 3 | categorical | l0, l236, l382, l500, l618, l786, l1000 |
+| `level_distance` | 4 | categorical | generated (seed labels on, near, far) |
+| `level_relation` | 5 | categorical | above, below, spans |
+| `base_holds_extreme` | 6 | categorical | no, yes |
+| `exit` | 7 | partition | the run's generated exit variants (no typed label) |
+| `weekday` | 8 | categorical | mon, tue, wed, thu, fri |
+| `time_of_day` | 9 | categorical | generated cuts per width, in seconds after 09:15 |
+| `base_kind` | 10 | categorical | micro2, micro3, rest |
+| `base_shape` | 11 | categorical | u, inverted_u, flat, triangle, inside_candles, tight_closes, rising_lows, shakeout_reclaim, v_bottom, partial_u, inside_pair, stair |
+| `base_tightness` | 12 | categorical | generated (seed labels tight, normal, wide) |
+| `base_length` | 13 | categorical | generated (seed labels short, normal, long) |
+| `edge_touches` | 14 | categorical | generated (seed labels few, many) |
+| `squeeze` | 15 | categorical | generated (seed labels yes, no) |
+| `trigger_body` | 16 | categorical | generated (seed labels small, normal, big) |
+| `trigger_close_location` | 17 | categorical | generated (seed labels near_extreme, middle, far) |
+| `trigger_order_flow` | 18 | categorical | with, against, balanced, unclassified, absent (D-6313) |
+| `stop_size` | 19 | categorical | generated (seed labels small, normal, large) |
+| `room_to_stop` | 20 | categorical | generated (seed labels low, mid, high) |
+| `entry_style` | 21 | partition | the run's generated variants, each one of close, break, retest |
+| `attempt` | 22 | categorical | generated (seed labels first, second_plus) |
+| `timeframe` | 23 | partition | the run's generated widths in whole minutes, 1 to 118 |
+
+The definitional lists (rows 0, 3, 5, 6, 8, 10, 11, 18 and the entry-style
+names) are fixed by `FIB_CUBE_VERSION` and pinned by
+`runner::fib::KNOWN_SCHEMAS`; every other row's values come from the run's
+versioned `Generation` (D-6312), so the value counts, the cell key's width and
+both paper counts belong to a run, not to this document (D-6315). A seed label
+is a name for the start, never a threshold.

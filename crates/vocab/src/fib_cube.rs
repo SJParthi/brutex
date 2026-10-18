@@ -4421,7 +4421,7 @@ mod tests {
             "no minimum stop (13:07 IST) and no coarse bucket count"
         );
         // Unique names, and a decision id inside the FIB plan's blocks
-        // (D-6300..D-6579 after FM-F008's move, D-6311).
+        // (numbers 6300 to 6579 after FM-F008's move, D-6311).
         let mut names: Vec<&str> = FIXED_NUMBERS.iter().map(|(n, _, _, _)| *n).collect();
         names.sort_unstable();
         let before = names.len();
