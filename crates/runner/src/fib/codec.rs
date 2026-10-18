@@ -894,3 +894,30 @@ fn take_order(r: &mut Reader<'_>) -> Option<ExitOrder> {
     };
     present.then_some(order)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compile-time count is the schema's, counted again at run time.
+    #[test]
+    fn the_measured_rows_are_the_schema_s_measured_rows() {
+        let counted = ROWS
+            .iter()
+            .filter(|row| row.source == Source::Measured)
+            .count();
+        assert_eq!(measured_rows(), counted);
+        assert_eq!(MEASURED_ROWS, counted);
+    }
+
+    /// A short read answers zeros, never past the end: the length is checked
+    /// once, by the constructor.
+    #[test]
+    fn a_reader_never_reads_past_its_bytes() {
+        let bytes = [7_u8];
+        let mut r = Reader { rest: &bytes };
+        assert_eq!(r.u32(), 7);
+        assert_eq!(r.u64(), 0);
+        assert!(Reader::new(&bytes, 2).is_err());
+    }
+}
