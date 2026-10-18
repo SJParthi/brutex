@@ -273,7 +273,9 @@ fn lower_edge(bin: usize, depth: u32, child: u64) -> u64 {
     };
     let top = at / HIST_SUB_BINS_PER_POWER;
     let mantissa = at % HIST_SUB_BINS_PER_POWER;
-    let head = u128::from(((HIST_SUB_BINS_PER_POWER + mantissa) << depth) | child);
+    // `child` sits below the shifted head, so the sum joins the bits; a sum
+    // rather than an or, because an or and an xor of disjoint bits agree.
+    let head = u128::from(((HIST_SUB_BINS_PER_POWER + mantissa) << depth) + child);
     let edge = (head << top) >> (SUB_BITS + depth);
     u64::try_from(edge).unwrap_or(u64::MAX)
 }
