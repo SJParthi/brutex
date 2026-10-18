@@ -608,6 +608,13 @@ impl RowTable {
         self.coords.is_empty()
     }
 
+    /// Every row index in canonical order (0, 1, 2, ...): a block of it is the
+    /// rows of a contiguous run of decisions.
+    #[must_use]
+    pub fn order(&self) -> &[u32] {
+        &self.order
+    }
+
     /// The run's month count.
     #[must_use]
     pub const fn months(&self) -> u32 {
