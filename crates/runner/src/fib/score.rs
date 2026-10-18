@@ -1025,6 +1025,18 @@ const NO_BLOCK: Block = Block {
     by: Blocker::Open,
 };
 
+/// What every lane of one pass reads alike.
+struct Ctx<'r> {
+    /// The table's search.
+    search: Search,
+    /// The current pass.
+    epoch: u64,
+    /// The pool the block slots are sized for.
+    pool: usize,
+    /// The ladders.
+    rungs: &'r Rungs,
+}
+
 /// One trade's figures, computed once and added to its month.
 struct Trade {
     /// Net money, in the model's unit.
@@ -1197,8 +1209,23 @@ impl<C: ChargeModel> OrderedPass<C> {
                     .ok_or(ScoreRefusal::DayNotTradable { day: view.day })?;
                 today = Some((view.day, view.month, *keys));
             }
-            for lane in 0..self.lanes.len() {
-                self.offer(lane, *row, &view, outcomes)?;
+            let ctx = Ctx {
+                search: self.search,
+                epoch: self.epoch,
+                pool: self.pool,
+                rungs: &self.rungs,
+            };
+            for (index, (lane, card)) in self.lanes.iter_mut().zip(&mut self.cards).enumerate() {
+                Self::offer(
+                    &ctx,
+                    &mut self.block,
+                    index,
+                    lane,
+                    card,
+                    *row,
+                    &view,
+                    outcomes,
+                )?;
             }
         }
         if let Some((day, month, keys)) = today {
@@ -1209,51 +1236,50 @@ impl<C: ChargeModel> OrderedPass<C> {
     }
 
     /// Offers one row to one profile's lane.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the pass's shared reading, the lane's slots, its state and card, and the row"
+    )]
     fn offer(
-        &mut self,
-        lane: usize,
+        ctx: &Ctx<'_>,
+        block: &mut [Block],
+        lane_index: usize,
+        lane: &mut Lane<C>,
+        card: &mut Card,
         row: u32,
         view: &RowView<'_>,
         outcomes: &[Outcome],
     ) -> Result<(), ScoreRefusal> {
-        let Some((offset, size)) = self.lanes.get(lane).map(|state| (state.offset, state.size))
-        else {
-            return Ok(());
-        };
         let index = view
             .outcomes
-            .get(offset)
+            .get(lane.offset)
             .copied()
             .ok_or(ScoreRefusal::RowOutOfTable { row })?;
         let slot = outcomes
             .get(index as usize)
-            .and_then(|outcome| outcome.slots.get(size))
+            .and_then(|outcome| outcome.slots.get(lane.size))
             .copied()
             .ok_or(ScoreRefusal::OutcomeOutOfRange {
                 index,
                 outcomes: outcomes.len(),
             })?;
-        let at = lane * self.pool + view.slot as usize;
-        let block = self.block.get(at).copied().unwrap_or(NO_BLOCK);
+        let at = lane_index * ctx.pool + view.slot as usize;
+        let current = block.get(at).copied().unwrap_or(NO_BLOCK);
         let blocked =
-            block.epoch == self.epoch && block.day == view.day && view.second <= block.until;
-        let Some(card) = self.cards.get_mut(lane) else {
-            return Ok(());
-        };
-        let counts = &mut card.counts;
-        counts.raw += 1;
+            current.epoch == ctx.epoch && current.day == view.day && view.second <= current.until;
+        card.counts.raw += 1;
         if blocked {
-            match block.by {
+            let counts = &mut card.counts;
+            match current.by {
                 Blocker::Open => counts.blocked_while_open += 1,
                 Blocker::Pending => counts.blocked_by_pending += 1,
                 Blocker::Unpriced => counts.blocked_by_unpriced += 1,
             }
-            counts.ties += u64::from(view.second == block.decided);
+            counts.ties += u64::from(view.second == current.decided);
             return Ok(());
         }
-        let epoch = self.epoch;
         let written = |until, by| Block {
-            epoch,
+            epoch: ctx.epoch,
             day: view.day,
             until,
             decided: view.second,
@@ -1261,33 +1287,31 @@ impl<C: ChargeModel> OrderedPass<C> {
         };
         let next = match slot {
             Slot::Priced(outcome) => {
-                self.take(lane, row, view, &outcome)?;
+                Self::take(ctx, lane, card, row, view, &outcome)?;
                 Some(written(outcome.exit_second, Blocker::Open))
             }
             Slot::Pending { until_second } => {
-                counts.unfilled += 1;
+                card.counts.unfilled += 1;
                 Some(written(until_second, Blocker::Pending))
             }
             Slot::Unpriced(_) => {
-                counts.unpriced += 1;
+                card.counts.unpriced += 1;
                 if let Some(stats) = card.months.get_mut(view.month as usize) {
                     stats.unpriced += 1;
                 }
-                if let Some(state) = self.lanes.get_mut(lane) {
-                    state.touch(view.month, epoch);
-                }
+                lane.touch(view.month, ctx.epoch);
                 Some(written(u32::MAX, Blocker::Unpriced))
             }
             Slot::ZeroQty => {
-                counts.zero_qty += 1;
+                card.counts.zero_qty += 1;
                 None
             }
             Slot::Inapplicable => {
-                counts.inapplicable += 1;
+                card.counts.inapplicable += 1;
                 None
             }
         };
-        if let (Some(next), Some(slot)) = (next, self.block.get_mut(at)) {
+        if let (Some(next), Some(slot)) = (next, block.get_mut(at)) {
             *slot = next;
         }
         Ok(())
@@ -1295,8 +1319,8 @@ impl<C: ChargeModel> OrderedPass<C> {
 
     /// Prices one trade through the lane's charge model.
     fn price(
-        &mut self,
-        lane: usize,
+        ctx: &Ctx<'_>,
+        lane: &mut Lane<C>,
         row: u32,
         view: &RowView<'_>,
         outcome: &SlotOutcome,
@@ -1310,7 +1334,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         if outcome.entry_value_paisa <= 0 {
             return Err(ScoreRefusal::EntryValueNotPositive { row });
         }
-        let long = self.search == Search::Long;
+        let long = ctx.search == Search::Long;
         let gross = if long {
             outcome
                 .exit_value_paisa
@@ -1335,14 +1359,11 @@ impl<C: ChargeModel> OrderedPass<C> {
             outcome.exit_value_paisa,
             outcome.flags.contains(TradeFlag::DhanSquareOff),
         );
-        let Some(state) = self.lanes.get_mut(lane) else {
-            return Err(ScoreRefusal::RowOutOfTable { row });
-        };
-        let scale = state.charges.scale();
-        let charges = state
+        let scale = lane.charges.scale();
+        let charges = lane
             .charges
             .add(&entry)
-            .checked_add(state.charges.add(&exit))
+            .checked_add(lane.charges.add(&exit))
             .ok_or(ScoreRefusal::MoneyOverflow { row })?;
         let qty = i128::from(outcome.filled_qty);
         let risk = i128::from(outcome.risk_per_share_paisa);
@@ -1365,31 +1386,29 @@ impl<C: ChargeModel> OrderedPass<C> {
             mae_r: outcome.mae_to_exit_paisa as Stat / risk as Stat,
             mfe_r: mfe as Stat / risk as Stat,
             net_rung: if net > 0 {
-                Rungs::reached(&self.rungs.net_r, net, den)
+                Rungs::reached(&ctx.rungs.net_r, net, den)
             } else {
                 0
             },
-            mfe_rung: Rungs::reached(&self.rungs.mfe_r, mfe, risk),
+            mfe_rung: Rungs::reached(&ctx.rungs.mfe_r, mfe, risk),
         })
     }
 
     /// Takes one trade: prices it and adds it to its month, its streaks and
     /// its day.
     fn take(
-        &mut self,
-        lane: usize,
+        ctx: &Ctx<'_>,
+        lane: &mut Lane<C>,
+        card: &mut Card,
         row: u32,
         view: &RowView<'_>,
         outcome: &SlotOutcome,
     ) -> Result<(), ScoreRefusal> {
-        let trade = self.price(lane, row, view, outcome)?;
-        let net_rungs = self.rungs.net_r.len();
-        let mfe_rungs = self.rungs.mfe_r.len();
-        let (Some(state), Some(card)) = (self.lanes.get_mut(lane), self.cards.get_mut(lane)) else {
-            return Err(ScoreRefusal::RowOutOfTable { row });
-        };
+        let trade = Self::price(ctx, lane, row, view, outcome)?;
+        let net_rungs = ctx.rungs.net_r.len();
+        let mfe_rungs = ctx.rungs.mfe_r.len();
         let month = view.month as usize;
-        state.touch(view.month, self.epoch);
+        lane.touch(view.month, ctx.epoch);
         let win = trade.net > 0;
         let r = trade.r;
         card.counts.trades += 1;
@@ -1442,8 +1461,8 @@ impl<C: ChargeModel> OrderedPass<C> {
             *count += 1;
         }
         card.streaks.add(win, r);
-        state.day_r += r;
-        state.day_traded = true;
+        lane.day_r += r;
+        lane.day_traded = true;
         Ok(())
     }
 

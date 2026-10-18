@@ -1493,3 +1493,64 @@ fn expand_range_is_one_nodes_expansion() {
         ["range_outside_table", "scratch_too_small"]
     );
 }
+
+/// A mix the scoring pass refuses is recorded by the sink, by key and by
+/// name, and adds no card; `expand_range` below its floor counts its node
+/// infrequent and visits nothing.
+#[test]
+fn a_refused_mix_is_recorded_and_a_range_below_its_floor_visits_nothing() {
+    use runner::fib::lattice::{Scratch, expand_range};
+    use runner::fib::score::ScoreRefusal;
+    let generation = generation(Search::Long, 2, 2, 1);
+    let data = (0..6_u32)
+        .map(|i| {
+            (
+                decision(base_cell(Search::Long), i, 60, 40_000, u64::from(i)),
+                vec![i],
+            )
+        })
+        .collect();
+    let table = fixture::table_of(
+        &generation,
+        fixture::partition(Search::Long, 1),
+        1,
+        vec![(0, data)],
+    );
+    let short: Vec<Outcome> = (0..3)
+        .map(|_| Outcome {
+            slots: [Slot::ZeroQty, Slot::ZeroQty],
+        })
+        .collect();
+    let calendar = fixture::calendar(50, 30);
+    let profiles = profiles_of(&table);
+    let mut sink = CardSink::new(
+        &table,
+        &profiles,
+        Rungs::new(Vec::new(), Vec::new()).unwrap(),
+        vec![Gross; profiles.len()],
+        &short,
+        &calendar,
+    )
+    .unwrap();
+    walk(&table, 1, Schedule::Sequential, &mut sink).unwrap();
+    assert_eq!(sink.mixes(), 0);
+    assert!(sink.bytes().is_empty());
+    assert_eq!(
+        sink.refusals(),
+        &[(
+            table.root_key(),
+            ScoreRefusal::OutcomeOutOfRange {
+                index: 3,
+                outcomes: 3
+            }
+        )]
+    );
+    let mut scratch = Scratch::for_rows(6);
+    let mut visited = Collect::default();
+    let tally = expand_range(&table, 0..4, 5, &mut scratch, &mut visited).unwrap();
+    assert!(visited.nodes.is_empty());
+    assert_eq!(
+        (tally.infrequent[0], tally.frequent[0], tally.row_touches),
+        (1, 0, 0)
+    );
+}

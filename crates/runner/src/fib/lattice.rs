@@ -323,6 +323,13 @@ const fn free_count() -> usize {
     count
 }
 
+/// Refuses a table of more rows than a `u32` row index can name.
+fn indexable(rows: usize) -> Result<(), LatticeRefusal> {
+    u32::try_from(rows)
+        .map(|_| ())
+        .map_err(|_| LatticeRefusal::RowsExceedU32)
+}
+
 /// One stable counting sort of `order` by `key`, whose values are all below
 /// `domain`: O(order + domain).
 fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u32> {
@@ -526,10 +533,7 @@ impl RowTable {
                 outcomes: outcomes.len(),
             });
         }
-        let total = self.coords.len().saturating_add(decisions.len());
-        if u32::try_from(total).is_err() {
-            return Err(LatticeRefusal::RowsExceedU32);
-        }
+        indexable(self.coords.len().saturating_add(decisions.len()))?;
         let mut previous: Option<(u32, u64)> = None;
         for (at, decision) in decisions.iter().enumerate() {
             self.check(decision)?;
@@ -1118,24 +1122,15 @@ impl Walker<'_> {
         out.tally.row_touches += cells.len() as u64;
     }
 
-    /// Whether a node of `rows` rows with `children` children to walk splits
-    /// them into tasks.
-    const fn splits(&self, rows: usize, children: usize) -> bool {
+    /// The batch budget when a node of `rows` rows with `children` children
+    /// to walk splits them into tasks; `None` when it walks them inline.
+    const fn splits(&self, rows: usize, children: usize) -> Option<u64> {
         match self.schedule {
-            Schedule::Sequential => false,
-            Schedule::Parallel { split_support, .. } => {
-                rows as u64 >= split_support && children > 1
-            }
-        }
-    }
-
-    /// Whether a batch holding `bytes` of task scratch passes the budget.
-    const fn over_budget(&self, bytes: usize) -> bool {
-        match self.schedule {
-            Schedule::Sequential => false,
             Schedule::Parallel {
-                batch_budget_bytes, ..
-            } => bytes as u64 > batch_budget_bytes,
+                split_support,
+                batch_budget_bytes,
+            } if rows as u64 >= split_support && children > 1 => Some(batch_budget_bytes),
+            Schedule::Sequential | Schedule::Parallel { .. } => None,
         }
     }
 
@@ -1217,8 +1212,8 @@ impl Walker<'_> {
 
     /// Whether to walk `ready` as tasks: the batch fits the budget. A batch
     /// over the budget is counted and runs inline.
-    fn as_tasks(&self, ready: &[Ready<'_>], next: usize, out: &mut Counted) -> bool {
-        if self.over_budget(self.batch_bytes(ready, next)) {
+    fn as_tasks(&self, ready: &[Ready<'_>], next: usize, budget: u64, out: &mut Counted) -> bool {
+        if self.batch_bytes(ready, next) as u64 > budget {
             out.spread.inline_for_budget += 1;
             return false;
         }
@@ -1286,14 +1281,14 @@ impl Walker<'_> {
             .filter(|(_, rows, _)| {
                 classify(rows.len() as u64, parent, None, self.min) == Child::Frequent
             });
-        if self.splits(at.rows.len(), frequent) {
+        if let Some(budget) = self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = children
                 .map(|(value, rows, cells)| Ready {
                     source: Source::Rows(rows, cells),
                     key: with_row(at.key, row, value),
                 })
                 .collect();
-            if self.as_tasks(&ready, next, out) {
+            if self.as_tasks(&ready, next, budget, out) {
                 self.tasks(&ready, next, fixed, visitor, out);
                 return;
             }
@@ -1358,7 +1353,7 @@ impl Walker<'_> {
             classes.filter_map(|(group, child)| (child == Child::Frequent).then_some(group));
         let next = position + 1;
         let fixed = at.fixed + 1;
-        if self.splits(at.rows.len(), frequent) {
+        if let Some(budget) = self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = wanted
                 .map(|group| Ready {
                     source: Source::Prefix {
@@ -1370,7 +1365,7 @@ impl Walker<'_> {
                     key: with_row(at.key, row, group),
                 })
                 .collect();
-            if self.as_tasks(&ready, next, out) {
+            if self.as_tasks(&ready, next, budget, out) {
                 self.tasks(&ready, next, fixed, visitor, out);
                 return;
             }
@@ -1821,19 +1816,16 @@ struct Guide<'t> {
 }
 
 impl Guide<'_> {
-    /// Scores trie node `node` when a survivor ends there, then walks each of
+    /// Scores trie node `trie` when a survivor ends there, then walks each of
     /// its trie children, with no floor and no equivalence skip.
     fn descend<V: Visitor>(
         &self,
-        node: u32,
+        trie: &TrieNode,
         at: At<'_>,
         arena: Arena<'_>,
         visitor: &mut V,
         tally: &mut GuidedTally,
     ) {
-        let Some(trie) = self.survivors.nodes.get(node as usize) else {
-            return;
-        };
         if trie.variants.is_empty() {
             tally.passed_through += 1;
         } else {
@@ -1883,7 +1875,9 @@ impl Guide<'_> {
                 next: at.next,
                 fixed: at.fixed + 1,
             };
-            self.descend(edge.child, child, rest.reborrow(), visitor, tally);
+            if let Some(next) = self.survivors.nodes.get(edge.child as usize) {
+                self.descend(next, child, rest.reborrow(), visitor, tally);
+            }
         }
     }
 }
@@ -1918,7 +1912,9 @@ pub fn walk_guided<V: Visitor>(
         rows: &mut arena_rows,
         cells: &mut arena_cells,
     };
-    guide.descend(0, root, arena, visitor, &mut tally);
+    if let Some(trie) = survivors.nodes.first() {
+        guide.descend(trie, root, arena, visitor, &mut tally);
+    }
     tally
 }
 
@@ -1953,4 +1949,19 @@ pub fn reconcile(survivors: &[MixKey], verdicts: &[MixKey]) -> Result<(), Lattic
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! What an integration test cannot reach: a table past `u32` rows.
+
+    use super::{LatticeRefusal, indexable};
+
+    #[test]
+    fn a_table_past_what_a_u32_row_index_names_is_refused() {
+        let most = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        assert_eq!(indexable(most), Ok(()));
+        assert_eq!(indexable(most + 1), Err(LatticeRefusal::RowsExceedU32));
+        assert_eq!(indexable(0), Ok(()));
+    }
 }
