@@ -4164,3 +4164,32 @@ fn a_late_slot_never_reads_the_swings_confirmed_before_its_window() {
     // confirmed at or after the window's minute.
     assert_eq!(slot.work(), 71);
 }
+
+/// A swing of width two must be below the two candles on each side: the
+/// 10:03 low is below its neighbours (a swing of width one) but not below
+/// 10:01's, so the width-two trail never forms and the trade is forced;
+/// at width one the same day trails out at 10:06.
+#[test]
+fn a_width_two_swing_is_below_both_candles_on_each_side() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_030, P + 100, 1_000),
+        bar(at(10, 2, 0), P + 100, 100_200, 100_100, 100_150, 1_000),
+        bar(at(10, 3, 0), P + 100, 100_200, 100_040, P + 100, 1_000),
+        bar(at(10, 4, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 5, 0), P + 100, 100_200, 100_090, P + 100, 1_000),
+        bar(at(10, 6, 0), P + 100, 100_200, 100_035, P + 100, 1_000),
+    ]);
+    let swing = |width| ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let two = minute_slot(&day, long_plan(at(10, 0, 0)), swing(2));
+    assert_eq!(two.exit_reason, ExitReason::Forced);
+    let one = minute_slot(&day, long_plan(at(10, 0, 0)), swing(1));
+    assert_eq!(one.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(one.exit_second, at(10, 6, 0));
+}
