@@ -1970,7 +1970,43 @@ pub fn reconcile(survivors: &[MixKey], verdicts: &[MixKey]) -> Result<(), Lattic
 mod tests {
     //! What an integration test cannot reach: a table past `u32` rows.
 
-    use super::{FREE_ROWS, LatticeRefusal, free_count, indexable};
+    use super::{Child, Counted, FREE_ROWS, LatticeRefusal, Spread, free_count, indexable};
+
+    /// A subtree's counters add into its parent's, every field: the schedule's
+    /// record as well as the tally (a task's are absorbed this way).
+    #[test]
+    fn a_subtrees_counters_add_into_its_parents() {
+        let mut parent = Counted::zero();
+        parent.spread = Spread {
+            tasks: 2,
+            inline_for_budget: 3,
+        };
+        parent.tally.count(Child::Frequent, 1);
+        parent.tally.row_touches = 10;
+        let mut child = Counted::zero();
+        child.spread = Spread {
+            tasks: 5,
+            inline_for_budget: 7,
+        };
+        child.tally.count(Child::Frequent, 1);
+        child.tally.count(Child::Infrequent, 2);
+        child.tally.count(Child::EquivalentToParent, 2);
+        child.tally.count(Child::EquivalentToSibling, 3);
+        child.tally.row_touches = 4;
+        parent.add(&child);
+        assert_eq!(
+            parent.spread,
+            Spread {
+                tasks: 7,
+                inline_for_budget: 10
+            }
+        );
+        assert_eq!(parent.tally.frequent[1], 2);
+        assert_eq!(parent.tally.infrequent[2], 1);
+        assert_eq!(parent.tally.equivalent_to_parent[2], 1);
+        assert_eq!(parent.tally.equivalent_to_sibling[3], 1);
+        assert_eq!(parent.tally.row_touches, 14);
+    }
 
     #[test]
     fn a_table_past_what_a_u32_row_index_names_is_refused() {
