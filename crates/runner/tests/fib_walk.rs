@@ -752,6 +752,42 @@ fn a_stage_a_buy_into_flat_day_high_minutes_is_unfilled() {
         SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
     );
     assert!(has(&out, TradeFlag::LockedMinuteSuspected));
+    // A corrupt minute's high, or a halted one's, is no day high: the locked
+    // minute after it is still at the day's high.
+    let locked_after = |first: Candle| {
+        minute_day(&[
+            first,
+            bar(at(10, 1, 0), P + 200, P + 200, P + 200, P + 200, 1_000),
+            quiet(at(10, 2, 0), P, 1_000),
+        ])
+    };
+    let corrupted = locked_after(corrupt(at(10, 0, 0), P + 600, P + 500, P - 10, P, 1_000));
+    let mut halted = locked_after(bar(at(10, 0, 0), P, P + 500, P - 10, P, 1_000));
+    halted.halts = vec![HaltRange {
+        start_second: at(10, 0, 0),
+        end_second: at(10, 1, 0),
+    }];
+    // A halt makes a later order not tradable under the halt-day rule, so the
+    // halted minute is read under the resume reading.
+    let resume = WalkProfile {
+        halt_rule: HaltRule::ResumeAtFirstPrint,
+        ..minute_profile()
+    };
+    for (day, profile) in [(corrupted, minute_profile()), (halted, resume)] {
+        let out = walk_one(
+            &day,
+            &profile,
+            long_plan(at(10, 1, 0)),
+            STOP_ONLY,
+            FillVariant::STAGE_A,
+            TradeSize::Small,
+        );
+        assert_eq!(
+            out.status,
+            SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
+        );
+        assert!(has(&out, TradeFlag::LockedMinuteSuspected));
+    }
 }
 
 #[test]
