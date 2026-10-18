@@ -809,6 +809,11 @@ fn a_hole_inside_a_micro_base_is_refused_and_the_rest_resets() {
         )
         .unwrap();
     }
+    assert_eq!(
+        d.counts().rest_resets,
+        0,
+        "the day's first candle is no reset"
+    );
     // Slot 3 is missing: slot 4 opens a hole.
     let e = fold(&mut d, &input(20_100, 1, 4, (7_000, 7_200, 6_900, 7_100))).unwrap();
     assert!(e.is_empty(), "no micro base and no rest across the hole");

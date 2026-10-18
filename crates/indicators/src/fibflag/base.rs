@@ -1748,6 +1748,91 @@ mod tests {
         assert_eq!(d.extremes().high().map(|e| e.price), Some(7_300));
     }
 
+    /// The detector's work over three candles, counted by hand, with no
+    /// generated lane and no touch level, so only the two overlap deques and
+    /// the maximal rest's six move. Candle 0 writes two overlap slots and six
+    /// lane slots (8). Candle 1 pops the lower low, writes two overlap slots,
+    /// and in the lane pops the high, the highest close and both pokes and
+    /// writes six (3 + 10 = 13, 21 in all). Candle 2 pops the low again and
+    /// writes two (3), shares no price with candle 0 nor with candle 1, so the
+    /// rest's start moves twice and each move expires one lowest high (2),
+    /// then the lane pops as before, writes six and expires two lows and two
+    /// lowest closes (10 + 4): 19, 40 in all.
+    #[test]
+    fn the_work_counts_every_slot_the_overlap_and_the_rest_touch() {
+        let mut d = Detector::new(params(8, 1, 1)).unwrap();
+        let day = DayInput {
+            ist_day: 20_500,
+            session_candles: 8,
+            observed_tick: 1,
+            long: DirectionDay {
+                rest_lengths: &[],
+                touch_bp: None,
+            },
+            short: DirectionDay {
+                rest_lengths: &[],
+                touch_bp: None,
+            },
+        };
+        d.begin_day(&day).unwrap();
+        let ohlc = [
+            (7_105, 7_110, 7_100, 7_105),
+            (7_115, 7_120, 7_108, 7_115),
+            (7_128, 7_130, 7_125, 7_128),
+        ];
+        let mut works = Vec::new();
+        for (slot, bar) in (0..).zip(ohlc) {
+            d.fold(&candle(20_500, slot, bar)).unwrap();
+            works.push(d.work());
+        }
+        assert_eq!(works, [8, 21, 40]);
+        assert_eq!(d.counts().rest_resets, 0, "no candle broke the chain");
+    }
+
+    /// A generated lane keeps live touch counts only while it is shorter than
+    /// the maximal rest. Candle 1 shares no price with candle 0, so the rest
+    /// starts at candle 1 and is `t` candles long at candle `t`: the lane of
+    /// four is first emittable, and first counted, at candle 5.
+    #[test]
+    fn a_lane_is_counted_only_while_it_is_shorter_than_the_rest() {
+        let mut d = Detector::new(params(16, 1, 1)).unwrap();
+        let day = DayInput {
+            ist_day: 20_500,
+            session_candles: 16,
+            observed_tick: 1,
+            long: DirectionDay {
+                rest_lengths: &[4],
+                touch_bp: Some(&[0]),
+            },
+            short: DirectionDay {
+                rest_lengths: &[],
+                touch_bp: None,
+            },
+        };
+        d.begin_day(&day).unwrap();
+        let mut live = Vec::new();
+        for slot in 0..6 {
+            let bar = if slot == 0 {
+                (7_005, 7_010, 7_000, 7_005)
+            } else {
+                (7_105, 7_110, 7_100, 7_105)
+            };
+            d.fold(&candle(20_500, slot, bar)).unwrap();
+            live.push((d.rest_start, d.lanes[0].length, d.lanes[0].long.valid));
+        }
+        assert_eq!(
+            live,
+            [
+                (0, 4, false),
+                (1, 4, false),
+                (1, 4, false),
+                (1, 4, false),
+                (1, 4, false),
+                (1, 4, true)
+            ]
+        );
+    }
+
     #[test]
     fn a_monotone_deque_keeps_the_window_s_extreme() {
         let mut largest = Monotone::new(8, true);
