@@ -66,7 +66,9 @@
 //! per run; the [`Tally`] counts the row-touches. Memory per worker: the table,
 //! the identity order and one scratch arena of 21 times the row count, reserved
 //! once and zeroed lazily by the allocator (the path from the root to any node
-//! holds at most 21 regions, each no larger than the root's rows).
+//! holds at most 21 regions, each no larger than the root's rows). Proved in
+//! `crates/runner/tests/fib_lattice.rs` (the row-touch tally against a naive
+//! walk) and measured by `crates/runner/benches/fib.rs` (`C-F6-01`).
 //!
 //! Pure: no I/O, and its loops call nothing but the visitor (gates 17 and 22).
 

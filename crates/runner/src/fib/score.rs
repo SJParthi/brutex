@@ -43,6 +43,9 @@
 //! Per mix: O(support x profiles + touched months + days with trades x periods)
 //! — O(1) per row-touch per profile. Memory per pass, reserved once: profiles x
 //! pool block slots, profiles x months month statistics, and the ladders.
+//! Proved in `crates/runner/tests/fib_score.rs` (a pass reused across mixes
+//! equals a fresh one) and measured by `crates/runner/benches/fib.rs`
+//! (`C-F6-02`, `C-F6-03`).
 //!
 //! Pure: no I/O, no print (gates 17 and 22).
 
@@ -196,7 +199,9 @@ pub struct Order {
     pub broker_square_off: bool,
 }
 
-/// The charges of each trade: a per (stock, day) accumulator, O(1) per order.
+/// The charges of each trade: a per (stock, day) accumulator, O(1) per order
+/// (an implementation's claim; the gross model's is proved in
+/// `crates/runner/tests/fib_score.rs`).
 pub trait ChargeModel: Send {
     /// The model's money unit per paisa (CHG-1's scale; one for [`Gross`]).
     fn scale(&self) -> i128;
@@ -312,7 +317,8 @@ impl PeriodKind {
 /// How many period kinds a scorecard tabulates.
 pub const PERIOD_KINDS: usize = PeriodKind::ALL.len();
 
-/// The observed tradable days of a run, by IST civil day: O(1) per lookup.
+/// The observed tradable days of a run, by IST civil day: O(1) per lookup, one
+/// subtraction and one bounded read (proved in `crates/runner/tests/fib_score.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Calendar {
     /// The civil day of the first entry.
