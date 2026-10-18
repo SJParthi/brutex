@@ -1343,7 +1343,11 @@ fn adding_a_variant_or_a_width_leaves_every_histogram_byte_identical() {
             levels,
         })
         .unwrap();
-        assert!(bank.clone().regrow(shape).is_err());
+        assert_eq!(
+            bank.clone().regrow(shape),
+            Err(HistRefusal::ShapeNotExtension { what: "dimension" }),
+            "{styles} {variants} {levels}: each dimension alone"
+        );
     }
     let past_end = shrunk(Dims {
         widths: vec![1, 2, 3],
@@ -1387,8 +1391,15 @@ fn exit_measures_quantiles_equal_sorted_history_from_committed_days_only() {
         Err(HistRefusal::NoObservations),
         "no_own_past:exit:mae for the short side"
     );
+    assert_eq!(bank.cell(&long).unwrap().staged_values(), 1);
     bank.discard_day();
-    assert_eq!(bank.cell(&long).unwrap().total(), 12);
+    assert_eq!(bank.cell(&long).unwrap().staged_values(), 0, "dropped");
+    bank.commit_day().unwrap();
+    assert_eq!(
+        bank.cell(&long).unwrap().total(),
+        12,
+        "nothing of it commits"
+    );
 }
 
 #[test]
