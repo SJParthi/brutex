@@ -172,14 +172,14 @@ pub(crate) fn refuse_out_inside_store(out: &Path, store_root: &Path) -> Result<(
     let lexical = |path: &Path| -> Result<PathBuf, String> {
         let absolute = std::path::absolute(path)
             .map_err(|why| format!("out_unresolved: {}: {why}", path.display()))?;
+        // An absolute path's `components()` already drops every `.`, so only
+        // `..` is left to fold.
         let mut clean = PathBuf::new();
         for part in absolute.components() {
-            match part {
-                std::path::Component::ParentDir => {
-                    clean.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => clean.push(other),
+            if part == std::path::Component::ParentDir {
+                clean.pop();
+            } else {
+                clean.push(part);
             }
         }
         Ok(clean)
@@ -313,6 +313,8 @@ mod tests {
         }
         let relative = refuse_out_inside_store(Path::new("x/y"), Path::new("x"));
         assert!(relative.unwrap_err().starts_with("out_inside_store"));
+        let dotted = refuse_out_inside_store(Path::new("./x/./y"), Path::new("x/."));
+        assert!(dotted.unwrap_err().starts_with("out_inside_store"));
         let empty = refuse_out_inside_store(Path::new(""), store);
         assert!(empty.unwrap_err().starts_with("out_unresolved: "));
     }
