@@ -1755,10 +1755,12 @@ mod tests {
             42,
             "an empty window is the candle alone"
         );
-        for (index, key) in [(0, 5), (1, 3), (2, 4), (3, 4)] {
-            largest.push(index, key);
-            smallest.push(index, key);
-        }
+        // The work a push returns: one slot written plus one per key popped.
+        let pushed: Vec<(u64, u64)> = [(0, 5), (1, 3), (2, 4), (3, 4)]
+            .into_iter()
+            .map(|(index, key)| (largest.push(index, key), smallest.push(index, key)))
+            .collect();
+        assert_eq!(pushed, [(1, 1), (1, 2), (2, 1), (2, 2)]);
         assert_eq!((largest.front(), smallest.front()), (Some(5), Some(3)));
         assert_eq!(largest.expire(1), 1);
         assert_eq!(largest.front(), Some(4), "the later equal key survives");
@@ -1769,5 +1771,91 @@ mod tests {
         largest.clear();
         assert_eq!(largest.push(0, 1), 1);
         assert_eq!(largest.bytes(), 8 * core::mem::size_of::<(u32, i64)>());
+    }
+}
+
+#[cfg(test)]
+mod instrumentation {
+    //! The structural work counter (FM-F001) and the state's bytes are what
+    //! the bench reports: each is pinned to a count made by hand.
+
+    use super::*;
+
+    const SLOT: usize = core::mem::size_of::<(u32, i64)>();
+
+    fn rec(high: i64, low: i64, close: i64, poke: i64) -> Rec {
+        Rec {
+            open: close,
+            high,
+            low,
+            close,
+            close_ts: 0,
+            linked: true,
+            poke_long: poke,
+            poke_short: poke,
+        }
+    }
+
+    /// Candle 0 fills six empty deques (six slots). Candle 1 pops one entry
+    /// (the lowest close) and writes six (seven). Candle 2, with the window
+    /// starting at it, pops one (the highest close) and writes six, then
+    /// expires two highs, two lows, one highest close, one lowest close and
+    /// two of each poke: 7 + 10 = 17.
+    #[test]
+    fn a_lane_push_counts_every_slot_it_touches() {
+        let mut lane = Lane::new(8, 1, 1);
+        let works = [
+            lane.push(0, &rec(10, 5, 7, 3), 0),
+            lane.push(1, &rec(9, 6, 5, 2), 0),
+            lane.push(2, &rec(8, 7, 6, 1), 2),
+        ];
+        assert_eq!(works, [6, 7, 17]);
+        let last = rec(8, 7, 6, 1);
+        let e = lane.extremes(&last);
+        assert_eq!((e.high, e.low, e.close_high, e.close_low), (8, 7, 6, 6));
+        assert_eq!((e.poke_long, e.poke_short), (1, 1));
+    }
+
+    #[test]
+    fn a_lane_holds_six_deques_and_two_count_lists() {
+        let lane = Lane::new(8, 2, 3);
+        assert_eq!(
+            lane.bytes(),
+            6 * 8 * SLOT + (2 + 3) * core::mem::size_of::<u16>()
+        );
+        assert_eq!(Monotone::new(5, true).bytes(), 5 * SLOT);
+    }
+
+    #[test]
+    fn the_state_bytes_are_every_buffer_the_run_sized() {
+        let (capacity, lengths, levels) = (40, (3, 2), (2, 4));
+        let d = Detector::new(DetectorParams {
+            tf_minutes: 1,
+            generation_version: 1,
+            ring_capacity: capacity,
+            long_rest_lengths: lengths.0,
+            short_rest_lengths: lengths.1,
+            long_touch_levels: levels.0,
+            short_touch_levels: levels.1,
+            zero_width: ZeroWidthReading::Emit,
+        })
+        .unwrap();
+        let c = usize::from(capacity);
+        let (ll, ls) = (usize::from(lengths.0), usize::from(lengths.1));
+        let (ql, qs) = (usize::from(levels.0), usize::from(levels.1));
+        let lane = 6 * c * SLOT + (ql + qs) * core::mem::size_of::<u16>();
+        let snapshots = KINDS + ll + KINDS + ls;
+        let expected = core::mem::size_of::<Detector>()
+            + c * core::mem::size_of::<Rec>()
+            + (c + 1) * core::mem::size_of::<Sums>()
+            + (c + 1) * core::mem::size_of::<Powers>()
+            + 2 * c * SLOT
+            + lane
+            + (ll + ls) * (lane + core::mem::size_of::<Lane>())
+            + (ql + qs) * core::mem::size_of::<u64>()
+            + snapshots * core::mem::size_of::<BaseSnapshot>()
+            + ((KINDS + ll) * ql + (KINDS + ls) * qs) * core::mem::size_of::<u16>()
+            + snapshots * core::mem::size_of::<(usize, usize)>();
+        assert_eq!(d.state_bytes(), expected);
     }
 }
