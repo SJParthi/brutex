@@ -644,6 +644,11 @@ fn month_block_order_equals_full_sort() {
             assert_eq!(got.outcomes, &[want.id as u32 * 2, want.id as u32 * 2 + 1]);
         }
         assert!(table.row(all.len() as u32).is_none());
+        assert_eq!(
+            table.order(),
+            (0..all.len() as u32).collect::<Vec<u32>>().as_slice()
+        );
+        assert_eq!(table.layout(), generation.layout());
     }
 }
 

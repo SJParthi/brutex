@@ -1373,3 +1373,75 @@ fn a_cards_bytes_move_with_its_figures() {
         assert!(seen.insert(bytes(changed)), "{changed:?}");
     }
 }
+
+/// The reachable edges: a day past the calendar's last, an empty mix, net
+/// money and the R denominator each past `i128`, and a sink with no profile.
+#[test]
+fn the_edges_of_the_pass_are_named() {
+    use runner::fib::score::CardSink;
+    let calendar = fixture::calendar(100, 30);
+    assert!(calendar.keys(129).is_some());
+    assert_eq!(calendar.keys(130), None, "one past the last day");
+    let entries = [
+        Entry {
+            slot: 0,
+            day: 100,
+            second: at(10, 0),
+            side: 0,
+            outcome: trade(1, at(10, 0), at(10, 5)),
+        },
+        Entry {
+            slot: 1,
+            day: 100,
+            second: at(10, 0),
+            side: 0,
+            outcome: trade(0, at(10, 0), at(10, 5)),
+        },
+    ];
+    let (table, outcomes) = case(Search::Long, &entries);
+    let profiles = [Profile {
+        variant: 0,
+        size: TradeSize::Small,
+    }];
+    let mut pass = OrderedPass::new(&table, &profiles, no_rungs(), vec![Gross]).unwrap();
+    let empty = pass.score(&table, &[], &outcomes, &calendar).unwrap()[0].clone();
+    assert_eq!(empty.counts, PassCounts::ZERO);
+    assert_eq!(empty.drawdown, Drawdown::ZERO);
+    assert!(empty.months.iter().all(|m| *m == MonthStats::EMPTY));
+    #[derive(Clone)]
+    struct Vast;
+    impl ChargeModel for Vast {
+        fn scale(&self) -> i128 {
+            i128::MAX / 2
+        }
+        fn add(&mut self, _order: &Order) -> i128 {
+            0
+        }
+        fn close_day(&mut self, _day: u32) -> i128 {
+            0
+        }
+    }
+    let mut vast = OrderedPass::new(&table, &profiles, no_rungs(), vec![Vast]).unwrap();
+    assert_eq!(
+        vast.score(&table, &[0], &outcomes, &calendar).unwrap_err(),
+        ScoreRefusal::MoneyOverflow { row: 0 },
+        "ten paisa times half of i128 is past i128"
+    );
+    assert_eq!(
+        vast.score(&table, &[1], &outcomes, &calendar).unwrap_err(),
+        ScoreRefusal::MoneyOverflow { row: 1 },
+        "a zero gross passes; the scale times 10 shares times 100 paisa does not"
+    );
+    assert_eq!(
+        CardSink::new(
+            &table,
+            &[],
+            no_rungs(),
+            Vec::<Gross>::new(),
+            &outcomes,
+            &calendar
+        )
+        .unwrap_err(),
+        ScoreRefusal::ProfilesEmpty
+    );
+}

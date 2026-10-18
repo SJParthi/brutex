@@ -330,6 +330,14 @@ fn indexable(rows: usize) -> Result<(), LatticeRefusal> {
         .map_err(|_| LatticeRefusal::RowsExceedU32)
 }
 
+/// Writes `value` at the cursor `start` of `out` and moves the cursor on.
+fn place(out: &mut [u32], start: &mut usize, value: u32) {
+    if let Some(slot) = out.get_mut(*start) {
+        *slot = value;
+    }
+    *start += 1;
+}
+
 /// One stable counting sort of `order` by `key`, whose values are all below
 /// `domain`: O(order + domain).
 fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u32> {
@@ -347,10 +355,7 @@ fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u3
     let mut out = vec![0_u32; order.len()];
     for at in order {
         if let Some(start) = starts.get_mut(key(*at)) {
-            if let Some(slot) = out.get_mut(*start) {
-                *slot = *at;
-            }
-            *start += 1;
+            place(&mut out, start, *at);
         }
     }
     out
@@ -555,10 +560,12 @@ impl RowTable {
             });
         }
         let order = Self::canonical(decisions);
-        for at in &order {
-            let Some(decision) = decisions.get(*at as usize) else {
-                continue;
-            };
+        let placed = order.iter().filter_map(|at| {
+            decisions
+                .get(*at as usize)
+                .map(|decision| (*at as usize, decision))
+        });
+        for (at, decision) in placed {
             self.coords.push(decision.coords);
             self.slot.push(decision.slot);
             self.day.push(decision.day);
@@ -567,7 +574,7 @@ impl RowTable {
             self.month.push(month);
             let next = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
             self.order.push(next);
-            let from = *at as usize * variants;
+            let from = at * variants;
             self.outcomes
                 .extend(outcomes.iter().skip(from).take(variants).copied());
             self.pool = self.pool.max(decision.slot.saturating_add(1));
@@ -1004,6 +1011,18 @@ impl<'b> Arena<'b> {
         )
     }
 
+    /// Writes one row and its cell at the cursor and moves the cursor on.
+    fn put(&mut self, cursor: &mut u32, index: u32, cell: &Coords) {
+        let slot = *cursor as usize;
+        if let Some(target) = self.rows.get_mut(slot) {
+            *target = index;
+        }
+        if let Some(target) = self.cells.get_mut(slot) {
+            *target = *cell;
+        }
+        *cursor += 1;
+    }
+
     /// A shorter-lived view of the same arena.
     fn reborrow(&mut self) -> Arena<'_> {
         Arena {
@@ -1251,18 +1270,11 @@ impl Walker<'_> {
             *count = end;
             end += width;
         }
-        let (region, mut rest) = bufs.arena.reborrow().split(at.rows.len());
+        let (mut region, mut rest) = bufs.arena.reborrow().split(at.rows.len());
         for (index, cell) in at.rows.iter().zip(at.cells) {
             let value = cell.get(row).copied().unwrap_or(OPEN);
             if let Some(cursor) = hist.get_mut(usize::from(value)) {
-                let slot = *cursor as usize;
-                if let Some(target) = region.rows.get_mut(slot) {
-                    *target = *index;
-                }
-                if let Some(target) = region.cells.get_mut(slot) {
-                    *target = *cell;
-                }
-                *cursor += 1;
+                region.put(cursor, *index, cell);
             }
         }
         out.tally.row_touches += parent;
@@ -1955,7 +1967,7 @@ pub fn reconcile(survivors: &[MixKey], verdicts: &[MixKey]) -> Result<(), Lattic
 mod tests {
     //! What an integration test cannot reach: a table past `u32` rows.
 
-    use super::{LatticeRefusal, indexable};
+    use super::{FREE_ROWS, LatticeRefusal, free_count, indexable};
 
     #[test]
     fn a_table_past_what_a_u32_row_index_names_is_refused() {
@@ -1963,5 +1975,11 @@ mod tests {
         assert_eq!(indexable(most), Ok(()));
         assert_eq!(indexable(most + 1), Err(LatticeRefusal::RowsExceedU32));
         assert_eq!(indexable(0), Ok(()));
+    }
+
+    /// The free-row count is evaluated at compile time; run here, it agrees.
+    #[test]
+    fn the_free_row_count_runs_the_same_at_run_time() {
+        assert_eq!(free_count(), FREE_ROWS);
     }
 }

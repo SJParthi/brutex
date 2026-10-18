@@ -588,6 +588,39 @@ impl MonthStats {
         sum_mfe_r: ZERO,
         unpriced: 0,
     };
+
+    /// Adds one priced trade, of side value `side`.
+    fn add(&mut self, trade: &Trade, side: usize) {
+        let r = trade.r;
+        let stats = self;
+        let win = trade.net > 0;
+        stats.trades += 1;
+        stats.sum_r += r;
+        stats.sum_r_squared += r * r;
+        stats.max_r = Some(stats.max_r.map_or(r, |max| max.max(r)));
+        stats.min_r = Some(stats.min_r.map_or(r, |min| min.min(r)));
+        if win {
+            stats.wins += 1;
+            stats.sum_win_r += r;
+            stats.win_money = stats.win_money.saturating_add(trade.net);
+        } else {
+            stats.losses += 1;
+            stats.sum_loss_r += r;
+            stats.loss_money = stats.loss_money.saturating_add(trade.net);
+        }
+        if let Some(side) = stats.per_side.get_mut(side) {
+            side.trades += 1;
+            side.sum_r += r;
+        }
+        stats.sum_stop_bp += trade.stop_bp;
+        stats.min_stop_bp = Some(
+            stats
+                .min_stop_bp
+                .map_or(trade.stop_bp, |min| min.min(trade.stop_bp)),
+        );
+        stats.sum_mae_r += trade.mae_r;
+        stats.sum_mfe_r += trade.mfe_r;
+    }
 }
 
 /// What happened to every raw row of one profile's pass.
@@ -1412,39 +1445,14 @@ impl<C: ChargeModel> OrderedPass<C> {
         let win = trade.net > 0;
         let r = trade.r;
         card.counts.trades += 1;
+        let side = usize::from(
+            view.coords
+                .get(RowId::Side.index())
+                .copied()
+                .unwrap_or(OPEN),
+        );
         if let Some(stats) = card.months.get_mut(month) {
-            stats.trades += 1;
-            stats.sum_r += r;
-            stats.sum_r_squared += r * r;
-            stats.max_r = Some(stats.max_r.map_or(r, |max| max.max(r)));
-            stats.min_r = Some(stats.min_r.map_or(r, |min| min.min(r)));
-            if win {
-                stats.wins += 1;
-                stats.sum_win_r += r;
-                stats.win_money = stats.win_money.saturating_add(trade.net);
-            } else {
-                stats.losses += 1;
-                stats.sum_loss_r += r;
-                stats.loss_money = stats.loss_money.saturating_add(trade.net);
-            }
-            let side = usize::from(
-                view.coords
-                    .get(RowId::Side.index())
-                    .copied()
-                    .unwrap_or(OPEN),
-            );
-            if let Some(side) = stats.per_side.get_mut(side) {
-                side.trades += 1;
-                side.sum_r += r;
-            }
-            stats.sum_stop_bp += trade.stop_bp;
-            stats.min_stop_bp = Some(
-                stats
-                    .min_stop_bp
-                    .map_or(trade.stop_bp, |min| min.min(trade.stop_bp)),
-            );
-            stats.sum_mae_r += trade.mae_r;
-            stats.sum_mfe_r += trade.mfe_r;
+            stats.add(&trade, side);
         }
         if let Some(rung) = trade.net_rung.checked_sub(1) {
             let at = month * net_rungs + rung;
