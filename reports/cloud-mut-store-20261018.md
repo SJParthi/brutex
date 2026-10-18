@@ -282,3 +282,20 @@ test does not call.
 Each of those is a `panic!` arm, an `assert!` short-circuit, or a match
 guard that is false only when the test fails. **No production line or branch
 this branch added is uncovered.**
+
+## Equivalent mutants, argued against the code at `24ca118c`
+
+Each mutant below survives the full suite on the final tree (see the
+re-test above). Each argument was re-derived from the code as it stands,
+not carried.
+
+| mutant | why no test can tell it from the original |
+|---|---|
+| `file.rs:215:32` `>` → `==`, `>` → `>=`; `file.rs:220:15` `>` → `>=` (`MAX_ROW_LEN`) | A `const` over the shipped widths: `RECORD_LEN` 56, `GREEK_LEN` 80, `OVERLAY_LEN` 24. `56 > 80`, `56 == 80` and `56 >= 80` are all false, so `widest` is 80. `80 > 24` and `80 >= 24` are both true, so the answer is 80. A width change that could tell them apart trips `const _: () = assert!(MAX_ROW_LEN == 80)` at compile time. The other operators there pick 56 or 24, and are unviable for the same assertion. |
+| `file.rs:5154:42` guard `O_SYNC.is_none()` → `false` (`DurableBatch::defer_file`) | On this target `O_SYNC` is `const Some(..)` (`file.rs:5064`), so `is_none()` is already `false`. Only a build for a host without a verified `O_SYNC` (`file.rs:5076`) tells them apart. The `→ true` mutant is caught. |
+| `file.rs:5365:67` `<` → `<=` (`flush_all`) | `at` comes from `next.fetch_add(1)`, so each index is handed to one worker once, and a failure is recorded at most once per index. `at == *earlier` never holds, so `<` and `<=` choose alike. `==` and `>` there are caught. |
+| `file.rs:5579:27` guard `through` → `true` / `false` (`writer_flags`) | The arm sits in `#[cfg(not(any(macos, linux or android on x86_64 or aarch64)))]`. It is not compiled on this target, so the mutated text never reaches a binary. |
+| `verdict.rs:410:29` `<` → `<=` (`Code::worse`) | `severity` maps the 18 codes to 1..=18, each once (`verdict.rs:378-398`). Equal severities mean the same code, and either answer is that code. |
+| `sealed.rs:1504:32` `<` → `<=` (`Fold::push`) | At most one extra time-table entry can be pushed once the table holds `table_rows`. `finish` does `table.resize(self.table_rows, n_blocks)`, which cuts it off, and nothing reads the table before `finish`. |
+| `sealed.rs:2352:35` guard `block > 0` → `true`, `2352:41` `>` → `>=` (`last_before`) | The guard is reached only in the `Some(previous)` arm, so `index = skip + at ≥ 1`. `skip` is 0 when `lo` is 0 and 1 otherwise, and `block = lo + at`. With `lo = 0`, `at = index ≥ 1`; with `lo ≥ 1`, `block ≥ 1` already. So `block > 0`, `true` and `block >= 0` are all true there. |
+| `sink.rs:3272:32` `>` → `>=` (`Audit::mark_coverage`) | `self.bytes` is a `u64`, so the mutant makes `older` always true. It differs only when `bytes == 0` and the generation folder does not exist. There `older` only chooses between `self.bytes` (0) and `0` as the start of the later dimensions' coverage: 0 either way. |
