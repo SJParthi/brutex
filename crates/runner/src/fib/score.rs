@@ -56,9 +56,11 @@
               money stays i128 and is converted only to form a ratio"
 )]
 
+use std::ops::Range;
+
 use vocab::fib_cube::{BP_PER_UNIT, MixKey, OPEN, Ratio, RowId, SIDE_ROW, Search};
 
-use super::lattice::{Node, RowTable, RowView, Visitor, Wanted};
+use super::lattice::{Node, RowTable, RowView, Visitor, Wanted, at_mut};
 use super::types::{SlotOutcome, TradeFlag, TradeSize};
 
 /// The one statistic type: every R, R squared, stop in bp and excursion sum.
@@ -614,10 +616,10 @@ impl MonthStats {
             stats.sum_loss_r += r;
             stats.loss_money = stats.loss_money.saturating_add(trade.net);
         }
-        if let Some(side) = stats.per_side.get_mut(side) {
+        at_mut(&mut stats.per_side, side, |side| {
             side.trades += 1;
             side.sum_r += r;
-        }
+        });
         stats.sum_stop_bp += trade.stop_bp;
         stats.min_stop_bp = Some(
             stats
@@ -1024,9 +1026,7 @@ impl<C> Lane<C> {
     fn touch(&mut self, month: u32, epoch: u64) {
         let at = month as usize;
         if self.stamp.get(at) != Some(&epoch) {
-            if let Some(stamp) = self.stamp.get_mut(at) {
-                *stamp = epoch;
-            }
+            at_mut(&mut self.stamp, at, |stamp| *stamp = epoch);
             self.touched.push(month);
         }
     }
@@ -1038,8 +1038,8 @@ impl<C> Lane<C> {
 pub struct OrderedPass<C> {
     /// The table's search.
     search: Search,
-    /// The table's first exit variant.
-    first_exit: u8,
+    /// The table's exit variants.
+    exits: Range<u8>,
     /// The run's months.
     months: usize,
     /// The pool the block slots are sized for.
@@ -1155,7 +1155,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         }
         Ok(Self {
             search: table.partition().search,
-            first_exit: exits.start,
+            exits: exits.clone(),
             months,
             pool,
             rungs,
@@ -1178,9 +1178,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         for (lane, card) in self.lanes.iter_mut().zip(&mut self.cards) {
             for month in lane.touched.drain(..) {
                 let at = month as usize;
-                if let Some(stats) = card.months.get_mut(at) {
-                    *stats = MonthStats::EMPTY;
-                }
+                at_mut(&mut card.months, at, |stats| *stats = MonthStats::EMPTY);
                 for slot in card.rung_net.iter_mut().skip(at * net).take(net) {
                     *slot = 0;
                 }
@@ -1228,9 +1226,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         if table.pool() as usize > self.pool {
             return Err(ScoreRefusal::TableMismatch { what: "pool" });
         }
-        if table.partition().search != self.search
-            || table.partition().exits.start != self.first_exit
-        {
+        if table.partition().search != self.search || table.partition().exits != self.exits {
             return Err(ScoreRefusal::TableMismatch { what: "partition" });
         }
         self.reset();
@@ -1290,11 +1286,10 @@ impl<C: ChargeModel> OrderedPass<C> {
         view: &RowView<'_>,
         outcomes: &[Outcome],
     ) -> Result<(), ScoreRefusal> {
-        let index = view
-            .outcomes
-            .get(lane.offset)
-            .copied()
-            .ok_or(ScoreRefusal::RowOutOfTable { row })?;
+        // The table check gives every row one outcome index per exit variant
+        // of the pass, so a row always holds its lane's; were one missing, it
+        // would read as `u32::MAX` and be refused just below, by name.
+        let index = view.outcomes.get(lane.offset).copied().unwrap_or(u32::MAX);
         let slot = outcomes
             .get(index as usize)
             .and_then(|outcome| outcome.slots.get(lane.size))
@@ -1336,9 +1331,9 @@ impl<C: ChargeModel> OrderedPass<C> {
             }
             Slot::Unpriced(_) => {
                 card.counts.unpriced += 1;
-                if let Some(stats) = card.months.get_mut(view.month as usize) {
+                at_mut(&mut card.months, view.month as usize, |stats| {
                     stats.unpriced += 1;
-                }
+                });
                 lane.touch(view.month, ctx.epoch);
                 Some(written(u32::MAX, Blocker::Unpriced))
             }
@@ -1458,22 +1453,16 @@ impl<C: ChargeModel> OrderedPass<C> {
                 .copied()
                 .unwrap_or(OPEN),
         );
-        if let Some(stats) = card.months.get_mut(month) {
-            stats.add(&trade, side);
-        }
+        at_mut(&mut card.months, month, |stats| stats.add(&trade, side));
         if let Some(rung) = trade.net_rung.checked_sub(1) {
             let at = month * net_rungs + rung;
-            if let Some(count) = card.rung_net.get_mut(at) {
-                *count += 1;
-            }
-            if let Some(sum) = card.rung_net_r.get_mut(at) {
-                *sum += r;
-            }
+            at_mut(&mut card.rung_net, at, |count| *count += 1);
+            at_mut(&mut card.rung_net_r, at, |sum| *sum += r);
         }
-        if let Some(rung) = trade.mfe_rung.checked_sub(1)
-            && let Some(count) = card.rung_mfe.get_mut(month * mfe_rungs + rung)
-        {
-            *count += 1;
+        if let Some(rung) = trade.mfe_rung.checked_sub(1) {
+            at_mut(&mut card.rung_mfe, month * mfe_rungs + rung, |count| {
+                *count += 1;
+            });
         }
         card.streaks.add(win, r);
         lane.day_r += r;
@@ -1489,9 +1478,9 @@ impl<C: ChargeModel> OrderedPass<C> {
             if adjustment != 0 {
                 let at = month as usize;
                 lane.touch(month, self.epoch);
-                if let Some(stats) = card.months.get_mut(at) {
+                at_mut(&mut card.months, at, |stats| {
                     stats.adjustment_money = stats.adjustment_money.saturating_add(adjustment);
-                }
+                });
             }
             if !lane.day_traded {
                 continue;
@@ -1667,9 +1656,7 @@ impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
             Wanted::Only(variants) => Some(variants),
         };
         for variant in only.unwrap_or_default() {
-            if let Some(flag) = self.asked.get_mut(usize::from(*variant)) {
-                *flag = true;
-            }
+            at_mut(&mut self.asked, usize::from(*variant), |flag| *flag = true);
         }
         for card in cards {
             let variant = card.profile.variant;
@@ -1687,9 +1674,7 @@ impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
             self.mixes += 1;
         }
         for variant in only.unwrap_or_default() {
-            if let Some(flag) = self.asked.get_mut(usize::from(*variant)) {
-                *flag = false;
-            }
+            at_mut(&mut self.asked, usize::from(*variant), |flag| *flag = false);
         }
     }
 
@@ -1741,7 +1726,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         }
         Self {
             search: self.search,
-            first_exit: self.first_exit,
+            exits: self.exits.clone(),
             months: self.months,
             pool: self.pool,
             rungs: self.rungs.clone(),

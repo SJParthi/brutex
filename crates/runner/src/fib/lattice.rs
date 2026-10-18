@@ -289,9 +289,7 @@ fn value_at(coords: &Coords, row: RowId) -> u8 {
 /// `key` with row `row` set to `value`.
 fn with_row(key: MixKey, row: usize, value: u8) -> MixKey {
     let mut out = key;
-    if let Some(slot) = out.0.get_mut(row) {
-        *slot = value;
-    }
+    at_mut(&mut out.0, row, |slot| *slot = value);
     out
 }
 
@@ -332,11 +330,28 @@ fn indexable(rows: usize) -> Result<(), LatticeRefusal> {
         .map_err(|_| LatticeRefusal::RowsExceedU32)
 }
 
+/// Runs `write` on the element at `at`. The workspace denies indexing, so
+/// every write at a computed index of FIB-6 goes through here, and an index
+/// past the slice writes nothing: every caller's index is in range by
+/// construction (a value below its row's radix, a fixed-row count below
+/// `FIXED_SLOTS`, a cursor below its region's length).
+pub(crate) fn at_mut<T>(slice: &mut [T], at: usize, write: impl FnOnce(&mut T)) {
+    if let Some(item) = slice.get_mut(at) {
+        write(item);
+    }
+}
+
+/// Runs `read` on the element at `at`; an index past the slice reads nothing
+/// (the read twin of `at_mut`).
+fn at_ref<'s, T>(slice: &'s [T], at: usize, read: impl FnOnce(&'s T)) {
+    if let Some(item) = slice.get(at) {
+        read(item);
+    }
+}
+
 /// Writes `value` at the cursor `start` of `out` and moves the cursor on.
 fn place(out: &mut [u32], start: &mut usize, value: u32) {
-    if let Some(slot) = out.get_mut(*start) {
-        *slot = value;
-    }
+    at_mut(out, *start, |slot| *slot = value);
     *start += 1;
 }
 
@@ -345,9 +360,7 @@ fn place(out: &mut [u32], start: &mut usize, value: u32) {
 fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u32> {
     let mut starts = vec![0_usize; domain];
     for at in order {
-        if let Some(count) = starts.get_mut(key(*at)) {
-            *count += 1;
-        }
+        at_mut(&mut starts, key(*at), |count| *count += 1);
     }
     let mut run = 0;
     for start in &mut starts {
@@ -357,9 +370,7 @@ fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u3
     }
     let mut out = vec![0_u32; order.len()];
     for at in order {
-        if let Some(start) = starts.get_mut(key(*at)) {
-            place(&mut out, start, *at);
-        }
+        at_mut(&mut starts, key(*at), |start| place(&mut out, start, *at));
     }
     out
 }
@@ -534,14 +545,7 @@ impl RowTable {
             return Err(LatticeRefusal::MonthNotAfterLast { month, last });
         }
         let variants = self.variants();
-        if decisions.len().checked_mul(variants) != Some(outcomes.len()) {
-            return Err(LatticeRefusal::OutcomesLength {
-                decisions: decisions.len(),
-                variants,
-                outcomes: outcomes.len(),
-            });
-        }
-        indexable(self.coords.len().saturating_add(decisions.len()))?;
+        Self::sized(self.coords.len(), decisions.len(), variants, outcomes.len())?;
         let mut previous: Option<(u32, u64)> = None;
         for (at, decision) in decisions.iter().enumerate() {
             self.check(decision)?;
@@ -585,6 +589,24 @@ impl RowTable {
         let kept_last_day = last_day.or(self.last.map(|(_, day)| day)).unwrap_or(0);
         self.last = Some((month, kept_last_day));
         Ok(())
+    }
+
+    /// Refuses a month whose outcomes are not one per decision per exit
+    /// variant, and a table it would take past `u32` rows.
+    fn sized(
+        held: usize,
+        decisions: usize,
+        variants: usize,
+        outcomes: usize,
+    ) -> Result<(), LatticeRefusal> {
+        if decisions.checked_mul(variants) != Some(outcomes) {
+            return Err(LatticeRefusal::OutcomesLength {
+                decisions,
+                variants,
+                outcomes,
+            });
+        }
+        indexable(held.saturating_add(decisions))
     }
 
     /// The canonical order of one month's decisions, already in (slot, id)
@@ -658,15 +680,36 @@ impl RowTable {
     pub fn row(&self, row: u32) -> Option<RowView<'_>> {
         let at = row as usize;
         let variants = self.variants();
-        Some(RowView {
-            coords: self.coords.get(at)?,
-            slot: *self.slot.get(at)?,
-            day: *self.day.get(at)?,
-            second: *self.second.get(at)?,
-            id: *self.id.get(at)?,
-            month: *self.month.get(at)?,
-            outcomes: self.outcomes.get(at * variants..(at + 1) * variants)?,
-        })
+        // The columns are pushed together, so they hold a row or none of them
+        // does: one arm reads it, the other is every row past the table.
+        match (
+            self.coords.get(at),
+            self.slot.get(at),
+            self.day.get(at),
+            self.second.get(at),
+            self.id.get(at),
+            self.month.get(at),
+            self.outcomes.get(at * variants..(at + 1) * variants),
+        ) {
+            (
+                Some(coords),
+                Some(slot),
+                Some(day),
+                Some(second),
+                Some(id),
+                Some(month),
+                Some(outcomes),
+            ) => Some(RowView {
+                coords,
+                slot: *slot,
+                day: *day,
+                second: *second,
+                id: *id,
+                month: *month,
+                outcomes,
+            }),
+            _ => None,
+        }
     }
 
     /// The key of the partition's root: every free row open, the entry-style
@@ -840,9 +883,7 @@ impl Tally {
             Child::EquivalentToSibling => &mut self.equivalent_to_sibling,
             Child::Frequent => &mut self.frequent,
         };
-        if let Some(slot) = array.get_mut(fixed) {
-            *slot += 1;
-        }
+        at_mut(array, fixed, |slot| *slot += 1);
     }
 
     /// Adds another tally.
@@ -1017,12 +1058,8 @@ impl<'b> Arena<'b> {
     /// Writes one row and its cell at the cursor and moves the cursor on.
     fn put(&mut self, cursor: &mut u32, index: u32, cell: &Coords) {
         let slot = *cursor as usize;
-        if let Some(target) = self.rows.get_mut(slot) {
-            *target = index;
-        }
-        if let Some(target) = self.cells.get_mut(slot) {
-            *target = *cell;
-        }
+        at_mut(self.rows, slot, |target| *target = index);
+        at_mut(self.cells, slot, |target| *target = *cell);
         *cursor += 1;
     }
 
@@ -1137,9 +1174,7 @@ impl Walker<'_> {
         hist.fill(0);
         for cell in cells {
             let value = cell.get(row).copied().unwrap_or(OPEN);
-            if let Some(count) = hist.get_mut(usize::from(value)) {
-                *count += 1;
-            }
+            at_mut(hist, usize::from(value), |count| *count += 1);
         }
         out.tally.row_touches += cells.len() as u64;
     }
@@ -1276,9 +1311,9 @@ impl Walker<'_> {
         let (mut region, mut rest) = bufs.arena.reborrow().split(at.rows.len());
         for (index, cell) in at.rows.iter().zip(at.cells) {
             let value = cell.get(row).copied().unwrap_or(OPEN);
-            if let Some(cursor) = hist.get_mut(usize::from(value)) {
+            at_mut(hist, usize::from(value), |cursor| {
                 region.put(cursor, *index, cell);
-            }
+            });
         }
         out.tally.row_touches += parent;
         let next = position + 1;
@@ -1296,8 +1331,10 @@ impl Walker<'_> {
             .filter(|(_, rows, _)| {
                 classify(rows.len() as u64, parent, None, self.min) == Child::Frequent
             });
+        // A batch over the budget falls through to the inline walk below.
         if let Some(budget) = self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = children
+                .clone()
                 .map(|(value, rows, cells)| Ready {
                     source: Source::Rows(rows, cells),
                     key: with_row(at.key, row, value),
@@ -1307,19 +1344,6 @@ impl Walker<'_> {
                 self.tasks(&ready, next, fixed, visitor, out);
                 return;
             }
-            for child in ready {
-                if let Source::Rows(rows, cells) = child.source {
-                    let place = At {
-                        rows,
-                        cells,
-                        key: child.key,
-                        next,
-                        fixed,
-                    };
-                    self.expand(place, rest.reborrow(), bufs.deeper, visitor, out);
-                }
-            }
-            return;
         }
         for (value, rows, cells) in children {
             let place = At {
@@ -1368,8 +1392,10 @@ impl Walker<'_> {
             classes.filter_map(|(group, child)| (child == Child::Frequent).then_some(group));
         let next = position + 1;
         let fixed = at.fixed + 1;
+        // A batch over the budget falls through to the inline walk below.
         if let Some(budget) = self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = wanted
+                .clone()
                 .map(|group| Ready {
                     source: Source::Prefix {
                         rows: at.rows,
@@ -1384,21 +1410,6 @@ impl Walker<'_> {
                 self.tasks(&ready, next, fixed, visitor, out);
                 return;
             }
-            for child in ready {
-                if let Source::Prefix { group, .. } = child.source {
-                    self.prefix_inline(
-                        at,
-                        row,
-                        group,
-                        next,
-                        bufs.arena.reborrow(),
-                        bufs.deeper,
-                        visitor,
-                        out,
-                    );
-                }
-            }
-            return;
         }
         for group in wanted {
             self.prefix_inline(
@@ -1466,12 +1477,8 @@ impl Walker<'_> {
         let mut kept = 0;
         for (index, cell) in rows.iter().zip(cells) {
             if cell.get(row).copied().unwrap_or(OPEN) <= group {
-                if let Some(target) = region.rows.get_mut(kept) {
-                    *target = *index;
-                }
-                if let Some(target) = region.cells.get_mut(kept) {
-                    *target = *cell;
-                }
+                at_mut(region.rows, kept, |target| *target = *index);
+                at_mut(region.cells, kept, |target| *target = *cell);
                 kept += 1;
             }
         }
@@ -1699,17 +1706,13 @@ impl Survivors {
                 node = child;
             }
             let exit = key.0.get(RowId::Exit.index()).copied().unwrap_or(OPEN);
-            if let Some(here) = variants.get_mut(node as usize) {
-                here.push(exit);
-            }
+            at_mut(&mut variants, node as usize, |here| here.push(exit));
         }
         let nodes = variants.len();
         let edges = stable_edges(&edges, nodes);
         let mut ranges = vec![0_usize; nodes + 1];
         for edge in &edges {
-            if let Some(count) = ranges.get_mut(edge.parent as usize + 1) {
-                *count += 1;
-            }
+            at_mut(&mut ranges, edge.parent as usize + 1, |count| *count += 1);
         }
         let mut run = 0;
         for slot in &mut ranges {
@@ -1785,9 +1788,7 @@ fn ascending(list: &[u8], values: usize) -> Vec<u8> {
     }
     let mut seen = vec![false; values];
     for value in list {
-        if let Some(slot) = seen.get_mut(usize::from(*value)) {
-            *slot = true;
-        }
+        at_mut(&mut seen, usize::from(*value), |slot| *slot = true);
     }
     (0_u8..)
         .zip(seen)
@@ -1873,12 +1874,8 @@ impl Guide<'_> {
                     value == edge.value
                 };
                 if inside {
-                    if let Some(target) = region.rows.get_mut(kept) {
-                        *target = *index;
-                    }
-                    if let Some(target) = region.cells.get_mut(kept) {
-                        *target = *cell;
-                    }
+                    at_mut(region.rows, kept, |target| *target = *index);
+                    at_mut(region.cells, kept, |target| *target = *cell);
                     kept += 1;
                 }
             }
@@ -1890,9 +1887,9 @@ impl Guide<'_> {
                 next: at.next,
                 fixed: at.fixed + 1,
             };
-            if let Some(next) = self.survivors.nodes.get(edge.child as usize) {
+            at_ref(&self.survivors.nodes, edge.child as usize, |next| {
                 self.descend(next, child, rest.reborrow(), visitor, tally);
-            }
+            });
         }
     }
 }
@@ -1927,9 +1924,9 @@ pub fn walk_guided<V: Visitor>(
         rows: &mut arena_rows,
         cells: &mut arena_cells,
     };
-    if let Some(trie) = survivors.nodes.first() {
+    at_ref(&survivors.nodes, 0, |trie| {
         guide.descend(trie, root, arena, visitor, &mut tally);
-    }
+    });
     tally
 }
 
@@ -1968,9 +1965,31 @@ pub fn reconcile(survivors: &[MixKey], verdicts: &[MixKey]) -> Result<(), Lattic
 
 #[cfg(test)]
 mod tests {
-    //! What an integration test cannot reach: a table past `u32` rows.
+    //! What an integration test cannot reach: a table past `u32` rows, and an
+    //! index past its slice.
 
-    use super::{Child, Counted, FREE_ROWS, LatticeRefusal, Spread, free_count, indexable};
+    use super::{
+        Child, Counted, FREE_ROWS, LatticeRefusal, Spread, at_mut, at_ref, free_count, indexable,
+    };
+
+    /// The one indexed write and read: inside the slice they act, past it they
+    /// do nothing and call nothing. Every caller's index is in range by
+    /// construction, so only this test reaches the second arm.
+    #[test]
+    fn an_index_past_the_slice_writes_and_reads_nothing() {
+        let mut cells = [0_u8; 2];
+        at_mut(&mut cells, 1, |cell| *cell = 7);
+        assert_eq!(cells, [0, 7]);
+        let mut called = false;
+        at_mut(&mut cells, 2, |_| called = true);
+        assert!(!called);
+        assert_eq!(cells, [0, 7]);
+        let mut read = None;
+        at_ref(&cells, 1, |cell| read = Some(*cell));
+        assert_eq!(read, Some(7));
+        at_ref(&cells, 2, |_| called = true);
+        assert!(!called);
+    }
 
     /// A subtree's counters add into its parent's, every field: the schedule's
     /// record as well as the tally (a task's are absorbed this way).

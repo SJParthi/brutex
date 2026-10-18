@@ -1186,6 +1186,20 @@ fn the_pass_refuses_by_name() {
         pass.score(&longer, &[], &outcomes, &calendar).unwrap_err(),
         ScoreRefusal::TableMismatch { what: "months" }
     );
+    // The same search and first exit with one variant more is another exit
+    // set: refused whole, never read row by row.
+    let two_exits = fixture::generation(Search::Long, 2, 2, 2);
+    let wider_exits = RowTable::new(
+        *two_exits.layout(),
+        fixture::partition(Search::Long, 2),
+        table.months(),
+    )
+    .unwrap();
+    assert_eq!(
+        pass.score(&wider_exits, &[], &outcomes, &calendar)
+            .unwrap_err(),
+        ScoreRefusal::TableMismatch { what: "partition" }
+    );
     let card = pass.score(&table, &[0], &outcomes, &calendar).unwrap()[0].clone();
     assert_eq!(card.counts.trades, 1, "a refused mix leaves nothing behind");
 
