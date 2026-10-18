@@ -993,10 +993,13 @@ fn build_day(
         previous_close = Some(minute.close);
     }
     let last_close = real.last().map(|minute| minute.close);
-    // The tail (FM-F094): a last minute closing before 15:09:00 is cut,
+    // The tail (FM-F094), on a tradable day only (a halt day ends at its
+    // halt, which the calendar names): a last minute closing before 15:09:00
+    // is cut,
     // unwitnessed, or kept with no trades after it.
     let mut no_trades_after = false;
     if refusal.is_none()
+        && tradable.admits()
         && let Some(last) = real.last()
     {
         let closes_at = ist_day_second(last.ts_micros).1 + minute_seconds();

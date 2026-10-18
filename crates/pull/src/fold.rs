@@ -325,19 +325,9 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         //
         // Checked at both ends. Saturating here would silently file a bar in
         // the wrong bucket rather than refuse, which `CLAUDE.md` §4 bans.
-        let shifted = snap
-            .ts_micros
-            .checked_add(anchor)
-            .ok_or(FoldError::AnchorOverflow {
-                ts_micros: snap.ts_micros,
-            })?;
-        let start = shifted
-            .div_euclid(width)
-            .checked_mul(width)
-            .and_then(|edge| edge.checked_sub(anchor))
-            .ok_or(FoldError::AnchorOverflow {
-                ts_micros: snap.ts_micros,
-            })?;
+        let start = bucket_start(snap.ts_micros, bucket).ok_or(FoldError::AnchorOverflow {
+            ts_micros: snap.ts_micros,
+        })?;
 
         if open_at == Some(start) {
             let Some(bar) = out.last_mut() else {
@@ -410,14 +400,45 @@ const fn grid_anchor(bucket: Bucket) -> i64 {
 
 /// The start of the bucket `ts_micros` falls in, on [`fold`]'s grid, or
 /// [`None`] where the shift leaves the `i64` range.
+///
+/// # The intraday grid restarts at each IST day's 09:15 (FIB-8, D-6446)
+///
+/// A day-or-wider bucket keeps the IST-midnight grid. An intraday bucket is
+/// counted from the 09:15 open of the IST day the instant falls on: `open +
+/// floor((t - open) / w) * w`. For every width that divides a day — every rung
+/// in `Timeframe::KNOWN`, and every width this fold was ever called with —
+/// that is exactly the epoch grid `t + A ≡ 0 (mod w)` with the open anchor,
+/// because each day's open lies on it; so no stored bar moves
+/// (`every_width_that_divides_a_day_keeps_its_grid`). A width that does not
+/// divide a day (7 or 64 minutes, which FIB-1 R7's generated timeframe set
+/// can name) drifted on the epoch grid, its first bucket landing at a
+/// different minute each day; counted from the day's open it starts at 09:15
+/// every day (`a_width_that_does_not_divide_a_day_starts_at_each_open`). No
+/// NSE venue trades across IST midnight, so a day's last bucket never meets
+/// the next day's first.
 fn bucket_start(ts_micros: i64, bucket: Bucket) -> Option<i64> {
-    let anchor = grid_anchor(bucket);
     let width = i64::from(bucket.secs()) * 1_000_000;
-    ts_micros
-        .checked_add(anchor)?
-        .div_euclid(width)
-        .checked_mul(width)?
-        .checked_sub(anchor)
+    if bucket.secs() >= Bucket::DAY.secs() {
+        let anchor = grid_anchor(bucket);
+        return ts_micros
+            .checked_add(anchor)?
+            .div_euclid(width)
+            .checked_mul(width)?
+            .checked_sub(anchor);
+    }
+    let day = i64::from(Bucket::DAY.secs()) * 1_000_000;
+    let midnight = ts_micros
+        .checked_add(IST_ANCHOR_MICROS)?
+        .div_euclid(day)
+        .checked_mul(day)?
+        .checked_sub(IST_ANCHOR_MICROS)?;
+    let open = midnight.checked_add(IST_ANCHOR_MICROS - OPEN_ANCHOR_MICROS)?;
+    open.checked_add(
+        ts_micros
+            .checked_sub(open)?
+            .div_euclid(width)
+            .checked_mul(width)?,
+    )
 }
 
 /// Why snapshots could not be folded.
@@ -2375,5 +2396,93 @@ mod guard {
             "3 minutes is not a whole multiple of 5 minutes — a bucket edge \
              would fall inside a source bar"
         );
+    }
+}
+
+/// The intraday grid restarts at each IST day's 09:15 (FIB-8, D-6446).
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod open_grid {
+    use super::{Bucket, IST_ANCHOR_MICROS, OPEN_ANCHOR_MICROS, bucket_start, fold};
+    use store::format::Bar;
+
+    /// The epoch grid the fold used before D-6446.
+    fn epoch_grid(ts: i64, width_secs: u32) -> i64 {
+        let width = i64::from(width_secs) * 1_000_000;
+        (ts + OPEN_ANCHOR_MICROS).div_euclid(width) * width - OPEN_ANCHOR_MICROS
+    }
+
+    /// 09:15 IST of the IST epoch day `day`, in UTC microseconds.
+    fn open_of(day: i64) -> i64 {
+        day * 86_400_000_000 - IST_ANCHOR_MICROS + (IST_ANCHOR_MICROS - OPEN_ANCHOR_MICROS)
+    }
+
+    /// Every width that divides a day keeps the grid it had: every store rung
+    /// and every divisor of 86,400 seconds, at instants all through two
+    /// years of days, before the open, inside the session and after it.
+    #[test]
+    fn every_width_that_divides_a_day_keeps_its_grid() {
+        let mut widths: Vec<u32> = store::path::Timeframe::KNOWN
+            .iter()
+            .map(|rung| rung.secs())
+            .filter(|secs| *secs < 86_400)
+            .collect();
+        widths.extend((1..86_400).filter(|secs| 86_400 % secs == 0 && secs % 60 == 0));
+        let first = 19_000_i64;
+        for width in widths {
+            let bucket = Bucket::of_secs(width).unwrap();
+            for day in (first..first + 730).step_by(7) {
+                for offset_secs in [-33_300_i64, -1, 0, 1, 59, 600, 21_000, 22_440, 52_000] {
+                    let ts = open_of(day) + offset_secs * 1_000_000;
+                    assert_eq!(
+                        bucket_start(ts, bucket),
+                        Some(epoch_grid(ts, width)),
+                        "width {width}s day {day} offset {offset_secs}s"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A width that does not divide a day starts at 09:15 every day, where the
+    /// epoch grid drifted.
+    #[test]
+    fn a_width_that_does_not_divide_a_day_starts_at_each_open() {
+        let minute = |day: i64, n: i64| Bar {
+            ts_micros: open_of(day) + n * 60_000_000,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        for width_minutes in [7_u32, 64, 118] {
+            let bucket = Bucket::of_secs(width_minutes * 60).unwrap();
+            let mut drifted = false;
+            for day in 20_000..20_010 {
+                let bars: Vec<Bar> = (0..375).map(|n| minute(day, n)).collect();
+                let folded = fold(&bars, bucket).unwrap();
+                assert_eq!(
+                    folded[0].ts_micros,
+                    open_of(day),
+                    "{width_minutes} day {day}"
+                );
+                assert_eq!(
+                    folded.len(),
+                    usize::try_from(375_u32.div_ceil(width_minutes)).unwrap()
+                );
+                drifted |= epoch_grid(open_of(day), width_minutes * 60) != open_of(day);
+            }
+            assert!(drifted, "the epoch grid drifts at {width_minutes} minutes");
+        }
+        // A day bucket keeps IST midnight.
+        let day = Bucket::DAY;
+        let ts = open_of(20_000);
+        assert_eq!(
+            bucket_start(ts, day),
+            Some(20_000 * 86_400_000_000 - IST_ANCHOR_MICROS)
+        );
+        assert_eq!(bucket_start(i64::MAX, Bucket::MINUTE), None);
     }
 }
