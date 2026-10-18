@@ -50,17 +50,29 @@ use crate::{Candle, Corrupt, OI_NULL, ist_day};
 /// the day range: the ladder rule's grid (D-6342).
 pub const MIN_RUNG_GAP: i32 = smallest_gap(&RUNGS);
 
-/// The smallest difference between adjacent entries of an ascending list.
+/// The smallest difference between adjacent entries of an ascending list;
+/// `i32::MAX` for a list with no pair.
 const fn smallest_gap(rungs: &[i32]) -> i32 {
     let [first, rest @ ..] = rungs else {
         return i32::MAX;
     };
-    let [second, ..] = rest else {
+    let [second, further @ ..] = rest else {
         return i32::MAX;
     };
     let here = *second - *first;
-    let further = smallest_gap(rest);
-    if here < further { here } else { further }
+    if further.is_empty() {
+        here
+    } else {
+        lesser(here, smallest_gap(rest))
+    }
+}
+
+/// The lesser of two: their sum less their distance, halved. It compares
+/// nothing, so no tie can make a strict and a non-strict reading of it agree
+/// (a `<` read as `<=` returns the same value on a tie and would survive as an
+/// equivalent mutant).
+const fn lesser(a: i32, b: i32) -> i32 {
+    (a + b - (a - b).abs()) >> 1
 }
 
 /// One day extreme and the candle that made it.
@@ -393,6 +405,12 @@ mod tests {
         assert_eq!(smallest_gap(&[5]), i32::MAX);
         assert_eq!(smallest_gap(&[0, 9, 12, 40]), 3);
         assert_eq!(smallest_gap(&[0, 2, 9]), 2);
+        assert_eq!(smallest_gap(&[0, 9, 10]), 1, "the last pair");
+        assert_eq!(smallest_gap(&[0, 3, 6]), 3, "a tie");
+        assert_eq!(
+            [lesser(2, 7), lesser(7, 2), lesser(3, 3), lesser(-4, 7)],
+            [2, 2, 3, -4]
+        );
     }
 
     #[test]
