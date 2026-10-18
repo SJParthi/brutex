@@ -1653,4 +1653,11 @@ fn a_refused_mix_is_recorded_and_a_range_below_its_floor_visits_nothing() {
         (tally.infrequent[0], tally.frequent[0], tally.row_touches),
         (1, 0, 0)
     );
+    let mut at_floor = Collect::default();
+    let tally = expand_range(&table, 0..4, 4, &mut scratch, &mut at_floor).unwrap();
+    assert_eq!(
+        (tally.frequent[0], at_floor.nodes.len()),
+        (1, 1),
+        "a range of exactly the floor is frequent"
+    );
 }
