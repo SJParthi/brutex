@@ -239,7 +239,7 @@ pub enum Cause {
     /// An open, high, low or close at or below zero (R4-17, ING-01 c).
     NonPositivePrice,
     /// Its day is before the master's listing day for its exact symbol and
-    /// ISIN ([`crate::listing`], D-5835).
+    /// ISIN ([`crate::listing`], D-5839).
     BeforeListing {
         /// The listing day, as IST days since the epoch.
         listed_on: i64,
@@ -701,7 +701,7 @@ impl<'a> MinuteJudge<'a> {
         }
         let verdict = match self.book.judge(day, low, high) {
             // THE LISTING, NEVER THE FIRST DAY BAR, WHEN A MASTER STATES IT
-            // (D-5835): a minute between the two is the series' own.
+            // (D-5839): a minute between the two is the series' own.
             Verdict::Refused(Cause::BeforeFirstDayBar { .. }) if self.rules.listed_on.is_some() => {
                 Verdict::Unchecked(Unchecked::NoDayBar)
             }

@@ -22,7 +22,7 @@
 //! # What is refused on its word, and what is not
 //!
 //! - A day before a master's listing day is not that security's
-//!   ([`Span::before_listing`]): a bar on it is refused by name (D-5835).
+//!   ([`Span::before_listing`]): a bar on it is refused by name (D-5839).
 //! - A day strictly after a master's removal day, with no readmission after
 //!   it, is past the end of its history ([`Span::history_ended`]): a vendor's
 //!   empty answer or 404 there is the end of history, not a failure (D-4991).

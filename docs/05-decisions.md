@@ -72652,7 +72652,207 @@ shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
 of the journal changes; a line closed before this change kept only its newline
 and reads as it did.
 
-### D-5835 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
+### D-5835 — /db names a re-keyed contract's successor and predecessor, and a key the census withdrew is explained by its lineage, never by the filters (AH-03, g-ui-dom-vs-json-2) — 2026-10-16
+
+*Numbers D-5835 to D-5838 were first taken as D-5330 to D-5333, were
+renumbered in repair 1 to D-5831 to D-5834 from the ledger's head on
+feat/db-fix (D-5830 at f8c22b1bd), and were renumbered again at the merge into
+feat/db-fix to D-5835 to D-5838, because IA-1 and R4-07 had taken D-5831,
+D-5833 and D-5834 first (A6).*
+
+**What was observed.** `/bars/window.json` sends `superseded_by`
+(`[{key, by, kind, recorded}]`) and `supersedes` (`[{key, of, kind, bars,
+blake3}]`) on every page since WP-12c (D-3331), and `/dayflags.json` sends the
+lineage ledger's `superseded_by`, `supersedes` and `retired` records for a key.
+`web/src` read none of them: NIFTY's three split 2023-06-29 PE keys were
+explained as "it may not have traded after that day, or the census is
+behind", and a key census epoch 000005 withdrew (e.g. the 2023-06-29
+1210000-PE) was explained by "Side is set to PE, which the rungs above it no
+longer offer" — the reader's filters, which were that key's own fields.
+
+**Decided.**
+1. `web/src/lib/db/lineage-labels.js` is the one place the re-key's fields
+   become words: "superseded by <key> (<why>; recorded yes/no)", "continues
+   <old key>: N bar(s) copied from it (<why>)", and every lineage record kind
+   (`continues_as`, `renamed_from`, `stitched`, `superseded_by`, `supersedes`,
+   `retired`, `stopped`); a kind it has no words for is counted and said,
+   never dropped. `recorded: false` says the re-key has not moved the bars,
+   so each key holds part of the contract's life.
+2. The expiry note shows every superseded or copied-in series of the page's
+   window answer (three named, the rest counted) with a /db link to the other
+   key.
+3. A contract key the census does not hold (one strike and a side, or a
+   future, built from the rungs with the exchange read off a census row of
+   the same underlying; the census probe is `store.byInstrument`, one Map
+   lookup) gets ONE lineage request — `/dayflags.json` for that key and its
+   expiry day, an existing route — remembered per (feed, key) for the page's
+   life (at most 32 keys). While it runs, and when the ledger explains the
+   key, the stranded line and the empty grid say the lineage and list the
+   contract rungs with their Clear buttons and no blame; when the ledger has
+   no record the rung wording stands with "the ledger files no record under
+   it"; a failed read is said as one.
+4. The stored-life-cut note (`selection.svelte.js` `lifeNote`) uses
+   `lifeCutBySupersession` in place of "may not have traded / census behind"
+   whenever a supersession on the page's window answer explains the cut, and
+   the empty grid says the same with a link to the successor. The day band's
+   `lineageOf` (`dayflags.js`) keeps every record kind through
+   `lineageLines`, and links the key the ledger says continues this one.
+   Landed after R3-05 and R3-01 merged into feat/db-fix.
+
+**Cost.** Every label is O(records on one answer) — a handful per key. The
+page adds at most one request per withdrawn key; the route is unchanged.
+
+**Repair 1 (the second agent's check, 18 Oct 2026), by addition.**
+5. THE KEY IS ONE PROBE, NEVER A CENSUS WALK. The first cut read the
+   exchange off "a census row of the same underlying" by walking `db.deco`
+   inside the withdrawn-key `$derived`, on every change of the rungs while
+   one was stranded: measured on GDFL's real census (2,098,428 rows) p50
+   171 ms for HDFC and 400 ms for ZYDUSLIFE, an absent underlying, per
+   recompute. `fnoExchanges` now folds the census into underlying →
+   exchange (the first F&O row's, in served order, so the answer is the
+   old rule's: 347 of 347 underlyings agree) in its own `$derived` of
+   `db.deco` alone — once per census load, and only once a contract rung is
+   stranded — and `contractKeyOf` is one Map probe that THROWS when handed
+   anything but that Map, so a caller cannot reintroduce the walk quietly.
+6. THE LINEAGE MEMO IS PER CENSUS GENERATION, AND A FAILURE IS NOT KEPT. A
+   failed read is dropped from the memo as it settles, so the next ask is a
+   new request; the stranded line and the empty grid offer "Read the lineage
+   again" on a failed read (it forgets that one key); a new census
+   generation or epoch (`store.lag`) forgets every remembered answer, since
+   a re-key can land between two. Not the rows' identity: the page swaps the
+   facet-scoped rows for the whole census once per open, and keying on that
+   asked twice per open on the shadow.
+7. A lineage record of a kind that names another key and carries none is
+   counted as malformed and said ("N lineage record(s) that name no key"),
+   never worded "superseded by undefined"; a `superseded_by` or
+   `supersedes` that is neither a list nor null is one malformed entry,
+   never read as "not re-keyed".
+
+**Proof.** `web/tests/db-lineage-labels.test.js`
+(`a_superseded_key_names_its_successor_in_the_expiry_note`,
+`a_new_key_names_the_key_it_continues`,
+`lineageOf_keeps_supersedes_superseded_by_and_retired`,
+`a_withdrawn_key_is_explained_by_its_lineage_not_the_filters`, the chain,
+quiet-ledger and memo tests;
+`contractKeyOf_is_one_probe_of_a_fold_made_once_per_census_load`,
+`the withdrawn-key derived folds the census in its own derived of db.deco, never inside the key`,
+`a failed lineage read is not kept: the next ask is a new request, and one key can be forgotten alone`,
+`a lineage record that names no key is malformed, never "superseded by undefined"`)
+and `web/tests/db-auction-words.test.js` (the wiring test reads `lifeNote`).
+Invariants AH03-01, AH03-02, AH03-06.
+
+### D-5836 — The closing-auction words follow the day's own auction record; a day with no filed print never denies the print; an extreme in the session's window is flagged (AH-03, g-ui-dom-vs-json-3) — 2026-10-16
+
+**What was observed.** The day band said "the auction print is kept apart from
+trades" for every closing-auction day of a share, while on a `no_sidecar` day
+(RELIANCE 2026-08-03) the bar's own mark said the print is held as an ordinary
+one-second bar until re-imported. `auctionVerdict` called a bar "not the
+auction's print" on a `kept_apart` day whose `prints` list was empty
+(RELIANCE 2026-09-28, close equal to the official close at 0 bps), because
+`kept_apart` is decided from the month file's existence, not the day.
+
+**Decided.**
+1. `auctionBandSentence` (notes-labels.js) words one day's record:
+   `kept_apart` with prints names them (and, when the server sends AG-04's
+   fields, an unchecked sidecar and a print also stored as a bar);
+   `kept_apart` with none says none is filed for that day; `no_sidecar` says
+   the print, if any, is an ordinary one-second bar until re-imported (D-3320
+   item 4); `unreadable` says so and claims nothing; a day record read with
+   `auction: null` (not a share, or before the auction runs) claims nothing;
+   an unknown state is named. With no record read, the run's sentence names
+   the session and says the handling is each day's record — it never claims
+   "kept apart". A feed whose minutes end before the auction
+   (`minutes_end_before_auction`, Zerodha) says its bars hold no print, from
+   the feed's own note.
+2. `auctionVerdict` on a `kept_apart` day with no print: the session's last
+   print at the official close (0 bps) reads "possibly the auction print, not
+   filed apart for this day"; any other bar reads "not decided here" with the
+   reason. A filed print that AG-04 marks `also_in_bars` at this bar's second
+   reads "the auction's print, filed apart AND also stored as this bar".
+3. The extremes panel flags an extreme whose bar lies in
+   `[eligible_continuous_close, 15:30)` on or after `closing_auction.from`, on
+   a CASH key below the day rung, for a feed that files the print apart: the
+   fold sends no phase, so the flag says the window and that the bar's own
+   phase (on Go to) decides.
+4. The day band (`DbDayFlags.svelte`) speaks the run sentence of item 1, and
+   opening a closing-auction day of a share on a feed that files the print
+   apart reads that day's `/sources/day.json` once (remembered per URL for the
+   page's life, at most 64) and speaks the day's sentence; a failed read or a
+   missing day record is said. The server half — `sources.rs` `auction_of`
+   decides `kept_apart` per month, not per day — is AG-04's file and is owed
+   after it (`docs/06-limits.md` L-AH03-2).
+5. Repair 1 (the second agent's follow-up), by addition to item 3: the
+   flag follows THE DAY'S CALENDAR CODE where the page holds it (the day
+   band's cells, one Map probe per extreme) — only `X`, the calendar's
+   regular day with a closing auction (D-3319), is flagged; a special
+   session, a halt, an unmeasured, a closed or a regular day is not — and a
+   day whose code the page has not read is flagged by the window rule and
+   says the code was not read. A bar whose span `[t, t + rung)` meets the
+   window is in it, so a 5-minute bar from 15:12 is flagged and one ending at
+   15:15 exactly is not. The window's end is one second past `CAS_READ_TO`,
+   the one constant this module spells the session's last second with, not
+   a second literal.
+
+**Proof.** `web/tests/db-auction-words.test.js` (with
+`an extreme's closing-auction flag follows the day's calendar code, and a bar straddling the eligible close is in the window`).
+Invariant AH03-03.
+
+### D-5837 — A closed day is closed on either side of the archive span, a day that holds bars was imported, and sessions are the calendar's (AH-03, g-ui-dom-vs-json-6) — 2026-10-17
+
+**What was observed.** `kindsOf` added `outside_archive` ("not imported",
+R3-05) to every day outside `/feeds.json` `archive`, closed days included, and
+the kind outranks `closed`; the band's session count excluded only `closed` and
+`outside` lead kinds, so GDFL NIFTY 2026-07-01..09-30 read 67 session days
+against the calendar's 65 (the weekend of 26-27 Sep), and 2018-08-01..09-10
+read 39 against 27. `emptyWindowWhy` said "No bar on any of 2 session day(s)"
+for a weekend-only window past the span. The days after the span's measured
+last day that hold 22,500 bars each read "not imported" too.
+
+**Decided.**
+1. `outside_archive` and `before_archive` apply only to a day whose calendar
+   code is a session (`R X P H U`) and that holds no bar: a closed day is
+   `closed` before and after the span, and a day holding bars was imported
+   (the span's last day is a measured lower bound, R3-05).
+2. The band's session count is `sessionCount` — the calendar codes — never a
+   lead kind; `emptyWindowWhy` picks its sessions the same way and says
+   "every one is closed" only when every asked day's code is `.`, else "none
+   is a session".
+3. A special session on a holiday is code `P`, so it is a session.
+
+**Cost.** O(1) per day. **Proof.** `web/tests/db-dayflags-closed.test.js`
+(`a_closed_day_outside_the_archive_is_closed_not_a_session`,
+`the_session_count_equals_the_calendars_sessions`,
+`an_empty_weekend_window_says_every_day_is_closed`, the held-past-the-span
+test). Invariant AH03-04.
+
+### D-5838 — A second with two values and a hole of seconds are not minute gaps; DB-G96's flag keeps, its word is amended by addition (AH-03, g-ui-dom-vs-json-7) — 2026-10-17
+
+**What was observed.** DB-G96 asked that a second holding two values at least
+10 bps apart be flagged, and the band flagged it under kind `gap`, whose word
+"minute gap" was written for Zerodha's `gaps.missing`. NIFTY 25, 28, 29 and 30
+Sep 2026 read "minute gap" with no time missing; `holes_5s` (holes of 5 s or
+more) and the stocks file's `shared_holes` read the same word. The stocks
+file's closing-auction count is carried on an INDEX record by design
+(D-3335 §3) without saying whose it is.
+
+**Decided.**
+1. Kind `gap` ("minute gap") is Zerodha's missing minutes only. Three kinds are
+   added, appended next to it in `DAY_KINDS`: `hole` ("holes of 5 s or more",
+   `quality.indices.holes_5s`), `shared_hole` ("hole shared by most shares",
+   `quality.stocks.shared_holes`) and `dual` ("two values in one second",
+   `quality.indices.dual_spread_s`). Each is a `warn`, flagged as before: the
+   DB-G96 pin moves from `gap` to `dual`; no kind is renamed or removed.
+2. On an INDEX record the phrase the route builds from
+   `quality.stocks.auction_prints` is prefixed "stocks file, all shares:" —
+   matched exactly as the route composes it from that count, so no other
+   phrase is touched. The route is unchanged.
+
+**Cost.** O(1) per day, O(phrases) for the label. **Proof.**
+`web/tests/db-dayflags-closed.test.js` (`a_two_valued_second_is_not_a_minute_gap`,
+`a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
+`web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
+
+### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's
 entry ("The macOS rows run on macOS") took D-4990 on `feat/db-fix` first
@@ -72666,8 +72866,21 @@ unchanged. Every R4-17 citation
 of the listing rule (`pull::fetch`, `pull::identity_screen`, `pull::listing`,
 `pull::series_identity`, `crates/pull/tests/zerodha_identity.rs`, the charter
 row, and the R4-17 sections of `docs/04-invariants.md` and
-`docs/06-limits.md`) now names D-5835. D-4991 to D-4995 head one entry each
+`docs/06-limits.md`) then named D-5835. D-4991 to D-4995 head one entry each
 and keep their numbers. The text below is unchanged.
+
+**Renumbered again at merge (repair 3).** D-5835 collided in turn: AH-03's
+entry ("/db names a re-keyed contract's successor and predecessor") took
+D-5835 on `feat/db-fix` (371b1a506) while this branch carried it, and AH-03
+heads D-5835 to D-5838, so the merged ledger headed D-5835 twice and gate
+27b refused it (`D-5835: 2 heading(s), allowed 1`). This entry is again the
+newer one and takes max(existing) + 1 of the merged tree: D-5839. No local or
+`origin/` branch heads D-5839 at the time of this merge; the higher numbers
+other branches head (D-5860 to D-5864, D-5865, D-5880 to D-5884, D-5899) are
+skipped by taking the lowest free number above the merged head. AH-03's D-5835
+and its citations are unchanged; every R4-17 citation listed above now names
+D-5839. Former numbers of this entry: D-4990 and D-5835; D-5832 was
+considered in the first merge and never committed.
 
 **Decision.** `pull::listing` reads the listing day of a CASH security from the
 newest receipted NSE security master under `<store>/session-masters`
@@ -72753,7 +72966,7 @@ against. Two things are refused by name, that row only:
    changed: `store::format`'s sanity check and `http`'s price decode both admit
    zero, and this door refuses it instead.
 2. **`before_listing`**: a CASH bar on a day before its master's listing day
-   (D-5835).
+   (D-5839).
 3. **On an index, exactly zero is held; only below zero is refused.** Amended
    on the Mac, 17 Oct 2026, from the real-data run the work package requires
    (`cli series-identity ALL --segment INDEX --feed zerodha` over a private
@@ -72910,7 +73123,7 @@ a measured cause:
 | Code | Means | Plan action |
 |---|---|---|
 | `zero_price` | a price at or below zero (D-4992) | quarantine |
-| `before_listing` | before its master's listing day (D-5835) | quarantine |
+| `before_listing` | before its master's listing day (D-5839) | quarantine |
 | `before_first_day_bar` | before the first day bar, where no master states the listing (WP-13d) | quarantine |
 | `basis_mismatch` | accused by its day rung or its run, but within `WITNESS_TOLERANCE_BPS` (100, chosen and stated) of GDFL's 1s bars of that minute folded by `pull::fold`: the vendor's minute is GDFL's and its day bar was adjusted apart | label |
 | `foreign_level` | matches neither its own day nor GDFL's minute | quarantine |
@@ -72944,7 +73157,7 @@ a measured cause:
    | VBL | 1 | 8 minutes on 2023-06-14 `foreign_level`, measured `foreign_level` against GDFL |
    | PATANJALI | 0 | one whole session in 2023-07 suspect (375 minutes), `no_gdfl_witness`, labelled |
    | UNITDSPR | 0 | 375 minutes unjudged (`no_day_bar`), nothing flagged |
-   | DALBHARAT | 0 | 1,967 minutes between its master's listing (2019-01-22) and its first day bar (2019-02-05) are its own: unjudged, never `before_first_day_bar` (D-5835) |
+   | DALBHARAT | 0 | 1,967 minutes between its master's listing (2019-01-22) and its first day bar (2019-02-05) are its own: unjudged, never `before_first_day_bar` (D-5839) |
 
    Over every share (`ALL`, exit 1): 9,567 `before_listing`, 7,600
    `foreign_level`, 383 suspect, 9 `zero_price` (7 day bars, 2 minutes), 0
