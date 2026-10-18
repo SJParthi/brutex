@@ -1794,6 +1794,8 @@ mod tests {
     /// price with candle 0, so the rest starts at candle 1 and is `t` candles
     /// long at candle `t`: the lane of four is first emittable, and first
     /// counted, at candle 5; the lane of three, micro3's own length, never.
+    /// The short view knows its tolerance but emits neither lane, so neither
+    /// keeps short counts.
     #[test]
     fn a_lane_is_counted_only_while_it_is_shorter_than_the_rest() {
         let mut d = Detector::new(params(16, 2, 1)).unwrap();
@@ -1807,7 +1809,7 @@ mod tests {
             },
             short: DirectionDay {
                 rest_lengths: &[],
-                touch_bp: None,
+                touch_bp: Some(&[0]),
             },
         };
         d.begin_day(&day).unwrap();
@@ -1819,10 +1821,14 @@ mod tests {
                 (7_105, 7_110, 7_100, 7_105)
             };
             d.fold(&candle(20_500, slot, bar)).unwrap();
-            let lane = |i: usize| d.lanes.get(i).map(|l| (l.length, l.long.valid));
+            let lane = |i: usize| {
+                d.lanes
+                    .get(i)
+                    .map(|l| (l.length, l.long.valid, l.short.valid))
+            };
             live.push((d.rest_start, lane(0), lane(1)));
         }
-        let (three, four) = (Some((3, false)), Some((4, false)));
+        let (three, four) = (Some((3, false, false)), Some((4, false, false)));
         assert_eq!(
             live,
             [
@@ -1831,7 +1837,7 @@ mod tests {
                 (1, three, four),
                 (1, three, four),
                 (1, three, four),
-                (1, three, Some((4, true)))
+                (1, three, Some((4, true, false)))
             ]
         );
     }
