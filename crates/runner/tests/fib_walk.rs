@@ -4086,3 +4086,81 @@ fn the_index_counts_none_on_a_clean_day_and_two_for_two() {
         (2, 2)
     );
 }
+
+/// Deep: the swings come from the Zerodha candles and the prices from GDFL
+/// seconds, so a second inside the confirming candle can print below the
+/// swing's level. The swing is read only from the confirming candle's close
+/// (no look-ahead), so that second does not stop the trade; a later one does.
+#[test]
+fn a_deep_second_before_the_confirming_close_never_meets_the_swing_trail() {
+    let mut day = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 10_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 2, 30), P + 100, 100_150, 100_030, P + 100, 1_000),
+        // Below the swing's level of 100,015, inside the confirming candle.
+        bar(at(10, 3, 30), P + 100, 100_300, 100_012, P + 100, 1_000),
+        bar(at(10, 4, 30), P + 100, 100_250, 100_010, P + 100, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.trail = [
+        bar(at(10, 0, 0), P, P + 100, 99_950, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 2, 0), P + 100, 100_150, 100_020, P + 100, 1_000),
+        bar(at(10, 3, 0), P + 100, 100_300, 100_080, P + 100, 1_000),
+        bar(at(10, 4, 0), P + 100, 100_250, 100_010, P + 100, 1_000),
+    ]
+    .iter()
+    .map(candle_of)
+    .collect();
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 4, 30));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_010));
+}
+
+/// A slot starts reading the day's swings at its own window: a plan decided
+/// at 14:00 on a day of 119 morning swings reads none of them.
+#[test]
+fn a_late_slot_never_reads_the_swings_confirmed_before_its_window() {
+    let morning = (0..240).map(|k| {
+        let low = P + 100 + 50 * i64::from(k % 2);
+        bar(at(10, 0, 0) + 60 * k, P + 200, P + 300, low, P + 200, 1_000)
+    });
+    let afternoon = (0..69).map(|k| quiet(at(14, 0, 0) + 60 * k, P + 200, 1_000));
+    let mut bars: Vec<Candle> = morning.chain(afternoon).collect();
+    bars.push(quiet(at(15, 9, 0), P + 200, 1_000));
+    let day = Day::minutes(bars);
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..STOP_ONLY
+    };
+    let exits = set_of(Search::Long, vec![variant]);
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    let plan = long_plan(at(14, 0, 0));
+    let mut slot = runner::fib::walk::Stepper::new(
+        &index,
+        &plan,
+        0,
+        &variant,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    )
+    .expect("a slot");
+    slot.run();
+    assert_eq!(slot.outcome().exit_reason, ExitReason::Forced);
+    // 69 afternoon minutes, the forced step, and the one swing confirmed at
+    // 14:00:00 itself (13:58's, read from its minute on and passed: it
+    // formed before the fill). `by_minute` starts at the first swing
+    // confirmed at or after the window's minute.
+    assert_eq!(slot.work(), 71);
+}
