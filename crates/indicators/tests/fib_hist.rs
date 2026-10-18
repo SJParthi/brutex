@@ -684,6 +684,9 @@ fn a_damaged_depth_table_is_refused_by_name() {
     let mut small = good.clone();
     small[21] = 3; // bin 3: never reached, one value wide
     assert_eq!(refused(&small), "depth");
+    let mut narrow = good.clone();
+    narrow[21] = 25; // bin 25 holds 8 alone: the last octave of one-value bins
+    assert_eq!(refused(&narrow), "depth");
     let mut none = good[..20].to_vec();
     none.push(0);
     none.extend_from_slice(&good[23..]);
