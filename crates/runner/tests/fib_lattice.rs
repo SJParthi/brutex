@@ -1270,6 +1270,7 @@ fn guided_scoring_equals_direct_per_survivor_scoring_via_contains() {
     }
     let keys: Vec<MixKey> = survivors.iter().copied().collect();
     let trie = Survivors::new(&table, &keys).unwrap();
+    assert_eq!((trie.len(), trie.is_empty()), (keys.len(), false));
     let mut guided = Collect::default();
     let tally = walk_guided(&table, &trie, &mut guided);
     let mut scored = BTreeSet::new();
