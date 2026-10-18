@@ -35,7 +35,7 @@
  */
 import { TF_SECS, fmt } from './notes-labels.js';
 import { windowQuery, istInstant, istDayKey, monthSpan, MAX_WINDOW_MONTHS, WINDOW_PAGE_MAX } from './bars-plan.js';
-import { cellOf, DAYFLAGS_PAGE_DAYS } from './dayflags.js';
+import { cellOf, isHoleDay, DAYFLAGS_PAGE_DAYS } from './dayflags.js';
 import { parseKey } from '../instrument.js';
 import { GREEK_CHUNK, greekKey } from '../greeks.js';
 import { ownMonth } from '../moneyness.js';
@@ -844,7 +844,10 @@ export function holeBands(bars, secs, cells, halts, tradeDriven) {
   const bands = [];
   let more = 0;
   if (tradeDriven || secs >= 86_400) return { bands, more };
-  const flagged = new Set(cells.filter((c) => c.kinds.includes('gap')).map((c) => c.day));
+  // A DAY WHOSE RECORD SAYS TIME IS MISSING (a minute gap, a hole of 5 s or
+  // more, a hole most shares share); a second with two values is not one
+  // (AH-03, D-5838).
+  const flagged = new Set(cells.filter((c) => isHoleDay(c)).map((c) => c.day));
   if (flagged.size === 0) return { bands, more };
   const least = secs < 60 ? SECOND_HOLE : 1;
   for (let i = 1; i < bars.length; i += 1) {
