@@ -567,3 +567,38 @@ async fn a_write_that_moves_no_byte_does_not_end_a_stall() {
         .expect("the peer reads it");
     assert_eq!(&got, b"ok");
 }
+
+/// **The stop line counts every request open across the speed table.** A
+/// fresh process has none open; two stages started are two, and each one
+/// that ends takes one away. Run in a child process, because the table is
+/// the process's own and every test beside this one in a `cargo test`
+/// process writes to it. Kills `open_requests -> 1` (server.rs:17943),
+/// which the one serve test of the "stop started" line could not tell
+/// apart: it stops with exactly one request open.
+#[test]
+fn the_stop_counts_every_request_open_across_the_speed_table() {
+    const CHILD: &str = "BRUTEX_CLOUDE_OPEN_REQUESTS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(open_requests(), 0, "a fresh process has none open");
+        let one = crate::speed::stage_start("cloude open one");
+        let two = crate::speed::stage_start("cloude open two");
+        assert_eq!(open_requests(), 2);
+        drop(one);
+        assert_eq!(open_requests(), 1);
+        drop(two);
+        assert_eq!(open_requests(), 0);
+        println!();
+        println!("CLOUDE-OPEN-REQUESTS=checked");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::the_stop_counts_every_request_open_across_the_speed_table",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDE-OPEN-REQUESTS=checked"),
+        "{stdout}"
+    );
+}
