@@ -71029,7 +71029,8 @@ on a real disk. Three of the arms answered wrongly when they were driven:
      refusal, armed for one `Action` on one file. The file is matched by
      path, or by device and inode for an open handle. `fault` replaces the
      answer after the call; a read or write is refused before it, so a
-     refused write writes nothing.
+     refused write writes nothing. The same refusal also reaches
+     `index_on_open`'s look at the `.tix` name.
    - `file::initialise`: an actor before the genesis' flush. It is the one
      place a batch can be sealed between an open's capture of it and that
      open's first deferral, so `defer_file`'s sealed answer is reached at
@@ -71076,4 +71077,4 @@ Defensive re-borrows (`let Some(tix) = self.tix.as_ref() else`) after a
 caller has checked the same value. And `cfg` arms for targets that are not
 built here (`safe_open`'s and `file`'s unverified-flag arms).
 
-Invariants: `docs/04-invariants.md` CMS-01 to CMS-08.
+Invariants: `docs/04-invariants.md` CMS-01 to CMS-09.

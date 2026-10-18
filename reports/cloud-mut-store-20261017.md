@@ -100,7 +100,7 @@ failed 3 of 30 runs on this branch (0 of 30 on the base).
 
 - `docs/05-decisions.md` D-6017. The number is above every D-number on any
   branch (the highest is D-5619).
-- `docs/04-invariants.md` CMS-01 to CMS-08.
+- `docs/04-invariants.md` CMS-01 to CMS-09.
 
 ### Mutation run A (`cargo mutants 27.1.0`)
 

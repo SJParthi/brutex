@@ -1004,3 +1004,33 @@ fn a_refusal_armed_for_a_missing_name_fires_on_no_handle() {
     );
     assert!(!host_fault_armed(), "fired once");
 }
+
+/// **A SMALL MONTH WHOSE INDEX NAME CANNOT BE LOOKED AT IS NOT TAKEN FOR ONE
+/// WITH NO INDEX.**
+///
+/// Covers the small-month rule's guard in `index_on_open`: only a look that
+/// says the name is not there gives a month under the threshold no `.tix`.
+/// A look the host refuses otherwise goes down the path that names what is
+/// there. Here the open that follows succeeds, so the index is built as
+/// absent, and the next run keeps it.
+#[test]
+fn a_small_months_refused_index_look_is_not_the_small_month_rule() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("small-look");
+    let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    writer.append(&bars(0, 100)).unwrap();
+    drop(writer);
+    let tix = root.at(FileKind::TimeIndex);
+    assert!(!tix.exists(), "the rule gave it none");
+    arm_host_fault(Action::Measure, &tix, 0, ErrorKind::PermissionDenied);
+    let indexed = BarFile::index_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    assert!(!host_fault_armed(), "the look was refused");
+    assert_eq!(indexed.outcome, super::Reindexed::Built(Why::Absent));
+    assert!(tix.exists(), "built whole");
+    assert_eq!(
+        BarFile::index_existing(&root.0, month(FileKind::Bars), SYMBOL)
+            .unwrap()
+            .outcome,
+        super::Reindexed::Kept
+    );
+}

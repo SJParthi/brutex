@@ -3191,6 +3191,11 @@ impl BarFile {
             return Ok(Reindexed::Unindexable(Why::NotBars));
         };
         let named = fs::symlink_metadata(&tix.path);
+        // Under `cfg(test)` the look can be refused through the file seam,
+        // as `measuring`: a look the host refuses otherwise than "not there"
+        // needs a directory that changes between two calls of this function.
+        #[cfg(test)]
+        let named = tests::host_fault(Action::Measure, &tix.path).map_or(named, Err);
         // THE SMALL-MONTH RULE (D-4933): a month under the threshold with NO
         // `.tix` is given none — not created, not built, nothing written. Only
         // a name that is not there at all qualifies: a link, a directory or
@@ -6061,7 +6066,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
         fires(action, |armed| {
             match (std::fs::metadata(armed), file.metadata()) {
-                (Ok(want), Ok(this)) => want.dev() == this.dev() && want.ino() == this.ino(),
+                (Ok(want), Ok(this)) => (want.dev(), want.ino()) == (this.dev(), this.ino()),
                 _ => false,
             }
         })
