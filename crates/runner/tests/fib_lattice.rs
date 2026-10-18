@@ -233,6 +233,10 @@ fn naive(layout: &Layout, root: MixKey, cells: &[Coords], min: u64) -> (Tally, V
         for (position, id) in free.iter().enumerate().skip(next) {
             let cumulative = id.row().kind == RowKind::Cumulative;
             let mut sibling = None;
+            // One counting pass per free row; a categorical row scatters once
+            // when any child is frequent; a prefix child is one scan.
+            tally.row_touches += rows.len() as u64;
+            let mut any = false;
             for value in 0..layout.radix(*id) {
                 let child: Vec<Coords> = rows
                     .iter()
@@ -258,6 +262,10 @@ fn naive(layout: &Layout, root: MixKey, cells: &[Coords], min: u64) -> (Tally, V
                 };
                 array[fixed + 1] += 1;
                 if class == Child::Frequent {
+                    any = true;
+                    if cumulative {
+                        tally.row_touches += rows.len() as u64;
+                    }
                     node(
                         layout,
                         free,
@@ -270,6 +278,9 @@ fn naive(layout: &Layout, root: MixKey, cells: &[Coords], min: u64) -> (Tally, V
                         order,
                     );
                 }
+            }
+            if any && !cumulative {
+                tally.row_touches += rows.len() as u64;
             }
         }
     }
@@ -366,6 +377,10 @@ fn the_tally_equals_a_naive_classification_of_every_child() {
         assert_eq!(tally.infrequent, want.infrequent);
         assert_eq!(tally.equivalent_to_parent, want.equivalent_to_parent);
         assert_eq!(tally.equivalent_to_sibling, want.equivalent_to_sibling);
+        assert_eq!(
+            tally.row_touches, want.row_touches,
+            "every row-touch accounted for"
+        );
         let keys: Vec<MixKey> = visited.nodes.iter().map(|(k, ..)| *k).collect();
         assert_eq!(keys, order);
         assert_eq!(tally.nodes(), keys.len() as u64);
