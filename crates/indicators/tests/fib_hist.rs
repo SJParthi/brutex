@@ -867,6 +867,7 @@ fn five_paisa_days_a_break_then_fifty_paisa_days_give_fifty() {
         tick.commit_day().unwrap();
     }
     assert_eq!(tick.tick(), Ok(5));
+    assert_eq!(tick.breaks(), 0);
     tick.observe(400_000).unwrap();
     assert_eq!(tick.basis_break(), Err(HistRefusal::StagedNotEmpty));
     tick.discard_day();
@@ -881,6 +882,8 @@ fn five_paisa_days_a_break_then_fifty_paisa_days_give_fifty() {
     }
     assert_eq!(tick.tick(), Ok(50));
     assert_eq!(tick.odd_tick_days(), 0);
+    tick.basis_break().unwrap();
+    assert_eq!(tick.breaks(), 2, "every break is counted");
 }
 
 /// FM-F014: an adjusted span labels the decision tick unobservable and uses
