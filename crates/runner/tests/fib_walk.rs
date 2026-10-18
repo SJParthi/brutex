@@ -4219,7 +4219,9 @@ fn late_slot_work(day: &Day) -> u64 {
         TradeSize::Small,
     )
     .expect("a slot");
+    assert!(!slot.done(), "a slot not yet walked is not done");
     slot.run();
+    assert!(slot.done());
     assert_eq!(slot.outcome().exit_reason, ExitReason::Forced);
     slot.work()
 }
