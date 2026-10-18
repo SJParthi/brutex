@@ -976,8 +976,9 @@ where
     // to the failures it keeps by name (D-4839) before anyone reads it, and
     // the observer is told the end, refusal or report, exactly once.
     let mut end = drive_days(run, options, census_scoped, read_day);
-    if let Ok(report) = &mut end {
-        report.seal();
+    match &mut end {
+        Ok(report) => report.seal(),
+        Err(refusal) => refusal.seal(),
     }
     if let Some(observer) = options.observer {
         observer.finished(run.kind, end.as_ref());

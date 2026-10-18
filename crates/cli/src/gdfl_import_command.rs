@@ -117,7 +117,10 @@ pub(crate) const DURABILITY_VAR: &str = "BRUTEX_GDFL_DURABILITY";
 ///
 /// # Errors
 ///
-/// A `--snapshot` with no name after it.
+/// A `--snapshot` with no NAME after it or with a flag where its NAME goes
+/// (`--snapshot --stored` once dropped `--stored` without a word), a second
+/// `--snapshot`, and a word beginning with `-` that is not one of the
+/// verb's flags (never filed as a symbol) (D-5831).
 fn flags_of(words: &[&str]) -> Result<(bool, bool, Option<String>, Vec<String>), String> {
     let mut symbols = Vec::with_capacity(words.len());
     let (mut retry, mut stored, mut snapshot) = (false, false, None);
@@ -127,15 +130,43 @@ fn flags_of(words: &[&str]) -> Result<(bool, bool, Option<String>, Vec<String>),
             RETRY_REFUSED => retry = true,
             STORED => stored = true,
             SNAPSHOT => {
-                let name = rest
-                    .next()
-                    .ok_or_else(|| format!("{SNAPSHOT} takes a NAME after it"))?;
-                snapshot = Some((*name).to_owned());
+                if snapshot.is_some() {
+                    return Err(format!(
+                        "{SNAPSHOT} is given twice; a run has one snapshot name"
+                    ));
+                }
+                match rest.next() {
+                    Some(name) if !name.starts_with('-') => snapshot = Some((*name).to_owned()),
+                    Some(flag) => {
+                        return Err(format!(
+                            "{SNAPSHOT} takes a NAME after it; {} is a flag, not a name",
+                            shown_word(flag)
+                        ));
+                    }
+                    None => return Err(format!("{SNAPSHOT} takes a NAME after it")),
+                }
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!(
+                    "{} is not a flag of gdfl-import; its flags are {RETRY_REFUSED}, {STORED} \
+                     and {SNAPSHOT} NAME",
+                    shown_word(flag)
+                ));
             }
             symbol => symbols.push(symbol.to_owned()),
         }
     }
     Ok((retry, stored, snapshot, symbols))
+}
+
+/// A word of the command line as a refusal shows it: debug-quoted, so a
+/// control character is visible, and at most 64 characters.
+fn shown_word(word: &str) -> String {
+    let mut shown = format!("{:?}", word.chars().take(64).collect::<String>());
+    if word.chars().nth(64).is_some() {
+        shown.push_str("...");
+    }
+    shown
 }
 
 /// `YYYY-MM-DD` as a day, or why not.
@@ -701,8 +732,8 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     if report.failures_unlisted() > 0 {
         let _ = writeln!(
             out,
-            "    ({} more not listed; the newest {} are; every one is in the journal and the \
-             audit stream)",
+            "    ({} more not listed; the newest {} are; each was logged as it \
+             happened, and the journal keeps each day's cause codes, not each failure)",
             report.failures_unlisted(),
             report.failures.len()
         );

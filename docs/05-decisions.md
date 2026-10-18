@@ -72076,3 +72076,60 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
+
+**Number** the ledger's head plus one at this head (A6); re-checked at
+landing.
+
+**What was observed.** The second agent's check of IA-1 (round 2,
+`verify-IA-1-r1.json`) ran `cli gdfl-import indices tickstore 2024-03-05
+2024-03-05 --snapshot --stored` on its own scratch store: `--snapshot` took
+the next word, `--stored`, as its NAME, and D-4902's alphabet (letters,
+digits, `.`, `-`, `_`) let a flag-shaped name pass, so the stored scope was
+dropped without a word, the run read 8 files under the filter `*` instead of
+the stored scope's 6, journaled `done indices 2024-03-05 *` and exited 0.
+Its follow-ups added two more in the same request: `Request::to_line` wrote a
+request `misuse` refuses (`only=[""]` reads back as no filter, every
+instrument), and a filter name with a space, a newline or a NUL reached the
+importer and was refused `filter_name` only after the lock.
+
+**Decision.** (1) A snapshot name is still at most 64 bytes of letters,
+digits, `.`, `-` and `_`, and now BEGINS WITH A LETTER OR A DIGIT, so a word
+shaped like a flag (`--stored`, `-x`) or a path step (`.`, `..`) is never
+one: `snapshot_invalid`, before any lock, from the request, the line and the
+plan alike. (2) The cli's `--snapshot` takes the next word only when it does
+not begin with `-`; a flag there, nothing there, or a second `--snapshot`
+is refused as a misuse naming `--snapshot takes a NAME after it` (or `given
+twice`) before the store is asked for. A word beginning with `-` that is not
+one of the verb's three flags is refused as `not a flag of gdfl-import`,
+never filed as a symbol. (3) `Request::misuse` applies the store's symbol
+rule (`brutex_core::symbol::Symbol`, exact bytes: A-Z, 0-9, `-`, `_`, `&`,
+at most 24) to every filter name after the empty and the count checks, as a
+new code `symbol_invalid` appended to `RunRefusal::CODES` (a misuse: the cli
+exits `MISUSED`, an api child answers 400); the importer's own `filter_name`
+check stays as the second line. (4) `Request::to_line` returns `misuse()`
+first: a request no run may make is never written. The line codec still
+carries every byte both ways; the request-line test now proves that at the
+codec (`encode`/`decode` of a space, a comma, `%`, a NUL, a newline and a
+non-ASCII letter) and proves that a line naming such a name is read exactly
+and then refused `symbol_invalid`, since no such name is a filter any more.
+(5) A run a census or durability refusal stopped carries what it did in the
+refusal (`ImportRefusal::report`); `drive_core` now seals that report as it
+seals a finished one (`ImportRefusal::seal`, the same three variants), so the
+receipt lists the newest 1,024 failures by name, never up to 2,047 (D-4839
+unchanged in intent; the refusal path had been missed). The receipt's line
+about failures not listed now says what is true: each was logged as it
+happened and the journal keeps each day's cause codes, not each failure.
+
+**Not here.** Run ids of two kinds started in one second (IA-2, D-4847), a
+range bound on the request (IA-10a), and a record of the snapshot name: it travels in the
+request and no event or file of the run names it until IA-2's claim and
+request sidecar (D-4902).
+
+**Proof.** `pull::gdfl_run::tests::a_flag_shaped_snapshot_or_a_name_that_is_no_symbol_is_refused_before_any_lock`,
+`the_request_line_carries_a_256_name_filter_and_a_snapshot_intact`,
+`every_run_refusal_has_its_own_code`,
+`a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does`; cli
+`a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol`.
+Invariants IA1-06, IA1-12 and IA1-15 in `docs/04-invariants.md`.

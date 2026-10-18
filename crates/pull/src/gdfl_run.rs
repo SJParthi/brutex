@@ -366,7 +366,8 @@ pub struct Request {
     /// Who started it.
     pub by: By,
     /// The operator's snapshot name for the run, if any (D-4902): at most
-    /// [`SNAPSHOT_MAX`] bytes of letters, digits, `.`, `-` and `_`.
+    /// [`SNAPSHOT_MAX`] bytes of letters, digits, `.`, `-` and `_`, beginning
+    /// with a letter or a digit.
     pub snapshot: Option<String>,
 }
 
@@ -394,8 +395,8 @@ impl Request {
 
     /// What the request asks that no run may do, before anything is read:
     /// `--stored` with options, a range that runs backwards, an empty name,
-    /// a filter of more than [`ONLY_MAX`] names, a snapshot name outside its
-    /// alphabet or bound. `None` for a request [`plan`] may go on with.
+    /// a filter of more than [`ONLY_MAX`] names, a name that is not a symbol
+    /// as the store files it, a snapshot name outside its alphabet or bound. `None` for a request [`plan`] may go on with.
     #[must_use]
     pub fn misuse(&self) -> Option<RunRefusal> {
         if self.stored && self.kinds.contains(ImportKind::Options) {
@@ -415,6 +416,11 @@ impl Request {
                 names: self.only.len(),
             });
         }
+        if let Some(name) = self.only.iter().find(|name| !symbol_ok(name)) {
+            return Some(RunRefusal::SymbolInvalid {
+                name: shown(name, 32),
+            });
+        }
         if let Some(name) = &self.snapshot
             && !snapshot_ok(name)
         {
@@ -431,9 +437,14 @@ impl Request {
     ///
     /// # Errors
     ///
+    /// What [`Request::misuse`] refuses, first: a request no run may make is
+    /// never written (an empty name would read back as no filter at all).
     /// [`RunRefusal::RequestLineInvalid`] when the line would be longer than
     /// [`REQUEST_LINE_MAX`]: never cut, since a cut filter is another run.
     pub fn to_line(&self) -> Result<String, RunRefusal> {
+        if let Some(misuse) = self.misuse() {
+            return Err(misuse);
+        }
         let kinds: Vec<&str> = self.kinds.iter().map(ImportKind::as_str).collect();
         let only: Vec<String> = self.only.iter().map(|name| encode(name)).collect();
         let line = format!(
@@ -585,13 +596,24 @@ fn field_of<'l>(
         })
 }
 
-/// Whether `name` is a snapshot name (D-4902).
+/// Whether `name` is a snapshot name (D-4902): it begins with a letter or a
+/// digit (IA-1 repair 1), so a word shaped like a flag (`--stored`) or a
+/// path step (`.`, `..`) is never one.
 fn snapshot_ok(name: &str) -> bool {
-    !name.is_empty()
+    name.bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric())
         && name.len() <= SNAPSHOT_MAX
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// Whether `name` is a symbol exactly as the store files it: the rule the
+/// importer's `check_filter` applies after the lock (D-2811), applied here
+/// before it.
+fn symbol_ok(name: &str) -> bool {
+    brutex_core::symbol::Symbol::new(name).is_ok_and(|symbol| symbol.as_str() == name)
 }
 
 /// `0` or `1`.
@@ -762,6 +784,14 @@ pub enum RunRefusal {
         /// Why.
         why: String,
     },
+    /// A filter name that is not a symbol as the store files it (IA-1 repair
+    /// 1): refused here, before any lock, by the rule the importer's
+    /// `filter_name` applies after it (`brutex_core::symbol::Symbol`, exact
+    /// bytes).
+    SymbolInvalid {
+        /// The name, as shown.
+        name: String,
+    },
 }
 
 impl RunRefusal {
@@ -780,6 +810,7 @@ impl RunRefusal {
             Self::SourceUnset { .. } => "source_unset",
             Self::Scope { .. } => "scope_unreadable",
             Self::SourceUnopened { .. } => "source_unopened",
+            Self::SymbolInvalid { .. } => "symbol_invalid",
         }
     }
 
@@ -795,12 +826,13 @@ impl RunRefusal {
                 | Self::EmptySymbol
                 | Self::FilterTooLong { .. }
                 | Self::SnapshotInvalid { .. }
+                | Self::SymbolInvalid { .. }
         )
     }
 
     /// Every code, in the order of the enum: the table a reader names a code
     /// by, and the test that no two variants share one.
-    pub const CODES: [&'static str; 11] = [
+    pub const CODES: [&'static str; 12] = [
         "request_line_invalid",
         "stored_with_options",
         "range_backwards",
@@ -812,6 +844,7 @@ impl RunRefusal {
         "source_unset",
         "scope_unreadable",
         "source_unopened",
+        "symbol_invalid",
     ];
 }
 
@@ -836,7 +869,7 @@ impl core::fmt::Display for RunRefusal {
             Self::SnapshotInvalid { name } => write!(
                 f,
                 "the snapshot name {name} is not 1 to {SNAPSHOT_MAX} letters, digits, '.', '-' \
-                 or '_'"
+                 or '_' beginning with a letter or a digit (a flag or a path step is no name)"
             ),
             Self::LogUnavailable { why } => write!(
                 f,
@@ -849,6 +882,13 @@ impl core::fmt::Display for RunRefusal {
                 "{var} is not set; it names where the GDFL data is read from and has no default"
             ),
             Self::SourceUnopened { path, why } => write!(f, "{}: {why}", path.display()),
+            Self::SymbolInvalid { name } => write!(
+                f,
+                "{name} is not a symbol as the store files it (A-Z, 0-9, '-', '_' or '&', at \
+                 most {cap} bytes): refused before any lock, as the importer would refuse \
+                 it after one",
+                cap = brutex_core::symbol::SYMBOL_CAPACITY
+            ),
         }
     }
 }

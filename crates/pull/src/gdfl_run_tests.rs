@@ -61,16 +61,19 @@ fn process<'a>(store: &'a Path, log: &'a LogState) -> Process<'a> {
 
 /// **A 256-NAME FILTER AND A SNAPSHOT CROSS THE LINE INTACT** (IA-GR-35's
 /// addition, D-4902): the line is the api child's only source of its
-/// request, so every byte a name can hold (an `&`, a comma, a space, a `%`,
-/// a non-ASCII letter) comes back exactly, and the line never holds a space
-/// inside a value or a newline.
+/// request, so every byte a name can hold comes back exactly, and the line
+/// never holds a space inside a value or a newline. A filter name is a
+/// symbol as the store files it (IA-1 repair 1), so the `&` is the one byte
+/// of a request that needs encoding; the codec itself carries every byte (a
+/// comma, a space, a `%`, a non-ASCII letter) both ways, and a line naming
+/// such a name is read exactly and then refused `symbol_invalid`.
 #[test]
 fn the_request_line_carries_a_256_name_filter_and_a_snapshot_intact() {
     let mut asked = request(&[ImportKind::Stocks, ImportKind::Indices]);
     asked.only = (0..ONLY_MAX - 6).map(|i| format!("SYM{i:03}")).collect();
     asked
         .only
-        .extend(["M&M", "BAJAJ-AUTO", "A B", "x,y", "100%", "café"].map(str::to_owned));
+        .extend(["M&M", "BAJAJ-AUTO", "L&TFH", "J&KBANK", "_X", "9"].map(str::to_owned));
     assert_eq!(asked.only.len(), ONLY_MAX);
     asked.retry_refused = true;
     asked.workers = Workers::new(3).unwrap();
@@ -82,7 +85,10 @@ fn the_request_line_carries_a_256_name_filter_and_a_snapshot_intact() {
     assert!(!line.contains('\n'));
     assert!(line.starts_with("gdfl-request v1 mode=import kinds=indices,stocks "));
     assert!(line.contains(" only=SYM000,SYM001,"), "{line}");
-    assert!(line.contains(",M%26M,BAJAJ-AUTO,A%20B,x%2Cy,100%25,caf%C3%A9 "));
+    assert!(
+        line.contains(",M%26M,BAJAJ-AUTO,L%26TFH,J%26KBANK,_X,9 "),
+        "{line}"
+    );
     assert_eq!(
         line.split(' ').count(),
         14,
@@ -97,6 +103,22 @@ fn the_request_line_carries_a_256_name_filter_and_a_snapshot_intact() {
     );
     // A trailing newline (stdin's) is the same line.
     assert_eq!(Request::from_line(&format!("{line}\n")).unwrap(), asked);
+    // The codec carries every byte a value can hold, both ways.
+    for odd in ["A B", "x,y", "100%", "café", "a\nb", "\0", "%", ","] {
+        let encoded = encode(odd);
+        assert!(
+            encoded
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'%')),
+            "{encoded}"
+        );
+        assert_eq!(decode(&encoded).unwrap(), odd);
+    }
+    // A line naming one is read exactly, then refused as no symbol.
+    let odd = line.replacen(",9 ", ",A%20B ", 1);
+    let refused = Request::from_line(&odd).unwrap_err();
+    assert_eq!(refused.code(), "symbol_invalid", "{refused}");
+    assert!(refused.to_string().contains("\"A B\""), "{refused}");
 }
 
 /// Every way a line can be wrong is refused by name before any lock, as
@@ -189,6 +211,98 @@ fn a_request_line_that_is_not_one_is_refused_before_any_lock() {
     let mut long = request(&[ImportKind::Stocks]);
     long.only = (0..ONLY_MAX).map(|_| "&".repeat(12)).collect();
     assert_eq!(long.to_line().unwrap_err().code(), invalid);
+}
+
+/// **A FLAG IS NEVER A SNAPSHOT NAME, AND A FILTER NAME IS A SYMBOL** (IA-1
+/// repair 1): a snapshot name begins with a letter or a digit, so a word
+/// shaped like a flag (`--stored`, `--retry-refused`, `-x`) or a path step
+/// (`.`, `..`) is refused `snapshot_invalid`, and a filter name that is not a
+/// symbol as the store files it is refused `symbol_invalid`: by the request,
+/// by the line written and read and by the plan, each before any lock,
+/// rather than as `filter_name` after the lock. A request `misuse` refuses
+/// is never written as a line (the verifier's `only=[""]`, which would read
+/// back as no filter at all).
+#[test]
+fn a_flag_shaped_snapshot_or_a_name_that_is_no_symbol_is_refused_before_any_lock() {
+    let store = scratch("flag-snapshot");
+    let log = installed();
+    let env = env_with(vec![(TICKSTORE_VAR, store.clone())]);
+    let refused_everywhere = |asked: &Request, code: &str| {
+        let refused = asked.misuse().unwrap_or_else(|| panic!("{asked:?}"));
+        assert_eq!(refused.code(), code, "{asked:?}");
+        assert!(refused.misuse(), "{refused}");
+        assert_eq!(asked.to_line().unwrap_err(), refused, "never written");
+        let planned = plan(
+            asked.clone(),
+            &process(&store, &log),
+            &env,
+            &mut SourceCache::default(),
+        );
+        assert_eq!(planned.unwrap_err(), refused, "the plan says the same");
+        refused
+    };
+    let good = request(&[ImportKind::Indices]).to_line().unwrap();
+    for name in [
+        "--stored",
+        "--retry-refused",
+        "--snapshot",
+        "-x",
+        "-",
+        ".",
+        "..",
+        "_x",
+        ".hidden",
+    ] {
+        let mut asked = request(&[ImportKind::Indices]);
+        asked.snapshot = Some(name.to_owned());
+        let refused = refused_everywhere(&asked, "snapshot_invalid");
+        assert!(
+            refused
+                .to_string()
+                .contains("beginning with a letter or a digit"),
+            "{refused}"
+        );
+        let line = good.replacen("snapshot=", &format!("snapshot={}", encode(name)), 1);
+        assert_eq!(Request::from_line(&line).unwrap_err(), refused, "{line}");
+    }
+    for name in ["7", "a", "A.b-c_d", "pre_restate-2026.10.17", "pre-1"] {
+        let mut asked = request(&[ImportKind::Indices]);
+        asked.snapshot = Some(name.to_owned());
+        assert_eq!(asked.misuse(), None, "{name}");
+        assert_eq!(
+            Request::from_line(&asked.to_line().unwrap()).unwrap(),
+            asked
+        );
+    }
+    let mut longest = request(&[ImportKind::Indices]);
+    longest.snapshot = Some("s".repeat(SNAPSHOT_MAX));
+    assert_eq!(longest.misuse(), None);
+    let too_long = "S".repeat(brutex_core::symbol::SYMBOL_CAPACITY + 1);
+    for name in [
+        "A B", "nifty", "x,y", "100%", "café", "NIFTY\n", "N\0", "N/A", &too_long,
+    ] {
+        let mut asked = request(&[ImportKind::Stocks]);
+        asked.only = vec!["NIFTY".to_owned(), name.to_owned()];
+        let refused = refused_everywhere(&asked, "symbol_invalid");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("{:?}", cut(name, 32))),
+            "{refused}"
+        );
+    }
+    let mut widest = request(&[ImportKind::Stocks]);
+    widest.only = vec![
+        "S".repeat(brutex_core::symbol::SYMBOL_CAPACITY),
+        "M&M".to_owned(),
+        "BAJAJ-AUTO".to_owned(),
+    ];
+    assert_eq!(widest.misuse(), None);
+    // The empty name keeps its own code, before the symbol rule.
+    let mut empty = request(&[ImportKind::Stocks]);
+    empty.only = vec![String::new()];
+    refused_everywhere(&empty, "symbol_empty");
+    std::fs::remove_dir_all(store).unwrap();
 }
 
 // ═══ Refusals before any lock ═══════════════════════════════════════════════
@@ -364,6 +478,9 @@ fn every_run_refusal_has_its_own_code() {
             path: PathBuf::new(),
             why: String::new(),
         },
+        RunRefusal::SymbolInvalid {
+            name: String::new(),
+        },
     ];
     let codes: Vec<&str> = all.iter().map(RunRefusal::code).collect();
     assert_eq!(codes, RunRefusal::CODES);
@@ -371,8 +488,8 @@ fn every_run_refusal_has_its_own_code() {
     assert_eq!(unique.len(), codes.len());
     assert_eq!(
         all.iter().filter(|r| r.misuse()).count(),
-        6,
-        "the request's six, never the process's"
+        7,
+        "the request's seven, never the process's"
     );
 }
 
@@ -952,6 +1069,51 @@ fn a_failure_past_the_kept_bound_is_counted_and_never_listed() {
     few.name(vendor, failure(0));
     few.seal();
     assert_eq!((few.failures.len(), few.failures_unlisted()), (1, 0));
+}
+
+/// **A REFUSAL'S REPORT IS SEALED AS A FINISHED RUN'S IS** (IA-1 repair 1,
+/// the verifier's follow-up): a run a census or durability refusal stopped
+/// carries what it did in the refusal, and `drive_core` cuts that report to
+/// the newest 1,024 by name too, so its receipt never lists up to 2,047. A
+/// refusal that carries no report is left as it is.
+#[test]
+fn a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does() {
+    let vendor = Cause::open(Stage::Vendor, "malformed_row");
+    let mut done = Report::default();
+    for i in 0..(2 * FAILURES_KEPT - 1) {
+        done.name(vendor, failure(i));
+    }
+    assert_eq!(
+        done.failures.len(),
+        2 * FAILURES_KEPT - 1,
+        "not cut while it runs"
+    );
+    let mut refusal = ImportRefusal::Durability {
+        kind: ImportKind::Indices,
+        day: day(2024, 4, 1),
+        why: "disk full".to_owned(),
+        done: Box::new(done),
+    };
+    refusal.seal();
+    let report = refusal.report().unwrap();
+    assert_eq!(report.failures.len(), FAILURES_KEPT);
+    assert_eq!(report.failures_total, 2 * FAILURES_KEPT - 1);
+    assert_eq!(report.failures_unlisted(), FAILURES_KEPT - 1);
+    assert_eq!(
+        report.failures[FAILURES_KEPT - 1].instrument,
+        format!("f{}", 2 * FAILURES_KEPT - 2),
+        "the newest are kept"
+    );
+    let sealed = refusal.clone();
+    refusal.seal();
+    assert_eq!(refusal, sealed, "idempotent");
+    let mut none = ImportRefusal::RangeBackwards {
+        from: day(2024, 4, 2),
+        to: day(2024, 4, 1),
+    };
+    let before = none.clone();
+    none.seal();
+    assert_eq!((none.report(), &none), (None, &before));
 }
 
 // ═══ The journal read and refreshed (L-IA-2) ════════════════════════════════

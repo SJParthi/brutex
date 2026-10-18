@@ -1010,3 +1010,63 @@ fn the_receipt_says_how_many_failures_it_does_not_list() {
         "{out}"
     );
 }
+
+/// **`--snapshot` NEVER TAKES A FLAG AS ITS NAME** (IA-1 repair 1, the
+/// verifier's blocking finding): `--snapshot --stored` once took `--stored`
+/// as the snapshot's name, dropped the stored scope and ran the swept surface
+/// under no filter with exit 0. A flag-shaped word after `--snapshot`, a
+/// `--snapshot` with nothing after it, a second `--snapshot` and a flag the
+/// verb does not have are each refused as a misuse before the store is asked
+/// for, so before any lock or read; and the flags keep their meaning
+/// wherever a NAME sits among them.
+#[test]
+fn a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol() {
+    let ts = scratch("snapshot-flag");
+    tick_store(&ts);
+    let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
+    let head = ["indices", "tickstore", "2024-04-01", "2024-04-01"];
+    let needs_a_name = "--snapshot takes a NAME after it";
+    let cases: [(&[&str], &str); 10] = [
+        (&["--snapshot", "--stored"], needs_a_name),
+        (&["--snapshot", "--retry-refused"], needs_a_name),
+        (&["--snapshot", "--snapshot", "pre-1"], needs_a_name),
+        (&["--snapshot", "-x"], needs_a_name),
+        (&["--snapshot", "-"], needs_a_name),
+        (&["NIFTY", "--snapshot"], needs_a_name),
+        (&["--snapshot", "a", "--snapshot", "b"], "given twice"),
+        (&["--stord"], "is not a flag of gdfl-import"),
+        (&["-s", "NIFTY"], "is not a flag of gdfl-import"),
+        (&["--snapshot", ".."], "snapshot_invalid"),
+    ];
+    for (rest, says) in cases {
+        let args: Vec<&str> = head.iter().chain(rest).copied().collect();
+        let mut out = String::new();
+        let code = command_with(
+            &args,
+            &env,
+            &|| Err("the store was asked for".to_owned()),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{args:?}: {out}");
+        assert!(out.starts_with("refused: "), "{args:?}: {out}");
+        assert!(out.contains(says), "{args:?}: {out}");
+        assert!(!out.contains("the store was asked for"), "{args:?}: {out}");
+    }
+    let flags = [
+        "--stored",
+        "--snapshot",
+        "pre-1",
+        "NIFTY",
+        "--retry-refused",
+        "BANKNIFTY",
+    ];
+    let request = asked(
+        ("indices", "tickstore", "2024-04-01", "2024-04-01", &flags),
+        &env,
+    )
+    .unwrap();
+    assert!(request.stored && request.retry_refused, "{request:?}");
+    assert_eq!(request.snapshot.as_deref(), Some("pre-1"));
+    assert_eq!(request.only, ["NIFTY", "BANKNIFTY"]);
+    std::fs::remove_dir_all(ts).unwrap();
+}
