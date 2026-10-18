@@ -338,15 +338,25 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
       under this mutant ended in the container's restart.
   - **The container restarted at about 23:30.** Run C stopped part way and
     resumed with `--iterate`. Nothing committed was lost.
-  - **Run C** (`sealed.rs`, `sealed_codec.rs`, 910 mutants): 412 done, 392
-    caught, 17 unviable, 3 missed.
-    - `Head::check` → `Ok(())` and its `||` → `&&`: run C skips
+  - **Run C, done** (`sealed.rs`, `sealed_codec.rs`, 910 mutants, five
+    legs). The last leg, on `349a8a34`'s tree, tested the 232 not already
+    caught or unviable: 217 caught, 9 unviable, 5 missed, 1 timeout.
+    - `Head::check` → `Ok(())` and its `||` → `&&` were missed. Run C skips
       `a_misfiled_month_is_refused` and
       `a_length_that_is_not_the_heads_is_refused` for speed, and those two
       exist to kill both. The misfiled test moves the month within its
-      year and the year within its month. The re-test with the full suite
-      is what counts.
-    - `Fold::push` `<` → `<=`, an argued equivalent.
+      year and the year within its month.
+    - `Fold::push` `<` → `<=` was missed, an argued equivalent. The guard
+      never stops the loop, and `finish` truncates the table to
+      `table_rows` anyway.
+    - `last_before`'s `block > 0` → `true` and `>` → `>=` were missed,
+      argued equivalents: the guard runs only for `index ≥ 1`, which
+      needs `block ≥ 1`.
+    - The 1 timeout is `audited`'s `<` → `<=` (below).
+    - **Re-tested with the full suite** on `349a8a34`, with the one
+      full-disk catch (`frames` → `Ok(())`): 6 tested, 3 caught (both
+      `Head::check` mutants and `frames`), 3 missed (exactly the three
+      equivalents).
   - **The disk allowance filled at about 22:11.** Tests that fail under a
     mutant leave their scratch directories behind: 11 GB of them in run
     B's TMPDIR and 4.8 GB in run C's. Run C stopped on its own log write.
