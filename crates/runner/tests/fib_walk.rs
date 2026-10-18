@@ -3935,3 +3935,81 @@ fn the_exit_set_digest_is_the_hash_of_its_bytes() {
     assert_eq!(set.digest(), brutex_core::blake3::hash(&set.bytes()));
     assert_ne!(set.digest(), five_reordered().digest());
 }
+
+/// Every seeded component stops at its own boundary: a median that would be
+/// no value (or a duplicate of a structural one) adds nothing, and the next
+/// value adds exactly one. The bare set is stop {none, beyond} x trail
+/// {none, swing of one}: four variants.
+#[test]
+fn a_seed_median_at_its_boundary_adds_nothing_and_one_past_it_adds_one() {
+    let none: [Sample; 0] = [];
+    let base = SeedSamples {
+        far_edge_excursion_ticks: &none,
+        run_up_milli_r: &none,
+        giveback_permille: &none,
+        pullback_candles: &none,
+        poke_through_paisa: &none,
+        swing_size_milli_r: &none,
+        last_peak_clock_seconds: &none,
+        time_to_best_seconds: &none,
+    };
+    let count = |seeds: SeedSamples<'_>| {
+        seed_exit_set(Search::Long, 0, 1, &seeds)
+            .expect("seeds")
+            .count()
+    };
+    let zero = samples(&[(0, 0)]);
+    let one = samples(&[(0, 1)]);
+    let two = samples(&[(0, 2)]);
+    let wide = samples(&[(0, 70_000)]);
+    let forced = samples(&[(0, at(15, 9, 0))]);
+    let before = samples(&[(0, at(15, 8, 59))]);
+    assert_eq!(count(base), 4);
+    // A stop zero ticks beyond the base is the structural one already.
+    let far = |s| SeedSamples {
+        far_edge_excursion_ticks: s,
+        ..base
+    };
+    assert_eq!(count(far(&zero)), 4);
+    assert_eq!(count(far(&one)), 6);
+    let give = |s| SeedSamples {
+        giveback_permille: s,
+        ..base
+    };
+    assert_eq!(count(give(&zero)), 4);
+    assert_eq!(count(give(&wide)), 4, "beyond u16: no value, never wrapped");
+    assert_eq!(count(give(&one)), 8);
+    // A swing of width one is always present.
+    let pull = |s| SeedSamples {
+        pullback_candles: s,
+        ..base
+    };
+    assert_eq!(count(pull(&one)), 4);
+    assert_eq!(count(pull(&wide)), 4);
+    assert_eq!(count(pull(&two)), 6);
+    let poke = |s| SeedSamples {
+        poke_through_paisa: s,
+        ..base
+    };
+    assert_eq!(count(poke(&zero)), 4);
+    assert_eq!(count(poke(&one)), 6);
+    let step = |s| SeedSamples {
+        swing_size_milli_r: s,
+        ..base
+    };
+    assert_eq!(count(step(&zero)), 4);
+    assert_eq!(count(step(&one)), 6);
+    // An instant at 15:09:00 collapses into the forced exit.
+    let clock = |s| SeedSamples {
+        last_peak_clock_seconds: s,
+        ..base
+    };
+    assert_eq!(count(clock(&forced)), 4);
+    assert_eq!(count(clock(&before)), 8);
+    let hold = |s| SeedSamples {
+        time_to_best_seconds: s,
+        ..base
+    };
+    assert_eq!(count(hold(&zero)), 4);
+    assert_eq!(count(hold(&one)), 8);
+}
