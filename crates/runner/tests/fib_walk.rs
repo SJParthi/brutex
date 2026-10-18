@@ -3926,3 +3926,12 @@ fn a_whole_unit_of_permille_is_valid_and_one_more_is_refused() {
         })
     );
 }
+
+/// The set's digest is the BLAKE3 of its canonical bytes, so two orders of
+/// one set of variants are two sets.
+#[test]
+fn the_exit_set_digest_is_the_hash_of_its_bytes() {
+    let set = five();
+    assert_eq!(set.digest(), brutex_core::blake3::hash(&set.bytes()));
+    assert_ne!(set.digest(), five_reordered().digest());
+}
