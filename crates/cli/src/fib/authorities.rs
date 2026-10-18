@@ -42,7 +42,7 @@
 //! it: an authority that is not built is never quietly replaced by an interim
 //! one.
 //!
-//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-10).
+//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-11).
 
 use std::fmt;
 

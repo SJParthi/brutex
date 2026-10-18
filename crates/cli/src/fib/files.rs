@@ -46,7 +46,7 @@
 //! FIB-14) is a container with the stride its header declares, fixed for the
 //! file, until its owner declares the layout.
 //!
-//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-10).
+//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-11).
 
 use std::fs::{self, File};
 use std::io::{SeekFrom, Write as _};

@@ -61,7 +61,7 @@
 //! one prefix count per day for completeness, one slot per minute. Every
 //! authority lookup is O(1) (`super::authorities`).
 //!
-//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-10).
+//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-11).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
