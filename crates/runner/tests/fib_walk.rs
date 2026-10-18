@@ -3605,7 +3605,15 @@ fn the_index_counts_its_bytes_and_more_bars_or_widths_hold_more() {
             .expect("indexes")
             .bytes()
     };
-    assert!(bytes(&few, &stop) > 0);
+    // A near-empty day's index is its second-to-bar map, one u32 for each
+    // second of the day, and little else: never as much as twice that.
+    let second_map = 86_400 * 4;
+    assert!(bytes(&few, &stop) > second_map, "{}", bytes(&few, &stop));
+    assert!(
+        bytes(&few, &stop) < 2 * second_map,
+        "{}",
+        bytes(&few, &stop)
+    );
     assert!(bytes(&many, &stop) > bytes(&few, &stop));
     assert!(bytes(&many, &swing) > bytes(&many, &stop), "the swing list");
     let index = many.index(&minute_profile(), &stop).expect("indexes");
