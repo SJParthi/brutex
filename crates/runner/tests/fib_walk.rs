@@ -4137,6 +4137,30 @@ fn a_late_slot_never_reads_the_swings_confirmed_before_its_window() {
     let mut bars: Vec<Candle> = morning.chain(afternoon).collect();
     bars.push(quiet(at(15, 9, 0), P + 200, 1_000));
     let day = Day::minutes(bars);
+    // 69 afternoon minutes, the forced step, and the one swing confirmed at
+    // 14:00:00 itself (13:58's, read from its minute on and passed: it
+    // formed before the fill). `by_minute` starts at the first swing
+    // confirmed at or after the window's minute.
+    assert_eq!(late_slot_work(&day), 71);
+    // Trail candles that close half a minute past each minute: no swing is
+    // confirmed on a minute's first second, and the slot still reads only
+    // the one confirmed at 14:00:30.
+    let mut shifted = day.clone();
+    shifted.trail = day
+        .bars
+        .iter()
+        .map(|b| {
+            let mut c = *b;
+            c.ts_micros += 30_000_000;
+            candle_of(&c)
+        })
+        .collect();
+    assert_eq!(late_slot_work(&shifted), 71);
+}
+
+/// The work of a long slot decided at 14:00 under a swing trail, walked to
+/// its end.
+fn late_slot_work(day: &Day) -> u64 {
     let variant = ExitVariant {
         trailing_stop: TrailingStop::Swing {
             width: 1,
@@ -4158,11 +4182,7 @@ fn a_late_slot_never_reads_the_swings_confirmed_before_its_window() {
     .expect("a slot");
     slot.run();
     assert_eq!(slot.outcome().exit_reason, ExitReason::Forced);
-    // 69 afternoon minutes, the forced step, and the one swing confirmed at
-    // 14:00:00 itself (13:58's, read from its minute on and passed: it
-    // formed before the fill). `by_minute` starts at the first swing
-    // confirmed at or after the window's minute.
-    assert_eq!(slot.work(), 71);
+    slot.work()
 }
 
 /// A swing of width two must be below the two candles on each side: the
