@@ -48,8 +48,9 @@ use pull::gdfl_import::{ImportKind, Rescan, rescan_cm, rescan_nfo};
 use pull::gdfl_nfo::NfoZips;
 use pull::session::Day;
 
-use crate::gdfl_import_command::{CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR, day, root, scope_of};
+use crate::gdfl_import_command::{CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR, day, root};
 use crate::{FAILED, MISUSED, OK};
+use pull::gdfl_run::scope::of as scope_of;
 
 /// The flag that writes the options lineage too (D-3331, D-3343).
 pub(crate) const LINEAGE: &str = "--lineage";

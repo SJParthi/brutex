@@ -4648,3 +4648,57 @@ that grows only when the operator saves (`docs/06-limits.md` L-R305-6).
 
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
 line above is a `v2` directory beside this one, never a rewrite of `v1`.
+
+## §37 — A GDFL run's progress record, format v1 (D-4904)
+
+**Path.** `<store>/imports/gdfl.<kind>.progress` on a version-4 census,
+`<store>/imports/gdfl.progress` on version 3 (`pull::gdfl_run::progress_path`).
+Written by the one process that runs that kind (IA-1); IA-2 adds the claim,
+request sidecar, stop file and runs-ledger subsections under this number.
+
+**Shape.** Exactly 4,096 bytes, rewritten whole by one positional write at
+offset 0, at the run's begin, at every day whose day counts changed,
+otherwise at most once a second, and at the run's end. Never appended to.
+All integers little-endian. The offsets are the definition.
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXPG` |
+| 8 | 2 | version, u16 = 1 |
+| 10 | 1 | state: 1 running, 2 stopping, 3 finished, 4 stopped, 5 shutdown, 6 source_lost, 7 disk_full, 8 refused, 9 census, 10 durability; 0 never written. Numbers are never reused |
+| 11 | 1 | mode: 1 import |
+| 12 | 1 | kind: 1 indices, 2 stocks, 3 options |
+| 13 | 1 | source: 1 `cm_zip`, 2 `nfo_zips`, 3 tickstore |
+| 14 | 1 | by: 1 cli, 2 api |
+| 15 | 1 | census layout: 3 or 4; 0 not known |
+| 16 | 8 | run: the journal's run id (0 before the first day) |
+| 24 | 4 | pid |
+| 28 | 4 | workers |
+| 32 | 4 | from, `yyyymmdd` |
+| 36 | 4 | to, `yyyymmdd` |
+| 40 | 4 | the day now, `yyyymmdd` (0 before the first) |
+| 44 | 4 | the day now's index in the range, from 0 |
+| 48 | 4 | the range's calendar days |
+| 52 | 1 | refusal slots used, 0 to 8 |
+| 53 | 3 | zero |
+| 56 | 176 | 22 u64 counters, in this order: files read, files not wanted, files refused, rows, seconds written, failures named, days imported, days done with refusals, days incomplete, days all refused, days already done, days closed (calendar), days not in source, days refused, elapsed seconds (monotonic clock), started (UNIX s), updated (UNIX s), events stamped with a held clock (`telemetry::Health::clock_held`), days in the rate's window, the window's seconds, events the run's sink dropped (`telemetry::Health::dropped`) and the sink's failed rolls (`telemetry::Health::rotation_failures`), both since the sink opened (RA-202: a run whose log loses lines half-way says so beside its counters) |
+| 232 | 24 | zero |
+| 256 | 2,816 | 8 refusal slots of 352 bytes, oldest first |
+| 3,072 | 1,020 | zero |
+| 4,092 | 4 | CRC-32C (Castagnoli) of bytes 0..4,092 |
+
+**A slot** (352 bytes, from its start): day `yyyymmdd` u32 (0); the lengths
+of stage, code, about and why, one byte each (4..8); stage, 8 bytes (8);
+code, 32 bytes (16); about, 64 bytes (48); why, 240 bytes (112). Each text
+is UTF-8 cut on a whole character to its field; the rest of a field is zero.
+
+**What a reader does.** A length other than 4,096, another magic, another
+version (`progress: format <n> unknown`: never guessed), a slot count above
+8 or a slot text that is not UTF-8 within its field are faults named by
+`pull::gdfl_run::ProgressFault`. A CRC that does not match is a torn read
+during a write: the reader reads once more, then names it
+(`Progress::read`). The rate and ETA are a reader's integer division of the
+window's days by its seconds; an ETA is always an extrapolation.
+
+**Proof.** `pull::gdfl_run::tests::the_progress_record_is_v1_byte_for_byte`
+asserts every offset above.
