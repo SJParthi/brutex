@@ -551,7 +551,15 @@ impl Filing<'_> {
                     match self.provenance(handed, held, done.bars_committed, begin_line) {
                         Ok(true) => filed.receipt = Receipt::Provenance,
                         Ok(false) => {}
-                        Err(refused) => filed.failures.push(refused),
+                        // Logged here, beside the failure it files (gate 19):
+                        // `note_staged` emits the day's `Error` event.
+                        Err(refusal) => filed.failures.push(note_staged(
+                            run,
+                            self.day,
+                            &handed.file.name,
+                            Stage::File,
+                            &refusal,
+                        )),
                     }
                 }
                 Landed::NewGeneration => {
@@ -653,7 +661,7 @@ impl Filing<'_> {
         held: &Held,
         committed: usize,
         begin_line: u64,
-    ) -> Result<bool, Staged> {
+    ) -> Result<bool, ImportRefusal> {
         let run = self.run;
         let (Some(origin), Some(member), Some(source)) =
             (self.origin, handed.facts.member.as_ref(), self.source)
@@ -690,10 +698,7 @@ impl Filing<'_> {
             };
             record_provenance(run.store_root, held, committed, &landing)
         });
-        recorded.map_err(|why| {
-            let refusal = ImportRefusal::Provenance { why };
-            note_staged(run, self.day, &handed.file.name, Stage::File, &refusal)
-        })
+        recorded.map_err(|why| ImportRefusal::Provenance { why })
     }
 
     /// A file whose day its month lacked inside what it holds, landed as a

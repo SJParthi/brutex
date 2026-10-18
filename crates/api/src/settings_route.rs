@@ -44,7 +44,9 @@
 //! A GET is one `stat` of the next generation's name (when nothing was
 //! saved) plus a fixed-size answer: O(1). `?history=N` reads N + 1 files,
 //! N at most [`MAX_HISTORY`]. The first request after start lists the
-//! settings directory once (named for `docs/06-limits.md`).
+//! settings directory once (named for `docs/06-limits.md`). Proof: gate 8's
+//! `/settings.json` rows at 2, 20 and 200 generations, run by
+//! `crates/api/benches/ratio.rs` (GF-1, gate 12).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -231,6 +233,10 @@ fn default_of(key: Key) -> (Option<String>, String) {
             None,
             "not set: the server derives the masters folder from HOME".to_owned(),
         ),
+        Key::DiskFloor => (
+            Some(pull::disk_projection::DEFAULT_FLOOR.to_string()),
+            pull::disk_projection::DEFAULT_FLOOR_SOURCE.to_owned(),
+        ),
     }
 }
 
@@ -411,6 +417,10 @@ pub const fn reader_of(key: Key) -> Result<&'static str, &'static str> {
         Key::SourceMasters => Err(
             "nothing reads a saved value yet: the server reads BRUTEX_MASTERS, else HOME, once \
              at start; owner: the masters loader",
+        ),
+        Key::DiskFloor => Err(
+            "nothing reads a saved value yet: pull::gdfl_dropbox checks the floor its caller \
+             passes before every file; owner: the ingest chain (R4-11), R4-23, R4-29",
         ),
     }
 }

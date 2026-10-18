@@ -1418,7 +1418,8 @@ fn measure_real_days_against_the_tools_files() {
 /// 32,768-byte header, then 56-byte rows). For each: the rows as one frame,
 /// and as 256-bar frames (the only way a page stays O(1)), bytes a bar in
 /// thousandths, and one 256-bar frame's decode p50/p99/max over 2,000 random
-/// pages. Writes nothing.
+/// pages. Writes nothing. Proof of the page's cost: this test,
+/// `pull::tickstore_write::tests::measure_ruzstd_fastest_on_bar_months`.
 #[test]
 #[ignore = "a measurement on copies of real bar months, run by hand with its inputs named"]
 fn measure_ruzstd_fastest_on_bar_months() {

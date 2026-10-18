@@ -1,6 +1,7 @@
 //! C-TSW-01 and C-TSW-02 (R4-08, E2E-02): the tick-store writer's cost per
 //! member at 1x, 10x and 100x a day's members, and a written day file's point
-//! lookup, flat across the same three sizes.
+//! lookup, flat across the same three sizes. Proof: the bench that mounts and
+//! runs this module, `crates/pull/benches/ratio.rs`.
 //!
 //! Writing is O(the day's bytes) by design (every byte is read, encoded,
 //! written and read back once), so the bound asserted is the cost PER MEMBER

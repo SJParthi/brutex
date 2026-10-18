@@ -67835,6 +67835,104 @@ CODE-14.
 `the_codes_and_their_severity_are_the_designs`,
 `format_v1_holds_every_fact_it_names`.
 
+### D-4810 — Zerodha answers are kept: each body deflated in a per-month pack beside a fixed receipt, for the vendor-pulled rungs — 2026-10-14
+
+**Implemented by** IA-8 (`crates/pull/src/response_keep.rs`). **Design**
+§6.3 "Keep", §17 Q3, finding F7.
+
+**Decision.** A broker's answer for a bar window is kept, not decoded and
+dropped: the body text, deflated, in one pack per (vendor, instrument and
+contract, timeframe, month), with a 128-byte receipt per window
+(`docs/02-store-format.md` §36), for the rungs pulled from the vendor (1min and
+1day). Never a header and never a token: the keeper is handed the body text
+and nothing else. The caller that holds the store root keeps it, after the
+landing returns (D-4859); `fetch::land` stays a pure row converter. A pack
+segment holds at most 64 MiB of bodies and 1,024 receipts; overflow is named
+(`pack_full`, `receipts_full`), never dropped silently.
+
+**Amended at landing (the rules audit, RA-075).** A full segment rolls to the
+next, up to eight per month, with an audited error event naming the roll, so
+keeping goes on instead of stopping at the first cap; the named refusals apply
+in the last segment. The verification half of the design's D-4810 row (minute
+by minute against the kept answer) is IA-9's and lands with it.
+
+**Amended in IA-8's verify round 1 (16 Oct 2026): the refused rows are a third
+cap, with the same two outcomes.** A segment's `.rsx` holds at most
+`REFUSAL_ROOM` = 2,796,202 records (64 MiB of 24-byte records). The first
+build skipped a window's refused rows once they did not fit, still wrote the
+receipt `rows_refused=N refusals=0` and returned `Ok` with no event, and no
+roll looked at the `.rsx` (the checker's probe: 5 rows dropped). Now a window
+whose rows do not fit rolls the month to the next segment like a full body (a
+repeated body included: it is kept again in the new segment rather than
+written `kept=2` without its rows); where no segment can take them (the last
+segment's room, or more rows than any segment holds) nothing is written and
+the append is refused `refusals_full`, its audited error event counting the
+rows left unkept. Refusing the whole append rather than writing the receipt
+with a new reason byte follows `receipts_full`, and keeps the receipt's one
+reason byte about the body: a body `pack_full` whose rows also could not be
+written would have needed two reasons. Two smaller bounds land with it: a
+reader refuses a receipt whose lengths pass the caps before allocating for
+them, and at most `MAX_PARKED_WAITERS` = 4 lock waiters stay parked per pack
+lock behind a holder that never lets go. Repair round 1 (17 Oct 2026) closes three edges of the same
+rule: more rows than any segment holds are refused before a roll taken for a
+full receipts or body file could hand them to an empty segment past its room;
+the writer refuses a CRC-valid receipt whose body or records end past the
+caps (`pack_damaged`) instead of rolling on it or overflowing its sum; and a
+window over months asks every later month for room before the first keeps
+anything, so `receipts_full` writes nothing, as its text says. The writer itself
+refuses rows past the room `refusals_full`, in every build, where it held only
+a `debug_assert` that a release build would have skipped.
+Repair round 2 (17 Oct 2026) corrects two things the second check found in
+round 1. The parked-waiter bound counted every waiter in `flock`, including
+one whose caller was still inside its 30 s wait, so a sixth healthy
+concurrent append of one pack was refused at once with a false "holder that
+has not let go" (the checker: 20 threads, 6 kept, 14 refused). Only a waiter
+whose caller's wait ran out is counted now, under the same mutex the waiter
+decides under when it finally gets the lock, so the two can never both think
+the other holds it. And every roll is an audited error event naming the
+month and the new segment's receipts file: a later month of a window that
+rolled used to roll with no event at all.
+Repair round 3 (18 Oct 2026) makes a window over months all-or-detectable. The
+third check killed a 20-thread writer five times on one pack and left two June
+receipts with no July pointer, every file CRC-whole, named by nothing and
+repaired by nothing. The choice: a 64-byte journal record per pack directory
+(`windows.rsw`), `open` before the first month's receipt and `closed` after the
+last pointer, so **the closing record is the commit of a window over months**
+(a window inside one month still commits with its receipt). The next append,
+under the pack lock and before anything else, finishes an open window: every
+missing pointer is written exactly as the interrupted append would have
+(`completed`), or, with no first receipt, the record is closed `abandoned`;
+both are an audited error event, and `response_keep::unfinished` names an open
+window to a reader meanwhile. Rejected: a flag in the first receipt (a receipt
+is never rewritten once trusted, so the flag could not be cleared without an
+in-place write), and repair by a reader (a reader takes no lock and writes
+nothing). The journal's look is one `stat` and at most 128 bytes per append
+(L-IA-52); a journal with no room for two more records refuses a window over
+months `windows_full` with nothing written. Every pack file's first write and
+every directory the keeper creates now syncs its parent; that is tested as a
+call, and its survival of a power loss is NOT PROVED.
+
+**Proof.** `the_kept_answer_decodes_to_the_rows_the_pull_landed`,
+`a_kept_answer_never_holds_a_header_or_token` (`crates/pull/src/http.rs`),
+`a_full_pack_is_named_never_silently_dropped`,
+`refused_rows_past_the_rsx_room_roll_or_are_refused_by_name`,
+`a_receipt_naming_lengths_past_the_caps_is_refused_before_reading`,
+`waiters_parked_on_a_held_pack_lock_are_bounded`,
+`more_refused_rows_than_a_segment_holds_are_refused_before_any_roll`,
+`the_writer_refuses_rows_past_the_room_by_name_in_every_build`,
+`a_receipt_naming_lengths_past_the_caps_is_damage_to_the_writer`,
+`a_window_over_months_writes_nothing_when_a_later_month_is_full`,
+`healthy_contention_on_one_pack_waits_rather_than_refusing`,
+`only_an_abandoned_waiter_is_counted_as_parked`,
+`a_window_over_months_killed_after_its_first_receipt_is_finished_by_the_next`,
+`every_kill_point_of_a_window_over_months_is_finished_or_named_abandoned`,
+`a_torn_window_journal_is_written_over_and_a_damaged_one_refused`,
+`a_full_window_journal_refuses_a_window_over_months_by_name`,
+`every_directory_created_and_every_first_write_syncs_its_parent`
+(`crates/pull/src/response_keep_tests.rs`), and the two roll rows and the
+finished-window row of `every_emit_site_in_this_crate_reaches_a_file`
+(`crates/pull/src/emit_sites.rs`).
+
 ### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
 
 **Implemented by** IA-5. **Design** §6.4, §6.5, §6.6, VERIFY-19, ATTACK-20;
@@ -67911,6 +68009,50 @@ little-endian with explicit offsets. In short:
 `the_bytes_sit_at_the_offsets_section_35_states`,
 `the_series_bytes_are_pinned`, `the_handle_cache_is_bounded`; bench C-VD-01,
 C-VD-02, C-VD-04.
+
+### D-4859 — Kept answers: the pack path carries the contract; body, refused rows, then receipt, each synced; readers trust receipts only; a repeated body is kept once — 2026-10-14
+
+**Implemented by** IA-8. **Design** §6.3, §11, critic round 3 SF-5 and
+BL-6, DB-B26, DB-G46.
+
+**Decision.**
+
+1. Path: `<store>/responses/<vendor>/<EXCH>/<SEG>/<SYMBOL>[/<contract>]/<tf>/<yyyy-mm>.rsb`
+   (bodies), `.rsr` (receipts) and `.rsx` (refused rows), the bar path's own
+   segments and validation. The design wrote `<SEG>/<SYMBOL>`; the exchange
+   level is kept so one rule builds both paths. A window's body goes into its
+   first month's pack; each further month gets a receipt only (`kept=3`).
+2. The 128-byte receipt is the design's offsets (asked span, stamps, body
+   place and size, rows decoded, landed and refused, run, HTTP status, rung,
+   kept and reason, landing rules version, door, BLAKE3, key hash, the
+   duplicate's ordinal, CRC-32C). The design's reserved bytes now carry: 71,
+   the segment holding the body; 116..124, the receipt's refused-row records
+   (first index, count). `kept` gains 3 (body in the first month) and 4 (a
+   refused answer's head, RA-299); the reason gains 4 `later_month` and 5
+   `refused_answer`.
+3. **Every refused row is kept with its cause (DB-G46)**: one 24-byte record
+   per row the landing refused by name, owned by its receipt, so a stored hole
+   is explained per minute. The cause is each ROW's own: every landing refuses
+   through `fetch::Refused::note`, which records the cause beside the second
+   (`causes`, parallel to `local_seconds`), because the per-(day, cause)
+   groups cannot name a row's cause once one day's rows of two causes
+   interleave. `RefusedRow::all_of` reads the two lists together and refuses
+   a record whose lists differ (`ListsDiffer`) rather than zip it short.
+4. Order: body, refused rows, receipt, each written at the place the trusted
+   receipts name and synced; a reader trusts receipts only; a torn tail is
+   overwritten by the next append; damage before the tail is refused by name
+   (D-4865).
+5. A body whose BLAKE3 a receipt of the newest segment holds is not written
+   again: a receipt only, `kept=2 reason=duplicate_body`, naming the receipt
+   that holds it.
+6. Land, keep, spool, in that order, after both landing doors
+   (`ingest::from_window` and `ingest::repair_window`); the receipt records
+   the door. The hook into the api's pull path is IA-10b/IA-10c's (D-4920).
+
+**Proof.** `an_interrupted_keep_is_repaired_by_the_next`,
+`each_contract_keeps_its_own_pack`, `a_repeated_body_is_kept_once`,
+`both_landing_doors_keep_and_count_their_refusals`,
+`a_window_over_months_keeps_its_body_once`.
 
 ### D-4861 — The CI rows land with each package — 2026-10-10
 
@@ -67989,6 +68131,58 @@ explain. A key with no record on a day not imported answers `owed
 `the_codes_and_their_severity_are_the_designs`,
 `format_v1_holds_every_fact_it_names`,
 `a_key_without_a_record_never_shows_another_keys_code`.
+
+### D-4920 — `window_answered_async` beside `window_async`; one writer per month behind the pack lock — 2026-10-14
+
+**Implemented by** IA-8. **Design** critic round 7, IA-8-1 and IA-8-2
+(amends D-4859 before it was minted).
+
+**Decision.**
+
+1. `HttpSource::window_answered_async` returns
+   `Answered { window, body, digest, status }` (no header field), and on a
+   refusal `Unanswered { error, refused }`, where `error` is exactly the
+   `FetchError` `window_async` returns and `refused` is the first 4 KiB of a
+   2xx body that was a refusal or did not decode (RA-299). `window_async`
+   keeps its signature and behaviour as a wrapper that drops the body, so
+   no caller changes in IA-8: `crates/api`'s production caller moves to the
+   new function with IA-10c, when it adds the keep.
+2. `response_keep::append` takes the pack directory's `keep.lock`
+   exclusively around "read the receipts, write the body, write the receipt"
+   and every further month's receipt: one `try_lock` when uncontended;
+   contended, a blocking `flock` on one named waiter thread (`keep-lock`),
+   bounded by 30 s, then `lock_stalled` by name (the D-4924 bound). A 10 ms
+   `try_lock` poll, as the verdict store's, starved: the holder re-takes the
+   lock microseconds after letting go, so under load the second landing was
+   refused after 2,128 tries while the first never paused (measured in the
+   full `pull` suite, 14 Oct 2026).
+   Two landings of one month never interleave a pack. The critic named one
+   lock per month (`<pack>.rsr.lock`); one per directory is taken instead, so
+   the store does not gain a lock file per instrument-month (the operator's
+   disk rule), and a window over several months is kept under one lock.
+
+**Proof.** `two_landings_of_one_month_never_interleave_a_pack` (2 threads,
+1,000 appends each), `a_pack_lock_held_past_the_wait_is_refused_by_name`,
+`a_refused_200_hands_back_its_head`.
+
+#### Cited, never written
+
+`pull::response_keep` names two receipt fields after numbers of the
+ingest-automation design (its section 15, kept outside the repository) that
+head no entry here. IA-8 decides neither; it only reserves the field each one
+fills (found by `every_cited_decision_heads_an_entry_or_is_named_pending`
+after `feat/db-fix` was merged into IA-8's branch, 17 Oct 2026).
+
+* **D-4843.** The design's "rule sets": verification compares a unit under
+  the rules that built it, and for Zerodha that is the landing rules version
+  each receipt carries. `Receipt::rules_version` (offset 69) is that byte;
+  IA-8 records the version its caller hands it and numbers no rule set.
+  The design lands the entry with IA-6, the verification package.
+* **D-4880.** The design's one runs ledger for the store, both feeds: every
+  landing takes a durable run id. `Receipt::run` (offset 60) is that id's
+  field; IA-8 records the run its caller hands it and allocates none. The
+  design lands the entry with IA-2, and IA-10b threads the id into the
+  Zerodha landings.
 
 ### D-4922 — A writer's temporary is born `O_EXCL` by one shared helper, `store::staging`: a name that exists is never opened, truncated or written through — 2026-10-12
 
@@ -71318,6 +71512,509 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
+
+**Implemented by** GF-1 (`.github/gates_platform.rs`, the `macos` job of
+`.github/workflows/ci.yml`, which `ci-ok` needs). **Finding** FM-236
+(CRIT-044): every CI job ran on `ubuntu-24.04` while the store's production
+host is macOS on APFS, so a test under `#[cfg(target_os = "macos")]` was never
+compiled in CI, and a test that branches on the platform never took its macOS
+branch there. A green run said nothing about either.
+
+**Decided.** (1) A `macos` job on `macos-15` runs `cargo test --workspace
+--locked` (the slow pool test, which asks nothing of the platform, stays in
+the Linux jobs). (2) Gate 31's inventory reads every tracked `.rs` under
+`crates/` and names each MACOS ROW: a test whose `cfg` conditions (its own,
+its blocks', its file's and the `mod` declarations leading to its file) run
+it on one of `linux` and `macos` and not the other, or whose body asks the
+platform. Each row is printed with `linux=runs|NOT RUN macos=runs|NOT RUN`,
+and each host's count of rows compiled out there is printed as NOT RUN, never
+green. (3) `verdict` refuses a workflow with no job on a `macos` runner, one
+that does not run `cargo test --workspace` and `gates_platform ran`, one that
+may fail without failing (`continue-on-error`, a false `if`), or one that
+`ci-ok` does not need; and refuses Linux-only rows with no ubuntu job testing
+the workspace. (4) `ran` reads the macOS job's own `cargo test` log and
+refuses unless every row that runs on that host passed in it, each named with
+the host it ran on.
+
+**Rejected.** A `#[cfg(target_os = "macos")]` test counted green from a Linux
+run (the defect); a signed local macOS receipt instead of a runner (it would
+prove one machine once, and nothing re-checks it on the next change); running
+only the named macOS tests (a test that branches on the platform is found by
+reading, and a missed one would then be silently skipped).
+
+**Limits** (`docs/06-limits.md` L-GF1-31, L-GF1-32): the inventory reads
+tokens and does not compile, so a test written by a macro is not seen and a
+non-platform predicate (`target_arch`, a feature) is taken to hold; the job
+has not yet run on GitHub, because no agent pushes. **Number**: the first
+number past those in use or taken in open worktrees on 16 October 2026
+(D-4990); the merge renumbers it if another lands first (amendment A6).
+
+### D-4800 — One GDFL run authority, `pull::gdfl_run`, shared by the cli and the api; the cli keeps only argument and environment parsing (IA-1) — 2026-10-17
+
+**Number** the ingest automation design's own (§15), free at this head
+(feat/db-fix 50093fa3); amendment A6: the landing may renumber from the
+head it lands on, and then renumbers every citation below with it.
+
+**Implemented by** IA-1. **Findings** design gaps F22, F23, F24 and F44;
+rules-audit RA-173, RA-245 (the kind half), RA-100; critic round 7 IA-1.
+
+**What was observed.** The setup of a GDFL import (which variable names a
+source, which reader opens it, what the run files under D-3333, the
+`--stored`-with-options refusal, the measure of the archive) was
+`cli gdfl-import`'s alone (`gdfl_import_command.rs:94`-`:298` at 50093fa3).
+The api's import (IA-10a) would have had to copy all of it, and a refusal
+the cli says by one code the api would have said by another.
+
+**Decision.**
+
+1. `crates/pull/src/gdfl_run.rs` is the one authority: a `Request` (mode,
+   kinds, source word, range, filter, `--stored`, `--retry-refused`,
+   workers, durability, who, snapshot), `plan` (every refusal before any
+   lock, in one order: the request's misuse, the log, the build's stamp,
+   then per kind the source root and the scope), `execute` (this process's
+   kinds in `ImportKind::ALL` order, on the calling thread, no thread per
+   kind: round 4, BL-A), the `Observer` a run is handed, the progress
+   record (D-4904), `JournalReader` (the journal read once, then only its
+   new bytes) and `run_dir` (D-4862's directory for a kind on the store's
+   census layout).
+2. Moved from `cli` with their tests, the cli keeping only argument and
+   environment parsing: `stored_option_underlyings` →
+   `gdfl_run::scope::option_underlyings`, `scope_of` → `scope::of` (the two
+   lines of `cli/src/gdfl_dayflags.rs` follow), `scope_for` →
+   `scope::for_request`, `stored_filter` → `scope::stored_filter`, the
+   `--stored`-with-options refusal → `RunRefusal::StoredWithOptions`
+   (`stored_with_options`, a misuse: the cli exits `MISUSED`), the
+   `(source word, kind)` → variable mapping → `resolve_source` and
+   `SourceId::var`, the source opening → `execute_kind`, the
+   `Origin::measure` call → `SourceCache` (once per root identity), and
+   WP-81's unstamped refusal → `RunRefusal::Unstamped` from
+   `cli::store_write`'s answer (D-4894). The range check moved too
+   (`range_backwards`, the same words) and the cli door's own copy was
+   removed: one rule, one place.
+3. Every refusal before a lock has one code: `request_line_invalid`,
+   `stored_with_options`, `range_backwards`, `symbol_empty`,
+   `filter_too_long` (more than 256 names, D-4801), `snapshot_invalid`,
+   `log_unavailable` (D-4903), `unstamped_write`, `source_unset`,
+   `scope_unreadable`, `source_unopened`. Codes are never renamed or reused.
+4. Not here: locks, claims, runs ledger, stop, resume point (IA-2), the
+   `dayzips` source (IA-3), verification modes (IA-6, IA-7). A request line
+   naming a mode other than `import` is refused, never read as one.
+
+**Proof.** `pull::gdfl_run::tests` (`stored_with_options_is_refused_by_one_authority`,
+`the_plan_refuses_in_one_order_before_any_lock`,
+`every_run_refusal_has_its_own_code`, `a_source_word_resolves_per_kind`,
+`the_kinds_run_in_order_on_the_calling_thread`,
+`an_unopened_source_stops_the_run_before_the_next_kind`,
+`the_source_cache_measures_again_only_when_the_root_changed`); the cli's
+`gdfl_import_command` tests run the same refusals through the verb.
+Invariants IA1-01 to IA1-12 in `docs/04-invariants.md`.
+
+### D-4801 — Sources are named by configuration, resolved per kind; a filter holds at most 256 names (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**Decision.** A request names a kind-agnostic source word, `zip` or
+`tickstore`, resolved per kind by `gdfl_run::resolve_source`: `zip` is
+`cm_zip` (the capital-market outer zip, `BRUTEX_GDFL_CM_ARCHIVE`) for
+indices and stocks and `nfo_zips` (the yearly options zips,
+`BRUTEX_GDFL_NFO_ARCHIVES`) for options; `tickstore` is
+`BRUTEX_GDFL_TICKSTORE` for every kind. A variable unset or empty is
+`source_unset`, named, never defaulted (`CLAUDE.md` §8). The resolved id is
+what the progress record shows. A browser never sends a path. A filter holds
+at most 256 names (`filter_too_long`). **Not built here**: the `dayzips`
+word and `BRUTEX_GDFL_DAYZIPS` (IA-3), `BRUTEX_GDFL_V3_LEDGER` (D-4867,
+IA-3), the claim's filter digest and the request sidecar (IA-2, §5.3); the
+whole filter crosses to an api child on its request line (D-4902).
+
+### D-4839 — The day loop's delta is a counters-only snapshot; a report keeps the newest 1,024 failures by name and counts every one by stage and code (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**What was observed.** WP-16 had already replaced the per-day `Report`
+clone with `Mark`, a `Copy` of seven counters (critic round 7 IA-1: seam 3
+is WP-16's), but `Report.failures` was unbounded and `Mark.failures` was its
+length: a systematic refusal (26,820 files of a day) was held whole in
+memory and printed whole by the receipt.
+
+**Decision.** Every failure enters a report through one door,
+`Report::name(cause, failure)`: it counts `failures_total` and
+`failures_by_cause[(stage, code)]`, keeps the failure among the newest
+`FAILURES_KEPT` = 1,024 by name and among the newest `RECENT_KEPT` = 8 with
+its cause (the progress record's slots). The list grows to twice the bound
+and then drops its older half in one move, and `Report::seal` cuts it to the
+bound at the run's end, so naming is O(1) amortised. `Mark.failures` and the
+day and run summaries count `failures_total`. The cli exits `FAILED` when
+`failures_total > 0`, and its receipt prints the count, "N more not listed",
+each stage and code's count, and the newest 1,024. Every failure is still in
+the journal's closing line (counts, the decisive stage and reason) and in
+the audit stream.
+
+**Proof.** `a_failure_past_the_kept_bound_is_counted_and_never_listed`
+(pull), `the_receipt_says_how_many_failures_it_does_not_list` (cli).
+
+### D-4874 — The GDFL repair trigger: WP-12d defined none, so IA-1 moves no flag and the field is IA-16's (IA-1) — 2026-10-17
+
+**Number** the design's own, free at this head (A6 as D-4800).
+
+**What was observed.** D-4874 (design §15) gave IA-1 the move of WP-12d's
+`--repair-reason` flag into `Request` "if WP-12d defines one". At this head
+no GDFL verb takes a repair reason: `repair_reason` appears only in the
+Zerodha repair path (`cli/src/zerodha_repair.rs`, `api/src/repair_route.rs`)
+and `pull::gdfl_import` lands an append-refused day through WP-12d's filing
+path without a reason (D-3350).
+
+**Decision.** IA-1 adds no `repair_reason` to `Request` and no flag; it is
+not coded around. As the design's round-4 text says, IA-16 adds the field,
+the flag and the `admit` row that reads it in one change (D-4885), and the
+request line (D-4902) then gains `repair_reason=` as its thirteenth field
+under a new line version. Until then a GDFL run has no repair door of its
+own beyond WP-12d's.
+
+### D-4894 — The unstamped-write check stays in `cli::store_write`; the plan takes its answer (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7), free at this head (A6 as
+D-4800).
+
+**Decision.** WP-81's `unstamped_write_refusal` (DB-B71) stays the one rule,
+in `cli::store_write`. `gdfl_run::Process.unstamped` carries its answer and
+`plan` refuses `unstamped_write` with it, after the misuse and log checks
+and before any root, scope or lock, for the cli and (IA-10a) an api child
+alike. Who adds a writing verb to `WRITERS`, and `gdfl-stop`'s exemption,
+are IA-2's.
+
+### D-4900 — The waits on WP-11c, WP-12e, WP-12f, WP-13d and WP-62 are file order only; every one has merged (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, X-7), free at this head (A6 as
+D-4800).
+
+**Decision.** Critic round 7 resolved that a wait on a fix-round package
+that is only a file order is dropped, and a wait on a rule (WP-12f's scope
+record, D-4878) is an inert named seam until it lands. At this head WP-11c,
+WP-12d, WP-12e, WP-12f, WP-13d, WP-16, WP-62, WP-81, IA-11r and R3-35 have
+all merged (`git log --grep='^Merge ' feat/db-fix`), so case (c) holds: the
+design's order stands unchanged and no seam is inert. `scope::for_request`
+builds the scope a run hands its source; the scope RECORD each close
+carries and the per-member reopening stay WP-12f's (`gdfl_import::scope`).
+
+### D-4901 — A run process reads no run parameter from its environment; the durability travels in the request (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-1), free at this head (A6
+as D-4800).
+
+**Decision.** `Request` carries `workers` and `durability` (WP-16's
+`Durability`, default `day`). The cli maps `BRUTEX_GDFL_WORKERS` and
+`BRUTEX_GDFL_DURABILITY` into it, refusing a bad value by name as before; an
+api child takes both from its request line only (D-4902), so the bytes an
+api child and a cli run leave never rest on the api's own environment. The
+progress record names a run stopped by a day that could not be made durable
+(`ImportRefusal::Durability`) as state `durability` (10). `POST
+/gdfl/import`'s lack of a durability field and `import_cause`'s arm are
+IA-10a's and IA-2's.
+
+### D-4902 — An api child's request is one line on stdin, at most 8 KiB, with the whole filter and the snapshot name (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-2), free at this head (A6
+as D-4800). Amends the design's D-4846 and D-4801 (not landed).
+
+**Decision.** `Request::to_line` and `Request::from_line` are the one codec
+of the request line: `gdfl-request v1` and twelve fields in one fixed
+order, `mode= kinds= source= from= to= only= stored= retry_refused=
+workers= durability= by= snapshot=`, each value percent-encoded outside
+letters, digits, `.`, `-` and `_` (upper-case hex; a raw byte that should
+have been encoded, a bad escape or non-UTF-8 is refused), lists
+comma-joined. At most 8,192 bytes (`REQUEST_LINE_MAX`) both ways: a request
+that cannot fit is refused writing, never cut. A line over the bound, of
+another head or version, with a field missing, out of order, repeated,
+unknown or not one is `request_line_invalid`, refused before any lock; a
+well-formed line asking a misuse earns that misuse's code. `snapshot` is at
+most 64 bytes of letters, digits, `.`, `-` and `_` (`snapshot_invalid`);
+the cli gains `--snapshot NAME`. The claim and the request sidecar derived
+from it are IA-2's.
+
+**Proof.** `the_request_line_carries_a_256_name_filter_and_a_snapshot_intact`
+(256 names, among them `M&M`, `x,y`, `A B`, `100%` and `café`, cross
+intact), `a_request_line_that_is_not_one_is_refused_before_any_lock` (31
+lines, each refused by its code).
+
+### D-4903 — A run whose event sink was refused refuses `log_unavailable` before any lock; a run logs only to its run directory (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-3), free at this head (A6
+as D-4800). Amends D-4862 (its "until IA-1 every run still logs to
+`logs/cli`" is now past).
+
+**What was observed.** FM-065 (CONC-005, INFRA-056, CONC-070), RA-118: every
+cli run logged to `logs/cli`, whose `events.lock` admits one writer; a
+second run (two kinds by hand, an import beside a recount) was refused the
+sink, printed "events are NOT being recorded" and ran for hours unlogged,
+so /logs, /imports.json's evidence and the pace data held nothing of it.
+
+**Decision.**
+
+1. `cli gdfl-import KIND` installs its sink in its own directory before any
+   command runs (`gdfl_import_command::install_run_log`, called by `main`):
+   `logs/gdfl/<kind>` on a version-4 census, `logs/gdfl/store` on version 3
+   (`gdfl_run::run_dir`, D-4862's table). A store whose census layout
+   cannot be read logs to `logs/cli`, and the run's door refuses it by name;
+   no layout is guessed. Every other verb keeps `install_log`.
+2. A `BRUTEX_LOG_DIR` naming any directory but the run's own is not
+   followed: the sink is not installed and the answer says "Unset
+   BRUTEX_LOG_DIR" (the run's evidence would sit where no reader looks).
+   One naming the run's own directory is that directory.
+3. `plan` refuses `log_unavailable` when `Process.log` is `Refused`, after
+   the request's misuse and before the build's stamp, any root, scope,
+   lock or journal line. The cli's state is the process sink's
+   (`LogState::of_process`). IA-10b's Zerodha runs take the same rule.
+4. While a run reads its days it holds the sink's run key (one
+   `compare_exchange` to take, one to give back), so every importer line of
+   the run, per day and per refusal, carries the journal's run id as its
+   record's `run` and `/logs.json?run=<id>` finds them (the leftover DB-A41
+   of round 3). A key another run of the process holds is left alone and
+   said once (`run key held by another run`).
+
+**Operational consequence, named.** A script that runs `cli gdfl-import`
+with `BRUTEX_LOG_DIR` set (for instance to `logs/cli-batch`) is refused at
+start and must drop the variable.
+
+**Proof.** `two_cli_kinds_at_once_both_log`,
+`a_run_whose_sink_is_held_refuses_before_any_lock`,
+`a_log_directory_outside_the_run_directories_is_refused_at_start` (the
+binary, `crates/cli/tests/gdfl_run_logs.rs`);
+`a_run_whose_sink_was_refused_refuses_before_any_lock` (pull and cli),
+`a_run_logs_to_its_own_directory_or_says_why_not` (cli).
+
+### D-4904 — The progress record's byte layout, format v1, is IA-1's (IA-1) — 2026-10-17
+
+**Number** the design's own (critic round 7, IA-1-4), free at this head (A6
+as D-4800).
+
+**Decision.** Each run writes one 4,096-byte record, `BRUTEXPG` version 1,
+whose offsets are the definition (`docs/02-store-format.md` §37): fixed
+fields, 22 little-endian u64 counters, 8 refusal slots of 352 bytes (stage
+≤ 8, code ≤ 32, about ≤ 64, why ≤ 240 bytes, each cut on a whole
+character: the design's 96-byte about is cut to fit the critic's slot), and
+a CRC-32C over the first 4,092 bytes in the last 4. It is written by the
+run's own process with one positional write at offset 0: at the run's
+begin, at every day whose day counts changed, otherwise at most once a
+second, and at the end. A reader that meets another version says
+`progress: format <n> unknown` and never guesses; a bad CRC is read once
+more (a torn read during a write). Elapsed time is the monotonic clock's and
+every difference saturates; the wall clock is only written down (IA-GR-28).
+The path is `imports/gdfl.<kind>.progress` (v4) or `imports/gdfl.progress`
+(v3). A write that fails is named once in a `warn`, said on the cli's
+stderr, and does not stop the run: the journal is the run's record, the
+progress a view. IA-2 adds the claim, sidecar, stop file and ledger
+subsections under §37 and `lock_state`, the reader of these records.
+
+**Proof.** `the_progress_record_is_v1_byte_for_byte` (IA-GR-45),
+`the_progress_slots_keep_the_newest_eight_cut_on_whole_characters`,
+`a_clock_step_back_never_aborts_a_run` (IA-GR-28),
+`the_progress_file_writes_each_closed_day_and_at_most_one_a_second_otherwise`,
+`a_progress_file_that_cannot_be_written_is_named_and_the_run_goes_on`.
+
+### D-4986 — The GDFL Dropbox fetch runs inside the app: one press lists, picks, downloads, verifies and hands on, never overwriting and never deleting (R4-07, E2E-01) — 2026-10-16
+
+Step 1 of the one-click chain is `pull::gdfl_dropbox::run`. The shared link
+lives in `~/.brutex/gdfl-dropbox.toml` (mode 600; group- or world-readable is
+the wait `dropbox_config_too_open`), read only there; a missing or malformed
+file is a journalled wait, never a default. The link never reaches a journal,
+log or page: a run names it by its print (the first 16 bytes of its SHA-256),
+and a link whose print differs from the journal's last is the wait
+`link_changed` until the operator writes `accept_link_print`.
+
+The listing is read to its end, every page of every folder (the shared-link
+listing is non-recursive, `docs/00-charter.md`); a cut listing is
+`listing_incomplete`, a renamed field `listing_shape_unknown`, a listing
+smaller than the last complete one for the same link `listing_shrank`, and a
+listing with no canonical GDFL day zip `link_holds_no_gdfl_day_zip`. A file is
+wanted when its name is a canonical day zip (`tickstore_write::DayIdentity`)
+the tick store does not hold and the import journal has not closed `done` for
+the whole scope; every other name is refused by name before any byte:
+`not_a_day_zip` (conflict copies, renames, case variants), `name_unsafe`,
+`names_collide`, `two_files_for_one_day`, `out_of_scope_exchange` (BSE, MCX,
+`CLAUDE.md` §1) and `content_duplicate` (a listed content hash or a verified
+SHA-256 another name already holds).
+
+Each run has its own staging folder `<store>/staging/gdfl-dropbox/<run>/`
+under one staging lock (`run_busy` names the holder). A download is a
+`create_new` part; a cut resumes by `Range` in the same run and on the next
+press (the part is found by its journal line and its length on disk), and
+appends only on a `206` that starts at the part's length and states the listed
+size; anything else starts a new part beside the old, so two versions are never
+stitched. A finished part is verified (size equal to the listing, the central
+directory read whole through `gdfl_archive`, every member's stated length
+under 64 MiB before it is inflated, every CRC-32) and only then renamed onto a
+name that does not exist, then handed to the tick-store writer (R4-08). A
+refused part stays where it is. `429` and `5xx` back off by name, honouring
+`Retry-After` up to a cap, at most five attempts, then refuse `throttled` or
+`server_error`; a `401` re-reads the token once and a second `401` is the wait
+`dropbox_token_dead`. The download client has connect and idle-read timeouts
+and no total timeout, no automatic decompression, and follows redirects only to
+Dropbox's hosts (`redirect_refused` otherwise). The journal
+`<store>/journal/gdfl-dropbox.journal` is append-only, one line per state
+change; its last line is the O(1) status read.
+
+Four more refusals, each with its own failing-first test (revised
+2026-10-17). The operator's Stop (`Fetch::stop`) is read before each file and
+between body chunks: the run ends `stopped`, the journal says
+`stopped stage=download` with the part's bytes, and the next press resumes
+that part by `Range`. A part write that fails with a full disk is `disk_full`
+(any other failure `staging_write_failed`); the part is kept and resumed. A
+held day (tick store or import `done`) whose listed content hash differs from
+the one this journal verified under its name is `redelivered`, named and never
+fetched over what is held: importing a correction is a new generation, the
+writer's step (FM-007's S1 half). The config's folder may not be writable by
+group or world, and the file must be the folder owner's
+(`dropbox_config_too_open`); a folder others can only read (the usual 0755
+`~/.brutex`) is kept, because the file's own 600 keeps the link unreadable and
+FM-242's stricter 0700 would refuse the operator's present setup for no gain in
+secrecy. A transport failure through a proxy names it by host only
+(`via_proxy=<host:port>`, never its credentials).
+
+The number: D-4979 and D-4980, the first draft's numbers, are taken by AG-04
+and R3-06 on their branches; D-4981..D-4985 by AH-01. D-4986 and D-4987 were
+free on every local branch on 2026-10-17; the main session renumbers at landing
+if that has changed.
+
+Rejected: listing the folder by scraping the shared page's HTML (a page shape
+nobody documents), and a total request timeout (a day zip is hundreds of
+megabytes). Tests: `crates/pull/src/gdfl_dropbox_tests.rs`.
+
+Repair round 1 (2026-10-17, after the second agent's check
+`round2/verify-R4-07-r1.json`), each locked here:
+
+1. **The first name of a hash is the original.** The journal's memory keeps
+   the first name a content hash or SHA-256 was verified under, and a file
+   refused `content_duplicate` by its SHA-256 is journalled with `of=<name>`;
+   while its listed revision is unchanged a later press refuses it at the
+   pick and never fetches, reads or hands it again (R407-14).
+2. **Every listing ends.** A page that lists nothing new or keeps its cursor
+   is a stall, and 8 in a row (`MAX_STALLED_PAGES`) are
+   `listing_incomplete`; an entry listed again at the same path and revision
+   is one file and a counted repeat; Stop is read before every page, while a
+   request waits and during a back-off sleep (polled every 50 ms); and one
+   press waits on `429` and `5xx` at most `Backoff::max_total`, 30 minutes,
+   in all (R407-15). Eight and thirty are this repository's own choices,
+   not Dropbox's: no vendor source states how many empty pages a listing
+   may return.
+3. **One torn write costs one line.** A whole line with a torn write's shape
+   (a prefix of this journal's own lines, at any byte, or a NUL tail) is
+   counted on `begin` as `torn=` and skipped; any other line is still
+   refused by its number (R407-16). The journal is read as bytes, so a cut
+   inside a character is a torn line, not an unreadable journal.
+4. **`status` reads bytes** and decodes whole lines, widening its window to
+   at most 4 MiB for a longer line and naming a tail with none (R407-17).
+5. **A journal that cannot be written stops the press** `journal_unwritable`
+   before the next byte, file or hand-off, and a press that lost a line is
+   never `complete` (R407-18).
+6. **Held and refused files are journalled once**, and a `picks` line counts
+   them on every press, in one write made durable once (R407-19). The
+   journal still grows by a constant a press and is read whole once a press
+   (L-R407-3); a checkpoint sidecar that would make that read O(state) is
+   not built.
+7. A permission refusal of the store root is `store_not_writable`, and a
+   redirect keeps the routes' scheme (R407-20).
+8. **Two first writers share the journal's folder.** Once a lost line
+   stops the press (item 5), the loser of a `create_dir` race on a fresh
+   store would end `journal_unwritable`; `File exists` with the folder
+   there is not a failure, and a lost line found with the store root gone
+   is named `store_lost` (R407-21).
+9. **A byte floor is at least 1 GB** (`store::settings::MIN_FLOOR_BYTES`),
+   recorded under D-4987 below (R407-22).
+
+### D-4987 — One disk projection and one free-space floor for every disk-writing step; the floor refuses before any byte (R4-07, PERF-13) — 2026-10-16
+
+`pull::disk_projection` is the shared answer to "how many bytes will this plan
+write, and may it start?" for the Dropbox fetch, the ingest chain (R4-11), the
+Zerodha plan (R4-23) and the GDFL preflight and `/disk.json` (R4-29). Bytes a
+day are measured, `bytes / held instrument-days` rounded up, from totals the
+caller fills from the census and the stored months; an option underlying with
+no stored month is projected from the median of the held underlyings of its
+class (index or stock options), and its line is labelled EXTRAPOLATION and
+named; a unit nothing measures is NOT KNOWN and refuses the plan
+(`projection_unknown`), never read as zero.
+
+The floor is the new setting `disk.floor` (`store::settings::Key::DiskFloor`,
+one reader `store::settings::disk_floor`: `<n>%` from 1 to 95, or a byte
+amount). Unset it is 15%, decided by measurement: `df -Pk` on the store's
+drive on 16 Oct 2026 read 7,813,821,744 KiB with 1,770,133,020 KiB free
+(22.6%), so 15% keeps 1.09 TiB free and leaves 0.56 TiB to write; the
+operator's 1 TB rule for the equities scope is the byte floor `1TB`.
+`floor_check` refuses `disk_floor` when the free bytes less the projection
+would fall below the floor, and every caller runs it BEFORE any file is read or
+written. **This supersedes, for the floor only, the design's "an extrapolation
+never refuses"** (`state/design/ingest-automation.md`, free space against the
+projected growth): a projection may be wrong by its tolerance, but a disk
+filled mid-write is the failure the append-only store cannot take back.
+
+Tolerance: a fixture projection must land within 10% of what is then written
+(`thirty_fixture_days_land_within_the_stated_tolerance`); the real options
+resume's first 30 days are compared with their projection within 20% by the
+store-steps check after the first real press (`RESUME_TOLERANCE_PERCENT`), and
+recorded there. The free space is measured with `/bin/df -Pk`, the method
+`/disk.json` uses (`std` has no `statvfs`, and `libc` is not taken for it,
+L-TSW-7).
+
+Re-measured 17 Oct 2026 07:53 IST: 1,740,640,996 KiB free of 7,813,821,744
+(22.3%), so the 15% floor leaves 0.53 TiB to write. Through this module, on
+sizes read only from the drive's own GDFL delivery (L-R407-9): a daily press
+(one options day zip, two capital-market files) projects 354 MB and passes;
+a from-scratch fetch of 2,000 options days and 3,995 market files projects
+708.5 GB and is refused `disk_floor`, 137.6 GB short. The median rule
+over-projects a small index on real data (L-R407-7: 4.9x for FINNIFTY), which
+the floor can afford and the label says.
+
+Repair round 1 (2026-10-17): **a byte floor is at least 1 GB**
+(`store::settings::MIN_FLOOR_BYTES`, 10^9 bytes). The second agent found
+`disk.floor = 15` read as fifteen bytes: a floor that protects nothing, and
+most likely a percent with its `%` left off. A smaller byte floor is refused by
+name, and a bare `1` to `95` is told to write `<n>%`. One gigabyte is this
+repository's own choice, not a vendor's: it is more than three times the
+largest file a press downloads, one GDFL options day zip (about 290 MB,
+L-R407-9). Rejected: accepting any non-zero
+byte count (the defect) and guessing that a bare small number means percent
+(a fallback that would hide which reading was taken). Test:
+`crates/store/src/settings_tests.rs::a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named`
+(R407-22).
+
+Repair round 1, gates 0 and 12 (2026-10-17): **`pull` starts no program.**
+Gate 0 (D-1603) refused `Command::new("/bin/df")` in `disk_projection.rs`, so
+the `Df` meter is removed: the fetch and every disk-writing step take the
+caller's `FreeSpace`, and the app's meter is the `/bin/df -Pk` that
+`/disk.json` already runs in `crates/api/src/disk_route.rs` (refused by gate 0
+on `feat/db-fix` too, outside this package), which the ingest chain (R4-11)
+wraps when it calls the fetch. The real-data check reads `df -Pk` text the
+operator passes (`BRUTEX_REAL_DF`). Every cost claim in this package's files
+names its proof (C-DP-01 and C-DP-02 by `crates/pull/benches/ratio.rs`) or
+says UNVERIFIED, recorded as docs/06 L-R407-11.
+
+### D-5302 — A journal past 64 MiB is said on every whole load; the progress record's two spare counters carry the sink's lost lines (IA-1; RA-091, RA-202) — 2026-10-17
+
+**Number** the ledger's head plus one at this head (A6); re-checked at
+landing.
+
+**What was observed.** The rules audit of 11 Oct (RA-091) found the journal
+load never timed and with no size at which it warns; the real journal was
+14,027,805 bytes in 23,270 lines on 14 Oct 2026, about 600 bytes a line
+(L-IA-2 assumed 9,180 short lines). RA-202 found that a run whose log starts
+dropping lines half-way finishes looking fully logged: D-4903 refuses a run
+with no sink at its start, and nothing says a sink lost lines after it.
+
+**Decision.** (1) `pull::gdfl_import::JOURNAL_LOAD_WARN_BYTES` = 64 MiB,
+about 4.8 times the real journal: every whole load past it (a run's start,
+the api reader's open) is one `warn` "journal past its stated load size"
+naming the journal, its bytes and lines, the bound and `L-IA-2`; the load
+goes on, since refusing a run for a long history would trade an import for
+a figure (IA1-14). L-IA-2 carries the measured load at 1x and 10x of the
+real line length and at 1x, 10x and 100x of the short one. (2) The progress
+record's counters 20 and 21 (offsets 216 and 224), written as zero by D-4904
+as first built and read by no one yet, are the sink's dropped events
+(`telemetry::Health::dropped`) and failed rolls
+(`telemetry::Health::rotation_failures`) since the sink opened, copied at
+each write beside `clock_held`. The format stays version 1: no record with
+other meanings at those offsets was ever written outside a test. A
+`log_lost` run state and the alert at release stay with IA-2 and IA-11a
+(the run's outcome and the alert kind are theirs).
 
 ### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
 
@@ -71786,6 +72483,173 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
+
+**Number** the ledger's head plus one at this head (A6); re-checked at
+landing.
+
+**What was observed.** The second agent's check of IA-1 (round 2,
+`verify-IA-1-r1.json`) ran `cli gdfl-import indices tickstore 2024-03-05
+2024-03-05 --snapshot --stored` on its own scratch store: `--snapshot` took
+the next word, `--stored`, as its NAME, and D-4902's alphabet (letters,
+digits, `.`, `-`, `_`) let a flag-shaped name pass, so the stored scope was
+dropped without a word, the run read 8 files under the filter `*` instead of
+the stored scope's 6, journaled `done indices 2024-03-05 *` and exited 0.
+Its follow-ups added two more in the same request: `Request::to_line` wrote a
+request `misuse` refuses (`only=[""]` reads back as no filter, every
+instrument), and a filter name with a space, a newline or a NUL reached the
+importer and was refused `filter_name` only after the lock.
+
+**Decision.** (1) A snapshot name is still at most 64 bytes of letters,
+digits, `.`, `-` and `_`, and now BEGINS WITH A LETTER OR A DIGIT, so a word
+shaped like a flag (`--stored`, `-x`) or a path step (`.`, `..`) is never
+one: `snapshot_invalid`, before any lock, from the request, the line and the
+plan alike. (2) The cli's `--snapshot` takes the next word only when it does
+not begin with `-`; a flag there, nothing there, or a second `--snapshot`
+is refused as a misuse naming `--snapshot takes a NAME after it` (or `given
+twice`) before the store is asked for. A word beginning with `-` that is not
+one of the verb's three flags is refused as `not a flag of gdfl-import`,
+never filed as a symbol. (3) `Request::misuse` applies the store's symbol
+rule (`brutex_core::symbol::Symbol`, exact bytes: A-Z, 0-9, `-`, `_`, `&`,
+at most 24) to every filter name after the empty and the count checks, as a
+new code `symbol_invalid` appended to `RunRefusal::CODES` (a misuse: the cli
+exits `MISUSED`, an api child answers 400); the importer's own `filter_name`
+check stays as the second line. (4) `Request::to_line` returns `misuse()`
+first: a request no run may make is never written. The line codec still
+carries every byte both ways; the request-line test now proves that at the
+codec (`encode`/`decode` of a space, a comma, `%`, a NUL, a newline and a
+non-ASCII letter) and proves that a line naming such a name is read exactly
+and then refused `symbol_invalid`, since no such name is a filter any more.
+(5) A run a census or durability refusal stopped carries what it did in the
+refusal (`ImportRefusal::report`); `drive_core` now seals that report as it
+seals a finished one (`ImportRefusal::seal`, the same three variants), so the
+receipt lists the newest 1,024 failures by name, never up to 2,047 (D-4839
+unchanged in intent; the refusal path had been missed). The receipt's line
+about failures not listed now says what is true: each was logged as it
+happened and the journal keeps each day's cause codes, not each failure.
+
+**Not here.** Run ids of two kinds started in one second (IA-2, D-4847), a
+range bound on the request (IA-10a), and a record of the snapshot name: it travels in the
+request and no event or file of the run names it until IA-2's claim and
+request sidecar (D-4902).
+
+**Proof.** `pull::gdfl_run::tests::a_flag_shaped_snapshot_or_a_name_that_is_no_symbol_is_refused_before_any_lock`,
+`the_request_line_carries_a_256_name_filter_and_a_snapshot_intact`,
+`every_run_refusal_has_its_own_code`,
+`a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does`; cli
+`a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol`.
+Invariants IA1-06, IA1-12 and IA1-15 in `docs/04-invariants.md`.
+### D-5833 — R4-07 repair 2: a shrunk listing is accepted by an exact count the operator writes; a link's host is what a URL reader connects to; a free-space answer no filesystem gives is refused; the package's gate 11 and gate 1d accounts are settled — 2026-10-18
+
+Renumbered at the merge into feat/db-fix from D-5831 (and its sequel from D-5832 to D-5834): IA-1 had taken D-5831 first (amendment A6).
+
+The second agent's r2 check failed R4-07 on two gate regressions it added on
+a base already red elsewhere: gate 11 (15 new refusals) and gate 1d (194 new
+undeclared literals). Gate 11: the five `Range::contains` status and percent
+tests (`gdfl_dropbox.rs` three, `store/settings.rs` two) are written as
+`matches!` with the same range, the listing-pick map is pre-sized with
+`HashMap::with_capacity`, and the nine constructs left are each allowlisted
+in `.github/gates_ledger.rs` with the reason in docs/06's gate 11 sections:
+two bounded sorts (the listing, once a press, at most MAX_LISTED; a class
+median, once per sealed projection), four backward byte searches (one
+journal line, the journal's last line once a press, the status window, one
+df line) and three `HashSet` probes. Gate 1d: the words this package adds
+are declared in `.github/gates_tree.rs` as `R4_07_LITERAL` with what each
+kind is (journal verbs and fields, refusal codes, Dropbox HTTP API words,
+projection units, test words); none is a parameter-path segment.
+
+Three of the second agent's follow-ups are taken because they are in this
+package's files. `listing_shrank` names the count to accept, and the config
+key `accept_listing_count` accepts exactly that count once (the accepted
+listing is journalled complete, so the next press compares against it; any
+other count, a later shrink, or a value that is not a whole number is
+refused) — the operator decides that a smaller folder is fine, never the
+fetch (docs/06 L-R407-14). `check_link` ends the host where a URL reader
+does (`/`, `?`, `#`, `\`) and refuses a host that holds anything but
+letters, digits, `.` and `-` or an empty label, so `#`, `\`, `%`, `@` and
+`:` cannot hide another host. `floor_check` refuses a free-space answer
+with a total of 0 or more free than total as `free_space_unknown` before it
+computes a floor, for every caller. The rest of the follow-ups are named in
+docs/06 (L-R407-12, L-R407-13) or left to their owners. Invariants
+R407-23..R407-25.
+
+Two more follow-ups are taken in the same files. A zip an earlier press
+verified and staged that no longer verifies is no longer refused on every
+press: it is journalled `reverify_failed` once, kept in place (the fetch
+deletes and overwrites nothing; its bytes count in L-R407-13's staging), and
+fetched again into a new part of the running press under the same floor
+(R407-26). And a name owns its content hash and SHA-256 only once the writer
+has taken the file (`handed ok=true`), so a file the writer refused never
+makes the true day with the same bytes a `content_duplicate` (R407-27); the
+writer, not the fetch, judges the second name. Not taken, and why: fetching
+newest-first up to the floor when the whole plan does not fit (the second
+agent's options-backlog follow-up) would change D-4987's "the floor refuses
+before any byte" for a whole plan into a partial one, which is a decision for
+the R4-11 wiring with the operator's backlog in view, not a repair; the
+press keeps refusing `disk_floor` by name with the plan's bytes. Invariants
+R407-26, R407-27.
+
+The merge of R4-06 brought its no-deletion guard
+(`crates/pull/tests/no_scheduler_delete.rs`), whose DECLARED list names
+`gdfl_dropbox.rs` and requires it in LISTED once it exists. It is listed now,
+with its one `rename` site justified in ALLOWED, and that site is made what
+AUT-05 allows: a verified part is promoted to the day's name in the part's own
+folder (a part resumed from an earlier press's run folder is published there),
+never moved into the running press's folder (R407-28).
+
+### D-5834 — R4-07 repair 3: a shrunk listing is accepted by the token its refusal names, once and journalled (amends D-5833's count-keyed acceptance); a floor need past `u64::MAX` is refused by name; an upper-case Dropbox host is named as that — 2026-10-18
+
+The third check failed R4-07 on two blocking issues in repair 2's own code.
+
+**The count-keyed acceptance is replaced.** D-5833 let `accept_listing_count
+= N` accept a listing shrunk to N "once", but the check ran against whatever
+count stayed in the config: after an accepted shrink to N, a listing that grew
+and then shrank back to N, even by losing a file of the accepted listing,
+passed with no line naming it, and no line ever recorded an acceptance. A
+count cannot be made single-use: the same value in the config is a fresh
+acceptance or a stale one, and nothing can tell them apart. So the acceptance
+now names the refusal it answers. A `listing_shrank` press journals a
+`listing complete=false reason=listing_shrank was= count= shrink=<token>`
+line, the token being the first refusing press's run id and kept while the
+same shrink (`was`, `now`) stays pending, so the operator's copy of it stays
+good across daily presses. Only `accept_listing_shrink = "<token>"` naming the
+pending token accepts that shrink. The accepted listing line carries
+`accepted_shrink=<token> was=<was>`, and any complete listing line clears the
+pending shrink, so the token is used up and every later shrink is refused with
+a new one; a stale token left in the config is named in the refusal. The key
+`accept_listing_count` is retired: it is an unknown key, refused by name. It
+was never wired to a route or a page (R1-WIRING), so no operator config holds
+it. Considered and not taken: keying the acceptance to the `was -> now` pair
+(the A1 case is the same pair again, so a stale pair accepts it) and refusing
+a count already journalled as accepted (then the same count can never be
+accepted again by any config value). R407-25, L-R407-14.
+
+**The two branches no test reached now have tests.** `Memory::read`'s
+`reverify_failed` arm is proved where the re-fetch does not finish (the floor
+refuses it), and the pick's refusal of a SHA-256 duplicate only while its
+original still owns the bytes is proved over three presses where the writer
+refuses the original on the second. Each test fails with its branch mutated
+(R407-26, R407-27).
+
+**Three follow-ups taken.** `floor_check` adds the projection and the floor with
+`checked_add`, and a sum that would overflow is `FloorRefusal::NeedOverflows`
+(code `disk_floor`), never a saturated need compared as if it fit (R407-29).
+`check_link` names a host that is dropbox.com only in another case instead of
+calling it "not dropbox.com"; it does not fold the case, because the link is
+handed to Dropbox as written and how Dropbox reads an upper-case host is
+UNVERIFIED (R407-30). A torn journal line is closed so that it can never be
+read as whole: `append_line` closes a last line that has no newline with one
+NUL byte before the newline, and `parse_line` refuses any line holding a raw
+NUL, which no line this module writes holds (`quoted` escapes every control
+character). So a line cut at a field boundary, or inside a bare value (a
+`count=1` cut from `count=12`), is counted torn and never read, by
+`Memory::load` and by `status` alike. The cut was not always fail-safe: a
+complete listing line cut inside its count, closed by a press that wrote no
+listing line of its own, became the shrink check's baseline, and a later
+shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
+of the journal changes; a line closed before this change kept only its newline
+and reads as it did.
 
 ### D-5860 — /db's bar grid asks one page read a change: a change of order reads page one itself, a question is asked once, and nothing is read while the selection reconciles (R3-03) — 2026-10-17
 
