@@ -35,10 +35,11 @@
 //!
 //! A stable LSD radix sort over the members in slot order (FM-F010), with
 //! digits of [`RANK_RADIX_DIGIT_BITS`] bits: gainers keyed by
-//! `i32::MAX − move_bp`, losers by the sign-flipped `move_bp`. Its buffers are
-//! sized once, at the run's largest pool ([`MoverRank::new`]); its work per
-//! minute is O(pool + buckets), the same at every minute of a day and O(1) per
-//! member, with the exact tie runs on top, each O(r log r) in its own length r
+//! `i32::MAX − move_bp`, losers by the sign-flipped `move_bp`, with the side in
+//! the key's top bits, so one sort over the whole pool puts the gainers first,
+//! the losers next and the unranked last. Its buffers are reserved once, at
+//! the run's largest pool ([`MoverRank::new`]); its work per minute is
+//! O(pool + buckets), the same at every minute of a day and O(1) per member, with the exact tie runs on top, each O(r log r) in its own length r
 //! (`docs/06-limits.md`). The ranks are the ones a sorting network over the
 //! same keys gives (`crates/runner/tests/fib_rank.rs`). Ranks are `u16`, and
 //! the run's rank WIDTH — one byte while the largest pool fits one, two above —
@@ -52,12 +53,6 @@ use vocab::fib_cube::{BP_PER_UNIT, RANK_RADIX_DIGIT_BITS, Ratio};
 
 /// Values one radix digit takes.
 const BUCKETS: usize = 1 << RANK_RADIX_DIGIT_BITS;
-
-/// The radix passes over a `u32` key.
-const PASSES: u64 = (u32::BITS as u64).div_ceil(RANK_RADIX_DIGIT_BITS);
-
-/// One digit's mask.
-const DIGIT_MASK: u32 = (1 << RANK_RADIX_DIGIT_BITS) - 1;
 
 const _: () = assert!(RANK_RADIX_DIGIT_BITS > 0 && RANK_RADIX_DIGIT_BITS < u32::BITS as u64);
 
@@ -230,11 +225,6 @@ impl MemberRefusal {
             Self::MoveOutOfRange => "move_out_of_range",
         }
     }
-
-    /// The reason's position in [`MemberRefusal::ALL`].
-    const fn position(self) -> usize {
-        self as usize
-    }
 }
 
 /// How many member refusal reasons there are.
@@ -294,39 +284,80 @@ pub struct Totals {
     pub refused: [u64; MEMBER_REFUSALS],
 }
 
+/// Where a member falls at one minute: the top bits of its radix key, so one
+/// sort puts the gainers first, the losers next and every unranked member
+/// last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// Ranked by move descending.
+    Gainer,
+    /// Ranked by move ascending.
+    Loser,
+    /// Missing, refused or unchanged: never ranked.
+    Neither,
+}
+
+impl Side {
+    /// The side a key's top bits name.
+    const fn of(key: u64) -> Self {
+        match key >> u32::BITS {
+            0 => Self::Gainer,
+            1 => Self::Loser,
+            _ => Self::Neither,
+        }
+    }
+
+    /// The side's top bits, above the 32 bits of the move.
+    const fn bits(self) -> u64 {
+        (self as u64) << u32::BITS
+    }
+}
+
+/// The bits the side takes above the move's 32.
+const SIDE_BITS: u32 = u64::BITS - (Side::Neither as u64).leading_zeros();
+
+/// The radix passes over a key: the move's 32 bits and the side's.
+const PASSES: u64 = ((u32::BITS + SIDE_BITS) as u64).div_ceil(RANK_RADIX_DIGIT_BITS);
+
+/// One digit's mask.
+const DIGIT_MASK: u64 = (1 << RANK_RADIX_DIGIT_BITS) - 1;
+
 /// The mover-rank fold of one run (D-6322, D-6323).
+///
+/// Every per-member buffer holds exactly today's pool and is reserved once, at
+/// the run's largest pool, so no day and no minute allocates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoverRank {
     /// The run's rank width.
     width: RankWidth,
-    /// Today's pool; zero before the first day.
-    pool: usize,
+    /// The run's largest pool: every buffer's reserved size.
+    max_pool: usize,
     /// Whether a day is open.
     open: bool,
     /// The last minute folded today.
     last_minute: Option<i64>,
     /// Per slot: the previous close, or the day's refusal.
-    previous: Box<[Result<i64, MemberRefusal>]>,
+    previous: Vec<Result<i64, MemberRefusal>>,
     /// Per slot: today's last good close.
-    last_close: Box<[Option<i64>]>,
+    last_close: Vec<Option<i64>>,
     /// Per slot: the state at the last minute.
-    state: Box<[MemberState]>,
+    state: Vec<MemberState>,
     /// Per slot: `move_bp` at the last minute (zero when not ranked).
-    move_bp: Box<[i32]>,
+    move_bp: Vec<i32>,
     /// Per slot: close minus previous close at the last minute, in paisa.
-    diff: Box<[i64]>,
-    /// Per slot: the radix key at the last minute.
-    keys: Box<[u32]>,
-    /// The ranked order: gainers then losers, by slot.
-    order: Box<[u16]>,
+    diff: Vec<i64>,
+    /// Per slot: the radix key at the last minute (side, then move).
+    keys: Vec<u64>,
+    /// Every slot in ranked order: gainers, then losers, then the unranked.
+    order: Vec<u16>,
     /// The radix sort's other buffer.
-    scratch: Box<[u16]>,
+    scratch: Vec<u16>,
     /// The radix sort's digit counts.
     counts: Box<[usize]>,
     /// Per slot: the gainer rank at the last minute, 0 = unranked.
-    gainer_rank: Box<[u16]>,
+    gainer_rank: Vec<u16>,
     /// Per slot: the loser rank at the last minute, 0 = unranked.
-    loser_rank: Box<[u16]>,
+    loser_rank: Vec<u16>,
     /// Gainers at the last minute: `order[..gainers]`.
     gainers: usize,
     /// Losers at the last minute: `order[gainers..gainers + losers]`.
@@ -354,20 +385,20 @@ impl MoverRank {
         let width = RankWidth::of_pool(max_pool)?;
         Ok(Self {
             width,
-            pool: 0,
+            max_pool,
             open: false,
             last_minute: None,
-            previous: vec![Err(MemberRefusal::NoPreviousClose); max_pool].into_boxed_slice(),
-            last_close: vec![None; max_pool].into_boxed_slice(),
-            state: vec![MemberState::Missing; max_pool].into_boxed_slice(),
-            move_bp: vec![0; max_pool].into_boxed_slice(),
-            diff: vec![0; max_pool].into_boxed_slice(),
-            keys: vec![0; max_pool].into_boxed_slice(),
-            order: vec![0; max_pool].into_boxed_slice(),
-            scratch: vec![0; max_pool].into_boxed_slice(),
+            previous: Vec::with_capacity(max_pool),
+            last_close: Vec::with_capacity(max_pool),
+            state: Vec::with_capacity(max_pool),
+            move_bp: Vec::with_capacity(max_pool),
+            diff: Vec::with_capacity(max_pool),
+            keys: Vec::with_capacity(max_pool),
+            order: Vec::with_capacity(max_pool),
+            scratch: Vec::with_capacity(max_pool),
             counts: vec![0; BUCKETS].into_boxed_slice(),
-            gainer_rank: vec![0; max_pool].into_boxed_slice(),
-            loser_rank: vec![0; max_pool].into_boxed_slice(),
+            gainer_rank: Vec::with_capacity(max_pool),
+            loser_rank: Vec::with_capacity(max_pool),
             gainers: 0,
             losers: 0,
             census: None,
@@ -389,16 +420,16 @@ impl MoverRank {
         self.width
     }
 
-    /// The run's largest pool: the buffers' size.
+    /// The run's largest pool: the buffers' reserved size.
     #[must_use]
-    pub fn max_pool(&self) -> usize {
-        self.order.len()
+    pub const fn max_pool(&self) -> usize {
+        self.max_pool
     }
 
     /// Today's pool.
     #[must_use]
-    pub const fn pool(&self) -> usize {
-        self.pool
+    pub fn pool(&self) -> usize {
+        self.previous.len()
     }
 
     /// Opens an IST day: one previous close per member slot, in slot order. A
@@ -414,24 +445,38 @@ impl MoverRank {
         if pool == 0 {
             return Err(RankRefusal::PoolEmpty);
         }
-        if pool > self.max_pool() {
+        if pool > self.max_pool {
             return Err(RankRefusal::PoolOverRunMaximum {
                 pool,
-                max_pool: self.max_pool(),
+                max_pool: self.max_pool,
             });
         }
-        for (slot, close) in self.previous.iter_mut().zip(previous_closes) {
-            *slot = match close {
+        self.previous.clear();
+        self.previous
+            .extend(previous_closes.iter().map(|close| match close {
                 None => Err(MemberRefusal::NoPreviousClose),
                 Some(close) if *close <= 0 => Err(MemberRefusal::PreviousCloseNotPositive),
                 Some(close) => Ok(*close),
-            };
+            }));
+        for (buffer, value) in [
+            (&mut self.gainer_rank, 0),
+            (&mut self.loser_rank, 0),
+            (&mut self.order, 0),
+            (&mut self.scratch, 0),
+        ] {
+            buffer.clear();
+            buffer.resize(pool, value);
         }
-        self.last_close.fill(None);
-        self.state.fill(MemberState::Missing);
-        self.gainer_rank.fill(0);
-        self.loser_rank.fill(0);
-        self.pool = pool;
+        self.last_close.clear();
+        self.last_close.resize(pool, None);
+        self.state.clear();
+        self.state.resize(pool, MemberState::Missing);
+        self.move_bp.clear();
+        self.move_bp.resize(pool, 0);
+        self.diff.clear();
+        self.diff.resize(pool, 0);
+        self.keys.clear();
+        self.keys.resize(pool, Side::Neither.bits());
         self.open = true;
         self.last_minute = None;
         self.gainers = 0;
@@ -453,10 +498,10 @@ impl MoverRank {
         if !self.open {
             return Err(RankRefusal::NoDay);
         }
-        if closes.len() != self.pool {
+        if closes.len() != self.pool() {
             return Err(RankRefusal::ClosesNotPool {
                 closes: closes.len(),
-                pool: self.pool,
+                pool: self.pool(),
             });
         }
         if let Some(last) = self.last_minute.filter(|last| minute <= *last) {
@@ -465,7 +510,7 @@ impl MoverRank {
         self.last_minute = Some(minute);
         let mut census = Census {
             minute,
-            pool: u16::try_from(self.pool).unwrap_or(u16::MAX),
+            pool: u16::try_from(self.pool()).unwrap_or(u16::MAX),
             ranked: 0,
             gainers: 0,
             losers: 0,
@@ -481,19 +526,33 @@ impl MoverRank {
             .zip(self.last_close.iter_mut())
             .zip(self.state.iter_mut())
             .zip(self.diff.iter_mut())
-            .zip(self.move_bp.iter_mut());
-        for (((((previous, close), last), state), diff), move_bp) in members {
+            .zip(self.move_bp.iter_mut())
+            .zip(self.keys.iter_mut());
+        for ((((((previous, close), last), state), diff), move_bp), key) in members {
             let fresh = close.filter(|close| *close > 0);
             if fresh.is_some() {
                 *last = fresh;
             }
             *state = classify(*previous, *close, *last, diff, move_bp);
+            let side = match *state {
+                MemberState::Fresh | MemberState::Stale if *diff > 0 => Side::Gainer,
+                MemberState::Fresh | MemberState::Stale if *diff < 0 => Side::Loser,
+                _ => Side::Neither,
+            };
+            *key = side.bits()
+                | u64::from(match side {
+                    Side::Gainer => (i32::MAX - *move_bp).cast_unsigned(),
+                    Side::Loser => (*move_bp ^ i32::MIN).cast_unsigned(),
+                    Side::Neither => 0,
+                });
+            census.gainers += u16::from(side == Side::Gainer);
+            census.losers += u16::from(side == Side::Loser);
             match *state {
                 MemberState::Missing => census.missing += 1,
                 MemberState::Refused(reason) => {
                     census.refused += 1;
-                    if let Some(count) = self.totals.refused.get_mut(reason.position()) {
-                        *count += 1;
+                    for (count, known) in self.totals.refused.iter_mut().zip(MemberRefusal::ALL) {
+                        *count += u64::from(known == reason);
                     }
                 }
                 MemberState::Fresh | MemberState::Stale => {
@@ -502,9 +561,9 @@ impl MoverRank {
                 }
             }
         }
+        self.gainers = usize::from(census.gainers);
+        self.losers = usize::from(census.losers);
         self.order_and_rank();
-        census.gainers = u16::try_from(self.gainers).unwrap_or(u16::MAX);
-        census.losers = u16::try_from(self.losers).unwrap_or(u16::MAX);
         census.ranked = census.gainers + census.losers;
         self.totals.minutes += 1;
         self.totals.ranked += u64::from(census.ranked);
@@ -515,55 +574,34 @@ impl MoverRank {
         Ok(census)
     }
 
-    /// Partitions today's ranked members into gainers then losers (stable, by
-    /// slot), sorts each by its radix key and its exact tie runs, and writes
-    /// every member's ranks.
+    /// Sorts every member of today's pool by its key — side, then move — in
+    /// one stable radix from slot order, orders each run of equal keys by the
+    /// exact move, and writes every member's ranks.
     fn order_and_rank(&mut self) {
-        let mut gainers = 0;
-        let mut losers = Vec::new();
-        let ranked = self
-            .state
-            .iter()
-            .zip(self.diff.iter())
-            .zip(self.move_bp.iter())
-            .zip(self.keys.iter_mut());
-        for (slot, (((state, diff), move_bp), key)) in (0_u16..).zip(ranked) {
-            let rankable = matches!(state, MemberState::Fresh | MemberState::Stale);
-            if rankable && *diff > 0 {
-                *key = (i32::MAX - *move_bp).cast_unsigned();
-                if let Some(at) = self.order.get_mut(gainers) {
-                    *at = slot;
-                }
-                gainers += 1;
-            } else if rankable && *diff < 0 {
-                *key = (*move_bp ^ i32::MIN).cast_unsigned();
-                losers.push(slot);
-            }
+        for (at, slot) in self.order.iter_mut().zip(0_u16..) {
+            *at = slot;
         }
-        self.work += u64::try_from(self.pool).unwrap_or(u64::MAX);
-        let end = gainers + losers.len();
-        if let Some(tail) = self.order.get_mut(gainers..end) {
-            tail.copy_from_slice(&losers);
-        }
-        self.gainers = gainers;
-        self.losers = losers.len();
-        let (gainer_order, loser_order) = self.order.split_at_mut(gainers);
-        let loser_order = loser_order.get_mut(..losers.len()).unwrap_or_default();
-        for (segment, descending) in [(gainer_order, true), (loser_order, false)] {
-            self.work += radix(segment, &mut self.scratch, &self.keys, &mut self.counts);
-            self.work += tie_runs(segment, &self.keys, &self.diff, &self.previous, descending);
-        }
+        let Self {
+            order,
+            scratch,
+            keys,
+            counts,
+            diff,
+            previous,
+            ..
+        } = self;
+        let pool = u64::try_from(order.len()).unwrap_or(u64::MAX);
+        self.work += pool + radix(order, scratch, keys, counts);
+        self.work += tie_runs(order, keys, diff, previous);
         self.gainer_rank.fill(0);
         self.loser_rank.fill(0);
-        let order = self.order.get(..end).unwrap_or_default();
-        for (rank, slot) in (1_u16..).zip(order) {
-            let (ranks, rank) = if usize::from(rank) <= gainers {
-                (&mut self.gainer_rank, rank)
+        let gainers = u16::try_from(self.gainers).unwrap_or(u16::MAX);
+        let ranked = self.order.iter().take(self.gainers + self.losers);
+        for (position, slot) in (1_u16..).zip(ranked) {
+            let (ranks, rank) = if position <= gainers {
+                (&mut self.gainer_rank, position)
             } else {
-                (
-                    &mut self.loser_rank,
-                    rank - u16::try_from(gainers).unwrap_or(0),
-                )
+                (&mut self.loser_rank, position - gainers)
             };
             if let Some(cell) = ranks.get_mut(usize::from(*slot)) {
                 *cell = rank;
@@ -591,10 +629,7 @@ impl MoverRank {
     /// A member's state at the last minute, or `None` outside today's pool.
     #[must_use]
     pub fn state(&self, slot: u16) -> Option<MemberState> {
-        self.state
-            .get(usize::from(slot))
-            .copied()
-            .filter(|_| usize::from(slot) < self.pool)
+        self.state.get(usize::from(slot)).copied()
     }
 
     /// A ranked member's `move_bp` at the last minute.
@@ -743,13 +778,10 @@ fn classify(
     }
 }
 
-/// A stable LSD radix sort of `segment` (slots) by `keys`, through `scratch`.
-/// Returns its work: members moved and buckets swept.
-fn radix(segment: &mut [u16], scratch: &mut [u16], keys: &[u32], counts: &mut [usize]) -> u64 {
-    let len = segment.len();
-    let Some(other) = scratch.get_mut(..len) else {
-        return 0;
-    };
+/// A stable LSD radix sort of `order` (slots) by `keys`, through `scratch`,
+/// which holds as many slots. Returns its work: members moved and buckets
+/// swept.
+fn radix(order: &mut [u16], scratch: &mut [u16], keys: &[u64], counts: &mut [usize]) -> u64 {
     let digit = |slot: u16, shift: u64| -> usize {
         let key = keys.get(usize::from(slot)).copied().unwrap_or(0);
         usize::try_from((key >> shift) & DIGIT_MASK).unwrap_or(0)
@@ -757,7 +789,7 @@ fn radix(segment: &mut [u16], scratch: &mut [u16], keys: &[u32], counts: &mut [u
     for pass in 0..PASSES {
         let shift = pass * RANK_RADIX_DIGIT_BITS;
         counts.fill(0);
-        for slot in segment.iter() {
+        for slot in order.iter() {
             if let Some(count) = counts.get_mut(digit(*slot, shift)) {
                 *count += 1;
             }
@@ -768,29 +800,30 @@ fn radix(segment: &mut [u16], scratch: &mut [u16], keys: &[u32], counts: &mut [u
             *count = start;
             start += here;
         }
-        for slot in segment.iter() {
+        for slot in order.iter() {
             if let Some(at) = counts.get_mut(digit(*slot, shift)) {
-                if let Some(place) = other.get_mut(*at) {
+                if let Some(place) = scratch.get_mut(*at) {
                     *place = *slot;
                 }
                 *at += 1;
             }
         }
-        segment.copy_from_slice(other);
+        order.copy_from_slice(scratch);
     }
-    let per_pass = u64::try_from(len + len + BUCKETS + BUCKETS).unwrap_or(u64::MAX);
+    let len = order.len();
+    let per_pass = u64::try_from(len + len + len + BUCKETS + BUCKETS).unwrap_or(u64::MAX);
     PASSES * per_pass
 }
 
-/// Orders each run of equal keys in `segment` by the exact move, `(c1 − p1) x
+/// Orders each run of equal keys in `order` by the exact move, `(c1 − p1) x
 /// p2` against `(c2 − p2) x p1` in `i128`, largest first for gainers and
-/// smallest first for losers, then by slot. Returns its work: comparisons.
+/// smallest first for losers, then by slot; the unranked run is left in slot
+/// order. Returns its work: comparisons.
 fn tie_runs(
-    segment: &mut [u16],
-    keys: &[u32],
+    order: &mut [u16],
+    keys: &[u64],
     diff: &[i64],
     previous: &[Result<i64, MemberRefusal>],
-    descending: bool,
 ) -> u64 {
     let key_of = |slot: &u16| keys.get(usize::from(*slot)).copied();
     let exact = |slot: u16| -> (i128, i128) {
@@ -800,25 +833,19 @@ fn tie_runs(
         (i128::from(moved), i128::from(base))
     };
     let mut comparisons = 0_u64;
-    let mut at = 0;
-    while at < segment.len() {
-        let key = segment.get(at).and_then(key_of);
-        let run = segment
-            .get(at..)
-            .unwrap_or_default()
-            .iter()
-            .take_while(|slot| key_of(slot) == key)
-            .count();
-        if let Some(tied) = segment.get_mut(at..at + run) {
-            tied.sort_unstable_by(|a, b| {
-                comparisons += 1;
-                let ((da, pa), (db, pb)) = (exact(*a), exact(*b));
-                let order = (da * pb).cmp(&(db * pa));
-                let order = if descending { order.reverse() } else { order };
-                order.then(a.cmp(b))
-            });
-        }
-        at += run;
+    for run in order.chunk_by_mut(|a, b| key_of(a) == key_of(b)) {
+        let descending = match run.first().and_then(key_of).map(Side::of) {
+            Some(Side::Gainer) => true,
+            Some(Side::Loser) => false,
+            _ => continue,
+        };
+        run.sort_unstable_by(|a, b| {
+            comparisons += 1;
+            let ((da, pa), (db, pb)) = (exact(*a), exact(*b));
+            let order = (da * pb).cmp(&(db * pa));
+            let order = if descending { order.reverse() } else { order };
+            order.then(a.cmp(b))
+        });
     }
     comparisons
 }
@@ -843,20 +870,23 @@ mod tests {
     }
 
     #[test]
-    fn the_radix_is_four_passes_of_a_byte() {
-        assert_eq!((BUCKETS, PASSES, DIGIT_MASK), (256, 4, 0xFF));
+    fn the_radix_is_five_passes_of_a_byte_over_side_and_move() {
+        assert_eq!((BUCKETS, SIDE_BITS, PASSES, DIGIT_MASK), (256, 2, 5, 0xFF));
         assert_eq!(MEMBER_REFUSALS, 4);
+        for side in [Side::Gainer, Side::Loser, Side::Neither] {
+            assert_eq!(Side::of(side.bits() | u64::from(u32::MAX)), side);
+        }
+        assert_eq!(Side::of(u64::MAX), Side::Neither);
     }
 
     #[test]
-    fn a_radix_over_a_short_scratch_does_nothing() {
-        let mut segment = [2, 1];
-        let mut scratch = [0];
+    fn the_radix_is_stable_and_keeps_slot_order_inside_a_key() {
+        let keys = [Side::Neither.bits(), 7, 3, 7, Side::Loser.bits()];
+        let mut order = [0, 1, 2, 3, 4];
+        let mut scratch = [0; 5];
         let mut counts = [0; BUCKETS];
-        assert_eq!(
-            radix(&mut segment, &mut scratch, &[3, 2, 1], &mut counts),
-            0
-        );
-        assert_eq!(segment, [2, 1]);
+        let work = radix(&mut order, &mut scratch, &keys, &mut counts);
+        assert_eq!(order, [2, 1, 3, 4, 0]);
+        assert_eq!(work, 5 * (15 + 512));
     }
 }

@@ -73277,3 +73277,275 @@ the operating system's, so the max criterion is applied to work.
 `harness_prints_timer_granularity`, `harness_refuses_row_without_class`,
 `every_row_declares_axis_and_scale`,
 `a_data_row_runs_at_one_and_at_the_production_worker_count`.
+
+### D-6320 — The own-past histogram: an expanding window from the first full session, a constant bin table over every non-negative `i64`, and no typed warm-up (FIB-2) — 2026-10-18
+
+**Number** the first of FIB-2's block, D-6320..D-6339 (the specification's
+D-5320..D-5339 moved up by 1,000 by D-6311). D-6329..D-6339 are unused.
+
+`indicators::fibflag::hist::OwnPast` holds one measure's own past for one
+stock, one direction and one scope. Its window is EXPANDING: every committed
+tradable day from the stock's first stored full session, never a typed span.
+There is no typed warm-up (operator 16 Oct 11:24 and 17:15 IST item 2): a
+histogram with no committed day answers `no_own_past`, one whose committed days
+hold no value answers `no_observations` (FM-F015), and the consumer counts the
+refusal; there is never a default bucket. The committed-day count is stamped on
+each candidate as a reference.
+
+**The bin table (R3, 17:15 IST item 1).** Bin 0 holds zero, then
+`HIST_SUB_BINS_PER_POWER` (8, the Representation seed) sub-bins per power of
+two over all 63 positions a non-negative `i64`'s top bit can take: 505 bins,
+found with `checked_ilog2` and the next three mantissa bits. No 2^40 cap, no
+overflow bin: `i64::MAX` ranks like any other value. A value below 16 has a bin
+of its own.
+
+**Splits.** When a cut must fall inside one bin, `OwnPast::split` divides that
+base bin by one more mantissa bit (a per-bin depth table) and rebuilds the
+counts once from the raw values, which must reproduce the committed counts and
+the exact committed maximum or the split is refused (`split_raw_mismatch`); a
+bin one integer wide is refused (`split_one_value_wide`), which is R2's STOP. A
+split histogram encodes as codec v2 (D-6325); earlier answers stay reproducible
+from the unsplit checkpoint.
+
+**A day computes only itself.** `observe` stages a value in O(1); every answer
+reads only what `commit_day` merged from earlier days (O(leaves) once a day,
+O(1) on a day that staged nothing), so a value observed today never changes
+today's answers; `discard_day` leaves the histogram as it was.
+
+**The answers.** `mid_rank(v)` is R1's exact pair `(2 x below + in-leaf,
+2 x total)` in O(1). `permille` is a display unit only, with its numerator in
+`u128` (FM-F020). `value_at_rank(k)` returns the LOWER EDGE of the leaf holding
+the k-th smallest committed value (FM-F012), found by one bisection of the
+cumulative array; its probes are counted and bounded by the table — ten for the
+unsplit table, which is `ceil(log2 505) + 1`: the standard library's bisection
+makes one final comparison past the specification's `ceil(log2 bins)`, and that
+one extra probe is recorded here rather than hidden. `quantile(num, den)` is the
+lower nearest rank `ceil(num x total / den)`; `median` is the value at
+`ceil(total / 2)`.
+
+**Refused by name, counted, never wrapped (FM-F020).** A bin's committed plus
+staged count is refused at `u32::MAX` (`count_full`), a negative value is
+refused (`negative_value`), and the committed-day count is refused at its top
+(`days_full`, nothing merged). Each observe refusal is counted in a plain field.
+
+**Censoring and the maximum.** An observation known only to exceed what was
+seen (FM-F016's `duration_censored`) is staged and committed as a count beside
+the bins, never in one; `censored_median` labels a median whose censored count
+reaches the resolved one. The exact committed maximum is kept beside the bins
+(the silence flag reads it, D-6326).
+
+Proof: `crates/indicators/tests/fib_hist.rs`; invariants FIB2-01 to FIB2-12 and
+FIB2-20. Bench rows H-F-01 to H-F-05.
+
+### D-6321 — The observed tick: the mode of the committed days' gcds since the last basis break (FIB-2, FM-F014) — 2026-10-18
+
+The tick size by price and date is UNVERIFIED in `docs/00-charter.md`, so the
+tick is OBSERVED: `indicators::fibflag::hist::ObservedTick`, one per price
+series (the decision and the raw series are separate values). Each day stages
+the gcd of the absolute differences between its consecutive distinct prices
+(none on a day with fewer than two distinct prices). The tick is the MODE of the
+committed days' gcds since the series' last basis break, ties to the larger,
+so one odd print leaves a 5-paisa series at 5 (a running gcd would answer 1
+forever) and a coarser tick is seen again. Days whose gcd differs from the mode
+are counted (`odd_tick_days`); a basis break resets the map. O(distinct gcds)
+per commit, O(1) per query; a series with no such day refuses by name
+(`no_tick`).
+
+On a DATA-1 adjusted span the decision tick is labelled unobservable and the
+GDFL raw tick converted exactly by the day's factor pair is used
+(`decision_tick`: `raw x zerodha_close / gdfl_close`, a reduced fraction). The
+report's comparison with `costs::rate::TICK` is `TickCensus`; `indicators`
+cannot name `costs` (gate 22), so the caller passes the reference. GC-37's
+sourced tick table supersedes all of this when it merges. The lag after a real
+regime change is in `docs/06-limits.md` (L-FIB2-04).
+
+Proof: invariants FIB2-13 to FIB2-16.
+
+### D-6322 — The mover rank: a per-day fold over the point-in-time pool, slot order breaking ties, missing and stale counted (FIB-2) — 2026-10-18
+
+`runner::fib::rank::MoverRank` is opened per IST day with the pool's member
+slots in point-in-time series-id order and each member's previous close
+(`begin_day`), then folds the day's finished Zerodha one-minute closes in time
+order, one per member or none (`minute`), a fold and never an indexed read of a
+later minute (`CLAUDE.md` §3 rule 7). Membership is the caller's; the file names
+no universe.
+
+* `move_bp = (last close - previous close) x 10,000 / previous close`, in
+  `i128`, rounded toward zero, narrowed to `i32`; a move that does not fit is
+  refused for that member-minute, counted (`move_out_of_range`, FM-F021), and
+  the other members are unchanged.
+* The SIDE is the sign of `close - previous close` in paisa (FM-F019): 0.4 bp
+  is a gainer although its `move_bp` is 0; an unchanged close is on neither
+  side.
+* Gainers by move descending, losers by move ascending; inside a run of equal
+  `move_bp`, the exact `(c1 - p1) x p2` against `(c2 - p2) x p1` in `i128`; then
+  SLOT ORDER, the fixed tie rule.
+* MISSING (no close yet today) is not ranked and is counted; STALE (the last
+  close is older than the minute) is ranked on that close, flagged and counted.
+  A member with no previous close, a non-positive previous close, or a
+  non-positive close this minute is refused by name and counted
+  (`no_previous_close`, `previous_close_not_positive`, `close_not_positive`; a
+  bad print keeps the last good close).
+* A decision closing at `c` reads the minute `[c - 60 s, c)`, which closes at
+  `c`: on the 09:15 grid the same instant as the decision candle, so no second
+  timeframe enters a trade.
+* FM-F005's stamps, handed to FIB-2 by D-6314: the rank's exact share of its
+  side's ranked count (`rank_share`, permille only for display) and, per year,
+  the decision ranks beyond the first learning window's widest rank
+  (`BeyondW0`, information only).
+
+UNVERIFIED: whether "previous close" means the last Zerodha one-minute close or
+NSE's official close. FIB-8 computes both; this fold ranks on the one the
+caller passes, and the choice is a recorded variant.
+
+Proof: `crates/runner/tests/fib_rank.rs`; invariants FIB2-26 to FIB2-40.
+
+### D-6323 — The rank's width and its order: `u16` ranks under a width chosen from the run's largest pool, and a stable LSD radix sort sized once per run (FIB-2, FM-F009, FM-F010) — 2026-10-18
+
+The specification's first text gave each day a bitonic network of the day's
+padded width and `u8` ranks. Both are superseded. Ranks are `u16` in memory;
+the run's rank WIDTH for the rank file is one byte while its largest pool
+(PIT-1's header) fits `u8` and two above, chosen once (`RankWidth::of_pool`),
+recorded for the header, and a rank beyond it is refused by name
+(`rank_width_exceeded`), never wrapped: with 257 gainers the 257th is 257, not
+0. A run whose largest pool passes `u16::MAX` is refused.
+
+The order is a stable LSD radix sort over the members in slot order (FM-F010):
+gainers keyed by `i32::MAX - move_bp`, losers by the sign-flipped `move_bp`
+(`move_bp ^ i32::MIN`), unchanged closes excluded. Its digit width is
+`RANK_RADIX_DIGIT_BITS` = 8, a Representation row of `FIXED_NUMBERS` (four
+passes over a `u32` key, 256 buckets); the ranks do not depend on it. Its
+buffers are sized once at the run's largest pool, so no day allocates them; a
+day's pool above it is refused (`pool_over_run_maximum`). The work per minute is
+O(pool + buckets), the same at every minute of a day, and O(1) per member; the
+exact tie runs of D-6322 add O(r log r) per run of r members. The ranks equal a
+bitonic network's over the same order, padded to the next power of two, whose
+padding never ranks: that network lives in the tests as an oracle beside a std
+sort.
+
+Proof: `pool_257_all_gainers_ranks_257`, `radix_equals_std_sort_and_network`,
+`pools_of_1_2_3_200_256_257_and_512_match_both_oracles`. Bench rows R-F-01,
+R-F-01m, R-F-02.
+
+### D-6324 — The bank: one stock's histograms by measure, direction, width, base kind, entry style, exit variant and touch level, nothing shared across directions (FIB-2, 17:15 IST item 3) — 2026-10-18
+
+`indicators::fibflag::hist::HistBank` is a boxed slice of `OwnPast` cells laid
+out by a `BankShape`, built once per generation version: for every `Measure`
+(an append-only enum, 35 today) and each direction, long before short, the
+cells its `Scope` needs. A direction's dimensions come from its own generation
+(the widths tried, the entry-style variants, the exit variants, the touch
+levels); the base kinds are the schema's. The index is O(1) mixed-radix
+arithmetic, and a key whose fields do not match its measure's scope is refused
+by name (`scope_mismatch`, `cell_out_of_range`).
+
+* EVERY GENERATED NUMBER IS PER DIRECTION (operator 16 Oct 16:04 IST): every
+  measure but two has a cell per direction, and nothing is copied across.
+  `CandleHighStep` is the long side's high steps and the short side's low steps
+  (D-6327); `MoveSoFarBp` is sampled at each direction's own decision instants
+  per width (17:15 IST item 6). `AbsMoveBp` (every Zerodha minute close of a
+  tradable day, a market reference only) and `MaxSecondGap` (D-6326) are one
+  cell per stock.
+* `TradeDurationSecs` has a cell per (width, entry style, exit variant,
+  direction), sized from the generation (FM-F016). The 17:15 IST item 9
+  measures and FM-F011's exit measures (`WinnerRunUpMilliR`,
+  `OpenProfitGiveBackMilliR`, `TimeToBestSecs`, `SwingSizeBp`, `MaeMilliR`) have
+  a cell per (direction, width, entry style); they are fed by FIB-5's reference
+  walk from EVERY walked candidate, independent of any exit. FM-F011 records
+  "past winners read as every past candidate" as UNVERIFIED in D-6380, which is
+  FIB-5's and FIB-7's block; FIB-2 builds the cells and observes nothing itself.
+* Every tradable day commits every cell, so a cell's own past holds the days on
+  which it saw nothing; a full cell refuses the whole commit.
+* A shape that EXTENDS the old one (a width added at a step, a style, variant or
+  level appended) keeps every cell byte-identical (`regrow`); a new cell starts
+  with no own past, and the caller builds it once from that width's committed
+  history, then incrementally (BOUNDED, L-FIB2-10).
+* SIZE: one unsplit cell's bytes are a compile-time constant
+  (`UNSPLIT_CELL_BYTES`), so a bank's total is known before it is allocated
+  (`BankShape::unsplit_bytes`), and the caller prints and records it at run
+  start (`indicators` never prints, gate 17). When the banks of every stock do
+  not fit R10's measured memory, `plan_width_passes` spreads the widths over
+  the fewest passes, largest first into the lightest pass, so the passes cost
+  about the same; it refuses `histbank_width_over_memory` only when one width
+  alone does not fit.
+
+Proof: invariants FIB2-21 to FIB2-24. Bench rows H-F-06, H-F-07.
+
+### D-6325 — The checkpoint bodies: sparse, canonical, little-endian, with the varint group width a Representation row (FIB-2, FM-F013) — 2026-10-18
+
+FIB-9 checkpoints every stock at each month end and resumes byte-identically.
+FIB-2 writes the BODIES; `indicators` never touches a file, and the
+"histogram checkpoint" file kind — its common header, footer and verify — is
+FIB-8's.
+
+* `OwnPast::encode`: `BTXFIBH1`, the codec version (1 unsplit; 2 with the
+  per-bin depth table, written as a sparse list), the bin count (505) and the
+  sub-bits (3), the committed days, total, censored count, the exact maximum (a
+  varint), the two refusal counters, then the committed counts as varint
+  zero-runs and varint counts.
+* `ObservedTick::encode`: `BTXFIBT1`, version 1, the counters, then each
+  `(gcd, days)` in ascending gcd order.
+* `HistBank::encode`: `BTXFIBB1`, version 1, each direction's dimensions, the
+  cell count, then every cell's body in index order.
+
+A varint carries `HIST_CHECKPOINT_GROUP_BITS` = 7 payload bits per byte, a
+Representation row of `FIXED_NUMBERS`; a non-minimal varint, a zero written as
+a value, a position past the table, a count past `u32::MAX`, a total, a maximum
+or a depth that does not agree with the counts and the table are each refused
+by name, so one histogram has one body. A body is refused while a day is staged
+(`staged_not_empty`). Encoding scans O(leaves) and writes O(nonzero leaves);
+FIB-9's sample measures the bytes and FIB-12 projects them.
+
+Proof: `sparse_snapshot_round_trip_and_golden` (a byte golden),
+`a_damaged_body_is_refused_by_name`, `a_damaged_depth_table_is_refused_by_name`,
+`the_tick_and_bank_bodies_round_trip_and_refuse_by_name`; invariant FIB2-12.
+
+### D-6326 — The silence flag reads the longest gap of each CLEAN day, inside one continuous phase (FIB-2, FM-F018) — 2026-10-18
+
+A running "longest gap ever" only grows and can span days or halts. So
+`GapDay` measures the gaps between consecutive GDFL seconds only inside one
+continuous phase: `phase_break` (a halt, a session-window edge) and `end_day`
+start a new one, so an overnight gap is never a gap. Each committed CLEAN day's
+longest gap enters the stock's `MaxSecondGap` histogram; an
+`execution_feed_hole` day is never observed, so a 40-minute hole does not raise
+the threshold. `silence_in_trade` is the main reading: a gap longer than the
+exact longest gap of every clean committed day (permille 1000) is SILENT, and
+with no clean committed day the flag is UNKNOWN, never true. The second,
+labelled reading is the histogram's median. Fed by FM-F107's seconds; O(1) per
+second and per query, O(leaves) per commit.
+
+Proof: `max_second_gap_only_grows_at_commits`,
+`a_hole_day_and_an_overnight_gap_never_raise_the_threshold`.
+
+### D-6327 — The touch step is in basis points of the previous extreme, per direction, and the touch test is exact (FIB-2, FM-F017, 17:15 IST item 4) — 2026-10-18
+
+A step in paisa makes the relative tolerance shrink as the price rises, and the
+short side must not read highs. `step_bp(previous, extreme)` is
+`|extreme - previous| x 10,000 / previous`, in `i128`, rounded toward zero; long
+passes highs and short passes lows, each into its own direction's
+`CandleHighStep` cell. FIB-3's touch tolerance is the level-q value of that
+cell on committed prior days, q seeded at the median and refined by R2, and a
+touch holds iff `|x - edge| x 10,000 <= tolerance_bp x edge`, exactly
+(`touches`). A history built at price P and a base at 10P give the same touch
+count. The duration median's censoring label (`OwnPast::censored_median`) is
+FIB-2's part of FM-F016; the walker's `after_last_entry:<variant>` refusal is
+FIB-5's.
+
+Proof: `a_history_at_p_and_a_base_at_ten_p_give_the_same_touch_count`,
+`the_censored_median_is_labelled_when_censored_reach_the_resolved`.
+
+### D-6328 — Two Representation rows appended to `FIXED_NUMBERS`, and the two goldens that read the ledger re-pinned (FIB-2) — 2026-10-18
+
+The ledger's own rule says a later FIB package that must type a
+representation number appends its row at the end under its own decision id.
+FIB-2 appends two: `rank_radix_digit_bits` = 8 (D-6323) and
+`hist_checkpoint_group_bits` = 7 (D-6325). Neither decides anything. The
+ledger's bytes are in every pair identity, so `FIXED_NUMBERS_GOLDEN`
+(`vocab::fib_cube`) became `(2_735, 15_552_432_544_502_829_085)` and
+`PAIR_GOLDEN` (`runner::fib::identity_tests`) became
+`1956186185fa61075de4abe4ae5a5bce20ee8b941138c8be0974092f6324283f`; no run was
+sealed under the old values. At merge-back with another wave-2 package that
+appends rows too, keep every row in merge order and recompute both goldens from
+the merged ledger. Every FIB-2 strategy file holds no numeric literal but 0 and
+1 in its shipping part, proved by its own source scan (`hist_types_no_number`,
+`rank_types_no_number`) and by FIB-1's (`every_fib1_file_of_fibflag_types_no_number`,
+`every_fib1_file_of_runner_types_no_number`).
