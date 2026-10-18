@@ -1818,7 +1818,8 @@ mod tests {
                 (7_105, 7_110, 7_100, 7_105)
             };
             d.fold(&candle(20_500, slot, bar)).unwrap();
-            live.push((d.rest_start, d.lanes[0].length, d.lanes[0].long.valid));
+            let lane = d.lanes.first().unwrap();
+            live.push((d.rest_start, lane.length, lane.long.valid));
         }
         assert_eq!(
             live,
