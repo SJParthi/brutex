@@ -1967,3 +1967,838 @@ fn a_walk_is_deterministic() {
     };
     assert_eq!(run(), run());
 }
+
+// --------------------------------------------------------------- mirror --
+
+/// A deterministic generator for the seeded property tests (splitmix64).
+struct Seeded(u64);
+
+impl Seeded {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        lo + i64::try_from(self.below(u64::try_from(hi - lo + 1).unwrap())).unwrap()
+    }
+
+    fn coin(&mut self) -> bool {
+        self.below(2) == 0
+    }
+}
+
+/// The mirror of a price about `2P`: a short on mirrored bars is the long.
+const K: i64 = 2 * P;
+
+fn mirror_bar(c: &Candle) -> Candle {
+    Candle::new(
+        c.ts_micros,
+        K - c.open,
+        K - c.low,
+        K - c.high,
+        K - c.close,
+        c.volume,
+        c.open_interest,
+    )
+}
+
+/// A random day at `resolution` from 10:00 with gaps, and a forced window.
+fn random_day(rng: &mut Seeded, resolution: Resolution) -> Day {
+    let mut bars = vec![quiet(at(9, 59, 0), P - rng.range(0, 300), 1_000)];
+    let mut price = P;
+    let step = if resolution == Resolution::Minute {
+        60
+    } else {
+        1
+    };
+    let mut second = at(10, 0, 0);
+    for _ in 0..rng.range(20, 90) {
+        let open = price;
+        price += rng.range(-250, 250);
+        let high = open.max(price) + rng.range(0, 150);
+        let low = open.min(price) - rng.range(0, 150);
+        let volume = rng.range(1, 160);
+        bars.push(bar(second, open, high, low, price, volume));
+        second += step * u32::try_from(rng.range(1, 3)).unwrap();
+    }
+    for window in [0, 17, 40, 59] {
+        if rng.coin() {
+            let w = if resolution == Resolution::Minute {
+                at(15, 9, 0)
+            } else {
+                at(15, 9, window)
+            };
+            if bars.last().is_some_and(|b| b.ts_micros >= ts(w)) {
+                continue;
+            }
+            let open = price;
+            bars.push(bar(
+                w,
+                open,
+                open + rng.range(0, 90),
+                open - rng.range(0, 90),
+                open,
+                rng.range(1, 400),
+            ));
+        }
+    }
+    let mut day = match resolution {
+        Resolution::Minute => Day::minutes(bars),
+        Resolution::Second => Day::seconds(bars),
+    };
+    if resolution == Resolution::Second && rng.coin() {
+        let marks = (0..day.bars.len())
+            .map(|_| BookMark {
+                ask: rng.below(8) != 0,
+                bid: rng.below(8) != 0,
+                flagged_print: rng.below(10) == 0,
+            })
+            .collect();
+        day.marks = Some(marks);
+    }
+    if rng.below(4) == 0 {
+        let start = at(10, 0, 0) + u32::try_from(rng.range(30, 900)).unwrap();
+        day.halts = vec![HaltRange {
+            start_second: start,
+            end_second: start + u32::try_from(rng.range(1, 200)).unwrap(),
+        }];
+    }
+    if rng.coin() {
+        day.max_gap = u32::try_from(rng.range(0, 4)).unwrap();
+    }
+    day
+}
+
+/// The mirrored day: every price about `2P`, the book's sides swapped.
+fn mirror_day(day: &Day) -> Day {
+    let mut out = day.clone();
+    out.bars = day.bars.iter().map(mirror_bar).collect();
+    out.zerodha = day.zerodha.iter().map(mirror_bar).collect();
+    out.trail = day
+        .trail
+        .iter()
+        .map(|c| FibCandle {
+            candle: mirror_bar(&c.candle),
+            ..*c
+        })
+        .collect();
+    out.marks = day.marks.as_ref().map(|marks| {
+        marks
+            .iter()
+            .map(|m| BookMark {
+                ask: m.bid,
+                bid: m.ask,
+                flagged_print: m.flagged_print,
+            })
+            .collect()
+    });
+    out
+}
+
+fn random_variant(rng: &mut Seeded) -> ExitVariant {
+    let rungs = indicators::fib::RUNGS;
+    ExitVariant {
+        stop: match rng.below(3) {
+            0 => StopLoss::Absent,
+            _ => StopLoss::BeyondBase {
+                extra_ticks: u32::try_from(rng.range(0, 6)).unwrap(),
+            },
+        },
+        take_profit: match rng.below(4) {
+            0 => TakeProfit::Absent,
+            1 => TakeProfit::RMultiple {
+                milli_r: u32::try_from(rng.range(50, 3_000)).unwrap(),
+            },
+            2 => TakeProfit::FibRung {
+                rung_permille: u16::try_from(rungs[rng.below(11) as usize]).unwrap(),
+            },
+            _ => TakeProfit::NextRung,
+        },
+        trailing_take_profit: match rng.below(2) {
+            0 => TrailingTakeProfit::Absent,
+            _ => TrailingTakeProfit::GiveBack {
+                permille: u16::try_from(rng.range(1, 1_000)).unwrap(),
+            },
+        },
+        trailing_stop: match rng.below(3) {
+            0 => TrailingStop::Absent,
+            1 => TrailingStop::Swing {
+                width: u16::try_from(rng.range(1, 2)).unwrap(),
+                buffer_paisa: u32::try_from(rng.range(0, 20)).unwrap(),
+            },
+            _ => TrailingStop::RStep {
+                milli_r: u32::try_from(rng.range(100, 2_000)).unwrap(),
+            },
+        },
+        time_exit: match rng.below(3) {
+            0 => TimeExit::Absent,
+            1 => TimeExit::Clock {
+                second: at(10, 0, 0) + u32::try_from(rng.range(0, 3_600)).unwrap(),
+            },
+            _ => TimeExit::Hold {
+                seconds: u32::try_from(rng.range(1, 900)).unwrap(),
+            },
+        },
+    }
+}
+
+fn random_plan(rng: &mut Seeded) -> Plan {
+    let mut plan = long_plan(at(10, 0, 0) + 60 * u32::try_from(rng.range(0, 30)).unwrap());
+    plan.style = [EntryStyle::Close, EntryStyle::Break, EntryStyle::Retest][rng.below(3) as usize];
+    plan.entry_window_end = plan.decision_second + 60 * u32::try_from(rng.range(1, 20)).unwrap();
+    plan.base_edge = P - rng.range(50, 1_500);
+    plan.trigger_edge = P + rng.range(-200, 200);
+    plan.fib_zero = P - rng.range(0, 2_000);
+    plan.fib_one = P + rng.range(1, 2_000);
+    plan
+}
+
+fn mirror_plan(plan: &Plan) -> Plan {
+    Plan {
+        direction: Search::Short,
+        entry_ref: K - plan.entry_ref,
+        base_edge: K - plan.base_edge,
+        trigger_edge: K - plan.trigger_edge,
+        fib_zero: K - plan.fib_zero,
+        fib_one: K - plan.fib_one,
+        ..*plan
+    }
+}
+
+fn random_profile(rng: &mut Seeded, resolution: Resolution) -> WalkProfile {
+    WalkProfile {
+        resolution,
+        exit_fill: if rng.coin() {
+            ExitFill::SpillByVolume
+        } else {
+            ExitFill::FirstTouchWhole
+        },
+        snapshot_edge: if rng.coin() {
+            SnapshotEdge::StampOpensInterval
+        } else {
+            SnapshotEdge::StampClosesInterval
+        },
+        halt_rule: if rng.coin() {
+            HaltRule::WorstSeenThroughHalt
+        } else {
+            HaltRule::ResumeAtFirstPrint
+        },
+        beyond_target: if rng.coin() {
+            BeyondTarget::FiresOnFirstBar
+        } else {
+            BeyondTarget::TargetVoid
+        },
+        ..minute_profile()
+    }
+}
+
+fn random_fill(rng: &mut Seeded, resolution: Resolution) -> FillVariant {
+    if resolution == Resolution::Minute {
+        return FillVariant::STAGE_A;
+    }
+    FillVariant {
+        window: match rng.below(3) {
+            0 => EntryWindow::NextClose,
+            1 => EntryWindow::UntilForced,
+            _ => EntryWindow::Deadline {
+                seconds: u32::try_from(rng.range(1, 400)).unwrap(),
+            },
+        },
+        participation: if rng.coin() {
+            Participation::NoCap
+        } else {
+            Participation::Cap {
+                permille: u16::try_from(rng.range(1, 1_000)).unwrap(),
+            }
+        },
+    }
+}
+
+/// Exited shares of a slot: its own order's and its forced order's.
+fn exited(outcome: &SlotOutcome) -> i128 {
+    let qty = |o: Option<runner::fib::types::ExitOrder>| o.map_or(0, |o| o.filled_qty);
+    i128::from(qty(outcome.own_exit) + qty(outcome.forced_exit))
+}
+
+#[test]
+fn a_short_on_mirrored_bars_is_the_long_mirrored_exactly() {
+    let mut rng = Seeded(0x00F1_B5ED);
+    let mut statuses = std::collections::HashSet::with_capacity(32);
+    let mut reasons = std::collections::HashSet::with_capacity(8);
+    for trial in 0..600 {
+        let resolution = if trial % 2 == 0 {
+            Resolution::Minute
+        } else {
+            Resolution::Second
+        };
+        let day = random_day(&mut rng, resolution);
+        let plan = random_plan(&mut rng);
+        let variant = random_variant(&mut rng);
+        let profile = random_profile(&mut rng, resolution);
+        let fill = random_fill(&mut rng, resolution);
+        let size = if rng.coin() {
+            TradeSize::Small
+        } else {
+            TradeSize::Large
+        };
+        let long = walk_one(&day, &profile, plan, variant, fill, size);
+        let short = walk_one(
+            &mirror_day(&day),
+            &profile,
+            mirror_plan(&plan),
+            variant,
+            fill,
+            size,
+        );
+        let context = format!("trial {trial}: {plan:?} {variant:?} {profile:?} {fill:?}");
+        assert_eq!(long.status, short.status, "{context}");
+        assert_eq!(long.exit_reason, short.exit_reason, "{context}");
+        assert_eq!(long.flags, short.flags, "{context}");
+        assert_eq!(
+            (long.filled_qty, long.decision_qty, long.planned_qty),
+            (short.filled_qty, short.decision_qty, short.planned_qty),
+            "{context}"
+        );
+        assert_eq!(
+            (long.risk_per_share_paisa, long.risk_num, long.risk_den),
+            (short.risk_per_share_paisa, short.risk_num, short.risk_den),
+            "{context}"
+        );
+        assert_eq!(
+            (
+                long.first_entry_second,
+                long.last_entry_second,
+                long.exit_second
+            ),
+            (
+                short.first_entry_second,
+                short.last_entry_second,
+                short.exit_second
+            ),
+            "{context}"
+        );
+        assert_eq!(
+            (
+                long.mfe_to_exit_paisa,
+                long.mae_to_exit_paisa,
+                long.mfe_to_horizon_paisa,
+                long.mae_to_horizon_paisa
+            ),
+            (
+                short.mfe_to_exit_paisa,
+                short.mae_to_exit_paisa,
+                short.mfe_to_horizon_paisa,
+                short.mae_to_horizon_paisa
+            ),
+            "{context}"
+        );
+        assert_eq!(
+            (
+                long.mfe_second,
+                long.last_peak_second,
+                long.entry_wait_seconds,
+                long.exit_spill_seconds,
+                long.max_participation_permille
+            ),
+            (
+                short.mfe_second,
+                short.last_peak_second,
+                short.entry_wait_seconds,
+                short.exit_spill_seconds,
+                short.max_participation_permille
+            ),
+            "{context}"
+        );
+        let k = i128::from(K);
+        assert_eq!(
+            short.entry_value_paisa,
+            k * i128::from(long.filled_qty) - long.entry_value_paisa,
+            "{context}"
+        );
+        assert_eq!(
+            short.exit_value_paisa,
+            k * exited(&long) - long.exit_value_paisa,
+            "{context}"
+        );
+        assert_eq!(
+            long.r_multiple(Search::Long),
+            short.r_multiple(Search::Short),
+            "{context}"
+        );
+        statuses.insert(long.status.name());
+        reasons.insert(long.exit_reason.name());
+    }
+    // The trials reach the walker's outcomes, not one corner of them.
+    assert!(statuses.len() >= 6, "{statuses:?}");
+    assert_eq!(reasons.len(), 6, "{reasons:?}");
+}
+
+// ---------------------------------------------------------------- codec --
+
+use runner::fib::codec::{
+    CodecRefusal, DECISION_RECORD_BYTES, DecisionRecord, HEADER_BYTES, Header, MEASURED_ROWS,
+    Measurement, OUTCOME_FIXED_BYTES, OUTCOME_RECORD_V1, OUTCOME_RECORD_V2, OutcomeRecord,
+    RecordKind, SLOT_V1_BYTES, SLOT_V2_BYTES, estimate_bytes, outcome_stride,
+};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decision() -> DecisionRecord {
+    let mut measurements = [Measurement {
+        raw: 0,
+        position_num: 0,
+        position_den: 0,
+    }; MEASURED_ROWS];
+    for (k, m) in measurements.iter_mut().enumerate() {
+        let k = k as u64;
+        m.raw = -7 - i64::try_from(k).unwrap();
+        m.position_num = 2 * k + 1;
+        m.position_den = 2 * (k + 20);
+    }
+    let mut coords = [0_u8; vocab::fib_cube::ROW_COUNT];
+    for (k, c) in coords.iter_mut().enumerate() {
+        *c = u8::try_from(k % 3).unwrap();
+    }
+    DecisionRecord {
+        ordinal: 41,
+        stock_slot: 207,
+        ist_day: DAY,
+        plan: long_plan(at(10, 0, 0)),
+        kind: indicators::fibflag::types::BaseKind::Micro3,
+        coords,
+        measurements,
+    }
+}
+
+/// A priced long with both exit orders, and an unfilled slot.
+fn outcome_record() -> OutcomeRecord {
+    let day = second_day(&[
+        quiet(at(15, 8, 0), P, 30),
+        bar(at(15, 9, 0), P, P + 10, 99_700, P, 1_000),
+    ]);
+    let variant = ExitVariant {
+        time_exit: TimeExit::Clock {
+            second: at(15, 8, 0),
+        },
+        ..STOP_ONLY
+    };
+    let priced = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    let unfilled = second_slot(&day, long_plan(at(12, 0, 0)), variant);
+    OutcomeRecord {
+        ordinal: 41,
+        variant: 3,
+        fill: 1,
+        zerodha_close: 60_680,
+        gdfl_close: 242_700,
+        clock_lag: ClockLag::Measured(-2),
+        slots: vec![priced, unfilled],
+    }
+}
+
+#[test]
+fn record_stride_equals_declared_layout() {
+    assert_eq!(MEASURED_ROWS, 13);
+    assert_eq!(HEADER_BYTES, 53);
+    assert_eq!(DECISION_RECORD_BYTES, 405);
+    assert_eq!(OUTCOME_FIXED_BYTES, 29);
+    assert_eq!(SLOT_V1_BYTES, 167);
+    assert_eq!(SLOT_V2_BYTES, 225);
+    assert_eq!(decision().encode().len(), DECISION_RECORD_BYTES);
+    let record = outcome_record();
+    for version in [OUTCOME_RECORD_V1, OUTCOME_RECORD_V2] {
+        let bytes = record.encode(version).expect("encodes");
+        assert_eq!(Some(bytes.len()), outcome_stride(version, 2));
+    }
+    assert_eq!(outcome_stride(OUTCOME_RECORD_V2 + 1, 2), None);
+    assert_eq!(
+        record.encode(OUTCOME_RECORD_V2 + 1),
+        Err(CodecRefusal::Version {
+            version: OUTCOME_RECORD_V2 + 1
+        })
+    );
+}
+
+#[test]
+fn the_records_bytes_are_pinned() {
+    let header = Header::outcomes(
+        OUTCOME_RECORD_V2,
+        Resolution::Second,
+        2,
+        7,
+        [0xAB; vocab::fib_cube::DIGEST_BYTES],
+    )
+    .expect("a header");
+    // "BTXFIBO1", version 2, resolution 1, two slots, stride 479, version 7.
+    assert_eq!(
+        hex(&header.encode()),
+        format!(
+            "{}{}{}{}{}{}{}",
+            "4254584649424f31",
+            "0200",
+            "01",
+            "0200",
+            "df010000",
+            "07000000",
+            "ab".repeat(32)
+        )
+    );
+    let decision = hex(&brutex_core::blake3::hash(&decision().encode()));
+    let outcome = hex(&brutex_core::blake3::hash(
+        &outcome_record().encode(OUTCOME_RECORD_V2).expect("encodes"),
+    ));
+    let outcome_v1 = hex(&brutex_core::blake3::hash(
+        &outcome_record().encode(OUTCOME_RECORD_V1).expect("encodes"),
+    ));
+    assert_eq!(
+        decision,
+        "03998d091aaeefe0e58384e050da5d7199b22fae0c7863f900d6aeb0cd2685d5"
+    );
+    assert_eq!(
+        outcome,
+        "8434ee0996726db30a9aa49bee7bb4b3ecf19ac3fc1511312d45fe48c5890522"
+    );
+    assert_eq!(
+        outcome_v1,
+        "bf35fcf707e6277f00fcb87d18cdc47d0b9806dac32837a517390fe95104e4fc"
+    );
+}
+
+#[test]
+fn every_record_round_trips_and_a_v1_record_reads_its_orders_merged() {
+    let d = decision();
+    assert_eq!(DecisionRecord::decode(&d.encode()), Ok(d));
+    let record = outcome_record();
+    let v2 = Header::outcomes(OUTCOME_RECORD_V2, Resolution::Second, 2, 7, [1; 32]).expect("v2");
+    let decoded = OutcomeRecord::decode(&v2, &record.encode(OUTCOME_RECORD_V2).expect("v2"))
+        .expect("decodes");
+    assert_eq!(decoded.record, record);
+    assert!(!decoded.orders_merged);
+    assert!(record.slots[0].own_exit.is_some() && record.slots[0].forced_exit.is_some());
+    let v1 = Header::outcomes(OUTCOME_RECORD_V1, Resolution::Second, 2, 7, [1; 32]).expect("v1");
+    let old = OutcomeRecord::decode(&v1, &record.encode(OUTCOME_RECORD_V1).expect("v1"))
+        .expect("decodes");
+    assert!(old.orders_merged, "v1 stays decodable, its orders merged");
+    let mut merged = record.clone();
+    for slot in &mut merged.slots {
+        slot.own_exit = None;
+        slot.forced_exit = None;
+    }
+    assert_eq!(old.record, merged);
+    for header in [v1, v2, Header::decisions(1, [9; 32])] {
+        assert_eq!(Header::decode(&header.encode()), Ok(header));
+    }
+    let lags = [
+        ClockLag::Unmeasured,
+        ClockLag::TrustUnchecked,
+        ClockLag::Measured(7),
+    ];
+    for lag in lags {
+        let mut r = record.clone();
+        r.clock_lag = lag;
+        let back =
+            OutcomeRecord::decode(&v2, &r.encode(OUTCOME_RECORD_V2).expect("v2")).expect("decodes");
+        assert_eq!(back.record.clock_lag, lag);
+    }
+}
+
+#[test]
+fn every_status_and_reason_survives_the_codec() {
+    let record = outcome_record();
+    let v2 = Header::outcomes(OUTCOME_RECORD_V2, Resolution::Second, 2, 7, [1; 32]).expect("v2");
+    let statuses = [
+        SlotStatus::Priced,
+        SlotStatus::NotTradable,
+        SlotStatus::Refused(SlotRefusal::SizeBelowOneShare),
+        SlotStatus::Refused(SlotRefusal::NonpositivePlannedRisk),
+        SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired),
+        SlotStatus::EntryUnfilled(UnfilledReason::TargetBeforeFill),
+        SlotStatus::EntryUnfilled(UnfilledReason::FeedHole),
+        SlotStatus::EntryUnfilled(UnfilledReason::NeverTriggered),
+        SlotStatus::Unpriceable(UnpricedReason::ForcedThin),
+        SlotStatus::Unpriceable(UnpricedReason::ForcedLockedLong),
+        SlotStatus::Unpriceable(UnpricedReason::ForcedLockedShort),
+        SlotStatus::Unpriceable(UnpricedReason::ForcedCheap),
+        SlotStatus::Unpriceable(UnpricedReason::ExecutionFeedHole),
+        SlotStatus::Unpriceable(UnpricedReason::CorruptBarInTrade),
+        SlotStatus::Unpriceable(UnpricedReason::Halt),
+    ];
+    let reasons = [
+        ExitReason::StopLoss,
+        ExitReason::TrailingStopLoss,
+        ExitReason::TrailingTakeProfit,
+        ExitReason::TakeProfit,
+        ExitReason::Time,
+        ExitReason::Forced,
+    ];
+    let mut names = std::collections::HashSet::with_capacity(statuses.len());
+    for (k, status) in statuses.into_iter().enumerate() {
+        let mut r = record.clone();
+        r.slots[0].status = status;
+        r.slots[1].exit_reason = reasons[k % reasons.len()];
+        let back =
+            OutcomeRecord::decode(&v2, &r.encode(OUTCOME_RECORD_V2).expect("v2")).expect("decodes");
+        assert_eq!(back.record, r);
+        assert!(names.insert(status.name()), "{} named twice", status.name());
+    }
+    assert_eq!(SlotStatus::Priced.entered(), true);
+    assert!(SlotStatus::Unpriceable(UnpricedReason::Halt).entered());
+    assert!(!SlotStatus::NotTradable.entered());
+}
+
+#[test]
+fn a_damaged_record_is_refused_by_name() {
+    let header =
+        Header::outcomes(OUTCOME_RECORD_V2, Resolution::Second, 2, 7, [1; 32]).expect("v2");
+    let mut bytes = header.encode();
+    bytes[0] = b'X';
+    assert_eq!(Header::decode(&bytes), Err(CodecRefusal::Magic));
+    assert_eq!(CodecRefusal::Magic.name(), "record_magic");
+    let short = &header.encode()[..HEADER_BYTES - 1];
+    assert_eq!(
+        Header::decode(short),
+        Err(CodecRefusal::Length {
+            expected: HEADER_BYTES,
+            got: HEADER_BYTES - 1
+        })
+    );
+    let mut bytes = header.encode();
+    bytes[8] = 9;
+    assert_eq!(
+        Header::decode(&bytes),
+        Err(CodecRefusal::Version { version: 9 })
+    );
+    let mut bytes = Header::decisions(1, [0; 32]).encode();
+    bytes[8] = 2;
+    assert_eq!(
+        Header::decode(&bytes),
+        Err(CodecRefusal::Version { version: 2 })
+    );
+    let mut bytes = header.encode();
+    bytes[10] = 7;
+    assert_eq!(
+        Header::decode(&bytes),
+        Err(CodecRefusal::Code {
+            field: "resolution",
+            code: 7
+        })
+    );
+    assert_eq!(
+        Header::outcomes(9, Resolution::Minute, 1, 1, [0; 32]),
+        Err(CodecRefusal::Version { version: 9 })
+    );
+    let mut d = decision().encode();
+    d[14] = 5;
+    assert_eq!(
+        DecisionRecord::decode(&d),
+        Err(CodecRefusal::Code {
+            field: "direction",
+            code: 5
+        })
+    );
+    let mut d = decision().encode();
+    d[15] = 5;
+    assert!(matches!(
+        DecisionRecord::decode(&d),
+        Err(CodecRefusal::Code {
+            field: "entry_style",
+            ..
+        })
+    ));
+    let mut d = decision().encode();
+    d[14 + 54] = 5;
+    assert!(matches!(
+        DecisionRecord::decode(&d),
+        Err(CodecRefusal::Code {
+            field: "base_kind",
+            ..
+        })
+    ));
+    let record = outcome_record().encode(OUTCOME_RECORD_V2).expect("v2");
+    let damage = |at: usize, value: u8| {
+        let mut bytes = record.clone();
+        bytes[at] = value;
+        OutcomeRecord::decode(&header, &bytes).map(|_| ())
+    };
+    let lag_at = 4 + 2 + 2 + 8 + 8;
+    assert!(matches!(
+        damage(lag_at, 9),
+        Err(CodecRefusal::Code {
+            field: "clock_lag",
+            ..
+        })
+    ));
+    let slot = OUTCOME_FIXED_BYTES;
+    assert!(matches!(
+        damage(slot, 9),
+        Err(CodecRefusal::Code {
+            field: "status",
+            ..
+        })
+    ));
+    for (kind, field) in [
+        (1, "unfilled_reason"),
+        (2, "unpriced_reason"),
+        (3, "slot_refusal"),
+    ] {
+        let mut bytes = record.clone();
+        bytes[slot] = kind;
+        bytes[slot + 1] = 99;
+        assert!(
+            matches!(
+                OutcomeRecord::decode(&header, &bytes),
+                Err(CodecRefusal::Code { field: f, .. }) if f == field
+            ),
+            "{field}"
+        );
+    }
+    assert!(matches!(
+        damage(slot + 2, 99),
+        Err(CodecRefusal::Code {
+            field: "exit_reason",
+            ..
+        })
+    ));
+    assert!(matches!(
+        OutcomeRecord::decode(&header, &record[1..]),
+        Err(CodecRefusal::Length { .. })
+    ));
+    let mut wide = outcome_record();
+    wide.slots = vec![wide.slots[0]; usize::from(u16::MAX) + 1];
+    assert_eq!(wide.encode(OUTCOME_RECORD_V2), Err(CodecRefusal::SlotCount));
+    for (refusal, name) in [
+        (CodecRefusal::SlotCount, "record_slot_count"),
+        (CodecRefusal::Version { version: 0 }, "record_version"),
+        (
+            CodecRefusal::Length {
+                expected: 0,
+                got: 1,
+            },
+            "record_length",
+        ),
+        (
+            CodecRefusal::Code {
+                field: "x",
+                code: 0,
+            },
+            "record_code",
+        ),
+    ] {
+        assert_eq!(refusal.name(), name);
+    }
+}
+
+#[test]
+fn estimate_uses_header_stride() {
+    let header =
+        Header::outcomes(OUTCOME_RECORD_V2, Resolution::Second, 2, 7, [1; 32]).expect("v2");
+    let stride = u128::try_from(OUTCOME_FIXED_BYTES + 2 * SLOT_V2_BYTES).unwrap();
+    assert_eq!(u128::from(header.stride), stride);
+    assert_eq!(estimate_bytes(&header, 10), 53 + 10 * stride);
+    let later = Header {
+        stride: header.stride + 100,
+        ..header
+    };
+    assert_eq!(estimate_bytes(&later, 10), 53 + 10 * (stride + 100));
+    assert_eq!(Header::decisions(1, [0; 32]).kind, RecordKind::Decisions);
+    assert_eq!(Header::decisions(1, [0; 32]).stride, 405);
+}
+
+#[test]
+fn adding_a_variant_appends_outcomes_only() {
+    let (day, plans) = busy();
+    let base = set_of(Search::Long, vec![STOP_ONLY]);
+    let grown = base
+        .extended(
+            7,
+            &[ExitVariant {
+                take_profit: ONE_R,
+                ..STOP_ONLY
+            }],
+        )
+        .expect("grown");
+    let file = |exits: &ExitSet, id: u16| -> Vec<u8> {
+        let index = day.index(&minute_profile(), exits).expect("indexes");
+        let pairs: Vec<(u32, u16)> = (0..3).map(|p| (p, id)).collect();
+        let walked = walk_pairs(
+            &index,
+            &plans,
+            exits,
+            FillVariant::STAGE_A,
+            &[TradeSize::Small],
+            &pairs,
+        )
+        .expect("walks");
+        let mut bytes = Vec::new();
+        for w in walked {
+            let record = OutcomeRecord {
+                ordinal: w.plan,
+                variant: w.variant,
+                fill: 0,
+                zerodha_close: 1,
+                gdfl_close: 1,
+                clock_lag: ClockLag::Measured(0),
+                slots: w.slots,
+            };
+            bytes.extend(record.encode(OUTCOME_RECORD_V2).expect("v2"));
+        }
+        bytes
+    };
+    let before = file(&base, 0);
+    let after = file(&grown, 0);
+    assert_eq!(
+        before, after,
+        "variant 0's file is untouched by the new variant"
+    );
+    let added = file(&grown, 1);
+    assert_eq!(
+        added.len(),
+        3 * outcome_stride(OUTCOME_RECORD_V2, 1).unwrap()
+    );
+    assert_ne!(added, before);
+    let decisions: Vec<u8> = plans
+        .iter()
+        .map(|plan| {
+            DecisionRecord {
+                plan: *plan,
+                ..decision()
+            }
+            .encode()
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(
+        decisions.len(),
+        3 * DECISION_RECORD_BYTES,
+        "no decision record grows"
+    );
+}
+
+#[test]
+fn outcomes_never_feed_a_coordinate() {
+    let record = decision();
+    let plan = record.plan;
+    let before = minute_day(&[bar(at(10, 0, 0), P, P + 100, P - 50, P, 1_000)]);
+    let mut after = before.clone();
+    for b in &mut after.bars {
+        if b.ts_micros >= ts(plan.decision_second) {
+            *b = mirror_bar(b);
+        }
+    }
+    after.trail = after.bars.iter().map(candle_of).collect();
+    let walked = minute_slot(&before, plan, STOP_ONLY);
+    let perturbed = minute_slot(&after, plan, STOP_ONLY);
+    assert_ne!(walked, perturbed, "the perturbation reached the outcome");
+    // The decision record is built from the plan and the cell alone: no bar
+    // after the decision can reach it.
+    assert_eq!(record.encode(), decision().encode());
+}
