@@ -242,14 +242,16 @@ pub const DECISION_RECORD_BYTES: usize = size_of::<u32>()
     + MEASURED_ROWS * MEASUREMENT_BYTES;
 
 /// The outcome record's fixed part: ordinal, variant, fill, factor pair,
-/// clock lag (state and seconds).
-pub const OUTCOME_FIXED_BYTES: usize = size_of::<u32>()
-    + size_of::<u16>()
-    + size_of::<u16>()
-    + size_of::<i64>()
-    + size_of::<i64>()
-    + size_of::<u8>()
-    + size_of::<i32>();
+/// clock lag (state and seconds). Summed out of field order, so the two
+/// two-byte fields never meet: `2 + 2` is also `2 x 2`, and a stride written
+/// that way could change shape with no byte moving.
+pub const OUTCOME_FIXED_BYTES: usize = size_of::<u32>() // ordinal
+    + size_of::<u16>() // variant
+    + size_of::<i64>() // zerodha close
+    + size_of::<u16>() // fill
+    + size_of::<i64>() // gdfl close
+    + size_of::<u8>() // clock lag state
+    + size_of::<i32>(); // clock lag seconds
 
 /// One v1 slot's width.
 pub const SLOT_V1_BYTES: usize = size_of::<u8>() // status
