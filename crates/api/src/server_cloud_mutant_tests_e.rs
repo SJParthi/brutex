@@ -714,3 +714,40 @@ fn ending_a_served_process_with_no_engine_work_abandons_none() {
         "{stdout}"
     );
 }
+
+/// **A stop says how much engine work it abandons, and says nothing when it
+/// abandons none.** The count of running engine tasks is handed in: none
+/// running ends quietly, and one that never finishes is abandoned when the
+/// grace runs out, by count and grace on one `api.main` line. Each case has
+/// a grace no other test uses, so the lines found are this test's own.
+/// Kills `>` turned to `==` at `abandoned > 0` in `wait_then_end_counting`
+/// (server.rs:19521), which said the quiet stop abandoned work and kept the
+/// real abandonment to itself.
+#[test]
+fn a_stop_names_the_engine_work_it_abandons_and_only_then() {
+    let _sink = crate::emitted::sink();
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    };
+    let abandoned_with = |from: u64, grace_ms: u64| {
+        crate::emitted::landed(from, "api.main", "engine tasks abandoned at shutdown")
+            .into_iter()
+            .filter(|record| crate::emitted::counts(record, "grace_ms", grace_ms))
+            .collect::<Vec<_>>()
+    };
+
+    let from = crate::emitted::mark();
+    let quiet = wait_then_end_counting(runtime(), std::time::Duration::from_millis(47), || 0);
+    assert_eq!(quiet.engine, 0);
+    assert!(abandoned_with(from, 47).is_empty());
+
+    let from = crate::emitted::mark();
+    let cut = wait_then_end_counting(runtime(), std::time::Duration::from_millis(53), || 1);
+    assert_eq!(cut.engine, 1);
+    let said = abandoned_with(from, 53);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(crate::emitted::counts(&said[0], "abandoned", 1));
+}
