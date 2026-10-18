@@ -317,6 +317,8 @@ mod tests {
         assert!(dotted.unwrap_err().starts_with("out_inside_store"));
         let empty = refuse_out_inside_store(Path::new(""), store);
         assert!(empty.unwrap_err().starts_with("out_unresolved: "));
+        let no_store = refuse_out_inside_store(Path::new("/tmp/fib"), Path::new(""));
+        assert!(no_store.unwrap_err().starts_with("out_unresolved: "));
     }
 
     /// `fib` is a command in the list, the usage, the dispatch and the sweep
