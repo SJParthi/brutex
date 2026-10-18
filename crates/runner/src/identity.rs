@@ -259,6 +259,14 @@ impl Params {
 pub struct RunId([u8; OUT_LEN]);
 
 impl RunId {
+    /// A run identity from a digest taken in another domain of this crate:
+    /// `fib::identity`'s pool-run and pair identities (D-6303, D-6317), which
+    /// hash their own framing under their own domain tags and are never this
+    /// module's nine-term encoding.
+    pub(crate) const fn from_digest(digest: [u8; OUT_LEN]) -> Self {
+        Self(digest)
+    }
+
     /// The raw digest.
     #[must_use]
     pub const fn bytes(&self) -> [u8; OUT_LEN] {

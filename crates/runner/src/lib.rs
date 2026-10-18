@@ -60,6 +60,7 @@ pub mod excursion;
 pub mod exit_grid_policy;
 pub mod expression;
 pub mod family_allocation_v1;
+pub mod fib;
 pub mod grid;
 pub mod identity;
 pub mod outcome;
@@ -78,6 +79,7 @@ pub mod synthetic;
 pub mod topn;
 pub mod trade;
 pub mod validate;
+pub mod winner_gate;
 
 use engine::{Ladder, Sweep};
 use indicators::column::{Census, Column};
