@@ -2368,3 +2368,36 @@ fn every_load_class_names_its_word() {
         stored::load_with_class(&store.0, Vendor::Zerodha, "SBIN", "1min", 2025, 13).unwrap_err();
     assert_eq!(class, LoadClass::NotSweepable, "{why}");
 }
+
+/// A month the store does not hold, beside a month before it that it does:
+/// `absent`, with the carried close read.
+#[test]
+fn a_month_the_store_lacks_beside_one_it_holds_is_absent() {
+    let store = Scratch::new("absent");
+    let authorities = interim();
+    let sbin = authorities
+        .pool
+        .member_named("SBIN", day_of(2025, 3, 1))
+        .unwrap()
+        .series_id;
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 2),
+        &full(day_of(2025, 2, 28), 2_222_000),
+    );
+    let check = day_check(
+        &store.0,
+        "SBIN",
+        sbin,
+        (2025, 3),
+        PreviousReference::TradableDay,
+        &authorities,
+    )
+    .unwrap();
+    assert_eq!(check.loaded, "absent");
+    assert_eq!(check.previous_month, "read for the carried close");
+    assert!(check.month.days.iter().all(|day| day.counts.real == 0));
+}
