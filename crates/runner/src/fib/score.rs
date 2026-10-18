@@ -49,7 +49,7 @@
 #![allow(
     clippy::float_arithmetic,
     clippy::cast_precision_loss,
-    reason = "statistics of R are f64 at full precision (CLAUDE.md section 7); \
+    reason = "statistics of R are floating point at full precision (CLAUDE.md section 7); \
               money stays i128 and is converted only to form a ratio"
 )]
 

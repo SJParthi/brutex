@@ -1367,6 +1367,10 @@ const ALLOW_SEARCH: Allow = &[
     // among a chain's step-born versions are the same bounded bisection.
     // Reason in docs/06-limits.md, "Gate 11 — FIB-1, declared".
     ("crates/vocab/src/fib_cube.rs", 5),
+    // FIB-6, 18 Oct 2026: a report-ladder lookup bisects the Generation's
+    // run-fixed rungs (at most log2 of the trades), once per priced trade.
+    // Reason in docs/06-limits.md, "Gate 11 — FIB-6, declared".
+    ("crates/runner/src/fib/score.rs", 1),
 ];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
@@ -1385,6 +1389,9 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
     ("crates/runner/src/significance.rs", 41),
+    // FIB-6, 18 Oct 2026: one alias, `Stat`, the type of every statistic of
+    // R. Reason in docs/06-limits.md, "Gate 11 — FIB-6, declared".
+    ("crates/runner/src/fib/score.rs", 1),
     ("crates/runner/src/admission.rs", 4),
     ("crates/runner/src/bootstrap.rs", 52),
     ("crates/runner/src/bootstrap_family_pass.rs", 17),

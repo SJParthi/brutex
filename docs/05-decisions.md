@@ -73277,3 +73277,250 @@ file's closing-auction count is carried on an INDEX record by design
 `web/tests/db-dayflags-closed.test.js` (`a_two_valued_second_is_not_a_minute_gap`,
 `a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
 `web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
+
+### D-6400 — The FIB lattice: a BUC iceberg cube over one partition, whose visited set equals Apriori's frequent set under the chain rule (FIB-6) — 2026-10-18
+
+**Number** the first of FIB-6's block D-6400..D-6419 (the specification's
+D-5400..D-5419, moved by D-6311). `grep` over `docs/05-decisions.md` on
+18 Oct 2026 found no heading in D-6400..D-6419.
+
+**What is decided.** `runner::fib::lattice` builds D-6302's lattice. A
+`RowTable` holds ONE partition — one (direction, entry style, timeframe) — of
+decisions in canonical order (day, decision second, stock slot, decision id);
+`walk(table, min_support, schedule, visitor)` grows one-direction mixes from the
+partition's root by fixing one free row at a time, in row order. A categorical
+row's children come from one stable counting sort of the node's rows, O(rows in
+node + radix); the cumulative `mover_rank` row's children are nested prefixes
+(`group <= g`, D-6406). A child is visited iff its RAW trade count reaches
+`min_support`: support is anti-monotone, so every branch dies out by itself and
+no parameter bounds how many rows a mix fixes — the 21 free rows of schema v1
+(`FREE_ROWS`) are a structural bound of the schema, never a parameter, and
+`lattice.rs` names no depth, `k` or `max_level` anywhere
+(`the_lattice_names_no_depth_k_or_max_level`). The lattice never reads a gate
+verdict (operator 16 Oct 11:10 IST: win rate is not monotone). `min_support`
+comes from the caller (FIB-1 R5's floors), never a flag; zero is refused by name.
+
+**The equality with Apriori.** The visited set is the set of mixes the chain
+rule admits: the root reaches the floor, and each fixing in row order keeps the
+floor, changes the raw count (D-6401) and, on the cumulative row, differs from
+the prefix one group narrower (D-6407). The oracle
+(`the_visited_mixes_and_counts_equal_a_brute_force_enumerator_and_engine_support`)
+enumerates every mix over the varying rows of 60 seeded inputs (at most six rows
+of at most four values, at most 2,000 rows, floors 1..=50), applies the chain
+rule with `vocab::fib_cube::contains`, and finds the walk's visited mixes and
+counts equal; every count also equals `engine::support` over the cells'
+`Layout::to_mask` bits. `engine::Ladder::walk` is NOT the oracle: it refuses
+positions not live in `vocab::table` and prunes pairs through
+`vocab::implication`, condition-table semantics false for the FIB namespace.
+
+**The tally.** `Tally` counts, by the FIXED ROWS IN THE MIX (17:15 IST item 6),
+nodes visited, children skipped as equivalent to their parent or sibling,
+children below the floor, and row-touches. A visited node scores every exit
+variant (D-6405), so the trials it adds are `Tally::mixes(variants)`.
+
+**Cost.** O(sum of visited supports): O(1) per row-touch, a node of `n` rows
+costing O(n + radix) per free row after its last fixed one and O(n) per prefix
+child. Not O(1) per run (`docs/06-limits.md`, L-FIB6-01).
+
+### D-6401 — A child equal to its parent is skipped as `equivalent_to_parent`, counted, never scored and never a trial (FIB-6) — 2026-10-18
+
+A child whose raw count equals its parent's holds exactly the parent's trades,
+so every mix below it is reached from the parent with the same rows: the walk
+skips it and its subtree, counts it at its fixed rows, and never scores it — the
+closed-itemset reasoning of `runner::closed::redundant_count`
+(`crates/runner/src/closed.rs`). The widest mover-rank group (every ranked
+decision) is always such a child. Precedence when a child is both: below the
+floor first, then equal to the parent, then equal to the sibling. Proof:
+`equivalent_to_parent_is_skipped_and_counted`,
+`the_tally_equals_a_naive_classification_of_every_child`. The guided walk turns
+the skip off on survivor paths (D-6408).
+
+### D-6402 — One position per stock per mix, blocking that follows the outcome, ties in canonical order, and the raw-count prune stays exact (FIB-6) — 2026-10-18
+
+**One position.** `runner::fib::score::OrderedPass` walks a mix's rows in
+canonical order once for its profiles and holds ONE position per (profile,
+stock): overlapping trades would inflate `n` and `t`. A candidate whose DECISION
+second is at or before the open position's block-until second is skipped and
+counted, never traded.
+
+**What blocks (FM-F056).** A priced slot blocks to its exit second
+(`blocked_while_open`); a pending order — an armed BREAK, an open entry window
+that never filled — blocks to its window end (`blocked_by_pending`, the slot
+counted `unfilled`); an unpriced slot (`no_execution_seconds`,
+`factor_refused`, `forced_exit_unpriceable`, `feed_hole`, `corrupt_bar`) blocks
+to the end of the stock-day (`blocked_by_unpriced`); a zero-quantity slot and an
+inapplicable exit variant block nothing. A skipped candidate whose decision
+second equals the blocker's is a TIE, counted: inside one (day, second, stock)
+the canonical order is decision-id order, so the lower id trades. The
+base-kind order is the schema's `base_kind` value order (micro2, micro3,
+rest): a producer that emits two decisions of one stock at one second assigns
+their ids in that order, and the lattice compares ids only. That FIB-3 assigns
+ids so is UNVERIFIED until FIB-3 merges (L-FIB6-09).
+
+**The prune stays exact.** Every row counts in the raw count; the effective
+count (trades taken) is never above it, so the lattice's raw-count prune never
+removes a mix that could reach the floor effectively. Every raw row is
+accounted for: trades + blocked (three kinds) + unfilled + unpriced + zero
+quantity + inapplicable = raw (`two_breaks_armed_at_one_close_give_one_trade_and_the_tie_count_is_golden`).
+
+Proofs: `one_position_per_stock_skips_overlapping_trades`,
+`two_signals_on_one_stock_in_one_second_and_fifty_stocks_in_one_second`,
+`an_unpriceable_long_blocks_a_later_long_to_the_end_of_the_day`, and the
+reference scorer of
+`month_vectors_and_scorecards_equal_brute_force_and_epoch_scratch_equals_reset_scratch`.
+
+### D-6403 — The scorecard: entry-ordered streaks, day-close drawdown in R, period tables — information, never a decision (FIB-6) — 2026-10-18
+
+**Label.** Every scorecard figure carries `score::SCORECARD_LABEL`,
+"scorecard (R, day close, entry order) - information" (the 18 Oct downside
+amendment's FIB-6 touch-point): the Winner Gate's downside checks are FIB-7's,
+in money and exit order, and this scorecard never decides.
+
+**Definitions.** A trade WINS only if its net money is above zero; zero is a
+loss (operator 11:13 IST). Net money is gross less the charge model's charges
+(D-6410); net R = net money / (quantity x risk per share). Per month (a vector
+sized by the run's own month count): trades, wins, losses, sums of R, of win R,
+of loss R, of R squared, max and min R, win and loss money, the day rounding
+adjustments, per side value trades and R, the sum and minimum of the stop in bp
+of the entry price (a measurement and the ranking column, never a filter), the
+MAE and MFE sums in R, and unpriced rows. STREAKS run in ENTRY order (current
+and longest runs of wins and losses, the deepest losing run in R). DRAWDOWN is
+taken at each DAY CLOSE of a day with trades: equity is the cumulative net R,
+the high starts at zero, an episode starts at the first close below the high
+and ends at the first later close at or above it; its length is in observed
+tradable days (the calendar's index), recovery index minus start index, or the
+last close's index minus the start index plus one while open; the deepest
+episode records its start, trough and recovery days and the tradable days from
+trough to recovery. PERIOD TABLES for day, week, fortnight, month, quarter,
+half-year and year (17:15 IST item 7) count periods with trades, winning,
+losing and flat ones, and keep the worst, best and second-best period net R (the
+leave-one-out's two maxima). The REPORT LADDERS (R4) count each winning trade
+at its highest net-R rung and each trade at its highest MFE rung, per month,
+compared exactly against the Generation's rungs.
+
+**Periods come from the calendar.** The week, fortnight, month, quarter,
+half-year and year keys and the tradable index are the calendar authority's
+(`score::Calendar`, built by FIB-10), never computed in a strategy file.
+
+Proofs: `streaks_and_drawdown_recovery_on_hand_built_sequences`,
+`a_deeper_later_episode_is_the_deepest_and_may_not_recover`,
+`the_report_ladders_count_each_trade_at_its_highest_rung`, and the reference
+scorer (D-6402).
+
+### D-6404 — FM-F051: a month's decisions are put in canonical order by two stable counting sorts and appended as a block (FIB-6) — 2026-10-18
+
+`RowTable::push_month(month, decisions, outcomes)` takes one month's decisions
+in strictly increasing (slot, id) order — refused by name otherwise — and puts
+them in canonical order by a stable counting sort on the decision second, then
+one on the day, each over the month's own domain (max minus min plus one, from
+the data): O(decisions + domains), no comparison sort, and no earlier month is
+touched, so a new month appends. Months come in strictly increasing order, each
+below the run's month count, and a month's first day must follow the previous
+month's last; every decision's cell is checked against the generation's layout,
+its side against the search, its entry-style, timeframe and exit rows against
+the partition, and its second against the day. A refused month leaves the table
+as it was. Proof: `month_block_order_equals_full_sort`,
+`a_table_refuses_by_name_and_a_refused_month_changes_nothing`.
+
+### D-6405 — FM-F054: one traversal per (direction, entry style, timeframe); every node scores every exit variant as its own mix (FIB-6) — 2026-10-18
+
+A decision's raw count is the same under every exit variant (an inapplicable
+variant carries a named outcome and still counts), so the per-exit lattices are
+one lattice V times. The table's partition names the exit variants it scores
+(`Partition::exits`), each row carries one outcome index per variant, the node's
+traversal key leaves the exit row open, and `Node::mix(variant)` is the mix of
+one variant — each its own trial. The exit row is never OPEN in a mix
+(`validate_mix`), and no partition count is typed: a new variant or width
+appends partitions with no code edit (17:15 IST item 1). Traversal O(sum of
+visited supports); scoring O(sum of supports x V x sizes). Proof:
+`shared_traversal_equals_per_exit_partitions` (the same (mix, rows) for every
+variant, and each per-exit run's tally equal to the shared one).
+
+### D-6406 — FM-F055: prefix children are built by stable linear scans, and every node region carries its rows' cells beside their indices (FIB-6) — 2026-10-18
+
+**Prefix children.** A counting sort of a node by `mover_rank` would put a
+wider prefix's rows out of time order, which breaks one-position blocking; each
+prefix child is instead one stable linear scan of the node's rows into its own
+scratch region, O(node rows) per prefix child, at most one per group. Proof:
+`prefix_children_rows_in_canonical_order_and_nested`.
+
+**Cells beside rows.** A node region holds its row indices AND their cells, side
+by side (two parallel arrays), so a node's counting passes read its own region
+in order and never gather from the table by index. A gather would make a deep
+node's passes cost a cache miss per row-touch on a large table, so per-touch
+time would grow with the table: the access pattern the bench must measure is
+the region's (`C-F6-01`). Memory: a path from the root holds at most 21
+regions, each no larger than the root's rows, so one walk reserves at most
+21 x rows x (4 + 24) bytes per worker, allocated once and zeroed lazily by the
+allocator (L-FIB6-02). `expand_range` is one node's expansion over a contiguous
+block of rows — the walk's unit of work on rows whose cells already lie side by
+side — and is the bench's row-touch op.
+
+### D-6407 — FM-F103: a prefix child equal to the prefix before it is skipped as `equivalent_to_sibling` (FIB-6) — 2026-10-18
+
+Nested prefixes with equal raw counts hold the same trades (a repeated inner
+rank edge leaves a group empty, FM-F005), so the wider one is skipped, counted
+at its fixed rows and never scored or counted as a trial. Categorical siblings
+are disjoint, so the skip applies to the cumulative row only. Proof:
+`equivalent_to_sibling_is_skipped_and_counted`.
+
+### D-6408 — FM-F052: the guided walk, its named outcomes, and `reconcile` (FIB-6) — 2026-10-18
+
+Re-scoring a few survivors (DEEP, `fib net`, FIB-13) must not rerun the
+lattice, and on deep rows a survivor equal to its parent would be skipped by
+D-6401 and falsely reported as "no mix passed". `Survivors::new(table, keys)`
+builds a trie of survivor keys in the walk's fixing order (edges ordered by three
+stable counting sorts), refusing by name a key the layout refuses, the other
+direction, another partition, an exit the table does not score and a repeated
+key. `walk_guided` descends only into trie children, with the floor and the
+equivalence skips switched off, and hands each survivor node to the visitor
+with the exit variants asked for (`Wanted::Only`). Rows with no deep outcome
+stay, carrying a named outcome (`no_execution_seconds`, `factor_refused`,
+`forced_exit_unpriceable`): they count in the raw count and add no R.
+`reconcile(survivors, verdicts)` fails when a survivor has no verdict, a verdict
+names no survivor, or a survivor has two — `fib verify` FAILS on each. Cost:
+O(sum of supports along survivor paths). Proofs:
+`deep_single_survivor_is_scored`,
+`guided_scoring_equals_direct_per_survivor_scoring_via_contains`,
+`verify_fails_when_a_survivor_has_no_deep_verdict`.
+
+### D-6409 — FM-F050: epoch-stamped block slots and touched lists, so a mix costs O(support x profiles + touched months), never O(days x pool) (FIB-6) — 2026-10-18
+
+Each (profile, stock) block slot holds the pass and the day it was written in;
+a stale stamp reads as empty, so nothing is reset per day or per mix. Month
+statistics and ladder counters clear through a per-profile touched list;
+drawdown, streaks and period tables update only on days with trades, with
+lengths from the calendar's tradable index. The pass is sized once per worker:
+profiles x pool block slots, profiles x months statistics, profiles x months x
+rungs ladder counters. Per mix: O(support x profiles + touched months + days
+with trades x period kinds); reading a card's month vector is O(months). Proof:
+`month_vectors_and_scorecards_equal_brute_force_and_epoch_scratch_equals_reset_scratch`
+(one pass reused across mixes equals a fresh pass per mix, and both equal a
+reference scorer that resets a hash map every day). Bench: `C-F6-02` (span),
+`C-F6-03` (pool).
+
+### D-6410 — FM-F053, FM-F117 and the charge model: work-stealing splits with forked visitors, profiles from the run's own exits, and a gross model that is plumbing only (FIB-6) — 2026-10-18
+
+**Work stealing (FM-F053).** Under `Schedule::Parallel { split_support,
+batch_budget_bytes }` a node of at least `split_support` rows walks the
+children of each free row as rayon tasks, each with its own scratch and a
+forked visitor (`Visitor::fork`), absorbed back in visit order
+(`Visitor::absorb`), so outputs concatenate in preorder with no sort and are
+byte-identical to the sequential walk; the tally is schedule-independent and
+the schedule's record (`Spread`: tasks, batches run inline over the budget) is
+information. `split_support` is derived by the caller from the measured
+per-task overhead and recorded; a batch whose task scratch would pass the budget
+runs inline and is counted. Proof: `work_stealing_equals_sequential_bytes`
+(1, 4 and 12 threads; split thresholds 40 and 1; a one-byte budget).
+
+**Profiles (FM-F117).** A profile is one of the table's own exit variants at
+one of the two report sizes (`profiles_of`: exits x sizes, in (variant, size)
+order); the caller splits them into passes of its measured budget. No profile
+count is typed (17:15 IST item 3).
+
+**Charges.** `score::ChargeModel` is a per (stock, day) accumulator: `add(order)`
+returns one order's unrounded charges, O(1), in the model's unit (`scale` per
+paisa), and `close_day(day)` returns the day's rounding adjustment. `Gross` is
+the zero model: a labelled plumbing run only, never a gate (D-6300); FIB-11
+supplies CHG-1's model. Proof:
+`a_small_gross_win_that_charges_turn_into_a_net_loss_counts_as_a_loss`.
