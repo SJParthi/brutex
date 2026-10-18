@@ -178,8 +178,91 @@ whole `api` library (less the twelve root-only tests) and
 | `render.rs` | 12 | 11 | 1 |
 | `gaps_route.rs` | 1 | 0 | 1 |
 | `bars.rs` | 32 | 25 | 7 |
-| `bars_sort.rs` | 32 | 12 (library); 18 of the other 20 run against both, all survived (the 16 Oct equivalents) | 2 running |
-| `bars_series.rs` | 27 | 17 of 28 run so far, all caught | running |
+| `bars_sort.rs` | 32 | 12 (library) | 20, every one an equivalent named below |
+| `bars_series.rs` | 27 | 26 of 28 run so far, all caught (two by a 300 s timeout) | running |
+
+**The 94 stage-1 timeouts.** cargo-mutants counts a timeout as a detection.
+I read each one's log (which tests were still running at the kill) and its
+code, to check that the timeout really is a detection.
+
+- **85 are a loop that no longer ends.** In 80 of them a bisection's
+  control was mutated (`lo < hi` → `<=` or `==`, the midpoint's `+`, `-`
+  or `/`, or a step `mid + 1` → `mid * 1` or `mid - 1`) in `RunArray::bounds`,
+  `RunArray::partition`, `Arrays::kept_le`, `Arrays::slice_count`,
+  `Arrays::select_in`, `Arrays::value_slices`, `start_key`, `cursors_at` and
+  `run_of_slot` (`bars_sort.rs`, 60), in `SeriesPlan::nth`,
+  `previous_held` and `slot_of` (`bars_series.rs`, 15), and in `merged`
+  (`bars.rs`, 5). The other five are a walk whose step stopped moving:
+  `bars_change.rs:435:35` (`at -= 1` → `/=`), `bars_series.rs:913:22` and
+  `:1362:17` and `bars_sort.rs:1358:17` (`+= 1` → `*=`), and
+  `bars.rs:588:14` (`at < end` → `<=`: the last chunk is empty and never
+  advances). In 71 of the 94 logs, all four
+  test threads were stuck at the kill.
+- **6 in `gaps_route.rs` were a failed assertion that the test turned into
+  a hang** (`133:24`, `133:60`, `259:8`, `259:38`, `383:19` ×2). Each stopped
+  `a_full_calendar_pool_refuses_the_census_and_the_audit` short of the
+  `429` it asserts, and the test then waited forever on a barrier its last
+  party never reached. The test now releases the barrier from a drop guard
+  (commit `63fae782`). All six were run again against the whole library
+  and all six were caught, each in under 75 s, with the test's own child
+  failing in under a second.
+- **`gaps_route.rs:989:5` (`lead_vote` → `()`) is a real hang.** The vote is
+  never led, so three peer-route tests wait on a build that nothing will
+  finish. The request itself would never answer.
+- **`bars.rs:1952:5` (`ascending_span` → `(0, 1)`) is a wrong answer that a
+  test loop turns into a hang.** Every page then serves the first row, and
+  `bars_window_route_tests::day_and_time_of_day_bounds_filter_every_month_on_the_server`
+  pages until a page comes back empty, which never happens. That test is
+  outside the eight files and was left as it is.
+- **`bars_sort.rs:2147:35` (`kept.len() == capacity` → `!=` in
+  `page_once`) is caught only by the clock.** `keep_best` then runs before
+  nearly every push instead of once the buffer is full. The rows kept, and
+  so the page, are the same, but the cut becomes a selection per candidate.
+  `a_page_near_the_end_of_a_read_order_keeps_the_last_rows` ran past 60 s
+  and was killed at 90 s. Counted as cargo-mutants counts it, it is a
+  detection. Judged by its answer, it is a cost-only mutant like the
+  equivalents below, and this report does not claim a test pins it.
+
+### Survivors of stage 2, and why each is equivalent
+
+I read each one against the code and traced the path a test would need.
+Where the reason is 16 Oct's, I checked it again at this branch's line. "Cost
+only" means the mutant changes how much is read, compared or held, but
+never the answer, and no test here measures cost.
+
+| Mutant | Why no test can kill it |
+|---|---|
+| `bars_change.rs:301:59` `<` → `<=` in `Rules::halted_between` | `close(before)` is a whole-second stamp plus a whole-second rung less 1 µs, and `resume` is a whole second, so the two are never equal. |
+| `bars_change.rs:333:34` `*` → `+` in `Rules::phase_at` | The test becomes `rung < 1.00006 s` instead of `rung < 60 s`. `Timeframe::from_secs` admits 1 s and then 1 min, with no rung between, so both tests pick the same rungs. |
+| `bars_change.rs:432:21` `-` → `/` in `session_before` | The walk's floor becomes `day / 10` instead of `day − 10`. The two differ only after ten closed days in a row. The sourced calendar has no such run, and outside its span the walk meets an unmeasured day and stops at the same `None` (the coverage class A3 row for line 439). |
+| `ladder.rs:686:32` `<` → `<=` in `owed_runs` | `lo` takes an equal month, which is the same value. |
+| `ladder.rs:689:32` `>` → `>=` in `owed_runs` | `hi` takes an equal month, which is the same value. |
+| `ladder.rs:703:38` `<` → `<=` in `owed_runs` | The month equal to `lo` is held, so the `held` probe two lines on skips it either way. |
+| `ladder.rs:704:38` `>` → `>=` in `owed_runs` | The month equal to `hi` is held, so the same probe skips it before its reason is read. |
+| `render.rs:2414:22` `>` → `>=` in `page_peak` | `peak` takes an equal value, which is the same value. |
+| `gaps_route.rs:1406:13` delete field `held` in `audit_one` | A dead store. That arm runs only when `!one_second` and there is no fold error, and lines 1429–1436 then overwrite `ledger.held` with the same `held.counts.folded`. |
+| `bars.rs:180:49` `>` → `>=` in `rupees` | At `from_end == 3` the first disjunct is already true. |
+| `bars.rs:180:66` `-` → `+` in `rupees` | `from_end + 3` and `from_end − 3` have the same parity. |
+| `bars.rs:945:66` `<` → `<=` in `Extreme::beats` | An equal `(t, series)` is the same bar, since an instant holds one row per series, so the replacement is the identical extreme. |
+| `bars.rs:2126:41` `<` → `==`, `>`, `<=` in `merged` (3) | Only the bisection's step changes (1 µs or 1 s). The merge pops rows in its own order and skips to `a`, so the page is the same; only the number of steps moves. Cost only. |
+| `bars.rs:2169:47` `<` → `<=` in `merged` | `rank` answers `count == total` only as the position past the last run, where `head` answers `None` anyway. |
+| `bars_sort.rs:598:49` `\|\|` → `&&` in `cut` | No index run lies both wholly before and wholly after the kept run, so the skip never fires. A run outside the kept run, once let through, gets `from ≥ until` in the cut branch and nothing is pushed, so the pieces are the same. |
+| `bars_sort.rs:619:38` `>` → `>=` in `cut` | The index's runs chain from row 0 with no gap (the walk refuses one), so an overlapping run's cut is never empty and `until == from` does not occur (coverage class A3, branch 619). |
+| `bars_sort.rs:815:50` `+` → `*` in `RunArray::bounds` | The lower bound becomes `(a−1)·FENCE`, one row lower than `(a−1)·FENCE + 1`. Both rows are in block `a−1`, and fence `a−1` already failed the predicate. The bound stays a valid lower bound, `partition` over the slightly wider range finds the same first entry in the same block, and `more_than`'s `lb > k` shortcut can only fire less often. Cost only. |
+| `bars_sort.rs:857:36` `-` → `+` in `RunArray::count_vkey_le` | It changes only a descending run's fence-bounded upper bound, `valued − a` → `valued + a`. That is still an upper bound, only looser. `more_than` reads it only for the shortcut `ub <= k`, which then fires less often, and the exact count decides instead. The exact count reads only the one block the fences locate (`a_damaged_block_the_fences_rule_out_is_never_read` passes under it). Cost only. |
+| `bars_sort.rs:929:25` `>` → `>=` in `Arrays::domain` | An all-null run also offers its column ends to the value domain. The writer gives an all-null column `(0, 0)`. Since the store refuses a negative price, volume or open interest at its write boundary (`ohlc_is_sane`, `counts_are_sane`), `vkey(0)` lies at or beyond every value's key in both directions, so the domain only widens and the bisection finds the same value. Where no row is valued, the domain is never asked (`k < valued` fails first). |
+| `bars_sort.rs:997:25` `>` → `>=` in `Arrays::count_le` | An all-null run is counted too. Its valued range `[nulls, rows)` is empty, so `partition` answers its start without reading and the run adds 0. |
+| `bars_sort.rs:1138:27` `\|\|` → `&&` in `Arrays::select_in` | The skip never fires. A slice whose `[first, last]` does not hold the instant counts the same rows at it and one microsecond before it, so it adds no row. |
+| `bars_sort.rs:1334:19` `>` → `>=`, `:1360:16` `>` → `>=` in `Arrays::value_slices`; `:1371:30`, `:1396:28` `>` → `>=` in `Arrays::null_slices` | Each lets an empty slice into the list. `select_in` gives an empty slice no ends and passes over it before reading (the class A3 arms at 1090–1136). |
+| `bars_sort.rs:1384:25` `>` → `>=` in `Arrays::null_slices` | A null series' time array is one of its kept runs, never empty (coverage class A3, branch 1384), so `>=` and `>` agree on every array that reaches it. |
+| `bars_sort.rs:1501:36` `>` → `>=` in `cursors_at` | An all-null run also gets a valued cursor. Ascending, `partition` over the empty `[nulls, rows)` answers `rows`, and `head` answers `None` at `p >= rows`. Descending, `group` answers an empty group, the cursor steps once and is spent. No row is added. |
+| `bars_sort.rs:1530:26` `>` → `>=` in `cursors_at` | A run with no nulls also gets a null cursor at `p = 0` over `[0, 0)`, and `head` answers `None` for `p >= nulls` before reading. |
+| `bars_sort.rs:1588:53` `<` → `<=` in `merge` | The keys are unique (an instant holds one row per series, and the key carries both), so two heads never compare equal. |
+| `bars_sort.rs:1618:31` `>` → `>=` in `keep_best` | At `len == keep` the cut keeps every row. In `page_once` the call inside the read is made only at `len == capacity`, before another candidate is pushed. `capacity` equals `keep` only when it is the number of rows read, and then no candidate is left to push. The last call's result is dropped. |
+| `bars_sort.rs:2056:18` `>` → `>=` in `page_once` | At `depth == MAX_SORT_DEPTH` exactly, a pure page is served from the end instead of from the front. Both are exact: the front keeps the `depth` best rows, the end keeps the `total − offset` last, and both answer the rows at `[offset, offset + limit)`. |
+| `bars_sort.rs:2229:25` delete field `nulls` from `ColumnInfo` in `page_once` | A cut run's null count is carried separately (the array's own `nulls`). Only the whole-run path reads `ColumnInfo::nulls`, so nothing reads the deleted field. |
+| `bars_sort.rs:2230:25` delete field `base` from `ColumnInfo` in `page_once` | `0` becomes the cut run's lowest value, which only widens the value domain. As for `929:25`, every stored value is at or above `0`. `domain` is the field's only reader. |
+| `bars_sort.rs:2607:22` `-` → `+` in `extremes_of` | The line runs only for a whole month, which means `start == 0`, so `end + start == end − start`. |
 
 ## Coverage
 
