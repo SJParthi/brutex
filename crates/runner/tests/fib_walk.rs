@@ -3731,3 +3731,115 @@ fn every_component_value_reaches_the_set_s_bytes() {
         4
     );
 }
+
+/// A held position meets a corrupt second, or the first second after a halt
+/// with no long silence before it: neither touches a level, so only the
+/// event tables' next-special entry makes the event walk step it.
+#[test]
+fn the_event_walk_steps_a_corrupt_bar_and_a_crossed_halt_inside_a_hold() {
+    let both = |day: &Day, profile: &WalkProfile| {
+        let plan = long_plan(at(10, 0, 0));
+        let forward = walk_one(
+            day,
+            profile,
+            plan,
+            STOP_ONLY,
+            FillVariant::STAGE_A,
+            TradeSize::Small,
+        );
+        let events = walk_events(
+            day,
+            profile,
+            plan,
+            STOP_ONLY,
+            FillVariant::STAGE_A,
+            TradeSize::Small,
+        );
+        assert_eq!(forward, events);
+        forward
+    };
+    // An open above its high: corrupt, with prices inside the trade's range.
+    let corrupted = second_day(&[
+        quiet(at(10, 30, 0), P, 1_000),
+        corrupt(at(11, 0, 0), P + 500, P + 10, P - 10, P, 1_000),
+        quiet(at(11, 30, 0), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    assert_eq!(
+        both(&corrupted, &second_profile()).status,
+        SlotStatus::Unpriceable(UnpricedReason::CorruptBarInTrade)
+    );
+    // A halt with no second inside it, and no silence limit to cross.
+    let mut halted = second_day(&[
+        quiet(at(10, 29, 0), P, 1_000),
+        quiet(at(10, 45, 0), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    halted.halts = vec![HaltRange {
+        start_second: at(10, 30, 0),
+        end_second: at(10, 40, 0),
+    }];
+    assert_eq!(
+        both(&halted, &second_profile()).status,
+        SlotStatus::Unpriceable(UnpricedReason::Halt)
+    );
+    let mut minutes = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        quiet(at(10, 29, 0), P, 1_000),
+        quiet(at(10, 45, 0), P, 1_000),
+    ]);
+    minutes.halts = halted.halts.clone();
+    assert_eq!(
+        both(&minutes, &minute_profile()).status,
+        SlotStatus::Unpriceable(UnpricedReason::Halt)
+    );
+}
+
+/// A silence inside a hold is an event only when it is longer than the
+/// committed past's: one longer is stepped (and flagged), one exactly at the
+/// limit is jumped like any quiet bar.
+#[test]
+fn the_event_walk_steps_a_long_silence_and_jumps_one_at_the_limit() {
+    let day = |resume: u32| {
+        let mut day = second_day(&[
+            quiet(at(10, 0, 30), P, 1_000),
+            quiet(at(10, 0, 59), P, 1_000),
+            quiet(resume, P, 1_000),
+            quiet(at(15, 9, 0), P, 1_000),
+        ]);
+        day.max_gap = 30;
+        day
+    };
+    let plan = long_plan(at(10, 0, 0));
+    // The 60 seconds of 10:01, a minute Zerodha did not trade.
+    let long = day(at(10, 2, 0));
+    let forward = second_slot(&long, plan, STOP_ONLY);
+    let events = walk_events(
+        &long,
+        &second_profile(),
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(forward, events);
+    assert!(has(&events, TradeFlag::SilenceInTrade));
+    // 30 missing seconds: no event, so the entry step, one jump and the
+    // forced step are the whole walk.
+    let limit = day(at(10, 1, 30));
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let index = limit.index(&second_profile(), &exits).expect("indexes");
+    let mut slot = runner::fib::walk::Stepper::new(
+        &index,
+        &plan,
+        0,
+        &STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    )
+    .expect("a slot");
+    slot.run_events();
+    assert!(slot.done());
+    assert_eq!(slot.work(), 3);
+    assert!(!has(&slot.outcome(), TradeFlag::SilenceInTrade));
+}
