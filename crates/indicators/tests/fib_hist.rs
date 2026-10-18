@@ -1324,6 +1324,19 @@ fn adding_a_variant_or_a_width_leaves_every_histogram_byte_identical() {
         bank.clone().regrow(dropped),
         Err(HistRefusal::ShapeNotExtension { what: "width" })
     );
+    // A dropped width is refused even when a later one is appended: no old
+    // width maps onto a larger new one.
+    let swapped = shrunk(Dims {
+        widths: vec![1, 3, 4, 5],
+        styles: 2,
+        variants: 4,
+        levels: 2,
+    })
+    .unwrap();
+    assert_eq!(
+        bank.clone().regrow(swapped),
+        Err(HistRefusal::ShapeNotExtension { what: "width" })
+    );
     let fewer = shrunk(Dims {
         widths: vec![1, 2, 3, 4],
         styles: 1,
