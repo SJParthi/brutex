@@ -274,6 +274,12 @@ mod tests {
         assert_eq!(better(&bars, Keep::LowestLow, 0, 1), 1);
         assert_eq!(better(&bars, Keep::HighestHighFirst, 1, 2), 1);
         assert_eq!(better(&bars, Keep::HighestHighLast, 1, 2), 2);
+        // Ties: the lower low and the first high keep the earlier bar, the
+        // last high the later one.
+        let tied = [bar(10, 5, 9), bar(11, 5, 9)];
+        assert_eq!(better(&tied, Keep::LowestLow, 0, 1), 0);
+        assert_eq!(better(&tied, Keep::HighestHighFirst, 0, 1), 0);
+        assert_eq!(better(&tied, Keep::HighestHighLast, 0, 1), 1);
     }
 
     /// No bars: no levels, no range, every descent ends at zero.
