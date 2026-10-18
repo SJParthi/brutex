@@ -2317,6 +2317,15 @@ pub const HIST_SUB_BINS_PER_POWER: u64 = 8;
 pub const MID_RANK_SCALE: u64 = 2;
 /// A pair is one long and one short setup (operator 16 Oct 17:11 IST).
 pub const PAIR_SIDES: u64 = 2;
+/// FIB-3's shape and squeeze measurements split a base into halves: the
+/// squeeze and the triangle score compare the mean range of its last half with
+/// its first (FIB-3 specification, D-6343). A definition of a measurement,
+/// never a threshold.
+pub const SHAPE_HALVES: u64 = 2;
+/// FIB-3's U and inverted-U scores split a rest into thirds: the mean close of
+/// the first and last thirds against the middle third (FIB-3 specification,
+/// D-6343). A definition of a measurement, never a threshold.
+pub const SHAPE_THIRDS: u64 = 3;
 
 /// THE ONE LEDGER of every number the FIB strategy path may type (operator
 /// 16 Oct 11:24 IST, narrowed by 17:15 IST item a; D-6309): the Winner Gate
@@ -2531,6 +2540,18 @@ pub const FIXED_NUMBERS: &[FixedNumber] = &[
         "D-6312",
     ),
     ("pair_sides", PAIR_SIDES, Category::Representation, "D-6312"),
+    (
+        "shape_halves",
+        SHAPE_HALVES,
+        Category::Representation,
+        "D-6343",
+    ),
+    (
+        "shape_thirds",
+        SHAPE_THIRDS,
+        Category::Representation,
+        "D-6343",
+    ),
 ];
 
 /// The Winner Gate's clauses that carry no number of their own (17:15 IST
