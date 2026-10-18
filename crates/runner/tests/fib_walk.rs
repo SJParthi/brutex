@@ -4240,3 +4240,28 @@ fn a_peak_inside_the_forced_window_is_the_trade_s_mfe() {
     assert_eq!(out.last_peak_second, at(15, 9, 0));
     assert_eq!(out.mfe_to_horizon_paisa, 400);
 }
+
+/// Stage A: a 15:09 minute locked at the day's low cannot take a long's
+/// forced sell, so the forced exit is unpriceable (cheap); the same minute
+/// unlocked prices it at its low.
+#[test]
+fn a_locked_15_09_minute_leaves_a_stage_a_forced_exit_unpriceable() {
+    let day = |last: Candle| {
+        Day::minutes(vec![
+            quiet(at(9, 59, 0), P - 50, 1_000),
+            bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+            quiet(at(12, 0, 0), P, 1_000),
+            last,
+        ])
+    };
+    let locked = day(bar(at(15, 9, 0), P - 200, P - 200, P - 200, P - 200, 1_000));
+    let out = minute_slot(&locked, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::Unpriceable(UnpricedReason::ForcedCheap)
+    );
+    let open = day(bar(at(15, 9, 0), P - 200, P - 190, P - 210, P - 200, 1_000));
+    let out = minute_slot(&open, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * (P - 210)));
+}
