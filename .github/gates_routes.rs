@@ -136,14 +136,16 @@ pub const BENCHES_OWED: &[Owed] = &[
     Owed {
         owner: "no package (does not read the store)",
         why: "fixed content, a table compiled into the binary, or the process's own counters \
-              (`/speed.json` is O(routes x buckets), measured in R3-14's report; \
-              `/census/warm.json` is the warm table's rows from memory, at most four per feed, \
-              R3-09, owed here by GF-1 on 18 Oct 2026)",
+              (`/speed.json` is O(routes x buckets), measured in R3-14's report; `/pools.json` \
+              is O(pools + routes), measured in R3-08's report; `/census/warm.json` is the warm \
+              table's rows from memory, at most four per feed, R3-09, owed here by GF-1 on 18 Oct \
+              2026)",
         routes: &[
             "/census/warm.json",
             "/health",
             "/inspection.json",
             "/masters.js",
+            "/pools.json",
             "/speed.json",
             "/typeahead.js",
             "/vocab.json",

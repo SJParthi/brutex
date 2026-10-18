@@ -39,6 +39,16 @@
   import DbSearch from './DbSearch.svelte';
   import DbMoneyness from './DbMoneyness.svelte';
 
+  import { supersessionOf, supersededWords, supersededWhy, continuesWords, kindWord, keyHref } from '$lib/db/lineage-labels.js';
+
+  /** The rungs a contract key's own fields set (Expiry, Strike, Side). */
+  const CONTRACT_RUNGS = new Set(['Expiry', 'Strike', 'Side']);
+  /**
+   * The /db link to one key at the page's rung (AH-03), or `null`.
+   * @param {any} db @param {string} key
+   */
+  const keyLink = (db, key) => keyHref(feeds.active ?? '', key, db.timeframe);
+
   export { feedRung, stranded };
 </script>
 
@@ -54,6 +64,18 @@
    * @param {string} iso
    */
   const dayMark = (iso) => db.dayFlagged?.(iso) ?? db.monthFlagged(iso);
+
+  /** @param {string} key */
+  const dbKeyHref = (key) => keyLink(db, key);
+  /* THE RE-KEY ON THE PAGE'S WINDOW ANSWER (AH-03, g-ui-dom-vs-json-2):
+     `superseded_by` and `supersedes`, which /db never read. At most three of
+     each are named beside the expiry note, the rest counted. */
+  const rekey = $derived(supersessionOf(db.barState?.answer));
+  const REKEY_NAMED = 3;
+  /** Every re-key line in full, for the clamped note's `title`. */
+  const rekeyTitle = $derived(
+    [...rekey.by.map((s) => `${s.key} is ${supersededWords(s)}`), ...rekey.of.map((s) => `${s.key} ${continuesWords(s)}`)].join('\n')
+  );
 </script>
 
 <!-- ==================================================================
@@ -950,6 +972,23 @@
       {#if db.lifeNote}
         <span class="note warn" title={db.lifeNote}>{db.lifeNote}</span>
       {/if}
+      {#if rekey.by.length || rekey.of.length || rekey.malformed}
+        <span class="note warn rekey" role="status" title={rekeyTitle}>
+          {#each rekey.by.slice(0, REKEY_NAMED) as s (s.key)}
+            <span class="rk"
+              >superseded by {#if dbKeyHref(s.by)}<a href={dbKeyHref(s.by)}>{s.by}</a>{:else}{s.by}{/if} ({supersededWhy(s)}): {s.key}. </span
+            >
+          {/each}
+          {#if rekey.by.length > REKEY_NAMED}<span class="rk">and {rekey.by.length - REKEY_NAMED} more superseded key(s). </span>{/if}
+          {#each rekey.of.slice(0, REKEY_NAMED) as s (`${s.key}|${s.of}`)}
+            <span class="rk"
+              >continues {#if dbKeyHref(s.of)}<a href={dbKeyHref(s.of)}>{s.of}</a>{:else}{s.of}{/if}{s.bars === null ? '' : `: ${fmt(s.bars)} bar(s)`} ({kindWord(s.kind)}), in {s.key}. </span
+            >
+          {/each}
+          {#if rekey.of.length > REKEY_NAMED}<span class="rk">and {rekey.of.length - REKEY_NAMED} more copied-in key(s). </span>{/if}
+          {#if rekey.malformed}<span class="rk">{rekey.malformed} re-key entr(ies) on /bars/window.json were not in the shape this page reads.</span>{/if}
+        </span>
+      {/if}
     </div>
   {/if}
 
@@ -1079,13 +1118,36 @@
        `stranded` folds the rungs, not the rows, so it is the same answer in
        either view and belongs before the split. ══ -->
   {#if db.stranded.length > 0}
+    <!-- A KEY THE CENSUS WITHDREW IS NAMED BY ITS LINEAGE BEFORE ANY RUNG IS
+         BLAMED (AH-03, g-ui-dom-vs-json-2): the Expiry, Strike and Side a
+         link set from a contract key are that key's own fields, so "which the
+         rungs above it no longer offer" named the wrong cause. While the one
+         lineage read runs, and when the ledger explains the key, the contract
+         rungs are listed with their Clear buttons and no blame. -->
+    {@const lineage = db.withdrawn}
+    {@const spoken = lineage && (lineage.state === 'pending' || lineage.state === 'explained')}
     <p class="stranded" role="status">
+      {#if lineage}
+        <span class="sitem lineage" data-state={lineage.state}>
+          {lineage.text}
+          {#if lineage.successor && keyLink(db, lineage.successor)}
+            <a href={keyLink(db, lineage.successor)}>Open {lineage.successor}</a>
+          {/if}
+          {#if lineage.state === 'failed'}
+            <button class="btn ghost sm" type="button" onclick={db.retryLineage}>Read the lineage again</button>
+          {/if}
+        </span>
+      {/if}
       {#each db.stranded as st (st.rung)}
         <span class="sitem">
-          <!-- WHAT IT DOES TO THE TABLE, TRULY (DB-020): "no row can match"
-               only when none does — never over a full grid. -->
-          <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
-          {st.effect}
+          {#if spoken && CONTRACT_RUNGS.has(st.rung)}
+            <b>{st.rung}</b> is <b>{st.value}</b>, from the key above.
+          {:else}
+            <!-- WHAT IT DOES TO THE TABLE, TRULY (DB-020): "no row can match"
+                 only when none does — never over a full grid. -->
+            <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
+            {st.effect}
+          {/if}
           <button class="btn ghost sm" type="button" onclick={st.clear}>Clear {st.rung}</button>
         </span>
       {/each}

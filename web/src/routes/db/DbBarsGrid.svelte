@@ -19,13 +19,14 @@
   import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, parseGoto, pageOfIndex, censusBehind, localComparator, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
   import { untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
+  import { contractKeyOf, fnoExchanges, askLineage, forgetLineage, withdrawnWords, keyHref, lifeCutBySupersession, supersessionOf } from '$lib/db/lineage-labels.js';
   import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { readWindowPage, readAllRows, sortIndexNote } from '$lib/database-pages.js';
   import { dirOf, bpsText } from '$lib/bps.js';
   import { timeLabel, stampLabel, dayLabel, barTimeLabel } from '$lib/dates.js';
-  import { refreshStore } from '$lib/store.svelte.js';
+  import { refreshStore, store } from '$lib/store.svelte.js';
   import Picker from '$lib/Picker.svelte';
   import DbChart from './DbChart.svelte';
   import DbExtremes, { extremesState } from './DbExtremes.svelte';
@@ -1424,6 +1425,82 @@
     /* THE EXTREMES PANEL'S STATE (DbExtremes, DB-G95), created here so it reads
        the plan and the bounds above and runs in the shell's order. */
     extremesState(db);
+    /* AND THE LINEAGE OF A KEY THE CENSUS DOES NOT HOLD (AH-03), read once
+       before the stranded rungs or the empty grid blame a filter. */
+    withdrawnState(db);
+  }
+
+  /**
+   * A KEY THE CENSUS WITHDREW IS EXPLAINED BY ITS LINEAGE, NOT THE FILTERS
+   * (AH-03, g-ui-dom-vs-json-2). A link to a contract key the census no
+   * longer lists (a re-keyed contract, census epoch 000005) sets the
+   * Expiry, Strike and Side rungs from the key's own fields; the store then
+   * offers none of them, and the page used to say "Side is set to PE, which
+   * the rungs above it no longer offer" — blaming the reader for the key's
+   * own name. When a contract rung is stranded and the rungs name ONE
+   * contract, its lineage is asked once (`/dayflags.json` for that key and
+   * its expiry day, through `askLineage`'s memo) and `db.withdrawn` carries
+   * what the ledger says; the stranded line and the empty grid speak it.
+   * `null` when no contract rung is stranded.
+   *
+   * O(1) PER RECOMPUTE (AH-03 repair 1): the exchange the key needs is ONE
+   * probe of `exchanges`, a fold of the census held in its own `$derived` of
+   * `db.deco` alone — so it recomputes once per census load, and only once
+   * a contract rung has been stranded (a `$derived` is lazy). The first cut
+   * walked the whole census inside `key`, on every change of the rungs.
+   *
+   * @param {any} db the page's shared state object (see the shell)
+   */
+  function withdrawnState(db) {
+    const exchanges = $derived(fnoExchanges(db.deco));
+    const key = $derived.by(() => {
+      if (!db.stranded.some((/** @type {any} */ s) => s.rung === 'Expiry' || s.rung === 'Side' || s.rung === 'Strike')) return null;
+      const k = contractKeyOf(exchanges, { sym: db.filter, expiry: db.expiry, strikes: db.strikePick, side: db.side });
+      // A key the census holds (another universe hides it) is a filter's
+      // doing after all: one Map probe (`store.byInstrument`), never a scan.
+      return k && !store.byInstrument?.has(k) ? k : null;
+    });
+    let got = $state.raw(/** @type {{ key: string, value: any } | null} */ (null));
+    /* "Read the lineage again" bumps this; a NEW CENSUS GENERATION OR EPOCH
+       forgets every remembered answer (a re-key or an import can land
+       between two). Not the rows' identity: the page swaps the facet-scoped
+       rows for the whole census once per open, and that is the same store —
+       measured on the shadow, keying on `exchanges` asked twice. */
+    let attempt = $state(0);
+    const censusId = $derived(`${store.feed ?? ''}\u0000${store.lag?.generation ?? ''}\u0000${store.lag?.epoch ?? ''}`);
+    /** @type {string | null} */
+    let seenCensus = null;
+    $effect(() => {
+      const k = key;
+      const feed = feeds.active;
+      void attempt;
+      if (!k || !feed) {
+        got = null;
+        return;
+      }
+      const census = censusId;
+      if (seenCensus !== null && seenCensus !== census) forgetLineage();
+      seenCensus = census;
+      let live = true;
+      got = { key: k, value: null };
+      void askLineage(feed, k).then((value) => {
+        if (live) got = { key: k, value };
+      });
+      return () => {
+        live = false;
+      };
+    });
+    const withdrawn = $derived(key ? { key, ...withdrawnWords(key, got?.key === key ? got.value : null) } : null);
+    /** Ask the one lineage read again for the withdrawn key (its failed answer is already not kept). */
+    function retryLineage() {
+      const k = key;
+      if (k && feeds.active) forgetLineage(feeds.active, k);
+      attempt += 1;
+    }
+    Object.defineProperties(db, {
+      withdrawn: { get: () => withdrawn },
+      retryLineage: { get: () => retryLineage }
+    });
   }
 
   /**
@@ -1645,6 +1722,8 @@
 <script>
   /** @type {{ db: any }} */
   let { db } = $props();
+  /** The re-key's lists on the page's window answer (AH-03), for the empty grid. */
+  const emptyRekey = $derived(supersessionOf(db.barState?.answer));
 </script>
 
   <!-- ==================================================================
@@ -1861,9 +1940,21 @@
               <td colspan={BAR_COLS.length}>
                 <div class="bnone">
                   <h3>No instrument-month matches this query</h3>
+                  {#if db.withdrawn}
+                    <!-- A WITHDRAWN KEY IS ITS LINEAGE'S, NOT THE FILTERS' (AH-03). -->
+                    <p class="lineage" data-state={db.withdrawn.state} role="status">
+                      {db.withdrawn.text}
+                      {#if db.withdrawn.successor && keyHref(feeds.active ?? '', db.withdrawn.successor, db.timeframe)}
+                        <a href={keyHref(feeds.active ?? '', db.withdrawn.successor, db.timeframe)}>Open {db.withdrawn.successor}</a>
+                      {/if}
+                      {#if db.withdrawn.state === 'failed'}
+                        <button class="btn ghost sm" type="button" onclick={db.retryLineage}>Read the lineage again</button>
+                      {/if}
+                    </p>
+                  {/if}
                   <p>
                     A bar lives in an instrument-month file, so with none matched there is no
-                    file to open — this grid has made no request. {db.feedName} holds {fmt(
+                    file to open — this grid has made no bar request{db.withdrawn ? ' (the lineage line above is one /dayflags.json read)' : ''}. {db.feedName} holds {fmt(
                       db.deco.length
                     )} instrument-month(s) in total.
                   </p>
@@ -1958,6 +2049,17 @@
                       {:else}
                         No bar is stored for this selection.
                       {/if}
+                    </p>
+                  {/if}
+                  <!-- A SUPERSEDED KEY IS SAID, WITH WHERE IT CONTINUES (AH-03,
+                       g-ui-dom-vs-json-2): the window answer's `superseded_by`
+                       names the key the re-key files the contract under. -->
+                  {#if emptyRekey.by.length}
+                    <p class="bwhy lineage">
+                      This selection's {emptyRekey.by.length === 1 ? 'key is' : 'keys are'} filed under another key — {lifeCutBySupersession(emptyRekey)}.
+                      {#each emptyRekey.by.slice(0, 3) as s (s.key)}
+                        {#if keyHref(feeds.active ?? '', s.by, db.timeframe)}<a href={keyHref(feeds.active ?? '', s.by, db.timeframe)}>Open {s.by}</a>{' '}{/if}
+                      {/each}
                     </p>
                   {/if}
                   <button class="btn" onclick={() => refreshStore()}>Read again</button>

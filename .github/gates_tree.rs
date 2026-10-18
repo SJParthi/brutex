@@ -2562,6 +2562,85 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
 // an account, an environment, a vendor credential or a field of a parameter
 // path.
 const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
+// R4-07 (D-4986, D-4987): the GDFL Dropbox fetch and the shared disk
+// projection. The package's first rounds added literals under crates/pull
+// and did not run gate 1d; its repair round 2 ran it at the merged head and
+// at feat/db-fix, and declares here exactly the words the head adds, each
+// read before it was listed (every one is in `pull/src/gdfl_dropbox*.rs`,
+// `pull/src/disk_projection*.rs` or `pull/benches/ratio*`). Five kinds.
+// (1) The fetch journal's verbs and fields: `picks`, `downloading`,
+// `downloaded`, `verified`, `handed`, `waiting`, `wait`, `restarted`, `stop`,
+// `held_new`, `refused_new`, `of`, `how`, `earlier`, `detail`, `verdict`,
+// `waited_ms`, `plan_bytes`, `hash`, `sha256`, `link`, `complete`, `wanted`,
+// `pages`, `end`. (2) Its refusal, wait and hold
+// codes, each a word the journal and the run's report print: from
+// `accept_link_print`, `content_duplicate` and `disk_floor` to
+// `zip_unreadable`, with `held_import_done`, `held_tick_store`, `run_busy`
+// and `journal_error`. (3) Words of the Dropbox HTTP API the client sends or
+// reads, and of the transport around it: the routes `list_folder`, `continue`,
+// `get_shared_link_file` and `sharing`; the fields `has_more`, `cursor`,
+// `path_display`, `rev`, `size`, `content_hash`, `shared_link`, `recursive`,
+// `error_summary` (and `items`, the renamed field a test server sends in
+// place of `entries`); the error tags `shared_link_not_found`,
+// `not_found`, `not_folder`, `invalid_access_token`; the headers
+// `dropbox-api-arg`, `content-length`, `range`; the media words
+// `octet-stream`, `html`, `text`; the proxy variables `https_proxy`,
+// `all_proxy` and the scheme `https`; `sh`, the shared-folder component of an
+// invented link; and `dropbox_token`, the KEY of the config line whose value
+// is never in the repository (CLAUDE.md section 8). (4) The projection's
+// unit and class words: `dropbox_zip`, `index`, `index_options`, `stock`,
+// `stock_options`, `ticks`, `floor`, `space`, `tolerance`. (5) Test words:
+// scratch-directory tags (every `r1-*`, `r4-07-test`, `bad-link`, `crash`,
+// `dropbox-*`, `floor-mid`, `unplug`, `send`, `shape`, ...), invented fixture
+// values (`fixture0000`, `n4999`, the revision `0123456789a`, the run id
+// `1-1-1`, `hello`, `same`, `quoted`, `lots`, `red`, `steal`, `bulk`), the
+// dates `01072019` and `02082019` of invented `GFDLNFO_TICK_*` names, and the
+// floor-setting inputs `15`, `4096`, `007`, `1000000000` a test refuses or
+// reads. Repair round 2 adds, from its own follow-ups: the config key
+// `accept_listing_count`, the journal verb `reverify_failed`, the host label
+// `evil` of an invented foreign link a test refuses, and the scratch tags
+// `reverify`, `shrink-accept`, `r2-writer-sha` and `r2-writer-hash`. Repair
+// round 3 adds: the config key `accept_listing_shrink` (the retired
+// `accept_listing_count` stays, as the key a test refuses), the journal
+// fields `shrink`, `was` and `accepted_shrink` of a listing line, the scratch
+// tags `r3-reverify-floor`, `r3-dup-of-refused` and `r3-torn-boundary`, and
+// the invented shrink tokens `1-2-3`, `1-`, `1--2` and `1-a` a test refuses
+// or names as stale.
+// None names an account, an environment, a vendor credential or a
+// field of a parameter path.
+const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 15 4096 accept_link_print \
+     accept_listing_count accept_listing_shrink accepted_shrink shrink was 1-2-3 1- 1--2 1-a \
+     r3-reverify-floor r3-dup-of-refused r3-torn-boundary evil r2-writer-hash r2-writer-sha reverify reverify_failed shrink-accept \
+     all_proxy bad-link bulk busy complete content-length content_duplicate \
+     content_hash continue crash crc_mismatch cursor deleted detail disk_floor \
+     download download_cut downloaded downloading dropbox-api-arg dropbox-cap \
+     dropbox-home dropbox-home-open dropbox-overlap dropbox_config_too_open \
+     dropbox_link_malformed dropbox_link_missing dropbox_token dropbox_token_dead \
+     dropbox_token_missing dropbox_zip earlier end enospc error_summary five-kinds \
+     fixture0000 floor floor-mid free_space_unknown gdfl-dropbox \
+     get_shared_link_file handed has_more hash hash-corrected held_import_done \
+     held_new held_tick_store hello how html http_status https https_proxy \
+     import-done index index_options invalid_access_token invented-filler- items \
+     journal_error journal_unreadable journal_unwritable link link-changed \
+     link_changed link_holds_no_gdfl_day_zip link_is_a_file link_revoked \
+     link_unreachable list_folder listing_incomplete listing_shape_unknown \
+     listing_shrank lots member_over_byte_cap member_size_mismatch member_unreadable \
+     missing-link n4999 name_taken name_unsafe names names_collide no-gdfl \
+     no-overwrite not_a_day_zip not_a_zip not_folder not_found not_refused \
+     octet-stream of out_of_scope_exchange paged pages path_display picks plan_bytes \
+     projection_unknown quoted r1-dup r1-endless r1-foreign r1-held r1-measure \
+     r1-presses-at-once r1-readonly r1-repeat r1-scheme r1-status-utf8 \
+     r1-status-wide r1-stop-listing r1-stop-silent r1-stop-sleep r1-torn-nul \
+     r1-torn-short r1-torn-utf8 r1-torn-v r1-torn-v-nul r1-total r1-unwritable \
+     r4-07-test range range_ignored recursive red redelivered redirect-ok \
+     redirect_refused redirected refused_for_the_test refused_new remote_changed \
+     remote_gone restarted rev rev-corrected revoked run_busy same sample_duplicate \
+     sample_holds_no_day send server_error sh sha256 shape shared_link \
+     shared_link_not_found sharing size size_mismatch size_unlikely space staging \
+     staging_overlaps_published staging_unreadable staging_write_failed steal stock \
+     stock_options stop store_not_writable text throttle ticks tok-dead tok-one \
+     tolerance two_files_for_one_day unplug value verdict verified wait waited_ms \
+     waiting wanted zip_holds_no_member zip_unreadable";
 
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
 // (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
@@ -2693,7 +2772,7 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 69] = [
+const DECLARED: [&str; 70] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2763,6 +2842,7 @@ const DECLARED: [&str; 69] = [
     MERGED_17_OCT_B_LITERAL,
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
+    R4_07_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4440,6 +4520,31 @@ mod tests {
         ] {
             assert!(d.contains(w), "{w}");
         }
+    }
+
+    #[test]
+    fn gate_1d_declares_the_r4_07_fetch_words() {
+        // R4-07 repair 2: the words its second agent named as undeclared.
+        let d = declared();
+        for w in [
+            "dropbox_token",
+            "accept_link_print",
+            "listing_shrank",
+            "tok-one",
+            "fixture0000",
+            "01072019",
+            "1000000000",
+            "zip_unreadable",
+            "007",
+            "accept_listing_count",
+            "accept_listing_shrink",
+            "r3-dup-of-refused",
+            "reverify_failed",
+            "r2-writer-sha",
+        ] {
+            assert!(d.contains(w), "{w}");
+        }
+        assert!(!d.contains("acmeorg"));
     }
 
     #[test]

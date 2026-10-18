@@ -1158,3 +1158,78 @@ fn under_a_real_successor_race_no_landed_save_is_answered_refused() {
         );
     }
 }
+
+/// A byte floor below [`super::MIN_FLOOR_BYTES`] is no floor in practice,
+/// and a bare small number is most often a percent with its `%` left off:
+/// refused by name, the percent spelling offered (R4-07 repair round 1,
+/// the second agent's C10: `15` and `1` were taken as 15 and 1 bytes).
+#[test]
+fn a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named() {
+    use super::{Floor, MIN_FLOOR_BYTES, disk_floor};
+    assert_eq!(MIN_FLOOR_BYTES, 1_000_000_000);
+    assert_eq!(
+        disk_floor("15"),
+        Err(
+            "\"15\" is 15 bytes, below the smallest floor of 1000000000 bytes (1GB); \
+             for 15 percent write 15%"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        disk_floor("4096"),
+        Err(
+            "\"4096\" is 4096 bytes, below the smallest floor of 1000000000 bytes (1GB)".to_owned()
+        )
+    );
+    for small in ["1", "95", "96", "999999999"] {
+        assert!(disk_floor(small).is_err(), "{small:?} must be refused");
+    }
+    assert!(super::check(Key::DiskFloor, "15").is_err());
+    assert_eq!(disk_floor("1000000000"), Ok(Floor::Bytes(MIN_FLOOR_BYTES)));
+    assert_eq!(disk_floor("1GB"), Ok(Floor::Bytes(MIN_FLOOR_BYTES)));
+    assert_eq!(disk_floor("1GiB"), Ok(Floor::Bytes(1 << 30)));
+    assert_eq!(disk_floor("1%"), Ok(Floor::Percent(1)));
+}
+
+/// `disk.floor` (R4-07, PERF-13, D-4987): one grammar, stored in one
+/// canonical spelling, refused by name otherwise.
+#[test]
+fn the_disk_floor_is_checked_and_stored_canonically() {
+    use super::{Floor, disk_floor};
+    assert_eq!(Key::of_name("disk.floor"), Some(Key::DiskFloor));
+    assert_eq!(Key::DiskFloor.slot(), 10);
+    assert_eq!(super::check(Key::DiskFloor, " 15% ").unwrap(), "15%");
+    assert_eq!(
+        super::check(Key::DiskFloor, "1TB").unwrap(),
+        "1000000000000"
+    );
+    assert_eq!(super::check(Key::DiskFloor, "2GiB").unwrap(), "2147483648");
+    assert!(super::check(Key::DiskFloor, "0%").is_err());
+    assert!(super::check(Key::DiskFloor, "lots").is_err());
+    assert!(super::check_stored(Key::DiskFloor, "15%").is_ok());
+    assert!(
+        super::check_stored(Key::DiskFloor, "1TB").is_err(),
+        "stored as a save writes it"
+    );
+    assert_eq!(
+        disk_floor("96%"),
+        Err("\"96%\" is not a percent from 1% to 95%".to_owned())
+    );
+    assert_eq!(Floor::Percent(15).bytes_of(1_000), 150);
+    assert_eq!(Floor::Bytes(5).bytes_of(1), 5);
+    assert_eq!(Floor::Percent(10).to_string(), "10%");
+    for bad in [
+        "",
+        "%",
+        "+5%",
+        "05%",
+        "0",
+        "007",
+        "GiB",
+        "9XB",
+        "99999999999999999999",
+        "20000000TiB",
+    ] {
+        assert!(disk_floor(bad).is_err(), "{bad:?}");
+    }
+}

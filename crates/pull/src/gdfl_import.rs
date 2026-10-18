@@ -398,7 +398,7 @@ pub(crate) use self::journal::append_lines;
 #[cfg(test)]
 pub(crate) use self::journal::load_warning;
 pub use self::journal::{
-    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, definition_is_current, journal_path,
+    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, definition_is_current, done_whole_days, journal_path,
 };
 #[cfg(test)]
 use self::journal::{closing_line, count_of, torn_fragment};
