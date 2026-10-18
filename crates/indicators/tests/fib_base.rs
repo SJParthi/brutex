@@ -1641,3 +1641,76 @@ fn the_state_is_sized_once_from_the_calendar_and_the_generation() {
     // and the snapshot buffers do not grow with it.
     assert!(large < 5 * small);
 }
+
+/// Every count the detector keeps equals the tally of what it emitted:
+/// snapshots, zero-width bases, ratios over zero, the two ladder stamps and
+/// the bases with no touch tolerance, over random days with withheld updates
+/// and suspect prints mixed in.
+#[test]
+fn every_count_equals_the_tally_of_the_emitted_snapshots() {
+    let mut rng = Seeded(0x00F1_B300_0009);
+    let mut d = Detector::new(params(64, 6, 3)).unwrap();
+    let mut tally = [0_u64; 6];
+    for day in 0..1_500 {
+        let random = random_day(&mut rng, 40, true);
+        let number = 96_000 + day;
+        d.begin_day(&DayInput {
+            ist_day: number,
+            session_candles: 64,
+            observed_tick: random.tick,
+            long: DirectionDay {
+                rest_lengths: &random.lengths[0],
+                touch_bp: random.tolerances[0].as_deref(),
+            },
+            short: DirectionDay {
+                rest_lengths: &random.lengths[1],
+                touch_bp: random.tolerances[1].as_deref(),
+            },
+        })
+        .unwrap();
+        for &(slot, ohlc) in &random.slots {
+            if rng.chance(30) {
+                let open_ts = open_of(number) + slot * MINUTE - MINUTE;
+                let _ = d.fold_withheld(&WithheldExtremes {
+                    open_ts_micros: open_ts,
+                    close_ts_micros: open_ts + MINUTE,
+                    high: ohlc.1 + 1 + i64::try_from(rng.below(60)).unwrap(),
+                    low: ohlc.2 - 1 - i64::try_from(rng.below(60)).unwrap(),
+                    suspect_print: false,
+                });
+            }
+            let mut candle = input(number, 1, slot, ohlc);
+            candle.suspect_print = rng.chance(20);
+            for e in fold(&mut d, &candle).unwrap() {
+                let s = &e.snapshot;
+                let flags = [
+                    true,
+                    s.measures.zero_width(),
+                    s.measures.squeeze == Ratio::OverZero,
+                    s.ladder.extreme_from_withheld_bucket,
+                    s.ladder.frame_from_suspect_print,
+                    !s.touches_known,
+                ];
+                for (count, flag) in tally.iter_mut().zip(flags) {
+                    *count += u64::from(flag);
+                }
+            }
+        }
+    }
+    let c = d.counts();
+    assert_eq!(
+        tally,
+        [
+            c.snapshots,
+            c.zero_width_bases,
+            c.ratio_over_zero,
+            c.extreme_from_withheld_bucket,
+            c.frame_from_suspect_print,
+            d.refusals().get(Refusal::NoTouchTolerance),
+        ]
+    );
+    assert!(
+        tally.iter().all(|n| *n > 0),
+        "every count was exercised: {tally:?}"
+    );
+}
