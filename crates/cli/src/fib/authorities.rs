@@ -41,6 +41,8 @@
 //! [`super::wire::register`], which refuses each by name until FIB-10 builds
 //! it: an authority that is not built is never quietly replaced by an interim
 //! one.
+//!
+//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-10).
 
 use std::fmt;
 
@@ -327,12 +329,15 @@ pub trait CalendarAuthority {
     /// The implementation's version.
     fn version(&self) -> &AuthorityVersion;
     /// The verdict for `series` on IST epoch day `day`. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn tradable(&self, series: SeriesId, day: i64) -> Tradable;
     /// The market-wide verdict alone, for an instrument with no series (an
     /// index reference stamp). O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn market(&self, day: i64) -> Result<(), CalendarReason>;
     /// Whether the exchange traded at all on `day`: the calendar's own answer,
     /// which the previous traded session is read from. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn traded(&self, day: i64) -> bool;
 }
 
@@ -545,6 +550,7 @@ pub struct Member {
 /// A per-day dense slot table over dense series ids (FM-F086): built once per
 /// day in O(pool), and each [`DaySlots::slot_of`] is one bounds-checked array
 /// read, O(1) worst case.
+/// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaySlots {
     slots: Vec<Option<u16>>,
@@ -588,6 +594,7 @@ impl DaySlots {
     }
 
     /// The slot of `series`, or `None` when it is not a member. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     #[must_use]
     pub fn slot_of(&self, series: SeriesId) -> Option<u16> {
         usize::try_from(series.0)
@@ -605,6 +612,7 @@ pub trait PoolAuthority {
     /// The members on IST epoch day `day`, in slot order.
     fn members(&self, day: i64) -> &[Member];
     /// The slot of `series` on `day`, or `None`. O(1) worst case.
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn slot_of(&self, series: SeriesId, day: i64) -> Option<u16>;
     /// The member whose symbol is `symbol` on `day`.
     fn member_named(&self, symbol: &str, day: i64) -> Option<&Member> {
@@ -719,12 +727,16 @@ pub trait FactorAuthority {
     fn version(&self) -> &AuthorityVersion;
     /// The stock-day's pair. O(1).
     ///
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
+    ///
     /// # Errors
     ///
     /// A refusal by name when no pair exists for the stock-day.
     fn factor(&self, series: SeriesId, day: i64) -> Result<FactorPair, String>;
     /// The pair at the stock-day's first matched minute, read no later than
     /// 09:16 (FM-F092 (c)). O(1).
+    ///
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     ///
     /// # Errors
     ///
@@ -799,6 +811,7 @@ pub trait SecondsTrust {
     /// The implementation's version.
     fn version(&self) -> &AuthorityVersion;
     /// The verdict for the stock-day. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn status(&self, series: SeriesId, day: i64) -> SecondsStatus;
 }
 
@@ -839,6 +852,7 @@ pub trait OrderFlowAuthority {
     fn version(&self) -> &AuthorityVersion;
     /// The window `[from_second, to_second)` of the stock-day, seconds of the
     /// IST day. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn window(
         &self,
         series: SeriesId,
@@ -902,8 +916,10 @@ pub trait LandingAuthority {
     /// The implementation's version.
     fn version(&self) -> &AuthorityVersion;
     /// The landing the stock-day's stored minutes came from. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn landing(&self, series: SeriesId, day: i64) -> Option<LandingId>;
     /// A PREC-10 basis-break record between `from_day` and `day`. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn basis_break(&self, series: SeriesId, from_day: i64, day: i64) -> Option<BasisBreak>;
 }
 
@@ -1019,6 +1035,7 @@ pub trait BasisVerdictAuthority {
     fn version(&self) -> &AuthorityVersion;
     /// The verdict for carrying `series`'s close of `previous_day` into `day`.
     /// O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn verdict(&self, series: SeriesId, previous_day: i64, day: i64) -> BasisVerdict;
 }
 
@@ -1157,6 +1174,7 @@ pub enum CorporateActions {
 /// is `same`, or it has a row and the stock was rebuilt. Any refusal latches
 /// `basis_unresolved since D` until a sealed rebuild clears it; a later `same`
 /// re-read never does. One stock's state, O(1) per day.
+/// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ForwardBasis {
     latched_since: Option<i64>,
@@ -1233,6 +1251,7 @@ pub trait TailWitness {
     fn version(&self) -> &AuthorityVersion;
     /// Whether trades happened on the stock-day after `last_second` (a second
     /// of the IST day). O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn after(&self, series: SeriesId, day: i64, last_second: u32) -> TailReading;
 }
 
@@ -1302,6 +1321,7 @@ pub trait IndexScreen {
     /// The implementation's version.
     fn version(&self) -> &AuthorityVersion;
     /// The verdict for `index` on `day`. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn screen(&self, index: &str, day: i64) -> IndexDay;
 }
 
@@ -1361,6 +1381,7 @@ pub trait ExpiryAuthority {
     /// The implementation's version.
     fn version(&self) -> &AuthorityVersion;
     /// The stamp for `series` on `day`. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     fn expiry(&self, series: SeriesId, day: i64) -> ExpiryStamp;
 }
 
@@ -1414,7 +1435,7 @@ pub fn select(kind: AuthorityKind, word: &str) -> Result<Choice, String> {
     if word == kind.interim_word() {
         return Ok(Choice::Interim);
     }
-    if Some(word) == kind.new_work_word() || wire::WORDS.contains(&word) {
+    if Some(word) == kind.new_work_word() {
         // Routed to FIB-10's register, whose refusal is the answer until it
         // is built; a word it accepts still has no implementation here.
         return wire::register(word).and(Err(format!(

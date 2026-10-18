@@ -45,6 +45,8 @@
 //! package (FIB-2's rank, FIB-7's downside readings, the results of FIB-9 to
 //! FIB-14) is a container with the stride its header declares, fixed for the
 //! file, until its owner declares the layout.
+//!
+//! Measured, every lookup and record operation of this module: `crates/cli/benches/fib.rs` (FIB-8's rows, C-F8-01 to C-F8-10).
 
 use std::fs::{self, File};
 use std::io::{SeekFrom, Write as _};
@@ -534,7 +536,7 @@ impl Scope {
         let kind = input.u8()?;
         let (series, year, month, partition) =
             (input.u32()?, input.u16()?, input.u8()?, input.u32()?);
-        let scope = match ScopeKind::ALL.iter().find(|known| **known as u8 == kind) {
+        let scope = match ScopeKind::ALL.get(usize::from(kind)) {
             Some(ScopeKind::StockMonth) => Self::StockMonth {
                 series: SeriesId(series),
                 year,
@@ -1068,6 +1070,8 @@ impl FibFile {
 
     /// Record `index`'s bytes. O(1): one multiply and add finds it; the first
     /// read in its block also reads and verifies the block.
+    ///
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     ///
     /// # Errors
     ///
@@ -1732,6 +1736,7 @@ pub struct MarksWord(pub u64);
 
 impl MarksWord {
     /// The word and the bit of a candidate ordinal. O(1).
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     #[must_use]
     pub fn position(ordinal: u64) -> (u64, u64) {
         let bits = u64::from(u64::BITS);
@@ -1773,6 +1778,8 @@ impl Record for MarksWord {
 
 /// Whether candidate `ordinal` is marked in an open `marks` file. O(1): one
 /// record read.
+///
+/// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
 ///
 /// # Errors
 ///
@@ -2194,6 +2201,8 @@ pub fn read_segment_index(path: &Path) -> Result<Vec<SegmentEntry>, FileError> {
 
 /// Row `ordinal` of a partition's month. O(1): the month names its sealed
 /// segment by path, and the ordinal is one record read in it.
+///
+/// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
 ///
 /// # Errors
 ///

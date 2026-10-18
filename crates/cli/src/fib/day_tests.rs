@@ -94,6 +94,7 @@ fn spec<'a>(
         widths,
         reference,
         daily: None,
+        rename_conflicts: &[],
     }
 }
 
@@ -712,6 +713,7 @@ fn a_missing_previous_day_is_not_adjacent() {
         }),
         wednesday,
         |_| false,
+        None,
         |_| unreachable!(),
     );
     assert_eq!(ahead.word(), "not_adjacent");
@@ -1687,4 +1689,301 @@ fn day_rs_types_no_number() {
     let source = include_str!("day.rs");
     let typed = vocab::fib_cube::untyped_numbers(source);
     assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// A pool whose series trades as `old` before `switch` and as `new` from it.
+struct Renamed(AuthorityVersion, i64, Vec<Member>, Vec<Member>);
+
+impl PoolAuthority for Renamed {
+    fn version(&self) -> &AuthorityVersion {
+        &self.0
+    }
+    fn members(&self, day: i64) -> &[Member] {
+        if day < self.1 { &self.2 } else { &self.3 }
+    }
+    fn slot_of(&self, _: SeriesId, _: i64) -> Option<u16> {
+        Some(0)
+    }
+}
+
+fn renamed(switch: i64, old: &str, new: &str) -> Renamed {
+    let member = |symbol: &str| Member {
+        series_id: SeriesId(7),
+        symbol_on_day: symbol.to_owned(),
+        zerodha_series_present: true,
+        in_current_list: true,
+    };
+    Renamed(
+        version(AuthorityKind::Pool),
+        switch,
+        vec![member(old)],
+        vec![member(new)],
+    )
+}
+
+/// FM-F093: OLDSYM's days and NEWSYM's days load as one series month with
+/// continuous state; a day held under both keys with differing bars is
+/// refused by name; equal bars under both keys are one day.
+#[test]
+fn a_rename_month_loads_as_one_series_with_continuous_state() {
+    let store = Scratch::new("rename");
+    let old_days: Vec<i64> = (3..=7).map(|d| day_of(2025, 3, d)).collect();
+    // 2025-03-14 is a trading holiday: the new key trades four days.
+    let new_days: Vec<i64> = (10..=13).map(|d| day_of(2025, 3, d)).collect();
+    let mut old = Vec::new();
+    for (n, on) in old_days.iter().enumerate() {
+        old.extend(full(*on, 2_020_000 + n as i64 * 100));
+    }
+    let mut new = Vec::new();
+    for (n, on) in new_days.iter().enumerate() {
+        new.extend(full(*on, 2_030_000 + n as i64 * 100));
+    }
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &old,
+    );
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("INFY"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &new,
+    );
+    let pool = renamed(new_days[0], "SBIN", "INFY");
+    let month = load_series_month(&store.0, &pool, SeriesId(7), (2025, 3)).unwrap();
+    assert_eq!(month.symbols, ["SBIN", "INFY"]);
+    assert!(month.conflicts.is_empty());
+    assert_eq!(month.minutes.len(), 375 * 9);
+    let mut state = StockState::first_day();
+    let series_spec = MonthSpec {
+        series: SeriesId(7),
+        rename_conflicts: &month.conflicts,
+        ..spec(2025, 3, &[1], PreviousReference::TradableDay)
+    };
+    let built = build_month(
+        &series_spec,
+        &month.minutes,
+        &no_master(),
+        &interim(),
+        &mut state,
+    )
+    .unwrap();
+    let first_new = input(&built, new_days[0]);
+    let carried = first_new.previous().accepted().unwrap().carried;
+    assert_eq!(
+        carried.day, old_days[4],
+        "the previous close carries across the rename"
+    );
+    assert_eq!(state.tradable.unwrap().day, new_days[3]);
+    // The old key also holds the first new day, identically: one day.
+    let mut both = old.clone();
+    both.extend(full(new_days[0], 2_030_000));
+    let same = Scratch::new("rename-same");
+    write_month(
+        &same.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &both,
+    );
+    write_month(
+        &same.0,
+        Vendor::Zerodha,
+        &cash_key("INFY"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &new,
+    );
+    let month = load_series_month(&same.0, &pool, SeriesId(7), (2025, 3)).unwrap();
+    assert!(month.conflicts.is_empty());
+    assert_eq!(month.minutes.len(), 375 * 9);
+    // The old key holds it with other bars: refused by name.
+    let mut differing = old.clone();
+    differing.extend(full(new_days[0], 2_040_000));
+    let conflict = Scratch::new("rename-conflict");
+    write_month(
+        &conflict.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &differing,
+    );
+    write_month(
+        &conflict.0,
+        Vendor::Zerodha,
+        &cash_key("INFY"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &new,
+    );
+    let month = load_series_month(&conflict.0, &pool, SeriesId(7), (2025, 3)).unwrap();
+    assert_eq!(month.conflicts, [new_days[0]]);
+    let conflict_spec = MonthSpec {
+        series: SeriesId(7),
+        rename_conflicts: &month.conflicts,
+        ..spec(2025, 3, &[1], PreviousReference::TradableDay)
+    };
+    let mut state = StockState::first_day();
+    let built = build_month(
+        &conflict_spec,
+        &month.minutes,
+        &no_master(),
+        &interim(),
+        &mut state,
+    )
+    .unwrap();
+    let refused = input(&built, new_days[0]);
+    assert_eq!(refused.refusal, Some(DayRefusal::RenameOverlapConflict));
+    assert_eq!(
+        DayRefusal::RenameOverlapConflict.name(),
+        "rename_overlap_conflict"
+    );
+    assert_eq!(
+        input(&built, new_days[1]).previous().word(),
+        "previous_day_refused"
+    );
+    // A key the store does not hold is counted, never read as a month.
+    let lost = renamed(new_days[0], "SBIN", "TCS");
+    let month = load_series_month(&store.0, &lost, SeriesId(7), (2025, 3)).unwrap();
+    assert_eq!(month.key_absent, ["TCS"]);
+    assert_eq!(month.minutes.len(), 375 * 5);
+    assert!(stitch((2025, 13), &|_| None, &[]).minutes.is_empty());
+}
+
+/// `day-check --reference` adds the month's reference table and its holes.
+#[test]
+fn day_check_reports_the_reference_table_with_holes_counted() {
+    let store = Scratch::new("refcheck");
+    let monday = day_of(2025, 3, 3);
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &full(monday, 1_515_000),
+    );
+    let nifty = InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap();
+    let session: Vec<Candle> = (0..375_u16)
+        .map(|n| minute(monday, hm(9, 15) + n, 2_200_000 + i64::from(n)))
+        .collect();
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &nifty,
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &session,
+    );
+    let vix = InstrumentKey::index(Exchange::Nse, "INDIAVIX").unwrap();
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &vix,
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &session[..10],
+    );
+    let friday = day_of(2025, 2, 28);
+    let february: Vec<Candle> = (0..375_u16)
+        .map(|n| minute(friday, hm(9, 15) + n, 2_100_000 + i64::from(n)))
+        .collect();
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &nifty,
+        Timeframe::MINUTE_1,
+        (2025, 2),
+        &february,
+    );
+    let request = parse(&[
+        "SBIN",
+        "2025-03",
+        "--reference",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ])
+    .unwrap();
+    assert!(request.reference_table);
+    let mut out = String::new();
+    assert_eq!(
+        run(&store.0, &request, &interim(), &mut out),
+        crate::OK,
+        "{out}"
+    );
+    assert!(
+        out.contains("reference 2025-03: 4 indices over 31 days of the index session; index day unscreened (PREC-9 not merged); absent stamps per index (holes): NIFTY 11250, BANKNIFTY 11625, INDIAVIX 11615, GIFTNIFTY 11625"),
+        "{out}"
+    );
+    let table = reference_check(&store.0, (2025, 3), &interim()).unwrap();
+    let slot = table.index_slot("NIFTY").unwrap();
+    assert_eq!(
+        table.stamp(instant(monday, u32::from(hm(9, 15)) * 60), slot),
+        Some(super::super::files::ReferenceCell::Exact {
+            close: 2_200_000 + 10,
+            previous_close: 2_100_000 + 374 + 10
+        }),
+        "March measures against February's last tradable close"
+    );
+    let json_request = Request {
+        json: true,
+        ..request
+    };
+    let mut json = String::new();
+    assert_eq!(
+        run(&store.0, &json_request, &interim(), &mut json),
+        crate::OK
+    );
+    assert!(json.contains("\"reference_table\":{\"days\":31,\"screen\":\"index day unscreened (PREC-9 not merged)\",\"indices\":[{\"index\":\"NIFTY\",\"holes\":11250}"), "{json}");
+    // A VIX month that is there and unreadable halts by name.
+    let broken = Scratch::new("refcheck-broken");
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &vix,
+        Timeframe::MINUTE_1,
+        YearMonth::new(2025, 3).unwrap(),
+        FileKind::Bars,
+    )
+    .unwrap()
+    .to_path_buf(&broken.0);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"synthetic garbage").unwrap();
+    let refused = reference_check(&broken.0, (2025, 3), &interim()).unwrap_err();
+    assert_eq!(refused.word, "reference_index", "{refused}");
+    let mut out = String::new();
+    write_month(
+        &broken.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &full(monday, 1_515_000),
+    );
+    assert_eq!(
+        run(&broken.0, &request_with_reference(), &interim(), &mut out),
+        crate::FAILED
+    );
+    assert!(out.contains("reference_index"), "{out}");
+}
+
+fn request_with_reference() -> Request {
+    parse(&[
+        "SBIN",
+        "2025-03",
+        "--reference",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ])
+    .unwrap()
 }

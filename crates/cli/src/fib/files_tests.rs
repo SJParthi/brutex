@@ -778,7 +778,8 @@ fn a_footer_or_body_that_disagrees_is_refused_by_the_whole_check() {
     assert_eq!(verify_whole(&path).unwrap_err().word, "body_digest");
 }
 
-/// FM-F088: a mark is the bit of the candidate's ordinal, read in O(1).
+/// FM-F088: a mark is the bit of the candidate's ordinal, one record read
+/// (timed by `crates/cli/benches/fib.rs`).
 #[test]
 fn marks_bit_equals_candidate_ordinal() {
     let scratch = Scratch::new("marks");

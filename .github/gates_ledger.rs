@@ -1644,6 +1644,11 @@ const ALLOW_SORT: Allow = &[
     // listing once, before any computation (one leaf per stock-month and
     // authority file); docs/06-limits.md, "Gate 11 — FIB-1, declared".
     ("crates/runner/src/fib/identity.rs", 1),
+    // FIB-8, 18 Oct 2026: `reference_indices` sorts the index directory
+    // listing once per reference month, so the table's slot order does not
+    // depend on the order a directory walk listed them; docs/06-limits.md,
+    // "Gate 11 — FIB-8, declared".
+    ("crates/cli/src/fib/reference.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1794,6 +1799,13 @@ const ALLOW_SCAN: Allow = &[
     ("crates/vocab/src/fib_cube.rs", 2),
     ("crates/runner/src/fib/mod.rs", 1),
     ("crates/cli/src/fib/mod.rs", 1),
+    // FIB-8, 18 Oct 2026; docs/06-limits.md, "Gate 11 — FIB-8, declared":
+    // the years one span met (two walks of `YearCounts`), `member_named` once
+    // per `day-check`, an authority flag among one invocation's words (twice),
+    // and an index name among one reference table's list.
+    ("crates/cli/src/fib/authorities.rs", 4),
+    ("crates/cli/src/fib/day.rs", 1),
+    ("crates/cli/src/fib/reference.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first

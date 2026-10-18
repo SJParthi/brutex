@@ -73277,3 +73277,287 @@ file's closing-auction count is carried on an INDEX record by design
 `web/tests/db-dayflags-closed.test.js` (`a_two_valued_second_is_not_a_minute_gap`,
 `a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
 `web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
+
+### D-6440 — The FIB day input reads Zerodha minutes through the one door and folds them in the run to every Generation width (FIB-8) — 2026-10-18
+
+**Number** the first of FIB-8's block D-6440..D-6459 (the specification's
+D-5440..D-5459 moved up by 1,000 with every FIB block, D-6311). `grep` over
+`docs/05-decisions.md` of every pushed branch on 18 Oct 2026 (feat/db-fix and
+cloud/fib1, fib2, fib3, fib5, fib6, fib8) found no heading in D-6440..D-6459.
+
+**What is decided.** `cli::fib::day` builds one stock-month of the day input
+from Zerodha one-minute bars read through `cli::stored::load` (classified,
+D-6449), split by IST day, streamed once. Only the share's continuous window
+builds candles: `[09:15, 15:30)` before 2026-08-03 and from then the share's
+dated close from its receipted master (`CashCloses`, 15:15 for an eligible
+share, a 360-minute day); a minute outside it is counted, never used. Each day
+is folded to every width of the run's Generation through
+`pull::fold::complete_minutes_with_calendar` for the cash venue — the one fold
+authority — never from the stored derived rungs and never from GDFL. A share's
+fold folds a bucket over the minutes that traded, so this module marks a candle
+`complete` only when every continuous minute it owes is a real minute and the
+bucket is full width; otherwise the candle is kept with `complete = false` and
+`missing_minutes`, and named in its width's `withheld` list. A short last bucket
+is partial and never a decision candle. Each width's day capacity (FIB-3's ring)
+is `ceil(session minutes / width)`. The minute closes 09:15..15:09 (354 slots)
+and the move side per slot are produced for the rank; `fib day-check SYM YYYY-MM
+--previous REF --authorities interim [--json]` prints the day input, the
+excluded days and the counts, read-only.
+
+**Why.** Operator rule (a) (minutes always from Zerodha, every candle width
+folded from them), FEEDS BY LEVEL (D-6304), one fold authority with known
+provenance. Zerodha minute volume decides nothing except FM-F095's padded
+no-trade test (D-6445), which ZM-55 defines on it.
+
+**Look-ahead.** The fold and the closes read bars one at a time; a candle's
+completeness reads its own minutes. The day-level refusals (D-6445) are judged
+after the close — the eligibility look-ahead FIB-15 states.
+
+**Proof.** `cli::fib::day::tests` (`a_missing_minute_withholds_every_bucket_that_holds_it`,
+`a_2018_day_is_tradable_through_sourced_kind_of`,
+`a_360_minute_day_and_the_regime_tag_reach_the_day_input`,
+`an_ampersand_symbol_loads_and_day_check_reads_it`, and the rest of the
+module). Invariants FIB8-01..FIB8-08.
+
+### D-6441 — The previous close: the previous tradable day's last Zerodha minute close, both references labelled, accepted only when adjacent, unrefused, positive and basis-proven (FIB-8) — 2026-10-18
+
+**What is decided.** The previous close of day D is the last real Zerodha minute
+close of the reference day, carried across months in `StockState` (FIB-9
+checkpoints it) with its IST day, its landing and its regime tag (the session's
+last minute-of-day, FM-F101: 929 before 2026-08-03, 914 for an eligible share
+after). Both references are computed and labelled (ZD-41): the previous TRADED
+SESSION (any day the exchange traded, a halt day included) and the previous
+TRADABLE day (operator rule h); only the recorded `PreviousReference` decides
+(`--previous traded-session|tradable-day`, never defaulted). A close is
+accepted only when (a) no day of the reference's kind lies between it and D
+(`not_adjacent`, or `previous_day_refused` when that day's minutes were refused,
+D-6445), (b) it is positive (`not_positive`), and (c) the basis-verdict authority
+proves its basis (`basis_unproven`, `basis_unreliable`; D-6447). A refused close
+gives D no move and no side, known at 09:15, and a candidate on D is refused
+`no_previous_close:<reason>`; a stock's first day is `first_day`, counted. The
+labelled variant `zerodha_1day_close` reads the stored Zerodha `1day` bar of the
+deciding reference day and never decides. Every verdict is counted per reason
+and year.
+
+**Deleted, per FM-F092.** The sentence "the move across an ex-date is the
+economic move" is not adopted: Zerodha adjusts as of each pull and not always
+proportionally, so a close crossing a basis is accepted only under D-6447's
+proof.
+
+**UNVERIFIED.** Whether the operator's "previous close" is the last Zerodha
+minute close or NSE's official close: both are computed (the folded minutes
+decide; the `1day` close is the labelled variant).
+
+**Proof.** `the_basis_of_a_carried_close_decides_whether_it_is_accepted`,
+`a_missing_previous_day_is_not_adjacent`, `minutes_after_0916_never_change_the_days_verdict`,
+`the_day_after_the_outage_names_both_previous_closes`, `a_first_day_has_no_previous_close_and_no_move`,
+`the_variant_1day_close_is_read_and_never_decides`, `an_affine_day_is_flagged_unreliable`.
+
+### D-6442 — The authority traits, their interim implementations, and why every interim one is refused for --out-store (FIB-8) — 2026-10-18
+
+**What is decided.** `cli::fib::authorities` holds one trait per question —
+`CalendarAuthority` (`tradable(series, day)`: the market-wide verdict AND the
+per-instrument record, FM-F097; `market(day)`; `traded(day)`), `PoolAuthority`
+(`members(day)`, `slot_of(series, day)` backed by a per-day dense array built
+once per day in O(pool), FM-F086), `FactorAuthority`, `SecondsTrust`,
+`OrderFlowAuthority`, `LandingAuthority`, `BasisVerdictAuthority` (D-6447),
+`TailWitness`, `IndexScreen`, `ExpiryAuthority` — each lookup O(1), each
+implementation carrying an `AuthorityVersion` (kind, flag word, label, digest of
+what it answers) for the run identity, none with `Default`. The interim
+implementations: the H5 calendar (`sourced_kind_of == Open(full)`, no special
+session, no halt; the reason names its code and whether it was known in
+advance, FM-F100; a halt is named before a special session, so 2021-02-24 is
+`systems_outage`), per-instrument sessions `instrument_session_unchecked`; the
+development pool (`FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, labelled
+survivorship-biased, renames not stitched); the identity factor (never
+measured, covering nothing); unchecked seconds; absent order flow (the
+`trigger_order_flow` row constant); a single assumed landing; no tail witness;
+every index day unscreened; expiry stamps absent. `select(kind, word)` maps a
+flag word to an implementation; `cal1`, `pit`, `data1`, `data2` and `of1` are
+routed to `super::wire::register`, which refuses each until FIB-10. Every
+interim authority is refused for `--out-store` by name
+(`interim_authority_for_out_store`): a result in the store never rests on a
+stand-in (`CLAUDE.md` §4).
+
+**Proof.** `cli::fib::authorities::tests`. Invariants FIB8-09..FIB8-13.
+
+### D-6443 — The reference stamps come from Zerodha index minutes, joined by a trade's (day, minute) key in O(1); never a coordinate, never an identity term (FIB-8) — 2026-10-18
+
+**What is decided.** `cli::fib::reference` builds a month's reference table
+`[day][minute][index slot]` (FM-F087): NIFTY and BANKNIFTY, every index
+directory under the Zerodha NSE index root (sorted), INDIA VIX (through
+`cli::vix_reference::VixReferenceMonth`: exact or absent, never a fill), and a
+reserved GIFT NIFTY slot, always absent (source UNVERIFIED). Each index month is
+read through `load_index_month`, the named reference loader in the shape of
+`cli::vix_reference` (index kind and one-minute rung fixed, never offered to the
+sweep, FM-F099). A stamp is the minute's close and the previous TRADABLE day's
+last minute close; a minute with no bar is absent (`no_minute`); a day PREC-9
+marks foreign, rescaled or junk is absent with that reason — until PREC-9 merges
+every day is stamped as measured and labelled `index day unscreened`; no
+own-past magnitude test blanks a stamp. A trade carries only its (day, minute)
+key, so a new index is a new reference-file version and no candidate stride
+changes. Expiry and F&O-ban stamps (FM-F098) ride the day input, reference
+only: the ban is absent ("ban list UNVERIFIED").
+
+**Proof.** `cli::fib::reference::tests`. Invariants FIB8-14..FIB8-16.
+
+### D-6444 — FIB run files v1: one container for every kind, per-block checksums, sealed once (FIB-8) — 2026-10-18
+
+**What is decided.** `docs/02-store-format.md` "FIB run files v1": a header
+(magic, versions, schema digest, run identity, scope, profile, header digest),
+fixed-stride records, a block table of blake3 per block, and a footer (count,
+body blake3, magic); written through `store::staging::create`, synced, renamed,
+the directory synced; a reader opens the header only and verifies each block on
+first touch (FM-F091). Kinds: closes, rank, reference, candidates
+(`CandidateRecord` v1), rows, survivors, marks, deep (`DeepRecord` v1),
+winners, keepers, steps, diagnostics, luck receipt, census, exam lock, side
+passers, pairs, histogram checkpoint, seconds summary, downside v1, downside
+refs v1 and the gate refusal census v2 — append-only codes. The block length,
+`FIB_FILE_BLOCK_BYTES = 65,536`, is appended to `vocab::fib_cube::FIXED_NUMBERS`
+as a Representation row under this decision (the ledger's own rule: a later FIB
+package that must type a representation number appends its row); FIB-1's
+golden of the ledger bytes is re-pinned for it.
+
+**Proof.** `cli::fib::files::tests`. Invariants FIB8-17..FIB8-24.
+
+### D-6445 — The stock-day is the unit of refusal; padded minutes are holes; an extreme wick is suspect (FIB-8; FM-F094, FM-F095, FM-F096) — 2026-10-18
+
+**What is decided.** A duplicate, unsorted or corrupt minute refuses its day
+only (`duplicate_minute`, `unsorted`, `corrupt_minute`); on a tradable day a last
+minute closing before 15:09:00 is `tail_cut` when the tail witness shows trades
+after it, `tail_unwitnessed` (labelled) when none can say, and kept, labelled
+`no_trades_after`, when it shows none; a halt day ends at its halt and is not
+tail-judged. A refused day emits no candle and makes the next day's previous
+close `previous_day_refused`; its minute closes stay (the rank is never removed
+retroactively; STALE after the last minute). A padded no-trade minute (volume
+0, O = H = L = C = the previous in-session close, never at 09:15) is a hole for
+the detector and STALE for the rank; a zero-volume minute with a range is kept
+and counted. A minute whose upper or lower wick, as an exact ratio of its close,
+is wider than every committed day's (permille 1000 among committed days) is
+`suspect_unwitnessed` without opening GDFL; only admitted days are committed.
+
+**Proof.** `a_duplicate_unsorted_or_corrupt_minute_refuses_only_its_day`,
+`an_early_last_minute_is_unwitnessed_cut_or_kept_by_its_witness`,
+`a_tail_cut_is_refused_and_leaves_the_committed_past_as_it_was`,
+`padded_no_trade_minutes_are_holes_and_stale`,
+`an_extreme_wick_is_marked_against_committed_days_only`.
+
+### D-6446 — `pull::fold` restarts the intraday grid at each IST day's 09:15 (FIB-8; a sequenced edit outside FIB ownership) — 2026-10-18
+
+**What was found.** FIB-1 R7 and FIB-8's specification state that `pull::fold`
+anchors every intraday width at 09:15. It did so only for widths that divide a
+day: the grid was the epoch grid `t + A ≡ 0 (mod w)`, on which a width of 7 or
+64 minutes — both in R7's generated timeframe set — lands its first bucket at a
+different minute each day (measured: width 7 started at 09:09 on 2025-03-03).
+
+**What is decided.** `pull::fold::bucket_start` counts an intraday bucket from
+the 09:15 open of the IST day the instant falls on: `open + floor((t − open) /
+w) × w`; a day-or-wider bucket keeps the IST-midnight grid. For every width that
+divides a day — every rung in `Timeframe::KNOWN` and every width any caller
+passed — that is the old grid exactly, so no stored bar moves
+(`pull::fold::open_grid::every_width_that_divides_a_day_keeps_its_grid` walks
+every divisor of 86,400 that is a whole minute and every store rung over two
+years of days). A width that does not divide a day now starts at 09:15 every
+day (`a_width_that_does_not_divide_a_day_starts_at_each_open`). No NSE venue
+trades across IST midnight. The restart at a special session's second window
+(FIB-1 R7's "restarted at each session window open") is NOT built: a special
+session is never tradable (rule h), and D-3321's one-grid rule for the derive
+stands.
+
+**Owner.** `pull::fold` is not a FIB file; the merge-back reviews this edit
+with the store's owners.
+
+### D-6447 — The per-stock-day basis-verdict authority, historical and forward (FIB-8; RQ-4 of FIB-15, amending FM-F092) — 2026-10-18
+
+**What is decided.** `BasisVerdictAuthority::verdict(series, previous_day,
+day)` is consumed by the day input in both paths. HISTORICAL (`HistoricalBasis`,
+FM-F092 (c)): a day DATA-1 or PREC-13 marks affine or non-constant is
+`basis_unreliable`; both days from one landing is proven; a PREC-10 record with
+a nonzero denominator carries the close exactly in `i128` (the move compared
+cross-multiplied, never divided); DATA-1's MEASURED pair for D−1 equal, as a
+ratio, to its pair at D's first matched minute is proven; anything else is
+`basis_unproven`. Before the factor authority's first covered day only the
+landing test applies, labelled `landing_only`. An unmeasured pair (the interim
+identity) proves nothing, so a raw-to-raw close across an ex-date is never
+accepted on a factor of one (FIB-15 4.8). It is interim exactly when either
+input is. FORWARD (`ForwardBasis`, FIB-15 4.8): accepted only when the NSE
+corporate-action list for D was read and either it has no row for the stock
+with ex-date D and the re-read class is `same`, or it has a row and the stock
+was rebuilt; otherwise `basis_unproven`, `basis_unsourced` (a measured step
+with no NSE row), `basis_differs` (revised or differs) or
+`basis_rebuild_pending`, and every refusal latches `basis_unresolved since D`
+until a sealed rebuild clears it; no source at all is `basis_source_missing`
+and an unread list is PENDING `corporate_actions_unread`, neither latching.
+
+**NOT BUILT here.** The ingest stage that produces the forward inputs (RQ-16,
+owner needed); until it lands FIB-15's freeze stays refused
+`rule_missing:basis_verdict` for want of inputs, not of the rule.
+
+**Proof.** `the_historical_basis_proof_follows_fm_f092`,
+`the_basis_verdict_is_interim_when_either_input_is`,
+`the_forward_basis_rule_refuses_by_name_and_latches_until_rebuilt`.
+
+### D-6448 — Marks over candidate ordinals, rows in sealed per-month segments, and the sealed exam lock (FIB-8; FM-F088, FM-F089, FIB-1 R6) — 2026-10-18
+
+**What is decided.** A row's outcome index is (stock-month candidates file,
+record ordinal); marks are a per-stock-month bitset over that ordinal, one
+`u64` word per 64 candidates, read in O(1). Rows are sealed per (partition,
+month) segments; the partition's append-only segment index holds one
+self-digested entry per month (month key, first global ordinal, count, segment
+file digest), so a new month appends one segment and one entry, and a seek by
+(month, ordinal) opens the month's segment by path and reads one record. The
+exam lock (`exam-lock.fib`) is written once, before any learning run; its file
+digest enters the identity; a typed exam that differs is refused
+`exam_lock_differs`.
+
+**Proof.** `marks_bit_equals_candidate_ordinal`, `row_outcome_index_round_trips`,
+`adding_month_appends_segment_only`,
+`the_exam_lock_is_sealed_once_and_a_differing_lock_is_refused`.
+
+### D-6449 — A classified month load, and no refusal ever counted as absence (FIB-8; FM-F099; a sequenced edit in `cli::stored`) — 2026-10-18
+
+**What is decided.** `cli::stored::load_with_class` returns `load`'s refusal
+with its class — `missing`, `locked`, `io`, `not_sweepable`, `corrupt` — named
+by opening the month again and reading the store's own `StoreError`; a month
+that opens but did not load is `corrupt`. `CashCloses::schedule` exposes the
+dated schedule read-only, so the day input folds against the same flags its
+closes come from. The day input stats the store root at each stock-month open:
+a vanished root halts by name (`store_root_vanished`), resumable; a missing
+month is absence only when the root and the symbol's directory both exist,
+otherwise `store_key_absent`, counted; `locked`, `io` and `corrupt` halt by
+name. Both edits are additive in `cli::stored` (not a FIB file).
+
+**Proof.** `load_month_classifies_every_refusal`,
+`a_month_held_by_a_writer_halts_by_name`,
+`an_ampersand_symbol_loads_and_day_check_reads_it` (a renamed root exits FAILED
+naming it).
+
+### D-6450 — A series month is read from each day's symbol and stitched; an overlapping day that differs is refused (FIB-8; FM-F093) — 2026-10-18
+
+**What is decided.** The FIB stock key is the pool's series id. Each IST day
+loads from `Member.symbol_on_day` through the classified door; the symbols of a
+month are read once each and stitched by day, so own past, the previous close
+and the carried state continue across a rename. A day held under both keys with
+equal bars is one day; with differing bars it is refused
+`rename_overlap_conflict` (ZM-35) and the next day's previous close is
+`previous_day_refused`. A day only the other key holds is not the series' on the
+pool's word and reads nothing. The development pool names one symbol a month:
+"renames not stitched". A sourced demerger or scheme day is a basis break
+(D-6447), not a stitch.
+
+**Proof.** `a_rename_month_loads_as_one_series_with_continuous_state`.
+
+### D-6451 — The halt-day exposure input and the downside sibling kinds (FIB-8; FM-F100 and FIB-7's downside touch-points) — 2026-10-18
+
+**What is decided.** On a day the calendar removed by hindsight for a halt
+(2020-03-13, 2020-03-23, 2021-02-24), the day input keeps a `HaltExposure`: the
+cash market's first halted second and each width's candles that closed at or
+before it — the decisions a live trader had. It is never committed to own past
+(the wick past and the tradable reference stay as they were) and never folded
+into the admitted candles; FIB-5/FIB-9 walk it and FIB-7 shows it, labelled,
+in no deciding half. The kinds `downside v1`, `downside refs v1` and the gate
+refusal census v2 are registered in FIB run files v1 with FIB-7's layouts
+declared by their headers.
+
+**Proof.** `halt_day_input_admits_only_pre_halt_decisions`,
+`downside_records_fixed_stride`, `v1_kinds_decode_after_block`.

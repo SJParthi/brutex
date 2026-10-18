@@ -222,6 +222,14 @@ fn index_root(root: &Path) -> Option<PathBuf> {
     Some(path.parent()?.parent()?.parent()?.to_path_buf())
 }
 
+/// Whether an index directory's name is one the table lists by name — the
+/// swept pair or INDIA VIX — rather than among the sorted others. A `match`
+/// over the three names, which `the_named_indices_are_the_lists` holds equal
+/// to [`SWEPT_INDICES`] and the VIX symbol.
+fn is_named_index(name: &str) -> bool {
+    matches!(name, "NIFTY" | "BANKNIFTY" | "INDIAVIX")
+}
+
 /// Every index the store holds Zerodha minutes for, in the order a reference
 /// table lists them: NIFTY and BANKNIFTY, every other index directory sorted,
 /// INDIA VIX, and the reserved GIFT NIFTY slot.
@@ -238,7 +246,7 @@ pub fn reference_indices(root: &Path) -> Result<Vec<String>, String> {
             let entry =
                 entry.map_err(|why| format!("index_root_unreadable: {}: {why}", dir.display()))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let named = SWEPT_INDICES.contains(&name.as_str()) || name == VIX_REFERENCE_SYMBOL;
+            let named = is_named_index(&name);
             if entry.path().is_dir() && !named {
                 others.push(name);
             }
@@ -299,6 +307,7 @@ impl ReferenceMonth {
 
     /// The stamp of index `slot` at the trade key `ts_micros` (a minute of
     /// this month). O(1): one multiply-add and one read.
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     #[must_use]
     pub fn stamp(&self, ts_micros: i64, slot: usize) -> Option<ReferenceCell> {
         let at = cell_index(self.year, self.month, self.indices.len(), ts_micros, slot)?;
@@ -350,42 +359,43 @@ pub fn build_reference(
     let mut cells =
         vec![ReferenceCell::Absent(AbsentReason::NoMinute.byte()); days * minutes * indices];
     let mut holes = vec![0_u64; indices];
-    let mut carried = HashMap::new();
+    let mut carried = HashMap::with_capacity(sources.len());
     for (slot, (name, source)) in sources.iter().enumerate() {
         let mut last_tradable = previous.get(name).copied();
         let mut today_last: Option<i64> = None;
-        let minutes_of = |day_index: usize| -> Vec<Option<Candle>> {
-            let day = first_day + i64::try_from(day_index).unwrap_or(0);
-            match source {
-                IndexSource::Minutes(bars) => {
-                    let mut row = vec![None; minutes];
-                    for bar in bars
-                        .iter()
-                        .filter(|bar| ist_day_second(bar.ts_micros).0 == day)
-                    {
-                        if let Some(at) = minute_slot(bar.ts_micros).and_then(|at| row.get_mut(at))
-                        {
-                            *at = Some(*bar);
-                        }
-                    }
-                    row
+        // Each index's minutes are streamed once, in time order: a day takes
+        // the minutes up to its end and no further.
+        let mut stream = match source {
+            IndexSource::Minutes(bars) => bars.as_slice(),
+            IndexSource::Vix | IndexSource::Missing | IndexSource::Unsourced => &[],
+        }
+        .iter()
+        .peekable();
+        let mut minutes_of = |day: i64| -> Vec<Option<Candle>> {
+            let mut row = vec![None; minutes];
+            while let Some(bar) = stream.next_if(|bar| ist_day_second(bar.ts_micros).0 <= day) {
+                let today = ist_day_second(bar.ts_micros).0 == day;
+                if let Some(at) = minute_slot(bar.ts_micros)
+                    .filter(|_| today)
+                    .and_then(|at| row.get_mut(at))
+                {
+                    *at = Some(*bar);
                 }
-                IndexSource::Vix => (0..minutes)
-                    .map(|minute| {
-                        let ts = super::day::instant(
-                            day,
-                            (u32::from(pull::calendar::OPEN_MINUTE)
-                                + u32::try_from(minute).unwrap_or(0))
-                                * u32::try_from(vocab::fib_cube::SECONDS_PER_MINUTE).unwrap_or(0),
-                        );
-                        match vix.map(|month| month.stamp(ts)) {
-                            Some(Ok(VixStamp::Exact(bar))) => Some(bar),
-                            _ => None,
-                        }
-                    })
-                    .collect(),
-                IndexSource::Missing | IndexSource::Unsourced => vec![None; minutes],
             }
+            if matches!(source, IndexSource::Vix) {
+                for (minute, at) in row.iter_mut().enumerate() {
+                    let ts = super::day::instant(
+                        day,
+                        (u32::from(pull::calendar::OPEN_MINUTE)
+                            + u32::try_from(minute).unwrap_or(0))
+                            * u32::try_from(vocab::fib_cube::SECONDS_PER_MINUTE).unwrap_or(0),
+                    );
+                    if let Some(Ok(VixStamp::Exact(bar))) = vix.map(|month| month.stamp(ts)) {
+                        *at = Some(bar);
+                    }
+                }
+            }
+            row
         };
         for day_index in 0..days {
             let day = first_day + i64::try_from(day_index).unwrap_or(0);
@@ -393,7 +403,7 @@ pub fn build_reference(
                 IndexSource::Unsourced => Some(AbsentReason::SourceUnverified),
                 _ => AbsentReason::of_screen(screen.screen(name, day)),
             };
-            let row = minutes_of(day_index);
+            let row = minutes_of(day);
             for (minute, bar) in row.iter().enumerate() {
                 let at = (day_index * minutes + minute) * indices + slot;
                 let cell = match (blank, bar) {
@@ -544,6 +554,8 @@ impl ReferenceFile {
 
     /// The stamp of index `slot` at the trade key `ts_micros`. O(1): one
     /// record read (its block verified on first touch).
+    ///
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
     ///
     /// # Errors
     ///

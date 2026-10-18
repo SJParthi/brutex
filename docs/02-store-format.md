@@ -4702,3 +4702,93 @@ window's days by its seconds; an ETA is always an extrapolation.
 
 **Proof.** `pull::gdfl_run::tests::the_progress_record_is_v1_byte_for_byte`
 asserts every offset above.
+
+## FIB run files v1 (FIB-8; D-6444, D-6448)
+
+Every file a FIB run writes under `results/fib-v1/<run-id>/` — and the sealed
+exam lock written before any learning run — is one container, read and written
+only by `cli::fib::files`. The container is versioned by its magic and its
+format version; a kind's record layout is versioned by its record version. A
+kind's code is its position in `cli::fib::files::Kind`, which is append-only
+(`v1_kinds_decode_after_block`), so every v1 file stays decodable after a kind
+is added.
+
+**Header** (little-endian; `fixed_header_len()` is 120 bytes):
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 8 | magic `BTXFIBF1` |
+| 8 | 4 | format version, 1 |
+| 12 | 2 | kind code (below) |
+| 14 | 2 | record version of the kind |
+| 16 | 4 | `vocab::fib_cube::FIB_CUBE_VERSION` |
+| 20 | 4 | record stride, bytes |
+| 24 | 8 | records per checksum block: `max(1, FIB_FILE_BLOCK_BYTES / stride)` |
+| 32 | 8 | record count |
+| 40 | 32 | the run's schema digest |
+| 72 | 32 | the run identity |
+| 104 | 12 | scope: kind byte (0 stock-month, 1 month, 2 partition, 3 partition-month, 4 run), series u32, year u16, month u8, partition u32 — a field the scope does not own is zero, and a reader refuses one that is not |
+| 116 | 4 | profile length |
+| 120 | n | profile bytes (the reference kind: the index list, count u32 then each name as length u32 and bytes) |
+| 120 + n | 32 | blake3 of every header byte before it |
+
+**Body:** `record count × stride` bytes; record `i` is at `header + i × stride`.
+
+**Block table:** one blake3 per block of `records per block` records (the last
+block may be short). `FIB_FILE_BLOCK_BYTES` is 65,536, a Representation entry
+of `vocab::fib_cube::FIXED_NUMBERS` (D-6444). Open reads only the header; the
+first read of a record reads its whole block and table entry and verifies them,
+once per block per handle; a mismatch refuses that block (`block_corrupt`) and
+it is never served or patched (FM-F091). `fib verify` (`verify_whole`) hashes
+the whole body, every block and the footer.
+
+**Footer:** record count u64, blake3 of the whole body, magic `BTXFIBE1`.
+
+**Sealing:** the temporary `<name>.tmp` is born through
+`store::staging::create` (CI gate 28), the header is written as a placeholder,
+then the body, the block table and the footer, then the real header over the
+placeholder; the file is synced, renamed onto its name, and the directory is
+synced. A failure at any step removes the temporary; an existing final name is
+refused `already_sealed` and never overwritten. The file digest a run records
+is blake3 over the header, the body digest, the block table and the footer.
+
+**Kinds** (code: name — scope — record layout owner):
+
+| Code | Kind | Scope | Record |
+|---|---|---|---|
+| 1 | closes | stock-month | FIB-8 `CloseRecord` v1, 30 bytes: tag u8 (0 real, 1 stale, 2 absent, 3 previous close, 4 no previous close), day i64, slot u16 (minutes after 09:15), close i64, from day i64, regime u16 (the previous close's session last minute), verdict u8 (0 accepted, n+1 refusal n) |
+| 2 | rank | month | FIB-2 |
+| 3 | reference | month | FIB-8 `ReferenceCell` v1, 17 bytes: tag u8 (0 exact, 1 no previous close, 2+r absent for reason r), close i64, previous close i64; record `((day − 1) × 375 + minute) × indices + slot` (FM-F087) |
+| 4 | candidates | stock-month | FIB-8 `CandidateRecord` v1, 83 bytes: FIB-1's `Candidate` (stock slot u16, IST day i64, width u16, decision close i64, base kind u8, entry style u8, direction u8, base kind u8, base direction u8, base high i64, base low i64, base candles u16, first close i64, last close i64) and the 24-byte cell |
+| 5 | rows | partition-month | FIB-8 `RowRecord` v1, 35 bytes: series u32, year u16, month u8, candidate ordinal u32 (the outcome index, FM-F088), cell 24 bytes. One sealed segment per (partition, month); the partition's append-only `rows-p<partition>.segments` index holds one 84-byte entry per month — month key u32, first global ordinal u64, count u64, segment file digest 32, the entry's own blake3 32 — so a new month appends one segment and one entry and no old byte moves (FM-F089) |
+| 6 | survivors | partition | FIB-7 |
+| 7 | marks | stock-month | FIB-8 `MarksWord` v1, 8 bytes: bit `o % 64` of word `o / 64` marks candidate ordinal `o` (FM-F088) |
+| 8 | deep | stock-month | FIB-8 `DeepRecord` v1, 108 bytes: candidate ordinal u32, exit-set version u32, variant u16, size u8, then FIB-1's `SlotOutcome` (filled qty u64, entry value i128, exit value i128, risk per share i64, first entry second u32, last entry second u32, exit second u32, exit reason u8, MFE/MAE to exit and to horizon i64 each, flags u32) |
+| 9 | winners | run | FIB-14 |
+| 10 | keepers | run | FIB-14 |
+| 11 | steps | run | FIB-13 |
+| 12 | diagnostics | run | FIB-14 |
+| 13 | luck receipt | run | FIB-7 |
+| 14 | census | run | FIB-9 |
+| 15 | exam lock | run | FIB-8 `ExamLock` v1, 48 bytes: first exam month u32 and last u32 (`year × 12 + month − 1`), newest covered IST day i64, coverage digest 32; `exam-lock.fib`, written once, its file digest in the identity; a typed exam that differs is refused `exam_lock_differs` (FIB-1 R6) |
+| 16 | side passers | partition | FIB-7 (FM-F057) |
+| 17 | pairs | run | FIB-7 (FM-F057) |
+| 18 | histogram checkpoint | stock-month | FIB-2 (FM-F013) |
+| 19 | seconds summary | stock-month | FIB-9 (FM-F107) |
+| 20 | downside v1 | partition | FIB-7 (downside amendment) |
+| 21 | downside refs v1 | partition-month | FIB-7 (downside amendment) |
+| 22 | gate refusal census v2 | run | FIB-7 (downside amendment) |
+
+A kind whose layout belongs to a later package is a container whose header
+declares its stride, fixed for the file (`downside_records_fixed_stride`); its
+owner declares the layout under a record version. A FIB-8 kind's stride is
+fixed by its record type and a header that says otherwise is refused
+`stride_mismatch`.
+
+**Proof.** `cli::fib::files::tests` — `the_header_is_byte_golden`,
+`every_file_kind_round_trips`, `a_truncated_or_padded_file_is_detected`,
+`a_failed_write_leaves_no_visible_half_file`, `a_flipped_byte_refuses_its_block_only`,
+`reader_bytes_per_request_stay_header_page_and_block`, `marks_bit_equals_candidate_ordinal`,
+`row_outcome_index_round_trips`, `adding_month_appends_segment_only`,
+`the_exam_lock_is_sealed_once_and_a_differing_lock_is_refused`,
+`downside_records_fixed_stride`, `v1_kinds_decode_after_block`.

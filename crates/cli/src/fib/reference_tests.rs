@@ -207,7 +207,8 @@ fn sources(monday: i64, tuesday: i64) -> Vec<(String, IndexSource)> {
     ]
 }
 
-/// FM-F087: a trade's (day, minute) key joins the table in O(1); the move is
+/// FM-F087: a trade's (day, minute) key joins the table by one multiply-add
+/// (timed by `crates/cli/benches/fib.rs`); the move is
 /// against the previous tradable day's last minute close; a minute with no
 /// bar is absent, never a fill; GIFT NIFTY is absent by name.
 #[test]
@@ -617,4 +618,13 @@ fn reference_rs_types_no_number() {
     let source = include_str!("reference.rs");
     let typed = vocab::fib_cube::untyped_numbers(source);
     assert!(typed.is_empty(), "{typed:?}");
+}
+
+#[test]
+fn the_named_indices_are_the_lists() {
+    for name in SWEPT_INDICES.iter().chain([&VIX_REFERENCE_SYMBOL]) {
+        assert!(is_named_index(name), "{name}");
+    }
+    assert!(!is_named_index("NIFTYIT"));
+    assert!(!is_named_index(GIFT_NIFTY));
 }

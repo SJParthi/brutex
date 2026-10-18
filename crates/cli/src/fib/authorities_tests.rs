@@ -672,10 +672,11 @@ fn every_word_selects_by_name_and_new_work_is_refused_until_fib_10() {
         );
         assert!(other.contains(kind.interim_word()));
     }
-    // Another kind's new-work word reaches the same refusal.
-    assert_eq!(
-        select(AuthorityKind::Expiry, "pit"),
-        Err("authority `pit` is not built yet: it arrives with FIB-10".to_owned())
+    // Another kind's new-work word is no word of this kind.
+    let other = select(AuthorityKind::Expiry, "pit").unwrap_err();
+    assert!(
+        other.starts_with("`pit` names no expiry authority"),
+        "{other}"
     );
     let calendar = select(AuthorityKind::Calendar, "x").unwrap_err();
     assert!(
