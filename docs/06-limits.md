@@ -19734,3 +19734,59 @@ processes against a shadow of the real store; nothing else here is measured.
 | L-AH03-2 | **NOT DONE — the server decides `kept_apart` per MONTH, not per day** | `sources.rs` `auction_of` answers `kept_apart` whenever the month's `.auc` file exists, so 2026-09-01..24 of every share whose 2026-09 month gained a `.auc` from the 25-30 Sep append (about 1,340 share-days, plus 15 in 2026-08) read `kept_apart` with no print. The page now says "none is filed for this day" there and never denies the print (D-5836), but the record itself is the month's | owed by AG-04's file (`crates/api/src/sources.rs`), a follow-on after AG-04 lands: a per-day state (`kept_apart` only where the sidecar holds that day) | AH-03 → AG-04 |
 | L-AH03-3 | Opening a closing-auction day of a share costs one `/sources/day.json` read | the day band's records do not carry the auction record; `/sources/day.json` does | one read per (share, day) opened, remembered per URL for the page's life (at most 64); Zerodha's band reads none (its minutes end before the auction). Measured on the AH-03 shadow, `curl` sequential GETs of `/sources/day.json?exchange=NSE&segment=CASH&symbol=RELIANCE&from=2026-09-28&to=2026-09-28`: n = 200, p50 0.995 ms, p99 1.162 ms, max 2.477 ms | AH-03 |
 | L-AH03-4 | The day band's words cost a pass over one page of days | each label is O(1) per day (a fixed set of field checks) and O(phrases) for the index auction label | one `/dayflags.json` page is at most 92 days. Measured in node over the real NIFTY 2026-07..09 answer (92 days), `bandOf` + `sessionCount` + `emptyWindowWhy`, n = 1,000 after 200 warm-up: before p50 0.045 ms, p99 0.352 ms, max 1.586 ms; after p50 0.059 ms, p99 0.351 ms, max 0.997 ms per page | AH-03 |
+
+### Gate 11 — FIB-8, declared (18 October 2026)
+
+~~~~text
+FIB-8 (D-6440..D-6451) met gate 11 in three files after every data-bounded
+scan it first had was replaced (the seconds month's day lookup is a hash
+probe, a series' symbol per day is one `slot_of` and one read, the rename
+conflicts are a cursor in day order, the scope byte is a table read by
+position, the reference index names are a `match`). Each occurrence left was
+read before it was counted; `file old -> new`, the occurrences, and the bound.
+
+RULE 4 (`ALLOW_SORT`) -- cli/src/fib/reference.rs 0 -> 1:
+  `reference_indices` sorts the Zerodha index directory listing once per
+  reference month (135 directories on 16 Oct 2026), so a table's slot order
+  never depends on the order a directory walk listed them.
+RULE 6 (`ALLOW_SCAN`) -- cli/src/fib/authorities.rs 0 -> 4: `YearCounts::add`
+  and `YearCounts::get` walk the years one span met (2018..2026: at most
+  nine); `PoolAuthority::member_named` walks one day's members once per
+  `day-check`, never per minute or per candidate; `words_of` finds an
+  authority flag among one invocation's words. cli/src/fib/day.rs 0 -> 1:
+  `flag_value` finds `--previous` among one invocation's words.
+  cli/src/fib/reference.rs 0 -> 1: `ReferenceMonth::index_slot` finds a name
+  among one table's index list (at most the stored indices plus two), once
+  per name a caller asks; a trade joins by slot, never by name.
+~~~~
+
+## The FIB day input, the authorities, the reference stamps and the FIB run files (FIB-8, D-6440 to D-6451)
+
+What FIB-8 leaves bounded, unbuilt or unmeasured. Every bench number below was
+measured in THIS session on THIS HOST (the cloud container FIB-8 was built
+in); the Mac re-measures every row at merge-back (`cargo bench -p cli --bench
+fib`).
+
+| ID | Limit | Why it is not O(1), or not done | Bound |
+|---|---|---|---|
+| L-FIB8-01 | The day input's fold is paid at each day's close | `pull::fold` folds a day's minutes per width in one call | AMORTISED O(1) per (stock, width) per minute over the day: C-F8-01, C-F8-02 |
+| L-FIB8-02 | Day-level refusals are judged after the day's close | a duplicate, an early tail, a rename conflict are facts of the whole day (FM-F094) | the eligibility look-ahead FIB-15 states; no decision bar reads it |
+| L-FIB8-03 | The previous-close adjacency check walks the days between the carried close and D | it must find the reference's previous day of its kind | each calendar day of a stream is walked once: O(gap) per day, amortised O(1) per day |
+| L-FIB8-04 | `build_month` walks every calendar day of its month | every day gets a calendar verdict, counted per reason and year | O(days in the month) per stock-month, one O(1) calendar lookup each |
+| L-FIB8-05 | A month's reference table is built in O(indices × days × minutes) and held in memory | one cell per (day, minute, index): 31 × 375 × 138 = 1.6 M cells, 24 bytes each in memory, 17 on disk | once per month; each (trade, index) join O(1): C-F8-10 |
+| L-FIB8-06 | `reference_indices` lists and sorts the index directory | the table's slot order must not depend on a directory walk | once per month (gate 11 rule 4, declared) |
+| L-FIB8-07 | `YearCounts` walks the years one span met | counts are per reason and IST year | at most the span's years (nine for 2018..2026) |
+| L-FIB8-08 | A FIB file record read is EXPECTED, not WORST-CASE | the first read of a block reads the whole block (≤ 65,536 bytes) and its checksum | after a block's first touch every read is one record: C-F8-08 |
+| L-FIB8-09 | `write_file` holds the block table in memory and rewrites the header in place in its temporary | the record count is known at the end | 32 bytes per 64 KiB block; the temporary is never visible |
+| L-FIB8-10 | The sync-and-publish failure branch of `write_file` is not driven by a test | no portable way makes a fresh `O_EXCL` file refuse a sync or a rename | every fill step's refusal is driven (`every_step_of_the_fill_refuses_by_name`); the cleanup path is the producer test's |
+| L-FIB8-11 | A partition's segment index is appended in place | it is an append-only journal of self-digested 84-byte entries | a torn tail or a bad entry is refused by name and NOT repaired; repair is not built |
+| L-FIB8-12 | Renames are stitched only as the pool names them | the development pool names one symbol per share | the interim pool is labelled "renames not stitched"; PIT-1 (FIB-10) supplies `symbol_on_day` |
+| L-FIB8-13 | Every authority is interim until FIB-10 | calendar (H5), development pool, identity factor, unchecked seconds, absent order flow, one assumed landing, no tail witness, unscreened index days, no expiry source | each is labelled and refused for `--out-store` |
+| L-FIB8-14 | The forward basis rule has no inputs | the ingest stage (RQ-16) that reads NSE's corporate-action list and re-reads D−1 is not built | FIB-15's freeze stays refused `rule_missing:basis_verdict` for want of inputs |
+| L-FIB8-15 | Which "previous close" the operator means is UNVERIFIED | the last Zerodha minute close and NSE's official close differ | both computed: the folded minutes decide, the stored `1day` close is the labelled variant |
+| L-FIB8-16 | `pull::fold` does not restart at a special session's second window | D-3321's one grid for the derive stands, and a special session is never tradable | D-6446 |
+| L-FIB8-17 | Zerodha minute volume is read by one test | FM-F095 defines a padded minute by volume 0 (ZM-55) | volume decides nothing else |
+| L-FIB8-18 | A day of GDFL seconds is a dense slot table | O(1) lookup needs a slot per second of the continuous window | 22,500 slots of 8 bytes a day held (≈ 180 KB): C-F8-09 |
+| L-FIB8-19 | The suspect-wick test reads the committed widest wick only | permille 1000 among committed days is "wider than every one" | FIB-2's own-past histograms are not consulted; resolution (deep or DATA-1) is FIB-3/FIB-5's |
+| L-FIB8-20 | Expiry stamps are absent | no stored contract expiries or settled-expiry authority is read in the interim | labelled `expiry_source_not_loaded`; the F&O ban is always absent (UNVERIFIED) |
+| L-FIB8-21 | Branch coverage and mutation of FIB-8's files | the stable toolchain measures lines and regions; a `cli` mutant rebuilds the crate | see the report's coverage and mutant tables |
