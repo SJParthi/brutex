@@ -129,6 +129,19 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
   outside `autopilot`'s own modules (20 of them) was run again that way
   (`p1b`). cargo-mutants 27.1.0 does not apply `-F` to "delete field"
   mutants, so nine of those were run again too; all nine were caught.
+- **Retries were not enough for one test, so it is excluded from the
+  mutation runs that started after 11:30 UTC.** In the retried re-check,
+  `slow_readers_at_the_cap_are_served_whole_and_the_next_waits` again
+  "caught" `autopilot.rs:2785:38`, and in phase 2 `audit.rs:535:16` (a loop
+  inside a `const` block that no running test can reach). It failed all three
+  attempts each time: twice no response head within its 10 s, then a cut.
+  Under three workers' load it is red, not flaky. From then on it is left out
+  of the mutation runs the same way as the opt-level-0 one (every
+  `server.rs` run and the phase-2 re-checks). Both mutants it "caught" were
+  re-run without it and survived. Every kill it made in the runs before is
+  re-checked, and phase 2 re-runs `HeadDeadline`'s survivors against the
+  whole suite, both tests included, at the checked-in profile on an idle
+  host.
 
 ## Phase 1 results
 
@@ -191,8 +204,10 @@ each by the flaky test.
 - Phase 2 (the newest source, the whole suite less the one opt-level-0
   exclusion, retries): `audit.rs`'s five mutants in code changed since
   `bdcfa9bd` (`Journal::identity`, `Journal::read_index`): **5 of 5 caught.**
-  The 17 Oct survivors of `audit.rs` and `import_journal.rs`: running. Every
-  phase-1 survivor: after phase 1.
+  The 17 Oct survivors of `audit.rs` (8) survive again and stay equivalent
+  (the `const` loops at 527 and 535, `Drops::peak`'s ties), and
+  `import_journal.rs:529:11` times out again (detected). Every phase-1
+  survivor: after phase 1.
 - The final coverage run; gates.
 
 ## NEEDS THE MAC
