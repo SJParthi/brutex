@@ -173,6 +173,44 @@ mod tests {
         assert_eq!(ledger.position(&[0; OUT_LEN]), None);
     }
 
+    /// FM-F006: a run-time schema (here, one exit set against another) is
+    /// recorded in the schema ledger and moves the run identity's params.
+    #[test]
+    fn runtime_schema_recorded_in_identity() {
+        let four = test_support::generation(Search::Long, 1, 6, &[1, 2, 4]);
+        let mut parts = four.parts().clone();
+        parts.exit_set.count = 7;
+        let seven = Generation::new(parts).expect("seven exit variants");
+        let (a, b) = (run_schema_digest(&four), run_schema_digest(&seven));
+        assert_ne!(a, b);
+        let mut ledger = SchemaLedger::new();
+        assert_eq!((ledger.record(a), ledger.record(b)), (0, 1));
+        let pool = identity::Pool::Development {
+            label: "dev",
+            names: &["ALPHA"],
+        }
+        .bytes()
+        .expect("a pool");
+        let run = |schema_digest| identity::FibRun {
+            mask: four.layout().offered_mask().expect("maskable"),
+            direction: Search::Long,
+            pool: &pool,
+            timeframe: "zerodha:1min,2min,4min",
+            params: identity::fib_params(&[]),
+            schema_digest,
+            generation_root: [0; OUT_LEN],
+            data_digest: [0; OUT_LEN],
+            vocab_version: FIB_CUBE_VERSION,
+            commit: "c",
+            feed: identity::FEED_STAGE_A,
+        };
+        assert_ne!(
+            identity::fib_identity(&run(a)),
+            identity::fib_identity(&run(b)),
+            "the per-run descriptor is an identity term"
+        );
+    }
+
     /// The `fib_zone` rungs `vocab` retypes (it can name no other crate) are
     /// the first seven of `indicators::fib::RUNGS`.
     #[test]
