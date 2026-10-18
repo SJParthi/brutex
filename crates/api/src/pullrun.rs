@@ -11064,3 +11064,91 @@ mod cloud_walk_tests {
         );
     }
 }
+
+/// Tests added by the cloud mutation pass of 18 Oct (cloud/mut-api-b-20261018)
+/// for survivors of its phase 1 on the merged tree, driven by value.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_tests_1018 {
+    use super::*;
+    use crate::audit::Scope;
+
+    /// Another run left open, opened at record `ordinal`.
+    fn other(ordinal: u64) -> AlsoOpen {
+        AlsoOpen {
+            ordinal,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "cloud-words-all-named".to_owned(),
+            scope: Scope::Spot,
+            ask: None,
+            window: None,
+            failures: 0,
+            failures_whole: true,
+            doubt: None,
+        }
+    }
+
+    /// The newest of `open_count` runs left open, naming `also_open`.
+    fn newest(open_count: u64, also_open: Vec<AlsoOpen>) -> Interrupted {
+        Interrupted {
+            ordinal: 9,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "cloud-words-all-named".to_owned(),
+            scope: Scope::Spot,
+            ask: None,
+            window: None,
+            failures: 0,
+            failures_whole: true,
+            note: "opened".to_owned(),
+            undecodable_before: 0,
+            undecodable: String::new(),
+            newer_may_be_open: false,
+            older_unread: None,
+            open_count,
+            also_open,
+            runs_unread: 0,
+        }
+    }
+
+    /// **A refusal whose every other open run is named counts none as
+    /// unnamed.** Four runs open, the newest naming the other three: its
+    /// words name them and write no "counted, not named" sentence. With a
+    /// fifth open and still three named, that sentence counts the one.
+    /// Kills `>` turned to `>=` at `unnamed > 0` in
+    /// `Interrupted::others_words` (pullrun.rs:996), which wrote the sentence
+    /// counting zero; the twin in `logged` is
+    /// `a_run_whose_every_other_open_run_is_named_logs_no_count`'s.
+    #[test]
+    fn a_refusal_whose_every_other_open_run_is_named_counts_none_unnamed() {
+        let all_named = newest(4, vec![other(3), other(5), other(7)]).words();
+        assert!(
+            all_named.contains(
+                " 4 runs read have no closing record, not this one only: this is the one \
+                 whose records were read last, and the others are record 3"
+            ),
+            "{all_named}"
+        );
+        assert!(
+            !all_named.contains("more run(s) read have no closing record and are counted"),
+            "{all_named}"
+        );
+
+        let one_unnamed = newest(5, vec![other(3), other(5), other(7)]).words();
+        assert!(
+            one_unnamed.contains(&format!(
+                " 1 more run(s) read have no closing record and are counted, not named (a \
+                 document names {OPEN_NAMED}); `/audit` lists them."
+            )),
+            "{one_unnamed}"
+        );
+    }
+}
