@@ -456,7 +456,14 @@ impl GreeksAsk {
                 OpenRefusalKind::Absent => Err(("no_option_file", None)),
                 OpenRefusalKind::Unreadable => {
                     faults.push(refusal.message.clone());
-                    Err(("option_unreadable", Some(refusal.message)))
+                    // A WRITER'S HOLD IS NAMED AS ONE, never "unreadable"
+                    // (R3-08 repair 2, NEW-21).
+                    let why = if crate::detail::is_being_written(&refusal.message) {
+                        "option_being_written"
+                    } else {
+                        "option_unreadable"
+                    };
+                    Err((why, Some(refusal.message)))
                 }
             },
         };
@@ -474,8 +481,9 @@ impl GreeksAsk {
                 OpenRefusalKind::Invalid => return Err(refusal.message),
                 OpenRefusalKind::Absent => Err(Spot::NoFile),
                 OpenRefusalKind::Unreadable => {
+                    let spot = Spot::unopened(&refusal.message);
                     faults.push(refusal.message);
-                    Err(Spot::Unreadable)
+                    Err(spot)
                 }
             },
         };
@@ -539,6 +547,7 @@ impl GreeksAsk {
             Spot::OrderBroken => return Cell::refused("option_order_broken", None),
             Spot::NoFile => return Cell::refused("no_option_file", None),
             Spot::Unreadable => return Cell::refused("option_unreadable", None),
+            Spot::BeingWritten => return Cell::refused("option_being_written", None),
         };
         let found = match underlying {
             Ok(file) => read(file, self.asof),
@@ -819,6 +828,11 @@ pub fn respond_with(
         }
         Err(why) => return bad_request(&why),
     };
+    // BEING WRITTEN, NEVER "UNREADABLE" (R3-08, NEW-21): a writer held the
+    // option's month or its underlying's past the read's patience.
+    if let Some((status, body)) = crate::detail::being_written_answer(&faults) {
+        return (status, json_headers(), body);
+    }
     let status = if faults.is_empty() {
         axum::http::StatusCode::OK
     } else {
@@ -832,7 +846,9 @@ pub fn respond_with(
 /// 400 for a malformed question, 206 when any record would not read (the
 /// answers are real and the set is not whole), 200 otherwise — including
 /// when every cell is a named refusal, the rate's among them. 429 with
-/// `Retry-After` when the store-read pool is full (DB-066, DB-G80).
+/// `Retry-After` when the store-read pool is full (DB-066, DB-G80). 503 with
+/// `Retry-After` and `"being_written": true` when a writer held a month the
+/// read needed past its patience (R3-08, NEW-21), never 206 "unreadable".
 pub async fn greeks_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,

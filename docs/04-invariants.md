@@ -7643,6 +7643,24 @@ fixture is invented.
 | AG04-13 | **A restart comes from the calendar of record only.** Every `HALTS` row names its cash resume second, and a special session names a reopen exactly when it has two windows or is a halt day. | `every_restart_comes_from_the_calendar_of_record` | ✓ |
 | AG04-14 | **A sidecar filed after a day was cached is read on the next request.** The sidecar's stamp is in the day key. | `sources_day_reads_a_sidecar_filed_after_the_day_was_cached` | ✓ |
 
+### Every read in a named, bounded pool; a reader that meets a writer waits, then says so (R3-08)
+
+`api::detail` (the named pools, the read patience and the being-written
+answer) and `api::server::gaps_route` (what a gaps audit beside a writer
+counts as damage). Proofs in `crates/api/src/pool_table_tests.rs` and the
+gaps route's own tests. Every fixture is invented, in a store the test owns.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R308-01 | **Every store route runs its read in a named pool, and the pools answer names the front-end row it counts.** A route that reads the store and names no pool fails the build. | `every_store_route_names_its_pool`, `the_pools_answer_names_the_front_end_row_it_counts` | ✓ |
+| R308-02 | **A full pool waits a bounded time, then answers 429 with Retry-After, counted busy.** Nothing queues without bound. | `a_full_pool_waits_then_says_busy_and_is_counted` | ✓ |
+| R308-03 | **A reader that meets a writer waits a bounded time, then answers 503 "being written, ask again" with Retry-After: 1 and the holder named, never "unreadable".** The month and the window, the per-instant spot and greeks reads, a large window, the fold, the day flags and the day table each do. | `a_reader_beside_a_writer_waits_then_says_being_written`, `a_spot_or_greeks_read_beside_a_writer_says_being_written`, `a_large_window_beside_a_writer_says_being_written_with_retry_after`, `the_fold_day_flags_and_day_table_beside_a_writer_say_being_written` | ✓ |
+| R308-04 | **The being-written answer is for a read whose every fault is a writer, and its body is bounded.** No fault, or any other fault beside a writer, is no "ask again"; past the naming bound the rest are counted. | `only_a_read_whose_every_fault_is_a_writer_is_asked_again`, `day_flags_beside_a_writer_still_answer_a_source_that_would_not_read` | ✓ |
+| R308-05 | **A gaps audit never counts a held month absent or lost.** The held month owes, holds and loses nothing and is counted in months_being_written; a real absence beside it is still found. | `a_gaps_audit_beside_a_writer_never_counts_the_held_month_absent` | ✓ |
+| R308-06 | **Every damage a gaps audit names is answered beside a held month, never hidden behind "ask again".** Unreadable records, invalid timestamps, a month that would not open, unread session evidence, a fold refusal, a kept summary whose bytes cannot be trusted, an unread import journal and an unread peer calendar each answer 200 with the held month counted apart; the fault list is one exhaustive destructuring, so a field cannot be added unclassified. A summary that is absent, below threshold, of another version or stale is not damage. | `every_fault_beside_a_held_month_is_answered_not_asked_again`, `a_kept_summary_is_damage_only_when_its_bytes_cannot_be_trusted`, `a_gaps_audit_beside_a_writer_still_names_a_damaged_month`, `a_fold_refusal_beside_a_writer_is_answered_not_asked_again`, `a_torn_summary_beside_a_writer_is_answered_not_asked_again`, `an_unread_import_journal_beside_a_writer_is_answered_not_asked_again` | ✓ |
+| R308-07 | **A read stops when its reader leaves.** The walk reads one cancel flag per month and serves nothing partial. | `a_read_stops_when_its_reader_leaves` | ✓ |
+| R308-08 | **A whole month of exactly the row cap is served whole; one row past it is refused by name.** | `a_whole_month_of_exactly_the_row_cap_is_served_whole`, `a_whole_month_past_the_row_cap_is_refused_by_name` | ✓ |
+
 ## The /db bar grid's pager, Go to, sort offers and words (R3-03; D-5860 to D-5864)
 
 `web/src/lib/db/pager.js`, `web/src/lib/db/goto.js`,

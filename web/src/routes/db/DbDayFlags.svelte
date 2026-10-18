@@ -21,6 +21,7 @@
    */
   import { createPageRequests } from '$lib/page-requests.js';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { dayLabel } from '$lib/dates.js';
@@ -119,7 +120,7 @@
       reads.cancel();
       void reads.run(async (ticket) => {
         try {
-          const response = await ask(url, { cache: 'no-store', signal: ticket.signal });
+          const response = await askAgainWhileWritten(ask, url, { cache: 'no-store', signal: ticket.signal });
           if (!ticket.current()) return;
           if (!response.ok) {
             band = null;

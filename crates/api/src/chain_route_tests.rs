@@ -801,3 +801,97 @@ fn the_event_and_stopped_records_are_read_and_move_no_rung() {
     let torn = LineageIndex::of(&format!("{text}stopped NSE-FNO-NIFTY ex=2020-06-16 v=1\n"));
     assert_eq!((torn.records, torn.unread), (2, 1));
 }
+
+/// **A CHAIN BESIDE A WRITER SAYS "BEING WRITTEN", NEVER `spot_unreadable`**
+/// (R3-08 repair 2, verify-R3-08-r2 blocking 3; NEW-21). With the
+/// underlying's month held by a writer, `/chain.json` answered 206, every
+/// instant `spot_why` `spot_unreadable`, ATM null and no `Retry-After` —
+/// measured on a copy of gdfl NIFTY 1s 2019-11 held by `lockf(1)` — so /db's
+/// chain and moneyness showed damage and never asked again. Now:
+///
+/// * the writer as the only fault: the one being-written 503, its sentence
+///   naming the holder, no rung and no `spot_unreadable`;
+/// * real damage beside it (a spot month that is not a bar file): the 206
+///   that names both, the held instant `spot_being_written` and the damaged
+///   one `spot_unreadable`;
+/// * the writer gone: 200 and the ladder counted from the invented spot.
+#[test]
+fn a_chain_beside_a_writer_says_being_written_never_spot_unreadable() {
+    let built = fixture("chain-beside-writer", &census_rows());
+    let spot_path = |at: YearMonth| {
+        StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month: at,
+            file: FileKind::Bars,
+        })
+        .expect("generated path")
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the same low 32 bits `api::bars::open_classified` checks"
+    )]
+    let id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let held = spot_path(month(2018, 9));
+    let writer_root = built.store_root.clone();
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let writer = std::thread::Builder::new()
+        .name("r3-08-chain-writer".to_owned())
+        .spawn(move || {
+            let file = BarFile::open_or_create(&writer_root, held, id).expect("the writer");
+            holding_tx.send(()).expect("the test waits for the writer");
+            let _ = release_rx.recv();
+            drop(file);
+        })
+        .expect("a writer thread");
+    holding_rx.recv().expect("the writer holds the month");
+    // THE ROUTE'S OWN PATIENCE: every store read is admitted with it.
+    let patient = |query: &str| {
+        store::flock::with_patience(
+            std::time::Duration::from_millis(crate::detail::READ_PATIENCE_MS),
+            || ask(&built, query),
+        )
+    };
+    let (status, body) = patient(&format!("{BASE}&expiry=2019-03-28&at={}", t1()));
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    assert_eq!(body["being_written"], true, "{body}");
+    let error = body["error"].as_str().expect("the sentence");
+    assert!(error.contains(store::flock::BEING_WRITTEN), "{body}");
+    assert!(
+        error.contains("r3-08-chain-writer"),
+        "names the holder: {body}"
+    );
+    assert!(body.get("chains").is_none(), "no rung is sent: {body}");
+    assert!(!body.to_string().contains("unreadable"), "{body}");
+
+    // REAL DAMAGE BESIDE THE WRITER: November's spot month is not a bar file.
+    let damaged = spot_path(month(2018, 11)).to_path_buf(&built.store_root);
+    std::fs::create_dir_all(damaged.parent().expect("a parent")).expect("a directory");
+    std::fs::write(&damaged, b"not a bar file, invented for this test").expect("damage");
+    let november = ist(2018, 11, 1, 10, 0, 0);
+    let (status, body) = patient(&format!("{BASE}&expiry=2019-03-28&at={},{november}", t1()));
+    assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+    assert_eq!(
+        body["chains"][0]["spot_why"], "spot_being_written",
+        "{body}"
+    );
+    assert_eq!(body["chains"][1]["spot_why"], "spot_unreadable", "{body}");
+    let faults = body["faults"].as_str().expect("the faults");
+    assert!(faults.contains(store::flock::BEING_WRITTEN), "{faults}");
+
+    release_tx.send(()).expect("the writer lets go");
+    writer.join().expect("the writer thread");
+    let (status, body) = ask(&built, &format!("{BASE}&expiry=2019-03-28&at={}", t1()));
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["chains"][0]["spot"], SPOT, "{body}");
+    assert_eq!(body["chains"][0]["atm"], 410_000, "{body}");
+}
