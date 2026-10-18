@@ -1,18 +1,21 @@
 //! The bench rows of the day input, the authorities, the FIB run files and
 //! the reference stamps (FIB-8; D-6440 to D-6451), through FIB-1's harness.
+//! Every data row walks in its production caller's order (FM-F002), named in
+//! the row's own op.
 //!
 //! | Row | What one call does | Class | Axis |
 //! |---|---|---|---|
 //! | C-F8-01 | one minute of a 375-minute day: gate, split, fold, closes, verdict — the day's work paid at its close | AMORTISED, period 375 | months held for the symbol |
 //! | C-F8-02 | the same on 360-minute closing-auction days | AMORTISED, period 360 | months held |
 //! | C-F8-03 | `CalendarAuthority::tradable` (interim) | WORST-CASE | fixed state |
-//! | C-F8-04 | `DaySlots::slot_of` (FM-F086) | WORST-CASE | members of the pool |
+//! | C-F8-04 | `DaySlots::slot_of` (FM-F086), month by month, member by member, day by day | WORST-CASE | members of the pool |
 //! | C-F8-05 | the historical basis verdict (interim inputs) | WORST-CASE | fixed state |
 //! | C-F8-06 | every other interim authority's answer | WORST-CASE | fixed state |
 //! | C-F8-07 | one candidate record encoded and decoded | WORST-CASE | fixed state |
-//! | C-F8-08 | one record read from a sealed FIB file (FM-F091) | EXPECTED | records in the file |
-//! | C-F8-09 | one GDFL second looked up (`SecondsDay::at`) | WORST-CASE | days of seconds held |
-//! | C-F8-10 | one reference stamp joined (FM-F087) | WORST-CASE | indices in the table |
+//! | C-F8-08 | one record of a sealed FIB file (FM-F091), dense ascending pass | AMORTISED, period one block | records in the file |
+//! | C-F8-09 | one GDFL second looked up (`SecondsDay::at`) in a deep walk | WORST-CASE | days of seconds held |
+//! | C-F8-10 | one reference stamp joined (FM-F087), trades in time order | WORST-CASE | indices in the table |
+//! | C-F8-11 | one record of a sealed FIB file, one a block, ascending | BOUNDED, one block | records in the file |
 //!
 //! The store read itself (`cli::stored::load`) is not in these rows: it is
 //! the store's own cost and its own rows measure it.
@@ -224,45 +227,62 @@ fn day_bytes(run: &DayRun) -> u64 {
 
 /// The slot tables of 1,000 days of a pool of `members` members whose
 /// series ids are spread sixteen apart (a point-in-time pool's ids are
-/// sparse), one table a day.
+/// sparse: a series keeps its id after it leaves), one table a day, and
+/// where the production walk is.
 pub(crate) struct Slots {
     days: Vec<DaySlots>,
     probes: u64,
     members: u64,
+    /// (month, member, day of the month) of the next probe.
+    at: (u64, u64, u64),
 }
 
 /// Days of slot tables held: enough that the largest pool's tables pass the
 /// last-level cache.
 const SLOT_DAYS: u64 = 1_000;
+/// Days of one month of the walk.
+const SLOT_MONTH_DAYS: u64 = 31;
+/// How far apart the series ids are.
+const SLOT_SPREAD: u32 = 16;
 
 fn slots(members: u64) -> Slots {
     let width = u32::try_from(members).unwrap();
-    let tables = (0..SLOT_DAYS)
-        .map(|day| {
-            let pool: Vec<Member> = (0..width)
-                .map(|n| Member {
-                    series_id: SeriesId(n * 16 + u32::try_from(day % 16).unwrap()),
-                    symbol_on_day: String::new(),
-                    zerodha_series_present: true,
-                    in_current_list: true,
-                })
-                .collect();
-            DaySlots::build(&pool).unwrap()
+    let pool: Vec<Member> = (0..width)
+        .map(|n| Member {
+            series_id: SeriesId(n * SLOT_SPREAD),
+            symbol_on_day: String::new(),
+            zerodha_series_present: true,
+            in_current_list: true,
         })
+        .collect();
+    let tables = (0..SLOT_DAYS)
+        .map(|_| DaySlots::build(&pool).unwrap())
         .collect();
     Slots {
         days: tables,
         probes: 0,
-        members: members * 16,
+        members,
+        at: (0, 0, 0),
     }
 }
 
-fn slot_op(state: &mut Slots, i: u64) -> u64 {
-    let mixed = i.wrapping_mul(2_654_435_761);
-    let day = usize::try_from(mixed % state.days.len() as u64).unwrap();
-    let series = SeriesId(u32::try_from((mixed >> 20) % state.members).unwrap());
+/// Production order (`load_series_month`, a stock-month at a time): month by
+/// month, each member in turn, one `slot_of` for each day of the month in
+/// order.
+fn slot_op(state: &mut Slots, _i: u64) -> u64 {
+    let (month, member, day) = state.at;
+    let table = &state.days[usize::try_from(month * SLOT_MONTH_DAYS + day).unwrap()];
+    let series = SeriesId(u32::try_from(member).unwrap() * SLOT_SPREAD);
     state.probes += 1;
-    u64::from(state.days[day].slot_of(series).unwrap_or(u16::MAX))
+    let slot = table.slot_of(series).unwrap_or(u16::MAX);
+    state.at = if day + 1 < SLOT_MONTH_DAYS {
+        (month, member, day + 1)
+    } else if member + 1 < state.members {
+        (month, member + 1, 0)
+    } else {
+        ((month + 1) % (SLOT_DAYS / SLOT_MONTH_DAYS), 0, 0)
+    };
+    u64::from(slot)
 }
 
 /// The interim set and a counter.
@@ -370,14 +390,37 @@ fn codec_op(state: &mut Codec, i: u64) -> u64 {
     u64::from(back.candidate.tf_minutes)
 }
 
-/// A sealed FIB file of `records` records and an open handle.
+/// A sealed FIB file of `records` records, an open handle, and where the
+/// ascending pass is.
 pub(crate) struct Sealed {
     handle: FibFile,
+    path: PathBuf,
     records: u64,
+    /// The next ordinal the pass reads.
+    next: u64,
+    /// Ordinals between two reads: 1 for the dense scan, a whole block for
+    /// the sparse one.
+    gap: u64,
+    /// Bytes read from the file over every pass's handle.
+    read: u64,
     _dir: Scratch,
 }
 
+/// The dense scan: every candidate in ordinal order (stage A's rows).
 fn sealed(records: u64) -> Sealed {
+    sealed_with(records, 1)
+}
+
+/// The sparse read: one candidate a block in ordinal order (the deep stage's
+/// rare survivors), so every read is a block's first touch.
+fn sparse(records: u64) -> Sealed {
+    sealed_with(
+        records,
+        cli::fib::files::block_records(CandidateRecord::stride()),
+    )
+}
+
+fn sealed_with(records: u64, gap: u64) -> Sealed {
     let dir = Scratch::new("file", records);
     let path = dir.0.join("candidates.fib");
     let stride = CandidateRecord::stride();
@@ -399,24 +442,47 @@ fn sealed(records: u64) -> Sealed {
     let record = probe.0;
     cli::fib::files::write_file(&path, &header, (0..records).map(|_| Ok(record.as_slice())))
         .unwrap();
+    let handle = FibFile::open(&path).unwrap();
     Sealed {
-        handle: FibFile::open(&path).unwrap(),
+        read: handle.bytes_read(),
+        handle,
+        path,
         records,
+        next: 0,
+        gap,
         _dir: dir,
     }
 }
 
-fn sealed_op(state: &mut Sealed, i: u64) -> u64 {
-    let index = i.wrapping_mul(2_654_435_761) % state.records;
-    u64::try_from(state.handle.record(index).unwrap().len()).unwrap()
+/// Production order: ascending ordinals, one pass a consumer, each pass on a
+/// handle of its own (so each pass verifies every block it touches).
+fn sealed_op(state: &mut Sealed, _i: u64) -> u64 {
+    if state.next >= state.records {
+        state.handle = FibFile::open(&state.path).unwrap();
+        state.read += state.handle.bytes_read();
+        state.next = 0;
+    }
+    let before = state.handle.bytes_read();
+    let length = state.handle.record(state.next).unwrap().len();
+    state.read += state.handle.bytes_read() - before;
+    state.next += state.gap;
+    u64::try_from(length).unwrap()
 }
 
-/// `days` days of GDFL seconds, every second of the continuous session held.
+/// `days` days of GDFL seconds, every second of the continuous session held,
+/// and the deep walk in progress.
 pub(crate) struct Seconds {
     month: SecondsMonth,
     days: Vec<i64>,
     lookups: u64,
+    /// The walk's day (its position in `days`) and its next second.
+    walk: (usize, u32),
 }
+
+/// 09:15:00, the continuous window's first second.
+const OPEN_SECOND: u32 = 33_300;
+/// 15:10:00, the end of the forced-exit minute: no deep walk reads past it.
+const EXIT_END_SECOND: u32 = 54_600;
 
 fn seconds(days: u64) -> Seconds {
     let authorities = Authorities::interim(&|_: &str| true).unwrap();
@@ -453,26 +519,44 @@ fn seconds(days: u64) -> Seconds {
         month: seconds_of(&bars, &held, &cash),
         days: held,
         lookups: 0,
+        walk: (0, EXIT_END_SECOND),
     }
 }
 
+/// Production order (stage DEEP): a walk reads every second from its entry
+/// to the forced exit's end; the next walk enters on a pseudo-random day and
+/// second, its day found once through the month's index.
 fn seconds_op(state: &mut Seconds, i: u64) -> u64 {
-    let mixed = i.wrapping_mul(2_654_435_761);
-    let day = state.days[usize::try_from(mixed % state.days.len() as u64).unwrap()];
-    let second = 33_300 + u32::try_from((mixed >> 16) % 22_500).unwrap();
+    if state.walk.1 >= EXIT_END_SECOND {
+        let mixed = i.wrapping_mul(2_654_435_761);
+        let at = usize::try_from(mixed % state.days.len() as u64).unwrap();
+        let span = u64::from(EXIT_END_SECOND - OPEN_SECOND);
+        black_box(state.month.day(state.days[at]));
+        state.walk = (
+            at,
+            OPEN_SECOND + u32::try_from((mixed >> 16) % span).unwrap(),
+        );
+    }
+    let (at, second) = state.walk;
     state.lookups += 1;
-    state
-        .month
-        .day(day)
-        .and_then(|held| held.at(second))
+    state.walk.1 = second + 1;
+    state.month.days[at]
+        .at(second)
         .map_or(0, |bar| u64::try_from(bar.close).unwrap())
 }
 
-/// A month's reference table of `indices` indices.
+/// A month's reference table of `indices` indices, and the trade being
+/// stamped.
 pub(crate) struct Table {
-    table: ReferenceMonth,
+    month: ReferenceMonth,
     stamps: u64,
+    /// The trade's minute of the month and the next index slot to stamp.
+    trade: (u64, usize),
 }
+
+/// Minutes of one table day, and days of the table.
+const TABLE_MINUTES: u64 = 375;
+const TABLE_DAYS: u64 = 31;
 
 fn table(indices: u64) -> Table {
     let first = day_of(2025, 3, 1);
@@ -495,16 +579,33 @@ fn table(indices: u64) -> Table {
         authorities.calendar.as_ref(),
         None,
     );
-    Table { table, stamps: 0 }
+    Table {
+        month: table,
+        stamps: 0,
+        trade: (0, 0),
+    }
 }
 
+/// Production order (each trade stamped with every index): a stock's trades
+/// in time order, every index of one trade before the next; the next trade
+/// is a pseudo-random 1 to 75 minutes later, and past the month's last
+/// minute the next stock's trades begin.
 fn table_op(state: &mut Table, i: u64) -> u64 {
-    let mixed = i.wrapping_mul(2_654_435_761);
-    let day = day_of(2025, 3, 1) + i64::try_from(mixed % 31).unwrap();
-    let ts = instant(day, (555 + u32::try_from((mixed >> 8) % 375).unwrap()) * 60);
-    let slot = usize::try_from((mixed >> 24) % state.table.indices.len() as u64).unwrap();
+    let (minute, slot) = state.trade;
+    let day = day_of(2025, 3, 1) + i64::try_from(minute / TABLE_MINUTES).unwrap();
+    let ts = instant(
+        day,
+        (555 + u32::try_from(minute % TABLE_MINUTES).unwrap()) * 60,
+    );
     state.stamps += 1;
-    u64::from(state.table.stamp(ts, slot).is_some())
+    let stamped = state.month.stamp(ts, slot).is_some();
+    state.trade = if slot + 1 < state.month.indices.len() {
+        (minute, slot + 1)
+    } else {
+        let gap = 1 + i.wrapping_mul(2_654_435_761) % 75;
+        ((minute + gap) % (TABLE_DAYS * TABLE_MINUTES), 0)
+    };
+    u64::from(stamped)
 }
 
 /// The rows, run and reported. False when any row failed.
@@ -560,7 +661,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     verdicts.push(run(&calendar, host, out));
     let pool = Row {
         id: "C-F8-04",
-        name: "DaySlots::slot_of (FM-F086)",
+        name: "DaySlots::slot_of (FM-F086), in load_series_month's order",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "members of the pool (1,000 days of tables held)",
@@ -570,7 +671,12 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         setup: slots,
         op: slot_op,
         work: |state| state.probes,
-        bytes: |state| state.days.len() as u64 * state.members * size_of::<Option<u16>>() as u64,
+        bytes: |state| {
+            state.days.len() as u64
+                * state.members
+                * u64::from(SLOT_SPREAD)
+                * size_of::<Option<u16>>() as u64
+        },
     };
     verdicts.push(run(&pool, host, out));
     let basis = Row {
@@ -615,8 +721,10 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     verdicts.push(run(&codec_row, host, out));
     let file = Row {
         id: "C-F8-08",
-        name: "one record read from a sealed FIB file, its block verified on first touch",
-        class: Some(Class::Expected),
+        name: "one record of a sealed FIB file in a dense ascending pass, each block verified on its first touch",
+        class: Some(Class::Amortised {
+            period: cli::fib::files::block_records(CandidateRecord::stride()),
+        }),
         axis: Some(Axis::Data {
             unit: "records in one candidates file",
             production: None,
@@ -624,13 +732,30 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         scales: [10_000, 100_000, 1_000_000],
         setup: sealed,
         op: sealed_op,
-        work: |state| state.handle.bytes_read(),
+        work: |state| state.read,
         bytes: |state| state.records * u64::from(CandidateRecord::stride()),
     };
     verdicts.push(run(&file, host, out));
+    let sparse_file = Row {
+        id: "C-F8-11",
+        name: "one record of a sealed FIB file read one a block, ascending: every read a block's first touch",
+        class: Some(Class::Bounded {
+            bound: "one block (at most 65,536 bytes) and its checksum per record (L-FIB8-08)",
+        }),
+        axis: Some(Axis::Data {
+            unit: "records in one candidates file",
+            production: None,
+        }),
+        scales: [10_000, 100_000, 1_000_000],
+        setup: sparse,
+        op: sealed_op,
+        work: |state| state.read,
+        bytes: |state| state.records * u64::from(CandidateRecord::stride()),
+    };
+    verdicts.push(run(&sparse_file, host, out));
     let second = Row {
         id: "C-F8-09",
-        name: "SecondsDay::at, one GDFL second",
+        name: "SecondsDay::at, one GDFL second in a deep walk's order",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "days of continuous seconds held",
@@ -649,7 +774,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     verdicts.push(run(&second, host, out));
     let reference = Row {
         id: "C-F8-10",
-        name: "ReferenceMonth::stamp, one (trade, index) join",
+        name: "ReferenceMonth::stamp, one (trade, index) join, trades in time order",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "indices in one month's reference table",
@@ -659,7 +784,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         setup: table,
         op: table_op,
         work: |state| state.stamps,
-        bytes: |state| state.table.indices.len() as u64 * 31 * 375 * 24,
+        bytes: |state| state.month.indices.len() as u64 * 31 * 375 * 24,
     };
     verdicts.push(run(&reference, host, out));
     let _ = writeln!(out);
