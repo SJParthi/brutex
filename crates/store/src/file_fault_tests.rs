@@ -341,8 +341,9 @@ fn every_refused_read_of_an_appends_index_is_routed_around_or_refuses_it() {
 /// rather than hanging the suite with every other test that holds the sink:
 /// a mutant of the overlap's partition makes an append call itself for
 /// ever. The file seam is per thread, so a body that arms it arms it on the
-/// worker that makes the calls.
-fn within<T: Send + 'static>(secs: u64, body: impl FnOnce() -> T + Send + 'static) -> T {
+/// worker that makes the calls. `cloud_mutant_tests`' agreeing-overlap test
+/// shares it.
+pub(super) fn within<T: Send + 'static>(secs: u64, body: impl FnOnce() -> T + Send + 'static) -> T {
     let (done, answered) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _gone = done.send(body());

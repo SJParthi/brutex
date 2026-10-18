@@ -10073,7 +10073,19 @@ mod cloud_mutant_tests {
     /// "skipped" at bar 10, by the last check.
     #[test]
     fn an_overlap_that_agrees_with_everything_it_meets_has_no_diagnosis() {
+        // Held on this thread, so a body that never returns lets go of it at
+        // the deadline.
         let _sink_is_mine = crate::emits::hold_the_sink();
+        super::file_fault_tests::within(20, agreeing_overlap_body);
+    }
+
+    /// The test above, on a worker given 20 s, where it takes well under
+    /// one. Under `first_at_or_after`'s `low < high` made `<=`, or its
+    /// midpoint's `/` made `%`, a lookup in this month never returns, and in
+    /// the mutation gate's order (nextest, one thread, stop at the first
+    /// failure) this is the first test that meets it: unbounded, the gate
+    /// waited out its timeout on it, where a deadline fails it.
+    fn agreeing_overlap_body() {
         let root =
             std::env::temp_dir().join(format!("brutex-file-cloud-diagnose-{}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&root);

@@ -2028,6 +2028,15 @@ fn builder_refusals_are_named() {
 
 #[test]
 fn a_file_on_disk_reads_the_same_as_its_bytes() {
+    within_a_minute(file_on_disk_body);
+}
+
+/// The test above, on a worker with a deadline. Under `audited`'s
+/// `chunk < n_blocks` made `<=`, every audit loops at its end, and in the
+/// mutation gate's order (nextest, one thread, stop at the first failure)
+/// this is the first test that audits: unbounded, the gate waited out its
+/// timeout on it, where a deadline fails it.
+fn file_on_disk_body() {
     let path = nifty(Timeframe::SECOND_1, june());
     let bars = seconds(20_000, 32);
     let image = prv_image(path, 4);
