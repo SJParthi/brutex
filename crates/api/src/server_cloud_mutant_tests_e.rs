@@ -362,3 +362,96 @@ fn a_window_ending_today_is_held_back_exactly_while_today_is_unsettled() {
         "got {got:?}; the guard's parts said {before:?} then {after:?}"
     );
 }
+
+/// **A month's bars page names the records it could not read, and a clean
+/// month's page names none.** 200 invented one-minute bars of one month,
+/// read twice through `held_bars_page`: whole, then with one byte of its
+/// first record flipped, so the block checksum refuses that block's records
+/// and the rest still read. The clean page is "held" with no trouble block.
+/// The damaged one is not "held", and its "this month" block carries the
+/// read's own fault sentence. Kills deleting the `!` of
+/// `(!faults.is_empty()).then(..)` in `held_bars_page` (server.rs:15421),
+/// which hid a damaged month's faults and gave a clean month an empty one.
+#[test]
+fn a_damaged_month_names_its_unreadable_records_and_a_clean_one_names_none() {
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    let root = crate::scratch::path("cloude-held-bars");
+    let _ = std::fs::remove_dir_all(&root);
+    let masters = root.join("masters");
+    std::fs::create_dir_all(&masters).expect("empty offline masters");
+    let site = Site::load(&masters, &root);
+    let month = YearMonth::new(2024, 3).expect("a month");
+    let parts = PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month,
+        file: FileKind::Bars,
+    };
+    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    let id = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+    let day = Day::new(2024, 3, 1).expect("a session day");
+    let open_micros = i64::from(day.days_from_epoch()) * 86_400_000_000 + 13_500_000_000;
+    let rows: Vec<store::format::Bar> = (0..200_i64)
+        .map(|n| store::format::Bar {
+            ts_micros: open_micros + n * 60_000_000,
+            open: 2_200_000 + n * 100,
+            high: 2_200_000 + n * 100 + 500,
+            low: 2_200_000 + n * 100 - 500,
+            close: 2_200_000 + n * 100,
+            volume: n + 1,
+            open_interest: store::format::OI_NULL,
+        })
+        .collect();
+    let mut written = store::file::BarFile::open_or_create(
+        &root,
+        StorePath::new(parts).expect("a store path"),
+        id,
+    )
+    .expect("a bar file");
+    written.append(&rows).expect("invented bars");
+    drop(written);
+    let address = BarsAddress {
+        symbol: "NIFTY",
+        contract: None,
+        segment: "INDEX",
+        vendor: "dhan",
+        month: "2024-03",
+        timeframe: "1min",
+    };
+
+    let clean = crate::bars::open_classified(&root, parts)
+        .map_err(|why| why.message)
+        .expect("the month opens");
+    let (status, page) = held_bars_page(&site, &address, &clean, 0);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(!page.contains("<b>this month</b>"), "{page}");
+    assert!(page.contains("held"), "{page}");
+    let at = usize::try_from(clean.layout().offset_of(0).expect("a committed record"))
+        .expect("a test offset fits usize");
+    let path = clean.path().to_path_buf();
+    drop(clean);
+
+    let mut bytes = std::fs::read(&path).expect("the bar file reads");
+    bytes[at + 8] ^= 0xff;
+    std::fs::write(&path, &bytes).expect("the damaged bar file writes");
+    let damaged = crate::bars::open_classified(&root, parts)
+        .map_err(|why| why.message)
+        .expect("a damaged record still opens its month");
+    let (_rows, faults) = crate::bars::page(&damaged, 0, crate::bars::PAGE_BARS);
+    let said = faults.sentences();
+    assert!(!said.is_empty(), "the premise: the flipped byte is refused");
+    let (status, page) = held_bars_page(&site, &address, &damaged, 0);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (_, trouble) = page
+        .split_once("<b>this month</b>")
+        .unwrap_or_else(|| panic!("a trouble block: {page}"));
+    assert!(
+        trouble.starts_with(&crate::render::escape(&said.join(" · "))),
+        "{trouble}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
