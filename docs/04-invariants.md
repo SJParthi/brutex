@@ -7764,3 +7764,4 @@ the tests only.
 | FIB2-38 | **Every misuse is refused by name and changes nothing.** | `every_misuse_is_refused_by_name_and_changes_nothing` | ✓ |
 | FIB2-39 | **FM-F005's stamps: the rank's exact share of its side's count, and ranks beyond the first window counted per year** (D-6314). | `the_rank_share_is_exact_and_absent_when_unranked`, `ranks_beyond_the_first_window_are_counted_per_year` | ✓ |
 | FIB2-40 | **Every own-past refusal has its stable name.** | `every_refusal_has_its_name` | ✓ |
+| FIB2-41 | **With no basis break announced, a new tick shows only once its days reach the old tick's**: a coarser one on the tie, a finer one a day later (L-FIB2-04). | `the_tick_lags_an_unannounced_change_by_the_days_it_had` | ✓ |

@@ -19734,3 +19734,93 @@ RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 4 -> 5: `fib`'s
 `cli/src/fib/wire.rs` met rule 7 once and was changed instead: the
   new-work authority words are a `matches!` over five literals.
 ~~~~
+
+## The own-past histograms and the mover rank (FIB-2, D-6320 to D-6328)
+
+Measured 18 October 2026 on THIS HOST: the cloud container FIB-2 was built in
+(4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.80GHz` — not FIB-1's 2.10 GHz
+host — 15 GiB, Linux 6.18.44, rustc 1.97.1, the `bench` profile), branch
+`cloud/fib2-20261018`, one bench target at a time after a 30-second pause with
+nothing else running (one-minute load 0.22 to 1.06 before each target). Timer
+granularity 17 to 18 ns; the pointer-chase probe's last-level-cache estimate
+8,192 KiB on every run. Times are percentiles OF BATCH MEANS (2,000 batches of
+1,000 calls after a warm-up), picoseconds per call, p50 / p99 / max at each
+scale; the work counter is exact. None is a Mac number: the Mac re-measures
+(`cargo bench -p indicators --bench fibflag`, `cargo bench -p runner --bench fib`).
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| H-F-01 | `OwnPast::observe` | WORST-CASE | 100, 10,000, 10,000,000 committed values (FIXED-STATE: the bin table is a constant) | 8,046 / 25,238 / 80,186; 8,053 / 24,945 / 52,416; 8,042 / 24,850 / 70,632 | 1 | p99 time 0.984x | PASS |
+| H-F-02 | `OwnPast::mid_rank` | WORST-CASE | the same | 7,543 / 23,754 / 80,619; 7,540 / 23,621 / 74,892; 7,524 / 23,998 / 77,270 | 1 | p99 time 1.010x | PASS |
+| H-F-03 | `OwnPast::permille` | WORST-CASE | the same | 9,756 / 28,987 / 74,182; 9,662 / 27,044 / 40,761; 9,562 / 27,223 / 49,560 | 1 | p99 time 0.939x | PASS |
+| H-F-04 | `OwnPast::commit_day` of a day that staged one value | WORST-CASE | the same | 443,996 / 954,804 / 1,606,940; 433,531 / 635,994 / 905,631; 434,434 / 525,248 / 966,634 | 507 (505 leaves, the observe, the day) | p99 time 0.550x | PASS |
+| H-F-05 | `OwnPast::value_at_rank` | WORST-CASE | the same | 25,861 / 48,303 / 547,759; 25,443 / 47,087 / 125,036; 25,280 / 49,412 / 200,199 | 10 probes | p99 time 1.022x | PASS |
+| H-F-06 | `HistBank::observe`, width-major (4,096 calls in one width's cells, then the next) | WORST-CASE | 50, 500, 5,000 cells of one stock's bank (1.4, 5.2, 42.1 MB; EXTRAPOLATION) | 33,176 / 59,801 / 85,160; 33,971 / 64,061 / 106,777; 47,103 / 95,530 / 142,032 | 1 | p99 time 1.597x | **FAIL (time) on this host**, within the shared 3.0x ceiling; L-FIB2-08 |
+| H-F-07 | a bank cell + `OwnPast::mid_rank`, width-major | WORST-CASE | the same | 50,728 / 100,639 / 177,004; 33,527 / 66,576 / 178,900; 48,218 / 132,440 / 860,239 | 1 | p99 time 1.315x | **FAIL (time) on this host**, within the shared 3.0x ceiling; L-FIB2-08 |
+| H-F-08 | `HistBank::observe` into a pseudo-random cell of the whole bank | BOUNDED: work 1; past the last-level cache, the time of one memory miss | the same | 27,063 / 59,094 / 101,381; 46,166 / 115,902 / 174,914; 72,636 / 251,048 / 1,636,942 | 1 | p99 time 4.248x | BOUNDED (L-FIB2-08) |
+| H-F-09 | a bank cell + `OwnPast::mid_rank`, pseudo-random over the whole bank | BOUNDED, as H-F-08 | the same | 26,519 / 63,174 / 323,879; 28,457 / 62,196 / 93,299; 73,544 / 187,990 / 677,117 | 1 | p99 time 2.975x | BOUNDED (L-FIB2-08) |
+| R-F-01 | `MoverRank::minute`, one minute over the pool | BOUNDED: O(pool + buckets) per minute | 5, 50, 512 members (FIXED-STATE: one day's state, reserved at the run's largest pool) | 1,114,085 / 2,073,739 / 2,945,969; 2,990,754 / 5,118,656 / 7,212,522; 34,914,686 / 52,272,778 / 56,983,684 | 2,640 / 3,382 / 12,320 (max 2,641 / 3,392 / 12,427) | p99 time 25.207x against work 4.705x | BOUNDED (L-FIB2-06) |
+| R-F-01m | the same, PER MEMBER (FM-F010's claim) | WORST-CASE per member | 5, 50, 512 members | 223,139 / 442,487 / 531,430; 59,889 / 115,875 / 138,773; 68,244 / 101,536 / 107,374 | the minute's work over the pool | p99 0.229x, max 0.202x | PASS |
+| R-F-02 | `MoverRank::minute` with one exact tie run of the whole pool | BOUNDED: O(r log r) per run | 5, 50, 512 members | 1,103,287 / 2,264,184 / 10,837,349; 2,810,346 / 4,918,257 / 6,368,541; 22,522,186 / 37,329,061 / 42,498,509 | 2,644 / 3,409 / 11,262 | p99 time 16.486x against work 4.259x | BOUNDED (L-FIB2-07) |
+
+**The specification's four pools, per minute (R-F-01s):** 16 members 1,487,125 /
+2,689,463 / 5,457,974 ps (work 2,818); 128 members 7,582,544 / 12,303,559 /
+19,924,311 (4,735); 256 members 16,036,140 / 23,911,917 / 28,218,140 (7,102);
+512 members 35,156,145 / 51,193,600 / 56,885,953 (12,320). The work is the same
+at every minute of a day (p99 within 1% of p50) and the minute grows with the
+pool, as an O(1)-per-member sort must.
+
+**The histogram rows across this session's runs.** The table is the third
+`indicators` run, on the final code. The first run (the histogram with three
+separate leaf arrays, its bank rows over 128, 1,280 and 12,800 cells picked
+pseudo-randomly and declared WORST-CASE) read H-F-01..05 at 0.942x, 0.811x,
+1.109x, 1.087x and 1.070x (PASS), and the bank rows 3.392x (observe) and
+3.137x (`mid_rank`), past the 3.0x ceiling: at 12,800 cells (107 MB) every call
+missed the cache — p50 111 ns against 43 ns at 128 cells — while the work stayed
+1. Two changes followed: each leaf's committed count, staged count and count
+below now sit in one 16-byte entry, so a call reads one line of a leaf rather
+than three arrays; and the bank rows were sized to one stock's bank, the unit a
+worker folds (50 to 5,000 cells). The second run (pseudo-random cells, still
+WORST-CASE) read H-F-01 at 1.486x — its p50 flat at 8.4 ns and its work 1 at
+every scale, the same p99 noise L-FIB1-13 recorded — H-F-02..05 at 0.882x,
+1.106x, 1.005x and 0.627x, and the bank rows at 2.686x and 4.034x. The third run
+measures both orders, named above.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FIB2-01 | `OwnPast::value_at_rank` (and `quantile`, `median`) is one bisection of the cumulative array | FM-F012 prescribes it; a value at a rank needs the leaf whose cumulative count reaches the rank | BOUNDED by the constant table: `ceil(log2 leaves) + 1` probes, ten for the unsplit 505 leaves — one more than the specification's `ceil(log2 bins)`, the standard bisection's final comparison (D-6320); counted in the work counter (H-F-05) | FIB-2 |
+| L-FIB2-02 | `OwnPast::commit_day` rebuilds the cumulative array | a query is O(1) only because the cumulative array is rebuilt once per day | O(leaves), once per cell per tradable day (505 unsplit); O(1) on a day that staged nothing (H-F-04) | FIB-2 |
+| L-FIB2-03 | `OwnPast::split` recounts the raw values twice and rebuilds the leaf arrays | R3: a cut inside one bin needs that bin's values divided exactly | O(raw values + leaves), once per R2 cut; each split doubles one base bin's leaves, so the leaves (and the cell's bytes) grow with the cuts R2 keeps — memory is R10's, never capped by a typed number | FIB-2 (R2 is FIB-6/FIB-13's) |
+| L-FIB2-04 | The observed tick lags a REAL tick change that no basis break announces | the tick is the MODE of the committed days' gcds since the last break (FM-F014): a new tick wins only once its days outnumber the old tick's (ties to the larger) | after n days at the old tick, a new coarser tick shows after n days (the tie goes to the larger), a new finer tick after n + 1; a declared basis break resets it at once. O(distinct gcds) per commit (one bisection of the sorted gcds, gate 11 rule 1) | FIB-2 |
+| L-FIB2-05 | A checkpoint body's encoding scans every leaf | the counts are dense in memory; the body is sparse | O(leaves) per cell, once per month end; the bytes written are O(nonzero leaves). FIB-9's sample measures the bytes and FIB-12 projects them (NOT measured on real data here) | FIB-2 |
+| L-FIB2-06 | One mover-rank minute is O(pool + buckets) | a radix sort of the pool, five passes of 256 buckets over a 34-bit key (side, move) | the same work at every minute of a day (but for exact tie runs): O(1) per member (R-F-01, R-F-01m) | FIB-2 |
+| L-FIB2-07 | An exact tie run of `move_bp` is sorted by comparison | FM-F019: members in one basis point are ordered by the exact move, then slot | O(r log r) per run of r members, at most the pool; `sort_unstable_by`, no allocation (R-F-02, gate 11 rule 4) | FIB-2 |
+| L-FIB2-08 | A bank past the last-level cache costs a memory miss per call, and a production bank's size and access order are not measured | the work is 1 per call at every size; the time is the memory hierarchy's. One stock's bank of 5,000 cells (42 MB) cost 47 ns p50 per observe width-major against 33 ns at 50 cells (H-F-06, 1.597x p99), and 73 ns p50 pseudo-randomly over the whole bank (H-F-08, 4.248x p99); the generated dimensions and the fold's order come from FIB-12's sample and FIB-9 | `UNSPLIT_CELL_BYTES` (8,200 bytes) is a compile-time constant and `BankShape::unsplit_bytes` is exact before allocation; H-F-06 and H-F-07 FAIL on time on this host within the shared ceiling, H-F-08 and H-F-09 are BOUNDED by one memory miss, all print EXTRAPOLATION. NOT closed here: the Mac's run at production size decides it | FIB-2, FIB-9, FIB-12 |
+| L-FIB2-09 | `plan_width_passes` sorts the widths by cost and retries with one more pass until they fit | the passes are planned once per run, before any computation | O(W log W + W x P) for W widths (at most 118 per direction) and P passes, once per run (gate 11 rule 4) | FIB-2 |
+| L-FIB2-10 | A width added at a walk-forward step builds its histograms from that width's committed history | its cells start empty; `regrow` keeps every other cell | BOUNDED by that width's committed history, once per added width; FIB-9 replays it | FIB-2, FIB-9 |
+| L-FIB2-11 | Branch coverage of `hist.rs` and `rank.rs` is below 100% | each untaken branch is the `None` side of a lookup whose index is inside its buffer by construction (`get_mut` of a leaf, a digit's bucket, a slot's rank); the workspace denies indexing, so the in-range read is written as a checked one | measured with a nightly toolchain (CI's coverage job measures lines and regions); the report lists every one | FIB-2 |
+| L-FIB2-12 | The real-data checks were not run in the cloud | there is no market data store here | NEEDS THE MAC: the report gives the exact command and the scratch program | FIB-2 |
+| L-FIB2-13 | "Previous close" is UNVERIFIED: the last Zerodha one-minute close or NSE's official close | FIB-8 computes both | the fold ranks on the close the caller passes; the choice is a recorded variant (D-6322) | FIB-2, FIB-8 |
+
+### Gate 11 — FIB-2, declared (18 October 2026)
+
+~~~~text
+FIB-2 (D-6320..D-6328) met gate 11 in two files. Each occurrence was read
+before it was counted; `file old -> new`, the occurrences, and the bound.
+
+RULE 1 (`ALLOW_SEARCH`) -- indicators/src/fibflag/hist.rs 0 -> 2:
+  `OwnPast::value_at_rank` is FM-F012's one bisection of a histogram's
+  leaves (505 unsplit: ten probes, counted in the work counter);
+  `ObservedTick::commit_day` bisects a price series' committed day gcds,
+  kept sorted, once per day (FM-F014: O(distinct gcds)).
+RULE 4 (`ALLOW_SORT`) -- indicators/src/fibflag/hist.rs 0 -> 1:
+  `plan_width_passes` orders a run's widths (at most 118 per direction)
+  by cost, once per run, before any computation.
+  runner/src/fib/rank.rs 0 -> 1: the mover rank orders each run of equal
+  `move_bp` by the exact move (FM-F019), O(r log r) in the run's length,
+  at most the pool; `sort_unstable_by`, no allocation.
+Two sites met rule 1 or rule 6 and were changed instead: `HistBank::regrow`
+  maps the old widths to the new by one merge walk, and
+  `OwnPast::decode` finds the highest counted leaf in the loop that reads
+  the counts.
+~~~~
