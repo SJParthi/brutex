@@ -487,13 +487,17 @@ const minuteOf = (t) => {
 };
 
 /**
- * @typedef {{date: string, kind: string, windows: Array<{from: number, to: number}>, halt?: boolean, halted?: Array<{from: number, to: number}>}} SpecialDay
+ * @typedef {{date: string, kind: string, windows: Array<{from: number, to: number}>, halt?: boolean, halted?: Array<{from: number, to: number}>, reopening?: Array<{from: number, to: number}>, suspected?: boolean}} SpecialDay
  *   `windows` the minutes that traded (a recorded halt cut out); `halt` the
  *   calendar of record's code is `H`: a regular-length session a recorded
  *   halt cut, which the day string already counts as regular (`specialsOf`
  *   always sets it; absent reads as not a halt day); `halted` the recorded
  *   halts INSIDE the day's session, the minutes cut out of `windows`
- *   (`specialsOf` always sets it; absent reads as none)
+ *   (`specialsOf` always sets it; absent reads as none); `reopening` the
+ *   part of `halted` that was the reopening call auction, where the record
+ *   knows it (`pull::calendar::Halt::reopening`, the cash market's and the
+ *   index's); `suspected` a halt of the day is a suspected one
+ *   (`/calendar.json` `halts[].suspected`, D-3320), never assumed
  */
 
 /**
@@ -502,11 +506,17 @@ const minuteOf = (t) => {
  * first and last halted minute, inclusive). An entry this reader cannot read
  * is left out, never guessed — which lists MORE minutes, never fewer.
  *
+ * Each keeps its reopening call auction (`reopening`, `null` when the record
+ * has none or it cannot be read) and whether the record calls it SUSPECTED
+ * (`suspected: true` only; repair round 3) — the 13 and 23 Mar 2020 halts are
+ * the NSE rule's shape read from measured minute holes, with no NSE circular
+ * (D-3320), and a list must not say more of them than the record does.
+ *
  * @param {unknown} halts
- * @returns {Map<string, Array<{from: number, to: number}>>}
+ * @returns {Map<string, Array<{from: number, to: number, reopening: {from: number, to: number} | null, suspected: boolean}>>}
  */
 export function haltsOf(halts) {
-  /** @type {Map<string, Array<{from: number, to: number}>>} */
+  /** @type {Map<string, Array<{from: number, to: number, reopening: {from: number, to: number} | null, suspected: boolean}>>} */
   const by = new Map();
   if (!Array.isArray(halts)) return by;
   for (const h of halts) {
@@ -514,9 +524,12 @@ export function haltsOf(halts) {
     const from = minuteOf(h.halted?.from);
     const to = minuteOf(h.halted?.to);
     if (from === null || to === null || from > to) continue;
+    const rf = minuteOf(h.reopening?.from);
+    const rt = minuteOf(h.reopening?.to);
+    const halt = { from, to, reopening: rf !== null && rt !== null && rf <= rt ? { from: rf, to: rt } : null, suspected: h.suspected === true };
     const list = by.get(h.date);
-    if (list) list.push({ from, to });
-    else by.set(h.date, [{ from, to }]);
+    if (list) list.push(halt);
+    else by.set(h.date, [halt]);
   }
   return by;
 }
@@ -584,11 +597,24 @@ export function specialsOf(body) {
        and Go to. `timeListRows` lists them labelled halted, never traded. */
     /** @type {Array<{from: number, to: number}>} */
     const inside = [];
+    /* THE REOPENING CALL AUCTION, LABELLED (repair round 3): the part of a
+       halt inside the session that the record names as its reopening auction
+       (13 Mar 2020 10:06–10:20, 23 Mar 2020 10:42–10:56), so those minutes
+       are not said as one undivided halt. */
+    /** @type {Array<{from: number, to: number}>} */
+    const reopening = [];
+    let suspected = false;
     for (const h of halted.get(s.date) ?? []) {
       for (const w of windows) {
         const from = Math.max(w.from, h.from);
         const to = Math.min(w.to, h.to);
-        if (from <= to) inside.push({ from, to });
+        if (from > to) continue;
+        inside.push({ from, to });
+        suspected ||= h.suspected;
+        if (!h.reopening) continue;
+        const af = Math.max(from, h.reopening.from);
+        const at = Math.min(to, h.reopening.to);
+        if (af <= at) reopening.push({ from: af, to: at });
       }
     }
     for (const h of halted.get(s.date) ?? []) windows = cutWindows(windows, h);
@@ -597,7 +623,9 @@ export function specialsOf(body) {
       kind: typeof s.kind === 'string' && s.kind ? s.kind : 'special session',
       windows,
       halt: s.code === 'H',
-      halted: inside
+      halted: inside,
+      reopening,
+      suspected
     });
   }
   /* ISO days order as text; `sort` is stable, so one day's entries keep the answer's order. */
@@ -705,6 +733,10 @@ export function timeListRows(grid, o) {
   /** @type {Map<string, SpecialDay[]>} */
   const stoppedBy = new Map();
   for (const t of specialMinutes(o.specials, o.step, o.open, haltedOf)) stoppedBy.set(t.key, t.days);
+  /* The buckets of a halt's reopening call auction (repair round 3): said as the auction, inside the halt. */
+  /** @type {Map<string, SpecialDay[]>} */
+  const auctionBy = new Map();
+  for (const t of specialMinutes(o.specials, o.step, o.open, reopeningOf)) auctionBy.set(t.key, t.days);
   const held = new Set(o.held);
   /* A HALT DAY IS NOT A WHOLE REGULAR SESSION: the day string counts code `H`
      as regular, but its halted minutes traded nothing, so a window holding
@@ -718,7 +750,7 @@ export function timeListRows(grid, o) {
   const spans = (/** @type {Array<{from: number, to: number}>} */ ws) => ws.map((w) => `${clockOf(w.from)}–${clockOf(w.to)}`).join(' and ');
   /* A halt day's traded windows are not where its bars open — both stores hold bars inside its halt — so it says what traded and what was halted. */
   const said = (/** @type {SpecialDay} */ d) =>
-    `${d.kind}, ${dayText(d.date)}: ${d.halted?.length ? `traded ${spans(d.windows)}, halted ${spans(d.halted)}` : `bars open ${spans(d.windows)}`}`;
+    `${d.kind}, ${dayText(d.date)}: ${d.halted?.length ? `traded ${spans(d.windows)}, halted ${spans(d.halted)}${d.reopening?.length ? ` with the reopening call auction at ${spans(d.reopening)}` : ''}` : `bars open ${spans(d.windows)}`}`;
   const named = (/** @type {SpecialDay[]} */ days) =>
     `${days.slice(0, 3).map(said).join('; ')}${days.length > 3 ? `; and ${days.length - 3} more` : ''} (the exchange calendar of record, /calendar.json)`;
   /** @type {Array<{key: string, name: string, detail: string, why?: string}>} */
@@ -733,13 +765,20 @@ export function timeListRows(grid, o) {
       continue;
     }
     if (!days) {
-      /* Only halted minutes in this bucket: listed so a stored bar here is reachable, never said to have traded. */
+      /* Only halted minutes in this bucket: listed so a stored bar here is reachable, said as halted — and
+         NEVER as "nothing traded" (repair round 3): a halt labels, it never removes (`pull::calendar::Halt`),
+         and the record's own evidence for 13 Mar 2020 has shares outside the F&O list and stock options
+         printing at 09:22. A minute of the reopening call auction says so; a suspected halt says it is
+         suspected and UNVERIFIED, as the record does (D-3320). */
       const s = /** @type {SpecialDay[]} */ (stopped);
+      const auction = auctionBy.get(row.key);
+      const what = auction?.length === s.length ? 'reopening auction' : 'halted';
+      const doubt = s.some((d) => d.suspected) ? ' — the record calls it a suspected halt, UNVERIFIED (D-3320): no NSE circular is recorded' : '';
       out.push({
         key: row.key,
         name: row.name,
-        detail: s.length === 1 ? `halted · ${dayText(s[0].date)}` : `halted · ${s.length} days in view`,
-        why: `${named(s)}. Nothing traded ${at}: a halted minute is neither owed nor missing (D-3336 §1). Listed so a bar the store holds here can still be reached.`
+        detail: s.length === 1 ? `${what} · ${dayText(s[0].date)}` : `${what} · ${s.length} days in view`,
+        why: `${named(s)}. Halted ${at}${auction ? `, in the reopening call auction of ${auction.map((d) => dayText(d.date)).join(' and ')}` : ''}${doubt}. A halted minute is neither owed nor missing (D-3336 §1), and a print inside a halt is still a bar (pull::calendar); listed so a bar the store holds here can still be reached.`
       });
       continue;
     }
@@ -806,6 +845,8 @@ export function specialMinutes(specials, step, open, rangesOf = windowsOf) {
 const windowsOf = (d) => d.windows;
 /** The recorded halts inside a day's session, `[]` when none. @param {SpecialDay} d */
 export const haltedOf = (d) => d.halted ?? [];
+/** The reopening call auctions inside a day's halts, `[]` when none. @param {SpecialDay} d */
+export const reopeningOf = (d) => d.reopening ?? [];
 
 /**
  * The special days of `specials` inside `[lo, hi]` (either end `''` for

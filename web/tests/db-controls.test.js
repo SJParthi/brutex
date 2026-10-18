@@ -24,6 +24,7 @@ import {
   timeListRows,
   timeListWhy,
   haltedOf,
+  reopeningOf,
   monthDays,
   monthNeedsRead,
   flagText,
@@ -257,7 +258,10 @@ test('the_calendar_marks_refused_days_outside_the_window', () => {
   const state = dbSource('../src/lib/db/selection.svelte.js');
   assert.match(state, /if \(!monthNeedsRead\(ym, band\)\) return;/);
   assert.match(state, /const r = await ask\(dayflagsUrl\(feed, inst, days\.from, days\.to\), \{ cache: 'no-store', signal: ctl\.signal \}\);/);
-  assert.match(state, /while \(next\.size > MONTH_FLAGS_KEPT\) next\.delete/);
+  // Bounded: beyond MONTH_FLAGS_KEPT the oldest ANSWERED month goes, and a read still out goes only with its
+  // read aborted (repair round 3; driven in `a_month_whose_read_is_out_is_never_dropped_or_asked_for_twice`).
+  assert.match(state, /if \(next\.size > MONTH_FLAGS_KEPT\) \{\s*const gone = \[\.\.\.next\]\.find\(\(\[, e\]\) => !e\.reading\)\?\.\[0\] \?\? /);
+  assert.match(state, /monthReads\.get\(gone\)\?\.abort\(\);\s*next\.delete\(gone\);/);
   // A feed, instrument or census change aborts the reads of the OLD scope only (round 1 aborted every
   // read in flight, the new scope's included); an abort is not cached as a refusal, and a finished read
   // never drops a newer read of the same key. The behaviour is driven in the test after this one.
@@ -432,30 +436,143 @@ test('a_shown_month_is_read_again_when_the_census_read_moves', async () => {
     flushSync();
     assert.equal(monthFlagWhy('2019-01'), 'No day of this month is marked: /dayflags.json answered HTTP 503: the day flags are not built.');
     assert.equal(monthFlagged('2019-01-15'), null);
+    // A refused month is asked again when it is shown again — its grid reopened — and only then (repair round
+    // 3: a refusal stayed until the feed, instrument or census read moved). A refusal asks nothing by itself.
+    await settle();
+    flushSync();
+    assert.equal(asked.length, 8, `${at}: a refusal is not asked again on its own`);
+    page.view.open = false;
+    flushSync();
+    page.view.open = true;
+    flushSync();
+    assert.equal(asked.length, 9, `${at}: a refused month shown again is asked once more`);
+    assert.equal(asked[8].url, asked[7].url);
+    assert.equal(monthFlagWhy('2019-01'), READING, `${at}: Reading while that read is out`);
+    asked[8].refuse();
+    await settle();
+    flushSync();
+    assert.equal(monthFlagWhy('2019-01'), 'No day of this month is marked: /dayflags.json answered HTTP 503: the day flags are not built.');
 
     // No feed: nothing is asked, and the grid never says Reading with nothing in flight.
     page.feeds.active = null;
     flushSync();
-    assert.equal(asked.length, 8, `${at}: no feed, no read`);
-    assert.equal(monthFlagWhy('2019-01'), 'No day of this month is marked yet: its day flags have not been asked for.');
+    assert.equal(asked.length, 9, `${at}: no feed, no read`);
+    assert.equal(monthFlagWhy('2019-01'), 'No day of this month is marked yet: its day flags are not on hand, and no read of them is out.');
     // A month the day band covers is not asked for and says nothing.
     page.feeds.active = 'gdfl';
     page.db.dayBand = {};
     page.db.dayBandSpan = { from: '2018-12-01', to: '2019-01-31' };
     flushSync();
-    assert.equal(asked.length, 8, `${at}: a month the band covers costs no request`);
+    assert.equal(asked.length, 9, `${at}: a month the band covers costs no request`);
     assert.equal(monthFlagWhy('2019-01'), '');
     page.view.shown = '2018-12';
     flushSync();
-    assert.equal(asked.length, 8, `${at}: paging to a month the band covers asks nothing`);
+    assert.equal(asked.length, 9, `${at}: paging to a month the band covers asks nothing`);
     assert.equal(monthFlagWhy('2018-12'), '');
     // The page going aborts a read still out.
     page.view.shown = '2019-03';
     flushSync();
-    assert.equal(asked.length, 9);
-    assert.equal(asked[8].signal.aborted, false);
+    assert.equal(asked.length, 10);
+    assert.equal(asked[9].signal.aborted, false);
     page.stop();
-    assert.equal(asked[8].signal.aborted, true, `${at}: the page going aborts the read still out`);
+    assert.equal(asked[9].signal.aborted, true, `${at}: the page going aborts the read still out`);
+  }
+});
+
+test('a_month_whose_read_is_out_is_never_dropped_or_asked_for_twice', async () => {
+  // REPAIR ROUND 3. The 48-month cache dropped its oldest entry whatever it was, so a month whose read was
+  // still out lost its `reading` entry once 48 other months were shown: shown again, it said "its day flags
+  // have not been asked for" with its read in flight, and only a second guard kept it from being asked for
+  // twice. Now the oldest ANSWERED month goes; a read still out goes only when every kept month is one, and
+  // then with its read aborted. Every day record is invented.
+  const { flushSync } = await import(SVELTE_CLIENT);
+  const REFUSED = { day: '2019-02-26', instrument: 'NSE-INDEX-SAMPLE', calendar: { code: 'R' }, import: { outcome: 'refused' }, held: { bars: 0 }, says: ['refused at import: every file failed its checksum'] };
+  const MARK = 'refused at import — refused at import: every file failed its checksum';
+  const READING = 'Reading this month’s day flags from /dayflags.json…';
+  const NONE = 'No day of this month is marked yet: its day flags are not on hand, and no read of them is out.';
+  /** 48 months other than Feb 2019: Jan 2015 to Dec 2018. */
+  const others = Array.from({ length: MONTH_FLAGS_KEPT }, (_, i) => `${2015 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`);
+  assert.equal(new Set([...others, '2019-02']).size, MONTH_FLAGS_KEPT + 1);
+  const fresh = async () => {
+    /** @type {Array<{url: string, signal: AbortSignal, answer: () => void}>} */
+    const asked = [];
+    /** @param {string} url @param {{signal: AbortSignal}} init */
+    const ask = (url, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      asked.push({ url, signal: init.signal, answer: () => resolve(Response.json({ days: url.includes('from=2019-02-01') ? [REFUSED] : [] })) });
+    });
+    const page = (await monthFlagPage(false)).mount({ feed: 'gdfl', shown: '2019-02', db: { dayBandInstrument: 'NSE-INDEX-SAMPLE', fetchedAt: 1, dayBand: null, dayBandLoading: false, dayBandSpan: null } }, ask);
+    flushSync();
+    return { asked, page };
+  };
+
+  // 1. Feb 2019's read stays out while 48 other months are shown and answered: the oldest ANSWERED month
+  //    goes, Feb 2019 keeps saying Reading, and showing it again asks nothing.
+  {
+    const { asked, page } = await fresh();
+    const { monthFlagged, monthFlagWhy } = page.api;
+    assert.equal(asked.length, 1);
+    for (const ym of others) {
+      page.view.shown = ym;
+      flushSync();
+      asked[asked.length - 1].answer();
+      await settle();
+      flushSync();
+    }
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 1, 'one read per month shown');
+    assert.equal(asked[0].signal.aborted, false, 'the read still out is not aborted while answered months can go');
+    assert.equal(monthFlagWhy('2019-02'), READING, 'a month whose read is out says Reading, never "not on hand"');
+    assert.equal(monthFlagWhy(others[0]), NONE, 'the oldest answered month went to keep the bound');
+    assert.equal(monthFlagWhy(others[1]), '', 'the next one is kept');
+    page.view.shown = '2019-02';
+    flushSync();
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 1, 'a month whose read is out is not asked for twice');
+    assert.equal(monthFlagWhy('2019-02'), READING);
+    asked[0].answer();
+    await settle();
+    flushSync();
+    assert.equal(monthFlagged('2019-02-26'), MARK, 'its first read marks it');
+    assert.equal(monthFlagWhy('2019-02'), '');
+    page.view.shown = others[0];
+    flushSync();
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 2, 'the month that went is read again when shown');
+    assert.equal(monthFlagWhy(others[0]), READING);
+    assert.equal(monthFlagWhy(others[1]), NONE, 'and the oldest answered month goes for it');
+    assert.equal(monthFlagWhy('2019-02'), '', 'never the month just answered');
+    page.stop();
+  }
+
+  // 2. No read answers: the 49th month shown drops the oldest read with its read ABORTED, so nothing
+  //    says Reading without a read out and nothing says "not on hand" with one out.
+  {
+    const { asked, page } = await fresh();
+    const { monthFlagged, monthFlagWhy } = page.api;
+    for (const ym of others) {
+      page.view.shown = ym;
+      flushSync();
+    }
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 1);
+    assert.equal(asked[0].signal.aborted, true, 'every kept month was a read out: the oldest read is aborted with its entry');
+    assert.equal(asked[1].signal.aborted, false, 'and only that one');
+    await settle();
+    assert.equal(monthFlagWhy('2019-02'), NONE, 'its read is not out, and it says so');
+    assert.equal(monthFlagWhy(others[0]), READING);
+    assert.equal(monthFlagWhy(others[MONTH_FLAGS_KEPT - 1]), READING);
+    page.view.shown = '2019-02';
+    flushSync();
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 2, 'a month whose read was aborted is asked for again');
+    assert.equal(asked[1].signal.aborted, true, 'the next oldest read goes for it');
+    assert.equal(monthFlagWhy(others[0]), NONE);
+    assert.equal(monthFlagWhy('2019-02'), READING);
+    asked[MONTH_FLAGS_KEPT + 1].answer();
+    await settle();
+    flushSync();
+    assert.equal(monthFlagged('2019-02-26'), MARK, 'the new read marks it; the aborted one left nothing behind');
+    assert.equal(monthFlagWhy('2019-02'), '');
+    page.view.shown = others[1];
+    flushSync();
+    assert.equal(asked.length, MONTH_FLAGS_KEPT + 2, 'a month whose read is still out is not asked for twice');
+    page.stop();
   }
 });
 
@@ -765,8 +882,8 @@ test('the edges of the special list, the day count and the month span', () => {
     ]
   });
   assert.deepEqual(read, [
-    { date: '2024-11-04', kind: 'special session', windows: [{ from: 1080, to: 1080 }], halt: false, halted: [] },
-    { date: '2024-11-05', kind: 'special session', windows: [{ from: 1110, to: 1125 }], halt: false, halted: [] }
+    { date: '2024-11-04', kind: 'special session', windows: [{ from: 1080, to: 1080 }], halt: false, halted: [], reopening: [], suspected: false },
+    { date: '2024-11-05', kind: 'special session', windows: [{ from: 1110, to: 1125 }], halt: false, halted: [], reopening: [], suspected: false }
   ]);
   assert.deepEqual(specialsOf(null), []);
 
@@ -858,9 +975,11 @@ const RECORD = {
     ['2026-02-01', 'P', 'Budget weekend session', [['09:15', '15:29']]]
   ].map(([date, code, kind, windows]) => ({ date, code, kind, windows: /** @type {string[][]} */ (windows).map(([from, to]) => ({ from, to })) })),
   halts: [
-    { date: '2020-03-13', halted: { from: '09:22', to: '10:20' } },
-    { date: '2020-03-23', halted: { from: '09:59', to: '10:56' } },
-    { date: '2021-02-24', halted: { from: '11:40', to: '15:44' } }
+    // `pull::calendar::HALTS` as `/calendar.json` serves it: the halted minutes, the reopening call auction and
+    // whether the record calls the halt suspected (D-3320; the outage day is SEBI-sourced).
+    { date: '2020-03-13', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:06', to: '10:20' }, suspected: true },
+    { date: '2020-03-23', halted: { from: '09:59', to: '10:56' }, reopening: { from: '10:42', to: '10:56' }, suspected: true },
+    { date: '2021-02-24', halted: { from: '11:40', to: '15:44' }, reopening: { from: '15:30', to: '15:44' }, suspected: false }
   ],
   /** minutes per bar -> owed, in the order of `special` */
   owed: {
@@ -903,7 +1022,8 @@ test('every_special_day_lists_as_many_bars_as_the_calendar_owes', () => {
         if (!traded.has(b)) haltOnly.add(b);
       }
       assert.equal(rows.length, owed[i] + haltOnly.size, `${st}min ${d.date}: the From time list against owed, plus the halt's own buckets`);
-      assert.equal(rows.filter((r) => r.detail.startsWith('halted · ')).length, haltOnly.size, `${st}min ${d.date}: each of those said as halted`);
+      assert.equal(rows.filter((r) => /^(halted|reopening auction) · /.test(r.detail)).length, haltOnly.size, `${st}min ${d.date}: each of those said as halted, or as its reopening auction`);
+      assert.equal(rows.some((r) => /Nothing traded/.test(String(r.why))), false, `${st}min ${d.date}: a halted minute is never said to have traded nothing`);
       if (d.halted?.length && st === 1) halted1 += haltOnly.size;
       pairs += 1;
     });
@@ -916,27 +1036,55 @@ test('every_special_day_lists_as_many_bars_as_the_calendar_owes', () => {
   const halt = /** @type {any} */ (days.find((d) => d.date === '2020-03-13'));
   assert.deepEqual(halt.windows, [{ from: 555, to: 561 }, { from: 621, to: 929 }]);
   assert.deepEqual(halt.halted, [{ from: 562, to: 620 }]);
+  assert.deepEqual(halt.reopening, [{ from: 606, to: 620 }], 'the reopening call auction, 10:06–10:20');
+  assert.equal(halt.suspected, true);
   assert.equal(halt.halt, true);
   const haltRows = timeListRows(sessionGrid(60, [], { venue: 'index', lo: halt.date, hi: halt.date }), { specials: [halt], regular: 1, held: [], step: 1, open: SESSION_OPEN_MINUTE });
   assert.equal(haltRows.length, 375, '13 Mar 2020 alone: 316 traded minutes and 59 halted ones');
   assert.equal(haltRows[0].detail, 'halt day · 13 Mar 2020');
-  assert.equal(haltRows[0].why, 'suspected halt, 13 Mar 2020: traded 09:15–09:21 and 10:21–15:29, halted 09:22–10:20 (the exchange calendar of record, /calendar.json). Listed because a day in view traded at this minute.');
+  const DAY13 = 'suspected halt, 13 Mar 2020: traded 09:15–09:21 and 10:21–15:29, halted 09:22–10:20 with the reopening call auction at 10:06–10:20 (the exchange calendar of record, /calendar.json).';
+  assert.equal(haltRows[0].why, `${DAY13} Listed because a day in view traded at this minute.`);
+  // REPAIR ROUND 3: a halted minute is said as halted, never "Nothing traded" — the record's own evidence has
+  // shares outside the F&O list and stock options printing at 09:22 on 13 Mar 2020, and a halt labels, it never
+  // removes (pull::calendar::Halt). The halt is a suspected one, said as the record says it (D-3320), and the
+  // reopening call auction's minutes say so.
+  const TAIL = 'A halted minute is neither owed nor missing (D-3336 §1), and a print inside a halt is still a bar (pull::calendar); listed so a bar the store holds here can still be reached.';
+  const DOUBT = ' — the record calls it a suspected halt, UNVERIFIED (D-3320): no NSE circular is recorded.';
   const stopped = haltRows.filter((r) => r.detail === 'halted · 13 Mar 2020');
-  assert.equal(stopped.length, 59);
+  assert.equal(stopped.length, 44);
   assert.equal(stopped[0].key, '09:22');
-  assert.equal(stopped[58].key, '10:20');
-  assert.equal(stopped[0].why, 'suspected halt, 13 Mar 2020: traded 09:15–09:21 and 10:21–15:29, halted 09:22–10:20 (the exchange calendar of record, /calendar.json). Nothing traded at this minute: a halted minute is neither owed nor missing (D-3336 §1). Listed so a bar the store holds here can still be reached.');
+  assert.equal(stopped[43].key, '10:05');
+  assert.equal(stopped[0].why, `${DAY13} Halted at this minute${DOUBT} ${TAIL}`);
+  const auction = haltRows.filter((r) => r.detail === 'reopening auction · 13 Mar 2020');
+  assert.deepEqual(auction.map((r) => r.key), Array.from({ length: 15 }, (_, i) => `10:${String(6 + i).padStart(2, '0')}`), '10:06–10:20');
+  assert.equal(auction[0].why, `${DAY13} Halted at this minute, in the reopening call auction of 13 Mar 2020${DOUBT} ${TAIL}`);
+  assert.equal(haltRows.some((r) => /Nothing traded/.test(String(r.why))), false);
   assert.equal(haltRows.find((r) => r.key === '10:21')?.detail, 'halt day · 13 Mar 2020', 'the first minute after the halt traded');
   // On a derived rung a bucket holding only halted minutes is said as halted, in its own bar's words.
   const halt2 = timeListRows(sessionGrid(120, [], { venue: 'index', lo: halt.date, hi: halt.date }), { specials: [halt], regular: 1, held: [], step: 2, open: SESSION_OPEN_MINUTE });
   const h923 = /** @type {any} */ (halt2.find((r) => r.key === '09:23'));
   assert.equal(h923.detail, 'halted · 13 Mar 2020');
-  assert.ok(h923.why.includes('Nothing traded inside the 2-minute bar stamped here (a bar carries the first minute of its bucket on the 09:15 grid, pull::fold)'), h923.why);
+  assert.ok(h923.why.includes('Halted inside the 2-minute bar stamped here (a bar carries the first minute of its bucket on the 09:15 grid, pull::fold) — the record calls it'), h923.why);
+  assert.equal(halt2.find((r) => r.key === '10:05')?.detail, 'reopening auction · 13 Mar 2020', '10:05–10:06 holds an auction minute');
+  assert.equal(halt2.find((r) => r.key === '10:03')?.detail, 'halted · 13 Mar 2020');
   assert.equal(halt2.find((r) => r.key === '09:21')?.detail, 'halt day · 13 Mar 2020', 'a bucket with a traded minute (09:21) is said as traded');
-  // Both halt days in view: a minute both halted names both, counted.
+  // Both halt days in view: a minute both halted names both, counted; 10:10 is 13 Mar's auction but only
+  // 23 Mar's halt, so it is said as halted and names the one day whose auction it was.
   const both = timeListRows(sessionGrid(60, [], {}), { specials: days.filter((d) => d.halt), regular: 2, held: [], step: 1, open: SESSION_OPEN_MINUTE });
   assert.equal(both.find((r) => r.key === '10:00')?.detail, 'halted · 2 days in view');
+  const m1010 = /** @type {any} */ (both.find((r) => r.key === '10:10'));
+  assert.equal(m1010.detail, 'halted · 2 days in view');
+  assert.match(m1010.why, /Halted at this minute, in the reopening call auction of 13 Mar 2020 — the record calls it a suspected halt/);
   assert.equal(both.length, 375);
+  // Two days whose auctions share a minute: said as the auction, with both days named.
+  const twin = { ...halt, date: '2020-03-12' };
+  const twins = timeListRows(sessionGrid(60, [], {}), { specials: [twin, halt], regular: 2, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(twins.find((r) => r.key === '10:10')?.detail, 'reopening auction · 2 days in view');
+  assert.match(String(twins.find((r) => r.key === '10:10')?.why), /in the reopening call auction of 12 Mar 2020 and 13 Mar 2020 — /);
+  // A halt the record does not call suspected says no doubt it does not hold.
+  const sure = timeListRows(sessionGrid(60, [], {}), { specials: [{ ...halt, suspected: false, reopening: [] }], regular: 1, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(sure.find((r) => r.key === '09:30')?.why, 'suspected halt, 13 Mar 2020: traded 09:15–09:21 and 10:21–15:29, halted 09:22–10:20 (the exchange calendar of record, /calendar.json). Halted at this minute. ' + TAIL);
+  assert.equal(sure.find((r) => r.key === '10:10')?.detail, 'halted · 13 Mar 2020', 'no auction recorded, none said');
   // A loaded bar inside the halt (a print the halt did not stop) is still listed.
   assert.ok(timeListRows(sessionGrid(60, ['09:22'], {}), { specials: [halt], regular: 1, held: ['09:22'], step: 1, open: SESSION_OPEN_MINUTE }).some((r) => r.key === '09:22'));
   // Beside a regular day the halted minutes are that day's regular minutes again.
@@ -1001,7 +1149,37 @@ test('the edges of the halts list and the window cut', () => {
     { date: '2020-03-13', halted: { from: '12:00', to: '12:00' } },
     { date: '2020-03-23' }
   ]);
-  assert.deepEqual([...by.entries()], [['2020-03-13', [{ from: 562, to: 620 }, { from: 720, to: 720 }]]]);
+  assert.deepEqual([...by.entries()], [['2020-03-13', [{ from: 562, to: 620, reopening: null, suspected: false }, { from: 720, to: 720, reopening: null, suspected: false }]]]);
+  // The reopening auction and the suspected flag are read as the record writes them, and nothing else (repair round 3).
+  const flags = haltsOf([
+    { date: '2020-03-13', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:06', to: '10:20' }, suspected: true },
+    { date: '2020-03-14', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:20', to: '10:06' }, suspected: 'true' },
+    { date: '2020-03-15', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:06' }, suspected: 1 },
+    { date: '2020-03-16', halted: { from: '09:22', to: '10:20' }, reopening: { to: '10:20' } },
+    { date: '2020-03-17', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:20', to: '10:20' } },
+    { date: '2020-03-18', halted: { from: '09:22', to: '10:20' }, reopening: { from: '00:00' } }
+  ]);
+  assert.deepEqual([...flags.values()].map((l) => l[0]), [
+    { from: 562, to: 620, reopening: { from: 606, to: 620 }, suspected: true },
+    { from: 562, to: 620, reopening: null, suspected: false },
+    { from: 562, to: 620, reopening: null, suspected: false },
+    { from: 562, to: 620, reopening: null, suspected: false },
+    { from: 562, to: 620, reopening: { from: 620, to: 620 }, suspected: false },
+    { from: 562, to: 620, reopening: null, suspected: false }
+  ]);
+  // The auction is kept only inside the session, like the halt; a suspected halt outside it suspects nothing.
+  const early = specialsOf({ special: [{ date: '2020-03-13', code: 'H', kind: 'h', windows: [{ from: '09:15', to: '15:29' }] }], halts: [{ date: '2020-03-13', halted: { from: '09:00', to: '09:20' }, reopening: { from: '09:05', to: '09:16' }, suspected: true }] });
+  assert.deepEqual([early[0].halted, early[0].reopening, early[0].suspected], [[{ from: 555, to: 560 }], [{ from: 555, to: 556 }], true]);
+  const before = specialsOf({ special: [{ date: '2020-03-13', code: 'H', kind: 'h', windows: [{ from: '09:15', to: '15:29' }] }], halts: [{ date: '2020-03-13', halted: { from: '09:00', to: '09:10' }, reopening: { from: '09:05', to: '09:10' }, suspected: true }] });
+  assert.deepEqual([before[0].halted, before[0].reopening, before[0].suspected], [[], [], false]);
+  const aside = specialsOf({ special: [{ date: '2020-03-13', code: 'H', kind: 'h', windows: [{ from: '09:15', to: '15:29' }] }], halts: [{ date: '2020-03-13', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:30', to: '10:40' } }] });
+  assert.deepEqual(aside[0].reopening, [], 'an auction outside its own halt is not inside the halted minutes');
+  const last = specialsOf({ special: [{ date: '2020-03-13', code: 'H', kind: 'h', windows: [{ from: '09:15', to: '15:29' }] }], halts: [{ date: '2020-03-13', halted: { from: '09:22', to: '10:20' }, reopening: { from: '10:20', to: '10:20' } }] });
+  assert.deepEqual(last[0].reopening, [{ from: 620, to: 620 }], 'a one-minute auction is kept');
+  // A halt with no auction recorded, over two windows, keeps its part inside each.
+  const across = specialsOf({ special: [{ date: '2021-02-24', code: 'P', kind: 'o', windows: [{ from: '09:15', to: '11:39' }, { from: '15:45', to: '16:59' }] }], halts: [{ date: '2021-02-24', halted: { from: '11:00', to: '16:00' } }] });
+  assert.deepEqual([across[0].halted, across[0].reopening], [[{ from: 660, to: 699 }, { from: 945, to: 960 }], []]);
+  assert.deepEqual(reopeningOf({ date: 'd', kind: 'k', windows: [] }), [], 'absent reads as none');
   assert.equal(haltsOf(undefined).size, 0);
   assert.equal(haltsOf('09:22').size, 0);
   // Two halts on one day both come out.
@@ -1016,8 +1194,8 @@ test('the edges of the halts list and the window cut', () => {
   assert.deepEqual(edge[0].windows, [{ from: 556, to: 928 }]);
   // A halt over the whole session leaves the day with no window, still counted as a halt day.
   const all = specialsOf({ special: [{ date: '2020-03-13', code: 'H', kind: 'h', windows: [{ from: '09:15', to: '15:29' }] }], halts: [{ date: '2020-03-13', halted: { from: '09:00', to: '16:00' } }] });
-  assert.deepEqual(all, [{ date: '2020-03-13', kind: 'h', windows: [], halt: true, halted: [{ from: 555, to: 929 }] }]);
-  // Nothing traded: every minute of the session is offered, each said as halted, none as traded.
+  assert.deepEqual(all, [{ date: '2020-03-13', kind: 'h', windows: [], halt: true, halted: [{ from: 555, to: 929 }], reopening: [], suspected: false }]);
+  // A halt over the whole session: every minute is offered, each said as halted, none as traded.
   const allRows = timeListRows(sessionGrid(60, [], {}), { specials: all, regular: 1, held: [], step: 1, open: SESSION_OPEN_MINUTE });
   assert.equal(allRows.length, 375);
   assert.equal(allRows.filter((r) => r.detail === 'halted · 13 Mar 2020').length, 375);

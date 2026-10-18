@@ -164,6 +164,8 @@ test('six_thousand_characters_are_refused_in_one_sentence', () => {
   assert.match(picker, /Nothing matches \$\{quote\(q\.trim\(\)\)\}/);
   assert.doesNotMatch(picker, /bind:value=\{q\}/);
   assert.match(picker, /\{#if qWhy\}\s*<p class="phint pcut" role="status">\{qWhy\}<\/p>/);
+  // A long list opens without laying out its hidden rows (the measured opening cost, docs/06-limits.md L-R302-1).
+  assert.match(picker, /content-visibility: auto;/);
 });
 
 test('a To box always takes a day, and Escape closes a calendar opened with the mouse', async () => {
@@ -223,4 +225,113 @@ test('the edges of the day words: the bound itself, blank text, a day on either 
   assert.equal(dayFieldWhy({ typed: '10 Sep 2026', value: '', label: 'To date', ...HELD, after: '2026-09-10' }), null, 'To on the From day');
   assert.equal(dayFieldWhy({ typed: '20 Sep 2026', value: '', label: 'From date', ...HELD, before: '2026-09-20' }), null, 'From on the To day');
   assert.equal(dayFieldWhy({ typed: '15 Sep 2026', value: '', label: 'From date', ...HELD, after: '2026-09-10', before: '2026-09-20' }), null);
+});
+
+/**
+ * A REAL COMPONENT, COMPILED FOR THE SERVER, IN THE STATE A READER LEAVES IT
+ * (repair round 3). A server render draws a field as it first mounts — its
+ * calendar shut, nothing typed — so the words a pick, a paste or an open grid
+ * owe were pinned only as source text, and four mutants that changed them
+ * passed every test. Here the module's `openId` names the first field a fresh
+ * copy issues (what a click on its button does), and `drive` calls the
+ * component's OWN handlers (`type`, `pick`, `search`) before it draws, so the
+ * markup asserted is the markup that state renders. Each patch must match the
+ * compiled code exactly once, so a change in the compiler's output fails here
+ * by name rather than testing something else.
+ *
+ * @param {string} file `DayField.svelte` or `Picker.svelte`
+ * @param {{open?: boolean, drive?: string}} [how]
+ */
+async function inState(file, { open = false, drive = '' } = {}) {
+  const src = readFileSync(new URL(`../src/lib/${file}`, import.meta.url), 'utf8');
+  let code = compile(src, { generate: 'server', filename: file })
+    .js.code.replace(/from (["'])(svelte[^"']*)\1/g, (_, q, spec) => `from ${q}${import.meta.resolve(spec)}${q}`)
+    .replace(/from (["'])\$lib\/([^"']+)\1/g, (_, q, rest) => `from ${q}${new URL(`../src/lib/${rest}`, import.meta.url).href}${q}`);
+  /** @param {string} from @param {string} to */
+  const patch = (from, to) => {
+    assert.equal(code.split(from).length, 2, `${file}: the compiled code holds ${JSON.stringify(from)} once`);
+    code = code.replace(from, () => to);
+  };
+  if (open) patch('let openId = 0;', 'let openId = 1;');
+  if (drive) {
+    const at = code.indexOf('$$renderer.push(');
+    assert.match(code.slice(at, at + 40), /^\$\$renderer\.push\(`<div class="(dcell|picker) /, `${file}: the first output is the field's root, after every statement of its script`);
+    code = `${code.slice(0, at)}${drive}\n${code.slice(at)}`;
+  }
+  return (await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}#${Math.random()}`)).default;
+}
+
+/** An attribute's text as written, its entities read back. @param {string} s */
+const unescaped = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+/** The input's shown text. @param {string} html */
+const boxText = (html) => unescaped(/<input class="din[^>]*\svalue="([^"]*)"/.exec(html)?.[1] ?? '');
+
+test('a_cut_paste_is_said_only_while_its_text_is_in_the_box', async () => {
+  // C02: the cut sentence is said while the box holds the cut text, and not once a picked day replaced it.
+  const paste = JSON.stringify('A'.repeat(6000));
+  const props = { label: 'From date', value: '2020-03-02', min: '2020-03-02', max: '2020-03-31' };
+  const cut = render(await inState('DayField.svelte', { drive: `type(${paste});` }), { props });
+  assert.equal(refusal(cut.body), 'From date is 6,000 characters long, and /db reads at most 32 — cut, not applied: the field still holds 02 Mar 2020.');
+  assert.equal(boxText(cut.body), 'A'.repeat(DAY_TEXT_MAX), 'the box keeps the first 32');
+  assert.match(cut.body, /aria-invalid="true"/);
+  // The reader then picks 15 Mar 2020 from the grid: the caller's value is that day, and the box says nothing.
+  const picked = render(await inState('DayField.svelte', { drive: `type(${paste}); pick('2020-03-15');` }), { props: { ...props, value: '2020-03-15' } });
+  assert.equal(refusal(picked.body), null, 'a cut that is no longer in the box is not said under a day that was applied');
+  assert.equal(boxText(picked.body), '15 Mar 2020');
+  assert.match(picked.body, /aria-invalid="false"/);
+  // Typed text that is not cut still says its own refusal, and Not applied, after the same pick path.
+  const typed = render(await inState('DayField.svelte', { drive: `type('31 Feb 2020');` }), { props });
+  assert.match(String(refusal(typed.body)), /Not applied: the field still holds 02 Mar 2020\. Escape restores it\.$/);
+});
+
+test('back_to_the_held_end_is_disabled_on_that_day_and_nowhere_else', async () => {
+  // C05: the calendar's clear button does nothing when the box already holds the day it takes.
+  /** One fresh copy per render: the open field is the first one a copy issues. @param {Record<string, string>} props */
+  const clear = async (props) => {
+    const html = render(await inState('DayField.svelte', { open: true }), { props: { label: 'To date', min: HELD.min, max: HELD.max, ...props } }).body;
+    assert.match(html, /role="dialog"/, 'the calendar is open');
+    const m = /<button type="button" class="clear[^"]*"([^>]*)>([^<]*)<\/button>/.exec(html);
+    assert.ok(m, 'the clear button is drawn');
+    return { disabled: /\sdisabled(\s|=|$)/.test(m[1]), face: m[2] };
+  };
+  assert.deepEqual(await clear({ value: '2026-09-30', empty: '2026-09-30' }), { disabled: true, face: 'Back to 30 Sep 2026' }, 'already on the held end: nothing to go back to');
+  assert.deepEqual(await clear({ value: '2026-09-25', empty: '2026-09-30' }), { disabled: false, face: 'Back to 30 Sep 2026' });
+  assert.deepEqual(await clear({ value: '', empty: '' }), { disabled: true, face: 'Clear' }, 'nothing held: nothing to clear');
+  assert.deepEqual(await clear({ value: '', empty: '2026-09-30' }), { disabled: true, face: 'Back to 30 Sep 2026' }, 'nothing held: nothing to go back from');
+  assert.deepEqual(await clear({ value: '2026-09-25', empty: '' }), { disabled: false, face: 'Clear' });
+});
+
+test('a_day_struck_by_the_other_box_says_the_order_on_hover', async () => {
+  // C07 (DB-045 goal 3): a struck cell's title is its own kind's words — the held span's reason outside the
+  // span, the window's order for a day before the From day — never the held span's reason for both.
+  const DayField = await inState('DayField.svelte', { open: true });
+  const html = render(DayField, { props: { label: 'To date', value: '2026-09-30', min: HELD.min, max: HELD.max, after: '2026-09-20', afterLabel: 'From date', boundsReason: HELD.reason } }).body;
+  assert.match(html, /role="dialog"/, 'the calendar is open');
+  const cells = [...html.matchAll(/<button type="button" class="day[^"]*"([^>]*)>(\d+)<\/button>/g)].map((m) => ({ day: +m[2], title: unescaped(/\stitle="([^"]*)"/.exec(m[1])?.[1] ?? ''), off: /\sdisabled(\s|=|$)/.test(m[1]) }));
+  assert.equal(cells.length, 42, 'six weeks');
+  // Sep 2026 starts on a Tuesday: the Monday-first grid opens on 31 Aug.
+  assert.deepEqual(cells[0], { day: 31, title: HELD.reason, off: true }, 'outside the held span: the span’s reason');
+  const order = 'Before the From date, 20 Sep 2026: a window ends on or after the day it starts.';
+  assert.equal(order, dayStruckWhy('2026-09-10', { ...HELD, after: '2026-09-20' }));
+  for (const d of [1, 10, 19]) assert.deepEqual(cells[d], { day: d, title: order, off: true }, `Sep ${d}: the order, not the held span`);
+  assert.deepEqual(cells[20], { day: 20, title: '', off: false }, 'the From day itself is taken');
+  assert.deepEqual(cells[31], { day: 1, title: HELD.reason, off: true }, '01 Oct: outside the held span');
+  assert.equal(cells.filter((c) => c.title === order).length, 19, 'exactly the days the order strikes');
+});
+
+test('a_cut_search_is_said_under_the_search_box', async () => {
+  // C09: 6,000 letters pasted into a list's search box are cut to 128 and the cut is said under the box,
+  // never silently.
+  const Picker = await inState('Picker.svelte', { open: true, drive: `search(${JSON.stringify('A'.repeat(6000))});` });
+  const rows = [{ key: 'one', name: 'Invented one' }, { key: 'two', name: 'Invented two' }];
+  const html = render(Picker, { props: { rows, label: 'instruments', filter: true } }).body;
+  const hint = /<p class="phint([^"]*)"( role="status")?>([^<]*)<\/p>/.exec(html);
+  assert.ok(hint, 'the hint under the search box is drawn');
+  assert.equal(hint[3], `This search is 6,000 characters long, and /db reads at most ${SEARCH_TEXT_MAX} — cut to its first ${SEARCH_TEXT_MAX}.`);
+  assert.match(hint[1], /\bpcut\b/);
+  assert.equal(hint[2], ' role="status"');
+  assert.equal(/<input class="pq[^>]*\svalue="([^"]*)"/.exec(html)?.[1], 'A'.repeat(SEARCH_TEXT_MAX), 'the box keeps the first 128');
+  // A search inside the bound says the ordinary hint.
+  const plain = render(await inState('Picker.svelte', { open: true, drive: `search('Invented');` }), { props: { rows, label: 'instruments', filter: true } }).body;
+  assert.equal(/<p class="phint([^"]*)"( role="status")?>([^<]*)<\/p>/.exec(plain)?.[3], 'Matches name or detail');
 });

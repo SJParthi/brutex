@@ -1731,12 +1731,14 @@ export function selectionState(db) {
      `/dayflags.json` (one page: at most 31 days), unless the day band's own
      answer already covers it, and kept: re-opening costs nothing. The cache
      is keyed by feed, instrument, census read and month, and holds at most
-     `MONTH_FLAGS_KEPT` months (the oldest goes first), so it is bounded. A
-     month that could not be read says why under the grid.
+     `MONTH_FLAGS_KEPT` months (the oldest answered month goes first, and a
+     read still out goes only with its read), so it is bounded. A month that
+     could not be read says why under the grid.
 
      A READ IN FLIGHT IS AN ENTRY OF ITS OWN (`reading: true`, repair round
      2), so the grid says "Reading…" only while a read for the key it shows is
-     out, and never about a month nothing asked for.
+     out, and never about a month with no read out (repair round 3: nor the
+     reverse, a month with its read out said to be unasked).
      ====================================================================== */
   /** @typedef {{flags: Map<string, string> | null, why: string, reading?: boolean}} MonthFlags */
   /** @type {Map<string, MonthFlags>} */
@@ -1754,8 +1756,20 @@ export function selectionState(db) {
   const monthKey = (ym) => `${monthScope()}${ym}`;
 
   /**
-   * Keep `v` as month `key`'s entry, newest last; the oldest beyond
-   * `MONTH_FLAGS_KEPT` goes.
+   * Keep `v` as month `key`'s entry, newest last; beyond `MONTH_FLAGS_KEPT`
+   * the oldest ANSWERED month goes.
+   *
+   * A READ STILL OUT IS NEVER DROPPED ON ITS OWN (repair round 3). Evicting
+   * the oldest entry whatever it was dropped a `reading` entry while its read
+   * was in flight: the month, shown again, then said "its day flags have not
+   * been asked for" with its read still out, and only a second guard on the
+   * plain map of reads kept it from being asked for twice. A `reading` entry
+   * now goes only when every kept month is a read still out, and then its read
+   * is aborted with it (the read's own `finally` takes it out of
+   * `monthReads`) — so an entry says "Reading…" exactly while its read is out,
+   * a month with a read out is never asked for again, and the cache never
+   * holds more than `MONTH_FLAGS_KEPT` months. One put adds at most one key,
+   * so one eviction keeps the bound.
    * @param {string} key
    * @param {MonthFlags} v
    */
@@ -1763,7 +1777,11 @@ export function selectionState(db) {
     const next = new Map(monthFlags);
     next.delete(key);
     next.set(key, v);
-    while (next.size > MONTH_FLAGS_KEPT) next.delete(/** @type {string} */ (next.keys().next().value));
+    if (next.size > MONTH_FLAGS_KEPT) {
+      const gone = [...next].find(([, e]) => !e.reading)?.[0] ?? /** @type {string} */ (next.keys().next().value);
+      monthReads.get(gone)?.abort();
+      next.delete(gone);
+    }
     monthFlags = next;
   }
 
@@ -1792,7 +1810,12 @@ export function selectionState(db) {
     if (!feed || !inst || !days) return;
     if (!monthNeedsRead(ym, band)) return;
     untrack(() => {
-      if (monthFlags.has(key) || monthReads.has(key)) return;
+      /* A read out for `key` always has its `reading` entry here (`putMonth` drops a `reading` entry only by
+         aborting its read), so a month read or being read is never asked for again. A REFUSED month is: shown
+         again (paged back to, or its grid reopened), it is asked once more (repair round 3: a refusal stayed
+         until the feed, instrument or census read moved, with no way to ask again). */
+      const got = monthFlags.get(key);
+      if (got?.reading || got?.flags) return;
       const ctl = new AbortController();
       monthReads.set(key, ctl);
       putMonth(key, { flags: null, why: '', reading: true });
@@ -1873,7 +1896,7 @@ export function selectionState(db) {
     const got = monthFlags.get(monthKey(ym));
     if (got?.reading) return 'Reading this month’s day flags from /dayflags.json…';
     if (got) return got.why ? `No day of this month is marked: ${got.why}.` : '';
-    return 'No day of this month is marked yet: its day flags have not been asked for.';
+    return 'No day of this month is marked yet: its day flags are not on hand, and no read of them is out.';
   }
 
   /**
