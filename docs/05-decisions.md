@@ -71912,6 +71912,7 @@ Proof: `crates/pull/tests/zerodha_identity.rs`
 `a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open`,
 `an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
 `a_day_rung_that_will_not_open_refuses_nothing_by_range`,
+`a_day_rung_that_will_not_open_is_named_on_the_log_beside_its_refusals`,
 `a_zero_price_day_bar_is_refused_by_name_at_landing`,
 `an_index_zero_day_bar_lands_and_a_negative_one_is_refused_by_name`,
 `pull::series_identity::tests::an_index_zero_is_held_and_a_price_below_zero_is_refused`,
@@ -72081,9 +72082,16 @@ a measured cause:
    read or fold error makes each bar it would have measured `gdfl_unread`,
    action `remeasure`, and the month a `NOT READ: gdfl 1s witness: <why>`
    line that fails the run, on one series and in `ALL`.
+7. **One event per run (repair 1).** A run was visible on `/logs` only as
+   the binary's `cli.lifecycle` started and finished pair. It now leaves one
+   `cli.series_identity` record after every bar is judged — feed, segment,
+   scope, exit, commit, each measured cause's count, the months that would
+   not open and the plan's path — `warn` when the run fails. Never per bar
+   or per series (gate 17).
 
 Proof: `cli::series_identity::tests`
-(`an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
+(`every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan`,
+`an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
 `a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absence`,
 `cli::store_write::tests::every_command_is_classified_as_a_store_writer_or_not`,
 `the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,

@@ -1378,7 +1378,12 @@ fn an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open() {
     let named = whys(&done, "in_session_jump");
     assert_eq!(named.len(), 1, "{:?}", done.failures);
     assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
-    assert_eq!(done.failures.len(), 1, "nothing by range: {:?}", done.failures);
+    assert_eq!(
+        done.failures.len(),
+        1,
+        "nothing by range: {:?}",
+        done.failures
+    );
     let held = cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1));
     assert_eq!(held.len(), honest - 10);
     assert!(
@@ -1511,6 +1516,17 @@ fn an_index_is_never_judged_by_the_jump_rule() {
     );
 }
 
+/// The one telemetry sink this test binary installs, or the one already there:
+/// `telemetry::install` refuses a second, so every log test shares it.
+fn log_sink() -> &'static telemetry::Sink {
+    let dir = std::env::temp_dir().join(format!("brutex-identity-log-{}", std::process::id()));
+    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    match telemetry::install(&config) {
+        Ok(installed) => installed,
+        Err(_already) => telemetry::global().expect("install named the sink that exists"),
+    }
+}
+
 /// Every `pull.identity` line the sink holds for `instrument`.
 fn identity_lines(sink: &telemetry::Sink, instrument: &str) -> Vec<String> {
     let needle = format!("\"instrument\":\"{instrument}\"");
@@ -1528,12 +1544,7 @@ fn identity_lines(sink: &telemetry::Sink, instrument: &str) -> Vec<String> {
 /// binary, so the global sink's lines can be told apart.
 #[test]
 fn the_screen_names_each_refused_cause_and_day_on_the_log() {
-    let dir = std::env::temp_dir().join(format!("brutex-identity-log-{}", std::process::id()));
-    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
-    let sink = match telemetry::install(&config) {
-        Ok(installed) => installed,
-        Err(_already) => telemetry::global().expect("install named the sink that exists"),
-    };
+    let sink = log_sink();
     let scratch = Scratch::new("identity-log");
     let (from, to, days) = week();
 
@@ -1622,10 +1633,17 @@ fn the_screen_names_each_refused_cause_and_day_on_the_log() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("\"level\":\"info\""), "{}", lines[0]);
     assert!(lines[0].contains("\"no_day_rung\":1875"), "{}", lines[0]);
+}
 
-    // RADICO: a day month that will not open and one zero minute (R4-17
-    // repair 1). One warn names why the rung would not open, and the zero is
-    // still refused, with its own warn; no `info` line claims the rung read.
+/// RADICO: a day month that will not open and one zero minute (R4-17 repair
+/// 1). One warn names why the rung would not open, and the zero is still
+/// refused, with its own warn; no `info` line claims the rung was read. The
+/// symbol is used by no other test in this binary.
+#[test]
+fn a_day_rung_that_will_not_open_is_named_on_the_log_beside_its_refusals() {
+    let sink = log_sink();
+    let scratch = Scratch::new("identity-log-unread");
+    let (from, to, _) = week();
     unreadable_day_month(&scratch.0, "RADICO", b"not a bar file");
     let mut rows = answer(from, to);
     rows[9].open = 0;
@@ -1636,14 +1654,24 @@ fn the_screen_names_each_refused_cause_and_day_on_the_log() {
         pull::vendor::Granularity::Minute1,
         rows,
     );
-    assert_eq!(whys(&done, "non_positive_price").len(), 1, "{:?}", done.failures);
+    assert_eq!(
+        whys(&done, "non_positive_price").len(),
+        1,
+        "{:?}",
+        done.failures
+    );
     let lines = identity_lines(sink, "RADICO");
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(lines.iter().all(|l| l.contains("\"level\":\"warn\"")), "{lines:?}");
     assert!(
-        lines.iter().any(|l| l.contains("the day rung would not open")
-            && l.contains("\"why\":")
-            && l.contains("\"no_day_rung\":1874")),
+        lines.iter().all(|l| l.contains("\"level\":\"warn\"")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("the day rung would not open")
+                && l.contains("\"why\":")
+                && l.contains("\"no_day_rung\":1874")),
         "{lines:?}"
     );
     assert!(

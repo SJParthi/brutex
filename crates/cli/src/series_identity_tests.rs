@@ -1363,7 +1363,10 @@ fn a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absenc
         out.contains("measured causes: zero_price 1, before_listing 376, before_first_day_bar 0, basis_mismatch 0, foreign_level 0, no_gdfl_witness 0, gdfl_unread 385"),
         "{out}"
     );
-    assert!(out.contains("2024-01: NOT READ: gdfl 1s witness: "), "{out}");
+    assert!(
+        out.contains("2024-01: NOT READ: gdfl 1s witness: "),
+        "{out}"
+    );
     let plan = fs::read_to_string(&plans(&root.0)[0].0).unwrap();
     assert!(plan.contains("\tgdfl_unread\tremeasure\t"), "{plan}");
     assert!(!plan.contains("\tno_gdfl_witness\t"), "{plan}");
@@ -1382,9 +1385,64 @@ fn a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absenc
     fs::rename(&held, &aside).unwrap();
     let (code, out) = other.run(&[symbol, "--segment", "CASH"]);
     assert_eq!(code, FAILED, "{out}");
-    assert!(
-        out.contains("no_gdfl_witness 385, gdfl_unread 0"),
-        "{out}"
-    );
+    assert!(out.contains("no_gdfl_witness 385, gdfl_unread 0"), "{out}");
     assert!(!out.contains("NOT READ"), "{out}");
+}
+
+/// **ONE EVENT PER RUN** (standing rule 4, gate 17): every run leaves exactly
+/// one `cli.series_identity` record on `/logs` carrying what was scanned, its
+/// exit, the commit, every measured cause's count, how many months would not
+/// open and where its plan is — `warn` for a run that fails — and none per
+/// bar or per series.
+#[test]
+fn every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan() {
+    use crate::ledger_all::tests::{counts, mark, says, sink};
+    let from = mark();
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
+    let (code, out) = root.run(&[symbol, "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{out}");
+    let (code, all) = root.run(&["ALL", "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, FAILED, "{all}");
+    let sink = sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes its file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.series_identity");
+    let here = root.0.display().to_string();
+    let mine: Vec<telemetry::Record> = telemetry::tail(&dir, sink.keep_files(), &query)
+        .records
+        .into_iter()
+        .filter(|record| record.seq >= from && says(record, "plan", &here))
+        .collect();
+    assert_eq!(mine.len(), 2, "one per run: {mine:?}");
+    let one = mine
+        .iter()
+        .find(|record| says(record, "scope", symbol))
+        .expect("the one-series run");
+    assert_eq!(one.level, telemetry::Level::Warn, "{one:?}");
+    assert!(counts(one, "exit", u64::from(FAILED)), "{one:?}");
+    assert!(counts(one, "unread_months", 0), "{one:?}");
+    assert!(says(one, "commit", STAMP), "{one:?}");
+    assert!(
+        says(one, "feed", "zerodha") && says(one, "segment", "CASH"),
+        "{one:?}"
+    );
+    assert!(
+        says(
+            one,
+            "causes",
+            "zero_price 1, before_listing 376, before_first_day_bar 0, basis_mismatch 375, foreign_level 10, no_gdfl_witness 0, gdfl_unread 0"
+        ),
+        "{one:?}"
+    );
+    assert!(says(one, "plan", ".plan"), "{one:?}");
+    let every = mine
+        .iter()
+        .find(|record| says(record, "scope", "ALL"))
+        .expect("the ALL run");
+    assert!(says(every, "plan", "dry run, not written: "), "{every:?}");
+    assert!(says(every, "causes", "zero_price 1,"), "{every:?}");
 }

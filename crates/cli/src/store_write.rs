@@ -347,7 +347,11 @@ mod tests {
             ("series-identity", &["ALL", "--segment", "CASH"], true),
             ("series-identity", &["PIIND", "--workers", "2"], true),
             ("series-identity", &["ALL", "--dry-run"], false),
-            ("series-identity", &["PIIND", "--dry-run", "--segment", "CASH"], false),
+            (
+                "series-identity",
+                &["PIIND", "--dry-run", "--segment", "CASH"],
+                false,
+            ),
             ("alerts", &[], false),
             ("alerts", &["--older"], false),
             ("alerts", &["--before", "5"], false),

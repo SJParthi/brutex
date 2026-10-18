@@ -125,8 +125,7 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
         brutex_core::symbol::Symbol::new(first).map_err(|why| format!("`{first}`: {why}"))?;
         Some((*first).to_owned())
     };
-    let (mut segment, mut feed, mut workers, mut dry_run) =
-        ("INDEX", Vendor::Zerodha, None, false);
+    let (mut segment, mut feed, mut workers, mut dry_run) = ("INDEX", Vendor::Zerodha, None, false);
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         if *flag == "--dry-run" {
@@ -660,6 +659,56 @@ fn counts_text(counts: &BTreeMap<Measured, u64>) -> String {
         .join(", ")
 }
 
+/// The plan's outcome in the words the run's event carries.
+fn plan_word(written: &Result<Written, String>) -> String {
+    match written {
+        Ok(Written::Plan(path)) => path.display().to_string(),
+        Ok(Written::DryRun(path)) => format!("dry run, not written: {}", path.display()),
+        Ok(Written::Nothing) => "none: nothing flagged".to_owned(),
+        Err(why) => format!("NOT WRITTEN: {why}"),
+    }
+}
+
+/// The target of the one event a run leaves on `/logs`.
+const EVENT_TARGET: &str = "cli.series_identity";
+
+/// The run's one `cli.series_identity` event: what was scanned, its exit,
+/// every measured cause's count, how many months would not open and where
+/// the plan is. Once per run, after every bar was judged, never in a loop
+/// (gate 17); `warn` for a run that fails.
+fn run_event(
+    run: &Run<'_>,
+    scope: &str,
+    code: u8,
+    plan: &str,
+    counts: &BTreeMap<Measured, u64>,
+    unread: usize,
+) {
+    let causes = counts_text(counts);
+    let event = if code == OK {
+        telemetry::Event::info(EVENT_TARGET, "series identity scanned: nothing refused")
+    } else {
+        telemetry::Event::warn(
+            EVENT_TARGET,
+            "series identity scanned: bars a landing refuses, or a month that would not open",
+        )
+    };
+    crate::note(
+        &event
+            .with("feed", telemetry::Value::Str(run.ask.feed.as_str()))
+            .with("segment", telemetry::Value::Str(run.ask.segment))
+            .with("scope", telemetry::Value::Str(scope))
+            .with("exit", telemetry::Value::Uint(u64::from(code)))
+            .with("commit", telemetry::Value::Str(run.commit))
+            .with("causes", telemetry::Value::Str(&causes))
+            .with(
+                "unread_months",
+                telemetry::Value::Uint(u64::try_from(unread).unwrap_or(u64::MAX)),
+            )
+            .with("plan", telemetry::Value::Str(plan)),
+    );
+}
+
 fn plan_line(out: &mut String, written: Result<Written, String>) -> bool {
     match written {
         Ok(Written::Plan(path)) => {
@@ -819,9 +868,18 @@ fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
         let _ = writeln!(out, "  {month}: NOT READ: {why}");
     }
     let _ = writeln!(out, "  measured causes: {}", counts_text(&counts));
-    let written = plan_line(out, plan.write(run, symbol));
-    let months = refused_months(&scan);
-    let days = day_refused(&scan);
+    let written = plan.write(run, symbol);
+    let plan_said = plan_word(&written);
+    let written = plan_line(out, written);
+    let code = one_verdict(out, &scan, &sum, written);
+    run_event(run, symbol, code, &plan_said, &counts, scan.unread.len());
+    code
+}
+
+/// The closing lines of one series' report, and its exit.
+fn one_verdict(out: &mut String, scan: &SeriesScan, sum: &Tally, written: bool) -> u8 {
+    let months = refused_months(scan);
+    let days = day_refused(scan);
     if months.is_empty() && days == 0 && scan.unread.is_empty() && written {
         let _ = writeln!(out, "  no stored bar would be refused at landing");
         return OK;
@@ -901,6 +959,8 @@ struct SeriesDone {
     bad: bool,
     /// Its share of the quarantine plan, measured.
     plan: Plan,
+    /// Months of either rung or of its GDFL witness that would not open.
+    unread: usize,
 }
 
 /// `symbol` scanned, measured and written up for the `ALL` table. Reads
@@ -928,6 +988,7 @@ fn series_done(root: &Path, ask: &Ask, symbol: &str) -> Option<SeriesDone> {
             day_bad,
             bad,
             plan,
+            unread: scan.unread.len(),
         });
     }
     let mut row = String::new();
@@ -937,6 +998,7 @@ fn series_done(root: &Path, ask: &Ask, symbol: &str) -> Option<SeriesDone> {
         day_bad,
         bad,
         plan,
+        unread: scan.unread.len(),
     })
 }
 
@@ -1021,9 +1083,10 @@ fn all(run: &Run<'_>, out: &mut String) -> u8 {
     );
     let (mut sum, mut bad, mut no_minutes) = (Tally::default(), false, Vec::new());
     let mut plan = Plan::default();
-    let mut days_refused = 0_u64;
+    let (mut days_refused, mut unread) = (0_u64, 0_usize);
     for done in scan_every(root, ask, &symbols, workers) {
         days_refused += done.day_bad;
+        unread += done.unread;
         bad |= done.bad;
         plan.absorb(done.plan);
         match done.row {
@@ -1058,8 +1121,12 @@ fn all(run: &Run<'_>, out: &mut String) -> u8 {
         }
     );
     let _ = writeln!(out, "  measured causes: {}", counts_text(&plan.counts));
-    bad |= !plan_line(out, plan.write(run, "ALL"));
-    if bad { FAILED } else { OK }
+    let written = plan.write(run, "ALL");
+    let plan_said = plan_word(&written);
+    bad |= !plan_line(out, written);
+    let code = if bad { FAILED } else { OK };
+    run_event(run, "ALL", code, &plan_said, &plan.counts, unread);
+    code
 }
 
 #[cfg(test)]
