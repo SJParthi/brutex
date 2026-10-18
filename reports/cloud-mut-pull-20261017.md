@@ -28,7 +28,10 @@ module at the end of `gdfl_cm_auction.rs`; both are kept. `auction::parse`
 now answers a `Sidecar`, so one old test reads its `.records`, assertions
 unchanged. Every result below up to that merge was measured on the
 `f9cdb584` base; what the merge brought into scope is measured separately
-(Mutants: the code `feat/db-fix` moved during the pass).
+(Mutants: the code `feat/db-fix` moved during the pass). A second merge at
+the end (`f4f4eabb`, `feat/db-fix` `f8c22b1b`, five commits) touches only
+`store/tests/cited_commits.rs`, `docs/05-decisions.md` and
+`docs/06-limits.md`, nothing in scope, with no conflict.
 
 **No production line changed on this branch.** `git diff origin/feat/db-fix`
 touches only test code under `crates/pull`, one test-order override in
@@ -92,8 +95,9 @@ Nothing in scope. Stated limits, so nothing reads as more than it is:
   survivors and timeouts were all re-run here under Gate 18's flags.
   `request_minutes.rs` was re-mutated whole (58 + 115), `gdfl_archive.rs`
   on its changed lines, and the three files the merge changed on theirs.
-- Measured against `feat/db-fix` `297996d9`. Anything it gains in these ten
-  files after that commit is unmeasured.
+- Measured against `feat/db-fix` `297996d9`; its later `f8c22b1b`, merged
+  too, changes none of the ten files. Anything it gains in them after that
+  is unmeasured.
 - Branch coverage is the nightly toolchain's (the pinned 1.97.1 cannot
   measure it), at opt-level 0.
 
@@ -384,7 +388,9 @@ depends on, so these test binaries are the base's own):
   `docs/06-limits.md` on `feat/db-fix` cites nine commits (`023d6ab8`,
   `079ad4af`, `4756cce0`, `521066e6`, `72c91a46`, `91ef0094`, `9cb9de51`,
   `cde73992`, `ff636f58`) that are not ancestors of `origin/main`
-  (`4bbd37df`). Fails the same in the real checkout.
+  (`4bbd37df`). Fails the same in the real checkout. **Fixed by
+  `feat/db-fix` `f8c22b1b`** (BASE-CITED): after the second merge it passes
+  on the head (6 of 6).
 - After the merge only — `api` `server::head_deadline_body_tests` (AH-02,
   just landed on `feat/db-fix`), five tests:
   `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`,
@@ -434,9 +440,8 @@ depends on, so these test binaries are the base's own):
    fails as an ordinary user here and passes as root** (Gates). Not this
    part's crate; sources identical to `feat/db-fix`. The Mac runs as an
    ordinary user, so it will show there if it is not this container.
-3. **`store` `cited_commits` is red on `feat/db-fix` itself**: nine commits
-   cited in `docs/06-limits.md` are not on `origin/main` and not in
-   `NOT_ON_MAIN`.
+3. ~~`store` `cited_commits` red on `feat/db-fix`~~: fixed there by
+   `f8c22b1b` and merged in; passes on the head. Nothing to do.
 3a. **Three more base reds arrived with `feat/db-fix` `297996d9`**, none in
    this part's files, each deterministic in this container (Gates):
    `api`'s five `head_deadline_body_tests` (bodies cut at ~5.37 MB of
