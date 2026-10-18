@@ -3772,7 +3772,7 @@ jobs:
           # raised in the same change, so a pin cannot fall behind silently.
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
-          pull   crates/pull/benches/ratio.rs   26 C-11 C-12 C-13 C-26 C-GI-01 C-GI-02 C-GI-03 C-RF-01 C-AL-01 C-AL-02 C-FD-01 C-NFO-01
+          pull   crates/pull/benches/ratio.rs   30 C-11 C-12 C-13 C-26 C-GI-01 C-GI-02 C-GI-03 C-RF-01 C-AL-01 C-AL-02 C-FD-01 C-NFO-01 C-RK-01 C-RK-02
           store  crates/store/benches/ratio.rs  19 C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02 C-TIX-01 C-TIX-02 C-RP-01 C-VD-01 C-VD-02 C-VD-04
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27 C-LG-01 C-LG-02
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13

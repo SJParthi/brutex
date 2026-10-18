@@ -217,6 +217,10 @@ pub mod rehearsal;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// Keeping the vendor's answer: each Zerodha body deflated in a per-month
+/// pack beside a 128-byte receipt, and every refused row with its cause
+/// (IA-8; D-4810, D-4859, D-4920).
+pub mod response_keep;
 /// The risk-free rate as a dated series -- the RBI 91-day Treasury Bill
 /// cut-off yield, as of the latest release strictly before the trade day,
 /// read from a table the operator supplies by path. D-2810.

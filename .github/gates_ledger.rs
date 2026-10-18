@@ -1712,6 +1712,7 @@ const ALLOW_SCAN: Allow = &[
     ("crates/pull/src/fno.rs", 1),
     ("crates/pull/src/manifest.rs", 1),
     ("crates/pull/src/resolve.rs", 1),
+    ("crates/pull/src/response_keep.rs", 1),
     ("crates/pull/src/rolling.rs", 3),
     ("crates/pull/src/ssm.rs", 1),
     ("crates/pull/src/vendor.rs", 9), // 8 -> 9, GF-1 (docs/06-limits.md)

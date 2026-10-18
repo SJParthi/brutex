@@ -2493,6 +2493,43 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
 // credential or a field of a parameter path.
 const WP62_LITERAL: &str = "1421286 1421400 calendar_past_record request-before-record";
 
+// THE KEPT VENDOR ANSWERS (IA-8; D-4810, D-4859, D-4920; 14 Oct 2026). Every
+// word was read before it was listed, and they are of four kinds. (1) The
+// keeper's refusal and reason words, written into receipts, events and the
+// verdict's detail: `pack_full`, `storage_full`, `duplicate_body`,
+// `later_month`, `refused_answer`, `receipts_full`, `refusals_full` (verify
+// round 1: no segment can take a window's refused rows), `lock_stalled`,
+// `pack_damaged`, `not_a_regular_file`, `source_refused`, `body_mismatch`,
+// `body_not_kept`, `path_refused`, `io`, and the host operations an `Io`
+// refusal names (`create`, `deflate`, `decode`). (2) Its directory and file
+// words: `responses` (the root under the store, beside `bars`), `rsb` and
+// `rsx` (bodies and refused rows, as the test-only fault seam names
+// them). (3) Event field
+// names: `pack`, `detail`, `refused_rows` (the rows a refusal left unkept);
+// and `keep-lock`, the name of the thread a
+// contended pack lock waits on.
+// (4) Test-only: scratch tags (`doors`, `dup`, `race`, `shapes`, `odd-dir`,
+// `oversize`, `torn-body`, `disk`, `ia8-session`, `ia8-causes`), invented
+// months and a contract prefix (`2019-12`, `2020-01`, `2020-02`,
+// `2019-06-27-`), and the marked header, cookie and token a test proves never
+// reach a pack (`ia8-*-secret`, `ia8-header-mark`, `set-cookie`, `x-marker`).
+// (5) Repair rounds 2 and 3 (verify-IA-8-r3 blocking 2; each read before it
+// was listed): the window journal's file word `rsw` (`windows.rsw`, and the
+// fault seam's name for it), its refusal `windows_full`, its closing states
+// `completed` and `abandoned`, the event field `pointers_written`; and
+// test-only words: the scratch tags `healthy-contention`, `unkept-pointer`,
+// `ia8-dir-sync`, `ia8-kill-points`, `ia8-killed-window`, `ia8-torn-journal`
+// and `ia8-windows-full`, and the invented bodies `window` and `august` of
+// the emit-site drive.
+// None names an account, an organisation or an environment.
+const KEPT_ANSWER_LITERAL: &str = "keep-lock 2019-06-27- 2019-12 2020-01 2020-02 abandoned august body_mismatch body_not_kept \
+     completed create decode deflate healthy-contention ia8-dir-sync ia8-kill-points ia8-killed-window ia8-torn-journal \
+     ia8-windows-full pointers_written rsw unkept-pointer window windows_full \
+     detail disk doors dup duplicate_body ia8-causes ia8-cookie-secret ia8-header-mark ia8-session ia8-token-secret \
+     io later_month lock_stalled not_a_regular_file odd-dir oversize pack pack_damaged \
+     pack_full path_refused race receipts_full refusals_full refused_answer refused_rows responses rsb rsx set-cookie \
+     shapes source_refused storage_full torn-body x-marker";
+
 // WP-12f, THE GDFL CAPITAL-MARKET SCOPE (D-4878; 14 Oct 2026). The package's
 // rounds added literals under crates/pull and ran no CI gate; its fifth round
 // ran gate 1d and declares them here, each read before it was listed. Four
@@ -2656,7 +2693,7 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 68] = [
+const DECLARED: [&str; 69] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2718,6 +2755,7 @@ const DECLARED: [&str; 68] = [
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
     WP62_LITERAL,
+    KEPT_ANSWER_LITERAL,
     WP12F_LITERAL,
     MERGED_AFTER_GF1_LITERAL,
     MERGED_16_OCT_LITERAL,
