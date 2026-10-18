@@ -426,6 +426,8 @@ struct Gate {
 impl Visitor for Gate {
     fn visit(&mut self, node: &Node<'_>) {
         let table = node.table();
+        assert_eq!(node.support(), node.rows().len() as u64);
+        assert!(node.support() >= 5, "every visited node reaches the floor");
         let wins = node
             .rows()
             .iter()
