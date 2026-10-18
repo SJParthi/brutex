@@ -171,10 +171,86 @@ is the same 38 mutants, line for line.
 
 ### Every carried survivor, re-tested on the final tree (`24ca118c`)
 
-(In progress. The container restarted at 08:45 UTC during leg 1, after 9
-of the 50 mutants. Leg 2 tests the other 41. At 10:10: 39 of 50 done,
-28 caught, 11 missed, 0 timeouts. Every one missed is an argued equivalent
-below.)
+**The set: 50 mutants.**
+- the 12 that the 17 Oct report left missed or argued equivalent: run B's 8,
+  run C's 3, run D's 1;
+- its 3 timeouts;
+- `Head::check`'s two, which run C missed with two tests skipped;
+- the 7 whose 17 Oct logs held the full disk's `os error 28`;
+- `Series::feed_byte`'s two;
+- every mutant the 16 Oct report argued equivalent, at its current line:
+  `open_regular`, `staging::create`, `clear_staging`, `walk_sidecar`,
+  `write_durable`, `remove_tmp`, `genesis`, `publish`, `missing_below`,
+  `Gathering::drop` and `refuse_link`.
+
+The patterns also matched 4 neighbours, which ran too:
+`first_at_or_after`'s `4325:31`, and `publish`'s `+=` mutants at
+`3269:17` and `3287:30`.
+
+**How.** The gate's flags, in place on `24ca118c`, with nothing skipped,
+`cited_commits` included (in a worktree its history check runs):
+- the timeout auto-set to 900 s;
+- each unmutated baseline passed first (166 s and 170 s of tests).
+
+The container restarted at 08:45 UTC during leg 1, after 9 of the 50, and
+left one mutant written into the worktree's `file.rs`. It was reverted
+(`git checkout`) and leg 2 tested the other 41.
+
+| | leg 1 | leg 2 | total |
+|---|---:|---:|---:|
+| tested | 9 | 41 | **50** |
+| caught | 6 | 32 | **38** |
+| missed | 3 | 9 | **12** |
+| timeout | 0 | 0 | **0** |
+| unviable | 0 | 0 | 0 |
+
+**The 12 missed are exactly the 12 argued equivalents** (next section):
+- `MAX_ROW_LEN` ×3;
+- `O_SYNC.is_none()` → `false`;
+- `flush_all` `<` → `<=`;
+- `writer_flags` ×2;
+- `Code::worse`;
+- `Fold::push`;
+- `last_before` ×2;
+- `mark_coverage`.
+
+So no test in the full suite tells any of them apart.
+
+**The 38 caught, and the test that caught each.** Every one fails in
+0.10 to 0.24 s, except the three timeout mutants, which fail at their
+deadline as shown above.
+- `first_at_or_after` ×3: the agreeing-overlap test (20 s; `4325:31` in
+  0.16 s).
+- `missing_below` ×3: `the_missing_directories_are_strictly_below_the_root`.
+- `Gathering::drop` ×2:
+  `a_gathering_dropped_unfinished_restores_the_state_before_it`.
+- `refuse_link` ×2: `refuse_link_refuses_a_link_and_passes_everything_else`.
+- `open_regular` guard:
+  `an_absent_name_is_refused_without_a_look_and_a_link_with_one`.
+- `Head::check` ×2: `a_full_disk_at_any_byte_is_…` and
+  `a_misfiled_month_is_refused`.
+- `frames`: `a_device_error_is_named_with_what_was_being_read`.
+- `audited` `<=`: `a_file_on_disk_reads_the_same_as_its_bytes` (60 s).
+- `clear_staging`, `walk_sidecar`:
+  `a_refused_look_at_the_sort_index_or_its_staging_name_refuses_the_door`.
+- `staging::create` ×2: `a_look_the_host_refuses_is_a_stat_refusal_…` and
+  `a_second_create_the_host_refuses_is_a_create_refusal_…`.
+- `feed_byte` ×2: `a_series_feed_byte_is_its_vendors_own`.
+- The verdict writer's 18:
+  - `write_durable` ×3: `a_refused_writes_temporary_gone_or_held_is_said_as_it_is`;
+  - `remove_tmp` ×4: `a_linked_temporary_gone_is_done_and_one_held_refuses_as_a_remove`
+    and `a_hard_link_at_a_staging_name_is_refused_…`;
+  - `genesis` ×3: `a_year_index_linked_first_is_read_and_any_other_refused_link_is_said`;
+  - `publish` ×8: `an_image_link_refused_otherwise_than_exists_is_never_stepped_past`,
+    `a_crash_between_link_and_commit_never_overwrites_an_image_unit` and
+    `a_day_at_the_last_generation_is_refused_never_wrapped`.
+
+The 7 full-disk suspects of 17 Oct (`verdict.rs` 3081:5, 3084:21 ×2,
+3084:32, 3108:21 ×2, and `sealed.rs` 2156:9) are all among the caught.
+
+The 16 Oct pass argued 34 mutants equivalent. 22 of them are now caught by
+the 17 Oct pass's seams and tests. **The other 12 are the 12 missed above.
+No other mutant in scope needs an argument.**
 
 ### Coverage, the final run (on `24ca118c`)
 
