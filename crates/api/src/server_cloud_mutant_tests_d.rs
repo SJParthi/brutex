@@ -313,9 +313,11 @@ fn an_override_with_no_subsystem_is_ignored_by_name() {
 }
 
 /// **An empty vectored write through the head deadline moves nothing and
-/// re-arms nothing; a real one re-arms.** Covers the `n > 0` guard of
-/// `poll_write_vectored` (server.rs:17416), the twin of
+/// re-arms nothing; a real one re-arms at its flush.** Covers the `n > 0`
+/// guard on the vectored path, the twin of
 /// `a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved`.
+/// Since AH-02 (D-4975) the re-arm is the flush's, after a write that moved
+/// bytes, not the write's own.
 #[tokio::test]
 async fn a_vectored_write_through_the_head_deadline_rearms_only_when_bytes_moved() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -339,6 +341,9 @@ async fn a_vectored_write_through_the_head_deadline_rearms_only_when_bytes_moved
         .await
         .expect("an empty write");
     assert_eq!(none, 0);
+    assert_eq!(wrapped.written, 0);
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+    wrapped.flush().await.expect("a flush");
     assert!(matches!(wrapped.state, HeadState::Delivered));
 
     let wrote = wrapped
@@ -349,6 +354,12 @@ async fn a_vectored_write_through_the_head_deadline_rearms_only_when_bytes_moved
         .await
         .expect("a write");
     assert!(wrote > 0, "bytes moved");
+    assert_eq!(
+        wrapped.written,
+        u64::try_from(wrote).expect("a small count")
+    );
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+    wrapped.flush().await.expect("a flush");
     assert!(matches!(
         wrapped.state,
         HeadState::Awaiting {

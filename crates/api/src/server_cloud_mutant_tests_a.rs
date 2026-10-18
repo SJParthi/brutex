@@ -341,11 +341,16 @@ async fn the_limited_listener_reports_its_inner_address() {
     assert_ne!(reported.port(), 0);
 }
 
-/// **A plain write through the head deadline reaches the peer, and re-arms
-/// the next head's clock only when bytes moved.** hyper writes vectored, so
-/// `poll_write` (server.rs:17340-17351) is reached only by a direct writer;
-/// this kills the `poll_write -> Poll::Ready(Ok(0|1))` mutants and the
-/// `n > 0` guard.
+/// **A plain write through the head deadline reaches the peer, and the next
+/// head's clock re-arms only once bytes moved.** hyper writes vectored, so
+/// `poll_write` is reached only by a direct writer; this kills the
+/// `poll_write -> Poll::Ready(Ok(0|1))` mutants and the `n > 0` guard.
+///
+/// Since AH-02 (D-4975) a write no longer re-arms the clock itself: it counts
+/// the bytes that went, and the flush that finds every request finished
+/// re-arms it, only when that count is not zero. So the empty write is
+/// followed by a flush that must leave the clock off, and the real write by
+/// one that must start it.
 #[tokio::test]
 async fn a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -353,18 +358,28 @@ async fn a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved()
     let (slots, slot) = one_slot();
     let mut wrapped = HeadDeadline::new(server, slot, std::time::Duration::from_secs(30));
 
-    // AN EMPTY WRITE MOVES NOTHING AND RE-ARMS NOTHING.
+    // AN EMPTY WRITE MOVES NOTHING AND COUNTS NOTHING, so its flush re-arms
+    // nothing.
     wrapped.state = HeadState::Delivered;
     let none = wrapped.write(b"").await.expect("an empty write");
     assert_eq!(none, 0);
+    assert_eq!(wrapped.written, 0);
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+    wrapped.flush().await.expect("a flush");
     assert!(matches!(wrapped.state, HeadState::Delivered));
 
-    // A REAL WRITE: every byte reported, every byte delivered, clock re-armed.
+    // A REAL WRITE: every byte reported, counted and delivered, and the head
+    // clock still off while the response is in flight.
     let wrote = wrapped
         .write(b"HTTP/1.1 200 OK\r\n")
         .await
         .expect("a write");
     assert_eq!(wrote, 17);
+    assert_eq!(wrapped.written, 17);
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+    // THE FLUSH, with nothing in flight, re-arms the next head's clock a whole
+    // timeout ahead.
+    wrapped.flush().await.expect("a flush");
     assert!(matches!(
         wrapped.state,
         HeadState::Awaiting {
@@ -373,8 +388,6 @@ async fn a_direct_write_through_the_head_deadline_rearms_only_when_bytes_moved()
             ..
         }
     ));
-    // THE NEXT HEAD'S CLOCK RUNS FROM THE WRITE, a whole timeout ahead (kills
-    // `replace + with -` in `rearm`, server.rs:17265).
     let HeadState::Awaiting { deadline, .. } = wrapped.state else {
         panic!("re-armed above");
     };
