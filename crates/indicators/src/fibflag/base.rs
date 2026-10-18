@@ -40,7 +40,11 @@
 //! lowest close and deepest poke. Every sum is a prefix sum by day index, so a
 //! measurement is O(1) as the start moves. Amortised O(1) per candle per
 //! length; the worst single candle is O(session candles), when the start jumps
-//! or the touches recount, and that is bounded by the session.
+//! or the touches recount, and that is bounded by the session. Measured by
+//! `crates/indicators/benches/fibflag.rs` (rows C-FIB3-01 to C-FIB3-05);
+//! the rest itself is proved against a backward scan in
+//! `crates/indicators/tests/fib_base.rs`
+//! (`the_two_pointer_rest_equals_a_naive_recomputation_on_100000_seeded_days`).
 //!
 //! Touches (FM-F022) are a pure function of the window: the candles whose high
 //! touches the window's highest high at the direction's tolerance, one count per
@@ -1413,7 +1417,10 @@ impl Detector {
     /// (its length between three candles and the maximal rest's); otherwise
     /// they are dropped, and its next emittable candle recounts it once. The
     /// rest grows by at most one candle a candle, so that recount is paid for
-    /// by the candles it took to grow: amortised O(1).
+    /// by the candles it took to grow: amortised O(1), measured by
+    /// `crates/indicators/benches/fibflag.rs` (row C-FIB3-03, L-FIB3-04) and
+    /// proved against the naive recount in `crates/indicators/tests/fib_base.rs`
+    /// (`every_measurement_and_score_equals_its_naive_recomputation`).
     fn advance_lanes(&mut self, index: u32, rec: &Rec, t: usize) {
         let Self {
             micro,

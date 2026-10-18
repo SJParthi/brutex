@@ -62,7 +62,7 @@ fn flat(t: i64) -> (i64, i64, i64, i64) {
     }
 }
 
-/// As `flat`, then the last candle overlaps none of it.
+/// The whole-session stream, then a last candle that overlaps none of it.
 fn jump(t: i64) -> (i64, i64, i64, i64) {
     if t == LAST_SLOT {
         (BASE + 1_000, BASE + 1_100, BASE + 1_000, BASE + 1_050)

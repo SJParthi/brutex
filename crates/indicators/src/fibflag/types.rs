@@ -114,7 +114,9 @@ pub struct DetectorParams {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ZeroWidthReading {
     /// Emitted, flagged `zero_width`, with the stated limits (flat 1000,
-    /// tight closes 1000, partial U 1000, V bottom 0, shakeout 0).
+    /// tight closes 1000, partial U 1000, V bottom 0, shakeout 0), proved in
+    /// `crates/indicators/tests/fib_base.rs`
+    /// (`three_one_price_candles_give_flat_1000_and_set_the_flag`).
     Emit,
     /// Refused by name, `zero_width_base`: the labelled variant.
     Refuse,

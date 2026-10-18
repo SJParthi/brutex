@@ -542,7 +542,7 @@ struct RandomDay {
     slots: Vec<Slot>,
 }
 
-/// A random day: a slow walk, some flat candles, some holes, at most
+/// A random day: a slow walk, some one-price candles, some holes, at most
 /// `candles` candles, the first one wide enough for a ladder at tick 1.
 fn random_day(rng: &mut Seeded, candles: u64, zero_runs: bool) -> RandomDay {
     let count = 1 + rng.below(candles);
