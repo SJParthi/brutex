@@ -212,10 +212,12 @@ mod tests {
         (code, out)
     }
 
-    /// EVERY SUB-VERB REFUSES BY NAME, EXITS FAILED AND NAMES ITS PACKAGE.
+    /// EVERY SUB-VERB NOT BUILT YET REFUSES BY NAME, EXITS FAILED AND NAMES
+    /// ITS PACKAGE. `day-check` is built (FIB-8): with no month it is a misuse.
     #[test]
     fn each_fib_sub_verb_refuses_by_name() {
-        for (verb, owner) in SUBVERBS {
+        let built = ["day-check"];
+        for (verb, owner) in SUBVERBS.iter().filter(|(verb, _)| !built.contains(verb)) {
             let words: Vec<&str> = if *verb == "run" {
                 vec![verb, "--direction", "long", "--out", "/tmp/x"]
             } else {
@@ -235,7 +237,11 @@ mod tests {
             let (code, _) = routed(&[verb]);
             assert_eq!(
                 code,
-                if *verb == "run" { MISUSED } else { FAILED },
+                if *verb == "run" || built.contains(verb) {
+                    MISUSED
+                } else {
+                    FAILED
+                },
                 "{verb} alone"
             );
         }

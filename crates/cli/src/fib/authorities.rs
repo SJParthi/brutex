@@ -328,6 +328,9 @@ pub trait CalendarAuthority {
     fn version(&self) -> &AuthorityVersion;
     /// The verdict for `series` on IST epoch day `day`. O(1).
     fn tradable(&self, series: SeriesId, day: i64) -> Tradable;
+    /// The market-wide verdict alone, for an instrument with no series (an
+    /// index reference stamp). O(1).
+    fn market(&self, day: i64) -> Result<(), CalendarReason>;
     /// Whether the exchange traded at all on `day`: the calendar's own answer,
     /// which the previous traded session is read from. O(1).
     fn traded(&self, day: i64) -> bool;
@@ -439,6 +442,10 @@ impl CalendarAuthority for InterimCalendar {
             market: market_verdict(day),
             instrument: InstrumentSession::Unchecked,
         }
+    }
+
+    fn market(&self, day: i64) -> Result<(), CalendarReason> {
+        market_verdict(day)
     }
 
     fn traded(&self, day: i64) -> bool {

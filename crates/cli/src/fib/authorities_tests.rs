@@ -767,86 +767,104 @@ struct Measured<T> {
     inner: T,
 }
 
-macro_rules! measured_impl {
-    ($trait:ident, $($body:tt)*) => {
-        impl<T: $trait> $trait for Measured<T> {
-            fn version(&self) -> &AuthorityVersion {
-                &self.version
-            }
-            $($body)*
-        }
-    };
-}
-
-measured_impl!(
-    CalendarAuthority,
+impl<T: CalendarAuthority> CalendarAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn tradable(&self, series: SeriesId, day: i64) -> Tradable {
         self.inner.tradable(series, day)
-    },
+    }
+    fn market(&self, day: i64) -> Result<(), CalendarReason> {
+        self.inner.market(day)
+    }
     fn traded(&self, day: i64) -> bool {
         self.inner.traded(day)
     }
-);
-measured_impl!(
-    PoolAuthority,
+}
+
+impl<T: PoolAuthority> PoolAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn members(&self, day: i64) -> &[Member] {
         self.inner.members(day)
-    },
+    }
     fn slot_of(&self, series: SeriesId, day: i64) -> Option<u16> {
         self.inner.slot_of(series, day)
     }
-);
-measured_impl!(
-    FactorAuthority,
+}
+
+impl<T: FactorAuthority> FactorAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn factor(&self, series: SeriesId, day: i64) -> Result<FactorPair, String> {
         self.inner.factor(series, day)
-    },
+    }
     fn first_minute(&self, series: SeriesId, day: i64) -> Result<FactorPair, String> {
         self.inner.first_minute(series, day)
-    },
+    }
     fn covers(&self, day: i64) -> bool {
         self.inner.covers(day)
     }
-);
-measured_impl!(
-    SecondsTrust,
+}
+
+impl<T: SecondsTrust> SecondsTrust for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn status(&self, series: SeriesId, day: i64) -> SecondsStatus {
         self.inner.status(series, day)
     }
-);
-measured_impl!(
-    OrderFlowAuthority,
+}
+
+impl<T: OrderFlowAuthority> OrderFlowAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn window(&self, series: SeriesId, day: i64, from: u32, to: u32) -> OrderFlowWindow {
         self.inner.window(series, day, from, to)
     }
-);
-measured_impl!(
-    LandingAuthority,
+}
+
+impl<T: LandingAuthority> LandingAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn landing(&self, series: SeriesId, day: i64) -> Option<LandingId> {
         self.inner.landing(series, day)
-    },
+    }
     fn basis_break(&self, series: SeriesId, from: i64, day: i64) -> Option<BasisBreak> {
         self.inner.basis_break(series, from, day)
     }
-);
-measured_impl!(
-    TailWitness,
+}
+
+impl<T: TailWitness> TailWitness for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn after(&self, series: SeriesId, day: i64, last: u32) -> TailReading {
         self.inner.after(series, day, last)
     }
-);
-measured_impl!(
-    IndexScreen,
+}
+
+impl<T: IndexScreen> IndexScreen for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn screen(&self, index: &str, day: i64) -> IndexDay {
         self.inner.screen(index, day)
     }
-);
-measured_impl!(
-    ExpiryAuthority,
+}
+
+impl<T: ExpiryAuthority> ExpiryAuthority for Measured<T> {
+    fn version(&self) -> &AuthorityVersion {
+        &self.version
+    }
     fn expiry(&self, series: SeriesId, day: i64) -> ExpiryStamp {
         self.inner.expiry(series, day)
     }
-);
+}
 
 fn wrap<T>(kind: AuthorityKind, inner: T) -> Measured<T> {
     Measured {
@@ -878,6 +896,7 @@ fn a_set_with_no_interim_authority_may_write_the_store() {
     let series = SeriesId(0);
     assert!(set.calendar.tradable(series, on).admits());
     assert!(set.calendar.traded(on));
+    assert_eq!(set.calendar.market(on), Ok(()));
     assert_eq!(set.pool.slot_of(series, on), Some(0));
     assert!(!set.pool.members(on).is_empty());
     assert!(set.factor.factor(series, on).is_ok());

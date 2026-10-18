@@ -426,7 +426,7 @@ fn the_header_is_byte_golden() {
         "a block holds at least one record"
     );
 }
-const GOLDEN_HEADER_DIGEST_PREFIX: &str = "pinned-at-first-run";
+const GOLDEN_HEADER_DIGEST_PREFIX: &str = "f652e8802fbb6478";
 
 #[test]
 fn a_truncated_or_padded_file_is_detected() {
