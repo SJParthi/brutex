@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
-import { parseGoto, gotoAsk, landing, GOTO_MAX } from '../src/lib/db/goto.js';
+import { parseGoto, gotoAsk, landing, GOTO_MAX, gotoTurns, NO_LANDING } from '../src/lib/db/goto.js';
 import { istInstant, pageOfIndex, windowQuery, seriesPlan } from '../src/lib/db/bars-plan.js';
 import { dbSource } from './database-page-fixture.js';
 
@@ -80,7 +80,7 @@ test('go_to_a_minute_lands_on_its_first_bar_in_both_directions', () => {
   assert.deepEqual(landing(answer, { ...asked, desc: true, size: 8, when }), landing(answer, { ...asked, desc: true, size: 8, when }));
   const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
   const script = grid.slice(0, grid.indexOf('</script>'));
-  assert.match(script, /async function jumpToInstant\(at, label, key = '', minute = false\) \{\s*db\.landedRk = '';/);
+  assert.match(script, /async function jumpToInstant\(at, label, key = '', minute = false\) \{\s*(?:\/\*[\s\S]*?\*\/\s*)?const ticket = gotoTurn\.ask\(setKey\);\s*jumping = false;\s*db\.landedRk = '';/);
   assert.match(script, /setTimeout\(\(\) => \{\s*db\.landedRk = row\.rk;/);
   assert.match(script, /windowQuery\(feed, p, \{ \.\.\.bounds, \.\.\.gotoAsk\(at\) \}\)/);
   assert.match(script, /anchorRow = land\.index;\s*db\.page = land\.page;/);
@@ -242,6 +242,8 @@ function minutePicker(o = {}) {
      is asked. */
   let renders = 0;
   let landed = 0;
+  /** How many times a refusal stopped whatever Go to was out. */
+  let stops = 0;
   /** @type {number[][]} */
   const clearedAfter = [];
   let goTime = '';
@@ -257,9 +259,9 @@ function minutePicker(o = {}) {
     landed += 1;
     db.page = 9;
   };
-  const made = new Function('db', 'parseGoto', 'dayOnScreen', 'gotoSpan', 'jumpToInstant', 'tick', 'dayRung',
+  const made = new Function('db', 'parseGoto', 'dayOnScreen', 'gotoSpan', 'jumpToInstant', 'tick', 'dayRung', 'stopGoto',
     `let jumpWhy = ''; ${grid.slice(fn.start, fn.end)}; return { jumpToTime, why: () => jumpWhy };`)(
-    db, parseGoto, () => DAY, () => ({ lo: DAY, hi: DAY, what: 'this selection' }), jumpToInstant, tick, Boolean(o.dayRung));
+    db, parseGoto, () => DAY, () => ({ lo: DAY, hi: DAY, what: 'this selection' }), jumpToInstant, tick, Boolean(o.dayRung), () => { stops += 1; });
   db.jumpToTime = made.jumpToTime;
   const onchange = new Function('db', `return (${attr('onchange')});`)(db);
   /** A click on the minute's radio: `false` when it was already checked, so no change fired. */
@@ -271,7 +273,7 @@ function minutePicker(o = {}) {
   const settle = async () => {
     for (let turn = 0; turn < 6; turn += 1) await new Promise((done) => setTimeout(done, 0));
   };
-  return { db, reads, pick, settle, clearedAfter, why: made.why, summary: attr('summary') };
+  return { db, reads, pick, settle, clearedAfter, why: made.why, summary: attr('summary'), stops: () => stops };
 }
 
 test('the_minute_picker_lands_again_on_the_minute_it_already_landed_on', async () => {
@@ -321,6 +323,7 @@ test('a minute the picker refuses is offered again too', async () => {
   await p.settle();
   assert.equal(p.reads.length, 0);
   assert.deepEqual(p.clearedAfter, [[1, 0], [2, 0]], 'each refusal is cleared after its own render');
+  assert.equal(p.stops(), 2, 'and each refusal stops whatever Go to was still out, so it cannot land after the words');
 });
 
 test('an end of the span the grid does not know is no end, and a number typed is read as its text', () => {
@@ -337,4 +340,238 @@ test('an end of the span the grid does not know is no end, and a number typed is
   assert.equal(/** @type {any} */ (parseGoto(0, DAY)).why,
     '"0" is not an instant. Type a day and a time, 2019-03-15 10:02, or a time alone, 10:02, for the day on screen.');
   assert.equal(/** @type {any} */ (parseGoto(null, DAY)).why.startsWith('Type an instant'), true);
+});
+
+test('a_go_to_lands_only_for_the_question_still_on_screen', () => {
+  // `gotoTurns` alone: the latest Go to, for the row set it was asked of.
+  const turns = gotoTurns();
+  const a = turns.ask('set-1');
+  assert.equal(turns.current(a, 'set-1'), true);
+  assert.equal(turns.current(a, 'set-2'), false, 'another row set is not this answer’s');
+  const b = turns.ask('set-1');
+  assert.equal(a.signal.aborted, true, 'a later Go to stops the read before it');
+  assert.equal(b.signal.aborted, false);
+  assert.deepEqual([turns.mine(a), turns.current(a, 'set-1'), turns.mine(b), turns.current(b, 'set-1')], [false, false, true, true]);
+  turns.drop();
+  assert.equal(b.signal.aborted, true, 'a moved row set stops the Go to that is out');
+  assert.deepEqual([turns.mine(b), turns.current(b, 'set-1')], [false, false]);
+  turns.drop();
+  const c = turns.ask('set-2');
+  assert.equal(turns.current(c, 'set-2'), true, 'and the next Go to is asked as ever');
+});
+
+/**
+ * THE GRID'S OWN GO TO, CUT OUT OF `DbBarsGrid.svelte` (R3-03 repair 2):
+ * `gotoTurn`, `stopGoto`, `jumpToInstant` and `dropGoto` run over a plain
+ * scope whose reads the test answers by hand, late or never.
+ */
+function gridGoto() {
+  const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
+  /** @type {Record<string, any>} */
+  const found = {};
+  /** @param {any} node */
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'FunctionDeclaration' && ['jumpToInstant', 'dropGoto'].includes(node.id?.name)) found[node.id.name] = node;
+    if (node.type === 'VariableDeclaration' && ['gotoTurn', 'stopGoto', 'dayOnScreen'].includes(node.declarations?.[0]?.id?.name)) found[node.declarations[0].id.name] = node;
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'parent' || key === 'loc' || key === 'metadata') continue;
+      if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === 'object') walk(value);
+    }
+  };
+  walk(parse(grid, { modern: true }));
+  for (const name of ['gotoTurn', 'stopGoto', 'dayOnScreen', 'jumpToInstant', 'dropGoto']) {
+    if (!found[name]) throw new Error(`${name} is not in DbBarsGrid.svelte`);
+  }
+  const src = (/** @type {string} */ name) => grid.slice(found[name].start, found[name].end);
+  /** @type {{at: number, signal: AbortSignal, resolve: (a: any) => void, reject: (e: any) => void}[]} */
+  const reads = [];
+  const scope = /** @type {any} */ ({
+    db: { landedRk: 'earlier', page: 1, pageSize: 10, toDay: '', fromDay: '' }, barPage: [],
+    jumpWhy: 'earlier', jumping: false, pinned: false, anchorRk: '', anchorRow: -1, barSortKey: 'ts', barDesc: true,
+    setKey: 'set-1', plan: { keys: ['NSE-FNO-ALPHA-2019-03-28-1160000-CE'], why: null }, feeds: { active: 'gdfl' },
+    barState: { answer: null, loading: true, error: null, set: '' }, pageTotal: 0,
+    sortNow: { key: 'ts', desc: true }, bounds: {},
+    readWindowPage: (/** @type {string} */ q, /** @type {number} */ _n, /** @type {AbortSignal} */ signal) =>
+      new Promise((resolve, reject) => reads.push({ at: Number(new URLSearchParams(q).get('at')), signal, resolve, reject })),
+    windowQuery: (/** @type {string} */ _feed, /** @type {any} */ _p, /** @type {any} */ o) => `at=${o.at}`,
+    gotoAsk, landing, NO_LANDING, gotoTurns,
+    dayLabel: () => '2019-03-15', barTimeLabel: () => '10:02:03', tick: () => Promise.resolve(), rowKey: (/** @type {string} */ k, /** @type {number} */ t) => `${k}@${t}`
+  });
+  const made = new Function('scope', `with (scope) { ${src('gotoTurn')} ${src('stopGoto')} ${src('dayOnScreen')} return { jumpToInstant: ${src('jumpToInstant')}, dropGoto: ${src('dropGoto')}, dayOnScreen }; }`)(scope);
+  /** An answer `at_index` places in a 300-row query. @param {number} t @param {number} i */
+  const answer = (t, i) => ({ total: 300, at_index: i, bars: [{ t }] });
+  return { scope, reads, answer, go: (/** @type {number} */ t, key = '') => made.jumpToInstant(t, `instant ${t}`, key), dropGoto: made.dropGoto, dayOnScreen: made.dayOnScreen };
+}
+
+test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failure of a stopped one', { timeout: 20_000 }, async () => {
+  // TWO QUICK PICKS, THE FIRST ANSWER LATE (the second agent's attack: 10:02
+  // held 900 ms, then 10:04). Before the repair the grid ended on 10:02.
+  let g = gridGoto();
+  const first = g.go(1000);
+  const second = g.go(2000);
+  assert.equal(g.reads.length, 2);
+  assert.equal(g.reads[0].signal.aborted, true, 'the first read is stopped');
+  g.reads[1].resolve(g.answer(2000, 200));
+  await second;
+  assert.equal(g.scope.db.page, 10, 'the later pick lands: row 100 of 300 newest first, page 10');
+  assert.equal(g.scope.jumping, false);
+  g.reads[0].resolve(g.answer(1000, 10)); // an answer that ignored its stop and came back after
+  await first;
+  assert.equal(g.scope.db.page, 10, 'and the earlier answer, late, moves nothing');
+  assert.equal(g.scope.anchorRow, 99);
+  assert.equal(g.scope.jumpWhy, '', 'the later instant is a bar of its own, so nothing is said, and the earlier one said nothing either');
+
+  // A STOPPED READ'S FAILURE SAYS NOTHING; THE LATEST ONE'S IS SAID.
+  g = gridGoto();
+  const stopped = g.go(1000);
+  const latest = g.go(2000);
+  g.reads[0].reject(new Error('The operation was aborted.'));
+  await stopped;
+  assert.equal(g.scope.jumpWhy, '', 'no word for a Go to the reader replaced');
+  assert.equal(g.scope.jumping, true, 'and the later one is still finding its page');
+  g.reads[1].reject(new Error('Failed to fetch'));
+  await latest;
+  assert.equal(g.scope.jumpWhy, 'Go to could not be answered: Failed to fetch');
+  assert.equal(g.scope.jumping, false);
+
+  // THE ROW SET MOVES WHILE THE ANSWER IS OUT (a Side change 150 ms after a
+  // Go to): before the effect has even run, the answer is not this screen's.
+  g = gridGoto();
+  let out = g.go(1000);
+  g.scope.setKey = 'set-2';
+  g.reads[0].resolve(g.answer(1000, 10));
+  await out;
+  assert.deepEqual([g.scope.db.page, g.scope.anchorRow, g.scope.pinned, g.scope.jumpWhy], [1, -1, false, ''], 'nothing lands on the new set');
+  // And once it has: the read is stopped, and the line and the mark go too.
+  g = gridGoto();
+  out = g.go(1000);
+  assert.equal(g.scope.jumping, true);
+  g.scope.setKey = 'set-2';
+  g.dropGoto();
+  assert.equal(g.reads[0].signal.aborted, true);
+  g.reads[0].resolve(g.answer(1000, 10));
+  await out;
+  assert.deepEqual([g.scope.db.page, g.scope.jumping, g.scope.jumpWhy, g.scope.db.landedRk, g.scope.anchorRow, g.scope.pinned], [1, false, '', '', -1, false]);
+  // A landing already made on the old set is not carried onto the new one.
+  g = gridGoto();
+  out = g.go(1000);
+  g.reads[0].resolve(g.answer(1000, 10));
+  await out;
+  assert.deepEqual([g.scope.db.page, g.scope.pinned, g.scope.anchorRow], [29, true, 289]);
+  g.scope.db.landedRk = 'row 290';
+  g.scope.setKey = 'set-2';
+  g.dropGoto();
+  assert.deepEqual([g.scope.pinned, g.scope.anchorRow, g.scope.anchorRk, g.scope.jumpWhy, g.scope.db.landedRk], [false, -1, '', '', '']);
+
+  // NOTHING TO ASK OF: no feed, no series, or a plan the page refused. Each
+  // is said, nothing is read, and the Go to before it is stopped.
+  for (const [what, set, says] of /** @type {[string, (sc: any) => void, string][]} */ ([
+    ['no feed', (sc) => { sc.feeds = { active: null }; }, 'No selection is read, so there is nothing to go to.'],
+    ['no series', (sc) => { sc.plan = { keys: [], why: null }; }, 'No selection is read, so there is nothing to go to.'],
+    ['a refused plan', (sc) => { sc.plan = { keys: ['NSE-FNO-ALPHA-2019-03-28-1160000-CE'], why: 'the plan names no rung' }; }, 'the plan names no rung']
+  ])) {
+    g = gridGoto();
+    const before = g.go(1000);
+    set(g.scope);
+    await g.go(2000);
+    assert.deepEqual([g.reads.length, g.scope.jumpWhy, g.scope.jumping], [1, says, false], what);
+    assert.equal(g.reads[0].signal.aborted, true, `${what}: the Go to before it is stopped`);
+    g.reads[0].resolve(g.answer(1000, 10));
+    await before;
+    assert.equal(g.scope.db.page, 1, `${what}: and lands nowhere`);
+  }
+
+  // A PLAN REFUSED WITH NO WORDS still says why nothing is read.
+  g = gridGoto();
+  g.scope.plan = { keys: [], why: '' };
+  await g.go(1000);
+  assert.equal(g.scope.jumpWhy, 'No selection is read, so there is nothing to go to.');
+
+  // UNDER A VALUE SORT a Go to puts the grid back in time order, newest
+  // first, and lands there; the line says so.
+  g = gridGoto();
+  g.scope.sortNow = { key: 'c', desc: false };
+  g.scope.barSortKey = 'c';
+  g.scope.barDesc = false;
+  out = g.go(2000);
+  g.reads[0].resolve(g.answer(2000, 200));
+  await out;
+  assert.deepEqual([g.scope.barSortKey, g.scope.barDesc, g.scope.db.page, g.scope.anchorRow], ['ts', true, 10, 99]);
+  assert.match(g.scope.jumpWhy, /^The grid is back in time order, which is the order an instant has a place in.$/);
+  // A re-sort's render that a later Go to overtakes lands nothing either.
+  g = gridGoto();
+  g.scope.sortNow = { key: 'c', desc: false };
+  g.scope.tick = () => new Promise((done) => setTimeout(done, 5));
+  out = g.go(2000);
+  g.reads[0].resolve(g.answer(2000, 200));
+  await Promise.resolve();
+  await Promise.resolve();
+  const overtaking = g.go(3000);
+  await out;
+  assert.deepEqual([g.scope.db.page, g.scope.anchorRow, g.scope.pinned], [1, -1, false], 'the Go to overtaken during its re-sort lands nowhere');
+  g.reads[1].resolve(g.answer(3000, 0));
+  await overtaking;
+  assert.equal(g.scope.db.page, 30, 'the later one lands: row 300 of 300 newest first');
+
+  // A SERIES NAMED (an extreme): its row is meant only when the bar is at
+  // the instant itself.
+  g = gridGoto();
+  out = g.go(2000, 'NSE-INDEX-ALPHA');
+  g.reads[0].resolve(g.answer(2000, 200));
+  await out;
+  assert.equal(g.scope.anchorRk, 'NSE-INDEX-ALPHA@2000');
+  g = gridGoto();
+  out = g.go(2000, 'NSE-INDEX-ALPHA');
+  g.reads[0].resolve(g.answer(2007, 200));
+  await out;
+  assert.equal(g.scope.anchorRk, '', 'a later bar is not that series’ bar at the instant');
+  g = gridGoto();
+  out = g.go(2000);
+  g.reads[0].resolve(g.answer(2000, 200));
+  await out;
+  assert.equal(g.scope.anchorRk, '', 'and with no series named, none is meant');
+
+  // THE DAY A TIME ALONE IS READ ON: the first row on screen, else the
+  // window's last day, else its first.
+  g = gridGoto();
+  assert.equal(g.dayOnScreen(), '');
+  g.scope.db.fromDay = '2019-03-01';
+  assert.equal(g.dayOnScreen(), '2019-03-01');
+  g.scope.db.toDay = '2019-03-15';
+  assert.equal(g.dayOnScreen(), '2019-03-15');
+  g.scope.db.fromDay = '';
+  assert.equal(g.dayOnScreen(), '2019-03-15');
+  g.scope.barPage = [{ day: '2019-03-08' }];
+  assert.equal(g.dayOnScreen(), '2019-03-08');
+
+  // AN ANSWER ALREADY KNOWN TO HOLD NO BAR IS NOT ASKED AGAIN.
+  g = gridGoto();
+  g.scope.barState = { answer: { total: 0 }, loading: false, error: null, set: 'set-1' };
+  await g.go(1000);
+  assert.equal(g.reads.length, 0, 'no at= read');
+  assert.equal(g.scope.jumpWhy, NO_LANDING);
+  assert.equal(g.scope.jumping, false);
+  // Known for ANOTHER set, or still loading, or failed: asked.
+  for (const barState of [
+    { answer: { total: 0 }, loading: false, error: null, set: 'set-0' },
+    { answer: { total: 0 }, loading: true, error: null, set: 'set-1' },
+    { answer: { total: 0 }, loading: false, error: 'refused', set: 'set-1' },
+    { answer: null, loading: false, error: null, set: 'set-1' }
+  ]) {
+    g = gridGoto();
+    g.scope.barState = barState;
+    void g.go(1000);
+    assert.equal(g.reads.length, 1, JSON.stringify(barState));
+  }
+  g = gridGoto();
+  g.scope.barState = { answer: { total: 4 }, loading: false, error: null, set: 'set-1' };
+  g.scope.pageTotal = 4;
+  void g.go(1000);
+  assert.equal(g.reads.length, 1, 'a query that keeps bars is asked');
+  // THE GRID CALLS `dropGoto` WHEN THE ROW SET MOVES, and never on its first
+  // reading: a remount keeps the line under the strip.
+  const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
+  assert.match(grid, /\$effect\(\(\) => \{\s*const set = setKey;\s*untrack\(\(\) => \{\s*const before = gotoSet;\s*gotoSet = set;\s*if \(before !== null && before !== set\) dropGoto\(\);\s*\}\);\s*\}\);/);
 });

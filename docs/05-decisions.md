@@ -72815,7 +72815,7 @@ a minute"), and the line under the strip still says where the grid landed.
 `parseGoto` also reads an empty end or name of its span as none (`||`, not
 `??`): the grid gives `''` for an end it does not know, which printed "Pick a
 day from 15 Mar 2019 to ." and "after 's last day". Tests that fail on
-`5d7ebdc72`: `the_minute_picker_lands_again_on_the_minute_it_already_landed_on`
+the first R3-03 head: `the_minute_picker_lands_again_on_the_minute_it_already_landed_on`
 and `a minute the picker refuses is offered again too` (they cut the picker's
 `selected` and `onchange` out of `DbControls.svelte` and `jumpToTime` out of
 `DbBarsGrid.svelte`, and refuse a click on a checked radio as the browser
@@ -72833,6 +72833,42 @@ CE's `at=` p50 1.1, p99 4.1, max 8.4 ms and its page p50 1.0, p99 5.5, max
 9.0 ms; NIFTY spot's `at=` p50 1.9, p99 3.1, max 4.2 ms and its page p50 1.9,
 p99 2.8, max 3.1 ms. `parseGoto` with an empty span end, in node, n = 20,000:
 p50 1.0 µs, p99 1.8 µs, max 66 µs.
+
+**Repair 2 (18 Oct, the second agent's follow-ups).** A Go to's answer was
+applied whenever it came back. Two quick picks with the first answer held
+900 ms (10:02, then 10:04) ended on 10:02's page with 10:02 marked; a Side
+change 150 ms after a Go to moved the new contract's 22 rows to page 3 of 3,
+and "row 81 of 142" stayed under the strip after any change of selection.
+`gotoTurns` (`goto.js`) now holds one Go to at a time: asking stops the read
+before it, and `jumpToInstant` applies an answer only while it is still the
+latest Go to AND the row set it was asked of (`setKey`) is still the one on
+screen, checked after the read and again after the re-sort's render. When the
+row set moves, `dropGoto` stops the Go to that is out and clears the line
+under the strip, the mark and a landing whose page is not yet read; on its
+first reading it clears nothing, so a remount keeps the line. A refused Go to
+stops the one before it, so a late answer cannot land after the refusal's
+words; a failure is said only for the latest Go to; and a query whose page
+read already answered no bar is not asked again (`NO_LANDING`, the words
+`landing` says). Tests that fail on the first R3-03 repair:
+`a_go_to_lands_only_for_the_question_still_on_screen`, `a late Go to answer
+lands nowhere: a later Go to, a moved row set, a failure of a stopped one`
+(the grid's own `gotoTurn`, `stopGoto`, `jumpToInstant` and `dropGoto` cut out
+of `DbBarsGrid.svelte` and run over a scope whose reads the test answers late
+or never) and `a minute the picker refuses is offered again too` (each refusal
+stops what is out). Each step is O(1): one counter and one abort. Measured in
+node on a loaded machine (18 Oct, `performance.now`, n = 20,000 each, 10,000
+for `drop`): `ask` p50 2.3, p99 10.8, max 2,979 µs (it makes an
+`AbortController`); `current` p50 0.04, p99 0.13, max 13 µs; `drop` p50 3.0,
+p99 20.0, max 2,981 µs. Shadow (:9502, 18 Oct, the second agent's attacks
+re-run): two quick picks with the first `at=` read held 900 ms end on 10:04's
+page 3 with 10:04:00 marked, the first read cancelled; a Side change 80 ms
+after a Go to whose read is held 1,500 ms, and under a uniform 300 ms latency
+by picker and by typed box, leaves the PE on page 1 of 3 with no line under
+the strip and no mark, the `at=` read cancelled; with no latency the landing
+on page 9 is made and the Side change then clears it; a blocked `at=` read
+says "Go to could not be answered: Failed to fetch" and the same minute again
+lands on page 9; a Go to typed on the empty 03:00 to 04:00 window sends no
+read and says the `NO_LANDING` words.
 
 ### D-5863 — Fit measures the heading's two rows and the notes strip is one fixed line, so no "Fit · 50" and no row under a notice (DB-N02, R3-03) — 2026-10-17
 
@@ -72857,7 +72893,7 @@ nine rows by the Fit's own count and one short of the fold's
 1,245px down the page), so the Fit was nine everywhere. The floor now adds the
 2px: the scroll box is 460px and the Fit is 10. Test: `the grid box at its
 floor holds ten rows by the Fit’s own count` (`web/tests/db-pager.test.js`; on
-`5d7ebdc72` it reads 458). Shadow, 18 Oct: at 1440 x 900, 1440 x 700, 1440 x
+the first R3-03 head it reads 458). Shadow, 18 Oct: at 1440 x 900, 1440 x 700, 1440 x
 1100 and 1280 x 800 the box is 460px, `Fit · measuring` then `Fit · 10`, ten
 rows, the last ending 8px above the notes strip, and nothing scrolls.
 
@@ -72902,3 +72938,33 @@ time order, "The grid is back in time order, newest first."; 03:00 to 04:00 on
 15 Mar 2019: the time window named; 2024-03-02: the drill session's day flags,
 no census accusation; six selections opened by address: no "census and the
 files disagree" and no "No bar came back" drawn at any moment.
+
+**Repair 2 (18 Oct, the second agent's blocking finding).** R303-04 said no
+sort is offered on a column with no value on the selection, and the page
+refused only Volume and open interest. On NIFTY spot · Zerodha 1min (1 to 30
+Sep 2026, 7,875 rows) Expiry, Days to exp, Type and Strike were enabled over
+cells that all read `—`; Days to exp read every row in eight requests, put its
+caret up and wrote `sort=dte` into the address, and ordered nothing.
+`seriesKinds` (`notes-bars.js`) reads the selection's series once per
+selection, by the same parse of the stored name the cells use (`expiryOf`,
+`contractOf` in `decoration.js`), and `refusalFor` is one look-up a header:
+Expiry and Days to exp are refused when no series is a contract, Type and
+Strike when none is an option, and TF when the selection is read at one rung
+(every row carries the same one), each with its reason on the disabled header,
+and a sort carried onto such a selection reads time order and says so, as
+Volume's does. A column empty by its DATA rather than its kind (a contract
+whose feed stamps no open interest) is not known before the read and stays
+offered: named in `docs/06-limits.md` L-R303-11, and R303-04 says exactly
+this much. Test: `no_sort_is_offered_on_a_column_without_values` checks every
+header a press can order against an index, a share, a future, an option and
+mixes; on the first R3-03 repair it fails at the index ("an index": only
+`vol`, `oi` and `oichg` were refused). Cost: `seriesKinds` is one pass over the
+series a selection (L-R303-05, measured there), where the offer it replaced
+was a pass a header a render. Shadow (:9502, 18 Oct, 1440 x 900): NIFTY spot ·
+Zerodha 1min, 1 to 30 Sep 2026: TF, Volume, Open interest, OI chg %, Expiry,
+Days to exp, Type and Strike disabled with their reasons, a press on Days to
+exp or TF sends no request and leaves the address as it was; the same address
+with `&sort=dte&dir=desc` opens with its three ordinary reads, says "Days to
+exp is not an order on this selection", reads time order and drops the sort
+from the address; the 11,600 CE on 15 Mar 2019 keeps every contract header
+and Days to exp still orders it.

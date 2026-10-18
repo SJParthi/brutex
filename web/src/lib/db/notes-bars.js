@@ -20,6 +20,7 @@
  * are relative for the same reason — `$lib` is a Vite alias node cannot see.
  */
 import { fmt } from './notes-labels.js';
+import { contractOf, expiryOf } from './decoration.js';
 
 /* ---------------------------------------------------------------------
    WHAT HAS NO SOURCE, SAID ONCE EACH.
@@ -357,10 +358,46 @@ export const NO_VOLUME_SORT =
   'an index has no traded volume (D-2802, D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under a Volume caret.';
 export const NO_OI_SORT =
   'an index or a share has no open interest (D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_EXPIRY_SORT =
+  'no series of this selection is a contract, and only a future or an option carries an expiry in its stored name: every row of this selection reads —, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_OPTION_SORT =
+  'no series of this selection is an option, and only an option carries a side and a strike in its stored name: every row of this selection reads —, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_RUNG_SORT =
+  'this selection is read at one rung, so every row carries the same one: there is nothing to order — the rows would come back in time order under this caret.';
+
+/**
+ * WHAT THE SELECTION'S SERIES CAN CARRY, read once per selection (R3-03).
+ *
+ * One pass over the series keys, so a header's refusal is one look-up on
+ * every render and every press rather than a pass over the series each time:
+ * a whole option chain is thousands of keys and the grid asks about
+ * twenty-five headers several times a render. The contract facts are read
+ * off the stored name by the SAME parse the cells use (`expiryOf`,
+ * `contractOf` in `decoration.js`), so a header cannot be offered over a
+ * column whose cells that parse leaves empty, nor refused over one it fills.
+ *
+ * @param {string[]} keys the selection's series
+ * @param {string} [timeframe] the rung the selection is read at, `''` for none chosen
+ */
+export function seriesKinds(keys, timeframe = '') {
+  let allIndex = true;
+  let noDerivative = true;
+  let expiry = false;
+  let option = false;
+  for (const k of keys) {
+    const seg = segmentOfKey(k);
+    if (seg !== 'INDEX') allIndex = false;
+    if (seg !== 'INDEX' && seg !== 'CASH') noDerivative = false;
+    if (!expiry && expiryOf(String(k)) !== null) expiry = true;
+    if (!option && contractOf(String(k)) !== null) option = true;
+  }
+  return { n: keys.length, allIndex, noDerivative, expiry, option, oneRung: timeframe !== '' };
+}
 
 /**
  * WHETHER A SORT MEANS SOMETHING ON THIS SELECTION (R3-03): `null` when it
- * does, else the reason its button is disabled.
+ * does, else the reason its button is disabled. One look-up: the selection is
+ * read once, by `seriesKinds`.
  *
  * Volume on an index and open interest on an index or a share are n/a on
  * every row, by the server's own rule (`bars_change.rs`: an `INDEX` bar has no
@@ -368,16 +405,31 @@ export const NO_OI_SORT =
  * them answered time order wearing a Volume caret (the 11 Oct re-check, NIFTY
  * spot · Zerodha 1min). A selection with any derivative keeps the sort.
  *
- * @param {string} key the grid's column key @param {string[]} keys the selection's series
+ * THE CONTRACT COLUMNS TOO (R3-03 repair 2). Expiry and Days to exp read `—`
+ * on every row of a selection with no future or option, Type and Strike on
+ * every row of one with no option, and they were offered: Days to exp on
+ * NIFTY spot · Zerodha 1min read all 7,875 rows in eight requests and
+ * ordered nothing, with the caret on it and `sort=dte` in the address. And
+ * TF, which the grid reads at one rung, so every row carries the same one.
+ *
+ * @param {string} key the grid's column key @param {ReturnType<typeof seriesKinds>} kinds
  * @returns {string | null}
  */
-export function sortRefusal(key, keys) {
-  if (keys.length === 0) return null;
-  const segs = keys.map(segmentOfKey);
-  if (key === 'vol' && segs.every((s) => s === 'INDEX')) return NO_VOLUME_SORT;
-  if ((key === 'oi' || key === 'oichg') && segs.every((s) => s === 'INDEX' || s === 'CASH')) return NO_OI_SORT;
+export function refusalFor(key, kinds) {
+  if (kinds.n === 0) return null;
+  if (key === 'vol' && kinds.allIndex) return NO_VOLUME_SORT;
+  if ((key === 'oi' || key === 'oichg') && kinds.noDerivative) return NO_OI_SORT;
+  if ((key === 'exp' || key === 'dte') && !kinds.expiry) return NO_EXPIRY_SORT;
+  if ((key === 'side' || key === 'strike') && !kinds.option) return NO_OPTION_SORT;
+  if (key === 'tf' && kinds.oneRung) return NO_RUNG_SORT;
   return null;
 }
+
+/**
+ * `refusalFor` over a list of series, for a caller that asks once.
+ * @param {string} key @param {string[]} keys @param {string} [timeframe]
+ */
+export const sortRefusal = (key, keys, timeframe = '') => refusalFor(key, seriesKinds(keys, timeframe));
 
 /**
  * WHAT TO DO WHEN THE BROWSER WILL NOT ORDER A COLUMN (R3-03, DB-B50): advice

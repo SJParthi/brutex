@@ -92,6 +92,9 @@ export function parseGoto(text, day, span = {}) {
  */
 export const gotoAsk = (at) => ({ sort: 'ts', desc: false, at, limit: 1 });
 
+/** What a Go to says when the query keeps no bar: there is nothing to land on. */
+export const NO_LANDING = 'No bar is kept by this query, so there is nothing to land on.';
+
 /**
  * @typedef {{page: number, index: number, bar: any, why: string}} Landing
  * `index` the 0-based row in the grid's own order; `why` what is said under
@@ -113,7 +116,7 @@ export const gotoAsk = (at) => ({ sort: 'ts', desc: false, at, limit: 1 });
  */
 export function landing(answer, o) {
   const total = Number(answer?.total);
-  if (!Number.isSafeInteger(total) || total <= 0) return { why: 'No bar is kept by this query, so there is nothing to land on.' };
+  if (!Number.isSafeInteger(total) || total <= 0) return { why: NO_LANDING };
   /* A number, not `Number(…)` of it: `null` — no place computed — is not row 0. */
   const ascIndex = answer.at_index;
   const bar = Array.isArray(answer.bars) ? answer.bars[0] : undefined;
@@ -143,5 +146,49 @@ export function landing(answer, o) {
     index,
     bar,
     why: `No bar opens ${o.minute ? 'in the minute' : 'at'} ${o.minute ? o.label.slice(0, 16) : o.label}. Landed on the first bar after it, ${o.when(bar.t)} IST, ${fmt(gap)} second(s) later — ${row}.`
+  };
+}
+
+/**
+ * ONE GO TO AT A TIME, FOR THE ROW SET IT WAS ASKED OF (R3-03 repair 2).
+ *
+ * A Go to asks the server where its instant lies and lands when the answer
+ * comes back. Nothing stopped an answer that came back LATE: two quick picks
+ * (10:02, then 10:04, the first answer held 900 ms) left the grid on 10:02's
+ * page with 10:02 marked, and a Side change 150 ms after a Go to moved the
+ * new contract's 22 rows to page 3 of 3 under the old contract's "row 81 of
+ * 142". The answer belongs to the question still on screen, or to nobody.
+ *
+ * `ask` starts a Go to and stops the one before it (its read is aborted and
+ * its answer will not land); `mine` says whether a ticket is still the latest
+ * Go to; `current` adds that the row set it was asked of is still the one on
+ * screen; `drop` stops whatever Go to is out because the row set moved. Each
+ * is O(1).
+ */
+export function gotoTurns() {
+  let turn = 0;
+  /** @type {AbortController | null} */
+  let flight = null;
+  return {
+    /** @param {string} set the row set the Go to is asked of */
+    ask(set) {
+      flight?.abort();
+      flight = new AbortController();
+      turn += 1;
+      return { turn, set, signal: flight.signal };
+    },
+    /** @param {{turn: number}} ticket */
+    mine(ticket) {
+      return ticket.turn === turn;
+    },
+    /** @param {{turn: number, set: string}} ticket @param {string} set the row set on screen now */
+    current(ticket, set) {
+      return ticket.turn === turn && ticket.set === set;
+    },
+    drop() {
+      flight?.abort();
+      flight = null;
+      turn += 1;
+    }
   };
 }

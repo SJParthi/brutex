@@ -15,13 +15,14 @@ import {
   parsePageBox, pageToRead, askOnce, readFor, generationOf, joinPage, joinSlices
 } from '../src/lib/db/pager.js';
 import { windowQuery, seriesPlan, rowKey, acrossDay, FIT_SLACK, MIN_USEFUL_ROWS, ROW, istInstant } from '../src/lib/db/bars-plan.js';
-import { sortRefusal, segmentOfKey, localSortAdvice, readFailure, NO_VOLUME_SORT, NO_OI_SORT } from '../src/lib/db/notes-bars.js';
+import { sortRefusal, seriesKinds, refusalFor, segmentOfKey, localSortAdvice, readFailure, NO_VOLUME_SORT, NO_OI_SORT, NO_EXPIRY_SORT, NO_OPTION_SORT, NO_RUNG_SORT, BAR_COLS } from '../src/lib/db/notes-bars.js';
 import { dbSource } from './database-page-fixture.js';
 
 const CE = 'NSE-FNO-NIFTY-2019-03-28-1160000-CE';
 const PE = 'NSE-FNO-NIFTY-2019-03-28-1160000-PE';
 const SPOT = 'NSE-INDEX-NIFTY';
 const SHARE = 'NSE-CASH-FIXTUREA';
+const FUT = 'NSE-FNO-NIFTY-2019-03-28-FUT';
 
 /** The grid's script with its comments cut, so a test reads code, not prose. */
 const gridScript = () => {
@@ -364,6 +365,42 @@ test('no_sort_is_offered_on_a_column_without_values', () => {
   assert.equal(sortRefusal('oi', [CE]), null);
   assert.equal(sortRefusal('c', [SPOT]), null);
   assert.equal(sortRefusal('vol', []), null, 'nothing selected refuses nothing');
+  // EVERY HEADER, EVERY KIND OF SERIES (repair 2). The contract columns read
+  // `—` on every row of a selection with nothing to fill them, and before the
+  // repair Expiry, Days to exp, Type and Strike were offered there: Days to
+  // exp on NIFTY spot read all 7,875 rows and ordered nothing.
+  const sortable = BAR_COLS.filter((c) => !c.none && !c.nosort).map((c) => c.key);
+  assert.deepEqual(sortable, ['ts', 'tod', 'tf', 'o', 'h', 'l', 'c', 'vol', 'chg', 'oi', 'oichg', 'exp', 'dte', 'side', 'strike'],
+    'the headers a press can order, so a new one is a decision here, not a default');
+  const refused = (/** @type {string[]} */ keys, tf = '1s') => sortable.filter((k) => sortRefusal(k, keys, tf) !== null);
+  assert.deepEqual(refused([SPOT]), ['tf', 'vol', 'oi', 'oichg', 'exp', 'dte', 'side', 'strike'], 'an index');
+  assert.deepEqual(refused([SHARE]), ['tf', 'oi', 'oichg', 'exp', 'dte', 'side', 'strike'], 'a share');
+  assert.deepEqual(refused([FUT]), ['tf', 'side', 'strike'], 'a future has an expiry and no strike');
+  assert.deepEqual(refused([CE]), ['tf'], 'an option has every column');
+  assert.deepEqual(refused([SPOT, FUT]), ['tf', 'side', 'strike'], 'one future gives the selection an expiry');
+  assert.deepEqual(refused([SHARE, SPOT, PE]), ['tf'], 'one option gives it the rest');
+  assert.deepEqual(refused([SPOT], ''), ['vol', 'oi', 'oichg', 'exp', 'dte', 'side', 'strike'], 'with no rung chosen TF can differ');
+  assert.equal(sortRefusal('dte', [SPOT]), NO_EXPIRY_SORT);
+  assert.equal(sortRefusal('exp', [SHARE, SPOT]), NO_EXPIRY_SORT);
+  assert.equal(sortRefusal('strike', [FUT]), NO_OPTION_SORT);
+  assert.equal(sortRefusal('side', [SPOT]), NO_OPTION_SORT);
+  assert.equal(sortRefusal('tf', [CE], '1min'), NO_RUNG_SORT);
+  // A name that does not end the way this repository writes a contract is
+  // NO contract, exactly as its cells read it (`decoration.js`).
+  assert.equal(sortRefusal('dte', ['NSE-FNO-NIFTY-28MAR19-FUT']), NO_EXPIRY_SORT);
+  assert.equal(sortRefusal('strike', ['NSE-FNO-NIFTY-2019-03-28-11600-XX']), NO_OPTION_SORT);
+  assert.equal(sortRefusal('dte', [/** @type {any} */ (null)]), NO_EXPIRY_SORT, 'a key that is not a string is no contract, never a throw');
+  for (const why of [NO_EXPIRY_SORT, NO_OPTION_SORT, NO_RUNG_SORT]) {
+    assert.match(why, /there is nothing to order — the rows would come back in time order under this caret\.$/);
+  }
+  // THE SELECTION IS READ ONCE, NOT ONCE A HEADER: one pass over the series,
+  // then a look-up per press and per render.
+  const kinds = seriesKinds([SPOT, FUT], '1s');
+  assert.deepEqual(kinds, { n: 2, allIndex: false, noDerivative: false, expiry: true, option: false, oneRung: true });
+  assert.deepEqual(seriesKinds([]), { n: 0, allIndex: true, noDerivative: true, expiry: false, option: false, oneRung: false });
+  assert.equal(refusalFor('strike', kinds), NO_OPTION_SORT);
+  assert.equal(refusalFor('strike', seriesKinds([])), null, 'nothing selected refuses nothing');
+  assert.match(gridScript(), /const kinds = \$derived\(seriesKinds\(plan\.keys, db\.timeframe \?\? ''\)\);\s*const sortOff = \(key\) => refusalFor\(key, kinds\);/);
   // The server's own rule, read out of its source: an INDEX bar has no
   // volume, an INDEX or CASH bar no open interest.
   const rules = readFileSync(new URL('../../crates/api/src/bars_change.rs', import.meta.url), 'utf8');

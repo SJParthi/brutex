@@ -19,13 +19,13 @@
   import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, pageOfIndex, censusBehind, localComparator, acrossDay, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON } from '$lib/db/bars-plan.js';
   import { tick, untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
-  import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText, sortRefusal, localSortAdvice, readFailure } from '$lib/db/notes-bars.js';
+  import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText, seriesKinds, refusalFor, localSortAdvice, readFailure } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { readWindowPage, readAllRows, sortIndexNote } from '$lib/database-pages.js';
   import { ask } from '$lib/ask.js';
   import { servedPages, clampServed, stepServed, lastServed, pageToRead, askOnce, generationOf, joinPage, joinSlices } from '$lib/db/pager.js';
-  import { parseGoto, gotoAsk, landing } from '$lib/db/goto.js';
+  import { parseGoto, gotoAsk, landing, gotoTurns, NO_LANDING } from '$lib/db/goto.js';
   import { dirOf, bpsText } from '$lib/bps.js';
   import { timeLabel, stampLabel, dayLabel, barTimeLabel } from '$lib/dates.js';
   import { refreshStore } from '$lib/store.svelte.js';
@@ -656,13 +656,17 @@
     /** Why the last sort asked for was refused, said beside the grid until the next header press. */
     let sortWhy = $state('');
 
+    /** What the selection's series can carry, read once per selection (R3-03). */
+    const kinds = $derived(seriesKinds(plan.keys, db.timeframe ?? ''));
     /**
      * WHY A COLUMN IS NOT OFFERED AS A SORT ON THIS SELECTION, or `null`
-     * (R3-03): Volume on an index, open interest on an index or a share —
-     * n/a on every row, so an order would be time order under its caret.
+     * (R3-03): Volume on an index, open interest on an index or a share, the
+     * expiry with no contract, the side and strike with no option, the rung
+     * read at one rung — the same on every row, so an order would be time
+     * order under its caret. One look-up a header.
      * @param {string} key
      */
-    const sortOff = (key) => sortRefusal(key, plan.keys);
+    const sortOff = (key) => refusalFor(key, kinds);
 
     /**
      * THE ORDER THE READ USES: the one chosen, unless the selection has since
@@ -1357,6 +1361,13 @@
 
     /** What the last jump has to say — a refusal, or how far it had to go. */
     let jumpWhy = $state('');
+    /** The Go to that may land: the latest one, for the row set on screen (R3-03). */
+    const gotoTurn = gotoTurns();
+    /** A Go to refused, or a row set moved: whatever Go to is out is stopped and lands nowhere. */
+    const stopGoto = () => {
+      gotoTurn.drop();
+      jumping = false;
+    };
 
     /**
      * GO TO AN INSTANT (DB-005, R3-03): the page holding the first bar at or
@@ -1380,19 +1391,33 @@
      * @param {boolean} [minute] whether a minute was typed, so its first bar is meant
      */
     async function jumpToInstant(at, label, key = '', minute = false) {
+      /* THE LATEST GO TO IS THE ONE THAT LANDS (R3-03 repair 2): asking
+         stops the one before it, and an answer is applied only while it is
+         still the latest Go to and the row set it was asked of is still the
+         one on screen (`gotoTurns`). */
+      const ticket = gotoTurn.ask(setKey);
+      jumping = false;
       db.landedRk = '';
       jumpWhy = '';
       const feed = feeds.active;
       const p = plan;
       if (!feed || p.keys.length === 0 || p.why) {
-        jumpWhy = p.why ?? 'No selection is read, so there is nothing to go to.';
+        jumpWhy = p.why || 'No selection is read, so there is nothing to go to.';
+        return;
+      }
+      /* AN ANSWER ALREADY KNOWN TO HOLD NO BAR IS NOT ASKED AGAIN: the page
+         read for this row set said so, and the Go to says the same words. */
+      if (barState.answer && !barState.loading && !barState.error && barState.set === setKey && pageTotal === 0) {
+        jumpWhy = NO_LANDING;
         return;
       }
       const resorted = sortNow.key !== 'ts';
       const desc = resorted ? true : sortNow.desc;
       jumping = true;
       try {
-        const answer = await readWindowPage(windowQuery(feed, p, { ...bounds, ...gotoAsk(at) }), 1, new AbortController().signal);
+        const answer = await readWindowPage(windowQuery(feed, p, { ...bounds, ...gotoAsk(at) }), 1, ticket.signal);
+        /* ASKED BEFORE A LATER GO TO OR ANOTHER ROW SET: not this screen's. */
+        if (!gotoTurn.current(ticket, setKey)) return;
         const land = landing(answer, {
           at,
           label,
@@ -1409,6 +1434,7 @@
           barSortKey = 'ts';
           barDesc = desc;
           await tick();
+          if (!gotoTurn.current(ticket, setKey)) return;
         }
         pinned = true;
         anchorRk = key && land.bar.t === at ? rowKey(key, at) : '';
@@ -1417,11 +1443,41 @@
         const lead = resorted ? 'The grid is back in time order, which is the order an instant has a place in. ' : '';
         jumpWhy = `${lead}${land.why}`.trim();
       } catch (why) {
+        /* A Go to stopped by a later one, or by a change of row set, says nothing. */
+        if (!gotoTurn.current(ticket, setKey)) return;
         jumpWhy = `Go to could not be answered: ${String(/** @type {any} */ (why)?.message ?? why)}`;
       } finally {
-        jumping = false;
+        /* `jumping` is the latest Go to's: a later one set it for itself, and
+           a change of row set cleared it (`dropGoto`). */
+        if (gotoTurn.mine(ticket)) jumping = false;
       }
     }
+
+    /**
+     * A GO TO BELONGS TO THE ROW SET IT WAS ASKED OF (R3-03 repair 2). When the
+     * row set moves — a Side, a contract, a rung, a day window, Read again —
+     * whatever Go to is out is stopped, and the line under the strip and the
+     * mark go with it: "row 81 of 142" stood under a 22-row grid. A page
+     * landed but not yet read is not carried onto the new set either.
+     */
+    function dropGoto() {
+      stopGoto();
+      pinned = false;
+      anchorRow = -1;
+      anchorRk = '';
+      jumpWhy = '';
+      db.landedRk = '';
+    }
+    /** The row set the Go to state was last kept for; `null` before the first. */
+    let gotoSet = /** @type {string | null} */ (null);
+    $effect(() => {
+      const set = setKey;
+      untrack(() => {
+        const before = gotoSet;
+        gotoSet = set;
+        if (before !== null && before !== set) dropGoto();
+      });
+    });
 
     /** The day a time alone is read on: the first row on screen, else the window's. */
     const dayOnScreen = () => barPage[0]?.day ?? (db.toDay || db.fromDay || '');
@@ -1452,18 +1508,22 @@
     async function jumpToTime(at = db.goTime) {
       try {
         if (dayRung) {
+          stopGoto();
           jumpWhy = `Every bar at ${db.timeframe} opens at the same minute, so there is no minute to choose between them.`;
           return;
         }
         const got = parseGoto(String(at ?? ''), dayOnScreen(), gotoSpan());
         if ('why' in got) {
+          stopGoto();
+          db.landedRk = '';
           jumpWhy = got.why;
           return;
         }
         await jumpToInstant(got.at, got.label, '', got.minute);
       } finally {
         await tick();
-        db.goTime = '';
+        /* Only the minute this call was for: a later pick is still landing. */
+        if (db.goTime === at) db.goTime = '';
       }
     }
 
@@ -1475,6 +1535,7 @@
     function jumpToText(text) {
       const got = parseGoto(text, dayOnScreen(), gotoSpan());
       if ('why' in got) {
+        stopGoto();
         db.landedRk = '';
         jumpWhy = got.why;
         return;
