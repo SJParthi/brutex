@@ -73277,3 +73277,301 @@ the operating system's, so the max criterion is applied to work.
 `harness_prints_timer_granularity`, `harness_refuses_row_without_class`,
 `every_row_declares_axis_and_scale`,
 `a_data_row_runs_at_one_and_at_the_production_worker_count`.
+
+### D-6380 — One pure walker for both stages: a day index built once per stock-day, one state machine per slot, generated exits walked in passes (FIB-5) — 2026-10-18
+
+**Number** the first of FIB-5's block, D-5380..D-5399 moved to D-6380..D-6399
+by D-6311 (FM-F008). D-6380..D-6390 are issued here; D-6391..D-6399 are unused.
+
+**What is decided.** `runner::fib::walk` is the ONE walker of the Fib engine:
+stage A walks each plan on the day's Zerodha one-minute bars
+(`Resolution::Minute`), stage DEEP on the GDFL one-second bars of the
+continuous phase (`Resolution::Second`), through the same code. Per stock-day,
+`DayIndex::build` indexes the bars once, in O(bars + seconds of the day +
+candles x widths): each side's bars stored MIRRORED (a short's prices negated,
+so one state machine walks both directions and the mirror is exact), a
+second-to-bar map, the Zerodha minute-presence prefix, the halt state of every
+bar, the silence before it, the forced window's summary, suffix extremes, and
+the confirmed swings of every timeframe at every swing width the exit set
+uses. A SLOT is (plan, exit variant, fill variant, trade size); its
+`Stepper` steps bar by bar from its entry window to its exit, each step a
+fixed set of comparisons (the trigger, the five exit components, the forced
+instant) with the swing list read through a forward-only cursor, so the work
+is O(1) per bar per open slot and does not depend on the hold or on how many
+other plans are active (C-F5-01..05 measure it). A slot's outcome is exact
+integers (`types::SlotOutcome`); R is the exact rational
+`SlotOutcome::r_multiple` and a reader converts it once to a full-precision
+statistic (no `f64` on the walker's path).
+
+**Slots, passes and increments.** Slots are independent of one another, so
+`walk_all` walks a generated exit set in `ceil(variants / budget)` passes of a
+`PassBudget` and gives byte-identical output for every budget; the budget is
+recorded in the run ledger and never in the identity (FM-F032).
+`walk_pairs` walks exactly the `(plan, variant)` pairs it is handed, and
+`missing_pairs` names those an incremental rerun lacks (13:05 item 5). Records
+are keyed and ordered by (decision ordinal, variant id).
+
+**The reference walk** (17:15 item 0) is `ExitVariant::REFERENCE` under
+`FillVariant::REFERENCE`: no stop order, no target, no time exit, no entry
+window and no cap, so only the forced exit closes it; its outcome carries the
+MFE second and the last-peak second (additive `SlotOutcome` fields) and the
+uncapped per-second participation.
+
+**Two paces.** The same machine runs every bar (`walk_pairs`) or by events
+(`walk_pairs_by_events`, FM-F030, D-6390), with the same bytes.
+
+**Not built here, said.** The worse-of-both cross-feed reading waits for
+PREC-15 (D-6383). The real-data proofs are the Mac's
+(`reports/cloud-fib5-20261018.md`, NEEDS THE MAC). Proved by
+`crates/runner/tests/fib_walk.rs`; invariants FIB5-01..FIB5-42.
+
+### D-6381 — The forced exit is priced only from `[15:09:00, 15:10:00)`, never later and never carried forward (FIB-5; refines D-0436) — 2026-10-18
+
+Recorded before any result is shown, as the operator required.
+
+**Deep.** A position still open at the first bar at or after 15:09:00 (or when
+the day's bars end) is priced ONLY from the GDFL seconds inside
+`[15:09:00, 15:10:00)`: a long at the LOWEST low of the window's seconds it
+can sell into, a short at the HIGHEST high; capacity is those seconds' summed
+volume. No such second, or capacity below the open quantity, makes the WHOLE
+slot unpriceable: `unpriceable_thin`, or `unpriceable_locked_long` /
+`unpriceable_locked_short` when the window printed but its book had no side to
+take (FM-F048). Nothing is priced at or after 15:10:00: `DayIndex::build`
+drops every bar from 15:10:00 unread (`dropped_after_auto_exit` counts them),
+so no exit at either resolution can read one (FM-F039).
+
+**Stage A.** The 15:09 Zerodha minute alone, at its low (long) or high
+(short), the `runner::outcome::FORCED_EXIT_MINUTE` semantics; missing, or
+locked at the running day extreme, is `forced_exit_unpriceable_cheap`.
+
+**Both.** Every slot or remainder the forced rule reaches is flagged
+`dhan_square_off` (FIB-11 charges Dhan's fee; FM-F040), its order is the
+slot's forced exit order (FM-F125), and a spill still open at 15:09:00 is
+flagged `exit_spill_to_forced` and goes to these rules (FM-F035). A time exit
+at or after 15:09:00 collapses into the forced exit. The excursions of a
+position open through the window run to 15:09:59 from the window's summary in
+one read.
+
+### D-6382 — The fill rules at both resolutions: worst printed prices, spills by volume, a resting limit on trade-through, exits before a held position's next fill (FIB-5) — 2026-10-18
+
+**Entry.** CLOSE fills from the first admitted bar; BREAK from the first bar
+whose high reaches the break level (the trigger candle's extreme plus one
+tick); RETEST from the first bar whose low reaches the retest level. Every
+entry fill is at the bar's worst price (a buy at its high, a sell at its low;
+`costs::fill::fills_at` with `Anchor::PrintedExtreme`, pinned by
+`single_minute_legs_are_the_cost_crate_s_printed_extreme_fills` — one fill
+authority). A RETEST therefore fills at the bar's high, not at its level:
+labelled, and conservative. Stage A fills the whole quantity in one minute
+(labelled "stage A assumes the whole quantity fills at the minute's worst
+printed price"; Zerodha minute volume is never used). Deep: each second
+supplies `min(remaining, volume)` (or `floor(cap x volume / 1000)` under a
+participation cap, entries only) and the rest spills into later seconds; the
+entry window ends at the next close of the plan's timeframe (reading 1), at
+15:09:00 (reading 2) or at a generated deadline, and an unfilled remainder is
+cancelled (`partial_entry`); nothing filled is `entry_unfilled` (or
+`entry_never_triggered` for an untriggered BREAK or RETEST).
+
+**Exits.** The stop loss, the trailing stop and the trailing take-profit are
+stop orders: the first bar whose low reaches the level exits at that bar's low
+(a gap through the level gives R below minus one, flagged `gap_through_stop`).
+A deep take-profit is a market exit on touch: the first second whose high
+reaches it exits at that second's LOW (`target_booked_at_worst`, D-0802 B3). A
+stage-A take-profit is a resting limit on the decision tick grid at the
+nearest tick at or above the target (the ORDER price is on the grid; the
+comparison is exact) and fills at that limit only when a minute's high trades
+THROUGH it. A time exit exits at the first bar at or after its instant, at the
+worst price. When several fire in one bar, the reason is the fixed precedence
+SL > TSL > TTP > TP > time, every fired component is flagged, and the price is
+the worst among them; a target and a stop in one bar is the stop. Trailing
+levels made by bar `t` apply from bar `t + 1` (FM-F037). Deep exits spill by
+volume under `ExitFill::SpillByVolume` (one order), or leave whole at the
+touching second's worst price under `ExitFill::FirstTouchWhole`, a labelled
+comparison (FM-F035); stage A exits the whole quantity, waiting past locked
+minutes.
+
+**Ordering inside one bar.** A first fill in a bar meets that bar's exits after
+it (an entry and a stop in one bar stop in that bar at its low). A position
+held from earlier bars meets the bar's exits FIRST: an exit cancels the
+unfilled entry remainder in that bar (`entry_cancelled_by_exit`) and applies to
+the filled quantity only (FM-F036). A target reached before the first fill is
+`target_before_fill`.
+
+**Why.** The operator's FILLS rule (worst price of each second, spill into
+later seconds) and D-0802 B1-B3; a minute bar holds nothing finer than its
+four prices, so stage A's honest worst case is the printed extreme; a resting
+limit cannot fill on a mere touch of its price.
+
+**Labelled proxies, UNVERIFIED.** Stage A skips a minute with high == low at
+the running day extreme as `locked_minute_suspected` (FM-F042) until OF-1's
+circuit evidence replaces the proxy. The trailing take-profit's open profit is
+measured from the frozen entry reference, like R.
+
+### D-6383 — Exact factor conversion: one common denominator, no level rounded, one raw tick, raw quantities (FIB-5) — 2026-10-18
+
+Every level the walker compares is on the common denominator
+`zerodha_close x 1000 x 1000`: a raw price `g` is scaled by
+`zerodha_close x 10^6` and a decision-basis level `z` by `gdfl_close x 10^6`, so
+`g` reaches `z` exactly when `g x zerodha_close` reaches `z x gdfl_close`, and
+every R multiple, Fibonacci rung, give-back and R-step lands on the same
+denominator without a rounding. A price or factor without room for that
+arithmetic is refused `price_beyond_exact_range`. The structural edge converts
+exactly and the stop sits one tick beyond it (the raw tick in deep, the
+decision tick at stage A), never twice; the break level likewise sits one tick
+beyond the trigger's extreme. R's denominator is `filled qty x planned risk
+per share`, the planned risk being the decision risk times `gdfl_close` over
+`zerodha_close`, an exact rational that is positive by construction
+(`nonpositive_planned_risk` refuses the slot otherwise) and never moved by a
+fill or a trail (FM-F033). Deep quantity is
+`floor(size x zerodha_close / (entry_ref x gdfl_close))` raw shares, stage A's
+`floor(size / entry_ref)`; both are stored, and a size below one share is
+refused for that size only (FM-F034).
+
+**The cross-feed reading.** `CrossFeed::SecondsOnly` (only GDFL seconds touch a
+level) is built. `CrossFeed::WorseOfBoth` must go through PREC-15's
+`runner::cross_feed`, called and never copied; that module does not exist, so
+the reading is refused by name `cross_feed_not_built` (FM-F046). Which reading
+decides is the operator's, UNVERIFIED until PREC-15 lands and both verdicts
+are shown.
+
+### D-6384 — No stop floor and no stop refusal: any structural stop walks unchanged (FIB-5; 13:07 and 17:15 IST) — 2026-10-18
+
+The specification's earlier "both stop readings" (widen a stop under 0.2% of
+the entry, or refuse it) are deleted (17:15 item 8), with the 0.2% gate number
+(13:07). A plan's structural stop walks exactly as detected, however small, and
+is judged only by the Winner Gate net of the entire charges, which already
+makes a tiny stop pay a large share of R
+(`a_tiny_structural_stop_walks_unchanged_and_is_judged_only_by_the_gate`). The
+stop-offset values `k` are generated exit components (D-6388), never a floor.
+
+### D-6385 — The record layouts: `DecisionRecord` v1, `OutcomeRecord` v1 and v2, headers with stride and slot count (FIB-5; FM-F031, FM-F125) — 2026-10-18
+
+`runner::fib::codec`, little-endian, fixed-stride, versioned, no byte cap:
+
+* `DecisionRecord` v1 (the specification's `CandidateRecord` v1), 405 bytes: the
+  ordinal, the pool slot, the IST day, the plan (direction, style, timeframe,
+  decision second, window end, entry reference, base edge, trigger edge, the
+  day's level 0 and level 1000, trail list), the base kind, the 24 coordinates,
+  and each of the 13 measured rows' raw measurement with its exact own-past
+  mid-rank pair, so a later generation re-buckets without re-simulating. It
+  holds no outcome, so no outcome can feed a coordinate.
+* `OutcomeRecord`, one per (decision ordinal, exit variant, fill variant): a
+  29-byte fixed part (ordinal, variant, fill, DATA-1's factor pair, the clock
+  lag's state and seconds) and one slot per trade size. A v1 slot is 167 bytes;
+  v2 (225 bytes) adds each exit order — the own exit (a spill inside it is one
+  order) and the forced remainder — with its last fill second, filled quantity
+  and exit value (FM-F125). A v1 record stays decodable and reads its orders
+  merged, labelled "exit orders merged (OutcomeRecord v1)".
+* A 53-byte header per file: magic (`BTXFIBD1` decisions, `BTXFIBO1` outcomes),
+  version, resolution, slot count, stride, set version and set digest. A reader
+  takes the stride from the header (`estimate_bytes`, FIB-12's estimate).
+
+Every code (direction, style, base kind, status and reason, exit reason, clock
+lag) is an append-only position; an unknown code, version, magic or length is
+refused by name. Strides are sums of field widths checked at compile time;
+`the_records_bytes_are_pinned` pins the bytes. Adding a variant appends outcome
+records only (`adding_a_variant_appends_outcomes_only`).
+
+### D-6386 — Every walk reading is named and has no default: the `WalkProfile` fields and their identity terms (FIB-5) — 2026-10-18
+
+`types::WalkProfile` gains, additively and with no `Default`: `exit_fill`
+(FM-F035), `snapshot_edge` (FM-F043: under `StampClosesInterval` the second
+stamped at the decision instant never fills), `halt_rule` (D-6387),
+`cross_feed` (FM-F046), `beyond_target` (FM-F038: `FiresOnFirstBar` or
+`TargetVoid`, both run, the deciding one the operator's) and `clock_rule`
+(FM-F043: a measured non-zero lag is refused `clock_shifted:<L>`, or re-stamped
+so fills start at `c + max(0, L)`; an unmeasured lag is refused
+`clock_lag_unmeasured` unless walked `TrustUnchecked`, labelled).
+`WalkProfile::identity_terms` gives the seven readings in a fixed order for
+`fib_params`; the price map is not a term, because DATA-1's per-stock-day pair
+is an authority file and a leaf of the data tree (D-6316).
+
+### D-6387 — The halt-day rule (FIB-15 RQ-5) and the one-sided-book rule (FIB-15 RQ-6), version 1 each (FIB-5) — 2026-10-18
+
+**Halt-day rule v1** (`HaltRule::WorstSeenThroughHalt`, the deciding reading,
+the same code in the backtest and the live record): a plan decided at or after
+a recorded halt start is `not_tradable_after_halt_start`; an order with nothing
+filled when a halt starts is the same; a position open when a halt starts stays
+in the record, flagged `halt`, status `halt_worst_seen`, with its excursions to
+15:09:59 for FIB-7's `AT_WORST_SEEN` (FM-F078), labelled "halt: real loss may
+be larger; the position may carry overnight (UNVERIFIED)". Nothing fills inside
+a halted range. The 17:15 item (6) reading runs beside it under its own
+identity (`HaltRule::ResumeAtFirstPrint`): the rules resume at the first real
+print after the halt, and a gapped stop fills at that print's worst price,
+flagged `gap_through_stop` and `circuit_halt`.
+
+**One-sided-book rule v1:** in deep, a second whose book has no ask supplies no
+buy and a second with no bid supplies no sell; the order moves to the next
+second, flagged `one_sided_book`; a forced window with prints but no side to
+take is `unpriceable_locked_long` or `unpriceable_locked_short`. The marks are
+OF-1's; a day walked without them says so (`DayIndex::book_observed`).
+
+### D-6388 — The exit set is generated, versioned and append-only; the fill set holds the deep-only components (FIB-5; 13:00, 13:05, 17:15 IST) — 2026-10-18
+
+An exit variant is a composition of five optional components: a stop loss
+(absent, or beyond the base by `k` more ticks), a take-profit (absent, an R
+multiple, a Fibonacci rung of `indicators::fib::RUNGS`, or the next rung), a
+trailing take-profit (absent, or a give-back of open profit in permille), a
+trailing stop (absent, a swing of width `w` with a buffer, or an R-step) and a
+time exit (absent, a clock instant, or a hold from the first fill); the forced
+exit is always last. No value is typed: `seed_exit_set` starts every component
+at its structural "none" plus one value at the lower nearest-rank median
+(R2's seed rule) of its own-past distribution on the direction's learning
+months `[0, W0)` only, with the swing of width one always present (17:15 items
+2 and 5, FM-F049), and the variants are every composition, in component order.
+An `ExitSet` is versioned and born at a walk-forward step; `ExitSet::extended`
+appends compositions as the next version and every existing id keeps its
+variant, so a new value is computed only for the pairs that lack it. A set
+gives the cube's exit row its `VariantSet` (version, digest, count). The entry
+fill window and the participation cap are deep-only components (17:15 items 3
+and 4) in their own `FillSet` (`seed_fill_set`: both window readings, no cap
+and a cap at the median own-past participation), so stage A never repeats
+itself per deep-only value; stage A takes `FillVariant::STAGE_A` only.
+
+### D-6389 — Data faults inside a trade are named, counted and never priced around (FIB-5; FM-F041, FM-F044, FM-F045, FM-F047) — 2026-10-18
+
+A silence is a run of missing seconds between two real seconds; FIB-2's
+`MaxSecondGap` is the committed past's longest. A longer silence inside a
+slot's window or trade that covers a TRADED Zerodha minute is
+`execution_feed_hole` (unpriceable, never priced at the resume second) or, with
+nothing filled, `entry_unfilled_feed_hole`; one Zerodha did not trade either is
+flagged `silence_in_trade` and the walk waits for the next real second. A bar
+that fails `Candle::check_evaluable` inside a window or a trade is
+`corrupt_bar_in_trade` (counted per day by `DayIndex::corrupt_bars`; never an
+exit at a zero price). A swing whose window crosses a withheld or unusable
+candle is a hole, counted by `DayIndex::trail_holes` and flagged `trail_hole`,
+never a trail level. A fill at a print PREC-3 flagged is kept and flagged
+`flagged_print_fill`; a fill outside its minute's converted Zerodha range is
+`cross_feed_outlier`; a touch by a second beyond its minute's converted range
+is `touch_unwitnessed`. Nothing is dropped.
+
+### D-6390 — Two paces of one walker: every bar, and by events over sparse tables (FIB-5; FM-F030) — 2026-10-18
+
+**Every bar** (`walk_pairs`, `Stepper::run`): each slot pays one fixed step per
+bar it is open, the operator's bound ("O(1) per second per open position,
+measured at p99"), measured by C-F5-01..05.
+
+**By events** (`walk_pairs_by_events`, `Stepper::run_events`; FM-F030): per
+side of a stock-day the index also builds, once in O(bars x log bars), sparse
+tables of the lowest low and the highest high (earliest and latest on a tie)
+of every power-of-two block, and for each bar the next bar that needs a full
+step (a corrupt or halted bar, a bar after a halt start, a deep bar after a
+silence longer than the committed past's). A HELD position with no order open
+jumps from its cursor straight to the earliest of: the first bar whose low
+reaches its stop, trail or give-back level, the first bar whose high reaches
+its target (stage A: trades through its limit), its time instant, its next
+swing confirmation, its next new high while a give-back or an R-step trails
+(each moves their level), the next full-step bar, and the forced window — each
+by a descent of O(log bars) — folds the skipped bars' extremes into its
+excursions by two reads, and steps that bar exactly as the every-bar walk
+would. Entry windows and spilling exits are stepped bar by bar. The cost per
+pair is O(log bars x (1 + events)), declared BOUNDED by its events (C-F5-07);
+a trending day under a give-back makes a new high an event on most bars.
+
+**Same bytes, proved.** `event_walk_equals_forward_pass` walks 900 seeded
+random and trending days at both resolutions under every reading and every
+component and finds the two outcomes identical; a quiet all-day hold takes
+under 40 units of work by events against over 3,000 stepped
+(`the_event_walk_matches_on_a_trending_day_with_a_give_back_and_jumps_the_hold`).
+The FM-F030 spill by binary search on a volume prefix is not used: a spill is a
+handful of seconds in practice and is stepped, so no binary search enters the
+walker (gate 11 rule 1).

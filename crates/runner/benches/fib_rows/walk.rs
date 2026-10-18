@@ -296,6 +296,19 @@ fn step(state: &mut Walking, _i: u64) -> u64 {
     state.work
 }
 
+/// One whole pair walked BY EVENTS (FM-F030): the current slot runs to its
+/// end with [`Stepper::run_events`], restarts on the next day of the ring, and
+/// the walk moves to the next slot.
+fn pair_by_events(state: &mut Walking, _i: u64) -> u64 {
+    let slot = &mut state.slots[state.at];
+    slot.run_events();
+    state.work += slot.work();
+    state.turns += 1;
+    *slot = stepper(state.ring, state.at + state.turns, &state.variant);
+    state.at = (state.at + 1) % state.slots.len();
+    state.work
+}
+
 fn work(state: &Walking) -> u64 {
     state.work
 }
@@ -381,6 +394,22 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         work,
         bytes,
     };
+    let deep_events = Row {
+        id: "C-F5-07",
+        name: "deep: one whole pair walked by events, every component live, full-day hold",
+        class: Some(Class::Bounded {
+            bound: "O(log bars x (1 + events)) per pair: touches, swings read, new highs while a give-back or an R-step trails",
+        }),
+        axis: Some(Axis::Data {
+            unit: "active slots per stock-day (8 synthetic days of 21,300 seconds)",
+            production: None,
+        }),
+        scales: [1, 16, 256],
+        setup: |slots| walking(deep_ring(), 0, slots),
+        op: pair_by_events,
+        work,
+        bytes,
+    };
     let mut ok = true;
     for row in [
         deep_slots,
@@ -388,9 +417,16 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         minute_slots,
         minute_holds,
         deep_swing,
+        deep_events,
     ] {
         ok &= !run(&row, host, out).fails();
     }
+    report_builds(out);
+    ok
+}
+
+/// C-F5-06: the per-stock-day index builds the rings timed, as information.
+fn report_builds(out: &mut String) {
     for (name, ring) in [
         ("deep, 21,300 seconds", deep_ring()),
         ("stage A, 355 minutes", minute_ring()),
@@ -399,7 +435,7 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         ns.sort_unstable();
         let _ = writeln!(
             out,
-            "C-F5-06 DayIndex::build of one stock-day ({name}), BOUNDED O(bars + seconds of the day + candles x widths), once per stock-day: {} builds, min {} ns, p50 {} ns, max {} ns; {} bytes per index",
+            "C-F5-06 DayIndex::build of one stock-day ({name}), BOUNDED O(bars x log bars + seconds of the day + candles x widths), once per stock-day: {} builds, min {} ns, p50 {} ns, max {} ns; {} bytes per index",
             ns.len(),
             ns[0],
             ns[ns.len() / 2],
@@ -408,5 +444,4 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         );
     }
     let _ = writeln!(out);
-    ok
 }

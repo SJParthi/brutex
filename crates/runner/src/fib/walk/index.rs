@@ -33,6 +33,7 @@ use vocab::fib_cube::{
 };
 
 use super::super::types::{ClockRule, CrossFeed, PriceMap, Resolution, SnapshotEdge, WalkProfile};
+use super::event::Events;
 use super::exits::ExitSet;
 use super::{BookEvidence, BookMark, ClockLag, DayInput, HaltRange, TrailCandles, WalkRefusal};
 
@@ -173,6 +174,8 @@ pub(super) struct SideIndex {
     pub(super) forced: Forced,
     /// The swings, `[list x widths + width]`.
     pub(super) swings: Vec<SwingList>,
+    /// The event walk's tables (FM-F030).
+    pub(super) events: Events,
 }
 
 /// One stock-day, indexed once for every slot the walker steps (FM-F030).
@@ -429,6 +432,7 @@ impl DayIndex {
             decision_scale,
             tick,
             deep,
+            max_gap: input.max_second_gap,
         };
         let mut trail_holes = 0;
         let long = shared.side(Search::Long, input.trail, exits.widths(), &mut trail_holes)?;
@@ -521,6 +525,7 @@ impl DayIndex {
                 .saturating_add(words(s.best_from.len(), size_of::<i64>()))
                 .saturating_add(words(s.worst_from.len(), size_of::<i64>()))
                 .saturating_add(swings)
+                .saturating_add(u64::try_from(s.events.bytes()).unwrap_or(u64::MAX))
         };
         words(self.first_at.len(), size_of::<u32>())
             .saturating_add(words(self.present_before.len(), size_of::<u32>()))
@@ -580,6 +585,8 @@ struct Shared<'a> {
     tick: i128,
     /// Whether this is a deep walk.
     deep: bool,
+    /// The committed past's longest silence.
+    max_gap: u32,
 }
 
 /// What the bar walk of one side carries from one bar to the next.
@@ -634,6 +641,7 @@ impl Shared<'_> {
         }
         let (best_from, worst_from) = suffixes(&bars);
         let forced = forced_window(&bars, self.deep);
+        let events = Events::build(&bars, self.max_gap, self.deep);
         let mut swings = Vec::with_capacity(trails.len() * widths.len());
         for list in trails {
             for width in widths {
@@ -647,6 +655,7 @@ impl Shared<'_> {
             worst_from,
             forced,
             swings,
+            events,
         })
     }
 

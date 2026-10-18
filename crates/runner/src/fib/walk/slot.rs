@@ -455,6 +455,85 @@ impl<'a> Stepper<'a> {
         while self.step() {}
     }
 
+    /// Runs the slot to its end by EVENTS (FM-F030): a held position jumps
+    /// over every bar that cannot change it, straight to its next touch, time
+    /// instant, swing, new high (while a give-back or an R-step trails), halt,
+    /// corrupt bar, silence or the forced window, and steps that bar as
+    /// [`Self::run`] would. The outcome is the same, byte for byte
+    /// (`event_walk_equals_forward_pass`); the work is O(log bars) per event.
+    pub fn run_events(&mut self) {
+        loop {
+            if self.phase == Phase::Holding && !self.after_halt {
+                self.jump();
+            }
+            if !self.step() {
+                break;
+            }
+        }
+    }
+
+    /// Moves a held position's cursor to its next event bar, folding the
+    /// skipped bars' extremes into its excursions.
+    fn jump(&mut self) {
+        let bars = &self.side.bars;
+        let events = &self.side.events;
+        let from = self.cursor;
+        let forced_start = u32::try_from(SESSION_FORCED_WINDOW_START_SECS).unwrap_or(u32::MAX);
+        let mut to = events
+            .next_special(from)
+            .min(self.day.first_bar_at(forced_start));
+        for level in [self.levels.stop, self.trail, self.ttp]
+            .into_iter()
+            .flatten()
+        {
+            to = to.min(events.low_reaches(bars, from, level));
+        }
+        match self.day.resolution() {
+            Resolution::Second => {
+                if let Some(target) = self.levels.target {
+                    to = to.min(events.high_reaches(bars, from, target));
+                }
+            }
+            Resolution::Minute => {
+                if let Some(limit) = self.levels.target_limit {
+                    to = to.min(events.high_above(bars, from, limit));
+                }
+            }
+        }
+        if let Some(at) = self.time_at {
+            to = to.min(self.day.first_bar_at(at));
+        }
+        let next_swing = self
+            .levels
+            .swing
+            .and_then(|(list, _)| self.side.swings.get(list))
+            .and_then(|list| list.events.get(self.swing_cursor));
+        if let Some(event) = next_swing {
+            to = to.min(self.day.first_bar_at(event.confirm_second));
+        }
+        if self.levels.giveback.is_some() || self.levels.rstep.is_some() {
+            to = to.min(events.high_above(bars, from, self.best_raw));
+        }
+        let Some(skipped) = events.extremes(bars, from, to) else {
+            return;
+        };
+        if skipped.best_raw > self.best_raw {
+            self.best_raw = skipped.best_raw;
+            self.best = skipped.best;
+            self.mfe_second = skipped.best_first;
+            self.last_peak_second = skipped.best_last;
+        } else if skipped.best_raw == self.best_raw {
+            self.last_peak_second = skipped.best_last;
+        }
+        self.worst_raw = self.worst_raw.min(skipped.worst_raw);
+        self.previous = to
+            .checked_sub(1)
+            .and_then(|k| bars.get(k))
+            .map(|b| b.second);
+        self.cursor = to;
+        self.work += 1;
+    }
+
     /// Ends the slot with `status`.
     fn finish(&mut self, status: SlotStatus) {
         self.status = status;

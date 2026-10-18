@@ -36,6 +36,7 @@
 //!
 //! This module does no I/O and its loops call nothing (gates 17 and 22).
 
+mod event;
 pub mod exits;
 mod index;
 mod slot;
@@ -301,6 +302,47 @@ pub fn walk_pairs(
     sizes: &[TradeSize],
     pairs: &[(u32, u16)],
 ) -> Result<Vec<Walked>, WalkRefusal> {
+    walk_paced(index, plans, exits, fill, sizes, pairs, Pace::EveryBar)
+}
+
+/// [`walk_pairs`] by events (FM-F030): each held position jumps to its next
+/// event bar ([`Stepper::run_events`]). The same bytes as [`walk_pairs`]
+/// (`event_walk_equals_forward_pass`), at O(log bars) per event instead of one
+/// step per bar.
+///
+/// # Errors
+///
+/// Every refusal of [`walk_pairs`].
+pub fn walk_pairs_by_events(
+    index: &DayIndex,
+    plans: &[Plan],
+    exits: &ExitSet,
+    fill: FillVariant,
+    sizes: &[TradeSize],
+    pairs: &[(u32, u16)],
+) -> Result<Vec<Walked>, WalkRefusal> {
+    walk_paced(index, plans, exits, fill, sizes, pairs, Pace::ByEvents)
+}
+
+/// How a walk advances a slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pace {
+    /// One step per bar.
+    EveryBar,
+    /// Held positions jump to their next event.
+    ByEvents,
+}
+
+/// [`walk_pairs`] at a pace.
+fn walk_paced(
+    index: &DayIndex,
+    plans: &[Plan],
+    exits: &ExitSet,
+    fill: FillVariant,
+    sizes: &[TradeSize],
+    pairs: &[(u32, u16)],
+    pace: Pace,
+) -> Result<Vec<Walked>, WalkRefusal> {
     if index.resolution() == Resolution::Minute && fill != FillVariant::STAGE_A {
         return Err(WalkRefusal::FillVariantDeepOnly);
     }
@@ -318,7 +360,10 @@ pub fn walk_pairs(
         let mut slots = Vec::with_capacity(sizes.len());
         for size in sizes {
             let mut stepper = Stepper::new(index, plan, at, variant, fill, *size)?;
-            stepper.run();
+            match pace {
+                Pace::EveryBar => stepper.run(),
+                Pace::ByEvents => stepper.run_events(),
+            }
             slots.push(stepper.outcome());
         }
         out.push(Walked {

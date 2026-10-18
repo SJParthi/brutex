@@ -3383,3 +3383,146 @@ fn r_is_exact_and_refuses_what_it_cannot_hold() {
         assert_eq!(out.r_multiple(Search::Long), None);
     }
 }
+
+// ----------------------------------------------------------- event walk --
+
+/// One slot walked by events.
+fn walk_events(
+    day: &Day,
+    profile: &WalkProfile,
+    plan: Plan,
+    variant: ExitVariant,
+    fill: FillVariant,
+    size: TradeSize,
+) -> SlotOutcome {
+    let exits = set_of(plan.direction, vec![variant]);
+    let index = day.index(profile, &exits).expect("the day indexes");
+    let walked =
+        runner::fib::walk::walk_pairs_by_events(&index, &[plan], &exits, fill, &[size], &[(0, 0)])
+            .expect("walks");
+    walked[0].slots[0]
+}
+
+/// A day of `count` contiguous seconds (or minutes) from 10:00 trending by
+/// `drift` per bar with a noise of `noise`, and a forced window.
+fn trending(rng: &mut Seeded, resolution: Resolution, count: u32, drift: i64, noise: i64) -> Day {
+    let step = if resolution == Resolution::Minute {
+        60
+    } else {
+        1
+    };
+    let mut bars = vec![quiet(at(9, 59, 0), P - 50, 1_000)];
+    let mut price = P;
+    for k in 0..count {
+        let open = price;
+        price += drift + rng.range(-noise, noise);
+        let high = open.max(price) + rng.range(0, noise);
+        let low = open.min(price) - rng.range(0, noise);
+        bars.push(bar(
+            at(10, 0, 0) + k * step,
+            open,
+            high,
+            low,
+            price,
+            rng.range(1, 400),
+        ));
+    }
+    let w = at(15, 9, 0);
+    bars.push(bar(w, price, price + 30, price - 30, price, 5_000));
+    if resolution == Resolution::Second {
+        bars.push(bar(w + 30, price, price + 40, price - 45, price, 5_000));
+    }
+    match resolution {
+        Resolution::Minute => Day::minutes(bars),
+        Resolution::Second => Day::seconds(bars),
+    }
+}
+
+#[test]
+fn event_walk_equals_forward_pass() {
+    let mut rng = Seeded(0x0E7E_1700);
+    let mut jumped = 0;
+    for trial in 0..900 {
+        let resolution = if trial % 2 == 0 {
+            Resolution::Minute
+        } else {
+            Resolution::Second
+        };
+        let drift = rng.range(-6, 6);
+        let day = match trial % 3 {
+            0 => random_day(&mut rng, resolution),
+            1 => trending(&mut rng, resolution, 300, drift, 25),
+            _ => trending(&mut rng, resolution, 180, 0, 60),
+        };
+        let mut plan = random_plan(&mut rng);
+        if trial % 3 != 0 {
+            plan.decision_second = at(10, 0, 0);
+            plan.entry_window_end = at(10, 1, 0);
+        }
+        let variant = random_variant(&mut rng);
+        let profile = random_profile(&mut rng, resolution);
+        let fill = random_fill(&mut rng, resolution);
+        let size = if rng.coin() {
+            TradeSize::Small
+        } else {
+            TradeSize::Large
+        };
+        let forward = walk_one(&day, &profile, plan, variant, fill, size);
+        let events = walk_events(&day, &profile, plan, variant, fill, size);
+        assert_eq!(
+            forward, events,
+            "trial {trial}: {plan:?} {variant:?} {profile:?} {fill:?}"
+        );
+        if forward.status.entered() {
+            jumped += 1;
+        }
+    }
+    assert!(jumped > 300, "the trials hold positions: {jumped}");
+}
+
+#[test]
+fn the_event_walk_matches_on_a_trending_day_with_a_give_back_and_jumps_the_hold() {
+    let mut rng = Seeded(0x7E4D);
+    let day = trending(&mut rng, Resolution::Second, 3_000, 2, 3);
+    let variant = ExitVariant {
+        trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 600 },
+        trailing_stop: TrailingStop::RStep { milli_r: 1_500 },
+        ..STOP_ONLY
+    };
+    let forward = second_slot(&day, long_plan(at(10, 0, 0)), variant);
+    let events = walk_events(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        variant,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(forward, events);
+    // A quiet hold: the stop, target and time are far, so the event walk
+    // steps a handful of bars where the forward walk steps every one.
+    let quiet_day = trending(&mut rng, Resolution::Second, 3_000, 0, 5);
+    let far = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 900_000 },
+        ..STOP_ONLY
+    };
+    let exits = set_of(Search::Long, vec![far]);
+    let index = quiet_day.index(&second_profile(), &exits).expect("indexes");
+    let plan = long_plan(at(10, 0, 0));
+    let mut forward = runner::fib::walk::Stepper::new(
+        &index,
+        &plan,
+        0,
+        &far,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    )
+    .expect("a slot");
+    let mut by_events = forward.clone();
+    forward.run();
+    by_events.run_events();
+    assert_eq!(forward.outcome(), by_events.outcome());
+    assert!(forward.done() && by_events.done());
+    assert!(forward.work() > 3_000, "{}", forward.work());
+    assert!(by_events.work() < 40, "{}", by_events.work());
+}
