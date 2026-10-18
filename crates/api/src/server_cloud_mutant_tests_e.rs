@@ -786,3 +786,53 @@ fn a_serve_holds_only_with_both_its_lock_and_its_port() {
     assert!(!half.holds(), "a port without the store's lock");
     assert!(!Held::default().holds(), "neither");
 }
+
+/// **The index map lists a feed's own indexes and nothing else it holds.** A
+/// universe holding NIFTY (an index) and RELIANCE (a share), each with a
+/// Groww id, is mapped for Groww against a catalogue naming NIFTY 50: NIFTY
+/// has a row and RELIANCE has none. Run in a child process, because the
+/// route reads the catalogue from the masters directory the environment
+/// names. Kills `&&` turned to `||` in `indexmap_reading`'s filter
+/// (server.rs:35956), which handed every key with a Groww id, share or
+/// index, to the join.
+#[test]
+fn the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds() {
+    const CHILD: &str = "BRUTEX_CLOUDE_INDEXMAP_CHILD";
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = PathBuf::from(dir);
+        let store = dir.join("store");
+        std::fs::create_dir_all(&store).expect("an empty store");
+        let site = Site::load(&dir, &store);
+        let (status, body) = indexmap_reading(&site, Vendor::Groww);
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let symbols: Vec<&str> = doc["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["symbol"].as_str().expect("a symbol"))
+            .collect();
+        assert_eq!(symbols, ["NIFTY"], "{body}");
+        println!();
+        println!("CLOUDE-INDEXMAP=checked");
+        return;
+    }
+    let dir = super::tests::agreeing("cloude-indexmap");
+    std::fs::write(
+        dir.join("nse_indices.csv"),
+        "index_name,category\nNIFTY 50,broad\n",
+    )
+    .expect("the exchange's catalogue");
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds",
+        &[
+            (CHILD, dir.as_os_str()),
+            ("BRUTEX_MASTERS", dir.as_os_str()),
+        ],
+    );
+    assert!(
+        stdout.lines().any(|line| line == "CLOUDE-INDEXMAP=checked"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
