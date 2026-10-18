@@ -4605,7 +4605,9 @@ mod tests {
         );
     }
 
-    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_608, 16_035_483_323_784_157_129);
+    // Re-pinned by FIB-3 (D-6343): the ledger gained `shape_halves` and
+    // `shape_thirds`.
+    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_712, 8_567_387_092_079_093_921);
 
     #[test]
     fn the_literal_scanner_skips_comments_strings_chars_and_fields() {

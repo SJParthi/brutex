@@ -269,7 +269,9 @@ fn pair_identity_changes_with_either_side_and_differs_from_both() {
     assert_eq!(pair.hex(), PAIR_GOLDEN);
 }
 
-const PAIR_GOLDEN: &str = "54ac18dc30df75baba2f98981f0da07b7a87f82f3cd60c47f839d4c1b6ad135a";
+// Re-pinned by FIB-3 (D-6343): `FIXED_NUMBERS` gained `shape_halves` and
+// `shape_thirds`, and the pair identity carries the ledger's digest.
+const PAIR_GOLDEN: &str = "2731433430807ca72ce58674226cee23c28faf286553c088ec7b962d80d2380f";
 
 fn leaf(n: u8) -> [u8; OUT_LEN] {
     [n; OUT_LEN]

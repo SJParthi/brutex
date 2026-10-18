@@ -73277,3 +73277,269 @@ the operating system's, so the max criterion is applied to work.
 `harness_prints_timer_granularity`, `harness_refuses_row_without_class`,
 `every_row_declares_axis_and_scale`,
 `a_data_row_runs_at_one_and_at_the_production_worker_count`.
+
+### D-6340 — Bases anywhere, and SEQUENTIAL CANDLES kept by the detector's shape (FIB-3) — 2026-10-18
+
+**Number** the first of FIB-3's block D-6340..D-6359 (the specification's
+D-5340..D-5359 moved up by 1,000 under D-6311).
+
+**What is decided.** `indicators::fibflag::base::Detector` emits, at every
+closed candle `t` of one width of one stock-day, every base that ENDS at `t`,
+in both directions, wherever it forms: on a Fib level, between levels or at the
+day extreme (operator rule c, PATTERNS ANYWHERE). The distance to the nearest
+level is a measured feature (D-6341), never a precondition. Per direction, in
+this order: `micro2` (candles `t-1, t`), `micro3` (`t-2 .. t`), the maximal
+REST (the longest suffix ending at `t` whose candles share a price, the highest
+low at most the lowest high, of at least two candles) and one rest suffix per
+generated rest length (D-6344).
+
+**SEQUENTIAL CANDLES** ("a retracement never happens inside the candle that
+made the high or low; Fib levels come from finished candles only") is kept
+three ways, each by construction:
+
+1. a single candle is never a base, so the high and the pullback inside one
+   candle are never a retracement (`a_single_candle_is_never_a_base`);
+2. the ladder a base is measured against is the day's extremes after candle
+   `t` folded, from closed candles only; a partial bucket is refused
+   `partial_candle` and decides nothing;
+3. the detector is fed one closed candle at a time and keeps running state
+   (CLAUDE.md section 3 rule 7, by the shape of the fold): nothing reads a
+   later candle (`no_look_ahead_snapshots_are_bit_identical_when_later_candles_are_garbage`).
+
+**`base_holds_extreme` is measured, not refused.** A base whose candle made the
+day high or low at its own close is emitted and stamped (`Holds::level0`,
+`Holds::level1`, `Holds::extreme`). The 16 Oct rule that patterns form "at the
+day extreme" is later than SEQUENTIAL CANDLES, and the PRECEDENCE rule of the
+specification is that the later rule wins: so the data decides, through the
+`base_holds_extreme` row. Made-at-close is the strict fold's moment: the
+candle's high strictly above the day high before it (or the day's first
+candle), and likewise for the low.
+
+**Contiguity.** Every base needs its candles contiguous on the width's
+09:15-anchored grid; the caller passes, with each candle, the close instant the
+next candle has within the calendar's session. A hole refuses a micro base
+`gap_in_base` (counted per kind and direction) and restarts the rest.
+
+**Proof.** `crates/indicators/tests/fib_base.rs` and the module tests;
+invariants FIB3-01 to FIB3-30.
+
+### D-6341 — The trade frame and the level measurements, exact (FIB-3; FM-F026) — 2026-10-18
+
+**The frame.** A direction's TRADE FRAME puts level 0 at the day extreme in its
+direction (long: `H`; short: `L`) and level 1 at the other. Rungs come from
+`indicators::fib::RUNGS`, never retyped: a rung `r` at most 1000 lies
+`r x R / 1000` from level 0 towards level 1, and an extension above 1000 lies
+`(r - 1000) x R / 1000` beyond level 0 in the trade's direction (long:
+`H + (r - 1000) x R / 1000`). `Ladder::rung_view` and `Ladder::rung_price`
+return every level as the exact numerator over 1000 in `i128`; nothing is
+rounded (FM-F026). The short view is the long view on negated prices (level 0
+is `-L`), so one code measures both directions (operator 16 Oct 16:04 IST item
+3: only the geometry is mirrored).
+
+**The measurements**, each in the base's own direction's view
+(`measure::measure`, `measure::BaseMeasures`): the width in paisa and in basis
+points of the base's level-0 edge (a long's high, a short's low), rounded
+toward zero; the sums of the candle ranges and bodies (the means are exact
+quotients by the candle count); the least-squares slopes of the highs and lows
+and the curvature of the closes (the `x squared` coefficient of their
+least-squares parabola, Cramer's rule on the normal equations), each an exact
+unreduced rational over the absolute day index, `None` below two (three)
+candles or past `i128`; the squeeze (D-6345); the holds flags (D-6340); the
+far edge's retracement from level 0, `(level 0 - far edge) x 1000 / R`, in
+`0..=1000` by construction because the day range contains the base; the
+nearest rung to it with `vocab::fib_cube::fib_zone_of`'s semantics (ties to
+the shallower rung); `level_distance = |far edge - that rung| x 1000 / R`; and
+`level_relation`: `spans` when that rung's price lies inside
+`[base low, base high]`, `above` when the whole base lies on the level-0 side
+of it, `below` otherwise. Relations, distances and touches are decided by
+cross-multiplication: with `R = 1,001` and a base low 0.382 paisa above the
+exact 382 level the relation is `above`, where truncating the level would say
+`spans` (`the_relation_is_decided_on_the_exact_level`,
+`the_relation_is_exact_with_a_range_of_1001`).
+
+**Percentiles are not applied here.** Every measurement is raw; the caller
+(FIB-9) places it in the stock's own past (FIB-2) per direction.
+
+### D-6342 — The ring sized from the calendar, the rung-gap ladder rule, the generated touch tolerance (FIB-3; FM-F015, FM-F017, FM-F022, FM-F023) — 2026-10-18
+
+**No typed number** (operator 16 Oct 11:24 IST). FIB-3's four strategy files
+type no number but 0 and 1 in their shipping parts; every other value is a named
+constant of `vocab::fib_cube::FIXED_NUMBERS` (the micro sizes, permille, basis
+points, the two D-6343 representation rows) or generated
+(`fib3_strategy_files_type_no_number`).
+
+**The ring.** Its capacity is the most candles of the width any session of the
+run's span holds, from the calendar's session length
+(`DetectorParams::ring_capacity`), never 375. Every buffer is allocated once,
+in `Detector::new`, and cleared each day (FM-F023); a day whose session is
+longer is refused `session_longer_than_ring` and never begun, and a candle past
+the day's session is refused by the same name. A rest can never outgrow the
+ring and nothing truncates it.
+
+**The ladder rule.** A ladder exists only if its rungs are distinguishable on
+the price grid: `R x g >= 1000 x tick`, where `g` is the smallest gap between
+adjacent rungs of `RUNGS` (118 parts of 1000, `extremes::MIN_RUNG_GAP`,
+computed by a `const fn`, never typed) and `tick` is the stock's observed tick
+from the caller. Else the candle emits no base and is counted `no_ladder`.
+There is no typed minimum range.
+
+**Touches (FM-F017, FM-F022, 17:15 IST item 1).** The tolerance is GENERATED:
+per (width, direction, level `q`), the level-`q` value of the direction's own
+past step measure in basis points of the previous extreme, passed by the caller
+for the day. A touch holds iff `|high - edge| x 10,000 <= tolerance x |edge|`,
+exactly. Touches are a pure function of the window `[s, t]`: the candles whose
+view high touches the window's highest view high, one count per `q`. The
+running restart rule ("a candle raising the base high by more than the
+tolerance restarts the count at 1") is restated on the window: a candle more
+than the tolerance below the window's highest high is no touch, which is what
+the restart did to the candles before the raise, and it stays right when the
+highest candle leaves the window or highs creep. A count slides with the
+window while its highest high stands and is recounted over the window when it
+changes: BOUNDED by the session (`docs/06-limits.md` L-FIB3-02).
+
+**No own past (FM-F015).** A direction with no tolerance today (its step
+measure has no committed observation) still has its bases emitted with every
+other measurement, `touches_known = false` and no count, each counted
+`no_touch_tolerance`: the caller refuses them before cubing and still walks
+them, so their outcomes feed the own past. Never a default tolerance.
+
+### D-6343 — The shape scores are labels for regions of measurements; two representation rows in FIXED_NUMBERS (FIB-3) — 2026-10-18
+
+**What is decided.** `shape::scores` computes integer permille scores of the
+base's width in its direction's view, O(1) from the window's prefix sums and
+deques: REST `u`, `inverted_u`, `flat`, `triangle`, `inside_candles`,
+`tight_closes`, `rising_lows`, `shakeout_reclaim`; MICRO `v_bottom`,
+`partial_u`, `inside_pair`, `stair` (the formulas are in `shape.rs`'s module
+table). The scores of the other family are 0. The SHAPE LABEL is chosen later by
+the caller as the argmax of each score's own-past permille within its kind's
+family, ties to the lower index; the names are labels only, never thresholds.
+`indicators::pattern`'s predicates are not reused: their thresholds are fixed
+classical conventions labelled UNVERIFIED.
+
+**Two choices the specification left open, made here and labelled.** A rest
+of fewer than three candles has no thirds, so its `u` and `inverted_u` are 0;
+`stair` is `(higher highs + higher lows) / (2 x pairs)`. The thirds are the
+first and last `floor(n / 3)` candles and the middle the rest; the halves are
+the first `floor(n / 2)` candles and the last `ceil(n / 2)`.
+
+**`FIXED_NUMBERS` gains two Representation rows**, `shape_halves = 2` and
+`shape_thirds = 3` (`vocab::fib_cube::SHAPE_HALVES`, `SHAPE_THIRDS`), so the
+split of a base into halves and thirds is named rather than typed. They define a
+measurement and never decide anything. The ledger's own rule allows it ("a
+later FIB package that must type a representation number appends its row at
+the end under its own decision id"); the ledger's digest therefore moved, and
+two FIB-1 goldens were re-pinned to it: `vocab::fib_cube`'s
+`FIXED_NUMBERS_GOLDEN` and `runner::fib::identity_tests`' `PAIR_GOLDEN`. With
+the refusal names appended to `types.rs`'s own test (D-6347) these are the only
+lines of FIB-1's tests this package changed.
+
+**No closed-form x sums.** The slopes and the curvature need the sums of `x`,
+`x^2`, `x^3` and `x^4` over the window; a closed form types its divisors (2, 6,
+30), so they are exclusive prefix sums over the day index, computed once per
+worker in `Detector::new`.
+
+### D-6344 — The generated rest suffixes and the per-direction values; the geometry shared (FIB-3; 17:15 IST items 2 and 4) — 2026-10-18
+
+**Rest suffixes (17:15 IST item 2).** Beside the maximal rest, the detector
+emits one rest suffix for every generated rest length of the direction that
+lies strictly between three candles and the maximal rest's length. The lengths
+are the direction's `base_length` cuts converted to candle counts through its
+own-past histogram once per day by the caller (`DirectionDay::rest_lengths`,
+strictly ascending, refused `rest_lengths_not_ascending` otherwise), and they are
+`base_length`'s R2 trials. There is no maximum-length parameter: the list's
+size is the run's generation, pre-sized at run start
+(`DetectorParams::long_rest_lengths`, `short_rest_lengths`; a longer list is
+refused `generation_beyond_capacity`).
+
+**Per direction (17:15 IST item 4; 16:04 IST items 1 to 4).** Every learned
+value the caller passes is per direction, from that direction's own past: the
+rest lengths and the touch tolerances. Only the geometry is mirrored. The
+folding, the maximal rest and the micro bases do not depend on direction and
+are computed once per width (R7, shared geometry); each distinct generated
+length of either direction gets one lane (its deques of the highest and lowest
+high, low and close and the deepest pokes), which names the directions that
+emit it.
+
+**Touch upkeep follows emission.** A generated lane keeps live touch counts
+only while it can be emitted (its length between three candles and the
+maximal rest's); otherwise its counts are dropped and its next emittable candle
+recounts it once. The rest grows by at most one candle a candle, so that
+recount is paid for by the candles it took to grow (L-FIB3-04).
+
+**Snapshots per candle**: per direction at most two micro bases, the maximal
+rest and one rest per generated length, pre-sized at run start.
+
+### D-6345 — A zero denominator never divides: stated limits, a flag, and a labelled refusing reading (FIB-3; FM-F024) — 2026-10-18
+
+Every denominator is checked before it divides; there is no panic path.
+`measure::ratio`: `0 / 0` is one whole (1000 permille), `x / 0` with `x > 0` is
+`Ratio::OverZero`, the histogram's top, counted `ratio_over_zero` by the
+detector. A zero-width base (`W == 0`, which refusing would drop the tightest
+base) is emitted with the stated limits (`flat` 1000, `tight_closes` 1000,
+`partial_u` 1000, `v_bottom` 0, `shakeout_reclaim` 0; with every range zero the
+squeeze is `0 / 0` = 1000 and `triangle` 0; `u` and `inverted_u` 0) and flagged
+(`BaseMeasures::zero_width`, counted `zero_width_bases`). The labelled other
+reading, `ZeroWidthReading::Refuse`, refuses flagged bases by name
+`zero_width_base`; the reading is a `DetectorParams` field with no `Default`,
+named in the run's identity. FIB-4's trigger body over a zero mean range is to
+use the same `ratio`. The squeeze is the mean range of the last
+`ceil(n / 2)` candles over the first `floor(n / 2)`, exact:
+`sum_last x n_first x 1000 / (sum_first x n_last)`.
+
+Every slope, curvature and level is computed in checked `i128` as one path (a
+step past `i128` makes the whole formula `None`), so a hand-built window a
+detector never builds is still measured without a panic
+(`a_window_outside_its_ladder_is_measured_without_a_panic`).
+
+### D-6346 — Extremes of a withheld bucket, and a frame from a suspect print, are folded and stamped (FIB-3; FM-F025, FM-F096) — 2026-10-18
+
+**FM-F025.** `pull::fold` withholds an incomplete bucket, which can hide the
+day's real high or low from a 3-, 5- or 15-minute stream. The caller passes an
+extremes-only update (`extremes::WithheldExtremes`: the present minutes' high
+and low at the bucket's close instant, corrupt minutes excluded) through
+`Detector::fold_withheld`; it is folded into `DayExtremes` only and is never a
+base candle, a trigger or a decision. While such an extreme stands the ladder
+is stamped `extreme_from_withheld_bucket`, and every base measured against it
+carries the stamp and is counted. Proof: at every N-minute close over random
+holes `H_N == H_1` and `L_N == L_1`
+(`a_withheld_bucket_keeps_every_width_on_the_one_minute_extremes`).
+
+**FM-F096.** A candle whose minute FIB-8 marked suspect (`suspect_unwitnessed`,
+a wick at the top of the stock's own past) is passed with
+`CandleInput::suspect_print`; when it makes an extreme of the frame, the ladder
+and every base measured against it carry `frame_from_suspect_print`, counted.
+The minute is kept.
+
+### D-6347 — The detector's contract: one day begun, one candle at a time, every refusal by name (FIB-3) — 2026-10-18
+
+**The calls.** `Detector::new(DetectorParams)` allocates every buffer from the
+run's values (no `Default` on `DetectorParams`; FIB-3 added `ring_capacity`, the
+four generated list sizes and `zero_width`, D-6342, D-6344, D-6345);
+`begin_day(&DayInput)` checks the day's session, observed tick and generated
+lists against them and clears every buffer; `fold(&CandleInput)` folds one
+closed candle and returns the bases that end at it, borrowed from the
+detector's buffers (`Emitted`: snapshots, each one's touch counts, the ladder);
+`fold_withheld` folds an extremes-only update (D-6346). A refused candle is
+folded into nothing and leaves no state behind; a refused day leaves the
+detector un-begun.
+
+**The refusals**, appended to FIB-1's append-only `types::Refusal`:
+`corrupt_candle` (`Candle::check_evaluable`), `width_mismatch`,
+`day_not_begun`, `session_longer_than_ring`, `no_observed_tick`,
+`generation_beyond_capacity`, `rest_lengths_not_ascending`, `gap_in_base`,
+`no_ladder`, `no_touch_tolerance`, `zero_width_base`; FIB-1's `partial_candle`,
+`missing_minutes`, `out_of_order` and `width_beyond_top` are used as named.
+Counters are plain fields (gate 17): `DetectorCounts` (snapshots, zero-width
+bases, ratios over zero, the two stamps, withheld updates, rest resets, touch
+recounts and the candles they visited) and the structural work counter
+(`Detector::work`, FM-F001).
+
+**The snapshot.** FIB-1's `BaseSnapshot` gained `first_index`, `last_index`,
+`measures`, `shape`, `ladder` (its high, low and two stamps) and
+`touches_known`; the per-`q` touch counts are runtime-sized and travel beside
+it (`Emitted::touches`).
+
+**The 13:07, 13:57, 16:04, 16:45 and 17:11 IST blocks** (FM-F117) were read
+from FIB-1's specification and bind FIB-3 through 16:04 items 1 to 4 (one
+direction per mix; every learned number per direction; only the geometry
+mirrored): D-6344. The gate numbers they carry are FIB-7's; FIB-3 types none.
