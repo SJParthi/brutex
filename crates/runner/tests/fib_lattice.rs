@@ -1014,7 +1014,7 @@ fn outcomes_for(rows: u32, exits: u32, rng: &mut Seeded) -> Vec<Outcome> {
 /// below it, plus the node's rows for a prefix child that scans its own,
 /// times an index and a cell). Returns the tasks the batches within `budget`
 /// spawn (one per child) and how many batches pass the budget and run inline.
-fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64) {
+fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64, Vec<u64>) {
     let free = free_rows();
     let last_fixed = |key: &MixKey| {
         free.iter()
@@ -1039,7 +1039,7 @@ fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64) {
         }
     }
     let entry = (size_of::<u32>() + size_of::<Coords>()) as u64;
-    let (mut tasks, mut inline) = (0, 0);
+    let (mut tasks, mut inline, mut sizes) = (0, 0, Vec::new());
     for ((parent, position), rows) in &children {
         let parent_rows = support[parent];
         if rows.len() < 2 || parent_rows < split_support {
@@ -1052,13 +1052,14 @@ fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64) {
             0
         };
         let bytes: u64 = rows.iter().map(|r| (r * below + own) * entry).sum();
+        sizes.push(bytes);
         if bytes > budget {
             inline += 1;
         } else {
             tasks += rows.len() as u64;
         }
     }
-    (tasks, inline)
+    (tasks, inline, sizes)
 }
 
 /// FM-F053: a work-stealing walk at 1, 4 and 12 threads hands every node to
@@ -1107,6 +1108,9 @@ fn work_stealing_equals_sequential_bytes() {
             .build()
             .unwrap();
         let mut mixed = false;
+        let (_, _, mut sizes) = batches(&collected, 40, u64::MAX);
+        sizes.sort_unstable();
+        let exact = sizes[sizes.len() / 2];
         for (split_support, budget) in [
             (40, u64::MAX),
             (1, u64::MAX),
@@ -1114,6 +1118,8 @@ fn work_stealing_equals_sequential_bytes() {
             (40, 100_000),
             (40, 400_000),
             (1, 1_000_000),
+            (40, exact),
+            (40, exact - 1),
         ] {
             let schedule = Schedule::Parallel {
                 split_support,
@@ -1127,7 +1133,7 @@ fn work_stealing_equals_sequential_bytes() {
                 "{threads} threads, {schedule:?}"
             );
             assert_eq!(spread.tally, walked.tally);
-            let (tasks, inline) = batches(&collected, split_support, budget);
+            let (tasks, inline, _) = batches(&collected, split_support, budget);
             assert_eq!(
                 (spread.spread.tasks, spread.spread.inline_for_budget),
                 (tasks, inline),
