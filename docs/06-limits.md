@@ -19611,6 +19611,63 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
 
+## The FIB cube, the pool-run identity and the FIB bench harness (FIB-1, D-6300 to D-6318)
+
+Measured 18 October 2026 on THIS HOST: the cloud container FIB-1 was built in
+(4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`, 15 GiB, Linux 6.18,
+rustc 1.97.1, the `bench` profile), branch `cloud/fib1-20261018` at `8b71fb41`,
+one bench target at a time after a 30-second pause, with no build or test
+running beside it (one-minute load average 0.25 to 0.73 before each target).
+Timer granularity 21 to 23 ns; the pointer-chase probe's last-level-cache
+estimate 32,768 KiB on all four targets. Every time is a percentile OF BATCH
+MEANS (2,000 batches of 1,000 calls after a warm-up), in picoseconds per call
+as the harness prints it, at each scale as p50 / p99 / max; the work counter is
+exact. None of these is a Mac number: the Mac re-measures every row at
+merge-back (`cargo bench -p vocab --bench fib_cube`, `-p runner --bench fib`,
+`-p indicators --bench fibflag`, `-p cli --bench fib`).
+
+The `indicators` and `cli` targets measure nothing yet: each prints its host
+block and one "not built yet: it arrives with FIB-n" line per row file, as do
+`runner`'s rank, walk, lattice, gate and charges files, because FIB-1 builds no
+detector, walk, lattice, gate, charge, day input or wiring. All four targets
+exited 0.
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-F-01 | `Layout::encode` of one cell | WORST-CASE | 100, 1,000, 10,000 distinct cells (FIXED-STATE) | 47,244 / 67,372 / 284,649; 47,195 / 67,443 / 103,767; 48,560 / 68,716 / 110,358 | 24 rows at every percentile | p99 time 1.019x, work 1.000x | PASS |
+| C-F-02 | `Layout::decode` of one code below 2^64 (the `u64` path) | WORST-CASE | 100, 1,000, 10,000 distinct codes (FIXED-STATE) | 69,420 / 86,330 / 112,249; 71,651 / 94,578 / 119,519; 71,085 / 128,599 / 339,292 | 24 rows at every percentile | p99 time 1.489x, work 1.000x | **FAIL (time) on this host**, above the specification's 1.25x line and within the shared 3.0x ceiling, so the process exited 0; L-FIB1-13 |
+| C-F-04 | `Layout::decode` of one code past 2^64 (the `u128` path) | WORST-CASE | 100, 1,000, 10,000 distinct codes (FIXED-STATE) | 98,108 / 121,399 / 161,559; 98,176 / 123,305 / 181,532; 101,112 / 124,764 / 181,621 | 24 rows at every percentile | p99 time 1.027x, work 1.000x | PASS |
+| C-F-03 | `contains` of one cell in one mix | WORST-CASE | 100, 1,000, 10,000 distinct pairs (FIXED-STATE) | 7,198 / 18,297 / 42,099; 6,917 / 11,736 / 25,474; 6,970 / 11,790 / 28,948 | 24 rows at every percentile | p99 time 0.644x, work 1.000x | PASS |
+| C-F-05 | `fib_identity` of one pooled run | BOUNDED, O(term bytes), once per run | 1, 10, 100 pool names (FIXED-STATE: the run's own terms) | 1,363,211 / 2,181,426 / 3,218,114; 1,800,418 / 2,323,003 / 4,267,820; 4,776,262 / 6,592,532 / 9,038,320 | 45, 162, 1,332 pool bytes | p99 time 3.022x against work 29.6x | BOUNDED: the bound is the claim (L-FIB1-01) |
+| C-F-06 | one Merkle Mountain Range append | BOUNDED, O(log n) merges, once per stock-month or authority leaf | 1,000, 10,000, 100,000 leaves already in the tree (FIXED-STATE: the peaks) | 349,071 / 380,067 / 914,405; 378,436 / 410,382 / 1,052,579; 390,942 / 413,072 / 988,167 | merges p50 0, p99 6, p99.9 9, max 20, 20, 21, mean 0.999, 0.999, 1.000 | p99 time 1.086x, max work 1.050x | BOUNDED (L-FIB1-02) |
+
+**C-F-02 across this session's runs.** Before `8b71fb41`, `decode` divided every
+row step in `u128`, two library calls; the row read 1.212x (PASS, at
+`780b5516`), then 2.245x and 1.441x (FAIL, at `00198cc0`), each with a flat p50
+and work 24. `8b71fb41` divides a code below 2^64 in `u64`: p50 fell from about
+90 ns to about 70 ns and the row read 0.599x and 0.928x (PASS, two runs before
+the commit, the same source) and 1.489x (FAIL, the table above). In those three
+runs of the `u64` path the largest scale's p99 sat below the smallest's twice
+and above it once.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FIB1-01 | `fib_identity` hashes every term byte | an identity is a digest of what it identifies; the pool's names are its largest term | BOUNDED: O(term bytes), once per run (C-F-05) | FIB-1 |
+| L-FIB1-02 | A data-tree append merges up to log2(n) times; the root bags up to log2(n) peaks | a Merkle Mountain Range keeps one peak per set bit of the leaf count | BOUNDED: O(log n) per append, once per stock-month or authority leaf (C-F-06) | FIB-1 |
+| L-FIB1-03 | A cut lookup is a binary search | a generated cut list holds up to 253 cuts | BOUNDED: at most eight exact comparisons, in `u128`; NOT benched here (FIB-2 owns the per-candidate stamp path and its row) | FIB-1 / FIB-2 |
+| L-FIB1-04 | `Generation::new` and `run_descriptor` walk every cut list | a version is built once per walk-forward step, never per candidate | O(cut lists x cuts), once per step | FIB-1 |
+| L-FIB1-05 | `SchemaLedger::record` scans the digests recorded | one digest per generation version of a run | O(versions), once per version | FIB-1 |
+| L-FIB1-06 | R2's candidate version costs one more lattice traversal per walk-forward step | a cut is kept only if a passer of the candidate version needs it, so the candidate must be traversed | BOUNDED: at most one extra traversal per step; `fib plan` projects it (FIB-12) | FIB-6, FIB-13 |
+| L-FIB1-07 | The permutation draws reuse the real run's generation versions | redrawing the refinement per draw would multiply the lattice cost by the draws | refinement luck is covered by the TRIAL count, not by the draws (R8); every version and cut tried is counted | FIB-7 |
+| L-FIB1-08 | The harness's last-level-cache figure is an estimate | a pointer-chase curve has no sharp knee on a shared host; it is the largest size whose load costs under half of a 256 MiB load, which errs large | printed with its whole curve; a data row's largest working set must pass it. This session it read 16,384 KiB on one run and 32,768 KiB on the others | FIB-1 |
+| L-FIB1-09 | A time ratio above 1.25x and up to 3.0x is a printed FAIL, not a failed process | gate 8 runs every bench on a shared CI runner, whose scheduler is noisier than a 25% line | the structural work verdicts are exact and fail the process; time fails it past the shared 3.0x ceiling | FIB-1 |
+| L-FIB1-10 | No FIB-1 row has a data axis, so the 1-worker and production-worker runs and the EXTRAPOLATION line are exercised only by the harness's own test | FIB-1 builds no detector, walk or lattice | `a_data_row_runs_at_one_and_at_the_production_worker_count`; FIB-2 onward add the data rows | FIB-1 |
+| L-FIB1-11 | "Free in the PREC plan" is UNVERIFIED for the moved decision blocks | the PREC plan's text is not in this repository | D-6311: every pushed branch's ledger (296 heads) was read on 18 Oct 2026 and only this branch holds a heading in D-6300..D-6579 or D-6600..D-6619; the Mac checks the PREC plan at merge-back | FIB-1 |
+| L-FIB1-12 | The `encode`, `decode` and `contains` work counters count the row loop's trip count | the library is not instrumented for the bench; the count is the loop bound, `ROW_COUNT` | 24 per call, structural; the time ratio is the measurement | FIB-1 |
+| L-FIB1-13 | C-F-02's p99 time ratio is above the specification's 1.25x line on this host in the final run, and in two of the three runs of the `u64` path | its p50 is flat and its work is 24 at every scale and percentile; the direction of the largest scale's p99 against the smallest's changed between runs. The cause is UNVERIFIED: no measurement here separates scheduler and steal time from the call | measured, not closed: the Mac's run at merge-back decides it, and the row stays WORST-CASE with its FAIL printed until a run passes | FIB-1 |
+| L-FIB1-14 | A code past 2^64 decodes about 30 ns slower than one below it | it divides in `u128`, two library calls a row; a layout's codes pass 2^64 only when its paper count does (`KeyWidth::Bits128`) | C-F-04: p50 98 to 101 ns against C-F-02's 69 to 72 ns; both 24 rows a call | FIB-1 |
+| L-FIB1-15 | The bench harness is 72.69% line-covered by `cargo test` (509 lines, 139 missed) | its self-tests run under `tests/fib_harness.rs`; the rest (the row loop's timing, the printing, the probe) runs only under `cargo bench`, and `cargo llvm-cov`'s default filter, which the coverage job uses, leaves `benches/` and `tests/` out | measured with `llvm-cov report` on the `fib_harness` test binary; the four targets' `main` runs every row at every bench run | FIB-1 |
+
 ### Gate 11 — FIB-1, declared (18 October 2026)
 
 ~~~~text
