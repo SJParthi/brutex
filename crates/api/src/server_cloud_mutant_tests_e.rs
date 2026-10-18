@@ -302,3 +302,63 @@ async fn a_router_served_without_the_limited_listener_passes_through_the_watch()
     assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
     assert!(said.ends_with("plain answer"), "{said:?}");
 }
+
+/// What `finished_day_only` must answer, at this instant, for a window that
+/// ends on `to`: refused while `to` is today and today's session has not
+/// settled, with the reason today is held back, and accepted otherwise.
+/// Built from the same parts the guard reads (the calendar of record, the
+/// venue's dated close, the minute of the day), but asked of them here.
+fn ending_on(to: Day) -> Result<(), String> {
+    let now = ingest::ist_moment(std::time::SystemTime::now()).expect("a usable clock");
+    let today = now.day();
+    if to != today {
+        // The day turned between building the window and asking: it ended
+        // yesterday, which is askable.
+        return Ok(());
+    }
+    let close = pull::vendor::Venue::NseCash
+        .hours_on(today)
+        .ok()
+        .map(pull::vendor::Session::close_minute);
+    match settled_today(
+        pull::calendar::exchange_kind_of(i64::from(today.days_from_epoch())),
+        close,
+        now.minute_of_day(),
+    ) {
+        Ok(()) => Ok(()),
+        Err(why) => Err(format!(
+            "{} Today: {why}.",
+            ingest::Refusal::WindowReachesToday { to, today }
+        )),
+    }
+}
+
+/// **A window that ends today is refused, with the reason today is held
+/// back, exactly while today's session has not settled.** The guard reads
+/// the wall clock, and this build has no clock seam, so the test asks the
+/// same question of the same parts at the moment of the call. Before and
+/// after it, so a minute (or a day) that turns in between is tolerated, and
+/// holds the answer to one of the two. On a day already settled (any closed
+/// day, and every open day from five minutes past its close) the answer is
+/// `Ok`. In the hours before that, it is the refusal ending in " Today: …",
+/// which kills the match guard at `finished_day_only`'s refusal
+/// (server.rs:6723) turned to `false`. Those hours are the only ones in
+/// which any test can tell that mutant apart.
+#[test]
+fn a_window_ending_today_is_held_back_exactly_while_today_is_unsettled() {
+    let today = ingest::ist_day(std::time::SystemTime::now()).expect("a usable clock");
+    let tomorrow = today.succ().expect("a day after today");
+    let asked = ingest::parse_spot(
+        &format!("target=swept&vendor=dhan&granularity=1day&from={today}&to={today}"),
+        tomorrow,
+    )
+    .expect("a one-day window ending today, parsed as of tomorrow");
+    assert_eq!(asked.window.to(), today);
+    let before = ending_on(today);
+    let got = finished_day_only(&asked);
+    let after = ending_on(today);
+    assert!(
+        got == before || got == after,
+        "got {got:?}; the guard's parts said {before:?} then {after:?}"
+    );
+}
