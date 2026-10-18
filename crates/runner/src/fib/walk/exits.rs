@@ -20,6 +20,7 @@
 //! bytes a walk writes never depend on the budget (FM-F032). Proved by
 //! `crates/runner/tests/fib_walk.rs`.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use brutex_core::blake3::{OUT_LEN, hash};
@@ -674,12 +675,13 @@ impl FillSet {
 fn insert_sorted(list: &mut Vec<u16>, value: u16) {
     let mut at = list.len();
     for (index, existing) in list.iter().enumerate() {
-        if *existing == value {
-            return;
-        }
-        if *existing > value {
-            at = index;
-            break;
+        match existing.cmp(&value) {
+            Ordering::Less => {}
+            Ordering::Equal => return,
+            Ordering::Greater => {
+                at = index;
+                break;
+            }
         }
     }
     list.insert(at, value);
