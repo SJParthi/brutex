@@ -112,6 +112,7 @@
   // whole is read as its newest bars, a thousand at a time.
   import { readWindowPage } from '$lib/database-pages.js';
   import { foldBars, tailCut, tailPlan, TAIL_PAGE } from '$lib/markets-tail.js';
+  import { barStateOf, barsOf, heldTally, isHeld, spotHome } from '$lib/markets-held.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { onDestroy } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
@@ -463,44 +464,24 @@
   }
 
   /**
-   * FOUR ANSWERS FOR ONE COLUMN, AND THEY NEVER LOOK ALIKE.
+   * FIVE ANSWERS FOR ONE COLUMN, AND THEY NEVER LOOK ALIKE — `$lib/markets-held.js`.
    *
-   *   count   — a measurement.
+   *   count   — a measurement of the SPOT series.
+   *   options — no spot bar under this name, and the feed holds this
+   *             underlying's option contracts (`options: true`). HELD, and
+   *             never "never pulled" (AH-04, g-ui-dom-vs-json-5, D-5882).
    *   zero    — a DIFFERENT measurement: the master answered and reports
-   *             nothing on disk. This instrument has never been pulled.
+   *             nothing on disk, spot or options. Never pulled.
    *   unread  — NOT a measurement. The `bars` field is absent or is not a
    *             whole number, so the count is unknown and no number will be
    *             printed for it anywhere.
    *   nomaster— nothing about this row has been measured at all, because the
    *             master on hand is not this feed's.
-   */
-  /** @param {import('$lib/index.svelte.js').MasterRow | null | undefined} row */
-  const barsOf = (row) =>
-    Number.isInteger(row?.bars) && /** @type {number} */ (row?.bars) >= 0
-      ? /** @type {number} */ (row?.bars)
-      : null;
-  /**
-   * A DISCRIMINATED UNION, SPELLED OUT, so `st.kind === 'count'` narrows.
-   *
-   * Inferred from the four returns, `kind` widens to `string` — and a `string`
-   * discriminant discriminates nothing, so `barCell` reading `st.n` under
-   * `{#if st.kind === 'count'}` was reading a field three of the four branches
-   * do not have. The four states are the whole point of this function; its own
-   * header calls them "four answers for one column, and they never look
-   * alike", and this is that sentence in a form the checker enforces.
    *
    * @param {import('$lib/index.svelte.js').MasterRow} row
-   * @returns {{ kind: 'nomaster', wait: boolean, why: string }
-   *          | { kind: 'unread', why: string }
-   *          | { kind: 'zero' }
-   *          | { kind: 'count', n: number }}
    */
   function barState(row) {
-    if (!masterIsThisFeed) return { kind: 'nomaster', wait: !catalogue.error, why: countRefusal };
-    const n = barsOf(row);
-    if (n === null) return { kind: 'unread', why: `this row's \`bars\` field is ${JSON.stringify(row?.bars)}` };
-    if (n === 0) return { kind: 'zero' };
-    return { kind: 'count', n };
+    return barStateOf(row, { isThisFeed: masterIsThisFeed, wait: !catalogue.error, why: countRefusal });
   }
 
   const hits = $derived.by(() => {
@@ -516,7 +497,7 @@
       (row) =>
         inUniverse(row, token) &&
         (segment === '' || row.segment === segment) &&
-        (!heldOnly || (barsOf(row) ?? 0) > 0) &&
+        (!heldOnly || isHeld(barState(row))) &&
         (!unreadOnly || barState(row).kind === 'unread')
     );
     const dir = sortDir;
@@ -551,18 +532,14 @@
   const counts = $derived.by(() => {
     const uni = Object.fromEntries(UNIVERSES.map((u) => [u.id, 0]));
     const seg = new Map();
-    let held = 0;
-    let zero = 0;
-    let unread = 0;
     for (const row of rows) {
       for (const u of UNIVERSES) if (inUniverse(row, u.token)) uni[u.id] += 1;
       seg.set(row.segment, (seg.get(row.segment) ?? 0) + 1);
-      const st = barState(row);
-      if (st.kind === 'count') held += 1;
-      else if (st.kind === 'zero') zero += 1;
-      else if (st.kind === 'unread') unread += 1;
     }
-    return { uni, seg, held, zero, unread };
+    // HELD COUNTS AN OPTIONS-ONLY LISTING (AH-04, D-5882): `optionsOnly` is
+    // the part of `held` whose spot is not stored under its own name.
+    const { held, optionsOnly, zero, unread } = heldTally(rows, barState);
+    return { uni, seg, held, optionsOnly, zero, unread };
   });
   /* A ROW WITH NO SEGMENT CONTRIBUTES NO SEGMENT. Coercing it to `''` would
      put a nameless entry in the segment filter that matches nothing an
@@ -1201,7 +1178,7 @@
    * the reason that was computed from it. One read, carried.
    *
    * @typedef {{
-   *   kind: 'nolist'|'gone'|'idle'|'error'|'wait'|'unreadable'|'nodata'|'norung'|'pinmiss'|'tailshort',
+   *   kind: 'nolist'|'gone'|'idle'|'error'|'wait'|'unreadable'|'nodata'|'optonly'|'norung'|'pinmiss'|'tailshort',
    *   tsub: string,
    *   why: string | null,
    *   raw?: boolean,
@@ -1249,6 +1226,15 @@
         tsub: 'the census cannot be read here',
         why: `${group(badMonths.length)} census row${badMonths.length === 1 ? '' : 's'} for ${picked.key} could not be parsed — ${badMonths[0].why}. How many bars are on disk is UNKNOWN, and no zero will be printed for it.`
       };
+    // OPTIONS ONLY IS HELD, NOT "NOT STORED" (AH-04, g-ui-dom-vs-json-5,
+    // D-5882): no spot month under this name, and the feed holds the
+    // underlying's option contracts. Never "it can be pulled".
+    if (heldMonths.length === 0 && barState(picked).kind === 'options')
+      return {
+        kind: 'optonly',
+        tsub: 'options only, spot not stored',
+        why: `${feedLabel(feeds.active)} holds option contracts for ${picked.symbol ?? picked.key} and no spot series under ${picked.key}.`
+      };
     if (heldMonths.length === 0)
       return { kind: 'nodata', tsub: 'not stored', why: `${feedLabel(feeds.active)} holds no bars for ${picked.key}.` };
     if (base === null)
@@ -1294,7 +1280,9 @@
   // an empty store ("you hold nothing" is an answer this bay exists to give),
   // a bad pin and an unreadable census row — the last three are answered IN
   // the bay, in its own words, rather than replacing it with a sentence.
-  const RAIL_ANSWERS = new Set(['nodata', 'pinmiss', 'unreadable']);
+  // An options-only row (AH-04) is answered there too: its tally says
+  // "options only" and its month stack names where its spot is filed.
+  const RAIL_ANSWERS = new Set(['nodata', 'optonly', 'pinmiss', 'unreadable']);
   const railReason = $derived(
     chartReason && !chartReason.chartOnly && !RAIL_ANSWERS.has(chartReason.kind) ? chartReason : null
   );
@@ -1359,6 +1347,44 @@
   });
   const change = $derived(lastBar && reference ? lastBar.c - reference.paisa : null);
   const changePct = $derived(change != null && reference?.paisa ? (change / reference.paisa) * 100 : null);
+
+  /* WHERE AN OPTIONS-ONLY ROW'S SPOT IS FILED (AH-04, g-ui-dom-vs-json-5,
+     D-5882). One GET of `/aliases.json?symbol=` when such a row is opened —
+     compile-time tables on the server, O(1) per request — kept per symbol for
+     the page's life, so reopening it asks nothing. `null` while unread. */
+  /** @type {Map<string, any>} */
+  const aliasAnswers = new Map();
+  let aliasTick = $state(0);
+  const optionsOnlySymbol = $derived(
+    picked && barState(picked).kind === 'options' && typeof picked.symbol === 'string' ? picked.symbol : null
+  );
+  const spotSaid = $derived.by(() => {
+    void aliasTick;
+    return optionsOnlySymbol ? spotHome(aliasAnswers.get(optionsOnlySymbol) ?? null, optionsOnlySymbol) : null;
+  });
+  $effect(() => {
+    const sym = optionsOnlySymbol;
+    if (!sym || aliasAnswers.has(sym)) return;
+    const ctl = new AbortController();
+    aliasAnswers.set(sym, null);
+    void (async () => {
+      try {
+        const r = await ask(`/aliases.json?symbol=${encodeURIComponent(sym)}`, { signal: ctl.signal });
+        const body = await r.json();
+        aliasAnswers.set(sym, r.ok ? body : new Error(body?.error ?? `HTTP ${r.status}`));
+      } catch (why) {
+        if (ctl.signal.aborted) return;
+        aliasAnswers.set(sym, why instanceof Error ? why : new Error(String(why)));
+      }
+      aliasTick += 1;
+    })();
+    return () => {
+      ctl.abort();
+      // An answer cut off by a new selection is asked again next time, never
+      // left reading forever.
+      if (aliasAnswers.get(sym) === null) aliasAnswers.delete(sym);
+    };
+  });
 
   /** THE TWO ANSWERS DISAGREEING IS ITSELF A FINDING. */
   const stated = $derived(picked ? barsOf(picked) : null);
@@ -1627,8 +1653,14 @@
   {:else if st.kind === 'zero'}
     <span
       class="n0"
-      title="Measured. The master answered for this series and reports zero bars on disk — it has never been pulled."
+      title="Measured. The master answered for this series and reports zero bars on disk, spot or options — it has never been pulled."
       >0</span
+    >
+  {:else if st.kind === 'options'}
+    <span
+      class="nopt"
+      title="Held: no spot bar is stored under this name, and the feed holds this underlying's option contracts (/instruments.json options: true). Not a zero and never 'never pulled'."
+      >options only</span
     >
   {:else if st.kind === 'unread'}
     <span
@@ -1749,9 +1781,10 @@
             <p class="hint">The same search as the bay on the left, and the same rows. This tray shows the first twelve.</p>
           </div>
           {#each hits.slice(0, 12) as r (r.key)}
+            {@const st = barState(r)}
             <button class="trow" type="button" aria-pressed={pickedKey === r.key} onclick={() => pick(r)}>
               <span class="nm">{r.symbol}</span>
-              <span class="de">{@render barCell(barState(r))} bars</span>
+              <span class="de">{@render barCell(st)}{st.kind === 'options' ? '' : ' bars'}</span>
             </button>
           {/each}
           {#if hits.length === 0}
@@ -2060,7 +2093,7 @@
               aria-pressed={heldOnly}
               disabled={!masterIsThisFeed}
               title={masterIsThisFeed
-                ? `At least one bar on disk — ${group(counts.held)} of ${group(rows.length)} held under ${feedLabel(feeds.active)}; ${group(counts.zero)} listed and not stored${counts.unread ? `; ${group(counts.unread)} whose count could not be read` : ''}.`
+                ? `At least one bar on disk — ${group(counts.held)} of ${group(rows.length)} held under ${feedLabel(feeds.active)}${counts.optionsOnly ? ` (${group(counts.optionsOnly)} of them options only, spot not stored)` : ''}; ${group(counts.zero)} listed and not stored${counts.unread ? `; ${group(counts.unread)} whose count could not be read` : ''}.`
                 : `Cannot be answered: which series hold bars comes from the master, and ${countRefusal}.`}
               onclick={() => (heldOnly = !heldOnly)}>Held</button
             >
@@ -2236,7 +2269,7 @@
             >
           {:else}
             <span class="sum" title="A partition, and it sums: every listed row is in exactly one of these buckets."
-              >· {group(counts.held)} held + {group(counts.zero)} not stored{counts.unread ? ` + ${group(counts.unread)} unread` : ''} =
+              >· {group(counts.held)} held{counts.optionsOnly ? ` (${group(counts.optionsOnly)} options only, spot not stored)` : ''} + {group(counts.zero)} not stored{counts.unread ? ` + ${group(counts.unread)} unread` : ''} =
               {group(counts.held + counts.zero + counts.unread)}</span
             >
           {/if}
@@ -2250,7 +2283,7 @@
             >
           {/if}
           {#if masterIsThisFeed}
-            <span class="lg">0 = measured zero · unread = the count could not be read</span>
+            <span class="lg">0 = measured zero, no spot and no options · options only = option contracts held, spot not stored under this name · unread = the count could not be read</span>
           {/if}
         {/if}
       </div>
@@ -2450,6 +2483,22 @@
                   ['bars on disk', '0 — measured, not unknown']
                 ])}
                 <div class="acts"><a class="cta" href="/ingest">Pull it from Ingest →</a></div>
+              </div>
+            {:else if chartReason.kind === 'optonly'}
+              <!-- HELD, AND SAID AS HELD (AH-04, g-ui-dom-vs-json-5, D-5882):
+                   the option contracts are on disk; only the spot series is
+                   not filed under this name, and no pull is offered. -->
+              <div class="why" data-options-only>
+                <h3>Options only for {picked?.symbol}</h3>
+                <p>{chartReason.why} The chart draws a spot series, so there is nothing to draw here; the contracts are on /db.</p>
+                {@render evid([
+                  ['feed', feedLabel(feeds.active)],
+                  ['instrument', picked?.key ?? pickedKey],
+                  ['spot month files', '0 under this name — the census answered and listed none'],
+                  ['option contracts', 'held — /instruments.json says options: true for this row'],
+                  ['spot filed under', spotSaid ? spotSaid.text : 'reading /aliases.json…', !spotSaid]
+                ])}
+                <div class="acts"><a class="cta" href={`/db?feed=${encodeURIComponent(feeds.active ?? '')}&seg=options&sym=${encodeURIComponent(picked?.symbol ?? '')}`}>Open its options on /db →</a></div>
               </div>
             {:else if chartReason.kind === 'unreadable'}
               <!-- NOT A ZERO. The count is unknown, and the overlay says which
@@ -2784,7 +2833,13 @@
             <span>{group(heldMonths.length)} files · newest first</span>
           </div>
 
-          {#if heldMonths.length === 0}
+          {#if heldMonths.length === 0 && optionsOnlySymbol}
+            <p class="empty" data-options-only>
+              No spot month file exists for <span class="m">{picked.key}</span> under {feedLabel(feeds.active)}; its option
+              contracts are held (options only). {spotSaid ? spotSaid.text : 'Where its spot is filed is being read from /aliases.json.'}
+              <a class="lnk" href={`/db?feed=${encodeURIComponent(feeds.active ?? '')}&seg=options&sym=${encodeURIComponent(optionsOnlySymbol)}`}>Open its options on /db →</a>
+            </p>
+          {:else if heldMonths.length === 0}
             <p class="empty">
               No month file exists for <span class="m">{picked.key}</span> under {feedLabel(feeds.active)}. That is a measured zero: the
               census answered for this series and listed none. <a class="lnk" href="/ingest">Pull it from Ingest →</a>
@@ -4281,6 +4336,16 @@
     color: var(--warn);
     text-decoration: underline dotted;
     text-underline-offset: 3px;
+    cursor: help;
+  }
+  /* HELD, AND NOT A COUNT (AH-04): the option contracts are held and the
+     spot is not stored under this name. Ink, not faint, so it never reads
+     as the ghost zero beside it. */
+  .nopt {
+    font-size: var(--fs-mini);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.04em;
+    color: var(--ink-2, var(--ink));
     cursor: help;
   }
   /* NOT AMBER: nothing is wrong yet, the read simply has not answered. */

@@ -71786,3 +71786,145 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-5880 — `/audit`'s last commit of a partitioned census is its newest CURRENT epoch file, never its directory, and the header counts this feed's runs (AH-04, g-ui-dom-vs-json-4) — 2026-10-18
+
+**Number** the first of the block D-5880..D-5883 taken by AH-04 from the
+ledger's head (A6); `grep` over every local branch's `docs/05-decisions.md`
+found no D-587x or D-588x on 18 Oct.
+
+**Finding** g-ui-dom-vs-json-4 (medium, both skeptics confirmed). `committed_at`
+(`crates/api/src/audit_json.rs`) ran `metadata(&census.path)`, and for a vendor
+migrated to version 4 that path is the DIRECTORY `manifest/v4/gdfl`. A
+directory's mtime moves when an entry is added or removed, not when a file
+under it is appended to: `/audit` printed GDFL's last commit as 10 Oct 08:56:23
+IST ("not written for 110h 27m") while `CASH/000001.man`, `FNO/000005.man` and
+`INDEX/000001.man` had been written on 14 Oct, so JUST WROTE could never fire
+for GDFL and the first answer of an open page said IDLE during an import. The
+same header printed `journal.records` (every vendor's pull-journal records,
+4,217,222) as "runs" while `journal.feed_scope` said GDFL holds 0 records in 0
+runs.
+
+**Decision.**
+
+1. For a census read from version-4 partitions, `committed_at` is the newest
+   mtime among the CURRENT epoch of each segment: the files the census itself
+   just read (`census::Part::path`), one `metadata` call per part, at most
+   three, no directory listing, no `census.rs` edit. A single-file census is
+   unchanged: its one file's mtime.
+2. **`store.committed_from`** says what the stamp rests on: `basis`
+   (`newest census file`, `manifest file` or `none`), `complete`, every file
+   asked (`segment`, `epoch`, `path`, `at`, `state` = `read` / `no epoch` /
+   `absent` / `unread`, `why`) and a `note`.
+3. Nothing unread becomes a zero. An epoch that will not stat is named with the
+   file system's refusal (a listed epoch that is gone says "epochs are never
+   deleted", D-3316 item 2), `complete` is `false`, and the newest of the
+   others is a LOWER bound and says so. A segment with no epoch yet is named
+   and contributes nothing; a migrated vendor with no epoch at all has
+   committed nothing (`null`). A census that did not load is stat'ed at its
+   path as before, and a path that is a directory answers `null` with the
+   reason: a directory's mtime is not a commit.
+4. An epoch newer than the server's clock is reported as it is. The page
+   (`web/src/lib/audit-header.js` `commitLine`, `sinceCommit`) names it "AHEAD
+   of the server's clock" and gives it no age, so it is never JUST WROTE.
+5. The label is "newest of N current census file(s)", or "the census file",
+   never "manifest mtime".
+6. The `/audit` header says `<feed>: <runs> runs · <records> records` from
+   `journal.feed_scope`, with the whole journal's record count in its title,
+   named as all feeds'; a scope that failed or is absent says "runs not
+   counted", never 0 (`journalHeader`).
+
+**Cost.** Three `metadata` calls more than a single file for a migrated vendor,
+none per row. Measured on a shadow of the real store (`docs/06-limits.md`
+L-AH04-01).
+
+**Proof.** `crates/api/src/audit_json_commit_tests.rs` (AH04-01 to AH04-04);
+`web/tests/audit-header.test.js` (AH04-05).
+
+### D-5881 — One archive end for `/ingest` and `/audit`, and the import journal's last day named apart (AH-04, g-ui-dom-vs-json-9) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-9 (low). `/audit` handed `ImportPanel` the import
+journal's last day (`imports.span.to`, 2026-09-30, reached by the tick-store
+append) as "an archive ending", while `/ingest` handed it `/feeds.json`'s
+`archive.to` (2026-09-24, and since R3-05 only where `to_binds`). One panel
+said two things for one fact. The reproduce skeptic also found the not-done
+list blank on a clean `/ingest` load (part of g-ui-dom-vs-json-15): rows were
+keyed `${kind}|${day}`, `options|2020-09-16` was named by three rows (two
+`incomplete` under different filters, one `open`), Svelte threw
+`each_key_duplicate`, and none of the 9 not-done days rendered.
+
+**Decision.**
+
+1. `import-panel.js` `archiveEnd(feed)` is the archive's last day from the
+   feed's `/feeds.json` descriptor only where it binds, else `null`: the rule
+   `/ingest` applies inline to the same descriptor. `/audit` passes
+   `archiveEnd` of the active feed's descriptor; it no longer passes the
+   journal's last day.
+2. `ImportPanel` names the journal's last imported day apart: "The import
+   journal reaches <day> (its last imported day, any kind)", with "past the
+   archive end" or "short of the archive end" where both are known. With no
+   binding end it says "/feeds.json states no binding archive end".
+   `optionsLeft` and the ETA are unchanged (`readImportExtras`).
+3. Each not-done row has an `id` of kind, day, outcome, filter and journal line
+   (`notDoneRows`); a row equal to an earlier one in all five is numbered, so
+   no answer can blank the list. The day key `key` is unchanged. A row shows
+   its filter (when not `*`) and line.
+
+**Proof.** `web/tests/import-panel-archive.test.js` (AH04-06, AH04-07).
+
+### D-5882 — `/markets` counts an options-only listing as held (AH-04, g-ui-dom-vs-json-5) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-5 (medium/low). `/instruments.json`'s `bars` counts
+a row's spot series only; 17 GDFL rows (FINNIFTY, MIDCPNIFTY, NIFTYNXT50 and
+14 renamed or removed share underlyings) are `spot: false, options: true,
+bars: 0`, holding 57,731 option contracts and 470,617,527 one-second bars.
+`/markets` read neither flag: "346 held + 17 not stored", "0 = measured zero",
+"The feed LISTS it, so it can be pulled — it just has not been", "Pull it from
+Ingest".
+
+**Decision.**
+
+1. `web/src/lib/markets-held.js` `barStateOf` has a fifth state, `options`:
+   `bars` 0 and `options: true`. It is HELD (`isHeld`), drawn "options only",
+   and counted in the footer as `N held (M options only, spot not stored)`.
+   Two field reads per row: O(1) per row, O(rows) once per master.
+2. `bars` absent or not a whole number is `unread` whatever `options` says,
+   and the reason names the options flag. An older server that sends no
+   `options` flag leaves the row a measured zero, as before.
+3. The detail view of an options-only row says "Options only for X", names its
+   option holdings, offers "Open its options on /db", and never "it can be
+   pulled". Where its spot is filed comes from one `GET
+   /aliases.json?symbol=X` when such a row is opened (compile-time tables on
+   the server, O(1)), kept per symbol: an INDEX key (FINNIFTY under
+   NIFTYFINSERVICE), a rename with its newest symbol, the table's own reason
+   for not aliasing, or "names no other key" — never a guessed key.
+4. The legend reads "0 = measured zero, no spot and no options · options only
+   = option contracts held, spot not stored under this name".
+
+**Proof.** `web/tests/markets-options-only.test.js` (AH04-08, AH04-09).
+
+### D-5883 — Below 768 px wide or 700 px tall the shell's banners scroll with the page and the /db census banner is bounded (AH-04, g-ui-dom-vs-json-10) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-10 (low). At 375x812 the fixed region (header 93
+px, connection banner 73, NO COPY alert 139, the /db census banner 259-290)
+left the board 27% of the window; at 375x667 about 72 px; at 375x568 the board
+started below the viewport, and with `main` and `body` clipping, all of its
+controls were unreachable. No phone reaches the app (127.0.0.1, FM-200), so
+this is a narrow or short desktop window.
+
+**Decision.**
+
+1. In `web/src/routes/+layout.svelte`, under `@media (max-width: 767px),
+   (max-height: 699px)`, `main` scrolls and the page beneath the banners is
+   given main's whole height. The banners stay in the flow on every page; the
+   NO COPY alert stays visible and scrolls; only the header (the nav) stays
+   fixed. A page's own scroll regions (the /db board) keep theirs.
+2. In `web/src/routes/db/DbCensusBanner.svelte`, under the same query, the
+   census banner is at most `min(5.5rem, 16dvh)` tall and scrolls inside
+   itself; every line and button stays reachable.
+3. Nothing changes above those sizes.
+
+**Proof.** A measurement, since no unit test can measure layout:
+`docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
+board control is reachable, before and after, at 375x812, 375x667, 375x568,
+320x568, 812x375 and 1280x800).

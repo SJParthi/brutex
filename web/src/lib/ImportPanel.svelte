@@ -9,7 +9,7 @@
    * and left, and the import runs. Every figure is the server's: the fold is
    * `$lib/import-panel.js`, and this file only lays it out.
    */
-  import { censusRefusedSentence, dayRow, importPanel, span } from '$lib/import-panel.js';
+  import { censusRefusedSentence, importPanel, notDoneRows, span } from '$lib/import-panel.js';
   import { group } from '$lib/money.js';
   import { stampLabel } from '$lib/dates.js';
 
@@ -35,7 +35,7 @@
   } = $props();
 
   const panel = $derived(importPanel(summary, store, { now, archiveTo, optionsLeft }));
-  const days = $derived((notDone ?? []).map(dayRow));
+  const days = $derived(notDoneRows(notDone));
 </script>
 
 <section class="imp" aria-label="Import journal" data-import-panel={panel.state}>
@@ -85,8 +85,19 @@
 
   {#if panel.options}
     <p class="line">
+      <!-- ONE ARCHIVE END, AND THE JOURNAL'S LAST DAY NAMED APART (AH-04,
+           g-ui-dom-vs-json-9, D-5881). `archiveTo` is the `/feeds.json`
+           archive's end where it binds (`archiveEnd`), on /ingest and /audit
+           alike; the journal's last imported day is its own fact. -->
       <b>Options</b> reach <span class="mono">{panel.options.lastDay ?? '—'}</span>{#if panel.archiveTo}
-        of an archive ending <span class="mono">{panel.archiveTo}</span>{/if}.
+        of an archive ending <span class="mono">{panel.archiveTo}</span>{:else}; /feeds.json states no binding archive end{/if}.
+      {#if panel.journalTo}
+        <span data-journal-to>The import journal reaches <span class="mono">{panel.journalTo}</span>{panel.reach === 'after'
+            ? ', past the archive end'
+            : panel.reach === 'before'
+              ? ', short of the archive end'
+              : ''} (its last imported day, any kind).</span>
+      {/if}
       {#if panel.optionsLeft !== null}
         {group(/** @type {number} */ (panel.optionsLeft))} archive day(s) after it are journalled for the indices and not yet for options.
       {/if}
@@ -129,9 +140,9 @@
     <details open={days.length <= 12}>
       <summary>{group(days.length)} day(s) not done, with the importer's reasons</summary>
       <ul class="days">
-        {#each days as d (d.key)}
+        {#each days as d (d.id)}
           <li>
-            <span class="mono">{d.day}</span> {d.kind} · <b>{d.outcome}</b>{d.stage ? ` · stage ${d.stage}` : ''}{d.reason
+            <span class="mono">{d.day}</span> {d.kind} · <b>{d.outcome}</b>{d.filter && d.filter !== '*' ? ` · filter ${d.filter}` : ''}{d.line !== null ? ` · line ${d.line}` : ''}{d.stage ? ` · stage ${d.stage}` : ''}{d.reason
               ? ` · ${d.reason}`
               : ''}{d.unsettled ? ' · stage unrecorded (a line written before D-3317)' : ''}
             {#each d.words as w, i (i)}

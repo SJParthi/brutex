@@ -7543,3 +7543,25 @@ fixture is invented.
 | AG04-12 | **A restart day whose first post-reopen second carries at least the pre-restart volume is labelled `restart_carry`, and its GDFL volume is UNVERIFIED.** This holds on a halt day (P 1,000, F 1,250) and on a drill Saturday (F = P). A smaller first second, P = 0, no second after the reopen, and an ordinary day carry no label. Nothing is subtracted. The volume never says `gdfl_sum_verified: true` (nothing in the route verifies the sum), and a restart day of an option or an index names that its carry is not measured. | `sources_day_names_the_restart_carry_on_a_halt_day`, `sources_day_names_the_restart_carry_on_a_drill_saturday`, `an_ordinary_day_and_a_restart_day_with_a_small_first_print_carry_no_restart_label`, `the_gdfl_sum_is_never_said_verified_and_a_derivative_restart_day_is_named` | ✓ |
 | AG04-13 | **A restart comes from the calendar of record only.** Every `HALTS` row names its cash resume second, and a special session names a reopen exactly when it has two windows or is a halt day. | `every_restart_comes_from_the_calendar_of_record` | ✓ |
 | AG04-14 | **A sidecar filed after a day was cached is read on the next request.** The sidecar's stamp is in the day key. | `sources_day_reads_a_sidecar_filed_after_the_day_was_cached` | ✓ |
+
+### `/audit`, `/markets` and the shell: a partitioned census's last commit, one archive end, the not-done list, options-only listings and narrow windows (AH-04; D-5880 to D-5883)
+
+`api::audit_json` and `web/src/lib/{audit-header,import-panel,markets-held}.js`.
+Proofs in `crates/api/src/audit_json_commit_tests.rs` (AH04-01 to AH04-04),
+`web/tests/audit-header.test.js` (AH04-05), `web/tests/import-panel-archive.test.js`
+(AH04-06, AH04-07) and `web/tests/markets-options-only.test.js` (AH04-08,
+AH04-09). AH04-10 is a measurement (`docs/06-limits.md` L-AH04-02). Every
+fixture is invented.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| AH04-01 | **A partitioned census's `committed_at` is the newest mtime among the CURRENT epoch of each segment, never its directory's.** An older epoch with a newer mtime is not read; `committed_from` names each of the three files with its epoch and mtime; the route's answer carries the same stamp. A single-file census is still its one file's mtime. | `a_partitioned_census_reports_its_newest_epoch_file`, `a_single_file_census_is_still_its_one_files_mtime`, `the_audit_answer_carries_the_newest_epoch_and_what_it_stands_on` | ✓ |
+| AH04-02 | **An epoch that will not stat is named, never read as 0**: `complete` is false, the stamp is the newest of the others and the note says it is a lower bound. | `an_epoch_that_will_not_stat_is_named_and_the_rest_is_a_lower_bound` | ✓ |
+| AH04-03 | **A segment with no epoch contributes nothing and is named; a migrated vendor with no epoch at all has committed nothing; a partitioned census that did not load is not dated by its directory.** | `a_segment_with_no_epoch_contributes_nothing_and_says_so`, `a_migrated_vendor_with_no_epoch_at_all_has_committed_nothing`, `a_partitioned_census_that_did_not_load_is_not_dated_by_its_directory` | ✓ |
+| AH04-04 | **An epoch newer than the server's clock is reported as it is.** | `an_epoch_newer_than_the_clock_is_reported_as_it_is` | ✓ |
+| AH04-05 | **The `/audit` header counts this feed's runs and records from `feed_scope`, never every feed's records as runs**; a failed or absent scope says "runs not counted". The last-commit cell names its basis, a lower bound and a stamp ahead of the clock, which has no age. | `the_journal_header_names_feed_scoped_records_and_runs`, `the_last_commit_cell_names_the_newest_census_file_a_lower_bound_and_a_clock_skew` | ✓ |
+| AH04-06 | **`/audit` and `/ingest` hand the import panel one archive end**, the binding end of the `/feeds.json` archive, for every descriptor shape (an open end, a binding end, an older server, no archive, a window, none); the panel names the import journal's last day apart, past or short of the end. | `import_panel_names_the_archive_end_and_the_journal_day_apart` | ✓ |
+| AH04-07 | **A day named by more than one not-done row renders every row**: three `options\|2020-09-16` rows render three items with three keys; rows equal in every field are numbered; 0 and 500 rows. | `the_not_done_list_renders_a_day_named_by_two_filters` | ✓ |
+| AH04-08 | **An options-only listing (`bars` 0, `options: true`) is held, not never pulled**: the tally counts it in `held`, the Held filter keeps it, its detail view offers no pull; `bars` null with `options: true` is unread; the partition sums. | `an_options_only_listing_is_held_not_never_pulled` | ✓ |
+| AH04-09 | **Where an options-only row's spot is filed is the alias table's answer, never a guess**: an INDEX key, a rename, the table's reason, or "names no other key". | `an_options_only_rows_spot_is_named_by_the_alias_table_never_guessed` | ✓ |
+| AH04-10 | **Below 768 px wide or 700 px tall only the header stays fixed and the /db board gets at least half of the viewport, every board control reachable; nothing changes at desktop sizes.** | a measurement in the Browser pane, `docs/06-limits.md` L-AH04-02 | ◐ |
