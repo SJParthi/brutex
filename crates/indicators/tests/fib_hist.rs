@@ -848,6 +848,12 @@ fn one_odd_print_day_leaves_the_tick_at_five() {
     }
     assert_eq!(tied.tick(), Ok(10));
     assert_eq!(tied.odd_tick_days(), 2);
+    // The gcds are held ascending: the body of two distinct gcds reads back.
+    for series in [&tick, &tied] {
+        let mut bytes = Vec::new();
+        series.encode(&mut bytes).unwrap();
+        assert_eq!(&ObservedTick::decode(&bytes).unwrap(), series);
+    }
 }
 
 /// FM-F014: 5-paisa days, then a basis break, then 50-paisa days give 50.
