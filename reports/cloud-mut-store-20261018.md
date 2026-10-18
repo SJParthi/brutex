@@ -63,9 +63,14 @@ versions and those flags, with three differences:
 - `-p store` (and `-p telemetry` for `sink.rs`) with `-F` patterns or
   `--in-diff` naming the mutants.
 
-The workspace profile is unchanged (opt-level 3). A sweeper removes test
-scratch older than 15 minutes, so the disk cannot fill as it did on
-17 Oct.
+One more difference, and only for the timeouts' before-and-after runs: a
+fixed `--timeout 300`. That is three times the 101 s suite, so a timeout
+there costs 5 minutes and not 15.
+
+The workspace profile is unchanged (opt-level 3). A sweeper removed test
+scratch older than 15 minutes during the mutation runs, so the disk could
+not fill as it did on 17 Oct. No store test runs that long: the whole suite
+takes 101 s one test at a time.
 
 ### The three timeouts of 17 Oct are now caught (`24ca118c`)
 
@@ -382,3 +387,167 @@ not carried.
 | `sealed.rs:1504:32` `<` → `<=` (`Fold::push`) | At most one extra time-table entry can be pushed once the table holds `table_rows`. `finish` does `table.resize(self.table_rows, n_blocks)`, which cuts it off, and nothing reads the table before `finish`. |
 | `sealed.rs:2352:35` guard `block > 0` → `true`, `2352:41` `>` → `>=` (`last_before`) | The guard is reached only in the `Some(previous)` arm, so `index = skip + at ≥ 1`. `skip` is 0 when `lo` is 0 and 1 otherwise, and `block = lo + at`. With `lo = 0`, `at = index ≥ 1`; with `lo ≥ 1`, `block ≥ 1` already. So `block > 0`, `true` and `block >= 0` are all true there. |
 | `sink.rs:3272:32` `>` → `>=` (`Audit::mark_coverage`) | `self.bytes` is a `u64`, so the mutant makes `older` always true. It differs only when `bytes == 0` and the generation folder does not exist. There `older` only chooses between `self.bytes` (0) and `0` as the start of the later dimensions' coverage: 0 either way. |
+
+## Gates, on the final tree
+
+The code is final at `24ca118c`; every later commit changes this report
+alone.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | **clean** (exit 0) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean**: exit 0, no warning, 2 min 31 s |
+| `cargo test -p store --locked` | **green: 810 passed, 0 failed, 4 ignored, nothing skipped, 37 targets** (exit 0, 2 min 58 s), with `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` dropped, as an ordinary user runs it. See the root caveat below |
+| `cargo deny check` | **green**: `advisories ok, bans ok, licenses ok, sources ok`, exit 0, cargo-deny 0.20.2. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` (DENY-1's bumps) |
+
+**Run as plain root**, with every capability, `cargo test -p store --locked`
+fails 3 tests, all in `settings::tests`, in code outside this pass:
+- `a_directory_that_stops_being_readable_is_a_fault_not_nothing_new`;
+- `a_disk_that_refuses_the_write_is_refused_with_nothing_visible`;
+- `a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason`.
+
+Their own message says why: "this host reads a 000 directory (root?): the
+property cannot be shown here". Unlike the store's other permission tests,
+they do not run through `where_permission_binds`.
+
+**The base `67c4e58d`, run the same way, fails the same 3**, plus
+`staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`.
+That is the ext4 inode-reuse failure, which the 17 Oct pass fixed on this
+branch. Neither the Mac nor CI runs as root. Not edited here:
+`settings.rs` is not this pass's file.
+
+### The workspace, measured for CI gate 20
+
+`cargo llvm-cov --workspace --locked --no-fail-fast` on `24ca118c`, then
+`cargo llvm-cov report --text`, then gate 20's own tool
+(`.github/gates_jobs.rs gate-20`, its 26 tests green), as the coverage job
+does. Linux is the platform CI measures on.
+
+- **Run as root, the profile is short.** The uid-65534 children cannot
+  write their profiles into the root-owned target folder. A first reading
+  gave `sink.rs` 199 and `lib.rs` 2, every one of the 199 a base line in a
+  `where_permission_binds` body.
+- **With the children's profiles.** The test binaries of the four crates
+  whose tests start such children (store 36, telemetry 3, pull 23, api 4)
+  were run again, from the same instrumented build, with their profiles in
+  a world-writable folder. Those 117 profiles were added to the workspace's
+  and the report taken again.
+  - Running again adds only coverage that CI's run as an ordinary user also
+    gets.
+  - The 25 lines `sink.rs` then leaves uncovered are exactly the 25 of the
+    per-binary union above.
+
+| file | declared in `ci.yml` | measured, this branch |
+|---|---:|---:|
+| `clock.rs` | 1 | 1 |
+| `level.rs` | 1 | 1 |
+| `lib.rs` | 6 | **0** |
+| `record.rs` | 1 | 1 |
+| `sink.rs` | 20 | **25** |
+| `tail.rs` | 3 | 3 |
+
+**So gate 20 would be red with this branch**: `sink.rs` 25 against 20, and
+`lib.rs` 0 against 6.
+- The 25 `sink.rs` lines are 3413 (production, a posting path with no
+  parent; see Coverage) and test code: 3604, 3606-3607, 3706-3716 (9
+  lines), 3995, 4032-4035, 4365, 4584, 4968, 6552, 6882, 6941, 7792.
+- None of them is a line this branch adds.
+- The declared counts live in `.github/workflows/ci.yml`, and their prose in
+  `docs/06-limits.md` §54. Both are outside this pass's files (see NEEDS THE
+  MAC).
+
+(The base, measured the same way, is in progress: below when it lands.)
+
+**What else the workspace run showed.** It ran 152 test targets in 142
+min, instrumented, beside a mutation run. Two targets failed:
+- **`api` lib: 5 tests of `server::head_deadline_body_tests`**, AH-02's from
+  `feat/db-fix`:
+  - `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`;
+  - `a_chunked_body_reaches_a_slow_reader_whole`;
+  - `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`;
+  - `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`;
+  - `slow_readers_at_the_cap_are_served_whole_and_the_next_waits`.
+
+  Run again alone, uninstrumented, on an idle machine: the same 5 fail on
+  this branch and **identically on the base `67c4e58d`**. Each is cut after
+  about 5.37 MB at about 1.28 s ("cut after 5374637 of 16777216 bytes"), so
+  it is deterministic and not load. This branch does not touch
+  `crates/api`. Not this pass's code; for AH-02's owner.
+- **`cli` lib: `pool::tests::the_pool_verb_prints_its_whole_page_on_a_generated_store`**:
+  "candidate detail refused: No such file or directory" after 1,058 s.
+  - The cause was this session's own scratch sweeper, which removed
+    `TMPDIR` entries older than 15 minutes, so it deleted this one
+    unusually long test's store under it.
+  - Run alone, uninstrumented: **passes** (227 s).
+  - The sweeper's age was then raised to 180 minutes.
+
+## What this session changed
+
+| commit | what |
+|---|---|
+| `318a3555` | merge of `feat/db-fix` `67c4e58d`: two document conflicts, both sides kept |
+| `24ca118c` | **tests only**: the agreeing-overlap test (`file.rs`, this branch's own) and `a_file_on_disk_reads_the_same_as_its_bytes` (`sealed_tests.rs`) run their bodies under a deadline; `file_fault_tests::within` becomes `pub(super)` so the first can share it |
+| the rest | this report |
+
+**No production line changed.** The rule "every source change gets its own
+test that fails before and passes after" therefore has nothing to bind.
+The test change's own before and after is the timeouts table above:
+timeout before, caught after, on CI's flags.
+
+No new invariant, so `docs/04-invariants.md` is unchanged past the merge.
+No new locked choice, so there is no new D-number. The deadline is the
+17 Oct pass's own pattern (D-6017).
+
+## Carried from the 17 Oct report, not re-measured here
+
+- **Mutation runs A to D**, and their legs and counts. They mutated the same
+  production code: no production line of a scoped file has changed since,
+  and the merge brought only tests. Their survivors and timeouts are all in
+  the re-test above, and their catches cannot be lost, because no test was
+  removed or weakened.
+- **The four real defects found and fixed on 17 Oct** (D-6017), and the
+  seams and tests of that pass (CMS-01 to CMS-09).
+- **The fork-gate flake fix** in the sink tests.
+
+## NEEDS THE MAC
+
+- **CI gate 20's declared counts** (`.github/workflows/ci.yml`) and
+  `docs/06-limits.md` §54. Measured here on Linux, as CI measures: with this
+  branch, `sink.rs` 25 (declared 20) and `lib.rs` 0 (declared 6).
+  - The comparison against the base is in the section above.
+  - Re-measure on the merged head, set the counts, and correct §54's prose
+    in the same commit, as the gate's own message asks.
+  - These are not this pass's files.
+- **The 4 ignored store tests** need real data or a release build, so
+  they did not run here:
+  - `the_sample_months_encode_to_the_prototype_sizes_less_the_first_row_saving`
+    (real months, `BRUTEX_SEAL_SAMPLES`);
+  - `real_months_seal_read_back_bit_for_bit_and_answer_like_the_raw_form`
+    (`BRUTEX_SEALED_ROOT`, `_MONTHS`, `_OUT`);
+  - `small_month_rule_latency` and `time_and_row_lookup_latency`, which are
+    release-mode measurements.
+- **The macOS rows.** This container is Linux on ext4, run as root with the
+  capabilities dropped.
+  - The `cfg(target_os = "macos")` arms of `file.rs`, `safe_open.rs` and
+    `open_flags.rs` are other targets' arms here, so they are neither covered
+    nor mutated on this host. Among them are `writer_flags`, an equivalent
+    here.
+  - GF-1's `macos` CI job runs the suite there.
+
+## Follow-ups for other owners
+
+- **`.config/nextest.toml`** (not this pass's file). A `priority` override
+  would make the three former timeout mutants' catches independent of the
+  order of test names:
+  - `first_at_or_after_never_probes_more_than_the_bisection_height` and
+    `an_empty_month_is_a_head_alone`;
+  - the same shape as D-0693's entries.
+
+  Today they are caught because the first test each meets in the gate's
+  order is under a deadline (`24ca118c`).
+- **`api`'s five `head_deadline_body_tests`** fail on Linux (this
+  container) on `feat/db-fix` itself. AH-02's owner should know before CI
+  runs them on `ubuntu-24.04`.
+- **`settings_tests`' three root-only failures** could run through
+  `where_permission_binds` as the store's other permission tests do. Then
+  they would hold as root too, where they now fail on their own premise.
