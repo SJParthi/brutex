@@ -148,7 +148,7 @@ whose stock maximum is the same 4 MiB, so this gate is likely red there too.
 | File | Mutants | Caught | Missed | Timeout | Unviable |
 |---|---:|---:|---:|---:|---:|
 | `autopilot.rs` | 371 | 305 | 7 (+1, see below) | 0 | 58 |
-| `pullrun.rs` | 466 | running | | | |
+| `pullrun.rs` | 466 | 432 (+2, see below) | 2 | 1 | 29 |
 | `server.rs` | 1,509 | queued | | | |
 
 `autopilot.rs` counts its first run with the 20 out-of-module kills replaced
@@ -181,6 +181,44 @@ turned non-strict where both arms give the same value on the tie:
 The 17 Oct pass had found four of these (671:13, 863:25, 864:22, 1527:17) in
 its 214. Three of those four came back "caught" here before the retries,
 each by the flaky test.
+
+**`pullrun.rs`** ran with retries. Every kill but two came from `pullrun`'s
+own test modules. The two others came from the load-red
+`slow_readers_at_the_cap_are_served_whole_and_the_next_waits` and are
+counted apart:
+
+- `2371:58`, `*at > other.ordinal` → `>=` in `decorate` (the
+  `CLOSE_UNDECODED` doubt). Re-run on the newest source without the timing
+  tests, it is **caught** by this pass's
+  `pullrun::cloud_tests_1018::damage_casts_doubt_only_on_a_run_opened_before_it`.
+- `2449:45`, `*at < oldest` → `<=` in `guessed_answer`'s count filter.
+  Re-run, it **survives**, and it is **equivalent in every state the code
+  writes**. The tie is a record that would not decode, at the very position
+  of the opening record of a counted pairing's oldest run, which the walk
+  decoded. Through `restart_scan` only an index whose `runs` and `faults`
+  files both name one position reaches it, and the builder files each record
+  once. It is not pinned by a test. At that tie the code drops the count
+  (claims less), while its comment says only damage AFTER the oldest opening
+  record drops it, so a test would pin a side the comment does not state.
+  Said here for the operator; nothing is changed.
+
+The two survivors are real gaps, each closed by a new test that fails on the
+hand-applied mutant and passes on the original:
+
+- `996:24`, `unnamed > 0` → `>=` in `Interrupted::others_words`: the refusal
+  would say "0 more run(s) read have no closing record and are counted, not
+  named". The 17 Oct test held the same guard in `logged` only.
+- `2360:49`, `weak > *oldest` → `>=` in `decorate`'s `newer_may_be_open`.
+  Its tie is reachable only as `2449:45`'s is, but here code and comment
+  agree ("a closing record after that one"), so the contract is pinned by
+  value.
+
+The timeout is a detection: `2718:22`, the match guard `waited < waits` →
+`true` in `older_runs_built`, waits for ever while another writer holds the
+lock, and
+`pullrun::tests::an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be`
+hangs to the timeout instead of passing. Unviable: 22 `E0277`, five `E0080`
+(the constants at lines 70–84) and two `||` inside a `let` chain.
 
 ## Left (in progress)
 
