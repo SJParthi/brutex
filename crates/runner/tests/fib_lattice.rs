@@ -1488,6 +1488,7 @@ fn expand_range_is_one_nodes_expansion() {
         21,
         "24 rows less the three partition rows"
     );
+    assert_eq!(FIXED_SLOTS, 25, "one slot per possible fixed-row count, 0 to 24");
     assert!(sink.nodes.len() == 1 && sink.nodes[0].1 == vec![0, 1, 2, 3]);
     let refusals = [
         LatticeRefusal::RangeOutsideTable {
