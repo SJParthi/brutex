@@ -1567,11 +1567,14 @@ fn a_log_that_cannot_open_is_said_and_the_serve_goes_on() {
 }
 
 /// **A scrub that cannot be admitted answers the admission refusal, not a
-/// report.** Every store-read slot is held by work that waits on this test,
-/// so `/verify.json`'s scrub waits out its admission and is refused. Driven in
-/// a child, because holding a process-global pool would refuse every other
-/// test's store reads for the wait. Covers `verify_json`'s refusal arm
-/// (server.rs:1904-1905).
+/// report.** Every slot of the scrub's pool is held by work that waits on
+/// this test, so `/verify.json`'s scrub waits out its admission and is
+/// refused. Driven in a child, because holding a process-global pool would
+/// refuse every other test's scrubs for the wait. Covers `verify_json`'s
+/// refusal arm (server.rs:1915). Since R3-08 the scrub runs in its own pool
+/// of [`crate::detail::MAX_VERIFY_CONCURRENT`] and no longer takes a page's
+/// store-read slot, so the slots held are the verify pool's: as many as it
+/// has on this machine.
 #[test]
 fn a_scrub_that_cannot_be_admitted_answers_the_admission_refusal() {
     if in_child() {
@@ -1582,19 +1585,20 @@ fn a_scrub_that_cannot_be_admitted_answers_the_admission_refusal() {
             .build()
             .expect("a runtime");
         runtime.block_on(async move {
+            let slots = crate::detail::Named::Verify.pool().max();
             let (started, mut running) = tokio::sync::mpsc::unbounded_channel::<()>();
             let mut releases = Vec::new();
             let mut holders = Vec::new();
-            for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+            for _ in 0..slots {
                 let (release, wait) = std::sync::mpsc::channel::<()>();
                 releases.push(release);
                 let started = started.clone();
-                holders.push(tokio::spawn(crate::detail::run_store_read(move || {
+                holders.push(tokio::spawn(crate::detail::run_verify(move |_cancel| {
                     let _sent = started.send(());
                     let _released = wait.recv();
                 })));
             }
-            for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+            for _ in 0..slots {
                 running.recv().await.expect("every holder starts");
             }
             let uri: axum::http::Uri = "/verify.json?feed=dhan".parse().expect("a uri");
@@ -1602,7 +1606,7 @@ fn a_scrub_that_cannot_be_admitted_answers_the_admission_refusal() {
                 verify_json(axum::extract::State(Loaded::clone(&site)), uri).await;
             let (want_status, want_body) = crate::detail::admission_refused(
                 "vendor scrub",
-                crate::detail::MAX_STORE_READ_CONCURRENT,
+                crate::detail::MAX_VERIFY_CONCURRENT,
                 &crate::detail::RunError::Saturated,
             );
             assert_eq!(status, want_status);
@@ -1876,11 +1880,13 @@ fn a_feed_already_unread_is_not_lost_by_a_reload() {
 
 /// `body`'s answer, awaited while every store-read slot is held by a blocking
 /// task that waits to be released; every holder is released and joined after.
+/// One holder a slot the pool has on this machine (R3-08 sizes it by the core
+/// count under `MAX_STORE_READ_CONCURRENT`), so every holder starts.
 async fn with_every_store_read_slot_held<T>(body: impl std::future::Future<Output = T>) -> T {
     let (started, mut running) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut releases = Vec::new();
     let mut holders = Vec::new();
-    for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+    for _ in 0..crate::detail::Named::StoreRead.pool().max() {
         let (release, wait) = std::sync::mpsc::channel::<()>();
         releases.push(release);
         let started = started.clone();
@@ -1889,7 +1895,7 @@ async fn with_every_store_read_slot_held<T>(body: impl std::future::Future<Outpu
             let _released = wait.recv();
         })));
     }
-    for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+    for _ in 0..crate::detail::Named::StoreRead.pool().max() {
         running.recv().await.expect("every holder starts");
     }
     let answered = body.await;
