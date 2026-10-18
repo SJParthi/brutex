@@ -71818,6 +71818,101 @@ rule and a test:
    ex-date is `unsourced`. Proof:
    `an_ex_date_is_judged_on_the_ranges_where_the_closes_emptied`.
 
+### D-5178 — A `--symbols` run is never the month's authority; a key neither feed holds, and a month neither feed holds, are refused before anything is written — 2026-10-19
+
+1. **The defect** (DATA-1 verification round 1, 19 Oct 2026,
+   `state/fix/round2/verify-DATA-1-r1.json`): a `--symbols` run was published
+   as the month's next version, and the newest version is the one authority
+   (D-5174). `FactorIndex::load`, `factor_of` and `file_digest` then read the
+   partial file, so every share left off the list answered `NotChecked`. The
+   next month carried from it: each unlisted share got back the carry that
+   came INTO the month (two months old), and `# pooled` came from the listed
+   shares alone. Measured by the verifier, READ-ONLY on the real store: after
+   a `2025-03 --symbols RELIANCE` run, 512 rows of 2025-04 across 74 shares
+   differed from the run without it (wrong applied lag, wrong median pair,
+   spurious `ex_date`). A key neither feed holds (`RELIANC`) exited 0 and
+   published a version of 0 rows, after which every share of the month
+   answered `NotChecked`.
+2. **The rule now**: a `--symbols` run is published as
+   `feed-reconcile-YYYY-MM.symbols.v<N>.csv`, numbered on its own, and its
+   header says `# scope symbols`. The month's authority is the newest
+   `feed-reconcile-YYYY-MM.v<N>.csv` only (`# scope all`): the next month's
+   carry, `FactorIndex` and `file_digest` never read a `.symbols.` file, so a
+   `--symbols` run changes no later month's bytes and no other share's
+   answer. A `--symbols` file repeats no unlisted share's carry line.
+3. **Refused, nothing written**: a `--symbols` key for which neither feed
+   holds a share directory of the month (named in the refusal); a month for
+   which neither feed holds any share directory; a store root that is not a
+   directory; an `--out` inside the store anywhere but under its audit area
+   `audit/` (compared on canonical paths). Each prints `FEED RECONCILE
+   REFUSED` or `FAILED` with the reason and exits 1.
+4. **Format 3** (`# brutex feed-reconcile 3`), so no format-2 file (which may
+   hold a partial authority, and ex-dates judged under D-5177's rule) is ever
+   carried into, or read as, this format.
+5. **Housekeeping found by the same verification, in the same module**: a
+   failed publish (a write, a sync, a link, or no version number left)
+   removes its own temporary; a version name that does not round-trip
+   (`v+7`, `v007`) is not a version; the summary log line, the screen and the
+   run event name the carry (`carry none:<why>` when there is none, with a
+   `FEED RECONCILE NOTE` on the screen; the exit status stays 0, because the
+   first month of the span has no previous file by construction); and the
+   generated worker count goes back to the fastest count when a doubling's
+   full round was slower, instead of keeping the slower one. A typed
+   `--workers` is still capped only by the share count: the operator's rule
+   (17:15 item 5) says it overrides.
+6. **Proof**: `a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month`,
+   `the_out_directory_may_sit_in_the_store_only_under_its_audit_area`,
+   `an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud`,
+   `a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary`,
+   `the_scheduler_doubles_while_throughput_rises_and_returns_to_the_fastest_count`,
+   `publishing_takes_the_next_free_version_and_replaces_nothing`,
+   `names_with_an_ampersand_are_read_by_their_stored_key`.
+
+### D-5179 — An ex-date is judged only on an interval that holds the day's own median pair — 2026-10-19
+
+1. **The defect** (DATA-1 verification round 1): D-5177 judged a day on its
+   close intersection, else its range intersection, even when that interval
+   excluded the day's own median pair. One discordant minute (the two feeds'
+   minute ranges holding no common trade at the day's factor) narrows an
+   intersection off the rest of the day WITHOUT emptying it, which D-5176
+   item 3 did not foresee. ICICIBANK 2024-12-13: median pair 133425/133425,
+   range intersection [264415/264375 .. 264855/264805] = [1.000151 ..
+   1.000189], narrowed by the 10:00 IST minute, where GDFL holds one second
+   against 36 to 38 in the neighbouring minutes (a gap, cause UNVERIFIED), so
+   that day and the next were `yes:unsourced:range` on a basis that never
+   moved. **The false-positive rate of D-5177, measured** (awk over the
+   format-2 full-span output, `state/fix/round2/data1-full-r5-20261018/out`,
+   105 months, reproducing the verifier's figures exactly): 6,370 rows were
+   judged on a basis interval that excluded their own median ratio; of the
+   6,839 `ex_date` flags, **136 (2.0%) sat between days whose median ratios
+   were equal**, 27 of them both exactly `n/n` — false by construction.
+2. **The rule now**: a day's basis is its close intersection if it holds the
+   ratio of the day's own median pair, else its range intersection if that
+   holds it. A day where an intersection survived and neither holds the
+   median is `unchecked:interval_excludes_median:<close+range|range>`, is
+   judged against nothing and hands nothing on; the next day is compared with
+   the last day that had a basis (the carry). Two days whose median ratios
+   are equal then always share that ratio, so **no ex-date can fire between
+   equal median ratios** (0 by construction, and 0 measured below). A day
+   whose two intersections both emptied is still `unchecked:no_interval`.
+   This amends D-5177 item 2 (which basis) and corrects D-5176 item 3's
+   claim that such a minute always empties the range intersection.
+3. **What remains, measured** (format 3, the same 105 months, READ-ONLY, 19
+   Oct 2026): RESULT_LINE. Every remaining flag is still `unsourced`: no
+   corporate-action source is merged (R4-26), and a flag between two
+   slightly different median ratios may still be a narrow interval rather than
+   an action; only that source can say which.
+4. **`grid_z` is the Zerodha grid as of the row's own day** (its last folded
+   minute, else the last earlier day's), not the share-month's grid after the
+   whole month: a later bar's information in an earlier row. No decision read
+   it; the column was the only place it showed.
+5. **Proof**: `an_interval_off_its_own_median_is_no_basis_for_an_ex_date`
+   (three days on factor 1, one discordant minute on the middle day: the
+   middle day is `unchecked:interval_excludes_median:range`, the third is
+   `no:close` judged against the first, and the month has 0 ex-date days),
+   `an_adjusted_day_is_an_exact_pair_and_a_disjoint_interval_is_an_ex_date`
+   (a real basis change still fires, and `grid_z` per day).
+
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 
 **Implemented by** GF-1 (`.github/gates_platform.rs`, the `macos` job of

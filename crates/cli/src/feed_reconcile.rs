@@ -45,9 +45,13 @@
 //!   verdict to the consumer inside the refusal.
 //! - `adjusted`: 1 lies outside the interval of the median pair.
 //! - `ex_date`: two consecutive matched days have disjoint intervals. A
-//!   day's interval is its close intersection, or where that emptied its
-//!   range intersection (D-5177): on the real store the closes empty on
-//!   almost every day, so an ex-date judged on them alone never fired. No
+//!   day's interval is its close intersection, or else its range
+//!   intersection (D-5177): on the real store the closes empty on almost
+//!   every day, so an ex-date judged on them alone never fired. Only an
+//!   intersection that holds the day's OWN median pair is a basis (D-5179):
+//!   one discordant minute narrows an intersection off the rest of the day,
+//!   and a day where neither holds its median is
+//!   `unchecked:interval_excludes_median` and hands nothing on. No
 //!   corporate-action source is merged (R4-26), so every one is `unsourced`.
 //! - **Alignment.** A GDFL minute close at lag `L` is the close of the last
 //!   GDFL second in `[HH:MM:00 + L, HH:MM+1:00 + L)`. Every lag −59..=+59 s is
@@ -79,6 +83,13 @@
 //! depend on the worker count, the time or the version number. Carry lines
 //! at the end hand the next month each share's lag history, last interval,
 //! open span and session-cut onset.
+//!
+//! A `--symbols` run is published as `feed-reconcile-YYYY-MM.symbols.v<N>.csv`
+//! and is never the month's authority: the next month's carry, the factor
+//! reader and the digest read only the newest FULL version (D-5178). A
+//! `--symbols` key neither feed holds a directory of is refused before
+//! anything is written, and `--out` may lie inside the store only under its
+//! audit area.
 //!
 //! # Cost
 //!
@@ -112,9 +123,52 @@ cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]\n       \
 cli feed-reconcile months";
 
 /// The first line of every file this verb writes. Version 2 is the exact-pair
-/// factor, the allowance intervals and the lag alignment (D-5171); version 1
-/// (the float ratio) is never read as version 2.
-pub const FORMAT: &str = "# brutex feed-reconcile 2";
+/// factor, the allowance intervals and the lag alignment (D-5171); version 3
+/// judges an ex-date only on an interval that holds the day's own median pair,
+/// prints the Zerodha grid as of each day and names the run's scope (D-5178,
+/// D-5179). An older version is never read as this one, so no ex-date judged
+/// under the old rule and no `--symbols` file written as a month's authority
+/// is ever carried into a run of this one.
+pub const FORMAT: &str = "# brutex feed-reconcile 3";
+
+/// The number [`FORMAT`] ends with, for the note a carried older file gets.
+const FORMAT_NUMBER: u32 = 3;
+
+/// Which shares a run covers, and so the name it is published under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// Every share either feed holds for the month: the month's authority,
+    /// `feed-reconcile-YYYY-MM.v<N>.csv`.
+    Full,
+    /// A `--symbols` run, `feed-reconcile-YYYY-MM.symbols.v<N>.csv`: no
+    /// next month's carry, no factor lookup and no digest reads it (D-5178).
+    Symbols,
+}
+
+impl Scope {
+    const fn infix(self) -> &'static str {
+        match self {
+            Self::Full => "",
+            Self::Symbols => ".symbols",
+        }
+    }
+
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Full => "all",
+            Self::Symbols => "symbols",
+        }
+    }
+}
+
+/// The largest price, in paisa, an allowance is formed from: 2^60, about
+/// ₹1.15 × 10^16. Every bound's numerator and denominator then stays below
+/// 2^62, so a cross-multiplication of two of them stays below 2^124 and can
+/// never overflow an i128. A minute above it admits nothing and is counted
+/// `interval_unbounded_minutes`; a carried bound beyond 2^62 is refused.
+const PRICE_CEILING: i128 = 1 << 60;
+/// The largest numerator or denominator a carried bound may hold.
+const BOUND_CEILING: i128 = 1 << 62;
 
 /// The column header, in output order.
 pub(crate) const COLUMNS: &str = "symbol,day,day_kind,status,applied_lag,lag_source,\
@@ -198,6 +252,17 @@ pub(crate) struct Ask {
     pub(crate) out: PathBuf,
     /// `None`: generated (start at 1, double while throughput rises).
     pub(crate) workers: Option<usize>,
+}
+
+impl Ask {
+    /// A `--symbols` run is never the month's authority (D-5178).
+    pub(crate) const fn scope(&self) -> Scope {
+        if self.symbols.is_some() {
+            Scope::Symbols
+        } else {
+            Scope::Full
+        }
+    }
 }
 
 /// `YYYY-MM`, strictly.
@@ -391,6 +456,13 @@ pub(crate) fn command_with(
             return FAILED;
         }
     };
+    if let Some(why) = place_refusal(&root, &ask.out) {
+        let _ = writeln!(
+            out,
+            "FEED RECONCILE REFUSED: {why}. Nothing was read or written."
+        );
+        return FAILED;
+    }
     match run(&root, &ask, commit) {
         Ok(report) => report.print(out),
         Err(why) => {
@@ -631,6 +703,60 @@ fn listed(symbol: String) -> Listed {
     Listed { symbol, refused }
 }
 
+/// The `--symbols` shares, each checked against the month's own listing: a
+/// key neither feed holds a directory of is refused by name before a file is
+/// opened or written (D-5178), so a typo never publishes a file of no row.
+fn chosen(root: &Path, month: YearMonth, symbols: &[String]) -> Result<Vec<Listed>, String> {
+    let held = listing(root, month)?;
+    let missing: Vec<&str> = symbols
+        .iter()
+        .filter(|symbol| {
+            held.binary_search_by(|listed| listed.symbol.as_str().cmp(symbol.as_str()))
+                .is_err()
+        })
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        Ok(symbols.iter().cloned().map(listed).collect())
+    } else {
+        Err(format!(
+            "refused: --symbols {}: neither feed holds a share directory of that key for \
+             {month} under `{}`; no bar was read and nothing was written (D-5178)",
+            missing
+                .iter()
+                .map(|symbol| format!("`{symbol}`"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            root.display()
+        ))
+    }
+}
+
+/// Why the run may not go ahead against `root` into `out`, or `None`. The
+/// store root must be a directory (an absent one would list no share and
+/// publish a file of no row), and `out` may lie inside the store only under
+/// its audit area: never in `bars/`, a generation or a manifest. Compared on
+/// canonical paths, so a link or a `..` does not slip a file past it.
+fn place_refusal(root: &Path, out: &Path) -> Option<String> {
+    let store = match root.canonicalize() {
+        Ok(store) if store.is_dir() => store,
+        Ok(_) => return Some(format!("the store `{}` is not a directory", root.display())),
+        Err(why) => return Some(format!("the store `{}`: {why}", root.display())),
+    };
+    let target = match out.canonicalize() {
+        Ok(target) => target,
+        Err(why) => return Some(format!("--out `{}`: {why}", out.display())),
+    };
+    (target.starts_with(&store) && !target.starts_with(store.join("audit"))).then(|| {
+        format!(
+            "--out `{}` lies inside the store `{}` outside its audit area `audit/`; this \
+             verb writes nowhere else in a store",
+            out.display(),
+            root.display()
+        )
+    })
+}
+
 /// A month file of one share, as the read door answered.
 enum Opened {
     Held(Box<BarFile>),
@@ -781,14 +907,21 @@ fn by_ratio(a: &PairAt, b: &PairAt) -> std::cmp::Ordering {
     left.cmp(&right).then(a.minute.cmp(&b.minute))
 }
 
+/// Whether no value is above `PRICE_CEILING`, so an allowance formed from
+/// them cannot overflow a cross-multiplication.
+fn within_ceiling(values: &[i128]) -> bool {
+    values.iter().all(|value| *value <= PRICE_CEILING)
+}
+
 /// The allowance interval of one matched minute, or `None` when `2g ≤ s_g`
-/// (no upper bound: the minute admits nothing).
+/// (no upper bound: the minute admits nothing) or a price or step is above
+/// `PRICE_CEILING`.
 pub(crate) fn bounds(pair: PairAt) -> Option<(Frac, Frac)> {
     let (z, g) = (i128::from(pair.z), i128::from(pair.g));
     let (sz, sg) = (i128::from(pair.sz), i128::from(pair.sg));
     let low_den = 2 * g + sg;
     let high_den = 2 * g - sg;
-    if low_den <= 0 || high_den <= 0 || z <= 0 {
+    if low_den <= 0 || high_den <= 0 || z <= 0 || !within_ceiling(&[z, g, sz, sg]) {
         return None;
     }
     Some((
@@ -807,13 +940,19 @@ pub(crate) fn bounds(pair: PairAt) -> Option<(Frac, Frac)> {
 /// every factor `f` for which Zerodha's `[low, high]` and GDFL's `[low, high]`
 /// times `f` can hold one trade, each side widened by half its own grid step:
 /// `[(2·z_low − s_z)/(2·g_high + s_g), (2·z_high + s_z)/(2·g_low − s_g)]`.
-/// `None` when `2·g_low ≤ s_g` or a price is not positive (no bound).
+/// `None` when `2·g_low ≤ s_g`, a price is not positive, GDFL's high is below
+/// its low, or a value is above `PRICE_CEILING` (no bound).
 fn range_bounds(z: ZMinute, w: Window) -> Option<(Frac, Frac)> {
     let (z_low, z_high) = (i128::from(z.low), i128::from(z.high));
     let (g_low, g_high) = (i128::from(w.low), i128::from(w.high));
     let (sz, sg) = (i128::from(z.step), i128::from(w.step));
     let high_den = 2 * g_low - sg;
-    if z_low <= 0 || g_low <= 0 || high_den <= 0 {
+    if z_low <= 0
+        || g_low <= 0
+        || g_high < g_low
+        || high_den <= 0
+        || !within_ceiling(&[z_low, z_high, g_low, g_high, sz, sg])
+    {
         return None;
     }
     Some((
@@ -918,6 +1057,8 @@ struct ZDay {
     day_bars: u32,
     day_volume: i64,
     last_minute: Option<u16>,
+    /// The series-month grid as of the day's last folded minute bar.
+    grid: u64,
     flags: u32,
 }
 
@@ -1171,6 +1312,7 @@ impl Scratch {
         if let Some(day) = self.zdays.get_mut(slot / MINUTES_PER_DAY) {
             day.minutes = day.minutes.saturating_add(1);
             day.volume += i128::from(bar.volume);
+            day.grid = step;
             if aligned && !duplicate {
                 day.last_minute = Some(day.last_minute.map_or(of_day, |m| m.max(of_day)));
             }
@@ -1663,6 +1805,9 @@ struct DayInputs<'a> {
     g_minutes: u32,
     g_unverified: i128,
     g_flags: u32,
+    /// The Zerodha minute grid as of this day's end: its own last minute's,
+    /// else the last earlier day's (`grid_z`).
+    z_grid: u64,
     source: &'a str,
 }
 
@@ -1831,13 +1976,37 @@ fn measure_day(
     // empties on almost every day and an ex-date judged on it alone could
     // never fire. Each per-minute close interval lies inside that minute's
     // range interval, so either is a set of factors the whole day admits.
+    //
+    // ONLY AN INTERVAL THAT HOLDS THE DAY'S OWN MEDIAN PAIR IS A BASIS
+    // (D-5179). One discordant minute (two feeds' minute ranges with no trade
+    // in common) narrows an intersection away from every other minute of the
+    // day without emptying it. Over the format-2 span (105 months) 6,370 rows
+    // were judged on such an interval, and 136 of the 6,839 ex-dates sat
+    // between days with an equal median ratio (D-5179). An interval that holds
+    // its own day's median cannot be disjoint from another that holds the
+    // same ratio, so no ex-date fires between equal ratios.
     let mut ex_date = String::new();
-    let basis = interval.map(|span| (span, "close")).or_else(|| {
-        matching
-            .and_then(|m| m.range.interval())
-            .map(|span| (span, "range"))
-    });
-    if let Some(((low, high), named)) = basis {
+    let median_ratio = median.map(PairAt::ratio);
+    let holds_median =
+        |(low, high): (Frac, Frac)| median_ratio.is_some_and(|ratio| holds(low, high, ratio));
+    let candidates = [
+        (interval, "close"),
+        (matching.and_then(|m| m.range.interval()), "range"),
+    ];
+    let basis = candidates
+        .iter()
+        .find_map(|(span, named)| span.filter(|span| holds_median(*span)).map(|s| (s, *named)));
+    let excluding: Vec<&str> = candidates
+        .iter()
+        .filter(|(span, _)| span.is_some())
+        .map(|(_, named)| *named)
+        .collect();
+    if basis.is_none() && !excluding.is_empty() {
+        // An intersection survived and lies off the day's own median: it is
+        // judged against nothing and hands the next day nothing, which is
+        // then compared with the last day that had a basis (the carry).
+        ex_date = format!("unchecked:interval_excludes_median:{}", excluding.join("+"));
+    } else if let Some(((low, high), named)) = basis {
         ex_date = match carry.interval {
             Some((_, before_low, before_high)) => {
                 if before_high.lt(low) || high.lt(before_low) {
@@ -1956,7 +2125,7 @@ fn measure_day(
         number(range.map(|(_, high)| high)),
         range_emptied.map_or_else(String::new, |(at, _)| clock(at.minute)),
         if z_any {
-            step_text(scratch.z_grid.step())
+            step_text(inputs.z_grid)
         } else {
             String::new()
         },
@@ -2096,6 +2265,7 @@ fn reconcile(context: &Context<'_>, listed: &Listed, scratch: &mut Scratch) -> S
     // in order, so each day is measured as soon as its seconds are in.
     let mut outs: Vec<(DayAt, Option<DayOut>)> = Vec::with_capacity(days);
     let mut exceed_run = carry.exceed_open;
+    let mut z_grid = 0_u64;
     for index in 0..days {
         let epoch = context
             .first_day
@@ -2123,6 +2293,9 @@ fn reconcile(context: &Context<'_>, listed: &Listed, scratch: &mut Scratch) -> S
         }
         loaded.push((g_seconds, g_volume, g_minutes, g_unverified, g_flags));
         let zday = scratch.zdays.get(index).copied().unwrap_or_default();
+        if zday.minutes > 0 {
+            z_grid = zday.grid;
+        }
         if !folded.failed.is_empty() {
             outs.push((day, None));
             continue;
@@ -2155,6 +2328,7 @@ fn reconcile(context: &Context<'_>, listed: &Listed, scratch: &mut Scratch) -> S
             g_minutes,
             g_unverified,
             g_flags,
+            z_grid,
             source: &source,
         };
         let out = measure_day(scratch, &inputs, applied, &mut carry, ex_date_note);
@@ -2350,10 +2524,16 @@ fn parse_frac(text: &str) -> Result<Frac, String> {
     let (num, den) = text
         .split_once('/')
         .ok_or_else(|| format!("fraction `{text}`"))?;
-    let num = num.parse().map_err(|_| format!("numerator `{num}`"))?;
+    let num: i128 = num.parse().map_err(|_| format!("numerator `{num}`"))?;
     let den: i128 = den.parse().map_err(|_| format!("denominator `{den}`"))?;
     if den <= 0 {
         return Err(format!("denominator `{den}` is not positive"));
+    }
+    // NO CARRIED BOUND CAN OVERFLOW A COMPARISON: every bound this verb
+    // forms stays below 2^62 (PRICE_CEILING), so a larger one is a damaged
+    // line, refused by name rather than left to panic a worker.
+    if num.unsigned_abs() >= BOUND_CEILING.unsigned_abs() || den >= BOUND_CEILING {
+        return Err(format!("fraction `{text}` is beyond 2^62"));
     }
     Ok(Frac { num, den })
 }
@@ -2439,8 +2619,9 @@ fn previous(month: YearMonth) -> Option<YearMonth> {
     }
 }
 
-/// The previous month's newest version file in `dir`, parsed. Absent or of
-/// another format: no carry, and the header says why.
+/// The previous month's newest FULL version file in `dir`, parsed (a
+/// `--symbols` file is never one, D-5178). Absent or of another format: no
+/// carry, and the header says why.
 pub(crate) fn carried(dir: &Path, month: YearMonth) -> Result<Carried, String> {
     let Some(before) = previous(month) else {
         return Ok(Carried {
@@ -2458,7 +2639,10 @@ pub(crate) fn carried(dir: &Path, month: YearMonth) -> Result<Carried, String> {
         .map_err(|why| format!("reading `{}`: {why}", file.display()))?;
     if text.lines().next() != Some(FORMAT) {
         return Ok(Carried {
-            note: format!("none:{}_is_not_format_2", name(before, version)),
+            note: format!(
+                "none:{}_is_not_format_{FORMAT_NUMBER}",
+                name(before, Scope::Full, version)
+            ),
             ..Carried::default()
         });
     }
@@ -2467,7 +2651,7 @@ pub(crate) fn carried(dir: &Path, month: YearMonth) -> Result<Carried, String> {
         .filter(|line| line.starts_with("# carry,"))
         .count();
     let mut carried = Carried {
-        note: name(before, version),
+        note: name(before, Scope::Full, version),
         stocks: HashMap::with_capacity(shares),
         pooled: [0; LAG_BINS],
     };
@@ -2495,7 +2679,8 @@ pub(crate) struct Rounds {
 
 /// Runs `work` over `items` on worker threads. With `fixed`, that many from
 /// the start; otherwise start at 1 and double while the throughput (bars per
-/// microsecond) of the last full round still rises, up to `ceiling`. Results
+/// microsecond) of the last full round still rises, up to `ceiling`; a full
+/// round whose throughput fell sends the count back to the fastest one. Results
 /// come back in item order, so nothing depends on which thread did what.
 pub(crate) fn schedule<T, F>(
     items: usize,
@@ -2510,7 +2695,7 @@ where
     let ceiling = ceiling.clamp(1, items.max(1));
     let mut workers = fixed.map_or(1, |n| n.clamp(1, items.max(1)));
     let mut adapting = fixed.is_none() && workers < ceiling;
-    let mut best: Option<(u64, u64)> = None;
+    let mut best: Option<(u64, u64, usize)> = None;
     let mut results: Vec<Option<T>> = std::iter::repeat_with(|| None).take(items).collect();
     let mut rounds = Rounds::default();
     let mut from = 0_usize;
@@ -2564,13 +2749,22 @@ where
         rounds.log.push((threads, take, bars, micros));
         if adapting {
             let full = take == workers;
-            let rises = best.is_none_or(|(b, m)| {
+            let rises = best.is_none_or(|(b, m, _)| {
                 u128::from(bars) * u128::from(m) > u128::from(b) * u128::from(micros)
             });
             if full && rises && workers < ceiling {
-                best = Some((bars, micros));
+                best = Some((bars, micros, workers));
                 workers = (workers * 2).min(ceiling);
             } else {
+                // THE FASTEST COUNT, NOT THE LAST ONE TRIED: a doubling whose
+                // full round's throughput fell goes back to the count before
+                // it, which the rest of the run (and its second pass) uses.
+                if full
+                    && !rises
+                    && let Some((_, _, faster)) = best
+                {
+                    workers = faster;
+                }
                 adapting = false;
             }
         }
@@ -2592,6 +2786,10 @@ where
 pub(crate) struct Report {
     pub(crate) file: PathBuf,
     pub(crate) version: u32,
+    pub(crate) scope: Scope,
+    /// What the previous month handed this one: its file's name, or
+    /// `none:<why>`.
+    pub(crate) carry: String,
     pub(crate) summary: String,
     timing: String,
     pub(crate) failed: bool,
@@ -2601,12 +2799,28 @@ impl Report {
     fn print(&self, out: &mut String) -> u8 {
         let _ = writeln!(
             out,
-            "FEED RECONCILE v{} -> {}\n{}\n{}",
+            "FEED RECONCILE {}v{} -> {}\ncarry {}\n{}\n{}",
+            match self.scope {
+                Scope::Full => "",
+                Scope::Symbols => "--symbols (never the month's authority, D-5178) ",
+            },
             self.version,
             self.file.display(),
+            self.carry,
             self.summary,
             self.timing
         );
+        // NO CARRY IS SAID OUT LOUD, not only in the file's header: every
+        // applied lag of this month then comes from its own earlier days or
+        // the pool, and its first matched day is judged against no interval.
+        if let Some(why) = self.carry.strip_prefix("none:") {
+            let _ = writeln!(
+                out,
+                "FEED RECONCILE NOTE: no carry from the previous month ({why}); each share's \
+                 applied lag starts from this month's own earlier days and its first matched \
+                 day's ex-date is unchecked. Run the months in order to carry one."
+            );
+        }
         if self.failed {
             let _ = writeln!(
                 out,
@@ -2630,9 +2844,19 @@ impl Report {
 pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report, String> {
     let started = Instant::now();
     let listing = match &ask.symbols {
-        Some(symbols) => symbols.iter().cloned().map(listed).collect(),
+        Some(symbols) => chosen(root, ask.month, symbols)?,
         None => listing(root, ask.month)?,
     };
+    // A MONTH NEITHER FEED HOLDS A SHARE OF IS REFUSED, never published as an
+    // authority of no row (D-5178).
+    if listing.is_empty() {
+        return Err(format!(
+            "refused: neither feed holds a share directory for {} under `{}`; no bar was read \
+             and nothing was written (D-5178)",
+            ask.month,
+            root.display()
+        ));
+    }
     let carried = carried(&ask.out, ask.month)?;
     let first_day = Day::new(ask.month.year(), ask.month.month(), 1)
         .map_err(|why| why.to_string())?
@@ -2705,12 +2929,15 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
     }
     let summary = summarise(ask.month, &results);
     let body = render(root, ask, commit, &carried, &results, &running, &summary);
-    let (file, version) = publish(&ask.out, ask.month, body.as_bytes())?;
+    let scope = ask.scope();
+    let (file, version) = publish(&ask.out, ask.month, scope, body.as_bytes())?;
     let timing = timing(&results, &rounds, started);
     let line = format!(
-        "{} v{version} {} | {summary} | {timing}\n",
+        "{} {} v{version} {} | carry {} | {summary} | {timing}\n",
         ask.month,
-        file.display()
+        scope.text(),
+        file.display(),
+        carried.note
     );
     append_summary(&ask.out, &line)?;
     let failed = results.iter().any(|r| r.read_failed);
@@ -2727,12 +2954,16 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
         .with("month", ask.month.to_string().as_str())
         .with("file", file.display().to_string().as_str())
         .with("version", version)
+        .with("scope", scope.text())
+        .with("carry", carried.note.as_str())
         .with("stocks", results.len())
         .with("read_failed", failed),
     );
     Ok(Report {
         file,
         version,
+        scope,
+        carry: carried.note,
         summary,
         timing,
         failed,
@@ -2902,6 +3133,22 @@ fn render(
     );
     let _ = writeln!(
         body,
+        "# scope {}: {}",
+        ask.scope().text(),
+        match ask.scope() {
+            Scope::Full => {
+                "every share either feed holds; the month's authority, read by the next \
+                 month's carry, the factor reader and the run identity's digest (D-5178)"
+            }
+            Scope::Symbols => {
+                "the listed shares only; never the month's authority: no next month's carry, \
+                 no factor lookup and no digest reads this file, and its pooled lag counts the \
+                 listed shares' days only (D-5178)"
+            }
+        }
+    );
+    let _ = writeln!(
+        body,
         "# feeds: gdfl NSE CASH 1s (raw prices; volume = sum of the 1s bars); zerodha NSE CASH \
          1min and 1day (corporate-action adjusted history); decisions on zerodha minutes, gdfl at \
          the seconds level only (D-5170)"
@@ -2917,9 +3164,11 @@ fn render(
          opposing_pair); range = the same intersection over the minutes' ranges \
          [(2z_low-s_z)/(2g_high+s_g) .. (2z_high+s_z)/(2g_low-s_g)], range_not_constant when \
          it empties (D-5176); adjusted = 1 outside the median pair's interval; ex_date = disjoint \
-         intervals of consecutive matched days, each day the close intersection or where it \
-         emptied the range intersection (D-5177), unsourced (no corporate-action source \
-         merged); \
+         intervals of consecutive matched days, each day the close intersection or else the \
+         range intersection (D-5177), whichever first holds the day's own median pair; a day \
+         where neither holds it is unchecked:interval_excludes_median and hands nothing on \
+         (D-5179); unsourced (no corporate-action source merged); grid_z = the zerodha grid \
+         as of the day's last minute; \
          lag scan = every lag -59..+59 s, equal = the lag's own lower-median ratio inside the \
          minute's interval, shares over zerodha minutes with a known grid, best = most equal, \
          ties to the smallest |L| then the negative; applied lag = the share's most frequent \
@@ -2945,14 +3194,16 @@ fn render(
         }
     }
     // A SHARE THIS MONTH DID NOT READ KEEPS WHAT IT CARRIED: a month with no
-    // file of a share (a suspension, a `--symbols` run) must not erase its lag
-    // history or its last interval, so its next month is still judged against
-    // its own earlier days. In byte order, so the bytes do not depend on the
-    // map.
+    // file of a share (a suspension) must not erase its lag history or its
+    // last interval, so its next month is still judged against its own
+    // earlier days. In byte order, so the bytes do not depend on the map. A
+    // `--symbols` file is never carried from (D-5178), so it repeats nothing.
     let mut kept = std::collections::BTreeSet::new();
-    for symbol in carried.stocks.keys() {
-        if !written.contains(symbol.as_str()) && not_a_key(symbol).is_none() {
-            kept.insert(symbol.as_str());
+    if ask.scope() == Scope::Full {
+        for symbol in carried.stocks.keys() {
+            if !written.contains(symbol.as_str()) && not_a_key(symbol).is_none() {
+                kept.insert(symbol.as_str());
+            }
         }
     }
     for symbol in kept {
@@ -2978,13 +3229,24 @@ fn render(
     body
 }
 
-fn name(month: YearMonth, version: u32) -> String {
-    format!("feed-reconcile-{month}.v{version}.csv")
+fn name(month: YearMonth, scope: Scope, version: u32) -> String {
+    format!("feed-reconcile-{month}{}.v{version}.csv", scope.infix())
 }
 
-/// The newest version file of `month` in `dir`, and its number.
+/// The newest FULL version file of `month` in `dir`, and its number: the
+/// month's one authority. A `--symbols` file has another name and is never
+/// it (D-5178).
 pub(crate) fn newest(dir: &Path, month: YearMonth) -> Result<Option<(PathBuf, u32)>, String> {
-    let prefix = format!("feed-reconcile-{month}.v");
+    newest_of(dir, month, Scope::Full)
+}
+
+/// The newest version file of `month` and `scope` in `dir`, and its number.
+pub(crate) fn newest_of(
+    dir: &Path,
+    month: YearMonth,
+    scope: Scope,
+) -> Result<Option<(PathBuf, u32)>, String> {
+    let prefix = format!("feed-reconcile-{month}{}.v", scope.infix());
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2994,25 +3256,28 @@ pub(crate) fn newest(dir: &Path, month: YearMonth) -> Result<Option<(PathBuf, u3
     for entry in entries {
         let entry = entry.map_err(|why| format!("listing `{}`: {why}", dir.display()))?;
         let file = entry.file_name().to_string_lossy().into_owned();
+        // ONLY A NAME THIS VERB WRITES: a number that parses but does not
+        // round-trip (`v+7`, `v007`) would name a file that is not there.
         let version = file
             .strip_prefix(&prefix)
             .and_then(|rest| rest.strip_suffix(".csv"))
-            .and_then(|n| n.parse::<u32>().ok());
+            .and_then(|n| n.parse::<u32>().ok().filter(|v| v.to_string() == n));
         if let Some(version) = version
             && best.is_none_or(|b| version > b)
         {
             best = Some(version);
         }
     }
-    Ok(best.map(|version| (dir.join(name(month, version)), version)))
+    Ok(best.map(|version| (dir.join(name(month, scope, version)), version)))
 }
 
-/// Writes `bytes` as the next version of the month's file: a temporary, made
-/// durable, then linked to its final name (a link never replaces a file),
-/// the temporary removed and the directory made durable.
+/// Writes `bytes` as the next version of the month's file of `scope`: a
+/// temporary, made durable, then linked to its final name (a link never
+/// replaces a file), the temporary removed and the directory made durable.
 pub(crate) fn publish(
     dir: &Path,
     month: YearMonth,
+    scope: Scope,
     bytes: &[u8],
 ) -> Result<(PathBuf, u32), String> {
     let tmp = dir.join(format!(
@@ -3030,24 +3295,22 @@ pub(crate) fn publish(
         .create_new(true)
         .open(&tmp)
         .map_err(|why| failed("creating", &tmp, why))?;
-    file.write_all(bytes)
+    // EVERY FAILURE AFTER THE TEMPORARY EXISTS REMOVES IT: it is this run's
+    // own unpublished file, never a version, and a leak would sit beside the
+    // versions until someone deleted it by hand.
+    let linked = file
+        .write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|why| failed("writing", &tmp, why))?;
-    drop(file);
-    let mut version = newest(dir, month)?.map_or(1, |(_, v)| v.saturating_add(1));
-    let published = loop {
-        let path = dir.join(name(month, version));
-        match std::fs::hard_link(&tmp, &path) {
-            Ok(()) => break (path, version),
-            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-                version = version
-                    .checked_add(1)
-                    .ok_or_else(|| format!("no version number is left for {month}"))?;
-            }
-            Err(why) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(failed("linking", &path, why));
-            }
+        .map_err(|why| failed("writing", &tmp, why))
+        .and_then(|()| {
+            drop(file);
+            link_next(dir, month, scope, &tmp)
+        });
+    let published = match linked {
+        Ok(published) => published,
+        Err(why) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(why);
         }
     };
     std::fs::remove_file(&tmp).map_err(|why| failed("removing the temporary", &tmp, why))?;
@@ -3055,6 +3318,32 @@ pub(crate) fn publish(
         .and_then(|handle| handle.sync_all())
         .map_err(|why| failed("syncing", dir, why))?;
     Ok(published)
+}
+
+/// Links the durable temporary `tmp` to the month's next free version name
+/// of `scope` (a link never replaces a file) and returns that name.
+fn link_next(
+    dir: &Path,
+    month: YearMonth,
+    scope: Scope,
+    tmp: &Path,
+) -> Result<(PathBuf, u32), String> {
+    let mut version = newest_of(dir, month, scope)?.map_or(Some(1), |(_, v)| v.checked_add(1));
+    loop {
+        let Some(number) = version else {
+            return Err(format!(
+                "no version number is left for {month}; nothing was published"
+            ));
+        };
+        let path = dir.join(name(month, scope, number));
+        match std::fs::hard_link(tmp, &path) {
+            Ok(()) => return Ok((path, number)),
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
+                version = number.checked_add(1);
+            }
+            Err(why) => return Err(format!("linking `{}`: {why}", path.display())),
+        }
+    }
 }
 
 /// Appends one line to the summary log: one `write` on a file opened to

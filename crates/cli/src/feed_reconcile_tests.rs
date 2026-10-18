@@ -27,10 +27,10 @@ use store::path::{StorePath, Timeframe, YearMonth};
 
 use super::{
     COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorRefusal, Frac, Grid,
-    LAG_BINS, PairAt, Running, Scratch, USAGE, Window, ZMinute, ask, bin, bounds, carried,
+    LAG_BINS, PairAt, Running, Scope, Scratch, USAGE, Window, ZMinute, ask, bin, bounds, carried,
     carry_line, command_with, day_kind, file_digest, flag_text, lag_order, lookup_ask, mode,
-    newest, parse_carry, parse_day, parse_month, parts, percent, previous, publish, range_bounds,
-    rank, round_half_up, schedule, symbol_id,
+    newest, newest_of, parse_carry, parse_day, parse_frac, parse_month, parts, percent, previous,
+    publish, range_bounds, rank, round_half_up, schedule, symbol_id,
 };
 use crate::{FAILED, MISUSED, OK};
 
@@ -488,6 +488,49 @@ fn a_missing_out_directory_or_store_refuses_before_anything_is_read() {
     );
 }
 
+/// `--out` MAY SIT IN THE STORE ONLY UNDER ITS AUDIT AREA, and a store root
+/// that is not a directory is refused rather than read as a store of no
+/// share (which would publish a file of no row).
+#[test]
+fn the_out_directory_may_sit_in_the_store_only_under_its_audit_area() {
+    let store = Dir::new("store");
+    let span = on(2025, 3, 3, hm(9, 15), 2);
+    Fixture::default()
+        .gdfl("SYNA", span, 10)
+        .minutes("SYNA", span, (1, 1), 20)
+        .write(&store.0);
+    let bars = store.0.join("bars");
+    assert!(bars.is_dir(), "the writer made the bars tree");
+    for inside in [store.0.clone(), bars.clone(), bars.join("..").join("bars")] {
+        let before = contents(&inside);
+        let (code, text) = reconcile(&store.0, &inside, &[]);
+        assert_eq!(code, FAILED, "{}: {text}", inside.display());
+        assert!(
+            text.contains("outside its audit area `audit/`"),
+            "{}: {text}",
+            inside.display()
+        );
+        assert_eq!(contents(&inside), before, "nothing written");
+    }
+    let audit = store.0.join("audit").join("feed-reconcile");
+    fs::create_dir_all(&audit).unwrap();
+    let (code, text) = reconcile(&store.0, &audit, &[]);
+    assert_eq!(code, OK, "{text}");
+    assert!(audit.join("feed-reconcile-2025-03.v1.csv").exists());
+    let out = Dir::new("out");
+    let absent = store.0.join("no-store-here");
+    let (code, text) = reconcile(&absent, &out.0, &[]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("FEED RECONCILE REFUSED: the store `"),
+        "{text}"
+    );
+    assert!(
+        contents(&out.0).0.is_empty(),
+        "no file of no row is published"
+    );
+}
+
 // ------------------------------------------------------- statuses and pairs
 
 #[test]
@@ -577,6 +620,11 @@ fn an_adjusted_day_is_an_exact_pair_and_a_disjoint_interval_is_an_ex_date() {
     assert_eq!(
         day["grid_z"], "1",
         "the series-month grid shrank to 1 paisa"
+    );
+    assert_eq!(
+        row(&all, "SYNB", "2025-03-04")["grid_z"],
+        "2",
+        "a day's grid is the grid as of that day, never the month's end"
     );
     assert!(text.contains("ex-date days 1 (unsourced)"), "{text}");
     assert!(text.contains("adjusted shares 1"), "{text}");
@@ -792,6 +840,122 @@ fn an_ex_date_is_judged_on_the_ranges_where_the_closes_emptied() {
     assert_eq!(day["ex_date"], "unchecked:no_interval");
 }
 
+/// One minute of both feeds: GDFL seconds at :00 (every price `g.0`) and :30
+/// (every price `g.1`), so the window's low is `g.0`, its high and close
+/// `g.1`; a Zerodha minute of low `z.0`, high `z.1` and close `z.2`.
+fn both_feeds(
+    fixture: &mut Fixture,
+    symbol: &str,
+    (year, month, day): (u16, u8, u8),
+    minute: i64,
+    g: (i64, i64),
+    z: (i64, i64, i64),
+) {
+    let t = |second| at(year, month, day, minute, second);
+    fixture
+        .push(
+            "gdfl",
+            Timeframe::SECOND_1,
+            symbol,
+            (year, month),
+            vec![
+                bar(t(0), g.0, g.0, g.0, g.0, 5),
+                bar(t(30), g.1, g.1, g.1, g.1, 5),
+            ],
+        )
+        .push(
+            "zerodha",
+            Timeframe::MINUTE_1,
+            symbol,
+            (year, month),
+            vec![bar(t(0), z.0, z.1, z.0, z.2, 10)],
+        );
+}
+
+/// AN INTERVAL OFF ITS OWN DAY'S MEDIAN IS NO BASIS FOR AN EX-DATE (D-5179).
+/// Three days on one unchanged basis, factor 1. The 4th and the 6th are
+/// tight: each feed prints the same two trades, the close intersection holds
+/// 1. On the 5th the closes are different trades (so the close intersection
+/// empties, as on almost every real day) and ONE minute is discordant: its
+/// Zerodha range lies 90 paisa above GDFL's. That minute narrows the range
+/// intersection to about [1 + 8/q, 1 + 82/q], which excludes the day's own
+/// median ratio 1 and is disjoint from the 4th's interval. Judged on it, the
+/// 5th and then the 6th were ex-dates on a basis that never moved.
+#[test]
+fn an_interval_off_its_own_median_is_no_basis_for_an_ex_date() {
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    let mut fixture = Fixture::default();
+    seeded(&mut fixture, "SYNO");
+    for n in 0..4 {
+        let q = BASE + 10 * n;
+        for day in [4, 6] {
+            both_feeds(
+                &mut fixture,
+                "SYNO",
+                (2025, 3, day),
+                hm(9, 15) + n,
+                (q, q + 2),
+                (q, q + 2, q + 2),
+            );
+        }
+        let close = if n % 2 == 0 { q + 40 } else { q - 40 };
+        both_feeds(
+            &mut fixture,
+            "SYNO",
+            (2025, 3, 5),
+            hm(9, 15) + n,
+            (q - 40, q + 40),
+            (q - 40, q + 40, close),
+        );
+    }
+    let q = BASE + 40;
+    both_feeds(
+        &mut fixture,
+        "SYNO",
+        (2025, 3, 5),
+        hm(9, 19),
+        (q - 40, q + 40),
+        (q + 50, q + 130, q + 130),
+    );
+    fixture.write(&store.0);
+    let (code, text) = reconcile(&store.0, &out.0, &[]);
+    assert_eq!(code, OK, "{text}");
+    let all = rows(&file(&out.0, "2025-03", 1));
+    let first = row(&all, "SYNO", "2025-03-04");
+    assert_eq!(first["ex_date"], "unchecked:no_carried_history:close");
+    let odd = row(&all, "SYNO", "2025-03-05");
+    assert_eq!(odd["status"], "matched");
+    assert_eq!(
+        odd["median_z"], odd["median_g"],
+        "the day's own median ratio is 1"
+    );
+    assert!(has_flag(odd, "factor_not_constant"), "{}", odd["flags"]);
+    assert!(!has_flag(odd, "range_not_constant"), "{}", odd["flags"]);
+    let low = parse_frac(&odd["range_lo"]).unwrap();
+    assert!(
+        Frac { num: 1, den: 1 }.lt(low),
+        "the discordant minute moved the range intersection off 1: {low}"
+    );
+    assert_eq!(odd["ex_date"], "unchecked:interval_excludes_median:range");
+    assert!(!has_flag(odd, "ex_date"), "{}", odd["flags"]);
+    let last = row(&all, "SYNO", "2025-03-06");
+    assert_eq!(
+        last["ex_date"], "no:close",
+        "judged against the 4th, the last day with a basis"
+    );
+    assert!(!has_flag(last, "ex_date"), "{}", last["flags"]);
+    assert!(text.contains("ex-date days 0 (unsourced)"), "{text}");
+    let carry = file(&out.0, "2025-03", 1)
+        .lines()
+        .find(|line| line.starts_with("# carry,SYNO,"))
+        .map(str::to_owned)
+        .unwrap();
+    assert!(
+        carry.contains("interval=2025-03-06:"),
+        "the 6th hands its own interval on: {carry}"
+    );
+}
+
 // ------------------------------------------------------------------- lags
 
 #[test]
@@ -960,6 +1124,103 @@ fn a_month_without_a_share_carries_its_history_unchanged() {
         "the lag history crossed the empty month"
     );
     assert_eq!(day["ex_date"], "yes:unsourced:close", "{}", day["flags"]);
+}
+
+/// Every file name in `dir`, sorted, and the summary log's text.
+fn contents(dir: &Path) -> (Vec<String>, String) {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let log = fs::read_to_string(dir.join("feed-reconcile.summary.log")).unwrap_or_default();
+    (names, log)
+}
+
+/// A `--SYMBOLS` RUN IS NEVER THE MONTH'S AUTHORITY (D-5178). Two
+/// directories run February, March and April in full; one of them also runs
+/// March for SYNA alone in between. That run is its own `.symbols.` file, so
+/// the factor of the share it did not list is answered from the full March
+/// exactly as before, and April's bytes are the same in both directories.
+/// SYNB moves from basis 1 in February to 1/2 in March and stays there in
+/// April, so an April carried from February's interval (what a partial March
+/// as the newest version did) would call April 1 an ex-date.
+#[test]
+fn a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month() {
+    let store = Dir::new("store");
+    let (plain, probed) = (Dir::new("out"), Dir::new("out"));
+    let mut fixture = Fixture::default();
+    for (span, basis) in [
+        (on(2025, 2, 26, hm(9, 15), 4), (1, 1)),
+        (on(2025, 2, 27, hm(9, 15), 4), (1, 1)),
+        (on(2025, 3, 3, hm(9, 15), 4), (1, 2)),
+        (on(2025, 4, 1, hm(9, 15), 4), (1, 2)),
+    ] {
+        fixture
+            .gdfl("SYNB", span, 10)
+            .minutes("SYNB", span, basis, 20)
+            .gdfl("SYNA", span, 10)
+            .minutes("SYNA", span, (1, 1), 20);
+    }
+    fixture.write(&store.0);
+    for month in ["2025-02", "2025-03"] {
+        for out in [&plain, &probed] {
+            let (code, text) = reconcile_month(&store.0, &out.0, month, &[]);
+            assert_eq!(code, OK, "{month}: {text}");
+        }
+    }
+    let (code, text) = reconcile_month(&store.0, &probed.0, "2025-03", &["--symbols", "SYNA"]);
+    assert_eq!(code, OK, "{text}");
+    assert!(text.contains("FEED RECONCILE --symbols"), "{text}");
+    let partial =
+        fs::read_to_string(probed.0.join("feed-reconcile-2025-03.symbols.v1.csv")).unwrap();
+    assert!(partial.contains("\n# scope symbols: "), "{partial}");
+    assert!(rows(&partial).iter().all(|row| row["symbol"] == "SYNA"));
+    assert!(
+        !partial.contains("# carry,SYNB,"),
+        "a --symbols file repeats no unlisted share's carry"
+    );
+    assert!(!probed.0.join("feed-reconcile-2025-03.v2.csv").exists());
+    assert!(file(&plain.0, "2025-03", 1).contains("\n# scope all: "));
+    let march = Day::new(2025, 3, 3).unwrap();
+    let before = FactorIndex::load(&plain.0, ym(2025, 3)).unwrap();
+    let after = FactorIndex::load(&probed.0, ym(2025, 3)).unwrap();
+    assert!(
+        before.factor_of("SYNB", march).is_ok(),
+        "{:?}",
+        before.factor_of("SYNB", march)
+    );
+    assert_eq!(
+        after.factor_of("SYNB", march),
+        before.factor_of("SYNB", march),
+        "the unlisted share answers exactly as before"
+    );
+    assert_eq!(after.digest, before.digest, "the same authority");
+    for out in [&plain, &probed] {
+        let (code, text) = reconcile_month(&store.0, &out.0, "2025-04", &[]);
+        assert_eq!(code, OK, "{text}");
+    }
+    let april = file(&plain.0, "2025-04", 1);
+    assert_eq!(
+        file(&probed.0, "2025-04", 1),
+        april,
+        "the next month is byte for byte the run without the --symbols run"
+    );
+    assert_eq!(
+        row(&rows(&april), "SYNB", "2025-04-01")["ex_date"],
+        "no:close"
+    );
+    // A KEY NEITHER FEED HOLDS (a typo) is refused by name and nothing is
+    // written: no version, no summary line.
+    let held = contents(&probed.0);
+    let (code, text) = reconcile_month(&store.0, &probed.0, "2025-03", &["--symbols", "SYNA,SYNZ"]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("--symbols `SYNZ`: neither feed holds a share directory"),
+        "{text}"
+    );
+    assert_eq!(contents(&probed.0), held, "nothing was written");
 }
 
 #[test]
@@ -1217,9 +1478,14 @@ fn names_with_an_ampersand_are_read_by_their_stored_key() {
     assert_eq!(row(&all, "SYN-X", "2025-03-03")["status"], "zerodha_only");
     let (code, text) = reconcile(&store.0, &out.0, &["--symbols", "M&M"]);
     assert_eq!(code, OK, "{text}");
-    let only = rows(&file(&out.0, "2025-03", 2));
+    let partial = fs::read_to_string(out.0.join("feed-reconcile-2025-03.symbols.v1.csv")).unwrap();
+    let only = rows(&partial);
     assert_eq!(only.len(), 1);
     assert_eq!(only[0]["symbol"], "M&M");
+    assert!(
+        !out.0.join("feed-reconcile-2025-03.v2.csv").exists(),
+        "a --symbols run is never a full version"
+    );
 }
 
 #[test]
@@ -1404,7 +1670,7 @@ fn publishing_takes_the_next_free_version_and_replaces_nothing() {
         b"not a version",
     )
     .unwrap();
-    let (path, version) = publish(&dir.0, month, b"new").unwrap();
+    let (path, version) = publish(&dir.0, month, Scope::Full, b"new").unwrap();
     assert_eq!(version, 8);
     assert_eq!(fs::read(&path).unwrap(), b"new");
     assert_eq!(
@@ -1413,6 +1679,111 @@ fn publishing_takes_the_next_free_version_and_replaces_nothing() {
     );
     assert_eq!(newest(&dir.0, month).unwrap().map(|(_, v)| v), Some(8));
     assert_eq!(newest(&dir.0.join("absent"), month).unwrap(), None);
+    // A `--symbols` file has its own name and numbers, and is never the
+    // month's newest version (D-5178).
+    let (partial, number) = publish(&dir.0, month, Scope::Symbols, b"partial").unwrap();
+    assert_eq!(number, 1);
+    assert_eq!(
+        partial.file_name().unwrap().to_string_lossy(),
+        "feed-reconcile-2025-03.symbols.v1.csv"
+    );
+    assert_eq!(
+        newest(&dir.0, month).unwrap().map(|(_, v)| v),
+        Some(8),
+        "the authority is still the newest FULL version"
+    );
+    assert_eq!(
+        newest_of(&dir.0, month, Scope::Symbols)
+            .unwrap()
+            .map(|(_, v)| v),
+        Some(1)
+    );
+    let (_, again) = publish(&dir.0, month, Scope::Full, b"next").unwrap();
+    assert_eq!(again, 9, "a --symbols file takes no full version number");
+}
+
+/// A NAME THAT DOES NOT ROUND-TRIP IS NO VERSION (`v+7` and `v007` parse as
+/// numbers this verb never writes), and a publish that cannot take a number
+/// refuses by name and leaves no temporary behind.
+#[test]
+fn a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary() {
+    let dir = Dir::new("versions");
+    let month = ym(2025, 3);
+    for odd in [
+        "feed-reconcile-2025-03.v+7.csv",
+        "feed-reconcile-2025-03.v007.csv",
+        "feed-reconcile-2025-03.v.csv",
+    ] {
+        fs::write(dir.0.join(odd), b"odd").unwrap();
+    }
+    assert_eq!(newest(&dir.0, month).unwrap(), None);
+    let (path, version) = publish(&dir.0, month, Scope::Full, b"first").unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(newest(&dir.0, month).unwrap(), Some((path, 1)));
+    fs::write(
+        dir.0
+            .join(format!("feed-reconcile-2025-03.v{}.csv", u32::MAX)),
+        b"last",
+    )
+    .unwrap();
+    let before = contents(&dir.0);
+    let refused = publish(&dir.0, month, Scope::Full, b"none left").unwrap_err();
+    assert!(
+        refused.contains("no version number is left for 2025-03"),
+        "{refused}"
+    );
+    assert_eq!(
+        contents(&dir.0),
+        before,
+        "no temporary and no version left behind"
+    );
+}
+
+/// A MONTH NEITHER FEED HOLDS A SHARE OF IS REFUSED rather than published as
+/// an authority of no row, and a month run with no previous file says so on
+/// the screen and in the summary log, not only in the file's header.
+#[test]
+fn an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud() {
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    let mut fixture = Fixture::default();
+    for span in [on(2025, 3, 3, hm(9, 15), 2), on(2025, 4, 1, hm(9, 15), 2)] {
+        fixture
+            .gdfl("SYNA", span, 10)
+            .minutes("SYNA", span, (1, 1), 20);
+    }
+    fixture.write(&store.0);
+    let (code, text) = reconcile_month(&store.0, &out.0, "2025-05", &[]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("neither feed holds a share directory for 2025-05"),
+        "{text}"
+    );
+    assert!(contents(&out.0).0.is_empty(), "nothing written");
+    let (code, text) = reconcile_month(&store.0, &out.0, "2025-03", &[]);
+    assert_eq!(code, OK, "{text}");
+    assert!(
+        text.contains("\ncarry none:no_file_for_2025-02\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "FEED RECONCILE NOTE: no carry from the previous month (no_file_for_2025-02)"
+        ),
+        "{text}"
+    );
+    assert!(
+        contents(&out.0)
+            .1
+            .contains("| carry none:no_file_for_2025-02 |"),
+        "the summary log names it"
+    );
+    let (code, text) = reconcile_month(&store.0, &out.0, "2025-04", &[]);
+    assert_eq!(code, OK, "{text}");
+    assert!(
+        text.contains("\ncarry feed-reconcile-2025-03.v1.csv\n"),
+        "{text}"
+    );
+    assert!(!text.contains("FEED RECONCILE NOTE"), "{text}");
 }
 
 #[test]
@@ -1433,6 +1804,39 @@ fn the_scheduler_doubles_while_throughput_rises_and_keeps_item_order() {
     assert_eq!(rounds.log[0].0, 3, "never more threads than items");
     let (none, _) = schedule(0, None, 4, |at, _| (at, 0)).unwrap();
     assert!(none.is_empty());
+}
+
+/// THE COUNT DOUBLES WHILE THROUGHPUT RISES AND GOES BACK WHEN IT FALLS.
+/// Item `n` reports `256^n` bars for the first 7 items, so each full round's
+/// throughput is tens of thousands of times its predecessor's whatever the
+/// host's timing (rounds of 1, 2 and 4 workers); the 8 items of the round
+/// of 8 report no bar, so that round's throughput falls to 0 and the rest of
+/// the run (and `rounds.last`, which a second pass uses) is back at 4.
+#[test]
+fn the_scheduler_doubles_while_throughput_rises_and_returns_to_the_fastest_count() {
+    let bars = |at: usize| -> u64 {
+        if at < 7 {
+            1_u64 << (8 * u32::try_from(at).unwrap())
+        } else {
+            0
+        }
+    };
+    let (out, rounds) = schedule(20, None, 8, |at, _| (at, bars(at))).unwrap();
+    assert_eq!(out, (0..20).collect::<Vec<_>>(), "item order kept");
+    let threads: Vec<usize> = rounds.log.iter().map(|r| r.0).collect();
+    let taken: Vec<usize> = rounds.log.iter().map(|r| r.1).collect();
+    assert_eq!(
+        threads,
+        vec![1, 2, 4, 8, 4],
+        "doubled three times, then back"
+    );
+    assert_eq!(taken, vec![1, 2, 4, 8, 5], "every item once");
+    assert_eq!(rounds.last, 4, "the fastest count, not the last one tried");
+    // At the ceiling with throughput still rising, it stays at the ceiling.
+    let (_, capped) = schedule(7, None, 2, |at, _| (at, bars(at))).unwrap();
+    let threads: Vec<usize> = capped.log.iter().map(|r| r.0).collect();
+    assert_eq!(threads, vec![1, 2, 2]);
+    assert_eq!(capped.last, 2);
 }
 
 // ------------------------------------------------------------ the reader
@@ -1536,7 +1940,7 @@ fn an_older_format_is_never_read_as_this_one() {
     assert!(carried_in.stocks.is_empty());
     assert_eq!(
         carried_in.note,
-        "none:feed-reconcile-2025-02.v1.csv_is_not_format_2"
+        "none:feed-reconcile-2025-02.v1.csv_is_not_format_3"
     );
     assert!(FactorIndex::load(&dir.0, ym(2025, 2)).is_err());
     let none = carried(&dir.0, ym(2025, 5)).unwrap();
@@ -1581,6 +1985,15 @@ fn the_allowance_interval_and_the_running_intersection_are_exact() {
         "2g <= s_g has no upper bound"
     );
     assert!(bounds(pair(0, 0, 100, 2, 2)).is_none());
+    // NO PRICE CAN OVERFLOW A CROSS-MULTIPLICATION: above 2^60 paisa a
+    // minute admits nothing (counted unbounded), never a panicking worker.
+    assert!(bounds(pair(0, i64::MAX, i64::MAX, 2, 2)).is_none());
+    assert!(
+        bounds(pair(0, 1 << 60, 1 << 60, 2, 2)).is_some(),
+        "the ceiling itself is held"
+    );
+    assert!(bounds(pair(0, (1 << 60) + 1, 100, 2, 2)).is_none());
+    assert!(bounds(pair(0, 100, 100, 2, u64::MAX)).is_none());
     let mut running = Running::default();
     assert_eq!(running.interval(), None);
     let first = pair(1, 100, 100, 2, 2);
@@ -1638,6 +2051,13 @@ fn the_allowance_interval_and_the_running_intersection_are_exact() {
     );
     let unpriced = ZMinute { low: 0, ..minute };
     assert_eq!(range_bounds(unpriced, window), None);
+    let huge = ZMinute {
+        high: i64::MAX,
+        ..minute
+    };
+    assert_eq!(range_bounds(huge, window), None, "above the ceiling");
+    let inverted = Window { high: 97, ..window };
+    assert_eq!(range_bounds(minute, inverted), None, "a high below its low");
     assert!(Frac { num: 1, den: 3 }.lt(Frac { num: 1, den: 2 }));
     assert!(Frac { num: 2, den: 4 }.le(Frac { num: 1, den: 2 }));
     assert!(!Frac { num: 2, den: 4 }.lt(Frac { num: 1, den: 2 }));
@@ -1674,6 +2094,8 @@ fn carry_lines_round_trip_and_bad_ones_are_refused_by_name() {
         "# carry,SYNA,lags=,interval=2025-03-31:1/0:1/2,exceed_open=-,cut_onset=-",
         "# carry,SYNA,lags=,interval=-,exceed_open=2025-03-28,cut_onset=-",
         "# carry,SYNA,lag=,interval=-,exceed_open=-,cut_onset=-",
+        "# carry,SYNA,lags=,interval=2025-03-31:9223372036854775807000/1:1/2,exceed_open=-,cut_onset=-",
+        "# carry,SYNA,lags=,interval=2025-03-31:1/2:1/4611686018427387904,exceed_open=-,cut_onset=-",
     ] {
         assert!(parse_carry(bad).is_err(), "{bad}");
     }
@@ -1716,7 +2138,8 @@ fn the_column_header_flags_and_format_agree() {
     assert_eq!(FLAG_NAMES.len(), 17);
     let unique: std::collections::HashSet<&str> = FLAG_NAMES.iter().copied().collect();
     assert_eq!(unique.len(), FLAG_NAMES.len());
-    assert_eq!(FORMAT, "# brutex feed-reconcile 2");
+    assert_eq!(FORMAT, "# brutex feed-reconcile 3");
+    assert!(FORMAT.ends_with(&super::FORMAT_NUMBER.to_string()));
 }
 
 // ------------------------------------------------------------------- months
