@@ -385,6 +385,7 @@ test('no_sort_is_offered_on_a_column_without_values', () => {
   assert.equal(sortRefusal('strike', [FUT]), NO_OPTION_SORT);
   assert.equal(sortRefusal('side', [SPOT]), NO_OPTION_SORT);
   assert.equal(sortRefusal('tf', [CE], '1min'), NO_RUNG_SORT);
+  assert.equal(sortRefusal('tf', [CE]), null, 'a caller that names no rung is read as no rung chosen, so TF can differ');
   // A name that does not end the way this repository writes a contract is
   // NO contract, exactly as its cells read it (`decoration.js`).
   assert.equal(sortRefusal('dte', ['NSE-FNO-NIFTY-28MAR19-FUT']), NO_EXPIRY_SORT);
@@ -401,6 +402,26 @@ test('no_sort_is_offered_on_a_column_without_values', () => {
   assert.equal(refusalFor('strike', kinds), NO_OPTION_SORT);
   assert.equal(refusalFor('strike', seriesKinds([])), null, 'nothing selected refuses nothing');
   assert.match(gridScript(), /const kinds = \$derived\(seriesKinds\(plan\.keys, db\.timeframe \?\? ''\)\);\s*const sortOff = \(key\) => refusalFor\(key, kinds\);/);
+  // DECIDED, SO DONE (repair 3): the pass stops at the key that settles all
+  // four kinds, and the answer is the whole selection's. An option chain is
+  // read to its first key; a selection with no option is read to its last.
+  const readTo = (/** @type {string[]} */ keys) => {
+    let last = -1;
+    const seen = new Proxy(keys, {
+      get(target, p, receiver) {
+        if (typeof p === 'string' && /^\d+$/.test(p)) last = Math.max(last, Number(p));
+        return Reflect.get(target, p, receiver);
+      }
+    });
+    return { kinds: seriesKinds(seen, '1s'), last };
+  };
+  const all = { n: 5, allIndex: false, noDerivative: false, expiry: true, option: true, oneRung: true };
+  assert.deepEqual(readTo([CE, PE, FUT, SPOT, SHARE]), { kinds: all, last: 0 }, 'an option decides every kind at once');
+  assert.deepEqual(readTo([SPOT, SHARE, FUT, CE, PE]), { kinds: all, last: 3 }, 'read to the first option, not past it');
+  assert.deepEqual(readTo([SPOT, CE, SHARE, FUT, PE]), { kinds: all, last: 1 });
+  assert.deepEqual(readTo([SPOT, SHARE, FUT, FUT, SPOT]), { kinds: { ...all, option: false }, last: 4 }, 'with no option every key is read');
+  assert.deepEqual(readTo([SPOT, SPOT, SHARE, SPOT, SPOT]), { kinds: { ...all, noDerivative: true, expiry: false, option: false }, last: 4 });
+  assert.deepEqual(readTo([SPOT, SPOT, SPOT, SPOT, SPOT]), { kinds: { ...all, allIndex: true, noDerivative: true, expiry: false, option: false }, last: 4 });
   // The server's own rule, read out of its source: an INDEX bar has no
   // volume, an INDEX or CASH bar no open interest.
   const rules = readFileSync(new URL('../../crates/api/src/bars_change.rs', import.meta.url), 'utf8');

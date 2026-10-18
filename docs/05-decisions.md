@@ -72870,6 +72870,36 @@ says "Go to could not be answered: Failed to fetch" and the same minute again
 lands on page 9; a Go to typed on the empty 03:00 to 04:00 window sends no
 read and says the `NO_LANDING` words.
 
+**Repair 3 (19 Oct, the second agent's blocking finding: the proof, not the
+behaviour).** Four statement mutants of repair 2's Go to code survived the
+whole web suite: `dropGoto` without `jumpWhy = ''`, the typed box's refusal
+without `stopGoto()`, the picker's parse refusal without `stopGoto()`, and the
+picker's clear made unconditional (`db.goTime = ''` whatever minute is
+picked). The grid behaved correctly on real data; no test could tell. Each
+was reproduced on a copy of the repair 2 head (each passed all 252 tests of
+the 19 test files that read the grid, the Go to or the pager code), and so
+were eight more of the same kind: the
+parse refusal without `db.landedRk = ''`, `jumpWhy = got.why` or `return`,
+the typed refusal without the same three, `dropGoto` without
+`anchorRk = ''`, and the typed box with no read at all. The code is
+unchanged; the harness that cuts the grid's Go to out of `DbBarsGrid.svelte`
+now cuts `jumpToText`, `jumpToTime` and `gotoSpan` with it, declared so they
+call `jumpToInstant` by name as the component does, and four tests ask what
+none did: `a_moved_row_set_clears_what_a_landing_said_and_the_series_row_it_meant`
+(a landing that said "Landed on the first bar after it", and an extreme's
+series row, each gone with the row set), `a_typed_instant_the_box_refuses_stops_the_go_to_still_out_says_why_and_asks_nothing`,
+`a_picked_minute_the_parse_refuses_stops_the_go_to_still_out_too` (both: the
+held read aborted, the refusal's own words, the mark cleared, no second read,
+and the late answer landing nowhere) and
+`an_earlier_pick_settling_leaves_a_later_pick_its_minute_until_its_own_landing`
+(10:02 then 10:04, the first answer settling first: the picker still holds
+10:04 until 10:04 lands). Each of the twelve mutants fails at least one of
+them, and none of the twelve hangs: a refusal is checked one turn after it
+is made, so a mutant that went on to ask a read the test never answers fails
+the check instead of waiting out the timeout. The sweep of repair 2's lines
+with statement deletions as well as operator swaps is in `docs/06-limits.md`
+L-R303-08. Invariant R303-12.
+
 ### D-5863 — Fit measures the heading's two rows and the notes strip is one fixed line, so no "Fit · 50" and no row under a notice (DB-N02, R3-03) — 2026-10-17
 
 **Decision.** The Fit takes the heading's measured height (`fitHead`, the group
@@ -72968,6 +72998,24 @@ with `&sort=dte&dir=desc` opens with its three ordinary reads, says "Days to
 exp is not an order on this selection", reads time order and drops the sort
 from the address; the 11,600 CE on 15 Mar 2019 keeps every contract header
 and Days to exp still orders it.
+
+**Repair 3 (19 Oct, the second agent's follow-up on cost).** `seriesKinds`
+read every series of the selection, and a selection of NIFTY options is all
+70,458 option directories the GDFL store holds (counted by `ls`, read-only):
+p50 38.2, p99 221.5, max 276.9 ms once per selection on this machine at a load
+average near 46 (n = 200, `performance.now`; the second agent measured 15.6 /
+20.3 / 21.6 ms on a lighter load). Each of the four kinds it reports moves one
+way only (`allIndex` and `noDerivative` from true to false, `expiry` and
+`option` from false to true), so once all four have moved no later series can
+change the answer, and the pass now stops there. An option decides all four
+at once, so an option chain is read to its first key: p50 0.0007, p99 0.0027,
+max 0.0049 ms over the same 70,458. A selection with no option still reads
+every key; the largest the store holds today is the 346 GDFL cash and index
+series, p50 0.055, p99 0.338, max 5.45 ms (synthetic keys of the same count
+and kinds). The answer is unchanged for every selection, which the existing
+header-by-kind assertions hold; `no_sort_is_offered_on_a_column_without_values`
+now also counts the keys read (a `Proxy` over the list) and fails without the
+stop. Bound and figures in `docs/06-limits.md` L-R303-05; invariant R303-13.
 
 ### D-5835 — /db names a re-keyed contract's successor and predecessor, and a key the census withdrew is explained by its lineage, never by the filters (AH-03, g-ui-dom-vs-json-2) — 2026-10-16
 

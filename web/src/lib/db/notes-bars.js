@@ -390,6 +390,13 @@ export function seriesKinds(keys, timeframe = '') {
     if (seg !== 'INDEX' && seg !== 'CASH') noDerivative = false;
     if (!expiry && expiryOf(String(k)) !== null) expiry = true;
     if (!option && contractOf(String(k)) !== null) option = true;
+    /* DECIDED, SO DONE (R3-03 repair 3): each of the four moves one way only,
+       so once all four have moved no later key can change the answer. An
+       option chain is decided by its first key, where every key was read
+       before (all 70,458 NIFTY option series on disk, once per selection).
+       A selection with no option still reads every key, once per selection;
+       both are measured in L-R303-05. */
+    if (!allIndex && !noDerivative && expiry && option) break;
   }
   return { n: keys.length, allIndex, noDerivative, expiry, option, oneRung: timeframe !== '' };
 }

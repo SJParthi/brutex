@@ -363,17 +363,23 @@ test('a_go_to_lands_only_for_the_question_still_on_screen', () => {
 /**
  * THE GRID'S OWN GO TO, CUT OUT OF `DbBarsGrid.svelte` (R3-03 repair 2):
  * `gotoTurn`, `stopGoto`, `jumpToInstant` and `dropGoto` run over a plain
- * scope whose reads the test answers by hand, late or never.
+ * scope whose reads the test answers by hand, late or never. Repair 3 cuts
+ * the two callers that refuse before any read out with them —
+ * `jumpToText` (the Go to box) and `jumpToTime` (the minute picker), with
+ * the `gotoSpan` they parse against — so a refusal's stop, its words and
+ * its cleared mark are the grid's own code under test, not a stub's.
  */
 function gridGoto() {
   const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
   /** @type {Record<string, any>} */
   const found = {};
+  const functions = ['jumpToInstant', 'dropGoto', 'jumpToText', 'jumpToTime'];
+  const consts = ['gotoTurn', 'stopGoto', 'dayOnScreen', 'gotoSpan'];
   /** @param {any} node */
   const walk = (node) => {
     if (!node || typeof node !== 'object') return;
-    if (node.type === 'FunctionDeclaration' && ['jumpToInstant', 'dropGoto'].includes(node.id?.name)) found[node.id.name] = node;
-    if (node.type === 'VariableDeclaration' && ['gotoTurn', 'stopGoto', 'dayOnScreen'].includes(node.declarations?.[0]?.id?.name)) found[node.declarations[0].id.name] = node;
+    if (node.type === 'FunctionDeclaration' && functions.includes(node.id?.name)) found[node.id.name] = node;
+    if (node.type === 'VariableDeclaration' && consts.includes(node.declarations?.[0]?.id?.name)) found[node.declarations[0].id.name] = node;
     for (const [key, value] of Object.entries(node)) {
       if (key === 'parent' || key === 'loc' || key === 'metadata') continue;
       if (Array.isArray(value)) value.forEach(walk);
@@ -381,28 +387,33 @@ function gridGoto() {
     }
   };
   walk(parse(grid, { modern: true }));
-  for (const name of ['gotoTurn', 'stopGoto', 'dayOnScreen', 'jumpToInstant', 'dropGoto']) {
+  for (const name of [...consts, ...functions]) {
     if (!found[name]) throw new Error(`${name} is not in DbBarsGrid.svelte`);
   }
   const src = (/** @type {string} */ name) => grid.slice(found[name].start, found[name].end);
   /** @type {{at: number, signal: AbortSignal, resolve: (a: any) => void, reject: (e: any) => void}[]} */
   const reads = [];
   const scope = /** @type {any} */ ({
-    db: { landedRk: 'earlier', page: 1, pageSize: 10, toDay: '', fromDay: '' }, barPage: [],
+    db: { landedRk: 'earlier', page: 1, pageSize: 10, toDay: '', fromDay: '', goTime: '', timeframe: '1s', heldDays: { lo: DAY, hi: DAY } }, barPage: [],
     jumpWhy: 'earlier', jumping: false, pinned: false, anchorRk: '', anchorRow: -1, barSortKey: 'ts', barDesc: true,
     setKey: 'set-1', plan: { keys: ['NSE-FNO-ALPHA-2019-03-28-1160000-CE'], why: null }, feeds: { active: 'gdfl' },
     barState: { answer: null, loading: true, error: null, set: '' }, pageTotal: 0,
-    sortNow: { key: 'ts', desc: true }, bounds: {},
+    sortNow: { key: 'ts', desc: true }, bounds: {}, dayRung: false, dayWindowNarrows: false,
     readWindowPage: (/** @type {string} */ q, /** @type {number} */ _n, /** @type {AbortSignal} */ signal) =>
       new Promise((resolve, reject) => reads.push({ at: Number(new URLSearchParams(q).get('at')), signal, resolve, reject })),
     windowQuery: (/** @type {string} */ _feed, /** @type {any} */ _p, /** @type {any} */ o) => `at=${o.at}`,
-    gotoAsk, landing, NO_LANDING, gotoTurns,
+    gotoAsk, landing, NO_LANDING, gotoTurns, parseGoto,
     dayLabel: () => '2019-03-15', barTimeLabel: () => '10:02:03', tick: () => Promise.resolve(), rowKey: (/** @type {string} */ k, /** @type {number} */ t) => `${k}@${t}`
   });
-  const made = new Function('scope', `with (scope) { ${src('gotoTurn')} ${src('stopGoto')} ${src('dayOnScreen')} return { jumpToInstant: ${src('jumpToInstant')}, dropGoto: ${src('dropGoto')}, dayOnScreen }; }`)(scope);
+  /* Declared, not returned as expressions: `jumpToText` and `jumpToTime`
+     call `jumpToInstant` by its name, as they do in the component. */
+  const made = new Function('scope', `with (scope) { ${[...consts, ...functions].map(src).join(' ')} return { jumpToInstant, dropGoto, dayOnScreen, jumpToText, jumpToTime }; }`)(scope);
   /** An answer `at_index` places in a 300-row query. @param {number} t @param {number} i */
   const answer = (t, i) => ({ total: 300, at_index: i, bars: [{ t }] });
-  return { scope, reads, answer, go: (/** @type {number} */ t, key = '') => made.jumpToInstant(t, `instant ${t}`, key), dropGoto: made.dropGoto, dayOnScreen: made.dayOnScreen };
+  return {
+    scope, reads, answer, go: (/** @type {number} */ t, key = '') => made.jumpToInstant(t, `instant ${t}`, key),
+    dropGoto: made.dropGoto, dayOnScreen: made.dayOnScreen, jumpToText: made.jumpToText, jumpToTime: made.jumpToTime
+  };
 }
 
 test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failure of a stopped one', { timeout: 20_000 }, async () => {
@@ -475,9 +486,12 @@ test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failu
     g = gridGoto();
     const before = g.go(1000);
     set(g.scope);
-    await g.go(2000);
+    /* Checked before the refusal is awaited: a refusal that went on to
+       ask a read the test never answers fails here instead of hanging. */
+    const refused = g.go(2000);
     assert.deepEqual([g.reads.length, g.scope.jumpWhy, g.scope.jumping], [1, says, false], what);
     assert.equal(g.reads[0].signal.aborted, true, `${what}: the Go to before it is stopped`);
+    await refused;
     g.reads[0].resolve(g.answer(1000, 10));
     await before;
     assert.equal(g.scope.db.page, 1, `${what}: and lands nowhere`);
@@ -486,8 +500,9 @@ test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failu
   // A PLAN REFUSED WITH NO WORDS still says why nothing is read.
   g = gridGoto();
   g.scope.plan = { keys: [], why: '' };
-  await g.go(1000);
-  assert.equal(g.scope.jumpWhy, 'No selection is read, so there is nothing to go to.');
+  const unworded = g.go(1000);
+  assert.deepEqual([g.scope.jumpWhy, g.reads.length, g.scope.jumping], ['No selection is read, so there is nothing to go to.', 0, false]);
+  await unworded;
 
   // UNDER A VALUE SORT a Go to puts the grid back in time order, newest
   // first, and lands there; the line says so.
@@ -549,10 +564,11 @@ test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failu
   // AN ANSWER ALREADY KNOWN TO HOLD NO BAR IS NOT ASKED AGAIN.
   g = gridGoto();
   g.scope.barState = { answer: { total: 0 }, loading: false, error: null, set: 'set-1' };
-  await g.go(1000);
+  const known = g.go(1000);
   assert.equal(g.reads.length, 0, 'no at= read');
   assert.equal(g.scope.jumpWhy, NO_LANDING);
   assert.equal(g.scope.jumping, false);
+  await known;
   // Known for ANOTHER set, or still loading, or failed: asked.
   for (const barState of [
     { answer: { total: 0 }, loading: false, error: null, set: 'set-0' },
@@ -574,4 +590,129 @@ test('a late Go to answer lands nowhere: a later Go to, a moved row set, a failu
   // reading: a remount keeps the line under the strip.
   const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
   assert.match(grid, /\$effect\(\(\) => \{\s*const set = setKey;\s*untrack\(\(\) => \{\s*const before = gotoSet;\s*gotoSet = set;\s*if \(before !== null && before !== set\) dropGoto\(\);\s*\}\);\s*\}\);/);
+});
+
+test('a_moved_row_set_clears_what_a_landing_said_and_the_series_row_it_meant', { timeout: 20_000 }, async () => {
+  // R3-03 repair 3 (verify-R3-03-r2 P1): the landing before had said
+  // nothing, so `dropGoto` clearing the line was never seen to clear one.
+  // No bar opens at the instant; the first after it is one second later, and
+  // the line under the strip says so.
+  let g = gridGoto();
+  let out = g.go(1000);
+  g.reads[0].resolve(g.answer(1001, 10));
+  await out;
+  assert.equal(g.scope.jumpWhy, 'No bar opens at instant 1000. Landed on the first bar after it, 2019-03-15 10:02:03 IST, 1 second(s) later — row 290 of 300.');
+  assert.deepEqual([g.scope.db.page, g.scope.pinned, g.scope.anchorRow, g.scope.anchorRk], [29, true, 289, ''], 'a later bar is no series’ bar at the instant');
+  g.scope.setKey = 'set-2';
+  g.dropGoto();
+  assert.equal(g.scope.jumpWhy, '', 'the words go with the row set they were said of');
+  assert.deepEqual([g.scope.pinned, g.scope.anchorRow], [false, -1]);
+  // An extreme names its series, and the bar is at the instant itself: the
+  // row the landing meant is that series' row, and a moved row set forgets it
+  // (the page-size anchor looks `anchorRk` up before its own row, so a stale
+  // one would mark the old Go to's row, wherever the new page still holds
+  // it, instead of the row the reader stood on).
+  g = gridGoto();
+  out = g.go(2000, 'NSE-INDEX-ALPHA');
+  g.reads[0].resolve(g.answer(2000, 200));
+  await out;
+  assert.deepEqual([g.scope.anchorRk, g.scope.anchorRow, g.scope.jumpWhy], ['NSE-INDEX-ALPHA@2000', 99, '']);
+  g.scope.setKey = 'set-2';
+  g.dropGoto();
+  assert.deepEqual([g.scope.anchorRk, g.scope.anchorRow, g.scope.pinned, g.scope.db.landedRk], ['', -1, false, '']);
+});
+
+test('a_typed_instant_the_box_refuses_stops_the_go_to_still_out_says_why_and_asks_nothing', { timeout: 20_000 }, async () => {
+  // R3-03 repair 3 (verify-R3-03-r2 P2): `jumpToText` had no test at all.
+  const ABC = '"abc" is not an instant. Type a day and a time, 2019-03-15 10:02, or a time alone, 10:02, for the day on screen.';
+  // NOTHING OUT: the words are the parse's, the mark a drawn landing left
+  // goes, and nothing is asked of the server.
+  let g = gridGoto();
+  g.scope.db.toDay = DAY;
+  g.jumpToText('abc');
+  assert.deepEqual([g.reads.length, g.scope.jumpWhy, g.scope.db.landedRk, g.scope.jumping], [0, ABC, '', false]);
+  // A GO TO STILL OUT when the box refuses: its read is stopped, and its
+  // answer, however late, lands nowhere.
+  g = gridGoto();
+  g.scope.db.toDay = DAY;
+  const held = g.go(at('10:02:00'));
+  assert.equal(g.scope.jumping, true);
+  g.scope.db.landedRk = 'row 81';
+  g.jumpToText('abc');
+  assert.equal(g.reads[0].signal.aborted, true, 'the read still out is stopped');
+  assert.deepEqual([g.reads.length, g.scope.jumpWhy, g.scope.db.landedRk, g.scope.jumping], [1, ABC, '', false], 'the refusal is said and nothing else is asked');
+  g.reads[0].resolve(g.answer(at('10:02:03'), 80));
+  await held;
+  assert.deepEqual([g.scope.db.page, g.scope.anchorRow, g.scope.pinned, g.scope.jumpWhy], [1, -1, false, ABC], 'and its late answer lands nowhere and says nothing over the refusal');
+  // A day outside the selection is refused in the same way, in its own words.
+  g = gridGoto();
+  g.scope.db.toDay = DAY;
+  g.jumpToText('2019-03-16 10:02');
+  assert.deepEqual([g.reads.length, g.scope.jumpWhy], [0, "16 Mar 2019 is after this selection's last day, 15 Mar 2019: no bar of it lies that late. Pick a day from 15 Mar 2019 to 15 Mar 2019."]);
+  // WHAT THE BOX TAKES IS ASKED: a time alone on the day on screen, and a
+  // day with exact seconds; the latest lands.
+  g = gridGoto();
+  g.scope.db.toDay = DAY;
+  g.jumpToText('10:02');
+  g.jumpToText('2019-03-15 10:02:05');
+  assert.deepEqual(g.reads.map((r) => r.at), [at('10:02:00'), at('10:02:05')]);
+  assert.equal(g.reads[0].signal.aborted, true);
+  g.reads[1].resolve(g.answer(at('10:02:05'), 120));
+  await new Promise((done) => setTimeout(done, 0));
+  assert.deepEqual([g.scope.db.page, g.scope.anchorRow, g.scope.pinned, g.scope.jumping], [18, 179, true, false]);
+});
+
+test('a_picked_minute_the_parse_refuses_stops_the_go_to_still_out_too', { timeout: 20_000 }, async () => {
+  // R3-03 repair 3 (verify-R3-03-r2 P3): the picker's refusal was tested on
+  // the day-rung branch only; the parse's own refusal stops, says and clears
+  // in the same way. A refusal settles within one turn (its `tick`); the
+  // checks are made then, not after awaiting it, so a refusal that went on
+  // to ask a read the test never answers fails here rather than hanging.
+  const ABC = '"abc" is not an instant. Type a day and a time, 2019-03-15 10:02, or a time alone, 10:02, for the day on screen.';
+  const turn = () => new Promise((done) => setTimeout(done, 0));
+  let g = gridGoto();
+  g.scope.db.toDay = DAY;
+  const held = g.go(at('10:02:00'));
+  g.scope.db.landedRk = 'row 81';
+  let refused = g.jumpToTime('abc');
+  await turn();
+  assert.equal(g.reads[0].signal.aborted, true, 'the read still out is stopped');
+  assert.deepEqual([g.reads.length, g.scope.jumpWhy, g.scope.db.landedRk, g.scope.jumping], [1, ABC, '', false], 'the refusal is said, the mark goes, nothing else is asked');
+  await refused;
+  g.reads[0].resolve(g.answer(at('10:02:03'), 80));
+  await held;
+  assert.deepEqual([g.scope.db.page, g.scope.anchorRow, g.scope.pinned, g.scope.jumpWhy], [1, -1, false, ABC], 'and its late answer lands nowhere');
+  // The day rung's refusal, through the grid's own code too.
+  g = gridGoto();
+  g.scope.dayRung = true;
+  g.scope.db.timeframe = '1day';
+  const before = g.go(at('10:02:00'));
+  refused = g.jumpToTime('10:02');
+  await turn();
+  assert.deepEqual([g.reads.length, g.reads[0].signal.aborted, g.scope.jumping], [1, true, false]);
+  assert.equal(g.scope.jumpWhy, 'Every bar at 1day opens at the same minute, so there is no minute to choose between them.');
+  await refused;
+  g.reads[0].resolve(g.answer(at('10:02:00'), 80));
+  await before;
+  assert.equal(g.scope.db.page, 1);
+});
+
+test('an_earlier_pick_settling_leaves_a_later_pick_its_minute_until_its_own_landing', { timeout: 20_000 }, async () => {
+  // R3-03 repair 3 (verify-R3-03-r2 P4): two picks, the first still out
+  // when the second is made. The picker shows `db.goTime` while a pick
+  // lands; the first one's settling must not clear the second's minute.
+  const g = gridGoto();
+  g.scope.db.toDay = DAY;
+  g.scope.db.goTime = '10:02';
+  const first = g.jumpToTime('10:02');
+  g.scope.db.goTime = '10:04';
+  const second = g.jumpToTime('10:04');
+  assert.deepEqual(g.reads.map((r) => r.at), [at('10:02:00'), at('10:04:00')]);
+  g.reads[0].resolve(g.answer(at('10:02:00'), 80));
+  await first;
+  assert.equal(g.scope.db.goTime, '10:04', 'the later pick is still landing: its minute stays picked');
+  assert.equal(g.scope.db.page, 1, 'and the earlier answer lands nowhere');
+  g.reads[1].resolve(g.answer(at('10:04:00'), 20));
+  await second;
+  assert.deepEqual([g.scope.db.goTime, g.scope.db.page, g.scope.anchorRow], ['', 28, 279], 'it is spent once it lands');
 });
