@@ -19734,3 +19734,71 @@ processes against a shadow of the real store; nothing else here is measured.
 | L-AH03-2 | **NOT DONE — the server decides `kept_apart` per MONTH, not per day** | `sources.rs` `auction_of` answers `kept_apart` whenever the month's `.auc` file exists, so 2026-09-01..24 of every share whose 2026-09 month gained a `.auc` from the 25-30 Sep append (about 1,340 share-days, plus 15 in 2026-08) read `kept_apart` with no print. The page now says "none is filed for this day" there and never denies the print (D-5836), but the record itself is the month's | owed by AG-04's file (`crates/api/src/sources.rs`), a follow-on after AG-04 lands: a per-day state (`kept_apart` only where the sidecar holds that day) | AH-03 → AG-04 |
 | L-AH03-3 | Opening a closing-auction day of a share costs one `/sources/day.json` read | the day band's records do not carry the auction record; `/sources/day.json` does | one read per (share, day) opened, remembered per URL for the page's life (at most 64); Zerodha's band reads none (its minutes end before the auction). Measured on the AH-03 shadow, `curl` sequential GETs of `/sources/day.json?exchange=NSE&segment=CASH&symbol=RELIANCE&from=2026-09-28&to=2026-09-28`: n = 200, p50 0.995 ms, p99 1.162 ms, max 2.477 ms | AH-03 |
 | L-AH03-4 | The day band's words cost a pass over one page of days | each label is O(1) per day (a fixed set of field checks) and O(phrases) for the index auction label | one `/dayflags.json` page is at most 92 days. Measured in node over the real NIFTY 2026-07..09 answer (92 days), `bandOf` + `sessionCount` + `emptyWindowWhy`, n = 1,000 after 200 warm-up: before p50 0.045 ms, p99 0.352 ms, max 1.586 ms; after p50 0.059 ms, p99 0.351 ms, max 0.997 ms per page | AH-03 |
+
+## The FIB lattice and its scoring pass: what is constant, what is bounded, and what is unmeasured (FIB-6, D-6400 to D-6410)
+
+| ID | Limit | Why | Bound, and where it is proved or measured |
+|---|---|---|---|
+| L-FIB6-01 | **The walk is O(sum of visited supports), not O(1) per run** | every visited node of `n` rows costs one counting pass per free row after its last fixed one (O(n + radix) each, at most 21) and one O(n) scan per mover-rank prefix child (at most one per group); an infrequent or equivalent child costs one comparison | O(1) per row-touch (`Tally::row_touches` counts them; `C-F6-01`), O(months) per mix read (a card's month vector), so the run is O(sum of visited supports x 21 + prefixes) and its size is set by the floor and the data, never by a parameter |
+| L-FIB6-02 | **Scratch per worker is at most 21 x rows x 28 bytes, reserved once and zeroed lazily** | a path from the root holds at most 21 node regions (the free rows of schema v1), each no larger than the root's rows, and a region carries each row's index (4 bytes) and cell (24 bytes) side by side (D-6406) | `vec![0; n]` reserves the bound and the allocator commits pages only as the walk writes them; a parallel task reserves the bound of its own subtree; a batch whose task scratch would pass `batch_budget_bytes` runs inline and is counted (`Spread::inline_for_budget`) — the budget bounds ONE batch, so nested batches on several workers may each hold one: at most workers x budget |
+| L-FIB6-03 | **Memory of one scoring pass is O(profiles x (pool + months x (1 + rungs)))**, reserved once | the block slots (profiles x pool), the month statistics (profiles x months), the ladder counters (profiles x months x rungs) and the touched lists | per mix O(support x profiles + touched months + days with trades x 7 period kinds); reading a card is O(months) (D-6409; `C-F6-02`, `C-F6-03`) |
+| L-FIB6-04 | **A report-ladder lookup is a binary search over the Generation's rungs**, O(log rungs) per trade | R4 prescribes "O(1) per trade through a bin-to-rung table" over FIB-2's histogram bins; FIB-2's histogram is not on this branch, so `Rungs::reached` bisects the run-fixed ladder (exact rational comparisons) | at most ceil(log2(rungs + 1)) comparisons, rungs fixed per Generation version (a halving ladder of n trades has at most log2(n) rungs); NOT the bin-to-rung table: FIB-14 or FIB-2 may replace it at merge, the counts unchanged |
+| L-FIB6-05 | **`push_month` is O(decisions + the month's second and day domains)**, once per month | two stable counting sorts over domains taken from the month's own data (max minus min plus one), plus one validation pass | a month appends; no earlier month is re-sorted (FM-F051) |
+| L-FIB6-06 | **The survivor trie is built in O(survivors x 21 + edges + 255 + 24 + nodes)**, once per guided run | one pre-sized hash probe per fixed row of each key (expected O(1), `CLAUDE.md` §3 rule 4's qualification), then three stable counting sorts of the edges | the guided walk is O(sum of supports along survivor paths), one scan per trie edge (FM-F052) |
+| L-FIB6-07 | **The parallel walk's speed-up is not a guarantee** | a node splits only at `split_support` rows or more (derived by the caller from the measured per-task overhead), and the side row has two values per direction, so the largest partition sets the wall time (FM-F053) | outputs are byte-identical at any thread count (`work_stealing_equals_sequential_bytes`); the measured speed-up is in the throughput table below |
+| L-FIB6-08 | **UNVERIFIED: the visited-mix count on real data** | it depends on the real cells' skew and the R5 floors, unknown until FIB-12's sample | the Zipf-skewed synthetic counts below are not a projection of it |
+| L-FIB6-09 | **UNVERIFIED: that FIB-3 assigns decision ids in `base_kind` order inside one (stock, second)** | the tie order is decision-id order (D-6402); the base-kind order is what the ids are assumed to carry | checked when FIB-3 merges; the lattice compares ids only |
+| L-FIB6-10 | **Branch coverage of `lattice.rs` and `score.rs` is not measured on this host** | the stable toolchain's `cargo llvm-cov` has no `--branch`; no nightly toolchain is installed here | lines and regions are measured (the FIB-6 report); branches go to the Mac |
+
+| L-FIB6-11 | **A whole walk's time per row-touch grows with the table, a node expansion's does not (measured below)** | a large node's region is larger than the cache, so its passes stream from memory; a small node's region is cache-resident | the walk is still O(1) per row-touch in WORK (exact counter); the time ratio is information, measured on this host (calibration table below) |
+
+### FIB-6 calibration: the walk's size against its floor (measured 18 October 2026 on THIS HOST)
+
+THIS HOST: the cloud container FIB-6 was built in, 4 vCPUs of an `Intel(R)
+Xeon(R) Processor @ 2.80GHz` (L3 33 MiB), 15 GiB, Linux 6.18, rustc 1.97.1,
+`release` profile, nothing else running. A throwaway calibration program (not
+committed) built the bench's synthetic partition table — Zipf-skewed cells on
+every free row, the long search's two side values, 2,000 decisions a day over
+208 stock slots, months of 21 days, four exit variants — and walked it once
+per floor, sequentially, with a visitor that only counts. Single runs, wall
+clock; not harness rows. The floor is a per mille of the table's rows.
+
+| Rows | Floor | Wall time | Nodes visited | Row-touches | ps per row-touch |
+|---|---|---|---|---|---|
+| 10,000 | 10 permille (100) | 2,289 ms | 1,672,080 | 1,232,642,799 | 1,857 |
+| 10,000 | 20 permille (200) | 916 ms | 373,137 | 579,047,458 | 1,582 |
+| 10,000 | 50 permille (500) | 312 ms | 40,145 | 174,969,303 | 1,785 |
+| 10,000 | 100 permille (1,000) | 99 ms | 5,810 | 58,395,158 | 1,704 |
+| 1,000,000 | 100 permille (100,000) | 14,620 ms | 5,515 | 5,662,512,027 | 2,581 |
+| 1,000,000 | 50 permille (50,000) | 42,276 ms | 39,931 | 17,487,986,454 | 2,417 |
+
+What it says: the lattice's shape follows the floor's share of the rows, not
+the row count (about 5,500 to 5,800 nodes at 100 permille at both sizes); the
+row-touches grow with the rows at a fixed share; and a whole walk's time per
+row-touch rose from about 1.7 ns at 10^4 rows to about 2.5 ns at 10^6 rows
+(L-FIB6-11). Extrapolation, labelled so: 2 x 10^7 rows at 10 permille would be
+about 2.4 x 10^12 row-touches, about 75 minutes on one thread of this host —
+which is why the first bench run of this session was stopped after 48 minutes
+and the bench's throughput section walks 2 x 10^7 rows at 100 permille only.
+### Gate 11 — FIB-6, declared (18 October 2026)
+
+~~~~text
+FIB-6 (D-6400..D-6410) met gate 11 in one file, crates/runner/src/fib/score.rs.
+Each occurrence was read before it was counted; `file old -> new`, the
+occurrence, and the bound.
+
+RULE 1 (`ALLOW_SEARCH`) -- runner/src/fib/score.rs 0 -> 1: `Rungs::reached`
+  bisects a report ladder of the run's Generation (R4: rungs fixed per
+  version, a halving ladder of n trades has at most log2(n) rungs), with
+  exact rational comparisons, once per priced trade per ladder. R4 asks for a
+  bin-to-rung table over FIB-2's histogram bins; that histogram is not on this
+  branch (L-FIB6-04).
+RULE 2 (`ALLOW_FLOAT`) -- runner/src/fib/score.rs 0 -> 1: `pub type Stat =
+  f64`, the one alias every statistic of R uses (sums of net R, of R squared,
+  stops in bp, excursions in R): statistics keep full precision (CLAUDE.md
+  section 7). Money stays i128 in the charge model's unit and is converted
+  only to form a ratio. Every other use of the type in the file is spelled
+  `Stat`, so this count is the alias, not the uses.
+runner/src/fib/lattice.rs meets no rule: its sorts are stable counting sorts,
+  its membership tests are range comparisons and pre-sized hash maps.
+~~~~
