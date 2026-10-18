@@ -19734,3 +19734,54 @@ RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 4 -> 5: `fib`'s
 `cli/src/fib/wire.rs` met rule 7 once and was changed instead: the
   new-work authority words are a `matches!` over five literals.
 ~~~~
+
+## The base detector: what FIB-3 leaves bounded, unmeasured or not done (FIB-3, D-6340 to D-6347)
+
+Measured 18 October 2026 on THIS HOST: the cloud container FIB-3 was built in
+(4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`, 15 GiB, Linux 6.18,
+rustc 1.97.1, the `bench` profile), branch `cloud/fib3-20261018` at the commit
+that added the detector's bench rows (the FIB-3 report,
+`reports/cloud-fib3-20261018.md`, names it), the one target alone with no build
+or test beside it (one-minute load average 0.97 during the run). Timer
+granularity 25 ns; the pointer-chase probe's last-level-cache estimate
+16,384 KiB; 4 workers. Every time is a percentile OF BATCH MEANS (2,000 batches
+of 1,000 calls after a warm-up), in picoseconds per call, at each scale as p50 /
+p99 / max; the work counter (deque slots and candles touched) is exact. None of
+these is a Mac number: the Mac re-measures with
+`cargo bench -p indicators --bench fibflag`.
+
+One call folds ONE closed candle of a 375-candle one-minute session and emits
+every base that ends at it in both directions, with seven generated rest
+lengths (4 to 256, doubling) and two touch levels per direction. The scale is
+the whole days folded before the row is timed: the state is allocated once at
+the span's longest session and cleared each day, so the axis is FIXED-STATE and
+the claim is that a day does not grow it. One such (stock-day, width) state is
+674,824 bytes, 1,120 of them the fixed part (`Detector::state_bytes`; the fixed
+part is asserted at compile time in `crates/indicators/tests/fib_base.rs`).
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-FIB3-01 | fold one candle, rest length 2, the start moving every candle | AMORTISED, period one day (375 calls) | 1, 100, 1,000 days (FIXED-STATE) | 1,823,224 / 3,659,187 / 8,860,944; 1,845,564 / 3,869,547 / 25,974,430; 1,806,812 / 2,871,549 / 4,244,610 | p50 106, p99 108, max 108, mean 105.170 | mean time 0.961x, p99 time 0.784x, work 1.000x | PASS |
+| C-FIB3-02 | fold one candle, rest length 16, the start moving every candle | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 3,228,047 / 6,293,249 / 8,922,452; 3,201,032 / 6,499,896 / 19,444,104; 3,189,907 / 5,847,260 / 6,297,673 | p50 210, p99 212, max 212, mean 206.301 | mean time 0.953x, p99 time 0.929x, work 1.000x | PASS |
+| C-FIB3-03 | fold one candle, the rest growing to 375 candles (a whole one-minute session) | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 5,255,740 / 10,853,286 / 11,710,501; 5,289,498 / 10,219,084 / 15,487,725; 5,227,804 / 10,517,138 / 12,464,419 | p50 145, p99 252, p99.9 1,172, max 1,172, mean 154.208 | mean time 0.988x, p99 time 0.969x, work 1.000x | PASS |
+| C-FIB3-04 | fold one candle, the rest's start jumping 374 candles once a day | BOUNDED, O(session candles) at the jump, amortised O(1) | 1, 100, 1,000 days (FIXED-STATE) | 5,314,931 / 10,967,363 / 12,541,365; 5,266,746 / 11,199,221 / 13,567,640; 5,253,026 / 10,753,767 / 14,544,268 | p50 145, p99 252, max 1,172, mean 154.074 | p99 time 0.980x, work 1.000x | BOUNDED |
+| C-FIB3-05 | `touch_recount_worst`: every high one paisa above the last, every touch count recounting its window | BOUNDED, O(window candles x touch levels) per recount | 1, 100, 1,000 days (FIXED-STATE) | 6,876,255 / 13,369,677 / 15,513,581; 6,759,699 / 13,284,609 / 18,410,223; 6,767,450 / 13,988,346 / 38,904,379 | p50 1,007, p99 1,891, p99.9 2,167, max 2,167, mean 1,052.076 | p99 time 1.046x, work 1.000x | BOUNDED |
+
+Per day of each synthetic stream (the setup's first day): C-FIB3-01 2,202
+snapshots, 749 touch recounts visiting 1,496 candles; C-FIB3-02 3,718
+snapshots, 2,211 recounts visiting 20,465 candles; C-FIB3-03 6,476 snapshots, 16
+recounts visiting 1,018 candles; C-FIB3-04 6,460 snapshots, 18 recounts
+visiting 1,020 candles; C-FIB3-05 6,476 snapshots, 2,500 recounts visiting
+174,133 candles. These are synthetic streams built to move one thing each;
+real recounts per day are NEEDS THE MAC (L-FIB3-02).
+
+| ID | Limit | Why | Bound, or what was measured | Owner |
+|---|---|---|---|---|
+| L-FIB3-01 | **The maximal rest's start can jump by the whole session at one candle** | the start pointer only advances, and a candle that overlaps none of the rest moves it past every earlier candle at once | amortised O(1) per candle: every candle enters and leaves each deque once a day; the single candle costs O(session candles). C-FIB3-04 measured the jump of 374 candles once a day inside a p99.9 and max work of 1,172, the same as C-FIB3-03 without the jump | FIB-3 |
+| L-FIB3-02 | **A touch count is recounted over its window when the window's highest high moves** (FM-F022) | touches are a pure function of the window; a count slides while the highest high stands and is recounted when it moves | O(window candles x touch levels) per recount, the window bounded by the session; C-FIB3-05 is the worst stream (every high creeping): mean work 1,052 per candle against 154 when the highs stand (C-FIB3-03). Recounts per day on real minutes: **NOT MEASURED here** (the scratch program prints them, NEEDS THE MAC). A Fenwick tree would bound a recount by O(log) and was not built | FIB-3 |
+| L-FIB3-03 | **The per-candle cost is proportional to the generation's list sizes** | every generated rest length is a lane updated every candle, and every touch level a count | constant per run: the sizes come from the run's generation and are pre-sized at run start. Measured with 7 lengths and 2 levels per direction (above); a larger generation costs proportionally more and is not measured | FIB-3 |
+| L-FIB3-04 | **A generated lane recounts once when it becomes emittable** | a lane keeps live touch counts only while its length is below the maximal rest's (D-6344) | one recount of its window per crossing; the rest grows by at most one candle a candle, so it is paid for by the candles it took to grow. The p99.9 work of C-FIB3-03 (1,172) is that recount on the 256-candle lane | FIB-3 |
+| L-FIB3-05 | **A slope or curvature is `None` past `i128`** | Cramer's rule on the normal equations multiplies sums of `x^4` by sums of closes | never for the detector's slopes (a ring of at most 65,535 candles of `i64` prices keeps every product inside `i128`); the curvature's products are shifted by the base low and stay inside `i128` for any real share, and a pathological hand-built window gets `None`, never a panic (`a_window_outside_its_ladder_is_measured_without_a_panic`) | FIB-3 |
+| L-FIB3-06 | **FM-F023's "no allocation per day" is proven by a buffer fingerprint, not by a counting allocator** | the workspace's one test root allowed to implement `GlobalAlloc`, `crates/pull/tests/allocation.rs` (gates 5 and 16, D-0724, D-1450), cannot link `indicators` without a new dev-dependency arrow `pull -> indicators`, a crate-graph change outside FIB-3 | `no_allocation_per_day` checks every buffer's address and capacity after each of 100 days that exercise every path (holes, refusals, every kind, every list size up to the capacity). An allocation freed within one call would not show. **NOT DONE** as specified; the counting-allocator module is a proposed follow-up for the operator | operator, FIB-3 |
+| L-FIB3-07 | **The real-data step was not run here** | there is no store in the cloud | the scratch program outside the repository builds; its run on HCLTECH 2025-10, RELIANCE 2025-03 and TECHM 2026-08 at every width 1..=118 is NEEDS THE MAC (the FIB-3 report gives the command) | FIB-3, Mac |
+| L-FIB3-08 | **Branch coverage of FIB-3's files was not measured** | this host's stable toolchain gives lines, regions and functions only | lines and regions of every FIB-3 file are 100% here; branches need a nightly compiler (NEEDS THE MAC) | FIB-3, Mac |
