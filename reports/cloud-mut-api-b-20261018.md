@@ -332,6 +332,107 @@ mutant naming `Html::..` unqualified where the function names
 `axum::response::Html`), 118 `E0277`, 17 `||` inside a `let` chain, 6
 `E0015`, 5 `E0080`, 4 `E0369`, 3 `E0599`, 1 `E0505`.
 
+## Coverage
+
+`cargo llvm-cov nextest -p api --lib --branch` (`RUSTC_BOOTSTRAP=1` for
+`--branch` only; measurement, nothing committed needs it), the whole `api`
+lib suite on the dev copy at the newest tree (`0ab9fb01`'s sources), `api`
+at opt-level 0, 22:26–22:40 UTC (03:56–04:10 IST Monday, an open NSE day
+before its session). 2,545 of 2,546 tests passed. The one failure is the
+opt-level-0 artifact named under Method, whose lines executed all the same.
+A branch is counted untaken only if no instantiation of it took that side;
+the text report lists one record per instantiation, and they are summed.
+Production lines only: the inline `#[cfg(test)]` modules are left out.
+
+| File | Lines never run | Lines with a side untaken | 17 Oct run 4 | This session's first run (08:43 UTC) |
+|---|---:|---:|---|---|
+| `audit.rs` | 1 | 0 | 1 / 0 | 1 / 0 |
+| `import_journal.rs` | 1 | 1 | 1 / 1 | 1 / 1 |
+| `autopilot.rs` | 29 | 7 | 29 / 8 | 29 / 7 |
+| `pullrun.rs` | 3 | 6 | 3 / 6 | 3 / 6 |
+| `server.rs` | 192 | 19 | 206 / 22 | 222 / 23 |
+| `emitted.rs` | 0 | 37 (test-only) | 0 / 0 | 0 / 37 |
+| `scratch.rs` | 0 | 0 | 0 / 0 | 0 / 0 |
+
+`server.rs` gained 16 unexecuted lines in the merge (AH-02's
+`HeadDeadline` and `exchange_watch` arms, at 17387–17791). This session's
+tests drive all of them, and also `end_served` (17711–17719 on 17 Oct),
+`run_held`, `poll_read`'s fill check and `finished_day_only`'s refusal of
+today while unsettled (6722–6723).
+
+### Lines not covered, and why
+
+Line numbers are the newest tree's. "L" is a line never executed, "B" a line
+with a branch side never taken. Every item is **unreachable** in this build,
+with the reason, or **not driven**, with the rule or the missing seam. Every
+`audit.rs`, `import_journal.rs`, `autopilot.rs` and `pullrun.rs` item is the
+17 Oct report's, line for line (none of those files' production code changed
+since), and its reasons are carried there:
+
+- `audit.rs` L 634; `import_journal.rs` L 361, B 467.
+- `autopilot.rs` L 319, B 928 / L 929–930, B 2814 / L 2815, B 2907 /
+  L 2909–2932, B 2963 / L 2964–2968, B 3018 / L 3019, B 3553 / L 3554,
+  B 3639 / L 3640.
+- `pullrun.rs` B 863 / L 864, B 1713 / L 1714, B 2080 / L 2081, B 3814,
+  3854, 3859.
+
+**`server.rs`, unreachable in this build** (17 Oct reasons, new numbers):
+B 1903 / L 1904–1908 (`VendorCensusNow::census()` is always `Some`,
+D-3327); B 1971 / L 1972 (`report_from` always ends with a newline); B 2739
+(`slot` enumerates `SpotTarget::ALL`); B 4462 (a one-day `Window` of a valid
+`Day` always builds); L 5756–5757 (`SessionLengthUnmeasured` never reaches
+`observed_cash_source_days`); B 6001 (the first guard already returned for
+every other vendor); L 6477 (`ledger.source()` is `None` only for a run that
+never opened); B 9279 / L 9280–9285 and L 9693, 9697, 9699
+(`Feed::store_vendor()` is `Some` for every feed); B 9769 / L 9770–9776 (both
+archive feeds declare an FNO layout); B 11213 / L 11214–11215, B 11681 /
+L 11682, L 12561 (a `Day` and a `YearMonth` span 1970..=9999, and a window
+has a day); B 12631 / L 12632–12637 (`window.verdict` converts the same stamp
+first); L 15299 (`contract_param` re-reads a query already accepted); B 36057
+/ L 36058, B 36064 / L 36065 (the vocabulary is dense and far below
+`u16::MAX`).
+
+**`server.rs`, not driven, by rule:** L 8828–8969 (`read_credential`,
+`credentialed_source`: AWS Parameter Store, `CLAUDE.md` §8); B 35257 /
+L 35274–35360 (the `/universe` crawl of NSE's index pages from
+`INDEX_HOST`; no test reaches a non-loopback host, so it needs a
+crawl-source seam); L 11605 (`fno_report` after a chain discovery: discovery
+URLs come from the shipped descriptor, not the wire's base URL, so it needs a
+discovery-URL seam); B 19864 / L 19866, 19870–19885 and L 20407
+(`open_unless_suppressed` past its suppression, and a browser that opened:
+none in a test); B 20337 / L 20338–20341 (the autopilot's start banner needs
+a writable serve with `BRUTEX_AUTOPILOT=run` over the real credential
+source).
+
+**`server.rs`, not driven: host resources, a thread, the wall clock, a
+race:** L 20166–20170 (`local_addr()` failing after a bind) and
+L 20211–20216 (`keep_port` with no descriptor left), which need descriptor
+exhaustion that would starve every other test; L 20290 (`Loading::Failed`,
+the start-up load's thread panicked); B 20421 / L 20422 and B 20427 /
+L 20428 (`warm_at_start`, `census_cache::start`: a thread that cannot be
+spawned); L 10339–10342 and L 14272–14275 (`ist_day(now)` failing: a host
+clock outside 1970..=9999); B 6495 / L 6496 (the 17 Oct report's race: a
+member-failure append refused while the closing append right after it
+lands). **B 6713**, the `!closed` side of `finished_day_only`'s guard: in this
+run (an unsettled hour) no window ending today found today settled. In
+phase 1's Sunday hours the opposite side was the one untaken, and
+`a_window_ending_today_is_held_back_exactly_while_today_is_unsettled` takes
+whichever the hour allows.
+
+**`emitted.rs`** (37 lines with a side untaken, as in this session's first
+run; the 17 Oct report counted none for it): every one is the false side of
+the first operand of an `&&` in a `mine:` predicate of the emit-site table, a
+test-only module (`#[cfg(test)]` in `lib.rs`, so cargo-mutants lists no
+mutant in it). A false side would be the predicate meeting another site's
+record first, and each case's own record is found first.
+
+**Test files** (not production): `server_cloud_mutant_tests_a` 7 / 10,
+`_b` 33 / 13, `_c` 16 / 10, `_d` 3 / 1, `_e` 3 / 3. These are failure paths
+(a `panic!` or an `else` arm an assertion never takes), arms one copy of the
+environment never takes (a build with or without repository metadata), and
+in `_e` the day-rollover and settled-day arms of `ending_on`, which a run
+before the open does not take.
+
 ## Left (in progress)
 
 - Phase 1: `pullrun.rs` (466) and `server.rs` (1,509), running with retries
