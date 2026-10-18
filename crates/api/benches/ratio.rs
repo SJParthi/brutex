@@ -81,12 +81,16 @@ mod gaps;
 mod greeks;
 #[path = "ratio/logs_dirs.rs"]
 mod logs_dirs;
+#[path = "ratio/months.rs"]
+mod months;
 #[path = "ratio/options.rs"]
 mod options;
 #[path = "ratio/provenance.rs"]
 mod provenance;
 #[path = "ratio/reads.rs"]
 mod reads;
+#[path = "ratio/rollup.rs"]
+mod rollup;
 #[path = "ratio/served.rs"]
 mod served;
 #[path = "ratio/settings.rs"]
@@ -714,6 +718,7 @@ fn served_routes_are_flat() -> bool {
     ok &= reads::reads_are_flat(&mut stores);
     ok &= db_page::page_reads_are_flat(&mut stores);
     ok &= settings::settings_are_flat(&mut stores);
+    ok &= rollup::rollups_are_flat(&mut stores);
     for store in &stores {
         let _ignored = std::fs::remove_dir_all(&store.root);
     }
@@ -778,9 +783,11 @@ fn main() {
         reads::ROUTES,
         db_page::ROUTES,
         settings::ROUTES,
+        rollup::ROUTES,
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));
+    ok &= months::rows_are_measured();
     if ok {
         println!("all ratios within the ceiling");
     } else {

@@ -126,7 +126,7 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 37] = [
+const NOT_ON_MAIN: [(&str, Off); 53] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -145,6 +145,14 @@ const NOT_ON_MAIN: [(&str, Off); 37] = [
     ("14133fa3", Off::Neither),
     ("4f19b981", Off::Neither),
     ("bfee2e39", Off::Neither),
+    // AF-02's repair rounds 1 and 2 (`docs/06-limits.md`, D-4970) measured
+    // release builds of two work-in-progress commits that reached no pushed
+    // branch: only the local `backup/af02-r1-wip-20261015` and
+    // `backup/AF-02-r2-wip` hold them, and the AF-02 branch was squashed
+    // before it merged. Each sentence names the commit on this branch whose
+    // four AF-02 files are byte for byte the measured ones (D-5820).
+    ("cde73992", Off::Neither),
+    ("91ef0094", Off::Neither),
     ("7f617f01", Off::Squashed),
     ("9fc9233b", Off::Squashed),
     ("f6716814", Off::Squashed),
@@ -154,6 +162,33 @@ const NOT_ON_MAIN: [(&str, Off); 37] = [
     // GI-21 (D-2822) names the GDFL import's own earlier commit whose
     // journal form it resumes.
     ("3cc6b8e0", Off::Squashed),
+    // `docs/06-limits.md`'s "before" builds and measured heads, each a commit
+    // of feat/db-fix awaiting its squash onto `main` (D-5820): AF-05's
+    // `4756cce0` (the R3-36 merge), AF-06's `023d6ab8` (the SC-2 merge),
+    // AG-01's and AG-03's `079ad4af` (the R3-16 merge), AF-04's and AF-03's
+    // `521066e6` (the SC-1 merge fix-up), and AF-02's `72c91a46` (the WP-62
+    // merge), `ff636f58` (its first form), `9cb9de51` (repair round 1) and
+    // `867771784f` (repair round 2).
+    ("4756cce0", Off::Squashed),
+    ("023d6ab8", Off::Squashed),
+    ("079ad4af", Off::Squashed),
+    ("521066e6", Off::Squashed),
+    ("72c91a46", Off::Squashed),
+    ("ff636f58", Off::Squashed),
+    ("9cb9de51", Off::Squashed),
+    ("867771784f", Off::Squashed),
+    // AH-02's and AG-04's measured feat/db-fix builds and AH-02's branch
+    // head, merged after this test first went green: `bf84e1f3` (the AG-03
+    // merge), `94320a4e` (the AF-06 merge), `62396df0` (the AF-07 merge) and
+    // `1ff03397` (AH-02's last merge of feat/db-fix).
+    ("bf84e1f3", Off::Squashed),
+    ("94320a4e", Off::Squashed),
+    ("62396df0", Off::Squashed),
+    ("1ff03397", Off::Squashed),
+    // AG-04's two measured branch builds, which no branch holds: AG-04 was
+    // squashed into one commit before it merged.
+    ("54f547be", Off::Neither),
+    ("fef92d53", Off::Neither),
     ("08a4258", Off::MainsOwnText),
     ("0d4fef13", Off::MainsOwnText),
     ("11feb080", Off::MainsOwnText),

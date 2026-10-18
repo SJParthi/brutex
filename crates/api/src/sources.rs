@@ -83,6 +83,14 @@
 //!   `stat` of each of the three month files, so an append or a new
 //!   generation is read again and an unchanged day costs three `stat`s. The
 //!   day marks are `/dayflags.json`'s own records for the page (WP-33b).
+//!   A share day from 2026-08-03 adds a fourth `stat`, of the month's `.auc`
+//!   sidecar, read whole under its shared lock on a miss (a handful of
+//!   records a day, a month at most) with one binary search of the day's
+//!   seconds per print; the band count and the restart measure are one pass
+//!   over the seconds already read; the share's eligibility is read only on
+//!   a day with a stored second inside the band, one memo probe once that
+//!   day's NSE master is loaded, and the first such read of a day loads it
+//!   once (AG-04, L-AG04-02).
 
 use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
@@ -2760,7 +2768,53 @@ struct DayFacts {
     /// time (D-3339 item 3).
     common_minute: Option<(i64, i64, i64)>,
     auction: Auction,
+    /// The GDFL seconds stamped inside the closing-auction band, on a share
+    /// day the auction can run on (AG-04, bars-1): `None` before 2026-08-03
+    /// and off the cash segment. Facts of the bars; whether the share was
+    /// eligible is read per request ([`cas_eligibility_of`]).
+    band: Option<BandBars>,
+    /// The restart the calendar names on this day, measured on the GDFL
+    /// seconds (AG-04, stocks-2), or `None`.
+    restart: Option<Restart>,
     records_read: u64,
+}
+
+/// The stored one-second bars inside the closing-auction band
+/// `[CAS_CONTINUOUS_CLOSE, AUCTION_BAND_END)` of one day: how many and their
+/// volume (AG-04, bars-1). Labelled, never subtracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BandBars {
+    count: u64,
+    volume: i64,
+}
+
+/// A session restart the calendar of record names (a market-wide halt in
+/// `pull::calendar::HALTS`, or a special session of two windows), and the
+/// GDFL seconds around it (AG-04, stocks-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Restart {
+    /// The IST second of the day continuous trading resumed.
+    reopen_sod: u32,
+    /// What restarted it, in the calendar's words.
+    source: &'static str,
+    /// Whether the calendar holds the window as suspected, not sourced.
+    suspected: bool,
+    /// The volume of every second before the reopen.
+    pre_restart_volume: i64,
+    /// The first second at or after the reopen, and its volume.
+    first_bar: Option<(i64, i64)>,
+}
+
+impl Restart {
+    /// Whether the first post-reopen second carries at least the whole
+    /// pre-restart volume: the vendor's restart carry (stocks-2), labelled
+    /// when `F >= P > 0`.
+    fn carried(&self) -> bool {
+        self.pre_restart_volume > 0
+            && self
+                .first_bar
+                .is_some_and(|(_, first)| first >= self.pre_restart_volume)
+    }
 }
 
 /// The last minute both feeds hold a print in, walking both back from the
@@ -2792,7 +2846,8 @@ fn common_minute(minutes: &[Bar], seconds: &[Bar]) -> Option<(i64, i64, i64)> {
 }
 
 /// The closing auction's prints of a day, from the `.auc` sidecar beside the
-/// GDFL second month (D-3320).
+/// GDFL second month (D-3320), said as far as the sidecar can prove them
+/// (AG-04, store-3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Auction {
     /// Not a share, or a day before the closing auction runs.
@@ -2800,13 +2855,49 @@ enum Auction {
     /// The month has no sidecar.
     NoSidecar,
     /// The sidecar's prints of the day.
-    Prints(Vec<(i64, i64, u64)>),
-    /// The sidecar would not read, and why.
-    Unreadable(String),
+    Prints(Box<HeldPrints>),
+    /// The sidecar would not read: the file, the record's ordinal where one
+    /// record is at fault, and why. Never dropped silently.
+    Unreadable {
+        file: String,
+        ordinal: Option<u64>,
+        why: String,
+    },
 }
 
-/// The day facts, by instrument, day and the stamps of the three month files.
-type DayKey = (String, u32, [Option<Stamp>; 3]);
+/// What a readable sidecar holds of one day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldPrints {
+    /// The sidecar's format version: 1 unchecked, 2 checksummed.
+    version: u16,
+    /// Why the values cannot be vouched for, where they cannot (version 1).
+    unchecked_why: Option<&'static str>,
+    /// The day's prints, in file order.
+    prints: Vec<HeldPrint>,
+    /// Records of the file whose IST day is outside the file's month: on
+    /// no day of it, so named on every day rather than filtered away.
+    outside_month: Vec<(u64, i64)>,
+}
+
+/// One print of the day as the sidecar holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldPrint {
+    ordinal: u64,
+    t_micros: i64,
+    price: i64,
+    quantity: u64,
+    rows: u32,
+    /// Whether its second is inside `[CAS_CONTINUOUS_CLOSE, AUCTION_BAND_END)`.
+    in_band: bool,
+    /// Whether a stored one-second bar sits at the same second with its close
+    /// equal to the print's price and its volume equal to its quantity: the
+    /// print counted twice (bars-1).
+    also_in_bars: bool,
+}
+
+/// The day facts, by instrument, day and the stamps of the three month files
+/// and of the month's auction sidecar.
+type DayKey = (String, u32, [Option<Stamp>; 4]);
 
 /// Every day's facts, by [`DayKey`].
 static DAYS: Memo<DayKey, Arc<DayFacts>> = Memo::new();
@@ -2883,6 +2974,13 @@ fn day_facts(
             day_stamp(root, series.zerodha_day.as_ref(), day),
             day_stamp(root, series.zerodha_minutes.as_ref(), day),
             day_stamp(root, series.gdfl_seconds.as_ref(), day),
+            // THE SIDECAR'S STAMP TOO: a first append after the day's bars
+            // were cached would otherwise stay `no_sidecar` until a month
+            // file changed (AG-04).
+            auction_applies(inst, day)
+                .then(|| sidecar_path(root, inst, day).ok())
+                .flatten()
+                .and_then(|path| Stamp::at(&path)),
         ],
     );
     if let Some(facts) = DAYS.get(&key) {
@@ -2904,49 +3002,353 @@ fn day_facts(
         zerodha_minutes: DayFold::of(&zerodha_minutes, Bucket::MINUTE)?,
         gdfl_seconds: DayFold::of(&gdfl_seconds, Bucket::SECOND)?,
         common_minute: common_minute(&zerodha_minutes, &gdfl_seconds),
-        auction: auction_of(root, inst, day),
+        auction: auction_of(root, inst, day, &gdfl_seconds),
+        // NO SECOND, NO BAND TO LABEL: a day GDFL holds nothing of (a
+        // weekend, a holiday, a share not yet imported) asks no master.
+        band: (auction_applies(inst, day) && !gdfl_seconds.is_empty())
+            .then(|| band_bars(&gdfl_seconds)),
+        restart: (inst.segment == Segment::Cash)
+            .then(|| restart_of(day, &gdfl_seconds))
+            .flatten(),
         records_read: budget.used() - before,
     });
     DAYS.put(key, Arc::clone(&facts));
     Ok((facts, false))
 }
 
-/// The closing auction's prints of `day` for a share, from the `.auc`
-/// sidecar (D-3320), or why there are none.
-fn auction_of(root: &Path, inst: &Instrument, day: Day) -> Auction {
+/// Whether the closing auction can run for `inst` on `day`: a share, on or
+/// after the day the GDFL feed's closing-auction note starts (D-3320).
+fn auction_applies(inst: &Instrument, day: Day) -> bool {
     let note = Feed::Gdfl.descriptor().closing_auction;
-    let applies = inst.segment == Segment::Cash && note.is_some_and(|note| day >= note.from);
-    if !applies {
-        return Auction::NotApplicable;
-    }
-    let Ok(symbol) = Symbol::new(&inst.symbol) else {
-        return Auction::Unreadable(format!("{} is not a symbol the store keys", inst.symbol));
-    };
+    inst.segment == Segment::Cash && note.is_some_and(|note| day >= note.from)
+}
+
+/// The `.auc` sidecar of `inst`'s month holding `day`.
+fn sidecar_path(root: &Path, inst: &Instrument, day: Day) -> Result<PathBuf, String> {
+    let symbol = Symbol::new(&inst.symbol)
+        .map_err(|_| format!("{} is not a symbol the store keys", inst.symbol))?;
     let key = brutex_core::instrument::InstrumentKey {
         exchange: inst.exchange,
         segment: inst.segment,
         underlying: symbol,
         kind: brutex_core::instrument::Kind::Equity,
     };
-    let path = match pull::gdfl_cm::auction::path(root, &key, day) {
+    pull::gdfl_cm::auction::path(root, &key, day)
+}
+
+/// The IST second of the day `ts` falls in.
+const fn second_of_day(ts: i64) -> i64 {
+    (ts.div_euclid(MICROS) + pull::session::IST_OFFSET_SECS).rem_euclid(DAY_SECS)
+}
+
+/// The closing-auction band as IST seconds of the day, `[from, to)`:
+/// continuous trading's close to the auction's last phase's end, WP-12f's
+/// constants (`pull::calendar::CAS_CONTINUOUS_CLOSE`,
+/// `pull::gdfl_cm::AUCTION_BAND_END`).
+fn auction_band() -> (i64, i64) {
+    (
+        i64::from(pull::calendar::CAS_CONTINUOUS_CLOSE) * 60,
+        i64::from(pull::gdfl_cm::AUCTION_BAND_END) * 60,
+    )
+}
+
+/// Whether `ts` is inside [`auction_band`].
+fn in_auction_band(ts: i64) -> bool {
+    let (from, to) = auction_band();
+    let sod = second_of_day(ts);
+    sod >= from && sod < to
+}
+
+/// The closing auction's prints of `day` for a share, from the `.auc`
+/// sidecar (D-3320), or why there are none; each print set against the
+/// day's stored seconds (`seconds`, in time order) to say whether it is also
+/// a bar (bars-1). One binary search per print, a handful a day.
+fn auction_of(root: &Path, inst: &Instrument, day: Day, seconds: &[Bar]) -> Auction {
+    if !auction_applies(inst, day) {
+        return Auction::NotApplicable;
+    }
+    let path = match sidecar_path(root, inst, day) {
         Ok(path) => path,
-        Err(why) => return Auction::Unreadable(why),
+        Err(why) => {
+            return Auction::Unreadable {
+                file: String::new(),
+                ordinal: None,
+                why,
+            };
+        }
     };
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Auction::NoSidecar,
-        Err(why) => return Auction::Unreadable(format!("{}: {why}", path.display())),
+    let file = path.display().to_string();
+    let sidecar = match pull::gdfl_cm::auction::read(&path) {
+        Ok(Some(sidecar)) => sidecar,
+        Ok(None) => return Auction::NoSidecar,
+        Err(refused) => {
+            return Auction::Unreadable {
+                file,
+                ordinal: refused.ordinal,
+                why: refused.why,
+            };
+        }
     };
     let (lo, hi) = day_bounds(day);
-    match pull::gdfl_cm::auction::parse(&bytes) {
-        Ok(records) => Auction::Prints(
-            records
+    // THE FILE'S MONTH, so a record no day of it holds is named, never lost
+    // to the day filter (a version-1 time flip that stays in order).
+    let (month_lo, month_hi) = (
+        day_bounds(Day::new(day.year(), day.month(), 1).unwrap_or(day)).0,
+        day_bounds(day.end_of_month()).1,
+    );
+    let mut held = HeldPrints {
+        version: sidecar.version,
+        unchecked_why: sidecar.unchecked_why(),
+        prints: Vec::new(),
+        outside_month: Vec::new(),
+    };
+    for (ordinal, record) in sidecar.records.iter().enumerate() {
+        let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
+        let t = record.t_micros;
+        if t < month_lo || t >= month_hi {
+            held.outside_month.push((ordinal, t));
+            continue;
+        }
+        if t < lo || t >= hi {
+            continue;
+        }
+        let also_in_bars = seconds
+            .binary_search_by_key(&t, |bar| bar.ts_micros)
+            .ok()
+            .and_then(|at| seconds.get(at))
+            .is_some_and(|bar| {
+                bar.close == record.price_paisa
+                    && u64::try_from(bar.volume).ok() == Some(record.quantity)
+            });
+        held.prints.push(HeldPrint {
+            ordinal,
+            t_micros: t,
+            price: record.price_paisa,
+            quantity: record.quantity,
+            rows: record.rows,
+            in_band: in_auction_band(t),
+            also_in_bars,
+        });
+    }
+    Auction::Prints(Box::new(held))
+}
+
+/// The day's stored seconds inside [`auction_band`]: one pass over the bars
+/// the day facts already read.
+fn band_bars(seconds: &[Bar]) -> BandBars {
+    let mut band = BandBars {
+        count: 0,
+        volume: 0,
+    };
+    for bar in seconds.iter().filter(|bar| in_auction_band(bar.ts_micros)) {
+        band.count += 1;
+        band.volume = band.volume.saturating_add(bar.volume);
+    }
+    band
+}
+
+/// The restart the calendar of record names on `day`, from its own tables:
+/// a market-wide halt (`pull::calendar::halt_on`, the cash segment's resume
+/// second) or a special session of more than one window
+/// (`pull::calendar::special_session`, its second window's open). No day
+/// list here: a new halt or drill is a calendar row, and this reads it.
+fn restart_on(day: Day) -> Option<(u32, &'static str, bool)> {
+    let epoch_day = i64::from(day.days_from_epoch());
+    if let Some(halt) = pull::calendar::halt_on(epoch_day) {
+        let cash = halt.seconds(pull::vendor::Venue::NseCash);
+        return Some((
+            cash.resume,
+            "market-wide halt",
+            halt.evidence.is_suspected(),
+        ));
+    }
+    let special = pull::calendar::special_session(epoch_day)?;
+    let session = special.session;
+    let reopen = session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .nth(1)?;
+    Some((u32::from(reopen.from) * 60, special.kind.label(), false))
+}
+
+/// `day`'s restart, measured on its stored seconds: the volume before the
+/// reopen second and the first second at or after it. One pass.
+fn restart_of(day: Day, seconds: &[Bar]) -> Option<Restart> {
+    let (reopen_sod, source, suspected) = restart_on(day)?;
+    let reopen = i64::from(reopen_sod);
+    let mut restart = Restart {
+        reopen_sod,
+        source,
+        suspected,
+        pre_restart_volume: 0,
+        first_bar: None,
+    };
+    for bar in seconds {
+        if second_of_day(bar.ts_micros) < reopen {
+            restart.pre_restart_volume = restart.pre_restart_volume.saturating_add(bar.volume);
+        } else {
+            restart.first_bar = Some((bar.ts_micros, bar.volume));
+            break;
+        }
+    }
+    Some(restart)
+}
+
+/// A share's closing-auction eligibility on one day, as the band label
+/// needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Eligibility {
+    /// Flag 1 in the day's dated master, and the session has a closing
+    /// auction.
+    Eligible,
+    /// Flag 0: the band's seconds are continuous trading to 15:30.
+    NotEligible,
+    /// Eligible, but the day's session has no closing-auction phase (a
+    /// special session): there is no band to hold a print.
+    NoClosingAuction,
+    /// No dated flag could be read, and why. Never read as flag 0.
+    Unverified(String),
+}
+
+/// Every day's loaded master, by (masters directory, IST day). Only a load
+/// that succeeded is kept (AF-03's rule): a refusal is read again next time.
+static MASTERS: Memo<(PathBuf, u32), Arc<pull::cash_session_cache::VerifiedLifecycleMaster>> =
+    Memo::new();
+
+/// `inst`'s closing-auction eligibility on `day`, from that day's dated NSE
+/// master through `pull::cash_session_cache`'s public read (charter §9),
+/// and the session's phases (`pull::calendar::phases_of`). One hash probe
+/// once the day's master is loaded; the first read of a day loads it once.
+fn cas_eligibility_of(root: &Path, inst: &Instrument, day: Day) -> Eligibility {
+    let Some(isin) = brutex_core::universe::nse_isin(&inst.symbol) else {
+        return Eligibility::Unverified(format!(
+            "no ISIN is known for {}, so its dated closing-auction flag cannot be read",
+            inst.symbol
+        ));
+    };
+    let masters = root.join("session-masters");
+    let memo = (masters.clone(), day.days_from_epoch());
+    let master = if let Some(kept) = MASTERS.get(&memo) {
+        kept
+    } else {
+        match pull::cash_session_cache::read_local_lifecycle(&masters, day) {
+            Ok(loaded) => {
+                let loaded = Arc::new(loaded);
+                MASTERS.put(memo, Arc::clone(&loaded));
+                loaded
+            }
+            Err(why) => return Eligibility::Unverified(why),
+        }
+    };
+    match master.cas_eligibility(&inst.symbol, isin.as_str()) {
+        Ok(pull::calendar::CasEligibility::Eligible) => {
+            let phases = pull::calendar::phases_of(
+                pull::vendor::Venue::NseCash,
+                i64::from(day.days_from_epoch()),
+                pull::calendar::CasEligibility::Eligible,
+            );
+            if phases
+                .bands()
                 .iter()
-                .filter(|record| record.t_micros >= lo && record.t_micros < hi)
-                .map(|record| (record.t_micros, record.price_paisa, record.quantity))
-                .collect(),
-        ),
-        Err(why) => Auction::Unreadable(format!("{}: {why}", path.display())),
+                .any(|band| band.phase == pull::calendar::Phase::ClosingAuction)
+            {
+                Eligibility::Eligible
+            } else {
+                Eligibility::NoClosingAuction
+            }
+        }
+        Ok(_) => Eligibility::NotEligible,
+        Err(why) => Eligibility::Unverified(why),
+    }
+}
+
+impl BandBars {
+    /// The label, given the share's eligibility that day: `None` where it
+    /// was not read, which [`day_table`] does only when no stored second
+    /// sits inside the band (nothing to label, so no master is loaded).
+    fn json(self, eligibility: Option<&Eligibility>) -> Value {
+        let (word, why, says) = match eligibility {
+            None => (
+                "not_read",
+                None,
+                "no stored second inside the band: there is nothing to label, so the share's \
+                 dated closing-auction flag was not read and no master was loaded for it",
+            ),
+            Some(Eligibility::Eligible) => (
+                "eligible",
+                None,
+                "stored GDFL seconds inside an eligible share's closing-auction band: a month \
+                 imported under bar definition 2, before D-3320's diversion reached it, still \
+                 holds the auction's print here as an ordinary trade until it is restated \
+                 (WP-12f's re-import, D-3320 item 4); labelled, never subtracted (bars-1)",
+            ),
+            Some(Eligibility::NotEligible) => (
+                "not_eligible",
+                None,
+                "the share is not eligible for the closing auction this day: these seconds are \
+                 continuous trades to 15:30",
+            ),
+            Some(Eligibility::NoClosingAuction) => (
+                "no_closing_auction",
+                None,
+                "the calendar of record holds no closing-auction phase for this day's session (a \
+                 special session, or one of no recorded length): no band holds a print",
+            ),
+            Some(Eligibility::Unverified(why)) => (
+                "unverified",
+                Some(why.as_str()),
+                "the share's dated closing-auction flag could not be read: whether these \
+                 seconds are the auction's is UNVERIFIED, never read as not eligible",
+            ),
+        };
+        json!({
+            "count": self.count,
+            "volume": self.volume,
+            "band": {
+                "from": ist_clock(day_start(0) + auction_band().0 * MICROS),
+                "to": ist_clock(day_start(0) + auction_band().1 * MICROS),
+            },
+            "eligibility": word,
+            "why": why,
+            "says": says,
+        })
+    }
+}
+
+impl Restart {
+    /// The restart's facts and, where carried, the label (stocks-2).
+    fn json(&self) -> Value {
+        let carried = self.carried();
+        // NOT MEASURED IS NOT "NO CARRY": a day the store holds no GDFL second
+        // of says so, never `false`.
+        let measured = self.pre_restart_volume > 0 || self.first_bar.is_some();
+        let says = if carried {
+            "the first GDFL second after the restart carries at least the whole pre-restart \
+             volume, the shape of the vendor restating the earlier session's quantity there \
+             (stocks-2: on 2020-03-23 the excess equalled the pre-restart volume exactly for 188 \
+             of 275 shares), so the day's GDFL volume is UNVERIFIED; labelled, never subtracted \
+             (subtracting needs a charter source and an operator decision)"
+        } else if !measured {
+            "the store holds no GDFL second of this day: the carry is not measured"
+        } else if self.pre_restart_volume <= 0 {
+            "no GDFL second before the restart: nothing could be carried"
+        } else if self.first_bar.is_none() {
+            "no GDFL second at or after the reopen: nothing carried it"
+        } else {
+            "the first GDFL second after the restart is smaller than the pre-restart volume: no \
+             carry is seen"
+        };
+        json!({
+            "source": self.source,
+            "suspected": self.suspected,
+            "reopen_at": ist_clock(day_start(0) + i64::from(self.reopen_sod) * MICROS),
+            "pre_restart_volume": self.pre_restart_volume,
+            "first_bar_at": self.first_bar.map(|(at, _)| ist_clock(at)),
+            "first_bar_volume": self.first_bar.map(|(_, volume)| volume),
+            "carry": measured.then_some(carried),
+            "says": says,
+        })
     }
 }
 
@@ -2960,13 +3362,58 @@ impl Auction {
                          D-3320 rule hold the auction print as an ordinary bar until re-imported, \
                          so the last print may be the auction's",
             }),
-            Self::Prints(prints) => json!({
-                "state": "kept_apart",
-                "prints": prints.iter().map(|(at, price, quantity)| json!({
-                    "at": ist_clock(*at), "price": price, "quantity": quantity,
-                })).collect::<Vec<_>>(),
+            Self::Prints(held) => {
+                let doubled: Vec<String> = held
+                    .prints
+                    .iter()
+                    .filter(|print| print.also_in_bars)
+                    .map(|print| ist_clock(print.t_micros))
+                    .collect();
+                json!({
+                    "state": "kept_apart",
+                    "version": held.version,
+                    "checked": held.unchecked_why.is_none(),
+                    "unchecked_why": held.unchecked_why,
+                    "prints": held.prints.iter().map(|print| json!({
+                        "at": ist_clock(print.t_micros),
+                        "price": print.price,
+                        "quantity": print.quantity,
+                        "rows": print.rows,
+                        "ordinal": print.ordinal,
+                        "in_band": print.in_band,
+                        "also_in_bars": print.also_in_bars,
+                    })).collect::<Vec<_>>(),
+                    "also_in_bars": {
+                        "count": doubled.len(),
+                        "seconds": doubled,
+                        "says": "prints also stored as a one-second bar at the same second, close \
+                                 equal to the price and volume equal to the quantity: counted \
+                                 twice in any sum of the two; labelled, never subtracted (bars-1)",
+                    },
+                    "outside_month": held.outside_month.iter().map(|(ordinal, at)| json!({
+                        "ordinal": ordinal,
+                        "at": ist_stamp(*at),
+                    })).collect::<Vec<_>>(),
+                })
+            }
+            Self::Unreadable { file, ordinal, why } => json!({
+                "state": "unreadable",
+                "file": file,
+                "ordinal": ordinal,
+                "why": why,
             }),
-            Self::Unreadable(why) => json!({ "state": "unreadable", "why": why }),
+        }
+    }
+
+    /// How many of the day's prints are also a stored second.
+    fn also_in_bars(&self) -> usize {
+        match self {
+            Self::Prints(held) => held
+                .prints
+                .iter()
+                .filter(|print| print.also_in_bars)
+                .count(),
+            Self::NotApplicable | Self::NoSidecar | Self::Unreadable { .. } => 0,
         }
     }
 }
@@ -3001,6 +3448,13 @@ struct DayTally {
     gdfl_only: usize,
     neither: usize,
     cached: usize,
+    /// Days with an auction print also stored as a second (bars-1).
+    auction_also_in_bars: usize,
+    /// Eligible share days with stored seconds inside the band (bars-1).
+    auction_band_bars: usize,
+    /// Days whose first post-restart second carries the earlier session
+    /// (stocks-2).
+    restart_carry: usize,
 }
 
 /// The day table. See the module header for its cost.
@@ -3057,7 +3511,23 @@ pub fn day_table(root: &Path, asked: &DayAsk) -> Result<Value, Refusal> {
         if cached {
             tally.cached += 1;
         }
-        let mut row = day_row(*day, &facts, &context, &mut previous, &mut tally);
+        // ELIGIBILITY PER REQUEST, never in the day memo: a master installed
+        // after the day was cached is read by the next request (AF-03). AND
+        // ONLY WHERE IT LABELS SOMETHING: a share day with no stored second
+        // inside the band (an eligible share's day imported after D-3320's
+        // diversion) asks no master, so it never pays L-AG04-02's load.
+        let eligibility = facts
+            .band
+            .filter(|band| band.count > 0)
+            .map(|_| cas_eligibility_of(root, inst, *day));
+        let mut row = day_row(
+            *day,
+            &facts,
+            &context,
+            eligibility.as_ref(),
+            &mut previous,
+            &mut tally,
+        );
         if let Some(object) = row.as_object_mut() {
             object.insert(
                 "marks".to_owned(),
@@ -3144,6 +3614,15 @@ fn day_notes(inst: &Instrument, flag_notes: Option<&Vec<Value>>) -> Vec<Value> {
             "Zerodha's share prices are back-adjusted by the vendor as of the pull date and \
              GDFL's are raw (D-3323): where the factor differs from 1 by more than 0.2% the \
              price comparisons across feeds give way to the factor"
+        ));
+        notes.push(json!(
+            "from 2026-08-03 the closing auction's prints are kept apart in the .auc sidecar \
+             (D-3320): its version and whether a checksum vouched for it are said, a print also \
+             stored as a second is named (also_in_bars), and an eligible day's seconds inside \
+             the auction band are counted (auction_band_bars); on a day the calendar names a \
+             restart, a first second carrying the earlier session's volume is labelled \
+             restart_carry and the GDFL volume UNVERIFIED. Labels only: nothing is subtracted \
+             (AG-04)"
         ));
     }
     if let Some(flag_notes) = flag_notes {
@@ -3246,6 +3725,7 @@ fn day_row(
     day: Day,
     facts: &DayFacts,
     context: &DayContext<'_>,
+    eligibility: Option<&Eligibility>,
     previous: &mut PreviousFactor,
     tally: &mut DayTally,
 ) -> Value {
@@ -3383,6 +3863,22 @@ fn day_row(
     if low_equal {
         tally.low_equal += 1;
     }
+    // THE RESTART CARRY (stocks-2) and THE AUCTION'S PRINTS IN THE BARS
+    // (bars-1): labels the day facts measured, counted here.
+    let carried = facts.restart.as_ref().is_some_and(Restart::carried);
+    let doubled = facts.auction.also_in_bars();
+    let band_held = facts
+        .band
+        .filter(|band| band.count > 0 && matches!(eligibility, Some(Eligibility::Eligible)));
+    if carried {
+        tally.restart_carry += 1;
+    }
+    if doubled > 0 {
+        tally.auction_also_in_bars += 1;
+    }
+    if band_held.is_some() {
+        tally.auction_band_bars += 1;
+    }
     // VOLUME: the minutes' sum against the day's, and GDFL's against both.
     let day_volume = day_bar.map(|bar| bar.volume);
     let minute_volume = minutes.map(|m| m.bar.volume);
@@ -3427,6 +3923,12 @@ fn day_row(
                 .and_then(|(m, d)| volume_cmp(m, d))
                 .map(|(pct, beyond)| json!({ "percent": pct, "flag": beyond })),
             "gdfl_vs_zerodha_day": gdfl_vs_day,
+            // A RESTART THE VENDOR CARRIED (stocks-2): the sum is labelled, never
+            // corrected. NOTHING HERE VERIFIES GDFL'S SUM (that reconciliation is
+            // IA-6p's), so the field is `false` with the reason where a carry is
+            // seen and `null` otherwise, never `true`.
+            "gdfl_sum_verified": carried.then_some(false),
+            "gdfl_sum_why": gdfl_sum_why(carried, segment, day),
         })
     };
     // THE SHARE'S BASIS: the factor, its step, the volume factor and the
@@ -3522,6 +4024,15 @@ fn day_row(
     if minute_basis_differs {
         flags.push("minute_basis_differs_from_day");
     }
+    if doubled > 0 {
+        flags.push("auction_print_also_in_bars");
+    }
+    if band_held.is_some() {
+        flags.push("auction_band_bars");
+    }
+    if carried {
+        flags.push("restart_carry");
+    }
     let bar_json = |bar: Option<Bar>| {
         bar.map(|bar| json!({ "o": bar.open, "h": bar.high, "l": bar.low, "c": bar.close, "v": bar.volume }))
     };
@@ -3610,10 +4121,42 @@ fn day_row(
         },
         "volume": volume,
         "basis": share_basis,
-        "auction": facts.auction.json(),
+        "auction": auction_json(facts, eligibility),
+        "restart": facts.restart.as_ref().map(Restart::json),
         "flags": flags,
         "records_read": facts.records_read,
     })
+}
+
+/// Why GDFL's day sum is not vouched for, or `None` where this route has
+/// nothing to say about it (AG-04, stocks-2): the carry it saw, or a
+/// restart day of a segment whose carry is not measured (the cash segment
+/// only is; L-AG04-08). Never a claim that the sum is right.
+fn gdfl_sum_why(carried: bool, segment: Segment, day: Day) -> Option<&'static str> {
+    if carried {
+        Some(
+            "UNVERIFIED: the first second after the restart carries at least the whole \
+             pre-restart volume (restart_carry), so the sum may count that quantity twice",
+        )
+    } else if segment != Segment::Cash && restart_on(day).is_some() {
+        Some(
+            "a restart day: whether the first second after the reopen restates the earlier \
+             session's quantity is measured on the cash segment only, so it is not known for \
+             this segment's sum",
+        )
+    } else {
+        None
+    }
+}
+
+/// The day's auction fact, with the band's label where the auction can run
+/// (AG-04, bars-1).
+fn auction_json(facts: &DayFacts, eligibility: Option<&Eligibility>) -> Value {
+    let mut value = facts.auction.json();
+    if let (Some(band), Some(object)) = (facts.band, value.as_object_mut()) {
+        object.insert("auction_band_bars".to_owned(), band.json(eligibility));
+    }
+    value
 }
 
 /// The page's tally as JSON.
@@ -3639,9 +4182,16 @@ fn day_summary(tally: &DayTally) -> Value {
         "minute_volume_off_day": tally.minute_volume_off,
         "gdfl_first_print_after_open": tally.gdfl_late,
         "days_from_cache": tally.cached,
+        "auction_print_also_in_bars": tally.auction_also_in_bars,
+        "auction_band_bars": tally.auction_band_bars,
+        "restart_carry": tally.restart_carry,
     })
 }
 
 #[cfg(test)]
 #[path = "sources_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sources_day_truth_tests.rs"]
+mod day_truth_tests;

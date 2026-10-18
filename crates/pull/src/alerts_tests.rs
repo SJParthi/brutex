@@ -1226,6 +1226,13 @@ fn a_settled_page_never_lists_an_alert_a_later_record_acknowledges() {
     let mut before = window(scratch.root()).unwrap().first;
     while before > 1 {
         let part = page_settled(scratch.root(), before).unwrap();
+        // Each page starts strictly before the ordinal it was asked before,
+        // so the walk ends; a page that did not walked for ever (GF-1).
+        assert!(
+            part.first < before,
+            "the page before {before} starts at {}",
+            part.first
+        );
         walked.extend(part.alerts.iter().map(|a| a.ordinal));
         before = part.first;
     }
@@ -1284,6 +1291,13 @@ fn an_older_page_is_one_read_at_any_depth() {
         if part.first == 0 {
             break;
         }
+        // Each page starts strictly before the ordinal it was asked before,
+        // so the walk ends; a page that did not walked for ever (GF-1).
+        assert!(
+            before.is_none_or(|asked| part.first < asked),
+            "the page before {before:?} starts at {}",
+            part.first
+        );
         firsts.push(part.first);
         for a in &part.alerts {
             if !carried.contains(&a.ordinal) {
@@ -1870,6 +1884,53 @@ fn the_older_walk_names_every_record_it_cannot_read() {
     assert!(page.acked_older.is_empty());
 }
 
+/// GF-1: `last + 1` mutated to `last * 1` in `page_settled` survived. The
+/// walk after the page then starts AT the page's own newest record, and
+/// when that record acknowledges an alert older than the page, the
+/// acknowledgement the page already applied is carried a second time:
+/// one more alert off the older count, and the ordinal listed twice.
+#[test]
+fn a_pages_own_newest_acknowledgement_of_an_older_alert_counts_once() {
+    let scratch = Scratch::new("GF1-SETTLED-OWN-ACK");
+    let mut records = open_alerts(1_029);
+    // Ordinal 1_030 acknowledges alert 3, older than the page of the 1_024
+    // records before 1_031 (ordinals 7 ..= 1_030): 1_028 left open.
+    records.push(raw_ack(3, 1_028));
+    raw_queue(&scratch, &records);
+    let page = page_settled(scratch.root(), 1_031).unwrap();
+    assert_eq!(page.first, 7);
+    assert_eq!(page.alerts.len(), 1_023, "alerts 7 ..= 1_029, all open");
+    assert_eq!(
+        page.older_unacknowledged, 5,
+        "alerts 1, 2, 4, 5 and 6: the acknowledged 3 is taken off once"
+    );
+    assert_eq!(page.acked_older, vec![3], "named once");
+    // The same acknowledgement met AFTER a page is carried onto it, once.
+    let before = page_settled(scratch.root(), 1_030).unwrap();
+    assert_eq!((before.first, before.alerts.len()), (6, 1_024));
+    assert_eq!(before.older_unacknowledged, 4, "alerts 1, 2, 4 and 5");
+    assert_eq!(before.acked_older, vec![3]);
+}
+
+/// GF-1: the same `last + 1` to `last * 1` survived again once the walk
+/// counted its reads up front, because the walk's length no longer reads
+/// `from` and the test above has no record after its page. With records
+/// after the page, the mutated first read starts at the page's own newest
+/// record, so a damaged newest record of the page is counted as a damaged
+/// LATER record, which it is not.
+#[test]
+fn a_damaged_newest_record_of_the_page_is_not_a_later_damaged_record() {
+    let scratch = Scratch::new("GF1-SETTLED-OWN-DAMAGE");
+    raw_queue(&scratch, &open_alerts(150));
+    spoil(&scratch, 99);
+    let page = page_settled(scratch.root(), 100).unwrap();
+    assert_eq!(page.first, 1, "the page is records 1 ..= 99");
+    assert_eq!(page.later_damaged, 0, "records 100 ..= 150 are all whole");
+    // The other side of the line: a damaged record just after the page is.
+    spoil(&scratch, 100);
+    assert_eq!(page_settled(scratch.root(), 100).unwrap().later_damaged, 1);
+}
+
 /// Arms the walk seam: `step` runs once before this thread's next later read.
 fn between_reads(step: impl FnOnce(&Path) + 'static) {
     BETWEEN_READS.with(|held| *held.borrow_mut() = Some(Box::new(step)));
@@ -2105,4 +2166,437 @@ fn the_operators_older_steps_timed() {
             "replace_damaged, {size} records: p50 {p50} us, p99 {p99} us, max {max} us (n = {n})"
         );
     }
+}
+
+// GF-1: the mutant `present || !create` in `open_lock` survived the round's
+// mutation run. A queue whose lock file has gone (a store copied without it,
+// or the name removed by hand) is the case it changes: a reader and an
+// acknowledgement still take the lock by making it, so the alerts stay
+// visible and acknowledgeable. The mutant opened the absent name read-only,
+// which a reader took for "no queue": every alert vanished from the page.
+#[test]
+fn a_queue_whose_lock_file_is_gone_is_still_read_and_acknowledged() {
+    let scratch = Scratch::new("GF1-LOCK-GONE");
+    for key in ["a", "b"] {
+        put_at(scratch.root(), &alert(9, key, key), NOW).unwrap();
+    }
+    let names = scratch.names();
+    fs::remove_file(&names.lock).unwrap();
+    assert!(names.queue.is_file() && !names.lock.exists(), "the premise");
+
+    let page = window(scratch.root()).unwrap();
+    let listed: Vec<u32> = page.alerts.iter().map(|a| a.ordinal).collect();
+    assert_eq!(listed, vec![2, 1], "a missing lock is not a missing queue");
+    assert!(names.lock.is_file(), "the reader made the lock it needed");
+    assert!(
+        older(scratch.root()).unwrap().exists,
+        "and the older walk sees it"
+    );
+
+    fs::remove_file(&names.lock).unwrap();
+    let acked = ack_at(scratch.root(), 1, "cli", Scope::Whole, NOW + 1).unwrap();
+    assert_eq!(acked.ordinal, 1, "{acked:?}");
+    assert!(names.lock.is_file(), "the acknowledgement made it too");
+    let page = window(scratch.root()).unwrap();
+    let listed: Vec<u32> = page.alerts.iter().map(|a| a.ordinal).collect();
+    assert_eq!(listed, vec![2], "the acknowledged alert is hidden");
+}
+
+// GF-1: `unix_now` replaced by `0` survived; nothing read the clock it gives.
+#[test]
+fn unix_now_is_the_clock_in_whole_seconds() {
+    let secs = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let before = secs();
+    let now = unix_now();
+    let after = secs();
+    assert!(
+        before <= now && now <= after,
+        "{before} <= {now} <= {after}"
+    );
+    assert!(
+        now > 1_767_225_600,
+        "this build runs after 2026-01-01: {now}"
+    );
+}
+
+// GF-1: `||` mutated to `&&` in `shape`'s length check survived. A header
+// whose CRC passes but which names a record length other than 128, or a
+// header length other than 64, is damaged, each on its own.
+#[test]
+fn a_header_that_passes_its_crc_with_a_wrong_record_or_header_length_is_damaged() {
+    let scratch = Scratch::new("GF1-LENGTHS");
+    put_at(scratch.root(), &alert(6, "k", "t"), NOW).unwrap();
+    for (at, value) in [(10_usize, 64_u16), (12, 128)] {
+        let mut head = header(NOW);
+        head[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        let crc = crc32c(&head[..60]).to_le_bytes();
+        head[60..64].copy_from_slice(&crc);
+        fs::write(scratch.names().queue, &head).unwrap();
+        assert_eq!(
+            window(scratch.root()),
+            Err(AlertError::Damaged { offset: 0 }),
+            "the field at byte {at} reads {value}"
+        );
+    }
+}
+
+// GF-1: `&&` mutated to `||` in `damaged_open_count` survived. ONE bad record
+// at the end is a torn append the next put writes over, and one bad record
+// before a good last one is not the two-bad tail either: neither queue is
+// damaged, so neither is replaced.
+#[test]
+fn one_bad_record_at_or_before_the_tail_is_not_a_damaged_queue() {
+    for spoiled in [5_u64, 4] {
+        let scratch = Scratch::new(&format!("onebad{spoiled}"));
+        raw_queue(&scratch, &open_alerts(5));
+        spoil(&scratch, spoiled);
+        assert_eq!(
+            replace_damaged_at(scratch.root(), NOW),
+            Err(AlertError::NotDamaged),
+            "record {spoiled} alone fails its CRC"
+        );
+        assert_eq!(scratch.len(), 64 + 128 * 5, "and nothing was rewritten");
+    }
+}
+
+// GF-1: `&&` mutated to `||` in `keep` survived. A replacement stopped after
+// its keep step leaves the queue with a second name; the next one must keep
+// THAT name, found by device and inode, and never another `alerts.damaged-*`
+// file that merely sorts first. Sixteen unrelated earlier names make the
+// directory order unable to hide the difference.
+#[test]
+fn a_stopped_replacement_keeps_the_queues_own_second_name_and_no_other() {
+    let scratch = Scratch::new("GF1-KEEP-OWN");
+    let names = scratch.names();
+    raw_queue(&scratch, &open_alerts(5));
+    spoil(&scratch, 4);
+    spoil(&scratch, 5);
+    let damaged = fs::read(&names.queue).unwrap();
+    for n in 0..16 {
+        fs::write(
+            names.dir.join(format!("alerts.damaged-0{n:02}")),
+            b"an unrelated earlier file",
+        )
+        .unwrap();
+    }
+    let own = names.dir.join(format!("alerts.damaged-{NOW}"));
+    fs::hard_link(&names.queue, &own).unwrap();
+    // Two earlier stopped replacements in the same second left `.2` to `.9`
+    // as well (`path < kept` mutated to `==` survived): the first name is kept.
+    for n in 2..10 {
+        fs::hard_link(
+            &names.queue,
+            names.dir.join(format!("alerts.damaged-{NOW}.{n}")),
+        )
+        .unwrap();
+    }
+
+    let done = replace_damaged_at(scratch.root(), NOW + 60).unwrap();
+    assert_eq!(done.kept, own, "the queue's own second name is kept");
+    assert_eq!(fs::read(&own).unwrap(), damaged, "kept byte for byte");
+    for n in 0..16 {
+        assert_eq!(
+            fs::read(names.dir.join(format!("alerts.damaged-0{n:02}"))).unwrap(),
+            b"an unrelated earlier file"
+        );
+    }
+    assert!(
+        !names
+            .dir
+            .join(format!("alerts.damaged-{}", NOW + 60))
+            .exists(),
+        "and no second copy of the same damaged file"
+    );
+}
+
+// GF-1: the guard `why.kind() == AlreadyExists` mutated to `true` in
+// `create_fresh` survived. Only a name that is already there is removed and
+// made again; any other refusal is the host's own, returned as it came. A
+// directory this process may not write gives PermissionDenied, which the
+// mutant turned into the NotFound of removing a name that was never there.
+#[test]
+fn create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it() {
+    let scratch = Scratch::new("fresh");
+    let shut = scratch.root().join("SHUT");
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = create_fresh(&shut.join("x")).map(drop);
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        refused.map_err(|why| why.kind()),
+        Err(io::ErrorKind::PermissionDenied)
+    );
+    // And a stale name is replaced by a new, empty file.
+    let stale = scratch.root().join("stale");
+    fs::write(&stale, b"left by a killed run").unwrap();
+    drop(create_fresh(&stale).unwrap());
+    assert_eq!(fs::metadata(&stale).unwrap().len(), 0);
+}
+
+// GF-1: four mutants of `hold_reserve`'s guard survived: `&&` to `||`, the
+// whole guard to `false`, and `RESERVE_RECORDS * RECORD_LEN` to `+` and `/`.
+// A whole reserve is held and never written again (its inode stays); a
+// reserve file of 1,000 bytes, longer than 512 + 128 and shorter than its
+// 64 KiB, is not held: the next put writes it whole.
+#[test]
+fn a_whole_reserve_is_kept_and_a_short_one_is_written_whole_by_the_next_put() {
+    use std::os::unix::fs::MetadataExt as _;
+    let scratch = Scratch::new("GF1-SHORT-RESERVE");
+    let names = scratch.names();
+    put_at(scratch.root(), &alert(6, "a", "t"), NOW).unwrap();
+    let made = fs::metadata(&names.reserve).unwrap().ino();
+    put_at(scratch.root(), &alert(6, "b", "t"), NOW + 1).unwrap();
+    assert_eq!(
+        fs::metadata(&names.reserve).unwrap().ino(),
+        made,
+        "a whole reserve is held, not written again"
+    );
+    fs::write(&names.reserve, vec![0_u8; 1_000]).unwrap();
+    put_at(scratch.root(), &alert(6, "c", "t"), NOW + 2).unwrap();
+    assert_eq!(
+        fs::metadata(&names.reserve).unwrap().len(),
+        RESERVE_RECORDS * RECORD_LEN
+    );
+}
+
+// GF-1: `+` mutated to `-` in `page_settled`'s span count survived, because
+// the one test whose loop reaches a short tail is ignored as slow. A page
+// with two newer records, the newest acknowledging an alert on the page,
+// must read both: the acknowledged alert leaves the page.
+#[test]
+fn a_page_reads_every_newer_record_to_its_last() {
+    let scratch = Scratch::new("GF1-SETTLED-TAIL");
+    for key in ["a", "b", "c"] {
+        put_at(scratch.root(), &alert(9, key, key), NOW).unwrap();
+    }
+    ack_at(scratch.root(), 1, "cli", Scope::Whole, NOW + 1).unwrap();
+    let page = page_settled(scratch.root(), 3).unwrap();
+    let listed: Vec<u32> = page.alerts.iter().map(|a| a.ordinal).collect();
+    assert_eq!(listed, vec![2], "#1 was acknowledged by the newest record");
+    assert_eq!(page.records, 4);
+}
+
+// GF-1: `||` mutated to `&&` in `ack_at`'s range check survived. Ordinal 0
+// and an ordinal past the last record are each no such alert, on a queue
+// that exists.
+#[test]
+fn an_acknowledgement_of_ordinal_zero_or_past_the_end_names_no_such_alert() {
+    let scratch = Scratch::new("GF1-ACK-RANGE");
+    for key in ["a", "b"] {
+        put_at(scratch.root(), &alert(9, key, key), NOW).unwrap();
+    }
+    for ordinal in [0_u32, 3, u32::MAX] {
+        assert_eq!(
+            ack_at(scratch.root(), ordinal, "cli", Scope::Whole, NOW),
+            Err(AlertError::NoSuchAlert { ordinal })
+        );
+    }
+    assert_eq!(scratch.len(), 64 + 128 * 2, "nothing was written");
+}
+
+// GF-1: `<` mutated to `<=` in `listed` survived. An acknowledgement of the
+// window's own first record is applied inside the window, never carried as
+// an older acknowledgement.
+#[test]
+fn an_acknowledgement_of_the_windows_first_record_is_not_an_older_one() {
+    let scratch = Scratch::new("GF1-ACK-FIRST");
+    for key in ["a", "b", "c"] {
+        put_at(scratch.root(), &alert(9, key, key), NOW).unwrap();
+    }
+    ack_at(scratch.root(), 1, "cli", Scope::Whole, NOW + 1).unwrap();
+    let page = window(scratch.root()).unwrap();
+    assert_eq!(page.first, 1);
+    assert!(page.acked_older.is_empty(), "{:?}", page.acked_older);
+    let listed: Vec<u32> = page.alerts.iter().map(|a| a.ordinal).collect();
+    assert_eq!(listed, vec![3, 2]);
+}
+
+// GF-1: `-` mutated to `+` in `of_file` survived: no test read a file past
+// one window. 1,100 records are read in two spans, every one of them.
+#[test]
+fn a_file_longer_than_one_window_is_read_whole() {
+    let scratch = Scratch::new("GF1-OF-FILE");
+    raw_queue(&scratch, &open_alerts(1_100));
+    let mut seen = 0_u32;
+    let shape = of_file(&scratch.names().queue, &mut |k| {
+        assert!(matches!(k, Kept::Good(..)), "{k:?}");
+        seen += 1;
+    })
+    .unwrap();
+    assert_eq!(seen, 1_100);
+    assert_eq!(shape.records, 1_100);
+}
+
+// GF-1: the guard `AlreadyExists && attempt < 64` in `keep` mutated to
+// `true` and to `||` survived. Sixty-four taken names are the bound: the
+// replacement is refused by name, the queue is left as it was, and no 65th
+// name is made.
+#[test]
+fn a_damaged_queue_with_every_kept_name_taken_is_refused_not_kept_under_a_65th() {
+    let scratch = Scratch::new("GF1-KEEP-64");
+    let names = scratch.names();
+    raw_queue(&scratch, &open_alerts(5));
+    spoil(&scratch, 4);
+    spoil(&scratch, 5);
+    let damaged = fs::read(&names.queue).unwrap();
+    fs::write(names.dir.join(format!("alerts.damaged-{NOW}")), b"TAKEN").unwrap();
+    for n in 2..=64 {
+        fs::write(
+            names.dir.join(format!("alerts.damaged-{NOW}.{n}")),
+            b"TAKEN",
+        )
+        .unwrap();
+    }
+    let refused = replace_damaged_at(scratch.root(), NOW);
+    assert!(
+        matches!(&refused, Err(AlertError::Io { op, .. }) if *op == "keep the damaged queue"),
+        "{refused:?}"
+    );
+    assert!(!names.dir.join(format!("alerts.damaged-{NOW}.65")).exists());
+    assert_eq!(fs::read(&names.queue).unwrap(), damaged);
+}
+
+// GF-1: the guard `kind == NotFound` in `regular` mutated to `true`
+// survived. A stat that fails for any other reason is that failure, never
+// "absent": with `audit` a regular file, `audit/alerts.lock` cannot be
+// looked at, and the reader says so instead of answering "no queue".
+#[test]
+fn a_stat_that_fails_other_than_not_found_is_refused_never_read_as_absent() {
+    let scratch = Scratch::new("GF1-STAT-FAIL");
+    let names = scratch.names();
+    fs::write(&names.dir, b"a file where audit/ belongs").unwrap();
+    let read = window(scratch.root());
+    assert!(
+        matches!(&read, Err(AlertError::Io { op: "stat", .. })),
+        "{read:?}"
+    );
+}
+
+// GF-1: deleting either `!` of `!present && !create` in `open_lock`
+// survived, because every "a read never writes" test had no `audit/` at all
+// and the lock could not be made there anyway. With `audit/` present and
+// empty, a reader still answers "no queue" and makes no lock.
+#[test]
+fn a_reader_of_an_empty_audit_directory_makes_no_lock() {
+    let scratch = Scratch::new("GF1-EMPTY-AUDIT");
+    let names = scratch.names();
+    fs::create_dir_all(&names.dir).unwrap();
+    assert_eq!(window(scratch.root()), Ok(Page::default()));
+    assert_eq!(older(scratch.root()), Ok(Older::default()));
+    assert!(
+        !names.lock.exists(),
+        "a read never writes, not even the lock"
+    );
+    assert!(!names.queue.exists());
+}
+
+// GF-1: the guard `why.kind() == StorageFull` in `write_record` mutated to
+// `true` survived: every refused write in these tests was the seam's full
+// disk. Only a full disk spends the reserve. A write refused for any other
+// reason (here a handle opened read-only) is the append's own failure, and
+// the reserve stays exactly as it was.
+#[test]
+fn a_write_refused_other_than_full_is_the_appends_failure_and_keeps_the_reserve() {
+    let scratch = Scratch::new("GF1-NOT-FULL");
+    let names = scratch.names();
+    fs::create_dir_all(&names.dir).unwrap();
+    assert_eq!(hold_reserve(&names), Reserve::Held);
+    let reserve = fs::read(&names.reserve).unwrap();
+    fs::write(&names.queue, header(NOW)).unwrap();
+    let read_only = fs::File::open(&names.queue).unwrap();
+    let refused = write_record(
+        &names,
+        &read_only,
+        &raw_alert("GF1-K", 1).encode(),
+        HEADER_LEN,
+    );
+    assert!(
+        matches!(&refused, Err(AlertError::Io { op: "append", .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fs::read(&names.reserve).unwrap(),
+        reserve,
+        "a refusal that is not a full disk spends nothing"
+    );
+    assert_eq!(
+        fs::read(&names.queue).unwrap(),
+        header(NOW),
+        "nothing was written"
+    );
+}
+
+// GF-1: `sync_dir` replaced by `Ok(())` survived: no test met a directory it
+// could not sync. One that cannot be opened is the refusal named "sync the
+// directory" with the host's own kind, never a quiet success.
+#[test]
+fn a_directory_that_cannot_be_synced_is_refused_by_name() {
+    let scratch = Scratch::new("GF1-SYNC-DIR");
+    assert_eq!(sync_dir(scratch.root()), Ok(()));
+    let refused = sync_dir(&scratch.root().join("GF1-NO-SUCH-DIR"));
+    assert!(
+        matches!(
+            &refused,
+            Err(AlertError::Io {
+                op: "sync the directory",
+                kind: io::ErrorKind::NotFound,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+}
+
+// GF-1, second look: `||` mutated to `&&` in `ack_at`'s range check still
+// survived the test above, because without the check ordinal 0 and one past
+// the end reach the older walk, which answers "no such alert" as well --
+// unless a record already acknowledges that ordinal, as a crafted one can.
+// The range check answers first: no such alert, never "already acknowledged".
+#[test]
+fn a_crafted_acknowledgement_of_ordinal_zero_or_past_the_end_is_still_no_such_alert() {
+    let scratch = Scratch::new("GF1-ACK-CRAFTED");
+    raw_queue(
+        &scratch,
+        &[
+            raw_alert("a", 1),
+            raw_alert("b", 2),
+            raw_ack(0, 2),
+            raw_ack(9, 2),
+        ],
+    );
+    let before = fs::read(scratch.names().queue).unwrap();
+    for ordinal in [0_u32, 9] {
+        assert_eq!(
+            ack_at(scratch.root(), ordinal, "cli", Scope::Whole, NOW),
+            Err(AlertError::NoSuchAlert { ordinal })
+        );
+    }
+    assert_eq!(
+        fs::read(scratch.names().queue).unwrap(),
+        before,
+        "nothing was written"
+    );
+}
+
+// GF-1: `queue.nlink() > 1` mutated to `>= 1` in `keep` survived. The look
+// for a name a stopped replacement already kept is taken only when the queue
+// has a second link: a queue with one link is kept without reading audit/'s
+// names, so an audit/ that cannot be listed (mode 0300: a name can be made
+// in it, none read) does not stop the keep.
+#[test]
+fn a_queue_with_one_link_is_kept_without_listing_audit() {
+    let scratch = Scratch::new("GF1-ONE-LINK");
+    let names = scratch.names();
+    raw_queue(&scratch, &open_alerts(2));
+    fs::set_permissions(&names.dir, fs::Permissions::from_mode(0o300)).unwrap();
+    let kept = keep(&names, NOW);
+    fs::set_permissions(&names.dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let name = names.dir.join(format!("alerts.damaged-{NOW}"));
+    assert_eq!(kept, Ok(name.clone()));
+    assert_eq!(fs::read(&name).unwrap(), fs::read(&names.queue).unwrap());
 }

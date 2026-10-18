@@ -9,6 +9,29 @@
 //! the one `Manifest::entry` lookup `rows_for` makes, which the census rows of
 //! `crates/api/benches/ratio.rs` time flat from 1,000 to 100,000 entries.
 //!
+//! # Warm at start, re-read in the background (R3-09)
+//!
+//! The server calls [`start`] once it listens: every vendor's census, and
+//! for each offered feed the facet index, the index map and the import
+//! journal's count, are built on a thread of their own, each listed by name
+//! on `/census/warm.json` as `warming`, then `ready` (or `failed`, with the
+//! reason), with the time its build took and the census generation it stood
+//! on; every build is also a line in the log (`api.census`, "cache built").
+//! From then on a request whose vendor's manifest moved -- an import day
+//! closed, a pull committed, a compaction, a repair -- is NOT made to read
+//! it: it is answered from the kept read, and says so on every census
+//! answer (`x-brutex-census-refreshing: 1`, `x-brutex-census-age-ms`), while
+//! one background thread per vendor reads the change (by its tail where it
+//! can) and builds the derived answers again, then serves it current. A
+//! vendor with no kept read at all (a request before the warm reached it)
+//! waits for that one read rather than repeating it. DB-G80, RA-032,
+//! RA-046, RA-093, RA-094. What stays on a request thread: a facet index or
+//! index map a request reaches in the moment between a re-read landing and
+//! the background build over it (whichever thread takes the lock first
+//! builds it; moved by the appended entries, or, after a new epoch, a
+//! compaction or a rename, built over the segment's keys in memory) --
+//! never a manifest read. Named for `docs/06-limits.md`.
+//!
 //! # Moved, not rewritten
 //!
 //! Every item below except those two interfaces -- [`VendorCensusNow`],
@@ -102,13 +125,42 @@ impl Cached {
 #[derive(Debug, Default)]
 pub(crate) struct Vendors {
     cells: [Cell; Vendor::ALL.len()],
+    /// Set once, by [`start`]: the site a background re-read runs for. While
+    /// it is unset a reader whose vendor's manifest moved re-reads it itself,
+    /// as every reader did before R3-09 (one-shot callers and the tests that
+    /// pin a write being seen by the very next read); once it is set, that
+    /// reader is answered from the kept census, with its age, and the re-read
+    /// runs on a thread of its own ([`refresh_in_background`]). R3-09,
+    /// DB-G80, RA-032.
+    background: OnceLock<std::sync::Weak<Site>>,
+    /// Set once, by [`start`]: the feeds whose derived answers (the facet
+    /// index, the index map, the import journal's count) are built by the
+    /// warm and by every background re-read. Every vendor's census itself is
+    /// warmed and re-read whatever this holds.
+    derived: OnceLock<Vec<Vendor>>,
+    /// What every cache [`start`] warms says of itself, by name and feed:
+    /// warming, ready, refreshing or failed. What `/census/warm.json` lists.
+    warmth: Mutex<Vec<Warmth>>,
+    /// Set while [`start`]'s warm thread runs: from just before it is
+    /// spawned until it ends (by return or by panic). What [`warming_since`]
+    /// asks, so a cache whose warm thread never started or died is never
+    /// reported warming for the life of the process.
+    warm_running: std::sync::atomic::AtomicBool,
 }
 
-/// One vendor's cache: its last kept census, and the lock one rebuild holds.
+/// One vendor's cache: its last kept census, the lock one rebuild holds, and
+/// whether a background re-read of it is running.
 #[derive(Debug, Default)]
 struct Cell {
     slot: Mutex<Option<Kept>>,
     build: Mutex<()>,
+    /// Set while a background re-read of this vendor is queued or running,
+    /// so a burst of readers that all see the moved stamp starts ONE.
+    refreshing: std::sync::atomic::AtomicBool,
+    /// When the running background re-read began: since when readers have
+    /// been answered from the kept read ([`Freshness::Stale`]'s
+    /// `stale_since`). `None` while none runs.
+    noticed: Mutex<Option<std::time::SystemTime>>,
 }
 
 /// A kept read: the slot, and the stamp it is kept under.
@@ -123,6 +175,76 @@ struct Kept {
     stamp: ManifestStamp,
     root_is_dir: bool,
     slot: Arc<Slot>,
+    /// When the read this slot stands for began: the census is no older than
+    /// the manifest as it was then. What a stale answer's age is counted from.
+    read_at: std::time::SystemTime,
+    /// How long that read took, in milliseconds, on whichever thread made it:
+    /// what `/census/warm.json` reports as the census's build time (R3-09).
+    read_ms: u64,
+}
+
+/// Milliseconds since `began`, saturated.
+fn ms_since(began: std::time::Instant) -> u64 {
+    u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// How current the census a reader was handed is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Freshness {
+    /// The kept census was read under the stamp this reader just took: it is
+    /// the census on disk.
+    Current,
+    /// The manifest moved since the kept census was read, and the reader was
+    /// answered from it while a background re-read runs. `read_at` is when
+    /// that read began; the stamp it was read under travels beside it
+    /// ([`vendor_slot_fresh`]), so this stays a small `Copy` value.
+    /// `stale_since` is when this server found the census had moved past
+    /// that read (the background re-read began, or the index rebuild over
+    /// the new read was first pending): how long answers have been standing
+    /// in, which `read_at` cannot say -- a read kept for a quiet week is a
+    /// week old one second after the next change (R3-09 repair 1).
+    Stale {
+        read_at: std::time::SystemTime,
+        stale_since: std::time::SystemTime,
+    },
+}
+
+impl Freshness {
+    /// How far behind the disk this answer may be, in milliseconds: zero for
+    /// a current census, else the time since the served read began. An upper
+    /// bound: the manifest moved at some instant after that read.
+    pub(crate) fn age_ms(self) -> u64 {
+        match self {
+            Self::Current => 0,
+            Self::Stale { read_at, .. } => {
+                u64::try_from(read_at.elapsed().unwrap_or_default().as_millis()).unwrap_or(u64::MAX)
+            }
+        }
+    }
+
+    /// How long answers have stood in for a newer census, in milliseconds:
+    /// zero for a current census, else the time since this server found the
+    /// census had moved ([`Self::Stale`]'s `stale_since`).
+    pub(crate) fn stale_ms(self) -> u64 {
+        self.stale_since().map_or(0, |at| {
+            u64::try_from(at.elapsed().unwrap_or_default().as_millis()).unwrap_or(u64::MAX)
+        })
+    }
+
+    /// When this server found the census had moved past the served read,
+    /// for a stale answer.
+    pub(crate) const fn stale_since(self) -> Option<std::time::SystemTime> {
+        match self {
+            Self::Current => None,
+            Self::Stale { stale_since, .. } => Some(stale_since),
+        }
+    }
+
+    /// Whether the answer was served from the previous read while a newer one
+    /// is being read.
+    pub(crate) const fn is_stale(self) -> bool {
+        matches!(self, Self::Stale { .. })
+    }
 }
 
 impl Cell {
@@ -131,6 +253,14 @@ impl Cell {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// When the running background re-read began, or now when none runs.
+    fn noticed(&self) -> std::time::SystemTime {
+        self.noticed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(std::time::SystemTime::now)
     }
 }
 
@@ -145,6 +275,9 @@ impl Cell {
 pub(crate) struct Slot {
     census: census::VendorCensus,
     entries: OnceLock<Arc<Vec<(census::Series, store::path::YearMonth)>>>,
+    /// When the read this slot holds began: an answer built from it while a
+    /// newer read's index is built is no older than this (R3-09).
+    read_at: std::time::SystemTime,
 }
 
 impl Slot {
@@ -155,7 +288,13 @@ impl Slot {
         Arc::new(Self {
             census,
             entries: OnceLock::new(),
+            read_at: std::time::SystemTime::now(),
         })
+    }
+
+    /// When the read this slot holds began.
+    pub(crate) const fn read_at(&self) -> std::time::SystemTime {
+        self.read_at
     }
 
     /// The census this slot holds.
@@ -268,13 +407,31 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// next written. So [`CensusStamps::modified`] takes the row as well, and
 /// hands a time only for one its stamp could have read. D-0695.
 pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
-    census_now_reading(site, |root| {
-        census::read_all_through(root, |vendor| {
-            vendor_slot(site, vendor, vendor_stamp(root, vendor), true)
-                .census
-                .clone()
-        })
+    census_now_kept(site, manifest_stamps, |root| {
+        // THE STAMP EACH ROW WAS READ UNDER, where that is not the one just
+        // taken: a vendor answered from its previous read while a background
+        // re-read runs (R3-09). The all-vendor read is then kept under the
+        // stamps its rows were read under, never under newer ones it does
+        // not reflect, or it would be served stale after the re-read landed.
+        let mut kept_under: Option<Vec<(usize, ManifestStamp)>> = None;
+        let rows = census::read_all_through(root, |vendor| {
+            let (slot, _freshness, kept) =
+                vendor_slot_fresh(site, vendor, vendor_stamp(root, vendor), true);
+            if let Some(stamp) = kept {
+                kept_under
+                    .get_or_insert_with(Vec::new)
+                    .push((vendor as usize, stamp));
+            }
+            slot.census.clone()
+        });
+        (rows, kept_under)
     })
+}
+
+/// The vendors' cells of `site`, made on first use.
+fn vendors_of(site: &Site) -> Arc<Vendors> {
+    let mut held = site.census.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(&held.get_or_insert_with(Cached::default).vendors)
 }
 
 /// One vendor's census, read through its own cell.
@@ -286,36 +443,106 @@ pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
 /// previous census where it can ([`census::read_vendor_after`]). A census
 /// `stamp` could not have read ([`stamp_could_read`]) is handed to this
 /// reader and not kept, exactly as the all-vendor read is not (D-0695).
-fn vendor_slot(site: &Site, vendor: Vendor, stamp: ManifestStamp, root_is_dir: bool) -> Arc<Slot> {
-    let vendors = {
-        let mut held = site.census.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(&held.get_or_insert_with(Cached::default).vendors)
-    };
-    let fresh = |previous: Option<&census::VendorCensus>| {
-        let root = &site.store_root;
-        census::root_refusal(root).map_or_else(
-            || census::read_vendor_after(root, vendor, previous),
-            |why| census::unreadable_root_row(root, vendor, &why),
-        )
-    };
+///
+/// # Answered from the kept read while a background re-read runs (R3-09)
+///
+/// Once [`start`] has run, a miss on a vendor that HAS a kept read is not
+/// rebuilt by the reader: the reader is handed the kept slot, marked
+/// [`Freshness::Stale`] with the time it was read at (and the stamp it was
+/// read under beside it, the third value), and the
+/// re-read runs on a thread of its own ([`refresh_in_background`]). So no
+/// request thread reads a manifest that changed -- whole after a restart, a
+/// compaction or a tail past its floor, or by its tail after an import day
+/// -- and a cheap route never waits behind one (DB-G80: `/feeds.json` stalled
+/// 550 ms behind a census miss on another connection). A vendor with no kept
+/// read at all (before the warm at start has read it) is still read by the
+/// first reader, under the single-flight lock the warm holds while it reads,
+/// so it waits for that read rather than repeating it.
+fn vendor_slot_fresh(
+    site: &Site,
+    vendor: Vendor,
+    stamp: ManifestStamp,
+    root_is_dir: bool,
+) -> (Arc<Slot>, Freshness, Option<ManifestStamp>) {
+    let vendors = vendors_of(site);
     let Some(cell) = vendors.cells.get(vendor as usize) else {
         // `Vendor::ALL` sizes the array and `vendor as usize` indexes it, so
         // this cannot be reached; a read that keeps nothing is still right.
-        return Arc::new(Slot {
-            census: fresh(None),
-            entries: OnceLock::new(),
-        });
+        return (
+            Arc::new(Slot {
+                read_at: std::time::SystemTime::now(),
+                census: fresh_read(&site.store_root, vendor, None),
+                entries: OnceLock::new(),
+            }),
+            Freshness::Current,
+            None,
+        );
     };
     let matches = |kept: &Kept| kept.stamp == stamp && kept.root_is_dir == root_is_dir;
-    if let Some(kept) = cell.current().filter(|kept| matches(kept)) {
-        return kept.slot;
+    let current = cell.current();
+    if let Some(kept) = current.as_ref().filter(|kept| matches(kept)) {
+        return (Arc::clone(&kept.slot), Freshness::Current, None);
     }
+    if let Some(kept) = current
+        && refresh_in_background(&vendors, vendor)
+    {
+        return (
+            kept.slot,
+            Freshness::Stale {
+                read_at: kept.read_at,
+                stale_since: cell.noticed(),
+            },
+            Some(kept.stamp),
+        );
+    }
+    (
+        rebuild(&site.store_root, cell, vendor, stamp, root_is_dir),
+        Freshness::Current,
+        None,
+    )
+}
+
+/// One vendor's census read from disk, extending `previous` where that
+/// reaches the same census, or the root's refusal for that vendor.
+fn fresh_read(
+    root: &std::path::Path,
+    vendor: Vendor,
+    previous: Option<&census::VendorCensus>,
+) -> census::VendorCensus {
+    #[cfg(test)]
+    slow_read::pause(root);
+    census::root_refusal(root).map_or_else(
+        || census::read_vendor_after(root, vendor, previous),
+        |why| census::unreadable_root_row(root, vendor, &why),
+    )
+}
+
+/// The one rebuild of `cell` under `stamp`: the single-flight lock taken, the
+/// kept read handed back if a rebuild that held it first reached `stamp`,
+/// else read (extending the kept read where it can) and kept if `stamp` could
+/// have read it. What the first reader of a cold vendor runs, and what a
+/// background re-read runs.
+fn rebuild(
+    root: &std::path::Path,
+    cell: &Cell,
+    vendor: Vendor,
+    stamp: ManifestStamp,
+    root_is_dir: bool,
+) -> Arc<Slot> {
+    let matches = |kept: &Kept| kept.stamp == stamp && kept.root_is_dir == root_is_dir;
     let _single_flight = cell.build.lock().unwrap_or_else(PoisonError::into_inner);
     let previous = cell.current();
     if let Some(kept) = previous.as_ref().filter(|kept| matches(kept)) {
         return Arc::clone(&kept.slot);
     }
-    let census = fresh(previous.as_ref().map(|kept| &kept.slot.census));
+    let read_at = std::time::SystemTime::now();
+    let began = std::time::Instant::now();
+    let census = fresh_read(
+        root,
+        vendor,
+        previous.as_ref().map(|kept| &kept.slot.census),
+    );
+    let read_ms = ms_since(began);
     // THE SAME READ IS THE SAME SLOT: a stamp that moved with nothing
     // appended keeps every answer derived from the kept slot.
     let slot = match previous {
@@ -323,16 +550,109 @@ fn vendor_slot(site: &Site, vendor: Vendor, stamp: ManifestStamp, root_is_dir: b
         _ => Arc::new(Slot {
             census,
             entries: OnceLock::new(),
+            read_at,
         }),
     };
     if stamp_could_read(stamp, root_is_dir, &slot.census.state) {
-        *cell.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Kept {
-            stamp,
-            root_is_dir,
-            slot: Arc::clone(&slot),
-        });
+        // THE KEPT READ IT REPLACES IS DROPPED AFTER THE LOCK IS LET GO, and
+        // off this thread: every reader of the vendor takes this lock, and
+        // the last reference to a two-million-entry census may be in it.
+        let replaced = cell
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Kept {
+                stamp,
+                root_is_dir,
+                slot: Arc::clone(&slot),
+                read_at,
+                read_ms,
+            });
+        retire_any(replaced);
     }
     slot
+}
+
+/// How long the read `cell` keeps took, or zero when it keeps none.
+fn kept_read_ms(cell: &Cell) -> u64 {
+    cell.current().map_or(0, |kept| kept.read_ms)
+}
+
+/// Clears a cell's `refreshing` flag when the background re-read ends, by
+/// return or by panic, so a re-read that died never leaves the vendor served
+/// stale for the life of the process: the next reader starts another.
+struct Refreshing<'a>(&'a Cell);
+
+impl Drop for Refreshing<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .noticed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.0
+            .refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Starts a background re-read of `vendor` unless one is already running,
+/// and says whether the reader may be answered from the kept read: `true`
+/// when a re-read is running (this one or an earlier one), `false` when the
+/// cache is not in background mode or the thread could not be started -- the
+/// reader then reads itself, which is slow and never wrong.
+///
+/// The thread loops until the vendor's stamp holds still across one re-read,
+/// so a manifest that moved again while it read is read again before the
+/// thread ends; each pass is the tail appended since the last (or the whole
+/// file when the tail cannot reach the same census), then the answers
+/// derived from it ([`warm_derived`]), all off every request.
+fn refresh_in_background(vendors: &Arc<Vendors>, vendor: Vendor) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(site) = vendors.background.get().and_then(std::sync::Weak::upgrade) else {
+        return false;
+    };
+    let Some(cell) = vendors.cells.get(vendor as usize) else {
+        return false;
+    };
+    if cell.refreshing.swap(true, Ordering::AcqRel) {
+        return true;
+    }
+    *cell.noticed.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(std::time::SystemTime::now());
+    let mine = Arc::clone(vendors);
+    let spawned = std::thread::Builder::new()
+        .name(format!("brutex-census-{}", vendor.as_str()))
+        .spawn(move || {
+            let Some(cell) = mine.cells.get(vendor as usize) else {
+                return;
+            };
+            let _clear = Refreshing(cell);
+            note_warmth(&mine, CENSUS, vendor, WarmState::Refreshing, None);
+            loop {
+                let (stamp, root_is_dir) = read_census(&site, &mine, cell, vendor);
+                let again = manifest_stamps(&site.store_root);
+                if again.manifests.get(vendor as usize) == Some(&stamp)
+                    && again.root_is_dir == root_is_dir
+                {
+                    break;
+                }
+            }
+        });
+    if let Err(why) = spawned {
+        cell.refreshing.store(false, Ordering::Release);
+        note_warmth(
+            vendors,
+            CENSUS,
+            vendor,
+            WarmState::Failed,
+            Some(format!(
+                "the background re-read could not be started ({why}); readers read it themselves"
+            )),
+        );
+        return false;
+    }
+    true
 }
 
 /// One vendor's census as the cache holds it right now: what
@@ -350,6 +670,9 @@ pub(crate) struct VendorCensusNow {
     census: census::VendorCensus,
     /// The cell's slot it came from.
     slot: Arc<Slot>,
+    /// Whether that slot is the census on disk, or the previous read served
+    /// while a background re-read runs (R3-09).
+    freshness: Freshness,
 }
 
 impl VendorCensusNow {
@@ -370,6 +693,48 @@ impl VendorCensusNow {
     pub(crate) const fn slot(&self) -> &Arc<Slot> {
         &self.slot
     }
+
+    /// Whether the row is the census on disk or the previous read, and how
+    /// old (R3-09). Every answer built from it says so in
+    /// [`freshness_headers`].
+    pub(crate) const fn freshness(&self) -> Freshness {
+        self.freshness
+    }
+}
+
+/// `x-brutex-census-age-ms`: how far behind the manifest on disk the census
+/// an answer was built from may be, in milliseconds; `0` when it is the
+/// census on disk. Never absent on a census-backed answer, so a reader never
+/// has to infer currency from a missing header (R3-09).
+pub(crate) const CENSUS_AGE_HEADER: &str = "x-brutex-census-age-ms";
+
+/// `x-brutex-census-stale-ms`: how long, in milliseconds, answers have stood
+/// in for a newer census -- since this server found the manifest had moved
+/// past the read the answer was built from (the background re-read began),
+/// or the index rebuild over the newer read was first pending; `0` when the
+/// answer is current. Beside [`CENSUS_AGE_HEADER`], which counts from when
+/// the served read BEGAN and so reads a quiet week's age one second after a
+/// change (R3-09 repair 1).
+pub(crate) const CENSUS_STALE_HEADER: &str = "x-brutex-census-stale-ms";
+
+/// `x-brutex-census-refreshing`: `1` when the answer was built from the
+/// previous read while a background re-read runs, `0` otherwise.
+pub(crate) const CENSUS_REFRESHING_HEADER: &str = "x-brutex-census-refreshing";
+
+/// The two headers above, for `freshness`, added to `headers`.
+pub(crate) fn freshness_headers(headers: &mut axum::http::HeaderMap, freshness: Freshness) {
+    let _age = headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_AGE_HEADER),
+        axum::http::HeaderValue::from(freshness.age_ms()),
+    );
+    let _stale = headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_STALE_HEADER),
+        axum::http::HeaderValue::from(freshness.stale_ms()),
+    );
+    let _refreshing = headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_REFRESHING_HEADER),
+        axum::http::HeaderValue::from_static(if freshness.is_stale() { "1" } else { "0" }),
+    );
 }
 
 /// One vendor's census, read through ITS OWN cell and nothing else, and the
@@ -384,23 +749,684 @@ impl VendorCensusNow {
 /// hit while Zerodha's pull commits. A row its stamp contradicts is handed
 /// over unreadable, by the same rule the all-vendor read applies
 /// ([`refuse_contradicted_absences`]).
+///
+/// # A row served while its re-read runs (R3-09)
+///
+/// The stamps handed back are the ones the row was READ under: for a row
+/// served from the previous read ([`Freshness::Stale`]) that vendor's stamp
+/// is the kept one, never the newer stamp it does not reflect, so a calendar
+/// kept from it is kept under the time it stands for (D-0695).
 pub(crate) fn vendor_census(site: &Site, vendor: Vendor) -> (CensusStamps, VendorCensusNow) {
+    let mut stamps = manifest_stamps(&site.store_root);
+    let stamp = stamps
+        .manifests
+        .get(vendor as usize)
+        .copied()
+        .unwrap_or(ManifestStamp::Missing);
+    let (slot, freshness, kept) = vendor_slot_fresh(site, vendor, stamp, stamps.root_is_dir);
+    if let Some(kept) = kept
+        && let Some(at) = stamps.manifests.get_mut(vendor as usize)
+    {
+        *at = kept;
+    }
+    let mut census = slot.census.clone();
+    refuse_contradicted_absences(&stamps, std::slice::from_mut(&mut census));
+    if matches!(census.state, census::Census::Absent) && !freshness.is_stale() {
+        refuse_contradicted_absences(
+            &manifest_stamps(&site.store_root),
+            std::slice::from_mut(&mut census),
+        );
+    }
+    (
+        stamps,
+        VendorCensusNow {
+            census,
+            slot,
+            freshness,
+        },
+    )
+}
+
+/// The census of one feed, as a cache [`start`] warms and a background
+/// re-read keeps current.
+pub(crate) const CENSUS: &str = "census";
+
+/// The `/census/facets.json` index of one feed, every segment (`facets.rs`).
+pub(crate) const FACETS: &str = "facets index";
+
+/// The `/indexmap.json` keeper of one feed's held index symbols
+/// (`indexmap::HeldIndexKeeper`).
+pub(crate) const INDEX_MAP: &str = "index map";
+
+/// The import journal's snapshot and the count `/store.json`'s
+/// `x-brutex-census-behind` is built from (`store_route::behind`): the
+/// journal read whole once, then by its tail.
+pub(crate) const JOURNAL: &str = "import journal";
+
+/// Every cache name [`start`] warms for a feed it is given, in the order
+/// `/census/warm.json` lists and the order they are built in: the census
+/// first, then what is derived from it, cheapest first ([`warm_derived`]).
+pub(crate) const WARMED: [&str; 4] = [CENSUS, JOURNAL, INDEX_MAP, FACETS];
+
+/// What one warmed cache says of itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WarmState {
+    /// Not yet read since the process started; a reader that asks now waits
+    /// for the warm (single-flight) rather than repeating it.
+    Warming,
+    /// Read, and current as of its last read.
+    Ready,
+    /// A background re-read is running; readers are answered from the
+    /// previous read, with its age ([`Freshness`]).
+    Refreshing,
+    /// The warm or the re-read could not be done; `reason` says why, and
+    /// readers read it themselves.
+    Failed,
+}
+
+impl WarmState {
+    /// The word the wire carries.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Warming => "warming",
+            Self::Ready => "ready",
+            Self::Refreshing => "refreshing",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One warmed cache's row: what `/census/warm.json` lists, one per (name,
+/// feed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Warmth {
+    /// One of [`WARMED`].
+    pub(crate) name: &'static str,
+    /// The feed it is kept for.
+    pub(crate) vendor: Vendor,
+    /// What it says of itself.
+    pub(crate) state: WarmState,
+    /// When it entered that state.
+    pub(crate) since: std::time::SystemTime,
+    /// How long its last build took, once it has finished one.
+    pub(crate) took_ms: Option<u64>,
+    /// The census generation its last build stood on.
+    pub(crate) generation: Option<u64>,
+    /// The census entries its last build stood on.
+    pub(crate) entries: Option<u64>,
+    /// Why, when it failed.
+    pub(crate) reason: Option<String>,
+}
+
+/// Sets `name` of `vendor` to `state` (and `reason`), adding its row the
+/// first time. One lock and a scan of at most three rows per feed.
+fn note_warmth(
+    vendors: &Vendors,
+    name: &'static str,
+    vendor: Vendor,
+    state: WarmState,
+    reason: Option<String>,
+) {
+    let mut rows = vendors
+        .warmth
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let now = std::time::SystemTime::now();
+    if let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.name == name && row.vendor == vendor)
+    {
+        if row.state != state {
+            row.since = now;
+        }
+        row.state = state;
+        row.reason = reason;
+        return;
+    }
+    rows.push(Warmth {
+        name,
+        vendor,
+        state,
+        since: now,
+        took_ms: None,
+        generation: None,
+        entries: None,
+        reason,
+    });
+}
+
+/// `name` of `vendor` is ready, built in the time since `began`, over the
+/// census in `slot`.
+fn note_ready(vendors: &Vendors, name: &'static str, vendor: Vendor, took_ms: u64, slot: &Slot) {
+    // A CENSUS THAT WAS READ AND REFUSED IS NOT "READY": the read finished,
+    // and what it holds is the refusal, named, which every reader is served
+    // until the file reads again. An absent census is ready, and empty.
+    let refused = matches!(slot.census.state, census::Census::Unreadable { .. });
+    let (state, reason) = if refused {
+        (WarmState::Failed, Some(slot.census.note()))
+    } else {
+        (WarmState::Ready, None)
+    };
+    note_warmth(vendors, name, vendor, state, reason);
+    let generation = slot.census.generation();
+    let entries = slot.census.counters().map(|(_, _, entries)| entries);
+    {
+        let mut rows = vendors
+            .warmth
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.name == name && row.vendor == vendor)
+        {
+            row.took_ms = Some(took_ms);
+            row.generation = generation;
+            row.entries = entries;
+        }
+    }
+    // EVERY BUILD IS A LINE IN THE LOG (the operator's rule 3: every state
+    // change saved and searchable): which cache, which feed, how long, and
+    // the census it stood on.
+    if telemetry::admits(telemetry::Level::Info, "api.census") {
+        let mut event = telemetry::Event::new(telemetry::Level::Info, "api.census", "cache built")
+            .with("cache", telemetry::Value::Str(name))
+            .with("feed", telemetry::Value::Str(vendor.as_str()))
+            .with("state", telemetry::Value::Str(state.word()))
+            .with("ms", telemetry::Value::Uint(took_ms));
+        // A census with no generation (absent, refused) says nothing here
+        // rather than a zero it never published.
+        if let Some(generation) = generation {
+            event = event.with("generation", telemetry::Value::Uint(generation));
+        }
+        if let Some(entries) = entries {
+            event = event.with("entries", telemetry::Value::Uint(entries));
+        }
+        let _written_or_not = telemetry::emit(&event);
+    }
+}
+
+/// Every warmed cache's row, as `/census/warm.json` lists them: in [`WARMED`]
+/// order per feed, feeds in the order [`start`] was given them.
+pub(crate) fn warmth(site: &Site) -> Vec<Warmth> {
+    vendors_of(site)
+        .warmth
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Whether [`start`] has put this site's census in background mode.
+pub(crate) fn in_background(site: &Site) -> bool {
+    vendors_of(site).background.get().is_some()
+}
+
+/// Warms every vendor's census and, for each of `feeds`, every cache in
+/// [`WARMED`], off the request path, and puts the census in background mode:
+/// from here on a reader whose vendor's manifest moved is answered from the
+/// kept read while it is read again on a thread of its own (R3-09; RA-032,
+/// RA-046, RA-093, RA-094).
+///
+/// Every row is `warming` before this returns, so `/census/warm.json` never
+/// lists a cache as missing while the thread has not reached it. Every
+/// vendor's census is warmed, not only `feeds`', because the all-vendor read
+/// ([`census_now`]: `/feeds.json`, `/calendar.json`, `/audit.json`) reads
+/// every vendor's manifest, and a vendor left cold would be read whole by the
+/// first of those requests.
+///
+/// # Errors
+///
+/// The thread could not be started. Every cache then stays `warming` until a
+/// reader reads it, which it does itself: slow, never wrong. The caller
+/// prints why.
+pub(crate) fn start(site: &super::Loaded, feeds: &[Vendor]) -> std::io::Result<()> {
+    let vendors = vendors_of(site);
+    let _first = vendors.background.set(Arc::downgrade(site));
+    let _derived = vendors.derived.set(feeds.to_vec());
+    // LISTED IN THE ORDER THEY ARE BUILT: each offered feed's census and what
+    // is derived from it, then every other vendor's census.
+    for &feed in feeds {
+        for name in WARMED {
+            note_warmth(&vendors, name, feed, WarmState::Warming, None);
+        }
+    }
+    for vendor in Vendor::ALL
+        .into_iter()
+        .filter(|vendor| !feeds.contains(vendor))
+    {
+        note_warmth(&vendors, CENSUS, vendor, WarmState::Warming, None);
+    }
+    let site = super::Loaded::clone(site);
+    vendors
+        .warm_running
+        .store(true, std::sync::atomic::Ordering::Release);
+    let theirs = Arc::clone(&vendors);
+    let spawned = std::thread::Builder::new()
+        .name("brutex-warm-census".to_owned())
+        .spawn(move || {
+            let _ended = WarmRunning(&theirs.warm_running);
+            warm(&site, &theirs);
+        });
+    if spawned.is_err() {
+        vendors
+            .warm_running
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+    spawned.map(drop)
+}
+
+/// Clears [`Vendors::warm_running`] when the warm thread ends, by return or
+/// by panic.
+struct WarmRunning<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for WarmRunning<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// When cache `name` of `vendor` began warming, while [`start`]'s warm
+/// thread is running and has not built it yet; `None` once it is built, or
+/// when no warm thread runs (never started, or it ended or died), so a
+/// reader then builds it itself rather than being told "warming" for ever.
+pub(crate) fn warming_since(
+    site: &Site,
+    name: &'static str,
+    vendor: Vendor,
+) -> Option<std::time::SystemTime> {
+    let vendors = vendors_of(site);
+    if !vendors
+        .warm_running
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return None;
+    }
+    let rows = vendors
+        .warmth
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    rows.iter()
+        .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
+        .map(|row| row.since)
+}
+
+/// The feeds [`start`] was given, whose derived answers are warmed.
+fn derived_feeds(vendors: &Vendors) -> &[Vendor] {
+    vendors.derived.get().map_or(&[], Vec::as_slice)
+}
+
+/// One read of `vendor`'s census under the stamp taken now, through the
+/// single-flight lock a cold reader would wait on, noted ready with the
+/// read's own time, then the answers derived from it. What the warm and
+/// every background re-read run; hands back the stamps it read under.
+fn read_census(
+    site: &Site,
+    vendors: &Vendors,
+    cell: &Cell,
+    vendor: Vendor,
+) -> (ManifestStamp, bool) {
     let stamps = manifest_stamps(&site.store_root);
     let stamp = stamps
         .manifests
         .get(vendor as usize)
         .copied()
         .unwrap_or(ManifestStamp::Missing);
-    let slot = vendor_slot(site, vendor, stamp, stamps.root_is_dir);
-    let mut census = slot.census.clone();
-    refuse_contradicted_absences(&stamps, std::slice::from_mut(&mut census));
-    if matches!(census.state, census::Census::Absent) {
-        refuse_contradicted_absences(
-            &manifest_stamps(&site.store_root),
-            std::slice::from_mut(&mut census),
+    // THE FACET INDEXES ARE PENDING BEFORE THE READ IS PUBLISHED, and until
+    // they are brought to it (R3-09 repair 1): a request handed the new read
+    // in between answers from the previous index or `503 index_warming`. It
+    // built the whole index itself, or waited for this thread's build (7.55
+    // and 12.21 s on the shadow of the real store), when they were marked
+    // pending only once their build began, after the journal count and the
+    // index map.
+    let _pending = derived_feeds(vendors)
+        .contains(&vendor)
+        .then(|| super::facets::hold_pending(site, vendor));
+    let slot = rebuild(&site.store_root, cell, vendor, stamp, stamps.root_is_dir);
+    note_ready(vendors, CENSUS, vendor, kept_read_ms(cell), &slot);
+    // ONLY A READ THE CELL KEPT HAS ITS ANSWERS DERIVED: one it handed back
+    // without keeping (its stamps contradicted it) is no reader's census,
+    // and an index moved to it would answer no request.
+    if keeps(site, vendor, &slot) {
+        warm_derived(site, vendors, vendor, &slot);
+    } else if derived_feeds(vendors).contains(&vendor) {
+        for name in [JOURNAL, INDEX_MAP, FACETS] {
+            note_warmth(
+                vendors,
+                name,
+                vendor,
+                WarmState::Failed,
+                Some(format!(
+                    "not built: the census read was not kept, because the manifest's stamps \
+                     contradict it ({}); the first request that needs it builds it",
+                    slot.census.note()
+                )),
+            );
+        }
+    }
+    (stamp, stamps.root_is_dir)
+}
+
+/// Drops `value` on a thread of its own, so whoever lets go of a large read
+/// -- a census of two million entries, a facet index of as many, their
+/// sorted lists -- never pays for freeing it under a lock every reader takes
+/// or on a request's thread (R3-09 repair 1: the FNO index dropped under its
+/// write lock stalled every reader of the segment 0.8 to 1.9 s on the
+/// shadow of the real store).
+///
+/// One sending of a pointer: the thread `brutex-retire` frees what it is
+/// sent, in order. Dropped here instead, and said so in the log, when that
+/// thread cannot be started or has ended: slower, never wrong.
+pub(crate) fn retire<T: Send + 'static>(value: T) {
+    type Retired = Box<dyn Send>;
+    static RETIRE: OnceLock<Option<std::sync::mpsc::Sender<Retired>>> = OnceLock::new();
+    let sender = RETIRE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<Retired>();
+        let spawned = std::thread::Builder::new()
+            .name("brutex-retire".to_owned())
+            .spawn(move || {
+                for retired in receiver {
+                    drop(retired);
+                }
+            });
+        match spawned {
+            Ok(_detached) => Some(sender),
+            Err(why) => {
+                warn_line!(
+                    "the thread that frees replaced census reads could not be started ({why}); \
+                     each is freed where it is replaced"
+                );
+                None
+            }
+        }
+    });
+    if let Some(sender) = sender {
+        // A SEND THAT FAILS hands the value back: dropped here.
+        let _sent_or_dropped_here = sender.send(Box::new(value));
+    }
+}
+
+/// [`retire`] of what `value` holds, when it holds anything.
+pub(crate) fn retire_any<T: Send + 'static>(value: Option<T>) {
+    if let Some(value) = value {
+        retire(value);
+    }
+}
+
+/// The site the census runs in the background for, once [`start`] has run:
+/// what a thread that builds a derived answer for a request is given.
+pub(crate) fn background_site(site: &Site) -> Option<super::Loaded> {
+    vendors_of(site)
+        .background
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+}
+
+/// The read `vendor`'s cell keeps now, if it keeps one.
+pub(crate) fn kept_slot(site: &Site, vendor: Vendor) -> Option<Arc<Slot>> {
+    vendors_of(site)
+        .cells
+        .get(vendor as usize)
+        .and_then(Cell::current)
+        .map(|kept| kept.slot)
+}
+
+/// Whether `slot` is the read `vendor`'s cell keeps NOW: one lock and a
+/// reference count. What a derived index asks before it moves back over an
+/// older read ([`super::facets::index`]; R3-09).
+pub(crate) fn keeps(site: &Site, vendor: Vendor, slot: &Arc<Slot>) -> bool {
+    vendors_of(site)
+        .cells
+        .get(vendor as usize)
+        .and_then(Cell::current)
+        .is_some_and(|kept| Arc::ptr_eq(&kept.slot, slot))
+}
+
+/// [`start`]'s thread: one thread per offered feed, in parallel, each its
+/// census then what is derived from it (a feed never waits behind another
+/// feed's build), and every other vendor's census here meanwhile. Ends when
+/// all have; logs the whole warm's time.
+fn warm(site: &super::Loaded, vendors: &Arc<Vendors>) {
+    let began = std::time::Instant::now();
+    let feeds = derived_feeds(vendors).to_vec();
+    let mut feed_threads = Vec::with_capacity(feeds.len());
+    for &feed in &feeds {
+        let (theirs, mine) = (super::Loaded::clone(site), Arc::clone(vendors));
+        let spawned = std::thread::Builder::new()
+            .name(format!("brutex-census-warm-{}", feed.as_str()))
+            .spawn(move || warm_one(&theirs, &mine, feed));
+        match spawned {
+            Ok(handle) => feed_threads.push(handle),
+            // NO THREAD, NO SKIP: this thread warms the feed itself.
+            Err(_) => warm_one(site, vendors, feed),
+        }
+    }
+    for vendor in Vendor::ALL
+        .into_iter()
+        .filter(|vendor| !feeds.contains(vendor))
+    {
+        warm_one(site, vendors, vendor);
+    }
+    for handle in feed_threads {
+        if handle.join().is_err() {
+            // A WARM THAT PANICKED leaves its rows as they were (`warming`,
+            // or the last state it reached), and readers read for themselves.
+            warn_line!("a census warm thread panicked; its caches are read by their first request");
+        }
+    }
+    let _dropped_when_filtered = telemetry::emit_if!(
+        telemetry::Level::Info,
+        "api.census",
+        "caches warmed at start",
+        "feeds" => telemetry::Value::count(feeds.len()),
+        "ms" => telemetry::Value::Uint(ms_since(began)),
+    );
+}
+
+/// One vendor's warm: [`read_census`] through its cell.
+fn warm_one(site: &Site, vendors: &Vendors, vendor: Vendor) {
+    if let Some(cell) = vendors.cells.get(vendor as usize) {
+        let _stamps = read_census(site, vendors, cell, vendor);
+    }
+}
+
+/// The answers derived from one read of `vendor`'s census, built now so no
+/// request builds them, for a feed [`start`] was given, cheapest first so a
+/// request after a restart pays none of them: the import journal's count
+/// (which every census answer's `x-brutex-census-behind` reads: 156 ms for
+/// GDFL's on the shadow, paid by the first roll-up when it came last), the
+/// index map's held index symbols, then the facet index of every segment,
+/// moved forward by the entries appended since it last moved (or built once
+/// over a census read whole; seconds at GDFL's size, during which its routes
+/// answer "warming", `facets::index_or_previous`).
+fn warm_derived(site: &Site, vendors: &Vendors, vendor: Vendor, slot: &Arc<Slot>) {
+    if !derived_feeds(vendors).contains(&vendor) {
+        return;
+    }
+    #[cfg(test)]
+    slow_read::pause(&site.store_root.join(SLOW_DERIVED_KEY));
+    note_rebuilding(vendors, JOURNAL, vendor);
+    let began = std::time::Instant::now();
+    let behind = super::store_route::behind(site, vendor);
+    match behind.unread {
+        Some(why) => note_warmth(vendors, JOURNAL, vendor, WarmState::Failed, Some(why)),
+        None => note_ready(vendors, JOURNAL, vendor, ms_since(began), slot),
+    }
+    note_rebuilding(vendors, INDEX_MAP, vendor);
+    let began = std::time::Instant::now();
+    match crate::indexmap::warm(site, vendor) {
+        Ok(()) => note_ready(vendors, INDEX_MAP, vendor, ms_since(began), slot),
+        Err(why) => note_warmth(vendors, INDEX_MAP, vendor, WarmState::Failed, Some(why)),
+    }
+    // A REFUSED CENSUS MOVES NO FACET INDEX (R3-09 repair 1): every route
+    // refuses it before it reaches one, and an index moved to it is EMPTY --
+    // what the routes then served, for 3 to 5 s after the census recovered,
+    // as the previous answer: "not held" and "0 underlyings" over a census
+    // of 347 underlyings. The index stays on the last read that loaded, and
+    // answers for the recovered read while it is rebuilt, said to be
+    // previous.
+    if let census::Census::Unreadable { .. } = slot.census.state {
+        note_warmth(
+            vendors,
+            FACETS,
+            vendor,
+            WarmState::Failed,
+            Some(format!(
+                "not moved: the census is unreadable ({}); the facet index stays on the last \
+                 read that loaded until the census reads again",
+                slot.census.note()
+            )),
+        );
+        return;
+    }
+    note_rebuilding(vendors, FACETS, vendor);
+    let began = std::time::Instant::now();
+    let behind: Vec<&str> = super::facets::SEGMENTS
+        .into_iter()
+        .filter(|&segment| !super::facets::bring(site, vendor, segment, slot))
+        .map(brutex_core::instrument::Segment::as_str)
+        .collect();
+    if behind.is_empty() {
+        note_ready(vendors, FACETS, vendor, ms_since(began), slot);
+    } else {
+        // NOT "READY" OVER A READ IT DOES NOT ANSWER: an index another
+        // thread moved meanwhile to a read this one cannot stand for.
+        note_warmth(
+            vendors,
+            FACETS,
+            vendor,
+            WarmState::Failed,
+            Some(format!(
+                "the {} index does not answer the census read it was built for; the next \
+                 request that needs it starts its build",
+                behind.join(", ")
+            )),
         );
     }
-    (stamps, VendorCensusNow { census, slot })
+}
+
+/// Lists `name` of `vendor` as `refreshing` while it is rebuilt over a new
+/// read, unless it is still warming for the first time: `/census/warm.json`
+/// said "ready", with the last build's time, through a 10 to 12 s rebuild
+/// of GDFL's FNO index (R3-09 repair 1).
+fn note_rebuilding(vendors: &Vendors, name: &'static str, vendor: Vendor) {
+    let warming = vendors
+        .warmth
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming);
+    if !warming {
+        note_warmth(vendors, name, vendor, WarmState::Refreshing, None);
+    }
+}
+
+/// The key under a store root whose `slow_read` pause holds every
+/// background pass between publishing a census read and deriving its
+/// answers: what a test opens the window a request fell into with (R3-09
+/// repair 1). Not a path anything reads or writes.
+#[cfg(test)]
+pub(crate) const SLOW_DERIVED_KEY: &str = "census-derived-pause";
+
+/// `/census/warm.json`'s body: every warmed cache by name and feed, its
+/// state, how long it has been in it, its last build's time, and the census
+/// generation and entries that build stood on.
+pub(crate) fn warm_json(site: &Site) -> String {
+    use std::fmt::Write as _;
+    let now = std::time::SystemTime::now();
+    let rows = warmth(site);
+    let mut out = String::with_capacity(64 + rows.len() * 160);
+    let _ = write!(out, "{{\"background\":{},\"caches\":[", in_background(site));
+    for (at, row) in rows.iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        let ms = |value: Option<u64>| value.map_or_else(|| "null".to_owned(), |v| v.to_string());
+        let _ = write!(
+            out,
+            "{{\"name\":\"{}\",\"feed\":\"{}\",\"state\":\"{}\",\"since_ms\":{},\"took_ms\":{},\
+             \"generation\":{},\"entries\":{},\"reason\":{}}}",
+            row.name,
+            row.vendor.as_str(),
+            row.state.word(),
+            u64::try_from(
+                now.duration_since(row.since)
+                    .unwrap_or_default()
+                    .as_millis()
+            )
+            .unwrap_or(u64::MAX),
+            ms(row.took_ms),
+            ms(row.generation),
+            ms(row.entries),
+            row.reason
+                .as_deref()
+                .map_or_else(|| "null".to_owned(), crate::render::json_string),
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
+/// `GET /census/warm.json`: [`warm_json`], from memory, on the async worker
+/// (no file is read: one lock and at most three rows per feed).
+pub(crate) async fn census_warm_json(
+    axum::extract::State(site): axum::extract::State<super::Loaded>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    let _type = headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    let _cache = headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    (axum::http::StatusCode::OK, headers, warm_json(&site))
+}
+
+#[cfg(test)]
+#[path = "census_warm_tests.rs"]
+mod warm_tests;
+
+/// A pause inside every census read under one store root, set by a test
+/// that must make a read slow on demand: what decides whether a reader
+/// waited for it. Keyed on the root so no other test's reads are slowed.
+#[cfg(test)]
+pub(crate) mod slow_read {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// The roots whose reads pause, and for how many milliseconds.
+    static PAUSES: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+
+    /// Every census read under `root` from now pauses `ms` milliseconds;
+    /// zero stops it.
+    pub(crate) fn set(root: &Path, ms: u64) {
+        let mut pauses = PAUSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pauses.retain(|(at, _)| at != root);
+        if ms > 0 {
+            pauses.push((root.to_path_buf(), ms));
+        }
+    }
+
+    /// The milliseconds a test asked reads under `root` to pause; zero when
+    /// none.
+    pub(crate) fn ms(root: &Path) -> u64 {
+        PAUSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(at, _)| at == root)
+            .map_or(0, |(_, ms)| *ms)
+    }
+
+    /// Pauses, if a test asked for it under `root`.
+    pub(crate) fn pause(root: &Path) {
+        let ms = ms(root);
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
 }
 
 /// What one census probe answers for one instrument-month key.
@@ -469,6 +1495,7 @@ impl census::VendorCensus {
 /// read, the stamps would name the newer image while the census held the older
 /// one, and every later request would hit the stale census for as long as the
 /// manifest stayed unchanged. D-0695.
+#[cfg(test)]
 pub(super) fn census_now_reading(
     site: &Site,
     read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
@@ -484,10 +1511,30 @@ pub(super) fn census_now_reading(
 /// away, under a root seen as a directory because it was back for its own
 /// check. No test can make a real root do that on demand; a review met it by
 /// renaming a root aside and back in a tight loop. D-0695.
+#[cfg(test)]
 pub(super) fn census_now_stamping(
     site: &Site,
-    mut stamp: impl FnMut(&std::path::Path) -> CensusStamps,
+    stamp: impl FnMut(&std::path::Path) -> CensusStamps,
     read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
+) -> (CensusStamps, CensusNow) {
+    census_now_kept(site, stamp, |root| (read(root), None))
+}
+
+/// The stamp each of these vendors' rows was read under, where it is not the
+/// one the request took: `(vendor as usize, stamp)` for a row served from its
+/// previous read while a background re-read runs (R3-09).
+type KeptUnder = Option<Vec<(usize, ManifestStamp)>>;
+
+/// [`census_now_stamping`], with the read saying which rows it served from a
+/// previous read ([`KeptUnder`]). Those rows' stamps replace the request's in
+/// the stamps the read is checked, kept and handed back under, so a census
+/// assembled from a stale row is never kept under a stamp it does not
+/// reflect -- kept so, it would be served after the re-read landed, for as
+/// long as the manifest then stood still.
+fn census_now_kept(
+    site: &Site,
+    mut stamp: impl FnMut(&std::path::Path) -> CensusStamps,
+    read: impl FnOnce(&std::path::Path) -> (Vec<census::VendorCensus>, KeptUnder),
 ) -> (CensusStamps, CensusNow) {
     // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
     // paths and it reads the whole store on every one of them.
@@ -553,7 +1600,14 @@ pub(super) fn census_now_stamping(
     // at most that one request. The other order keys an older census under a
     // newer stamp, which is stale until the manifest next changes. See
     // `census_now_reading`'s doc.
-    let mut censuses = read(&site.store_root);
+    let (mut censuses, kept_under) = read(&site.store_root);
+    let stale = kept_under.unwrap_or_default();
+    let mut stamps = stamps;
+    for &(vendor, kept) in &stale {
+        if let Some(at) = stamps.manifests.get_mut(vendor) {
+            *at = kept;
+        }
+    }
     // AND A ROW READ ABSENT THAT ITS STAMP CONTRADICTS IS NOT ANSWERED AS AN
     // EMPTY FEED, to this request either. It is served unreadable, naming why.
     // See `refuse_contradicted_absences`. D-0695.
@@ -568,7 +1622,15 @@ pub(super) fn census_now_stamping(
         .iter()
         .any(|row| matches!(row.state, census::Census::Absent))
     {
-        refuse_contradicted_absences(&stamp(&site.store_root), &mut censuses);
+        // A row served from its previous read is checked against the stamp
+        // it was read under, not a newer one it was never meant to reflect.
+        let mut again = stamp(&site.store_root);
+        for &(vendor, kept) in &stale {
+            if let Some(at) = again.manifests.get_mut(vendor) {
+                *at = kept;
+            }
+        }
+        refuse_contradicted_absences(&again, &mut censuses);
     }
     let censuses = std::sync::Arc::new(censuses);
     let entries = std::sync::Arc::new(HeldEntries::of(&censuses));
@@ -602,11 +1664,15 @@ pub(super) fn census_now_stamping(
                 ),
             );
         }
-        cached.every = Some((
+        // THE READ IT REPLACES IS DROPPED OFF THIS LOCK AND THIS THREAD:
+        // every census reader takes the lock, and the replaced read can hold
+        // the last reference to a two-million-entry census or its sorted
+        // entries (R3-09 repair 1).
+        retire_any(cached.every.replace((
             stamps.clone(),
             std::sync::Arc::clone(&censuses),
             std::sync::Arc::clone(&entries),
-        ));
+        )));
     }
     (stamps, (censuses, entries))
 }

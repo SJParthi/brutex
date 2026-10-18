@@ -350,7 +350,9 @@ fn a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left() {
         .expect("mkfifo runs");
     assert!(made.success());
     let socket = dir.join("socket.tmp");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // Bound through the store's one short-address helper: under a long
+    // TMPDIR the direct bind failed before the refusal was reached (GF-1).
+    let _listener = crate::safe_open::tests::socket_at(&socket, "staging");
     for (at, found) in [(&pipe, Found::Pipe), (&socket, Found::Socket)] {
         let refusal = create(at).unwrap_err();
         assert!(
