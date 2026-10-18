@@ -510,6 +510,26 @@ fn the_reference_file_round_trips_and_joins_in_o1() {
     )
     .unwrap();
     assert_eq!(ReferenceFile::open(&short).unwrap_err().word, "bad_profile");
+    // An exact profile over too few records is refused on the count alone.
+    let empty = store.0.join("empty.fib");
+    files::write_file(
+        &empty,
+        &Header {
+            kind: Kind::Reference,
+            record_version: 1,
+            stride: ReferenceCell::stride(),
+            schema_digest: [0; 32],
+            run_identity: [0; 32],
+            scope: Scope::Month {
+                year: 2025,
+                month: 3,
+            },
+            profile: profile(&table.indices),
+        },
+        std::iter::empty(),
+    )
+    .unwrap();
+    assert_eq!(ReferenceFile::open(&empty).unwrap_err().word, "bad_profile");
 }
 
 /// INDIA VIX through `VixReferenceMonth`: exact or absent, never a fill.
