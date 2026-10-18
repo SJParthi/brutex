@@ -424,7 +424,8 @@ const STATE_HEAD_V1: &str = "watchdog-state v1";
 
 /// The longest state file read. A v2 line is under 200 bytes, so anything
 /// longer is damage, kept aside without being read whole: the read is O(1)
-/// whatever was left at the name.
+/// whatever was left at the name. Proof:
+/// `cli::watchdog_command::tests::a_state_that_is_binary_huge_or_a_directory_is_kept_aside_not_refused_for_ever`.
 pub const MAX_STATE_BYTES: u64 = 512;
 
 impl State {
@@ -883,7 +884,8 @@ const ATTEMPT_HEAD: &str = "watchdog-attempt v1";
 const ATTEMPT_BYTES: usize = ATTEMPT_HEAD.len() + 1 + 20 + 1;
 
 /// Records `now` as a probe whose state could not be saved, in the lock file
-/// this run holds. O(1): one 41-byte write at offset 0 and one sync.
+/// this run holds. O(1): one 41-byte write at offset 0 and one sync. Proof of
+/// the fixed length: `cli::watchdog_command::tests::the_lock_stamp_never_keeps_a_miss_across_a_real_sleep`.
 fn stamp_attempt(lock: &std::fs::File, now: u64) -> Result<(), String> {
     use std::os::unix::fs::FileExt as _;
     let line = format!("{ATTEMPT_HEAD} {now:020}\n");
@@ -904,7 +906,8 @@ enum Attempt {
 }
 
 /// Reads the lock file's stamp: at most [`ATTEMPT_BYTES`] + 1 bytes at offset
-/// 0, whatever else the file holds. O(1).
+/// 0, whatever else the file holds. O(1). Proof: a stamp longer than one is read as
+/// none, `cli::watchdog_command::tests::the_lock_stamp_never_keeps_a_miss_across_a_real_sleep`.
 fn read_attempt(lock: &std::fs::File) -> Attempt {
     use std::os::unix::fs::FileExt as _;
     let mut buf = [0_u8; ATTEMPT_BYTES + 1];
@@ -943,7 +946,9 @@ fn read_attempt(lock: &std::fs::File) -> Attempt {
 /// The lock file's stamp as this run judges by it: a stamp that is not one is
 /// rewritten as the zero stamp (no unsaved probe), so the line that names it
 /// is written once, not every minute after. O(1): one bounded read and, only
-/// for a damaged stamp, one truncate and one 41-byte write.
+/// for a damaged stamp, one truncate and one 41-byte write. Proof: a garbage
+/// and a torn stamp are named once and rewritten,
+/// `cli::watchdog_command::tests::the_lock_stamp_never_keeps_a_miss_across_a_real_sleep`.
 fn attempt_of(lock: &std::fs::File) -> Attempt {
     match read_attempt(lock) {
         Attempt::Unreadable(why) => Attempt::Unreadable(

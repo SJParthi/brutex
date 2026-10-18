@@ -8051,6 +8051,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A HALT HOLDING NO SESSION SECOND OF THE LINE SAYS NOTHING WAS
+    /// PLACED IN IT** (GF-1: `halt_s > 0` mutated to `>=` survived the
+    /// round's mutation run). A line whose halt held none of its session
+    /// seconds has no measure of the import's to say, so no "placed 0 of the
+    /// halt's 0" phrase is added; a halt of one second is said, with the 0
+    /// the import placed in it.
+    #[test]
+    fn a_halt_holding_no_session_second_says_nothing_was_placed_in_it() {
+        let root = root_of("halt-zero");
+        let later = |line: String, more: &str| format!("{} {more}\n", line.trim_end());
+        let mut ledger = later(
+            index_flags("2020-03-13", "NIFTY", &[("rows", "1")]),
+            "halt_s=0 halt_held_s=0",
+        );
+        ledger.push_str(&later(
+            index_flags("2020-03-13", "BANKNIFTY", &[("rows", "1")]),
+            "halt_s=1 halt_held_s=0",
+        ));
+        write(&quality_path(&root), &ledger);
+        let get = |instrument: &str| {
+            let got = answer(
+                &root,
+                &ask(&format!(
+                    "feed=gdfl&instrument={instrument}&from=2020-03-13"
+                )),
+            );
+            record(&got, "2020-03-13").clone()
+        };
+        let none = get("NSE-INDEX-NIFTY");
+        assert_eq!(none["quality"]["indices"]["halt_s"], 0, "the line is read");
+        assert!(
+            says(&none)
+                .iter()
+                .all(|s| !s.starts_with("the import placed")),
+            "{none:#}"
+        );
+        let one = get("NSE-INDEX-BANKNIFTY");
+        says_has(
+            &one,
+            "the import placed 0 of the halt's 1 session second(s)",
+        );
+    }
+
     /// **THE IMPORT'S HALT AND FLAT-RUN FIELDS ARE READ WHERE A LINE HAS
     /// THEM, AND ARE `null` WHERE IT DOES NOT** (WP-11c): a line written
     /// before the fields stays valid and never reads as zero; one that
@@ -8256,5 +8299,23 @@ mod tests {
                 "{rec:#}"
             );
         }
+    }
+
+    /// GF-1: `sampled_rule` replaced by `""` and by `"xyzzy"` survived: every
+    /// test compared a body's rule with the function itself. The page shows
+    /// this sentence, so its words and its one threshold are pinned here.
+    #[test]
+    fn the_sampled_rule_names_the_threshold_the_import_reads() {
+        let most = pull::gdfl_import::quality::SAMPLED_SS_DISTINCT;
+        assert_eq!(
+            sampled_rule(),
+            format!("ss_distinct is {most} or less, on a day with rows")
+        );
+        assert!(
+            sampled_rule_held().starts_with("no day-ledger line, and the series holds at most "),
+            "{}",
+            sampled_rule_held()
+        );
+        assert!(sampled_rule_held().contains(&most.to_string()));
     }
 }

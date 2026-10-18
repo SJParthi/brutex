@@ -62,7 +62,9 @@
 //! is read, so the name scan is bounded too; the operator items are the
 //! step's own (a property of the list, not of the data) and each is matched
 //! against the step's yes entries and the caller's attested items. Building
-//! the map is O(list length), once.
+//! the map is O(list length), once. Proof:
+//! `pull::rehearsal::tests::the_gate_is_one_lookup_per_start` times n = 1,000
+//! admits over a 1-kind and a 10,001-kind list and bounds the p50 ratio.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

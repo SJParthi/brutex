@@ -17353,6 +17353,7 @@ impl http_body::Body for WatchedBody {
 /// Counts a request in and its response out for the connection it arrived
 /// on (AH-02, D-4975). O(1) a request: one atomic add each way, two
 /// uncontended locks (the request line, then its status), one boxed body.
+/// UNVERIFIED by a timing (`docs/06-limits.md` L-GF1-34).
 ///
 /// The extension is missing only for a router served without
 /// [`serve_limited`], which has no [`HeadDeadline`] to tell; such a request

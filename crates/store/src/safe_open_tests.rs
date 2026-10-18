@@ -41,6 +41,77 @@ fn mkfifo(at: &Path) {
     assert!(made.success(), "mkfifo made {}", at.display());
 }
 
+/// A UNIX socket bound AT `path` itself, whatever `path`'s length; the
+/// store's unit tests share this one (`staging`'s too).
+///
+/// A socket address holds a short path (`sun_path`: 104 bytes on macOS, 108
+/// on Linux), and a test's directory under a long TMPDIR is longer: bound
+/// directly, the bind failed with "path must be shorter than `SUN_LEN`" before
+/// the property was reached (GF-1: gate 1e on macOS, TMPDIR under the gate's
+/// own log folder). The bind goes through a symbolic link to `path`'s
+/// directory, named in the temporary root or else `/tmp`: the kernel follows
+/// the link, so the socket file is made in `path`'s own directory under its
+/// own name and only the address is the short spelling. The link is removed
+/// at once. No short directory that can hold the link is a panic naming each
+/// one tried and why, never a skip. `tag` keeps two tests running at once
+/// from sharing a link. `socket_at_binds_where_a_direct_bind_cannot` pins it.
+pub(crate) fn socket_at(path: &Path, tag: &str) -> std::os::unix::net::UnixListener {
+    let dir = path.parent().expect("a socket path inside a directory");
+    let file = path.file_name().expect("a socket path naming a file");
+    let mut tried = Vec::new();
+    for base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        let link = base.join(format!("brutex-sock-{}-{tag}", std::process::id()));
+        let _stale = fs::remove_file(&link);
+        if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
+            tried.push(format!("{}: {why}", link.display()));
+            continue;
+        }
+        let bound = std::os::unix::net::UnixListener::bind(link.join(file));
+        let _unlinked = fs::remove_file(&link);
+        match bound {
+            Ok(listener) => return listener,
+            Err(why) => tried.push(format!("{}: {why}", link.display())),
+        }
+    }
+    panic!(
+        "no short directory carries a socket to {}: {}",
+        path.display(),
+        tried.join("; ")
+    )
+}
+
+/// **A SOCKET IS BOUND AT A PATH TOO LONG FOR A SOCKET ADDRESS** (GF-1).
+/// Bound directly, the path is refused with `InvalidInput` wherever TMPDIR
+/// is; [`socket_at`] makes the socket at that very path, and leaves no link.
+#[test]
+fn socket_at_binds_where_a_direct_bind_cannot() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let deep = dir("long-socket").join("d".repeat(120));
+    fs::create_dir_all(&deep).unwrap();
+    let path = deep.join("socket");
+    let direct = std::os::unix::net::UnixListener::bind(&path);
+    assert!(
+        matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+        "the premise: this path does not fit a socket address: {direct:?}"
+    );
+    let listener = socket_at(&path, "long");
+    let found = fs::symlink_metadata(&path).expect("something at the path itself");
+    assert!(
+        found.file_type().is_socket(),
+        "the socket itself, not a link: {:?}",
+        found.file_type()
+    );
+    for base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        let link = base.join(format!("brutex-sock-{}-long", std::process::id()));
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "no link is left at {}",
+            link.display()
+        );
+    }
+    drop(listener);
+}
+
 /// Runs `open` on its own thread and fails the test if it has not answered
 /// within ten seconds: an open that waits on a pipe is released by opening
 /// the pipe's other end, then named.
@@ -115,7 +186,7 @@ fn a_pipe_device_or_link_is_refused_by_name() {
     let dangling = dir.join("dangling");
     std::os::unix::fs::symlink(dir.join("nowhere"), &dangling).unwrap();
     let socket = dir.join("socket");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _listener = socket_at(&socket, "kinds");
     let folder = dir.join("folder");
     fs::create_dir(&folder).unwrap();
 

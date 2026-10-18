@@ -2262,6 +2262,11 @@ macOS with Apple's, so two libms are already in play in this project. **No
 measurement was taken on glibc** — this machine has no x86_64 toolchain — and
 nothing here should be read as one.
 
+One CI job is the exception, and it adds no third libm: gate 31's `macos` job
+(`runs-on: macos-15`, D-4990) runs the workspace's tests on macOS, whose libm
+is Apple's, so that the tests which run only on macOS run somewhere. Every
+other job, and every glibc statement in this section, is `ubuntu-24.04`.
+
 **The discrete outputs are target-dependent too, and that is the sharper
 hazard.** Which `GreeksError` variant is returned, which `Method` finished, and
 the `iterations` count are all decided by floating-point comparisons on
@@ -14936,6 +14941,10 @@ remove at a cost worth paying, so none was rewritten.
   pull/cash_auction.rs 2 of 2 -- the five `REQUIRED` probes in
     `Columns::parse`, the same header walk as the lifecycle probes
     above: once per file, never per record.
+  pull/response_keep.rs -- `Segment::holding`, the duplicate-body
+    check of one kept-answer append over the newest segment's
+    receipts, at most `MAX_RECEIPTS` (1,024) of 128 B, the receipts
+    the append already read (IA-8, D-4859, L-IA-6; bench C-RK-01).
 ~~~~
 
 ~~~~text
@@ -15109,6 +15118,258 @@ bounds are all nonzero.
     in `underlying_segment` is the FIXED `const` ARRAY case: five `&str`,
     the same array `core::instrument::is_sweepable` walks. Asked once per
     `/spot.json` request, never per instant.
+~~~~
+
+### Gate 11 — the /db fix round and the ingest automation, declared together (GF-1, 13 October 2026)
+
+~~~~text
+WHY THESE ARE HERE AT ONCE. The /db fix round (WP-01 .. WP-81) and the
+ingest-automation packages (IA-11a, IA-11r) ran cargo, clippy and the web
+gates but not this workflow, so the round's full-gate run (12 October,
+state/fix/round2/gate.json) found gate 11 refusing 87 (rule, file) pairs
+at once; the merge the round started from passed it. GF-1 read every new
+occurrence before counting it. Each entry below is `file old -> new`
+and the occurrences the raise covers, with the bound that holds them.
+A raise is a counted, named cost, not an O(1) proof: where the bound is
+the data rather than a table, the line says so and the cost is listed
+in "Costs the round's gate 11 entries name" below, for the operator's
+O(1)-at-p99 rule to judge.
+
+RULE 1 (`ALLOW_SEARCH`) -- every one is a search of a vector that is
+sorted where it is built, O(log n), never a scan:
+  api/src/audit.rs 0 -> 1 (WP-33c) -- `vendor_before`: the run records
+    of one audit index, sorted by ordinal as read; O(log runs).
+  api/src/census.rs 0 -> 1 (WP-30) -- `changed_since`: a census tail's
+    change list is appended in generation order; O(log changes).
+  api/src/chain.rs 0 -> 1 (WP-32) -- `put`: the sorted expiry days of
+    one underlying, kept sorted by inserting at the search's own slot;
+    O(log expiries), at most a few hundred per underlying.
+  cli/src/scrub_blocks.rs 0 -> 1 (WP-81) -- the resume cursor of a
+    scrub pass: one search of the sorted month paths instead of one
+    comparison per month, once per pass.
+  pull/src/gdfl_import_quality.rs 0 -> 5 (WP-11b, WP-11c) -- `gaps_in`
+    and `measure_file`: the sorted, deduplicated held seconds of one
+    file of one day (at most 22,500 plus a special session); two
+    searches per session span and per halt span, once per file.
+  pull/src/gdfl_lineage.rs 0 -> 1 (WP-12b) -- `single_near`: one sorted
+    strike ladder of one (expiry, side) on one ex-date; once per
+    contract on a lineage day.
+  pull/src/series_identity.rs 0 -> 2 (WP-13d) -- `holds` and `judge`:
+    the day ranges of one series, sorted and deduplicated in `new`;
+    O(log days held).
+  store/src/provenance.rs 0 -> 1 (WP-38a) -- `covering`: at most
+    `MAX_RECORDS` records, in bar order by construction.
+
+RULE 2 (`ALLOW_FLOAT`) -- a model value, not a price:
+  pull/src/pricing.rs 36 -> 37 (WP-32) -- `below_discounted_intrinsic`
+    hands back the two `f64`s `greeks::GreeksError::PriceBelowIntrinsic`
+    carries (the model's price and its discounted intrinsic) so the
+    chain can name the refusal; no paisa is computed from them.
+
+RULE 3 (`ALLOW_UNSIZED`) -- no size is known where the map is made:
+  api/src/audit_json.rs 0 -> 1, api/src/import_journal.rs 0 -> 1,
+  api/src/imports.rs 0 -> 1, api/src/logs.rs 0 -> 1, api/src/dayflags.rs
+  0 -> 1, api/src/calendar_build.rs 0 -> 1 (WP-33a, WP-33c, WP-54,
+    WP-36) -- process-wide memo caches made once in a `OnceLock`, keyed
+    by a file path or a feed of the store; one entry per file the
+    server reads, so the key space is the store's own file count for
+    those journals, not the request stream.
+  api/src/bars.rs 0 -> 1 (WP-39) -- `seek`'s `unopened_at`: one entry
+    per month of one window that could not be opened; empty on a sound
+    store.
+  api/src/bars_series.rs 0 -> 1 (WP-52) -- the `old` half of a
+    two-generation cache whose `young` half is pre-sized to 1,024; `old`
+    is only ever the previous `young`, swapped in whole.
+  api/src/store_route.rs 0 -> 1 (WP-56) -- `delta_entries`'s `seen`: the
+    keys of one delta since a generation, bounded by that delta.
+  api/src/sweeprun.rs 0 -> 1 (WP-34) -- the finished command runs of
+    one lifecycle read, bounded by the records that read holds.
+  pull/src/gdfl_cm.rs 0 -> 1 (WP-12a) -- `share_at` of one day's swept
+    CM archive, filled once per day as shares are met.
+  pull/src/gdfl_import.rs 0 -> 1 (WP-11b) -- `imported_days`: the
+    journal's (day, filter) closes, read once per rescan, never per row.
+  pull/src/gdfl_import_lineage.rs 0 -> 7 (WP-11b, WP-12e) -- the
+    per-underlying lineage state (`forward`, `back`, `stopped`,
+    `restarted`) made once per underlying per run, and `load`'s three
+    sets made once per run from the lineage ledger.
+  pull/src/gdfl_import_quality.rs 0 -> 1 (WP-11b) -- `Ledger::load`'s
+    newest line per key, read once per import or rescan.
+  pull/src/gdfl_lineage.rs 0 -> 6 (WP-12b, WP-12e) -- `day_lot`,
+    `detect` and `detect_unchanged_lot`: tallies of ONE underlying's
+    contracts on ONE ex-date (a few thousand at most), once per such
+    day, never per tick.
+  pull/src/gdfl_nfo.rs 0 -> 1 (WP-12b) -- `strike_median`: once per
+    opened NFO day folder, behind a `OnceLock`, one entry per underlying.
+  telemetry/src/sink.rs 0 -> 1 (WP-33a) -- the audit sink's open file
+    handles, one per audit dimension posting file it writes.
+
+RULE 4 (`ALLOW_SORT`) -- each sort's input and when it runs:
+  api/src/audit.rs 0 -> 3 (WP-33c) -- `read_index` and
+    `refusal_ordinals`: an audit index file's run records and fault
+    ordinals, sorted once when the index file is read.
+  api/src/calendar_record.rs 0 -> 1 (WP-35) -- `specials_json`: the
+    special-session days inside the asked range, from a compiled table.
+  api/src/census.rs 2 -> 3 (WP-30) -- `newest`: a census tail's rows,
+    sorted by key once per census read. O(t log t) in the tail's rows.
+  api/src/dayflags.rs 0 -> 1 (WP-54) -- `runs_of`: the run lines of one
+    `/imports.json` answer, a bounded page.
+  api/src/disk_route.rs 0 -> 1 (WP-81) -- the census epochs of one feed,
+    at most once in 30 s (L-WP81-4).
+  api/src/facets.rs 0 -> 1 (WP-56b) -- `rows_answer`: the rows of one
+    facet selection, in /store.json's order. O(k log k) in the rows the
+    selection names.
+  api/src/gaps_route.rs 1 -> 2 (WP-35) -- `second_audit`: one day's held
+    seconds, sorted per day of the asked range (at most one session's
+    seconds per day).
+  api/src/imports.rs 0 -> 1 (WP-33a) -- `merged`: the journal rows of
+    the asked day range, in day then kind order. O(r log r) in r rows.
+  api/src/logs.rs 1 -> 4 (WP-33c, IA-11r) -- `keyed_walk`: one page's
+    ring rows and index rows, each at most `limit` before the sort is
+    truncated to `limit`; `pace_of`: at most `RATE_WINDOW` - 1 = 30 gaps.
+  api/src/store_route.rs 0 -> 1 (WP-56) -- `delta_entries`: the rows of
+    one census delta, in the whole body's order. O(d log d) in d rows.
+  cli/src/scrub_blocks.rs 0 -> 1 (WP-81) -- `addressed`: the months of
+    one scrub pass, once per pass, an operator command.
+  pull/src/gdfl_import.rs 0 -> 1 (WP-11a) -- `measure_zips`: the years a
+    vendor folder holds, once per import.
+  pull/src/gdfl_import_lineage.rs 0 -> 2 (WP-11b) -- one underlying's
+    contracts before and after one ex-date, once per such day.
+  pull/src/gdfl_import_quality.rs 0 -> 1 (WP-11b) -- `first_trade_p50`:
+    `select_nth_unstable` over one day's first trades, O(n) once per day.
+  pull/src/gdfl_lineage.rs 0 -> 1 (WP-12b) -- one strike ladder per
+    (expiry, side) of one underlying on one ex-date.
+  pull/src/gdfl_nfo.rs 0 -> 1 (WP-12c) -- `lower_median`: one
+    underlying's strikes of one day, once per NFO folder (`OnceLock`).
+  pull/src/repair_plan.rs 0 -> 1 (WP-13d) -- the months a repair plan
+    names, once per plan, an operator command.
+  pull/src/series_identity.rs 0 -> 1 (WP-13d) -- the day ranges of one
+    series, once when its identity is built.
+
+RULE 6 (`ALLOW_SCAN`) -- a linear search, and its bound:
+  BOUNDED BY A COMPILED TABLE OR A FIXED SHAPE -- api/src/audit.rs 0 -> 1
+    (`Vendor::ALL`), api/src/calendar_route.rs 1 -> 2 and
+    api/src/gaps_route.rs 0 -> 1 and api/src/census.rs 0 -> 1 and
+    api/src/feeds_route.rs 0 -> 1 (one census row per `Vendor::ALL`
+    entry, or one part per segment), api/src/import_journal.rs 0 -> 3
+    (`ImportKind::ALL`; `nth_of`, a walk of one run id's own lines; and
+    one line splitter, below), api/src/imports.rs 0 -> 2 (`DayOutcome::ALL`,
+    `ImportKind::ALL`), api/src/server.rs 5 -> 6 (WP-61 `seat_holder`:
+    one progress row per feed), pull/src/expiry_alias.rs 0 -> 4
+    (`EARLY_SETTLEMENTS` and `ALIASES`, compiled tables of a few rows),
+    pull/src/vendor.rs 8 -> 9 (WP-13a: a vendor's per-segment basis, a
+    compiled table), telemetry/src/run_dirs.rs 0 -> 1 (`GDFL_KINDS`),
+    telemetry/src/sink.rs 1 -> 3 (one record's own fields),
+    pull/src/gdfl_import.rs 0 -> 1 (`decisive`: one day's failures, at
+    most one per stage and file), api/src/dayflags.rs 0 -> 2 (one
+    answer's run lines; one day's pull refusals).
+  ONE LINE OF BYTES -- api/src/import_journal.rs and api/src/logs.rs and
+    api/src/scrub_route.rs and cli/src/scrub_blocks.rs: `position` or
+    `rposition` of b'\n' in the bytes appended since the last read (at
+    most the read step, 16 MiB for the scrub ledger), the line splitter
+    of an incremental tail; api/src/disk_route.rs 0 -> 1: the words of
+    one `df -Pk` line.
+  ONE ANSWER'S OWN LIST -- api/src/calendar_record.rs 0 -> 2
+    (`held_span`: the day counts of one calendar record), api/src/chain.rs
+    0 -> 2 (the months one chain request opened, and one expiry's stored
+    strike ladder), api/src/bars_sort.rs 0 -> 1 (`view`: the sort indexes
+    set aside during one window request), pull/src/gdfl_lineage.rs
+    0 -> 2 (one ex-date's lineage pairs), api/src/scrub_route.rs's third,
+    `index_rebuilds`, is `#[cfg(test)]` and never built into the server.
+  BOUNDED BY THE DATA -- api/src/logs.rs 0 -> 2: `attempt_of_importer_run`,
+    O(attempts held in one log read), listed below; the other is
+    `read_appended`'s line splitter, above.
+
+RULE 7 (`ALLOW_MEMBER`) -- what each `.contains(&` is:
+  RANGE, two comparisons -- api/src/calendar_record.rs 0 -> 1,
+    api/src/disk_route.rs 0 -> 2 (month 1..=12, day 1..=days),
+    api/src/gaps_route.rs (two of 0 -> 3: a day range and a halt's
+    second range), pull/src/calendar.rs 1 -> 2 (WP-54: a halt's second
+    range), pull/src/alerts.rs (one of 0 -> 2: `listed`'s
+    `(1..first).contains`, an ordinal older than the window, written as
+    a range by GF-1 so that no comparison of it is an equivalent
+    mutant).
+  HASH PROBE OR ORDERED-SET PROBE -- api/src/chain.rs 0 -> 1, api/src/
+    gaps_route.rs (the third: `printed`), api/src/sweeprun.rs (WP-34's
+    `finished`), pull/src/alerts.rs (the other of 0 -> 2: `carried`, a `BTreeSet`),
+    pull/src/gdfl_import.rs 0 -> 3 (`open_days`, `runs`, `imported`;
+    `fresh_run` steps at most once per `run` line), pull/src/
+    gdfl_import_lineage.rs 0 -> 1, pull/src/gdfl_lineage.rs 0 -> 4 (three
+    `before_keys` `HashSet` probes; the fourth, `unpaired`, is one
+    ex-date's unpaired contracts).
+  COMPILED TABLE -- api/src/calendar_route.rs 0 -> 2 (`REFERENCES`),
+    api/src/logs.rs (`DB_READS`, `known` query names), api/src/sweeprun.rs
+    5 -> 8 (`COMMAND_TARGETS`; and `names`, the distinct command names of
+    the older unfinished commands of one read), cli/src/
+    gdfl_import_command.rs 0 -> 2 and cli/src/store_write.rs 0 -> 4 (one
+    command line's arguments; `WRITERS`), costs/src/lot.rs 0 -> 1
+    (`old_expiries`, a compiled `&'static [TradeDay]`), pull/src/
+    census_store.rs 0 -> 1 (`READER_FEATURES`), pull/src/http.rs 0 -> 1
+    (one bar's four prices), telemetry/src/sink.rs 0 -> 5 (the audit
+    dimension and lifecycle word tables).
+  ONE ANSWER'S OWN LIST -- api/src/imports.rs 0 -> 2 (the attempts of
+    one (kind, day)), api/src/logs.rs (one attempt's importer runs and
+    one (day, kind)'s attempts, built while one log is read), api/src/
+    repair_route.rs 0 -> 1 (`str::contains` of a needle in one journal
+    line of the asked page), pull/src/gdfl_import_quality.rs 0 -> 1
+    (`sampled_among`: the lines one rescan wrote for one day).
+
+COSTS THE ROUND'S GATE 11 ENTRIES NAME (not O(1); for docs/06-limits.md
+and the O(1)-at-p99 rule): `census::newest` O(t log t) per census read
+in the tail's rows; `facets::rows_answer` O(k log k) in a selection's
+rows; `store_route::delta_entries` O(d log d) in a delta's rows;
+`imports::merged` O(r log r) in the asked range's rows; `gaps_route::
+second_audit` one per-day sort of a day's seconds per asked day;
+`logs::attempt_of_importer_run` O(attempts). Each is measured, if at
+all, by its own package's p50/p99 rows in this file; GF-1 measured none
+of them and claims none of them as O(1).
+~~~~
+
+### Gate 11 — WP-62's pull runtime, merged after the round's run (GF-1, 14 October 2026)
+
+~~~~text
+WP-62 (the pull runtime and its six repairs) merged into feat/db-fix
+after the 12 October full-gate run and ran no CI gate, so the gate met
+15 new occurrences in three files. GF-1 read each before counting it;
+`file old -> new`, the occurrences, and the bound that holds them.
+Most sit in the restart scan, which runs ONCE PER PROCESS at site load
+and whose reads WP-62 bounds in "Pull runtime: the restart scan, the
+store probe, the pull order (WP-62)" above: the newest 800 records
+(`INTERRUPTED_SCAN`), the 64 newest run records before them
+(`INTERRUPTED_RUNS`) and at most 64 re-read faults, so every list the
+walk builds holds at most 928 entries. None is on a route's request
+path.
+
+RULE 1 (`ALLOW_SEARCH`) -- api/src/pullrun.rs 0 -> 3: `older_runs`
+  searches the index's `runs` list for the scan's first ordinal and its
+  `fault_ordinals` twice for the span the walk re-reads. Both lists are
+  sorted as the index is written; O(log n) in a list that is NOT bounded
+  by a constant (every run record and fault ever written, which that
+  section already names), once per process.
+RULE 4 (`ALLOW_SORT`) -- api/src/pullrun.rs 1 -> 3: `restart_scan_waiting`
+  sorts the scan's undecodable records (at most 928) and `older_runs` the
+  ordinals it re-reads (at most 64 + 64), once per process.
+  api/src/server.rs 7 -> 8: `spot_ask` sorts the named members of one
+  spot request, once per run; bounded by the request (at most the
+  universe of instruments a request may name).
+RULE 6 (`ALLOW_SCAN`) -- api/src/pullrun.rs 1 -> 4: `Walker::closed`
+  finds the run a close directly follows and else the newest open run of
+  its scope, window and source (`position`, `rposition`) among the open
+  runs the walk holds (at most 928); `own_vendors` finds a feed in
+  `pull::vendor::Feed::ALL`, a compiled table. api/src/server.rs 6 -> 7:
+  `ladder_withheld`'s `find` of one vendor's census among the per-vendor
+  censuses, bounded by `Vendor::ALL`. pull/src/calendar.rs 0 -> 1:
+  `short_day_on` walks the compiled two-entry `SHORT_DAYS`.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/pullrun.rs 3 -> 7: `Walker::opened`
+  asks the walk's closed ordinals (at most 928) whether a restated head's
+  run was closed; `rows_of` and `own_vendors` ask the run's own store
+  vendors, at most one per feed of `Feed::ALL`; `stop_of` asks one pass's
+  outcomes, one per leg group of the run, for `Halted`, as the three
+  `Retry` probes beside it already were.
+
+None of these is claimed O(1) here. Measured only where WP-62 measured
+them (`api::server::tests::pull_runtime_costs`, an ignored test run by
+hand; its figures are in WP-62's report): UNVERIFIED as a gated
+measurement.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
@@ -16927,6 +17188,21 @@ rule 4" above (`store/verdict.rs 1`).
 | L-IA-46 | The year index does not say whose it is | a slot's head holds the magic, the version, the year and the commit generation only (docs/02 §35.7): no feed, exchange, segment or timeframe, and 4 reserved bytes are not room for them (the timeframe is 4 bytes of seconds). So a `.vdi` copied or moved into another family's directory reads as that family's calendar with no refusal, and a `.vdi` hard-linked into two families is written through by both | NOT DONE in format version 1. The identity goes into the slot head in year-index version 2, which IA-6 writes with the per-code day counts (RA-172) since both change the slot's size and every number pinned from it; `INDEX_VERSION` exists for that. A link-count refusal alone was not added: genesis itself gives the index two names for the instant between its `hard_link` and the removal of its temporary, so a refusal on a count other than 1 would turn a writer killed in that instant into a year refused until hand repair. Day images are not exposed: each carries its series in its header and a lookup refuses one filed under another family (RA-243) | IA-5, then IA-6 |
 | L-IA-47 | What a `Reader` holds, and what one call may read | a `Reader` caches the `.vdi`'s handle (at most 64 handles), so an index file REPLACED by another file (IA-6's rebuild, RA-303) is not seen by a running reader until it is dropped; slots written in place are seen at once. `Reader::page` reads the slice it is asked for: `page(code, 0, u32::MAX)` reads one code's whole slice, 22 MB at the record ceiling | the rebuild must write through the existing file or tell the server's reader (IA-6, IA-10b); the route must cap a page's `len` (IA-10b). A whole image is read only by `read_image` and `check_trailer`, at most `MAX_IMAGE_LEN` = 180,355,672 bytes, a longer file refused unread (IA-VD-21); a bit flipped in a table slot can make one lookup answer "not in this day's verification" with no error, and only `check_trailer` (WP-81's scrub) names it | IA-5, then IA-6, IA-10b, WP-81 |
 
+### Kept vendor answers (IA-8; D-4810, D-4859, D-4920)
+
+`pull::response_keep`, `docs/02-store-format.md` §36. Finding a pack is a
+path build, not a search; nothing below grows with the number of packs in the
+store (C-RK-01, C-RK-02).
+
+| Id | Operation | What grows | Bound and measurement | Owner |
+|---|---|---|---|---|
+| L-IA-6 | Kept answers on disk | one deflated body per distinct answer, a 128-byte receipt per window and per further month it covers, a 24-byte record per refused row; re-pulls of the same body add a receipt only | at most 64 MiB of bodies, 1,024 receipts and 2,796,202 refused-row records (64 MiB of 24-byte records, `REFUSAL_ROOM`) per segment, eight segments per (vendor, instrument[, contract], timeframe, month), so at most 512 MiB of bodies, 512 MiB of refused-row records and 8,192 receipts per month; a window whose rows no segment can take is refused `refusals_full` with nothing written (IA-RK-15). **Refused-row volume (cap arithmetic, an extrapolation, not a measurement):** every append writes its own landing's refused rows, a re-pull's `kept=2` receipt included, because each pass's refusals are that pass's evidence; a 60-day 1min window holds about 15,375 rows (41 sessions × 375), so if every row were refused and `/pull/run` re-pulled it 400 times the month's `.rsx` would take 400 × 15,375 × 24 B ≈ 147.6 MB, filling one segment's room after 181 passes and rolling to the next. Refused rows are rare in practice (off-grid or conflicting candles, D-3351), and nothing is backfilled. **Projection (an extrapolation, not a measurement of a vendor answer):** an invented Kite-shaped 1min month of NIFTY spot (22 days × 375 candles, `[stamp, o, h, l, c, v]`) measured 549,421 B raw and 118,768 B deflated at flate2's default level (4.6x); with volume and OI, as an option's, 643,521 B raw and 183,510 B deflated. The design's 26,617 1min instrument-months held today would take about 3.2 to 4.9 GB of distinct bodies, plus the 1day packs and every re-pull that returns a different body. **Files:** two per pack month (`.rsb`, `.rsr`), a third (`.rsx`) only when the landing refused a row, and one `keep.lock` per pack directory, so about 53,000 files for those months and one directory per instrument and timeframe | IA-8 |
+| L-IA-48 | One kept-answer append | O(body) to deflate and write, a read of the newest segment's receipts (at most 128 KiB, the duplicate check's bound), at most eight `stat`s for the newest segment, and two or three positional writes each followed by `F_FULLFSYNC` (body, refused rows when any, receipt), plus one receipt and sync per further month the window covers (a 1day window over five years: about 60) | flat in the store's size (C-RK-02: 0.970x at 10x, 1.019x at 100x packs). **Measured** 14 Oct 2026, release, internal disk, loaded machine: p50 7.97 ms, p99 16.0 ms, max 25.2 ms (n = 200), a small body; a second run an hour later on a busier machine p50 25.0 ms, p99 51.0 ms, max 152.8 ms (ratios 0.780x and 0.617x). 15 Oct 2026, dev profile (opt-level 3), internal disk: p50 27.0 ms, p99 78.7 ms, max 152.0 ms (n = 200; 1.263x, 1.100x). **Real bars, 15 Oct 2026**: 326 Kite-shaped bodies rendered from stored NIFTY (1min and 1day, 2020), BANKNIFTY and RELIANCE (1min, 2020-11) and two NIFTY 2019-06-27 options' GDFL 1s days, kept on the external store disk: p50 3.66 ms, p99 38.4 ms, max 49.6 ms; the same 326 again as a re-pull (a receipt only) p50 2.04 ms, p99 41.9 ms, max 50.7 ms. The tail is the host's `F_FULLFSYNC` queue, shared with every writer on the machine, not the pack. It runs on the caller's thread after the landing returns; whether that is the pull's blocking thread or a bounded queue is IA-9's and IA-10c's to state (the rules audit's RA-049). Not yet called from the api: the production caller moves to `window_answered_async` with IA-10c (D-4920) | IA-8, then IA-10c |
+| L-IA-49 | Waiting for a pack directory's lock | a second landing of the same (vendor, instrument, timeframe) waits while the first holds `keep.lock` across one append | at most `LOCK_WAIT` = 30 s, then refused `lock_stalled` by name with nothing written (D-4920; `a_pack_lock_held_past_the_wait_is_refused_by_name`). Uncontended the lock is one `try_lock`; contended, one blocking `flock` on one short-lived named thread (`keep-lock`) per waiting append, which exits as soon as it has the lock, so the threads are bounded by the appends waiting at once. A refused waiter's thread takes the lock when it frees and lets it go at once; until then it stays parked and counted as abandoned, so at most `MAX_PARKED_WAITERS` = 4 abandoned waiters are parked per lock before the next contended append is refused `lock_stalled` at once, naming how many are parked (`LockWaitersParked`; IA-RK-17): a holder that never lets go leaves at most four threads and four descriptors behind per lock, plus any waits already in flight when the fourth was abandoned, not one per refused append. A waiter whose caller is still inside its wait is never counted, so healthy contention waits up to the 30 s however many appends queue (IA-RK-19, repair round 2: counting every waiter refused the sixth of six healthy appends at once). Not a fair queue: the host decides which blocked waiter wakes first, so a waiter can in principle lose more than one hand-over; the 2 × 1,000-append race (IA-RK-08) finishes with no refusal. **Per queued append (measured by the verify-IA-8-r3 probe on this machine, not re-measured in repair round 3):** each append ahead in the queue adds about 10 to 25 ms of wait, its own deflate, reads and synced writes, so 64 threads appending one pack at once waited p99 1.43 s; the wait grows with the queue, not with the store, and (an extrapolation, not a measurement) 30 s at 10 to 25 ms each is reached with roughly 1,200 to 3,000 appends queued on one pack at once. A reader takes no lock: it trusts receipts only | IA-8 |
+| L-IA-50 | Reading one month's receipts | every trusted receipt of every segment of that month | at most 8 × 1,024 receipts of 128 B (1 MiB), read whole per segment. **Measured** (C-RK-01, one full segment, 1,024 receipts): p50 72.8 us, p99 215 us, max 8.68 ms (n = 2,000), flat from 1x to 100x packs (0.980x, 1.067x); a second, busier run p50 77.7 us, p99 1.11 ms, max 5.75 ms (1.020x, 0.991x); 15 Oct 2026, dev profile: p50 80.3 us, p99 817 us, max 6.17 ms (n = 2,000; 1.018x, 0.978x). On real bars (one month's pack of 1 to 46 receipts, n = 308): p50 20 us, p99 388 us, max 1.11 ms; one body read, inflated and checked against its BLAKE3: p50 122 us, p99 3.01 ms, max 12.9 ms (n = 326). A reader asking for one window's receipt reads its month's segments; an index by window is not built | IA-8 |
+| L-IA-51 | What a receipt cannot say | the keeper stores what its caller hands it: the rows landed and refused and their causes come from the landing; it does not re-run the landing | the per-row refused records (DB-G46) exist only when the caller passes them. Every landing refuses a row through `fetch::Refused::note`, which now records the row's own cause beside its second (`causes`, parallel to `local_seconds`), and `RefusedRow::all_of` turns one record into the keeper's rows (a record whose two lists differ is refused by name, `ListsDiffer`). `ingest::from_window` and `repair_window` do not return that record today (`ingest::Ingested` carries counts in `failures` text only, and the landing hands only the seconds to the gap ledger), so until IA-10b/IA-10c hand each landing's `fetch::Refused` through, a receipt carries the count (offset 56) with zero records. The verification half (IA-9) re-derives each refused row from the kept body under the receipt's landing rules version | IA-8, then IA-10b |
+| L-IA-52 | A window over months: its journal and its finishing | two 64-byte records in the pack directory's `windows.rsw` per window over months (`open` before the first receipt, `closed` after the last pointer); every append reads the journal's last one or two records under the pack lock, and when the last is `open` finishes it: one read of the first month's segment named, and one read of each further month's newest segment, plus one pointer write per missing pointer | O(1) per append for the look: one `stat` and at most 128 bytes, whatever the journal's length. The finishing costs what the interrupted append's pointers would have cost (O(months in the window), each one segment read of at most 128 KiB), and runs at most once per interruption. At most 1,048,576 records (64 MiB, `MAX_WINDOW_RECORDS`) per pack directory, so 524,288 windows over months; past that a window over months is refused `windows_full` by name with nothing written (IA-RK-21) and a window inside one month is still kept. Only the last two records are read: a damaged record further back is history no append reads, and is not found by the writer. Not measured as a bench: the look is a fixed-size read (repair round 3) | IA-8 |
+
 **Re-measured on 12 October 2026**, after the exchange level, the staging
 create and the counted lock wait landed (D-4922 to D-4924), same machine
 (shared with other agents building), release, `cargo bench -p store --bench
@@ -18449,6 +18725,8 @@ waiting write resets it once, and 200 more waiting polls move neither.
 | L-R318-02 | `cli zerodha-gaps` reads the whole ledger once per run | the ledger is append-only and keyed by line, with no index of `(key, day)` | O(ledger lines) once per run (about 79,000 lines, 9 MB, on 9 Oct 2026), then per series O(lines appended since that read) under the ledger's lock, and per short session at most its owed minutes read from the month | R3-18 |
 | L-R318-03 | The ledger's lock is advisory | `flock(2)` holds off only writers that take it; every writer in this tree does (`request_minutes::append_named_picking`, which `append_ledger` and `append_named` call), but a running build from before this change does not | until every process that appends to `audit/<feed>.gaps` or `audit/<feed>.repairs` runs a build with this change, run `cli zerodha-gaps --apply` only while no pull or repair runs against that store | R3-18 |
 | L-R318-04 | A ledger append waits for the lock's holder | an append that reads what others wrote cannot let a second writer in between its read and its write | one holder's read of the lines appended since its last read, one write and one `sync_data`; a holder that hangs inside its sync holds every ledger writer of that feed | R3-18 |
+| L-R318-05 | `gap_backfill::Have::holds`, one ledger probe | none: it is one `HashSet` probe of the pairs read, O(1) expected (an adversarial worst case is not claimed); the key is copied once per probe to build the probe's tuple | measured by GF-1 (16 Oct 2026, `crates/pull/tests/zerodha_gaps.rs` `a_ledger_probe_is_flat_in_the_ledgers_lines`, the dev profile at opt-level 3, a loaded machine): n = 200 passes of 256 probes, half held, per probe at 790 lines p50 40 ns, p99 385 ns, max 430 ns; at 79,000 lines p50 39 ns, p99 1,007 ns, max 1,208 ns; median ratio 0.975 (held under 3.0x), p99 ratio 2.6 printed, not asserted on a shared machine | R3-18, GF-1 |
+| L-R318-06 | `repair_plan::owed`, what one day owes | none: one calendar answer, at most two dated-table walks of fixed length and the three-entry halt table, all compile-time | measured by GF-1 (16 Oct 2026, `crates/pull/tests/zerodha_gaps.rs` `what_a_day_owes_costs_the_same_on_every_date_of_the_window`, the dev profile at opt-level 3): n = 200 passes over 120 calendar days from 2018-01-01, 2022-01-01 and to 2026-09-30, per call, INDEX p50 26 / 18 / 20 ns, p99 30 / 21 / 22 ns, max 78 / 85 / 25 ns; CASH p50 27 / 19 / 21 ns, p99 30 / 21 / 23 ns, max 31 / 67 / 25 ns; 2022 and 2026 medians 0.69 to 0.78 of 2018's (held under 3.0x) | R3-18, GF-1 |
 
 ## Window keys that name no series (AG-03, D-4966)
 
@@ -18496,6 +18774,196 @@ log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
 | L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
 | L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
 
+### Gate 11 — the packages merged on 14 and 15 October, after GF-1's last run (GF-1, 16 October 2026)
+
+~~~~text
+SC-2, AF-03, AF-04 and WP-12f merged into feat/db-fix after GF-1's run
+of 14 October and ran no gate 11, so the gate met 7 new occurrences in
+four files. GF-1 read each before counting it; `file old -> new`, the
+occurrences, and the bound that holds them.
+
+RULE 1 (`ALLOW_SEARCH`) -- store/src/sealed.rs 0 -> 2: the sealed
+  month's time lookup bisects ONE FRAME's stamps (`partition_point`, at
+  most `block_rows` = 256, a format constant) and, past the time table,
+  a window of at most `BISECT_IN_ONE_READ` + 1 = 65 directory entries
+  read in one read (D-4965 item 6). Both lists are bounded by constants
+  of the format, never by the month.
+RULE 3 (`ALLOW_UNSIZED`) -- api/src/bars_change.rs 0 -> 1: `Rules`'
+  `refused` map, this request's refused master loads by IST day. Empty
+  until a load is refused, which is the failure path; at most one insert
+  per IST day the request spans (CSL-05). No growth on the success path.
+RULE 6 (`ALLOW_SCAN`) -- store/src/sealed.rs 0 -> 2: `extremes.iter()
+  .position` over the six `EXTREME_NAMES` and `checks.iter().find` over
+  the audit's six named checks: both compiled arrays. api/src/server.rs
+  7 -> 8: the `/bars` contract locator's `find` of the asked feed's
+  census among the per-vendor censuses `census_now` holds (AF-04),
+  bounded by `Vendor::ALL`.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/gdfl_import.rs 3 -> 4:
+  `end_auction_keys` asks whether every share of a filter is among the
+  shares of the run's `--only` list (WP-12f repair 7): once per day's
+  close, over the operator's own filter (a handful of names), never per
+  file, row or tick.
+
+None of these is claimed O(1) here and none is on a request's per-bar
+or per-row path except the sealed lookups, whose bounds are the format's.
+Not timed by GF-1; SC-2 times the sealed page and lookup (its own row
+above), AF-03 and WP-12f did not time these sites.
+~~~~
+
+### Gate 11 — R4-08 and R3-18, declared after they merged (GF-1, 16 October 2026)
+
+~~~~text
+R3-18 and R4-08 merged into feat/db-fix on 16 October after GF-1's run of
+that day and ran no gate 11, so the gate met 7 new occurrences in three
+files. GF-1 read each before counting it; `file old -> new`, the
+occurrences, and the bound that holds them.
+
+RULE 4 (`ALLOW_SORT`) -- cli/src/zerodha_gaps_command.rs 0 -> 1: `cli
+  zerodha-gaps ALL` sorts the symbol directory names it listed, once per
+  run, O(s log s) over the series of one segment, so two runs walk them
+  in one order. A verb, never a request path.
+  pull/src/gap_backfill.rs 0 -> 1: per held month, the days the plan
+  names (absent sessions and short ones) are put in date order before
+  the month's lines are found: at most one entry per calendar day of the
+  month, 31, never the ledger or the store.
+  pull/src/tickstore_write.rs 0 -> 2: the worker threads' results are
+  put back in member order, O(m log m) over the day's members, once per
+  day written (inside L-TSW-1's O(the day's bytes)); and the day
+  folder's leftover `<day>.bts.tmp*` names are sorted so the refusal
+  names them in one order: the leftovers of one day, normally none.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/gap_backfill.rs 0 -> 1: `Have::holds`
+  is a `HashSet` probe (O(1) expected, timed by
+  `a_ledger_probe_is_flat_in_the_ledgers_lines`, L-R318-05).
+  pull/src/tickstore_write.rs 0 -> 2: `run_id_ok`'s `(1..=64).contains`
+  is a literal Range; `columnar`'s `line.contains(&b'\r')` tests one CSV
+  line for a stray carriage return inside the encode that already reads
+  every byte of the member once (L-TSW-1), never a lookup.
+
+None of these is on a request's per-bar or per-row path. The two writer
+sites are inside the write L-TSW-1 bounds by the day's bytes; the sorts
+are bounded by a month's days, a day's members or one segment's series.
+~~~~
+
+### Gate 11 — the packages merged on 16 and 17 October, declared after they merged (GF-1, 17 October 2026)
+
+~~~~text
+AF-01, AF-02, AG-01, R3-32 and R3-35 merged into feat/db-fix after GF-1's
+run of 16 October. feat/db-fix carries none of the round's gate 11
+allowances (they land with GF-1), so none of them could run the gate
+green on its own tree, and the merged tree met 14 new occurrences in six
+files and 4 that R3-35's split moved out of `gdfl_import.rs`. GF-1 read
+each before counting it; `file old -> new`, the occurrences, and the
+bound that holds them.
+
+RULE 4 (`ALLOW_SORT`) -- api/src/imports.rs 1 -> 2: `where_looked` sorts
+  the names of the directories under `logs/` that no importer writes,
+  once per `/imports.json` run answer that names where it looked: the
+  log directories of one store (one per program that logs), then cut to
+  `MAX_NOT_READ_NAMED` = 32 names and the rest counted.
+RULE 6 (`ALLOW_SCAN`) -- api/src/imports.rs 2 -> 3: `started_of` finds the
+  `started` field among one journal `run` line's own fields, a line the
+  importer writes with a fixed field set.
+  cli/src/gdfl_import_guard.rs 0 -> 2: the tail read finds the first and
+  the last newline of one window of the sources ledger, at most
+  `TAIL_WINDOW` = 1 MiB (L-AF01-3), never the whole file.
+  cli/src/watchdog_command.rs 0 -> 1: `value_of` finds one flag among the
+  pairs a verb's own command line parsed, at most one pair per word the
+  operator typed.
+  pull/src/gdfl_import_day.rs 0 -> 1 and pull/src/gdfl_import.rs 1 -> 0:
+  R3-35's move-only split (`the_split_moves_lines_and_changes_none`)
+  carried the one allowed occurrence into the day file; same line, same
+  bound as before the split.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags.rs 0 -> 1: the closers of one
+  day of the page, a list of the handful of runs that closed it (AF-02
+  repair 2), probed once per row of that day.
+  api/src/pullrun.rs 7 -> 9: AG-01's restart walk probes its `closed`
+  list (one entry per closing record the walk read, at most
+  `INTERRUPTED_SCAN` + `INTERRUPTED_RUNS` = 864, once per process, the
+  bound "The restart scan's walk is bounded by what it reads" states) and
+  a `BTreeSet` of the guessed ordinals twice (a tree probe, O(log n)).
+  cli/src/watchdog_command.rs 0 -> 3: a verb's compile-time flag and
+  switch tables (a few words each) per argument word, and the two-entry
+  `OWN_ENV` table per `--env` pair.
+  pull/src/gdfl_import_journal.rs 0 -> 3 and pull/src/gdfl_import.rs 4 -> 1:
+  R3-35's split carried three allowed occurrences into the journal file;
+  same lines, same bounds as before the split.
+
+None of these is on a request's per-bar or per-row path except the
+dayflags closers, bounded by the runs that closed one day.
+~~~~
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-33 | Three O(1) claims merged on 16 and 17 October name no timing | `feeds_route::ImportReach::not_yet` (one comparison), `feeds_route::imported_to` (one probe while the journal does not move) and `store::month_summary`'s per-bar fold carry no test that times them at two sizes; gate 12 asked for a proof and none exists, so each says UNVERIFIED rather than citing a test that does not measure it | not_yet: one `i64` comparison; imported_to: L-R305-3's bound; the fold: a constant amount of work per bar by reading, NOT MEASURED | R3-05, R3-06; named by GF-1 |
+
+### Gate 11 — AG-04, declared after it merged (GF-1, 17 October 2026)
+
+~~~~text
+AG-04 (the closing-auction sidecar version 2) merged into feat/db-fix on
+17 October 2026 after GF-1's run of that day had made gate 11 green, and
+feat/db-fix carries none of GF-1's allowances, so it met one new
+occurrence. GF-1 read it before counting it.
+
+RULE 1 (`ALLOW_SEARCH`) -- api/src/sources.rs 0 -> 1: `auction_of`, for
+  `/sources/day.json`, asks of each auction record of the asked day
+  whether a 1s bar holds the same second, price and quantity, by one
+  `binary_search_by_key` over that day's 1s bars of the one instrument
+  asked, ascending by time (at most 86,400). O(log n) per record of that
+  day; the month's other records are only compared with the day's bounds.
+~~~~
+
+### Gate 11 — R3-09 and R4-06, declared after they merged (GF-1, 18 October 2026)
+
+~~~~text
+R3-09 (the census caches warmed at start, `/census/rollup.json`) and R4-06
+(the rehearse-then-run gate) merged into feat/db-fix on 17
+October 2026 after GF-1's run of that day had made gate 11 green; feat/db-fix
+carries none of GF-1's allowances, so the merged tree met 11 new
+occurrences in four files. GF-1 read each before counting it; `file old ->
+new`, the occurrences, and the bound that holds them.
+
+RULE 3 (`ALLOW_UNSIZED`) -- pull/src/rehearsal.rs 0 -> 1: `Gate::from_list`
+  keeps the keys of the one table it is reading in an unsized `HashSet`,
+  to refuse a key written twice. The list is `config/store-steps.toml`,
+  committed to the repository and read once per gate built; a table has
+  a few dozen keys, and the set is cleared at each table.
+RULE 4 (`ALLOW_SORT`) -- api/src/census_rollup.rs 0 -> 1: the roll-up
+  orders one answer's (month, rung) cells newest month first; the cells
+  are at most `CELLS_MOST` = 4,096 and refused by name past it
+  (`rollup_too_many`), never the census.
+RULE 5c (`ALLOW_DISARM`) -- api/src/census_cache.rs: R3-09 put its test
+  module's panic-lint allow on the `mod` line; GF-1 moved it into
+  `census_warm_tests.rs` as an inner attribute, as every other test file
+  carries it, so no allowance is added.
+RULE 6 (`ALLOW_SCAN`) -- pull/src/rehearsal.rs 0 -> 1: `Gate::admit` asks
+  whether a kind holds any of the eight `NEVER_AUTOMATIC` words; the kind
+  is at most `MAX_KIND_BYTES` = 64 bytes and refused unread past it, so the
+  scan is at most 8 x 64 byte comparisons per start.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/census_cache.rs 0 -> 3: the list of
+  feeds whose answers are derived (one entry per feed `start` was given),
+  probed once per background read of a feed's census.
+  api/src/census_rollup.rs 0 -> 1: a query parameter's name against the
+  route's four-name table, once per parameter of one request.
+  api/src/settings_route.rs 0 -> 1: building the credential-field list
+  (four charter fields plus each feed's key field) once per process,
+  inside its `OnceLock`.
+  pull/src/rehearsal.rs 0 -> 2: `is_commit`'s two Ranges, a length in
+  `7..=40` and a byte in `b'a'..=b'f'`.
+
+None of these is on a request's per-bar or per-row path; the roll-up's
+sort is bounded by the cells of one answer.
+~~~~
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-34 | Three O(1) claims merged on 17 October name no timing | `server::exchange_watch` (AH-02: one atomic add each way, two uncontended locks, one boxed body), `speed::AccessWindows::cut` (AH-02: one probe of the routes table) and `facets::emptied` (R3-09: one `mem::replace` by an empty index) carry no test that times them at two sizes; gate 12 asked for a proof and none exists, so each says UNVERIFIED rather than citing a test that does not measure it | each is a constant amount of work per call by reading, NOT MEASURED | AH-02, R3-09; named by GF-1 |
+
+## The macOS rows (GF-1, D-4990)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-GF1-31 | Gate 31 reads, it does not compile | its inventory reads tokens: `cfg` conditions on a test, its blocks, its file and the `mod` declarations to its file, through `#[path]` | a test written by a macro (`macro_rules!` or a proc macro) is not seen; a predicate the platform does not decide (`target_arch`, `feature`, `test`) is taken to hold on both hosts, so the two Linux-arch tests of `store/tests/open_flags.rs` both read `linux=runs` though each runs on one arch only. What it guarantees: every test it names as running on macOS passed in the macOS job's own log (`gates_platform ran`), and a row compiled out on a host is printed NOT RUN there | GF-1 |
+| L-GF1-32 | The `macos` job has not run on GitHub yet | agents never push; its steps were run on this Mac (M4 Pro, macOS, APFS) instead: the tool's tests, `verdict` on the workflow, and `ran` on the `cargo test` logs of the crates that hold the rows | the first push runs it; until then the evidence is the local run named in `state/fix/round2/gate-20261013.json` | GF-1 |
 ## `/gaps.json` and the month summary (R3-06; D-4980; DB-A30)
 
 **The bound.** `/gaps.json` is O(months asked) per request, capped at 12
