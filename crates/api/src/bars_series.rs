@@ -27,9 +27,16 @@
 //! * **Opening**: a month file is opened only when a row of it is read, or a
 //!   time is located in it.
 //! * **Filters**: a day bound locates its two edges, in the two edge months
-//!   only. A time-of-day bound locates each day's window edges, two `.tix`
-//!   lookups per calendar day of the range: `O(days)`, cached per month file
-//!   and window ([`RUNS`]).
+//!   only. A time-of-day bound cuts each day's window from the month's
+//!   TIME-OF-DAY INDEX ([`TodIndex`], R3-07, DB-B57): built once per month
+//!   file stamp from the month summary R3-06 keeps beside it, it answers "rows
+//!   before this instant" with one array index and one popcount, so a NEW
+//!   window costs two in-memory lookups a day and no file is opened — what a
+//!   kept window costs, give or take that arithmetic. A month that keeps no
+//!   usable summary (none written yet, stale, or one whose counts do not
+//!   add up) is located the old way, two `.tix` lookups a day, and is
+//!   COUNTED and NAMED on the answer (`tod_index`), never silently slower.
+//!   Either way the runs are cached per month file and window ([`RUNS`]).
 //! * **Rank** — how many kept rows lie strictly before an instant — is one
 //!   bucket lookup (the instant's month, or its day under a time-of-day bound)
 //!   and at most one `first_at_or_after`: O(1) with the month's `.tix`.
@@ -345,6 +352,412 @@ type RunsKey = (PathBuf, Stamp, i64, i64, u32, u32);
 /// Every month file's time-of-day runs, by file stamp and window.
 static RUNS: Memo<RunsKey, Arc<[Run]>> = Memo::new();
 
+/// A process-wide memo held within a byte budget, in two generations of at
+/// most half the budget each — the [`Memo`] rule by weight rather than by
+/// count (DB-B57): when the young generation would pass its half, the old one
+/// is dropped and the young one becomes old, so at most the older half is
+/// ever dropped at once and a value in use (hit since the last turn) survives
+/// the turn. One value heavier than half the budget is not held. A lookup or
+/// an insert is two hash probes; a turn moves one map, freed outside the
+/// lock.
+pub(super) struct Weighed<K, V> {
+    map: OnceLock<Mutex<WeighedGenerations<K, V>>>,
+    budget: usize,
+    turned: std::sync::atomic::AtomicU64,
+}
+
+/// The two generations behind a [`Weighed`], each value with its weight.
+struct WeighedGenerations<K, V> {
+    young: HashMap<K, (V, usize)>,
+    young_bytes: usize,
+    old: HashMap<K, (V, usize)>,
+}
+
+impl<K: Eq + Hash, V> WeighedGenerations<K, V> {
+    /// Puts `value` into the young generation, turning first when it would
+    /// pass `half`. Returns the dropped generation, to be freed unlocked.
+    fn admit(
+        &mut self,
+        key: K,
+        value: V,
+        weight: usize,
+        half: usize,
+    ) -> Option<Turned<K, (V, usize)>> {
+        let mut turned = None;
+        if let Some((_, was)) = self.young.remove(&key) {
+            self.young_bytes = self.young_bytes.saturating_sub(was);
+        }
+        if self.young_bytes.saturating_add(weight) > half {
+            let older = std::mem::replace(&mut self.young, HashMap::with_capacity(64));
+            let dropped = std::mem::replace(&mut self.old, older);
+            self.young_bytes = 0;
+            turned = Some(Turned { dropped });
+        }
+        self.young_bytes = self.young_bytes.saturating_add(weight);
+        self.young.insert(key, (value, weight));
+        turned
+    }
+}
+
+impl<K: Eq + Hash, V: Clone> Weighed<K, V> {
+    /// An empty memo of `budget` bytes across both generations.
+    pub(super) const fn new(budget: usize) -> Self {
+        Self {
+            map: OnceLock::new(),
+            budget,
+            turned: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, WeighedGenerations<K, V>> {
+        self.map
+            .get_or_init(|| {
+                Mutex::new(WeighedGenerations {
+                    young: HashMap::with_capacity(64),
+                    young_bytes: 0,
+                    old: HashMap::new(),
+                })
+            })
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The value held for `key`, cloned; a hit in the old generation moves
+    /// it into the young one.
+    pub(super) fn get(&self, key: &K) -> Option<V> {
+        let mut gens = self.lock();
+        if let Some((value, _)) = gens.young.get(key) {
+            return Some(value.clone());
+        }
+        let (key, (value, weight)) = gens.old.remove_entry(key)?;
+        let out = value.clone();
+        let turned = gens.admit(key, value, weight, self.budget / 2);
+        drop(gens);
+        self.announce(turned);
+        Some(out)
+    }
+
+    /// Holds `value`, which weighs `weight` bytes. One heavier than half the
+    /// budget is not held: it would turn a whole generation out for itself.
+    pub(super) fn put(&self, key: K, value: V, weight: usize) {
+        if weight > self.budget / 2 {
+            return;
+        }
+        let mut gens = self.lock();
+        gens.old.remove(&key);
+        let turned = gens.admit(key, value, weight, self.budget / 2);
+        drop(gens);
+        self.announce(turned);
+    }
+
+    fn announce<T>(&self, turned: Option<Turned<K, T>>) {
+        let Some(turned) = turned else {
+            return;
+        };
+        self.turned
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        drop(turned.dropped);
+    }
+
+    /// Turns taken since the process started.
+    #[cfg(test)]
+    pub(super) fn turns(&self) -> u64 {
+        self.turned.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bytes held across both generations.
+    #[cfg(test)]
+    pub(super) fn bytes(&self) -> usize {
+        let gens = self.lock();
+        gens.young_bytes + gens.old.values().map(|(_, weight)| *weight).sum::<usize>()
+    }
+}
+
+/// Bytes the time-of-day indexes may hold, both generations together.
+///
+/// A one-second index month of 22 trading days holds about 4.2 KB a day (the
+/// held seconds of the day as a bitmap, 352 words, and a 32-bit rank a word):
+/// about 92 KB a month, so 64 MiB holds about 700 such months — NIFTY's,
+/// BANKNIFTY's and five more 97-month one-second histories at once. A minute
+/// month is under 5 KB.
+const TOD_INDEX_BUDGET: usize = 64 * 1024 * 1024;
+
+/// A month's time-of-day index: for every IST day of the month, the rows of
+/// the month before it, and a rank over the day's held units (seconds, or
+/// minutes for a rung of a minute or coarser), so the number of rows stamped
+/// before any instant of the month is one array index and one popcount.
+/// Built once per month file stamp from the month summary (R3-06) and kept
+/// in [`TOD_INDEXES`]. R3-07, DB-B57.
+#[derive(Debug)]
+pub(super) struct TodIndex {
+    /// Epoch day of the month's first day.
+    first_day: i64,
+    /// Seconds one held unit spans: 1 below a minute, 60 at a minute or more.
+    unit: i64,
+    /// Rows of the month.
+    n_valid: u64,
+    /// One entry per day of the month.
+    days: Vec<TodDay>,
+}
+
+/// One day of a [`TodIndex`].
+#[derive(Debug, Default)]
+struct TodDay {
+    /// Rows of the month stamped before this day.
+    before: u64,
+    /// Rows stamped on it.
+    bars: u64,
+    /// The word of the day's bitmap `words[0]` is.
+    first_word: u32,
+    /// The held units of the day, one bit each, from `first_word * 64`.
+    words: Box<[u64]>,
+    /// `rank[i]` is the set bits of `words[..i]`.
+    rank: Box<[u32]>,
+}
+
+impl TodDay {
+    /// Rows of this day stamped at a unit below `unit`.
+    fn below(&self, unit: u64) -> u64 {
+        let word = unit / 64;
+        let Some(local) = word.checked_sub(u64::from(self.first_word)) else {
+            return 0;
+        };
+        let Ok(local) = usize::try_from(local) else {
+            return self.bars;
+        };
+        match (self.words.get(local), self.rank.get(local)) {
+            (Some(&bits), Some(&ranked)) => {
+                let mask = (1_u64 << (unit % 64)) - 1;
+                u64::from(ranked) + u64::from((bits & mask).count_ones())
+            }
+            _ => self.bars,
+        }
+    }
+
+    /// A day from its held units, ascending and distinct.
+    fn of(before: u64, held: &[u32]) -> Self {
+        let (Some(&first), Some(&last)) = (held.first(), held.last()) else {
+            return Self {
+                before,
+                ..Self::default()
+            };
+        };
+        let (first_word, last_word) = (first / 64, last / 64);
+        let span = usize::try_from(last_word - first_word + 1).unwrap_or(0);
+        let mut words = vec![0_u64; span];
+        for unit in held {
+            if let Some(word) = usize::try_from(unit / 64 - first_word)
+                .ok()
+                .and_then(|at| words.get_mut(at))
+            {
+                *word |= 1_u64 << (unit % 64);
+            }
+        }
+        let mut rank = Vec::with_capacity(span);
+        let mut sum = 0_u32;
+        for word in &words {
+            rank.push(sum);
+            sum = sum.saturating_add(word.count_ones());
+        }
+        Self {
+            before,
+            bars: u64::try_from(held.len()).unwrap_or(u64::MAX),
+            first_word,
+            words: words.into(),
+            rank: rank.into(),
+        }
+    }
+
+    /// Bytes this day holds.
+    fn weight(&self) -> usize {
+        self.words.len() * 8 + self.rank.len() * 4 + 48
+    }
+}
+
+impl TodIndex {
+    /// The index of a month from its kept summary, or why it cannot be one.
+    ///
+    /// Every count the rank arithmetic leans on is checked against the
+    /// header the summary must describe and against itself: the same
+    /// generation, rows and first and last stamp; no row off the rung's grid,
+    /// out of order or outside the month; exactly one held unit per row on
+    /// every day. A summary that fails any of them is refused by name and the
+    /// month is located the old way — never indexed from counts that do not
+    /// add up.
+    ///
+    /// # Errors
+    ///
+    /// The reason, in words.
+    pub(super) fn from_summary(
+        summary: &store::month_summary::MonthSummary,
+        month: YearMonth,
+        timeframe: Timeframe,
+        held: Held,
+    ) -> Result<Self, String> {
+        if summary.month != month || summary.timeframe_secs != timeframe.secs() {
+            return Err("its summary describes another month or rung".to_owned());
+        }
+        let stamps = held.n_valid == 0
+            || (summary.first_ts_micros == held.first_ts && summary.last_ts_micros == held.last_ts);
+        if summary.generation != held.generation || summary.n_valid != held.n_valid || !stamps {
+            return Err(format!(
+                "its summary describes generation {} with {} rows, the file is at generation {} \
+                 with {} rows",
+                summary.generation, summary.n_valid, held.generation, held.n_valid
+            ));
+        }
+        let counts = summary.counts;
+        if counts.folded != held.n_valid
+            || counts.invalid != 0
+            || counts.decreasing != 0
+            || counts.outside_month != 0
+        {
+            return Err(format!(
+                "its summary folded {} rows with {} off the grid or repeated, {} out of order \
+                 and {} outside the month, so its days cannot be counted into rows",
+                counts.folded, counts.invalid, counts.decreasing, counts.outside_month
+            ));
+        }
+        let seconds = timeframe.secs() < 60;
+        let unit = if seconds { 1 } else { 60 };
+        let first_day = summary.first_day();
+        let last_day = summary.last_day();
+        let mut minutes: Vec<Vec<u32>> = Vec::new();
+        if !seconds {
+            minutes = vec![Vec::new(); usize::try_from(last_day - first_day + 1).unwrap_or(0)];
+            for stamp in summary.minute_stamps() {
+                let day = day_of(stamp);
+                let minute = (stamp - day_start(day)) / (60 * MICROS);
+                if let (Some(slot), Ok(minute)) = (
+                    usize::try_from(day - first_day)
+                        .ok()
+                        .and_then(|at| minutes.get_mut(at)),
+                    u32::try_from(minute),
+                ) {
+                    slot.push(minute);
+                }
+            }
+        }
+        let mut days = Vec::with_capacity(minutes.len().max(31));
+        let mut before = 0_u64;
+        for (at, day) in (first_day..=last_day).enumerate() {
+            let held_units = if seconds {
+                summary.seconds_on(day).ok_or_else(|| {
+                    "its summary keeps no seconds (the density rule leaves them out of a \
+                     sparse month)"
+                        .to_owned()
+                })?
+            } else {
+                minutes.get_mut(at).map(std::mem::take).unwrap_or_default()
+            };
+            let entry = TodDay::of(before, &held_units);
+            if entry.bars != u64::from(summary.bars_on(day)) {
+                return Err(format!(
+                    "its summary counts {} bars on day {day} and {} held {}",
+                    summary.bars_on(day),
+                    entry.bars,
+                    if seconds { "seconds" } else { "minutes" }
+                ));
+            }
+            before = before.saturating_add(entry.bars);
+            days.push(entry);
+        }
+        if before != held.n_valid {
+            return Err(format!(
+                "its summary's days hold {before} rows, the file {}",
+                held.n_valid
+            ));
+        }
+        Ok(Self {
+            first_day,
+            unit,
+            n_valid: held.n_valid,
+            days,
+        })
+    }
+
+    /// Rows of the month stamped strictly before `ts`: what
+    /// `BarFile::first_at_or_after(ts)` answers, from memory. One day lookup,
+    /// one rank lookup and one popcount.
+    pub(super) fn rows_before(&self, ts: i64) -> u64 {
+        let day = day_of(ts);
+        let Ok(at) = usize::try_from(day - self.first_day) else {
+            return 0;
+        };
+        let Some(entry) = self.days.get(at) else {
+            return self.n_valid;
+        };
+        // A UNIT u HOLDS A ROW STAMPED u × unit SECONDS INTO THE DAY, which is
+        // before `ts` exactly when u < ceil(into / (unit × 1 s)).
+        let into = ts - day_start(day);
+        let span = self.unit * MICROS;
+        let unit = u64::try_from((into + span - 1).div_euclid(span)).unwrap_or(0);
+        entry.before + entry.below(unit)
+    }
+
+    /// Bytes this index holds.
+    fn weight(&self) -> usize {
+        self.days.iter().map(TodDay::weight).sum::<usize>() + 64
+    }
+}
+
+/// Every month file's time-of-day index, or why it has none, by the bar
+/// file's stamp and the summary's (a summary rewritten beside an unchanged
+/// month is read again).
+static TOD_INDEXES: Weighed<TodKey, TodEntry> = Weighed::new(TOD_INDEX_BUDGET);
+
+/// A month file, its stamp and its summary's stamp (`None` when it has none).
+type TodKey = (PathBuf, Stamp, Option<Stamp>);
+
+/// A month's time-of-day index, or why it has none.
+type TodEntry = Arc<Result<TodIndex, String>>;
+
+/// The time-of-day index of one held month, from the memo when neither the
+/// bar file nor its summary changed, else built from the summary. One `stat`
+/// of the summary when the memo holds it; one read of it (a few kilobytes to
+/// about 55 KB for a one-second month) and a pass over its held units when
+/// it does not.
+fn tod_index_of(
+    path: &Path,
+    stamp: Stamp,
+    month: YearMonth,
+    timeframe: Timeframe,
+    held: Held,
+) -> TodEntry {
+    let beside = store::month_summary::path_beside(path);
+    let summary_stamp = std::fs::symlink_metadata(&beside)
+        .ok()
+        .map(|meta| Stamp::of(&meta));
+    let key = (path.to_path_buf(), stamp, summary_stamp);
+    if let Some(index) = TOD_INDEXES.get(&key) {
+        return index;
+    }
+    let built = match store::month_summary::read_kept(path, held.n_valid) {
+        Ok(summary) => TodIndex::from_summary(&summary, month, timeframe, held),
+        Err(why) => Err(why.to_string()),
+    };
+    let weight = built.as_ref().map_or(256, TodIndex::weight);
+    let built = Arc::new(built);
+    TOD_INDEXES.put(key, Arc::clone(&built), weight);
+    built
+}
+
+/// How one request's time-of-day bound was cut, month by month (R3-07): from
+/// the runs memo, from the month's time-of-day index, or located day by day
+/// because the month keeps no usable summary — counted, and the first
+/// reason named, so a slow first window is never silent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodReport {
+    /// Months whose runs this window was already cut for.
+    pub kept: usize,
+    /// Months cut from their time-of-day index, no bar file opened.
+    pub indexed: usize,
+    /// Months located day by day through their `.tix`.
+    pub located: usize,
+    /// Why the first located month was not indexed.
+    pub why: Option<String>,
+}
+
 /// The months a rung directory holds a bar file for, oldest first.
 ///
 /// One `stat` of the directory; the listing is read again only when the
@@ -409,7 +822,12 @@ pub(super) fn held_months(dir: &Path) -> Result<Arc<[YearMonth]>, String> {
 /// 2023-07) ends a share's months exactly as a missing pull would, and no
 /// lifecycle source tells them apart on this path. Both stay counted as
 /// expected absences rather than invented as holes.
-fn life_of(key: &SeriesKey, vendor: Vendor, held: &[YearMonth]) -> Option<(YearMonth, YearMonth)> {
+fn life_of(
+    root: &Path,
+    key: &SeriesKey,
+    vendor: Vendor,
+    held: &[YearMonth],
+) -> Option<(YearMonth, YearMonth)> {
     use brutex_core::instrument::Segment;
     let held_life = held.first().copied().zip(held.last().copied());
     let never_expires =
@@ -417,12 +835,59 @@ fn life_of(key: &SeriesKey, vendor: Vendor, held: &[YearMonth]) -> Option<(YearM
     let Some((born, died)) = held_life.filter(|_| never_expires) else {
         return held_life;
     };
-    let span_end = pull::vendor::Feed::ALL
-        .into_iter()
-        .find(|feed| feed.store_vendor() == Some(vendor))
-        .and_then(|feed| feed.descriptor().archive.or(feed.descriptor().window))
-        .and_then(|span| span.to.year_month().ok());
+    let span_end = served_end(root, vendor);
     Some((born, span_end.map_or(died, |to| to.max(died))))
+}
+
+/// The last month a feed SERVES, from what the store and its sources hold
+/// rather than a date typed into the program (R3-05, R3-07): the widest of
+/// the descriptor's dated measurement of the archive, the newest day the
+/// import journal names (not after today: a line stamped later is no
+/// evidence of a delivery), and the operator's window as the store's
+/// settings hold it now. So importing one day past the old end, or saving a
+/// later window, moves an index's owed months with no rebuild.
+///
+/// `None` for a feed with no recorded span (an index's life is then what it
+/// holds). Cost: one `stat` of the settings and, for an archive feed, one of
+/// the journal while neither changed — both readers keep what they read —
+/// and only an `INDEX` series asks.
+fn served_end(root: &Path, vendor: Vendor) -> Option<YearMonth> {
+    let feed = pull::vendor::Feed::ALL
+        .into_iter()
+        .find(|feed| feed.store_vendor() == Some(vendor))?;
+    let descriptor = feed.descriptor();
+    let day_month = |day: pull::session::Day| day.year_month().ok();
+    let mut end: Option<YearMonth> = None;
+    let mut widen = |month: Option<YearMonth>| {
+        end = match (end, month) {
+            (Some(held), Some(more)) => Some(held.max(more)),
+            (held, more) => held.or(more),
+        };
+    };
+    if let Some(archive) = descriptor.archive {
+        widen(day_month(archive.to));
+        let today = crate::ingest::today_ist().ok();
+        if let Ok(journal) = crate::server::import_journal::snapshot(root)
+            && let Some((_, last)) = journal.parsed.span()
+        {
+            let last = today.map_or(last, |today| last.min(today));
+            widen(day_month(last));
+        }
+    }
+    if let Some(window) = descriptor.window {
+        let settings = crate::server::settings_route::snapshot(root);
+        let to =
+            crate::server::settings_route::effective(&settings, store::settings::Key::WindowTo);
+        let saved = to
+            .value
+            .as_deref()
+            .and_then(|text| text.get(..7))
+            .and_then(month_of_text);
+        // THE SETTING WHEN ONE IS IN FORCE, else the descriptor's own end:
+        // a window the operator narrowed narrows what is owed.
+        widen(saved.or_else(|| day_month(window.to)));
+    }
+    end
 }
 
 /// `YYYY-MM` as a month, or `None`: THE ONE MONTH SPELLING EVERY ROUTE READS.
@@ -617,6 +1082,8 @@ pub(super) struct SeriesPlan {
     /// Months a stretch read ([`Self::read_stretch`]) left rows of unread,
     /// one entry a month whatever the rows.
     unread: Vec<UnreadMonth>,
+    /// How a time-of-day bound was cut, month by month (R3-07).
+    pub(super) tod: TodReport,
 }
 
 /// Rows between two looks at the client's cancellation flag during a read
@@ -693,8 +1160,9 @@ impl SeriesPlan {
             outside_life: 0,
             faults: Vec::new(),
             unread: Vec::new(),
+            tod: TodReport::default(),
         };
-        let life = life_of(&plan.key, vendor, &held_all);
+        let life = life_of(root, &plan.key, vendor, &held_all);
         let mut held = held_all.iter().copied().peekable();
         for &month in months {
             while held.next_if(|&at| at < month).is_some() {}
@@ -812,7 +1280,10 @@ impl SeriesPlan {
     }
 
     /// Runs under a time-of-day bound: one per IST day whose window holds a
-    /// row, two lookups per calendar day, cached per month file and window.
+    /// row, cached per month file and window. A month whose runs are not
+    /// cached yet is cut from its time-of-day index ([`TodIndex`]) when its
+    /// summary is usable, with no bar file opened, else located day by day
+    /// through its `.tix` — counted in [`Self::tod`] and named either way.
     fn cut_days(
         &mut self,
         root: &Path,
@@ -840,11 +1311,32 @@ impl SeriesPlan {
             if lo >= hi {
                 continue;
             }
-            let memo = (path, stamp, lo, hi, tod.0, tod.1);
+            let memo = (path.clone(), stamp, lo, hi, tod.0, tod.1);
             let runs = if let Some(runs) = RUNS.get(&memo) {
+                self.tod.kept = self.tod.kept.saturating_add(1);
                 runs
             } else {
-                let runs: Arc<[Run]> = self.day_runs(root, slot, (lo, hi), held, tod)?.into();
+                // THE MONTH'S TIME-OF-DAY INDEX FIRST (R3-07, DB-B57): a new
+                // window is two in-memory lookups a day, not two `.tix` reads.
+                let index = tod_index_of(&path, stamp, month, self.timeframe, held);
+                let runs: Vec<Run> = match index.as_ref() {
+                    Ok(index) => {
+                        self.tod.indexed = self.tod.indexed.saturating_add(1);
+                        Self::day_runs(slot, (lo, hi), held, tod, |ts| Ok(index.rows_before(ts)))?
+                    }
+                    Err(why) => {
+                        // LOCATED, AND SAID: the answer is the same, the cost
+                        // is two `.tix` lookups a day, and the reason is on
+                        // the wire (`tod_index.why`).
+                        self.tod.located = self.tod.located.saturating_add(1);
+                        if self.tod.why.is_none() {
+                            self.tod.why = Some(format!("{} {month}: {why}", self.key.text()));
+                        }
+                        let mut locate = |ts: i64| self.locate(root, slot, ts);
+                        Self::day_runs(slot, (lo, hi), held, tod, &mut locate)?
+                    }
+                };
+                let runs: Arc<[Run]> = runs.into();
                 RUNS.put(memo, Arc::clone(&runs));
                 runs
             };
@@ -861,14 +1353,16 @@ impl SeriesPlan {
     }
 
     /// The day runs of one month: each IST day in `[lo, hi)` and inside the
-    /// file's records, its `[day + from, day + to + 1 s)` window located.
+    /// file's records, its `[day + from, day + to + 1 s)` window located by
+    /// `locate` (rows stamped strictly before an instant). ONE loop for both
+    /// ways a month is located, so the index and the `.tix` cannot cut a
+    /// different window.
     fn day_runs(
-        &mut self,
-        root: &Path,
         slot: usize,
         (lo, hi): (i64, i64),
         held: Held,
         (from, to): (u32, u32),
+        mut locate: impl FnMut(i64) -> Result<u64, String>,
     ) -> Result<Vec<Run>, String> {
         let mut out = Vec::with_capacity(31);
         let mut day = day_of(lo.max(held.first_ts));
@@ -878,8 +1372,8 @@ impl SeriesPlan {
             let window_lo = (start_of_day + i64::from(from) * MICROS).max(lo);
             let window_hi = (start_of_day + (i64::from(to) + 1) * MICROS).min(hi);
             if window_lo < window_hi {
-                let start = self.locate(root, slot, window_lo)?;
-                let end = self.locate(root, slot, window_hi)?;
+                let start = locate(window_lo)?;
+                let end = locate(window_hi)?;
                 if end > start {
                     out.push(Run {
                         slot,
@@ -1436,6 +1930,10 @@ mod generation_tests {
     /// AND A SHARE ONLY THEIR HELD LIFE.** DB-B47.
     #[test]
     fn an_index_is_owed_the_feeds_span_after_its_newest_file() {
+        // A STORE WITH NO JOURNAL AND NO SAVED SETTINGS: the descriptor and
+        // the built-in window decide.
+        let root = crate::scratch::path("lifeof-bare");
+        std::fs::create_dir_all(&root).expect("a root");
         let held = months(&["2019-01", "2019-03"]);
         let index = SeriesKey::parse("NSE-INDEX-INDIAVIX").expect("key");
         let share = SeriesKey::parse("NSE-CASH-BAJAJ-AUTO").expect("key");
@@ -1448,35 +1946,316 @@ mod generation_tests {
         };
         // ZERODHA: the operator's window ends 2026-09 (D-3338).
         assert_eq!(
-            life_of(&index, Vendor::Zerodha, &held),
+            life_of(&root, &index, Vendor::Zerodha, &held),
             span("2019-01", "2026-09")
         );
         // GDFL: the archive it was bought as ends 2026-09-24.
         assert_eq!(
-            life_of(&index, Vendor::Gdfl, &held),
+            life_of(&root, &index, Vendor::Gdfl, &held),
             span("2019-01", "2026-09")
         );
         // A MONTH HELD PAST THE SPAN KEEPS ITS PLACE: the span never shortens.
         let late = months(&["2019-01", "2026-11"]);
         assert_eq!(
-            life_of(&index, Vendor::Zerodha, &late),
+            life_of(&root, &index, Vendor::Zerodha, &late),
             span("2019-01", "2026-11")
         );
         // A SHARE AND A CONTRACT LIVE FROM THEIR FIRST FILE TO THEIR LAST.
         assert_eq!(
-            life_of(&share, Vendor::Zerodha, &held),
+            life_of(&root, &share, Vendor::Zerodha, &held),
             span("2019-01", "2019-03")
         );
         assert_eq!(
-            life_of(&option, Vendor::Gdfl, &held),
+            life_of(&root, &option, Vendor::Gdfl, &held),
             span("2019-01", "2019-03")
         );
         // A FEED WITH NO RECORDED SPAN, AND A SERIES HOLDING NOTHING, CLAIM
         // NOTHING MORE THAN WHAT IS HELD.
         assert_eq!(
-            life_of(&index, Vendor::Dhan, &held),
+            life_of(&root, &index, Vendor::Dhan, &held),
             span("2019-01", "2019-03")
         );
-        assert_eq!(life_of(&index, Vendor::Zerodha, &[]), None);
+        assert_eq!(life_of(&root, &index, Vendor::Zerodha, &[]), None);
+    }
+
+    /// **AN INDEX'S LIFE ENDS WHERE ITS FEED IS SERVED TO, NOT AT A TYPED
+    /// DATE** (R3-07 item 7, after R3-05). A journal line for a GDFL day past
+    /// the descriptor's archive end moves the owed life of every index with
+    /// no rebuild; a line stamped after today is no evidence and is clamped.
+    #[test]
+    fn an_index_life_ends_at_the_served_span_not_a_fixed_date() {
+        let held = months(&["2019-01", "2019-03"]);
+        let index = SeriesKey::parse("NSE-INDEX-INDIAVIX").expect("key");
+        let root = crate::server::import_journal::tests::journal(
+            "r307-life",
+            "begin indices 2026-10-05 *\ndone indices 2026-10-05 * files=2 seconds=44891 \
+             failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+        );
+        let life = life_of(&root, &index, Vendor::Gdfl, &held).expect("a life");
+        assert_eq!(life.0, month_of_text("2019-01").expect("m"));
+        let today = crate::ingest::today_ist().expect("today");
+        let owed_to = today
+            .year_month()
+            .expect("a month")
+            .min(month_of_text("2026-10").expect("m"))
+            .max(month_of_text("2026-09").expect("m"));
+        assert_eq!(
+            life.1, owed_to,
+            "the journal's 2026-10-05, never past today"
+        );
+        // THE SAME INDEX ON A STORE WITH NO JOURNAL ENDS AT THE DESCRIPTOR.
+        let bare = crate::scratch::path("lifeof-nojournal");
+        std::fs::create_dir_all(&bare).expect("a root");
+        assert_eq!(
+            life_of(&bare, &index, Vendor::Gdfl, &held).map(|(_, to)| to),
+            month_of_text("2026-09")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tod_index_tests {
+    #![allow(clippy::expect_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    /// UTC micros of an IST wall clock on 2024-01-`date`.
+    fn ist(date: i64, hour: i64, minute: i64, second: i64) -> i64 {
+        // 2024-01-01 is epoch day 19,723.
+        ((19_722 + date) * 86_400 + hour * 3_600 + minute * 60 + second - 19_800) * MICROS
+    }
+
+    /// An invented bar at `ts`: prices that cannot be mistaken for a market's.
+    fn bar(ts: i64, n: i64) -> Bar {
+        Bar {
+            ts_micros: ts,
+            open: 1_000 + n % 7,
+            high: 1_010 + n % 7,
+            low: 990 + n % 7,
+            close: 1_005 + n % 7,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        }
+    }
+
+    /// Writes `rows` as NIFTY's January 2024 at `timeframe` under a fresh
+    /// scratch root, and returns the root and the bar file's path.
+    fn month_of(name: &str, timeframe: Timeframe, rows: &[Bar]) -> (PathBuf, PathBuf) {
+        let root = crate::scratch::path(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a root");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe,
+            month: YearMonth::new(2024, 1).expect("a month"),
+            file: FileKind::Bars,
+        })
+        .expect("a path");
+        #[expect(clippy::cast_possible_truncation, reason = "the cross-check id")]
+        let id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a writer");
+        file.append(rows).expect("ordered rows");
+        drop(file);
+        let bars = path.to_path_buf(&root);
+        (root, bars)
+    }
+
+    /// The index the month's kept summary gives, and the file reopened.
+    fn index_of(bars: &Path, timeframe: Timeframe) -> (Result<TodIndex, String>, BarFile, Held) {
+        let root = bars
+            .ancestors()
+            .nth(7)
+            .expect("the store root above vendor/exchange/segment/symbol/rung/month")
+            .to_path_buf();
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe,
+            month: YearMonth::new(2024, 1).expect("a month"),
+            file: FileKind::Bars,
+        })
+        .expect("a path");
+        #[expect(clippy::cast_possible_truncation, reason = "the cross-check id")]
+        let id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let file = BarFile::open_existing(&root, path, id).expect("the month opens");
+        let held = Held::of(&file);
+        let index = match store::month_summary::read_kept(bars, held.n_valid) {
+            Ok(summary) => TodIndex::from_summary(
+                &summary,
+                YearMonth::new(2024, 1).expect("a month"),
+                timeframe,
+                held,
+            ),
+            Err(why) => Err(why.to_string()),
+        };
+        (index, file, held)
+    }
+
+    /// Every window of `windows` cut from the index equals the one the
+    /// month's `.tix` cuts, and the rank of every second between `first` and
+    /// `last` on each day of `days` equals `first_at_or_after`.
+    fn agree(index: &TodIndex, file: &BarFile, held: Held, days: &[i64], windows: &[(u32, u32)]) {
+        let (lo, hi) = YearMonth::new(2024, 1).expect("m").ist_bounds_micros();
+        for &tod in windows {
+            let from_index =
+                SeriesPlan::day_runs(0, (lo, hi), held, tod, |ts| Ok(index.rows_before(ts)))
+                    .expect("cut from the index");
+            let from_tix = SeriesPlan::day_runs(0, (lo, hi), held, tod, |ts| {
+                file.first_at_or_after(ts).map_err(|why| why.to_string())
+            })
+            .expect("cut from the .tix");
+            assert_eq!(from_index, from_tix, "window {tod:?}");
+        }
+        for &date in days {
+            for second in (8 * 3_600)..(11 * 3_600) {
+                let ts = ist(date, 0, 0, second);
+                assert_eq!(
+                    index.rows_before(ts),
+                    file.first_at_or_after(ts).expect("located"),
+                    "2024-01-{date} second {second}"
+                );
+            }
+            for ts in [
+                ist(date, 0, 0, 0),
+                ist(date, 23, 59, 59),
+                ist(date + 1, 0, 0, 0),
+            ] {
+                assert_eq!(
+                    index.rows_before(ts),
+                    file.first_at_or_after(ts).expect("located")
+                );
+            }
+        }
+    }
+
+    /// The windows every test cuts: a whole day, one second, the session's
+    /// first and last instants, windows that open or close inside a gap,
+    /// windows wholly inside a gap or outside every bar, and a reversed
+    /// clock's neighbours.
+    const WINDOWS: [(u32, u32); 12] = [
+        (0, 86_399),
+        (33_300, 33_300),
+        (33_299, 33_300),
+        (33_305, 33_425),
+        (33_600, 33_720),
+        (33_610, 33_611),
+        (33_720, 33_900),
+        (34_000, 36_000),
+        (36_001, 86_399),
+        (0, 33_299),
+        (50_000, 60_000),
+        (33_301, 34_501),
+    ];
+
+    /// **THE TIME-OF-DAY INDEX CUTS EXACTLY THE WINDOW THE `.tix` CUTS, ON A
+    /// ONE-SECOND MONTH WITH GAPS** (R3-07, DB-B57). Rows before any instant
+    /// of the month, from the summary alone, equal `first_at_or_after`;
+    /// every window of [`WINDOWS`] is the same runs both ways.
+    #[test]
+    fn the_time_of_day_index_cuts_every_window_the_tix_cuts() {
+        let mut rows = Vec::new();
+        // 2 Jan: 09:15:00 to 09:24:59, every seventh second missing.
+        for second in 0..600 {
+            if second % 7 != 3 {
+                rows.push(bar(ist(2, 9, 15, second), second));
+            }
+        }
+        // 3 Jan: nothing. 4 Jan: 09:15:00 to 09:40:00, with 09:20 to 09:22
+        // missing whole.
+        for second in 0..1_501 {
+            if !(300..420).contains(&second) {
+                rows.push(bar(ist(4, 9, 15, second), second));
+            }
+        }
+        assert!(rows.len() >= 1_024, "a month the writer summarises");
+        let (_root, bars) = month_of("r307-tod-1s", Timeframe::SECOND_1, &rows);
+        let (index, file, held) = index_of(&bars, Timeframe::SECOND_1);
+        let index = index.expect("a dense one-second month is indexed");
+        assert_eq!(index.unit, 1);
+        agree(&index, &file, held, &[1, 2, 3, 4, 5, 31], &WINDOWS);
+    }
+
+    /// **AND ON A MINUTE MONTH**, whose units are minutes.
+    #[test]
+    fn the_time_of_day_index_cuts_a_minute_month_the_way_the_tix_does() {
+        let mut rows = Vec::new();
+        for date in [2_i64, 3, 5, 8, 9, 10, 11] {
+            for minute in 0..375 {
+                if minute % 11 != 5 && !(date == 5 && (100..160).contains(&minute)) {
+                    rows.push(bar(ist(date, 9, 15 + minute, 0), minute));
+                }
+            }
+        }
+        assert!(rows.len() >= 1_024);
+        let (_root, bars) = month_of("r307-tod-1m", Timeframe::MINUTE_1, &rows);
+        let (index, file, held) = index_of(&bars, Timeframe::MINUTE_1);
+        let index = index.expect("a minute month is indexed");
+        assert_eq!(index.unit, 60);
+        agree(&index, &file, held, &[2, 4, 5, 11], &WINDOWS);
+    }
+
+    /// **A MONTH WITHOUT A USABLE SUMMARY IS NAMED, NEVER INDEXED FROM COUNTS
+    /// THAT DO NOT ADD UP.** A sparse one-second month (one bar in three
+    /// seconds) keeps no seconds by the density rule; a month under 1,024
+    /// bars keeps no summary at all. Both refuse with the reason, and the
+    /// window locates them through the `.tix`.
+    #[test]
+    fn a_month_without_a_usable_summary_is_refused_by_name() {
+        let sparse: Vec<Bar> = (0..1_200)
+            .map(|n| bar(ist(2, 9, 15, 0) + n * 3 * MICROS, n))
+            .collect();
+        let (_root, bars) = month_of("r307-tod-sparse", Timeframe::SECOND_1, &sparse);
+        let why = index_of(&bars, Timeframe::SECOND_1)
+            .0
+            .expect_err("no seconds kept");
+        assert!(why.contains("keeps no seconds"), "{why}");
+        let small: Vec<Bar> = (0..50).map(|n| bar(ist(2, 9, 15, n), n)).collect();
+        let (_root, bars) = month_of("r307-tod-small", Timeframe::SECOND_1, &small);
+        let why = index_of(&bars, Timeframe::SECOND_1)
+            .0
+            .expect_err("no summary under 1,024 bars");
+        assert!(!why.is_empty(), "the reason is named");
+    }
+
+    /// **A FULL WEIGHED MEMO DROPS ITS OLDER HALF, NEVER EVERYTHING, AND A
+    /// VALUE IN USE SURVIVES** (DB-B57). The sort indexes' fence and cut
+    /// memos, and the time-of-day indexes, are held by weight: before, one
+    /// value past the budget emptied the whole map.
+    #[test]
+    fn a_full_weighed_memo_turns_a_generation_and_keeps_what_is_in_use() {
+        let memo: Weighed<u64, u64> = Weighed::new(1_000);
+        for key in 0..10 {
+            memo.put(key, key, 100);
+        }
+        assert_eq!(memo.turns(), 1, "the young half filled once");
+        assert!(
+            memo.bytes() <= 1_000,
+            "held {} past the budget",
+            memo.bytes()
+        );
+        // A KEY USED SINCE THE TURN SURVIVES THE NEXT ONE.
+        assert_eq!(memo.get(&0), Some(0));
+        for key in 10..15 {
+            memo.put(key, key, 100);
+        }
+        assert_eq!(memo.get(&0), Some(0), "a key in use survives a turn");
+        assert!(
+            memo.bytes() <= 1_000,
+            "held {} past the budget",
+            memo.bytes()
+        );
+        // NEVER EMPTIED WHOLE: the newest entries are always held.
+        assert_eq!(memo.get(&14), Some(14));
+        // ONE VALUE HEAVIER THAN HALF THE BUDGET IS NOT HELD.
+        memo.put(99, 99, 600);
+        assert_eq!(memo.get(&99), None);
+        assert_eq!(memo.get(&14), Some(14), "and turns nothing out for itself");
     }
 }
