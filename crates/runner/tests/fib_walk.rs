@@ -1079,6 +1079,17 @@ fn an_r_step_earned_in_a_bar_is_not_hit_inside_that_bar() {
     assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
     assert_eq!(out.exit_second, at(10, 2, 0));
     assert_eq!(out.exit_value_paisa, i128::from(100 * 99_995));
+    // The step is one whole R (1,005 paisa), so the 1,100 paisa run-up
+    // earns one step: the trail is 100,000, and a low of 100,050 holds it.
+    let held = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P, 1_000),
+        bar(at(10, 1, 0), P, 101_100, 99_990, P, 1_000),
+        bar(at(10, 2, 0), 100_100, 100_500, 100_050, 100_100, 1_000),
+        bar(at(10, 3, 0), P, 100_500, 99_995, P, 1_000),
+    ]);
+    let out = minute_slot(&held, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 3, 0));
 }
 
 // ----------------------------------------------------------- exit fills --
