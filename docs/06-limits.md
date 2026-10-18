@@ -19749,7 +19749,6 @@ processes against a shadow of the real store; nothing else here is measured.
 | L-FIB6-08 | **UNVERIFIED: the visited-mix count on real data** | it depends on the real cells' skew and the R5 floors, unknown until FIB-12's sample | the Zipf-skewed synthetic counts below are not a projection of it |
 | L-FIB6-09 | **UNVERIFIED: that FIB-3 assigns decision ids in `base_kind` order inside one (stock, second)** | the tie order is decision-id order (D-6402); the base-kind order is what the ids are assumed to carry | checked when FIB-3 merges; the lattice compares ids only |
 | L-FIB6-10 | **Branch coverage of `lattice.rs` and `score.rs` is not measured on this host** | the stable toolchain's `cargo llvm-cov` has no `--branch`; no nightly toolchain is installed here | lines and regions are measured (the FIB-6 report); branches go to the Mac |
-
 | L-FIB6-11 | **A whole walk's time per row-touch grows with the table, a node expansion's does not (measured below)** | a large node's region is larger than the cache, so its passes stream from memory; a small node's region is cache-resident | the walk is still O(1) per row-touch in WORK (exact counter); the time ratio is information, measured on this host (calibration table below) |
 
 ### FIB-6 calibration: the walk's size against its floor (measured 18 October 2026 on THIS HOST)
@@ -19780,6 +19779,7 @@ row-touch rose from about 1.7 ns at 10^4 rows to about 2.5 ns at 10^6 rows
 about 2.4 x 10^12 row-touches, about 75 minutes on one thread of this host —
 which is why the first bench run of this session was stopped after 48 minutes
 and the bench's throughput section walks 2 x 10^7 rows at 100 permille only.
+
 ### Gate 11 — FIB-6, declared (18 October 2026)
 
 ~~~~text
