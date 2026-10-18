@@ -455,3 +455,77 @@ fn a_damaged_month_names_its_unreadable_records_and_a_clean_one_names_none() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A head ends at its blank line, in either spelling, at the byte that
+/// ends it.** `\r\n\r\n` and the bare-LF `\n\n` that httparse also accepts
+/// both deliver the head on their last byte, from the head scan alone,
+/// without waiting for the service to count the request in. A `\r` that does
+/// not follow a line end, or a line end followed by anything but `\r` or
+/// `\n`, ends nothing. Kills deleting the `(1, b'\r') => 2` arm of
+/// `HeadDeadline::observe` (server.rs:17533), which a head ending in
+/// `\r\n\r\n` survived only because the service's own count delivered it a
+/// poll later.
+#[tokio::test]
+async fn a_head_ends_at_its_blank_line_in_either_spelling() {
+    let waiting = || HeadState::Awaiting {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        progress: 0,
+        partial: false,
+    };
+    let (server, _client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudehead", waiting());
+
+    // CRLF CRLF: one byte short of the end, the scan holds a line end and a
+    // `\r` after it.
+    wrapped.observe(b"GET / HTTP/1.1\r\nHost: x\r\n\r");
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 2,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+    wrapped.observe(b"\n");
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+
+    // BARE LF LF, fed one byte at a time.
+    wrapped.state = waiting();
+    for &byte in b"GET / HTTP/1.1\nHost: x\n" {
+        wrapped.observe(&[byte]);
+    }
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 1,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+    wrapped.observe(b"\n");
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+
+    // NOT AN END: a `\r` inside a line, and a line end followed by a byte.
+    wrapped.state = waiting();
+    wrapped.observe(b"GET / HTTP/1.1\r\nHost: x\rx\r\nX: \n\ry");
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 0,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+}
