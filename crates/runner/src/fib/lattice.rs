@@ -927,13 +927,23 @@ pub enum Schedule {
     /// free row as rayon tasks, each with its own scratch and its own forked
     /// visitor, absorbed in visit order (preorder) (FM-F053). `split_support` is
     /// derived by the caller from the measured per-task overhead and
-    /// recorded; a batch whose task scratch would pass `batch_budget_bytes`
-    /// runs inline and is counted.
+    /// recorded.
+    ///
+    /// `scratch_budget_bytes` bounds ALL task scratch the walk holds at once,
+    /// at any thread count: the root's allowance is the budget, a child walked
+    /// inline keeps its parent's allowance, and a batch runs as tasks only if
+    /// its scratch fits the allowance of the node that grows it, its tasks
+    /// sharing what it leaves in proportion to their own scratch. A batch that
+    /// does not fit runs inline and is counted. Every decision follows from
+    /// the data and the budget alone, never from timing (D-6411; proved by
+    /// `crates/runner/tests/fib_lattice.rs`'s
+    /// `work_stealing_equals_sequential_bytes`). The visitor's forks are the
+    /// visitor's own memory, not scratch.
     Parallel {
         /// The least support a node needs to split.
         split_support: u64,
-        /// The most scratch one batch of tasks may hold, in bytes.
-        batch_budget_bytes: u64,
+        /// The most task scratch the walk may hold at once, in bytes.
+        scratch_budget_bytes: u64,
     },
 }
 
@@ -942,7 +952,8 @@ pub enum Schedule {
 pub struct Spread {
     /// Subtree tasks spawned.
     pub tasks: u64,
-    /// Batches run inline because their scratch would pass the budget.
+    /// Batches run inline because their scratch would pass the allowance of
+    /// the node that grows them.
     pub inline_for_budget: u64,
 }
 
@@ -970,6 +981,9 @@ struct At<'r> {
     next: usize,
     /// Its fixed rows.
     fixed: usize,
+    /// The task scratch its subtree may hold at once, beyond its own arena
+    /// (zero when the walk is sequential).
+    allowance: u64,
 }
 
 /// The counters one subtree adds.
@@ -1021,6 +1035,8 @@ enum Source<'r> {
         row: usize,
         /// The widest group kept.
         group: u8,
+        /// How many of the parent's rows it keeps (its support).
+        kept: usize,
     },
 }
 
@@ -1179,50 +1195,65 @@ impl Walker<'_> {
         out.tally.row_touches += cells.len() as u64;
     }
 
-    /// The batch budget when a node of `rows` rows with `children` children
-    /// to walk splits them into tasks; `None` when it walks them inline.
-    const fn splits(&self, rows: usize, children: usize) -> Option<u64> {
+    /// Whether a node of `rows` rows with `children` children to walk splits
+    /// them into tasks.
+    const fn splits(&self, rows: usize, children: usize) -> bool {
         match self.schedule {
-            Schedule::Parallel {
-                split_support,
-                batch_budget_bytes,
-            } if rows as u64 >= split_support && children > 1 => Some(batch_budget_bytes),
-            Schedule::Sequential | Schedule::Parallel { .. } => None,
+            Schedule::Parallel { split_support, .. } => {
+                rows as u64 >= split_support && children > 1
+            }
+            Schedule::Sequential => false,
         }
     }
 
+    /// The scratch bytes one task below free position `next` holds: its arena
+    /// (an index and a cell per row per free row still open below it), its
+    /// own copy of the parent's rows when it scans a prefix, and its count
+    /// regions. Exactly what [`Walker::owned`] and the prefix scan allocate.
+    fn child_bytes(&self, child: &Ready<'_>, next: usize) -> u64 {
+        let below = self.free.len().saturating_sub(next) as u64;
+        let entry = (size_of::<u32>() + size_of::<Coords>()) as u64;
+        let (rows, own) = match child.source {
+            Source::Rows(rows, _) => (rows.len() as u64, 0),
+            Source::Prefix { rows, kept, .. } => (kept as u64, rows.len() as u64),
+        };
+        let counts = (COUNT_STRIDE as u64) * (below + 1) * size_of::<u32>() as u64;
+        rows.saturating_mul(below)
+            .saturating_add(own)
+            .saturating_mul(entry)
+            .saturating_add(counts)
+    }
+
     /// The scratch bytes one batch of tasks below free position `next` holds.
-    fn batch_bytes(&self, ready: &[Ready<'_>], next: usize) -> usize {
-        let below = self.free.len().saturating_sub(next);
-        let entry = size_of::<u32>() + size_of::<Coords>();
-        ready.iter().fold(0_usize, |sum, child| {
-            let (rows, own) = match child.source {
-                Source::Rows(rows, _) => (rows.len(), 0),
-                Source::Prefix { rows, .. } => (rows.len(), rows.len()),
-            };
-            sum.saturating_add(
-                rows.saturating_mul(below)
-                    .saturating_add(own)
-                    .saturating_mul(entry),
-            )
+    fn batch_bytes(&self, ready: &[Ready<'_>], next: usize) -> u64 {
+        ready.iter().fold(0_u64, |sum, child| {
+            sum.saturating_add(self.child_bytes(child, next))
         })
     }
 
     /// Walks a batch of children as rayon tasks, each with its own scratch and
-    /// its own forked visitor, absorbed in visit order (FM-F053).
+    /// its own forked visitor, absorbed in visit order (FM-F053). The batch
+    /// fits `allowance`; each task's own allowance is its share of what the
+    /// batch leaves, in proportion to its scratch.
     fn tasks<V: Visitor>(
         &self,
         ready: &[Ready<'_>],
         next: usize,
         fixed: usize,
+        allowance: u64,
         visitor: &mut V,
         out: &mut Counted,
     ) {
+        let total = self.batch_bytes(ready, next);
+        let left = allowance.saturating_sub(total);
         let forks: Vec<V> = ready.iter().map(|_| visitor.fork()).collect();
         let done: Vec<(V, Counted)> = forks
             .into_par_iter()
             .zip(ready.par_iter())
             .map(|(mut fork, child)| {
+                let share = u128::from(left) * u128::from(self.child_bytes(child, next))
+                    / u128::from(total.max(1));
+                let allowance = u64::try_from(share).unwrap_or(left);
                 let mut counted = Counted::zero();
                 let mut own_rows = Vec::new();
                 let mut own_cells = Vec::new();
@@ -1231,6 +1262,7 @@ impl Walker<'_> {
                     cells,
                     row,
                     group,
+                    ..
                 } = child.source
                 {
                     own_rows = vec![0_u32; rows.len()];
@@ -1255,6 +1287,7 @@ impl Walker<'_> {
                     key: child.key,
                     next,
                     fixed,
+                    allowance,
                 };
                 self.expand(place, arena, counts, &mut fork, &mut counted);
                 (fork, counted)
@@ -1267,10 +1300,16 @@ impl Walker<'_> {
         }
     }
 
-    /// Whether to walk `ready` as tasks: the batch fits the budget. A batch
-    /// over the budget is counted and runs inline.
-    fn as_tasks(&self, ready: &[Ready<'_>], next: usize, budget: u64, out: &mut Counted) -> bool {
-        if self.batch_bytes(ready, next) as u64 > budget {
+    /// Whether to walk `ready` as tasks: the batch fits `allowance`. A batch
+    /// that does not is counted and runs inline.
+    fn as_tasks(
+        &self,
+        ready: &[Ready<'_>],
+        next: usize,
+        allowance: u64,
+        out: &mut Counted,
+    ) -> bool {
+        if self.batch_bytes(ready, next) > allowance {
             out.spread.inline_for_budget += 1;
             return false;
         }
@@ -1331,8 +1370,8 @@ impl Walker<'_> {
             .filter(|(_, rows, _)| {
                 classify(rows.len() as u64, parent, None, self.min) == Child::Frequent
             });
-        // A batch over the budget falls through to the inline walk below.
-        if let Some(budget) = self.splits(at.rows.len(), frequent) {
+        // A batch over the allowance falls through to the inline walk below.
+        if self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = children
                 .clone()
                 .map(|(value, rows, cells)| Ready {
@@ -1340,8 +1379,8 @@ impl Walker<'_> {
                     key: with_row(at.key, row, value),
                 })
                 .collect();
-            if self.as_tasks(&ready, next, budget, out) {
-                self.tasks(&ready, next, fixed, visitor, out);
+            if self.as_tasks(&ready, next, at.allowance, out) {
+                self.tasks(&ready, next, fixed, at.allowance, visitor, out);
                 return;
             }
         }
@@ -1352,6 +1391,7 @@ impl Walker<'_> {
                 key: with_row(at.key, row, value),
                 next,
                 fixed,
+                allowance: at.allowance,
             };
             self.expand(place, rest.reborrow(), bufs.deeper, visitor, out);
         }
@@ -1380,38 +1420,39 @@ impl Walker<'_> {
                 let child = classify(prefix, parent, *sibling, self.min);
                 *below = prefix;
                 *sibling = Some(prefix);
-                Some((group, child))
+                Some((group, child, prefix))
             },
         );
         let mut frequent = 0;
-        for (_, child) in classes.clone() {
+        for (_, child, _) in classes.clone() {
             out.tally.count(child, at.fixed + 1);
             frequent += usize::from(child == Child::Frequent);
         }
-        let wanted =
-            classes.filter_map(|(group, child)| (child == Child::Frequent).then_some(group));
+        let wanted = classes
+            .filter_map(|(group, child, kept)| (child == Child::Frequent).then_some((group, kept)));
         let next = position + 1;
         let fixed = at.fixed + 1;
-        // A batch over the budget falls through to the inline walk below.
-        if let Some(budget) = self.splits(at.rows.len(), frequent) {
+        // A batch over the allowance falls through to the inline walk below.
+        if self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = wanted
                 .clone()
-                .map(|group| Ready {
+                .map(|(group, kept)| Ready {
                     source: Source::Prefix {
                         rows: at.rows,
                         cells: at.cells,
                         row,
                         group,
+                        kept: usize::try_from(kept).unwrap_or(usize::MAX),
                     },
                     key: with_row(at.key, row, group),
                 })
                 .collect();
-            if self.as_tasks(&ready, next, budget, out) {
-                self.tasks(&ready, next, fixed, visitor, out);
+            if self.as_tasks(&ready, next, at.allowance, out) {
+                self.tasks(&ready, next, fixed, at.allowance, visitor, out);
                 return;
             }
         }
-        for group in wanted {
+        for (group, _) in wanted {
             self.prefix_inline(
                 at,
                 row,
@@ -1460,6 +1501,7 @@ impl Walker<'_> {
             key: with_row(at.key, row, group),
             next,
             fixed: at.fixed + 1,
+            allowance: at.allowance,
         };
         self.expand(place, rest, deeper, visitor, out);
     }
@@ -1523,6 +1565,13 @@ pub fn walk<V: Visitor>(
             key: table.root_key(),
             next: 0,
             fixed: 0,
+            allowance: match schedule {
+                Schedule::Parallel {
+                    scratch_budget_bytes,
+                    ..
+                } => scratch_budget_bytes,
+                Schedule::Sequential => 0,
+            },
         };
         walker.expand(root, arena, counts, visitor, &mut counted);
     }
@@ -1623,6 +1672,7 @@ pub fn expand_range<V: Visitor>(
         key: table.root_key(),
         next: 0,
         fixed: 0,
+        allowance: 0,
     };
     walker.expand(node, arena, &mut scratch.counts, visitor, &mut counted);
     Ok(counted.tally)
@@ -1886,6 +1936,7 @@ impl Guide<'_> {
                 key: with_row(at.key, row, edge.value),
                 next: at.next,
                 fixed: at.fixed + 1,
+                allowance: 0,
             };
             at_ref(&self.survivors.nodes, edge.child as usize, |next| {
                 self.descend(next, child, rest.reborrow(), visitor, tally);
@@ -1919,6 +1970,7 @@ pub fn walk_guided<V: Visitor>(
         key: table.root_key(),
         next: 0,
         fixed: 0,
+        allowance: 0,
     };
     let arena = Arena {
         rows: &mut arena_rows,

@@ -73524,3 +73524,44 @@ paisa), and `close_day(day)` returns the day's rounding adjustment. `Gross` is
 the zero model: a labelled plumbing run only, never a gate (D-6300); FIB-11
 supplies CHG-1's model. Proof:
 `a_small_gross_win_that_charges_turn_into_a_net_loss_counts_as_a_loss`.
+
+### D-6411 — FM-F053's budget bounds the whole walk's task scratch, not one batch: allowances split down the recursion (FIB-6) — 2026-10-18
+
+**Why.** D-6410 let a batch of tasks run only if its own scratch fit
+`batch_budget_bytes`, and `docs/06-limits.md` L-FIB6-02 stated the consequence
+as "at most workers x budget". That bound was false. Under work stealing a
+worker blocked on a nested batch runs other tasks while its own task keeps its
+scratch, so the scratch alive at once was bounded by no product of workers and
+budget. Measured in this session: the bench's 4-thread walk of a 2 x 10^7-row
+partition at a floor of 10% of the rows, with a 4 GiB batch budget, was killed
+by the kernel's memory-cgroup OOM killer at 13,901,196 kB resident on a 15 GiB host.
+FM-F053 asks that task scratch stay within the memory budget; it did not.
+
+**What is decided.** `Schedule::Parallel`'s second field is now
+`scratch_budget_bytes`, and it bounds ALL task scratch a walk holds at once,
+at any thread count. Every node carries an allowance: the root's is the
+budget; a child walked inline keeps its parent's (inline children run one
+after another, so each may use all of it); a batch of tasks runs only if its
+scratch fits the allowance of the node that grows it, and each of its tasks is
+allowed its share of what the batch leaves, in proportion to its own scratch
+(exact integer arithmetic in `u128`). A batch that does not fit runs inline
+and is counted, as before. By induction the scratch alive beneath a node never
+passes its allowance, so the walk's never passes the budget.
+
+**What a task's scratch is.** Exactly what the task allocates: its arena (an
+index and a cell per row of its own, per free row still open below it), the
+copy of its parent's rows a prefix task scans, and its count regions. A
+prefix task's own row count is its support, which the histogram already
+gives; D-6410's sizing used the parent's rows there and over-reserved.
+
+**What is unchanged.** Outputs are byte-identical at any thread count and any
+budget; the tally does not depend on the schedule; every decision follows from
+the data and the budget alone, never from timing, so the schedule's record
+(`Spread`) is reproducible too. The budget covers the walk's scratch, not the
+visitor's forks: a scoring visitor's own memory per fork is L-FIB6-03's.
+
+**Proof.** `work_stealing_equals_sequential_bytes` recomputes, from the visited
+nodes alone, every batch's scratch and every node's allowance as written here,
+and finds the walk's tasks and inline batches equal to it at 1, 4 and 12
+threads and eight (split, budget) pairs, while the scored bytes equal the
+sequential walk's. Bound: `docs/06-limits.md` L-FIB6-12.

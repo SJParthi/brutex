@@ -1022,56 +1022,73 @@ fn outcomes_for(rows: u32, exits: u32, rng: &mut Seeded) -> Vec<Outcome> {
         .collect()
 }
 
-/// The batches a parallel walk splits, found from the visited nodes alone:
-/// each (node, free row) whose node has at least `split_support` rows and two
-/// or more visited children fixing that row, with the scratch bytes the
-/// specification gives it (each child's rows times the free rows still open
-/// below it, plus the node's rows for a prefix child that scans its own,
-/// times an index and a cell). Returns the tasks the batches within `budget`
-/// spawn (one per child) and how many batches pass the budget and run inline.
+/// The batches a parallel walk splits, found from the visited nodes alone,
+/// with the allowances the specification gives them (FM-F053). Each node of at
+/// least `split_support` rows with two or more visited children fixing one
+/// free row forms a batch; a child's scratch is its rows times the free rows
+/// still open below it, plus the node's rows for a prefix child that scans its
+/// own, times an index and a cell, plus one count region per open free row and
+/// its own. The root's allowance is `budget`. A batch within its node's
+/// allowance spawns one task per child, each allowed its share of what the
+/// batch leaves in proportion to its scratch; a batch past it runs inline and
+/// is counted, and its children keep the node's allowance, as does every child
+/// of a node that does not split. Returns the tasks, the inline batches and
+/// every batch's scratch.
 fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64, Vec<u64>) {
     let free = free_rows();
-    let last_fixed = |key: &MixKey| {
-        free.iter()
-            .rev()
-            .find(|id| key.0[id.index()] != OPEN)
-            .copied()
-    };
-    let support: HashMap<MixKey, u64> = visited
-        .nodes
-        .iter()
-        .map(|(key, rows, ..)| (*key, rows.len() as u64))
-        .collect();
-    let mut children: BTreeMap<(MixKey, usize), Vec<u64>> = BTreeMap::new();
+    let fixed_free = |key: &MixKey| free.iter().filter(|id| key.0[id.index()] != OPEN).count();
+    let mut support: HashMap<MixKey, u64> = HashMap::new();
+    let mut groups: BTreeMap<(usize, MixKey, usize), Vec<(MixKey, u64)>> = BTreeMap::new();
+    let mut allowance: HashMap<MixKey, u64> = HashMap::new();
     for (key, rows, ..) in &visited.nodes {
-        if let Some(id) = last_fixed(key) {
-            let parent = with(*key, id, OPEN);
-            let position = free.iter().position(|f| *f == id).unwrap();
-            children
-                .entry((parent, position))
-                .or_default()
-                .push(rows.len() as u64);
+        support.insert(*key, rows.len() as u64);
+        match free.iter().rposition(|id| key.0[id.index()] != OPEN) {
+            Some(position) => {
+                let parent = with(*key, free[position], OPEN);
+                groups
+                    .entry((fixed_free(&parent), parent, position))
+                    .or_default()
+                    .push((*key, rows.len() as u64));
+            }
+            None => {
+                allowance.insert(*key, budget);
+            }
         }
     }
     let entry = (size_of::<u32>() + size_of::<Coords>()) as u64;
     let (mut tasks, mut inline, mut sizes) = (0, 0, Vec::new());
-    for ((parent, position), rows) in &children {
-        let parent_rows = support[parent];
-        if rows.len() < 2 || parent_rows < split_support {
-            continue;
-        }
+    // Parents before children: a group's parent fixes fewer free rows than
+    // any group its children head.
+    for ((_, parent, position), children) in &groups {
+        let mine = allowance[parent];
         let below = (free.len() - position - 1) as u64;
         let own = if free[*position].row().kind == RowKind::Cumulative {
-            parent_rows
+            support[parent]
         } else {
             0
         };
-        let bytes: u64 = rows.iter().map(|r| (r * below + own) * entry).sum();
-        sizes.push(bytes);
-        if bytes > budget {
-            inline += 1;
+        let counts = u64::from(OPEN) * (below + 1) * size_of::<u32>() as u64;
+        let bytes: Vec<u64> = children
+            .iter()
+            .map(|(_, rows)| (rows * below + own) * entry + counts)
+            .collect();
+        let total: u64 = bytes.iter().sum();
+        let split = children.len() >= 2 && support[parent] >= split_support;
+        if split {
+            sizes.push(total);
+        }
+        if split && total <= mine {
+            tasks += children.len() as u64;
+            let left = mine - total;
+            for ((child, _), own_bytes) in children.iter().zip(&bytes) {
+                let share = u128::from(left) * u128::from(*own_bytes) / u128::from(total);
+                allowance.insert(*child, share as u64);
+            }
         } else {
-            tasks += rows.len() as u64;
+            inline += u64::from(split);
+            for (child, _) in children {
+                allowance.insert(*child, mine);
+            }
         }
     }
     (tasks, inline, sizes)
@@ -1080,7 +1097,9 @@ fn batches(visited: &Collect, split_support: u64, budget: u64) -> (u64, u64, Vec
 /// FM-F053: a work-stealing walk at 1, 4 and 12 threads hands every node to
 /// forked visitors that, absorbed in visit order, equal the sequential walk
 /// byte for byte — the scored cards included — and its tally is the same. A
-/// batch over the budget runs inline, is counted, and changes no byte.
+/// batch past its node's allowance runs inline, is counted, and changes no
+/// byte, and every task and inline batch is the one the allowance model
+/// (D-6411) predicts from the visited nodes alone.
 #[test]
 fn work_stealing_equals_sequential_bytes() {
     let mut rng = Seeded(0x3EA1_0006);
@@ -1138,7 +1157,7 @@ fn work_stealing_equals_sequential_bytes() {
         ] {
             let schedule = Schedule::Parallel {
                 split_support,
-                batch_budget_bytes: budget,
+                scratch_budget_bytes: budget,
             };
             let mut parallel = sink();
             let spread = pool.install(|| walk(&table, 6, schedule, &mut parallel).unwrap());

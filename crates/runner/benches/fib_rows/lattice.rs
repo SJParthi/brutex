@@ -21,6 +21,7 @@
 
 use std::fmt::Write as _;
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use runner::fib::lattice::{
@@ -327,9 +328,16 @@ fn score_bytes(state: &Score) -> u64 {
     table_bytes(&state.table) + state.outcomes.len() as u64 * size_of::<Outcome>() as u64
 }
 
-/// One progress line on stderr, so a long stage is visible while the report
-/// itself is held until the end.
-fn progress(stage: &str) {
+/// How much of the report stderr has repeated so far.
+static SHOWN: AtomicUsize = AtomicUsize::new(0);
+
+/// Repeats on stderr every report line measured since the last call, then
+/// names the stage about to start. The report itself is printed only at the
+/// end, so without this a stage that fails later, or a host that kills the
+/// process, would take every measured line with it.
+fn progress(out: &str, stage: &str) {
+    let from = SHOWN.swap(out.len(), Ordering::Relaxed);
+    eprint!("{}", out.get(from..).unwrap_or_default());
     eprintln!("[fib-6 bench] {stage}");
 }
 
@@ -378,11 +386,11 @@ fn harness_rows(host: &Host, out: &mut String) -> bool {
         bytes: score_bytes,
     };
     let mut ok = true;
-    progress("C-F6-01");
+    progress(out, "C-F6-01");
     ok &= !run(&expand, host, out).fails();
-    progress("C-F6-02");
+    progress(out, "C-F6-02");
     ok &= !run(&span, host, out).fails();
-    progress("C-F6-03");
+    progress(out, "C-F6-03");
     ok &= !run(&pool, host, out).fails();
     ok
 }
@@ -437,7 +445,8 @@ impl Visitor for Timed<'_> {
 fn throughput(host: &Host, out: &mut String) {
     let _ = writeln!(
         out,
-        "\nWALK THROUGHPUT (outside the harness: one run each, wall clock; FIB-12 projects from these)"
+        "\nWALK THROUGHPUT (outside the harness: one run each, wall clock; FIB-12 projects from these; \
+         a parallel walk splits nodes of at least max(rows / 64, 256) rows and holds at most 4 GiB of task scratch at once)"
     );
     // (rows, floor in permille of the rows, whether every visited mix is also
     // scored and timed). The floors were calibrated in this session: at 1% a
@@ -450,7 +459,7 @@ fn throughput(host: &Host, out: &mut String) {
         (1_000_000, 100, true),
         (20_000_000, 100, false),
     ] {
-        progress(&format!("build, {rows} rows"));
+        progress(out, &format!("build, {rows} rows"));
         let built = Instant::now();
         let table = table(rows, 2_000, 208);
         let build_ms = built.elapsed().as_millis();
@@ -474,10 +483,10 @@ fn throughput(host: &Host, out: &mut String) {
             } else {
                 Schedule::Parallel {
                     split_support: (rows / 64).max(256),
-                    batch_budget_bytes: 4 << 30,
+                    scratch_budget_bytes: 4 << 30,
                 }
             };
-            progress(&format!("walk, {rows} rows, {threads} threads"));
+            progress(out, &format!("walk, {rows} rows, {threads} threads"));
             let mut count = Count(0);
             let start = Instant::now();
             let walked = pool.install(|| walk(&table, min, schedule, &mut count).unwrap());
@@ -499,7 +508,7 @@ fn throughput(host: &Host, out: &mut String) {
             );
         }
         if timed {
-            progress(&format!("per-mix times, {rows} rows"));
+            progress(out, &format!("per-mix times, {rows} rows"));
             time_mixes(&table, min, out);
         }
     }
@@ -555,7 +564,7 @@ fn shared_exits(out: &mut String) {
     );
     let base = table(100_000, 2_000, 208);
     for exits in [1_u8, 2, 4] {
-        progress(&format!("shared traversal, {exits} exits"));
+        progress(out, &format!("shared traversal, {exits} exits"));
         let partition = Partition {
             exits: 0..exits,
             ..base.partition().clone()
@@ -619,5 +628,6 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     throughput(host, out);
     shared_exits(out);
     let _ = writeln!(out);
+    progress(out, "done");
     ok
 }
