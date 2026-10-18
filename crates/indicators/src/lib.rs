@@ -26,6 +26,10 @@
 //! **328 of the vocabulary's 328 live positions are computable.** Every other position
 //! in the table is not live (`vocab::table::LIVE` excludes it) and is never set.
 //!
+//! [`fibflag`] — the Fib Flag Breakout detector (FIB-1 scaffold) — claims **0
+//! vocabulary positions**: its candidates land in `vocab::fib_cube`, never in the
+//! condition table, so it has no row above.
+//!
 //! # The three rules this crate exists to keep
 //!
 //! 1. **No look-ahead** (§3 rule 7). At bar *N* the evaluator may read bars
@@ -65,6 +69,7 @@ pub mod column;
 pub mod daily;
 pub mod evaluator;
 pub mod fib;
+pub mod fibflag;
 pub mod gap;
 pub mod orb;
 pub mod pattern;

@@ -81,6 +81,13 @@ fn modules() -> Vec<(&'static str, &'static str, usize)> {
             "src/trend.rs",
             indicators::trend::TrendState::positions().len(),
         ),
+        // The Fib Flag Breakout detector claims none (FIB-1, D-6301): its
+        // candidates land in `vocab::fib_cube`, never in the condition table.
+        (
+            "fibflag",
+            "src/fibflag/mod.rs",
+            indicators::fibflag::positions().len(),
+        ),
     ]
 }
 
@@ -143,8 +150,8 @@ fn every_module_header_states_the_position_count_it_actually_emits() {
         checked = checked.saturating_add(1);
     }
     assert_eq!(
-        checked, 8,
-        "eight modules state a count and all eight must be read; a module dropped from \
+        checked, 9,
+        "nine modules state a count and all nine must be read; a module dropped from \
          the list is a module nobody checks"
     );
 }

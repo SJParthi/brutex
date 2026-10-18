@@ -91,6 +91,9 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+/// `cli fib`: the Fib Flag Breakout engine's sub-verbs, each refusing by name
+/// until its package lands (FIB-1, D-6307).
+mod fib;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored minute of a series judged against its
@@ -500,6 +503,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    dirty minute month yields coarse bars built out
                                    of gaps that no other check can see. Exits
                                    non-zero on any disagreement. Reads only.
+       cli fib SUBVERB [ARGS]
+                                   the Fib Flag Breakout engine, labelled research
+                                   and gross of every charge until its charges are
+                                   built: day-check, run, deep, sample, verify,
+                                   net, plan, wf, exam, report. run needs
+                                   --direction long|short. Only --out-store writes
+                                   the store; --out must be outside it. A sub-verb
+                                   not yet built refuses by name.
        cli alerts [--ack N | --older | --before N | --replace-damaged | --file PATH]
                                    The alert queue (<store>/audit/alerts): with no
                                    flag, the unacknowledged alerts among the newest
@@ -2747,6 +2758,7 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
+        ["fib", rest @ ..] if !rest.is_empty() => fib::command(rest, out),
         ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
         ["watchdog", arguments @ ..] if !arguments.is_empty() => {
             watchdog_command::command(arguments, out)
@@ -2858,7 +2870,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 52] = [
+const COMMANDS: [&str; 53] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2880,6 +2892,7 @@ const COMMANDS: [&str; 52] = [
     "expression-backtest-stored",
     "expression-search-stored",
     "expression-stored",
+    "fib",
     "fold-audit",
     "gdfl-dayflags",
     "gdfl-import",
@@ -2936,6 +2949,7 @@ pub fn is_sweep_command(command: &str) -> bool {
             | "expression-backtest-stored"
             | "expression-stored"
             | "expression-search-stored"
+            | "fib"
             | "ledger-all"
             | "ledger-v6"
             | "ledger-v6-replay"

@@ -72,10 +72,16 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 13] = [
+///
+/// `fib` (FIB-1, D-6306) is one in its `--out-store` form only: its results go
+/// under `<store>/results/fib-v1/<run-id>/`. Every other form writes only to
+/// an `--out` directory outside the store root, and an `--out` inside it is
+/// refused by name (`fib::refuse_out_inside_store`).
+pub(crate) const WRITERS: [&str; 14] = [
     "alerts",
     "census-migrate",
     "census-recount",
+    "fib",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
@@ -96,11 +102,12 @@ pub(crate) const WRITERS: [&str; 13] = [
 /// without `--apply`, and `zerodha-repair` without `--from-store` each state
 /// in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
-/// the one place its own parse takes it.
+/// the one place its own parse takes it; `fib` writes only with `--out-store`.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
+        "fib" => arguments.contains(&"--out-store"),
         "msum-build" | "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
@@ -346,6 +353,11 @@ mod tests {
             ("alerts", &["--older", "--ack"], false),
             ("alerts", &["--ack", "3"], true),
             ("alerts", &["--replace-damaged"], true),
+            ("fib", &["run", "--out-store"], true),
+            ("fib", &["deep", "--out-store", "--direction", "long"], true),
+            ("fib", &["run", "--out", "/scratch/fib"], false),
+            ("fib", &["day-check", "SBIN", "2025-03"], false),
+            ("fib", &[], false),
             ("top", &[], false),
             ("no-such-verb", &["--apply"], false),
         ] {
@@ -382,10 +394,11 @@ mod tests {
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
         // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 13] = [
+        let writing: [(&str, &[&str]); 14] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
+            ("fib", &["run", "--out-store"]),
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),
@@ -417,6 +430,7 @@ mod tests {
         }
         for (verb, arguments) in [
             ("alerts", &[][..]),
+            ("fib", &["run", "--out", "/scratch/fib"][..]),
             ("gdfl-rekey", &["--plan"][..]),
             ("msum-build", &["--dry-run"][..]),
             ("srt-build", &["--dry-run"][..]),
