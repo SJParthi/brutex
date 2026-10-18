@@ -1749,44 +1749,65 @@ mod tests {
     }
 
     /// The detector's work over three candles, counted by hand, with no
-    /// generated lane and no touch level, so only the two overlap deques and
-    /// the maximal rest's six move. Candle 0 writes two overlap slots and six
-    /// lane slots (8). Candle 1 pops the lower low, writes two overlap slots,
-    /// and in the lane pops the high, the highest close and both pokes and
-    /// writes six (3 + 10 = 13, 21 in all). Candle 2 pops the low again and
-    /// writes two (3), shares no price with candle 0 nor with candle 1, so the
-    /// rest's start moves twice and each move expires one lowest high (2),
-    /// then the lane pops as before, writes six and expires two lows and two
-    /// lowest closes (10 + 4): 19, 40 in all.
+    /// generated lane, so only the two overlap deques and the maximal rest's
+    /// six move. Candle 0 writes two overlap slots and six lane slots (8).
+    /// Candle 1 pops the lower low, writes two overlap slots, and in the lane
+    /// pops the high, the highest close and both pokes and writes six
+    /// (3 + 10 = 13, 21 in all). Candle 2 pops the low again and writes two
+    /// (3), shares no price with candle 0 nor with candle 1, so the rest's
+    /// start moves twice and each move expires one lowest high (2), then the
+    /// lane pops as before, writes six and expires two lows and two lowest
+    /// closes (10 + 4): 19, 40 in all.
+    ///
+    /// With one long level and two short ones, each candle a view visits
+    /// costs its levels. The long edge moves at every candle, so it recounts
+    /// 1, 2 and 1 candles; the short edge stands at candle 1, which slides in
+    /// one candle, and moves at candle 2 (1, 1, 1, times two): 3, 4 and 3
+    /// more, 11, 28 and 50 in all, over five recounts of six candles.
     #[test]
     fn the_work_counts_every_slot_the_overlap_and_the_rest_touch() {
-        let mut d = Detector::new(params(8, 1, 1)).unwrap();
-        let day = DayInput {
-            ist_day: 20_500,
-            session_candles: 8,
-            observed_tick: 1,
-            long: DirectionDay {
-                rest_lengths: &[],
-                touch_bp: None,
-            },
-            short: DirectionDay {
-                rest_lengths: &[],
-                touch_bp: None,
-            },
-        };
-        d.begin_day(&day).unwrap();
+        type Levels = Option<&'static [u64]>;
         let ohlc = [
             (7_105, 7_110, 7_100, 7_105),
             (7_115, 7_120, 7_108, 7_115),
             (7_128, 7_130, 7_125, 7_128),
         ];
-        let mut works = Vec::new();
-        for (slot, bar) in (0..).zip(ohlc) {
-            d.fold(&candle(20_500, slot, bar)).unwrap();
-            works.push(d.work());
+        let levels: [(Levels, Levels); 2] = [(None, None), (Some(&[0]), Some(&[0, 20]))];
+        let mut runs = Vec::new();
+        for (long, short) in levels {
+            let mut d = Detector::new(params(8, 1, 2)).unwrap();
+            let day = DayInput {
+                ist_day: 20_500,
+                session_candles: 8,
+                observed_tick: 1,
+                long: DirectionDay {
+                    rest_lengths: &[],
+                    touch_bp: long,
+                },
+                short: DirectionDay {
+                    rest_lengths: &[],
+                    touch_bp: short,
+                },
+            };
+            d.begin_day(&day).unwrap();
+            let mut works = Vec::new();
+            for (slot, bar) in (0..).zip(ohlc) {
+                d.fold(&candle(20_500, slot, bar)).unwrap();
+                works.push(d.work());
+            }
+            let c = *d.counts();
+            runs.push((
+                works,
+                c.rest_resets,
+                c.touch_recounts,
+                c.touch_recount_candles,
+            ));
         }
-        assert_eq!(works, [8, 21, 40]);
-        assert_eq!(d.counts().rest_resets, 0, "no candle broke the chain");
+        assert_eq!(
+            runs,
+            [(vec![8, 21, 40], 0, 0, 0), (vec![11, 28, 50], 0, 5, 6)],
+            "no candle broke the chain"
+        );
     }
 
     /// A generated lane keeps live touch counts only while it is longer than
