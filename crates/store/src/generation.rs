@@ -248,14 +248,20 @@ pub fn pointer_path(root: &Path, path: StorePath<'_>) -> PathBuf {
 /// the file the read door opens first (`BarFile::open_existing`), so a
 /// month sealed after a cache entry was made is a new key — and a stamp of
 /// the immutable sealed file — never a stale hit on the raw form's. One
-/// `lstat` more than before; the raw `.bin` when no `.sbar` is there.
+/// `stat` more than before; the raw `.bin` when no `.sbar` is there.
+///
+/// A FINAL LINK IS FOLLOWED, as the door's open follows it: a `.sbar` that
+/// is a link to a sealed file is the file the door serves, so it is the key
+/// here too (verify-SC-3-r1). Keyed by the `.bin` before, a cache entry made
+/// over a linked `.sbar` carried the raw form's path and stamp while the
+/// door answered from the sealed one.
 pub fn served_bars_path(root: &Path, path: StorePath<'_>) -> Result<PathBuf, StoreError> {
     let served = served(root, path)?;
     let served_root = served.root(root);
     let sealed = path
         .with_file(FileKind::SealedBars)
         .to_path_buf(&served_root);
-    if fs::symlink_metadata(&sealed).is_ok_and(|meta| meta.is_file()) {
+    if fs::metadata(&sealed).is_ok_and(|meta| meta.is_file()) {
         return Ok(sealed);
     }
     Ok(path.with_file(FileKind::Bars).to_path_buf(&served_root))

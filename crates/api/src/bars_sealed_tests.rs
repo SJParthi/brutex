@@ -213,3 +213,50 @@ fn a_damaged_sealed_frame_is_named_row_by_row_on_a_page() {
     assert!(said[0].contains("sealed month is refused"), "{said:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `docs/06-limits.md` L-SC-24 and L-SC-25, held to what was measured and to
+/// the source they name (verify-SC-3-r1). L-SC-24 once quoted `/calendar.json`
+/// at 0.25 ms over sealed months when every timed answer had been a 202 or a
+/// 503, and said every max was under 50 ms when the first request after a
+/// start costs more in both forms. So: the warm row says its figures count
+/// only answers of 200 and no longer denies a max over 50 ms; the first-request
+/// row names that cost in both forms, the function that pays its floor, the
+/// auction row it shares, and the bound this module enforces, read from the
+/// constant itself so the bound cannot drift from the code.
+#[test]
+fn the_sealed_route_limits_time_answers_and_name_first_requests() {
+    const LIMITS: &str = include_str!("../../../docs/06-limits.md");
+    const LINEAGE: &str = include_str!("bars_change.rs");
+    let row = |id: &str| {
+        LIMITS
+            .lines()
+            .find(|line| line.starts_with(&format!("| {id} |")))
+            .unwrap_or_else(|| panic!("docs/06-limits.md has no row {id}"))
+    };
+    let warm = row("L-SC-24");
+    assert!(warm.contains("every answer 200"), "{warm}");
+    assert!(warm.contains("HTTP status"), "{warm}");
+    assert!(!warm.contains("every max under 50 ms"), "{warm}");
+    assert!(warm.contains("L-SC-25"), "{warm}");
+    let first = row("L-SC-25");
+    for named in [
+        "first request",
+        "sealed",
+        "raw",
+        "`bars::change::Lineage::read`",
+        "`imports/gdfl.lineage`",
+        "L-AG04-02",
+        "every answer 200",
+        "over 50 ms",
+    ] {
+        assert!(first.contains(named), "L-SC-25 names {named}: {first}");
+    }
+    let bound = format!("`MAX_WINDOW_MONTHS` = {MAX_WINDOW_MONTHS}");
+    assert!(first.contains(&bound), "L-SC-25 quotes {bound}: {first}");
+    // The floor it names is still the source's shape: a ledger whose stamp is
+    // new is read and parsed whole, once, and kept until the stamp moves.
+    assert!(
+        LINEAGE.contains("let ledger = Arc::new(parse_ledger(&text));"),
+        "bars_change.rs no longer parses the whole lineage ledger on a new stamp: L-SC-25 is stale"
+    );
+}

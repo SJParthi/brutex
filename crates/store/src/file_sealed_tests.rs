@@ -491,6 +491,43 @@ fn a_misfiled_sealed_month_is_refused() {
 }
 
 #[test]
+fn a_linked_sealed_month_is_keyed_by_the_file_the_door_serves() {
+    // verify-SC-3-r1 follow-up: the door's open follows a final link (as the
+    // raw reader's does), so a `.sbar` that is a link to a sealed file is
+    // SERVED; `served_bars_path` asked `lstat` and keyed that month by its
+    // `.bin`, a cache key with the raw form's path and stamp over sealed
+    // answers. A link that points nowhere is an absent `.sbar` to both.
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("linked");
+    let path = month_path(None);
+    let bars = seconds(300);
+    write_raw(&root.0, path, &bars);
+    let elsewhere = Root::new("linked-target");
+    let target = elsewhere.0.join("sealed-elsewhere.sbar");
+    fs::write(&target, sealed_bytes(&root.0, path)).unwrap();
+    let sbar = root.file(path, FileKind::SealedBars);
+    std::os::unix::fs::symlink(&target, &sbar).unwrap();
+
+    let door = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(door.form(), Form::Sealed, "the door follows the link");
+    assert_eq!(door.read_range(0, 300).unwrap(), bars);
+    assert_eq!(
+        crate::generation::served_bars_path(&root.0, path).unwrap(),
+        sbar,
+        "the key names the file the door served"
+    );
+
+    fs::remove_file(&target).unwrap();
+    let door = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(door.form(), Form::Raw, "a dangling link is no sealed month");
+    assert_eq!(door.read_range(0, 300).unwrap(), bars);
+    assert_eq!(
+        crate::generation::served_bars_path(&root.0, path).unwrap(),
+        root.file(path, FileKind::Bars)
+    );
+}
+
+#[test]
 fn a_sealed_month_needs_no_time_index_and_none_is_written() {
     // EVERY TEST HERE APPENDS OR IS REFUSED, so it emits: the sink is held
     // (`crate::emits::hold_the_sink`).

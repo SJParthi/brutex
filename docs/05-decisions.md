@@ -72902,3 +72902,48 @@ for a re-offer) is SC-4's; `.srt` v2 is SC-5's; sealing is SC-6's; retiring the
 raw form is SC-9's and needs the operator's decision. Until SC-6 lands nothing
 in the store writes a `.sbar`, so this door changes no answer the live app
 gives today.
+
+### D-5900 — The read door's key follows the file it serves, `cli tix-rebuild` names a sealed month, and a route figure counts only answers that were 200 (SC-3 repair 1, verify-SC-3-r1) — 2026-10-18
+
+A second agent re-checked D-5899 on the package branch and failed it on two
+claims in `docs/06-limits.md` L-SC-24, not on the code. Three choices follow,
+each an addition to D-5899, none a change to it.
+
+**A figure is the time of an answer, never of a refusal.** L-SC-24 gave
+`/calendar.json` "0.25 ms" over sealed months. The timing script recorded no
+HTTP status, and on a private root holding the listed months but not the rest
+of a series the census holds, that route answers 202 (`building`: the
+calendar is built in the background, retry) and then 503 (95 BANKNIFTY bar
+files the census holds could not be opened, so no calendar is answered), by
+design: it refuses rather than answer a calendar over months it cannot open. The route
+figures are now re-measured with every answer's status recorded
+(`state/fix/round2/sc3r1-warm.txt`, `all200=yes` on every quoted line), on a
+root holding every month of each series it serves. A line with any status but
+200 is never quoted as the route's figure.
+
+**First requests are named, not denied.** L-SC-24 said every max was under
+50 ms. The first request after a start fills in-process memos and costs
+more, in both forms. Its floor, about 38 ms even for a one-month window, is
+paid once a process by whichever GDFL bar route comes first: it parses the
+whole GDFL lineage ledger (`bars::change::Lineage::read`, 50 of 54 samples
+of that request), and a later series' first request costs 1 to 2 ms. Above
+the floor, a series' first request over N months builds its plan, month
+extremes, time-of-day runs and sort view from every month in range, O(N)
+bounded by `MAX_WINDOW_MONTHS`, and a share's first request on a day from
+2026-08-03 loads that day's closing-auction master (L-AG04-02). L-SC-25
+gives those figures and their cause, and
+`the_sealed_route_limits_time_answers_and_name_first_requests` holds that
+row and L-SC-24 to the bound in the code and the parse they name; the warm
+figures stay in L-SC-24. Prewarming the memos at start was not chosen: it would move
+O(every month held) of work into every start, which is the cost the memos
+exist to avoid paying for months nobody asks for.
+
+**The key is the file the door serves.** The door's open follows a final link
+exactly as the raw reader's does (only the writer door refuses links, D-2686),
+so `generation::served_bars_path` asks `stat`, not `lstat`: a `.sbar` that is
+a link to a sealed file is the key, and a link that points nowhere is no sealed
+month to either. `cli tix-rebuild` prints `sealed` for `Reindexed::Sealed`
+and `TimeLookup::Sealed`, tallies `sealed N` in both receipts, reads the month
+back through the sealed table, writes nothing beside it and is clean; before,
+it REFUSED the month as "an outcome this build does not know". The receipt
+line `small N,` is now followed by `sealed N,` in both runs.

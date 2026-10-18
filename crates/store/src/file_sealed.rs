@@ -102,11 +102,18 @@ impl BarFile {
     /// there is no `.sbar`. No lock, no sidecar, no generation resolved: the
     /// caller hands the served generation's root.
     ///
+    /// A FINAL LINK IS FOLLOWED, exactly as the raw form's reader open
+    /// follows one (`open_read` asks no `O_NOFOLLOW`); a link that points
+    /// nowhere is an absent `.sbar`. Only the WRITER door refuses links
+    /// (CE-62, D-2686), and a sealed month is never written through this
+    /// handle. [`crate::generation::served_bars_path`] keys the month by the
+    /// same followed file.
+    ///
     /// # Errors
     ///
-    /// The open's own refusal naming the `.sbar` (not a regular file, a final
-    /// link, denied), and [`StoreError::SealedRefused`] for a head that fails
-    /// its checks or was written for another month.
+    /// The open's own refusal naming the `.sbar` (denied, or not a file the
+    /// head can be read from), and [`StoreError::SealedRefused`] for a head
+    /// that fails its checks or was written for another month.
     pub(super) fn open_sealed_at(
         root: &Path,
         path: StorePath<'_>,
