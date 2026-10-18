@@ -38,14 +38,14 @@
 //! Equities are labelled research, gross of every charge until FIB-11 wires
 //! the charges, and never Selection V6 or execution authority (`CLAUDE.md` §1).
 
-mod authorities;
-mod day;
+pub mod authorities;
+pub mod day;
 mod deep;
 mod exam;
-mod files;
+pub mod files;
 mod net;
 mod plan;
-mod reference;
+pub mod reference;
 mod report;
 mod run;
 mod sample;

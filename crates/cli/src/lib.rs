@@ -93,7 +93,7 @@ mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 /// `cli fib`: the Fib Flag Breakout engine's sub-verbs, each refusing by name
 /// until its package lands (FIB-1, D-6307).
-mod fib;
+pub mod fib;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored minute of a series judged against its

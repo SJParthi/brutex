@@ -2318,6 +2318,11 @@ pub const MID_RANK_SCALE: u64 = 2;
 /// A pair is one long and one short setup (operator 16 Oct 17:11 IST).
 pub const PAIR_SIDES: u64 = 2;
 
+/// The FIB run files' checksum block, in bytes (FIB-8, FM-F091; D-6444): how
+/// many bytes of whole records one verified read covers. A representation
+/// choice, never a threshold.
+pub const FIB_FILE_BLOCK_BYTES: u64 = 65_536;
+
 /// THE ONE LEDGER of every number the FIB strategy path may type (operator
 /// 16 Oct 11:24 IST, narrowed by 17:15 IST item a; D-6309): the Winner Gate
 /// thresholds are the only fixed numbers that DECIDE; every other row is a
@@ -2531,6 +2536,12 @@ pub const FIXED_NUMBERS: &[FixedNumber] = &[
         "D-6312",
     ),
     ("pair_sides", PAIR_SIDES, Category::Representation, "D-6312"),
+    (
+        "fib_file_block_bytes",
+        FIB_FILE_BLOCK_BYTES,
+        Category::Representation,
+        "D-6444",
+    ),
 ];
 
 /// The Winner Gate's clauses that carry no number of their own (17:15 IST

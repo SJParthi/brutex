@@ -621,6 +621,116 @@ impl CashCloses {
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
     }
+
+    /// The dated schedule itself, for the one fold authority
+    /// (`pull::fold::complete_minutes_with_calendar`): the FIB day input folds
+    /// a share's minutes against the same flags its closes are read from
+    /// (FIB-8, D-6440). Read-only.
+    #[must_use]
+    pub const fn schedule(&self) -> &pull::cash_auction::Schedule {
+        &self.schedule
+    }
+}
+
+/// What kind of refusal a month load met (FM-F099, D-6449): absence kept apart
+/// from every refusal that must halt a run, so no refusal is ever counted as
+/// absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LoadClass {
+    /// The month file does not exist.
+    Missing,
+    /// A writer holds the month.
+    Locked,
+    /// The host refused: permission, a full disk, a directory or a link where
+    /// the file should be, a short read.
+    Io,
+    /// The word names no instrument or rung the engine sweeps.
+    NotSweepable,
+    /// The file is there and is not a readable month: its format, checksums,
+    /// commit record or bars refuse.
+    Corrupt,
+}
+
+impl LoadClass {
+    /// The class's counted word.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Locked => "locked",
+            Self::Io => "io",
+            Self::NotSweepable => "not_sweepable",
+            Self::Corrupt => "corrupt",
+        }
+    }
+}
+
+/// [`load`], with its refusal classified (FM-F099, D-6449). The message is
+/// [`load`]'s own; the class comes from opening the month again and naming
+/// the store's own refusal, so a lock, a host refusal and a corrupt file are
+/// never read as absence. A month that opens but did not load (a record read
+/// failed) is [`LoadClass::Corrupt`].
+///
+/// # Errors
+///
+/// [`load`]'s refusal, with its class.
+pub fn load_with_class(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    year: u16,
+    month: u8,
+) -> Result<Loaded, (LoadClass, Refusal)> {
+    load(root, vendor, underlying, rung_name, year, month).map_err(|why| {
+        (
+            classify_month(root, vendor, underlying, rung_name, year, month),
+            why,
+        )
+    })
+}
+
+/// The class of a month that did not load.
+fn classify_month(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    year: u16,
+    month: u8,
+) -> LoadClass {
+    let (Ok(timeframe), Ok(key)) = (rung(rung_name), swept_index(underlying)) else {
+        return LoadClass::NotSweepable;
+    };
+    let Ok(ym) = YearMonth::new(year, month) else {
+        return LoadClass::NotSweepable;
+    };
+    let Ok(path) = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars) else {
+        return LoadClass::NotSweepable;
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the store's symbol id is the low 32 bits of FNV-1a, as `load` asks it"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
+    match BarFile::open_existing(root, path, symbol_id) {
+        Ok(_) => LoadClass::Corrupt,
+        Err(StoreError::Missing { .. }) => LoadClass::Missing,
+        Err(StoreError::Locked { .. }) => LoadClass::Locked,
+        Err(
+            StoreError::Io { .. }
+            | StoreError::Denied { .. }
+            | StoreError::ReadOnly { .. }
+            | StoreError::DiskFull { .. }
+            | StoreError::IsADirectory { .. }
+            | StoreError::NotADirectory { .. }
+            | StoreError::NotARegularFile { .. }
+            | StoreError::Symlinked { .. }
+            | StoreError::BarrierFailed { .. }
+            | StoreError::ShortRead { .. },
+        ) => LoadClass::Io,
+        Err(_) => LoadClass::Corrupt,
+    }
 }
 
 /// The dated closes `key` needs over `signal`'s days, or `None` for any key
