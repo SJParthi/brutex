@@ -669,3 +669,48 @@ fn a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more() {
         "{stdout}"
     );
 }
+
+/// **Ending a served process with no engine work running says none was
+/// abandoned.** `end_served` is the binary's own end: it asks every engine
+/// task in the process to stop, waits for the runtime, has the last word
+/// said and releases what was held, then answers how many engine tasks it
+/// abandoned. Run in a child process, because the stop it asks for is the
+/// whole process's and would stop every test beside this one. Kills
+/// `end_served -> 1` (server.rs:18089), which no test reached before.
+#[test]
+fn ending_a_served_process_with_no_engine_work_abandons_none() {
+    const CHILD: &str = "BRUTEX_CLOUDE_END_SERVED_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let mut outlived = None;
+        let abandoned = end_served(
+            runtime,
+            std::time::Duration::from_millis(200),
+            Held::default(),
+            |said| outlived = Some(said),
+        );
+        assert_eq!(abandoned, 0);
+        assert_eq!(
+            outlived,
+            Some(false),
+            "the last word was said, of an idle pool"
+        );
+        println!();
+        println!("CLOUDE-END-SERVED=checked");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::ending_a_served_process_with_no_engine_work_abandons_none",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDE-END-SERVED=checked"),
+        "{stdout}"
+    );
+}
