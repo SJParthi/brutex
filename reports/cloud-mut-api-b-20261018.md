@@ -421,10 +421,12 @@ whichever the hour allows.
 
 **`emitted.rs`** (37 lines with a side untaken, as in this session's first
 run; the 17 Oct report counted none for it): every one is the false side of
-the first operand of an `&&` in a `mine:` predicate of the emit-site table, a
-test-only module (`#[cfg(test)]` in `lib.rs`, so cargo-mutants lists no
-mutant in it). A false side would be the predicate meeting another site's
-record first, and each case's own record is found first.
+an operand of the `&&` chain in one of the emit-site table's `mine:`
+predicates (checked line by line: 37 lines in 26 predicates). The module is
+test-only (`#[cfg(test)]` in `lib.rs`, so cargo-mutants lists no mutant in
+it). A false side would be the predicate meeting a record that matches its
+earlier operands and not that one, and each case's own record is the one it
+meets.
 
 **Test files** (not production): `server_cloud_mutant_tests_a` 7 / 10,
 `_b` 33 / 13, `_c` 16 / 10, `_d` 3 / 1, `_e` 3 / 3. These are failure paths
