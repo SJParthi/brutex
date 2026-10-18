@@ -32,6 +32,10 @@ Scope, as that report sets it:
 - **Gates.** fmt clean, clippy clean, deny green, and
   `cargo test -p store --locked` green (810/0) as an ordinary user runs it.
   - Run as plain root, 3 `settings` tests fail, as on the base.
+  - `cargo test --workspace --locked`: 9,411 passed. Its 5 failures are
+    `api`'s slow-reader tests, red identically on the base (not this pass's
+    code).
+  - The CI `language-purity` job: 32 of 32 green.
   - **CI gate 20 would be red with this branch** (`sink.rs` 25 against 20,
     `lib.rs` 0 against 6), measured on Linux. Its counts are not this
     pass's files: see NEEDS THE MAC.
