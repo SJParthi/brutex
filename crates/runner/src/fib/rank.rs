@@ -48,7 +48,7 @@
 //! This module is pure: no I/O, no print, no telemetry (gates 17 and 22).
 //! Every refusal is counted in a plain field.
 
-use vocab::fib_cube::{BP_PER_UNIT, RANK_RADIX_DIGIT_BITS};
+use vocab::fib_cube::{BP_PER_UNIT, RANK_RADIX_DIGIT_BITS, Ratio};
 
 /// Values one radix digit takes.
 const BUCKETS: usize = 1 << RANK_RADIX_DIGIT_BITS;
@@ -165,6 +165,13 @@ pub enum RankRefusal {
         /// The last minute folded.
         last: i64,
     },
+    /// A year counted before the last year counted.
+    YearOutOfOrder {
+        /// The year offered.
+        year: i32,
+        /// The last year counted.
+        last: i32,
+    },
 }
 
 impl RankRefusal {
@@ -178,6 +185,7 @@ impl RankRefusal {
             Self::NoDay => "no_day",
             Self::ClosesNotPool { .. } => "closes_not_pool",
             Self::MinuteOutOfOrder { .. } => "minute_out_of_order",
+            Self::YearOutOfOrder { .. } => "year_out_of_order",
         }
     }
 }
@@ -262,7 +270,8 @@ pub struct Census {
     pub flat: u16,
     /// Members with no close yet today.
     pub missing: u16,
-    /// Members ranked on an earlier close (among `ranked` and `flat`).
+    /// Members ranked on an earlier close (counted among the ranked and the
+    /// unmoved).
     pub stale: u16,
     /// Members refused this minute.
     pub refused: u16,
@@ -275,7 +284,7 @@ pub struct Totals {
     pub minutes: u64,
     /// Member-minutes ranked.
     pub ranked: u64,
-    /// Member-minutes flat.
+    /// Member-minutes whose close equals the previous close.
     pub flat: u64,
     /// Member-minutes missing.
     pub missing: u64,
@@ -629,6 +638,74 @@ impl MoverRank {
     #[must_use]
     pub const fn work(&self) -> u64 {
         self.work
+    }
+
+    /// A ranked member's rank as an exact share of its side's ranked count at
+    /// the last minute — `rank / gainers` for a gainer, `rank / losers` for a
+    /// loser (FM-F005's stamp beside the raw rank, D-6314) — or `None` when
+    /// unranked. Its permille is a display unit only.
+    #[must_use]
+    pub fn rank_share(&self, slot: u16) -> Option<Ratio> {
+        let (gainer, loser) = (self.gainer_rank(slot), self.loser_rank(slot));
+        let (rank, count) = if gainer > 0 {
+            (gainer, self.gainers)
+        } else {
+            (loser, self.losers)
+        };
+        let count = u64::try_from(count).ok()?;
+        Ratio::new(u64::from(rank), count).ok().filter(|_| rank > 0)
+    }
+}
+
+/// Decision ranks beyond the widest rank of the first learning window, per
+/// year (FM-F005: `beyond_w0_range`, information only): later pools are
+/// larger, and every ranked decision still has a group. Plain counters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeyondW0 {
+    /// The widest decision rank the first learning window held.
+    widest: u16,
+    /// `(year, decisions, beyond)`, years ascending.
+    years: Vec<(i32, u64, u64)>,
+}
+
+impl BeyondW0 {
+    /// Counters against the first learning window's widest rank.
+    #[must_use]
+    pub const fn new(widest: u16) -> Self {
+        Self {
+            widest,
+            years: Vec::new(),
+        }
+    }
+
+    /// Counts one ranked decision of `year`; a rank of 0 is unranked and is
+    /// not a decision of the rank row.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::YearOutOfOrder`] for a year before the last one counted.
+    pub fn record(&mut self, year: i32, rank: u16) -> Result<(), RankRefusal> {
+        if rank == 0 {
+            return Ok(());
+        }
+        let beyond = u64::from(rank > self.widest);
+        match self.years.last_mut() {
+            Some((last, decisions, count)) if *last == year => {
+                *decisions += 1;
+                *count += beyond;
+            }
+            Some((last, _, _)) if *last > year => {
+                return Err(RankRefusal::YearOutOfOrder { year, last: *last });
+            }
+            _ => self.years.push((year, 1, beyond)),
+        }
+        Ok(())
+    }
+
+    /// `(year, decisions, beyond)` per year counted, ascending.
+    #[must_use]
+    pub fn years(&self) -> &[(i32, u64, u64)] {
+        &self.years
     }
 }
 

@@ -596,7 +596,8 @@ impl OwnPast {
 
     /// Merges today's staged values into the committed past and rebuilds the
     /// cumulative array: O(leaves) once per day, O(1) on a day that staged
-    /// nothing. Every answer after it reads the day.
+    /// nothing (`crates/indicators/tests/fib_hist.rs`, bench row H-F-04).
+    /// Every answer after it reads the day.
     ///
     /// # Errors
     ///
@@ -912,9 +913,13 @@ impl OwnPast {
         past.refused_negative = reader.u64()?;
         past.refused_full = reader.u64()?;
         let counts = read_sparse(reader, leaves)?;
-        for (count, value) in past.committed.iter_mut().zip(counts) {
+        let mut highest = None;
+        for (leaf, (count, value)) in past.committed.iter_mut().zip(counts).enumerate() {
             if value > u64::from(u32::MAX) {
                 return Err(invalid("counts"));
+            }
+            if value > 0 {
+                highest = Some(leaf);
             }
             *count = u32::try_from(value).unwrap_or(u32::MAX);
         }
@@ -928,7 +933,6 @@ impl OwnPast {
             }
             None
         } else {
-            let highest = past.committed.iter().rposition(|count| *count > 0);
             if highest != Some(past.leaf_of(max)) {
                 return Err(invalid("max"));
             }
@@ -2013,7 +2017,8 @@ fn field(
 
 /// The layout of one stock's bank: every measure's cells for each direction,
 /// in [`Measure::ALL`] order, long before short (D-6324). Built once per
-/// generation version; a cell's index is O(1) mixed-radix arithmetic.
+/// generation version; a cell's index is O(1) mixed-radix arithmetic
+/// (`crates/indicators/tests/fib_hist.rs`, bench rows H-F-06 and H-F-07).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BankShape {
     /// The two directions' dimensions, long first.
@@ -2433,12 +2438,12 @@ impl HistBank {
             if new.styles < old.styles || new.variants < old.variants || new.levels < old.levels {
                 return Err(HistRefusal::ShapeNotExtension { what: "dimension" });
             }
+            let mut newer = (0_u16..).zip(&new.widths);
             for minutes in &old.widths {
-                let at = new.widths.partition_point(|w| w < minutes);
-                if new.widths.get(at) != Some(minutes) {
-                    return Err(HistRefusal::ShapeNotExtension { what: "width" });
+                match newer.find(|(_, width)| *width >= minutes) {
+                    Some((at, width)) if width == minutes => map.push(at),
+                    _ => return Err(HistRefusal::ShapeNotExtension { what: "width" }),
                 }
-                map.push(u16::try_from(at).unwrap_or(u16::MAX));
             }
         }
         let mut cells: Vec<OwnPast> = (0..shape.cells).map(|_| OwnPast::empty()).collect();

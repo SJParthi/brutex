@@ -627,3 +627,42 @@ fn every_misuse_is_refused_by_name_and_changes_nothing() {
     assert_eq!(rank.move_bp(9), None);
     assert_eq!(MEMBER_REFUSALS, 4);
 }
+
+/// FM-F005 (D-6314): the rank's exact share of its side's ranked count is
+/// stamped beside the raw rank; an unranked member has none.
+#[test]
+fn the_rank_share_is_exact_and_absent_when_unranked() {
+    let mut rank = day(&[Some(1_000), Some(1_000), Some(1_000), Some(1_000)]);
+    rank.minute(OPEN, &[Some(1_030), Some(1_010), Some(990), None])
+        .unwrap();
+    let share = |slot| rank.rank_share(slot).map(|r| (r.num(), r.den()));
+    assert_eq!(share(0), Some((1, 2)));
+    assert_eq!(share(1), Some((2, 2)));
+    assert_eq!(share(2), Some((1, 1)));
+    assert_eq!(share(3), None, "missing");
+    assert_eq!(share(9), None, "outside the pool");
+}
+
+/// FM-F005: decision ranks beyond the first learning window's widest rank are
+/// counted per year, as information; a year out of order is refused by name.
+#[test]
+fn ranks_beyond_the_first_window_are_counted_per_year() {
+    use runner::fib::rank::BeyondW0;
+    let mut beyond = BeyondW0::new(150);
+    for (year, rank) in [(2019, 3), (2019, 151), (2019, 0), (2020, 150), (2020, 260)] {
+        beyond.record(year, rank).unwrap();
+    }
+    assert_eq!(beyond.years(), &[(2019, 2, 1), (2020, 2, 1)]);
+    assert_eq!(
+        beyond.record(2019, 5),
+        Err(RankRefusal::YearOutOfOrder {
+            year: 2019,
+            last: 2020
+        })
+    );
+    assert_eq!(
+        RankRefusal::YearOutOfOrder { year: 0, last: 0 }.name(),
+        "year_out_of_order"
+    );
+    assert_eq!(beyond.years().len(), 2, "nothing counted");
+}

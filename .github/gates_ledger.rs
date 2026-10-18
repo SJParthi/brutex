@@ -1367,6 +1367,13 @@ const ALLOW_SEARCH: Allow = &[
     // among a chain's step-born versions are the same bounded bisection.
     // Reason in docs/06-limits.md, "Gate 11 — FIB-1, declared".
     ("crates/vocab/src/fib_cube.rs", 5),
+    // FIB-2, 18 Oct 2026: FM-F012 prescribes `OwnPast::value_at_rank` as one
+    // bisection of a histogram's cumulative array (505 entries unsplit:
+    // ten probes, counted); FM-F014 keeps a price series' committed day
+    // gcds sorted, and `ObservedTick::commit_day` bisects them once per
+    // day (O(distinct gcds)). Reason in docs/06-limits.md, "Gate 11 —
+    // FIB-2, declared".
+    ("crates/indicators/src/fibflag/hist.rs", 2),
 ];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
@@ -1644,6 +1651,12 @@ const ALLOW_SORT: Allow = &[
     // listing once, before any computation (one leaf per stock-month and
     // authority file); docs/06-limits.md, "Gate 11 — FIB-1, declared".
     ("crates/runner/src/fib/identity.rs", 1),
+    // FIB-2, 18 Oct 2026: `plan_width_passes` orders a run's widths (at
+    // most 118 per direction) by cost once per run; the mover rank orders
+    // each run of equal `move_bp` by the exact move (FM-F019), bounded by
+    // the run's length. docs/06-limits.md, "Gate 11 — FIB-2, declared".
+    ("crates/indicators/src/fibflag/hist.rs", 1),
+    ("crates/runner/src/fib/rank.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
