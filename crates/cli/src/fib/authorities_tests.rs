@@ -967,3 +967,28 @@ fn authorities_rs_types_no_number() {
     assert!(typed.is_empty(), "{typed:?}");
     assert!(vocab::fib_cube::shipping_part(source).len() < source.len());
 }
+
+/// The interim calendar's digest is taken over its answer on every day of the
+/// sourced spans, each day once and in order: recomputed here the slow way.
+#[test]
+fn the_interim_calendars_digest_covers_every_sourced_day() {
+    let mut table = Vec::new();
+    for day in pull::calendar::SOURCED_FIRST_DAY..=pull::calendar::SOURCED_LAST_DAY {
+        table.extend_from_slice(&day.to_le_bytes());
+        let code = market_verdict(day)
+            .err()
+            .map_or(CalendarCode::ALL.len(), |reason| reason.code.index());
+        table.extend_from_slice(&(code as u64).to_le_bytes());
+    }
+    assert!(table.len() > 1_000, "the spans hold years of days");
+    let calendar = InterimCalendar::interim();
+    assert_eq!(
+        calendar.version().digest,
+        version_digest(
+            AuthorityKind::Calendar,
+            AuthorityKind::Calendar.interim_word(),
+            INTERIM_CALENDAR_LABEL,
+            &table
+        )
+    );
+}
