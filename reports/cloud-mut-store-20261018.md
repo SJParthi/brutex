@@ -166,5 +166,104 @@ type that has none: `File`, `Metadata`, `Staged`, `Seen`, `ReadRefusal`,
 - `staging::create`'s `links != 1` guard, forced true or false, and `!=`
   made `==`.
 
-`24ca118c` changes only test code, so the plan is the same on the final
-tree.
+`24ca118c` changes only test code. Listed again on the final tree, the plan
+is the same 38 mutants, line for line.
+
+### Coverage, the final run (on `24ca118c`)
+
+**How.** `cargo llvm-cov` 0.8.4's own wrapper, with `--branch`
+(`RUSTC_BOOTSTRAP=1`, since `-Zcoverage-options=branch` is unstable),
+builds the store and telemetry test binaries in the workspace profile.
+- Each of the 39 binaries runs alone from its package root, with the
+  capabilities dropped and its profiles in its own world-writable folder,
+  so the uid-65534 children's profiles are kept too.
+- Each binary's profiles are merged on their own, and `llvm-cov export
+  -format=lcov` reads them against that binary.
+- A line counts as covered when any binary ran it, and a branch arm when
+  any binary took it. This is the per-binary union the 16 and 17 Oct passes
+  used: one merged profile keeps one copy of a function built differently in
+  two binaries, and undercounts.
+
+All 39 binaries passed (`cited_commits`' history test skipped, as in every
+run).
+
+| file | lines | missed | branches | missed |
+|---|---:|---:|---:|---:|
+| `store/src/emits.rs` | 285 | 6 | 2 | 0 |
+| `store/src/file.rs` | 4,440 | 64 | 358 | 20 |
+| `store/src/flock.rs` | 75 | 0 | 8 | 0 |
+| `store/src/path.rs` | 206 | 0 | 30 | 0 |
+| `store/src/safe_open.rs` | 177 | 8 | 22 | 2 |
+| `store/src/sealed.rs` | 1,434 | 0 | 274 | 4 |
+| `store/src/sealed_codec.rs` | 646 | 0 | 90 | 0 |
+| `store/src/sort_index_writer.rs` | 388 | 0 | 62 | 0 |
+| `store/src/staging.rs` | 109 | 0 | 14 | 0 |
+| `store/src/time_index.rs` | 744 | 0 | 80 | 9 |
+| `store/src/verdict.rs` | 2,685 | 6 | 310 | 14 |
+| `telemetry/src/sink.rs` | 4,463 | 25 | 340 | 20 |
+
+This is the 17 Oct r5 table, line for line, with one difference: `file.rs`
+has three more instrumented lines, `24ca118c`'s wrapper, all covered. `lib.rs`
+has no instrumented line. Every uncovered line and branch is where r5 put
+it, except one test-code branch, which `24ca118c` moved from 10095 to 10107.
+
+Each one was looked at again in the code at this commit. The production
+code ends where each file's first `#[cfg(test)]` begins: `file.rs` 5990,
+`verdict.rs` 4178, `sink.rs` 3511.
+
+**Uncovered production lines, each unreachable:**
+- `file.rs` 3349-3350, 3363-3364, 3467-3468, 3546-3547, 3557-3558,
+  3574-3575, 3577-3578: `let Some(tix) = self.tix.as_ref() else`, a
+  re-borrow after the caller read the same `Some`.
+- `file.rs` 3375-3385 and 3493-3507: `time_index::extend` refusing
+  `OffGrid` or `Outside`. Admission refused those bars first, on the same
+  grid and month bounds. `Err(other)` cannot come, because the stamps
+  iterator never errs.
+- `file.rs` 3488-3491: `SharedSlot` at the threshold. An intraday slot holds
+  one bar, and a daily month never reaches 1,024 bars.
+- `file.rs` 2582, 2588, 3796, 3806-3808: a block range refused when it was
+  computed from the same layout, and a buffer that a `const` assertion
+  sizes.
+- `file.rs` 3941-3942: the overlap walk past `held_through`.
+- `file.rs` 3993-3994: an empty month at `suffix_that_follows`, which
+  admission refuses first.
+- `file.rs` 4424-4427: `index_refused`'s non-`Unreadable` arm, which only
+  the arms above reach.
+- `safe_open.rs` 104/107: a file type Linux does not have.
+- `safe_open.rs` 299-306: the arm for targets without verified open flags.
+- `verdict.rs` 716-717: a vendor table that disagrees with its declaration.
+- `verdict.rs` 3923-3924, 4075-4076, 4136-4137: `handle` answering `None`
+  right after `prefix` cached it.
+- `sink.rs` 3410/3413: a posting path with no parent.
+
+**Uncovered production branches with no uncovered line:**
+- `file.rs` 3256: `set_tix_state` on a handle with no `tix`.
+- `file.rs` 3679: the sort cache's second key. Every commit sets the cached
+  block to `NO_BLOCK`, so a changed count always comes with a changed block.
+- `file.rs` 5154: `O_SYNC.is_none()`, true only on a target without one.
+- `file.rs` 5248: the parent walk ending by `None`. It ends at the root's
+  parent, which `starts_with(root)` refuses.
+- `sealed.rs` 1499, 1525: `get_mut(5)` on arrays of six.
+- `sealed.rs` 1504: `Fold::push`'s table-length guard (see its equivalent
+  mutant below).
+- `sealed.rs` 2352: `block > 0` with block 0, which the arm cannot see (see
+  its equivalent mutant below).
+- `verdict.rs` 2278, 2312, 2478, 3417: `get_mut` on tables sized by the
+  value that indexes them.
+- `verdict.rs` 3143: `make_dirs`' walk ending by `None`. It breaks at the
+  series root first.
+- `verdict.rs` 3853: the eviction's `min_by_key` on a full cache, which is
+  never empty.
+
+**Test code**, run only when a test fails:
+- `file.rs` 6220 to 9776 and branches 6367 to 10107;
+- `verdict.rs` 4219, 4227, 4637, 4974;
+- `time_index.rs` 921, 1057, 1058, 1105;
+- `emits.rs` 788-792 and 801;
+- `sink.rs` 3604-3607, 3995, 4032-4035, 4365, 4584, 4968, 6552, 6882, 6941
+  and 7792, the doubles' methods at 3706-3716, and the branches after 3511.
+
+These are `panic!` arms of helpers, `assert!` messages and short-circuits,
+deadlines that pass only when a body never returns, and doubles' methods a
+test does not call. **No production line or branch this branch added is
+uncovered.**
