@@ -1493,3 +1493,28 @@ fn a_trade_has_one_buy_and_one_sell() {
         );
     }
 }
+
+/// A zero net is a loss: it never counts on the winners' ladder, even one whose
+/// first rung is zero.
+#[test]
+fn a_zero_net_never_climbs_the_winners_ladder() {
+    let entries = [Entry {
+        slot: 0,
+        day: 100,
+        second: at(10, 0),
+        side: 0,
+        outcome: trade(0, at(10, 0), at(10, 5)),
+    }];
+    let (table, outcomes) = case(Search::Long, &entries);
+    let rungs = Rungs::new(vec![Ratio::whole(0), Ratio::whole(1)], Vec::new()).unwrap();
+    let profiles = [Profile {
+        variant: 0,
+        size: TradeSize::Small,
+    }];
+    let mut pass = OrderedPass::new(&table, &profiles, rungs, vec![Gross]).unwrap();
+    let card = pass
+        .score(&table, &[0], &outcomes, &fixture::calendar(100, 30))
+        .unwrap()[0]
+        .clone();
+    assert_eq!((card.months[0].losses, card.rung_net[0]), (1, 0));
+}
