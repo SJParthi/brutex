@@ -2,7 +2,7 @@
 
 Depends on: FIB-13, FIB-14, FIB-7, FIB-9, FIB-10, FIB-11, FIB-12; outside parts: CHG-1, CHG-2, CAL-1, PIT-1, DATA-1, DATA-2, OF-1, R4-06, R4-07, R4-11, R4-12, R4-26
 
-Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof and its requirements on other parts; every FIB decision id moved +1000 to D-6300..D-6579 because the old ids collided with feat/db-fix and the PREC blocks). Operator blocks at the end supersede earlier text.
+Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof and its requirements; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 IST universe = today's F&O stocks only; 15:57 IST four decisions: span 2018-09-03.., exam partly seen, WINNER word, one-account check). Operator blocks at the end supersede earlier text.
 
 # FIB-15: Live proof: a daily forward paper-trading record of each frozen long + short setup on newly delivered data, with the same code and full charges, judged by the Winner Gate and the downside checks, with an automatic brake
 
@@ -886,4 +886,15 @@ See the list returned with this spec. In short: real-time feeds; Zerodha's post-
 - Every RQ of section (12) that has not landed is listed with what FIB-15 does until it lands.
 - Everything else is listed as NOT DONE.
 ```
+
+
+OPERATOR 18 Oct 2026 ~15:57 IST - FOUR DECISIONS FROM THE ASSURANCE RESEARCH (operator, verbatim: "Yes dude yes to all four"). Binding on top of the text above; FIB-07 owns every gate definition.
+
+(A) TRADING SPAN (assurance S1-01 / FIB-ATK-02). Trades are taken from 2018-09-03 (the first GDFL second-level day) to 2026-09-30 (the end of the Zerodha pull window). 2018-01-01..2018-08-31 (167 sessions) is WARM-UP ONLY: each stock's own-past statistics may read it, no trade, rank-pool entry or gate figure ever comes from it (there are no GDFL seconds and no F&O list source before 2018-09). FIB-10 moves the stored-run calendar from cli's FIRST_DAY 2019-12-02 to CAL-1's sourced calendar (tradable_day), as a recorded decision that re-keys runs; until it lands a run that needs 2018-09..2019-11 is refused by name, never silently shortened. Every report states its covered span and its refused days per year.
+
+(B) EXAM YEAR LABEL (FIB-ATK-03). The sealed exam year (2025-10..2026-09, D-6520) was partly looked at before the lock (the 16 Oct HCLTECH 1-year study, 26,306 candidates). It stays an exam, opened once after the operator's yes, but every exam verdict is labelled "exam year partly seen (HCLTECH study, 16 Oct)", and the DECIDING proof is FIB-15's live record on days after the freeze. FIB-05's outcome proof on TECHM 2026-08 moves to a learning month; D-6520 lists every prior look.
+
+(C) THE WORD WINNER (FIB-ATK-04). A setup that passes gate B on its walk-forward months is a "walk-forward passer (selected on these months)", never a WINNER. It is called WINNER only when (i) it beats the luck test: the permutation draws under the same procedure and trial count pass fewer pairs than the real run, and (ii) it passes the exam under every walk-forward scheme. Reports, pages and APIs use these two words exactly.
+
+(D) ONE-ACCOUNT CHECK (FIB-ATK-08). Besides the per-trade gate, every passer and pair is replayed as ONE ACCOUNT with the operator's capital and leverage, given as run inputs (18 Oct: Rs 10,00,000 capital, intraday leverage up to 5x; both recorded in the run identity, never typed in a strategy file). Every trade in time order needs its margin (notional / the leverage allowed for that stock on that day; the per-stock leverage is UNVERIFIED until a chartered broker margin source is recorded, until then the operator's 5x ceiling is used and labelled) from the free margin at its entry second; a trade that does not fit is skipped and counted 'blocked_by_margin', never resized silently. The account's day-by-day net (after the entire precise charges) must pass the Winner Gate clauses and the five downside checks too; the per-trade figures and the account figures are shown side by side. Cost: O(1) per trade with a running free-margin counter and a per-second release queue.
 
