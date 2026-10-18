@@ -55,6 +55,8 @@
    */
   import { untrack } from 'svelte';
   import { MON, istMonth } from '$lib/dates.js';
+  import { parseDay } from '$lib/db/input-check.js';
+  import { cutText, dayFieldWhy, dayTakes, dayStruckWhy, calendarNote, DAY_TEXT_MAX } from '$lib/db/notes-controls.js';
 
   let {
     /** `yyyy-mm-dd`, or `''` for "no bound". The caller owns it. */
@@ -90,6 +92,35 @@
      * @type {((iso: string) => string | null) | null}
      */
     flagged = null,
+    /**
+     * THE OTHER BOX'S DAY (R3-02; DB-045). A To box takes `after` (its From
+     * day) and a From box `before` (its To day): a day on the wrong side is
+     * refused in the window's order words, and struck in the grid with its own
+     * clause under it — never folded into `min`/`max`, whose reason is the
+     * held span's. `''` means no such bound.
+     */
+    after = '',
+    afterLabel = 'From date',
+    before = '',
+    beforeLabel = 'To date',
+    /**
+     * THE DAY AN EMPTIED BOX TAKES (R3-02), `''` for none. /db passes the held
+     * span's end, so a To box always holds a day: emptied, it reads the last
+     * day held rather than a blank the page read as "no bound".
+     */
+    empty = '',
+    /**
+     * Called with `YYYY-MM` whenever the open grid shows a month, so the
+     * caller can read that month's flags (DB-025). Omitted, nothing is asked.
+     * @type {((ym: string) => void) | null}
+     */
+    onshow = null,
+    /**
+     * Why a shown month's days are not marked, or `''` (DB-025): said under
+     * the grid, so an unmarked month is never read as clean.
+     * @type {((ym: string) => string) | null}
+     */
+    flagWhy = null,
     disabled = false
   } = $props();
 
@@ -145,36 +176,22 @@
    * order would walk the ambiguity this component exists to remove straight
    * back in.
    *
+   * ONE PARSER (R3-02): `parseDay` in `$lib/db/input-check.js` is the rule a
+   * link's `from=` is read with, written from this component's own `parse` and
+   * `valid` (years 1900 to 2999) by R3-01 for this box to move onto. Two
+   * parsers for one question answer differently on the same input.
+   *
    * @param {string} text @returns {string} ISO, or `''` when it is not a day.
    */
-  function parse(text) {
-    const s = text.trim();
-    if (s === '') return '';
-    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
-    if (m) return valid(+m[1], +m[2], +m[3]);
-    m = /^(\d{1,2})[ \-/.]+([A-Za-z]{3,})[ \-/.,]+(\d{4})$/.exec(s);
-    if (m) {
-      // DESTRUCTURED, BECAUSE THE CLOSURE BELOW OUTLIVES THE NARROWING. `m` is
-      // a `let` that later regexes reassign, so `if (m)` narrows it here but not
-      // inside the arrow passed to `findIndex` — from in there `m` is still
-      // `RegExpExecArray | null` and `m[2]` is a read off a possible null. The
-      // three parts are pulled out while the narrowing holds.
-      const [, day, name, year] = m;
-      const mo = MON.findIndex((x) => x.toLowerCase() === name.slice(0, 3).toLowerCase()) + 1;
-      return mo === 0 ? '' : valid(+year, mo, +day);
-    }
-    m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s);
-    if (m) return valid(+m[3], +m[2], +m[1]);
-    return '';
-  }
-  /** @param {number} y @param {number} mo @param {number} d */
-  const valid = (y, mo, d) =>
-    mo >= 1 && mo <= 12 && d >= 1 && d <= daysIn(y, mo) && y >= 1900 && y <= 2999
-      ? isoOf(y, mo, d)
-      : '';
+  const parse = (/** @type {string} */ text) => parseDay(text);
 
-  /** @param {string} iso Is this day inside `min`/`max`? */
-  const inRange = (iso) => (!min || iso >= min) && (!max || iso <= max);
+  /**
+   * Is this day one the field takes: inside `min`/`max` (the held span) and on
+   * the right side of the other box (`after`/`before`)? The same predicate the
+   * grid strikes by, so a struck day and a refused typed day are one rule.
+   * @param {string} iso
+   */
+  const inRange = (iso) => dayTakes(iso, { min, max, after, before });
 
   /* ---- typing ---------------------------------------------------------- */
 
@@ -187,33 +204,45 @@
    */
   let typing = $state(/** @type {string | null} */ (null));
   const text = $derived(typing ?? render(value));
-  const bad = $derived(typing !== null && typing.trim() !== '' && parse(typing) === '');
 
-  /* THE CALLER'S REASON, PUNCTUATED ONCE.
-     `boundsReason` is prose the caller writes and it may or may not end in a
-     stop — /db's ends "…is its expiry." — so appending one produced
-     "…its expiry..". The tail owns the punctuation: it trims whatever the
-     caller ended with and supplies exactly one.
-     ONLY THE FIRST SENTENCE. These reasons run to two and three sentences,
-     which is right on the calendar's own footer where there is room, and is a
-     paragraph under a form field. The first sentence is the bound; the rest is
-     background the opener's title still carries in full. */
-  const reasonTail = $derived.by(() => {
-    const raw = String(boundsReason ?? '').trim();
-    if (raw === '') return '.';
-    const first = raw.split(/(?<=\.)\s+/)[0] ?? raw;
-    return ` — ${first.replace(/[.;,\s]+$/, '')}.`;
-  });
-  const outOfRange = $derived.by(() => {
-    const iso = typing === null ? value : parse(typing);
-    return isIso(iso) && !inRange(iso);
-  });
+  /**
+   * THE LAST PASTE'S CUT (R3-02). More than `DAY_TEXT_MAX` characters are cut
+   * to that many as they arrive — 6,000 pasted characters were kept whole and
+   * echoed back inside the refusal, a paragraph wider than the page — and this
+   * holds the one sentence that says so, `''` otherwise.
+   */
+  let cutWhy = $state('');
+
+  /**
+   * WHAT THE BOX SAYS UNDER ITSELF, or `null` (R3-02; DB-045): the cut, the
+   * shape, the held span or the window's order, each in its own words — see
+   * `dayFieldWhy`. The reason is the caller's (`boundsReason`), cut to its first
+   * sentence and punctuated once (`reasonTail` in `input-check.js`).
+   */
+  const why = $derived(
+    dayFieldWhy({
+      typed: typing,
+      value,
+      label,
+      min,
+      max,
+      after,
+      before,
+      reason: boundsReason,
+      cut: typing !== null ? cutWhy : ''
+    })
+  );
 
   /** @param {string} next */
   function type(next) {
-    typing = next;
-    const iso = parse(next);
-    if (next.trim() === '') onchange?.('');
+    const cut = cutText(next, DAY_TEXT_MAX, label);
+    typing = cut.text;
+    cutWhy = cut.why;
+    if (cut.why) return;
+    const iso = parse(cut.text);
+    /* AN EMPTIED BOX TAKES `empty` (the held span's end on /db), so the
+       window never silently loses a side; with no `empty` it is unbounded. */
+    if (cut.text.trim() === '') onchange?.(empty);
     else if (iso !== '' && inRange(iso)) onchange?.(iso);
   }
 
@@ -227,7 +256,8 @@
    * Now a blur keeps unread or out-of-range text in the box, with
    * `aria-invalid` and the sentence under it saying it was NOT applied and
    * what the field still holds. Escape puts the held value back; text that
-   * did apply simply re-renders in the field's own format.
+   * did apply simply re-renders in the field's own format — an emptied box
+   * re-renders the day it took.
    */
   function settle() {
     if (typing === null) return;
@@ -237,14 +267,17 @@
 
   /* A VALUE SET FROM OUTSIDE (a reset, a link, the other field) replaces
      unapplied text: the box shows what the window now is. Text that parses to
-     the new value is the reader's own typing and is left alone. */
+     the new value is the reader's own typing and is left alone — and so is an
+     EMPTIED box whose emptying moved the value to `empty`: the reader is about
+     to type the next day, and refilling the box under the caret would undo
+     the clearing they just did. */
   let lastValue = /** @type {string | null} */ (null);
   $effect(() => {
     const v = value;
     untrack(() => {
       if (v === lastValue) return;
       lastValue = v;
-      if (typing !== null && parse(typing) !== v) typing = null;
+      if (typing !== null && typing.trim() !== '' && parse(typing) !== v) typing = null;
     });
   });
 
@@ -261,6 +294,7 @@
       e.preventDefault();
       e.stopPropagation();
       typing = null;
+      cutWhy = '';
     }
   }
 
@@ -349,6 +383,7 @@
         day: +iso.slice(8, 10),
         other: n < 1 || n > len,
         ok: inRange(iso),
+        struck: dayStruckWhy(iso, { min, max, after, afterLabel, before, beforeLabel, reason: boundsReason }),
         shut: closed ? closed(iso) === true : false,
         flag: flagged ? flagged(iso) : null
       });
@@ -482,12 +517,52 @@
     openId = 0;
   }
 
-  /** @param {KeyboardEvent} e */
+  /** @type {HTMLButtonElement | null} */
+  let opener = $state(null);
+
+  /**
+   * Escape inside the panel closes it AND gives focus back to the opener: the
+   * panel had focus and is gone once it closes, so without this focus fell to
+   * the page's body and the next Tab started again from the top (R3-02 repair
+   * round 1). It stops the key here, so `onFieldKey` never hears it.
+   * @param {KeyboardEvent} e
+   */
   function onKey(e) {
     if (e.key !== 'Escape') return;
     e.stopPropagation();
     openId = 0;
+    opener?.focus();
   }
+
+  /**
+   * ESCAPE CLOSES A CALENDAR OPENED WITH THE MOUSE (R3-02). A click on the
+   * opener left focus on the opener, outside the panel, so the panel's own
+   * Escape handler never heard the key and the calendar stayed open. The
+   * field's root hears it now from anywhere in the field, and the opener
+   * takes focus back, the way `Picker` returns focus to its button.
+   * @param {KeyboardEvent} e
+   */
+  function onFieldKey(e) {
+    if (e.key !== 'Escape' || !open) return;
+    e.stopPropagation();
+    openId = 0;
+    opener?.focus();
+  }
+
+  /* THE PANEL TAKES FOCUS AS IT OPENS, so keys reach it whichever way it was
+     opened — the mouse included. */
+  $effect(() => {
+    if (open && panel) panel.focus({ preventScroll: true });
+  });
+
+  /* THE MONTH ON SHOW IS TOLD TO THE CALLER (DB-025), once per month the
+     open grid shows, so it can read that month's day flags. */
+  $effect(() => {
+    if (open && pad === 'day' && /^\d{4}-\d{2}$/.test(shown)) onshow?.(shown);
+  });
+
+  /** What the grid's footer says it strikes — every kind it strikes (DB-045). */
+  const note = $derived(calendarNote({ min, max, after, afterLabel, before, beforeLabel, reason: boundsReason }));
 
   /**
    * CLOSE ON AN OUTSIDE PRESS — `pointerdown` rather than `click`, because a
@@ -506,7 +581,7 @@
 
 <svelte:document onpointerdown={onDocDown} />
 
-<div class="dcell" data-dayfield={id}>
+<div class="dcell" data-dayfield={id} onkeydown={onFieldKey} role="presentation">
   <span class="dlbl">{label}</span>
   <div class="dwrap">
     <input
@@ -516,8 +591,8 @@
       spellcheck="false"
       placeholder="dd Mon yyyy"
       aria-label={label}
-      aria-invalid={bad || outOfRange}
-      aria-describedby={bad || outOfRange ? `${id}-why` : undefined}
+      aria-invalid={why !== null}
+      aria-describedby={why !== null ? `${id}-why` : undefined}
       {disabled}
       value={text}
       oninput={(e) => type(e.currentTarget.value)}
@@ -533,6 +608,7 @@
       aria-expanded={open}
       aria-label={`Choose ${label.toLowerCase()}`}
       title={boundsReason || undefined}
+      bind:this={opener}
       {disabled}
       onclick={toggle}>▦</button
     >
@@ -559,21 +635,14 @@
        typed, and `aria-describedby` ties it to the input so the two are one
        control to anything reading rather than looking.
        ================================================================== -->
-  {#if bad || outOfRange}
+  <!-- ONE SENTENCE PER REFUSAL, NAMING WHAT WAS CROSSED (R3-02): the cut, the
+       shape, the held span, or the window's order — `dayFieldWhy` — and never
+       the typed text echoed whole (a 6,000-character paste was). After a cut
+       the sentence already says it was not applied. -->
+  {#if why !== null}
     <p class="dbad" id={`${id}-why`} role="alert">
-      {#if bad}
-        <b>{typing}</b> is not a date this field can read — it takes
-        <b>dd Mon yyyy</b>, like <b>{render(min || max || '2026-01-31')}</b>.
-      {:else if min && max}
-        Outside <b>{render(min)}</b> to <b>{render(max)}</b>{reasonTail}
-      {:else if min}
-        Earlier than <b>{render(min)}</b>{reasonTail}
-      {:else if max}
-        Later than <b>{render(max)}</b>{reasonTail}
-      {:else}
-        Outside the range this field accepts.
-      {/if}
-      {#if typing !== null}
+      {why}
+      {#if typing !== null && !cutWhy}
         Not applied: the field still holds <b>{render(value) || 'no bound'}</b>. Escape restores it.
       {/if}
     </p>
@@ -695,7 +764,7 @@
                     : c.shut
                       ? 'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.'
                       : undefined
-                  : boundsReason || 'Outside what this field may take.'}
+                  : c.struck}
                 onclick={() => pick(c.iso)}>{c.day}</button
               >
             {/each}
@@ -707,16 +776,27 @@
            states that a day cannot be picked; only this line states why, and a
            refusal a reader has to hover to find is one most readers never
            meet. -->
-      {#if min || max}
-        <p class="cal-n">
-          {render(min) || 'any earlier day'} – {render(max) || 'any later day'} can be picked.{boundsReason
-            ? ` ${boundsReason}`
-            : ''}
-        </p>
+      <!-- EVERY KIND OF STRUCK DAY IS NAMED (DB-045): the held span, and the
+           other box's day when it strikes more — `calendarNote`. -->
+      {#if note}
+        <p class="cal-n">{note}</p>
+      {/if}
+      <!-- AN UNMARKED MONTH SAYS WHY (DB-025): unread, refused, or a
+           selection spanning instruments — never left to read as clean. -->
+      {#if flagged && flagWhy && pad === 'day' && flagWhy(shown)}
+        <p class="cal-n" role="status">{flagWhy(shown)}</p>
       {/if}
 
       <div class="cal-f">
-        <button type="button" class="clear" onclick={() => pick('')} disabled={!value}>Clear</button>
+        <!-- WITH `empty`, CLEARING TAKES THAT DAY, AND SAYS SO ON ITS FACE. -->
+        <button
+          type="button"
+          class="clear"
+          onclick={() => pick(empty)}
+          disabled={!value || value === empty}
+          title={empty ? `Back to ${render(empty)}, the end of what this field may take.` : undefined}
+          >{empty ? `Back to ${render(empty)}` : 'Clear'}</button
+        >
         <button type="button" class="clear" onclick={() => (openId = 0)}>Close</button>
       </div>
     </div>

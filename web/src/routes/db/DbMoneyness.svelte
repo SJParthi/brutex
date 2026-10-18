@@ -27,6 +27,8 @@
   import { rungKey } from '$lib/moneyness.js';
   import { dayLabel, secondLabel } from '$lib/dates.js';
   import Picker from '$lib/Picker.svelte';
+  /* R3-02 goal 5: a note cut to two lines carries its whole sentence as hover text. */
+  import { wholeTitle } from '$lib/db/notes-controls.js';
 
   /** The Spot control's two rows (D-3328). */
   const ASOF_ROWS = [
@@ -348,7 +350,7 @@
       selected={new Set([db.spotAsof])}
       onchange={(/** @type {Set<string>} */ sel) => (db.spotAsof = [...sel][0] ?? 'exact')}
     />
-    <span class="note" class:warn={db.spotAsof === 'prev'}>
+    <span class="note" class:warn={db.spotAsof === 'prev'} use:wholeTitle>
       {#if db.spotAsof === 'prev'}
         last underlying bar at or before each option bar, same session, never later — every cell shows its age
       {:else}

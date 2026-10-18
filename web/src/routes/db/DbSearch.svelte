@@ -48,6 +48,8 @@
   import { yieldToPage } from '$lib/database-preparation.js';
   import { ask } from '$lib/ask.js';
   import { fmt } from '$lib/db/notes-labels.js';
+  /* R3-02 goal 5: a note cut to two lines carries its whole sentence as hover text. */
+  import { wholeTitle } from '$lib/db/notes-controls.js';
   /** @typedef {import('$lib/db/decoration.js').DecoRow} DecoRow */
   /** @typedef {import('$lib/db/search.js').Hit} Hit */
 
@@ -489,7 +491,7 @@
     {/if}
   </div>
   {#if db.aliasWhy}
-    <span class="note warn">Index names and old symbols are not searched: {db.aliasWhy}</span>
+    <span class="note warn" use:wholeTitle>Index names and old symbols are not searched: {db.aliasWhy}</span>
   {:else if db.findCommitted}
     <span class="note quiet" title={[db.findCommitted.label, segmentName(db.findCommitted.seg), ...db.findCommitted.notes].join('. ')}>
       Opened {db.findCommitted.label}{db.findCommitted.seg ? ` · ${segmentName(db.findCommitted.seg)}` : ''}{#each db.findCommitted.notes as n (n)} · {n}{/each}

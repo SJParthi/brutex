@@ -45,6 +45,8 @@
    *      never mutate what is selected, and a redraw driven by the selection
    *      must never overwrite what is being typed.
    */
+  import { quote } from '$lib/db/input-check.js';
+  import { cutText, SEARCH_TEXT_MAX } from '$lib/db/notes-controls.js';
 
   let {
     /**
@@ -143,6 +145,19 @@
   const open = $derived(openId === id);
 
   let q = $state('');
+  /**
+   * THE LAST PASTE'S CUT (R3-02). The search reads at most `SEARCH_TEXT_MAX`
+   * characters; 6,000 pasted letters were kept, filtered every row against
+   * them and quoted all 6,000 back in "Nothing matches". The box keeps the
+   * first `SEARCH_TEXT_MAX` and this one sentence says so, `''` otherwise.
+   */
+  let qWhy = $state('');
+  /** @param {string} raw */
+  function search(raw) {
+    const cut = cutText(raw, SEARCH_TEXT_MAX, 'This search');
+    q = cut.text;
+    qWhy = cut.why ? `${cut.why} — cut to its first ${SEARCH_TEXT_MAX}.` : '';
+  }
   // TYPED BECAUSE `bind:this` WRITES A NODE INTO THEM. Inferred from `null`
   // alone each is `null` and nothing else, so the binding below was an
   // assignment error and every read of a property off them was a read off
@@ -208,6 +223,7 @@
   });
   $effect(() => {
     if (!open) q = '';
+    if (!open) qWhy = '';
   });
 
   $effect(() => {
@@ -431,10 +447,19 @@
               placeholder="Search {label}"
               aria-label="Filter {label}"
               bind:this={pq}
-              bind:value={q}
+              value={q}
+              oninput={(e) => {
+                search(e.currentTarget.value);
+                if (e.currentTarget.value !== q) e.currentTarget.value = q;
+              }}
               onclick={(e) => e.stopPropagation()}
             />
-            <p class="phint">Matches name or detail</p>
+            <!-- A CUT PASTE IS SAID, NEVER SILENT (R3-02). -->
+            {#if qWhy}
+              <p class="phint pcut" role="status">{qWhy}</p>
+            {:else}
+              <p class="phint">Matches name or detail</p>
+            {/if}
           {/if}
           {#if !single}
             <div class="pact">
@@ -482,7 +507,7 @@
           </label>
         {:else}
           <p class="pnone">
-            {q.trim() ? `Nothing matches “${q}”` : `No ${label} here yet`}
+            {q.trim() ? `Nothing matches ${quote(q.trim())}` : `No ${label} here yet`}
           </p>
         {/each}
 
@@ -672,6 +697,11 @@
     font-size: var(--fs-mini);
     color: var(--faint, #414b60);
   }
+  /* A CUT PASTE (R3-02): the warn hue the day box's refusal takes. */
+  .phint.pcut {
+    color: var(--warn, #f5a524);
+    max-width: 44ch;
+  }
   .pact {
     display: flex;
     gap: 7px;
@@ -696,6 +726,13 @@
   }
 
   .plist label {
+    /* A ROW OFF THE LIST'S SCREEN IS NOT LAID OUT OR PAINTED UNTIL IT SCROLLS
+       IN (R3-02). Opening the 375-minute time list laid out and painted every
+       row although about nine show: the measured open ran past 50 ms. Each
+       row keeps its measured height once drawn (`auto`), so the scroll bar
+       does not jump; 44px is a one-line row before any is measured. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 44px;
     display: flex;
     /* So a row's own reason can take a line of its own beneath the two
        columns. A row without one never wraps: the name flexes and ellipses

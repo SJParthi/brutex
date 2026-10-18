@@ -32,8 +32,36 @@ import { feeds, selectFeed } from '../feeds.svelte.js';
    which is the only thing that makes a count under this feed's name
    checkable. See `universeRefusal`. */
 import { catalogue } from '../index.svelte.js';
-import { UNIVERSES, EVERYTHING, tokensOf, LEGACY_BLIND, censusKeyOf, SEG_VIEW, VIEWS } from './notes-controls.js';
-import { fmt, txt, tfCmp, TF_SECS } from './notes-labels.js';
+import {
+  UNIVERSES,
+  EVERYTHING,
+  tokensOf,
+  LEGACY_BLIND,
+  censusKeyOf,
+  SEG_VIEW,
+  VIEWS,
+  specialsOf,
+  specialsIn,
+  regularDaysIn,
+  timeListRows,
+  timeListWhy,
+  specialMinutes,
+  monthDays,
+  monthNeedsRead,
+  MONTH_FLAGS_KEPT,
+  flagText,
+  tierLeavesOut,
+  fullestSpot,
+  shortfallsAgainst,
+  hiddenMonths,
+  hiddenText,
+  timeframeTitle,
+  strandedEffect,
+  sideStranded
+} from './notes-controls.js';
+import { bandOf, dayflagsUrl } from './dayflags.js';
+import { refusalFrom } from '../refusal.js';
+import { fmt, txt, tfCmp, TF_SECS, tfNote } from './notes-labels.js';
 import { parseKey } from '../instrument.js';
 import { monthLabel, dayLabel, istDay, timeLabel } from '../dates.js';
 import { strikeText } from './decoration.js';
@@ -61,6 +89,7 @@ import {
   linkedContract,
   rebound,
   timeBound,
+  SESSION_OPEN_MINUTE,
   DEFAULT_INSTRUMENT,
   DEFAULT_SEGMENT
 } from './selection-model.js';
@@ -372,6 +401,22 @@ export function selectionState(db) {
    * @type {{from: number, days: string, fromDate: string, toDate: string} | null}
    */
   let calendar = $state.raw(null);
+  /**
+   * THE SPECIAL SESSIONS THE SAME `/calendar.json` ANSWER RECORDS (DB-074):
+   * its `special` list as served — each special day with the windows that
+   * traded — read by `specialsOf` for the time lists. `[]` until it answers.
+   * @type {any[]}
+   */
+  let calSpecial = $state.raw([]);
+  /**
+   * THE HALTS THE SAME ANSWER RECORDS: its `halts` list as served, each with
+   * the minutes it halted, cut out of that day's traded windows by
+   * `specialsOf` (a halted minute is neither owed nor missing, D-3336 §1) and
+   * kept as `halted`, which the time lists offer as halted, never as traded
+   * (repair round 2). `[]` until it answers.
+   * @type {any[]}
+   */
+  let calHalts = $state.raw([]);
   let calWhy = $state('');
   let calFor = $state('');
 
@@ -542,7 +587,9 @@ export function selectionState(db) {
   const tierRefusal = (label, token) =>
     !carriesArray && LEGACY_BLIND.has(token)
       ? `/instruments.json?feed=${feeds.active ?? ''} cannot express ${label} on the API this page is talking to. Its rows answer with the legacy "universe" string only, and crates/api/src/server.rs freezes that string at three tokens — index, fno and ntm — through LEGACY_UNIVERSE_TOKENS. The full "universes" array, which names n500, n200, n100 and n50, is emitted beside it by that same file (D-0089/D-0090): the source has this tier and the running binary predates it. Rebuild and restart the API and this row lights up with no change to this page. What will not happen is a tier synthesised here — NIFTY Total Market arrives in alphabetical order, and slicing its first fifty names would print 360ONE as a NIFTY 50 constituent.`
-      : `${feedDisplay(feeds.active)}'s master lists no instrument in ${label}. Counted over all ${fmt(masterRows().length)} row(s) /instruments.json returned for this feed: the field that would name this set is present on them and not one carries it. That is an EMPTY SET, not a missing endpoint — nothing needs rebuilding, and there is simply nothing here to hold the store against.`;
+      : noMaster
+        ? `${feedDisplay(feeds.active)} has no instrument master: its list is its census, with membership from core::universe's own lists, and not one of the ${fmt(masterRows().length)} name(s) it stores is in ${label}. That is an EMPTY SET, not a missing endpoint.`
+        : `${feedDisplay(feeds.active)}'s master lists no instrument in ${label}. Counted over all ${fmt(masterRows().length)} row(s) /instruments.json returned for this feed: the field that would name this set is present on them and not one carries it. That is an EMPTY SET, not a missing endpoint — nothing needs rebuilding, and there is simply nothing here to hold the store against.`;
 
   /**
    * WHY the universe narrowing is not in force, or `null` when it is.
@@ -567,7 +614,7 @@ export function selectionState(db) {
     if (catalogueIsThisFeed) return null;
     if (catalogue.error) return `/instruments.json could not be read: ${catalogue.error}`;
     if (!catalogue.ready) return 'reading /instruments.json…';
-    return `the instrument list on hand answers for ${feedDisplay(catalogue.feed)}, not for ${feedDisplay(feeds.active)} — no count on this page is built from another feed's master`;
+    return `the instrument list on hand answers for ${feedDisplay(catalogue.feed)}, not for ${feedDisplay(feeds.active)} — no count on this page is built from another feed's instrument list`;
   });
 
   /* MEMBERSHIP IS CHECKED BEFORE THE TOKEN IS, and the order is the whole
@@ -667,6 +714,16 @@ export function selectionState(db) {
     return n;
   });
 
+  /**
+   * THIS INSTRUMENT'S MONTHS OUTSIDE THE WINDOW, PER SEGMENT AND PER RUNG
+   * (D-3338; R3-02), for the Segment and Timeframe lists: held and hidden,
+   * counted on the row they would join. Empty with `oow` on — nothing is
+   * hidden then. Walks the out-of-window rows only.
+   */
+  const hidden = $derived(
+    oow ? { bySegment: new Map(), byRung: new Map() } : hiddenMonths(windowSplit.out, filter, segOf, kind)
+  );
+
   const universed = $derived(
     universeNames === null
       ? inWindow.rows
@@ -765,6 +822,23 @@ export function selectionState(db) {
     }
     return { months, instruments: names.size };
   });
+
+  /**
+   * WHAT THE CHOSEN TIER LEAVES OUT OF WHAT IS STORED, by name (DB-041).
+   * `null` with no join (Everything, or a tier not in force).
+   */
+  const leftOut = $derived(tierLeavesOut(heldUnderlyings, universeNames));
+
+  /**
+   * SPOT SHORTFALLS PER UNDERLYING AND RUNG, against the fullest series of the
+   * SAME segment at each (month, rung) — a share against shares, an index
+   * against indices — with a trade-driven rung counted apart (DB-G63). See
+   * `spotShortfalls`. The fullest series depend on the census alone, so they
+   * are their own derived: a universe or window change folds only the
+   * universe's rows against them (R3-02 repair round 1).
+   */
+  const fullest = $derived(fullestSpot(db.deco));
+  const shortfalls = $derived(shortfallsAgainst(fullest, universed));
 
   const typed = $derived(filter.trim().toUpperCase());
 
@@ -904,7 +978,9 @@ export function selectionState(db) {
       bars: h?.bars ?? 0,
       short: h?.short ?? 0,
       spotMonths: h?.spotMonths ?? 0,
-      contractMonths: h?.contractMonths ?? 0
+      contractMonths: h?.contractMonths ?? 0,
+      /* PER RUNG, AGAINST ITS OWN SEGMENT (DB-G63). */
+      shortBy: shortfalls.get(k)
     });
     if (universeNames === null) return instrumentRows.map((r) => decorate(r.key, r));
     /* ALREADY UNDERLYINGS AND ALREADY UNIQUE -- `universeNames` is a Set of
@@ -1011,11 +1087,12 @@ export function selectionState(db) {
           : all > 0
             ? ` ${name} holds ${fmt(all)} such instrument-month(s), ${contractSource}.`
             : ` ${name} holds none${/** @type {any} */ (activeFeed)?.fno === 'none' ? ' — /feeds.json says it serves no expired F&O (fno: none)' : ''}.`;
+      const off = hidden.bySegment.get(s.key) ?? 0;
       return {
         key: s.key,
         name: s.name,
-        detail: c > 0 ? `${fmt(c)} held` : 'nothing stored',
-        title: `${c > 0 ? `${fmt(c)} instrument-month(s) held for this instrument.` : 'Nothing stored for this instrument.'} ${s.note}.${feedSays}`,
+        detail: `${c > 0 ? `${fmt(c)} held` : 'nothing stored'}${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+        title: `${c > 0 ? `${fmt(c)} instrument-month(s) held for this instrument.` : 'Nothing stored for this instrument.'} ${s.note}.${feedSays}${hiddenText(off, /** @type {any} */ (activeFeed)?.window, fmt)}`,
         /* NOT `disabled`. A segment with nothing stored is a legitimate thing to
            select — the answer is an empty table, which IS the answer to "do I
            hold any of these". Disabling it would refuse the question. */
@@ -1049,6 +1126,39 @@ export function selectionState(db) {
      OUT and every coarser one applied — the facet rule stated further down,
      and the reason the number on a row is the number clicking it returns.
      ====================================================================== */
+
+  /**
+   * THE TIMEFRAME LIST'S ROWS: every rung held inside the window with its
+   * count, and its months held outside the window said beside it (D-3338;
+   * R3-02). A rung held ONLY outside the window is listed too, refused with
+   * the count and the way to show it — it was absent, so 1day on a feed
+   * whose daily months all lie before the window had no row at all.
+   */
+  const timeframeRows = $derived.by(() => {
+    const win = /** @type {any} */ (activeFeed)?.window;
+    /** @type {Array<{key: string, name: string, detail: string, title: string, disabled?: boolean, why?: string}>} */
+    const rows = tfAll.map(([tf, n]) => {
+      const off = hidden.byRung.get(tf) ?? 0;
+      return {
+        key: tf,
+        name: tf,
+        detail: `${fmt(n)} held${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+        title: timeframeTitle(tfNote(tf), off, win, fmt)
+      };
+    });
+    for (const [tf, off] of hidden.byRung) {
+      if (tfAll.some(([t]) => t === tf)) continue;
+      rows.push({
+        key: tf,
+        name: tf,
+        detail: `${fmt(off)} hidden`,
+        title: timeframeTitle(tfNote(tf), off, win, fmt),
+        disabled: true,
+        why: `every ${tf} month of this selection is outside your window`
+      });
+    }
+    return rows.sort((a, b) => tfCmp(a.key, b.key));
+  });
 
   /** Every rung the chosen universe holds, in LENGTH order, with its row count. */
   const tfAll = $derived.by(() => {
@@ -1611,6 +1721,161 @@ export function selectionState(db) {
     return c === null ? null : c === '.';
   }
 
+  /* ======================================================================
+     THE CALENDAR'S MONTH FLAGS (R3-02; DB-025)
+     ----------------------------------------------------------------------
+     The day fields' grid marked a refused or incomplete day only inside the
+     chosen window, because the only flags it was handed were the day band's.
+     Paging the calendar to another month showed every day of it unmarked —
+     which reads as clean. Each month a grid shows is now read once from
+     `/dayflags.json` (one page: at most 31 days), unless the day band's own
+     answer already covers it, and kept: re-opening costs nothing. The cache
+     is keyed by feed, instrument, census read and month, and holds at most
+     `MONTH_FLAGS_KEPT` months (the oldest goes first), so it is bounded. A
+     month that could not be read says why under the grid.
+
+     A READ IN FLIGHT IS AN ENTRY OF ITS OWN (`reading: true`, repair round
+     2), so the grid says "Reading…" only while a read for the key it shows is
+     out, and never about a month nothing asked for.
+     ====================================================================== */
+  /** @typedef {{flags: Map<string, string> | null, why: string, reading?: boolean}} MonthFlags */
+  /** @type {Map<string, MonthFlags>} */
+  let monthFlags = $state.raw(new Map());
+  /** Month reads in flight, by key — plain, never rendered (their `reading` entry is what renders). */
+  const monthReads = new Map();
+
+  /**
+   * The part of a month's key every month of one census read shares — feed,
+   * instrument and census read — ending in `|`, so one scope is never the
+   * prefix of another.
+   */
+  const monthScope = () => `${feeds.active ?? ''}|${db.dayBandInstrument ?? ''}|${db.fetchedAt ?? ''}|`;
+  /** @param {string} ym */
+  const monthKey = (ym) => `${monthScope()}${ym}`;
+
+  /**
+   * Keep `v` as month `key`'s entry, newest last; the oldest beyond
+   * `MONTH_FLAGS_KEPT` goes.
+   * @param {string} key
+   * @param {MonthFlags} v
+   */
+  function putMonth(key, v) {
+    const next = new Map(monthFlags);
+    next.delete(key);
+    next.set(key, v);
+    while (next.size > MONTH_FLAGS_KEPT) next.delete(/** @type {string} */ (next.keys().next().value));
+    monthFlags = next;
+  }
+
+  /**
+   * A grid shows month `ym`: read its day flags if nothing on hand covers it.
+   * Called from the day field's own effect.
+   *
+   * THE KEY AND THE BAND ARE READ TRACKED, ON PURPOSE (DB-025, repair round
+   * 2): the caller's effect then runs again whenever one of them moves while
+   * a grid shows the month — a census read landing (the first press on /db
+   * starts the whole-census read, so opening the calendar first always met
+   * it), a generation re-read, a feed or instrument change — and this asks
+   * for the month under its new key. Read untracked, as before, the key moved
+   * under the open grid and nothing asked again: its marks vanished and
+   * "Reading…" stayed with no read in flight until the grid was closed and
+   * reopened. Only the writes are untracked.
+   *
+   * @param {string} ym `YYYY-MM`
+   */
+  function showMonth(ym) {
+    const feed = feeds.active;
+    const inst = db.dayBandInstrument ?? '';
+    const band = db.dayBand && !db.dayBandLoading ? (db.dayBandSpan ?? null) : null;
+    const key = monthKey(ym);
+    const days = monthDays(ym);
+    if (!feed || !inst || !days) return;
+    if (!monthNeedsRead(ym, band)) return;
+    untrack(() => {
+      if (monthFlags.has(key) || monthReads.has(key)) return;
+      const ctl = new AbortController();
+      monthReads.set(key, ctl);
+      putMonth(key, { flags: null, why: '', reading: true });
+      void (async () => {
+        try {
+          const r = await ask(dayflagsUrl(feed, inst, days.from, days.to), { cache: 'no-store', signal: ctl.signal });
+          if (!r.ok) {
+            putMonth(key, { flags: null, why: await refusalFrom('/dayflags.json', r) });
+            return;
+          }
+          const read = bandOf(await r.json(), { archive: /** @type {any} */ (activeFeed)?.archive ?? null });
+          /** @type {Map<string, string>} */
+          const flags = new Map();
+          for (const c of read.cells) if (c.flagged) flags.set(c.day, flagText(c));
+          putMonth(key, { flags, why: '' });
+        } catch (why) {
+          /* An abort is the page's own (the key moved on), not a refusal of this month. */
+          if (ctl.signal.aborted) return;
+          putMonth(key, { flags: null, why: `/dayflags.json could not be read: ${String(/** @type {any} */ (why)?.message ?? why)}` });
+        } finally {
+          if (monthReads.get(key) === ctl) monthReads.delete(key);
+        }
+      })();
+    });
+  }
+
+  /* A FEED, INSTRUMENT OR CENSUS CHANGE ABORTS THE MONTH READS OF THE OLD
+     SCOPE, AND ONLY THOSE (repair round 1, narrowed in round 2). Round 1
+     aborted every read in flight from this effect's cleanup — which runs on
+     the same change that makes a shown grid ask for its month under the new
+     key, so it could abort the very read that redraws the marks, depending
+     on which effect ran first. A read whose key is in the scope now current
+     keeps going; an aborted read's `reading` entry goes with it, so its
+     month never says "Reading…" with nothing in flight. */
+  $effect(() => {
+    const scope = monthScope();
+    untrack(() => {
+      let next = null;
+      for (const [key, ctl] of monthReads) {
+        if (key.startsWith(scope)) continue;
+        ctl.abort();
+        monthReads.delete(key);
+        if (monthFlags.get(key)?.reading) (next ??= new Map(monthFlags)).delete(key);
+      }
+      if (next) monthFlags = next;
+    });
+  });
+  /* The page going aborts every read still in flight. */
+  $effect(() => () => {
+    for (const ctl of monthReads.values()) ctl.abort();
+    monthReads.clear();
+  });
+
+  /**
+   * A flagged day of a month a grid has shown, in the band's words, or `null`
+   * (unread or ordinary — never "clean").
+   *
+   * @param {string} iso
+   * @returns {string | null}
+   */
+  function monthFlagged(iso) {
+    return monthFlags.get(monthKey(String(iso).slice(0, 7)))?.flags?.get(iso) ?? null;
+  }
+
+  /**
+   * What the grid says under itself about month `ym`'s flags: `''` when they
+   * are read (or the band covers them), else why no day is marked —
+   * "Reading…" only while a read for this key is in flight. A month the day
+   * band covers is marked from the band, so an older month read's refusal is
+   * not said over it.
+   *
+   * @param {string} ym
+   */
+  function monthFlagWhy(ym) {
+    if (!db.dayBandInstrument) return 'No day is marked: day flags are read for one instrument, and this selection spans several.';
+    const band = db.dayBand && !db.dayBandLoading ? (db.dayBandSpan ?? null) : null;
+    if (!monthNeedsRead(ym, band)) return '';
+    const got = monthFlags.get(monthKey(ym));
+    if (got?.reading) return 'Reading this month’s day flags from /dayflags.json…';
+    if (got) return got.why ? `No day of this month is marked: ${got.why}.` : '';
+    return 'No day of this month is marked yet: its day flags have not been asked for.';
+  }
+
   /**
    * WHAT THE DATE FIELDS SAY ABOUT THEIR BOUNDS (DB-045, DB-046, DB-G89),
    * built from the census span and the feed's era — and saying that the
@@ -1679,13 +1944,36 @@ export function selectionState(db) {
    * The minutes a bar of this rung opens on (09:15 to 15:29 on 1min and 1s,
    * every five minutes on 5min), plus any minute outside the regular session
    * the loaded rows actually hold — never only the minutes on screen.
+   *
+   * EVERY MINUTE THE DAYS IN VIEW TRADED (R3-02; DB-074). A special session
+   * in the window — an evening Muhurat hour, a disaster-recovery Saturday's
+   * windows, the 24 Feb 2021 resumption to 16:59 — was listed only when one of
+   * the fifty loaded rows opened in it, so 18:00 on 01 Nov 2024 could not be
+   * asked for without paging to it. Its windows come from the calendar of
+   * record the page already holds (`calSpecial`, the `special` list of the
+   * same `/calendar.json` answer), so opening a list costs no request; and a
+   * window of special days only (`regularDaysIn` is 0) lists no regular
+   * minute nothing traded at. O(1) for the regular-day count (prefix sums per
+   * calendar), O(special days) for the rest.
    */
-  const sessionRows = $derived.by(() => {
+  const daysInView = $derived({ lo: fromDay || heldDays.lo, hi: toDay || heldDays.hi });
+  /** The minutes the loaded rows open on. */
+  const loadedMinutes = $derived.by(() => {
     const held = new Set();
     for (const b of db.barRows ?? []) {
       const t = timeLabel(b.ts);
       if (t !== '—') held.add(t);
     }
+    return held;
+  });
+  /** The rung's bar length in minutes, the grid's step (1 on 1s and 1min). */
+  const gridStep = $derived(Math.max(1, Math.round(Math.max(Number(rungSecs) || 60, 60) / 60)));
+  /** The special days in view, from the calendar answer's own list. */
+  const specialsHere = $derived(specialsIn(specialsOf({ special: calSpecial, halts: calHalts }), daysInView.lo, daysInView.hi));
+  /** The rung's grid, the loaded minutes and the special days' minutes in it. */
+  const rungGrid = $derived.by(() => {
+    const held = new Set(loadedMinutes);
+    for (const m of specialMinutes(specialsHere, gridStep, SESSION_OPEN_MINUTE)) held.add(m.key);
     /* THE DATED CLOSE (SC-CLOSE-18): a contract's grid runs to 15:39 on a
        span reaching 03 Aug 2026, a share's 15:15–15:29 is marked as the
        closing auction there; an index keeps 15:30. What the series is comes
@@ -1697,6 +1985,27 @@ export function selectionState(db) {
         : 'index';
     return sessionGrid(rungSecs, held, { venue, lo: fromDay || heldDays.lo, hi: toDay || heldDays.hi });
   });
+  const sessionRows = $derived(
+    timeListRows(rungGrid, {
+      specials: specialsHere,
+      regular: regularDaysIn(calendar, daysInView.lo, daysInView.hi),
+      held: loadedMinutes,
+      step: gridStep,
+      open: SESSION_OPEN_MINUTE
+    })
+  );
+  /** Why the three time lists are disabled, on their buttons; `''` while they hold a minute. */
+  const timeListTitle = $derived(
+    timeListWhy({
+      rows: sessionRows.length,
+      rung: timeframe,
+      rungSecs,
+      regular: regularDaysIn(calendar, daysInView.lo, daysInView.hi),
+      specials: specialsHere,
+      lo: daysInView.lo,
+      hi: daysInView.hi
+    })
+  );
 
   /**
    * One end of the time window, set from a picked minute (and, on the 1s rung,
@@ -2003,18 +2312,27 @@ export function selectionState(db) {
     if (expiry && !expiryOffered.includes(expiry)) {
       out.push({ rung: 'Expiry', value: expiry, clear: () => (expiry = '') });
     }
-    if (side && !sideOffered.includes(side)) {
+    /* THE STRIKES STILL ON THIS EXPIRY'S CHAIN, as text — read by the Side
+       and Strike checks below. */
+    const here = new Set(strikesHere.list.map(String));
+    /* A SIDE IS STRANDED ONLY BY WHAT IS REALLY ABOVE IT (DB-020; control 110
+       of the 12 Oct re-check). `sideOffered` counts under the strike pick —
+       right for the side list's counts — so a strike left over from another
+       expiry emptied it and PE was named stranded on 02 Jan 2020, whose chain
+       offers PE: only the strike emptied the grid. The side is judged against
+       the strikes still on the chain (`sideStranded`). */
+    if (sideStranded(side, expiryGated, strikePick, here)) {
       out.push({ rung: 'Side', value: side, clear: () => (side = '') });
     }
     /* THE STRIKE IS NAMED TOO (DB-020). A strike left over from another
        expiry or segment emptied the grid with no banner and no Clear. */
     if (strikePick.size > 0) {
-      const here = new Set(strikesHere.list.map(String));
       const gone = [...strikePick].filter((k) => !here.has(k));
       if (gone.length > 0) {
         out.push({
           rung: gone.length === 1 ? 'Strike' : 'Strikes',
           value: gone.map((k) => strikeText(Number(k))).join(', '),
+          kept: strikePick.size - gone.length,
           clear: () => (strikePick = new Set([...strikePick].filter((k) => here.has(k))))
         });
       }
@@ -2027,6 +2345,9 @@ export function selectionState(db) {
     if (dayDisjoint) {
       out.push({
         rung: 'Days',
+        /* NO BAR CAN SHOW: the window misses every held day, whatever the
+           instrument-months above it count. */
+        empty: true,
         value: `${fromDay ? dayLabel(fromDay) : 'any'} → ${toDay ? dayLabel(toDay) : 'any'}`,
         clear: () => {
           fromDay = heldDays.lo;
@@ -2035,7 +2356,12 @@ export function selectionState(db) {
         }
       });
     }
-    return out;
+    /* WHAT EACH ONE DOES TO THE TABLE, SAID TRULY (DB-020): "so no row can
+       match" only when no row does. */
+    return out.map((/** @type {any} */ st) => ({
+      ...st,
+      effect: strandedEffect(st.empty ? 0 : matched.length, st.kept ?? 0, fmt)
+    }));
   });
 
   /* EVERY RUNG, OR THE BUTTON LIES. "Reset all filters" that leaves a universe
@@ -2153,6 +2479,9 @@ export function selectionState(db) {
     segmentRows: { get: () => segmentRows },
     segmented: { get: () => segmented },
     tfAll: { get: () => tfAll },
+    timeframeRows: { get: () => timeframeRows },
+    hidden: { get: () => hidden },
+    leftOut: { get: () => leftOut },
     timeframed: { get: () => timeframed },
     tfRefusal: { get: () => tfRefusal },
     monthsAll: { get: () => monthsAll },
@@ -2207,13 +2536,19 @@ export function selectionState(db) {
     dayNarrowing: { get: () => dayNarrowing },
     dayDisjoint: { get: () => dayDisjoint },
     dayClosed: { get: () => dayClosed },
+    showMonth: { get: () => showMonth },
+    monthFlagged: { get: () => monthFlagged },
+    monthFlagWhy: { get: () => monthFlagWhy },
     dayReason: { get: () => dayReason },
     calendar: { get: () => calendar, set: (v) => (calendar = v) },
+    calSpecial: { get: () => calSpecial, set: (v) => (calSpecial = v) },
+    calHalts: { get: () => calHalts, set: (v) => (calHalts = v) },
     calWhy: { get: () => calWhy, set: (v) => (calWhy = v) },
     calFor: { get: () => calFor, set: (v) => (calFor = v) },
     rungSecs: { get: () => rungSecs },
     secondRung: { get: () => secondRung },
     sessionRows: { get: () => sessionRows },
+    timeListTitle: { get: () => timeListTitle },
     setTimeBound: { get: () => setTimeBound },
     strikesHere: { get: () => strikesHere },
     lifeNote: { get: () => lifeNote },
@@ -2574,6 +2909,8 @@ export function selectionSeeds(db) {
     if (untrack(() => db.calFor) === want) return;
     db.calFor = want;
     db.calendar = null;
+    db.calSpecial = [];
+    db.calHalts = [];
     db.calWhy = '';
     calReads.cancel();
     void calReads.run(async (ticket) => {
@@ -2589,6 +2926,8 @@ export function selectionSeeds(db) {
         const cal = calendarOf(body);
         const reason = typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : '';
         db.calendar = cal;
+        db.calSpecial = Array.isArray(body?.special) ? body.special : [];
+        db.calHalts = Array.isArray(body?.halts) ? body.halts : [];
         db.calWhy = cal
           ? ''
           : body?.status === 'building'
