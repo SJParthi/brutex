@@ -22,6 +22,7 @@
 //! `crates/runner/tests/fib_walk.rs` and measured by
 //! `crates/runner/benches/fib_rows/walk.rs`.
 
+use core::mem::size_of;
 use std::collections::VecDeque;
 
 use indicators::fibflag::types::FibCandle;
@@ -122,6 +123,16 @@ pub(super) struct Forced {
     /// Stage A: the 15:09 minute's exit price, when the minute is there,
     /// usable and not locked.
     pub(super) minute: Option<i64>,
+    /// The best buy-side price of every usable window bar, raw, mirrored
+    /// (`i64::MIN` for an empty window): an open position's excursions run
+    /// through the window in one read.
+    pub(super) best_raw: i64,
+    /// The first second that best price printed.
+    pub(super) best_first: u32,
+    /// The last second it printed.
+    pub(super) best_last: u32,
+    /// The worst sell-side price of every usable window bar, raw, mirrored.
+    pub(super) low_raw: i64,
 }
 
 /// One confirmed swing of one timeframe at one width, or a hole.
@@ -490,6 +501,32 @@ impl DayIndex {
     #[must_use]
     pub fn bars(&self) -> usize {
         self.long.bars.len()
+    }
+
+    /// The bytes the index holds: its working set, for a memory budget.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        let words =
+            |n: usize, width: usize| u64::try_from(n.saturating_mul(width)).unwrap_or(u64::MAX);
+        let side = |s: &SideIndex| {
+            let swings: u64 = s
+                .swings
+                .iter()
+                .map(|l| {
+                    words(l.events.len(), size_of::<SwingEvent>())
+                        .saturating_add(words(l.by_minute.len(), size_of::<u32>()))
+                })
+                .sum();
+            words(s.bars.len(), size_of::<SideBar>())
+                .saturating_add(words(s.best_from.len(), size_of::<i64>()))
+                .saturating_add(words(s.worst_from.len(), size_of::<i64>()))
+                .saturating_add(swings)
+        };
+        words(self.first_at.len(), size_of::<u32>())
+            .saturating_add(words(self.present_before.len(), size_of::<u32>()))
+            .saturating_add(words(self.halts.len(), size_of::<HaltRange>()))
+            .saturating_add(side(&self.long))
+            .saturating_add(side(&self.short))
     }
 
     /// One side.
@@ -888,12 +925,24 @@ fn forced_window(bars: &[SideBar], deep: bool) -> Forced {
         worst_raw: i64::MAX,
         last_second: 0,
         minute: None,
+        best_raw: i64::MIN,
+        best_first: 0,
+        best_last: 0,
+        low_raw: i64::MAX,
     };
     for bar in bars {
         if u64::from(bar.second) < SESSION_FORCED_WINDOW_START_SECS || !bar.usable() {
             continue;
         }
         forced.bars += 1;
+        if bar.hi_raw > forced.best_raw {
+            forced.best_raw = bar.hi_raw;
+            forced.best_first = bar.second;
+            forced.best_last = bar.second;
+        } else if bar.hi_raw == forced.best_raw {
+            forced.best_last = bar.second;
+        }
+        forced.low_raw = forced.low_raw.min(bar.lo_raw);
         if deep {
             if bar.is(Bit::ExitOk) {
                 forced.capable += 1;

@@ -3239,23 +3239,25 @@ fn five_reordered() -> ExitSet {
     set_of(Search::Long, variants)
 }
 
+/// Seed samples with only run-ups, every other distribution `none`.
+fn only_run_up<'a>(run_up: &'a [Sample], none: &'a [Sample]) -> SeedSamples<'a> {
+    SeedSamples {
+        far_edge_excursion_ticks: none,
+        run_up_milli_r: run_up,
+        giveback_permille: none,
+        pullback_candles: none,
+        poke_through_paisa: none,
+        swing_size_milli_r: none,
+        last_peak_clock_seconds: none,
+        time_to_best_seconds: none,
+    }
+}
+
 #[test]
 fn an_unsorted_seed_sample_is_refused_and_an_empty_one_seeds_none() {
     use runner::fib::walk::exits::ExitSetRefusal;
     let none: [Sample; 0] = [];
     let unsorted = samples(&[(0, 9), (0, 3)]);
-    fn only_run_up<'a>(run_up: &'a [Sample], none: &'a [Sample]) -> SeedSamples<'a> {
-        SeedSamples {
-            far_edge_excursion_ticks: none,
-            run_up_milli_r: run_up,
-            giveback_permille: none,
-            pullback_candles: none,
-            poke_through_paisa: none,
-            swing_size_milli_r: none,
-            last_peak_clock_seconds: none,
-            time_to_best_seconds: none,
-        }
-    }
     let seeds = |run_up| only_run_up(run_up, &none);
     assert_eq!(
         seed_exit_set(Search::Long, 0, 1, &seeds(&unsorted)),

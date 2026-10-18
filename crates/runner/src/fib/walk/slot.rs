@@ -958,14 +958,16 @@ impl<'a> Stepper<'a> {
             self.flag(TradeFlag::ExitSpillToForced);
         }
         // The position is open through the forced window: its excursions to
-        // the exit run to 15:09:59. At most one minute of bars, once.
-        while let Some(bar) = self.side.bars.get(self.cursor).copied() {
-            self.cursor += 1;
-            if bar.usable() {
-                self.track(&bar);
-            }
-        }
+        // the exit run to 15:09:59, read from the window's summary.
         let window = self.side.forced;
+        if window.best_raw > self.best_raw {
+            self.best_raw = window.best_raw;
+            self.mfe_second = window.best_first;
+            self.last_peak_second = window.best_last;
+        } else if window.bars > 0 && window.best_raw == self.best_raw {
+            self.last_peak_second = window.best_last;
+        }
+        self.worst_raw = self.worst_raw.min(window.low_raw);
         let priced = match self.day.resolution() {
             Resolution::Second => {
                 if window.bars > 0 && window.capable == 0 {
