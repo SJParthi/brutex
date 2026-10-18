@@ -408,7 +408,10 @@ export const FLAG_WORDS = Object.freeze({
   basis_differs: { word: 'price basis differs: factor shown', tone: 'info', why: "Zerodha's share prices are back-adjusted and GDFL's are as traded: the factor replaces a disagreement (D-3323, DB-G58)" },
   basis_unmeasured: { word: 'basis not measured', tone: 'warn', why: 'no pair of prices of the same instant exists on this row, so no factor is read and nothing is judged' },
   basis_step: { word: 'factor stepped', tone: 'warn', why: 'the factor moved by more than the factor tolerance since the last day measured the same way' },
-  minute_basis_differs_from_day: { word: 'minutes on another basis than the day bar', tone: 'warn', why: "the factor read from Zerodha's minutes differs from the one read from its day bar" }
+  minute_basis_differs_from_day: { word: 'minutes on another basis than the day bar', tone: 'warn', why: "the factor read from Zerodha's minutes differs from the one read from its day bar" },
+  auction_print_also_in_bars: { word: 'auction print also stored as a second', tone: 'warn', why: "a closing-auction print kept apart in the .auc sidecar (from 2026-08-03, D-3320) is also stored as a one-second bar at the same second, so any sum of the two counts it twice: labelled, never subtracted (AG-04, bars-1)" },
+  auction_band_bars: { word: 'seconds inside the auction band', tone: 'warn', why: "this closing-auction-eligible share has stored GDFL seconds inside the auction band: counted and labelled, never removed (AG-04)" },
+  restart_carry: { word: 'restart carry: volume unverified', tone: 'warn', why: "on a day the calendar names a restart, the first second after it carries at least the whole pre-restart volume, so GDFL's day volume may count that quantity twice: labelled UNVERIFIED, nothing subtracted (AG-04, stocks-2)" }
 });
 
 /**
