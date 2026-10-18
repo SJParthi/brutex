@@ -628,3 +628,58 @@ fn the_named_indices_are_the_lists() {
     assert!(!is_named_index("NIFTYIT"));
     assert!(!is_named_index(GIFT_NIFTY));
 }
+
+/// The reader's check of a stored index bar, on bars the store's own writer
+/// would refuse: insane, off the grid, outside the month, not after the bar
+/// before it.
+#[test]
+fn a_reference_minute_is_sane_on_the_grid_in_its_month_and_in_order() {
+    let candle = index_minute(day_of(2025, 3, 3), hm(10, 0), 3_200_000);
+    let bar = Bar {
+        ts_micros: candle.ts_micros,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+        open_interest: candle.open_interest,
+    };
+    let minute = 60_000_000;
+    let march = (2025, 3);
+    assert!(is_reference_minute(&bar, None, march));
+    assert!(is_reference_minute(
+        &bar,
+        Some(bar.ts_micros - minute),
+        march
+    ));
+    assert!(
+        !is_reference_minute(&bar, Some(bar.ts_micros), march),
+        "not after the one before"
+    );
+    assert!(!is_reference_minute(
+        &bar,
+        Some(bar.ts_micros + minute),
+        march
+    ));
+    assert!(
+        !is_reference_minute(&bar, None, (2025, 4)),
+        "outside the month"
+    );
+    for off in [1, minute / 2] {
+        let shifted = Bar {
+            ts_micros: bar.ts_micros + off,
+            ..bar
+        };
+        assert!(!is_reference_minute(&shifted, None, march), "off the grid");
+    }
+    let insane = Bar {
+        low: bar.high + 1,
+        ..bar
+    };
+    assert!(!is_reference_minute(&insane, None, march), "insane");
+    let negative = Bar { volume: -1, ..bar };
+    assert!(
+        !is_reference_minute(&negative, None, march),
+        "a negative volume"
+    );
+}

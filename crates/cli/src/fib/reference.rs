@@ -39,6 +39,7 @@ use brutex_core::instrument::{Exchange, InstrumentKey};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
 use store::file::{BarFile, StoreError};
+use store::format::Bar;
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
 use super::authorities::{CalendarAuthority, IndexDay, IndexScreen};
@@ -170,10 +171,7 @@ pub fn load_index_month(
         let bar = file
             .read_record(record)
             .map_err(|why| format!("{symbol} 1min {ym} record {record}: {why}"))?;
-        let on_grid = bar.ts_micros.rem_euclid(minute_micros()) == 0;
-        let in_month = civil_month(ist_day_second(bar.ts_micros).0) == Some((year, month));
-        let after = previous.is_none_or(|before| bar.ts_micros > before);
-        if !bar.ohlc_is_sane() || !bar.counts_are_sane() || !on_grid || !in_month || !after {
+        if !is_reference_minute(&bar, previous, (year, month)) {
             return Err(format!(
                 "{symbol} 1min {ym} record {record} at {} is not a reference minute: impossible, \
                  off the grid, outside the month or out of order; refused",
@@ -192,6 +190,17 @@ pub fn load_index_month(
         });
     }
     Ok(Some(bars))
+}
+
+/// Whether a stored index bar is a reference minute of `(year, month)`: sane
+/// by the store's own rules, on the minute grid, inside the month and strictly
+/// after the bar before it. The store's writer refuses every bar that is not,
+/// so this is the reader's check that no other writer put one there.
+fn is_reference_minute(bar: &Bar, previous: Option<i64>, (year, month): (u16, u8)) -> bool {
+    let on_grid = bar.ts_micros.rem_euclid(minute_micros()) == 0;
+    let in_month = civil_month(ist_day_second(bar.ts_micros).0) == Some((year, month));
+    let after = previous.is_none_or(|before| bar.ts_micros > before);
+    bar.ohlc_is_sane() && bar.counts_are_sane() && on_grid && in_month && after
 }
 
 /// A minute in microseconds.
