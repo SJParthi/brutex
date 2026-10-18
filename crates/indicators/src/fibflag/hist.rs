@@ -913,7 +913,7 @@ impl OwnPast {
         past.refused_full = reader.u64()?;
         let counts = read_sparse(reader, leaves)?;
         for (count, value) in past.committed.iter_mut().zip(counts) {
-            if value >= u64::from(u32::MAX) {
+            if value > u64::from(u32::MAX) {
                 return Err(invalid("counts"));
             }
             *count = u32::try_from(value).unwrap_or(u32::MAX);
