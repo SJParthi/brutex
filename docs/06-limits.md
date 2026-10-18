@@ -19786,6 +19786,46 @@ every scale, the same p99 noise L-FIB1-13 recorded — H-F-02..05 at 0.882x,
 1.106x, 1.005x and 0.627x, and the bank rows at 2.686x and 4.034x. The third run
 measures both orders, named above.
 
+**The final code, measured again (commit `70cc78bc`, after the mutation fixes:
+the varint byte and the rank key joined by a sum, the checked writes, the
+counted discard).** Same host and bench profile. A fourth `indicators` run began
+30 seconds after the mutation runs ended (one-minute load 1.74, five-minute
+5.01), and its p99s show it: H-F-01..05 0.684x, 0.246x, 1.020x, 1.245x and
+**1.316x (FAIL, time)** — H-F-05's p50 25.5 ns and work 10 at every scale, its
+p99 54 / 61 / 71 ns — H-F-06 1.703x and H-F-07 1.658x (FAIL, time), H-F-08
+2.367x and H-F-09 1.533x (BOUNDED). The fifth run waited for a one-minute load
+under 0.5 (0.29) and is the final code's reading:
+
+| ID | p50 / p99 / max ps at each scale | Work | Ratio | Verdict |
+|---|---|---|---|---|
+| H-F-01 | 8,053 / 24,575 / 396,202; 8,029 / 25,349 / 78,642; 8,057 / 24,852 / 77,506 | 1 | 1.011x | PASS |
+| H-F-02 | 7,517 / 26,322 / 95,673; 7,459 / 16,874 / 44,352; 7,522 / 24,739 / 990,591 | 1 | 0.939x | PASS |
+| H-F-03 | 9,453 / 27,386 / 630,723; 9,442 / 27,696 / 402,843; 9,520 / 28,519 / 37,071 | 1 | 1.041x | PASS |
+| H-F-04 | 435,181 / 825,460 / 2,467,878; 432,193 / 667,208 / 1,898,856; 428,404 / 502,375 / 1,535,624 | 507 | 0.608x | PASS |
+| H-F-05 | 25,539 / 50,555 / 74,582; 25,376 / 50,300 / 67,447; 25,360 / 50,866 / 91,494 | 10 probes | 1.006x | PASS |
+| H-F-06 | 33,268 / 63,009 / 127,256; 34,064 / 63,433 / 108,980; 48,610 / 113,112 / 3,090,314 | 1 | 1.795x | **FAIL (time)**, within the shared ceiling (L-FIB2-08) |
+| H-F-07 | 32,492 / 63,544 / 101,805; 51,949 / 100,074 / 1,797,571; 42,810 / 88,530 / 109,977 | 1 | 1.393x | **FAIL (time)**, within the shared ceiling (L-FIB2-08) |
+| H-F-08 | 27,876 / 61,989 / 121,697; 30,405 / 70,808 / 172,432; 79,615 / 162,966 / 384,076 | 1 | 2.628x | BOUNDED |
+| H-F-09 | 26,579 / 54,386 / 114,287; 29,433 / 88,208 / 1,254,988; 76,175 / 212,088 / 368,329 | 1 | 3.899x | BOUNDED |
+
+Its pointer-chase probe estimated the last-level cache at 16,384 KiB (8,192 KiB on
+every earlier run): a 16 MiB chase cost 73.9 ns per load against 266.5 ns at
+256 MiB. Per call at 1 worker and per worker at 4, at 50 / 500 / 5,000 cells:
+H-F-06 34.6 / 35.7 / 60.2 ns and 31.5 / 30.8 / 50.1 ns; H-F-07 34.2 / 53.0 /
+49.1 and 30.2 / 31.3 / 53.6; H-F-08 29.6 / 33.2 / 85.8 and 26.2 / 26.7 / 79.1;
+H-F-09 28.1 / 36.1 / 90.2 and 29.3 / 26.4 / 67.2. The `runner` rows on the final
+code (load 1.22 at its start): R-F-01 1,115,144 / 2,205,834 / 4,484,444;
+3,061,094 / 5,636,414 / 9,701,327; 35,360,778 / 54,078,820 / 58,500,994 ps at
+5 / 50 / 512 members, work 2,640 / 3,382 / 12,320 (BOUNDED, p99 time 24.516x
+against work 4.705x); R-F-01m per member 218,374 / 413,204 / 898,593; 59,702 /
+111,146 / 146,250; 67,196 / 101,280 / 142,815 ps, p99 0.245x and max 0.158x
+(PASS); R-F-02 1,077,042 / 1,682,520 / 3,543,439; 2,849,976 / 5,294,376 /
+10,429,285; 22,082,910 / 34,638,789 / 47,430,927 ps, work 2,644 / 3,409 / 11,262
+(BOUNDED, 20.587x against 4.259x); R-F-01s 16 / 128 / 256 / 512 members p50
+1,472,685 / 7,747,845 / 16,016,491 / 35,357,917 ps, p99 2,933,172 / 12,455,791 /
+24,610,343 / 52,135,948, work 2,818 / 4,735 / 7,102 / 12,320; FIB-1's C-F-05
+2.991x and C-F-06 1.057x (BOUNDED). Both targets exit 0.
+
 | ID | Limit | Why it is not O(1) / not closed | Bound | Package |
 |---|---|---|---|---|
 | L-FIB2-01 | `OwnPast::value_at_rank` (and `quantile`, `median`) is one bisection of the cumulative array | FM-F012 prescribes it; a value at a rank needs the leaf whose cumulative count reaches the rank | BOUNDED by the constant table: `ceil(log2 leaves) + 1` probes, ten for the unsplit 505 leaves — one more than the specification's `ceil(log2 bins)`, the standard bisection's final comparison (D-6320); counted in the work counter (H-F-05) | FIB-2 |
