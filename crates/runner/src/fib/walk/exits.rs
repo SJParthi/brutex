@@ -791,7 +791,7 @@ pub fn seed_exit_set(
         && let Ok(permille) = u16::try_from(g)
     {
         let value = TrailingTakeProfit::GiveBack { permille };
-        if probe(TrailingStop::Absent, value).is_ok() {
+        if probe(value).is_ok() {
             givebacks.push(value);
         }
     }
@@ -872,11 +872,10 @@ fn push_valid_target(targets: &mut Vec<TakeProfit>, target: TakeProfit) {
     }
 }
 
-/// Validates one trailing take-profit value beside a trailing stop.
-fn probe(trailing_stop: TrailingStop, value: TrailingTakeProfit) -> Result<(), ExitSetRefusal> {
+/// Validates one trailing take-profit value on its own.
+fn probe(value: TrailingTakeProfit) -> Result<(), ExitSetRefusal> {
     ExitVariant {
         trailing_take_profit: value,
-        trailing_stop,
         ..ExitVariant::REFERENCE
     }
     .validate()
