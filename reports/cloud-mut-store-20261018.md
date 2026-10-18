@@ -135,5 +135,36 @@ the two lookup mutants at once, and `an_empty_month_is_a_head_alone` the
 audit one at its deadline. That file is outside this pass's scope, so
 this is a follow-up for its owner.
 
-(More to follow: the full-suite re-test of every survivor, the CI-shaped
-`--in-diff` run, coverage and gates.)
+### What CI's gate will plan for this branch: the `--in-diff` run
+
+The gate mutates only the lines a change touches. The plan here is
+`git diff origin/feat/db-fix HEAD -- crates/store/src crates/telemetry/src`,
+the production lines this branch adds over the base it merges into. Test
+modules are not mutated. Both 26.2.0 and 27.1.0 list the same 38 mutants
+(all `file`, `flock`, `safe_open`, `staging`, `verdict`, `sort_index_writer`
+and `sink`). Run on `85713b2f` with the gate's flags, the timeout auto-set
+to 900 s as in CI, in 48 min:
+
+| | count |
+|---|---:|
+| mutants | 38 |
+| caught | 22 |
+| unviable | 16 |
+| missed | **0** |
+| timeout | **0** |
+
+The 16 unviable mutants each replace a body with `Default::default()` of a
+type that has none: `File`, `Metadata`, `Staged`, `Seen`, `ReadRefusal`,
+`Flock`, `Sink`, `Published`, `Reindexed`, `Walked`, `Why`, and the generic
+`T` of `fault`. The 22 caught are:
+- the bodies of `seal_committed`, `initialise`, `barrier_in`, the
+  `Positional` seam's `put` and `get` (`Ok(0)`, `Ok(1)`),
+  `write_durable`, `remove_tmp`, `Reader::index_handle` (`Ok(None)`),
+  `keep_sort_index`, `append_sort_run`, `write_whole`, `read_index_at`,
+  `damaged` (`Ok(None)`), `clear_staging`, `walk_sidecar` (`Ok(None)`) and
+  `Audit::retire`;
+- `staging::create`'s `links != 1` guard, forced true or false, and `!=`
+  made `==`.
+
+`24ca118c` changes only test code, so the plan is the same on the final
+tree.
