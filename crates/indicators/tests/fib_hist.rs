@@ -8,6 +8,8 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::too_many_lines,
+    clippy::panic,
+    clippy::similar_names,
     reason = "a test that cannot panic cannot fail"
 )]
 
@@ -87,11 +89,7 @@ fn permille_is_monotone_in_the_value() {
         let permille = past.permille(value).unwrap();
         let rank = past.mid_rank(value).unwrap();
         assert!(permille >= last.0, "{value}");
-        assert_ne!(
-            rank.cmp_exact(last.1),
-            core::cmp::Ordering::Less,
-            "{value}"
-        );
+        assert_ne!(rank.cmp_exact(last.1), core::cmp::Ordering::Less, "{value}");
         assert!(permille <= 1_000);
         last = (permille, rank);
     }
@@ -211,7 +209,11 @@ fn zero_one_two_to_the_forty_and_i64_max_rank_like_any_other_value() {
         .collect();
     assert_eq!(ranks, [(1, 8), (3, 8), (5, 8), (7, 8)], "golden");
     assert_eq!(past.max(), Some(i64::MAX));
-    assert_eq!(past.value_at_rank(4).unwrap(), 15 << 59, "the top bin's edge");
+    assert_eq!(
+        past.value_at_rank(4).unwrap(),
+        15 << 59,
+        "the top bin's edge"
+    );
     assert_eq!(past.value_at_rank(3).unwrap(), 1 << 40);
     assert_eq!(past.leaves(), BASE_BINS);
     assert_eq!(past.refused_full(), 0);
@@ -421,11 +423,7 @@ fn a_split_divides_a_bin_by_one_more_mantissa_bit_and_rebuilds_from_raw() {
     let mut past = committed(&raw);
     assert_eq!(past.leaf_bounds(1_000).unwrap(), (960, 64));
     let before = past.mid_rank(1_000).unwrap();
-    assert_eq!(
-        past.mid_rank(1_020).unwrap(),
-        before,
-        "one bin, one stamp"
-    );
+    assert_eq!(past.mid_rank(1_020).unwrap(), before, "one bin, one stamp");
     past.split(1_000, &raw).unwrap();
     assert_eq!(past.leaves(), BASE_BINS + 1);
     assert_eq!(past.leaf_bounds(1_000).unwrap(), (992, 32));
@@ -950,14 +948,21 @@ fn a_hole_day_and_an_overnight_gap_never_raise_the_threshold() {
             last: 400_000
         })
     );
-    assert_eq!(day.second(400_000).map_err(|e| e.name()), Err("second_out_of_order"));
+    assert_eq!(
+        day.second(400_000).map_err(|e| e.name()),
+        Err("second_out_of_order")
+    );
     assert_eq!(day.refused(), 2);
     assert_eq!(day.end_day(DayFeed::Clean), None);
     assert_eq!(day.refused(), 2, "the count survives the day");
     // The second, labelled reading is the median.
     let mut empty = OwnPast::empty();
     empty.commit_day().unwrap();
-    assert_eq!(silence_in_trade(&empty, 1), Silence::Unknown, "no clean day");
+    assert_eq!(
+        silence_in_trade(&empty, 1),
+        Silence::Unknown,
+        "no clean day"
+    );
     assert_eq!(gaps.median(), Ok(2));
 }
 
@@ -973,10 +978,14 @@ fn a_history_at_p_and_a_base_at_ten_p_give_the_same_touch_count() {
     let highs = [100_000, 100_030, 100_010, 100_050, 100_020, 100_040];
     let lows = [99_000, 98_700, 98_900, 98_100, 98_800, 98_500];
     for pair in highs.windows(2) {
-        long_steps.observe(step_bp(pair[0], pair[1]).unwrap()).unwrap();
+        long_steps
+            .observe(step_bp(pair[0], pair[1]).unwrap())
+            .unwrap();
     }
     for pair in lows.windows(2) {
-        short_steps.observe(step_bp(pair[0], pair[1]).unwrap()).unwrap();
+        short_steps
+            .observe(step_bp(pair[0], pair[1]).unwrap())
+            .unwrap();
     }
     long_steps.commit_day().unwrap();
     short_steps.commit_day().unwrap();
@@ -984,11 +993,16 @@ fn a_history_at_p_and_a_base_at_ten_p_give_the_same_touch_count() {
     let short_tol = short_steps.median().unwrap();
     assert_eq!(long_tol, 2);
     assert_eq!(short_tol, 30, "the short side reads lows, not highs");
-    let count = |edge: i64, tol: i64, xs: &[i64]| xs.iter().filter(|x| touches(**x, edge, tol)).count();
+    let count =
+        |edge: i64, tol: i64, xs: &[i64]| xs.iter().filter(|x| touches(**x, edge, tol)).count();
     let at_p = [100_000, 100_015, 100_020, 100_021, 99_980, 99_979];
     let at_ten_p: Vec<i64> = at_p.iter().map(|x| x * 10).collect();
     assert_eq!(count(100_000, long_tol, &at_p), 4);
-    assert_eq!(count(1_000_000, long_tol, &at_ten_p), 4, "not rescaled, same");
+    assert_eq!(
+        count(1_000_000, long_tol, &at_ten_p),
+        4,
+        "not rescaled, same"
+    );
     assert!(touches(100_020, 100_000, 2), "on the line touches");
     assert!(!touches(100_021, 100_000, 2));
     assert_eq!(
@@ -1151,7 +1165,10 @@ fn a_bank_shape_that_is_not_well_formed_is_refused() {
         refused(dims(vec![0, 1], 1), dims(vec![1], 1)),
         "widths_not_increasing"
     );
-    assert_eq!(refused(dims(vec![1], 0), dims(vec![1], 1)), "dimension_zero");
+    assert_eq!(
+        refused(dims(vec![1], 0), dims(vec![1], 1)),
+        "dimension_zero"
+    );
     let mut no_variant = dims(vec![1], 1);
     no_variant.variants = 0;
     assert_eq!(refused(dims(vec![1], 1), no_variant), "dimension_zero");
@@ -1308,7 +1325,7 @@ fn width_passes_fit_the_budget_or_refuse_one_width_by_name() {
     for bytes in &passes.pass_bytes {
         assert!(*bytes <= budget, "{bytes} > {budget}");
     }
-    let mut seen = vec![false; 4];
+    let mut seen = [false; 4];
     for (at, pass) in passes.pass_of.iter().enumerate() {
         assert!(usize::from(*pass) < count);
         seen[at] = true;
@@ -1352,7 +1369,10 @@ fn width_passes_fit_the_budget_or_refuse_one_width_by_name() {
         narrow.dims(Search::Long).clone(),
     )
     .unwrap();
-    assert_eq!(plan_width_passes(&mirrored, 1, u64::MAX).unwrap().widths, [1, 2]);
+    assert_eq!(
+        plan_width_passes(&mirrored, 1, u64::MAX).unwrap().widths,
+        [1, 2]
+    );
 }
 
 #[test]

@@ -1,3 +1,785 @@
 //! The mover rank: the cross-sectional gainer and loser ranks of every
-//! decision instant over the point-in-time pool (FIB-2, PART B). A stub until
-//! FIB-2 fills it; nothing here is called before then.
+//! Zerodha minute over the day's point-in-time pool (FIB-2, PART B; D-6322,
+//! D-6323).
+//!
+//! # The rule (D-6322)
+//!
+//! Per IST day the caller opens the day with the pool's member slots, in
+//! point-in-time series-id order (the FIXED TIE RULE: slot order), and each
+//! member's previous close ([`MoverRank::begin_day`]). It then folds the day's
+//! minutes in time order, one finished Zerodha one-minute close per member or
+//! none ([`MoverRank::minute`]) — a fold, never an indexed read of a later
+//! minute (`CLAUDE.md` §3 rule 7). Membership is the caller's: this file never
+//! names `core::universe`.
+//!
+//! * `move_bp` = (last close at or before the minute − previous close) ×
+//!   10,000 / previous close, in `i128`, rounded toward zero, narrowed to
+//!   `i32`; a member whose move does not fit is refused for that minute
+//!   (`move_out_of_range`, counted) and the others are unchanged (FM-F021).
+//! * The SIDE is the sign of (close − previous close) in paisa (FM-F019): a
+//!   move of 0.4 bp is a gainer, though its `move_bp` is 0. A close equal to
+//!   the previous close is on neither side.
+//! * Gainers rank by move descending, losers by move ascending (most negative
+//!   first). The order is `move_bp`, then, inside each run of equal `move_bp`,
+//!   the exact ratio `(c1 − p1) x p2` against `(c2 − p2) x p1` in `i128`, then
+//!   slot order.
+//! * A member with no minute yet today is MISSING: not ranked, counted. A
+//!   member whose last close is older than the minute is STALE: ranked on that
+//!   close, flagged, counted.
+//!
+//! A decision closing at instant `c` reads the minute `[c − 60 s, c)`, which
+//! closes at `c` — on the 09:15 grid the same instant as the decision candle,
+//! so no second timeframe enters a trade.
+//!
+//! # The order and its width (D-6323)
+//!
+//! A stable LSD radix sort over the members in slot order (FM-F010), with
+//! digits of [`RANK_RADIX_DIGIT_BITS`] bits: gainers keyed by
+//! `i32::MAX − move_bp`, losers by the sign-flipped `move_bp`. Its buffers are
+//! sized once, at the run's largest pool ([`MoverRank::new`]); its work per
+//! minute is O(pool + buckets), the same at every minute of a day and O(1) per
+//! member, with the exact tie runs on top, each O(r log r) in its own length r
+//! (`docs/06-limits.md`). The ranks are the ones a sorting network over the
+//! same keys gives (`crates/runner/tests/fib_rank.rs`). Ranks are `u16`, and
+//! the run's rank WIDTH — one byte while the largest pool fits one, two above —
+//! is chosen from that pool and recorded for the rank file's header
+//! ([`RankWidth`], FM-F009); a rank beyond it is refused by name, never wrapped.
+//!
+//! This module is pure: no I/O, no print, no telemetry (gates 17 and 22).
+//! Every refusal is counted in a plain field.
+
+use vocab::fib_cube::{BP_PER_UNIT, RANK_RADIX_DIGIT_BITS};
+
+/// Values one radix digit takes.
+const BUCKETS: usize = 1 << RANK_RADIX_DIGIT_BITS;
+
+/// The radix passes over a `u32` key.
+const PASSES: u64 = (u32::BITS as u64).div_ceil(RANK_RADIX_DIGIT_BITS);
+
+/// One digit's mask.
+const DIGIT_MASK: u32 = (1 << RANK_RADIX_DIGIT_BITS) - 1;
+
+const _: () = assert!(RANK_RADIX_DIGIT_BITS > 0 && RANK_RADIX_DIGIT_BITS < u32::BITS as u64);
+
+/// The bytes one rank takes in the rank file: the run's rank width (FM-F009).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RankWidth {
+    /// One byte: the run's largest pool fits `u8`.
+    U8,
+    /// Two bytes: the run's largest pool fits `u16`.
+    U16,
+}
+
+impl RankWidth {
+    /// The width a run whose largest pool is `max_pool` members needs.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::RankWidthExceeded`] above `u16::MAX` members.
+    pub fn of_pool(max_pool: usize) -> Result<Self, RankRefusal> {
+        if u8::try_from(max_pool).is_ok() {
+            Ok(Self::U8)
+        } else if u16::try_from(max_pool).is_ok() {
+            Ok(Self::U16)
+        } else {
+            Err(RankRefusal::RankWidthExceeded {
+                rank: max_pool,
+                width: Self::U16,
+            })
+        }
+    }
+
+    /// The largest rank this width holds.
+    #[must_use]
+    pub const fn max_rank(self) -> u16 {
+        match self {
+            Self::U8 => u8::MAX as u16,
+            Self::U16 => u16::MAX,
+        }
+    }
+
+    /// The width's name, for the rank file's header.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+        }
+    }
+
+    /// Appends one rank at this width, little-endian.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::RankWidthExceeded`] for a rank the width cannot hold:
+    /// refused by name, never wrapped (FM-F009).
+    pub fn put(self, rank: u16, out: &mut Vec<u8>) -> Result<(), RankRefusal> {
+        let [low, high] = rank.to_le_bytes();
+        match self {
+            Self::U8 if rank <= self.max_rank() => out.push(low),
+            Self::U16 => out.extend_from_slice(&[low, high]),
+            Self::U8 => {
+                return Err(RankRefusal::RankWidthExceeded {
+                    rank: usize::from(rank),
+                    width: self,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A refusal of the mover rank, by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankRefusal {
+    /// A rank (or a pool) beyond the width chosen for it (FM-F009).
+    RankWidthExceeded {
+        /// The rank or pool size offered.
+        rank: usize,
+        /// The width it exceeds.
+        width: RankWidth,
+    },
+    /// A run or a day with no member.
+    PoolEmpty,
+    /// A day's pool larger than the run's largest pool, which sized the
+    /// buffers.
+    PoolOverRunMaximum {
+        /// The day's pool.
+        pool: usize,
+        /// The run's largest pool.
+        max_pool: usize,
+    },
+    /// A minute folded before any day was opened.
+    NoDay,
+    /// A minute whose closes are not one per member of the day's pool.
+    ClosesNotPool {
+        /// Closes offered.
+        closes: usize,
+        /// The day's pool.
+        pool: usize,
+    },
+    /// A minute at or before the last one folded today.
+    MinuteOutOfOrder {
+        /// The minute's close instant offered.
+        minute: i64,
+        /// The last minute folded.
+        last: i64,
+    },
+}
+
+impl RankRefusal {
+    /// The refusal's stable name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::RankWidthExceeded { .. } => "rank_width_exceeded",
+            Self::PoolEmpty => "pool_empty",
+            Self::PoolOverRunMaximum { .. } => "pool_over_run_maximum",
+            Self::NoDay => "no_day",
+            Self::ClosesNotPool { .. } => "closes_not_pool",
+            Self::MinuteOutOfOrder { .. } => "minute_out_of_order",
+        }
+    }
+}
+
+impl core::fmt::Display for RankRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "mover rank refused ({}): {self:?}", self.name())
+    }
+}
+
+impl std::error::Error for RankRefusal {}
+
+/// Why one member is not ranked at one minute, counted by name. APPEND-ONLY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemberRefusal {
+    /// The member has no previous close today.
+    NoPreviousClose,
+    /// The member's previous close is zero or negative.
+    PreviousCloseNotPositive,
+    /// This minute's close is zero or negative; the last good close is kept.
+    CloseNotPositive,
+    /// The move does not fit `i32` basis points (FM-F021).
+    MoveOutOfRange,
+}
+
+impl MemberRefusal {
+    /// Every reason, in declaration order.
+    pub const ALL: [Self; MEMBER_REFUSALS] = [
+        Self::NoPreviousClose,
+        Self::PreviousCloseNotPositive,
+        Self::CloseNotPositive,
+        Self::MoveOutOfRange,
+    ];
+
+    /// The reason's counted name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NoPreviousClose => "no_previous_close",
+            Self::PreviousCloseNotPositive => "previous_close_not_positive",
+            Self::CloseNotPositive => "close_not_positive",
+            Self::MoveOutOfRange => "move_out_of_range",
+        }
+    }
+
+    /// The reason's position in [`MemberRefusal::ALL`].
+    const fn position(self) -> usize {
+        self as usize
+    }
+}
+
+/// How many member refusal reasons there are.
+pub const MEMBER_REFUSALS: usize = MemberRefusal::MoveOutOfRange as usize + 1;
+
+/// A member's state at one minute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemberState {
+    /// No close yet today: not ranked.
+    Missing,
+    /// Ranked on this minute's close.
+    Fresh,
+    /// Ranked on an earlier close of today: flagged.
+    Stale,
+    /// Not ranked, for the reason given.
+    Refused(MemberRefusal),
+}
+
+/// The census of one minute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Census {
+    /// The minute's close instant.
+    pub minute: i64,
+    /// Members in the day's pool.
+    pub pool: u16,
+    /// Members ranked: gainers and losers.
+    pub ranked: u16,
+    /// Members ranked as gainers.
+    pub gainers: u16,
+    /// Members ranked as losers.
+    pub losers: u16,
+    /// Members with a close equal to their previous close: on neither side.
+    pub flat: u16,
+    /// Members with no close yet today.
+    pub missing: u16,
+    /// Members ranked on an earlier close (among `ranked` and `flat`).
+    pub stale: u16,
+    /// Members refused this minute.
+    pub refused: u16,
+}
+
+/// The run-wide totals: minutes folded and member-minutes by fate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Totals {
+    /// Minutes folded.
+    pub minutes: u64,
+    /// Member-minutes ranked.
+    pub ranked: u64,
+    /// Member-minutes flat.
+    pub flat: u64,
+    /// Member-minutes missing.
+    pub missing: u64,
+    /// Member-minutes stale.
+    pub stale: u64,
+    /// Member-minutes refused, by [`MemberRefusal`].
+    pub refused: [u64; MEMBER_REFUSALS],
+}
+
+/// The mover-rank fold of one run (D-6322, D-6323).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoverRank {
+    /// The run's rank width.
+    width: RankWidth,
+    /// Today's pool; zero before the first day.
+    pool: usize,
+    /// Whether a day is open.
+    open: bool,
+    /// The last minute folded today.
+    last_minute: Option<i64>,
+    /// Per slot: the previous close, or the day's refusal.
+    previous: Box<[Result<i64, MemberRefusal>]>,
+    /// Per slot: today's last good close.
+    last_close: Box<[Option<i64>]>,
+    /// Per slot: the state at the last minute.
+    state: Box<[MemberState]>,
+    /// Per slot: `move_bp` at the last minute (zero when not ranked).
+    move_bp: Box<[i32]>,
+    /// Per slot: close minus previous close at the last minute, in paisa.
+    diff: Box<[i64]>,
+    /// Per slot: the radix key at the last minute.
+    keys: Box<[u32]>,
+    /// The ranked order: gainers then losers, by slot.
+    order: Box<[u16]>,
+    /// The radix sort's other buffer.
+    scratch: Box<[u16]>,
+    /// The radix sort's digit counts.
+    counts: Box<[usize]>,
+    /// Per slot: the gainer rank at the last minute, 0 = unranked.
+    gainer_rank: Box<[u16]>,
+    /// Per slot: the loser rank at the last minute, 0 = unranked.
+    loser_rank: Box<[u16]>,
+    /// Gainers at the last minute: `order[..gainers]`.
+    gainers: usize,
+    /// Losers at the last minute: `order[gainers..gainers + losers]`.
+    losers: usize,
+    /// The last minute's census.
+    census: Option<Census>,
+    /// The run's totals.
+    totals: Totals,
+    /// The structural work counter the bench reads: members visited, buckets
+    /// swept and tie comparisons (a plain field, gate 17).
+    work: u64,
+}
+
+impl MoverRank {
+    /// A fold sized once for a run whose largest pool (PIT-1's header) is
+    /// `max_pool` members.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::PoolEmpty`] and [`RankRefusal::RankWidthExceeded`].
+    pub fn new(max_pool: usize) -> Result<Self, RankRefusal> {
+        if max_pool == 0 {
+            return Err(RankRefusal::PoolEmpty);
+        }
+        let width = RankWidth::of_pool(max_pool)?;
+        Ok(Self {
+            width,
+            pool: 0,
+            open: false,
+            last_minute: None,
+            previous: vec![Err(MemberRefusal::NoPreviousClose); max_pool].into_boxed_slice(),
+            last_close: vec![None; max_pool].into_boxed_slice(),
+            state: vec![MemberState::Missing; max_pool].into_boxed_slice(),
+            move_bp: vec![0; max_pool].into_boxed_slice(),
+            diff: vec![0; max_pool].into_boxed_slice(),
+            keys: vec![0; max_pool].into_boxed_slice(),
+            order: vec![0; max_pool].into_boxed_slice(),
+            scratch: vec![0; max_pool].into_boxed_slice(),
+            counts: vec![0; BUCKETS].into_boxed_slice(),
+            gainer_rank: vec![0; max_pool].into_boxed_slice(),
+            loser_rank: vec![0; max_pool].into_boxed_slice(),
+            gainers: 0,
+            losers: 0,
+            census: None,
+            totals: Totals {
+                minutes: 0,
+                ranked: 0,
+                flat: 0,
+                missing: 0,
+                stale: 0,
+                refused: [0; MEMBER_REFUSALS],
+            },
+            work: 0,
+        })
+    }
+
+    /// The run's rank width, for the rank file's header.
+    #[must_use]
+    pub const fn width(&self) -> RankWidth {
+        self.width
+    }
+
+    /// The run's largest pool: the buffers' size.
+    #[must_use]
+    pub fn max_pool(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Today's pool.
+    #[must_use]
+    pub const fn pool(&self) -> usize {
+        self.pool
+    }
+
+    /// Opens an IST day: one previous close per member slot, in slot order. A
+    /// member with none, or with one that is not positive, is refused for the
+    /// whole day, by name, at every minute.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::PoolEmpty`] and [`RankRefusal::PoolOverRunMaximum`]; the
+    /// fold is unchanged.
+    pub fn begin_day(&mut self, previous_closes: &[Option<i64>]) -> Result<(), RankRefusal> {
+        let pool = previous_closes.len();
+        if pool == 0 {
+            return Err(RankRefusal::PoolEmpty);
+        }
+        if pool > self.max_pool() {
+            return Err(RankRefusal::PoolOverRunMaximum {
+                pool,
+                max_pool: self.max_pool(),
+            });
+        }
+        for (slot, close) in self.previous.iter_mut().zip(previous_closes) {
+            *slot = match close {
+                None => Err(MemberRefusal::NoPreviousClose),
+                Some(close) if *close <= 0 => Err(MemberRefusal::PreviousCloseNotPositive),
+                Some(close) => Ok(*close),
+            };
+        }
+        self.last_close.fill(None);
+        self.state.fill(MemberState::Missing);
+        self.gainer_rank.fill(0);
+        self.loser_rank.fill(0);
+        self.pool = pool;
+        self.open = true;
+        self.last_minute = None;
+        self.gainers = 0;
+        self.losers = 0;
+        self.census = None;
+        Ok(())
+    }
+
+    /// Folds one finished Zerodha minute: each member's close for the minute
+    /// closing at `minute` (an instant, strictly later than the last one
+    /// folded today), or `None`. Every rank and state read afterwards is this
+    /// minute's.
+    ///
+    /// # Errors
+    ///
+    /// [`RankRefusal::NoDay`], [`RankRefusal::ClosesNotPool`] and
+    /// [`RankRefusal::MinuteOutOfOrder`]; the fold is unchanged.
+    pub fn minute(&mut self, minute: i64, closes: &[Option<i64>]) -> Result<Census, RankRefusal> {
+        if !self.open {
+            return Err(RankRefusal::NoDay);
+        }
+        if closes.len() != self.pool {
+            return Err(RankRefusal::ClosesNotPool {
+                closes: closes.len(),
+                pool: self.pool,
+            });
+        }
+        if let Some(last) = self.last_minute.filter(|last| minute <= *last) {
+            return Err(RankRefusal::MinuteOutOfOrder { minute, last });
+        }
+        self.last_minute = Some(minute);
+        let mut census = Census {
+            minute,
+            pool: u16::try_from(self.pool).unwrap_or(u16::MAX),
+            ranked: 0,
+            gainers: 0,
+            losers: 0,
+            flat: 0,
+            missing: 0,
+            stale: 0,
+            refused: 0,
+        };
+        let members = self
+            .previous
+            .iter()
+            .zip(closes)
+            .zip(self.last_close.iter_mut())
+            .zip(self.state.iter_mut())
+            .zip(self.diff.iter_mut())
+            .zip(self.move_bp.iter_mut());
+        for (((((previous, close), last), state), diff), move_bp) in members {
+            let fresh = close.filter(|close| *close > 0);
+            if fresh.is_some() {
+                *last = fresh;
+            }
+            *state = classify(*previous, *close, *last, diff, move_bp);
+            match *state {
+                MemberState::Missing => census.missing += 1,
+                MemberState::Refused(reason) => {
+                    census.refused += 1;
+                    if let Some(count) = self.totals.refused.get_mut(reason.position()) {
+                        *count += 1;
+                    }
+                }
+                MemberState::Fresh | MemberState::Stale => {
+                    census.stale += u16::from(*state == MemberState::Stale);
+                    census.flat += u16::from(*diff == 0);
+                }
+            }
+        }
+        self.order_and_rank();
+        census.gainers = u16::try_from(self.gainers).unwrap_or(u16::MAX);
+        census.losers = u16::try_from(self.losers).unwrap_or(u16::MAX);
+        census.ranked = census.gainers + census.losers;
+        self.totals.minutes += 1;
+        self.totals.ranked += u64::from(census.ranked);
+        self.totals.flat += u64::from(census.flat);
+        self.totals.missing += u64::from(census.missing);
+        self.totals.stale += u64::from(census.stale);
+        self.census = Some(census);
+        Ok(census)
+    }
+
+    /// Partitions today's ranked members into gainers then losers (stable, by
+    /// slot), sorts each by its radix key and its exact tie runs, and writes
+    /// every member's ranks.
+    fn order_and_rank(&mut self) {
+        let mut gainers = 0;
+        let mut losers = Vec::new();
+        let ranked = self
+            .state
+            .iter()
+            .zip(self.diff.iter())
+            .zip(self.move_bp.iter())
+            .zip(self.keys.iter_mut());
+        for (slot, (((state, diff), move_bp), key)) in (0_u16..).zip(ranked) {
+            let rankable = matches!(state, MemberState::Fresh | MemberState::Stale);
+            if rankable && *diff > 0 {
+                *key = (i32::MAX - *move_bp).cast_unsigned();
+                if let Some(at) = self.order.get_mut(gainers) {
+                    *at = slot;
+                }
+                gainers += 1;
+            } else if rankable && *diff < 0 {
+                *key = (*move_bp ^ i32::MIN).cast_unsigned();
+                losers.push(slot);
+            }
+        }
+        self.work += u64::try_from(self.pool).unwrap_or(u64::MAX);
+        let end = gainers + losers.len();
+        if let Some(tail) = self.order.get_mut(gainers..end) {
+            tail.copy_from_slice(&losers);
+        }
+        self.gainers = gainers;
+        self.losers = losers.len();
+        let (gainer_order, loser_order) = self.order.split_at_mut(gainers);
+        let loser_order = loser_order.get_mut(..losers.len()).unwrap_or_default();
+        for (segment, descending) in [(gainer_order, true), (loser_order, false)] {
+            self.work += radix(segment, &mut self.scratch, &self.keys, &mut self.counts);
+            self.work += tie_runs(segment, &self.keys, &self.diff, &self.previous, descending);
+        }
+        self.gainer_rank.fill(0);
+        self.loser_rank.fill(0);
+        let order = self.order.get(..end).unwrap_or_default();
+        for (rank, slot) in (1_u16..).zip(order) {
+            let (ranks, rank) = if usize::from(rank) <= gainers {
+                (&mut self.gainer_rank, rank)
+            } else {
+                (
+                    &mut self.loser_rank,
+                    rank - u16::try_from(gainers).unwrap_or(0),
+                )
+            };
+            if let Some(cell) = ranks.get_mut(usize::from(*slot)) {
+                *cell = rank;
+            }
+        }
+    }
+
+    /// A member's gainer rank at the last minute: 1 is the largest gainer,
+    /// 0 is unranked.
+    #[must_use]
+    pub fn gainer_rank(&self, slot: u16) -> u16 {
+        self.gainer_rank
+            .get(usize::from(slot))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// A member's loser rank at the last minute: 1 is the largest loser,
+    /// 0 is unranked.
+    #[must_use]
+    pub fn loser_rank(&self, slot: u16) -> u16 {
+        self.loser_rank.get(usize::from(slot)).copied().unwrap_or(0)
+    }
+
+    /// A member's state at the last minute, or `None` outside today's pool.
+    #[must_use]
+    pub fn state(&self, slot: u16) -> Option<MemberState> {
+        self.state
+            .get(usize::from(slot))
+            .copied()
+            .filter(|_| usize::from(slot) < self.pool)
+    }
+
+    /// A ranked member's `move_bp` at the last minute.
+    #[must_use]
+    pub fn move_bp(&self, slot: u16) -> Option<i32> {
+        match self.state(slot) {
+            Some(MemberState::Fresh | MemberState::Stale) => {
+                self.move_bp.get(usize::from(slot)).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// The gainers at the last minute, by rank: their slots.
+    #[must_use]
+    pub fn gainers(&self) -> &[u16] {
+        self.order.get(..self.gainers).unwrap_or_default()
+    }
+
+    /// The losers at the last minute, by rank: their slots.
+    #[must_use]
+    pub fn losers(&self) -> &[u16] {
+        self.order
+            .get(self.gainers..self.gainers + self.losers)
+            .unwrap_or_default()
+    }
+
+    /// The last minute's census, or `None` before today's first minute.
+    #[must_use]
+    pub const fn census(&self) -> Option<Census> {
+        self.census
+    }
+
+    /// The run's totals.
+    #[must_use]
+    pub const fn totals(&self) -> Totals {
+        self.totals
+    }
+
+    /// The structural work done so far.
+    #[must_use]
+    pub const fn work(&self) -> u64 {
+        self.work
+    }
+}
+
+/// One member's state at one minute, with its close difference and its move.
+fn classify(
+    previous: Result<i64, MemberRefusal>,
+    close: Option<i64>,
+    last: Option<i64>,
+    diff: &mut i64,
+    move_bp: &mut i32,
+) -> MemberState {
+    *diff = 0;
+    *move_bp = 0;
+    let previous = match previous {
+        Ok(previous) => previous,
+        Err(reason) => return MemberState::Refused(reason),
+    };
+    if close.is_some_and(|close| close <= 0) {
+        return MemberState::Refused(MemberRefusal::CloseNotPositive);
+    }
+    let Some(last) = last else {
+        return MemberState::Missing;
+    };
+    let moved = i128::from(last) - i128::from(previous);
+    let bp = moved * i128::from(BP_PER_UNIT) / i128::from(previous);
+    let Ok(bp) = i32::try_from(bp) else {
+        return MemberState::Refused(MemberRefusal::MoveOutOfRange);
+    };
+    *diff = last - previous;
+    *move_bp = bp;
+    if close.is_some() {
+        MemberState::Fresh
+    } else {
+        MemberState::Stale
+    }
+}
+
+/// A stable LSD radix sort of `segment` (slots) by `keys`, through `scratch`.
+/// Returns its work: members moved and buckets swept.
+fn radix(segment: &mut [u16], scratch: &mut [u16], keys: &[u32], counts: &mut [usize]) -> u64 {
+    let len = segment.len();
+    let Some(other) = scratch.get_mut(..len) else {
+        return 0;
+    };
+    let digit = |slot: u16, shift: u64| -> usize {
+        let key = keys.get(usize::from(slot)).copied().unwrap_or(0);
+        usize::try_from((key >> shift) & DIGIT_MASK).unwrap_or(0)
+    };
+    for pass in 0..PASSES {
+        let shift = pass * RANK_RADIX_DIGIT_BITS;
+        counts.fill(0);
+        for slot in segment.iter() {
+            if let Some(count) = counts.get_mut(digit(*slot, shift)) {
+                *count += 1;
+            }
+        }
+        let mut start = 0;
+        for count in counts.iter_mut() {
+            let here = *count;
+            *count = start;
+            start += here;
+        }
+        for slot in segment.iter() {
+            if let Some(at) = counts.get_mut(digit(*slot, shift)) {
+                if let Some(place) = other.get_mut(*at) {
+                    *place = *slot;
+                }
+                *at += 1;
+            }
+        }
+        segment.copy_from_slice(other);
+    }
+    let per_pass = u64::try_from(len + len + BUCKETS + BUCKETS).unwrap_or(u64::MAX);
+    PASSES * per_pass
+}
+
+/// Orders each run of equal keys in `segment` by the exact move, `(c1 − p1) x
+/// p2` against `(c2 − p2) x p1` in `i128`, largest first for gainers and
+/// smallest first for losers, then by slot. Returns its work: comparisons.
+fn tie_runs(
+    segment: &mut [u16],
+    keys: &[u32],
+    diff: &[i64],
+    previous: &[Result<i64, MemberRefusal>],
+    descending: bool,
+) -> u64 {
+    let key_of = |slot: &u16| keys.get(usize::from(*slot)).copied();
+    let exact = |slot: u16| -> (i128, i128) {
+        let at = usize::from(slot);
+        let moved = diff.get(at).copied().unwrap_or(0);
+        let base = previous.get(at).and_then(|p| p.ok()).unwrap_or(1);
+        (i128::from(moved), i128::from(base))
+    };
+    let mut comparisons = 0_u64;
+    let mut at = 0;
+    while at < segment.len() {
+        let key = segment.get(at).and_then(key_of);
+        let run = segment
+            .get(at..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|slot| key_of(slot) == key)
+            .count();
+        if let Some(tied) = segment.get_mut(at..at + run) {
+            tied.sort_unstable_by(|a, b| {
+                comparisons += 1;
+                let ((da, pa), (db, pb)) = (exact(*a), exact(*b));
+                let order = (da * pb).cmp(&(db * pa));
+                let order = if descending { order.reverse() } else { order };
+                order.then(a.cmp(b))
+            });
+        }
+        at += run;
+    }
+    comparisons
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod tests {
+    use super::*;
+    use vocab::fib_cube::untyped_numbers;
+
+    /// NO TYPED NUMBERS (operator 16 Oct 11:24 IST): this file's shipping part
+    /// holds no numeric literal but 0 and 1.
+    #[test]
+    fn rank_types_no_number() {
+        let typed = untyped_numbers(include_str!("rank.rs"));
+        assert!(typed.is_empty(), "rank.rs types {typed:?}");
+    }
+
+    #[test]
+    fn the_radix_is_four_passes_of_a_byte() {
+        assert_eq!((BUCKETS, PASSES, DIGIT_MASK), (256, 4, 0xFF));
+        assert_eq!(MEMBER_REFUSALS, 4);
+    }
+
+    #[test]
+    fn a_radix_over_a_short_scratch_does_nothing() {
+        let mut segment = [2, 1];
+        let mut scratch = [0];
+        let mut counts = [0; BUCKETS];
+        assert_eq!(
+            radix(&mut segment, &mut scratch, &[3, 2, 1], &mut counts),
+            0
+        );
+        assert_eq!(segment, [2, 1]);
+    }
+}
