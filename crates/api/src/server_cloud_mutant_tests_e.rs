@@ -751,3 +751,21 @@ fn a_stop_names_the_engine_work_it_abandons_and_only_then() {
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(crate::emitted::counts(&said[0], "abandoned", 1));
 }
+
+/// **The binary's entry answers a command it cannot parse as misused, and
+/// keeps nothing.** `run_held` is the entry `main` calls: the same answer as
+/// [`run`], with what a serve kept left in `held`, and a command that never
+/// served keeps nothing there. Kills `run_held -> 1` (server.rs:19601),
+/// which no test reached: `main` is its only caller.
+#[tokio::test]
+async fn the_entry_answers_a_command_it_cannot_parse_as_misused_and_keeps_nothing() {
+    let mut held = Held::default();
+    let code = run_held(
+        &["--wat".to_owned()],
+        Box::pin(std::future::ready(Ok(()))),
+        &mut held,
+    )
+    .await;
+    assert_eq!(code, MISUSED);
+    assert!(!held.holds(), "a command that never served keeps nothing");
+}
