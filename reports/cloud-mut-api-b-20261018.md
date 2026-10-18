@@ -223,7 +223,7 @@ hangs to the timeout instead of passing. Unviable: 22 `E0277`, five `E0080`
 ## Left (in progress)
 
 - Phase 1: `pullrun.rs` (466) and `server.rs` (1,509), running with retries
-  (15:03 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 535 of 1,509).
+  (15:24 UTC: `pullrun.rs` 466 of 466 tested, `server.rs` 587 of 1,509).
   `pullrun.rs` survivors so far: `996:24` and `2360:49`, each closed by a new
   test (below).
 - New tests so far, each measured failing on its hand-applied mutant and
