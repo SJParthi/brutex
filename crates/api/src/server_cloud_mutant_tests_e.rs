@@ -529,3 +529,41 @@ async fn a_head_ends_at_its_blank_line_in_either_spelling() {
         wrapped.state
     );
 }
+
+/// **A write that moves no byte does not end a stall.** A response whose
+/// writes have made no progress since a known instant keeps that instant
+/// through an empty write: nothing went, so the stall clock still runs from
+/// when progress stopped. A write that moves a byte ends it. Kills `>`
+/// turned to `>=` at `n > 0` in `HeadDeadline::wrote` (server.rs:17647),
+/// under which an empty write restarted the stall clock of a reader that
+/// had stopped.
+#[tokio::test]
+async fn a_write_that_moves_no_byte_does_not_end_a_stall() {
+    let (server, mut client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudestall", HeadState::Delivered);
+    let since = tokio::time::Instant::now();
+    wrapped.stalled_since = Some(since);
+    wrapped.written = 5;
+
+    let none = tokio::time::timeout(PATIENCE, wrapped.write(b""))
+        .await
+        .expect("an empty write answers at once")
+        .expect("an empty write");
+    assert_eq!(none, 0);
+    assert_eq!(wrapped.stalled_since, Some(since), "nothing went");
+    assert_eq!(wrapped.written, 5);
+
+    let wrote = tokio::time::timeout(PATIENCE, wrapped.write(b"ok"))
+        .await
+        .expect("a write answers at once")
+        .expect("a write");
+    assert_eq!(wrote, 2);
+    assert_eq!(wrapped.stalled_since, None, "a byte went");
+    assert_eq!(wrapped.written, 7);
+    let mut got = [0_u8; 2];
+    tokio::time::timeout(PATIENCE, client.read_exact(&mut got))
+        .await
+        .expect("the peer reads it at once")
+        .expect("the peer reads it");
+    assert_eq!(&got, b"ok");
+}
