@@ -70060,6 +70060,69 @@ a_retired_key_that_grew_is_unresolved_like_a_moved_one}`,
 `cli::gdfl_rekey::tests::{an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing,
 the_plan_receipt_prints_recorded_apart_from_pending}`.
 
+**Repair r4 (18 October 2026; a second agent's third check, of repair r2).** One
+blocking defect, reproduced first: merged into feat/db-fix, this entry's
+`docs/06-limits.md` rows failed `store`'s `cited_commits` gate (D-5820, which
+landed after this package's last merge), because four of its sentences cited a
+build by a commit of this package's branch or of feat/db-fix that `main`'s
+squash merge does not keep. Decided:
+
+1. **The rows name a build by what it was, not by a branch commit.** The
+four sentences now say "the merge base feat/db-fix had before AG-02", "the
+package's first build against this repair", "R3-32 on 17 October 2026" and
+"feat/db-fix (its head of 16 October 2026)"; the kept binaries and logs the
+rows already name identify each build. `cited_commits` is green on the merged
+tree, run in a new target directory.
+
+Three follow-ups of the same check, in this package's files, are taken:
+
+2. **A retirement is written only with the count its key holds under the
+lock.** `apply` re-counts each planned retirement's key (`source_now`, as
+for a move's source) after it takes `imports/gdfl.lineage.lock`; a key
+that gained bars since the survey is refused by name, gets no `retired`
+line and no census withdrawal, and a re-plan retires it with what it holds
+(probe P4: before, the apply appended `bars=1` for a key holding 2).
+3. **The stale-plan comparison reads the plan's own underlyings.** A
+`superseded` or `retired` line names one underlying and a plan's verdicts
+read only its own underlyings' lines, so the ledger re-read under the lock is
+compared with the planned one over those lines only (every line for a plan
+of every underlying), in one O(lines) pass with no sort. Two applies of
+disjoint `--underlying` plans no longer refuse each other (probe P12); a
+plan of the same underlying is still refused.
+4. **An `--underlying` with no stored key is refused, not read as done.**
+`cli gdfl-rekey` names every underlying it walked nothing under after the
+receipt and exits `FAILED` (1), for `--plan` and `--apply`, before anything
+is written, and the receipt's `PENDING:` line says `not answered (--underlying
+names ZZZZ, ...)` instead of a count, so no receipt of a refused name holds
+the words `PENDING: 0` a gate reads. Rejected: a zero exit with a note,
+because `PENDING: 0` with exit 0 is the acceptance R4-21, ING-10 and
+DATA-REKEY-APPLY read, and a misspelled name would pass it. The refused-move
+text now names the repair-door publish (R4-21 item 1) instead of WP-80's
+month regeneration.
+
+**What remains (r4)**: `crates/cli/src/lib.rs` still does not hold
+`RunClaim` around one command (L-AG02-7): on 18 October 2026 eight other
+packages' branches hold `lib.rs` edits feat/db-fix does not, so the line stays with the
+file's next owner. **The line is not one line, measured by reading the
+callers on 18 October 2026:** two commands already take the same
+process-wide key for themselves, `pull::gdfl_import_day`'s `RunKey::claim`
+(the import's journal id, so `/logs.json?run=<id>` answers its per-day
+events, DB-A41) and `cli::zerodha_gaps_command::claim_run` (a reserved id
+its header prints and its `audit/zerodha.gaps` lines carry). `claim_run` is
+a compare-and-exchange from no run, so an invocation-wide claim taken first
+would make both fail: the import would warn "run key held by another run"
+and its days would carry the cli's attempt id, and `zerodha-gaps --apply`
+would print "run 0 ... lines carry run=0" above lines that carry the
+attempt id. The next owner settles which id those two commands' lines and
+events carry (the invocation's attempt, or their own nested inside it) in
+the same change as the line. Everything listed under repair r2 and r1e's
+"What remains" stands.
+
+**Proved by (r4)** `pull::gdfl_rekey::tests::{a_retirement_whose_key_grew_after_the_plan_is_refused_not_retired_stale,
+applies_of_disjoint_underlying_plans_do_not_refuse_each_other}`,
+`cli::gdfl_rekey::tests::an_underlying_with_no_stored_key_is_refused_by_name_and_writes_nothing`,
+and `store`'s `cited_commits` on the merged tree.
+
 ### D-4970 — A log-only import row is made only for the refusals no close of the kind-day owns, and a close's refusals are only those logged in its own run's window; a journal row is an instrument's when its filter NAMES the symbol as a whole name or is `*`, the newest such close winning; a run with no lifecycle event says where it looked — 2026-10-14
 
 **Implemented by** AF-02 (`api::imports::{merged, placed, next_start, Owners,

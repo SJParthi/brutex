@@ -196,8 +196,9 @@ fn a_dry_run_names_the_plan_and_writes_nothing() {
 }
 
 /// `--apply` carries the plan out and exits OK; a second `--apply` changes
-/// nothing and says so. `--underlying` naming another underlying plans
-/// nothing.
+/// nothing and says so. `--underlying` naming an underlying with no stored
+/// key prints its receipt and is refused by name (AG-02 repair r4), never
+/// read as `PENDING: 0`.
 #[test]
 fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
     let scratch = store("apply");
@@ -212,6 +213,7 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
         out.contains("APPLIED: 1 key(s) moved (1 month file(s) written"),
         "{out}"
     );
+    assert!(out.contains("1 key(s) retired, 0 refused"), "{out}");
     assert!(
         out.contains("census epoch 000001 -> 000002 (rekey)"),
         "{out}"
@@ -240,6 +242,7 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
         again.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved, 0 census)"),
         "{again}"
     );
+    assert!(again.contains("0 key(s) retired, 0 refused"), "{again}");
     assert!(again.contains("0 ledger line(s) appended"), "{again}");
     assert!(again.contains("no epoch was installed"), "{again}");
     assert_eq!(
@@ -253,15 +256,26 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
         &|| Ok(root.clone()),
         &mut narrowed,
     );
-    assert_eq!(code, OK, "{narrowed}");
+    assert_eq!(code, FAILED, "{narrowed}");
     assert!(narrowed.contains("PLAN: 0 key(s) judged"), "{narrowed}");
+    assert!(
+        narrowed.contains(
+            "REFUSED: --underlying names BANKNIFTY, under which no option key holds a bar"
+        ),
+        "{narrowed}"
+    );
+    assert!(!narrowed.contains("PLAN ONLY"), "{narrowed}");
     assert!(
         narrowed.contains(
             "ledger              0 superseded and 0 retired key(s) already recorded (BANKNIFTY)"
         ),
         "{narrowed}"
     );
-    assert!(narrowed.contains("PENDING: 0"), "{narrowed}");
+    assert!(
+        narrowed.contains("PENDING: not answered (--underlying names BANKNIFTY,")
+            && !narrowed.contains("PENDING: 0"),
+        "{narrowed}"
+    );
 }
 
 /// rekey-3: AFTER AN APPLY, `--plan` PRINTS WHAT IS RECORDED APART FROM WHAT
@@ -511,4 +525,59 @@ fn an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing() {
         "{again}"
     );
     assert!(pull::gdfl_lineage::lineage_path(&root).exists(), "{again}");
+}
+
+/// Follow-up r3: `--underlying` NAMING AN UNDERLYING WITH NO STORED KEY is
+/// refused by name, alone or beside one that has keys, for `--plan` and for
+/// `--apply`, and the apply writes nothing: no month, no ledger line, no
+/// census epoch. Before repair r4 `--underlying ZZZZ` printed `PENDING: 0`
+/// and exited 0, so a misspelled name read as a finished re-key; the first
+/// refusal still printed `PENDING: 0` above its REFUSED line, so a gate that
+/// reads the PENDING line read it as done: no refused receipt holds it now.
+#[test]
+fn an_underlying_with_no_stored_key_is_refused_by_name_and_writes_nothing() {
+    let scratch = store("nokeys");
+    let root = scratch.0.clone();
+    let census = epoch_path(&root, Vendor::Gdfl, Segment::Fno, 2);
+    for arguments in [
+        &["--plan", "--underlying", "ZZZZ"][..],
+        &["--apply", "--underlying", "ZZZZ"][..],
+        &["--apply", "--underlying", "NIFTY,ZZZZ,ZZZY"][..],
+    ] {
+        let mut out = String::new();
+        let code = command_with(arguments, &|| Ok(root.clone()), &mut out);
+        assert_eq!(code, FAILED, "{arguments:?}: {out}");
+        let named = if arguments[2].contains("NIFTY") {
+            "ZZZY,ZZZZ"
+        } else {
+            "ZZZZ"
+        };
+        assert!(
+            out.contains(&format!(
+                "REFUSED: --underlying names {named}, under which no option key holds a bar"
+            )) && out.contains("Nothing was written"),
+            "{arguments:?}: {out}"
+        );
+        assert!(!out.contains("APPLIED:"), "{arguments:?}: {out}");
+        assert!(!out.contains("PLAN ONLY"), "{arguments:?}: {out}");
+        // NO RECEIPT OF A REFUSED NAME HOLDS THE WORDS A GATE READS AS DONE.
+        assert!(
+            out.contains(&format!(
+                "PENDING: not answered (--underlying names {named}, under which"
+            )) && !out.contains("PENDING: 0"),
+            "{arguments:?}: {out}"
+        );
+        assert!(!pull::gdfl_lineage::lineage_path(&root).exists());
+        assert!(!root.join("bars/gdfl/NSE/FNO/NIFTY").join(SETTLED).exists());
+        assert!(!census.exists(), "{arguments:?}: no epoch was installed");
+    }
+    // The same store, named rightly, plans and applies.
+    let mut out = String::new();
+    let code = command_with(
+        &["--apply", "--underlying", "NIFTY"],
+        &|| Ok(root.clone()),
+        &mut out,
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(census.exists(), "{out}");
 }

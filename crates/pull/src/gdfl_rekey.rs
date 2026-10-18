@@ -212,7 +212,9 @@ pub struct Withdrawn {
     /// there and its line (AG-02 repair r2). What refuses a retired target
     /// and what keeps the writer from retiring one.
     into: HashMap<(Symbol, Contract), (Contract, usize)>,
-    lines: HashSet<String>,
+    /// Every re-key line read, each with the underlying it names: what
+    /// [`Self::same_records`] compares, narrowed to a plan's underlyings.
+    lines: HashMap<String, Symbol>,
     /// Whether the file's last line has no newline: a torn append.
     torn_tail: bool,
 }
@@ -242,7 +244,7 @@ impl Withdrawn {
             retired: HashMap::with_capacity(16),
             line_of: HashMap::with_capacity(80),
             into: HashMap::with_capacity(64),
-            lines: HashSet::with_capacity(80),
+            lines: HashMap::with_capacity(80),
             torn_tail,
         };
         let count = text.lines().count();
@@ -251,20 +253,22 @@ impl Withdrawn {
             if line.ends_with(" (torn)") || (torn_tail && at == count) {
                 continue;
             }
-            if line.starts_with("superseded ") {
+            let underlying = if line.starts_with("superseded ") {
                 let record = SupersededRecord::parse(line).ok_or_else(|| {
                     format!("line {at} does not parse as a `superseded` record: {line:?}")
                 })?;
                 out.admit_superseded(record, at)?;
+                record.underlying
             } else if line.starts_with("retired ") {
                 let record = RetiredRecord::parse(line).ok_or_else(|| {
                     format!("line {at} does not parse as a `retired` record: {line:?}")
                 })?;
                 out.admit_retired(record, at)?;
+                record.underlying
             } else {
                 continue;
-            }
-            let _ = out.lines.insert(line.to_owned());
+            };
+            let _ = out.lines.insert(line.to_owned(), underlying);
         }
         out.targets_continue()?;
         Ok(out)
@@ -366,34 +370,69 @@ impl Withdrawn {
     }
 
     /// Whether `fresh` (the ledger re-read under the re-key's lock) holds
-    /// exactly the re-key lines this ledger held: `Err` names how they
-    /// differ. Lines of the ledger's other kinds are not compared — no re-key
-    /// verdict reads them. O(lines).
-    fn same_records(&self, fresh: &Self) -> Result<(), String> {
-        if self.lines == fresh.lines {
+    /// exactly the re-key lines this ledger held for `only`'s underlyings
+    /// (every underlying for `None`): `Err` names how they differ. Lines of
+    /// the ledger's other kinds are not compared — no re-key verdict reads
+    /// them — and neither are another underlying's (AG-02 repair r4): a
+    /// line names one underlying and a plan's verdicts read only its own
+    /// underlyings' lines, so two applies of disjoint `--underlying` plans
+    /// no longer refuse each other. O(lines): one hash probe into `fresh`
+    /// per line this ledger holds in scope and one filter pass over `fresh`
+    /// to count its own; only a refusal builds the two sets that name the
+    /// difference. A line's text names its underlying, so every scoped line
+    /// held in `fresh` is scoped there too, and equal counts make the two
+    /// sets equal.
+    fn same_records(&self, fresh: &Self, only: Option<&BTreeSet<Symbol>>) -> Result<(), String> {
+        let within = |under: &Symbol| only.is_none_or(|only| only.contains(under));
+        let mut counted = 0_usize;
+        let held = self
+            .lines
+            .iter()
+            .filter(|(_, under)| within(under))
+            .all(|(line, _)| {
+                counted = counted.saturating_add(1);
+                fresh.lines.contains_key(line)
+            });
+        if held && counted == fresh.lines.values().filter(|under| within(under)).count() {
             return Ok(());
         }
-        let first = |of: &Self, not_in: &Self| {
-            of.lines
-                .iter()
-                .filter(|line| !not_in.lines.contains(*line))
-                .min()
-                .cloned()
-        };
-        let detail = first(fresh, self).map_or_else(
+        let (read, now) = (self.scoped_lines(only), fresh.scoped_lines(only));
+        let detail = now.difference(&read).min().map_or_else(
             || {
-                first(self, fresh).map_or_else(String::new, |gone| {
-                    format!("; the plan read {gone:?}, which the ledger no longer holds")
-                })
+                read.difference(&now)
+                    .min()
+                    .map_or_else(String::new, |gone| {
+                        format!("; the plan read {gone:?}, which the ledger no longer holds")
+                    })
             },
             |new| format!("; the ledger now holds {new:?}, which the plan did not read"),
         );
         Err(format!(
-            "the ledger changed since this plan; re-plan ({} re-key line(s) when the plan read \
-             it, {} now{detail})",
-            self.lines.len(),
-            fresh.lines.len()
+            "the ledger changed since this plan; re-plan ({} re-key line(s) of {} when the \
+             plan read it, {} now{detail})",
+            read.len(),
+            only.map_or_else(
+                || "every underlying".to_owned(),
+                |only| only
+                    .iter()
+                    .map(Symbol::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            now.len()
         ))
+    }
+
+    /// This ledger's re-key lines that name one of `only`'s underlyings
+    /// (every line for `None`), borrowed. O(lines): one set probe per line
+    /// and no sort, so the comparison stays one pass over each ledger (the
+    /// first narrowing built two sorted copies of every line).
+    fn scoped_lines(&self, only: Option<&BTreeSet<Symbol>>) -> HashSet<&str> {
+        self.lines
+            .iter()
+            .filter(|(_, under)| only.is_none_or(|only| only.contains(*under)))
+            .map(|(line, _)| line.as_str())
+            .collect()
     }
 
     /// One `superseded` line on line `at`, refused if it re-targets a key or
@@ -558,7 +597,7 @@ impl Withdrawn {
 
     /// Whether this exact line is already in the ledger.
     fn has_line(&self, line: &str) -> bool {
-        self.lines.contains(line)
+        self.lines.contains_key(line)
     }
 
     /// The lines [`apply`] would append for `plan`, checked against this
@@ -752,6 +791,10 @@ pub struct Survey {
     /// [`apply`]'s `target_state` will do with it. Empty for a survey built
     /// by hand, whose plan then says it read no census.
     pub root: PathBuf,
+    /// The underlyings `--underlying` narrowed the walk to, or `None` for
+    /// every one: what [`apply`] compares its re-read ledger over (AG-02
+    /// repair r4), so applies of disjoint plans do not refuse each other.
+    pub only: Option<BTreeSet<Symbol>>,
 }
 
 impl Survey {
@@ -854,6 +897,7 @@ pub fn day_counts(file: &BarFile) -> Result<Vec<(Day, u64)>, StoreError> {
 pub fn survey(root: &Path, only: Option<&BTreeSet<Symbol>>) -> Result<Survey, String> {
     let mut found = Survey {
         root: root.to_path_buf(),
+        only: only.cloned(),
         ..Survey::default()
     };
     let base = root
@@ -1749,8 +1793,13 @@ pub struct Applied {
     pub months_written: u64,
     /// Month files that already held exactly the bars to be written.
     pub months_already: u64,
-    /// Moves refused when their target was read, with why. Nothing of a
-    /// refused move was written.
+    /// One record per key retired, as written to the ledger: each of the
+    /// plan's retirements whose bars, re-counted under the lock, are the
+    /// plan's (AG-02 repair r4).
+    pub retired: Vec<RetiredRecord>,
+    /// Moves refused when their target was read, and retirements refused
+    /// when their key was re-counted, with why. Nothing of a refused move
+    /// or retirement was written.
     pub refused: Vec<Unresolved>,
     /// The census cycles that recorded the new months.
     pub census: Vec<census_store::Cycle>,
@@ -1887,7 +1936,7 @@ fn target_state(
     Err(format!(
         "{} already holds bars from {} to {} that these {} bar(s) from {} to {} would \
          precede or contradict; a month is never rewritten in place, so moving them \
-         needs the month regenerated (WP-80): run the re-key before the import resumes",
+         needs the repair-door publish (R4-21 item 1)",
         shown.display(),
         header.first_ts_micros,
         header.last_ts_micros,
@@ -2170,10 +2219,11 @@ pub fn apply(
     };
     let fresh = withdrawn(root)?;
     ledger
-        .same_records(&fresh)
+        .same_records(&fresh, survey.only.as_ref())
         .map_err(|why| format!("{why}: nothing was written"))?;
     let mut out = Applied::default();
     let rows = move_all(root, plan, &mut out);
+    retire_all(root, plan, &mut out);
     if !rows.is_empty() {
         out.census = census_store::record(root, Vendor::Gdfl, &rows).map_err(|why| {
             format!(
@@ -2187,14 +2237,14 @@ pub fn apply(
         .moved
         .iter()
         .map(SupersededRecord::line)
-        .chain(plan.retired.iter().map(RetiredRecord::line))
+        .chain(out.retired.iter().map(RetiredRecord::line))
         .filter(|line| !fresh.has_line(line))
         .collect();
     append_lines(&lineage_path(root), &lines, fresh.torn_tail).map_err(|why| {
         format!("{why} (the moved months are written and counted; run again to finish)")
     })?;
     out.lines_written = u64::try_from(lines.len()).unwrap_or(u64::MAX);
-    out.withdrawal = withdraw_all(root, &out, plan, &fresh).map_err(|why| {
+    out.withdrawal = withdraw_all(root, &out, &fresh).map_err(|why| {
         format!(
             "{why} (the moved months are written and counted and the ledger holds every \
              line; run again to finish)"
@@ -2269,6 +2319,41 @@ fn preflight(root: &Path, survey: &Survey) -> Result<(), String> {
     }
 }
 
+/// Step 1b (AG-02 repair r4): every planned retirement, its key's bars
+/// re-counted under the ledger's lock from the same month headers
+/// [`survey`] read (`source_now`: one listing and one header read per month
+/// file), as each move's source is before it moves. A key that gained bars
+/// after the survey is not retired: its `retired` line would carry the
+/// plan's count, the reader holds a retirement's one account as the key's,
+/// and the bars that landed after it would be withdrawn under a count that
+/// does not name them. It is named in [`Applied::refused`] instead, nothing
+/// of it is written, and the next plan judges it from what it holds.
+fn retire_all(root: &Path, plan: &Plan, out: &mut Applied) {
+    for record in &plan.retired {
+        let why = match source_now(root, record.underlying, record.key) {
+            Ok((_, bars)) if bars == record.bars => {
+                out.retired.push(*record);
+                continue;
+            }
+            Ok((months, bars)) => format!(
+                "the plan counted {} bar(s) to retire, and it holds {bars} bar(s) in {} \
+                 month(s) now: bars landed after the survey, and a retirement has one \
+                 account, so it is not retired with a count that does not name them; \
+                 re-plan",
+                record.bars,
+                months.len()
+            ),
+            Err(why) => format!(
+                "{why}: its bars could not be re-counted under the lock, so it is not \
+                 retired; re-plan"
+            ),
+        };
+        let key = option_key(record.underlying, record.key);
+        note_refused(&key, &why);
+        out.refused.push(Unresolved { key, why });
+    }
+}
+
 /// Step 1: every move, grouped by the key it moves to, written; the census
 /// rows of what was written are returned, and a group that refuses is named
 /// in [`Applied::refused`] with nothing of it written.
@@ -2314,13 +2399,12 @@ fn move_all(root: &Path, plan: &Plan, out: &mut Applied) -> Vec<Held> {
 fn withdraw_all(
     root: &Path,
     out: &Applied,
-    plan: &Plan,
     ledger: &Withdrawn,
 ) -> Result<Option<census_store::Compaction>, String> {
     let mut gone: HashMap<(Symbol, Contract), RetiredOr> = HashMap::with_capacity(
         out.moved
             .len()
-            .saturating_add(plan.retired.len())
+            .saturating_add(out.retired.len())
             .saturating_add(ledger.superseded.len())
             .saturating_add(ledger.retired.len()),
     );
@@ -2332,7 +2416,7 @@ fn withdraw_all(
         let _ = gone.insert(at, RetiredOr::Superseded);
     }
     for at in ledger.retired.keys().copied().chain(
-        plan.retired
+        out.retired
             .iter()
             .map(|record| (record.underlying, record.key)),
     ) {
@@ -2347,7 +2431,7 @@ fn withdraw_all(
     census_store::withdraw(root, Vendor::Gdfl, Segment::Fno, &withdrawn)
 }
 
-/// One refused move, at `Warn`.
+/// One refused move or retirement, at `Warn`.
 fn note_refused(key: &str, why: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn(TARGET, "move refused")
@@ -2367,7 +2451,7 @@ fn note_applied(out: &Applied, plan: &Plan) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(level, TARGET, "re-key applied")
             .with("moved", count(out.moved.len()))
-            .with("retired", count(plan.retired.len()))
+            .with("retired", count(out.retired.len()))
             .with("recorded_moves", count(plan.recorded_moves.len()))
             .with("recorded_retired", count(plan.recorded_retired.len()))
             .with("refused", count(out.refused.len()))

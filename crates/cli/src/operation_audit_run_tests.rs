@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use pull::fetch::{RawRow, RawWindow};
 use pull::session::{Day, IST_OFFSET_SECS, Window};
@@ -25,10 +26,34 @@ use pull::session::{Day, IST_OFFSET_SECS, Window};
 use super::{Origin, RunClaim, begin, claim_invocation_run, current_id};
 use crate::OK;
 
-/// The sink's run key is process-wide and these are the only tests in this
-/// binary that claim it on the installed sink, so they take turns: a test
-/// that reads `run=0` must not overlap one that holds a run.
+/// The sink's run key is process-wide, so these tests take turns: a test
+/// that reads `run=0` must not overlap one that holds a run. They are not
+/// the binary's only claimants: `zerodha_gaps_command`'s `--apply` tests
+/// claim the same key outside this lock, so every claim here waits for the
+/// key ([`hold`]) and every `run=0` read is retried ([`quiet_repair_runs`]).
 static SERIAL: Mutex<()> = Mutex::new(());
+
+/// [`claim_invocation_run`] of `attempt`, waiting while another claimant
+/// holds the key, for at most a minute, then failing with the holder's run.
+/// Once held, no other claim can take the key, so every line written while
+/// the guard lives names `attempt`.
+fn hold(attempt: Option<u64>) -> RunClaim<'static> {
+    let sink = crate::ledger_all::tests::sink();
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let claim = claim_invocation_run(attempt);
+        if claim.held() {
+            return claim;
+        }
+        drop(claim);
+        assert!(
+            Instant::now() < deadline,
+            "run {} has held the sink's key for a minute",
+            sink.run()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -167,12 +192,11 @@ fn a_cli_written_repair_line_carries_the_invocations_run() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let sink = crate::ledger_all::tests::sink();
-    assert_eq!(sink.run(), 0, "no run is held before the invocation");
 
     // A NON-SWEEP COMMAND: no durable invocation, so the attempt is one
     // reserved from the sink, exactly as `run_with_sink` reserves it.
     let attempt = current_id().or_else(|| sink.reserve_run_id());
-    let claim = claim_invocation_run(attempt);
+    let claim = hold(attempt);
     assert!(claim.held());
     let id = attempt.unwrap();
     assert_ne!(id, 0);
@@ -180,7 +204,7 @@ fn a_cli_written_repair_line_carries_the_invocations_run() {
         assert_eq!(run, format!("run={id}"));
     }
     drop(claim);
-    assert_eq!(sink.run(), 0, "released with the invocation");
+    assert_ne!(sink.run(), id, "released with the invocation");
 
     // A SWEEP COMMAND'S DURABLE INVOCATION: its id is the attempt.
     let audit_root = Root::new();
@@ -189,7 +213,7 @@ fn a_cli_written_repair_line_carries_the_invocations_run() {
     audit.enter(|| {
         let attempt = current_id().or_else(|| sink.reserve_run_id());
         assert_eq!(attempt, Some(durable));
-        let _claim = claim_invocation_run(attempt);
+        let _claim = hold(attempt);
         for run in repair_runs("RUNIDXB") {
             assert_eq!(run, format!("run={durable}"));
         }
@@ -197,7 +221,7 @@ fn a_cli_written_repair_line_carries_the_invocations_run() {
     audit
         .finish(super::Phase::Completed, 0)
         .expect("terminal audit");
-    assert_eq!(sink.run(), 0);
+    assert_ne!(sink.run(), durable);
 }
 
 /// D-0088: zero is the absence of a run. A process with no attempt claims
@@ -207,15 +231,28 @@ fn a_process_with_no_attempt_writes_run_0() {
     let _turn = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let sink = crate::ledger_all::tests::sink();
     let claim = claim_invocation_run(None);
     assert!(!claim.held());
     assert_eq!(claim.run(), 0);
-    for run in repair_runs("RUNIDXC") {
-        assert_eq!(run, "run=0");
-    }
+    let runs = quiet_repair_runs("RUNIDXC");
+    assert!(runs.iter().all(|run| run == "run=0"), "{runs:?}");
     drop(claim);
-    assert_eq!(sink.run(), 0);
+}
+
+/// [`repair_runs`] with no run claimed here, retried while another claimant
+/// of the process-wide key (see [`SERIAL`]) held it during the repair: the
+/// first repair whose every line says `run=0`, else, after fifty, the last
+/// one seen. A line naming a run nobody claimed fails all fifty.
+fn quiet_repair_runs(symbol: &str) -> Vec<String> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        last = repair_runs(symbol);
+        if last.iter().all(|run| run == "run=0") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    last
 }
 
 /// TWO INVOCATIONS IN ONE PROCESS: the second claims its own id once the
@@ -231,7 +268,7 @@ fn two_invocations_in_one_process_each_name_their_own_run() {
     let second = sink.reserve_run_id();
     assert_ne!(first, second);
     {
-        let _claim = claim_invocation_run(first);
+        let _claim = hold(first);
         for run in repair_runs("RUNIDXD") {
             assert_eq!(run, format!("run={}", first.unwrap()));
         }
@@ -242,14 +279,14 @@ fn two_invocations_in_one_process_each_name_their_own_run() {
         drop(inner);
         assert_eq!(Some(sink.run()), first);
     }
-    assert_eq!(sink.run(), 0);
+    assert_ne!(Some(sink.run()), first);
     {
-        let _claim = claim_invocation_run(second);
+        let _claim = hold(second);
         for run in repair_runs("RUNIDXE") {
             assert_eq!(run, format!("run={}", second.unwrap()));
         }
     }
-    assert_eq!(sink.run(), 0);
+    assert_ne!(Some(sink.run()), second);
 }
 
 /// The guard's own edges on a private sink: no sink, no id and a zero id

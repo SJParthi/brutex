@@ -46,10 +46,11 @@
 //! # Exit
 //!
 //! [`OK`] only when every month file was read and every key was either kept,
-//! moved or retired (and, with `--apply`, every move landed); [`FAILED`] when
-//! a key is left unresolved, a file was unreadable, a move was refused or the
-//! apply stopped; [`MISUSED`] for arguments it does not know, before anything
-//! is read.
+//! moved or retired (and, with `--apply`, every move and retirement landed);
+//! [`FAILED`] when a key is left unresolved, a file was unreadable, a move or
+//! a retirement was refused, `--underlying` named an underlying no key is
+//! stored under (refused before anything is written), or the apply stopped;
+//! [`MISUSED`] for arguments it does not know, before anything is read.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -176,8 +177,12 @@ fn render_survey(
     );
 }
 
-/// The plan's half of the receipt.
-fn render_plan(out: &mut String, plan: &Plan, only: Option<&BTreeSet<Symbol>>) {
+/// The plan's half of the receipt. `unwalked` names the `--underlying`
+/// names the walk read nothing under ([`unwalked`]): when there is one the
+/// receipt's `PENDING:` line says it is not answered rather than print a
+/// count, so no receipt of a refused name holds the `PENDING: 0` a gate
+/// reads as done (AG-02 repair r4).
+fn render_plan(out: &mut String, plan: &Plan, only: Option<&BTreeSet<Symbol>>, unwalked: &[&str]) {
     let _ = writeln!(
         out,
         "  PLAN: {} key(s) judged; {} kept, {} to move, {} to retire, {} unresolved; {} moved \
@@ -211,15 +216,24 @@ fn render_plan(out: &mut String, plan: &Plan, only: Option<&BTreeSet<Symbol>>) {
     // in it, so a store whose re-key has run reads `pending 0` however long
     // its old files are kept; the census step is in it until the epoch that
     // leaves out every withdrawn key is installed.
-    let _ = writeln!(
-        out,
-        "  PENDING: {} ({} to move, {} to retire, {} unresolved, {} census)",
-        plan.pending(),
-        plan.moves.len(),
-        plan.retired.len(),
-        plan.unresolved.len(),
-        plan.census.pending()
-    );
+    if unwalked.is_empty() {
+        let _ = writeln!(
+            out,
+            "  PENDING: {} ({} to move, {} to retire, {} unresolved, {} census)",
+            plan.pending(),
+            plan.moves.len(),
+            plan.retired.len(),
+            plan.unresolved.len(),
+            plan.census.pending()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  PENDING: not answered (--underlying names {}, under which no option key holds \
+             a bar)",
+            unwalked.join(",")
+        );
+    }
     for one in plan.moves.iter().take(SHOWN) {
         let _ = writeln!(
             out,
@@ -286,10 +300,11 @@ fn render_applied(out: &mut String, done: &Applied) {
     let _ = writeln!(
         out,
         "  APPLIED: {} key(s) moved ({} month file(s) written, {} already held exactly), \
-         {} move(s) refused, {} ledger line(s) appended",
+         {} key(s) retired, {} refused, {} ledger line(s) appended",
         done.moved.len(),
         done.months_written,
         done.months_already,
+        done.retired.len(),
         done.refused.len(),
         done.lines_written
     );
@@ -331,6 +346,20 @@ fn render_applied(out: &mut String, done: &Applied) {
     }
 }
 
+/// The underlyings `--underlying` names under which the survey found no
+/// option key with a bar, in name order (AG-02 repair r4). O(keys)
+/// once: one set of the walked underlyings, one probe per name.
+fn unwalked<'a>(only: Option<&'a BTreeSet<Symbol>>, found: &Survey) -> Vec<&'a str> {
+    let Some(only) = only else {
+        return Vec::new();
+    };
+    let walked: BTreeSet<Symbol> = found.keys.iter().map(|key| key.underlying).collect();
+    only.iter()
+        .filter(|name| !walked.contains(*name))
+        .map(Symbol::as_str)
+        .collect()
+}
+
 /// `gdfl-rekey`, with the store root passed in so every arm is driven by a
 /// test without the process environment.
 pub(crate) fn command_with(
@@ -359,7 +388,23 @@ pub(crate) fn command_with(
     };
     render_survey(out, &root, &found, &ledger, asked.only.as_ref());
     let plan = gdfl_rekey::plan(&found, &ledger);
-    render_plan(out, &plan, asked.only.as_ref());
+    // A NAMED UNDERLYING WITH NO KEY IS REFUSED (AG-02 repair r4): the walk
+    // reads nothing under it, and a plan of nothing reads `PENDING: 0`, the
+    // word a gate takes for done, so a misspelled or absent name would read
+    // as finished. Its receipt's `PENDING:` says not answered, and it is
+    // refused by name before anything is written.
+    let empty = unwalked(asked.only.as_ref(), &found);
+    render_plan(out, &plan, asked.only.as_ref(), &empty);
+    if !empty.is_empty() {
+        let _ = writeln!(
+            out,
+            "  REFUSED: --underlying names {}, under which no option key holds a bar \
+             (bars/gdfl/NSE/FNO/<underlying>); a name the walk reads nothing under is not \
+             read as nothing pending. Nothing was written",
+            empty.join(",")
+        );
+        return FAILED;
+    }
     // A census that was not read or would not read leaves step 4 unknown: that
     // is a failure to answer, not pending work (AG-02 repair r1e).
     let clean = found.unreadable == 0

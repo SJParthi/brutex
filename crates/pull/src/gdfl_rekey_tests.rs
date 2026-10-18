@@ -1709,6 +1709,18 @@ fn a_held_month_is_decided_by_applys_own_check() {
         "{}",
         left.why
     );
+    // ONE ROUTE NAMED (AG-02 repair r4): both halves of the sentence name
+    // the repair-door publish; the apply's half no longer names WP-80's
+    // regeneration beside it.
+    assert!(!left.why.contains("WP-80"), "{}", left.why);
+    assert_eq!(
+        left.why
+            .matches("repair-door publish (R4-21 item 1)")
+            .count(),
+        2,
+        "{}",
+        left.why
+    );
 }
 
 /// An apply killed between the two months of one move (FM-273 step 1 cut
@@ -2385,7 +2397,9 @@ fn spread(mut samples: Vec<u128>) -> String {
 /// open, take and release; the ledger's re-key lines compared with a fresh
 /// read of 10,000 records (O(lines), once per apply); the reader's two
 /// whole-ledger rules on the same 10,000 lines; and `source_now` of one
-/// two-month key (one listing, two headers). 200 samples each, nanoseconds.
+/// two-month key (one listing, two headers). Repair r4 adds the comparison
+/// narrowed to one `--underlying` that names every line (its worst case).
+/// 200 samples each, nanoseconds.
 /// Run with `--ignored --nocapture apply_guard_cost`.
 #[test]
 #[ignore = "a measurement, run by hand: --ignored --nocapture apply_guard_cost"]
@@ -2413,10 +2427,15 @@ fn apply_guard_cost_per_operation() {
     let again = Withdrawn::parse(&text).unwrap();
     let mut compare = Vec::with_capacity(200);
     let mut rules = Vec::with_capacity(200);
+    let mut narrowed = Vec::with_capacity(200);
+    let only: BTreeSet<Symbol> = [sym("NIFTY")].into_iter().collect();
     for _ in 0..200 {
         let started = std::time::Instant::now();
-        read.same_records(&again).unwrap();
+        read.same_records(&again, None).unwrap();
         compare.push(started.elapsed().as_nanos());
+        let started = std::time::Instant::now();
+        read.same_records(&again, Some(&only)).unwrap();
+        narrowed.push(started.elapsed().as_nanos());
         let started = std::time::Instant::now();
         read.targets_continue().unwrap();
         rules.push(started.elapsed().as_nanos());
@@ -2445,9 +2464,152 @@ fn apply_guard_cost_per_operation() {
     eprintln!("APPLY_GUARD lock_open_take_release {}", spread(lock));
     eprintln!("APPLY_GUARD same_records_10000_lines {}", spread(compare));
     eprintln!(
+        "APPLY_GUARD same_records_10000_lines_one_underlying {}",
+        spread(narrowed)
+    );
+    eprintln!(
         "APPLY_GUARD targets_continue_10000_records {}",
         spread(rules)
     );
     eprintln!("APPLY_GUARD targets_continue_10000_chain {}", spread(walk));
     eprintln!("APPLY_GUARD source_now_2_months {}", spread(source));
+}
+
+/// Follow-up r3 (probe P4): A RETIREMENT WHOSE KEY GREW AFTER THE PLAN is
+/// refused by name under the lock, never appended with the plan's stale
+/// `bars=`: no `retired` line for it, its census rows kept, and a re-plan
+/// retires it with the bars it holds. Before repair r4 the apply appended
+/// `bars=1` for a key holding 2, and the reader held that one account.
+#[test]
+fn a_retirement_whose_key_grew_after_the_plan_is_refused_not_retired_stale() {
+    let scratch = retirements_only("retire-grew");
+    let root = scratch.root();
+    let (found, ledger, decided) = view(root);
+    let grew = IMPOSSIBLE[0];
+    let planned = decided
+        .retired
+        .iter()
+        .find(|record| record.key == c(grew))
+        .unwrap();
+    assert_eq!(planned.bars, 1);
+    put(root, "NIFTY", grew, &[bar(d(2019, 5, 30), 40_500, 9)]);
+    let census_before = census_keys(root).1;
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(
+        done.retired.iter().all(|record| record.key != c(grew)),
+        "{:?}",
+        done.retired
+    );
+    assert_eq!(done.retired.len(), IMPOSSIBLE.len() - 1);
+    let refused = done
+        .refused
+        .iter()
+        .find(|one| one.key == format!("NSE-FNO-NIFTY-{grew}"))
+        .unwrap();
+    assert!(
+        refused.why.contains("the plan counted 1 bar(s) to retire")
+            && refused.why.contains("it holds 2 bar(s) in 1 month(s) now")
+            && refused.why.ends_with("re-plan"),
+        "{}",
+        refused.why
+    );
+    let read = withdrawn(root).unwrap();
+    assert!(read.retired(sym("NIFTY"), c(grew)).is_none());
+    assert!(read.retired(sym("NIFTY"), c(IMPOSSIBLE[1])).is_some());
+    let text = std::fs::read_to_string(lineage_path(root)).unwrap();
+    assert!(!text.contains(grew), "{text}");
+    let listed = census_keys(root).1;
+    let row = format!("NIFTY {grew} 2019-05");
+    assert!(
+        census_before.contains(&row) && listed.contains(&row),
+        "{listed:?}"
+    );
+    // THE RE-PLAN retires it with what it holds, and then nothing is pending.
+    let (found, ledger, again) = view(root);
+    assert_eq!(again.retired.len(), 1);
+    assert_eq!(again.retired[0].bars, 2);
+    let done = apply(root, &found, &again, &ledger).unwrap();
+    assert_eq!((done.retired.len(), done.refused.len()), (1, 0));
+    assert_eq!(view(root).2.pending(), 0);
+    assert_eq!(
+        withdrawn(root)
+            .unwrap()
+            .retired(sym("NIFTY"), c(grew))
+            .map(|r| r.bars),
+        Some(2)
+    );
+}
+
+/// The retirements-only store's ladder and impossible strikes, a second time
+/// under BANKNIFTY, so two underlyings each have a retirement to apply.
+fn second_underlying(root: &Path) {
+    let on = d(2019, 5, 30);
+    for (at, key) in LADDER.iter().enumerate() {
+        let price = 201 + i64::try_from(at).unwrap();
+        put(
+            root,
+            "BANKNIFTY",
+            key,
+            &[bar(on, 33_300, price), bar(on, 33_301, price)],
+        );
+    }
+    put(root, "BANKNIFTY", IMPOSSIBLE[0], &[bar(on, 41_000, 7)]);
+}
+
+/// Follow-up r3 (probe P12): APPLIES OF DISJOINT `--underlying` PLANS do
+/// not refuse each other. Each compares the ledger it re-reads under the
+/// lock with the one it planned from over its own underlyings only, so the
+/// NIFTY apply's lines do not stale the BANKNIFTY plan; a plan of the same
+/// underlying, or of every underlying, made before them is still refused.
+/// Before repair r4 the BANKNIFTY apply was refused ("the ledger changed
+/// since this plan") and a re-plan cost a whole survey.
+#[test]
+fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
+    let scratch = retirements_only("disjoint");
+    let root = scratch.root();
+    second_underlying(root);
+    let only = |name: &str| BTreeSet::from([sym(name)]);
+    let narrowed = |name: &str| {
+        let wanted = only(name);
+        let found = survey(root, Some(&wanted)).unwrap();
+        let ledger = withdrawn(root).unwrap();
+        let decided = plan(&found, &ledger);
+        (found, ledger, decided)
+    };
+    let nifty = narrowed("NIFTY");
+    let bank = narrowed("BANKNIFTY");
+    let nifty_again = narrowed("NIFTY");
+    let every = view(root);
+    assert_eq!((nifty.2.retired.len(), bank.2.retired.len()), (3, 1));
+
+    let first = apply(root, &nifty.0, &nifty.2, &nifty.1).unwrap();
+    assert_eq!(first.retired.len(), 3);
+    let second = apply(root, &bank.0, &bank.2, &bank.1).unwrap();
+    assert_eq!((second.retired.len(), second.lines_written), (1, 1));
+    let read = withdrawn(root).unwrap();
+    assert_eq!(read.counts(), (0, 4));
+    assert!(read.retired(sym("BANKNIFTY"), c(IMPOSSIBLE[0])).is_some());
+
+    // THE SAME UNDERLYING, AND THE WHOLE LEDGER, ARE STILL COMPARED.
+    let bytes = std::fs::read(lineage_path(root)).unwrap();
+    for (name, stale) in [("NIFTY", &nifty_again), ("every", &every)] {
+        let why = apply(root, &stale.0, &stale.2, &stale.1).unwrap_err();
+        assert!(
+            why.contains("the ledger changed since this plan; re-plan")
+                && why.contains("nothing was written"),
+            "{name}: {why}"
+        );
+        assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes, "{name}");
+    }
+    let why = apply(root, &nifty_again.0, &nifty_again.2, &nifty_again.1).unwrap_err();
+    assert!(
+        why.contains("re-key line(s) of NIFTY when the plan read it"),
+        "{why}"
+    );
+    let why = apply(root, &every.0, &every.2, &every.1).unwrap_err();
+    assert!(
+        why.contains("re-key line(s) of every underlying when the plan read it"),
+        "{why}"
+    );
+    assert_eq!(view(root).2.pending(), 0);
 }
