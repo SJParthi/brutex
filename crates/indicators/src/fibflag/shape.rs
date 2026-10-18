@@ -247,15 +247,17 @@ const fn inside(later: Bar, earlier: Bar) -> bool {
 fn micro(w: &Window, width: i128, out: &mut ShapeScores) {
     let (first, last) = (w.first, w.last);
     let before_last = w.middle.unwrap_or(first);
-    let v_bottom = w
-        .middle
-        .filter(|mid| mid.low < first.low && mid.low < last.low)
-        .map_or(0, |mid| {
-            permille(
-                i128::from(first.low.min(last.low)) - i128::from(mid.low),
-                width,
-            )
-        });
+    // The middle low's depth below the lower of its neighbours' lows: positive
+    // only when it lies below both, and a depth that is not positive scores 0.
+    // There is no comparison of its own, so no tie can make a strict and a
+    // non-strict reading of one agree.
+    let v_bottom = match w.middle {
+        Some(mid) if width != 0 => permille(
+            i128::from(first.low.min(last.low)) - i128::from(mid.low),
+            width,
+        ),
+        _ => 0,
+    };
     out.set(Shape::VBottom, v_bottom);
     let partial_u = if width == 0 {
         whole()
@@ -452,5 +454,14 @@ mod tests {
             (1_000, 1_000)
         );
         assert_eq!(s.get(Shape::Stair), 0);
+        // Three candles of zero width have no V (FM-F024); a middle low level
+        // with a neighbour's, or above one, has no depth.
+        let mut flat3 = window(3, 70, 70);
+        flat3.middle = Some(Bar { high: 70, low: 70 });
+        assert_eq!(scores(&flat3, BaseKind::Micro3).get(Shape::VBottom), 0);
+        v.middle = Some(Bar { high: 60, low: 30 });
+        assert_eq!(scores(&v, BaseKind::Micro3).get(Shape::VBottom), 0, "a tie");
+        v.middle = Some(Bar { high: 60, low: 35 });
+        assert_eq!(scores(&v, BaseKind::Micro3).get(Shape::VBottom), 0);
     }
 }
