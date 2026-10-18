@@ -4348,3 +4348,26 @@ fn a_stop_extra_ticks_beyond_the_base_sits_that_far_below_the_planned_stop() {
     assert_eq!(out.exit_second, at(10, 2, 0));
     assert_eq!(out.exit_value_paisa, i128::from(100 * 98_985));
 }
+
+/// NEXT RUNG is the first Fibonacci rung strictly above the entry: an entry
+/// exactly on the 500 rung (Rs 1,002.50 of 995.00 to 1,010.00) targets the
+/// 618 rung, Rs 1,004.27, a stage-A limit resting at 1,004.30.
+#[test]
+fn next_rung_is_the_first_rung_strictly_above_the_entry() {
+    let plan = Plan {
+        entry_ref: 100_250,
+        ..long_plan(at(10, 0, 0))
+    };
+    let next = ExitVariant {
+        take_profit: TakeProfit::NextRung,
+        ..STOP_ONLY
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), 100_250, 100_300, 100_200, 100_250, 1_000),
+        bar(at(10, 1, 0), 100_250, 100_431, 100_200, 100_300, 1_000),
+    ]);
+    let out = minute_slot(&day, plan, next);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert_eq!(out.exit_second, at(10, 1, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(out.filled_qty) * 100_430);
+}
