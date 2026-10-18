@@ -51,7 +51,10 @@ All are `#[cfg(test)]`, in the codebase's own shape (`sync_hooked`, D-2740;
 flock's unlock seam; verdict's crash seam). Each adds a branch under test,
 so the shipped call is the call every test runs.
 - `file::fault` and `impl Positional for File`: a per-thread host refusal,
-  armed for one action on one file.
+  armed for one action on one file. The same refusal reaches
+  `index_on_open`'s look at the `.tix` name.
+- `file::initialise`: an actor before the genesis' flush, so a batch can be
+  sealed under an opening writer.
 - `staging`: a stand-in for the look, and an open refusal.
 - `sort_index_writer`: `look` and `read_index_at`.
 - `verdict`: `tests::interfere`.
@@ -63,13 +66,33 @@ so the shipped call is the call every test runs.
 ### New tests
 
 Every one asserts behaviour, and every doc comment names what it kills or
-covers.
-- `crates/store/src/file_fault_tests.rs` (new, 18).
-- `staging_tests.rs` (+4), `verdict_tests.rs` (+10), `safe_open_tests.rs`
-  (+1).
-- `verdict`, `sealed` and `time_index` `cloud_mutant_tests` (+2, +1, +1).
-- `crates/store/tests/cloud_mutants_store.rs` (+2).
-- `telemetry::sink::cloud_mutant_tests` (+2).
+covers. The branch adds 163 `#[test]`s over `feat/db-fix`: the 16 Oct
+pass's, re-applied, and this pass's.
+
+| file | tests added |
+|---|---:|
+| `crates/store/tests/cloud_mutants_store.rs` | 65 |
+| `crates/telemetry/src/sink.rs` | 26 |
+| `crates/store/src/file_fault_tests.rs` (new, this pass) | 21 |
+| `crates/store/src/verdict.rs` | 19 |
+| `crates/telemetry/tests/cloud_mutants_sink.rs` | 12 |
+| `crates/store/src/verdict_tests.rs` | 9 |
+| `crates/store/src/staging_tests.rs` | 3 |
+| `crates/store/src/time_index.rs` | 3 |
+| `crates/store/src/sealed.rs` | 2 |
+| `crates/store/src/file.rs` | 1 |
+| `crates/store/src/safe_open_tests.rs` | 1 |
+| `crates/store/src/sealed_codec.rs` | 1 |
+
+Existing tests changed by this pass, none weakened:
+- A deadline that turns a hang under a mutant into a failure:
+  - `sealed_tests.rs`: three tests;
+  - `tests/verdict.rs`: one stem;
+  - `cloud_mutants_store.rs`: the long stems;
+  - the sink's `reaped()` and its posting pager.
+- A fork gate on three sink tests.
+- Added assertions in `time_index::tests` and in the sink's refusing-target
+  and `Debug` tests.
 
 ### Findings from the 16 Oct report
 
