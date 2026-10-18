@@ -1097,7 +1097,8 @@ test('the page compiles, draws the three parts and reads each from its own route
   assert.ok(out.js.code.length > 1000);
   for (const section of ['rungs', 'timeline', 'days']) assert.match(PAGE, new RegExp(`data-section="${section}"`));
   for (const fn of ['rungsUrl(key)', 'barsUrl({ key, rung, day, dir, cursor })', 'dayUrl(key, month)']) assert.ok(PAGE.includes(fn), fn);
-  assert.match(PAGE, /await ask\(url, \{ signal: ticket\.signal \}\)/);
+  // THROUGH `ask`, asked again while a month is being written (R3-08, RA-117).
+  assert.match(PAGE, /await askAgainWhileWritten\(ask, url, \{ signal: ticket\.signal \}\)/);
   // GET only, and no request that bypasses the deadline
   assert.doesNotMatch(PAGE, /\bfetch\(/);
   assert.doesNotMatch(PAGE, /method:|POST|PUT|DELETE/);

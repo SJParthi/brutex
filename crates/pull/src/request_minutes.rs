@@ -217,6 +217,24 @@ struct Audit {
     days: Vec<DayGaps>,
 }
 
+/// The one `Error` event of one (month, reason) group of an answer's gaps,
+/// emitted beside the receipt failure it explains (D-3341, gate 19).
+fn note_gap_group(instrument: &str, plan: Plan<'_>, group: &Group) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
+            .with("instrument", telemetry::Value::Str(instrument))
+            // `feed`, `instrument` and `month` are three of the audit
+            // stream's index dimensions (D-3341 item 3).
+            .with("feed", telemetry::Value::Str(plan.vendor.as_str()))
+            .with("month", telemetry::Value::Str(&group.month))
+            .with("code", telemetry::Value::Str(group.why.code()))
+            .with("count", telemetry::Value::Uint(u64::from(group.count)))
+            .with("first_day", telemetry::Value::Str(&group.first_day))
+            .with("last_day", telemetry::Value::Str(&group.last_day))
+            .with("reason", telemetry::Value::Str(&group.text)),
+    );
+}
+
 /// Audits one answer and hands its findings to the receipt, the log and the
 /// ledger. See the module header.
 ///
@@ -236,19 +254,7 @@ pub(super) fn report(
     };
     let audit = audit_refused(rows, plan, venue, refusals);
     for group in aggregate(&audit.findings, plan.vendor) {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
-                .with("instrument", telemetry::Value::Str(instrument))
-                // `feed`, `instrument` and `month` are three of the audit
-                // stream's index dimensions (D-3341 item 3).
-                .with("feed", telemetry::Value::Str(plan.vendor.as_str()))
-                .with("month", telemetry::Value::Str(&group.month))
-                .with("code", telemetry::Value::Str(group.why.code()))
-                .with("count", telemetry::Value::Uint(u64::from(group.count)))
-                .with("first_day", telemetry::Value::Str(&group.first_day))
-                .with("last_day", telemetry::Value::Str(&group.last_day))
-                .with("reason", telemetry::Value::Str(&group.text)),
-        );
+        note_gap_group(instrument, plan, &group);
         done.failures.push(group.receipt(instrument));
     }
     if audit.days.is_empty() {

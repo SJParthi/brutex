@@ -21,6 +21,7 @@
    */
   import { createPageRequests } from '$lib/page-requests.js';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { dayLabel } from '$lib/dates.js';
@@ -31,8 +32,45 @@
     dayflagsUrl,
     emptyWindowWhy,
     tally,
+    sessionCount,
     DAYFLAGS_PAGE_DAYS
   } from '$lib/db/dayflags.js';
+  import { auctionBandSentence, dayFactsUrl } from '$lib/db/notes-labels.js';
+  import { keyHref } from '$lib/db/lineage-labels.js';
+
+  /**
+   * THE AUCTION RECORDS THIS PAGE HAS READ, by `/sources/day.json` URL: one
+   * read per (share, day) opened, for the page's life; the oldest is
+   * forgotten past `AUCTION_READS_MAX`. A failed read is remembered as one
+   * and said; Read again on the grid reloads the page's store, not this.
+   *
+   * @type {Map<string, Promise<{ state: 'read', auction: any, found: boolean } | { state: 'failed', why: string }>>}
+   */
+  const AUCTION_READS = new Map();
+  const AUCTION_READS_MAX = 64;
+
+  /**
+   * One day's auction record, read once (AH-03, g-ui-dom-vs-json-3).
+   *
+   * @param {string} url `dayFactsUrl(instrument, day)`
+   * @param {string} day `YYYY-MM-DD`
+   */
+  function readAuctionDay(url, day) {
+    const kept = AUCTION_READS.get(url);
+    if (kept) return kept;
+    /** @type {Promise<{ state: 'read', auction: any, found: boolean } | { state: 'failed', why: string }>} */
+    const asked = ask(url, { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) return { state: /** @type {const} */ ('failed'), why: await refusalFrom('/sources/day.json', response) };
+        const body = await response.json();
+        const rec = Array.isArray(body?.days) ? body.days.find((/** @type {any} */ d) => d?.day === day) : undefined;
+        return { state: /** @type {const} */ ('read'), auction: rec ? (rec.auction ?? null) : null, found: rec !== undefined };
+      })
+      .catch((/** @type {any} */ why) => ({ state: /** @type {const} */ ('failed'), why: `/sources/day.json could not be read: ${String(why?.message ?? why)}` }));
+    AUCTION_READS.set(url, asked);
+    while (AUCTION_READS.size > AUCTION_READS_MAX) AUCTION_READS.delete(/** @type {string} */ (AUCTION_READS.keys().next().value));
+    return asked;
+  }
 
   /**
    * `YYYY-MM-DD` moved by `n` days, on the calendar (no time zone).
@@ -119,7 +157,7 @@
       reads.cancel();
       void reads.run(async (ticket) => {
         try {
-          const response = await ask(url, { cache: 'no-store', signal: ticket.signal });
+          const response = await askAgainWhileWritten(ask, url, { cache: 'no-store', signal: ticket.signal });
           if (!ticket.current()) return;
           if (!response.ok) {
             band = null;
@@ -196,9 +234,55 @@
     flagged.filter((/** @type {any} */ c) => !(c.kind === 'cas' && c.kinds.length === 1))
   );
   const casDays = $derived(flagged.length - listed.length);
-  const sessions = $derived(
-    db.dayBandCells.filter((/** @type {any} */ c) => c.kind !== 'closed' && c.kind !== 'outside').length
-  );
+  /* SESSIONS ARE THE CALENDAR'S (AH-03, g-ui-dom-vs-json-6): counted from
+     each day's calendar code, never from its lead kind, so a closed day
+     outside the archive is not a session. */
+  const sessions = $derived(sessionCount(db.dayBandCells));
+
+  /* THE CLOSING-AUCTION SENTENCE FOLLOWS THE DAY'S OWN RECORD (AH-03,
+     g-ui-dom-vs-json-3). The run line said "the auction print is kept apart
+     from trades" for every closing-auction day, while a month imported
+     before D-3320's rule holds the print as an ordinary bar and the bar's
+     own mark said so. The run line now names the session and says the
+     handling is each day's record; opening a closing-auction day of a share
+     reads that day's `/sources/day.json` once and words it. */
+  const feed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
+  const casAll = $derived(db.dayBandCells.filter((/** @type {any} */ c) => c.kinds.includes('cas')).length);
+  const runAuction = $derived(auctionBandSentence(feed, null, { sessions: casAll }));
+  const auctionUrl = $derived.by(() => {
+    if (!openDay || /** @type {any} */ (feed)?.closing_auction?.handling !== 'print_kept_apart') return null;
+    const c = db.dayBandCells.find((/** @type {any} */ x) => x.day === openDay);
+    if (!c || !c.kinds.includes('cas')) return null;
+    const inst = db.dayBandInstrument;
+    return typeof inst === 'string' && inst ? dayFactsUrl(inst, openDay) : null;
+  });
+  /** @type {{ day: string, url: string, value: any } | null} */
+  let auctionGot = $state.raw(null);
+  $effect(() => {
+    const url = auctionUrl;
+    const day = openDay;
+    if (!url) {
+      auctionGot = null;
+      return;
+    }
+    let live = true;
+    auctionGot = { day, url, value: null };
+    void readAuctionDay(url, day).then((value) => {
+      if (live) auctionGot = { day, url, value };
+    });
+    return () => {
+      live = false;
+    };
+  });
+  /** The opened day's auction sentence, or `null` when none applies. */
+  const dayAuction = $derived.by(() => {
+    const got = auctionGot;
+    if (!got || got.url !== auctionUrl) return null;
+    if (got.value === null) return { tone: 'info', state: 'reading', text: `Reading ${dayLabel(got.day)}'s auction record from /sources/day.json…` };
+    if (got.value.state === 'failed') return { tone: 'warn', state: 'failed', text: `${dayLabel(got.day)}'s auction record could not be read (${got.value.why}), so whether its print is kept apart is not known.` };
+    if (!got.value.found) return { tone: 'warn', state: 'no_record', text: `/sources/day.json returned no record for ${dayLabel(got.day)}, so whether its auction print is kept apart is not known.` };
+    return auctionBandSentence(feed, got.value.auction, { day: got.day, read: true });
+  });
 
   /** @param {string} feed */
   const feedWord = (feed) => (feed === 'gdfl' ? 'GDFL' : feed === 'zerodha' ? 'Zerodha' : feed);
@@ -244,6 +328,11 @@
     {#if db.dayBand?.lineage?.lines.length}
       <ul class="dlineage">
         {#each db.dayBand.lineage.lines as line, i (i)}<li>{line}</li>{/each}
+        <!-- WHERE IT CONTINUES, AS A LINK (AH-03): the key the ledger says
+             supersedes or continues this one. -->
+        {#if db.dayBand.lineage.successor && keyHref(feeds.active ?? '', db.dayBand.lineage.successor, db.timeframe ?? '')}
+          <li><a href={keyHref(feeds.active ?? '', db.dayBand.lineage.successor, db.timeframe ?? '')}>Open {db.dayBand.lineage.successor}</a></li>
+        {/if}
       </ul>
     {/if}
 
@@ -275,12 +364,9 @@
             <li class="more">and {listed.length - 12} more flagged day(s) — each is a cell above; hover it for its reason</li>
           {/if}
           {#if casDays}
-            <li data-tone="info">
+            <li data-tone={runAuction.tone} data-auction={runAuction.state}>
               <span class="kw">closing auction</span>
-              <span class="says"
-                >{casDays} session(s) of this share are closing-auction days: continuous trading ends
-                at 15:15 and the auction print is kept apart from trades (charter §9, D-3320).</span
-              >
+              <span class="says">{runAuction.text}</span>
             </li>
           {/if}
         </ul>
@@ -301,6 +387,9 @@
             <ul>
               {#each c.says as s, i (i)}<li>{s}</li>{/each}
             </ul>
+            {#if dayAuction}
+              <p class="dauction" data-tone={dayAuction.tone} data-auction={dayAuction.state} role="status">{dayAuction.text}</p>
+            {/if}
             {#if c.superseded.length}
               <p class="hist">History — refusals an earlier run logged for this day, superseded by the run that closed it:</p>
               <ul class="hist">
@@ -468,6 +557,14 @@
     margin-top: var(--s2);
     color: var(--faint);
     font-size: var(--fs-xs);
+  }
+  .dauction {
+    margin: var(--s2) 0 0;
+    color: var(--dim);
+    font-size: var(--fs-xs);
+  }
+  .dauction[data-tone='warn'] {
+    color: var(--warn);
   }
   .dnotes summary {
     cursor: pointer;

@@ -59,6 +59,7 @@
    */
   import { untrack } from 'svelte';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { dayLabel, barTimeLabel, secondLabel } from '$lib/dates.js';
   import {
     TF_SECS,
@@ -143,7 +144,10 @@
     answers = remember(answers, url, { state: 'loading' });
     const started = performance.now();
     try {
-      const res = await ask(url);
+      // A MONTH BEING WRITTEN IS ASKED AGAIN (R3-08 repair 2, NEW-21): the
+      // route answers the being-written 503 beside a landing, never a bare
+      // 409; past the tries the holder's sentence is the failure shown.
+      const res = await askAgainWhileWritten(ask, url);
       /** @type {any} */
       let body = null;
       try {

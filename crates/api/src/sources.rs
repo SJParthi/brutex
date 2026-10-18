@@ -234,6 +234,24 @@ impl Refusal {
     fn json(&self) -> Value {
         json!({ "error": self.why })
     }
+
+    /// The refusal as an answer. A store refusal that is a writer holding
+    /// the month past the read's patience is the "being written, ask again"
+    /// 503 every bar route answers ([`crate::detail::being_written_answer`]):
+    /// `"being_written":true`, so `count_route` adds `Retry-After`, counts it
+    /// as being written and the chart asks again by itself (R3-08, NEW-21).
+    /// Before this `/sources/bars.json` beside a held month answered
+    /// `{"error":"being written, ask again: ..."}` with neither, was counted
+    /// "failed", and the chart never asked again.
+    fn answer(&self) -> Answer {
+        if self.status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            && let Some((status, body)) =
+                crate::detail::being_written_answer(std::slice::from_ref(&self.why))
+        {
+            return (status, [(axum::http::header::CONTENT_TYPE, JSON)], body);
+        }
+        answer(self.status, &self.json())
+    }
 }
 
 /// `410` for a GDFL option key the re-key RETIRED, with the ledger's
@@ -1227,7 +1245,7 @@ pub(super) async fn sources_json(
     let site = Loaded::clone(&site);
     match crate::detail::run_store_read(move || rung_table(&site, &inst)).await {
         Ok(Ok(body)) => answer(axum::http::StatusCode::OK, &body),
-        Ok(Err(refusal)) => answer(refusal.status, &refusal.json()),
+        Ok(Err(refusal)) => refusal.answer(),
         Err(why) => refused_admission("all sources rung table", &why),
     }
 }
@@ -1963,7 +1981,7 @@ pub(super) async fn sources_bars_json(
     let root = site.store_root.clone();
     match crate::detail::run_store_read(move || timeline(&root, &asked)).await {
         Ok(Ok(body)) => answer(axum::http::StatusCode::OK, &body),
-        Ok(Err(refusal)) => answer(refusal.status, &refusal.json()),
+        Ok(Err(refusal)) => refusal.answer(),
         Err(why) => refused_admission("all sources timeline", &why),
     }
 }
@@ -2715,7 +2733,7 @@ pub(super) async fn sources_day_json(
     let root = site.store_root.clone();
     match crate::detail::run_store_read(move || day_table(&root, &asked)).await {
         Ok(Ok(body)) => answer(axum::http::StatusCode::OK, &body),
-        Ok(Err(refusal)) => answer(refusal.status, &refusal.json()),
+        Ok(Err(refusal)) => refusal.answer(),
         Err(why) => refused_admission("all sources day table", &why),
     }
 }
@@ -3457,6 +3475,31 @@ struct DayTally {
     restart_carry: usize,
 }
 
+/// A WRITER-HELD MONTH IS "ASK AGAIN" ON THE DAY TABLE TOO (R3-08, RA-117):
+/// when the day flags' only faults are writers holding months past the
+/// read's patience, the day table is not whole until they let go. It used to
+/// answer 200 with a "being written, ask again" note that nothing asked again
+/// on; now it is the 503 every bar route answers a writer with
+/// ([`Refusal::answer`]). `Ok` when nothing failed or anything failed for
+/// another reason, which the notes then name as before.
+fn refuse_being_written(flags: &Value) -> Result<(), Refusal> {
+    if super::dayflags::being_written(flags).is_none() {
+        return Ok(());
+    }
+    let said = flags
+        .get("month_faults")
+        .and_then(Value::as_array)
+        .map(|faults| {
+            faults
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
+    Err(Refusal::store(said))
+}
+
 /// The day table. See the module header for its cost.
 ///
 /// # Errors
@@ -3488,6 +3531,7 @@ pub fn day_table(root: &Path, asked: &DayAsk) -> Result<Value, Refusal> {
             page: 0,
         },
     );
+    refuse_being_written(&flags)?;
     let mut marks: HashMap<String, Value> = HashMap::with_capacity(days.len());
     if let Some(records) = flags.get("days").and_then(Value::as_array) {
         for record in records {

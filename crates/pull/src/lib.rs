@@ -134,6 +134,8 @@ pub mod daycheck;
 /// alone, and an unsubscribed account was told to wait for tomorrow's
 /// credential.
 pub mod dhan;
+/// The shared disk projection and its free-space floor (PERF-13, R4-07).
+pub mod disk_projection;
 /// The day an option contract SETTLED when the vendor's name states another:
 /// measured re-datings and the calendar, one contract one series. D-3331.
 pub mod expiry_alias;
@@ -156,6 +158,9 @@ pub mod gdfl_archive;
 /// a `CmSource` and checked before the one-second fold sees them. D-0808,
 /// D-2800.
 pub mod gdfl_cm;
+/// The GDFL Dropbox fetch inside the app: list, pick, download, verify and
+/// hand on, never overwriting, never deleting (E2E-01, R4-07).
+pub mod gdfl_dropbox;
 /// The common GDFL import runtime: indices, stocks and option contracts
 /// folded to one-second and one-minute bars through the one ingest door,
 /// incremental by day. D-2802.
@@ -171,6 +176,10 @@ pub mod gdfl_nfo;
 /// another key (moved, as new files, the old key pointing at the new) or
 /// refuses (retired, by name). D-3331, D-3316; WP-12c.
 pub mod gdfl_rekey;
+/// The one GDFL run authority the cli and the api share: the request and its
+/// line, the plan and every refusal before a lock, the kinds run in order, the
+/// progress record and where a run logs. IA-1, D-4800.
+pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
@@ -217,6 +226,10 @@ pub mod rehearsal;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// Keeping the vendor's answer: each Zerodha body deflated in a per-month
+/// pack beside a 128-byte receipt, and every refused row with its cause
+/// (IA-8; D-4810, D-4859, D-4920).
+pub mod response_keep;
 /// The risk-free rate as a dated series -- the RBI 91-day Treasury Bill
 /// cut-off yield, as of the latest release strictly before the trade day,
 /// read from a table the operator supplies by path. D-2810.

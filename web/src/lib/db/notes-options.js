@@ -43,6 +43,7 @@ export const REFUSAL_WORD = {
   no_spot_in_session: 'no prior',
   no_spot_file: 'unimported',
   spot_unreadable: 'unreadable',
+  spot_being_written: 'writing',
   spot_order_broken: 'unordered',
   spot_request_failed: 'failed',
   t_outside_month: 'bad month',
@@ -66,6 +67,7 @@ export const REFUSAL_WORD = {
   no_option_bar: 'no bar',
   no_option_file: 'no file',
   option_unreadable: 'unreadable',
+  option_being_written: 'writing',
   option_order_broken: 'unordered',
   greeks_request_failed: 'failed'
 };

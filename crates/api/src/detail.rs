@@ -7,7 +7,7 @@
 //! enforce byte/row caps.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[path = "boolean_observation_budget.rs"]
 mod boolean_observation_budget;
@@ -109,29 +109,128 @@ pub const MAX_WAITING: usize = 32;
 /// [`ADMISSION_WAIT_MS`].
 const CLOCK_TICK_MS: u64 = 10;
 
-/// One bounded pool: the slots running, the requests waiting, the wake-up a
-/// returned slot sends to one waiter, and the clock that ends a wait.
+/// Window scans (a non-time sort, a fold of the extremes, the O(days) work of
+/// a time-of-day bound or `coverage=1`) that may run at once: the scan pool's
+/// ceiling, apart from [`run_store_read`]'s so a seek never waits behind a
+/// scan (D-3326, DB-066). It was a counter of its own in `bars_route` that
+/// refused at once with no wait and no name; since R3-08 it is a named pool
+/// here like every other.
+pub const MAX_SCAN_CONCURRENT: usize = 2;
+
+/// Whole-vendor checks (`/verify.json`) that may run at once: ONE (R3-08,
+/// RA-009). A check opens one bar file per held month — 246,147 for GDFL when
+/// it was timed, 158 to 172 s a request — and it used a slot of the store-read
+/// pool every `/db` seek takes, so eight loads of it took every page slot for
+/// minutes. Its own pool of one, so at most one runs and the bar pages keep
+/// all of theirs; a second asks again after `Retry-After`.
+pub const MAX_VERIFY_CONCURRENT: usize = 1;
+
+/// The feed list and the settings reads (`/feeds.json`, `/settings.json`)
+/// that may run at once: the list pool's ceiling (R3-08, NEW-04, RA-020).
+///
+/// R3-05 moved both bodies off the async worker onto Tokio's own blocking
+/// pool, which has no name, no bound a page can see and no `Retry-After`: a
+/// burst of cold feed lists (a held-span walk of 0.66 to 2 s) started that
+/// many threads with nothing counted. Their own pool, apart from every page
+/// read's, so the feed list — the page's first answer and the canary the
+/// load test times beside 32 looping clients — never waits behind a month
+/// read, a scan or the whole-vendor check.
+pub const MAX_LIST_CONCURRENT: usize = 4;
+
+/// How long a page read admitted to one of these pools waits for a WRITER
+/// that holds the month it opens (an import worker, a month repair, an index
+/// build) before it is answered "being written, ask again" — never
+/// "unreadable" (R3-08, NEW-21, RA-117; `store::flock::with_patience`).
+///
+/// A choice, not a measurement of a writer: an import holds a month for the
+/// length of a day's append, so a short wait catches a writer that is just
+/// letting go, and a writer that is not answers within a fifth of a second
+/// with `Retry-After` rather than holding a page slot for the writer's whole
+/// run.
+pub const READ_PATIENCE_MS: u64 = 200;
+
+/// How many slots a pool has: from the machine's core count, never past a
+/// ceiling, or fixed (R3-08: "pool sizes come from the core count").
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Size {
+    /// One slot per core the host reports, at least one and at most `cap`.
+    Cores {
+        /// The ceiling; the `MAX_*` constant the pool's refusal names.
+        cap: usize,
+    },
+    /// Exactly this many, whatever the machine.
+    Fixed(usize),
+}
+
+/// The cores this process may use, as the host reports them; one when it
+/// cannot say.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// The slots a [`Size::Cores`] pool with ceiling `cap` has on this machine:
+/// one per core, at least one, at most `cap`.
+fn slots_under(cap: usize) -> usize {
+    cores().clamp(1, cap.max(1))
+}
+
+/// One bounded, NAMED pool: the slots running, the requests waiting, the
+/// wake-up a returned slot sends to one waiter, the clock that ends a wait,
+/// and what it did — answered, refused busy, abandoned by its reader — so a
+/// page can show it (`/pools.json`, R3-08).
 pub(crate) struct Pool {
+    /// The name every refusal, count and table uses.
+    name: &'static str,
     active: AtomicUsize,
     waiting: AtomicUsize,
     freed: tokio::sync::Notify,
-    max: usize,
+    size: Size,
+    /// The slot count, decided from [`Size`] on first use.
+    slots: std::sync::OnceLock<usize>,
     /// The thread that wakes this pool's waiters every [`CLOCK_TICK_MS`]
     /// while any wait; started by the first wait, parked while none does.
     /// `None` inside: the thread could not be started, and nothing waits.
     clock: std::sync::OnceLock<Option<std::thread::Thread>>,
+    /// Work this pool ran to its end for a reader still there.
+    answered: AtomicU64,
+    /// Requests refused because every slot stayed taken.
+    busy: AtomicU64,
+    /// Requests whose reader left: while waiting for a slot, or while the
+    /// work ran (the work saw the flag).
+    cancelled: AtomicU64,
 }
 
 impl Pool {
-    /// A pool of `max` slots, none taken. `const` so it can back a `static`.
-    pub(crate) const fn new(max: usize) -> Self {
+    /// A named pool of `size` slots, none taken. `const` so it can back a
+    /// `static`.
+    pub(crate) const fn new(name: &'static str, size: Size) -> Self {
         Self {
+            name,
             active: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
             freed: tokio::sync::Notify::const_new(),
-            max,
+            size,
+            slots: std::sync::OnceLock::new(),
             clock: std::sync::OnceLock::new(),
+            answered: AtomicU64::new(0),
+            busy: AtomicU64::new(0),
+            cancelled: AtomicU64::new(0),
         }
+    }
+
+    /// How many slots this pool has on this machine.
+    pub(crate) fn max(&self) -> usize {
+        *self.slots.get_or_init(|| match self.size {
+            Size::Cores { cap } => slots_under(cap),
+            // A FIXED BOUND IS TAKEN AS WRITTEN: zero admits nothing, as it
+            // always did (`a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot`).
+            Size::Fixed(slots) => slots,
+        })
+    }
+
+    /// This pool's name.
+    pub(crate) const fn name(&self) -> &'static str {
+        self.name
     }
 
     /// This pool's clock, started on the first wait; `None` when the thread
@@ -184,9 +283,10 @@ impl Pool {
 
     /// A slot now, or `None` when every slot is taken.
     fn try_take(&'static self) -> Option<Permit> {
+        let max = self.max();
         self.active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < self.max).then_some(active.saturating_add(1))
+                (active < max).then_some(active.saturating_add(1))
             })
             .ok()
             .map(|_| Permit(self))
@@ -206,6 +306,16 @@ impl Pool {
     /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
     /// "Cost claims of the /db fix round that name no proof").
     async fn take(&'static self) -> Option<Permit> {
+        let taken = self.queue().await;
+        if taken.is_none() {
+            self.busy.fetch_add(1, Ordering::Relaxed);
+        }
+        taken
+    }
+
+    /// [`Self::take`]'s wait, counted: a reader that leaves while it waits —
+    /// the request's future dropped with this one — is counted cancelled.
+    async fn queue(&'static self) -> Option<Permit> {
         if let Some(permit) = self.try_take() {
             return Some(permit);
         }
@@ -215,9 +325,13 @@ impl Pool {
             })
             .ok()?;
         let _queued = Queued(&self.waiting);
+        let left = Leaving(Some(&self.cancelled));
         // NO CLOCK, NO WAIT: a wait nothing can end is refused at once, as a
         // full pool was before the wait existed.
-        let clock = self.clock()?;
+        let Some(clock) = self.clock() else {
+            left.stay();
+            return None;
+        };
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(ADMISSION_WAIT_MS);
         // Counted in `waiting` above, so the clock ticks until this request
@@ -230,13 +344,34 @@ impl Pool {
             let mut freed = std::pin::pin!(freed);
             freed.as_mut().enable();
             if let Some(permit) = self.try_take() {
+                left.stay();
                 return Some(permit);
             }
             if std::time::Instant::now() >= deadline {
+                left.stay();
                 return None;
             }
             // Woken by a returned slot or by the clock's next tick.
             freed.await;
+        }
+    }
+}
+
+/// A waiter that has not been answered yet: dropped before [`Self::stay`],
+/// its reader left while it waited, and the pool counts it cancelled.
+struct Leaving(Option<&'static AtomicU64>);
+
+impl Leaving {
+    /// The wait ended with an answer (a slot or a refusal): nothing to count.
+    fn stay(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Leaving {
+    fn drop(&mut self) {
+        if let Some(cancelled) = self.0.take() {
+            cancelled.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -250,12 +385,55 @@ impl Drop for Queued {
     }
 }
 
-static ACTIVE: Pool = Pool::new(MAX_CONCURRENT);
-static CALENDAR: Pool = Pool::new(MAX_CALENDAR_CONCURRENT);
-static STORE_READ: Pool = Pool::new(MAX_STORE_READ_CONCURRENT);
-static LOG_READ: Pool = Pool::new(MAX_LOG_READ_CONCURRENT);
-static OPS_READ: Pool = Pool::new(MAX_OPS_READ_CONCURRENT);
-static CENSUS: Pool = Pool::new(MAX_CENSUS_CONCURRENT);
+static ACTIVE: Pool = Pool::new(
+    "detail",
+    Size::Cores {
+        cap: MAX_CONCURRENT,
+    },
+);
+static CALENDAR: Pool = Pool::new(
+    "calendar",
+    Size::Cores {
+        cap: MAX_CALENDAR_CONCURRENT,
+    },
+);
+static STORE_READ: Pool = Pool::new(
+    "store_read",
+    Size::Cores {
+        cap: MAX_STORE_READ_CONCURRENT,
+    },
+);
+static LOG_READ: Pool = Pool::new(
+    "log_read",
+    Size::Cores {
+        cap: MAX_LOG_READ_CONCURRENT,
+    },
+);
+static OPS_READ: Pool = Pool::new(
+    "ops_read",
+    Size::Cores {
+        cap: MAX_OPS_READ_CONCURRENT,
+    },
+);
+static CENSUS: Pool = Pool::new(
+    "census",
+    Size::Cores {
+        cap: MAX_CENSUS_CONCURRENT,
+    },
+);
+static SCAN: Pool = Pool::new(
+    "scan",
+    Size::Cores {
+        cap: MAX_SCAN_CONCURRENT,
+    },
+);
+static VERIFY: Pool = Pool::new("verify", Size::Fixed(MAX_VERIFY_CONCURRENT));
+static LIST: Pool = Pool::new(
+    "list",
+    Size::Cores {
+        cap: MAX_LIST_CONCURRENT,
+    },
+);
 
 /// One admitted request in one pool.  Dropping it always returns the slot,
 /// and wakes one request waiting for it.
@@ -395,12 +573,19 @@ where
 /// The status and JSON body a route answers when its blocking work was not
 /// admitted (429) or could not be joined (503), naming `what` and its bound.
 /// D-1508.
+///
+/// `bound` is the pool's ceiling (a `MAX_*` constant); the sentence names the
+/// slots the pool has ON THIS MACHINE (R3-08: sizes come from the core
+/// count), which is the same number for every pool sized by
+/// [`Size::Cores`] and for the verify pool of one — so a smaller host is
+/// never told a ceiling it does not have.
 #[must_use]
 pub fn admission_refused(
     what: &str,
     bound: usize,
     why: &RunError,
 ) -> (axum::http::StatusCode, String) {
+    let bound = slots_under(bound);
     let status = if matches!(why, RunError::Saturated) {
         axum::http::StatusCode::TOO_MANY_REQUESTS
     } else {
@@ -415,17 +600,491 @@ pub fn admission_refused(
     (status, body.to_string())
 }
 
+/// Runs admitted work on the blocking pool, its slot held until it ends,
+/// PATIENT for a writer on the months it opens ([`READ_PATIENCE_MS`]), and
+/// counted: answered when its reader is still there, cancelled when the
+/// reader left while it ran (the request's future dropped with this one).
 async fn admitted<T, F>(permit: Permit, work: F) -> Result<T, RunError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
+    let pool = permit.0;
+    let left = Leaving(Some(&pool.cancelled));
+    let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        work()
+        store::flock::with_patience(std::time::Duration::from_millis(READ_PATIENCE_MS), work)
     })
     .await
-    .map_err(|why| RunError::Join(why.to_string()))
+    .map_err(|why| RunError::Join(why.to_string()));
+    left.stay();
+    if joined.is_ok() {
+        pool.answered.fetch_add(1, Ordering::Relaxed);
+    }
+    joined
+}
+
+/// The pools by name, for a caller that chooses one at run time and for the
+/// route table that names each route's pool (`pool_table_tests`, R3-08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Named {
+    /// [`run`]: sweep detail, live and status reads, the audit journal.
+    Detail,
+    /// [`run_calendar`]: calendar derivations and the gaps audit.
+    Calendar,
+    /// [`run_store_read`]: bar seeks, facets, chains, folder and source reads.
+    StoreRead,
+    /// [`run_log_read`]: log tails.
+    LogRead,
+    /// [`run_ops_read`]: scrub and disk reads.
+    OpsRead,
+    /// [`run_census`]: `/store.json`.
+    Census,
+    /// [`run_scan`]: window scans.
+    Scan,
+    /// [`run_verify`]: the whole-vendor check.
+    Verify,
+    /// [`run_list`]: the feed list and the settings reads.
+    List,
+}
+
+impl Named {
+    /// Every pool by name, in the order `/pools.json` lists them: one list,
+    /// so a pool added to [`Named`] is served and counted by the same change.
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Detail,
+        Self::Calendar,
+        Self::StoreRead,
+        Self::LogRead,
+        Self::OpsRead,
+        Self::Census,
+        Self::Scan,
+        Self::Verify,
+        Self::List,
+    ];
+
+    /// The pool this name stands for.
+    pub(crate) fn pool(self) -> &'static Pool {
+        match self {
+            Self::Detail => &ACTIVE,
+            Self::Calendar => &CALENDAR,
+            Self::StoreRead => &STORE_READ,
+            Self::LogRead => &LOG_READ,
+            Self::OpsRead => &OPS_READ,
+            Self::Census => &CENSUS,
+            Self::Scan => &SCAN,
+            Self::Verify => &VERIFY,
+            Self::List => &LIST,
+        }
+    }
+}
+
+/// Runs `work` in the named pool with a cancellation flag the request's
+/// future owns: when the reader leaves, the future and the guard drop, the
+/// flag is set, and `work` — which looks at it between months and every few
+/// thousand rows — stops by name (DB-N15; R3-08 brings it to every pool). An
+/// answer that arrives disarms the guard first, so a finished request
+/// cancels nothing.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] when every slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`].
+pub(crate) async fn cancellable_in<T, F>(named: Named, work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::bars::Cancel) -> T + Send + 'static,
+{
+    let (cancel, guard) = crate::bars::Cancel::pair();
+    let permit = named.pool().take().await.ok_or(RunError::Saturated)?;
+    let answered = admitted(permit, move || work(&cancel)).await;
+    guard.disarm();
+    answered
+}
+
+/// Runs a window scan in the scan pool of at most [`MAX_SCAN_CONCURRENT`]
+/// slots, apart from [`run_store_read`]'s (D-3326, DB-066; named and given
+/// the bounded wait by R3-08).
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] when every scan slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`].
+pub async fn run_scan<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = SCAN.take().await.ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs the whole-vendor check (`/verify.json`) in its own pool of ONE
+/// ([`MAX_VERIFY_CONCURRENT`]), with the cancellation flag (R3-08, RA-009,
+/// RA-130).
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] while another check runs past
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`].
+pub(crate) async fn run_verify<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::bars::Cancel) -> T + Send + 'static,
+{
+    cancellable_in(Named::Verify, work).await
+}
+
+/// Runs a feed-list or settings read (`/feeds.json`, `/settings.json`) in the
+/// list pool of at most [`MAX_LIST_CONCURRENT`] slots, apart from every page
+/// read's pool, with the bounded wait and its `busy` answer (R3-08, NEW-04).
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] when every list slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`].
+pub(crate) async fn run_list<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = LIST.take().await.ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// What one route did since this process started (R3-08): answered;
+/// asked to come back because every slot of its pool stayed taken (`busy`,
+/// 429); asked to come back because a writer held the month it reads
+/// (`being_written`, 503 with [`BEING_WRITTEN_FIELD`]); abandoned by its
+/// reader before the answer (`cancelled`); refused as asked (other 4xx);
+/// failed (every other 5xx, a 503 that is not "being written" among them).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RouteTally {
+    pub(crate) answered: u64,
+    pub(crate) busy: u64,
+    pub(crate) being_written: u64,
+    pub(crate) cancelled: u64,
+    pub(crate) refused: u64,
+    pub(crate) failed: u64,
+}
+
+/// What a JSON answer carries when the read met a writer on its month and
+/// waited [`READ_PATIENCE_MS`] in vain (R3-08, NEW-21). [`count_route`] gives
+/// a 503 that carries it `Retry-After`, and only such a 503: a generic 503 (a
+/// task that could not be joined, a census that does not read) is not a
+/// "come back" and the page's retry (`fetchWithBusyRetry`) must not wait on
+/// it.
+pub const BEING_WRITTEN_FIELD: &str = r#""being_written":true"#;
+
+/// The longest 503 body [`count_route`] reads to tell "being written" from
+/// any other 503. Every being-written answer is made by
+/// [`being_written_answer`], which keeps it under this bound by construction
+/// ([`BEING_WRITTEN_CHARS`]): the store's sentences and the holders' names,
+/// never the rows a read got before it met the writer. A longer body is not
+/// one, and is left as it is without being read.
+pub(crate) const BEING_WRITTEN_BODY_MAX: usize = 16 * 1024;
+
+/// Every route's tally, keyed by the route as registered (`MatchedPath`), so
+/// the map holds at most one row per registered route plus [`FRONT_END`]:
+/// bounded by the route table, never by what clients type.
+///
+/// **An ordered map, so `/pools.json` walks it in route order and sorts
+/// nothing** (R3-08 repair 5, verify-R3-08-r5 blocking 2). It was a hash map
+/// that [`pools_json`] copied and sorted on every read, a sort gate 11 rule 4
+/// refuses on a request path; the order is now kept where the rows live, once
+/// per route ever, rather than redone per read.
+static ROUTES: std::sync::Mutex<std::collections::BTreeMap<String, RouteTally>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The row requests that matched no registered route are counted under: the
+/// front end's pages and assets, served by the fallback.
+pub(crate) const FRONT_END: &str = "(front end)";
+
+/// Changes one route's tally. One lock and one probe of the ordered map:
+/// O(log R) comparisons, where R is at most one row per registered route
+/// plus [`FRONT_END`] (96 today) and is fixed when the binary is built, so a
+/// constant per request that never grows with the store or with what clients
+/// type; the route's name is copied once, the first time it is seen.
+/// UNVERIFIED on its own: no bench times the tally apart. It runs inside every
+/// request `crates/api/tests/pool_load.rs` times (p99 per request at 16, 64
+/// and 256 clients), and its map is bounded by the route table
+/// (`crate::server::pool_table_tests::every_store_route_names_its_pool`);
+/// `docs/06-limits.md` L-R308-01.
+fn tally(route: &str, change: impl FnOnce(&mut RouteTally)) {
+    let mut routes = lock_through_poison(&ROUTES);
+    if let Some(row) = routes.get_mut(route) {
+        change(row);
+    } else {
+        let mut row = RouteTally::default();
+        change(&mut row);
+        routes.insert(route.to_owned(), row);
+    }
+}
+
+/// One route's tally now; a route never asked is all zeros.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn route_tally(route: &str) -> RouteTally {
+    lock_through_poison(&ROUTES)
+        .get(route)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// A request in flight: dropped before its answer — its reader left and the
+/// server dropped the request's future — it is counted cancelled.
+struct InFlight {
+    route: Option<axum::extract::MatchedPath>,
+    armed: bool,
+}
+
+impl InFlight {
+    fn route(&self) -> &str {
+        self.route
+            .as_ref()
+            .map_or(FRONT_END, axum::extract::MatchedPath::as_str)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if self.armed {
+            tally(self.route(), |row| {
+                row.cancelled = row.cancelled.saturating_add(1);
+            });
+        }
+    }
+}
+
+/// The middleware that counts every route's answers (R3-08): what the Speed
+/// page shows as answered, busy, being written and cancelled per route
+/// (`/pools.json`). A 503 that says the month is being written
+/// ([`BEING_WRITTEN_FIELD`]) leaves with `Retry-After: 1`, so the page asks
+/// again by itself (NEW-21); no other 503 gains one.
+pub(crate) async fn count_route(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .cloned();
+    let mut in_flight = InFlight { route, armed: true };
+    let response = next.run(request).await;
+    in_flight.armed = false;
+    let (response, being_written) = ask_again_when_being_written(response).await;
+    let status = response.status().as_u16();
+    tally(in_flight.route(), |row| {
+        let counter = match status {
+            _ if being_written => &mut row.being_written,
+            429 => &mut row.busy,
+            0..400 => &mut row.answered,
+            400..500 => &mut row.refused,
+            _ => &mut row.failed,
+        };
+        *counter = counter.saturating_add(1);
+    });
+    response
+}
+
+/// `response`, with `Retry-After: 1` when it is a 503 whose body says the
+/// month is being written, and whether it is one.
+///
+/// Only a 503 is looked at, and only a body whose exact length is known and
+/// at most [`BEING_WRITTEN_BODY_MAX`]: one bounded read of a few hundred
+/// bytes on an answer that is already a refusal, nothing on any other
+/// answer. A body that fails to read is replaced by a sentence that says so,
+/// never by an empty one.
+async fn ask_again_when_being_written(
+    response: axum::response::Response,
+) -> (axum::response::Response, bool) {
+    use axum::body::HttpBody as _;
+    if response.status() != axum::http::StatusCode::SERVICE_UNAVAILABLE {
+        return (response, false);
+    }
+    let small = response
+        .body()
+        .size_hint()
+        .exact()
+        .is_some_and(|bytes| bytes <= BEING_WRITTEN_BODY_MAX as u64);
+    if !small {
+        return (response, false);
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, BEING_WRITTEN_BODY_MAX).await {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            let said = serde_json::json!({
+                "error": format!("this 503's own body did not read: {why}"),
+            });
+            return (
+                axum::response::Response::from_parts(
+                    parts,
+                    axum::body::Body::from(said.to_string()),
+                ),
+                false,
+            );
+        }
+    };
+    let being_written =
+        std::str::from_utf8(&bytes).is_ok_and(|text| text.contains(BEING_WRITTEN_FIELD));
+    if being_written && !parts.headers.contains_key(axum::http::header::RETRY_AFTER) {
+        parts.headers.insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    (
+        axum::response::Response::from_parts(parts, axum::body::Body::from(bytes)),
+        being_written,
+    )
+}
+
+/// `GET /pools.json`: every named pool — its slots on this machine, what runs
+/// and waits now, what it answered, refused busy and saw abandoned — and every
+/// route's tally (R3-08; the Speed page reads it). Memory only: it touches no
+/// file, so it runs on the async worker and is in no pool.
+pub(crate) async fn pools_json() -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let pools: Vec<serde_json::Value> = Named::ALL
+        .iter()
+        .map(|named| {
+            let pool = named.pool();
+            serde_json::json!({
+                "pool": pool.name(),
+                "slots": pool.max(),
+                "running": pool.active.load(Ordering::Acquire),
+                "waiting": pool.waiting.load(Ordering::Acquire),
+                "answered": pool.answered.load(Ordering::Relaxed),
+                "busy": pool.busy.load(Ordering::Relaxed),
+                "cancelled": pool.cancelled.load(Ordering::Relaxed),
+            })
+        })
+        .collect();
+    // In route order as kept: the map is ordered, so nothing is sorted here
+    // (repair 5). The rows are copied out under the lock and rendered after
+    // it, so no request's tally waits on the JSON.
+    let routes: Vec<(String, RouteTally)> = lock_through_poison(&ROUTES)
+        .iter()
+        .map(|(route, row)| (route.clone(), *row))
+        .collect();
+    let routes: Vec<serde_json::Value> = routes
+        .into_iter()
+        .map(|(route, row)| {
+            serde_json::json!({
+                "route": route,
+                "answered": row.answered,
+                "busy": row.busy,
+                "being_written": row.being_written,
+                "cancelled": row.cancelled,
+                "refused": row.refused,
+                "failed": row.failed,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "cores": cores(),
+        "wait_ms": ADMISSION_WAIT_MS,
+        "max_waiting": MAX_WAITING,
+        "read_patience_ms": READ_PATIENCE_MS,
+        // THE ONE ROUTE ROW THAT IS NO PATH, NAMED BY THE SERVER THAT COUNTS
+        // IT (R3-08 repair 2): every page and asset the fallback serves is
+        // tallied under [`FRONT_END`], so the row exists as soon as a browser
+        // has loaded the page that asks. The reader takes the name from here
+        // rather than keeping a copy of it.
+        "front_end": FRONT_END,
+        "pools": pools,
+        "routes": routes,
+        "say": "since this process started; busy is a 429 (every slot of the pool stayed taken \
+                for the wait) and being_written a 503 (a writer held the month past the read's \
+                patience), each with Retry-After; cancelled is a reader that left before its \
+                answer; failed is every other 5xx. A pool's answered is work it ran to its end for a \
+                reader still there, WHATEVER the route then said: a page, a refusal or being \
+                written. The route rows split that one count by what was said, so the two \
+                answered columns count different things",
+    });
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        body.to_string(),
+    )
+}
+
+/// Whether a refusal says the month is being written (a writer held it past
+/// [`READ_PATIENCE_MS`]): the route answers 503 "being written, ask again"
+/// with `Retry-After`, never "unreadable" (R3-08, NEW-21).
+#[must_use]
+pub fn is_being_written(why: &str) -> bool {
+    why.contains(store::flock::BEING_WRITTEN)
+}
+
+/// The most of a read's being-written sentences [`being_written_answer`]
+/// names; past it the rest are counted. A per-instant read opens at most two
+/// months (the option's and its underlying's), so this is never reached by
+/// the routes that call it today; it keeps the body under
+/// [`BEING_WRITTEN_BODY_MAX`], which [`count_route`] reads to add
+/// `Retry-After`, whatever a later caller passes.
+const BEING_WRITTEN_NAMED: usize = 4;
+
+/// The most characters of the holders' sentences one being-written body
+/// quotes: six bytes each at worst once escaped, with 128 bytes left for the
+/// envelope and the count of the rest, so the body is never over
+/// [`BEING_WRITTEN_BODY_MAX`].
+pub(crate) const BEING_WRITTEN_CHARS: usize = (BEING_WRITTEN_BODY_MAX - 128) / 6;
+
+/// A read that answers per instant (`/spot.json`, `/greeks.json`) and whose
+/// EVERY fault is a writer holding a month it needed: the "being written, ask
+/// again" 503, its body the store's sentences (each names the holder) and
+/// [`BEING_WRITTEN_FIELD`], so [`count_route`] gives it `Retry-After` and the
+/// page asks again by itself (R3-08, NEW-21). Before this such a read
+/// answered 206 with every instant `"unreadable"` — the word a damaged file
+/// earns — and no `Retry-After`, so nothing asked again (measured on a copy
+/// of gdfl NIFTY 1s 2019-11 held by `lockf(1)`).
+///
+/// `None` when there is no fault, or when ANY fault is something else: real
+/// damage beside a busy month is answered as damage, never dressed as
+/// "ask again".
+#[must_use]
+pub(crate) fn being_written_answer(faults: &[String]) -> Option<(axum::http::StatusCode, String)> {
+    if faults.is_empty() || !faults.iter().all(|why| is_being_written(why)) {
+        return None;
+    }
+    // BOUNDED BY CONSTRUCTION, WHATEVER THE SENTENCES HOLD: the JSON escape
+    // writes at most six bytes for one character (`<`, `\u001f`), so
+    // [`BEING_WRITTEN_CHARS`] characters and the envelope stay under
+    // [`BEING_WRITTEN_BODY_MAX`]. The verifier's case: a window page that
+    // spanned a held month and an unheld one answered its being-written 503
+    // with every row it read — 126,649 bytes, no `Retry-After`, counted
+    // "failed". Every being-written body is made here now, and this cap is
+    // what lets `count_route` read it.
+    let named = faults
+        .iter()
+        .take(BEING_WRITTEN_NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("; ")
+        .chars()
+        .take(BEING_WRITTEN_CHARS)
+        .collect::<String>();
+    let more = faults.len().saturating_sub(BEING_WRITTEN_NAMED);
+    let said = if more == 0 {
+        named
+    } else {
+        format!("{named}; and {more} more being written")
+    };
+    Some((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        format!(
+            r#"{{"error":{},{BEING_WRITTEN_FIELD}}}"#,
+            crate::render::json_string(&said)
+        ),
+    ))
 }
 
 /// Runs blocking work an already-admitted request OWES, outside Tokio's
@@ -764,7 +1423,7 @@ pub(crate) struct HeldSlots {
 #[cfg(test)]
 pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
     let serial = TEST_SERIAL.lock().await;
-    let permits = (0..MAX_CONCURRENT)
+    let permits = (0..ACTIVE.max())
         .map(|_| {
             ACTIVE
                 .try_take()
@@ -786,6 +1445,28 @@ pub(crate) fn take_every_log_read_slot(
     _apart: &tokio::sync::MutexGuard<'static, ()>,
 ) -> Vec<Permit> {
     std::iter::from_fn(|| LOG_READ.try_take()).collect()
+}
+
+/// Every slot of one pool counted taken, whatever other tests hold, until
+/// dropped: a test that must see a route refused at that pool (R3-08).
+#[cfg(test)]
+pub(crate) struct Crowd(&'static Pool, usize);
+
+/// Crowds the named pool: adds its whole slot count to what runs.
+#[cfg(test)]
+pub(crate) fn crowd(named: Named) -> Crowd {
+    let pool = named.pool();
+    let slots = pool.max();
+    pool.active.fetch_add(slots, Ordering::AcqRel);
+    Crowd(pool, slots)
+}
+
+#[cfg(test)]
+impl Drop for Crowd {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(self.1, Ordering::AcqRel);
+        self.0.freed.notify_waiters();
+    }
 }
 
 /// One long-lived read handle on a results file, refreshed per request.
@@ -1165,9 +1846,9 @@ mod tests {
     use super::{
         ACTIVE, ADMISSION_WAIT_MS, CENSUS, Cached, IDENTITY_REFUSAL, LOG_READ,
         MAX_CENSUS_CONCURRENT, MAX_LOG_READ_CONCURRENT, MAX_PAGE, MAX_PAGE_ROWS, MAX_QUERY_BYTES,
-        MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT, MAX_WAITING, Ordering, Page,
-        Permit, Pool, RunError, STORE_READ, Selector, admission_refused, must_admit, preflight,
-        run, run_calendar, run_census, run_log_read, run_store_read, seek_window, window,
+        MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_WAITING, Ordering, Page, Permit, Pool, RunError,
+        STORE_READ, Selector, Size, admission_refused, must_admit, preflight, run, run_calendar,
+        run_census, run_log_read, run_store_read, seek_window, window,
     };
 
     /// locks-2, D-1912: a request that finds the retained reader taken out is
@@ -1242,13 +1923,44 @@ mod tests {
         }
     }
 
+    /// **A REFUSAL NAMES THE SLOTS THIS MACHINE HAS, NEVER ONLY THE
+    /// CEILING** (R3-08: pool sizes come from the core count). A ceiling past
+    /// the cores is told as the cores; one under them as itself; the verify
+    /// pool's one as one; and a ceiling of zero still names one slot, the
+    /// floor every `Size::Cores` pool keeps.
+    #[test]
+    fn a_refusal_names_the_slots_this_machine_has() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        for (ceiling, slots) in [
+            (cores.saturating_mul(4).max(2), cores),
+            (1, 1),
+            (0, 1),
+            (super::MAX_VERIFY_CONCURRENT, 1),
+        ] {
+            let (status, body) = admission_refused("a probe", ceiling, &RunError::Saturated);
+            assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert!(
+                body.contains(&format!("at most {slots} run at once")),
+                "ceiling {ceiling} on {cores} cores: {body}"
+            );
+        }
+        for pool in super::Named::ALL {
+            let pool = pool.pool();
+            assert!(
+                pool.max() >= 1 && pool.max() <= cores.max(1),
+                "{}",
+                pool.name()
+            );
+        }
+    }
+
     /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
     /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
     /// route test sharing the real pools can see it.
     #[test]
     fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
-        static POOL: Pool = Pool::new(2);
-        static NONE: Pool = Pool::new(0);
+        static POOL: Pool = Pool::new("test", Size::Fixed(2));
+        static NONE: Pool = Pool::new("test", Size::Fixed(0));
         let first = POOL.try_take().expect("one of two");
         let second = POOL.try_take().expect("two of two");
         assert!(POOL.try_take().is_none(), "a third is refused");
@@ -1277,7 +1989,7 @@ mod tests {
     /// slot is returned.
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_pool_admits_a_waiter_when_a_slot_is_returned() {
-        static POOL: Pool = Pool::new(1);
+        static POOL: Pool = Pool::new("test", Size::Fixed(1));
         let held = POOL.try_take().expect("the only slot");
         let started = tokio::time::Instant::now();
         let waiter = tokio::spawn(POOL.take());
@@ -1301,7 +2013,7 @@ mod tests {
     /// waiting at all.
     #[tokio::test(flavor = "current_thread")]
     async fn a_waiter_is_refused_at_its_deadline_and_a_full_queue_refuses_at_once() {
-        static POOL: Pool = Pool::new(1);
+        static POOL: Pool = Pool::new("test", Size::Fixed(1));
         let held = POOL.try_take().expect("the only slot");
         let started = tokio::time::Instant::now();
         assert!(POOL.take().await.is_none(), "still held at the deadline");
@@ -1355,7 +2067,7 @@ mod tests {
     /// tests held the slots.
     #[test]
     fn a_wait_is_timed_on_a_runtime_that_has_no_timer() {
-        static POOL: Pool = Pool::new(1);
+        static POOL: Pool = Pool::new("test", Size::Fixed(1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("a runtime with no timer and no I/O driver");
@@ -1405,7 +2117,15 @@ mod tests {
         assert_eq!(run_census(|| 5).await, Ok(5), "detail full, census free");
         drop(detail);
         let census: Vec<Permit> = std::iter::from_fn(|| CENSUS.try_take()).collect();
-        assert_eq!(census.len(), MAX_CENSUS_CONCURRENT);
+        assert_eq!(
+            census.len(),
+            CENSUS.max(),
+            "every census slot this machine has"
+        );
+        assert!(
+            CENSUS.max() <= MAX_CENSUS_CONCURRENT,
+            "never past its ceiling"
+        );
         assert_eq!(run(|| 6).await, Ok(6), "census full, detail free");
         assert_eq!(run_census(|| ()).await, Err(RunError::Saturated));
         drop(census);
@@ -1853,7 +2573,7 @@ mod tests {
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
         // Hold every slot; the next is refused once its wait ends (DB-B51),
         // and a released slot admits again. D-1508.
-        let held: Vec<Permit> = (0..MAX_STORE_READ_CONCURRENT)
+        let held: Vec<Permit> = (0..STORE_READ.max())
             .map(|_| STORE_READ.try_take().expect("a free slot"))
             .collect();
         assert_eq!(run_store_read(|| ()).await, Err(RunError::Saturated));
@@ -1909,7 +2629,11 @@ mod tests {
             .expect("admitted log read");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
         let held = super::take_every_log_read_slot(&apart);
-        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+        assert_eq!(
+            held.len(),
+            LOG_READ.max(),
+            "this test owns every log-read slot"
+        );
         assert_eq!(MAX_LOG_READ_CONCURRENT, 4);
         assert_eq!(run_log_read(|| ()).await, Err(RunError::Saturated));
         // The other pools are not this one's.
@@ -1947,5 +2671,75 @@ mod tests {
             .await
             .expect("admitted blocking task");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+    }
+
+    /// **EVERY POOL'S WORK SEES ITS FLAG ONCE ITS READER LEAVES, AND THE POOL
+    /// COUNTS IT** (R3-08, RA-130). The gaps walk (calendar pool), the
+    /// whole-vendor check (verify pool), spot and greeks (store-read pool)
+    /// and window scans (scan pool) reach their work through
+    /// [`super::cancellable_in`]. For each named pool: a request starts work
+    /// that looks at its flag every millisecond, the request is dropped while
+    /// the work runs (what the server does when the client closes its
+    /// connection), and the work must see the flag within its next look — not
+    /// run to its ten-second deadline — and the pool must count one reader
+    /// that left. Before R3-08 only the bar routes had a flag at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_pools_work_sees_its_flag_once_its_reader_leaves() {
+        let _apart = super::apart_from_slot_owners().await;
+        for named in super::Named::ALL {
+            let pool = named.pool();
+            let before = pool.cancelled.load(Ordering::Relaxed);
+            let (started, has_started) = std::sync::mpsc::channel::<()>();
+            let (ended, has_ended) = std::sync::mpsc::channel::<Option<u64>>();
+            let request = tokio::spawn(super::cancellable_in(named, move |cancel| {
+                let _ = started.send(());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let mut looks = 0_u64;
+                while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
+                    looks += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let _ = ended.send(cancel.is_cancelled().then_some(looks));
+            }));
+            tokio::task::spawn_blocking(move || {
+                has_started.recv_timeout(std::time::Duration::from_secs(5))
+            })
+            .await
+            .expect("joined")
+            .unwrap_or_else(|_| panic!("{named:?}: the work never started"));
+            let left = std::time::Instant::now();
+            request.abort();
+            let seen = tokio::task::spawn_blocking(move || {
+                has_ended.recv_timeout(std::time::Duration::from_secs(12))
+            })
+            .await
+            .expect("joined")
+            .unwrap_or_else(|_| panic!("{named:?}: the work never ended"));
+            assert!(
+                seen.is_some(),
+                "{named:?}: the work ran to its deadline; the flag never reached it"
+            );
+            assert!(
+                left.elapsed() < std::time::Duration::from_secs(2),
+                "{named:?}: the work took {:?} to see its reader leave",
+                left.elapsed()
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while (pool.cancelled.load(Ordering::Relaxed) == before
+                || pool.active.load(Ordering::Acquire) != 0)
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            assert!(
+                pool.cancelled.load(Ordering::Relaxed) > before,
+                "{named:?}: the pool counts the reader that left"
+            );
+            assert_eq!(
+                pool.active.load(Ordering::Acquire),
+                0,
+                "{named:?}: the slot is free"
+            );
+        }
     }
 }

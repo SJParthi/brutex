@@ -577,8 +577,10 @@ fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
     }
     let gaps = body_of(gaps_route, "async fn audit_span(");
     let pool = gaps
-        .rfind("crate::detail::run_calendar(move ||")
-        .expect("the audits are admitted to the calendar pool");
+        .rfind("crate::detail::cancellable_in(crate::detail::Named::Calendar, move |cancel|")
+        .expect(
+            "the audits are admitted to the calendar pool, with the reader's cancel flag (R3-08)",
+        );
     for call in ["audit_one(", "audit_cash_schedule("] {
         let at: Vec<usize> = gaps.match_indices(call).map(|(i, _)| i).collect();
         assert!(!at.is_empty(), "/gaps.json calls {call}");

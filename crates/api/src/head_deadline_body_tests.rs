@@ -811,13 +811,13 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
 /// move neither; and once the deadline has passed the next poll is the cut.
 /// Each poll is timed and the p50, p99 and max are printed for
 /// `docs/06-limits.md` (`--nocapture`); the assertions are the counts.
-#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one wrapped socket walked through moving writes, one stall and its cut, \
               each step's counts read from the state the one before left; split, a \
               step could pass on a socket the step before never filled"
 )]
+#[tokio::test]
 async fn a_progressing_write_touches_no_timer_and_a_stall_resets_it_once() {
     use std::future::poll_fn;
     use std::task::Poll;

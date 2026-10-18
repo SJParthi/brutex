@@ -475,4 +475,4 @@ pub fn refuse_linked_store_root(root: &Path) -> Result<(), StoreRootRefusal> {
 
 #[cfg(test)]
 #[path = "safe_open_tests.rs"]
-mod tests;
+pub(crate) mod tests;

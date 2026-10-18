@@ -71,6 +71,9 @@ impl Fixture {
     }
 
     async fn get(&self, feed: &str) -> (StatusCode, Value) {
+        // APART FROM A TEST THAT CROWDS THE VERIFY POOL OF ONE (R3-08,
+        // `pool_table_tests`), which holds this guard while it does.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let uri = format!("/verify.json?feed={feed}").parse().expect("URI");
         let (status, headers, body) =
             verify_json(axum::extract::State(Loaded::clone(&self.site)), uri).await;

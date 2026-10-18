@@ -175,12 +175,59 @@ pub(super) async fn gaps_json(
             Ok(done) => done,
             Err(why) => return calendar_admission_refused(&why),
         };
+    if let Some((status, body)) = writers_only(&months, &denominator) {
+        return (status, json(), body);
+    }
 
     (
         axum::http::StatusCode::OK,
         json(),
         gaps_body(&months, &span, &denominator, truncated_range, &inferred),
     )
+}
+
+/// WRITERS ONLY: ASK AGAIN (R3-08 repairs 2, 3 and 4, NEW-21). When the
+/// audit's every fault is a month that met a writer, it is not an answer yet:
+/// the one being-written 503 (`Retry-After`, counted `being_written`), which
+/// the gaps page asks again on. `None` when nothing met a writer, or when ANY
+/// other fault is beside a held month: that is answered as the audit it is,
+/// the held month named and counted apart (`months_being_written`), never
+/// absent and never lost, and the fault named where it lies.
+///
+/// # What counts as another fault
+///
+/// Everything the answer would name as damage, and nothing it reports as a
+/// finding: each month's [`AuditedMonth::faults`] — a month that would not
+/// open, session evidence that would not read, records that would not read
+/// (`unreadable_records` above zero), timestamps off the grid or out of order
+/// (`invalid_timestamps`), a one-second month whose rows the fold refused
+/// (`fold_error`), a kept summary whose bytes cannot be trusted
+/// (`summary_fallback` torn, unreadable, another magic, a failed checksum, a
+/// wrong shape or another month's), and a GDFL import journal that would not
+/// read (`imported_to_from`) — and a peer whose calendar would not read
+/// (`calendar.unreadable`). Repair 2 collected only the first two and repair
+/// 3 the first four, so a fold refusal, a torn summary and an unread journal
+/// were hidden behind "being written, ask again" for as long as the writer
+/// held another month (verify-R3-08-r3, verify-R3-08-r4); the list is now
+/// one exhaustive destructuring, so a field cannot be added unclassified.
+/// Lost minutes are what the audit is for, not a fault: beside a writer they
+/// are said once the held month is read, as before. A month its kept
+/// summary answered read no record (`unreadable` null), so it names no
+/// damage of its records.
+///
+/// O(months in the span), which the span's own cap bounds; no read.
+fn writers_only(
+    months: &[AuditedMonth],
+    denominator: &Denominator,
+) -> Option<(axum::http::StatusCode, String)> {
+    let mut faults: Vec<String> = months.iter().flat_map(AuditedMonth::faults).collect();
+    faults.extend(
+        denominator
+            .unreadable
+            .iter()
+            .map(|peer| format!("the calendar of {peer} would not read")),
+    );
+    crate::detail::being_written_answer(&faults)
 }
 
 /// `/gaps.json?{query}` answered by the route's own handler over `site`: its
@@ -630,24 +677,45 @@ async fn audit_span(
 ) -> Result<(Vec<AuditedMonth>, Denominator), crate::detail::RunError> {
     let runtime = tokio::runtime::Handle::current();
     let audit_site = std::sync::Arc::clone(site);
-    crate::detail::run_calendar(move || {
-        let mut months = Vec::with_capacity(span.len());
-        for month in &span {
-            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
+    // STOPPED WHEN THE READER LEAVES (R3-08, RA-130): one flag read per month
+    // of the span. The flag is set only when this request's future — the one
+    // reader of what the walk returns — has been dropped, so the months it
+    // stops short of are read by nobody, and nothing partial is ever served.
+    crate::detail::cancellable_in(crate::detail::Named::Calendar, move |cancel| {
+        let months = walk_until(&span, cancel, |month| {
+            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, month));
             let mut audited = audit_one(
                 &audit_site,
                 &asked,
-                *month,
+                month,
                 denominator.calendar.as_ref(),
                 schedule.as_ref().ok().and_then(Option::as_ref),
                 min_run,
             );
             audited.evidence_error = schedule.err();
-            months.push(audited);
-        }
+            audited
+        });
         (months, denominator)
     })
     .await
+}
+
+/// `each` month of `span` in order, until `cancel` says the reader left: one
+/// flag read before each month, so the walk stops before the next month
+/// rather than after the whole span (R3-08, RA-130).
+fn walk_until<T>(
+    span: &[store::path::YearMonth],
+    cancel: &crate::bars::Cancel,
+    mut each: impl FnMut(store::path::YearMonth) -> T,
+) -> Vec<T> {
+    let mut months = Vec::with_capacity(span.len());
+    for month in span {
+        if cancel.is_cancelled() {
+            break;
+        }
+        months.push(each(*month));
+    }
+    months
 }
 
 /// The audit's whole answer, from the months it walked.
@@ -671,6 +739,9 @@ fn gaps_body(
     let held: u64 = months.iter().map(|m| u64::from(m.held)).sum();
     let lost: u64 = months.iter().map(|m| u64::from(m.lost)).sum();
     let absent_files = months.iter().filter(|m| m.absent_file.is_some()).count();
+    // HELD BY A WRITER, NOT ABSENT (R3-08 repair 2): counted apart, so a busy
+    // month never reads as a hole in the store.
+    let being_written = months.iter().filter(|m| m.being_written.is_some()).count();
     // HOW THE ANSWER WAS HAD, beside the answer (R3-06): months read off a
     // kept summary, months whose bars were read because none was usable (each
     // month row names why), and the bar records that cost. A store that keeps
@@ -740,7 +811,7 @@ fn gaps_body(
     };
 
     format!(
-        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"months_being_written":{being_written},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
         identity.json,
         months.len(),
         day_text(first_bound),
@@ -1163,8 +1234,30 @@ struct AuditedMonth {
     /// leaves exactly this. Returning it as a `400` would end the walk at the
     /// first hole and report the absence as a malformed request.
     absent_file: Option<String>,
+    /// The holder's sentence when a writer held this month past the read's
+    /// patience (R3-08, NEW-21): the month is BEING WRITTEN, which is neither
+    /// an absent file nor lost minutes. Such a month owes, holds and loses
+    /// nothing in this answer — it was not read — and is counted apart
+    /// (`months_being_written`); when writers are the audit's only faults the
+    /// route answers the being-written 503 instead and the page asks again.
+    being_written: Option<String>,
     /// Missing/corrupt dated session evidence is not a missing bar file.
     evidence_error: Option<String>,
+    /// The fold's refusal of a one-second month's rows, in its own words
+    /// (`NegativeVolume`, `VolumeOverflow`, `AnchorOverflow`, a stamp before
+    /// the one before it): input this audit cannot certify, so the month's
+    /// ledger is zero. Rendered inside the month's seconds members as
+    /// `fold_error`, and carried here so [`AuditedMonth::faults`] sees it
+    /// (R3-08 repair 4, verify-R3-08-r4).
+    fold_error: Option<String>,
+    /// Whether the month's kept summary was refused because its bytes cannot
+    /// be trusted ([`summary_is_damaged`]); the refusal is `fallback`. A
+    /// summary that is absent, below the size that keeps one, of another
+    /// version, or describing an older generation is not damage.
+    summary_damaged: bool,
+    /// Why the GDFL import journal, which says how far the import reached
+    /// (`imported_to_from`), would not read for this month, if it would not.
+    journal_error: Option<String>,
     /// Records `bars::page` could not read, or `None` when no record was
     /// read because the month's kept summary answered: rendered `null`,
     /// NOT `0`. A kept summary was built from a full read of the committed
@@ -1188,10 +1281,89 @@ struct AuditedMonth {
 }
 
 impl AuditedMonth {
+    /// Every fault this month's answer names as damage, one sentence each,
+    /// and nothing it reports as a finding (R3-08 repairs 3 and 4).
+    ///
+    /// **Every field is named below, and that is the point.** Repair 2
+    /// collected two kinds of damage by hand and missed unreadable records;
+    /// repair 3 added those and missed the fold's refusal, a torn kept
+    /// summary and an unread import journal (verify-R3-08-r4): each time the
+    /// list drifted from the fields, and a missed kind was hidden behind
+    /// "being written, ask again" for as long as a writer held another month.
+    /// The destructuring has no `..`, so a field added to this type does not
+    /// compile until it is classified here as damage or as not.
+    ///
+    /// O(1) in the store: no read and no walk, at most seven sentences, each
+    /// a copy of a string the month already holds or a fixed format of its
+    /// counts. The bound is by construction (the destructuring above); no
+    /// bench times this apart. What it returns for every fault at once is
+    /// checked by
+    /// `api::server::gaps_route::tests::every_fault_beside_a_held_month_is_answered_not_asked_again`
+    /// and invariant row R308-06.
+    fn faults(&self) -> Vec<String> {
+        let Self {
+            month,
+            // FINDINGS, NOT DAMAGE: what the audit is for. Beside a writer
+            // they are said once the held month is read.
+            expected: _,
+            held: _,
+            lost: _,
+            absent: _,
+            unmeasured: _,
+            runs: _,
+            // A CAP THE ANSWER STATES (`MAX_GAPS`), not damage.
+            truncated: _,
+            // RENDERED FINDINGS: the halts, the reach's counts and a one-second
+            // month's seconds. The one fault rendered among them, the fold's
+            // refusal, is carried apart in `fold_error`, and an unread import
+            // journal in `journal_error`.
+            seconds: _,
+            // HOW THE MONTH WAS READ, not what it holds: `summary_damaged`
+            // says when the reason is damage.
+            summary: _,
+            fallback,
+            records_read: _,
+            // THE WRITER ITSELF: what `writers_only` asks again on.
+            being_written,
+            invalid_timestamps,
+            absent_file,
+            evidence_error,
+            fold_error,
+            summary_damaged,
+            journal_error,
+            unreadable,
+        } = self;
+        let mut faults: Vec<String> = [absent_file, evidence_error]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        faults.extend(being_written.iter().cloned());
+        if let Some(records) = unreadable.filter(|records| *records > 0) {
+            faults.push(format!("{month}: {records} unreadable records"));
+        }
+        if *invalid_timestamps > 0 {
+            faults.push(format!("{month}: {invalid_timestamps} invalid timestamps"));
+        }
+        if let Some(why) = fold_error {
+            faults.push(format!("{month}: the fold refused its rows: {why}"));
+        }
+        if *summary_damaged {
+            faults.push(format!(
+                "{month}: its kept summary is damaged: {}",
+                fallback.as_deref().unwrap_or("no reason was kept")
+            ));
+        }
+        if let Some(why) = journal_error {
+            faults.push(format!("{month}: {why}"));
+        }
+        faults
+    }
+
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{},"summary":"{}","summary_fallback":{},"bar_records_read":{}{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"being_written":{},"evidence_error":{},"summary":"{}","summary_fallback":{},"bar_records_read":{}{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
@@ -1203,6 +1375,9 @@ impl AuditedMonth {
                 .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.invalid_timestamps,
             self.absent_file
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.being_written
                 .as_ref()
                 .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
             self.evidence_error
@@ -1340,7 +1515,11 @@ fn audit_one(
         absent: 0,
         unmeasured: 0,
         absent_file,
+        being_written: None,
         evidence_error: None,
+        fold_error: None,
+        summary_damaged: false,
+        journal_error: None,
         unreadable: Some(0),
         truncated: false,
         runs: String::new(),
@@ -1379,6 +1558,22 @@ fn audit_one(
     // kept and the read answer are one computation.
     let needs_seconds = one_second && !trade_driven;
     let input = month_input(site, asked, month, needs_seconds);
+    // A WRITER'S HOLD IS NOT AN ABSENT FILE (R3-08 repair 2, NEW-21). Before
+    // this the open's refusal fell into `absent_file`, and the calendar then
+    // owed the month's every minute: a NIFTY 1s 2019-11 held by `lockf(1)`
+    // answered 200 with `months_absent` 1 and 7,560 minutes lost, and no
+    // `Retry-After`, so the gaps page reported damage that was only a busy
+    // month. Nothing of the month was read, so it owes, holds and loses
+    // nothing here; it is named, counted apart, and `gaps_json` answers the
+    // being-written 503 when writers are the audit's only faults.
+    if let Some(why) = &input.being_written {
+        return AuditedMonth {
+            being_written: Some(why.clone()),
+            unreadable: None,
+            summary: SummarySource::BeingWritten,
+            ..empty(None)
+        };
+    }
     let held = &input.summary;
     // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY: the
     // minutes a one-second month holds are its summary's minute index, which
@@ -1561,7 +1756,14 @@ fn audit_one(
         // verdict so "the file is damaged" cannot be read as "the vendor is
         // missing minutes" — opposite faults wanting opposite fixes.
         absent_file: input.absent_file,
+        being_written: None,
         evidence_error: None,
+        // THE FOLD'S REFUSAL AND A DAMAGED KEPT SUMMARY ARE FAULTS, and an
+        // unread import journal too: carried apart from the rendered members
+        // so `writers_only` sees them beside a held month (R3-08 repair 4).
+        fold_error,
+        summary_damaged: input.summary_damaged,
+        journal_error: reach.journal_error,
         // RECORDS, NOT SENTENCES: `page` coalesces a run of refusals into
         // one sentence (DB-B75) and counts every record.
         unreadable: input
@@ -1585,6 +1787,9 @@ enum SummarySource {
     Built,
     /// The month has no file; the summary is empty.
     AbsentFile,
+    /// A writer held the month past the read's patience; nothing was read
+    /// (R3-08, NEW-21).
+    BeingWritten,
 }
 
 impl SummarySource {
@@ -1593,6 +1798,7 @@ impl SummarySource {
             Self::Kept => "kept",
             Self::Built => "built",
             Self::AbsentFile => "absent_file",
+            Self::BeingWritten => "being_written",
         }
     }
 }
@@ -1608,8 +1814,47 @@ struct MonthInput {
     /// Records `bars::page` could not read; `None` when no record was read.
     unreadable: Option<u64>,
     absent_file: Option<String>,
+    /// The holder's sentence when a writer held the month past the read's
+    /// patience: never an absent file (R3-08, NEW-21).
+    being_written: Option<String>,
     /// The fold's refusal of a one-second month's rows, in its own words.
     fold_error: Option<String>,
+    /// Whether the kept summary was refused for bytes that cannot be trusted
+    /// ([`summary_is_damaged`]).
+    summary_damaged: bool,
+}
+
+/// Whether a kept summary refused for `why` is DAMAGE — bytes that cannot be
+/// trusted — rather than a summary that is simply not there or not current
+/// (R3-08 repair 4, verify-R3-08-r4 follow-up).
+///
+/// Damage: the host refused the read (a planted link or a non-regular file
+/// included), the file is shorter than its section says, another magic, a
+/// failed CRC-32C, a wrong shape inside a payload whose CRC passed, or a
+/// summary naming another symbol, rung or month at this month's path. Not
+/// damage: no summary kept, a month under 1,024 bars that keeps none
+/// (D-4933), a well-formed summary of a version this build does not read
+/// (the CRC is checked before the version, so its bytes are as written), and
+/// a well-formed summary of an older generation, which a writer's next step
+/// rebuilds. Either way the month is read from its bars and the reason is
+/// named in `summary_fallback`; only damage keeps a held month beside it from
+/// being asked again.
+///
+/// The match has no wildcard, so a refusal added to the store does not
+/// compile here until it is classified.
+const fn summary_is_damaged(why: &store::month_summary::Refused) -> bool {
+    use store::month_summary::Refused;
+    match why {
+        Refused::Unreadable(_)
+        | Refused::Torn
+        | Refused::Magic
+        | Refused::Checksum
+        | Refused::Shape(_)
+        | Refused::NotThisMonth => true,
+        Refused::Absent | Refused::BelowThreshold | Refused::Version(_) | Refused::Stale { .. } => {
+            false
+        }
+    }
 }
 
 /// The month's summary: kept and usable, or built from its bars with the
@@ -1630,20 +1875,31 @@ fn month_input(
     let file = match asked.open(site, month) {
         Ok(file) => file,
         Err(why) => {
+            // A WRITER'S HOLD IS NAMED APART FROM AN ABSENT FILE: the store's
+            // sentence says "being written, ask again" and who holds it
+            // (`crate::detail::is_being_written`, R3-08 repair 2).
+            let (being_written, absent_file) = if crate::detail::is_being_written(&why) {
+                (Some(why), None)
+            } else {
+                (None, Some(why))
+            };
             return MonthInput {
                 summary: store::month_summary::MonthSummary::new(0, asked.timeframe.secs(), month),
                 source: SummarySource::AbsentFile,
                 fallback: None,
                 records_read: 0,
                 unreadable: Some(0),
-                absent_file: Some(why),
+                being_written,
+                absent_file,
                 fold_error: None,
+                summary_damaged: false,
             };
         }
     };
     let header = file.header();
     let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
-    let fallback = match store::month_summary::read_beside(file.path(), &header, month) {
+    let kept = store::month_summary::read_beside(file.path(), &header, month);
+    let (fallback, summary_damaged) = match kept {
         // INPUT THE FOLD MAY REFUSE: a stamp before the one before it, a
         // negative volume, a volume summed past `i64::MAX` (any minute's
         // bucket overflowing makes the month's saturate) or a row outside the
@@ -1656,13 +1912,18 @@ fn month_input(
                     || kept.counts.outside_month > 0
                     || kept.extremes.volume == i64::MAX) =>
         {
-            "the month holds rows the fold may refuse; its answer is read from the bars".to_owned()
+            (
+                "the month holds rows the fold may refuse; its answer is read from the bars"
+                    .to_owned(),
+                false,
+            )
         }
-        Ok(kept) if needs_seconds && !kept.tracks_seconds() => {
+        Ok(kept) if needs_seconds && !kept.tracks_seconds() => (
             "the kept summary holds no seconds index (fewer than half the seconds it spans \
              are held, D-4980); an index's seconds are read from the bars"
-                .to_owned()
-        }
+                .to_owned(),
+            false,
+        ),
         Ok(kept) => {
             return MonthInput {
                 summary: kept,
@@ -1672,10 +1933,14 @@ fn month_input(
                 // NOT READ, so not counted: see `AuditedMonth::unreadable`.
                 unreadable: None,
                 absent_file: None,
+                being_written: None,
                 fold_error: None,
+                summary_damaged: false,
             };
         }
-        Err(why) => why.to_string(),
+        // A DAMAGED SUMMARY IS A FAULT, not only a reason (R3-08 repair 4):
+        // see `summary_is_damaged`.
+        Err(why) => (why.to_string(), summary_is_damaged(&why)),
     };
     // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
     // `n_valid` seeks of known length and nothing scans.
@@ -1703,7 +1968,9 @@ fn month_input(
             .saturating_add(faults.records()),
         unreadable: Some(faults.records()),
         absent_file: None,
+        being_written: None,
         fold_error,
+        summary_damaged,
     }
 }
 
@@ -2086,6 +2353,47 @@ mod tests {
         cash_month_files, cash_month_replay_fixture, day, masters, store_root,
     };
     use brutex_core::vendor::Vendor;
+
+    /// **THE GAPS AUDIT STOPS WHEN ITS READER LEAVES** (R3-08, RA-130; the
+    /// verifier proved it live and found no test). A reader still there walks
+    /// every month; one that left before the walk reads none; one that leaves
+    /// while the second month is audited stops before the third.
+    #[test]
+    fn the_gaps_audit_stops_when_its_reader_leaves() {
+        let span: Vec<store::path::YearMonth> = (1..=6)
+            .map(|month| store::path::YearMonth::new(2024, month).expect("a legal month"))
+            .collect();
+        let whole = walk_until(&span, &crate::bars::Cancel::never(), |month| month);
+        assert_eq!(whole, span, "a reader still there gets every month");
+
+        let (cancel, guard) = crate::bars::Cancel::pair();
+        drop(guard);
+        let mut read = 0_u32;
+        let none = walk_until(&span, &cancel, |month| {
+            read += 1;
+            month
+        });
+        assert!(
+            none.is_empty() && read == 0,
+            "a reader gone first: no month is read"
+        );
+
+        let (cancel, guard) = crate::bars::Cancel::pair();
+        let mut guard = Some(guard);
+        let mut read = 0_u32;
+        let some = walk_until(&span, &cancel, |month| {
+            read += 1;
+            if read == 2 {
+                drop(guard.take());
+            }
+            month
+        });
+        assert_eq!(
+            read, 2,
+            "the month in hand finishes; the next is never opened"
+        );
+        assert_eq!(some, span[..2].to_vec());
+    }
 
     #[tokio::test]
     async fn cash_gap_page_uses_receipted_local_flags_and_refuses_missing_or_corrupt_evidence() {
@@ -3199,12 +3507,14 @@ mod tests {
             from: "test".to_owned(),
             open: Vec::new(),
             today: Some(day(15)),
+            journal_error: None,
         };
         let pulled = super::super::feeds_route::ImportReach {
             to: None,
             from: "pulled".to_owned(),
             open: Vec::new(),
             today: Some(day(15)),
+            journal_error: None,
         };
         for reach in [&imported, &pulled] {
             assert_eq!(run_word(&gap(day(16)), false, None, reach), NOT_YET_WORD);
@@ -3964,5 +4274,252 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One audited month as `audit_one` would leave it, clean: read whole,
+    /// nothing absent, nothing damaged.
+    fn audited(month: u8) -> AuditedMonth {
+        AuditedMonth {
+            month: store::path::YearMonth::new(2019, month).expect("a legal month"),
+            expected: 375,
+            held: 375,
+            invalid_timestamps: 0,
+            lost: 0,
+            absent: 0,
+            unmeasured: 0,
+            absent_file: None,
+            being_written: None,
+            evidence_error: None,
+            fold_error: None,
+            summary_damaged: false,
+            journal_error: None,
+            unreadable: Some(0),
+            truncated: false,
+            runs: String::new(),
+            seconds: String::new(),
+            summary: SummarySource::Built,
+            fallback: None,
+            records_read: 375,
+        }
+    }
+
+    /// One month a writer held past the read's patience, as `audit_one`
+    /// leaves it: nothing read, owed, held or lost.
+    fn writing(month: u8) -> AuditedMonth {
+        AuditedMonth {
+            expected: 0,
+            held: 0,
+            being_written: Some(format!(
+                "/s/bars/x.lock: {}: another writer holds /s/bars/x.lock",
+                store::flock::BEING_WRITTEN
+            )),
+            unreadable: None,
+            summary: SummarySource::BeingWritten,
+            records_read: 0,
+            ..audited(month)
+        }
+    }
+
+    /// **EVERY FAULT BESIDE A HELD MONTH IS ANSWERED, NOT ASKED AGAIN** (R3-08
+    /// repair 3; NEW-21). `writers_only` named the months that would not open
+    /// and the evidence that would not read, and nothing else: records that
+    /// would not read, timestamps off the grid, and a peer whose calendar
+    /// would not read were no fault to it, so each was hidden behind the
+    /// being-written 503 for as long as a writer held another month. Each
+    /// fault on its own beside a held month is now the 200, and a month that
+    /// is only clean, or answered by its kept summary (`unreadable` null: no
+    /// record read, so no damage seen), is still the 503.
+    #[test]
+    fn every_fault_beside_a_held_month_is_answered_not_asked_again() {
+        // THE WRITER AS THE ONLY FAULT: ask again.
+        let kept = AuditedMonth {
+            unreadable: None,
+            summary: SummarySource::Kept,
+            records_read: 0,
+            ..audited(10)
+        };
+        for beside in [audited(10), kept] {
+            let (status, body) = writers_only(&[beside, writing(11)], &Denominator::table())
+                .expect("a writer beside a clean month is asked again");
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert!(body.contains(crate::detail::BEING_WRITTEN_FIELD), "{body}");
+        }
+
+        // EACH OTHER FAULT ON ITS OWN BESIDE THE WRITER: answered.
+        for (what, beside) in [
+            (
+                "unreadable records",
+                AuditedMonth {
+                    unreadable: Some(73),
+                    ..audited(12)
+                },
+            ),
+            (
+                "invalid timestamps",
+                AuditedMonth {
+                    invalid_timestamps: 2,
+                    ..audited(12)
+                },
+            ),
+            (
+                "an absent file",
+                AuditedMonth {
+                    absent_file: Some("no such file".to_owned()),
+                    ..audited(12)
+                },
+            ),
+            (
+                "unread session evidence",
+                AuditedMonth {
+                    evidence_error: Some("a torn receipt".to_owned()),
+                    ..audited(12)
+                },
+            ),
+            // R3-08 REPAIR 4 (verify-R3-08-r4): the fold's refusal, a kept
+            // summary whose bytes cannot be trusted, and an unread import
+            // journal, each hidden behind the 503 before.
+            (
+                "a fold refusal",
+                AuditedMonth {
+                    fold_error: Some("VolumeOverflow { at: 1, bucket: 0 }".to_owned()),
+                    expected: 0,
+                    held: 0,
+                    ..audited(12)
+                },
+            ),
+            (
+                "a damaged kept summary",
+                AuditedMonth {
+                    summary_damaged: true,
+                    fallback: Some("torn: the summary is shorter than its section says".to_owned()),
+                    ..audited(12)
+                },
+            ),
+            (
+                "an unread import journal",
+                AuditedMonth {
+                    journal_error: Some(
+                        "the GDFL import journal cannot be read: Is a directory".to_owned(),
+                    ),
+                    ..audited(12)
+                },
+            ),
+        ] {
+            let faults = beside.faults();
+            assert!(
+                !faults.is_empty()
+                    && !faults
+                        .iter()
+                        .any(|why| crate::detail::is_being_written(why)),
+                "{what} is a fault, and not a writer's: {faults:?}"
+            );
+            assert!(
+                writers_only(&[writing(11), beside], &Denominator::table()).is_none(),
+                "{what} beside a held month is answered as the audit it is"
+            );
+        }
+        let peers = Denominator {
+            unreadable: vec!["gdfl:BANKNIFTY".to_owned()],
+            ..Denominator::table()
+        };
+        assert!(
+            writers_only(&[writing(11)], &peers).is_none(),
+            "a peer whose calendar would not read is named, not asked again"
+        );
+
+        // NOTHING HELD: no "ask again" at all, damaged or not.
+        let damaged = AuditedMonth {
+            unreadable: Some(1),
+            ..audited(12)
+        };
+        assert!(writers_only(&[audited(10)], &Denominator::table()).is_none());
+        assert!(writers_only(&[damaged], &Denominator::table()).is_none());
+        assert!(writers_only(&[], &Denominator::table()).is_none());
+    }
+
+    /// **A KEPT SUMMARY IS DAMAGE ONLY WHEN ITS BYTES CANNOT BE TRUSTED**
+    /// (R3-08 repair 4, verify-R3-08-r4 follow-up). Every refusal the store
+    /// names is classified: unreadable, torn, another magic, a failed
+    /// checksum, a wrong shape and another month's summary are damage, and a
+    /// month beside a writer is answered with them; no summary, a month too
+    /// small to keep one, another version and an older generation are not, and
+    /// beside a writer they are still asked again. Each fault sentence names
+    /// its month and its reason.
+    #[test]
+    fn a_kept_summary_is_damage_only_when_its_bytes_cannot_be_trusted() {
+        use store::month_summary::Refused;
+        let damaged = [
+            Refused::Unreadable("/s/x.msum: Permission denied".to_owned()),
+            Refused::Torn,
+            Refused::Magic,
+            Refused::Checksum,
+            Refused::Shape("a reserved byte is set"),
+            Refused::NotThisMonth,
+        ];
+        let not_damaged = [
+            Refused::Absent,
+            Refused::BelowThreshold,
+            Refused::Version(9),
+            Refused::Stale {
+                summary: (1, 10),
+                header: (2, 12),
+            },
+        ];
+        for (why, damage) in damaged
+            .iter()
+            .map(|why| (why, true))
+            .chain(not_damaged.iter().map(|why| (why, false)))
+        {
+            assert_eq!(summary_is_damaged(why), damage, "{why}");
+            let beside = AuditedMonth {
+                summary_damaged: summary_is_damaged(why),
+                fallback: Some(why.to_string()),
+                ..audited(12)
+            };
+            let answer = writers_only(&[writing(11), beside], &Denominator::table());
+            if damage {
+                assert!(answer.is_none(), "{why}: answered, not asked again");
+            } else {
+                let (status, _) = answer.unwrap_or_else(|| panic!("{why}: asked again"));
+                assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{why}");
+            }
+        }
+
+        // EACH NEW FAULT NAMES ITS MONTH AND ITS REASON, and a month with
+        // none names nothing.
+        let named = |month: AuditedMonth, reason: &str| {
+            let faults = month.faults();
+            assert_eq!(faults.len(), 1, "{faults:?}");
+            assert!(faults[0].starts_with("2019-12: "), "{faults:?}");
+            assert!(faults[0].contains(reason), "{reason}: {faults:?}");
+        };
+        named(
+            AuditedMonth {
+                fold_error: Some("NegativeVolume { at: 3 }".to_owned()),
+                ..audited(12)
+            },
+            "the fold refused its rows: NegativeVolume",
+        );
+        named(
+            AuditedMonth {
+                summary_damaged: true,
+                fallback: Some(Refused::Checksum.to_string()),
+                ..audited(12)
+            },
+            "its kept summary is damaged: checksum",
+        );
+        named(
+            AuditedMonth {
+                journal_error: Some("the GDFL import journal cannot be read: EIO".to_owned()),
+                ..audited(12)
+            },
+            "the GDFL import journal cannot be read: EIO",
+        );
+        assert!(audited(12).faults().is_empty());
+        assert_eq!(
+            writing(11).faults().len(),
+            1,
+            "a held month's one fault is its writer"
+        );
     }
 }

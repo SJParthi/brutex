@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { askWhileBeingWritten, pause } from './being-written.js';
 import { parseKey } from './instrument.js';
 import { ownMonth } from './moneyness.js';
 
@@ -48,6 +49,8 @@ export const GREEK_WHY = {
   no_option_bar: 'the option has no stored bar stamped at this instant.',
   no_option_file: 'the option’s month file is not in this feed’s store.',
   option_unreadable: 'the option’s bar for this instant would not read; the server named the fault.',
+  option_being_written:
+    'the option’s month was being written by an import or a repair when this was asked, so its bar was not read — not damage; ask again once the writer is done.',
   option_order_broken:
     'the option’s file is not strictly increasing around this instant, so its close cannot be stated without a scan.',
   no_spot_bar:
@@ -60,6 +63,8 @@ export const GREEK_WHY = {
     'the instant is not on this rung’s grid, so the spot bar before it may close after it; no earlier spot is taken for it (D-3328).',
   no_spot_file: 'the underlying’s month file at this rung is not in this feed’s store, so there is no spot to price against.',
   spot_unreadable: 'the underlying’s bar for this instant would not read; the server named the fault.',
+  spot_being_written:
+    'the underlying’s month was being written by an import or a repair when this was asked, so its bar was not read — not damage; ask again once the writer is done.',
   spot_order_broken:
     'the underlying’s file is not strictly increasing around this instant, so its close cannot be stated without a scan.',
   greeks_request_failed: 'the greeks request failed, so this bar’s greeks are unknown.',
@@ -218,9 +223,10 @@ export const greekWhyText = (cell) =>
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
  * @param {'exact'|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking a month being written again (R3-08)
  * @returns {Promise<{cells: Map<string, GreekCell>, rate: Record<string, any>|null}>}
  */
-export async function readGreeks(feed, rows, signal, request = ask, asof = 'exact') {
+export async function readGreeks(feed, rows, signal, request = ask, asof = 'exact', wait = pause) {
   /** @type {Map<string, {instrument: string, tf: string, month: string, times: Set<number>}>} */
   const groups = new Map();
   for (const r of rows) {
@@ -253,8 +259,8 @@ export async function readGreeks(feed, rows, signal, request = ask, asof = 'exac
       });
       if (asof === 'prev') q.set('asof', 'prev');
       try {
-        const res = await request(`/greeks.json?${q}`, { signal });
-        const body = await res.json();
+        // A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21).
+        const { res, body } = await askWhileBeingWritten(request, `/greeks.json?${q}`, signal, wait);
         if (!Array.isArray(body?.rows) || body.rows.length !== chunk.length) {
           throw new Error(body?.error ?? `HTTP ${res.status}`);
         }

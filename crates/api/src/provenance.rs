@@ -454,17 +454,22 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Answer {
     let bars = match BarFile::open_existing(root, bars_path, symbol_id(&asked.symbol)) {
         Ok(bars) => bars,
         // A LANDING HOLDS THE MONTH'S LOCK WHILE IT APPENDS, and the store
-        // refuses a reader meanwhile. That is the month being written, not a
-        // damaged one: a 409 that says so, never a 500 and never a guess.
+        // refuses a reader once its patience is spent. That is the month being
+        // written, not a damaged one: never a 500 and never a guess. It was a
+        // 409 with no `being_written` and no `Retry-After`, so /db's
+        // provenance panel showed a failure and never asked again (R3-08
+        // repair 2, NEW-21). It is now the being-written 503 every store read
+        // answers: `count_route` adds `Retry-After: 1` and counts it
+        // `being_written`, and the panel asks again by itself.
         Err(why @ StoreError::Locked { .. }) => {
             return Answer::refused(
-                StatusCode::CONFLICT,
+                StatusCode::SERVICE_UNAVAILABLE,
                 asked,
                 &format!(
                     "{why}: the month is being written right now; ask again when the landing \
                      commits"
                 ),
-                json!({ "path": relative }),
+                json!({ "path": relative, "being_written": true }),
             );
         }
         Err(why @ StoreError::Missing { .. }) => {

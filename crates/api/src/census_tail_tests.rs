@@ -6,6 +6,15 @@
 //!
 //! Every price and row count below is invented.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+
 use super::*;
 use pull::manifest::{Closes, Entry, EntryKey, Held, Manifest, epoch_path, segment_dir};
 

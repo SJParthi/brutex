@@ -491,16 +491,29 @@ fn d_0692_cites_the_glibc_ci_target_to_a_source_that_states_it() {
         );
     }
 
-    // And the fact itself: every CI job runs on the runner §29 names.
-    let runners: Vec<&str> = CI
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("runs-on:"))
-        .map(str::trim)
+    // And the fact itself: every CI job runs on the runner §29 names, but for
+    // the one macOS job §29 names as its exception (gate 31, D-4990), which
+    // must still be that job.
+    let lines: Vec<&str> = CI.lines().map(str::trim).collect();
+    let runners: Vec<(&str, &str)> = lines
+        .windows(2)
+        .filter_map(|pair| Some((pair[0], pair[1].strip_prefix("runs-on:")?.trim())))
         .collect();
     assert!(!runners.is_empty(), "ci.yml names no runner");
-    assert!(
-        runners.iter().all(|runner| *runner == "ubuntu-24.04"),
+    let others: Vec<(&str, &str)> = runners
+        .iter()
+        .copied()
+        .filter(|(_, runner)| *runner != "ubuntu-24.04")
+        .collect();
+    assert_eq!(
+        others,
+        [("name: Gate 31 — the macOS rows run on macOS", "macos-15")],
         "CI no longer runs only where docs/06-limits.md §29 says: {runners:?}"
+    );
+    offset(
+        &limits,
+        "docs/06-limits.md §29",
+        "gate 31's `macos` job (`runs-on: macos-15`, D-4990) runs the workspace's tests on macOS",
     );
 }
 

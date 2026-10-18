@@ -246,23 +246,38 @@ pub(super) async fn feeds_json(
     // next request with no restart. ON THE BLOCKING POOL, NOT THIS WORKER
     // (repair 3): the read is file I/O, and an async handler that waits on
     // it holds a runtime worker every other route needs.
-    let settings =
-        crate::server::settings_route::snapshot_off_worker(site.store_root.clone()).await;
     // THE CENSUS READ AND THE HELD-SPAN WALK ON THE BLOCKING POOL TOO (R3-05
     // repair 4, the second agent's follow-up). A cold held-span walk is
     // O(census keys) — 0.66 to 2 s on the operator's store — and it ran
     // inline on a runtime worker, so the first `/feeds.json` after a start
     // stalled unrelated routes. A task that did not finish is a 503 that
     // says so, never an empty list.
-    let answer = tokio::task::spawn_blocking(move || feeds_body(&site, &settings)).await;
+    //
+    // IN THE NAMED LIST POOL, BOTH READS IN ONE HOP (R3-08, NEW-04): Tokio's
+    // own blocking pool has no name, no bound and no busy answer; the list
+    // pool has all three, and is apart from every page read's pool.
+    let root = site.store_root.clone();
+    let answer = crate::detail::run_list(move || {
+        let settings = crate::server::settings_route::snapshot(&root);
+        feeds_body(&site, &settings)
+    })
+    .await;
     let (status, body) = match answer {
         Ok(body) => (axum::http::StatusCode::OK, body),
+        Err(crate::detail::RunError::Saturated) => {
+            // 429; the server adds `Retry-After` to every 429 (WP-81).
+            crate::detail::admission_refused(
+                "/feeds.json",
+                crate::detail::MAX_LIST_CONCURRENT,
+                &crate::detail::RunError::Saturated,
+            )
+        }
         Err(why) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             format!(
                 r#"{{"refused":{}}}"#,
                 render::json_string(&format!(
-                    "the /feeds.json answer did not finish on the blocking pool: {why}"
+                    "the /feeds.json answer did not finish on the list pool: {why:?}"
                 ))
             ),
         ),
@@ -763,6 +778,9 @@ pub(crate) fn walks_of(path: &std::path::Path) -> u64 {
 /// A span only widens as entries are appended, because the store is
 /// append-only (`CLAUDE.md` §3 rule 8): a month once held stays held at its
 /// generation. A part re-read whole is walked whole.
+///
+/// Proof: `api::server::feeds_route::tests::held_span_growth_bench` (a hit
+/// and a one-key append at 1x, 10x and 100x keys, the walk counted).
 fn part_span(part: &census::Part) -> PartSpan {
     let generation = part.header().generation;
     // A PART WITH NO FILE (built in memory) has no identity to remember.
@@ -938,15 +956,38 @@ pub(crate) struct ImportReach {
     /// Today, IST epoch days, read once when the reach was built; `None`
     /// when the clock could not be read (then no day is `not_yet`).
     pub(crate) today: Option<i64>,
+    /// Why the GDFL import journal would not read, when it would not: DAMAGE,
+    /// not a reach that says nothing (an absent journal reads as an empty
+    /// one). `from` says the same in its sentence; this is the typed copy a
+    /// caller tests, never a prefix of `from` (R3-08 repair 4: `/gaps.json`
+    /// beside a held month counts it as a fault, not "ask again").
+    pub(crate) journal_error: Option<String>,
 }
 
 impl ImportReach {
+    /// The reach when the GDFL import journal would not read (`why`): it
+    /// says nothing (no `to`, no open day), and the failure is named twice,
+    /// in `from`'s sentence and typed in `journal_error`, which a caller
+    /// counts as damage (R3-08 repair 4).
+    fn unread(why: &str, today: Option<i64>) -> Self {
+        let why = format!("the GDFL import journal cannot be read: {why}");
+        Self {
+            to: None,
+            from: why.clone(),
+            open: Vec::new(),
+            today,
+            journal_error: Some(why),
+        }
+    }
+
     /// Whether `day` (IST epoch days) is after today: a session that has
     /// not happened yet owes nothing, so a minute the calendar names there
     /// is neither lost nor "not imported" (R3-05 repair 3, the second
     /// agent's follow-up: `/gaps.json` for 2026-10 counted 16..31 October as
     /// 7,500 not-imported minutes on 15 October). Every feed, pulled or
-    /// imported. O(1).
+    /// imported. O(1): one comparison with the day read once
+    /// when the reach was built. UNVERIFIED: no test times it (GF-1, gate 12;
+    /// `docs/06-limits.md` L-GF1-33).
     pub(crate) fn not_yet(&self, day: i64) -> bool {
         self.today.is_some_and(|today| day > today)
     }
@@ -979,6 +1020,8 @@ impl ImportReach {
 /// (`crate::server::import_journal::snapshot`), then [`journal_reach`]: O(1)
 /// while the journal does not move; plus O(log n + rows in `days`) for the
 /// open days — a month's rows, at most 31 days of three kinds.
+/// UNVERIFIED: no test times the reach at two journal sizes (GF-1, gate 12;
+/// `docs/06-limits.md` L-GF1-33); the bound is L-R305-3's.
 pub(crate) fn imported_to(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -993,6 +1036,7 @@ pub(crate) fn imported_to(
         from,
         open: Vec::new(),
         today,
+        journal_error: None,
     };
     if vendor != brutex_core::vendor::Vendor::Gdfl {
         return none(format!(
@@ -1005,7 +1049,7 @@ pub(crate) fn imported_to(
     let slot = segment_slot(segment);
     let snapshot = match crate::server::import_journal::snapshot(root) {
         Ok(snapshot) => snapshot,
-        Err(why) => return none(format!("the GDFL import journal cannot be read: {why}")),
+        Err(why) => return ImportReach::unread(&why, today),
     };
     let reach = journal_reach(root, &snapshot);
     let (Some(kind), Some(day)) = (
@@ -1091,6 +1135,7 @@ pub(crate) fn imported_to(
         from,
         open,
         today,
+        journal_error: None,
     }
 }
 
@@ -2000,8 +2045,13 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nfn feeds_body(").next())
             .expect("the handler, then the body");
+        // In the named list pool since R3-08 (NEW-04), the settings read
+        // and the body in one hop.
+        assert!(handler.contains("crate::detail::run_list(move || {"));
+        assert!(handler.contains("feeds_body(&site, &settings)"));
         assert!(
-            handler.contains("tokio::task::spawn_blocking(move || feeds_body(&site, &settings))")
+            !handler.contains("tokio::task::spawn_blocking("),
+            "an unnamed, unbounded blocking task"
         );
         assert!(
             !handler.contains("census_now("),
@@ -2909,7 +2959,8 @@ mod tests {
     /// cost no more than 4x their 1x figure, each the quietest of three
     /// rounds of 200 (one round's p99 is three samples on a shared host);
     /// the walk is allowed to grow and is the cost named for
-    /// `docs/06-limits.md`.
+    /// `docs/06-limits.md`. Proof of `part_span`'s claim: this test,
+    /// `api::server::feeds_route::tests::held_span_growth_bench`.
     #[test]
     #[ignore = "a growth bench: cargo test --release -p api held_span_growth -- --ignored --nocapture"]
     fn held_span_growth_bench() {

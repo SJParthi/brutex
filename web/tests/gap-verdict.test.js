@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
 import { monthVerdict, isWholeAudit, peersAllRead, unreadablePeers } from '../src/lib/gap-verdict.js';
 import { createPageRequests } from '../src/lib/page-requests.js';
+import { askAgainWhileWritten } from '../src/lib/being-written.js';
 
 /** @type {import('../src/lib/gap-verdict.js').MonthEvidence} */
 const clean = {
@@ -173,7 +174,9 @@ test('the minute audit cannot select or submit a coarser rung, and an absent sou
     assert.ok(node, `The actual ${name} entry point is required by this check.`);
     return page.slice(node.start, node.end);
   }).join('\n');
-  const create = new Function('hasMinuteSource', 'createPageRequests', `
+  // The page asks through the shared ask-again rule (R3-08 repair 2): the
+  // real one is handed in, so the request below is the one the page sends.
+  const create = new Function('hasMinuteSource', 'createPageRequests', 'askAgainWhileWritten', `
     const calls=[],feeds={active:'fixture-feed'},symbol='NSE-INDEX-NIFTY',rung='1min';
     const from='2025-01',to='2025-02',questionKey='exact selected window';
     const parsed={exchange:'NSE',segment:'INDEX',underlying:'NIFTY'},contractTail=()=>'';
@@ -184,7 +187,7 @@ test('the minute audit cannot select or submit a coarser rung, and an absent sou
     return {run,calls,state:()=>result,dispose:()=>auditRequests.dispose()};
   `);
   for (const available of [false, true]) {
-    const app = create(available, createPageRequests);
+    const app = create(available, createPageRequests, askAgainWhileWritten);
     await app.run();
     assert.equal(app.calls.length, available ? 1 : 0);
     assert.equal(app.state().phase, available ? 'done' : 'idle');

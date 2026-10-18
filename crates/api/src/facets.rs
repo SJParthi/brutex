@@ -1054,7 +1054,9 @@ fn moved_by_tail(
 
 /// Replaces `index` by the empty index over `slot` (a segment `slot` holds
 /// no part for), handing back the index it replaced for the caller to drop
-/// after it lets the lock go. O(1).
+/// after it lets the lock go. O(1): one `mem::replace` by an index whose maps
+/// are empty, which allocates nothing; UNVERIFIED by a timing
+/// (`docs/06-limits.md` L-GF1-34).
 fn emptied(index: &mut Index, slot: &Arc<Slot>) -> Index {
     std::mem::replace(
         index,
@@ -2444,13 +2446,5 @@ impl Changed {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a test that cannot panic cannot fail, and these lints exist to \
-              keep panics out of the crate rather than out of its tests"
-)]
 #[path = "facets_tests.rs"]
 mod tests;
