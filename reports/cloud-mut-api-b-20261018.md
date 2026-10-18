@@ -171,19 +171,28 @@ each by the flaky test.
 
 ## Left (in progress)
 
-- Phase 1: `autopilot.rs` (371), `pullrun.rs` (466), `server.rs` (1,509),
-  every listed mutant on the merged tree. `autopilot.rs` is done (below);
-  `pullrun.rs` and `server.rs` are running with retries.
-- New tests so far: `server_cloud_mutant_tests_e.rs` (5), for AH-02's
-  `HeadDeadline` and `exchange_watch` arms that a coverage run of the merged
-  tree left unexecuted; `pullrun::cloud_tests_1018` (1), for the survivor
-  `pullrun.rs:996:24` (`unnamed > 0` → `>=` in `Interrupted::others_words`,
-  which would write "0 more run(s) … counted, not named"). That test fails on
-  the hand-applied mutant and passes on the original. `cargo clippy --workspace --all-targets -- -D
-  warnings` is clean at `f9a7c020`.
-- Phase 2: every survivor and every mutant in code changed since phase 1's
-  base (`audit.rs`'s `Journal::page` doc and `Journal::identity`, changed
-  since `bdcfa9bd`).
+- Phase 1: `pullrun.rs` (466) and `server.rs` (1,514), running with retries.
+  `pullrun.rs` survivors so far: `996:24` and `2360:49`, each closed by a new
+  test (below).
+- New tests so far, each measured failing on its hand-applied mutant and
+  passing on the original where it targets one:
+  `server_cloud_mutant_tests_e.rs` (5), for AH-02's `HeadDeadline` and
+  `exchange_watch` arms that a coverage run of the merged tree left
+  unexecuted; `pullrun::cloud_tests_1018` (3): `996:24` (`unnamed > 0` → `>=`
+  in `Interrupted::others_words`, which would write "0 more run(s) …
+  counted, not named"), `2360:49` (`weak > *oldest` → `>=` in `decorate`'s
+  `newer_may_be_open`) and its sibling `2371:58` (`*at > other.ordinal` →
+  `>=`, the `CLOSE_UNDECODED` doubt). Both `decorate` ties need an index
+  whose `runs` and `faults` files name one position, which this code never
+  writes. `decorate`'s own contract ("a record AFTER") is pinned by value
+  instead of argued from the index's consistency.
+- `cargo clippy --workspace --all-targets -- -D warnings` is clean at
+  `f9a7c020`.
+- Phase 2 (the newest source, the whole suite less the one opt-level-0
+  exclusion, retries): `audit.rs`'s five mutants in code changed since
+  `bdcfa9bd` (`Journal::identity`, `Journal::read_index`): **5 of 5 caught.**
+  The 17 Oct survivors of `audit.rs` and `import_journal.rs`: running. Every
+  phase-1 survivor: after phase 1.
 - The final coverage run; gates.
 
 ## NEEDS THE MAC
