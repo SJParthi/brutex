@@ -72840,3 +72840,30 @@ listing line of its own, became the shrink check's baseline, and a later
 shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
 of the journal changes; a line closed before this change kept only its newline
 and reads as it did.
+
+### D-5884 — IA-2 repair 1: a run's end line is folded into its run by every reader; stop askers write in turn under the journal lock; a busy store lock on v4 names its runs; a held lock is named before its sink; a census verb is never promised a stop — 2026-10-18
+
+**Number** free on every local branch on 2026-10-18 (the highest seen was
+D-5883); A6 renumbers it at landing from the ledger's head. **Amends** D-4804
+(the end line), D-4827 (the stop file) and D-4803 (the census verbs' refusal).
+**Decision.** (1) `run <id> ended=.. outcome=.. definition=..` is a fact about
+run `<id>`, never a run of its own: `/imports.json`'s reader folds it into the
+newest `run` line of its id (fields it lacks are added; a disagreeing one is
+kept as `end_<name>`; `end_line` names it), so `runs_total` counts runs. An end
+whose start the journal does not hold is listed as itself. (2) Stop askers
+write in turn under the journal lock beside the stop file (`imports/
+gdfl.journal.lock`, at most `LOCK_WAIT`): each reads the file under the lock
+and, when it names its run, writes nothing and is answered with that line;
+otherwise it stages under a name of its own (`<stop>.<pid>-<n>.tmp`) and
+renames it into place. Every asker of a run is answered with the one line the
+file holds. A `link(2)` without the lock was tried and refused by its own
+test: replacing a stop file of an ended run cannot be made atomic without one. (3) On v4 the store lock's own text is empty while runs hold it
+shared, so a refused census verb names each live run from the kind locks (run,
+kind, pid, by, started), and the empty-holder words say no claim names the
+holder yet rather than claim one is being written. (4) A second run of a held
+lock is refused its sink before any lock; the plan then probes that lock
+shared and answers `run_busy` naming the holder in the door's words, never
+`log_unavailable` alone. (5) A census verb reads no stop file, so a stop of
+its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
+written. (6) A runs ledger whose last id is `u64::MAX` refuses
+`runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.

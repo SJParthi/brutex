@@ -418,7 +418,7 @@ fn started_of(record: &str) -> &str {
 /// A refusal of the run's claim, as the door names it: the guard's codes for
 /// a busy lock, a lock that cannot be taken and a lost store, and the
 /// authority's own code for every other (`pull::gdfl_run::RunRefusal`).
-fn refused_finding(store: &Path, refused: &RunRefusal) -> Finding {
+pub(crate) fn refused_finding(store: &Path, refused: &RunRefusal) -> Finding {
     match refused {
         RunRefusal::RunBusy { lock, holder } if holder.is_empty() => Finding::new(
             RUN_BUSY,

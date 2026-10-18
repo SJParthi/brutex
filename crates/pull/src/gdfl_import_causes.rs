@@ -386,11 +386,28 @@ fn stop_said(f: &mut core::fmt::Formatter<'_>, stopped: &ImportRefusal) -> core:
     else {
         return f.write_str("stopped");
     };
-    let at = day.map_or_else(|| "between two days".to_owned(), |day| format!("on {day}"));
+    // WHAT A RESUME READS, said only as far as it is known here (IA-2 repair
+    // 1): the day's own journal line (D-4853) says whether it closed
+    // `incomplete stage=run reason=stopped`, closed `done` (the stop came
+    // after its last file) or has no line (the stop came before its begin).
+    let (at, resume) = day.map_or_else(
+        || {
+            (
+                "between two days".to_owned(),
+                "a resume starts at the first day not done",
+            )
+        },
+        |day| {
+            (
+                format!("on {day}"),
+                "a resume reads that day again unless its journal line closed it done",
+            )
+        },
+    );
     write!(
         f,
         "a stop asked by {by} at {requested} (UNIX s) ended the {} run at a file boundary \
-         {at}, after {} day(s) imported; a resume reads that day again",
+         {at}, after {} day(s) imported; {resume}",
         kind.as_str(),
         done.days_imported
     )

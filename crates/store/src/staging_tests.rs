@@ -79,7 +79,7 @@ const TEMPORARY_NAMES: [(&str, &str); 10] = [
     ("cli::search_checkpoint, a completion", "complete.tmp"),
     (
         "design (ingest-automation.md:1376), a stop file",
-        "gdfl.options.stop.tmp",
+        "gdfl.options.stop.4242-7.tmp",
     ),
 ];
 

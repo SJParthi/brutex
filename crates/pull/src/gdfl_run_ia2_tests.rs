@@ -830,3 +830,344 @@ fn every_event_ia2_adds_is_audited() {
     }
     assert_eq!(lifecycle, "gdfl.import.lifecycle");
 }
+
+// ═══ Repair round 1 (18 Oct): the verifier's four blocking findings ═════════
+
+/// **N ASKERS AT ONCE: EVERY ONE IS ANSWERED WITH THE ONE STOP LINE, AND THE
+/// FIRST IS KEPT** (IA-2 repair 1; RA-336, IA-GR-21). Twenty-four askers of
+/// one live run, released together by a barrier, in ten rounds: none is
+/// refused, all are answered with the same line, the file holds that line,
+/// and no staging or aside name is left. Then with a stop file of another
+/// (ended) run already there, the same: it is replaced once, never twice.
+/// Before the repair every asker staged under one shared name, so one
+/// asker's rename took another's staging file (`stop_unwritten`, ENOENT) and
+/// a later rename replaced the first line.
+#[test]
+fn concurrent_stop_askers_are_all_answered_with_the_first_line() {
+    const ASKERS: u64 = 24;
+    let store = scratch("stop-race");
+    let imports = store.join("imports");
+    std::fs::create_dir_all(&imports).unwrap();
+    let path = imports.join("gdfl.options.stop");
+    for round in 0..10_u64 {
+        let _fresh = std::fs::remove_file(&path);
+        if round % 2 == 1 {
+            let ended = stop::StopRequest {
+                run: 7,
+                requested: NOW,
+                by: "cli".to_owned(),
+            };
+            stop::write_stop(&path, &ended).unwrap();
+        }
+        let barrier = std::sync::Barrier::new(usize::try_from(ASKERS).unwrap());
+        let answers: Vec<Result<stop::StopRequest, String>> = std::thread::scope(|scope| {
+            let askers: Vec<_> = (0..ASKERS)
+                .map(|asker| {
+                    let (barrier, path) = (&barrier, &path);
+                    scope.spawn(move || {
+                        let request = stop::StopRequest {
+                            run: 1_790_000_900,
+                            requested: NOW + asker,
+                            by: if asker % 2 == 0 { "cli" } else { "api" }.to_owned(),
+                        };
+                        barrier.wait();
+                        stop::write_stop(path, &request)
+                    })
+                })
+                .collect();
+            askers.into_iter().map(|one| one.join().unwrap()).collect()
+        });
+        let first = answers[0]
+            .clone()
+            .unwrap_or_else(|why| panic!("round {round}: {why}"));
+        for answer in &answers {
+            assert_eq!(
+                answer.as_ref(),
+                Ok(&first),
+                "round {round}: every asker, one line"
+            );
+        }
+        assert_eq!(first.run, 1_790_000_900, "round {round}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            first.line(),
+            "round {round}: the file holds the line every asker was told"
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&imports)
+            .unwrap()
+            .map(|one| one.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["gdfl.journal.lock", "gdfl.options.stop"],
+            "round {round}: no staging name is left"
+        );
+    }
+}
+
+/// **A CENSUS VERB BESIDE V4 RUNS NAMES EVERY HOLDER, NEVER "CLAIM BEING
+/// WRITTEN"** (IA-2 repair 1; FM-058, IA-GR-14). A v4 run holds the store
+/// lock shared and its claim lives in its kind lock, so the store lock's
+/// own text is empty: the refusal of `census-recount` and `--seal` (both
+/// `claim_census`) reads the kind locks and names each live run's run, kind,
+/// pid, by and start. Nothing is allocated from the runs ledger on the
+/// refusal. With no kind claim written, the words say no claim names the
+/// holder yet, never a guessed one.
+#[test]
+fn a_census_verb_beside_v4_runs_names_every_holder() {
+    let root = scratch("census-v4-holder");
+    let v4 = v4(&root);
+    let options = claim_with(&v4, template("options", "cli"), 0, None, NOW).unwrap();
+    let indices = claim_with(&v4, template("indices", "api"), 0, None, NOW).unwrap();
+    let ledger_len = || std::fs::metadata(v4.join(ledger::LEDGER)).unwrap().len();
+    let before = ledger_len();
+    for mode in ["census-recount", "census-seal"] {
+        let refused = claim_census(&v4, mode).unwrap_err();
+        assert_eq!(refused.code(), "run_busy", "{refused}");
+        let said = refused.to_string();
+        assert!(!said.contains("being written"), "{said}");
+        for (claimed, kind, by) in [(&options, "options", "cli"), (&indices, "indices", "api")] {
+            assert!(
+                said.contains(&format!(
+                    "imports/gdfl.{kind}.lock: run={} kind={kind} pid=4242 by={by} started={NOW}",
+                    claimed.run
+                )),
+                "{mode}: {said}"
+            );
+        }
+    }
+    assert_eq!(ledger_len(), before, "a refused census verb takes no id");
+    options.release().unwrap();
+    indices.release().unwrap();
+    // A holder whose claim is not written: the store lock held shared by a
+    // process that has no kind claim (a run between its two locks).
+    let file = locks::open_lock_file(&v4, locks::STORE_LOCK).unwrap();
+    let shared = store::flock::Flock::try_lock_shared(file, v4.join(locks::STORE_LOCK)).unwrap();
+    let unnamed = RunLocks::take_store(&v4, 0).unwrap_err();
+    assert!(
+        matches!(&unnamed, LockFault::Busy { holder, .. } if holder.is_empty()),
+        "{unnamed:?}"
+    );
+    assert!(
+        unnamed.to_string().contains("no claim names it yet"),
+        "{unnamed}"
+    );
+    drop(shared);
+    RunLocks::take_store(&v4, 0).unwrap().release().unwrap();
+}
+
+/// **A HELD LOCK IS NAMED BEFORE THE SINK'S REFUSAL** (IA-2 repair 1;
+/// FM-064). A run logs in the directory its claim lock makes it alone in, so
+/// a second run of a held lock finds the sink taken before it tries any
+/// lock. The plan probes the lock read-only and refuses `run_busy` naming
+/// the holder's claim; with no holder the sink's own `log_unavailable`
+/// stands. On v4 the same kind, on v3 any second kind; the probe takes
+/// nothing, so the holder keeps its lock and no lock file is made.
+#[test]
+fn a_held_lock_is_named_before_the_sink_refusal() {
+    let root = scratch("held-before-sink");
+    let v3 = root.join("v3");
+    std::fs::create_dir_all(&v3).unwrap();
+    let v4 = v4(&root);
+    let ts = root.join("ts");
+    std::fs::create_dir_all(&ts).unwrap();
+    std::fs::write(ts.join("FORMAT.md"), "invented").unwrap();
+    let refused_sink = LogState::Refused("the sink is held by another process".to_owned());
+    let plan_of = |store: &Path, kind: ImportKind| {
+        let request = Request::new(
+            Kinds::of(&[kind]).unwrap(),
+            SourceWord::TickStore,
+            (Day::new(2024, 4, 1).unwrap(), Day::new(2024, 4, 1).unwrap()),
+        );
+        let process = Process {
+            store_root: store,
+            commit: Some("feedc0de"),
+            log: &refused_sink,
+            unstamped: None,
+        };
+        let env = |var: &str| (var == TICKSTORE_VAR).then(|| ts.clone().into_os_string());
+        plan(request, &process, &env, &mut SourceCache::default())
+    };
+    for (store, held, asked) in [
+        (&v4, "options", ImportKind::Options),
+        (&v3, "options", ImportKind::Indices),
+    ] {
+        let unheld = plan_of(store, asked).unwrap_err();
+        assert_eq!(unheld.code(), "log_unavailable", "{unheld}");
+        assert!(
+            !store.join("imports/gdfl.indices.lock").exists(),
+            "a probe makes no lock file"
+        );
+        let holder = claim_with(store, template(held, "cli"), 0, None, NOW).unwrap();
+        let busy = plan_of(store, asked).unwrap_err();
+        let RunRefusal::RunBusy {
+            lock,
+            holder: named,
+        } = &busy
+        else {
+            panic!("{busy:?}");
+        };
+        assert_eq!(lock, holder.locks.claim_name(), "{busy}");
+        assert!(
+            named.contains(&format!("run={} ", holder.run))
+                && named.contains(" pid=4242 ")
+                && named.contains(" by=cli "),
+            "{named}"
+        );
+        assert!(
+            holder.locks.still_held(),
+            "the probe took nothing from the holder"
+        );
+        holder.release().unwrap();
+        assert_eq!(plan_of(store, asked).unwrap_err().code(), "log_unavailable");
+    }
+}
+
+/// **A CENSUS VERB IS NEVER PROMISED A STOP** (IA-2 repair 1): a census verb
+/// reads no stop file, so `gdfl-stop --run <its id>` is refused
+/// `run_not_stoppable` naming it, and no stop file is written; a stop by
+/// kind never takes the census verb for a run of that kind.
+#[test]
+fn a_census_verb_is_never_promised_a_stop() {
+    let store = scratch("stop-census");
+    let census = claim_census(&store, "census-recount").unwrap();
+    let refused =
+        stop::request_stop(&store, StopTarget::Run(census.run), "cli", NOW + 1).unwrap_err();
+    assert_eq!(refused.code(), "run_not_stoppable", "{refused}");
+    assert!(
+        refused.to_string().contains(&format!(
+            "run {} is a census verb (census-recount)",
+            census.run
+        )),
+        "{refused}"
+    );
+    let by_kind = stop::request_stop(&store, StopTarget::Kind("options"), "cli", NOW).unwrap_err();
+    assert_eq!(by_kind.code(), "run_not_live", "{by_kind}");
+    assert!(
+        !store.join(locks::stop_name(locks::STORE_LOCK)).exists(),
+        "no stop file promised to a verb that reads none"
+    );
+    census.release().unwrap();
+}
+
+/// **THE LAST ID THERE IS IS NEVER HANDED OUT TWICE** (IA-2 repair 1): a
+/// journal whose largest run id is `u64::MAX` seeds a ledger with no later
+/// id; the allocation is refused by name and writes nothing, where it once
+/// answered `u64::MAX` to every run.
+#[test]
+fn a_saturated_runs_ledger_refuses_by_name() {
+    let store = scratch("ledger-saturated");
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    std::fs::write(
+        store.join("imports/gdfl.journal"),
+        format!("run {} source=zip started=1\n", u64::MAX),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let refused = allocate(&store, NOW).unwrap_err();
+        assert_eq!(refused.code(), "runs_ledger_entry", "{refused}");
+        assert!(
+            refused.to_string().contains("the largest an id can be"),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(store.join(ledger::LEDGER)).map_or(0, |m| m.len()),
+        0,
+        "nothing was written"
+    );
+}
+
+/// **REPAIR 1'S OPERATIONS, TIMED** (IA-2 repair 1): a stop written under
+/// the journal lock (stage, sync, rename, directory sync), a stop asked
+/// again when the file already names the run (one read), a census verb
+/// refused beside three v4 runs (the store lock tried, three kind locks
+/// probed), and a plan refused before its sink with its lock held (one
+/// probe). Printed for `docs/06-limits.md` and the package report, never
+/// asserted: a timing on a shared machine is evidence, not a gate.
+#[test]
+#[ignore = "timings, printed"]
+fn ia2_repair_timings() {
+    fn pct(mut v: Vec<Duration>) -> String {
+        v.sort_unstable();
+        let n = v.len();
+        format!(
+            "n={n} p50={:?} p99={:?} max={:?}",
+            v[n / 2],
+            v[n * 99 / 100],
+            v[n - 1]
+        )
+    }
+    let root = scratch("repair-timings");
+    let v4 = v4(&root);
+    std::fs::create_dir_all(v4.join("imports")).unwrap();
+    let path = v4.join("imports/gdfl.options.stop");
+    let mut took = Vec::new();
+    for at in 0..500_u64 {
+        let _fresh = std::fs::remove_file(&path);
+        let request = stop::StopRequest {
+            run: 9,
+            requested: NOW + at,
+            by: "cli".to_owned(),
+        };
+        let began = std::time::Instant::now();
+        stop::write_stop(&path, &request).unwrap();
+        took.push(began.elapsed());
+    }
+    println!(
+        "stop written (lock, stage, sync, rename, dir sync): {}",
+        pct(took)
+    );
+    let again = stop::StopRequest {
+        run: 9,
+        requested: NOW,
+        by: "api".to_owned(),
+    };
+    let mut took = Vec::new();
+    for _ in 0..10_000 {
+        let began = std::time::Instant::now();
+        let _first = stop::write_stop(&path, &again).unwrap();
+        took.push(began.elapsed());
+    }
+    println!("stop asked again, file names the run: {}", pct(took));
+    let _fresh = std::fs::remove_file(&path);
+    let held: Vec<_> = ["indices", "stocks", "options"]
+        .into_iter()
+        .map(|kind| claim_with(&v4, template(kind, "cli"), 0, None, NOW).unwrap())
+        .collect();
+    let mut took = Vec::new();
+    for _ in 0..2_000 {
+        let began = std::time::Instant::now();
+        let refused = RunLocks::take_store(&v4, 0).unwrap_err();
+        took.push(began.elapsed());
+        assert!(matches!(refused, LockFault::Busy { .. }));
+    }
+    println!(
+        "census verb refused beside 3 v4 runs, holders named: {}",
+        pct(took)
+    );
+    let refused_sink = LogState::Refused("held".to_owned());
+    let mut took = Vec::new();
+    for _ in 0..2_000 {
+        let request = Request::new(
+            Kinds::of(&[ImportKind::Options]).unwrap(),
+            SourceWord::TickStore,
+            (Day::new(2024, 4, 1).unwrap(), Day::new(2024, 4, 1).unwrap()),
+        );
+        let process = Process {
+            store_root: &v4,
+            commit: Some("feedc0de"),
+            log: &refused_sink,
+            unstamped: None,
+        };
+        let began = std::time::Instant::now();
+        let refused = plan(request, &process, &|_| None, &mut SourceCache::default()).unwrap_err();
+        took.push(began.elapsed());
+        assert_eq!(refused.code(), "run_busy");
+    }
+    println!("plan refused before its sink, holder named: {}", pct(took));
+    for one in held {
+        one.release().unwrap();
+    }
+}

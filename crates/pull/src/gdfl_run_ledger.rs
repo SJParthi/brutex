@@ -350,7 +350,18 @@ impl LedgerHold {
             at = 0;
             seed.id
         };
-        let id = now.max(last_id.saturating_add(1));
+        // THE LAST ID THERE IS IS NEVER HANDED OUT TWICE (IA-2 repair 1): a
+        // ledger whose last id is `u64::MAX` has no later one, and refuses by
+        // name rather than repeat it.
+        let Some(next) = last_id.checked_add(1) else {
+            return Err(RunsLedgerFault::Entry {
+                why: format!(
+                    "the runs ledger's last id is {last_id}, the largest an id can be: no later \
+                     id exists, so none was allocated and nothing was written"
+                ),
+            });
+        };
+        let id = now.max(next);
         let mine = Entry {
             id,
             ..entry.clone()

@@ -168,7 +168,8 @@ impl core::fmt::Display for LockFault {
         match self {
             Self::Busy { lock, holder } if holder.is_empty() => write!(
                 f,
-                "another process holds {lock}; its claim is being written"
+                "another process holds {lock} and no claim names it yet: a run or a census verb \
+                 is between taking it and writing its claim; ask again in a moment"
             ),
             Self::Busy { lock, holder } => write!(f, "{lock} is held: {holder}"),
             Self::Refused { lock, why } => write!(f, "{lock}: {why}"),
@@ -598,7 +599,19 @@ impl RunLocks {
         // so the layout is recorded when it can be read and never checked.
         let layout = layout_at(store).unwrap_or(GdflLayout::V3);
         let file = open_lock_file(store, STORE_LOCK)?;
-        let flock = take(file, store, STORE_LOCK, Hold::Exclusive, retry)?;
+        // THE HOLDER IS NAMED ON V4 TOO (IA-2 repair 1; FM-058, IA-GR-14): a
+        // v4 run holds the store lock SHARED and keeps its claim in its kind
+        // lock, so the store lock's own text is empty while runs hold it.
+        // Its refusal then names each live run from the kind locks, never
+        // "its claim is being written".
+        let flock =
+            take(file, store, STORE_LOCK, Hold::Exclusive, retry).map_err(|fault| match fault {
+                LockFault::Busy { lock, holder } if holder.is_empty() => LockFault::Busy {
+                    lock,
+                    holder: shared_holders(store),
+                },
+                other => other,
+            })?;
         Self::held(
             store,
             (layout, false),
@@ -1360,6 +1373,45 @@ pub fn probe_one(store: &Path, name: &str, retry: u32) -> LockState {
             lock: name.to_owned(),
             why: why.to_string(),
         },
+    }
+}
+
+/// Who holds the store lock SHARED, read from the kind locks (v4): each
+/// held kind lock's claim as `<lock>: run=<id> kind=<kind> pid=<pid>
+/// by=<by> started=<s>`, joined by `; `, each probe shared, non-blocking,
+/// at most [`PROBE_READ`] bytes and released at once (at most three).
+/// Empty when no kind lock names a run: a run between its two locks, or a
+/// census verb whose claim is being written, and [`LockFault::Busy`] then
+/// says so in its own words.
+#[must_use]
+pub fn shared_holders(store: &Path) -> String {
+    let named: Vec<String> = ["indices", "stocks", "options"]
+        .into_iter()
+        .map(kind_lock)
+        .filter(|name| store.join(name).exists())
+        .filter_map(|name| match probe_one(store, &name, 0) {
+            LockState::Held {
+                lock,
+                claim: ClaimState::Claim(claim),
+            } => Some(format!(
+                "{lock}: run={} kind={} pid={} by={} started={}",
+                claim.run, claim.kind, claim.pid, claim.by, claim.started
+            )),
+            LockState::Held {
+                lock,
+                claim: ClaimState::Empty,
+            } => Some(format!("{lock}: a run whose claim is being written")),
+            LockState::Held {
+                lock,
+                claim: ClaimState::Unreadable(text),
+            } => Some(format!("{lock}: a claim that is not one: {text}")),
+            _ => None,
+        })
+        .collect();
+    if named.is_empty() {
+        String::new()
+    } else {
+        format!("shared by the GDFL run(s) {}", named.join("; "))
     }
 }
 

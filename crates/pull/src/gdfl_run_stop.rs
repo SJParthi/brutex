@@ -5,9 +5,11 @@
 //! that holds the run's claim: `imports/gdfl.<kind>.stop` on a v4 store,
 //! `imports/gdfl.stop` on v3. It is one line,
 //! `stop run=<id> requested=<unix_s> by=<api|cli|operator|shutdown>`, written
-//! to a staging name, synced, renamed and its directory synced, BEFORE the
-//! asker is answered ([`request_stop`]), so a stop that was acknowledged
-//! survives a crash of either side.
+//! to a staging name of the asker's own, synced, renamed and its directory
+//! synced, each asker in turn under the journal lock (so the first asker of
+//! a run is kept however many ask at once), BEFORE the asker is answered
+//! ([`request_stop`]), so a stop that was acknowledged survives a crash of
+//! either side.
 //!
 //! The run asks [`StopControl::requested`] before it takes each file, never
 //! inside one: one atomic load, and while no stop is seen one `metadata` of
@@ -103,18 +105,40 @@ pub fn read_stop(path: &Path) -> Option<StopRequest> {
     StopRequest::parse(std::str::from_utf8(&buf).ok()?).ok()
 }
 
-/// Writes `request` as the stop file at `path`: a staging name, synced,
-/// renamed, the directory synced. A second stop of the same run keeps the
-/// first asker (RA-336): the file already naming this run is left as it is.
+/// Writes `request` as the stop file at `path`, keeping the FIRST asker of a
+/// run atomically, however many ask at once (RA-336; IA-2 repair 1).
+///
+/// Askers write in turn, under the journal lock beside the stop file
+/// (`imports/gdfl.journal.lock`, the lock every write to `imports/` takes,
+/// D-4905; at most [`locks::LOCK_WAIT`], then `lock_stalled`): the file is
+/// read under the lock, and when it already names this run every later
+/// asker is answered with that first line and writes nothing. Otherwise the
+/// line is staged under a name of the asker's own (`<stop>.<pid>-<n>.tmp`,
+/// [`store::staging`]'s rule: a staging name belongs to one writer), synced,
+/// renamed over the stop name and the directory synced, all before the
+/// asker is answered. What a rename replaces names no live run: the live
+/// run's take of its lock removed every older stop file, so one there was
+/// written after that take for a run that had already ended.
 ///
 /// # Errors
 ///
-/// The staging helper's refusal or the host's, by name.
+/// The lock's refusal, the staging helper's or the host's, by name.
 pub fn write_stop(path: &Path, request: &StopRequest) -> Result<StopRequest, String> {
-    if let Some(first) = read_stop(path).filter(|first| first.run == request.run) {
+    let first_of = || read_stop(path).filter(|first| first.run == request.run);
+    if let Some(first) = first_of() {
         return Ok(first);
     }
-    let staging = path.with_extension("stop.tmp");
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{}: a stop file has a folder", path.display()))?;
+    // EVERY ASKER IN TURN: the read and the write are one step for each.
+    let _turn = locks::take_path_within(&dir.join(TURN_LOCK), locks::LOCK_WAIT)
+        .map_err(|fault| fault.to_string())?;
+    if let Some(first) = first_of() {
+        return Ok(first);
+    }
+    let own = STAGED.fetch_add(1, Ordering::Relaxed);
+    let staging = path.with_extension(format!("stop.{}-{own}.tmp", std::process::id()));
     let staged = store::staging::create(&staging).map_err(|why| why.to_string())?;
     staged
         .file
@@ -122,13 +146,18 @@ pub fn write_stop(path: &Path, request: &StopRequest) -> Result<StopRequest, Str
         .and_then(|()| staged.file.sync_all())
         .map_err(|why| format!("{}: {why}", staging.display()))?;
     fs::rename(&staging, path).map_err(|why| format!("{}: {why}", path.display()))?;
-    if let Some(dir) = path.parent() {
-        File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|why| format!("{}: {why}", dir.display()))?;
-    }
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|why| format!("{}: {why}", dir.display()))?;
     Ok(request.clone())
 }
+
+/// The lock askers write a stop file under, beside it: the journal's
+/// (`locks::JOURNAL_LOCK`), held for one read and one rename.
+const TURN_LOCK: &str = "gdfl.journal.lock";
+
+/// Staging names this process has used, so each [`write_stop`] has its own.
+static STAGED: AtomicU64 = AtomicU64::new(0);
 
 /// A run's stop, as the run asks it (design §5.5): the flag is set only by
 /// the run's own process, from its stop file or [`StopControl::ask`].
@@ -311,6 +340,17 @@ pub enum StopRefusal {
         /// The word.
         by: String,
     },
+    /// The run asked for is a census verb (`census-recount`, `census-migrate`,
+    /// `--seal`): it reads no stop file and finishes on its own, so a stop
+    /// is never promised for it (IA-2 repair 1).
+    NotStoppable {
+        /// The lock it holds.
+        lock: String,
+        /// Its ledger id.
+        run: u64,
+        /// Its mode.
+        mode: String,
+    },
     /// The stop file could not be written.
     Unwritten {
         /// Why.
@@ -326,6 +366,7 @@ impl StopRefusal {
             Self::NotLive { .. } => "run_not_live",
             Self::ClaimBeingWritten { .. } => "claim_being_written",
             Self::ByUnknown { .. } => "stop_by_unknown",
+            Self::NotStoppable { .. } => "run_not_stoppable",
             Self::Unwritten { .. } => "stop_unwritten",
         }
     }
@@ -341,6 +382,11 @@ impl core::fmt::Display for StopRefusal {
                 "{lock} is held and its claim is being written; ask again in a moment"
             ),
             Self::ByUnknown { by } => write!(f, "by={by} is not one of {BY:?}"),
+            Self::NotStoppable { lock, run, mode } => write!(
+                f,
+                "run {run} is a census verb ({mode}) holding {lock}: it reads no stop file and \
+                 finishes on its own, so no stop was written"
+            ),
             Self::Unwritten { why } => f.write_str(why),
         }
     }
@@ -382,6 +428,17 @@ pub fn request_stop(
             }
             ClaimState::Unreadable(_) => continue,
         };
+        // A CENSUS VERB IS NEVER PROMISED A STOP: it reads no stop file.
+        if claim.kind == "census" {
+            if matches!(target, StopTarget::Run(run) if claim.run == run) {
+                return Err(StopRefusal::NotStoppable {
+                    lock,
+                    run: claim.run,
+                    mode: claim.mode.clone(),
+                });
+            }
+            continue;
+        }
         let matches = match target {
             StopTarget::Kind(kind) => claim.kind == kind,
             StopTarget::Run(run) => claim.run == run,

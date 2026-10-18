@@ -422,11 +422,14 @@ pub(crate) fn command_in(
         Ok(plan) => plan,
         Err(refused) => {
             let code = if refused.misuse() { MISUSED } else { FAILED };
-            let _ = writeln!(
-                out,
-                "GDFL IMPORT REFUSED: {}",
-                guard::plain(&refused.to_string())
-            );
+            // A HELD LOCK FOUND BEFORE THE SINK (IA-2 repair 1; FM-064) is
+            // said in the door's own words: the holder's kind, pid, start,
+            // run and by, exactly as a refusal at the lock says them.
+            let said = match &refused {
+                RunRefusal::RunBusy { .. } => guard::refused_finding(&store, &refused).to_string(),
+                other => other.to_string(),
+            };
+            let _ = writeln!(out, "GDFL IMPORT REFUSED: {}", guard::plain(&said));
             return code;
         }
     };

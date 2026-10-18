@@ -88,8 +88,11 @@
 //! * `expiry_not_in_census` -- the census holds no option of this underlying
 //!   and expiry.
 //! * the spot's own word (`no_spot_bar`, `no_spot_in_session`,
-//!   `no_spot_file`, `spot_unreadable`, `spot_order_broken`) -- no spot, no
-//!   money to count from.
+//!   `no_spot_file`, `spot_unreadable`, `spot_being_written`,
+//!   `spot_order_broken`) -- no spot, no money to count from. A read whose
+//!   every fault is a writer holding a month it needed (the underlying's, or
+//!   an option month a relisting check opened) answers the being-written 503
+//!   with `Retry-After` instead, and the page asks again (R3-08, NEW-21).
 //! * `no_strike_stored_by_then` -- the chain is empty at `t`.
 //! * `ladder_too_sparse` -- one strike only, or the ATM strike is more than
 //!   `step_local` from spot: the nearest stored strike is not the money
@@ -809,8 +812,11 @@ impl Months<'_> {
                     OpenRefusalKind::Invalid => return Err(refusal.message),
                     OpenRefusalKind::Absent => Err(Spot::NoFile),
                     OpenRefusalKind::Unreadable => {
+                        // A WRITER'S HOLD IS `spot_being_written`, never
+                        // `spot_unreadable` (R3-08 repair 2, NEW-21).
+                        let spot = Spot::unopened(&refusal.message);
                         faults.push(refusal.message);
-                        Err(Spot::Unreadable)
+                        Err(spot)
                     }
                 },
             };
@@ -1022,6 +1028,15 @@ fn answer(site: &Site, query: &str) -> Answered {
         render_instant(&mut chains, &asked, &strikes, &ladder, at, spot.as_ref());
     }
     chains.push(']');
+    // BEING WRITTEN, NEVER "SPOT UNREADABLE" (R3-08 repair 2, NEW-21): with
+    // the underlying's month held this answered 206, every instant
+    // `spot_unreadable` and ATM null, and no `Retry-After` — measured on a copy
+    // of gdfl NIFTY 1s 2019-11 held by `lockf(1)`. When every fault is a
+    // writer the answer is the one being-written 503, and /db's chain asks
+    // again; real damage beside one stays the 206 that names both.
+    if let Some((status, body)) = crate::detail::being_written_answer(&faults) {
+        return (status, json_headers(), body);
+    }
     let (lineage_state, lineage_records, lineage_unread, lineage_error) = match &lineage {
         Lineage::NotKept => ("not_kept", 0, 0, None),
         Lineage::Absent => ("absent", 0, 0, None),

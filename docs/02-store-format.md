@@ -4753,9 +4753,15 @@ run whose claim says `request=-` removes one a dead run left.
 **Path.** Beside the claim's lock: `imports/gdfl.stop` (v3) or
 `imports/gdfl.<kind>.stop` (v4). One line,
 `stop run=<id> requested=<unix_s> by=<api|cli|operator|shutdown>` and a
-newline, born at a staging name (`.stop.tmp`), synced, renamed and its
-directory synced **before** the asker is answered. A second stop of the same
-run leaves the first file as it is (the first asker is kept). A run reads it
+newline, born at a staging name of the asker's own (`.stop.<pid>-<n>.tmp`),
+synced, renamed and its directory synced **before** the asker is answered,
+each asker in turn under `imports/gdfl.journal.lock` (at most `LOCK_WAIT`, then
+`lock_stalled`): the file is read under the lock, and an asker that finds it
+naming its run writes nothing and is answered with that line, so every asker
+of the same run, however many at once, is answered with the one line the file
+holds (the first asker is kept, D-5884). What a rename replaces names no live
+run: a stop written after the live run took its lock, for a run that had
+already ended. A run reads it
 (one `metadata`, and the line only when it exists) before each file it takes
 and before each day; a file naming another run is not its stop. Removed at
 release, and by the next run that takes the lock when it names no live claim.

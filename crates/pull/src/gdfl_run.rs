@@ -1024,7 +1024,8 @@ impl core::fmt::Display for RunRefusal {
             ),
             Self::RunBusy { lock, holder } if holder.is_empty() => write!(
                 f,
-                "another process holds {lock}; its claim is being written"
+                "another process holds {lock} and no claim names it yet: a run or a census verb \
+                 is between taking it and writing its claim; ask again in a moment"
             ),
             Self::RunBusy { lock, holder } => write!(f, "{lock} is held: {holder}"),
             Self::RunLockRefused { lock, why } => write!(f, "{lock}: {why}"),
@@ -1123,7 +1124,9 @@ pub struct Plan {
 ///
 /// # Errors
 ///
-/// In order: [`Request::misuse`]'s refusal, [`RunRefusal::LogUnavailable`],
+/// In order: [`Request::misuse`]'s refusal, [`RunRefusal::LogUnavailable`]
+/// (or, when a live run holds a lock the request needs, [`RunRefusal::RunBusy`]
+/// naming its claim, read by a shared probe that takes nothing),
 /// [`RunRefusal::Unstamped`], then per kind [`RunRefusal::SourceUnset`] and
 /// [`RunRefusal::Scope`]. Nothing is written and no lock is taken on any of
 /// them.
@@ -1137,6 +1140,14 @@ pub fn plan(
         return Err(misuse);
     }
     if let LogState::Refused(why) = process.log {
+        // THE HOLDER BEFORE THE SINK (IA-2 repair 1; FM-064): a run logs in
+        // the directory its claim lock makes it alone in, so a second run
+        // of a held lock is refused the sink before any lock is tried. The
+        // lock is probed read-only and a live holder is the refusal's cause,
+        // named by its claim, `run_busy`: never `log_unavailable` alone.
+        if let Some(busy) = held_by_a_run(process.store_root, &request) {
+            return Err(busy);
+        }
         return Err(RunRefusal::LogUnavailable { why: why.clone() });
     }
     if let Some(why) = process.unstamped {
@@ -1167,6 +1178,31 @@ pub fn plan(
         request,
         store_root: process.store_root.to_path_buf(),
         kinds,
+    })
+}
+
+/// The live run holding a lock `request` would claim, as `run_busy` naming
+/// its claim: each kind's claim lock on the store's census layout probed
+/// shared and non-blocking (at most three probes, each released at once, a
+/// probe never makes a press busy, D-4849). `None` when the layout cannot
+/// be read or no such lock is held by a run whose claim is written.
+fn held_by_a_run(store: &Path, request: &Request) -> Option<RunRefusal> {
+    let layout = locks::layout_at(store).ok()?;
+    request.kinds.iter().find_map(|kind| {
+        let name = locks::claim_lock(kind.as_str(), layout);
+        if !store.join(&name).exists() {
+            return None;
+        }
+        match locks::probe_one(store, &name, 0) {
+            locks::LockState::Held {
+                lock,
+                claim: locks::ClaimState::Claim(claim),
+            } => Some(RunRefusal::RunBusy {
+                lock,
+                holder: claim.line().trim_end().to_owned(),
+            }),
+            _ => None,
+        }
     })
 }
 

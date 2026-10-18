@@ -240,3 +240,95 @@ fn a_log_directory_outside_the_run_directories_is_refused_at_start() {
     assert!(own.join("events.ndjson").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **A SECOND PRESS ON A HELD LOCK IS REFUSED NAMING THE HOLDER** (IA-2
+/// repair 1; FM-064, IA-GR-03), measured on the BINARY, two processes: this
+/// test holds a run's claim through the one authority
+/// (`pull::gdfl_run::claim_with`) and that run's log directory, as a live
+/// `gdfl-import` does. A second `cli gdfl-import` that needs the same lock
+/// (v4: the same kind; v3: any kind) finds the sink taken before it tries
+/// any lock, and is refused `run_busy` naming the holder's kind, pid, start,
+/// run and by, exit 1, never `log_unavailable` alone; it writes no journal,
+/// and the holder keeps its lock.
+#[test]
+fn a_second_press_on_a_held_lock_is_refused_naming_the_holder() {
+    for (layout, held, pressed, log) in [
+        ("v4", "options", "options", "options"),
+        ("v3", "options", "indices", "store"),
+    ] {
+        let (root, store, ts) = fixture(&format!("busy-{layout}"));
+        if layout == "v3" {
+            std::fs::remove_dir_all(store.join("manifest")).unwrap();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claim = pull::gdfl_run::locks::Claim {
+            run: 0,
+            mode: "import".to_owned(),
+            kind: held.to_owned(),
+            batch: String::new(),
+            source: "tickstore".to_owned(),
+            from: "2024-04-01".to_owned(),
+            to: "2024-04-05".to_owned(),
+            filter: "*".to_owned(),
+            verify: "off".to_owned(),
+            restate: false,
+            repair: "0".to_owned(),
+            workers: 1,
+            auto_resume: false,
+            pid: std::process::id(),
+            host: "-".to_owned(),
+            exe: "-".to_owned(),
+            by: "cli".to_owned(),
+            started: 0,
+            resumes: 0,
+            resume_day: "-".to_owned(),
+            legacy_ack: false,
+            unstamped: false,
+            request: "-".to_owned(),
+        };
+        let holder = pull::gdfl_run::claim_with(&store, claim, 0, None, now).unwrap();
+        let dir = store.join("logs").join("gdfl").join(log);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("events.lock"))
+            .unwrap();
+        sink.try_lock().unwrap();
+        let journal = store.join("imports").join("gdfl.journal");
+        let journal_before = std::fs::read(&journal).ok();
+
+        let run = import(pressed, &store, &ts).output().unwrap();
+        let said = text(&run);
+        assert_eq!(run.status.code(), Some(1), "{layout}: {said}");
+        let lock = holder.locks.claim_name().to_owned();
+        let named = format!(
+            "GDFL IMPORT REFUSED: run_busy: another {held} run holds {lock}: pid {} started {} \
+             (UNIX s), run {}, by cli",
+            std::process::id(),
+            holder.claim.started,
+            holder.run
+        );
+        assert!(said.contains(&named), "{layout}: {said}");
+        assert!(
+            !said.contains("REFUSED: log_unavailable"),
+            "{layout}: {said}"
+        );
+        assert_eq!(
+            std::fs::read(&journal).ok(),
+            journal_before,
+            "{layout}: no journal line"
+        );
+        assert!(
+            holder.locks.still_held(),
+            "{layout}: the holder keeps its lock"
+        );
+        drop(sink);
+        holder.release().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
