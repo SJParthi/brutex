@@ -1775,6 +1775,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "the exception every test module in this workspace takes: a test \
+              that cannot panic cannot fail."
+)]
 mod instrumentation {
     //! The structural work counter (FM-F001) and the state's bytes are what
     //! the bench reports: each is pinned to a count made by hand.
