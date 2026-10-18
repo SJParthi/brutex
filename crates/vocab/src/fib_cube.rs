@@ -2317,6 +2317,14 @@ pub const HIST_SUB_BINS_PER_POWER: u64 = 8;
 pub const MID_RANK_SCALE: u64 = 2;
 /// A pair is one long and one short setup (operator 16 Oct 17:11 IST).
 pub const PAIR_SIDES: u64 = 2;
+/// FIB-2's mover rank: the bits of one digit of its stable LSD radix sort
+/// (FM-F010, D-6323). The ranks are the same at any digit width; only the
+/// work per minute (passes against buckets) depends on it. Never a threshold.
+pub const RANK_RADIX_DIGIT_BITS: u64 = 8;
+/// FIB-2's histogram checkpoint body: the payload bits of one varint byte
+/// (FM-F013, D-6325), the high bit of each byte saying another follows. It
+/// sets the body's bytes, never a value. Never a threshold.
+pub const HIST_CHECKPOINT_GROUP_BITS: u64 = 7;
 
 /// THE ONE LEDGER of every number the FIB strategy path may type (operator
 /// 16 Oct 11:24 IST, narrowed by 17:15 IST item a; D-6309): the Winner Gate
@@ -2531,6 +2539,18 @@ pub const FIXED_NUMBERS: &[FixedNumber] = &[
         "D-6312",
     ),
     ("pair_sides", PAIR_SIDES, Category::Representation, "D-6312"),
+    (
+        "rank_radix_digit_bits",
+        RANK_RADIX_DIGIT_BITS,
+        Category::Representation,
+        "D-6323",
+    ),
+    (
+        "hist_checkpoint_group_bits",
+        HIST_CHECKPOINT_GROUP_BITS,
+        Category::Representation,
+        "D-6325",
+    ),
 ];
 
 /// The Winner Gate's clauses that carry no number of their own (17:15 IST
@@ -4584,7 +4604,8 @@ mod tests {
         );
     }
 
-    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_608, 16_035_483_323_784_157_129);
+    // Re-pinned by FIB-2 (D-6323, D-6325): two Representation rows appended.
+    const FIXED_NUMBERS_GOLDEN: (usize, u64) = (2_735, 15_552_432_544_502_829_085);
 
     #[test]
     fn the_literal_scanner_skips_comments_strings_chars_and_fields() {

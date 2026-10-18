@@ -269,7 +269,10 @@ fn pair_identity_changes_with_either_side_and_differs_from_both() {
     assert_eq!(pair.hex(), PAIR_GOLDEN);
 }
 
-const PAIR_GOLDEN: &str = "54ac18dc30df75baba2f98981f0da07b7a87f82f3cd60c47f839d4c1b6ad135a";
+/// Re-pinned by FIB-2 (D-6323, D-6325): the fixed-number ledger gained the
+/// radix digit width and the checkpoint varint group width, so its digest and
+/// every pair identity re-keyed.
+const PAIR_GOLDEN: &str = "1956186185fa61075de4abe4ae5a5bce20ee8b941138c8be0974092f6324283f";
 
 fn leaf(n: u8) -> [u8; OUT_LEN] {
     [n; OUT_LEN]
