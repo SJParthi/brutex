@@ -71512,6 +71512,312 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+### D-5170 — Volume is GDFL's, never Zerodha's minutes; decisions are taken on Zerodha minutes, GDFL only at the seconds level, and the per-stock-day factor converts at the fill boundary — 2026-10-16
+
+**Context** (DATA-1; hand-over FINDING 2, FINDING 3, FINDING 4 and the DATA
+FLAGS paragraph of step 0b2; deep check of 15 Oct, `data` claims and handover
+issues H7 and H8). Three stored views of one cash share disagree in ways that
+change any volume condition, any capacity figure and any cross-feed fill:
+Zerodha's `1min` volumes are short of Zerodha's own `1day` bar on most days of
+some months (and far above it on a few), Zerodha's history is
+corporate-action adjusted while GDFL's is raw, and from the closing-auction
+era Zerodha's minutes of many shares stop before 15:15. The numbers that first
+showed this came from an untracked scratch check over `/bars.json` that
+skipped `M&M` and `GVT&D` every month, turned every failure into "feed
+missing", wrote an invented factor 1.0 on days with no matched minute and
+dropped days one feed held. `docs/00-charter.md` §"Zerodha and GDFL cash feeds
+per stock-day" holds the measurements of its replacement (D-5172).
+
+**Three wordings, and the latest operator rule wins** (the hand-over's
+PRECEDENCE paragraph). The package said "the price basis for the intraday
+search is GDFL raw with Zerodha converted by the per-stock-day factor (test
+both, the run decides)". The operator's FEEDS BY LEVEL rule (16 Oct 08:45
+IST) settled that question the other way, and the design judge's follow-up
+wrote it with "2..60-minute candles". The operator's NOTHING TYPED rule (16
+Oct 17:15 IST, item 8) replaced that typed range. All three are recorded here;
+the decision is the last.
+
+**Decision.**
+
+1. **Zerodha minute volume is never used** for a volume condition, a volume
+   rank, a liquidity or capacity figure, or a fill's size. **GDFL's `1s`
+   volume is**, summed as stored (into a Zerodha minute, the GDFL seconds
+   inside it; a minute with no GDFL second has no volume value, never 0).
+   Zerodha's `1day` volume is a cross-check of GDFL's day, never a substitute
+   for it.
+2. **Decisions are taken on Zerodha 1-minute bars and on the candles folded
+   from them at the timeframes the search generates, with day bars as context
+   from earlier days; GDFL is used only at the seconds level (fills at the
+   worst price of each second, order flow); the per-stock-day factor converts
+   Zerodha-basis price levels into GDFL raw prices at the fill boundary**
+   (operator, 16 Oct 2026 17:15 IST, item 8). The earlier "test both price
+   bases" question is settled by this rule.
+3. **The conversion is exact.** The factor is a paisa PAIR, never a float
+   (D-5171 item 4), and `FactorPair::to_gdfl(level)` returns
+   `level × gdfl_close / zerodha_close` as an exact fraction: the consumer
+   rounds once, at its own grid (CLAUDE.md §7). A day with no factor has no
+   conversion: its refusal is named (`FactorRefusal`, D-5174), never 1.0.
+4. **Which corporate action explains a factor is UNVERIFIED.** An `ex_date`
+   row is `yes:unsourced:<basis>` (D-5177) until the dated corporate-action
+   rows of R4-26 are merged and a row confirms it; the factor is a measurement
+   of the two feeds, not a claim about the action.
+
+**Rejected.** Zerodha minute volume where GDFL has no second (it is the series
+measured short); one factor per month (wrong across an ex-date); converting
+GDFL onto Zerodha's adjusted basis (the adjustment changes whenever a later
+corporate action happens, so every stored result would drift with it); a
+second search on GDFL-raw decision candles (settled by the operator); a float
+ratio as the factor (a converted level would be rounded twice).
+
+### D-5171 — The feed reconcile's rules, every number generated from the data (operator 16 Oct 2026 17:15 IST, "nothing typed") — 2026-10-16
+
+The first version of these rules (a 1% threshold on the minute sum, "far
+above" the day bar, a 360-minute session from a typed date, a median ratio
+with a spread test) is superseded by the operator's rule of 17:15 IST and is
+recorded only as history. Every rule below reads the stored bars of the
+share's own days; nothing is a constant chosen here.
+
+1. **Grid.** Each feed's grid `s` for a series-month is the gcd of the
+   differences between its distinct paisa prints so far, updated per bar; a
+   minute carries the grid as it stood when it was printed, so no later bar
+   decides an earlier minute (CLAUDE.md §3 rule 7). Below two distinct prints
+   the operator's rule says "use the exchange tick, labelled": **no exchange
+   tick size is recorded in `docs/00-charter.md`**, so such a minute is counted
+   `grid_unknown_minutes` and admits no factor. A typed 5 paisa would be the
+   invention §3 rule 1 forbids.
+2. **Matched minute.** A Zerodha `1min` bar stamped on its minute, and at
+   least one GDFL `1s` bar in `[HH:MM:00 + L, HH:MM+1:00 + L)` IST, where `L`
+   is the day's APPLIED lag (D-5175). The GDFL minute close is the close of
+   the last stored second in that window, left-labelled like Zerodha's
+   minute. A minute with no GDFL second is unmatched.
+3. **Allowance.** A matched minute (Zerodha close `z`, GDFL close `g`) admits
+   every factor in `[(2z − s_z − 2t)/(2g + s_g), (2z + s_z)/(2g − s_g)]`,
+   with `t` = 1 paisa only where `vendor_truncated` is PROVEN for the series:
+   `pull::daycheck` proves it for a Zerodha day bar against its own minutes,
+   never for a minute series, so `t` = 0 here. Every comparison is an `i128`
+   cross-multiplication. A minute with `2g ≤ s_g` has no upper bound and
+   admits nothing (`interval_unbounded_minutes`).
+4. **Factor.** The exact paisa pair `(z, g)` of the matched minute whose ratio
+   is the LOWER median of the day's matched minutes (ratios ordered by
+   cross-multiplication, ties by minute), plus the pairs of the smallest and
+   the largest ratio. Empty — never 1.0 — when no minute matched.
+5. **`factor_not_constant`**: the day's running intersection of allowance
+   intervals becomes empty. The minute that emptied it (`emptied_at`), its
+   pair and the pair holding the opposing bound are printed. Such a day keeps
+   its median pair in the row and the reader refuses it by name.
+6. **`adjusted`**: 1 lies outside the allowance interval of the median pair.
+7. **`ex_date`**: two consecutive matched days (each with a non-empty
+   intersection) have disjoint intervals, across a month boundary through the
+   carry line. `yes:unsourced` (no R4-26 row is merged), `no`, or
+   `unchecked:<why>` when no earlier interval is held.
+8. **Zerodha minutes short.** `short = (day bar − minute sum) − explained`;
+   `explained` = the GDFL volume in seconds outside the continuous-phase
+   minutes Zerodha printed (pre-open, every phase `pull::calendar::phase_at`
+   does not call continuous, and minutes Zerodha omitted), at the applied lag.
+   Always reported in shares and as a pair over the day bar; on an adjusted
+   day also on Zerodha's basis (`explained × g / z`, half up; Zerodha's own
+   adjustment rule is UNVERIFIED). The FLAG is set beyond the share's ENV-1
+   recurrence envelope (PREC-3), pooled over swept shares: **ENV-1 is not on
+   `feat/db-fix`**, so every computed day says `unjudged:no_env1_envelope` and
+   no flag is set. Without GDFL seconds the day is `not_checked:no_gdfl_seconds`.
+   Report only.
+9. **`zerodha_minute_sum_exceeds_day_bar`**: the minute sum exceeds the day
+   bar by more than the rounding allowance — 0 shares on an unadjusted day,
+   `ceil((printed minutes + 1) / 2)` on an adjusted one, and the wider room,
+   labelled `unknown`, when the day has no factor. Consecutive flagged days
+   are printed as `# span` lines, carried across months while open. PIIND
+   2018-09 to 2019-08 is the proof expectation (charter §"Zerodha and GDFL
+   cash feeds per stock-day").
+10. **`zerodha_session_cut`** (with the cut minute): GDFL trades in a
+    continuous-phase minute after the day's last Zerodha minute; the cut
+    minute is the first continuous minute after it, and each share's onset is
+    printed once (`# onset`). An eligible share's 15:15-15:29 is its closing
+    auction, never a gap: **per-share eligibility is not joined here** (the
+    dated flag in `pull::cash_session_cache` is keyed by symbol AND ISIN, and
+    a share's month holds no ISIN), so those minutes are `Unverified` for
+    every share, never counted as a gap, and their GDFL volume is printed
+    (`gdfl_unverified_phase_volume`). A cut inside them is therefore not seen
+    for an ineligible share: a stated limit, not a guess. NOT_CHECKED without
+    GDFL seconds or without an applied lag.
+11. **Data faults are counted, never misfiled**: an off-grid Zerodha minute
+    (`zerodha_unaligned_minutes`), a second minute in one slot
+    (`zerodha_duplicate_minutes`), a second day bar on one IST day
+    (`zerodha_duplicate_day_bar`, the first is used), a non-positive price,
+    bars outside the month, GDFL seconds off the second.
+12. **Percentages keep full precision** (CLAUDE.md §7): the shortest decimal
+    that round-trips the `f64`. Every price and pair is integer paisa.
+
+**Rejected.** Every typed threshold of the first version (above); a float
+median ratio and a spread test on it; a typed exchange tick.
+
+### D-5172 — `cli feed-reconcile`: a store reader that writes a NEW version file per run, never replacing one; workers and span generated, not typed — 2026-10-16
+
+1. **Reads the store directly** through `store::file::BarFile::open_existing`
+   (the served generation, every sealed block checked), never over HTTP and
+   never through `:8080`. A share is named by its stored directory, so a name
+   with `&` is read by its own key.
+2. **One CSV per month per run**: `feed-reconcile-YYYY-MM.v<N>.csv`, `N` the
+   first version not already present. First line `# brutex feed-reconcile 2`
+   (a new column or rule is a new number; version 1, the float ratio, is never
+   read as version 2), then the month, store, commit, symbols and the previous
+   month's file it carried from, the rules, the column line, one row per
+   stock-day, the carry lines, the spans, the onsets and the summary. Written
+   whole to a temporary, `fsync`ed, linked to its name with `hard_link` (which
+   refuses rather than replaces), the temporary removed and the directory
+   synced: a reader never sees half a file and a re-run never overwrites one.
+   The bytes do not depend on the worker count, the time or the version.
+3. **Carry, so a new month computes only itself.** `# carry,<symbol>,lags=…,
+   interval=…,exceed_open=…,cut_onset=…` and `# pooled,lags=…` hand the next
+   month each share's lag history, last interval, open span and session-cut
+   onset; a month reads only the previous month's newest version file. Absent,
+   the header says `none:no_file_for_<month>`. **A full run therefore goes
+   month by month, oldest first.**
+4. **One summary line per run** is appended to `feed-reconcile.summary.log`
+   beside the files, with the per-share-month and per-bar timings, which the
+   CSV never carries.
+5. **Workers are generated** (operator 17:15 IST, item 5): the ceiling is
+   `min(available_parallelism, share-months)`; a run starts at 1 and doubles
+   while the throughput (bars per microsecond) of the last full round still
+   rises. No memory probe: each worker's buffers are sized once from the
+   month's shape (31 × 1,440 minute slots, 86,400 second slots). `--workers N`
+   overrides. Results are put back in share order, so the bytes are identical
+   at any count.
+6. **One telemetry event per share-month** (`cli.feed_reconcile`, Error when a
+   month could not be read) **and one per run**, emitted from the coordinating
+   thread; the per-bar loop calls nothing (gate 17's shape).
+7. **A store writer by name** (`cli::store_write::WRITERS`): its files are
+   audit records `/ingest` is to serve and their proposed home is the store's
+   audit area (`<store>/audit/feed-reconcile/`), so an unstamped build is
+   refused and a store whose `bars` is a link is refused. `factor` (reads a
+   version file) and `months` (reads the census) are its read-only forms;
+   the rule `writes_the_store` states is "writes when `--out` is given",
+   which the month run requires and neither read-only form takes, and which
+   is a shape gate 30 reads (`arguments.contains(&"--out")`).
+8. **The span is the census's** (operator 17:15 IST, item 6): `cli
+   feed-reconcile months` lists every month in which any NSE cash share holds
+   a GDFL `1s`, Zerodha `1min` or Zerodha `1day` month of at least one row, as
+   `pull::ingest::census_store::read_vendor` records it, oldest first. A census
+   that will not load refuses; no directory walk stands in for it. Folding
+   each sealed stock-day into a day segment at import time is the
+   ingest-automation package's hook and is not built here.
+9. **The full run is the main session's, after the merge**, because its
+   output is to sit in the store's audit area: the command is in
+   `docs/06-limits.md` §"Feed reconcile". It writes no bar, sidecar or census
+   byte. Serving the files on `/ingest` is a separate change.
+10. Exit 0 when every share-month was read; 1 when any was not (the file is
+    still written, those rows say `read_failed:<file>:<why>`); 2 for a misuse.
+11. **A share is a key exactly as stored.** `--symbols` and every listed
+    directory must equal its own `Symbol` form: a word the constructor would
+    upper-case is refused by name with the key it would have meant.
+
+### D-5173 — Every stock-day either feed holds is a row; an unreadable month is `read_failed` by name; no factor without a matched minute — 2026-10-16
+
+The four defects handover H7 named in the scratch check, each closed by a
+rule and a test:
+
+1. `M&M`, `GVT&D`, `ARE&M`, `M&MFIN` are read by their stored keys
+   (`names_with_an_ampersand_are_read_by_their_stored_key`).
+2. A month file that exists and cannot be read makes every day the other
+   files hold `read_failed:<file>:<why>` with no half-read number, and a share
+   with no readable day still has one row (`day` = `-`); a directory that is
+   no share key is a row `read_failed:not_a_share_key:<why>`. Never "feed
+   missing" (`a_month_that_cannot_be_read_is_read_failed_never_absent`,
+   `a_share_with_no_readable_day_still_has_its_failure_row`).
+3. A day with no matched minute, or no applied lag, has an EMPTY factor
+   (`every_status_comes_from_its_own_shape_and_no_factor_is_invented`).
+4. A day one feed holds is a row: `gdfl_only` or `zerodha_only`; both feeds
+   with no matched minute is `no_overlap`; both feeds and no lag yet is
+   `not_aligned` (same test).
+
+### D-5174 — One authority for the per-stock-day factor: `cli::feed_reconcile::FactorIndex`, read by FIB-10 and OF-2, never recomputed — 2026-10-16
+
+1. `FactorIndex::load(dir, month)` reads the NEWEST version file of the month
+   once into a fixed-stride table (share slot × 31 days of the month).
+   `factor_of(symbol, day)` is one hash of the symbol and one multiply-add:
+   O(1) per lookup, measured in `docs/06-limits.md` §"Feed reconcile".
+2. It answers `FactorPair` — the median, min and max paisa pairs, the day's
+   intersected interval and the lag it was matched at — or a `FactorRefusal`
+   by name: `NoOverlap`, `FactorNotConstant { minute, pair }` (the day's
+   whole `FactorPair`, both intersections included, D-5176), `ReadFailed`,
+   `NotChecked` (no row, another month, or a share the file does not hold),
+   `NotAligned` and `OneFeed`. No refusal is ever answered as a factor of 1.
+3. `file_digest(dir, month)` names the newest file and the BLAKE3 of its
+   bytes, so a run that converted levels names exactly which factors it used
+   (CLAUDE.md §3 rule 3).
+4. An older format (version 1) is refused by name, never read as version 2.
+5. `cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]`
+   answers one lookup from the shell and times `N` of them.
+
+### D-5175 — The Zerodha-to-GDFL clock alignment has one owner: the feed reconcile's lag scan — 2026-10-16
+
+1. **Measured per stock-day, every lag from −59 to +59 s** (operator 17:15
+   IST, item 7): at each lag, the Zerodha minutes whose close EQUALS the GDFL
+   close at that lag converted by that lag's own lower-median ratio (the ratio
+   lies in the minute's allowance interval). Lag 0's share, the best lag (ties
+   to the smallest |L|, then the negative) and its share are stored, over the
+   Zerodha minutes with a known grid.
+2. **The lag APPLIED on day D comes only from earlier days**: the share's most
+   frequent earlier best lag (a 119-bin count, carried across months); else
+   every share's earlier days for the same feed pair (GDFL `1s` against
+   Zerodha `1min`, the one pair this verb reads), labelled `pooled`; else the
+   day is `not_aligned` and has no factor. Day D's own best lag is reported,
+   never applied on D (CLAUDE.md §3 rule 7).
+3. **Replaced, not adopted**: the judge's "the smallest window holding 99% of
+   the best lags measured on the 2025-03 sample" was one sample's number fixed
+   for every month; 2025-03 is now only the proof month.
+4. OF-2 and the Fib run read the stored lag and never recompute it.
+
+### D-5176 — The range intersection: a labelled companion to `factor_not_constant`, because the two feeds' minute closes are often different trades of one minute — 2026-10-18
+
+1. **Measured first** (READ-ONLY run of `cli feed-reconcile 2025-03` over the
+   real store, 18 Oct 2026, `state/fix/round2/data1-real-20261018/pre/`): the
+   operator's close rule (D-5171 item 5) emptied the running intersection on
+   3,948 of 3,952 matched stock-days, and on 3,951 of 3,952 in 2025-02. A
+   typical unadjusted day (an unadjusted share, median pair exactly 1/1) had
+   lag-0 equality on 252 of 375 minutes: one minute in three closes on a
+   different trade in each feed (a different last trade before the minute
+   edge), which empties a close intersection whose basis never moved.
+2. **Kept, not replaced**: `factor_not_constant` stays the operator's rule,
+   computed and printed exactly as written. Beside it, the same running
+   intersection is taken over each matched minute's RANGES,
+   `[(2·z_low − s_z)/(2·g_high + s_g), (2·z_high + s_z)/(2·g_low − s_g)]`,
+   every factor for which the two ranges, each widened by half its own grid
+   step, can hold one trade. It is flagged `range_not_constant` when it
+   empties, with `range_lo`, `range_hi` and `range_emptied_at` in the row.
+   A minute's close interval lies inside its range interval, so the range
+   intersection contains the close intersection whenever that is non-empty.
+3. **What it separates**: different trades of one minute share the minute's
+   range and do not empty it; a minute on another basis (a split, an
+   adjustment applied mid-day, a fault) still does
+   (`a_minute_from_another_basis_empties_the_interval_and_is_named`,
+   `a_different_trade_of_one_minute_empties_the_closes_and_not_the_ranges`).
+4. **The reader does not choose for its consumer**: `FactorIndex::factor_of`
+   still refuses a `factor_not_constant` day as `FactorNotConstant`, and the
+   refusal carries the day's whole `FactorPair` (median, min and max pairs,
+   both intersections, the lag), so FIB-10 and OF-2 decide by their own
+   stated rule without recomputing (D-5174).
+
+### D-5177 — An ex-date is judged on each day's close intersection, or where that emptied, its range intersection — 2026-10-18
+
+1. **The defect**: D-5171 item 7 compared consecutive matched days' running
+   CLOSE intersections. By D-5176 item 1 that intersection is empty on almost
+   every real matched day, and a day with no interval was skipped, so on the
+   real store `ex_date` could not fire: 0 ex-date days in 2025-02 and 2025-03
+   across 208 shares, by construction rather than by measurement.
+2. **The rule now**: a day's interval for the ex-date is its close
+   intersection when non-empty, else its range intersection (D-5176), and the
+   `ex_date` column names which (`yes:unsourced:close|range`,
+   `no:close|range`, `unchecked:<why>:close|range`). Both are sets of factors
+   that the whole day admits, so two consecutive matched days whose sets are
+   disjoint admit no one factor between them. A day whose two intersections
+   both emptied is `unchecked:no_interval`, is judged against nothing, and
+   hands nothing to the next day; the next day is compared with the last day
+   that had an interval (the carry). This supersedes D-5171 item 7's
+   "each with a non-empty intersection" and its `yes:unsourced` and `no`.
+3. **Still unsourced**: no corporate-action source is merged (R4-26), so every
+   ex-date is `unsourced`. Proof:
+   `an_ex_date_is_judged_on_the_ranges_where_the_closes_emptied`.
+
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 
 **Implemented by** GF-1 (`.github/gates_platform.rs`, the `macos` job of

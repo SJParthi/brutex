@@ -1364,6 +1364,9 @@ const ALLOW_SEARCH: Allow = &[
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
 const ALLOW_FLOAT: Allow = &[
+    // DATA-1 (D-5171 item 12): the percentage difference of two day volumes,
+    // a statistic at full precision (CLAUDE.md section 7), never a price.
+    ("crates/cli/src/feed_reconcile.rs", 2),
     ("crates/api/src/ingest.rs", 1),
     ("crates/api/src/server.rs", 4),
     ("crates/api/src/optiongreeks.rs", 1),
@@ -1403,6 +1406,10 @@ const ALLOW_FLOAT: Allow = &[
 
 /// Rule 3. docs/07 law 2: pre-size every map.
 const ALLOW_UNSIZED: Allow = &[
+    // DATA-1: the carry of a month with no previous file is empty and never
+    // inserted into; the parsed carry and the factor index are pre-sized
+    // from the file's own carry lines.
+    ("crates/cli/src/feed_reconcile.rs", 1),
     ("crates/api/src/catalog.rs", 1),
     ("crates/pull/src/manifest.rs", 1),
     ("crates/api/src/autopilot.rs", 1),
@@ -1494,6 +1501,10 @@ const ALLOW_UNSIZED: Allow = &[
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
 const ALLOW_SORT: Allow = &[
+    // DATA-1: the lower median over at most MINUTES_PER_DAY (1,440) matched
+    // minutes of one stock-day, and per-run timing percentiles over the
+    // run's share-months and its `--repeat` lookups (docs/06-limits.md).
+    ("crates/cli/src/feed_reconcile.rs", 4),
     ("crates/runner/src/audit.rs", 2),
     ("crates/runner/src/bootstrap.rs", 4),
     ("crates/runner/src/bootstrap_family_pass.rs", 1),
@@ -1888,7 +1899,9 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/logs.rs", 5),
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
-    ("crates/cli/src/store_write.rs", 4),
+    // 4 -> 5, DATA-1 (D-5172): `feed-reconcile` writes only with `--out`, a
+    // probe of the verb's own argument slice, bounded by its argument count.
+    ("crates/cli/src/store_write.rs", 5),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),

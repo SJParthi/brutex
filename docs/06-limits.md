@@ -19391,6 +19391,93 @@ always was.
 |---|---|---|---|---|
 | L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
 | L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
+## Feed reconcile: `cli feed-reconcile` — D-5172 to D-5177, measured 18 October 2026
+
+What is constant, what is bounded, and what was measured. Every figure below
+is wall clock of the format-2 verb (commit `dedcb99a`, release build) over the
+operator's store, READ-ONLY, `--workers 4`, 18 Oct 2026: the whole span
+2018-01 to 2026-09 (105 months, 35,385 share-months, every one with its
+"share-month reconciled" event), each month after the one before it. The host
+was shared with other agents' builds and the API, so a tail can be the host's.
+
+- **Per bar: constant.** A GDFL second, a Zerodha minute or a Zerodha day bar
+  is one positional record read (`BarFile::read_record`) and one write into a
+  slot addressed by the bar's own offset from the month's IST start (a GDFL
+  second's slot is tagged with its day, so no slot is cleared per day): no
+  search, no map, no allocation. Per bar, over the 16,922 share-months of at
+  least 100,000 bars: **p50 296 ns, p99 544 ns, max 6,113 ns**.
+- **Per stock-day: a fixed walk, bounded by the clock, not by the bars.** Each
+  day both feeds hold costs one walk of 86,400 second slots
+  (`Seconds::fill`), the 1,440-minute matching at the applied lag with at most
+  60 seconds a minute, the lag scan of 119 lags × 1,440 minutes (each window's
+  last second found in O(1) from the filled slots) with one selection over at
+  most 1,440 ratios per lag, the 1,440-minute unverified-phase sum and the
+  session-cut walk. Per matched stock-day (the share-month's time over its
+  days, bars included): **p50 2.6 ms, p99 4.2 ms, max 38.3 ms** (n = 18,706
+  share-months with a matched day). A day with few bars costs about the same
+  as a full one: this is the fixed cost the operator's O(1) rule names, and it
+  does not grow with the store.
+- **Per share-month: the fixed walks plus its bars.** Two clears of 44,640
+  minute slots and the month's days: **p50 44.2 ms, p99 85.1 ms, max 803.6 ms**
+  over the 30,895 share-months that hold a bar (p50 109,032 bars, max 493,636).
+  The 14 share-months above 150 ms are host stalls, not data: four
+  consecutive shares of 2025-06 (HINDPETRO to HONAUT, 11,670 to 171,127 bars)
+  each took about 0.8 s at the same moment. A share-month with no bar costs a
+  listing entry and one event. Per bar over every share-month that holds one
+  is p50 289 ns, p99 1,243 ns, and max 922 µs for a share-month of one day bar,
+  which is the fixed share-month cost divided by one.
+- **Per month: generated workers, bounded.** The workers start at 1 and double
+  while the last full round's throughput rises, up to
+  `min(available_parallelism, share-months)`; `--workers` overrides, and the
+  bytes are the same at any count (FR-14, FR-15). A share whose first day has
+  no lag of its own is read a second time once the pooled lag of the earlier
+  days is known, so a month reads at most twice its bars (in 2019-02, 2025-02
+  and 2026-07, whose previous month had no file, 172 to 208 shares were read
+  twice). **A whole month: p50 3.0 s, max 4.4 s; the 105 months in 302 s** on
+  4 workers.
+- **Per run: bounded by name.** Listing is one directory read per feed (337
+  share directories). Publishing lists the output directory once to find the
+  newest version, so it costs one entry per file already there (one version
+  file per month and re-run); a race to one name takes the next free number,
+  never replacing a file. The whole file is built in memory before it is
+  written: 0.7 to 2.3 MB a month for 3,231 to 7,160 rows, maximum resident
+  set 13.6 to 35.3 MB at 4 workers.
+- **The factor reader: O(1) per lookup.** `FactorIndex::load` is one pass over
+  a version file; `factor_of` is one hash of the share's name and one
+  fixed-stride index (share slot × day of month). Measured with
+  `cli feed-reconcile factor SYMBOL DAY --dir DIR --repeat 1000` on five
+  stock-days (M&M, RELIANCE, TECHM, NMDC, GVT&D; answers and refusals):
+  **p50 41 to 42 ns, p99 42 to 84 ns, max 208 to 1,583 ns** (n = 1,000 each,
+  one thread, sequential).
+- **Disk: measured.** The 105 version files of the full span hold 194,924,111
+  bytes (0.7 to 2.3 MB a month); each re-run adds a NEW version of about the
+  same size, never a replacement, and nothing is ever removed by the verb.
+- **The full run on the store (D-5172 item 9), for the main session after
+  the merge.** It reads bars only and writes only under its `--out`, which
+  must already exist (the verb never creates it), oldest month first because
+  each month carries from the one before:
+
+  ```text
+  mkdir <store>/audit/feed-reconcile
+  cli feed-reconcile months | grep -E '^[0-9]{4}-[0-9]{2}$' |
+    while read -r m; do cli feed-reconcile "$m" --out <store>/audit/feed-reconcile || break; done
+  ```
+
+  Measured as a READ-ONLY rehearsal into a scratch directory: 105 months in
+  302 s on 4 workers (one month p50 3.0 s), 194,924,111 bytes written, no
+  `read_failed` row. Generated workers on the store may use more cores; that
+  count is not measured.
+- **Gate 11.** `crates/cli/src/feed_reconcile.rs` is allowlisted for two
+  floats (two percentages of volumes, statistics at full precision), one
+  unsized map (the empty carry of a month with no previous file, never
+  inserted into) and four bounded sorts (the lower median over at most 1,440
+  ratios, and per-run timing percentiles). `crates/cli/src/store_write.rs`
+  rose from 4 to 5 membership probes: `feed-reconcile` writes only with
+  `--out`, a probe of the verb's own argument slice.
+- **NOT measured:** a cold page cache (the runs read months the host had
+  cached or not as it happened), more than 4 workers on the real store (the
+  read-only rule of this run), and the generated worker count on the real
+  store.
 
 ## The GDFL Dropbox fetch and the shared disk projection — D-4986, D-4987, 17 October 2026
 

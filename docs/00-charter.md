@@ -1288,6 +1288,119 @@ record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
 
+## Zerodha and GDFL cash feeds per stock-day — measured 2026-10-18 (D-5170 to D-5177)
+
+`CLAUDE.md` §3 rule 1 requires every vendor claim the code applies to trace to
+a source recorded here. D-5170 applies four: Zerodha's history is
+corporate-action adjusted and GDFL's is raw, Zerodha's minute volume is not its
+own day bar's, Zerodha's minutes of the closing-auction era stop at 15:14, and
+some Zerodha minute volume disagrees with its day bar beyond any rounding.
+**No row of this section is a vendor statement, and no vendor row is quoted**:
+each figure is an aggregate `cli feed-reconcile` (format 2,
+`crates/cli/src/feed_reconcile.rs`, commit `dedcb99a`) computed on 18 Oct 2026
+(IST), read-only, from the operator's store as it stood that day
+(`--workers 4`; the bars were opened through the read door and the version
+files, summary log and events went to a scratch directory outside the store;
+each month was run after the month before it, so every applied lag came from
+earlier days). Anyone with that store can repeat each figure with the command
+in D-5172. Where the store is mounted is machine layout and is not recorded.
+
+| Month | Shares listed (both feeds / GDFL only / Zerodha only / no day) | Stock-days: matched / gdfl_only / zerodha_only / no_overlap / not_aligned / read_failed | Adjusted shares (days) | `ex_date` days (close / range basis) | `factor_not_constant` days | `range_not_constant` days | Minute sum above the day bar beyond the allowance | Matched days of 360 Zerodha minutes |
+|---|---|---|---|---|---|---|---|---|
+| 2019-03 | 337 (172 / 115 / 5 / 45) | 3,268 / 2,185 / 84 / 0 / 0 / 0 | 91 (1,720) | 103 (3 / 100) | 3,135 | 267 | 35 | 7 |
+| 2025-03 | 337 (208 / 104 / 0 / 25) | 3,952 / 1,976 / 0 / 0 / 0 / 0 | 49 (931) | 1 (0 / 1) | 3,948 | 27 | 8 | 0 |
+| 2026-08 | 337 (208 / 100 / 0 / 29) | 4,368 / 2,094 / 0 / 0 / 0 / 0 | 2 (14) | 2 (0 / 2) | 4,366 | 1 | 0 | 4,366 |
+
+What the code relies on, and what is not known:
+
+- **Zerodha adjusted, GDFL raw — prices and volumes.** On an unadjusted
+  matched day the median pair is exactly `n/n`. On an adjusted day Zerodha's
+  volumes are adjusted too, and not always by the price factor: TATASTEEL on
+  2019-03-01 has the median pair 4583/50485 (a price ratio of 1 to 11.02) and
+  day volumes of 6,670,866 (GDFL) and 66,725,690 (Zerodha), a volume ratio of
+  10.00. So `gdfl_vs_day_pct` compares two bases on an adjusted day
+  (|difference| p50 0.12 / 0.022 / 0.031%, p99 91.1 / 80.0 / 4.96% over the
+  three months' matched days), the short is printed on both bases, and the
+  conversion by `g/z` is only as good as Zerodha's own rule, which is
+  UNVERIFIED (D-5171 item 8).
+- **The two feeds' minute closes are often different trades of one minute.**
+  The share of a day's Zerodha minutes whose close equals the factor-converted
+  GDFL close at lag 0 is p50 0.928 / 0.816 / 0.872 (p1 0.17 / 0.59 / 0.74). The
+  operator's close intersection empties on 3,135, 3,948 and 4,366 matched days
+  (96%, 99.9%, 99.95%); the range intersection on 267, 27 and 1 (D-5176).
+- **The clock.** The best lag is 0 s on 2,881 / 2,749 / 3,395 matched days and
+  +1 s on 222 / 999 / 777, and lies in −5..+4 s in 2025-03 and −2..+4 s in
+  2026-08; 72 days of 2019-03 reach beyond ±4 s, often as a near tie
+  (ADANIPOWER 2019-03-20: +16 s at 371/375 against 367/375 at lag 0). The lag applied
+  (from earlier days only, D-5175) is +1 s on 22 / 1,698 / 147 days, +2 or +3 s
+  on 114 days of 2025-03, 0 otherwise.
+- **A level-dependent ratio on some adjusted shares, cause UNVERIFIED.** TECHM
+  in 2019-03: median pair 77250/83515 (0.92498) on 03-01 and 72650/78700
+  (0.92313) on 03-19 as the price fell. An adjustment with a subtractive term
+  (a dividend taken off before scaling) would do this; that is a hypothesis,
+  not a measurement. 2019-03's 103 `ex_date` days fall on 21 adjusted shares,
+  most of them repeatedly (TECHM 11, ASHOKLEY 10, UNIONBANK, LICHSGFIN and
+  BANKBARODA 9 each): a level-dependent ratio moves a day's interval as the
+  price moves, so `ex_date` marks two days no single factor explains, a
+  corporate action or a level move, and which is which is R4-26's to confirm
+  (WIPRO, NTPC and IDEA have one such day each in the month). A
+  consumer converting a level far from the median minute's price on such a
+  day has the day's min and max pairs to bound its error (D-5174).
+- **Factor jumps at a single day, cause UNVERIFIED**: NMDC 2025-03-21 (median
+  6514/6712), INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 (36770/38665 and
+  37165/39080 on 08-12 and 08-13, then 37270/37270: Zerodha's adjustment ends
+  at that day), BSE 2019-03-18 and 03-19 and MCX 2019-03-08 (close basis). No
+  circular was read.
+- **Zerodha's minute volume is not its day bar's.** The minute sum is below
+  the day bar on most matched days (p50 −0.21 / −0.35 / −2.17%, p1 −3.1 /
+  −16.1 / −39.0%). Above it beyond the rounding allowance on 35, 8 and 0 days:
+  PIIND on 9 days of 2019-03 (up to +324.6%), and RELIANCE on 39 consecutive
+  matched days from 2019-02-01, where the minute sum agrees with GDFL's day
+  converted by the day's factor (2019-03-01: 16,766,764 against 7,919,821 ×
+  122690/57925 = 16,774,844) and the day bar (16,622,986) is the short one.
+  The flag names the disagreement, not which series is wrong.
+- **The 15:14 stop.** In 2026-08, 4,366 of 4,368 matched days hold exactly 360
+  Zerodha minutes, none in `[15:15, 15:30)`, and GDFL holds volume in those
+  minutes on 4,309 of them (`gdfl_unverified_phase_volume`); 2026-07 holds 375
+  on every matched day. The auction rule itself is §9's (NSE/CMTR/73845).
+  `zerodha_session_cut` does not fire on these days because per-share
+  eligibility is not joined, so 15:15-15:29 is `Unverified`, never a gap
+  (D-5171 item 10).
+- **One-feed shares are renames or other instruments, cause UNVERIFIED.** The
+  2019-03 Zerodha-only shares are TATACONSUM, UNOMINDA, NAM-INDIA and GVT&D
+  (19 days each; their GDFL months of then are under other keys) and IRFC (8
+  days of minutes with no day bar). Joining keys across a rename is the dated
+  rename table's work (R4-21), not this verb's.
+- **Over the whole span** (2018-01 to 2026-09, 105 months, the same verb and
+  store, `state/fix/round2/data1-full-r5-20261018/`): no `read_failed` row.
+  PIIND carries `zerodha_minute_sum_exceeds_day_bar` in every month of
+  2018-09 to 2019-08, on 114 days (p50 +92.9%, max +11,409% over the day bar;
+  57 days above twice it), and on 156 days in all; RELIANCE on 543 days (on
+  2019-03-01, above, the day bar is the short series). `zerodha_session_cut`
+  is set on 182 days: 181 shares on 2021-02-24 at 15:45, the calendar's
+  220-bar day, where Zerodha's minutes stop before the resumed session GDFL
+  traded in, and KPITTECH on 2019-09-23, a day the calendar has not
+  measured. Causes UNVERIFIED. `ex_date` is set on 6,839 days of 118 shares:
+  6,399 of them on 20 shares that repeat it as their level moves (UNIONBANK
+  632, TECHM 629, BPCL 510), while 82 shares have at most three, the
+  single-day candidates R4-26 is to confirm.
+- **The untracked scratch check of 15 Oct, joined on (share, day)**
+  (`state/fix/round2/data1-real-r5-20261018/compare-vs-scratch.txt`): it wrote
+  3,249, 3,914 and 4,326 rows for the three months and the verb holds every
+  one of them (none missing). On every joined row the GDFL day volume, the
+  Zerodha day volume and the Zerodha minute sum are equal. Every other
+  difference is explained: matched minutes, factor and high-match share differ
+  only on rows whose applied lag is not 0 (the scratch matched at lag 0
+  always), except five factors of 2019-03 at lag 0 — four days with an even
+  count of matched minutes, where the scratch averaged the two middle ratios
+  and the verb keeps the lower median's exact pair (D-5171 item 4), and MCX
+  2019-03-01, whose first minutes of the month have no grid yet and admit no
+  factor (D-5171 item 1). What the verb adds (handover H7): M&M (19, 19 and 21
+  matched days) and GVT&D (19 Zerodha-only days in 2019-03, 19 and 21 matched
+  days later), every one-feed day (2,269, 1,976 and 2,094 rows), and no
+  invented factor (the scratch wrote 1.0 on a day with no matched minute; none
+  of its rows in these three months had one).
+
 ## Dropbox API v2: what the GDFL Dropbox fetch relies on (R4-07, E2E-01; D-4986)
 
 Read 16 Oct 2026 from Dropbox's own published API specification, the Stone

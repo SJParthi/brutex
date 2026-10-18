@@ -72,10 +72,16 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 13] = [
+///
+/// `feed-reconcile` is one (DATA-1, D-5172): it reads only bars, but its
+/// version files and summary log are audit records `/ingest` is to serve, and
+/// its proposed home is the store's audit area, so a run that wrote them must
+/// name the commit that computed them.
+pub(crate) const WRITERS: [&str; 14] = [
     "alerts",
     "census-migrate",
     "census-recount",
+    "feed-reconcile",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
@@ -93,8 +99,10 @@ pub(crate) const WRITERS: [&str; 13] = [
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
 /// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
 /// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, `zerodha-gaps`
-/// without `--apply`, and `zerodha-repair` without `--from-store` each state
-/// in their own module that they write nothing; `alerts` writes only as
+/// without `--apply`, `zerodha-repair` without `--from-store`, and
+/// `feed-reconcile` without `--out` (its `factor` and `months` forms, which
+/// take no `--out`: one reads a version file, the other the census) each
+/// state in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it.
 #[must_use]
@@ -103,6 +111,7 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
         "msum-build" | "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
+        "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
     }
@@ -269,6 +278,10 @@ mod tests {
             ("census-migrate", &["gdfl"], true),
             ("census-migrate", &["gdfl", "--seal"], true),
             ("census-recount", &["gdfl", "--from", "2019-11-14"], true),
+            ("feed-reconcile", &["2025-03", "--out", "audit"], true),
+            ("feed-reconcile", &["factor", "M&M", "2025-03-03"], false),
+            ("feed-reconcile", &["months"], false),
+            ("feed-reconcile", &["2025-03"], false),
             (
                 "gdfl-dayflags",
                 &["indices", "2019-11-01", "2019-11-30"],
@@ -382,10 +395,11 @@ mod tests {
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
         // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 13] = [
+        let writing: [(&str, &[&str]); 14] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
+            ("feed-reconcile", &["2025-03", "--out", "audit"]),
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),

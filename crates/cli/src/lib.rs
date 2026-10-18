@@ -70,6 +70,10 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli feed-reconcile`: Zerodha minutes vs Zerodha day bar vs GDFL seconds,
+/// per stock-day, read from the store directly, and the factor reader
+/// (DATA-1, D-5170..D-5175).
+pub mod feed_reconcile;
 /// `cli gdfl-dayflags`: the GDFL day ledger of days already imported (D-3335).
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
@@ -545,6 +549,17 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the span's census-refused gdfl import days
                                    with a `recounted` journal line each. DAY is
                                    YYYY-MM-DD (D-3316, D-3317).
+       cli feed-reconcile YYYY-MM --out DIR [--symbols A,B] [--workers N]
+                                   read-only over the bars: per stock-day held by
+                                   either feed, GDFL 1s volume vs Zerodha day bar
+                                   vs Zerodha minute sum, the exact paisa-pair
+                                   price factor (empty when no minute matched),
+                                   the clock lag, ex-date, volume and session
+                                   flags. Writes a NEW version file under DIR,
+                                   never replacing one (D-5170..D-5175).
+       cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]
+                                   one stock-day's factor from the newest
+                                   version file, O(1) per lookup, timed.
        cli gdfl-dayflags KIND FROM TO [--lineage]
                                    the GDFL day ledger (D-3335) of every day
                                    of the range the import journal records as
@@ -2787,6 +2802,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["series-identity", arguments @ ..] if !arguments.is_empty() => {
             series_identity::command(arguments, out)
         }
+        ["feed-reconcile", arguments @ ..] if !arguments.is_empty() => {
+            feed_reconcile::command(arguments, out)
+        }
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
@@ -2858,7 +2876,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 52] = [
+const COMMANDS: [&str; 53] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2880,6 +2898,7 @@ const COMMANDS: [&str; 52] = [
     "expression-backtest-stored",
     "expression-search-stored",
     "expression-stored",
+    "feed-reconcile",
     "fold-audit",
     "gdfl-dayflags",
     "gdfl-import",
