@@ -2475,6 +2475,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.prv".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.srt".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.sbar".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.sum".to_owned(),
         ],
     );
 
@@ -2491,8 +2492,10 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // and blocks self-checked, with no checksum sibling. The eleventh is the
     // sealed form of a closed month (D-4965): its head, directory entries,
     // table, provenance and frames each carry their own checksum, so it has no
-    // checksum sibling either.
-    assert_eq!(FileKind::ALL.len(), 11);
+    // checksum sibling either. The twelfth is the month summary (R3-06,
+    // D-4980): derived from the bars and self-checked by its CRC-32C.
+    assert_eq!(FileKind::ALL.len(), 12);
+    assert_eq!(FileKind::MonthSummary.checksums(), None);
     assert_eq!(FileKind::Provenance.checksums(), None);
     assert_eq!(FileKind::SortIndex.checksums(), None);
     assert_eq!(FileKind::SealedBars.checksums(), None);

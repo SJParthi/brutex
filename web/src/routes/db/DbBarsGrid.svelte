@@ -19,7 +19,7 @@
   import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, parseGoto, pageOfIndex, censusBehind, localComparator, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
   import { untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
-  import { contractKeyOf, askLineage, withdrawnWords, keyHref, lifeCutBySupersession, supersessionOf } from '$lib/db/lineage-labels.js';
+  import { contractKeyOf, fnoExchanges, askLineage, forgetLineage, withdrawnWords, keyHref, lifeCutBySupersession, supersessionOf } from '$lib/db/lineage-labels.js';
   import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
   import { feeds } from '$lib/feeds.svelte.js';
@@ -1443,24 +1443,44 @@
    * what the ledger says; the stranded line and the empty grid speak it.
    * `null` when no contract rung is stranded.
    *
+   * O(1) PER RECOMPUTE (AH-03 repair 1): the exchange the key needs is ONE
+   * probe of `exchanges`, a fold of the census held in its own `$derived` of
+   * `db.deco` alone — so it recomputes once per census load, and only once
+   * a contract rung has been stranded (a `$derived` is lazy). The first cut
+   * walked the whole census inside `key`, on every change of the rungs.
+   *
    * @param {any} db the page's shared state object (see the shell)
    */
   function withdrawnState(db) {
+    const exchanges = $derived(fnoExchanges(db.deco));
     const key = $derived.by(() => {
       if (!db.stranded.some((/** @type {any} */ s) => s.rung === 'Expiry' || s.rung === 'Side' || s.rung === 'Strike')) return null;
-      const k = contractKeyOf(db.deco, { sym: db.filter, expiry: db.expiry, strikes: db.strikePick, side: db.side });
+      const k = contractKeyOf(exchanges, { sym: db.filter, expiry: db.expiry, strikes: db.strikePick, side: db.side });
       // A key the census holds (another universe hides it) is a filter's
       // doing after all: one Map probe (`store.byInstrument`), never a scan.
       return k && !store.byInstrument?.has(k) ? k : null;
     });
     let got = $state.raw(/** @type {{ key: string, value: any } | null} */ (null));
+    /* "Read the lineage again" bumps this; a NEW CENSUS GENERATION OR EPOCH
+       forgets every remembered answer (a re-key or an import can land
+       between two). Not the rows' identity: the page swaps the facet-scoped
+       rows for the whole census once per open, and that is the same store —
+       measured on the shadow, keying on `exchanges` asked twice. */
+    let attempt = $state(0);
+    const censusId = $derived(`${store.feed ?? ''}\u0000${store.lag?.generation ?? ''}\u0000${store.lag?.epoch ?? ''}`);
+    /** @type {string | null} */
+    let seenCensus = null;
     $effect(() => {
       const k = key;
       const feed = feeds.active;
+      void attempt;
       if (!k || !feed) {
         got = null;
         return;
       }
+      const census = censusId;
+      if (seenCensus !== null && seenCensus !== census) forgetLineage();
+      seenCensus = census;
       let live = true;
       got = { key: k, value: null };
       void askLineage(feed, k).then((value) => {
@@ -1471,8 +1491,15 @@
       };
     });
     const withdrawn = $derived(key ? { key, ...withdrawnWords(key, got?.key === key ? got.value : null) } : null);
+    /** Ask the one lineage read again for the withdrawn key (its failed answer is already not kept). */
+    function retryLineage() {
+      const k = key;
+      if (k && feeds.active) forgetLineage(feeds.active, k);
+      attempt += 1;
+    }
     Object.defineProperties(db, {
-      withdrawn: { get: () => withdrawn }
+      withdrawn: { get: () => withdrawn },
+      retryLineage: { get: () => retryLineage }
     });
   }
 
@@ -1919,6 +1946,9 @@
                       {db.withdrawn.text}
                       {#if db.withdrawn.successor && keyHref(feeds.active ?? '', db.withdrawn.successor, db.timeframe)}
                         <a href={keyHref(feeds.active ?? '', db.withdrawn.successor, db.timeframe)}>Open {db.withdrawn.successor}</a>
+                      {/if}
+                      {#if db.withdrawn.state === 'failed'}
+                        <button class="btn ghost sm" type="button" onclick={db.retryLineage}>Read the lineage again</button>
                       {/if}
                     </p>
                   {/if}

@@ -846,7 +846,7 @@ export function holeBands(bars, secs, cells, halts, tradeDriven) {
   if (tradeDriven || secs >= 86_400) return { bands, more };
   // A DAY WHOSE RECORD SAYS TIME IS MISSING (a minute gap, a hole of 5 s or
   // more, a hole most shares share); a second with two values is not one
-  // (AH-03, D-5333).
+  // (AH-03, D-5834).
   const flagged = new Set(cells.filter((c) => isHoleDay(c)).map((c) => c.day));
   if (flagged.size === 0) return { bands, more };
   const least = secs < 60 ? SECOND_HOLE : 1;

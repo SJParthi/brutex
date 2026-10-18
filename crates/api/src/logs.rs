@@ -1613,10 +1613,33 @@ pub async fn note_request(
     // A `/db` READ KEEPS ITS SELECTION (WP-33c, DB-A42): the names it read
     // by, never the whole query, and only on a read route.
     let selection = is_db_read(&path).then(|| selection_of(request.uri().query().unwrap_or("")));
+    // EVERY ROUTE IS TIMED INTO ITS BUCKETS (R3-14, RA-014): its matched
+    // path, or the front end's one row. A request whose client leaves before
+    // the answer is dropped here with its `Pending`, which counts it
+    // cancelled.
+    let pending = crate::speed::Pending::start(
+        crate::speed::global().row(
+            request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .map_or(crate::speed::FRONT_END, axum::extract::MatchedPath::as_str),
+            crate::speed::Kind::Route,
+            crate::speed::now_ms(),
+        ),
+    );
     let started = std::time::Instant::now();
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    pending.finish(
+        micros,
+        crate::speed::Outcome::of(
+            status.as_u16(),
+            response
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER),
+        ),
+    );
     let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
 
     let level = request_level(status);
@@ -1658,6 +1681,15 @@ pub async fn note_request(
         // keeps; a served one also leaves the `debug` request line below.
         if status.is_client_error() {
             return response;
+        }
+        // A SERVED READ CARRIES ITS COUNT (AH-02, D-4975): it was counted at
+        // handler return, before a byte of its body went, so a body the
+        // connection then cuts for want of write progress is taken back out
+        // of `served` by [`note_cut`] through this mark.
+        if let Some(route) = DB_READS.iter().copied().find(|route| *route == path) {
+            response
+                .extensions_mut()
+                .insert(CountedServed { route, at_ms: now });
         }
     }
     if !admitted {
@@ -1753,7 +1785,9 @@ static AUDITED_ERRORS: std::sync::Mutex<Ration> =
 //   this console, 50 from another site, the rest counted and said.
 // * When a route's window closes, its next read first writes
 //   `api.access reads counted`: how many were served and refused in the
-//   window that closed, and the slowest.
+//   window that closed, and the slowest; and how many served reads had their
+//   body cut by the connection for want of write progress (`cut`, AH-02,
+//   D-4975), which are no longer in `served`.
 //
 // A target ending in `access` is audited (`telemetry::is_audited`), so all
 // three reach the durable stream and its index (feed, instrument, day, month):
@@ -1766,7 +1800,7 @@ static AUDITED_ERRORS: std::sync::Mutex<Ration> =
 
 /// The routes a `/db` page reads its data from: each read is counted and
 /// sampled into the durable stream (WP-33c, DB-A42).
-pub const DB_READS: [&str; 16] = [
+pub const DB_READS: [&str; 17] = [
     "/bars.json",
     "/bars/window.json",
     "/spot.json",
@@ -1783,6 +1817,8 @@ pub const DB_READS: [&str; 16] = [
     "/sources/bars.json",
     "/sources/day.json",
     "/census/facets.json",
+    // The Coverage grid's roll-up per month (R3-09).
+    "/census/rollup.json",
 ];
 
 /// The query names an access record keeps: the selection, never anything
@@ -1827,79 +1863,22 @@ fn selection_of(query: &str) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// One route's access window.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccessWindow {
-    /// When it opened, ms.
-    opened_ms: u64,
-    /// Reads served in it.
-    served: u64,
-    /// Reads refused in it.
-    refused: u64,
-    /// The slowest read in it, microseconds.
-    slowest: u64,
-    /// Whether its served read was written.
-    sampled: bool,
-}
+// THE PER-ROUTE MINUTE COUNTER LIVES IN `crate::speed` (R3-14): one module
+// keeps every per-route count, and this one decides what a read writes.
+use crate::speed::AccessWindows;
+// The mark a served read carries so a cut of its body can take it back
+// (AH-02, D-4975); named here because `server::HeadDeadline` reads it here.
+pub(crate) use crate::speed::CountedServed;
 
-/// What one read writes, decided by [`AccessWindows::account`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccessPlan {
-    /// The window that just closed, to be said first, when it held more than
-    /// the line it wrote.
-    pub(crate) closed: Option<AccessWindow>,
-    /// Whether this read is written whole.
-    pub(crate) sample: bool,
-}
-
-/// Every route's access window. O(1) a read: one probe of a table of at most
-/// [`DB_READS`] routes.
-///
-/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
-/// "Cost claims of the /db fix round that name no proof").
-#[derive(Debug, Default)]
-pub(crate) struct AccessWindows {
-    routes: std::collections::HashMap<&'static str, AccessWindow>,
-}
-
-impl AccessWindows {
-    /// Accounts one read of `route`, `refused` or served, taking `micros`, at
-    /// `now_ms`.
-    pub(crate) fn account(
-        &mut self,
-        route: &'static str,
-        refused: bool,
-        micros: u64,
-        now_ms: u64,
-    ) -> AccessPlan {
-        let window = self.routes.entry(route).or_insert(AccessWindow {
-            opened_ms: now_ms,
-            ..AccessWindow::default()
-        });
-        let mut plan = AccessPlan::default();
-        if now_ms.saturating_sub(window.opened_ms) >= ACCESS_WINDOW_MS || now_ms < window.opened_ms
-        {
-            let reads = window.served.saturating_add(window.refused);
-            if reads > u64::from(window.sampled) {
-                plan.closed = Some(*window);
-            }
-            *window = AccessWindow {
-                opened_ms: now_ms,
-                ..AccessWindow::default()
-            };
-        }
-        if refused {
-            window.refused = window.refused.saturating_add(1);
-        } else {
-            window.served = window.served.saturating_add(1);
-            if !window.sampled {
-                window.sampled = true;
-                plan.sample = true;
-            }
-        }
-        window.slowest = window.slowest.max(micros);
-        plan
-    }
+/// Takes one cut read back out of the access windows of this process:
+/// [`AccessWindows::cut`]. Called by the connection that cut it
+/// (`server::HeadDeadline`), once per cut (AH-02, D-4975).
+pub(crate) fn note_cut(counted: CountedServed) {
+    ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(AccessWindows::default)
+        .cut(counted);
 }
 
 /// The access windows of this process.
@@ -1931,6 +1910,7 @@ pub(crate) fn note_access(
                 .with("route", telemetry::Value::Str(route))
                 .with("served", telemetry::Value::Uint(closed.served))
                 .with("refused", telemetry::Value::Uint(closed.refused))
+                .with("cut", telemetry::Value::Uint(closed.cut))
                 .with("slowest_micros", telemetry::Value::Uint(closed.slowest))
                 .with("window_ms", telemetry::Value::Uint(ACCESS_WINDOW_MS)),
         );
@@ -4255,6 +4235,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::speed::AccessPlan;
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
     /// WIPE THE LOG. 100,000 failed requests inside one window write at most
@@ -6222,6 +6203,52 @@ mod tests {
         );
         assert!(keyed_page.contains("durable audit index"), "{keyed_page}");
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A CUT READ IS NOT COUNTED SERVED** (AH-02, D-4975): a read counted
+    /// at handler return whose body the connection then cut leaves `served`
+    /// for `cut` in the window that counted it; a cut of a read counted in a
+    /// window already said is counted where it happened and takes nothing
+    /// from that window's `served`; a lone sampled read that was cut is still
+    /// said; a route never counted is untouched.
+    #[test]
+    fn a_cut_read_leaves_served_for_cut_in_the_window_that_counted_it() {
+        let mut windows = AccessWindows::default();
+        let _ = windows.account("/store.json", false, 10, 1_000);
+        let _ = windows.account("/store.json", false, 10, 2_000);
+        windows.cut(CountedServed {
+            route: "/store.json",
+            at_ms: 2_000,
+        });
+        let next = windows.account("/store.json", false, 1, 1_000 + ACCESS_WINDOW_MS);
+        let closed = next.closed.expect("the closed window is said");
+        assert_eq!((closed.served, closed.refused, closed.cut), (1, 0, 1));
+        windows.cut(CountedServed {
+            route: "/store.json",
+            at_ms: 2_000,
+        });
+        let later = windows.account("/store.json", false, 1, 1_000 + 2 * ACCESS_WINDOW_MS);
+        let closed = later.closed.expect("a window holding a cut is said");
+        assert_eq!((closed.served, closed.refused, closed.cut), (1, 0, 1));
+
+        let mut lone = AccessWindows::default();
+        let _ = lone.account("/spot.json", false, 1, 5_000);
+        lone.cut(CountedServed {
+            route: "/spot.json",
+            at_ms: 5_000,
+        });
+        let said = lone
+            .account("/spot.json", false, 1, 5_000 + ACCESS_WINDOW_MS)
+            .closed
+            .expect("a cut sampled read is news");
+        assert_eq!((said.served, said.cut), (0, 1));
+
+        let mut none = AccessWindows::default();
+        none.cut(CountedServed {
+            route: "/bars.json",
+            at_ms: 1,
+        });
+        assert!(none.routes.is_empty(), "a route never counted is untouched");
     }
 
     /// **EVERY /db READ IS COUNTED, THE FIRST OF A WINDOW SAMPLED, AND A

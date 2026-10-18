@@ -167,8 +167,20 @@
      the flag is the feed's window rule, and the bar's own phase decides. */
   const feed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
   const soleKey = $derived(db.barQueryPlan?.keys.length === 1 ? db.barQueryPlan.keys[0] : null);
+  /* THE DAY'S CALENDAR CODE, where the page has read it (AH-03 repair 1):
+     the day band's cells, folded once per band load into a Map, so a day
+     the calendar codes otherwise than X (a special session, a halt) is not
+     flagged, and one it has not read says so. One probe per extreme. */
+  const codeByDay = $derived.by(() => {
+    /** @type {Map<string, string>} */
+    const m = new Map();
+    for (const c of db.dayBandCells ?? []) if (typeof c?.day === 'string' && typeof c?.code === 'string') m.set(c.day, c.code);
+    return m;
+  });
+  /** @param {string} iso */
+  const codeOf = (iso) => codeByDay.get(iso) ?? null;
   /** @param {any} x */
-  const casFlag = (x) => extremeAuctionFlag(x, feed, x.key ?? soleKey, tfSecs);
+  const casFlag = (x) => extremeAuctionFlag(x, feed, x.key ?? soleKey, tfSecs, codeOf);
 </script>
 
 {#if db.view === 'bars' && (db.barQueryPlan?.keys.length ?? 0) > 0}

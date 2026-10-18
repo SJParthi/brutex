@@ -1090,6 +1090,9 @@
           {#if lineage.successor && keyLink(db, lineage.successor)}
             <a href={keyLink(db, lineage.successor)}>Open {lineage.successor}</a>
           {/if}
+          {#if lineage.state === 'failed'}
+            <button class="btn ghost sm" type="button" onclick={db.retryLineage}>Read the lineage again</button>
+          {/if}
         </span>
       {/if}
       {#each db.stranded as st (st.rung)}

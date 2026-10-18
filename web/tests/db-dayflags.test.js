@@ -110,7 +110,7 @@ test('every vendor-fault and exchange-event field becomes its kind, in a fixed s
   assert.deepEqual(kindsOf(rec({ degraded: [{ kind: 'indices', says: 'ss_distinct 1' }] })), ['degraded']);
   assert.deepEqual(kindsOf(rec({ gaps: { missing: 14, why: 'vendor_empty' } })), ['gap']);
   // A HOLE OF SECONDS AND A TWO-VALUED SECOND ARE NOT MINUTE GAPS (AH-03,
-  // D-5333): DB-G96 asked that dual-value seconds be flagged, and they are,
+  // D-5834): DB-G96 asked that dual-value seconds be flagged, and they are,
   // under their own kind and word.
   assert.deepEqual(kindsOf(rec({ quality: { indices: { holes_5s: 1, dual_spread_s: 0 }, stocks: null } })), ['hole']);
   assert.deepEqual(kindsOf(rec({ quality: { indices: { holes_5s: 0, dual_spread_s: 3 }, stocks: null } })), ['dual'], 'DB-G96: dual-value seconds');

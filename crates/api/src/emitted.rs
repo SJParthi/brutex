@@ -234,7 +234,9 @@ struct Case {
 /// holding January and March only.
 /// 38 -> 39 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, the hand
 /// runs' own stop generation moving on the operator's Stop.
-const ROWS: usize = 39;
+/// 39 -> 40 at R4-06 (SEC-07): `api.settings secret-shaped value refused`, a
+/// credential-shaped setting refused by key, class and length.
+const ROWS: usize = 40;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -824,6 +826,30 @@ fn cases() -> Vec<Case> {
         }),
         mine: Box::new(|record| counts(record, "hand_epoch", 1)),
     });
+    // R4-06 (SEC-07): a credential-shaped setting refused, naming the key,
+    // the class and the length, never the value.
+    {
+        let root = fixture("emit-settings-secret");
+        cases.push(Case {
+            site: "settings_route.rs secret-shaped value refused",
+            target: "api.settings",
+            message: "secret-shaped value refused",
+            level: telemetry::Level::Warn,
+            drive: Box::new(move || {
+                let (status, answer) = crate::server::settings_route::change(
+                    &root,
+                    r#"{"expected":0,"changed_by":"a","reason":"b","set":{"open.order":"q7Zt0invented0token0value0x9K2mW"}}"#,
+                );
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{answer}");
+                assert_eq!(answer["code"], "secret_shaped", "{answer}");
+            }),
+            mine: Box::new(|record| {
+                says(record, "key", "open.order")
+                    && says(record, "class", "token")
+                    && counts(record, "bytes", 32)
+            }),
+        });
+    }
 
     // crates/api/src/audit_json.rs — two refusals a status code cannot carry.
     {
@@ -1873,7 +1899,21 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open
     // is not known` (DB-B34), the scan's third answer, whose site is in
     // `pullrun` and is read back by the same test.
-    const REACHED_IN_SERVER_TESTS: usize = 27;
+    // 27 -> 29 at R3-09 (DB-G80, RA-046): `api.census cache built`, one line
+    // per cache the warm at start and every background re-read builds, and
+    // `api.census caches warmed at start`, both in `census_cache` and read
+    // back by `server::census_cache::warm_tests::
+    // every_warm_build_is_a_line_in_the_log`.
+    // 29 -> 30 at R3-09 repair 1: `api.census facet index rebuild started by
+    // a request`, in `facets::kick`, read back by `server::census_cache::
+    // warm_tests::a_request_that_finds_the_index_behind_starts_its_build_and_never_waits`.
+    // 30 -> 31 at AH-02 (D-4975): `server::HeadDeadline::report`, the one
+    // site of `api.serve response cut` and `api.serve response closed by the
+    // client`, read back by `server::head_deadline_body_tests::
+    // a_reader_that_stops_reading_is_closed_and_logged_as_cut` and
+    // `a_client_that_closes_mid_body_is_logged_as_its_close_not_a_cut`.
+    // (That branch counted 27 -> 28; the package's site is added here.)
+    const REACHED_IN_SERVER_TESTS: usize = 31;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1975,7 +2015,28 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// previous window`, which needs more than fifty cross-site failures and
     /// then a minute's wait — the ration it reports is proven by
     /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
-    const UNREACHABLE: usize = 10;
+    ///
+    /// AND TWO MORE AT R3-14, each firing only when the OS refuses this
+    /// process something no test can make it refuse: `api.speed the minute
+    /// thread did not start` (a thread) and `api.speed SIGTERM cannot be
+    /// caught` (a signal handler).
+    const UNREACHABLE: usize = 12;
+    // R3-14: the speed minute line, the page report and the bounded drain's
+    // cut, each read back off this sink by its own module's test; and, at
+    // R3-14 repair 1, the stop's start line (`api.serve stop started`) and the
+    // exit's uncounted-requests line, read back by
+    // `server::stop_tests::a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free`
+    // and `speed::tests::a_request_still_open_at_exit_is_named_not_dropped`.
+    // 5 -> 6 at R3-14 repair 4: `api.main blocking work outlived the shutdown
+    // wait`, read back by `server::stop_tests::
+    // blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end`.
+    // 6 -> 9 at R3-14 repair 5: `api.serve stop asked during the start-up
+    // load`, read back by `server::stop_tests::
+    // a_stop_during_a_slow_load_ends_within_the_stop_bound`; `api.serve the
+    // stop signal could not be waited for` and `api.serve the start-up load
+    // did not finish`, read back by
+    // `server::stop_tests::every_end_of_the_load_race_is_named`.
+    const REACHED_IN_SPEED_TESTS: usize = 9;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -2029,16 +2090,61 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
     // `api.recovery recovery not resumed`, reached in recovery tests. (That
     // branch counted 73 -> 74; the two packages' sites are added here.)
+    //
+    // 78 -> 81 at R3-14: `api.speed minute ended` and `api.page.access page
+    // reported a failure`, both read back off this sink by their own modules'
+    // tests (`speed::tests::the_last_minute_of_counts_survives_a_shutdown`,
+    // `page_report_route::tests::a_page_report_is_rationed_and_audited`), and
+    // `api.speed the minute thread did not start`, named unreachable: it fires
+    // only when the OS refuses a thread, which no test can arrange.
+    //
+    // 81 -> 82 at R3-14: `api.speed SIGTERM cannot be caught`, named
+    // unreachable for the same reason: it fires only when the OS refuses this
+    // process a `SIGTERM` handler.
+    //
+    // 82 -> 83 at R3-14: `api.serve requests still open at the stop were cut
+    // short`, read back off this sink by
+    // `speed::tests::a_stop_waits_for_open_requests_no_longer_than_its_grace`.
+    //
+    // 83 -> 85 at R3-14 repair 1: `api.serve stop started` and `api.speed
+    // requests still open at exit were not counted`, both named in
+    // `REACHED_IN_SPEED_TESTS`.
+    //
+    // 85 -> 86 at R3-14 repair 4: `api.main blocking work outlived the
+    // shutdown wait`, named in `REACHED_IN_SPEED_TESTS`.
+    //
+    // 86 -> 89 at R3-14 repair 5: the start-up load race's three lines (a
+    // stop during the load, a stop future that failed, a load that
+    // panicked), named in `REACHED_IN_SPEED_TESTS`.
+    //
+    // 89 -> 90 at R4-06 (SEC-07): `api.settings secret-shaped value refused`,
+    // driven in the table above.
+    //
+    // 90 -> 92 at R3-09: the warm's two `api.census` lines, named above
+    // `REACHED_IN_SERVER_TESTS`. (That branch counted 78 -> 80, then 89 -> 91;
+    // the packages' sites are added here.)
+    //
+    // 92 -> 93 at R3-09 repair 1: `api.census facet index rebuild started by
+    // a request`, named above `REACHED_IN_SERVER_TESTS`.
+    //
+    // 93 -> 94 at AH-02 (D-4975): the cut or client-close line of a response
+    // in flight, `server::HeadDeadline::report`, named above
+    // `REACHED_IN_SERVER_TESTS`. (That branch counted 78 -> 79; the
+    // package's site is added here.)
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 78,
+        lib_sites, 94,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_SPEED_TESTS
+            + UNREACHABLE,
         lib_sites,
         "every emit site is proven here, in server::tests or recovery::tests, or named above"
     );

@@ -57,7 +57,7 @@ export const DAY_KINDS = [
   // a session owed that the vendor did not serve (D-3321). The GDFL quality
   // ledger's seconds are not minutes, and two of its three counts are not
   // missing time at all, so each has its own kind and word (AH-03,
-  // g-ui-dom-vs-json-7; DB-G96's "flag them" kept, its word amended — D-5333).
+  // g-ui-dom-vs-json-7; DB-G96's "flag them" kept, its word amended — D-5834).
   { kind: 'gap', word: 'minute gap', tone: 'warn' },
   // `quality.indices.holes_5s`: in-session index holes of 5 s or more.
   { kind: 'hole', word: 'holes of 5 s or more', tone: 'warn' },
@@ -119,7 +119,7 @@ export function isSessionCode(code) {
 
 /** The kinds that say time is missing on the day: Zerodha's missing minutes,
  *  the index holes of 5 s or more, and the holes shared by most shares. A
- *  second with two values is not one (D-5333). */
+ *  second with two values is not one (D-5834). */
 const HOLE_KINDS = new Set(['gap', 'hole', 'shared_hole']);
 
 /**
@@ -169,7 +169,7 @@ export function barsOf(held) {
  * - `degraded`, `gap`, `hole`, `shared_hole`, `dual`, `junk`, `late`: the
  *   vendor-fault fields (D-3335); `gap` is Zerodha's missing minutes only,
  *   and the GDFL quality ledger's three counts each have their own kind
- *   (AH-03, D-5333).
+ *   (AH-03, D-5834).
  * - `halt`, `special`, `unmeasured`, `cas`: the calendar's events (D-3319,
  *   D-3320). `cas` only for a share: an index has no auction phase.
  *
@@ -179,7 +179,7 @@ export function barsOf(held) {
  *   imported yet" (DB-G67, DB-G68).
  * - `before_archive`: a day before the archive's first day when that day
  *   binds (`from_binds`, R3-05 repair 3): no file can exist, ever.
- * - Both only for a SESSION that holds no bar (AH-03, D-5332): a closed day
+ * - Both only for a SESSION that holds no bar (AH-03, D-5833): a closed day
  *   is `closed` on either side of the span, and a day holding bars was
  *   imported.
  *
@@ -371,7 +371,7 @@ export function bandOf(body, ctx = {}) {
  * said. O(records) for one key.
  *
  * @param {any} l `body.lineage`
- * @returns {{ present: boolean, lines: string[], why: string | null, successor: string | null, retired: boolean, unknown: number } | null}
+ * @returns {{ present: boolean, lines: string[], why: string | null, successor: string | null, retired: boolean, unknown: number, malformed: number } | null}
  */
 export function lineageOf(l) {
   if (!l || typeof l !== 'object') return null;

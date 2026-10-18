@@ -1392,6 +1392,10 @@ pub struct BarFile {
     /// keeps it — the writer's and `Self::sort_index_existing`; `None` for
     /// every reader, which never writes. D-3349.
     srt: Option<sort_writer::SortSidecar>,
+    /// The month's `.sum` summary, for a BAR file opened by a door that keeps
+    /// it — the writer's and `Self::month_summary_existing`; `None` for every
+    /// reader, which never writes. R3-06, D-4980.
+    msum: Option<summary_writer::SummarySidecar>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1801,6 +1805,9 @@ impl BarFile {
             // are committed — at open for rows an earlier writer left
             // unordered, and after every commit (D-3349).
             file.attach_sort_index(root, path);
+            // THE MONTH SUMMARY, AFTER THE SORT INDEX AND FOR THE SAME REASON:
+            // it describes only committed bars (R3-06, D-4980).
+            file.attach_month_summary(path);
             file
         })
     }
@@ -2470,6 +2477,7 @@ impl BarFile {
             tix,
             batch,
             srt: None,
+            msum: None,
             _lock: lock,
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
@@ -2945,6 +2953,9 @@ impl BarFile {
         // a run that would not write is a `store.srt` warning, and readers
         // read the rows it would have ordered themselves.
         self.keep_sort_index();
+        // THE MONTH SUMMARY, extended by this commit's rows or written whole;
+        // never a refusal of the bars it follows (R3-06, D-4980).
+        self.keep_month_summary();
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
         // never before. An event emitted ahead of the commit would claim a
         // durability the file does not have yet, and a crash between the two
@@ -5171,7 +5182,8 @@ impl DurableBatch {
     /// directory, whose names that process never flushed either.
     ///
     /// O(1): one `lstat` per sibling kind ([`FileKind::ALL`], the lock aside,
-    /// which holds no byte) and one set insert per directory level. A sibling
+    /// which holds no byte, and the month summary, which is owed no flush,
+    /// D-4980) and one set insert per directory level. A sibling
     /// that is absent, or is not a regular file, is not the month's and is
     /// passed over: the doors that open it refuse it by name. A month with no
     /// file at all holds nothing to confirm.
@@ -5185,7 +5197,12 @@ impl DurableBatch {
     pub fn confirm_month(&self, root: &Path, path: StorePath<'_>) -> Result<bool, StoreError> {
         let mut files = Vec::with_capacity(FileKind::ALL.len());
         for kind in FileKind::ALL {
-            if kind == FileKind::Lock {
+            // THE LOCK HOLDS NO BYTE, AND THE MONTH SUMMARY IS OWED NO FLUSH:
+            // its writer never flushes it, because every read checks it against
+            // the committed header and a lost one is rebuilt or refused by name
+            // (R3-06, D-4980 item 5). Confirming it would cost a flush a month
+            // for bytes no reader trusts without checking.
+            if matches!(kind, FileKind::Lock | FileKind::MonthSummary) {
                 continue;
             }
             let at = path.with_file(kind).to_path_buf(root);
@@ -9839,6 +9856,11 @@ enum Access {
 #[path = "sort_index_writer.rs"]
 mod sort_writer;
 pub use sort_writer::{Resorted, SortIndexed};
+
+/// The writer's half of the `.sum` month summary. R3-06, D-4980.
+#[path = "month_summary_writer.rs"]
+mod summary_writer;
+pub use summary_writer::Summarized;
 
 #[cfg(test)]
 #[path = "sidecar_checksum_tests.rs"]

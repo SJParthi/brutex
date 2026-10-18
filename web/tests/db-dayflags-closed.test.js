@@ -1,5 +1,5 @@
 // A CLOSED DAY IS CLOSED, A SESSION IS THE CALENDAR'S, AND A SECOND IS NOT
-// A MINUTE (AH-03, g-ui-dom-vs-json-6 and g-ui-dom-vs-json-7; D-5332, D-5333).
+// A MINUTE (AH-03, g-ui-dom-vs-json-6 and g-ui-dom-vs-json-7; D-5833, D-5834).
 //
 // `node --test web/tests/` — the day band's kinds, its session count and the
 // empty grid's reason, over `/dayflags.json` records in the route's own shape
@@ -198,4 +198,25 @@ test("the stocks file's auction count on an INDEX record is labelled as the whol
   // A phrase that does not match the count is not touched.
   const other = cellOf(rec({ quality: { indices: null, stocks: { auction_prints: 8 }, options: null }, says: [phrase] }));
   assert.deepEqual(other.says, [phrase]);
+});
+
+test('a closed day whose lead kind is a vendor fault is still closed: the session count and the empty window read the calendar code', () => {
+  // AH-03 REPAIR 1 (the second agent's mutants M02 and M03): every closed
+  // day above led with 'closed', so the count and the empty-window reason
+  // could fall back to the lead-kind rule unseen. A weekend that carries
+  // junk rows, or late rows the import deferred, leads with that fault.
+  const junky = (/** @type {string} */ day) =>
+    rec({ ...weekend(day), junk: [{ kind: 'fixture_junk', rows: 2 }], says: ['closed: a weekend', 'junk rows: 2 (fixture)'] });
+  const late = (/** @type {string} */ day) => rec({ ...weekend(day), import: { outcome: 'none', reached: false, late: 3 } });
+  const cells = [junky('2026-09-26'), late('2026-09-27')].map((r) => cellOf(r, { archive: ARCHIVE }));
+  assert.equal(cells[0].kind, 'junk');
+  assert.ok(cells[0].kinds.includes('closed'));
+  assert.equal(cells[1].kind, 'late');
+  assert.ok(cells[1].kinds.includes('closed'));
+  assert.equal(sessionCount(cells), 0);
+  assert.equal(emptyWindowWhy(cells, '2026-09-26', '2026-09-27', label), 'No bar in 2 days: every one is closed (closed: a weekend).');
+  // Beside a real session the count is the calendar's, one.
+  const withSession = [...cells, cellOf(unimported('2026-09-28'), { archive: ARCHIVE })];
+  assert.equal(sessionCount(withSession), 1);
+  assert.equal(emptyWindowWhy(withSession, '2026-09-26', '2026-09-28', label), 'No bar on [2026-09-28]: not imported.');
 });

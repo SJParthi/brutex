@@ -177,3 +177,42 @@ test('the day band speaks the auction sentence and counts sessions from the cale
   assert.match(life, /lifeCutBySupersession\(supersessionOf\(db\.barState\?\.answer\)\)/);
   assert.ok(life.indexOf('lifeCutBySupersession(') < life.indexOf('it may not have traded after that day'), 'the supersession is read before the lag wording');
 });
+
+test("an extreme's closing-auction flag follows the day's calendar code, and a bar straddling the eligible close is in the window", () => {
+  // AH-03 REPAIR 1 (the second agent's follow-up): the flag ignored the
+  // day's calendar code, so a special session with no auction was flagged,
+  // and a bar opening before 15:15 that runs into the window was not.
+  const at = (/** @type {string} */ day, /** @type {string} */ clock) => ({ v: 1, t: ist(day, clock) });
+  const codes = new Map([
+    [DAY, 'X'],
+    ['2026-08-08', 'P'],
+    ['2026-08-11', 'H'],
+    ['2026-08-12', 'U'],
+    ['2026-08-15', '.'],
+    ['2026-08-13', 'R']
+  ]);
+  const codeOf = (/** @type {string} */ iso) => codes.get(iso) ?? null;
+  // A day coded X: flagged, and the text says the calendar was read.
+  const x = extremeAuctionFlag(at(DAY, '15:29:19'), GDFL, KEY, 1, codeOf);
+  assert.match(x?.text ?? '', /on a day the calendar codes as a closing-auction session \(X\)/);
+  // A special session, a halt, an unmeasured, a closed or a regular day without the auction: never.
+  for (const d of ['2026-08-08', '2026-08-11', '2026-08-12', '2026-08-15', '2026-08-13']) {
+    assert.equal(extremeAuctionFlag(at(d, '15:20:00'), GDFL, KEY, 1, codeOf), null, d);
+  }
+  // A day whose code this page has not read: the window rule, said as unchecked.
+  const blind = extremeAuctionFlag(at('2026-08-14', '15:20:00'), GDFL, KEY, 1, codeOf);
+  assert.match(blind?.text ?? '', /this page has not read the day's calendar code/);
+  assert.match(extremeAuctionFlag(at(DAY, '15:20:00'), GDFL, KEY, 1)?.text ?? '', /has not read the day's calendar code/);
+  // STRADDLING THE ELIGIBLE CLOSE: a 5-minute bar from 15:12 holds 15:15-15:17.
+  assert.ok(extremeAuctionFlag(at(DAY, '15:12:00'), GDFL, KEY, 300, codeOf));
+  // A 5-minute bar from 15:10 ends at 15:15 exactly: none of its seconds is in the window.
+  assert.equal(extremeAuctionFlag(at(DAY, '15:10:00'), GDFL, KEY, 300, codeOf), null);
+  // An hour bar from 14:30 runs to 15:30: in. One from 15:30 is past the session.
+  assert.ok(extremeAuctionFlag(at(DAY, '14:30:00'), GDFL, KEY, 3600, codeOf));
+  assert.equal(extremeAuctionFlag(at(DAY, '15:30:00'), GDFL, KEY, 3600, codeOf), null);
+  // The last second the session can hold is in; a rung of 0 s is garbage.
+  assert.ok(extremeAuctionFlag(at(DAY, '15:29:59'), GDFL, KEY, 1, codeOf));
+  assert.equal(extremeAuctionFlag(at(DAY, '15:20:00'), GDFL, KEY, 0, codeOf), null);
+  // A malformed eligible close in the feed note flags nothing.
+  assert.equal(extremeAuctionFlag(at(DAY, '15:20:00'), { ...GDFL, closing_auction: { ...GDFL.closing_auction, eligible_continuous_close: '3pm' } }, KEY, 1, codeOf), null);
+});

@@ -18,9 +18,15 @@
  * (the expiry note, the empty grid, the stranded-rung line, the day band's
  * lineage lines) calls it, so one record reads the same everywhere.
  *
- * Cost: every function here is O(records) over the records one answer
- * carries for the asked series — a handful per key — and `askLineage` asks
- * the server AT MOST ONCE per (feed, key) for the life of the page.
+ * Cost: every word function here is O(records) over the records one answer
+ * carries for the asked series — a handful per key. `contractKeyOf` is ONE
+ * Map probe: the exchange it needs comes from `fnoExchanges`, a fold over
+ * the census that the page runs ONCE PER CENSUS LOAD (a `$derived` of
+ * `db.deco` alone), never per reactive step (AH-03 repair 1: the first cut
+ * walked the census on every recompute, 134-280 ms on GDFL's 2,098,428 rows
+ * for an old-name or absent underlying). `askLineage` asks the server AT
+ * MOST ONCE per (feed, key) per census generation; a failed read is not
+ * kept, so the next ask is a new request.
  *
  * Owner: AH-03.
  */
@@ -98,7 +104,11 @@ export function supersessionOf(answer) {
   const by = [];
   /** @type {{ key: string, of: string, kind: string, bars: number | null }[]} */
   const of = [];
+  // A LIST THAT IS NOT A LIST IS MALFORMED, not empty: `null` and absent are
+  // the server's "not re-keyed"; anything else is one entry the page could
+  // not read (the second agent's follow-up, AH-03 repair 1).
   let malformed = 0;
+  for (const list of [answer?.superseded_by, answer?.supersedes]) if (list !== null && list !== undefined && !Array.isArray(list)) malformed++;
   for (const s of Array.isArray(answer?.superseded_by) ? answer.superseded_by : []) {
     if (typeof s?.key === 'string' && typeof s?.by === 'string') {
       by.push({ key: s.key, by: s.by, kind: String(s.kind ?? ''), recorded: typeof s.recorded === 'boolean' ? s.recorded : null });
@@ -150,15 +160,22 @@ export function continuesWords(s) {
   return `continues ${s.of}${n === null ? '' : `: ${n} bar(s) copied from it`} (${kindWord(s.kind)})`;
 }
 
+/** The lineage kinds whose record names another key (`key`): one without
+ *  it is malformed, never "superseded by undefined". */
+const KEYED_KINDS = new Set(['continues_as', 'renamed_from', 'superseded_by', 'supersedes']);
+
 /**
  * One lineage-ledger record (`/dayflags.json` `lineage.records`) as the band
  * says it, or `null` for a kind this page has no words for (counted by the
  * caller). Every kind the server files under a key is here (D-3331, D-3355).
+ * A record of a kind that names another key and carries none is `null` too,
+ * and `lineageLines` counts it as malformed rather than unknown.
  *
  * @param {any} r
  * @returns {string | null}
  */
 export function lineageRecordLine(r) {
+  if (KEYED_KINDS.has(r?.kind) && (typeof r.key !== 'string' || r.key === '')) return null;
   switch (r?.kind) {
     case 'continues_as':
       return `renamed at the ${r.ex} ex-date, continues as ${r.key} (factor ${r.factor})`;
@@ -193,24 +210,27 @@ export function lineageRecordLine(r) {
  * or `continues_as` key), for a link.
  *
  * @param {any} records `lineage.records`
- * @returns {{ lines: string[], unknown: number, successor: string | null, retired: boolean }}
+ * @returns {{ lines: string[], unknown: number, malformed: number, successor: string | null, retired: boolean }}
  */
 export function lineageLines(records) {
   /** @type {string[]} */
   const lines = [];
   let unknown = 0;
+  let malformed = 0;
   /** @type {string | null} */
   let successor = null;
   let retired = false;
   for (const r of Array.isArray(records) ? records : []) {
     const line = lineageRecordLine(r);
-    if (line === null) unknown++;
-    else lines.push(line);
+    if (line !== null) lines.push(line);
+    else if (KEYED_KINDS.has(r?.kind)) malformed++;
+    else unknown++;
     if (successor === null && (r?.kind === 'superseded_by' || r?.kind === 'continues_as') && typeof r.key === 'string') successor = r.key;
     if (r?.kind === 'retired') retired = true;
   }
   if (unknown > 0) lines.push(`${unknown} lineage record(s) of a kind this page has no words for — read /dayflags.json`);
-  return { lines, unknown, successor, retired };
+  if (malformed > 0) lines.push(`${malformed} lineage record(s) that name no key, so this page cannot say where the contract went — read /dayflags.json`);
+  return { lines, unknown, malformed, successor, retired };
 }
 
 /**
@@ -232,27 +252,60 @@ export function lifeCutBySupersession(s, most = 3) {
 }
 
 /**
+ * EVERY UNDERLYING'S F&O EXCHANGE, FOLDED ONCE PER CENSUS LOAD (AH-03
+ * repair 1): the exchange of the FIRST F&O row of each underlying, in the
+ * census's served order — the row `contractKeyOf` used to search for on
+ * every recompute. Read from the decorated row's own fields (`kind`, the
+ * key's segment token; `underlying`, parsed once at store-read time), so
+ * the fold parses nothing: one pass, one Map write per underlying. A row
+ * whose key is not `<EX>-FNO-<underlying>-…` (a malformed key the
+ * decoration kept as its own name) adds nothing.
+ *
+ * The caller holds it in a `$derived` of `db.deco` alone, so it recomputes
+ * when a census is loaded and at no other step. O(rows) once per load.
+ *
+ * @param {Iterable<any> | null | undefined} rows the decorated census rows (`db.deco`)
+ * @returns {Map<string, string>} underlying → exchange
+ */
+export function fnoExchanges(rows) {
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  for (const r of rows ?? []) {
+    const u = r?.underlying;
+    const ins = r?.instrument;
+    if (r?.kind !== 'FNO' || typeof u !== 'string' || typeof ins !== 'string' || out.has(u)) continue;
+    const cut = ins.indexOf('-');
+    if (cut > 0 && ins.startsWith(`-FNO-${u}-`, cut)) out.set(u, ins.slice(0, cut));
+  }
+  return out;
+}
+
+/**
  * A /db selection's one contract key, from its rungs: the underlying, the
  * expiry, exactly one strike and a side (an option), or the expiry alone
  * with no strike and no side (a future). The exchange is the one the
- * census files this underlying's contracts under (a row of `rows`), never a
+ * census files this underlying's contracts under (`fnoExchanges`), never a
  * literal. `null` when the rungs name no single contract, or the census
  * holds no F&O row of the underlying to read an exchange from.
  *
- * @param {any[]} rows the census rows (`db.deco`)
+ * ONE MAP PROBE, never a census walk: given anything but the folded Map it
+ * THROWS, because a caller passing the rows would be the scan this repair
+ * removed, and a quiet `null` would hide it. O(1) (at most two strikes
+ * are read off the picked set).
+ *
+ * @param {Map<string, string>} exchanges `fnoExchanges(db.deco)`
  * @param {{ sym: string, expiry: string, strikes: Iterable<string>, side: string }} rungs
  */
-export function contractKeyOf(rows, { sym, expiry, strikes, side }) {
+export function contractKeyOf(exchanges, { sym, expiry, strikes, side }) {
+  if (!(exchanges instanceof Map)) throw new TypeError('contractKeyOf takes fnoExchanges(db.deco), folded once per census load — never the census rows');
   if (!sym || !/^\d{4}-\d{2}-\d{2}$/.test(expiry ?? '')) return null;
-  const ks = [...(strikes ?? [])].map(String);
-  let exchange = null;
-  for (const r of rows ?? []) {
-    const p = parseKey(r?.instrument);
-    if (p.why === null && p.segment === 'FNO' && p.underlying === sym) {
-      exchange = p.exchange;
-      break;
-    }
+  /** @type {string[]} */
+  const ks = [];
+  for (const k of strikes ?? []) {
+    ks.push(String(k));
+    if (ks.length > 1) break;
   }
+  const exchange = exchanges.get(sym) ?? null;
   if (exchange === null) return null;
   if (ks.length === 1 && /^\d+$/.test(ks[0]) && (side === 'CE' || side === 'PE')) return `${exchange}-FNO-${sym}-${expiry}-${ks[0]}-${side}`;
   if (ks.length === 0 && !side) return `${exchange}-FNO-${sym}-${expiry}-FUT`;
@@ -294,7 +347,13 @@ export function askLineage(feed, key, fetchJson = readLineageJson) {
       const got = lineageLines(l.records);
       return { state: 'read', url, present: l.present === true, ...got, why: typeof l.why === 'string' ? l.why : null };
     })
-    .catch((/** @type {any} */ why) => ({ state: 'failed', url, why: String(why?.message ?? why) }));
+    .catch((/** @type {any} */ why) => {
+      // A FAILED READ IS NOT REMEMBERED: the next ask for this key is a new
+      // request ("Read the lineage again", a key change, a census reload),
+      // never the same failure for the page's life (AH-03 repair 1).
+      if (MEMO.get(memoKey) === asked) MEMO.delete(memoKey);
+      return { state: 'failed', url, why: String(why?.message ?? why) };
+    });
   MEMO.set(memoKey, asked);
   while (MEMO.size > LINEAGE_MEMO_MAX) MEMO.delete(/** @type {string} */ (MEMO.keys().next().value));
   return asked;
@@ -306,9 +365,18 @@ export const LINEAGE_MEMO_MAX = 32;
 /** @type {Map<string, Promise<any>>} */
 const MEMO = new Map();
 
-/** Forget every remembered lineage answer (a store reload; tests). */
-export function forgetLineage() {
-  MEMO.clear();
+/**
+ * Forget remembered lineage answers: one (feed, key)'s when both are given
+ * ("Read the lineage again"), else every one (a new census generation or
+ * epoch: a re-key can have landed between two, so what the ledger said may
+ * have changed).
+ *
+ * @param {string} [feed]
+ * @param {string} [key]
+ */
+export function forgetLineage(feed, key) {
+  if (typeof feed === 'string' && typeof key === 'string') MEMO.delete(`${feed}\u0000${key}`);
+  else MEMO.clear();
 }
 
 /**

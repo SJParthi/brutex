@@ -19,6 +19,7 @@ import {
   lineageRecordLine,
   lineageLines,
   contractKeyOf,
+  fnoExchanges,
   askLineage,
   forgetLineage,
   withdrawnWords,
@@ -27,6 +28,11 @@ import {
   LINEAGE_MEMO_MAX
 } from '../src/lib/db/lineage-labels.js';
 import { lineageOf, bandOf } from '../src/lib/db/dayflags.js';
+import { instrumentDescription } from '../src/lib/db/decoration.js';
+import { readFileSync } from 'node:fs';
+
+/** Census rows as `db.deco` holds them: the key and its decoration's fields. */
+const deco = (/** @type {string[]} */ keys) => keys.map((instrument) => ({ instrument, ...instrumentDescription(instrument) }));
 
 const OLD = 'NSE-FNO-FIXTUREIDX-2031-07-31-777700-PE';
 const NEW = 'NSE-FNO-FIXTUREIDX-2031-07-30-777700-PE';
@@ -89,7 +95,7 @@ test('lineageOf_keeps_supersedes_superseded_by_and_retired', () => {
   assert.equal(got.retired, true);
   assert.equal(lineageRecordLine({ kind: 'retired', why: 'expiry_unsettled' }), 'retired: the decoder refuses every day of it — its expiry is not a settled one');
   assert.equal(lineageRecordLine(null), null);
-  assert.deepEqual(lineageLines(undefined), { lines: [], unknown: 0, successor: null, retired: false });
+  assert.deepEqual(lineageLines(undefined), { lines: [], unknown: 0, malformed: 0, successor: null, retired: false });
   // THE DAY BAND'S lineageOf (dayflags.js) keeps every kind too: it used to
   // word only continues_as, renamed_from and stitched and drop the rest.
   const band = lineageOf({ present: true, records: [
@@ -134,7 +140,7 @@ test('a key superseded twice, and a key that both supersedes and is superseded, 
 
 test('a_withdrawn_key_is_explained_by_its_lineage_not_the_filters', async () => {
   forgetLineage();
-  const rows = [{ instrument: 'NSE-FNO-FIXTUREIDX-2031-08-28-800000-CE' }, { instrument: 'NSE-INDEX-FIXTUREIDX' }];
+  const rows = fnoExchanges(deco(['NSE-FNO-FIXTUREIDX-2031-08-28-800000-CE', 'NSE-INDEX-FIXTUREIDX']));
   const key = contractKeyOf(rows, { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: new Set(['777700']), side: 'PE' });
   assert.equal(key, OLD);
   /** @type {string[]} */
@@ -196,13 +202,124 @@ test('the lineage memo is bounded and the rungs must name one contract', async (
   await askLineage('gdfl', 'NSE-FNO-FIXTUREIDX-2031-07-31-100000-CE', fetchJson);
   await askLineage('gdfl', `NSE-FNO-FIXTUREIDX-2031-07-31-${100000 + LINEAGE_MEMO_MAX + 4}-CE`, fetchJson);
   assert.equal(n, LINEAGE_MEMO_MAX + 6);
-  const rows = [{ instrument: 'NSE-FNO-FIXTUREIDX-2031-08-28-FUT' }];
+  const rows = fnoExchanges(deco(['NSE-FNO-FIXTUREIDX-2031-08-28-FUT']));
   // Two strikes, no side, a bad expiry, an unknown underlying: no one contract.
   assert.equal(contractKeyOf(rows, { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: ['1', '2'], side: 'PE' }), null);
   assert.equal(contractKeyOf(rows, { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: ['1'], side: '' }), null);
   assert.equal(contractKeyOf(rows, { sym: 'FIXTUREIDX', expiry: '31-07-2031', strikes: ['1'], side: 'PE' }), null);
   assert.equal(contractKeyOf(rows, { sym: 'OTHERIDX', expiry: '2031-07-31', strikes: ['1'], side: 'PE' }), null);
-  assert.equal(contractKeyOf([], { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: ['1'], side: 'PE' }), null);
+  assert.equal(contractKeyOf(new Map(), { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: ['1'], side: 'PE' }), null);
   // A future: the expiry alone.
   assert.equal(contractKeyOf(rows, { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: [], side: '' }), 'NSE-FNO-FIXTUREIDX-2031-07-31-FUT');
+});
+
+test('contractKeyOf_is_one_probe_of_a_fold_made_once_per_census_load', () => {
+  // AH-03 REPAIR 1: the first cut walked the census on every recompute of the
+  // withdrawn-key derived (134-280 ms on GDFL's 2,098,428 rows for an
+  // old-name or absent underlying). The census here is an iterable that
+  // counts its passes; the fold takes one, and a thousand keys take none.
+  const keys = [
+    'NSE-INDEX-FIXTUREIDX',
+    'NSE-CASH-FIXTURESHARE',
+    'NSE-FNO-FIXTURESHARE-2031-07-31-FUT',
+    'NSE-FNO-FIXTUREIDX-2031-08-28-800000-CE',
+    // A second exchange's F&O row of the same underlying, later in served
+    // order: the FIRST row's exchange is the one taken, as before.
+    'BSE-FNO-FIXTUREIDX-2031-08-28-800000-CE',
+    // A malformed key the decoration kept as its own name adds nothing.
+    'NSE-FNO'
+  ];
+  const rows = deco(keys);
+  let passes = 0;
+  const census = {
+    [Symbol.iterator]() {
+      passes++;
+      return rows[Symbol.iterator]();
+    }
+  };
+  const exchanges = fnoExchanges(census);
+  assert.equal(passes, 1);
+  assert.deepEqual([...exchanges], [
+    ['FIXTURESHARE', 'NSE'],
+    ['FIXTUREIDX', 'NSE']
+  ]);
+  for (let i = 0; i < 1000; i++) {
+    assert.equal(
+      contractKeyOf(exchanges, { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: new Set([String(700000 + i)]), side: 'PE' }),
+      `NSE-FNO-FIXTUREIDX-2031-07-31-${700000 + i}-PE`
+    );
+  }
+  assert.equal(contractKeyOf(exchanges, { sym: 'FIXTURESHARE', expiry: '2031-07-31', strikes: [], side: '' }), 'NSE-FNO-FIXTURESHARE-2031-07-31-FUT');
+  // An old-name or absent underlying is one probe that misses, not a full pass.
+  assert.equal(contractKeyOf(exchanges, { sym: 'FIXTUREGONE', expiry: '2031-07-31', strikes: ['1'], side: 'PE' }), null);
+  assert.equal(passes, 1);
+  // Given the rows, it refuses loudly instead of walking them.
+  assert.throws(() => contractKeyOf(/** @type {any} */ (rows), { sym: 'FIXTUREIDX', expiry: '2031-07-31', strikes: ['1'], side: 'PE' }), TypeError);
+  assert.equal(fnoExchanges(null).size, 0);
+});
+
+test('the withdrawn-key derived folds the census in its own derived of db.deco, never inside the key', () => {
+  // The fold must recompute once per census load, so it is a `$derived` of
+  // `db.deco` alone, and the key derived probes it: source-shape, because
+  // Svelte's dependency tracking is what bounds it.
+  const src = readFileSync(new URL('../src/routes/db/DbBarsGrid.svelte', import.meta.url), 'utf8');
+  const at = src.indexOf('function withdrawnState(db)');
+  assert.ok(at > 0);
+  const body = src.slice(at, src.indexOf('Object.defineProperties(db', at));
+  assert.match(body, /const exchanges = \$derived\(fnoExchanges\(db\.deco\)\);/);
+  assert.match(body, /contractKeyOf\(exchanges, /);
+  assert.doesNotMatch(src, /contractKeyOf\(db\.deco/);
+  assert.equal((src.match(/fnoExchanges\(/g) ?? []).length, 1);
+  // The lineage memo is forgotten on a new census generation or epoch, never on
+  // the rows swap the page makes once per open (facet rows, then the whole
+  // census): keyed on the rows, the shadow asked the same key twice.
+  assert.match(body, /const censusId = \$derived\(`\$\{store\.feed \?\? ''\}\\u0000\$\{store\.lag\?\.generation \?\? ''\}\\u0000\$\{store\.lag\?\.epoch \?\? ''\}`\);/);
+  assert.match(body, /const census = censusId;\n\s*if \(seenCensus !== null && seenCensus !== census\) forgetLineage\(\);/);
+});
+
+test('a failed lineage read is not kept: the next ask is a new request, and one key can be forgotten alone', async () => {
+  forgetLineage();
+  let n = 0;
+  const flaky = async () => {
+    n++;
+    if (n === 1) throw new Error('fixture: refused 503');
+    return { lineage: { present: true, records: [{ kind: 'superseded_by', key: NEW, why: 'vendor_redated', bars: 53 }], why: null } };
+  };
+  const first = await askLineage('gdfl', OLD, flaky);
+  assert.equal(first.state, 'failed');
+  const second = await askLineage('gdfl', OLD, flaky);
+  assert.equal(n, 2);
+  assert.equal(withdrawnWords(OLD, second).state, 'explained');
+  // A read answer is kept…
+  await askLineage('gdfl', OLD, flaky);
+  assert.equal(n, 2);
+  // …until that one key is forgotten ("Read the lineage again"); another key's stays.
+  await askLineage('gdfl', NEW, flaky);
+  assert.equal(n, 3);
+  forgetLineage('gdfl', OLD);
+  await askLineage('gdfl', OLD, flaky);
+  await askLineage('gdfl', NEW, flaky);
+  assert.equal(n, 4);
+  // A census load forgets every one.
+  forgetLineage();
+  await askLineage('gdfl', NEW, flaky);
+  assert.equal(n, 5);
+});
+
+test('a lineage record that names no key is malformed, never "superseded by undefined"', () => {
+  for (const kind of ['superseded_by', 'supersedes', 'continues_as', 'renamed_from']) {
+    assert.equal(lineageRecordLine({ kind, why: 'vendor_redated', bars: 5 }), null, kind);
+    assert.equal(lineageRecordLine({ kind, key: '', why: 'vendor_redated' }), null, kind);
+  }
+  const got = lineageLines([{ kind: 'superseded_by', why: 'vendor_redated', bars: 5 }, { kind: 'superseded_by', key: NEW, why: 'vendor_redated' }, { kind: 'fixture_kind' }]);
+  assert.equal(got.malformed, 1);
+  assert.equal(got.unknown, 1);
+  assert.equal(got.successor, NEW);
+  assert.ok(got.lines.every((l) => !l.includes('undefined')), got.lines.join(' | '));
+  assert.match(got.lines.at(-1) ?? '', /^1 lineage record\(s\) that name no key/);
+  // A re-key list that is not a list is one malformed entry, not "not re-keyed".
+  assert.equal(supersessionOf({ superseded_by: { key: OLD, by: NEW }, supersedes: null }).malformed, 1);
+  assert.equal(supersessionOf({ superseded_by: 'fixture', supersedes: 7 }).malformed, 2);
+  assert.equal(supersessionOf({ superseded_by: null }).malformed, 0);
+  assert.equal(supersessionOf({}).malformed, 0);
 });

@@ -831,35 +831,71 @@ export function auctionBandSentence(feed, auction, { day = '', sessions = 0, rea
  * g-ui-dom-vs-json-3)? The extremes fold sends `{v, t, key}` and no phase,
  * so the panel decides by the rule the page already reads the session's
  * tail with: a CASH key, below the day rung, on or after the day the feed's
- * closing auction began (`closing_auction.from`), and a time of day in
- * `[eligible_continuous_close, 15:30)` (D-3320 item 2). Eligibility is per
- * share and per day (charter §9), so the flag says the bar is in the
- * session's WINDOW and that its own phase — on Go to — decides. Only a feed
- * that files the print apart (`print_kept_apart`) is flagged: Zerodha's
- * minutes of an eligible share end before the window by design. `null`
- * when not in it. O(1).
+ * closing auction began (`closing_auction.from`), and a bar whose span
+ * `[t, t + rung)` meets `[eligible_continuous_close, end)` (D-3320 item 2),
+ * `end` being one second past `CAS_READ_TO` — the one place this module
+ * spells the session's last second. A bar that STRADDLES the eligible close
+ * (a 5-minute bar from 15:12) holds window seconds and is flagged.
+ * Eligibility is per share and per day (charter §9), so the flag says the
+ * bar is in the session's WINDOW and that its own phase — on Go to —
+ * decides. Only a feed that files the print apart (`print_kept_apart`) is
+ * flagged: Zerodha's minutes of an eligible share end before the window by
+ * design.
+ *
+ * THE DAY'S CALENDAR CODE DECIDES WHEN THE PAGE HOLDS IT (AH-03 repair 1):
+ * `X` is the calendar's "regular day with a closing auction" (D-3319); a
+ * day it codes otherwise — a special session, a halt, an unmeasured or a
+ * closed day — has no auction window to be in, so it is not flagged. A day
+ * whose code the page has not read is flagged by the window rule and SAYS
+ * the code was not read. `null` when not in it. O(1).
  *
  * @param {{ t: number, v?: number, key?: string | null }} x one extreme
  * @param {any} feed `/feeds.json`'s feed
  * @param {string | null} key the extreme's series (its own `key`, or the
  *   query's one series)
  * @param {number | undefined} rungSecs the rung's length in seconds
+ * @param {((iso: string) => string | null) | null} [codeOf] the calendar
+ *   code of a day the page has read (the day band's cells), else `null`
  * @returns {{ short: string, text: string } | null}
  */
-export function extremeAuctionFlag(x, feed, key, rungSecs) {
+export function extremeAuctionFlag(x, feed, key, rungSecs, codeOf = null) {
   const a = feed?.closing_auction;
   if (!a || a.handling !== 'print_kept_apart' || typeof a.from !== 'string' || typeof a.eligible_continuous_close !== 'string') return null;
   if (!Number.isFinite(x?.t) || segmentOfKey(key) !== 'CASH') return null;
-  if (!(Number.isFinite(rungSecs) && /** @type {number} */ (rungSecs) < 86_400)) return null;
-  if (istDay(x.t * 1000) < a.from) return null;
-  const [hh, mm] = a.eligible_continuous_close.split(':').map(Number);
-  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  if (!(Number.isFinite(rungSecs) && /** @type {number} */ (rungSecs) > 0 && /** @type {number} */ (rungSecs) < 86_400)) return null;
+  const day = istDay(x.t * 1000);
+  if (day < a.from) return null;
+  const start = secondOfDay(a.eligible_continuous_close);
+  const end = secondOfDay(CAS_READ_TO);
+  if (start === null || end === null) return null;
   const of = (((x.t + 19_800) % 86_400) + 86_400) % 86_400;
-  if (of < hh * 3600 + mm * 60 || of >= 15 * 3600 + 30 * 60) return null;
+  if (!(of <= end && of + /** @type {number} */ (rungSecs) > start)) return null;
+  const code = typeof codeOf === 'function' ? codeOf(day) : null;
+  if (typeof code === 'string' && code !== 'X') return null;
+  const endLabel = clockOf(end + 1);
+  const which =
+    code === 'X'
+      ? 'on a day the calendar codes as a closing-auction session (X)'
+      : "on a day the auction applies by date — this page has not read the day's calendar code, so whether it was a closing-auction session is not checked";
   return {
     short: 'closing-auction session',
-    text: `this bar is in the closing-auction session's window (${a.eligible_continuous_close}–15:30, D-3320 item 2) on a day the auction applies: for an eligible share it is not continuous trading, and it may be the auction's print held as a one-second bar. Its own phase decides — Go to opens it and marks it`
+    text: `this bar is in the closing-auction session's window (${a.eligible_continuous_close}–${endLabel}, D-3320 item 2) ${which}: for an eligible share it is not continuous trading, and it may be the auction's print held as a one-second bar. Its own phase decides — Go to opens it and marks it`
   };
+}
+
+/** `HH:MM` or `HH:MM:SS` as a second of the day, or `null`. @param {unknown} hhmm */
+function secondOfDay(hhmm) {
+  const m = typeof hhmm === 'string' ? hhmm.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/) : null;
+  if (!m) return null;
+  const [h, mi, se] = [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+  return h < 24 && mi < 60 && se < 60 ? h * 3600 + mi * 60 + se : null;
+}
+
+/** A second of the day as `HH:MM` (`HH:MM:SS` when it is not on a minute). @param {number} s */
+function clockOf(s) {
+  const p = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  const hm = `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}`;
+  return s % 60 === 0 ? hm : `${hm}:${p(s % 60)}`;
 }
 
 /* ── where a bar came from: /provenance.json (D-3334) ─────────────────── */

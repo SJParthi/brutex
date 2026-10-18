@@ -61,6 +61,10 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     // The routes the WP-01 seam registers ahead of their packages: store,
     // import and census reads, answered `501 not built` until each lands.
     ("/census/facets.json", DATA),
+    // The warm-at-start list and the coverage roll-up (R3-09): census
+    // reads from memory, no state change.
+    ("/census/warm.json", DATA),
+    ("/census/rollup.json", DATA),
     ("/chain.json", DATA),
     ("/imports.json", DATA),
     ("/disk.json", DATA),
@@ -109,6 +113,18 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     (
         "/inspection.json",
         "the audited router's application-mode probe; not a sweep result or control",
+    ),
+    // R3-14 (RA-014): the server's own speed table, and a page saying it
+    // broke. Neither is a sweep result or control; a page report is written
+    // to the audit stream by its own route, rationed (`page_report_route`).
+    (
+        "/speed.json",
+        "the process's own per-route counters; not a sweep result or control",
+    ),
+    (
+        "/page-report",
+        "a page's own failure, 1 KiB, rationed and written to the audit stream by its \
+         route; not a sweep result or control",
     ),
 ];
 const PAGE: &str = "a page, script or health check; not a sweep result or control";
