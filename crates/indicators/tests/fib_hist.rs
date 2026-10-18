@@ -816,11 +816,14 @@ fn the_tick_of_a_five_paisa_and_a_one_paisa_series() {
     flat.commit_day().unwrap();
     assert_eq!(flat.tick(), Err(HistRefusal::NoTick));
     assert_eq!(flat.committed_days(), 1);
+    assert_eq!(flat.refused_prices(), 0);
     assert_eq!(
         flat.observe(0),
         Err(HistRefusal::PriceNotPositive { price: 0 })
     );
     assert_eq!(flat.refused_prices(), 1);
+    assert!(flat.observe(-5).is_err());
+    assert_eq!(flat.refused_prices(), 2, "each refusal is counted");
 }
 
 /// FM-F014: one odd-print day leaves the tick at 5 (a running gcd would
