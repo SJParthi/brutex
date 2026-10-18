@@ -188,15 +188,22 @@ impl RefusalCounts {
 
     /// Counts one refusal.
     pub fn record(&mut self, refusal: Refusal) {
-        if let Some(count) = self.counts.get_mut(refusal as usize) {
-            *count = count.saturating_add(1);
+        for (count, reason) in self.counts.iter_mut().zip(Refusal::ALL) {
+            if *reason == refusal {
+                *count = count.saturating_add(1);
+            }
         }
     }
 
     /// How many refusals of one reason were counted.
     #[must_use]
     pub fn get(&self, refusal: Refusal) -> u64 {
-        self.counts.get(refusal as usize).copied().unwrap_or(0)
+        self.counts
+            .iter()
+            .zip(Refusal::ALL)
+            .filter(|(_, reason)| **reason == refusal)
+            .map(|(count, _)| *count)
+            .sum()
     }
 }
 

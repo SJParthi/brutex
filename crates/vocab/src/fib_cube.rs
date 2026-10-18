@@ -3611,8 +3611,19 @@ mod tests {
         assert_eq!(l.mix_mask(&MixKey::root_of(&wide_cell)), Err(refused));
         assert_eq!(l.offered_mask(), Err(refused));
         assert_eq!(refused.name(), "fib_mask_exceeds_words");
-        // Exactly the mask's width is maskable.
-        assert!(layout().total_values() < 384);
+        // Exactly the mask's width is maskable; one value more is not.
+        // Twenty-four rows of sixteen values are 384.
+        let mut full = [16; ROW_COUNT];
+        let exact = Layout::of(full).unwrap();
+        assert_eq!(exact.total_values(), 384);
+        assert!(exact.to_mask(&[0; ROW_COUNT]).is_ok());
+        assert_eq!(exact.offered_mask().unwrap().popcount(), 384);
+        full[0] += 1;
+        let over = Layout::of(full).unwrap();
+        assert_eq!(
+            over.to_mask(&[0; ROW_COUNT]).unwrap_err().name(),
+            "fib_mask_exceeds_words"
+        );
     }
 
     #[test]
