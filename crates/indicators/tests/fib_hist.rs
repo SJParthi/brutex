@@ -540,6 +540,11 @@ fn a_split_is_refused_by_name_and_changes_nothing() {
         Err(HistRefusal::SplitOneValueWide { value: 5 })
     );
     assert_eq!(
+        past.split(15, &raw),
+        Err(HistRefusal::SplitOneValueWide { value: 15 }),
+        "the top octave of one-integer bins: 8 to 15"
+    );
+    assert_eq!(
         past.split(0, &raw),
         Err(HistRefusal::SplitOneValueWide { value: 0 })
     );
