@@ -37,7 +37,8 @@ pub(super) struct Staged {
 }
 
 /// A day's failure about `about`, refused by `refusal` (an import refusal
-/// that names its own code), at `stage`, logged.
+/// that names its own code), at `stage`, logged: [`note_failure`] emits its
+/// `Error` event, which is why the name says `note_` (gate 19 reads it).
 pub(super) fn note_staged(
     run: &Run<'_>,
     day: Day,

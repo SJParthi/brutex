@@ -52,7 +52,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 /// C-TSW-01 and C-TSW-02: the tick-store writer per member and a written
-/// day's lookup, flat at 1x, 10x and 100x (R4-08, E2E-02).
+/// day's lookup, flat at 1x, 10x and 100x (R4-08, E2E-02). Proof: this
+/// bench, `crates/pull/benches/ratio.rs`, which runs both and fails on a ratio.
 #[path = "ratio/tickstore_write.rs"]
 mod tickstore_write;
 

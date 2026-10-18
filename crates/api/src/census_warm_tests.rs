@@ -23,6 +23,15 @@
 //!
 //! Every price, row count and contract below is invented.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+
 use super::*;
 use crate::server::store_route::{
     CENSUS_EPOCH_HEADER, CENSUS_PART_GENERATIONS_HEADER, store_response,

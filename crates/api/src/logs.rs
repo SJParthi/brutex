@@ -1603,6 +1603,10 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// and the 64 MiB window is not spent on `GET /_app/immutable/...`. A
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
+///
+/// The failed-request ration is [`failed_line_admitted`], kept apart only so
+/// this function stays under clippy's line limit (GF-1, gate 6b, 18 Oct
+/// 2026); what it does is unchanged.
 pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1628,7 +1632,7 @@ pub async fn note_request(
         ),
     );
     let started = std::time::Instant::now();
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     pending.finish(
@@ -1646,33 +1650,7 @@ pub async fn note_request(
     // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`]. A
     // refused `/db` read's access record is under the same ration.
-    let mut admitted = true;
-    if level != telemetry::Level::Debug {
-        let admit = FAILED_LINES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admit(from_another_site, now);
-        if let Some(suppressed) = admit.summary {
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::new(
-                    telemetry::Level::Warn,
-                    "api.request",
-                    suppression_message(from_another_site),
-                )
-                .with("suppressed", telemetry::Value::Uint(suppressed))
-                .with(
-                    "origin",
-                    telemetry::Value::Str(if from_another_site {
-                        "cross-site"
-                    } else {
-                        "same-origin"
-                    }),
-                )
-                .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
-            );
-        }
-        admitted = admit.write;
-    }
+    let admitted = level == telemetry::Level::Debug || failed_line_admitted(from_another_site, now);
     if let Some(ref selection) = selection
         && !status.is_server_error()
     {
@@ -1681,6 +1659,15 @@ pub async fn note_request(
         // keeps; a served one also leaves the `debug` request line below.
         if status.is_client_error() {
             return response;
+        }
+        // A SERVED READ CARRIES ITS COUNT (AH-02, D-4975): it was counted at
+        // handler return, before a byte of its body went, so a body the
+        // connection then cuts for want of write progress is taken back out
+        // of `served` by [`note_cut`] through this mark.
+        if let Some(route) = DB_READS.iter().copied().find(|route| *route == path) {
+            response
+                .extensions_mut()
+                .insert(CountedServed { route, at_ms: now });
         }
     }
     if !admitted {
@@ -1776,7 +1763,9 @@ static AUDITED_ERRORS: std::sync::Mutex<Ration> =
 //   this console, 50 from another site, the rest counted and said.
 // * When a route's window closes, its next read first writes
 //   `api.access reads counted`: how many were served and refused in the
-//   window that closed, and the slowest.
+//   window that closed, and the slowest; and how many served reads had their
+//   body cut by the connection for want of write progress (`cut`, AH-02,
+//   D-4975), which are no longer in `served`.
 //
 // A target ending in `access` is audited (`telemetry::is_audited`), so all
 // three reach the durable stream and its index (feed, instrument, day, month):
@@ -1855,6 +1844,20 @@ fn selection_of(query: &str) -> Vec<(&'static str, String)> {
 // THE PER-ROUTE MINUTE COUNTER LIVES IN `crate::speed` (R3-14): one module
 // keeps every per-route count, and this one decides what a read writes.
 use crate::speed::AccessWindows;
+// The mark a served read carries so a cut of its body can take it back
+// (AH-02, D-4975); named here because `server::HeadDeadline` reads it here.
+pub(crate) use crate::speed::CountedServed;
+
+/// Takes one cut read back out of the access windows of this process:
+/// [`AccessWindows::cut`]. Called by the connection that cut it
+/// (`server::HeadDeadline`), once per cut (AH-02, D-4975).
+pub(crate) fn note_cut(counted: CountedServed) {
+    ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(AccessWindows::default)
+        .cut(counted);
+}
 
 /// The access windows of this process.
 static ACCESS: std::sync::Mutex<Option<AccessWindows>> = std::sync::Mutex::new(None);
@@ -1885,6 +1888,7 @@ pub(crate) fn note_access(
                 .with("route", telemetry::Value::Str(route))
                 .with("served", telemetry::Value::Uint(closed.served))
                 .with("refused", telemetry::Value::Uint(closed.refused))
+                .with("cut", telemetry::Value::Uint(closed.cut))
                 .with("slowest_micros", telemetry::Value::Uint(closed.slowest))
                 .with("window_ms", telemetry::Value::Uint(ACCESS_WINDOW_MS)),
         );
@@ -1951,6 +1955,37 @@ pub const FAILED_LINES_PER_WINDOW: u64 = 50;
 /// 9.3 MB an hour, so a sustained flood of both still takes some seven hours
 /// to roll the 64 MiB retained log (`docs/06-limits.md`).
 pub const LOCAL_FAILED_LINES_PER_WINDOW: u64 = 200;
+
+/// Whether one failed request's line is written under [`FAILED_LINES`]'s
+/// ration for its origin class, emitting the window's suppression summary
+/// first when the ration says one is due. [`note_request`] asks it only for a
+/// request that is not `Debug`.
+fn failed_line_admitted(from_another_site: bool, now: u64) -> bool {
+    let admit = FAILED_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(from_another_site, now);
+    if let Some(suppressed) = admit.summary {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "api.request",
+                suppression_message(from_another_site),
+            )
+            .with("suppressed", telemetry::Value::Uint(suppressed))
+            .with(
+                "origin",
+                telemetry::Value::Str(if from_another_site {
+                    "cross-site"
+                } else {
+                    "same-origin"
+                }),
+            )
+            .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
+        );
+    }
+    admit.write
+}
 
 /// The summary line's message for one origin class.
 pub(crate) const fn suppression_message(from_another_site: bool) -> &'static str {
@@ -6177,6 +6212,52 @@ mod tests {
         );
         assert!(keyed_page.contains("durable audit index"), "{keyed_page}");
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A CUT READ IS NOT COUNTED SERVED** (AH-02, D-4975): a read counted
+    /// at handler return whose body the connection then cut leaves `served`
+    /// for `cut` in the window that counted it; a cut of a read counted in a
+    /// window already said is counted where it happened and takes nothing
+    /// from that window's `served`; a lone sampled read that was cut is still
+    /// said; a route never counted is untouched.
+    #[test]
+    fn a_cut_read_leaves_served_for_cut_in_the_window_that_counted_it() {
+        let mut windows = AccessWindows::default();
+        let _ = windows.account("/store.json", false, 10, 1_000);
+        let _ = windows.account("/store.json", false, 10, 2_000);
+        windows.cut(CountedServed {
+            route: "/store.json",
+            at_ms: 2_000,
+        });
+        let next = windows.account("/store.json", false, 1, 1_000 + ACCESS_WINDOW_MS);
+        let closed = next.closed.expect("the closed window is said");
+        assert_eq!((closed.served, closed.refused, closed.cut), (1, 0, 1));
+        windows.cut(CountedServed {
+            route: "/store.json",
+            at_ms: 2_000,
+        });
+        let later = windows.account("/store.json", false, 1, 1_000 + 2 * ACCESS_WINDOW_MS);
+        let closed = later.closed.expect("a window holding a cut is said");
+        assert_eq!((closed.served, closed.refused, closed.cut), (1, 0, 1));
+
+        let mut lone = AccessWindows::default();
+        let _ = lone.account("/spot.json", false, 1, 5_000);
+        lone.cut(CountedServed {
+            route: "/spot.json",
+            at_ms: 5_000,
+        });
+        let said = lone
+            .account("/spot.json", false, 1, 5_000 + ACCESS_WINDOW_MS)
+            .closed
+            .expect("a cut sampled read is news");
+        assert_eq!((said.served, said.cut), (0, 1));
+
+        let mut none = AccessWindows::default();
+        none.cut(CountedServed {
+            route: "/bars.json",
+            at_ms: 1,
+        });
+        assert!(none.routes.is_empty(), "a route never counted is untouched");
     }
 
     /// **EVERY /db READ IS COUNTED, THE FIRST OF A WINDOW SAMPLED, AND A
