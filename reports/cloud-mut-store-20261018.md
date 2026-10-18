@@ -432,6 +432,7 @@ alone.
 | `cargo clippy --workspace --all-targets -- -D warnings` | **clean**: exit 0, no warning, 2 min 31 s |
 | `cargo test -p store --locked` | **green: 810 passed, 0 failed, 4 ignored, nothing skipped, 37 targets** (exit 0, 2 min 58 s), with `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` dropped, as an ordinary user runs it. See the root caveat below |
 | `cargo deny check` | **green**: `advisories ok, bans ok, licenses ok, sources ok`, exit 0, cargo-deny 0.20.2. `Cargo.toml`, `Cargo.lock` and `deny.toml` are identical to `feat/db-fix` (DENY-1's bumps) |
+| CI job `language-purity`: every `run:` step but 1e (it moves `web/` aside) and 14 (it re-measures bounds), run through `.github/checks_all.rs`'s plan as the 17 Oct pass ran them | **32 of 32 green** on `0c1c19e2` (144 s), and 32 of 32 on the base `67c4e58d` (143 s), each in its own worktree. The 8 that were red on 17 Oct, on the base and the branch alike, have been fixed on `feat/db-fix` since |
 
 **Run as plain root**, with every capability, `cargo test -p store --locked`
 fails 3 tests, all in `settings::tests`, in code outside this pass:
