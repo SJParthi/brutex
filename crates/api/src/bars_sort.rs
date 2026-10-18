@@ -70,13 +70,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::Arc;
 
 use store::format::{Bar, OI_NULL};
 use store::path::YearMonth;
 use store::sort_index::{Column, ColumnInfo, Entry, FENCE, Fences, Shape, SortIndex, Walked, Why};
 
-use super::series::{self, Position, SeriesPlan, Stamp};
+use super::series::{self, Position, SeriesPlan, Stamp, Weighed};
 use super::{
     Behind, Cancel, Extreme, Extremes, MAX_SCAN_BARS, MAX_SORT_DEPTH, SortKey, WindowBar,
     WindowQuery, behind_of, change, window_bar,
@@ -93,7 +93,7 @@ pub(super) const fn column_of(sort: SortKey) -> Option<Column> {
         SortKey::Close => Some(Column::Close),
         SortKey::Volume => Some(Column::Volume),
         SortKey::OpenInterest => Some(Column::OpenInterest),
-        SortKey::Ts | SortKey::TimeOfDay => None,
+        SortKey::Ts | SortKey::TimeOfDay | SortKey::Change => None,
     }
 }
 
@@ -272,47 +272,10 @@ type Held = (Arc<Result<View, String>>, Stamp);
 /// Every month's walk one request loaded, by series and slot.
 type Views = HashMap<(usize, usize), Held>;
 
-/// A process-wide memo held within a byte budget, emptied whole when a value
-/// would pass it.
-struct Weighed<K, V> {
-    map: OnceLock<Mutex<(usize, HashMap<K, V>)>>,
-    budget: usize,
-}
-
-impl<K: Eq + std::hash::Hash, V: Clone> Weighed<K, V> {
-    const fn new(budget: usize) -> Self {
-        Self {
-            map: OnceLock::new(),
-            budget,
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, HashMap<K, V>)> {
-        self.map
-            .get_or_init(|| Mutex::new((0, HashMap::with_capacity(1_024))))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn get(&self, key: &K) -> Option<V> {
-        self.lock().1.get(key).cloned()
-    }
-
-    /// Holds `value`, which weighs `weight` bytes; one heavier than the whole
-    /// budget is not held.
-    fn put(&self, key: K, value: V, weight: usize) {
-        if weight > self.budget {
-            return;
-        }
-        let mut held = self.lock();
-        if held.0.saturating_add(weight) > self.budget {
-            held.1.clear();
-            held.0 = 0;
-        }
-        held.0 = held.0.saturating_add(weight);
-        held.1.insert(key, value);
-    }
-}
+// The process-wide memos below are held within a byte budget by
+// `series::Weighed`: two generations of half the budget each, so a full memo
+// drops its older half and never empties whole (DB-B57, R3-07). This file's
+// own memo cleared everything when one value would pass the budget.
 
 /// Fence tables kept between requests, within [`FENCE_BUDGET`].
 static FENCE_TABLES: Weighed<FenceKey, Arc<Fences>> = Weighed::new(FENCE_BUDGET);
@@ -1770,7 +1733,7 @@ pub(super) fn page(
     query: &WindowQuery,
     (offset, limit): (usize, usize),
     faults: &mut FaultLog,
-    cancel: &Cancel,
+    (cancel, budget): (&Cancel, Option<u64>),
 ) -> Result<Sorted, String> {
     let mut set_aside = Vec::new();
     let mut aside = Aside::new();
@@ -1783,7 +1746,7 @@ pub(super) fn page(
             query,
             (offset, limit),
             &mut tried,
-            (cancel, &aside),
+            (cancel, &aside, budget),
         ) {
             Ok(sorted) => {
                 faults.absorb(tried);
@@ -1849,7 +1812,7 @@ fn page_once(
     query: &WindowQuery,
     (offset, limit): (usize, usize),
     faults: &mut FaultLog,
-    (cancel, aside): (&Cancel, &Aside),
+    (cancel, aside, budget): (&Cancel, &Aside, Option<u64>),
 ) -> Result<Sorted, Attempt> {
     let Some(column) = column_of(query.sort) else {
         return Err(Attempt::Refused(
@@ -1993,6 +1956,16 @@ fn page_once(
             format!("; index them with: {}", report.build.join(" ; "))
         }
     };
+    // ADMITTED BY WHAT IT WILL READ (R3-07, DB-061): a request admitted with
+    // the cheap reads that would read rows no index orders past its budget
+    // goes to the scan pool before it reads one.
+    if let Some(budget) = budget.filter(|&budget| read_rows > budget) {
+        return Err(Attempt::Refused(super::needs_scan_sentence(
+            &format!("ordering by {}", column.as_str()),
+            read_rows,
+            budget,
+        )));
+    }
     if read_rows > MAX_SCAN_BARS {
         return Err(Attempt::Refused(format!(
             "scan_budget_exceeded: ordering by {} serves {} kept rows from sort indexes and \
@@ -2262,6 +2235,13 @@ fn page_once(
                 }
             }
         }
+        if let Some(budget) = budget.filter(|&budget| owed > budget) {
+            return Err(Attempt::Refused(super::needs_scan_sentence(
+                "the extremes",
+                owed,
+                budget,
+            )));
+        }
         if owed > super::MAX_EXTREMES_SCAN_BARS {
             extremes = None;
             extremes_why = Some(format!(
@@ -2474,6 +2454,7 @@ pub(super) fn extremes_of(
     query: &WindowQuery,
     faults: &mut FaultLog,
     cancel: &Cancel,
+    budget: Option<u64>,
 ) -> Result<(Extremes, u64), String> {
     for plan in plans.iter_mut() {
         plan.clear_unread();
@@ -2527,6 +2508,9 @@ pub(super) fn extremes_of(
                 read.push((cut.series, slot, start, end));
             }
         }
+    }
+    if let Some(budget) = budget.filter(|&budget| owed > budget) {
+        return Err(super::needs_scan_sentence("the extremes", owed, budget));
     }
     if owed > super::MAX_EXTREMES_SCAN_BARS {
         return Err(format!(
