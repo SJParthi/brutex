@@ -70990,6 +70990,76 @@ above for the rule as it lands.
   the months are cut, and they admit 11,116,682 rows in all against policy 3's
   11,019,137.
 
+**Repair round 2 (2026-10-18): a halt's minutes leave the coarse rung's
+execution series.** AH-01's second re-check found item 3 false for the halt
+cause. A recorded halt cut only the SIGNAL rows. On every coarse rung the
+separately loaded `1min` execution series kept the feed's frozen and
+auction-indicative halt minutes. No minute was missing there, so D-1514's
+located hole could not fire, and a position opened from a row admitted
+before the halt was walked through those minutes to the 15:10 square-off,
+where a stop, target or exit could fill. The re-check's probe (5 minutes on
+2020-03-13) showed it: the last admitted row was 09:15, its entry minute
+09:20, and the next 60 execution minutes were consecutive, 59 of them inside
+`HALTS`' 09:22..10:20. Census-3's exposure ("auction-indicative minutes
+treated as tradable") was still there on coarse rungs.
+
+1. `cli::minute_gaps::withhold_halted_minutes` removes every minute inside
+   a recorded halt's `halted` window (`pull::calendar::halt_on`, the one
+   authority; the window holds the whole minutes with no continuous trading
+   on any segment, reopening auction included) from a coarse rung's
+   execution series. `sweep-stored`, `audit-range`, `screen` and `pool` call
+   it as soon as they load that series, before the floors, the census, the
+   digest and the alignment read it. `auto-stored` opens no execution series.
+   On `1min` the series is the signal itself, and the halt's cut already
+   withholds every row from its start to the session end.
+2. With those minutes gone, a halt is a missing span in the execution series,
+   just as a vendor hole is. A path that crosses it fails
+   `runner::trade::SliceFacts::path_accepts` at the first minute after it.
+   Under D-1514 a level exit strictly before the halt can still be priced;
+   nothing at or after the halt is. A signal whose entry minute would be the
+   halt's first minute has no immediate execution bar, so it is dropped and
+   never delayed.
+3. **Item 3 above, corrected.** A trade entered before a cut is refused at
+   the cut on every rung. On `1min` the slice ends at the cut, so a trade
+   whose horizon reaches past it has no square-off and is not priced. On a
+   coarse rung the cut's minute is absent from the execution series: for a
+   vendor hole or an absent closing minute because the feed lacks it, and
+   for a halt because of item 1. There, D-1514 prices only a level exit
+   strictly before the cut. The two rungs can differ in what they price
+   before a cut. Neither prices anything at or after it.
+4. The exclusion counts the removed minutes (`GapExclusion::
+   with_halted_minutes`), and `sweep-stored`, `audit-range` and `screen`
+   print `HALTED EXECUTION MINUTES WITHHELD: N one-minute bar(s) inside a
+   recorded halt ...` whenever N > 0. `pool`'s page names no cut and no
+   halted minute (`docs/06-limits.md` L-AH1-07).
+5. **Identity.** The removed minutes are absent from the execution slice
+   that each door digests into its data term, so a run under this rule
+   cannot share an identity with a run that kept them. `MINUTE_GAP_POLICY`
+   stays 4, as it did in repair round 1: policy 4 has not landed on
+   `feat/db-fix`, so no filed run carries it.
+6. `audit-stored`, the checksum-audited door, applies no minute-gap rule
+   and keeps its identity (D-0694). It still sweeps and trades both March
+   2020 halt windows. `expression-search-stored` and `expression-search-priced`
+   apply no minute-gap rule either, and price on the whole `1min` series.
+   Both are follow-ons, stated in `docs/06-limits.md` L-AH1-13, and are not
+   done here.
+
+Proved by `cli::halted_execution_tests::a_coarse_rung_trade_never_prices_a_halted_minute`
+(a generated March 2020 store through the `sweep-stored` door on 2, 5 and 15
+minutes: no halted execution minute, 117 counted, every pre-halt row's
+consecutive run ends before the halt, and on the door's own column and
+projection `runner::trade::SliceFacts::first_missing_within` places the hole
+at the first minute after the halt for every swept entry on a halt day while
+`path_accepts` refuses its path to the day's last minute) and
+`cli::minute_gaps::causal_tests::withhold_halted_minutes_removes_exactly_the_halt_window`.
+The test fails before the fix: with the removal turned off it fails at
+`2min: an execution minute inside a halt`, and with the removal off and its
+three direct checks on the series made inert it fails at the runner's check,
+`2min: the path from 1584071220000000 meets no hole` (2020-03-13 09:17 IST).
+The cost is one `halt_on` (three entries) per IST day and two compares per
+minute, in one `retain` pass: O(1) per minute, measured in `docs/06-limits.md`
+L-AH1-14 (p99 2.0 ns per minute, 16.0 us per month, n = 1,678 real months).
+
 ### D-4982 — `sweep-stored`'s exit code agrees with its sweep evidence: a walk that is not a whole answer exits FAILED (AH-01; repro-2; extends D-2720) — 2026-10-16
 
 **Observed.** `stored_month_arm` exited on `work_exit`, which reads only a

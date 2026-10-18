@@ -142,6 +142,9 @@ fn admission_cost_per_bar_and_month() {
     let (mut before_bar, mut after_bar, mut before_month, mut after_month) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut cut_months, mut rows_before, mut rows_after) = (0_u64, 0_u64, 0_u64);
+    // The halted-minute removal (AH-01 repair round 2), timed on its own over
+    // the execution minutes each month loads.
+    let (mut halted_minute, mut halted_month, mut halted_total) = (Vec::new(), Vec::new(), 0_u64);
     for (symbol, rung) in selections {
         let length = crate::stored::rung_length_micros(rung).expect("rung");
         for (year, month) in months() {
@@ -183,6 +186,13 @@ fn admission_cost_per_bar_and_month() {
             });
             let (kept, _) = withhold(&signal.bars, &cuts);
             let spent_after = start.elapsed().as_nanos() as f64;
+            let mut execution = minutes.clone();
+            let start = Instant::now();
+            let halted = withhold_halted_minutes(&mut execution);
+            let spent_halted = start.elapsed().as_nanos() as f64;
+            halted_minute.push(spent_halted / minutes.len().max(1) as f64);
+            halted_month.push(spent_halted / 1_000.0);
+            halted_total += halted;
             before_bar.push(spent_before / bars);
             after_bar.push(spent_after / bars);
             before_month.push(spent_before / 1_000.0);
@@ -204,6 +214,12 @@ fn admission_cost_per_bar_and_month() {
     println!("AFTER  per month (us): n={n} p50={p50:.1} p99={p99:.1} max={max:.1}");
     println!(
         "months with a cut: {cut_months}; rows admitted before {rows_before}, after {rows_after}"
+    );
+    let (_, p50, p99, max) = quantiles(halted_minute);
+    println!("HALTED per minute (ns): p50={p50:.1} p99={p99:.1} max={max:.1}");
+    let (_, p50, p99, max) = quantiles(halted_month);
+    println!(
+        "HALTED per month (us): p50={p50:.1} p99={p99:.1} max={max:.1}; minutes removed {halted_total}"
     );
     assert!(n >= 200, "at least 200 months measured, got {n}");
 }

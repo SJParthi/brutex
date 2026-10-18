@@ -1046,7 +1046,7 @@ pub(crate) fn prepare_span(
     let native = rung == crate::EXECUTION_RUNG;
     let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
-    let execution_bars = if native {
+    let mut execution_bars = if native {
         None
     } else {
         Some(stored::load_span(
@@ -1058,6 +1058,12 @@ pub(crate) fn prepare_span(
             to,
         )?)
     };
+    // A RECORDED HALT'S MINUTES ARE NEVER A FILL, as in `sweep-stored`,
+    // `audit-range` and `screen` (AH-01 repair round 2). This page names no cut
+    // and no halted minute (L-AH1-07).
+    let _halted_minutes = execution_bars.as_mut().map_or(0, |exec| {
+        crate::minute_gaps::withhold_halted_minutes(&mut exec.bars)
+    });
     let execution_slice = execution_bars
         .as_ref()
         .map_or(span.bars.as_slice(), |exec| exec.bars.as_slice());

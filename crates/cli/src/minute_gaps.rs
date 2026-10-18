@@ -330,14 +330,16 @@ impl GapExclusion {
         }
     }
 
-    /// What a door that withholds from its SIGNAL bars alone removed, on a
-    /// coarse rung, counted over `folded`. D-0694.
+    /// What a door that withholds from its SIGNAL bars removed, on a coarse
+    /// rung, counted over `folded`. D-0694.
     ///
-    /// On a coarse rung the separately loaded execution minutes stay whole:
-    /// no signal row exists from a cut on, so none of those minutes is
-    /// looked up for an entry. So no minute bar was removed, and this says so
-    /// rather than counting one. On `1min` there is no separate series, and
-    /// [`Self::one_series`] is the answer.
+    /// On a coarse rung the separately loaded execution minutes are not cut:
+    /// no signal row exists from a cut on, so none of those minutes is looked
+    /// up for an entry, and a path crossing a hole meets it in the minutes
+    /// themselves. Only a recorded halt's minutes leave that series
+    /// ([`withhold_halted_minutes`]), and [`Self::with_halted_minutes`] counts
+    /// them; this alone says no minute bar was removed. On `1min` there is no
+    /// separate series, and [`Self::one_series`] is the answer.
     #[must_use]
     pub fn signal_only(cuts: &[Cut], folded: &[Candle]) -> Self {
         let cuts = counted(folded, cuts);
@@ -356,6 +358,15 @@ impl GapExclusion {
         let mut exclusion = Self::signal_only(cuts, folded);
         exclusion.minute_bars = exclusion.signal_bars;
         exclusion
+    }
+
+    /// This exclusion with `minutes` execution minutes counted as withheld
+    /// for a recorded halt ([`withhold_halted_minutes`]): a coarse rung's
+    /// separate series. AH-01 repair round 2.
+    #[must_use]
+    pub const fn with_halted_minutes(mut self, minutes: u64) -> Self {
+        self.minute_bars = self.minute_bars.saturating_add(minutes);
+        self
     }
 
     /// How many days were cut.
@@ -746,6 +757,75 @@ pub fn withhold(bars: &[Candle], cuts: &[Cut]) -> (Vec<Candle>, u64) {
         }
     }
     (kept, removed)
+}
+
+/// Remove from a coarse rung's separately loaded one-minute EXECUTION series
+/// every minute a recorded halt covers, returning how many went.
+///
+/// # Why (AH-01 repair round 2, g-zerodha-universe-census-3)
+///
+/// A recorded halt cuts the SIGNAL rows from its first whole minute
+/// ([`days_with_minute_holes`]), but on a coarse rung the execution minutes
+/// are a second series: the feed serves every minute of a halt (frozen, or the
+/// reopening auction's indicative index), so no minute was missing there and
+/// D-1514's located hole could not fire. A position opened from a row admitted
+/// before the halt was walked through those minutes to the square-off, and a
+/// stop, target or exit could fill on a price no one could trade at.
+///
+/// With the halt's minutes gone the halt is a missing span in the execution
+/// series, exactly as a vendor hole is: a path that crosses it fails
+/// `runner::trade::SliceFacts::path_accepts` at the first minute after it, so
+/// a level exit strictly before the halt is still priced (D-1514) and nothing
+/// at or after it is. A signal whose entry minute is the halt's first minute
+/// has no immediate execution bar and is dropped, never delayed.
+///
+/// On `1min` the series is the signal itself, and the halt's cut already
+/// withholds every row from its start to the session end; this is for the
+/// separate series only.
+///
+/// [`pull::calendar::halt_on`] is the one authority: its `halted` window
+/// holds the whole minutes with no continuous trading on any segment,
+/// reopening auction included. A day the charter withholds whole on load
+/// (2021-02-24, `indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS`) has no
+/// minute here to remove.
+///
+/// # Cost
+///
+/// One pass, one `halt_on` (three entries) per IST day the series changes
+/// to, two compares per minute: O(1) per minute. `retain` moves nothing on a
+/// span with no halt.
+pub fn withhold_halted_minutes(minutes: &mut Vec<Candle>) -> u64 {
+    let before = minutes.len();
+    let mut day: Option<i64> = None;
+    let mut window: Option<(i64, i64)> = None;
+    minutes.retain(|minute| {
+        let today = indicators::ist_day(minute.ts_micros);
+        if day != Some(today) {
+            day = Some(today);
+            window = pull::calendar::halt_on(today).map(|halt| {
+                let open = day_open_micros(today);
+                (
+                    open.saturating_add(i64::from(halt.halted.from).saturating_mul(MINUTE_MICROS)),
+                    open.saturating_add(i64::from(halt.halted.to).saturating_mul(MINUTE_MICROS)),
+                )
+            });
+        }
+        window.is_none_or(|(from, to)| minute.ts_micros < from || minute.ts_micros > to)
+    });
+    u64::try_from(before.saturating_sub(minutes.len())).unwrap_or(u64::MAX)
+}
+
+/// The line a door with a separate execution series prints for the minutes
+/// [`withhold_halted_minutes`] removed from it. Empty when it removed none:
+/// a span with no recorded halt says nothing it did not do.
+#[must_use]
+pub fn halted_minutes_note(minutes: u64) -> String {
+    if minutes == 0 {
+        return String::new();
+    }
+    format!(
+        "HALTED EXECUTION MINUTES WITHHELD: {minutes} one-minute bar(s) inside a recorded halt (pull::calendar::HALTS) left the execution series, so no entry, stop, target or exit is priced in a halt; a position opened before one is refused at it (D-1514), and only a level exit strictly before it is priced.\n"
+    )
 }
 
 /// `cuts` with each day's rows admitted before and withheld after its cut,

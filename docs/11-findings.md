@@ -965,7 +965,11 @@ confirmed by two skeptics; their corrections are applied.
 - **g-zerodha-universe-census-3: frozen bars inside both March 2020 halts were
   swept.** FIXED by the AH-01 change: a recorded halt is a hole from its
   first whole minute, `pull::calendar::HALTS` the one authority. D-4981,
-  AH1-03.
+  AH1-03. Found by AH-01's second re-check and repaired: on a coarse rung the
+  separately loaded `1min` execution series kept the halt's minutes, so a
+  position opened before the halt was walked through them; they now leave that
+  series (D-4981 repair round 2, AH1-19, AH1-20). `audit-stored` and the
+  expression search still sweep through both halts (L-AH1-13, follow-on).
 - **repro-2: a halted `sweep-stored` walk exited 0 and was logged
   completed.** FIXED by the AH-01 change. D-4982, AH1-06; the API's
   in-process path is L-AH1-06.

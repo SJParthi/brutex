@@ -730,3 +730,50 @@ fn a_hole_at_the_open_outside_the_calendar_withholds_the_whole_day() {
         }
     }
 }
+
+/// `withhold_halted_minutes` removes exactly a recorded halt's `halted`
+/// minutes, inclusive at both ends, from any series: 59 on 2020-03-13
+/// (09:22..10:20) and 58 on 2020-03-23 (09:59..10:56); the minutes either side
+/// stay; a day with no halt, an empty series and a series already without the
+/// halt lose nothing. AH-01 repair round 2.
+#[test]
+fn withhold_halted_minutes_removes_exactly_the_halt_window() {
+    for (day, first, last, count) in [
+        (day_of(2020, 3, 13), hhmm(9, 22), hhmm(10, 20), 59_u64),
+        (day_of(2020, 3, 23), hhmm(9, 59), hhmm(10, 56), 58),
+    ] {
+        let whole = served(day, &[], None);
+        let mut minutes = whole.clone();
+        assert_eq!(withhold_halted_minutes(&mut minutes), count);
+        assert_eq!(
+            minutes.len(),
+            whole.len() - usize::try_from(count).expect("count")
+        );
+        let kept: Vec<i64> = minutes.iter().map(|bar| bar.ts_micros).collect();
+        assert!(
+            kept.contains(&stamp(day, first - 1)),
+            "the minute before stays"
+        );
+        assert!(
+            kept.contains(&stamp(day, last + 1)),
+            "the minute after stays"
+        );
+        assert!(
+            kept.iter()
+                .all(|ts| *ts < stamp(day, first) || *ts > stamp(day, last))
+        );
+        // Idempotent: a series already without the halt loses nothing.
+        assert_eq!(withhold_halted_minutes(&mut minutes), 0);
+    }
+    let quiet = day_of(2020, 3, 12);
+    let mut minutes = served(quiet, &[], None);
+    let before = minutes.clone();
+    assert_eq!(withhold_halted_minutes(&mut minutes), 0);
+    assert_eq!(minutes, before, "a day with no recorded halt is untouched");
+    assert_eq!(withhold_halted_minutes(&mut Vec::new()), 0, "empty");
+    assert!(
+        halted_minutes_note(0).is_empty(),
+        "nothing removed, nothing said"
+    );
+    assert!(halted_minutes_note(3).starts_with("HALTED EXECUTION MINUTES WITHHELD: 3 "));
+}

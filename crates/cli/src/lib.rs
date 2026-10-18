@@ -4443,7 +4443,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
             "the {rung} month {year}-{month:02} is stored and holds no bar. Nothing was swept"
         ));
     }
-    let execution_bars = if rung == EXECUTION_RUNG {
+    let mut execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load(
@@ -4455,6 +4455,12 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
             month,
         )?)
     };
+    // A RECORDED HALT'S MINUTES ARE NEVER A FILL (AH-01 repair round 2): the
+    // separate series loses them here, so a path opened before the halt meets
+    // D-1514's located hole at its first minute (D-4981 repair round 2).
+    let halted_minutes = execution_bars.as_mut().map_or(0, |execution| {
+        crate::minute_gaps::withhold_halted_minutes(&mut execution.bars)
+    });
     let execution_slice = execution_bars
         .as_ref()
         .map_or(loaded.bars.as_slice(), |execution| {
@@ -4508,6 +4514,7 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         crate::minute_gaps::GapExclusion::one_series(&holed_days, whole)
     } else {
         crate::minute_gaps::GapExclusion::signal_only(&holed_days, whole)
+            .with_halted_minutes(halted_minutes)
     };
     Ok(StoredMonthInputs {
         loaded,
@@ -4518,6 +4525,10 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         folded,
     })
 }
+
+#[cfg(test)]
+#[path = "halted_execution_tests.rs"]
+mod halted_execution_tests;
 
 /// The params term of a stored month's identity. D-0694.
 ///
@@ -4718,6 +4729,11 @@ fn stored_month_kernel(
             gaps.day_names().join("; "),
             loaded.bars.len(),
         );
+    }
+    // A coarse rung's own execution series: the minutes a recorded halt
+    // covered, said even when no signal row of that day was withheld.
+    if let Some(gaps) = minute_gaps.as_ref().filter(|_| execution_bars.is_some()) {
+        out.push_str(&crate::minute_gaps::halted_minutes_note(gaps.minute_bars()));
     }
     out.push_str(&daily_reference_note(daily, exact_minute));
     if let Some(guard) = integrity {
@@ -7910,6 +7926,9 @@ struct AuditInputs {
     /// Every day cut from the sweep: the holed days, then any day the
     /// overlay could not source, each with its causal cut (policy 4).
     withheld_days: Vec<crate::minute_gaps::Cut>,
+    /// Execution minutes a recorded halt covered, removed from the separate
+    /// series (`minute_gaps::withhold_halted_minutes`; AH-01 repair round 2).
+    halted_minutes: u64,
 }
 
 /// The inputs of the last stored range audit, or its refusal, and the raw
@@ -7970,6 +7989,19 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     audit_range_kernel_cached(request, &mut AuditCache::default())
 }
 
+/// The refusal [`load_audit_inputs`] gives when a coarse rung's one-minute
+/// execution span cannot be loaded, word for word what it printed inline
+/// before AH-01 repair round 2 moved it here (the function's own length).
+fn audit_execution_refusal(why: &str) -> stored::Refusal {
+    format!(
+        "the {EXECUTION_RUNG} execution series is required and could \
+         not be loaded: {why} Every entry and exit fills on \
+         {EXECUTION_RUNG} bars, so without them there is no run to \
+         make. Pull that rung for this span, or sweep \
+         {EXECUTION_RUNG} directly."
+    )
+}
+
 /// The support-independent half of a stored range audit: both spans, the
 /// withholding, the anchored column under its preparation evidence, both
 /// contexts and the executed-data digest. Loaded once per [`AuditCache`] key.
@@ -8006,7 +8038,7 @@ fn load_audit_inputs(
     // they can be measured on the right one. This block used to sit forty lines
     // lower, which is precisely why `Rules::derived` was reachable only with the
     // signal bars -- the execution ones had not been read yet.
-    let execution_bars = if rung == EXECUTION_RUNG {
+    let mut execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         match stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to) {
@@ -8016,17 +8048,14 @@ fn load_audit_inputs(
             // the `CLAUDE.md` §4 fallback: the numbers would be a different
             // model's, rendered identically. If the one-minute bars are not
             // there, the answer this command promises cannot be computed.
-            Err(why) => {
-                return Err(format!(
-                    "the {EXECUTION_RUNG} execution series is required and could \
-                     not be loaded: {why} Every entry and exit fills on \
-                     {EXECUTION_RUNG} bars, so without them there is no run to \
-                     make. Pull that rung for this span, or sweep \
-                     {EXECUTION_RUNG} directly."
-                ));
-            }
+            Err(why) => return Err(audit_execution_refusal(&why)),
         }
     };
+    // A RECORDED HALT'S MINUTES ARE NEVER A FILL (AH-01 repair round 2):
+    // removed before the floors, the census and the digest read the series.
+    let halted_minutes = execution_bars.as_mut().map_or(0, |exec| {
+        crate::minute_gaps::withhold_halted_minutes(&mut exec.bars)
+    });
     let execution = execution_bars.as_ref().map(|exec| Execution {
         bars: &exec.bars,
         signal_length_micros: signal_length,
@@ -8153,6 +8182,7 @@ fn load_audit_inputs(
         executed_digest,
         folded,
         withheld_days,
+        halted_minutes,
     })
 }
 
@@ -8192,6 +8222,7 @@ fn audit_range_kernel_cached(
         executed_digest,
         folded,
         withheld_days,
+        halted_minutes,
     } = cache.inputs(
         AuditKey {
             root: root.clone(),
@@ -8306,6 +8337,7 @@ fn audit_range_kernel_cached(
 
     let mut header = span_banner(&root, span, folded, underlying, from, to, commit);
     header.push_str(&minute_gap_line(folded, withheld_days));
+    header.push_str(&crate::minute_gaps::halted_minutes_note(*halted_minutes));
     // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
     //
     // A sweep whose sample is smaller than the operator asked for must say so
@@ -18412,6 +18444,9 @@ struct ScreenInputs {
     execution_bars: Option<stored::Span>,
     holed_days: Vec<crate::minute_gaps::Cut>,
     withheld: u64,
+    /// Execution minutes a recorded halt covered, removed from the separate
+    /// series (`minute_gaps::withhold_halted_minutes`; AH-01 repair round 2).
+    halted_minutes: u64,
     /// The whole signal span the column was folded over, holed days included.
     /// p11num-1, D-1781.
     folded: Vec<indicators::Candle>,
@@ -18526,7 +18561,7 @@ fn load_screen_inputs(
     let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
 
-    let execution_bars = if rung == EXECUTION_RUNG {
+    let mut execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load_span(
@@ -18538,6 +18573,10 @@ fn load_screen_inputs(
             to,
         )?)
     };
+    // A RECORDED HALT'S MINUTES ARE NEVER A FILL (AH-01 repair round 2).
+    let halted_minutes = execution_bars.as_mut().map_or(0, |exec| {
+        crate::minute_gaps::withhold_halted_minutes(&mut exec.bars)
+    });
     let execution = execution_bars.as_ref().map(|exec| Execution {
         bars: &exec.bars,
         signal_length_micros: signal_length,
@@ -18623,6 +18662,7 @@ fn load_screen_inputs(
         execution_bars,
         holed_days,
         withheld,
+        halted_minutes,
         folded,
         daily,
         exact_minute,
@@ -18668,6 +18708,7 @@ fn screen_range_kernel_cached(
         execution_bars,
         holed_days,
         withheld,
+        halted_minutes,
         folded,
         daily,
         exact_minute,
@@ -18731,6 +18772,7 @@ fn screen_range_kernel_cached(
             span.bars.len(),
         );
     }
+    header.push_str(&crate::minute_gaps::halted_minutes_note(*halted_minutes));
     header.push_str(&daily_reference_note(daily, exact_minute));
     Ok(audit_bars(
         &evaluator_stored(availability),
