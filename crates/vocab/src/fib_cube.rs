@@ -4606,6 +4606,8 @@ mod tests {
             format!("a {} e", spaces(nested.len()))
         );
         assert_eq!(shown("x/*\n*/y"), "x  \n  y");
+        // `/*/` opens a comment and does not close it.
+        assert_eq!(shown("a /*/ b */ c"), format!("a {} c", spaces(8)));
         assert_eq!(shown("x /* y"), "x     ");
         assert_eq!(shown("x /* a */ / * y"), "x         / * y");
         // A raw string closes only on a quote followed by all its hashes.
