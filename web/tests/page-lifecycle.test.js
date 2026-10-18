@@ -6,6 +6,7 @@ import { createPageRequests, watchVisible } from '../src/lib/page-requests.js';
 import { pooled } from '../src/lib/pooled.js';
 import { mergePages, nextOrdinal, pageFor } from '../src/lib/audit-pages.js';
 import { newestImportAt } from '../src/lib/import-panel.js';
+import { askAgainWhileWritten } from '../src/lib/being-written.js';
 
 /** @param {string} route @param {string[]} names */
 function functions(route, names) {
@@ -221,12 +222,16 @@ test('the actual Whole audit binds every answer to its requested selection and p
   const { code, source } = functions('gaps', ['runCurrent', 'run']);
   assert.match(source, /questionKey = \$derived\(JSON.stringify\(\[feeds.active, symbol, rung, from, to\]\)\)/);
   assert.match(source, /onDestroy\(\(\) => auditRequests.dispose\(\)\)/);
-  const create = new Function('ask', 'createPageRequests', `
+  // The page asks through the shared ask-again rule (R3-08 repair 2); the real
+  // one is in scope, so a being-written 503 would be asked again here too.
+  const make = new Function('ask', 'createPageRequests', 'askAgainWhileWritten', `
     const feeds={active:'A'}, parsed={exchange:'NSE',segment:'INDEX',underlying:'NIFTY'}, hasMinuteSource=true;
     const symbol='NSE-INDEX-NIFTY', rung='1min', from='2025-01', to='2025-02', contractTail=()=>'';
     let questionKey='original',result={phase:'idle',body:null,why:''};
     const auditRequests=createPageRequests(); ${code}
     return {run,runCurrent,auditRequests,state:()=>result,replace:()=>{questionKey='replacement';}};`);
+  /** @param {any} ask @param {typeof createPageRequests} requests */
+  const create = (ask, requests) => make(ask, requests, askAgainWhileWritten);
   for (const at of ['response', 'body', 'error']) {
     const delayed = deferred();
     const response = Response.json({ summary: 'old range' });

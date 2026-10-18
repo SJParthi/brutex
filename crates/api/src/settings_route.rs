@@ -678,12 +678,22 @@ pub(super) async fn settings_json(
         history = n;
     }
     let root = site.store_root.clone();
-    match tokio::task::spawn_blocking(move || answer(&root, history)).await {
+    // IN THE NAMED LIST POOL (R3-08, NEW-04): bounded, counted, and a full
+    // pool is a 429 the server gives `Retry-After`, never an unnamed thread.
+    match crate::detail::run_list(move || answer(&root, history)).await {
         Ok(body) => (StatusCode::OK, json_headers(), body.to_string()),
+        Err(why @ crate::detail::RunError::Saturated) => {
+            let (status, body) = crate::detail::admission_refused(
+                "/settings.json",
+                crate::detail::MAX_LIST_CONCURRENT,
+                &why,
+            );
+            (status, json_headers(), body)
+        }
         Err(why) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             json_headers(),
-            serde_json::json!({"refusal": format!("the settings read did not finish: {why}")})
+            serde_json::json!({"refusal": format!("the settings read did not finish: {why:?}")})
                 .to_string(),
         ),
     }
