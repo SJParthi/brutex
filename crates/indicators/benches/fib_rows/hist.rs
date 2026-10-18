@@ -7,7 +7,9 @@
 //! worker folds, one stock-day at a time — from a cache-resident 50 to 5,000
 //! (about 41 MB, past every last-level-cache estimate the FIB probe has printed
 //! on the cloud hosts, 8 to 32 MiB), each call landing in a pseudo-random cell
-//! as a stock-day's candidates land in its bank. One stock's production bank is
+//! as a stock-day's candidates land in its bank. The rows land in one width's cells at a time
+//! (WORST-CASE), as a fold lands a width's candidates, and anywhere in the bank
+//! (BOUNDED by one memory miss: the worst order). One stock's production bank is
 //! not measured yet (FIB-12's sample; about 1,900 cells by the generated
 //! dimensions FIB-1 seeds, an estimate), so that axis prints EXTRAPOLATION.
 
@@ -41,17 +43,24 @@ fn one(total: u64) -> OwnPast {
     past
 }
 
-/// A bank, its keys in index order, and the work its calls did.
+/// Calls spent in one width's cells before the next width (the width-major
+/// rows): a fold that lands a width's candidates together.
+const RUN: u64 = 4_096;
+
+/// A bank, its keys (every cell's, and each width's), and the work its calls
+/// did.
 pub(crate) struct Resident {
     /// The bank.
     bank: HistBank,
-    /// Every cell's key.
+    /// Every cell's key, in index order.
     keys: Vec<CellKey>,
+    /// Each long width's cells' keys.
+    by_width: Vec<Vec<CellKey>>,
     /// The work of the calls made, read from the cell each call touched.
     work: u64,
 }
 
-/// A bank of about `cells` cells (one width per 92 long cells), every cell
+/// A bank of about `cells` cells (one long width per 92 cells), every cell
 /// holding one committed day of values.
 fn bank(cells: u64) -> Resident {
     let widths = u16::try_from(cells.div_ceil(92)).unwrap();
@@ -78,16 +87,121 @@ fn bank(cells: u64) -> Resident {
         }
     }
     bank.commit_day().unwrap();
+    let by_width = (0..widths)
+        .map(|width| {
+            keys.iter()
+                .filter(|key| key.dir == Some(Search::Long) && key.width == Some(width))
+                .copied()
+                .collect()
+        })
+        .collect();
     Resident {
         bank,
         keys,
+        by_width,
         work: 0,
     }
 }
 
 /// A key of the bank for call `i`, spread over every cell.
-fn spread(keys: &[CellKey], i: u64) -> &CellKey {
-    &keys[usize::try_from(i.wrapping_mul(2_654_435_761) % keys.len() as u64).unwrap()]
+fn spread(keys: &[CellKey], i: u64) -> CellKey {
+    keys[usize::try_from(i.wrapping_mul(2_654_435_761) % keys.len() as u64).unwrap()]
+}
+
+/// A key for call `i` in width-major order: `RUN` calls inside one width's
+/// cells, then the next width.
+fn width_major(state: &Resident, i: u64) -> CellKey {
+    let width = usize::try_from((i / RUN) % state.by_width.len() as u64).unwrap();
+    spread(&state.by_width[width], i)
+}
+
+/// One observe into the cell `pick` chooses, its work read from that cell.
+fn observe_at(state: &mut Resident, i: u64, pick: fn(&Resident, u64) -> CellKey) -> u64 {
+    let key = pick(state, i);
+    let cell = state.bank.cell_mut(&key).unwrap();
+    let before = cell.work();
+    cell.observe(value(i)).unwrap();
+    state.work += cell.work() - before;
+    i
+}
+
+/// One `mid_rank` in the cell `pick` chooses, its work read from that cell.
+fn rank_at(state: &mut Resident, i: u64, pick: fn(&Resident, u64) -> CellKey) -> u64 {
+    let key = pick(state, i);
+    let cell = state.bank.cell(&key).unwrap();
+    let before = cell.work();
+    let num = cell.mid_rank(value(i)).unwrap().num();
+    state.work += cell.work() - before;
+    num
+}
+
+/// The whole-bank pick.
+fn anywhere(state: &Resident, i: u64) -> CellKey {
+    spread(&state.keys, i)
+}
+
+/// The rows over one stock's bank (FM-F002's data axis), run and reported.
+fn bank_rows(host: &Host, out: &mut String) -> bool {
+    let cells = Some(Axis::Data {
+        unit: "own-past cells resident in one stock's bank",
+        production: None,
+    });
+    let row = |id, name, class, op| Row {
+        id,
+        name,
+        class: Some(class),
+        axis: cells,
+        scales: [50, 500, 5_000],
+        setup: bank,
+        op,
+        work: |state: &Resident| state.work,
+        bytes: |state: &Resident| state.bank.bytes(),
+    };
+    let missed = Class::Bounded {
+        bound: "work 1; past the last-level cache, the time of one memory miss",
+    };
+    let rows = [
+        row(
+            "H-F-06",
+            "HistBank::observe, width-major (a width's candidates land together)",
+            Class::WorstCase,
+            |state, i| observe_at(state, i, width_major),
+        ),
+        row(
+            "H-F-07",
+            "HistBank cell + OwnPast::mid_rank, width-major",
+            Class::WorstCase,
+            |state, i| rank_at(state, i, width_major),
+        ),
+        row(
+            "H-F-08",
+            "HistBank::observe into a pseudo-random cell of the whole bank",
+            missed,
+            |state, i| observe_at(state, i, anywhere),
+        ),
+        row(
+            "H-F-09",
+            "HistBank cell + OwnPast::mid_rank in a pseudo-random cell of the whole bank",
+            missed,
+            |state, i| rank_at(state, i, anywhere),
+        ),
+    ];
+    let mut ok = true;
+    for row in &rows {
+        ok &= !run(row, host, out).fails();
+    }
+    let probe = bank(1);
+    let key = CellKey::at(Measure::StopBp, Search::Long, 0).kind(BaseKind::Rest);
+    let _ = writeln!(
+        out,
+        "  bank sizes: one unsplit cell {} bytes; a one-width bank of {} cells holds {} bytes; \
+         StopBp long width 0 rest holds {} values\n",
+        indicators::fibflag::hist::UNSPLIT_CELL_BYTES,
+        probe.bank.shape().cell_count(),
+        probe.bank.bytes(),
+        probe.bank.cell(&key).unwrap().total()
+    );
+    ok
 }
 
 /// The rows, run and reported. False when any row failed.
@@ -172,63 +286,4 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         ok &= !verdict.fails();
     }
     ok & bank_rows(host, out)
-}
-
-/// The rows over a bank of cells (FM-F002's data axis), run and reported.
-fn bank_rows(host: &Host, out: &mut String) -> bool {
-    let cells = Some(Axis::Data {
-        unit: "own-past cells resident in one bank",
-        production: None,
-    });
-    let bank_observe = Row {
-        id: "H-F-06",
-        name: "HistBank::observe into a pseudo-random cell",
-        class: Some(Class::WorstCase),
-        axis: cells,
-        scales: [50, 500, 5_000],
-        setup: bank,
-        op: |state, i| {
-            let key = *spread(&state.keys, i);
-            let cell = state.bank.cell_mut(&key).unwrap();
-            let before = cell.work();
-            cell.observe(value(i)).unwrap();
-            state.work += cell.work() - before;
-            i
-        },
-        work: |state| state.work,
-        bytes: |state| state.bank.bytes(),
-    };
-    let bank_rank = Row {
-        id: "H-F-07",
-        name: "HistBank cell + OwnPast::mid_rank in a pseudo-random cell",
-        class: Some(Class::WorstCase),
-        axis: cells,
-        scales: [50, 500, 5_000],
-        setup: bank,
-        op: |state, i| {
-            let cell = state.bank.cell(spread(&state.keys, i)).unwrap();
-            let before = cell.work();
-            let num = cell.mid_rank(value(i)).unwrap().num();
-            state.work += cell.work() - before;
-            num
-        },
-        work: |state| state.work,
-        bytes: |state| state.bank.bytes(),
-    };
-    let mut ok = true;
-    for verdict in [run(&bank_observe, host, out), run(&bank_rank, host, out)] {
-        ok &= !verdict.fails();
-    }
-    let probe = bank(1);
-    let key = CellKey::at(Measure::StopBp, Search::Long, 0).kind(BaseKind::Rest);
-    let _ = writeln!(
-        out,
-        "  bank sizes: one unsplit cell {} bytes; a one-width bank of {} cells holds {} bytes; \
-         StopBp long width 0 rest holds {} values\n",
-        indicators::fibflag::hist::UNSPLIT_CELL_BYTES,
-        probe.bank.shape().cell_count(),
-        probe.bank.bytes(),
-        probe.bank.cell(&key).unwrap().total()
-    );
-    ok
 }
