@@ -1045,3 +1045,19 @@ fn checked_trails(trails: &[TrailCandles<'_>]) -> Result<Vec<u16>, WalkRefusal> 
     }
     Ok(tfs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bar's bits are set, never toggled: setting a set bit keeps it set,
+    /// and an off fact changes nothing.
+    #[test]
+    fn setting_a_set_bit_keeps_it_and_an_off_fact_changes_nothing() {
+        let once = set(0, Bit::Corrupt, true);
+        assert_ne!(once, 0);
+        assert_eq!(set(once, Bit::Corrupt, true), once);
+        assert_eq!(set(once, Bit::Halted, false), once);
+        assert_eq!(set(once, Bit::Corrupt, false), once);
+    }
+}
