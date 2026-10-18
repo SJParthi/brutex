@@ -453,13 +453,35 @@ fn a_delta_answers_only_what_changed_and_an_old_generation_is_refused() {
         "with its current totals"
     );
 
-    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS NOT HELD.
+    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS READ BACK FROM
+    // THE FILE (R3-09, RA-008): the future the base's last entry named, and
+    // the weekly appended after it.
+    let older = generation.checked_sub(1).expect("a generation");
+    let read_back = json(
+        &render_answer(
+            &index,
+            &asked_for(&format!(
+                "feed=gdfl&segment=FNO&underlying=NIFTY&since={older}"
+            )),
+            "held",
+            None,
+        )
+        .expect("read back"),
+    );
+    let expiries = read_back["expiries"].as_array().expect("a list");
+    assert_eq!(expiries.len(), 2, "{read_back}");
+    assert_eq!(read_back["since"], older);
+
+    // AND REFUSED, NEVER GUESSED, ONCE THE FILE IS NOT THE ONE THE BASE WAS
+    // READ FROM: the same bytes installed by rename are another inode.
+    let path = manifest_path(&disk.root, Vendor::Gdfl);
+    let bytes = std::fs::read(&path).expect("read");
+    let tmp = path.with_extension("man.writing");
+    std::fs::write(&tmp, &bytes).expect("written");
+    std::fs::rename(&tmp, &path).expect("renamed");
     let (code, body) = render_answer(
         &index,
-        &asked_for(&format!(
-            "feed=gdfl&segment=FNO&since={}",
-            generation.checked_sub(1).expect("a generation")
-        )),
+        &asked_for(&format!("feed=gdfl&segment=FNO&since={older}")),
         "held",
         None,
     )
@@ -1414,6 +1436,75 @@ fn a_rows_answer_reads_the_same_keys_at_ten_times_the_census() {
     assert_eq!(few.len(), 25);
     assert_eq!(few, many, "the same probes, whatever else the census holds");
     assert_eq!(sums_small, sums_large);
+}
+
+/// **A RETIRED INDEX IS TAKEN APART IN PACED STEPS, ITS CENSUS READ LAST**
+/// (R3-09 repair 1, blocking item 4). Freed in one burst, GDFL's FNO index
+/// stalled every request of the process 67 to 138 ms at each census change.
+/// [`dismantle`] pauses after every `step` nodes, frees every node it
+/// counts, and lets the census read go only after the last pause: while it
+/// runs, the read is still held.
+#[test]
+fn a_retired_index_is_taken_apart_in_paced_steps_and_its_census_read_last() {
+    let slot = slot_of(&chain());
+    let index = built(Segment::Fno, &slot);
+    let nodes: usize = index
+        .underlyings
+        .values()
+        .map(|one| {
+            one.expiries
+                .values()
+                .map(|expiry| expiry.contracts.len() + expiry.months.len() + 1)
+                .sum::<usize>()
+                + one.months.len()
+                + one.cells.len()
+                + 1
+        })
+        .sum::<usize>()
+        + index.denoms.len()
+        + index.cells.len();
+    assert!(nodes >= 8, "the chain indexes {nodes} nodes");
+    let held = Arc::strong_count(&slot);
+    assert_eq!(held, 2, "the index holds its read");
+    let mut pauses = 0usize;
+    let mut held_at_each_pause = Vec::new();
+    let freed = dismantle(index, 2, &mut || {
+        pauses += 1;
+        held_at_each_pause.push(Arc::strong_count(&slot));
+    });
+    // EVERY NODE COUNTED: each contract, month and expiry, each
+    // underlying's months, cells and itself, and the segment's own sums.
+    assert_eq!(freed, nodes);
+    // A PAUSE AFTER A STEP, AND ONE MORE BEFORE THE CENSUS READ.
+    assert!(pauses >= 2, "{pauses} pauses for {freed} nodes");
+    assert!(
+        held_at_each_pause.iter().all(|&count| count == held),
+        "the census read was let go before the nodes: {held_at_each_pause:?}"
+    );
+    assert_eq!(Arc::strong_count(&slot), 1, "and then let go");
+    // A STEP OF ZERO IS A STEP OF ONE, never a division by it: a pause after
+    // every expiry, every underlying and the segment's sums, and the last.
+    let index = built(Segment::Fno, &slot);
+    let steps = index
+        .underlyings
+        .values()
+        .map(|one| one.expiries.len() + 1)
+        .sum::<usize>()
+        + 1;
+    let mut zero_step = 0usize;
+    assert_eq!(dismantle(index, 0, &mut || zero_step += 1), freed);
+    assert_eq!(zero_step, steps + 1);
+    // A STEP NO INDEX REACHES pauses once, before the census read.
+    let mut one = 0usize;
+    assert_eq!(
+        dismantle(built(Segment::Fno, &slot), usize::MAX, &mut || one += 1),
+        freed
+    );
+    assert_eq!(one, 1);
+    // AN EMPTY INDEX frees nothing and pauses once, before its (absent) read.
+    let mut empty = 0usize;
+    assert_eq!(dismantle(Index::default(), 2, &mut || empty += 1), 0);
+    assert_eq!(empty, 1);
 }
 
 /// What the two counters must equal: every expiry's contracts summed, and

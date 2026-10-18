@@ -70636,6 +70636,99 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
 
+### D-4975 — The head deadline runs only while no request is in flight: it restarts when a response is complete, not at its first written byte, and a response whose writes stop making progress is cut after the same timeout and logged as cut (amends D-1200 by addition) — 2026-10-15
+
+**Implemented by** AH-02 (`api::server`: `HeadDeadline`, `HeadState`,
+`Exchange`, `ExchangeOf`, `InFlight`, `WatchedBody`, `exchange_watch`, and one
+statement inserted in `serve_limited`; `api::logs`: `CountedServed`,
+`AccessWindows::cut`, `note_cut` and the `cut` count; tests in
+`crates/api/src/head_deadline_body_tests.rs` and one in `logs`).
+**Finding** g-ui-dom-vs-json-1 (14 Oct attack run, confirmed by two skeptics),
+and the (a) half of g-ui-dom-vs-json-14.
+
+**What was wrong.** D-1200 gave every connection a head-read deadline and
+restarted it "after every response written". `HeadDeadline::poll_write` and
+`poll_write_vectored` restarted it on a response's FIRST written byte, and
+hyper reads the socket while a body is still streaming (to notice a client that
+left), so the read after the deadline closed the connection mid-body. Every
+response the server could not hand to the kernel within `HEAD_READ_TIMEOUT`
+(10 s) of its first byte arrived cut: a `200` whose `Content-Length` promised
+the rest. Measured on :8080 by the finding: the 183,715,726-byte GDFL census at
+`--limit-rate 8M` stopped at 86,163,218 bytes after 10.28 s (curl exit 18), a
+GDFL NIFTY 1 s month at 3 MB/s and the Zerodha census at 1 MB/s the same way,
+and the browser showed `ERR_CONTENT_LENGTH_MISMATCH` on `/markets` and
+`/backtest` under load. The access log counted each as `read served`, status
+200; nothing recorded the cut.
+
+**Decided.**
+
+1. **Two clocks, never at once.** The HEAD clock runs only while no request is
+   in flight (`HeadState::Awaiting`): from accept, and again from the moment
+   the previous response is COMPLETE. The WRITE-STALL clock runs only while a
+   response is in flight and a write returns `Pending`: it starts at the first
+   such write, any write that moves a byte clears it, and when a write has made
+   no progress for the same timeout (`ConnectionLimits::head_read_timeout`,
+   10 s served) the connection is closed with the error
+   `response cut: no write progress for <ms> ms after <n> bytes`. A slow reader
+   is never cut while it keeps taking bytes; a stopped one is cut one timeout
+   after it stopped.
+2. **"Complete" is decided by the service and by hyper, not by the bytes.**
+   The socket cannot see where a response ends. `exchange_watch`, the outer
+   layer `serve_limited` adds, counts every request the service takes and every
+   response body hyper lets go of (written whole or abandoned) on per-connection
+   atomics the socket reads through axum's connect-info extension
+   (`into_make_service_with_connect_info::<ExchangeOf>`). hyper calls the
+   socket's `poll_flush` only once its own write buffer is empty. A response is
+   complete at a flush with every taken request finished and at least one byte
+   written since its head: only then does the next head's clock start. A head
+   hyper parses from its own buffer (pipelining) is seen as a request the
+   service took while the head clock ran, and stops that clock; any write while
+   the head clock runs is a response starting and stops it too.
+3. **A cut is logged once, as not delivered.** The cut writes one
+   `api.serve` "response cut" line at `warn`: method, path and query (through
+   `note_alphabet`), the status the handler chose, the declared length, the
+   bytes that went, `delivered` false and the stall in milliseconds. A client
+   that leaves mid-response (end of stream or a failed read or write while a
+   request is in flight) writes one `api.serve` "response closed by the client"
+   line at `info` instead, never a cut. At most one line per connection.
+   **A cut `/db` read is not counted served.** `logs::note_request` counts a
+   `/db` read at handler return, before its body goes, and marks the response
+   with that count (`logs::CountedServed`); the cut hands the mark to
+   `logs::note_cut`, which takes the read out of the window's `served` and
+   counts it in `cut`, and the window's `api.access reads counted` line says
+   `cut`. The cut line says `access_counted`.
+4. **What stays exactly as D-1200, D-1510 and D-1580 made it.** The idle
+   keep-alive closure (silent, one deadline after the response completed), the
+   `408` for a partial head, the leading-blank-line rule, the body deadline,
+   `MAX_CONNECTIONS` and the cap's queueing. Every test in
+   `server::head_deadline_tests` is unchanged and passes.
+
+**Cost.** O(1) per operation and counted, not argued: a write that moves bytes
+compares the state, adds and stores — no clock read, no timer touched; a write
+that waits reads the clock and resets the timer once per stall; a read or a
+flush loads two atomics; a request takes two atomic adds, two uncontended locks
+and one boxed body. `head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
+counts it over 400 moving and 200 waiting writes; the measured p50/p99/max and
+the shadow-server before/after numbers are in `docs/06-limits.md` under D-4975.
+
+**Not decided here.** A cut read whose access window closed before the cut
+(the stall is at least a timeout after the handler answered, and a window is
+60 s) was already said in that window's `served`; it is counted in the `cut`
+of the window it happened in, beside a `served` it was never part of. The
+window's one sampled `read served` line is written at handler return and is
+not taken back; the window's `cut` says so later. A client's own close
+mid-body stays counted served: the client chose to stop. A response body whose
+HANDLER pauses between chunks is not bounded by the stall clock (nothing is
+waiting to be written); no route in this build streams such a body. A graceful
+stop with a slow body in flight is R3-14's drain bound and is not exercised here. A
+reader that keeps the server's writes moving at least once a timeout holds its
+slot for as long as it reads, bounded only by `MAX_CONNECTIONS`; and a
+pipelined head whose first bytes arrived while the previous body was still
+being written, and which never completes, is closed silently at the deadline
+rather than answered `408` (the wrapper did not see those bytes; it used to,
+when the head clock wrongly ran during the body). Both are written down in
+`docs/06-limits.md` under D-4975.
+
 ### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
 
 The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
@@ -71225,6 +71318,170 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
+
+**Number** taken above every ledger head on the local branches on 17 Oct
+(feat/db-fix's highest is D-5301; D-5800..D-5804 are named by an unmerged
+branch). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R4-06 (repair 1). **Findings** AUT-05, and the second
+agent's re-check of 16 Oct (`verify-R4-06-r1.json`, blocking 1 and the
+follow-ups on `rehearsal.rs`).
+
+**What was observed.** `pull::rehearsal::Gate::admit` filtered every
+`operator: <what>` prerequisite out before judging readiness, so a kind
+whose step waits for the operator's approval (S-33's window past
+2026-09-30, S-35, S-48) or for "every writer stopped" (S-01) was admitted
+to start by itself, and the starter was never told those items existed.
+The same gate admitted `rehearsed_ms = -5`, `rehearsed_bytes = 0`, a stamp
+at `i64::MIN`, a snapshot at unix 99999999999 (always newer than any bulk
+write) and `rehearsed_commit = "not-a-commit 200"`, read a key written twice
+or a package declared twice as last-wins, admitted a kind on a `done` or
+`withdrawn` step, and wrote check lines whose run id could forge fields.
+
+**Decision.**
+
+1. **An operator item is never met silently.** Each `operator: <what>`
+   prerequisite of a kind's step is met only by (a) the step's own
+   `operator_yes` entry `"<the item's words, exactly> | <who, when, and the
+   words of the yes>"`, or (b) the starter attesting the item's exact words
+   in `Facts::attested` at the moment of the start — for a condition it can
+   read for itself (a Kite token read from Parameter Store and found valid;
+   every writer stopped). A person's approval is always (a), and the gate
+   enforces it: an item whose words name an approval, a yes, a decision, an
+   owner, a sign-off or "no agent" (`rehearsal::PERSON_ONLY`, any case) is
+   never met by an attestation, so a starter cannot approve its own run by
+   passing the approval's words (repair 1b; the attested-approval case was
+   admitted before it, `a_persons_decision_is_met_only_by_a_recorded_yes`).
+   The word list errs toward the person: an attestable condition that
+   happened to use one of those words would need a recorded yes, never the
+   reverse. Anything else
+   is `operator_pending`, naming each unmet item; an admitted kind returns
+   every item with how it was met (`Admitted::operator`) so the run records
+   it. A yes that names no operator item of its step word for word, or says
+   no one's yes, makes the whole list unreadable (every kind refused
+   `list_unreadable`), and gate 30 refuses it in CI. This supersedes the
+   builder's first choice ("an operator item is the person's and does not
+   hold an automatic start"), which was the defect.
+2. **Only a `pending` step's kind starts by itself** (`step_closed`
+   otherwise): a `done` step's run is not done twice and a `withdrawn` one
+   never runs. A recurring kind stays `pending`.
+3. **Figures above 0; stamps in 1970..now; commit stamps name a commit.**
+   `rehearsed_ms` and `rehearsed_bytes` must both be above 0 (a dry run that
+   took no time or wrote nothing rehearsed no write); every stamp's unix
+   seconds must be above 0 and not after `Facts::now`, the caller's clock;
+   `rehearsed_commit` and `writer_changed` must name 7 to 40 lower-case hex
+   digits. Gate 30 holds the same in CI.
+4. **Commits are compared by time, not ancestry.** The running app has no
+   repository to ask, and asking `git` would put a process launch on every
+   start. So a rehearsal on a commit later in time that does not contain the
+   writer's change reads as current; the commit stamps are written at
+   landing, from the branch that lands. `docs/06-limits.md` L-R406-03.
+5. **The list is compiled in** (`include_str!` of `config/store-steps.toml`):
+   the build that starts a kind is the build whose list it obeys, read once
+   per process. The price is that every edit of the list rebuilds `pull`
+   and every crate above it (`api`, `cli`), and a recorded rehearsal reaches
+   a running starter only through a new build. Reading the file once per
+   file stamp instead would let an edit under a running app change what it
+   starts, which is the edit this gate exists to stop. L-R406-02.
+6. **The list reader refuses a key written twice in one table and a package
+   declared twice**, as gate 30 already did; a kind longer than 64 bytes is
+   refused before it is read, so the never-automatic scan is bounded.
+7. **A check line escapes `%`, space, `=`, tab and line breaks** in `run`,
+   `kind` and `step` (`%25 %20 %3D %09 %0A %0D`); `why` comes last and keeps
+   spaces. The ledger's folder is fsynced when an append creates the file.
+   No caller writes this ledger yet (R3-23 owns the runs ledger), so the v=1
+. **Every built `POST /pull/spot` and `POST /pull/fno` line of the list is a
+   body the route's own parser accepts** (`api/tests/store_step_forms.rs`).
+   Reading them found S-48's line refused three ways: no `underlying=` (the
+   route takes one a request), `series=futures` (the slug is `fut`), and, with
+   an underlying named, `ExpiredSeriesIsOneMinuteOnly`: the operator's rule
+   of 2026-08-19 in `parse_fno` stores an expired contract at 1min or not at
+   all, and S-48 asks for 1day. S-48 is therefore `planned:` and names the
+   conflict; R4-28 (its prerequisite) reconciles the step with the rule or
+   brings the operator's answer. The four `/pull/spot` lines (S-33, S-34)
+   parse.
+
+**Proof.** `pull::rehearsal::tests::an_operator_prerequisite_is_never_met_silently`
+(the second agent's own case among them), `a_done_or_withdrawn_step_never_starts_by_itself`,
+`garbage_figures_and_impossible_stamps_are_refused`,
+`a_key_twice_or_a_package_twice_does_not_read`,
+`a_kind_longer_than_the_bound_is_refused_unread`,
+`a_check_line_field_cannot_forge_another`; gate 30
+`a_kind_is_named_once_never_a_deletion_and_its_stamps_read`. Invariants
+R406-02, R406-03, R406-06 to R406-08 in docs/04-invariants.md.
+
+### D-5321 — R4-06: the secret-shape detector reads a path's later words, full-width and zero-width characters and loosely written parameter paths; `-` and `_` still break a token run; a refusal says a value's length, never the value — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+SEC-07, and the second agent's attacks of 16 Oct (`verify-R4-06-r1.json`).
+
+**What was observed.** `brutex_core::secret_shape` let through `/x
+<token>` (a value opening with `/` skipped the token test whole), a token
+split by U+200B or typed in full width, and a parameter path with a
+trailing `/`, a doubled `/`, a `./` segment or an upper-case field. And
+`GET /settings.json?open.order=<token>` answered `bad_parameter` quoting the
+pair back.
+
+**Decision.**
+
+1. **In a value that opens with a separator, every word is still read**;
+   a word without a separator is a token when its run of twenty or more
+   letters and digits mixes letters and digits. A long all-letter folder
+   word stays a folder word (a false refusal there would block a real
+   archive path); a pasted token almost always mixes the two.
+2. **A full-width ASCII form reads as its ASCII character, and a zero-width
+   or soft-hyphen character as nothing**, in both shapes.
+3. **A parameter path is read from a word's first `/`**: empty and `.`
+   segments are no segments, the field matches in any letter case, and a
+   quote or stop after it is not part of it.
+4. **`-` and `_` break a token run although they are base64url's**: the
+   store symbols the operator types are upper-case words joined by `-`
+   (`NSE-INDEX-NIFTYNXT50`), and counting the `-` would refuse them. A
+   base64url token whose every run is broken that way is missed, and so is
+   a token pasted as a path segment; both are pinned by a test and stated
+   in the module docs (`CLAUDE.md` §3 rule 6).
+5. **A query refusal names a parameter by `said` and its value by length
+   only.** `store::settings`'s own `Invalid` refusals (R3-05's file) still
+   quote a value that evades the detector; that is R3-05's to change and is
+   listed as NOT DONE in R4-06's report.
+
+**Proof.** `brutex_core::secret_shape::tests::every_evasion_the_second_agent_tried_is_refused`,
+`a_full_width_or_zero_width_character_reads_as_the_shape_tests_say`, and the
+four earlier tests unchanged; `api::settings_route::tests::garbage_is_refused_by_name`
+(the token-in-query cases). Invariant R406-01; limit L-R406-01.
+
+### D-5322 — R4-06: a listed scheduler module may not delete, cut, rename, empty or spawn, except at a named, counted site — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+AUT-05 item 2, and the second agent's mutations of `autopilot.rs` (16 Oct).
+
+**What was observed.** `pull/tests/no_scheduler_delete.rs` caught
+`remove_file`, `remove_dir`, `remove_dir_all` and a same-line `rename(`, and
+missed `Command::new("rm")`, `libc::unlink`, a turbofish
+`rename::<_, _>(..)`, a `rename` whose `(` is on the next line and
+`OpenOptions::truncate(true)`.
+
+**Decision.** The scan reads the whole stripped text (comments, literals
+and top-level `#[cfg(test)]` items blanked) and refuses: `remove_file`,
+`remove_dir`, `remove_dir_all`, `unlink`, `unlinkat`, `rmdir`, `set_len`,
+`ftruncate` anywhere; `rename` called (the `(` on any later line),
+turbofished, reached as `fs::rename` or imported; `truncate(true)` and
+`libc::truncate`; `File::create` (it empties an existing file);
+`libc::remove`; and `Command`, because a spawned process can delete anything
+and its program name is a string the scan blanks. A scheduler module that
+must spawn (a chain that runs a `cli` verb) adds a named, counted `ALLOWED`
+row with its reason in the change that needs it. `autopilot.rs` holds two:
+the store-writable probe's `File::create` and its `remove_file` of the
+dot-file it created (R4-12 owns making the probe overwrite instead).
+
+**Proof.** `every_evasion_the_second_agent_tried_is_refused`,
+`no_scheduler_path_deletes_a_file`,
+`a_fixture_deletion_is_refused_and_a_comment_or_string_is_not`,
+`every_declared_module_that_exists_is_listed`. Invariant R406-04; limit
+L-R406-04.
+
 ### D-5800 — The GDFL options reader splits a row into a fixed ten-field array, refuses the eleventh field where it is seen, and reserves its rows once from the body (CLOUD-ATTACKO1, F1) — 2026-10-17
 
 `pull::gdfl_nfo::decode_capped` collected a `Vec<&str>` of every comma-split
@@ -71394,6 +71651,45 @@ profile (out of memory, twice). Every number in `docs/06-limits.md` under
 this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
 one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
 gate-8 command.
+
+### D-5820 — A measurement in `docs/06-limits.md` that names a feat/db-fix commit says `main`'s squash merge does not keep it, and one that names a commit no pushed branch holds says so and names the commit on this branch with the same files — 2026-10-17
+
+BASE-CITED, found by the CLOUD-RUST1 merge-back on 17 October 2026 (its
+finding BASE-RED-CITED-COMMITS). `crates/store/tests/cited_commits.rs`
+(`every_commit_the_store_records_cite_is_on_main_or_says_why_not`) failed on
+feat/db-fix itself: `docs/06-limits.md` cited nine commits that
+`refs/remotes/origin/main` (4bbd37df, 2 October 2026) does not hold, none of
+them in `NOT_ON_MAIN` and none of their sentences giving a reason. Every one
+was the "before" build or the measured head of a package's p50/p99 table.
+
+**What is decided.** The rule the test already states is applied as it
+stands, by evidence for each commit; the test is not weakened and no history
+is rewritten. (1) A cited commit that is an ancestor of feat/db-fix is listed
+as `Off::Squashed`, and every sentence citing it gains the words "which
+`main`'s squash merge does not keep": `4756cce0` (AF-05, the R3-36 merge),
+`023d6ab8` (AF-06, the SC-2 merge), `079ad4af` (AG-01 and AG-03, the R3-16
+merge), `521066e6` (AF-04 in `a560c52dd` and AF-03, the SC-1 merge fix-up),
+`72c91a46` (AF-02, the WP-62 merge), `ff636f58` (AF-02's first form) and
+`9cb9de51` (AF-02 repair round 1). (2) A cited commit that is on no pushed
+branch is not re-cited to another commit, because the measurement was taken
+of that build and naming another would claim a build nobody timed. It is
+listed as `Off::Neither`, its sentence says it "is in neither `main`'s history
+nor this branch", and the sentence also names the feat/db-fix commit whose
+four AF-02 files (`imports.rs`, `dayflags.rs`, `imports_filter_tests.rs`,
+`dayflags_filter_tests.rs` under `crates/api/src`) are byte for byte the
+measured ones, checked by `git rev-parse <commit>:<file>` on both:
+`cde73992` (AF-02 repair round 1, only on the local
+`backup/af02-r1-wip-20261015`) with `9cb9de51`, and `91ef0094` (AF-02 repair
+round 2, only on the local `backup/AF-02-r2-wip`) with `867771784f`, which is
+listed as `Off::Squashed` like the others. The rest of each tree differs (the
+feat/db-fix work merged between them), so the timings stay those of the WIP
+build. `NOT_ON_MAIN` grows from 37 to 47.
+
+**Why.** A measurement cited to a commit a reader cannot fetch cannot be
+checked (`CLAUDE.md` §3 rule 6), and feat/db-fix reaches `main` by a squash
+merge (`auto-merge.yml`), which makes none of its commits an ancestor of
+`main`. The proof is the test itself: it failed on feat/db-fix `f9cdb5840`
+with the nine faults and passes with this change.
 
 ### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
 

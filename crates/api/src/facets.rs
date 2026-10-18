@@ -35,10 +35,15 @@
 //! # What `since` answers
 //!
 //! The rows whose census entry was appended after that generation, with
-//! their current totals, so a client merges them by key. A generation the
-//! census no longer holds the appends of (it was read whole since: a new
-//! epoch, a compaction, a restart) is refused `410 since_too_old`, and the
-//! client loads the selection afresh; never a silent partial delta.
+//! their current totals, so a client merges them by key. A generation older
+//! than the census's last whole read -- a restart, a tail read whole again
+//! past its floor -- is answered from the FILE, read back by position
+//! (`census::Part::changed_since`; R3-09, RA-008), so a tab kept open across
+//! them refreshes by a delta. One the file cannot answer (another file now
+//! stands at the path: a new epoch, a compaction, a rename; or more than
+//! `census::SINCE_READ_BACK_MOST` entries since) is refused `410
+//! since_too_old`, and the client loads the selection afresh; never a
+//! silent partial delta.
 //!
 //! # Cost
 //!
@@ -50,7 +55,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -155,6 +160,52 @@ impl Agg {
     }
 }
 
+/// One (month, rung) of the coverage roll-up (`census_rollup.rs`; R3-09):
+/// how many census keys hold that month at that rung, their rows summed,
+/// and the earliest first and the latest last stamp among them. Kept per
+/// underlying and per segment by the same `apply` the nodes are, so a
+/// roll-up is read off the index and never walks the census.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MonthCell {
+    /// Census keys (instrument-months) at this month and rung.
+    pub(crate) keys: u64,
+    /// Their rows summed.
+    pub(crate) rows: u64,
+    /// The earliest first stamp, in microseconds.
+    pub(crate) first: Option<i64>,
+    /// The latest last stamp, in microseconds.
+    pub(crate) last: Option<i64>,
+}
+
+impl MonthCell {
+    /// One entry moved from `old` (or new) to `new`, exactly as
+    /// [`Agg::apply`] moves a node: a key is counted once, when first seen;
+    /// rows move by the difference; the first stamp is a minimum and the
+    /// last a maximum, both exact because a key's rows and last stamp only
+    /// grow and its first stamp is fixed once written.
+    fn apply(&mut self, old: Option<&Held>, new: &Held) {
+        let entry = &new.entry;
+        if old.is_none() {
+            self.keys = self.keys.saturating_add(1);
+        }
+        self.rows = self
+            .rows
+            .saturating_sub(old.map_or(0, |was| was.entry.rows))
+            .saturating_add(entry.rows);
+        self.first = Some(self.first.map_or(entry.first_ts_micros, |first| {
+            first.min(entry.first_ts_micros)
+        }));
+        self.last = Some(
+            self.last
+                .map_or(entry.last_ts_micros, |last| last.max(entry.last_ts_micros)),
+        );
+    }
+}
+
+/// Every (month, rung) cell of one roll-up, oldest month first, finest rung
+/// first within a month.
+pub(crate) type Cells = BTreeMap<(YearMonth, Timeframe), MonthCell>;
+
 /// Which side of an option, or a future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ContractId {
@@ -210,6 +261,9 @@ pub(crate) struct Underlying {
     expiries: BTreeMap<Day, Expiry>,
     /// Keys whose contract text is not one this index can read.
     unread_contracts: u64,
+    /// The coverage roll-up of this underlying, per (month, rung): what
+    /// `/census/rollup.json` reads (R3-09).
+    cells: Cells,
     /// Distinct contracts across every expiry, counted by `apply` as each is
     /// first seen: the underlyings answer read it by walking every expiry of
     /// every underlying on every request (`cloud/attack-o1-20261016`). A key
@@ -238,6 +292,12 @@ pub(crate) struct Index {
     /// maximum never has to come down, and a key is counted once, when it is
     /// first seen.
     denoms: BTreeMap<(YearMonth, Timeframe), (u64, u64)>,
+    /// The coverage roll-up of the whole segment, per (month, rung): what
+    /// `/census/rollup.json` reads without an underlying (R3-09).
+    cells: Cells,
+    /// How long a test says this index takes to drop ([`SLOW_DROP_KEY`]).
+    #[cfg(test)]
+    drop_pause: DropPause,
 }
 
 impl Index {
@@ -257,6 +317,21 @@ impl Index {
     /// map probe.
     pub(crate) fn holds(&self, exchange: Exchange, symbol: Symbol) -> bool {
         self.underlyings.contains_key(&(exchange, symbol))
+    }
+
+    /// The whole segment's coverage roll-up per (month, rung): one field
+    /// read, whatever the census holds (`census_rollup.rs`; R3-09).
+    pub(crate) const fn segment_cells(&self) -> &Cells {
+        &self.cells
+    }
+
+    /// One underlying's coverage roll-up per (month, rung), or `None` when
+    /// the segment holds no such underlying on `exchange`: one map probe
+    /// (`census_rollup.rs`; R3-09).
+    pub(crate) fn underlying_cells(&self, exchange: Exchange, symbol: Symbol) -> Option<&Cells> {
+        self.underlyings
+            .get(&(exchange, symbol))
+            .map(|under| &under.cells)
     }
 
     /// One expiry's option contracts, each as (strike paisa, `true` for a
@@ -291,6 +366,10 @@ impl Index {
     fn apply(&mut self, old: Option<&Held>, new: &Held) {
         let key = new.entry.key;
         self.total.apply(old, new);
+        self.cells
+            .entry((key.month, key.timeframe))
+            .or_default()
+            .apply(old, new);
         let denom = self
             .denoms
             .entry((key.month, key.timeframe))
@@ -304,6 +383,11 @@ impl Index {
             .entry((key.exchange, key.symbol))
             .or_default();
         under.agg.apply(old, new);
+        under
+            .cells
+            .entry((key.month, key.timeframe))
+            .or_default()
+            .apply(old, new);
         under.months.entry(key.month).or_default().apply(old, new);
         let Some(contract) = key.contract else {
             return;
@@ -348,15 +432,169 @@ fn part_of(slot: &Slot, segment: Segment) -> Option<&census::Part> {
 #[derive(Debug, Default)]
 pub(super) struct Cache(Mutex<HashMap<(Vendor, Segment), IndexCell>>);
 
-/// One (feed, segment)'s index, behind the lock its moves are made under.
-type IndexCell = Arc<Mutex<Index>>;
+/// One (feed, segment)'s index and the locks its moves and builds are made
+/// under. See [`IndexSlot`].
+type IndexCell = Arc<IndexSlot>;
+
+/// One (feed, segment)'s index, behind the lock its moves are made under:
+/// a READ lock for every answer that finds it current, so concurrent answers
+/// render side by side instead of queueing behind one another (R3-09: sixty
+/// clients on NIFTY's FNO underlying queued to 141 ms behind one `Mutex`);
+/// the write lock only to move it forward by appended entries, and to swap
+/// in a whole build.
+///
+/// # A whole build is made OFF the index's lock (R3-09)
+///
+/// A build over every key of the segment (the first after a start, or after
+/// a new epoch, a compaction or a file replaced by rename) took the write
+/// lock for its whole length: 2.6 s for GDFL's 2,068,946 FNO entries, during
+/// which every answer of the segment queued behind it -- the ones the
+/// previous read could answer included. It is now made under `building`
+/// alone (one build at a time, so a burst after a restart builds once) with
+/// the index free, swapped in under a moment's write lock, and `pending`
+/// says one is on its way: what [`building`] and [`index_or_previous`] read
+/// to answer "warming" or from the previous index at once instead of
+/// waiting.
+///
+/// # Pending from BEFORE the read is published (R3-09 repair 1)
+///
+/// `pending` was set by the build itself, after it took `building`. The
+/// background re-read publishes the new census read first and builds the
+/// index after the import journal's count and the index map (283 to
+/// 1,657 ms on the shadow of the real store): inside that window a request
+/// handed the new read found nothing pending, built the whole index itself,
+/// or waited on `building` for the re-read's build, 7.55 s and 12.21 s
+/// measured. Now the re-read holds `pending` before it publishes
+/// ([`hold_pending`]), a whole build holds it while it runs, and a request
+/// that finds the index behind its read with nothing pending starts a build
+/// on a thread of its own ([`kick`]). No request thread takes `building`
+/// once the census runs in the background.
+///
+/// # The old index is dropped OFF the lock (R3-09 repair 1)
+///
+/// The swap moved the new index in under the write lock and dropped the old
+/// one there: 0.8 to 1.9 s for GDFL's 2,068,946-entry FNO index, every
+/// reader of the segment queued on the read lock meanwhile. Only the move is
+/// made under the lock now; the old index is retired to a thread of its own
+/// ([`super::census_cache::retire`]).
+#[derive(Debug, Default)]
+pub(super) struct IndexSlot {
+    index: RwLock<Index>,
+    building: Mutex<()>,
+    pending: Mutex<Pending>,
+}
+
+/// Who is bringing one index forward, and since when. See [`IndexSlot`].
+#[derive(Debug, Default)]
+struct Pending {
+    /// How many hold it: a census re-read about to publish a read the index
+    /// does not reflect yet ([`hold_pending`]), a whole build in [`index`],
+    /// a build a request started ([`kick`]).
+    holders: u32,
+    /// When the first of them took it; `None` while nobody holds it.
+    since: Option<std::time::SystemTime>,
+}
+
+/// One holder of an index's [`Pending`], released when dropped -- by return
+/// or by panic, so a build that died never leaves the routes answering
+/// "warming" for the life of the process.
+#[derive(Debug)]
+pub(crate) struct PendingHold(IndexCell);
+
+impl PendingHold {
+    /// Holds `cell`'s pending, beside any other holder.
+    fn of(cell: &IndexCell) -> Self {
+        let mut pending = cell.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.holders = pending.holders.saturating_add(1);
+        let _first = pending.since.get_or_insert_with(std::time::SystemTime::now);
+        Self(Arc::clone(cell))
+    }
+
+    /// Holds `cell`'s pending if nobody does; else when the holder took it.
+    fn if_idle(cell: &IndexCell) -> Result<Self, std::time::SystemTime> {
+        let mut pending = cell.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(since) = pending.since.filter(|_| pending.holders > 0) {
+            return Err(since);
+        }
+        let since = std::time::SystemTime::now();
+        *pending = Pending {
+            holders: 1,
+            since: Some(since),
+        };
+        Ok(Self(Arc::clone(cell)))
+    }
+
+    /// When the pending this holds was first taken.
+    fn since(&self) -> std::time::SystemTime {
+        self.0
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .since
+            .unwrap_or_else(std::time::SystemTime::now)
+    }
+}
+
+impl Drop for PendingHold {
+    fn drop(&mut self) {
+        let mut pending = self
+            .0
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pending.holders = pending.holders.saturating_sub(1);
+        if pending.holders == 0 {
+            pending.since = None;
+        }
+    }
+}
+
+/// Holds every segment's index of `vendor` pending: what a census re-read
+/// takes BEFORE it publishes a read, and drops once the indexes are brought
+/// to it, so a request handed the new read meanwhile answers from the
+/// previous index or `503 index_warming` and never builds or waits
+/// ([`IndexSlot`]).
+pub(crate) fn hold_pending(site: &Site, vendor: Vendor) -> Vec<PendingHold> {
+    SEGMENTS
+        .into_iter()
+        .map(|segment| PendingHold::of(&cell_of(site, vendor, segment)))
+        .collect()
+}
+
+/// The cell of (`vendor`, `segment`), made on first use.
+fn cell_of(site: &Site, vendor: Vendor, segment: Segment) -> IndexCell {
+    let mut cells = site
+        .census_wire
+        .facets
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(cells.entry((vendor, segment)).or_default())
+}
+
+/// Whether `index` answers a request handed `slot`: it reflects `slot`, or a
+/// LATER read than it ([`later`]).
+fn answers(site: &Site, vendor: Vendor, index: &Index, slot: &Arc<Slot>) -> bool {
+    index
+        .reflects
+        .as_ref()
+        .is_some_and(|reflects| Arc::ptr_eq(reflects, slot) || later(site, vendor, reflects, slot))
+}
 
 /// `segment`'s index as of `slot`, built or moved forward, under its lock.
 ///
 /// Moved forward when the index reflects an earlier read of the same census
 /// and that census still holds the appends since (`changed_since`); built
-/// from the census otherwise. Either way the sums equal a fresh build over
-/// `slot`'s census: `facets::a_moved_index_equals_a_fresh_build` holds it.
+/// from the census otherwise, off the index's lock ([`IndexSlot`]). Either
+/// way the sums equal a fresh build over `slot`'s census:
+/// `facets::a_moved_index_equals_a_fresh_build` holds it.
+///
+/// WAITS for a whole build: what the census re-read and a request's
+/// [`kick`] run on threads of their own, and what a one-shot caller (no
+/// background census, `census_cache::start` never ran) runs on its own. A
+/// route never calls it while the census runs in the background
+/// ([`index_or_previous`], [`building`]); `/chain.json` still does (its
+/// owner's follow-up, named in `docs/06-limits.md`).
 pub(crate) fn index<T>(
     site: &Site,
     vendor: Vendor,
@@ -364,71 +602,687 @@ pub(crate) fn index<T>(
     slot: &Arc<Slot>,
     read: impl FnOnce(&Index) -> T,
 ) -> T {
-    let cell = {
-        let mut cells = site
-            .census_wire
-            .facets
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(cells.entry((vendor, segment)).or_default())
-    };
-    let mut held = cell.lock().unwrap_or_else(PoisonError::into_inner);
-    advance(&mut held, segment, slot);
+    let cell = cell_of(site, vendor, segment);
+    {
+        let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+        if answers(site, vendor, &held, slot) {
+            return read(&held);
+        }
+    }
+    // MOVED BY ITS TAIL, the entries found off the lock and applied under
+    // the write lock: a mover that took it after another moved the index
+    // finds it current, so a burst after a change moves it once; and never
+    // moved BACK over a read older than the one another request moved it to
+    // ([`later`]). Whatever the move displaced is dropped after the lock is
+    // let go, never under it.
+    if !moved_off_lock(site, vendor, &cell, segment, slot) {
+        // BUILT WHOLE, OFF THE INDEX'S LOCK, ONE BUILD AT A TIME: a builder
+        // that waited for another finds the index current and builds nothing.
+        let _one = cell.building.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = {
+            let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+            answers(site, vendor, &held, slot)
+        };
+        if !current {
+            // PENDING WHILE IT RUNS, released by return or by panic.
+            let _pending = PendingHold::of(&cell);
+            #[cfg(test)]
+            super::census_cache::slow_read::pause(&site.store_root.join(SLOW_BUILD_KEY));
+            #[cfg(test)]
+            let fresh = {
+                let mut fresh = whole(segment, slot);
+                fresh.drop_pause = DropPause(super::census_cache::slow_read::ms(
+                    &site.store_root.join(SLOW_DROP_KEY),
+                ));
+                fresh
+            };
+            #[cfg(not(test))]
+            let fresh = whole(segment, slot);
+            // A MOMENT'S WRITE LOCK, TO MOVE A POINTER: the old index (two
+            // million entries at GDFL's size) is dropped after the lock is
+            // let go, on a thread of its own. A LATER READ MOVED IT MEANWHILE
+            // (by its tail, while this build ran): kept, and the build
+            // retired instead.
+            let retired = {
+                let mut held = cell.index.write().unwrap_or_else(PoisonError::into_inner);
+                if answers(site, vendor, &held, slot) {
+                    fresh
+                } else {
+                    std::mem::replace(&mut *held, fresh)
+                }
+            };
+            super::census_cache::retire(Dismantled(retired));
+        }
+    }
+    let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
     read(&held)
 }
 
-/// [`index`]'s update, on its own so a test drives it without a site.
+/// Brings `segment`'s index to `slot` ([`index`]), and says whether it
+/// answers `slot` once that returns: what the census re-read runs on its own
+/// thread for every segment before it lists the facet index `ready`.
+pub(crate) fn bring(site: &Site, vendor: Vendor, segment: Segment, slot: &Arc<Slot>) -> bool {
+    index(site, vendor, segment, slot, |index| {
+        answers(site, vendor, index, slot)
+    })
+}
+
+/// The key under a store root whose `census_cache::slow_read` pause slows
+/// every whole facet-index build there: what a test stands a long build up
+/// with. Not a path anything reads or writes.
+#[cfg(test)]
+pub(crate) const SLOW_BUILD_KEY: &str = "facets-whole-build-pause";
+
+/// The key under a store root whose `census_cache::slow_read` milliseconds
+/// every index built whole there takes to DROP: what a test stands a
+/// two-million-entry index's drop up with (R3-09 repair 1). Not a path
+/// anything reads or writes.
+#[cfg(test)]
+pub(crate) const SLOW_DROP_KEY: &str = "facets-index-drop-pause";
+
+/// A test's stand-in for the time a large index takes to drop: sleeps its
+/// milliseconds when the index that carries it is dropped ([`SLOW_DROP_KEY`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DropPause(u64);
+
+#[cfg(test)]
+impl Drop for DropPause {
+    fn drop(&mut self) {
+        if self.0 > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.0));
+        }
+    }
+}
+
+/// When a build stands between a request handed `slot` and its answer: the
+/// census re-read holds it pending from before it published the read, a
+/// whole build of this cell is running, a request started one, or the warm
+/// at start has not built this feed's indexes yet (`census_cache::start`).
+/// `None` when nothing is bringing it forward.
+fn pending(site: &Site, vendor: Vendor, cell: &IndexSlot) -> Option<std::time::SystemTime> {
+    let held = {
+        let pending = cell.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.since.filter(|_| pending.holders > 0)
+    };
+    held.or_else(|| super::census_cache::warming_since(site, super::census_cache::FACETS, vendor))
+}
+
+/// Milliseconds since `at`, saturated.
+fn ms_since(at: std::time::SystemTime) -> u64 {
+    u64::try_from(at.elapsed().unwrap_or_default().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Where a request handed `slot` stands with one index, found without
+/// waiting for any build.
+enum Stand {
+    /// The index answers `slot` ([`answers`]).
+    Current,
+    /// A build is on its way, held since this instant: the request answers
+    /// from the previous index, or `503 index_warming`.
+    Pending(std::time::SystemTime),
+    /// Nothing builds it and no thread could be started for it (the census
+    /// is not in the background: a one-shot caller, a test without
+    /// `census_cache::start`): the request builds it itself, which is slow
+    /// and never wrong.
+    Unattended,
+}
+
+/// Where a request handed `slot` stands: current; pending; current after a
+/// move that needs no whole build (the appended entries since the index's
+/// generation, or the empty index of a segment `slot` holds no part for),
+/// made by the request when nothing is bringing the index forward; else
+/// pending on a build it starts on a thread of its own ([`kick`]); else
+/// unattended.
+fn stand(
+    site: &Site,
+    vendor: Vendor,
+    segment: Segment,
+    cell: &IndexCell,
+    slot: &Arc<Slot>,
+) -> Stand {
+    {
+        let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+        if answers(site, vendor, &held, slot) {
+            return Stand::Current;
+        }
+    }
+    if let Some(since) = pending(site, vendor, cell) {
+        return Stand::Pending(since);
+    }
+    // THE ONE MOVE A REQUEST MAKES: to the empty index of a segment its read
+    // holds no part for, O(1). A move by appended entries (up to a quarter
+    // of a million, read back from the file below the base) is made off the
+    // request, by the build it starts.
+    if part_of(slot, segment).is_none() && moved_off_lock(site, vendor, cell, segment, slot) {
+        return Stand::Current;
+    }
+    kick(site, vendor, segment, cell, slot).map_or(Stand::Unattended, Stand::Pending)
+}
+
+/// Starts a build of this index on a thread of its own, for a request that
+/// found it behind its read with nothing bringing it forward: a re-read
+/// that ended without building it (it panicked, or the read it published
+/// was not kept), or a census read on a request thread. Built over the read
+/// the vendor's cell KEEPS where it keeps one (what every later request is
+/// handed), else over the request's own. One at a time: a request that
+/// finds one started is told when.
+///
+/// `None` when the census is not in the background (no thread may build
+/// for the site), the read to build is a refused one (every route refuses
+/// it before it reaches an index), or the thread could not be started; the
+/// request then builds the index itself.
+fn kick(
+    site: &Site,
+    vendor: Vendor,
+    segment: Segment,
+    cell: &IndexCell,
+    slot: &Arc<Slot>,
+) -> Option<std::time::SystemTime> {
+    let loaded = super::census_cache::background_site(site)?;
+    // NEVER A REFUSED READ: the kept one if it loaded, else the request's own
+    // (a kept read refused after the request was handed a held one).
+    let unreadable = |read: &Slot| matches!(read.census().state, census::Census::Unreadable { .. });
+    let target = super::census_cache::kept_slot(site, vendor)
+        .filter(|kept| !unreadable(kept))
+        .unwrap_or_else(|| Arc::clone(slot));
+    if unreadable(&target) {
+        return None;
+    }
+    let hold = match PendingHold::if_idle(cell) {
+        Ok(hold) => hold,
+        Err(since) => return Some(since),
+    };
+    let since = hold.since();
+    let spawned = std::thread::Builder::new()
+        .name(format!(
+            "brutex-facets-{}-{}",
+            vendor.as_str(),
+            segment.as_str()
+        ))
+        .spawn(move || {
+            let _hold = hold;
+            index(&loaded, vendor, segment, &target, |_| ());
+        });
+    match spawned {
+        Ok(_detached) => {
+            let _dropped_when_filtered = telemetry::emit_if!(
+                telemetry::Level::Info,
+                "api.census",
+                "facet index rebuild started by a request",
+                "feed" => telemetry::Value::Str(vendor.as_str()),
+                "segment" => telemetry::Value::Str(segment.as_str()),
+            );
+            Some(since)
+        }
+        Err(why) => {
+            warn_line!(
+                "the {} {} facet index could not be rebuilt on a thread of its own ({why}); \
+                 the request builds it itself",
+                vendor.as_str(),
+                segment.as_str()
+            );
+            None
+        }
+    }
+}
+
+/// Whether `index`, which does not answer `slot`, may answer for it as the
+/// PREVIOUS index: it was built over a read, and that read holds a part for
+/// `segment` whenever `slot`'s does. An index over a census with no part for
+/// the segment -- unreadable, refused or absent -- is empty, and served for
+/// a census that holds the segment it said "not held" and "0 underlyings"
+/// for 3 to 5 s after a census recovered (R3-09 repair 1): that answer is
+/// `503 index_warming` instead.
+fn serves_as_previous(index: &Index, segment: Segment, slot: &Slot) -> bool {
+    index.reflects.as_ref().is_some_and(|reflects| {
+        part_of(reflects, segment).is_some() || part_of(slot, segment).is_none()
+    })
+}
+
+/// What [`index_or_previous`] answered from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answered {
+    /// The index as of the request's read (or a later one, [`later`]).
+    Current,
+    /// The PREVIOUS index, while a whole build over the request's read runs:
+    /// built from the read that began at `read_at`, and standing in since
+    /// `stale_since` (when the build it waits for was first pending). The
+    /// answer says so, as an answer from the previous census read does
+    /// ([`Freshness::Stale`]).
+    ///
+    /// [`Freshness::Stale`]: super::census_cache::Freshness::Stale
+    Previous {
+        read_at: std::time::SystemTime,
+        stale_since: std::time::SystemTime,
+    },
+}
+
+impl Answered {
+    /// The census freshness an answer from this index carries: the request's
+    /// own, or, from the previous index, stale since the read it stands on.
+    pub(crate) fn freshness(
+        self,
+        census: super::census_cache::Freshness,
+    ) -> super::census_cache::Freshness {
+        match self {
+            Self::Current => census,
+            Self::Previous {
+                read_at,
+                stale_since,
+            } => super::census_cache::Freshness::Stale {
+                read_at,
+                stale_since: census
+                    .stale_since()
+                    .map_or(stale_since, |at| at.min(stale_since)),
+            },
+        }
+    }
+}
+
+/// [`index`], unless a build stands between the request and its answer
+/// (R3-09, RA-046): then the PREVIOUS index answers, said to be previous,
+/// while the build runs; and with no previous index that can stand for the
+/// request's read (the first build after a start, or an index over a census
+/// that held nothing of the segment, [`serves_as_previous`]) the request is
+/// told how long the build has been pending (`Err`, milliseconds), at once,
+/// instead of waiting it out. Over 20 restarts of the shadow of the real
+/// store the first roll-up of NIFTY's options waited 5.6 s on average for
+/// the warm's FNO build; a compaction or a new epoch had every answer of the
+/// segment wait for its rebuild.
+///
+/// What `/census/facets.json` and `/census/rollup.json` call. Never waits
+/// for a build while the census runs in the background: one short lock, then
+/// the index's read lock, which a build holds only to move a pointer
+/// ([`IndexSlot`]); a request that finds the index behind with nothing
+/// bringing it forward starts the build on a thread of its own ([`kick`]).
+///
+/// # Errors
+///
+/// The milliseconds the build this request would wait for has been pending.
+pub(crate) fn index_or_previous<T>(
+    site: &Site,
+    vendor: Vendor,
+    segment: Segment,
+    slot: &Arc<Slot>,
+    read: impl FnOnce(&Index) -> T,
+) -> Result<(T, Answered), u64> {
+    let cell = cell_of(site, vendor, segment);
+    let since = match stand(site, vendor, segment, &cell, slot) {
+        Stand::Current | Stand::Unattended => {
+            return Ok((index(site, vendor, segment, slot, read), Answered::Current));
+        }
+        Stand::Pending(since) => since,
+    };
+    let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+    if answers(site, vendor, &held, slot) {
+        return Ok((read(&held), Answered::Current));
+    }
+    if !serves_as_previous(&held, segment, slot) {
+        return Err(ms_since(since));
+    }
+    match held.reflects.as_ref().map(|reflects| reflects.read_at()) {
+        Some(read_at) => Ok((
+            read(&held),
+            Answered::Previous {
+                read_at,
+                stale_since: since,
+            },
+        )),
+        None => Err(ms_since(since)),
+    }
+}
+
+/// Whether a request handed `slot` would wait for a build of this index:
+/// how long it has been pending, in milliseconds, else `None`. What an
+/// answer that reaches the index by another path (`rows=census-tuples-v1`)
+/// asks first. A request that finds the index behind with nothing bringing
+/// it forward starts the build ([`kick`]) and is told so.
+pub(crate) fn building(
+    site: &Site,
+    vendor: Vendor,
+    segment: Segment,
+    slot: &Arc<Slot>,
+) -> Option<u64> {
+    let cell = cell_of(site, vendor, segment);
+    match stand(site, vendor, segment, &cell, slot) {
+        Stand::Current | Stand::Unattended => None,
+        Stand::Pending(since) => {
+            let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+            (!answers(site, vendor, &held, slot)).then(|| ms_since(since))
+        }
+    }
+}
+
+/// `503 index_warming`, naming the index, how long its build has run, and
+/// that this answer did not wait for it; `Retry-After: 1`.
+pub(crate) fn warming_answer(
+    headers: &mut axum::http::HeaderMap,
+    vendor: Vendor,
+    segment: Segment,
+    since_ms: u64,
+) -> (axum::http::StatusCode, String) {
+    let _retry = headers.insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        format!(
+            r#"{{"error":"index_warming","why":{},"cache":{},"feed":{},"segment":{},"since_ms":{since_ms}}}"#,
+            render::json_string(&format!(
+                "the {} {} facet index is being built over the census (begun {since_ms} ms \
+                 ago: the warm at start, or a rebuild after a new census file), and this \
+                 answer did not wait for it; ask again in a moment",
+                vendor.as_str(),
+                segment.as_str()
+            )),
+            render::json_string(super::census_cache::FACETS),
+            render::json_string(vendor.as_str()),
+            render::json_string(segment.as_str()),
+        ),
+    )
+}
+
+/// Whether the index reflects a LATER read than `slot`: the read
+/// `vendor`'s cell keeps now, of a higher generation than `slot`'s, which the
+/// cell no longer keeps. A request handed the previous read while a
+/// background re-read ran (R3-09) and reaching the index just after that
+/// re-read moved it on is answered from the moved index -- never older than
+/// it asked, and self-consistent, since every answer carries the index's own
+/// generation -- instead of building the index back over the older census:
+/// a whole build on a request thread that the next current request would
+/// undo. A slot of the same or a higher generation, or an index that
+/// reflects a read the cell does not keep (a test's detached slot), is moved
+/// or built as before.
+fn later(site: &Site, vendor: Vendor, reflects: &Arc<Slot>, slot: &Arc<Slot>) -> bool {
+    let generation = |slot: &Slot| slot.census().generation();
+    generation(reflects) > generation(slot)
+        && super::census_cache::keeps(site, vendor, reflects)
+        && !super::census_cache::keeps(site, vendor, slot)
+}
+
+/// [`index`]'s update, on its own so a test drives it without a site: moved
+/// by the appended entries where it can be, else built whole. [`index`]
+/// itself builds whole off the index's lock instead ([`IndexSlot`]).
+#[cfg(test)]
 fn advance(index: &mut Index, segment: Segment, slot: &Arc<Slot>) {
+    let mut displaced = None;
+    if !moved_by_tail(index, segment, slot, &mut displaced) {
+        *index = whole(segment, slot);
+    }
+}
+
+/// Moves `index` to `slot` where that needs no whole build: it reflects
+/// `slot` already, `slot` holds no part for `segment` (an empty index), or
+/// the part continues the file the index was built from and still holds the
+/// appends since its generation. `false` when only a whole build reaches it.
+///
+/// An index REPLACED by the empty one is handed back in `displaced`, for
+/// the caller to drop after it lets the index's lock go: dropped under the
+/// write lock, at GDFL's size it stalls every reader of the segment for a
+/// second or more (R3-09 repair 1). The move a test drives without a site:
+/// [`index`] makes the same one with the entries found off the lock
+/// ([`moved_off_lock`]).
+#[cfg(test)]
+fn moved_by_tail(
+    index: &mut Index,
+    segment: Segment,
+    slot: &Arc<Slot>,
+    displaced: &mut Option<Index>,
+) -> bool {
     if index
         .reflects
         .as_ref()
         .is_some_and(|reflects| Arc::ptr_eq(reflects, slot))
     {
-        return;
+        return true;
     }
-    let Some(part) = part_of(slot, segment) else {
-        *index = Index {
+    if part_of(slot, segment).is_none() {
+        *displaced = Some(emptied(index, slot));
+        return true;
+    }
+    let Some(before) = index.reflects.clone() else {
+        return false;
+    };
+    let Some((part, was, changes)) = tail_of(&before, index.generation, segment, slot) else {
+        return false;
+    };
+    apply_tail(index, segment, slot, part, was, &changes);
+    true
+}
+
+/// Replaces `index` by the empty index over `slot` (a segment `slot` holds
+/// no part for), handing back the index it replaced for the caller to drop
+/// after it lets the lock go. O(1).
+fn emptied(index: &mut Index, slot: &Arc<Slot>) -> Index {
+    std::mem::replace(
+        index,
+        Index {
             reflects: Some(Arc::clone(slot)),
             ..Index::default()
-        };
-        return;
-    };
-    // MOVED FORWARD ONLY ALONG ONE READ OF ONE FILE: the parts must share
-    // their whole read, or the generation the index stands at may name a
-    // census of another file (a new epoch, a migration, a whole re-read).
-    let moved = index.reflects.as_ref().and_then(|before| {
-        let before = part_of(before, segment)?;
-        if !part.extends_same_read(before) {
-            return None;
+        },
+    )
+}
+
+/// What moves an index built over `before` at `generation` forward to
+/// `slot` by its appended entries: `slot`'s part, `before`'s, and the
+/// entries appended since. Found WITHOUT the index's lock (R3-09 repair 1):
+/// below the part's base they are read back from the file by position, up
+/// to `census::SINCE_READ_BACK_MOST` entries, I/O that was made under the
+/// write lock with every reader of the segment queued behind it. `None`
+/// when only a whole build reaches `slot`.
+///
+/// MOVED FORWARD ONLY ALONG ONE FILE: the parts must share their whole read,
+/// or continue the same file (R3-09: a census read whole again past its tail
+/// floor continues it, and the appends since the index's generation are
+/// read back by position), or the generation the index stands at may name a
+/// census of another file (a new epoch, a migration, a file replaced by
+/// rename): built again then.
+fn tail_of<'a>(
+    before: &'a Slot,
+    generation: u64,
+    segment: Segment,
+    slot: &'a Slot,
+) -> Option<(&'a census::Part, &'a census::Part, census::Since<'a>)> {
+    let part = part_of(slot, segment)?;
+    let was = part_of(before, segment)?;
+    if !part.continues_file(was) {
+        return None;
+    }
+    let changes = part.changed_since(generation)?;
+    Some((part, was, changes))
+}
+
+/// Applies the entries [`tail_of`] found to `index`, which then reflects
+/// `slot`: O(entries appended), all in memory, under the write lock.
+fn apply_tail(
+    index: &mut Index,
+    segment: Segment,
+    slot: &Arc<Slot>,
+    part: &census::Part,
+    was: &census::Part,
+    changes: &census::Since<'_>,
+) {
+    let mut seen: HashSet<EntryKey> = HashSet::with_capacity(changes.len());
+    for (_, key) in changes.iter() {
+        if key.segment != segment || !seen.insert(*key) {
+            continue;
         }
-        let changes = part.changed_since(index.generation)?;
-        Some((before.clone(), changes))
-    });
-    if let Some((before, changes)) = moved {
-        let mut seen: HashSet<EntryKey> = HashSet::with_capacity(changes.len());
-        for (_, key) in changes.iter() {
-            if key.segment != segment || !seen.insert(*key) {
-                continue;
-            }
-            if let Some(now) = part.held(key) {
-                index.apply(before.held(key).as_ref(), &now);
-            }
+        if let Some(now) = part.held(key) {
+            index.apply(was.held(key).as_ref(), &now);
         }
-    } else {
-        let mut fresh = Index::default();
-        for key in part.held_keys() {
-            if key.segment != segment {
-                continue;
-            }
-            if let Some(held) = part.held(key) {
-                fresh.apply(None, &held);
-            }
-        }
-        *index = fresh;
     }
     index.reflects = Some(Arc::clone(slot));
     index.generation = part.header().generation;
+}
+
+/// Moves `cell`'s index to `slot` by its appended entries, found off the
+/// lock ([`tail_of`]) and applied under it, or to the empty index of a
+/// segment `slot` holds no part for: `true` when the index answers `slot`
+/// after it. `false` when only a whole build reaches `slot`, or another
+/// thread moved the index between the two locks (the caller builds, and
+/// finds it current under `building` if that move reached `slot`).
+fn moved_off_lock(
+    site: &Site,
+    vendor: Vendor,
+    cell: &IndexSlot,
+    segment: Segment,
+    slot: &Arc<Slot>,
+) -> bool {
+    let (before, generation) = {
+        let held = cell.index.read().unwrap_or_else(PoisonError::into_inner);
+        if answers(site, vendor, &held, slot) {
+            return true;
+        }
+        (held.reflects.clone(), held.generation)
+    };
+    if part_of(slot, segment).is_none() {
+        let replaced = {
+            let mut held = cell.index.write().unwrap_or_else(PoisonError::into_inner);
+            (!answers(site, vendor, &held, slot)).then(|| emptied(&mut held, slot))
+        };
+        super::census_cache::retire_any(replaced.map(Dismantled));
+        return true;
+    }
+    let Some(before) = before else {
+        return false;
+    };
+    let Some((part, was, changes)) = tail_of(&before, generation, segment, slot) else {
+        return false;
+    };
+    let mut held = cell.index.write().unwrap_or_else(PoisonError::into_inner);
+    if answers(site, vendor, &held, slot) {
+        return true;
+    }
+    // STILL THE INDEX THE TAIL WAS FOUND FOR, or another thread moved it
+    // between the locks and these entries do not continue it.
+    let same = held
+        .reflects
+        .as_ref()
+        .is_some_and(|reflects| Arc::ptr_eq(reflects, &before))
+        && held.generation == generation;
+    if same {
+        apply_tail(&mut held, segment, slot, part, was, &changes);
+    }
+    same
+}
+
+/// An index a swap replaced, on its way to the retire thread: dropped there
+/// a little at a time ([`dismantle`]), never in one burst.
+///
+/// # Why not a plain drop on the retire thread (R3-09 repair 1, item 4)
+///
+/// Freeing GDFL's FNO index is about a million small frees (977 ms of the
+/// retire thread in a `sample` of the shadow of the real store). Made in one
+/// burst, every request of the process -- `/feeds.json`, which reads no
+/// index, included -- stalled 67 to 138 ms at once, 10 to 20 ms after the
+/// swap, once per census change (three changes, five client loops). Paced,
+/// the allocator gets the time between steps back; and the census read the
+/// index stood on is let go LAST, after the nodes, so a stall that is the
+/// census's own free is seen apart from the index's.
+pub(crate) struct Dismantled(Index);
+
+impl Drop for Dismantled {
+    fn drop(&mut self) {
+        let _freed = dismantle(std::mem::take(&mut self.0), DISMANTLE_STEP, &mut || {
+            std::thread::sleep(DISMANTLE_PAUSE);
+        });
+    }
+}
+
+/// Nodes the retire thread frees between two pauses ([`dismantle`]).
+const DISMANTLE_STEP: usize = 8_192;
+
+/// The retire thread's pause between two steps of [`dismantle`].
+const DISMANTLE_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Takes `index` apart: every expiry, every underlying's months and cells,
+/// the segment's own sums, and LAST the census read it reflects, calling
+/// `pause` after every `step` nodes freed. The nodes it freed, counted as
+/// one per contract, month, expiry and underlying.
+fn dismantle(index: Index, step: usize, pause: &mut dyn FnMut()) -> usize {
+    struct Paced<'a> {
+        step: usize,
+        since: usize,
+        freed: usize,
+        pause: &'a mut dyn FnMut(),
+    }
+    impl Paced<'_> {
+        fn freed(&mut self, nodes: usize) {
+            self.freed = self.freed.saturating_add(nodes);
+            self.since = self.since.saturating_add(nodes);
+            if self.since >= self.step {
+                self.since = 0;
+                (self.pause)();
+            }
+        }
+    }
+    let mut paced = Paced {
+        step: step.max(1),
+        since: 0,
+        freed: 0,
+        pause,
+    };
+    let Index {
+        reflects,
+        underlyings,
+        denoms,
+        cells,
+        ..
+    } = index;
+    // `into_iter` frees each node of a map as it is left behind.
+    for (_, underlying) in underlyings {
+        let Underlying {
+            months,
+            expiries,
+            cells,
+            ..
+        } = underlying;
+        for (_, expiry) in expiries {
+            let nodes = expiry
+                .contracts
+                .len()
+                .saturating_add(expiry.months.len())
+                .saturating_add(1);
+            drop(expiry);
+            paced.freed(nodes);
+        }
+        let nodes = months.len().saturating_add(cells.len()).saturating_add(1);
+        drop((months, cells));
+        paced.freed(nodes);
+    }
+    let nodes = denoms.len().saturating_add(cells.len());
+    drop((denoms, cells));
+    paced.freed(nodes);
+    // THE CENSUS READ LAST: its own free (two million entries in two large
+    // tables at GDFL's size) after a pause of its own.
+    (paced.pause)();
+    drop(reflects);
+    paced.freed
+}
+
+/// `segment`'s index built over every key `slot`'s part holds. An empty
+/// index over `slot` when it holds no part (never reached from [`index`],
+/// which [`moved_off_lock`] answers first).
+fn whole(segment: Segment, slot: &Arc<Slot>) -> Index {
+    let mut fresh = Index {
+        reflects: Some(Arc::clone(slot)),
+        ..Index::default()
+    };
+    let Some(part) = part_of(slot, segment) else {
+        return fresh;
+    };
+    for key in part.held_keys() {
+        if key.segment != segment {
+            continue;
+        }
+        if let Some(held) = part.held(key) {
+            fresh.apply(None, &held);
+        }
+    }
+    fresh.generation = part.header().generation;
+    fresh
 }
 
 /// What a request asked for, read and checked.
@@ -469,7 +1323,9 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
         ));
     };
     let segment_word = param(query, "segment");
-    let segment = Segment::parse(&segment_word).map_err(|why| {
+    // CASE-FOLDED, as the feed and the underlying are: `fno` is `FNO`
+    // (R3-09 repair 1; it was refused while `nifty` was NIFTY).
+    let segment = Segment::parse(&segment_word.to_ascii_uppercase()).map_err(|why| {
         bad(format!(
             "segment {:?}: {}; one of {} is required",
             echo(&segment_word),
@@ -656,7 +1512,9 @@ fn root_answer(
     let (_stamps, now) = vendor_census(site, feed);
     let census = now.census();
     let behind = super::store_route::behind(site, feed);
-    let headers = super::store_route::census_headers_with(census, Some(&behind));
+    let mut headers = super::store_route::census_headers_with(census, Some(&behind));
+    // HOW CURRENT, on the root answer too (R3-09).
+    super::census_cache::freshness_headers(&mut headers, now.freshness());
     let state = census.map_or("absent", |census| census.state_word(behind.days));
     if super::store_route::census_is_unreadable(census) {
         let why = census.map_or_else(String::new, census::VendorCensus::note);
@@ -678,8 +1536,10 @@ fn root_answer(
         order_json(),
     );
     let mut listed = 0_usize;
+    let mut previous = Answered::Current;
     for segment in SEGMENTS {
-        let row = index(site, feed, segment, slot, |index| {
+        // AN INDEX BEING BUILT IS NAMED, NOT WAITED FOR (R3-09, RA-046).
+        let row = match index_or_previous(site, feed, segment, slot, |index| {
             (!index.underlyings.is_empty()).then(|| {
                 let mut row = format!(
                     r#"{{"segment":{},"generation":{},"underlyings":{},"#,
@@ -691,7 +1551,18 @@ fn root_answer(
                 row.push('}');
                 row
             })
-        });
+        }) {
+            Ok((row, answered)) => {
+                if answered != Answered::Current {
+                    previous = answered;
+                }
+                row
+            }
+            Err(since_ms) => {
+                let (code, body) = warming_answer(&mut headers, feed, segment, since_ms);
+                return (code, headers, body);
+            }
+        };
         if let Some(row) = row {
             if listed > 0 {
                 out.push(',');
@@ -701,6 +1572,7 @@ fn root_answer(
         }
     }
     out.push_str("]}");
+    super::census_cache::freshness_headers(&mut headers, previous.freshness(now.freshness()));
     (axum::http::StatusCode::OK, headers, out)
 }
 
@@ -722,6 +1594,11 @@ pub(super) fn answer(
     let state = census.map_or("absent", |census| census.state_word(behind.days));
     if super::store_route::census_is_unreadable(census) {
         let why = census.map_or_else(String::new, census::VendorCensus::note);
+        // HOW CURRENT, on the refusal too, as the roll-up says it (R3-09
+        // repair 1): a refusal from the previous read while a re-read runs
+        // is marked refreshing, so a reader knows to ask again.
+        let mut headers = headers;
+        super::census_cache::freshness_headers(&mut headers, now.freshness());
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             headers,
@@ -733,15 +1610,37 @@ pub(super) fn answer(
     // were committed, and a reader of the lists alone must be able to say so.
     let degraded = census.and_then(census::VendorCensus::degraded);
     let slot = now.slot();
+    // AN INDEX BEING BUILT IS NAMED, NOT WAITED FOR (R3-09, RA-046): the
+    // first request after a restart, or after a new census file, answers
+    // "warming" at once instead of waiting the whole build out.
+    // The lists answer from the PREVIOUS index while a rebuild runs, said to
+    // be previous; the rows (which probe the census by the index's keys) and
+    // a first build are answered "warming".
+    let warming = |since_ms: u64| {
+        let mut headers = headers.clone();
+        super::census_cache::freshness_headers(&mut headers, now.freshness());
+        let (code, body) = warming_answer(&mut headers, asked.feed, asked.segment, since_ms);
+        (code, headers, body)
+    };
+    let mut answered = Answered::Current;
     let (body, generation) = if asked.rows {
+        if let Some(since_ms) = building(site, asked.feed, asked.segment, slot) {
+            return warming(since_ms);
+        }
         rows_answer(site, &asked, census, slot, state, degraded.as_deref())
     } else {
-        index(site, asked.feed, asked.segment, slot, |index| {
+        match index_or_previous(site, asked.feed, asked.segment, slot, |index| {
             (
                 render_answer(index, &asked, state, degraded.as_deref()),
                 index.generation,
             )
-        })
+        }) {
+            Ok((out, how)) => {
+                answered = how;
+                out
+            }
+            Err(since_ms) => return warming(since_ms),
+        }
     };
     // THE GENERATION A `since` IS SPELLED IN, in a header as well as the
     // body, so a client never keys a delta on the vendor-wide sum (WP-56;
@@ -751,6 +1650,10 @@ pub(super) fn answer(
         axum::http::HeaderName::from_static(super::store_route::CENSUS_PART_GENERATION_HEADER),
         axum::http::HeaderValue::from(generation),
     );
+    // HOW CURRENT, on every answer: an answer built from the previous read
+    // while a background re-read runs, or from the previous index while a
+    // rebuild runs, says so and how old it is (R3-09).
+    super::census_cache::freshness_headers(&mut headers, answered.freshness(now.freshness()));
     match body {
         Ok(body) => (axum::http::StatusCode::OK, headers, body),
         Err((code, body)) => (code, headers, body),
@@ -1227,8 +2130,9 @@ fn render_answer(
                     format!(
                         r#"{{"error":"since_too_old","why":{},"since":{since},"floor":{},"generation":{}}}"#,
                         render::json_string(
-                            "the census no longer holds the appends after that generation \
-                             (it was read whole since, or the generation is not one it \
+                            "the census file cannot answer the appends after that generation \
+                             (another file stands at its path, more entries were appended \
+                             since than a refresh reads back, or the generation is not one it \
                              published); load the selection afresh"
                         ),
                         part.since_floor(),
@@ -1236,7 +2140,7 @@ fn render_answer(
                     ),
                 ));
             };
-            Some(Changed::of(changes, asked.segment))
+            Some(Changed::of(&changes, asked.segment))
         }
     };
     // THE ASKED UNDERLYING BY PROBE: one map lookup per exchange the store
@@ -1486,7 +2390,7 @@ struct Changed {
 }
 
 impl Changed {
-    fn of(changes: census::Since<'_>, segment: Segment) -> Self {
+    fn of(changes: &census::Since<'_>, segment: Segment) -> Self {
         let mut out = Self::default();
         let mut seen: HashSet<EntryKey> = HashSet::with_capacity(changes.len());
         for (_, key) in changes.iter() {
