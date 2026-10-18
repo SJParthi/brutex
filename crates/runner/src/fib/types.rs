@@ -675,11 +675,16 @@ pub struct SlotOutcome {
 impl SlotOutcome {
     /// The trade's R multiple from its exact integers (FM-F033): its money
     /// over `filled_qty x planned risk`, a fill's slippage in the numerator
-    /// only. `None` for a slot with nothing filled, or when a product leaves
-    /// `i128`.
+    /// only. `None` unless the slot is [`SlotStatus::Priced`] (an unpriced
+    /// slot has no exit to measure; FIB-7's `AT_WORST_SEEN` prices it from its
+    /// excursions), and when a product leaves `i128`.
     #[must_use]
     pub fn r_multiple(&self, direction: vocab::fib_cube::Search) -> Option<RMultiple> {
-        if self.filled_qty == 0 || self.risk_num <= 0 || self.risk_den <= 0 {
+        if self.status != SlotStatus::Priced
+            || self.filled_qty == 0
+            || self.risk_num <= 0
+            || self.risk_den <= 0
+        {
             return None;
         }
         let money = match direction {
