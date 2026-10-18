@@ -4382,3 +4382,91 @@ fn next_rung_is_the_first_rung_strictly_above_the_entry() {
     assert_eq!(out.exit_second, at(10, 1, 0));
     assert_eq!(out.exit_value_paisa, i128::from(out.filled_qty) * 100_430);
 }
+
+/// A slot reads the swings of its own trail list at its own width: with two
+/// lists and two widths, list 1 at width two is the fourth, and list 0 (flat
+/// candles, no swing at all) is never read for it.
+#[test]
+fn a_slot_reads_its_own_trail_list_at_its_own_width() {
+    // Width one: 10:02's low (100,060) is a swing, confirmed at 10:04:00,
+    // and 10:04 stops it. Width two: 10:02 is not one (10:00 is lower); 10:04
+    // (100,040) is, confirmed at 10:07:00, and 10:07 stops it.
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_100, 100_150, 1_000),
+        bar(at(10, 2, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 3, 0), P + 100, 100_200, 100_070, P + 100, 1_000),
+        bar(at(10, 4, 0), P + 100, 100_200, 100_040, P + 100, 1_000),
+        bar(at(10, 5, 0), P + 100, 100_200, 100_080, P + 100, 1_000),
+        bar(at(10, 6, 0), P + 100, 100_200, 100_090, P + 100, 1_000),
+        bar(at(10, 7, 0), P + 100, 100_200, 100_030, P + 100, 1_000),
+    ]);
+    let flat: Vec<FibCandle> = day
+        .bars
+        .iter()
+        .map(|b| {
+            let mut flat = quiet(at(10, 0, 0), P, 1_000);
+            flat.ts_micros = b.ts_micros;
+            candle_of(&flat)
+        })
+        .collect();
+    let swing = |width| ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let exits = set_of(Search::Long, vec![swing(1), swing(2)]);
+    let trails = [
+        TrailCandles {
+            tf_minutes: 1,
+            candles: &flat,
+        },
+        TrailCandles {
+            tf_minutes: 1,
+            candles: &day.trail,
+        },
+    ];
+    let input = DayInput {
+        bars: &day.bars,
+        book: BookEvidence::NotObserved,
+        halts: &[],
+        zerodha_minutes: &[],
+        raw_tick: TICK,
+        decision_tick: TICK,
+        max_second_gap: u32::MAX,
+        clock_lag: ClockLag::Measured(0),
+        trail: &trails,
+    };
+    let index = DayIndex::build(&minute_profile(), &input, &exits).expect("indexes");
+    let walk = |trail, variant| {
+        let plan = Plan {
+            trail,
+            ..long_plan(at(10, 0, 0))
+        };
+        walk_pairs(
+            &index,
+            &[plan],
+            &exits,
+            FillVariant::STAGE_A,
+            &[TradeSize::Small],
+            &[(0, variant)],
+        )
+        .expect("walks")[0]
+            .slots[0]
+    };
+    let two = walk(1, 1);
+    assert_eq!(two.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(two.exit_second, at(10, 7, 0));
+    let one = walk(1, 0);
+    assert_eq!(one.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(one.exit_second, at(10, 4, 0));
+    for variant in [0, 1] {
+        assert_eq!(
+            walk(0, variant).exit_reason,
+            ExitReason::Forced,
+            "list 0 is flat"
+        );
+    }
+}
