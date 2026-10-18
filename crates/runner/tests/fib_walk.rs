@@ -2350,7 +2350,11 @@ use runner::fib::codec::{
 };
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 fn decision() -> DecisionRecord {
@@ -2550,7 +2554,7 @@ fn every_status_and_reason_survives_the_codec() {
         assert_eq!(back.record, r);
         assert!(names.insert(status.name()), "{} named twice", status.name());
     }
-    assert_eq!(SlotStatus::Priced.entered(), true);
+    assert!(SlotStatus::Priced.entered());
     assert!(SlotStatus::Unpriceable(UnpricedReason::Halt).entered());
     assert!(!SlotStatus::NotTradable.entered());
 }
@@ -2801,4 +2805,579 @@ fn outcomes_never_feed_a_coordinate() {
     // The decision record is built from the plan and the cell alone: no bar
     // after the decision can reach it.
     assert_eq!(record.encode(), decision().encode());
+}
+
+// ------------------------------------------------- refusals, by name --
+
+#[test]
+fn a_lower_later_swing_never_lowers_the_trail() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), 100_150, 100_200, 100_120, 100_150, 1_000),
+        bar(at(10, 1, 0), 100_150, 100_200, 100_100, 100_150, 1_000),
+        bar(at(10, 2, 0), 100_160, 100_200, 100_150, 100_160, 1_000),
+        bar(at(10, 3, 0), 100_150, 100_200, 100_098, 100_150, 1_000),
+        bar(at(10, 4, 0), 100_150, 100_200, 100_140, 100_150, 1_000),
+        bar(at(10, 5, 0), 100_150, 100_200, 100_094, 100_150, 1_000),
+    ]);
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    // The 10:01 swing set 100,095; the 10:03 swing's 100,093 never lowers it.
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 5, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 100_094));
+}
+
+#[test]
+fn an_impossible_day_is_refused_by_name() {
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let refusal =
+        |day: &Day, profile: &WalkProfile| day.index(profile, &exits).expect_err("refused");
+    let base = Day::seconds(vec![quiet(at(10, 0, 0), P, 10), quiet(at(10, 0, 1), P, 10)]);
+    let mut d = base.clone();
+    d.bars.swap(0, 1);
+    assert_eq!(
+        refusal(&d, &second_profile()),
+        WalkRefusal::BarsNotSortedUnique { at: 1 }
+    );
+    let mut d = base.clone();
+    d.bars[1].ts_micros += 1;
+    assert_eq!(
+        refusal(&d, &second_profile()),
+        WalkRefusal::BarOffGrid { at: 1 }
+    );
+    let mut d = base.clone();
+    d.bars[1].ts_micros += 86_400_000_000;
+    assert_eq!(refusal(&d, &second_profile()), WalkRefusal::BarsSpanDays);
+    let mut d = base.clone();
+    d.marks = Some(Vec::new());
+    assert_eq!(refusal(&d, &second_profile()), WalkRefusal::BookMarksLength);
+    for halts in [
+        vec![HaltRange {
+            start_second: 9,
+            end_second: 9,
+        }],
+        vec![
+            HaltRange {
+                start_second: 1,
+                end_second: 9,
+            },
+            HaltRange {
+                start_second: 5,
+                end_second: 12,
+            },
+        ],
+    ] {
+        let mut d = base.clone();
+        d.halts = halts;
+        assert_eq!(refusal(&d, &second_profile()), WalkRefusal::HaltsInvalid);
+    }
+    let mut d = base.clone();
+    d.raw_tick = 0;
+    assert_eq!(refusal(&d, &second_profile()), WalkRefusal::NonpositiveTick);
+    let factor = |zerodha_close, gdfl_close| WalkProfile {
+        price_map: PriceMap::Factor {
+            zerodha_close,
+            gdfl_close,
+        },
+        ..second_profile()
+    };
+    assert_eq!(
+        refusal(&base, &factor(0, 7)),
+        WalkRefusal::NonpositiveFactor
+    );
+    assert_eq!(
+        refusal(&base, &factor(7, -1)),
+        WalkRefusal::NonpositiveFactor
+    );
+    let stage_a_factor = WalkProfile {
+        resolution: Resolution::Minute,
+        ..factor(3, 7)
+    };
+    let minutes = minute_day(&[]);
+    assert_eq!(
+        refusal(&minutes, &stage_a_factor),
+        WalkRefusal::StageATakesIdentity
+    );
+    let mut d = base.clone();
+    d.zerodha.clear();
+    assert_eq!(
+        refusal(&d, &second_profile()),
+        WalkRefusal::ZerodhaMinutesAbsent
+    );
+    let mut d = base.clone();
+    d.zerodha[0].ts_micros += 1_000_000;
+    assert_eq!(
+        refusal(&d, &second_profile()),
+        WalkRefusal::BarOffGrid { at: 0 }
+    );
+    let mut d = minutes.clone();
+    d.trail.swap(0, 1);
+    assert_eq!(
+        refusal(&d, &minute_profile()),
+        WalkRefusal::TrailListInvalid { list: 0 }
+    );
+    let mut d = minutes.clone();
+    d.trail[0].close_ts_micros = d.trail[0].candle.ts_micros;
+    assert_eq!(
+        refusal(&d, &minute_profile()),
+        WalkRefusal::TrailListInvalid { list: 0 }
+    );
+    // A Zerodha close of i64::MAX / 2 leaves the fixtures' prices room, and a
+    // price or a tick of Rs 10,00,000 past the exact comparison's headroom.
+    let huge = factor(i64::MAX / 2, 1);
+    assert!(base.index(&huge, &exits).is_ok());
+    let mut d = base.clone();
+    d.bars[0].high = 100_000_000;
+    assert_eq!(refusal(&d, &huge), WalkRefusal::PriceBeyondExactRange);
+    let mut d = base;
+    d.raw_tick = 100_000_000;
+    assert_eq!(refusal(&d, &huge), WalkRefusal::PriceBeyondExactRange);
+}
+
+#[test]
+fn a_zero_width_trail_list_is_refused() {
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let day = minute_day(&[]);
+    let trails = [TrailCandles {
+        tf_minutes: 0,
+        candles: &day.trail,
+    }];
+    let input = DayInput {
+        bars: &day.bars,
+        book: BookEvidence::NotObserved,
+        halts: &[],
+        zerodha_minutes: &[],
+        raw_tick: TICK,
+        decision_tick: TICK,
+        max_second_gap: 0,
+        clock_lag: ClockLag::Measured(0),
+        trail: &trails,
+    };
+    assert_eq!(
+        runner::fib::walk::index_day(&minute_profile(), &input, &exits).map(|_| ()),
+        Err(WalkRefusal::TrailListInvalid { list: 0 })
+    );
+}
+
+#[test]
+fn an_impossible_plan_is_refused_by_name() {
+    let day = minute_day(&[quiet(at(10, 0, 0), P, 1_000)]);
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let index = day.index(&minute_profile(), &exits).expect("indexes");
+    let why = |plan: Plan| match walk_pairs(
+        &index,
+        &[plan],
+        &exits,
+        FillVariant::STAGE_A,
+        &[TradeSize::Small],
+        &[(0, 0)],
+    ) {
+        Err(WalkRefusal::PlanInvalid { plan: 0, why }) => why,
+        other => panic!("{other:?}"),
+    };
+    let base = long_plan(at(10, 0, 0));
+    assert_eq!(
+        why(Plan {
+            entry_ref: 0,
+            ..base
+        }),
+        "nonpositive_entry_ref"
+    );
+    assert_eq!(
+        why(Plan {
+            tf_minutes: 0,
+            ..base
+        }),
+        "zero_timeframe"
+    );
+    assert_eq!(
+        why(Plan {
+            entry_window_end: base.decision_second,
+            ..base
+        }),
+        "window_ends_at_decision"
+    );
+    assert_eq!(
+        why(Plan {
+            tf_minutes: 5,
+            ..base
+        }),
+        "trail_list_not_the_plan_s_timeframe"
+    );
+    assert_eq!(
+        why(Plan { trail: 3, ..base }),
+        "trail_list_not_the_plan_s_timeframe"
+    );
+    let swing = set_of(
+        Search::Long,
+        vec![ExitVariant {
+            trailing_stop: TrailingStop::Swing {
+                width: 4,
+                buffer_paisa: 0,
+            },
+            ..STOP_ONLY
+        }],
+    );
+    assert_eq!(
+        walk_pairs(
+            &index,
+            &[base],
+            &swing,
+            FillVariant::STAGE_A,
+            &[TradeSize::Small],
+            &[(0, 0)]
+        ),
+        Err(WalkRefusal::WidthNotIndexed { width: 4 })
+    );
+}
+
+#[test]
+fn every_walk_refusal_has_its_own_name() {
+    let all = [
+        WalkRefusal::BarsNotSortedUnique { at: 0 },
+        WalkRefusal::BarsSpanDays,
+        WalkRefusal::BarOffGrid { at: 0 },
+        WalkRefusal::BookMarksLength,
+        WalkRefusal::HaltsInvalid,
+        WalkRefusal::NonpositiveTick,
+        WalkRefusal::NonpositiveFactor,
+        WalkRefusal::StageATakesIdentity,
+        WalkRefusal::CrossFeedNotBuilt,
+        WalkRefusal::ZerodhaMinutesAbsent,
+        WalkRefusal::ClockShifted { lag: 1 },
+        WalkRefusal::ClockLagUnmeasured,
+        WalkRefusal::TrailListInvalid { list: 0 },
+        WalkRefusal::PriceBeyondExactRange,
+        WalkRefusal::PlanInvalid { plan: 0, why: "x" },
+        WalkRefusal::FillVariantDeepOnly,
+        WalkRefusal::VariantUnknown { id: 0 },
+        WalkRefusal::DirectionMismatch { plan: 0 },
+        WalkRefusal::WidthNotIndexed { width: 0 },
+    ];
+    let names: std::collections::HashSet<&str> = all.iter().map(WalkRefusal::name).collect();
+    assert_eq!(names.len(), all.len());
+    assert!(names.contains("bars_not_sorted_unique"));
+    assert!(names.contains("width_not_indexed"));
+}
+
+// ------------------------------------------------ the exit set's rules --
+
+#[test]
+fn an_exit_set_refuses_by_name_and_keeps_its_ids_append_only() {
+    use runner::fib::walk::exits::{ExitSetRefusal, FillSet};
+    let bad =
+        |variant: ExitVariant| ExitSet::new(Search::Long, 1, 0, vec![variant]).expect_err("bad");
+    let cases = [
+        (
+            ExitVariant {
+                take_profit: TakeProfit::RMultiple { milli_r: 0 },
+                ..STOP_ONLY
+            },
+            "take_profit_r_multiple",
+        ),
+        (
+            ExitVariant {
+                take_profit: TakeProfit::FibRung { rung_permille: 333 },
+                ..STOP_ONLY
+            },
+            "take_profit_fib_rung",
+        ),
+        (
+            ExitVariant {
+                trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 0 },
+                ..STOP_ONLY
+            },
+            "trailing_take_profit_give_back",
+        ),
+        (
+            ExitVariant {
+                trailing_take_profit: TrailingTakeProfit::GiveBack { permille: 1_001 },
+                ..STOP_ONLY
+            },
+            "trailing_take_profit_give_back",
+        ),
+        (
+            ExitVariant {
+                trailing_stop: TrailingStop::Swing {
+                    width: 0,
+                    buffer_paisa: 0,
+                },
+                ..STOP_ONLY
+            },
+            "trailing_stop_swing_width",
+        ),
+        (
+            ExitVariant {
+                trailing_stop: TrailingStop::RStep { milli_r: 0 },
+                ..STOP_ONLY
+            },
+            "trailing_stop_r_step",
+        ),
+        (
+            ExitVariant {
+                time_exit: TimeExit::Hold { seconds: 0 },
+                ..STOP_ONLY
+            },
+            "time_exit_hold",
+        ),
+    ];
+    for (variant, component) in cases {
+        assert_eq!(bad(variant), ExitSetRefusal::InvalidValue { component });
+    }
+    assert_eq!(
+        ExitSet::new(Search::Long, 1, 0, Vec::new()),
+        Err(ExitSetRefusal::Empty)
+    );
+    assert_eq!(
+        ExitSet::new(Search::Long, 1, 0, vec![STOP_ONLY, STOP_ONLY]),
+        Err(ExitSetRefusal::DuplicateVariant { id: 1 })
+    );
+    let many: Vec<ExitVariant> = (0..=u32::from(u16::MAX))
+        .map(|k| ExitVariant {
+            stop: StopLoss::BeyondBase { extra_ticks: k },
+            ..ExitVariant::REFERENCE
+        })
+        .collect();
+    assert_eq!(
+        ExitSet::new(Search::Long, 1, 0, many),
+        Err(ExitSetRefusal::TooManyVariants { count: 65_536 })
+    );
+    let top = ExitSet::new(Search::Short, u32::MAX, 0, vec![STOP_ONLY]).expect("valid");
+    assert_eq!(
+        top.extended(1, &[ExitVariant::REFERENCE]),
+        Err(ExitSetRefusal::VersionExhausted)
+    );
+    assert_eq!(top.direction(), Search::Short);
+    assert_eq!(top.get(1), None);
+    let set = five();
+    let digest = set.digest();
+    let vs = set.variant_set();
+    assert_eq!((vs.version, vs.count, vs.digest), (1, 5, digest));
+    assert_ne!(set.bytes(), five_reordered().bytes(), "ids are order");
+    let budget = |n| PassBudget::new(n).expect("budget");
+    assert_eq!(set.passes(budget(5)), vec![0..5]);
+    assert_eq!(set.passes(budget(9)), vec![0..5]);
+    assert_eq!(set.passes(budget(2)), vec![0..2, 2..4, 4..5]);
+    assert_eq!(budget(4).get(), 4);
+    for (refusal, name) in [
+        (ExitSetRefusal::Empty, "exit_set_empty"),
+        (
+            ExitSetRefusal::VersionExhausted,
+            "exit_set_version_exhausted",
+        ),
+        (
+            ExitSetRefusal::TooManyVariants { count: 0 },
+            "exit_variants_exceed_u16",
+        ),
+        (
+            ExitSetRefusal::DuplicateVariant { id: 0 },
+            "exit_variant_duplicate",
+        ),
+        (
+            ExitSetRefusal::InvalidValue { component: "x" },
+            "exit_value_invalid",
+        ),
+        (
+            ExitSetRefusal::SamplesNotSorted { distribution: "x" },
+            "seed_samples_not_sorted",
+        ),
+    ] {
+        assert_eq!(refusal.name(), name);
+    }
+    let window = FillVariant {
+        window: EntryWindow::Deadline { seconds: 0 },
+        participation: Participation::NoCap,
+    };
+    assert_eq!(
+        FillSet::new(Search::Long, 1, vec![window]),
+        Err(ExitSetRefusal::InvalidValue {
+            component: "entry_window_deadline"
+        })
+    );
+    for permille in [0, 1_001] {
+        let cap = FillVariant {
+            window: EntryWindow::NextClose,
+            participation: Participation::Cap { permille },
+        };
+        assert_eq!(
+            FillSet::new(Search::Long, 1, vec![cap]),
+            Err(ExitSetRefusal::InvalidValue {
+                component: "participation_cap"
+            })
+        );
+    }
+    assert_eq!(
+        FillSet::new(Search::Long, 1, Vec::new()),
+        Err(ExitSetRefusal::Empty)
+    );
+    assert_eq!(
+        FillSet::new(
+            Search::Long,
+            1,
+            vec![FillVariant::STAGE_A, FillVariant::STAGE_A]
+        ),
+        Err(ExitSetRefusal::DuplicateVariant { id: 1 })
+    );
+    let fills = FillSet::new(
+        Search::Long,
+        1,
+        vec![FillVariant::STAGE_A, FillVariant::REFERENCE],
+    )
+    .expect("valid");
+    assert_eq!(fills.bytes().len(), 8 + 1 + 4 + 2 + 2 * 2 * 17);
+}
+
+fn five_reordered() -> ExitSet {
+    let mut variants = five().variants().to_vec();
+    variants.reverse();
+    set_of(Search::Long, variants)
+}
+
+#[test]
+fn an_unsorted_seed_sample_is_refused_and_an_empty_one_seeds_none() {
+    use runner::fib::walk::exits::ExitSetRefusal;
+    let none: [Sample; 0] = [];
+    let unsorted = samples(&[(0, 9), (0, 3)]);
+    fn only_run_up<'a>(run_up: &'a [Sample], none: &'a [Sample]) -> SeedSamples<'a> {
+        SeedSamples {
+            far_edge_excursion_ticks: none,
+            run_up_milli_r: run_up,
+            giveback_permille: none,
+            pullback_candles: none,
+            poke_through_paisa: none,
+            swing_size_milli_r: none,
+            last_peak_clock_seconds: none,
+            time_to_best_seconds: none,
+        }
+    }
+    let seeds = |run_up| only_run_up(run_up, &none);
+    assert_eq!(
+        seed_exit_set(Search::Long, 0, 1, &seeds(&unsorted)),
+        Err(ExitSetRefusal::SamplesNotSorted {
+            distribution: "run_up_milli_r"
+        })
+    );
+    let bare = seed_exit_set(Search::Long, 0, 1, &seeds(&none)).expect("seeds");
+    // Stop {none, beyond} x trail {none, swing of one}: no generated value.
+    assert_eq!(bare.count(), 4);
+    let zero = samples(&[(0, 0)]);
+    let only_zero = seed_exit_set(Search::Long, 0, 1, &seeds(&zero)).expect("seeds");
+    assert_eq!(only_zero.count(), 4, "a zero multiple is no value");
+    assert_eq!(
+        seed_fill_set(Search::Long, 1, &unsorted),
+        Err(ExitSetRefusal::SamplesNotSorted {
+            distribution: "participation_permille"
+        })
+    );
+    let wide = samples(&[(0, 5_000)]);
+    assert_eq!(
+        seed_fill_set(Search::Long, 1, &wide)
+            .expect("fills")
+            .variants()
+            .len(),
+        2,
+        "a cap above the second's volume is no cap"
+    );
+}
+
+// --------------------------------------------- the profile and the flags --
+
+#[test]
+fn the_walk_profile_s_readings_are_identity_terms_in_a_fixed_order() {
+    use runner::fib::types::WALK_PROFILE_TERMS;
+    assert_eq!(WALK_PROFILE_TERMS, 7);
+    assert_eq!(minute_profile().identity_terms(), [0, 0, 0, 0, 0, 0, 0]);
+    let other = WalkProfile {
+        resolution: Resolution::Second,
+        price_map: PriceMap::Factor {
+            zerodha_close: 1,
+            gdfl_close: 2,
+        },
+        exit_fill: ExitFill::FirstTouchWhole,
+        snapshot_edge: SnapshotEdge::StampClosesInterval,
+        halt_rule: HaltRule::ResumeAtFirstPrint,
+        cross_feed: CrossFeed::WorseOfBoth,
+        beyond_target: BeyondTarget::TargetVoid,
+        clock_rule: ClockRule::Restamp,
+    };
+    assert_eq!(other.identity_terms(), [1, 1, 1, 1, 1, 1, 1]);
+    let names = [
+        ExitFill::SpillByVolume.name(),
+        ExitFill::FirstTouchWhole.name(),
+        SnapshotEdge::StampOpensInterval.name(),
+        SnapshotEdge::StampClosesInterval.name(),
+        HaltRule::WorstSeenThroughHalt.name(),
+        HaltRule::ResumeAtFirstPrint.name(),
+        CrossFeed::SecondsOnly.name(),
+        CrossFeed::WorseOfBoth.name(),
+        BeyondTarget::FiresOnFirstBar.name(),
+        BeyondTarget::TargetVoid.name(),
+        ClockRule::RefuseShifted.name(),
+        ClockRule::Restamp.name(),
+    ];
+    let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len());
+    assert_eq!(names[0], "spill_by_volume");
+    assert_eq!(names[11], "restamp");
+}
+
+#[test]
+fn every_flag_is_its_bit_and_named_once() {
+    let mut names = std::collections::HashSet::with_capacity(TradeFlag::ALL.len());
+    for (bit, flag) in TradeFlag::ALL.iter().enumerate() {
+        let one = runner::fib::types::TradeFlags::NONE.with(*flag);
+        assert_eq!(one.0, 1 << bit, "{flag:?}");
+        assert!(names.insert(flag.name()));
+    }
+    assert_eq!(TradeFlag::ALL.len(), 23);
+    assert_eq!(TradeFlag::fired(ExitReason::Forced), None);
+    assert_eq!(
+        TradeFlag::fired(ExitReason::TakeProfit),
+        Some(TradeFlag::FiredTakeProfit)
+    );
+}
+
+#[test]
+fn r_is_exact_and_refuses_what_it_cannot_hold() {
+    let a = RMultiple { num: 1, den: 3 };
+    let b = RMultiple { num: 2, den: 6 };
+    assert_eq!(a.cmp_exact(b), Some(core::cmp::Ordering::Equal));
+    assert_ne!(a, b, "equality is representational");
+    let huge = RMultiple {
+        num: i128::MAX,
+        den: 1,
+    };
+    assert_eq!(huge.cmp_exact(RMultiple { num: 1, den: 2 }), None);
+    assert_eq!(RMultiple { num: 1, den: 2 }.cmp_exact(huge), None);
+    let day = minute_day(&[bar(at(10, 0, 0), P, P + 100, 98_000, P, 1_000)]);
+    let mut out = minute_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(out.r_multiple(Search::Long).is_some());
+    let priced = out;
+    out.exit_value_paisa = i128::MIN;
+    assert_eq!(out.r_multiple(Search::Long), None);
+    out = priced;
+    out.entry_value_paisa = i128::MIN;
+    assert_eq!(out.r_multiple(Search::Short), None);
+    out = priced;
+    out.risk_den = i64::MAX;
+    out.exit_value_paisa = i128::MAX / 2;
+    assert_eq!(out.r_multiple(Search::Long), None);
+    out = priced;
+    out.risk_num = i128::MAX;
+    assert_eq!(out.r_multiple(Search::Long), None);
+    for (field, value) in [(0, 0), (1, 0), (2, 0)] {
+        out = priced;
+        match field {
+            0 => out.filled_qty = value,
+            1 => out.risk_num = 0,
+            _ => out.risk_den = 0,
+        }
+        assert_eq!(out.r_multiple(Search::Long), None);
+    }
 }

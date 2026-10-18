@@ -40,9 +40,6 @@ pub mod exits;
 mod index;
 mod slot;
 
-#[cfg(test)]
-mod tests;
-
 pub use index::DayIndex;
 pub use slot::Stepper;
 
@@ -398,3 +395,6 @@ pub fn index_day(
 ) -> Result<DayIndex, WalkRefusal> {
     DayIndex::build(profile, input, exits)
 }
+
+#[cfg(test)]
+mod tests;
