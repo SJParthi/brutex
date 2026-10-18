@@ -312,8 +312,37 @@ fn quantile_is_lower_edge_and_bounded_probes() {
         assert_eq!(got, edge, "{num}/{den}");
         assert!(got <= exact && exact - got < i64::try_from(width).unwrap());
         assert!(probes <= bound, "{probes} probes > {bound}");
+        assert!(probes > 0, "every bisection probes");
     }
     assert_eq!(bound, 10);
+}
+
+/// The work counter the bench rows read is exact: one unit per stage, query
+/// and discard, and the leaves plus one for a commit — the leaves only on a
+/// day that staged a value.
+#[test]
+fn the_work_counter_counts_each_operation() {
+    let leaves = u64::try_from(BASE_BINS).unwrap();
+    let mut past = OwnPast::empty();
+    assert_eq!(past.work(), 0);
+    past.observe(5).unwrap();
+    assert_eq!(past.work(), 1);
+    past.commit_day().unwrap();
+    assert_eq!(
+        past.work(),
+        leaves + 2,
+        "a day that staged a value rebuilds every leaf"
+    );
+    past.commit_day().unwrap();
+    assert_eq!(
+        past.work(),
+        leaves + 3,
+        "a day that staged nothing is one unit"
+    );
+    past.observe_censored();
+    past.discard_day();
+    past.mid_rank(5).unwrap();
+    assert_eq!(past.work(), leaves + 6);
 }
 
 /// FM-F020: a total past `u32::MAX / 1000` keeps an exact permille (the
@@ -451,7 +480,18 @@ fn a_split_divides_a_bin_by_one_more_mantissa_bit_and_rebuilds_from_raw() {
     assert_eq!(past.leaves(), BASE_BINS + 3);
     assert_eq!(past.leaf_bounds(1_020).unwrap(), (1_008, 16));
     assert_eq!(past.value_at_rank(6).unwrap(), 1_008);
-    assert!(past.bytes() > UNSPLIT_CELL_BYTES);
+    // Its bytes: the leaves, and the depth table (two boxed slices: an entry
+    // per base bin, a base bin per leaf).
+    let leaves = BASE_BINS + 3;
+    let leaf = (UNSPLIT_CELL_BYTES - size_of::<OwnPast>()) / BASE_BINS;
+    let table = 2 * size_of::<Box<[u32]>>()
+        + BASE_BINS * size_of::<(u32, u8)>()
+        + leaves * size_of::<u32>();
+    assert_eq!(
+        past.bytes(),
+        size_of::<OwnPast>() + leaves * leaf + table,
+        "the split table's heap is counted"
+    );
     // A later day observes into the split leaves.
     past.observe(1_021).unwrap();
     past.commit_day().unwrap();
