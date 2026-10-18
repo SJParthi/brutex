@@ -4213,3 +4213,30 @@ fn a_width_two_swing_is_below_both_candles_on_each_side() {
     assert_eq!(one.exit_reason, ExitReason::TrailingStopLoss);
     assert_eq!(one.exit_second, at(10, 6, 0));
 }
+
+/// A trade's best price can print inside the forced window: it is the MFE,
+/// and on a tie the first second is the MFE's and the last the last peak's.
+#[test]
+fn a_peak_inside_the_forced_window_is_the_trade_s_mfe() {
+    let deep = second_day(&[
+        quiet(at(12, 0, 0), P, 1_000),
+        bar(at(15, 9, 0), P, P + 500, P - 20, P, 1_000),
+        bar(at(15, 9, 30), P, P + 500, P - 30, P, 1_000),
+    ]);
+    let out = second_slot(&deep, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+    assert_eq!(out.mfe_second, at(15, 9, 0));
+    assert_eq!(out.last_peak_second, at(15, 9, 30));
+    assert_eq!(out.mfe_to_horizon_paisa, 400);
+    let minutes = Day::minutes(vec![
+        quiet(at(9, 59, 0), P - 50, 1_000),
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        quiet(at(12, 0, 0), P, 1_000),
+        bar(at(15, 9, 0), P, P + 500, P - 20, P, 1_000),
+    ]);
+    let out = minute_slot(&minutes, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+    assert_eq!(out.mfe_second, at(15, 9, 0));
+    assert_eq!(out.last_peak_second, at(15, 9, 0));
+    assert_eq!(out.mfe_to_horizon_paisa, 400);
+}
