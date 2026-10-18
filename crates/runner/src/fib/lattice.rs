@@ -222,6 +222,22 @@ pub enum LatticeRefusal {
         /// The key.
         key: MixKey,
     },
+    /// A range of rows past the table, or backwards.
+    RangeOutsideTable {
+        /// Its first row.
+        start: u32,
+        /// One past its last row.
+        end: u32,
+        /// Rows the table holds.
+        rows: usize,
+    },
+    /// Scratch smaller than the range it is asked to expand.
+    ScratchTooSmall {
+        /// Rows the range holds.
+        needed: usize,
+        /// Rows the scratch holds.
+        have: usize,
+    },
 }
 
 impl LatticeRefusal {
@@ -249,6 +265,8 @@ impl LatticeRefusal {
             Self::SurvivorWithoutVerdict { .. } => "survivor_without_verdict",
             Self::VerdictWithoutSurvivor { .. } => "verdict_without_survivor",
             Self::VerdictRepeated { .. } => "verdict_repeated",
+            Self::RangeOutsideTable { .. } => "range_outside_table",
+            Self::ScratchTooSmall { .. } => "scratch_too_small",
         }
     }
 }
@@ -277,11 +295,32 @@ fn with_row(key: MixKey, row: usize, value: u8) -> MixKey {
 
 /// The schema rows a mix may leave free or fix: every row but the partition
 /// rows, in row order.
-fn free_rows() -> Vec<RowId> {
-    RowId::ALL
+fn free_rows() -> [RowId; FREE_ROWS] {
+    let mut out = [RowId::Side; FREE_ROWS];
+    let free = RowId::ALL
         .into_iter()
-        .filter(|id| id.row().kind != RowKind::Partition)
-        .collect()
+        .filter(|id| id.row().kind != RowKind::Partition);
+    for (slot, id) in out.iter_mut().zip(free) {
+        *slot = id;
+    }
+    out
+}
+
+/// How many schema rows a mix may leave free or fix: the structural bound on
+/// the fixed rows of any mix, counted from the schema at compile time.
+pub const FREE_ROWS: usize = free_count();
+
+/// Counts the rows that are not partition rows.
+const fn free_count() -> usize {
+    let mut rest: &[RowId] = &RowId::ALL;
+    let mut count = 0;
+    while let [first, tail @ ..] = rest {
+        if !matches!(first.row().kind, RowKind::Partition) {
+            count += 1;
+        }
+        rest = tail;
+    }
+    count
 }
 
 /// One stable counting sort of `order` by `key`, whose values are all below
@@ -335,6 +374,9 @@ pub struct RowTable {
     month: Vec<u32>,
     /// Each row's outcome index per exit variant, row-major.
     outcomes: Vec<u32>,
+    /// The identity order 0, 1, 2, ...: the root's rows, kept so no walk
+    /// allocates them.
+    order: Vec<u32>,
     /// One past the largest stock slot seen: the pool the scorer sizes for.
     pool: u32,
 }
@@ -403,6 +445,7 @@ impl RowTable {
             id: Vec::new(),
             month: Vec::new(),
             outcomes: Vec::new(),
+            order: Vec::new(),
             pool: 0,
         })
     }
@@ -518,6 +561,8 @@ impl RowTable {
             self.second.push(decision.second);
             self.id.push(decision.id);
             self.month.push(month);
+            let next = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
+            self.order.push(next);
             let from = *at as usize * variants;
             self.outcomes
                 .extend(outcomes.iter().skip(from).take(variants).copied());
@@ -601,16 +646,6 @@ impl RowTable {
             month: *self.month.get(at)?,
             outcomes: self.outcomes.get(at * variants..(at + 1) * variants)?,
         })
-    }
-
-    /// The value of schema row `row` in table row `at` (`OPEN` past the
-    /// table): one read, the row-touch the walk counts.
-    fn value(&self, at: u32, row: usize) -> u8 {
-        self.coords
-            .get(at as usize)
-            .and_then(|cell| cell.get(row))
-            .copied()
-            .unwrap_or(OPEN)
     }
 
     /// The key of the partition's root: every free row open, the entry-style
@@ -858,12 +893,15 @@ pub struct Walked {
     pub spread: Spread,
 }
 
-/// Where one node sits: its rows, its key, the next free row it may fix and
-/// how many rows it fixes.
+/// Where one node sits: its rows with their cells side by side, its key, the
+/// next free row it may fix and how many rows it fixes.
 #[derive(Clone, Copy)]
 struct At<'r> {
     /// The node's rows, ascending.
     rows: &'r [u32],
+    /// Their cells, in the same order: a node's own region, never a gather
+    /// from the table.
+    cells: &'r [Coords],
     /// Its key.
     key: MixKey,
     /// The first position in the free-row list it may fix.
@@ -903,15 +941,20 @@ impl Counted {
 /// The width of one count region: one slot per possible value of a row.
 const COUNT_STRIDE: usize = OPEN as usize;
 
+/// The zero cell a fresh scratch region holds.
+const BLANK: Coords = [0; ROW_COUNT];
+
 /// Where a task's rows come from.
 #[derive(Clone, Copy)]
 enum Source<'r> {
     /// Already in place: a categorical child's range of the scatter.
-    Rows(&'r [u32]),
+    Rows(&'r [u32], &'r [Coords]),
     /// Scanned by the task itself: a prefix child of the parent's rows.
     Prefix {
         /// The parent's rows.
-        parent: &'r [u32],
+        rows: &'r [u32],
+        /// Their cells.
+        cells: &'r [Coords],
         /// The cumulative schema row.
         row: usize,
         /// The widest group kept.
@@ -927,15 +970,70 @@ struct Ready<'r> {
     key: MixKey,
 }
 
-/// The buffers one node writes: its count region, its scratch (its children's
-/// region first) and the count regions below it.
+/// A scratch arena: row indices and their cells side by side.
+struct Arena<'b> {
+    /// The row indices.
+    rows: &'b mut [u32],
+    /// Their cells.
+    cells: &'b mut [Coords],
+}
+
+impl<'b> Arena<'b> {
+    /// Splits off the first `n` entries (fewer when the arena is shorter):
+    /// this node's child region, and the rest for the nodes below.
+    fn split(self, n: usize) -> (Arena<'b>, Arena<'b>) {
+        let (rows, rows_rest) = self.rows.split_at_mut(n.min(self.rows.len()));
+        let (cells, cells_rest) = self.cells.split_at_mut(n.min(self.cells.len()));
+        (
+            Arena { rows, cells },
+            Arena {
+                rows: rows_rest,
+                cells: cells_rest,
+            },
+        )
+    }
+
+    /// A shorter-lived view of the same arena.
+    fn reborrow(&mut self) -> Arena<'_> {
+        Arena {
+            rows: self.rows,
+            cells: self.cells,
+        }
+    }
+}
+
+/// The buffers one node writes: its count region, its scratch arena (its
+/// children's region first) and the count regions below it.
 struct Bufs<'b> {
     /// The node's own count region.
     hist: &'b mut [u32],
-    /// The scratch: this node's child region, then everything below.
-    scratch: &'b mut [u32],
+    /// The arena: this node's child region, then everything below.
+    arena: Arena<'b>,
     /// The count regions of the nodes below.
     deeper: &'b mut [u32],
+}
+
+/// Owned scratch: an arena and count regions, sized once.
+struct Owned {
+    /// Row indices.
+    rows: Vec<u32>,
+    /// Their cells.
+    cells: Vec<Coords>,
+    /// Count regions.
+    counts: Vec<u32>,
+}
+
+impl Owned {
+    /// The arena.
+    fn arena(&mut self) -> (Arena<'_>, &mut [u32]) {
+        (
+            Arena {
+                rows: &mut self.rows,
+                cells: &mut self.cells,
+            },
+            &mut self.counts,
+        )
+    }
 }
 
 /// The walk over one table.
@@ -945,29 +1043,31 @@ struct Walker<'t> {
     /// The floor.
     min: u64,
     /// The free rows, in row order.
-    free: Vec<RowId>,
+    free: [RowId; FREE_ROWS],
     /// The schedule.
     schedule: Schedule,
+    /// Whether children are visited and never expanded ([`expand_range`]).
+    once: bool,
 }
 
 impl Walker<'_> {
     /// Scratch for a subtree of `rows` rows whose next free position is
-    /// `next`: one region per free row it may still fix.
-    fn scratch_for(&self, rows: usize, next: usize) -> Vec<u32> {
-        vec![0_u32; rows.saturating_mul(self.free.len().saturating_sub(next))]
-    }
-
-    /// Count regions for a subtree: its own, and one per free row it may
-    /// still fix.
-    fn counts_for(&self, next: usize) -> Vec<u32> {
-        vec![0_u32; COUNT_STRIDE * (self.free.len().saturating_sub(next) + 1)]
+    /// `next`: one arena region per free row it may still fix, and one count
+    /// region per free row plus its own.
+    fn owned(&self, rows: usize, next: usize) -> Owned {
+        let regions = self.free.len().saturating_sub(next);
+        Owned {
+            rows: vec![0_u32; rows.saturating_mul(regions)],
+            cells: vec![BLANK; rows.saturating_mul(regions)],
+            counts: vec![0_u32; COUNT_STRIDE * (regions + 1)],
+        }
     }
 
     /// Visits a node and walks every child it grows.
     fn expand<V: Visitor>(
         &self,
         at: At<'_>,
-        scratch: &mut [u32],
+        arena: Arena<'_>,
         counts: &mut [u32],
         visitor: &mut V,
         out: &mut Counted,
@@ -979,10 +1079,13 @@ impl Walker<'_> {
             fixed: at.fixed,
             wanted: Wanted::Every,
         });
+        if self.once && at.fixed > 0 {
+            return;
+        }
         let (hist, deeper) = counts.split_at_mut(COUNT_STRIDE.min(counts.len()));
         let mut bufs = Bufs {
             hist,
-            scratch,
+            arena,
             deeper,
         };
         for (position, id) in self.free.iter().enumerate().skip(at.next) {
@@ -995,15 +1098,17 @@ impl Walker<'_> {
         }
     }
 
-    /// Fills `hist` with the node's value counts on schema row `row`.
-    fn histogram(&self, rows: &[u32], row: usize, hist: &mut [u32], out: &mut Counted) {
+    /// Fills `hist` with the node's value counts on schema row `row`, reading
+    /// the node's own cells in order.
+    fn histogram(cells: &[Coords], row: usize, hist: &mut [u32], out: &mut Counted) {
         hist.fill(0);
-        for at in rows {
-            if let Some(count) = hist.get_mut(usize::from(self.table.value(*at, row))) {
+        for cell in cells {
+            let value = cell.get(row).copied().unwrap_or(OPEN);
+            if let Some(count) = hist.get_mut(usize::from(value)) {
                 *count += 1;
             }
         }
-        out.tally.row_touches += rows.len() as u64;
+        out.tally.row_touches += cells.len() as u64;
     }
 
     /// Whether a node of `rows` rows with `children` children to walk splits
@@ -1030,15 +1135,16 @@ impl Walker<'_> {
     /// The scratch bytes one batch of tasks below free position `next` holds.
     fn batch_bytes(&self, ready: &[Ready<'_>], next: usize) -> usize {
         let below = self.free.len().saturating_sub(next);
+        let entry = size_of::<u32>() + size_of::<Coords>();
         ready.iter().fold(0_usize, |sum, child| {
             let (rows, own) = match child.source {
-                Source::Rows(rows) => (rows.len(), 0),
-                Source::Prefix { parent, .. } => (parent.len(), parent.len()),
+                Source::Rows(rows, _) => (rows.len(), 0),
+                Source::Prefix { rows, .. } => (rows.len(), rows.len()),
             };
             sum.saturating_add(
                 rows.saturating_mul(below)
                     .saturating_add(own)
-                    .saturating_mul(size_of::<u32>()),
+                    .saturating_mul(entry),
             )
         })
     }
@@ -1059,28 +1165,39 @@ impl Walker<'_> {
             .zip(ready.par_iter())
             .map(|(mut fork, child)| {
                 let mut counted = Counted::zero();
-                let own = match child.source {
-                    Source::Rows(_) => Vec::new(),
-                    Source::Prefix { parent, row, group } => {
-                        let mut own = vec![0_u32; parent.len()];
-                        let kept = self.scan(parent, row, group, &mut own, &mut counted);
-                        own.truncate(kept);
-                        own
-                    }
+                let mut own_rows = Vec::new();
+                let mut own_cells = Vec::new();
+                if let Source::Prefix {
+                    rows,
+                    cells,
+                    row,
+                    group,
+                } = child.source
+                {
+                    own_rows = vec![0_u32; rows.len()];
+                    own_cells = vec![BLANK; rows.len()];
+                    let mut region = Arena {
+                        rows: &mut own_rows,
+                        cells: &mut own_cells,
+                    };
+                    let kept = Self::scan(rows, cells, row, group, &mut region, &mut counted);
+                    own_rows.truncate(kept);
+                    own_cells.truncate(kept);
+                }
+                let (rows, cells) = match child.source {
+                    Source::Rows(rows, cells) => (rows, cells),
+                    Source::Prefix { .. } => (own_rows.as_slice(), own_cells.as_slice()),
                 };
-                let rows = match child.source {
-                    Source::Rows(rows) => rows,
-                    Source::Prefix { .. } => &own,
-                };
-                let mut scratch = self.scratch_for(rows.len(), next);
-                let mut counts = self.counts_for(next);
+                let mut owned = self.owned(rows.len(), next);
+                let (arena, counts) = owned.arena();
                 let place = At {
                     rows,
+                    cells,
                     key: child.key,
                     next,
                     fixed,
                 };
-                self.expand(place, &mut scratch, &mut counts, &mut fork, &mut counted);
+                self.expand(place, arena, counts, &mut fork, &mut counted);
                 (fork, counted)
             })
             .collect();
@@ -1091,8 +1208,8 @@ impl Walker<'_> {
         }
     }
 
-    /// Whether to walk `ready` as tasks: the node is large enough and the
-    /// batch fits the budget. A batch over the budget is counted.
+    /// Whether to walk `ready` as tasks: the batch fits the budget. A batch
+    /// over the budget is counted and runs inline.
     fn as_tasks(&self, ready: &[Ready<'_>], next: usize, out: &mut Counted) -> bool {
         if self.over_budget(self.batch_bytes(ready, next)) {
             out.spread.inline_for_budget += 1;
@@ -1102,7 +1219,7 @@ impl Walker<'_> {
     }
 
     /// The children of a categorical row: one stable counting sort of the
-    /// node's rows into the first region of the scratch.
+    /// node's rows and cells into the first region of the arena.
     fn categories<V: Visitor>(
         &self,
         at: At<'_>,
@@ -1116,7 +1233,7 @@ impl Walker<'_> {
         let radix = usize::from(self.table.layout.radix(id));
         let parent = at.rows.len() as u64;
         let hist = bufs.hist.get_mut(..radix).unwrap_or_default();
-        self.histogram(at.rows, row, hist, out);
+        Self::histogram(at.cells, row, hist, out);
         let mut frequent = 0;
         for count in hist.iter() {
             let child = classify(u64::from(*count), parent, None, self.min);
@@ -1132,13 +1249,16 @@ impl Walker<'_> {
             *count = end;
             end += width;
         }
-        let (region, rest) = bufs
-            .scratch
-            .split_at_mut(at.rows.len().min(bufs.scratch.len()));
-        for index in at.rows {
-            if let Some(cursor) = hist.get_mut(usize::from(self.table.value(*index, row))) {
-                if let Some(slot) = region.get_mut(*cursor as usize) {
-                    *slot = *index;
+        let (region, mut rest) = bufs.arena.reborrow().split(at.rows.len());
+        for (index, cell) in at.rows.iter().zip(at.cells) {
+            let value = cell.get(row).copied().unwrap_or(OPEN);
+            if let Some(cursor) = hist.get_mut(usize::from(value)) {
+                let slot = *cursor as usize;
+                if let Some(target) = region.rows.get_mut(slot) {
+                    *target = *index;
+                }
+                if let Some(target) = region.cells.get_mut(slot) {
+                    *target = *cell;
                 }
                 *cursor += 1;
             }
@@ -1146,22 +1266,23 @@ impl Walker<'_> {
         out.tally.row_touches += parent;
         let next = position + 1;
         let fixed = at.fixed + 1;
+        let (region_rows, region_cells) = (&*region.rows, &*region.cells);
         let children = (0_u8..)
             .zip(hist.iter())
             .scan(0_u32, |start, (value, end)| {
-                let rows = region
-                    .get(*start as usize..*end as usize)
-                    .unwrap_or_default();
+                let span = *start as usize..*end as usize;
+                let rows = region_rows.get(span.clone()).unwrap_or_default();
+                let cells = region_cells.get(span).unwrap_or_default();
                 *start = *end;
-                Some((value, rows))
+                Some((value, rows, cells))
             })
-            .filter(|(_, rows)| {
+            .filter(|(_, rows, _)| {
                 classify(rows.len() as u64, parent, None, self.min) == Child::Frequent
             });
         if self.splits(at.rows.len(), frequent) {
             let ready: Vec<Ready<'_>> = children
-                .map(|(value, rows)| Ready {
-                    source: Source::Rows(rows),
+                .map(|(value, rows, cells)| Ready {
+                    source: Source::Rows(rows, cells),
                     key: with_row(at.key, row, value),
                 })
                 .collect();
@@ -1170,31 +1291,33 @@ impl Walker<'_> {
                 return;
             }
             for child in ready {
-                if let Source::Rows(rows) = child.source {
+                if let Source::Rows(rows, cells) = child.source {
                     let place = At {
                         rows,
+                        cells,
                         key: child.key,
                         next,
                         fixed,
                     };
-                    self.expand(place, rest, bufs.deeper, visitor, out);
+                    self.expand(place, rest.reborrow(), bufs.deeper, visitor, out);
                 }
             }
             return;
         }
-        for (value, rows) in children {
+        for (value, rows, cells) in children {
             let place = At {
                 rows,
+                cells,
                 key: with_row(at.key, row, value),
                 next,
                 fixed,
             };
-            self.expand(place, rest, bufs.deeper, visitor, out);
+            self.expand(place, rest.reborrow(), bufs.deeper, visitor, out);
         }
     }
 
     /// The prefix children of the cumulative row: each one stable linear
-    /// scan of the node's rows into the first region of the scratch (FM-F055).
+    /// scan of the node's rows into the first region of the arena (FM-F055).
     fn prefixes<V: Visitor>(
         &self,
         at: At<'_>,
@@ -1208,7 +1331,7 @@ impl Walker<'_> {
         let radix = usize::from(self.table.layout.radix(id));
         let parent = at.rows.len() as u64;
         let hist = bufs.hist.get_mut(..radix).unwrap_or_default();
-        self.histogram(at.rows, row, hist, out);
+        Self::histogram(at.cells, row, hist, out);
         let classes = (0_u8..).zip(hist.iter()).scan(
             (0_u64, None),
             move |(below, sibling), (group, count)| {
@@ -1232,7 +1355,8 @@ impl Walker<'_> {
             let ready: Vec<Ready<'_>> = wanted
                 .map(|group| Ready {
                     source: Source::Prefix {
-                        parent: at.rows,
+                        rows: at.rows,
+                        cells: at.cells,
                         row,
                         group,
                     },
@@ -1250,7 +1374,7 @@ impl Walker<'_> {
                         row,
                         group,
                         next,
-                        bufs.scratch,
+                        bufs.arena.reborrow(),
                         bufs.deeper,
                         visitor,
                         out,
@@ -1265,7 +1389,7 @@ impl Walker<'_> {
                 row,
                 group,
                 next,
-                bufs.scratch,
+                bufs.arena.reborrow(),
                 bufs.deeper,
                 visitor,
                 out,
@@ -1273,8 +1397,7 @@ impl Walker<'_> {
         }
     }
 
-    /// Builds one prefix child in the first region of the scratch and walks
-    /// it.
+    /// Builds one prefix child in the first region of the arena and walks it.
     #[allow(
         clippy::too_many_arguments,
         reason = "one node's place, the prefix it builds, and the buffers and sinks it writes"
@@ -1285,15 +1408,27 @@ impl Walker<'_> {
         row: usize,
         group: u8,
         next: usize,
-        scratch: &mut [u32],
+        arena: Arena<'_>,
         deeper: &mut [u32],
         visitor: &mut V,
         out: &mut Counted,
     ) {
-        let (region, rest) = scratch.split_at_mut(at.rows.len().min(scratch.len()));
-        let kept = self.scan(at.rows, row, group, region, out);
+        let (region, rest) = arena.split(at.rows.len());
+        let (rows, cells) = (region.rows, region.cells);
+        let kept = Self::scan(
+            at.rows,
+            at.cells,
+            row,
+            group,
+            &mut Arena {
+                rows: &mut *rows,
+                cells: &mut *cells,
+            },
+            out,
+        );
         let place = At {
-            rows: region.get(..kept).unwrap_or_default(),
+            rows: rows.get(..kept).unwrap_or_default(),
+            cells: cells.get(..kept).unwrap_or_default(),
             key: with_row(at.key, row, group),
             next,
             fixed: at.fixed + 1,
@@ -1301,21 +1436,24 @@ impl Walker<'_> {
         self.expand(place, rest, deeper, visitor, out);
     }
 
-    /// Copies the rows whose group on schema row `row` is at most `group` into
-    /// `region`, in order; returns how many.
+    /// Copies the rows (and cells) whose group on schema row `row` is at most
+    /// `group` into `region`, in order; returns how many.
     fn scan(
-        &self,
         rows: &[u32],
+        cells: &[Coords],
         row: usize,
         group: u8,
-        region: &mut [u32],
+        region: &mut Arena<'_>,
         out: &mut Counted,
     ) -> usize {
         let mut kept = 0;
-        for at in rows {
-            if self.table.value(*at, row) <= group {
-                if let Some(slot) = region.get_mut(kept) {
-                    *slot = *at;
+        for (index, cell) in rows.iter().zip(cells) {
+            if cell.get(row).copied().unwrap_or(OPEN) <= group {
+                if let Some(target) = region.rows.get_mut(kept) {
+                    *target = *index;
+                }
+                if let Some(target) = region.cells.get_mut(kept) {
+                    *target = *cell;
                 }
                 kept += 1;
             }
@@ -1345,30 +1483,125 @@ pub fn walk<V: Visitor>(
         min: min_support,
         free: free_rows(),
         schedule,
+        once: false,
     };
     let mut counted = Counted::zero();
-    let identity: Vec<u32> = (0..table.len())
-        .filter_map(|at| u32::try_from(at).ok())
-        .collect();
-    let support = identity.len() as u64;
-    if support < min_support {
+    let rows = &table.order;
+    if (rows.len() as u64) < min_support {
         counted.tally.count(Child::Infrequent, 0);
     } else {
         counted.tally.count(Child::Frequent, 0);
-        let mut scratch = walker.scratch_for(identity.len(), 0);
-        let mut counts = walker.counts_for(0);
+        let mut owned = walker.owned(rows.len(), 0);
+        let (arena, counts) = owned.arena();
         let root = At {
-            rows: &identity,
+            rows,
+            cells: &table.coords,
             key: table.root_key(),
             next: 0,
             fixed: 0,
         };
-        walker.expand(root, &mut scratch, &mut counts, visitor, &mut counted);
+        walker.expand(root, arena, counts, visitor, &mut counted);
     }
     Ok(Walked {
         tally: counted.tally,
         spread: counted.spread,
     })
+}
+
+/// Caller-owned scratch for [`expand_range`]: one child region and two count
+/// regions, sized once for the largest range it will expand, so an expansion
+/// allocates nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scratch {
+    /// Child row indices.
+    rows: Vec<u32>,
+    /// Their cells.
+    cells: Vec<Coords>,
+    /// Count regions.
+    counts: Vec<u32>,
+}
+
+impl Scratch {
+    /// Scratch for ranges of up to `rows` rows.
+    #[must_use]
+    pub fn for_rows(rows: usize) -> Self {
+        Self {
+            rows: vec![0; rows],
+            cells: vec![BLANK; rows],
+            counts: vec![0; COUNT_STRIDE + COUNT_STRIDE],
+        }
+    }
+
+    /// The largest range it can expand.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// Expands ONE node: the table's contiguous rows `range` as the root of their
+/// own lattice (every free row open), handing the node and each frequent
+/// child to `visitor` and expanding no child. The unit of work the walk does
+/// per node, on a block of rows whose cells already lie side by side — the
+/// shape every child region of a walk has. The bench's row-touch op.
+///
+/// # Errors
+///
+/// [`LatticeRefusal::MinSupportZero`], [`LatticeRefusal::RangeOutsideTable`]
+/// and [`LatticeRefusal::ScratchTooSmall`].
+pub fn expand_range<V: Visitor>(
+    table: &RowTable,
+    range: Range<u32>,
+    min_support: u64,
+    scratch: &mut Scratch,
+    visitor: &mut V,
+) -> Result<Tally, LatticeRefusal> {
+    if min_support == 0 {
+        return Err(LatticeRefusal::MinSupportZero);
+    }
+    let span = range.start as usize..range.end as usize;
+    let cells = table
+        .coords
+        .get(span.clone())
+        .filter(|_| range.start <= range.end)
+        .ok_or(LatticeRefusal::RangeOutsideTable {
+            start: range.start,
+            end: range.end,
+            rows: table.len(),
+        })?;
+    if span.len() > scratch.rows() {
+        return Err(LatticeRefusal::ScratchTooSmall {
+            needed: span.len(),
+            have: scratch.rows(),
+        });
+    }
+    let rows = table.order.get(span).unwrap_or_default();
+    let walker = Walker {
+        table,
+        min: min_support,
+        free: free_rows(),
+        schedule: Schedule::Sequential,
+        once: true,
+    };
+    let mut counted = Counted::zero();
+    if (rows.len() as u64) < min_support {
+        counted.tally.count(Child::Infrequent, 0);
+        return Ok(counted.tally);
+    }
+    counted.tally.count(Child::Frequent, 0);
+    let arena = Arena {
+        rows: &mut scratch.rows,
+        cells: &mut scratch.cells,
+    };
+    let node = At {
+        rows,
+        cells,
+        key: table.root_key(),
+        next: 0,
+        fixed: 0,
+    };
+    walker.expand(node, arena, &mut scratch.counts, visitor, &mut counted);
+    Ok(counted.tally)
 }
 
 /// One node of the survivor trie.
@@ -1587,7 +1820,7 @@ impl Guide<'_> {
         &self,
         node: u32,
         at: At<'_>,
-        scratch: &mut [u32],
+        arena: Arena<'_>,
         visitor: &mut V,
         tally: &mut GuidedTally,
     ) {
@@ -1611,35 +1844,39 @@ impl Guide<'_> {
             .edges
             .get(trie.edges.clone())
             .unwrap_or_default();
+        let (region, mut rest) = arena.split(at.rows.len());
         for edge in edges {
             let row = usize::from(edge.row);
             let cumulative = RowId::ALL
                 .get(row)
                 .is_some_and(|id| id.row().kind == RowKind::Cumulative);
-            let (region, rest) = scratch.split_at_mut(at.rows.len().min(scratch.len()));
             let mut kept = 0;
-            for index in at.rows {
-                let value = self.table.value(*index, row);
+            for (index, cell) in at.rows.iter().zip(at.cells) {
+                let value = cell.get(row).copied().unwrap_or(OPEN);
                 let inside = if cumulative {
                     value <= edge.value
                 } else {
                     value == edge.value
                 };
                 if inside {
-                    if let Some(slot) = region.get_mut(kept) {
-                        *slot = *index;
+                    if let Some(target) = region.rows.get_mut(kept) {
+                        *target = *index;
+                    }
+                    if let Some(target) = region.cells.get_mut(kept) {
+                        *target = *cell;
                     }
                     kept += 1;
                 }
             }
             tally.row_touches += at.rows.len() as u64;
             let child = At {
-                rows: region.get(..kept).unwrap_or_default(),
+                rows: region.rows.get(..kept).unwrap_or_default(),
+                cells: region.cells.get(..kept).unwrap_or_default(),
                 key: with_row(at.key, row, edge.value),
                 next: at.next,
                 fixed: at.fixed + 1,
             };
-            self.descend(edge.child, child, rest, visitor, tally);
+            self.descend(edge.child, child, rest.reborrow(), visitor, tally);
         }
     }
 }
@@ -1654,22 +1891,27 @@ pub fn walk_guided<V: Visitor>(
     visitor: &mut V,
 ) -> GuidedTally {
     let guide = Guide { table, survivors };
-    let identity: Vec<u32> = (0..table.len())
-        .filter_map(|at| u32::try_from(at).ok())
-        .collect();
-    let mut scratch = vec![0_u32; identity.len().saturating_mul(free_rows().len())];
+    let rows = &table.order;
+    let regions = rows.len().saturating_mul(free_rows().len());
+    let mut arena_rows = vec![0_u32; regions];
+    let mut arena_cells = vec![BLANK; regions];
     let mut tally = GuidedTally {
         scored: 0,
         passed_through: 0,
         row_touches: 0,
     };
     let root = At {
-        rows: &identity,
+        rows,
+        cells: &table.coords,
         key: table.root_key(),
         next: 0,
         fixed: 0,
     };
-    guide.descend(0, root, &mut scratch, visitor, &mut tally);
+    let arena = Arena {
+        rows: &mut arena_rows,
+        cells: &mut arena_cells,
+    };
+    guide.descend(0, root, arena, visitor, &mut tally);
     tally
 }
 

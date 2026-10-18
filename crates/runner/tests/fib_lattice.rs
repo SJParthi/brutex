@@ -1375,3 +1375,121 @@ fn fib6_files_type_no_number() {
         assert_eq!(untyped_numbers(source), Vec::new(), "{name}");
     }
 }
+
+/// `expand_range` is one node's expansion: on the whole table it visits the
+/// root and exactly the walk's frequent children of the root, with the
+/// walk's classification of them; on a sub-range each child holds the range's
+/// rows that `contains` selects. Its refusals are by name.
+#[test]
+fn expand_range_is_one_nodes_expansion() {
+    use runner::fib::lattice::{Scratch, expand_range};
+    let mut rng = Seeded(0xE4A9_0006);
+    for _ in 0..8 {
+        let case = random_case(&mut rng, Search::Long, 1_500);
+        let min = 1 + case.min_support / 5;
+        let (walked, walk_tally) = collect(&case.table, min);
+        let rows = case.table.len() as u32;
+        let mut scratch = Scratch::for_rows(rows as usize);
+        assert_eq!(scratch.rows(), rows as usize);
+        let mut once = Collect::default();
+        let tally = expand_range(&case.table, 0..rows, min, &mut scratch, &mut once).unwrap();
+        let first: Vec<_> = walked.nodes.iter().filter(|n| n.2 <= 1).cloned().collect();
+        if u64::from(rows) >= min {
+            assert_eq!(once.nodes, first);
+            for slot in 0..2 {
+                assert_eq!(tally.frequent[slot], walk_tally.frequent[slot]);
+                assert_eq!(tally.infrequent[slot], walk_tally.infrequent[slot]);
+                assert_eq!(
+                    tally.equivalent_to_parent[slot],
+                    walk_tally.equivalent_to_parent[slot]
+                );
+                assert_eq!(
+                    tally.equivalent_to_sibling[slot],
+                    walk_tally.equivalent_to_sibling[slot]
+                );
+            }
+            assert_eq!(tally.frequent[2..], [0; FIXED_SLOTS - 2]);
+        }
+        let (start, end) = (rows / 3, rows - rows / 4);
+        let mut part = Collect::default();
+        expand_range(&case.table, start..end, 1, &mut scratch, &mut part).unwrap();
+        for (key, node_rows, fixed, _) in &part.nodes {
+            assert!(*fixed <= 1);
+            let want: Vec<u32> = (start..end)
+                .filter(|r| contains(key, &case.cells[*r as usize]))
+                .collect();
+            assert_eq!(node_rows, &want);
+        }
+    }
+    let generation = generation(Search::Long, 2, 2, 1);
+    let data = (0..10_u32)
+        .map(|i| {
+            (
+                decision(base_cell(Search::Long), i, 5, 40_000, u64::from(i)),
+                vec![i],
+            )
+        })
+        .collect();
+    let table = fixture::table_of(
+        &generation,
+        fixture::partition(Search::Long, 1),
+        1,
+        vec![(0, data)],
+    );
+    let mut scratch = Scratch::for_rows(4);
+    let mut sink = Collect::default();
+    assert_eq!(
+        expand_range(&table, 0..4, 0, &mut scratch, &mut sink).unwrap_err(),
+        LatticeRefusal::MinSupportZero
+    );
+    assert_eq!(
+        expand_range(&table, 8..11, 1, &mut scratch, &mut sink).unwrap_err(),
+        LatticeRefusal::RangeOutsideTable {
+            start: 8,
+            end: 11,
+            rows: 10
+        }
+    );
+    #[allow(
+        clippy::reversed_empty_ranges,
+        reason = "the backwards range is the case under test"
+    )]
+    let backwards = 5..2;
+    assert_eq!(
+        expand_range(&table, backwards, 1, &mut scratch, &mut sink).unwrap_err(),
+        LatticeRefusal::RangeOutsideTable {
+            start: 5,
+            end: 2,
+            rows: 10
+        }
+    );
+    assert_eq!(
+        expand_range(&table, 0..5, 1, &mut scratch, &mut sink).unwrap_err(),
+        LatticeRefusal::ScratchTooSmall { needed: 5, have: 4 }
+    );
+    let tally = expand_range(&table, 0..4, 1, &mut scratch, &mut sink).unwrap();
+    assert_eq!((tally.frequent[0], tally.nodes()), (1, 1));
+    assert_eq!(
+        tally.row_touches,
+        4 * runner::fib::lattice::FREE_ROWS as u64,
+        "one histogram pass per free row, no scatter"
+    );
+    assert_eq!(
+        runner::fib::lattice::FREE_ROWS,
+        21,
+        "24 rows less the three partition rows"
+    );
+    assert!(sink.nodes.len() == 1 && sink.nodes[0].1 == vec![0, 1, 2, 3]);
+    let refusals = [
+        LatticeRefusal::RangeOutsideTable {
+            start: 0,
+            end: 1,
+            rows: 0,
+        },
+        LatticeRefusal::ScratchTooSmall { needed: 1, have: 0 },
+    ];
+    assert_eq!(
+        refusals.map(|r| r.name()),
+        ["range_outside_table", "scratch_too_small"]
+    );
+}
