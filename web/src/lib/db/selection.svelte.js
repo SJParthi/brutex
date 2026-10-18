@@ -1823,7 +1823,13 @@ export function selectionState(db) {
         try {
           const r = await ask(dayflagsUrl(feed, inst, days.from, days.to), { cache: 'no-store', signal: ctl.signal });
           if (!r.ok) {
-            putMonth(key, { flags: null, why: await refusalFrom('/dayflags.json', r) });
+            const why = await refusalFrom('/dayflags.json', r);
+            /* AN ABORT DURING THE REFUSAL'S BODY IS STILL THE PAGE'S OWN (repair round 4): `reasonOf` swallows
+               the aborted read and names no reason, and writing that put a refusal back for a month whose
+               entry the cache had already let go — said under its grid, and taking a slot from an answered
+               month. */
+            if (ctl.signal.aborted) return;
+            putMonth(key, { flags: null, why });
             return;
           }
           const read = bandOf(await r.json(), { archive: /** @type {any} */ (activeFeed)?.archive ?? null });
@@ -2822,10 +2828,20 @@ export function selectionSeeds(db) {
          a linked day and a typed day are refused in one sentence. */
       const r = vetDayWindow(want, { lo, hi, reason, opens: { from: lo ? dayText(lo) : '', to: hi ? dayText(hi) : '' } });
       /* A side refused opens on the span's own edge — the value the box
-         would hold had nothing been linked; a side the link left out stays
-         out. */
-      const from = r.from || (want.from || want.refused?.from ? lo : '');
-      const to = r.to || (want.to || want.refused?.to ? hi : '');
+         would hold had nothing been linked.
+
+         A SIDE THE LINK LEFT OUT OPENS ON THE HELD SPAN'S EDGE TOO (repair
+         round 4; R302-04, a To box always holds a day). It stayed empty: a
+         link naming only From left the To box blank, refused under itself as
+         `To date "" is not a date`, while the grid read the window as
+         unbounded on that side — the held span's end, said by no box. A side
+         the address reader dropped before this point (`from=` blank, not a
+         day, too long) arrives here left out, and opens the same way. Only a
+         HELD span fills it: with the era alone known the box stays empty, and
+         says nothing (`dayFieldWhy`). */
+      const held = db.heldDays;
+      const from = r.from || (want.from || want.refused?.from ? lo : held.lo);
+      const to = r.to || (want.to || want.refused?.to ? hi : held.hi);
       if (from !== db.fromDay) db.fromDay = from;
       if (to !== db.toDay) db.toDay = to;
       if (lo && hi && from === lo && to === hi) db.daySeed = { from: lo, to: hi };

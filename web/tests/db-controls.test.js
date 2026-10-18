@@ -53,11 +53,13 @@ import {
   SEGMENT_KEYS,
   SEG_VIEW,
   VIEWS,
-  dayWindowApplies
+  dayWindowApplies,
+  dayFieldWhy
 } from '../src/lib/db/notes-controls.js';
 import { sessionGrid, SESSION_OPEN_MINUTE, calendarOf } from '../src/lib/db/selection-model.js';
 import { bandOf } from '../src/lib/db/dayflags.js';
 import { tfCmp, tfNote } from '../src/lib/db/notes-labels.js';
+import { vetDayWindow, dayText } from '../src/lib/db/input-check.js';
 
 const fmt = (/** @type {number} */ n) => n.toLocaleString('en-IN');
 
@@ -576,6 +578,62 @@ test('a_month_whose_read_is_out_is_never_dropped_or_asked_for_twice', async () =
   }
 });
 
+test('a_refusal_read_after_its_month_was_let_go_is_never_written', async () => {
+  // REPAIR ROUND 4. A month's read is answered 503, and while its body is still being read the 48-month cache
+  // lets the month go and aborts the read. `reasonOf` swallows the aborted body read and names no reason, and
+  // the refusal was written anyway: the month, never asked for again, said "/dayflags.json … named no reason"
+  // under its grid, and the stale entry took the slot of a month that had been answered. fetch rejects a body
+  // read once its request is aborted; here the rejection arrives after another month has answered, as a later
+  // task can. Every day record is invented.
+  const { flushSync } = await import(SVELTE_CLIENT);
+  const NONE = 'No day of this month is marked yet: its day flags are not on hand, and no read of them is out.';
+  const READING = 'Reading this month’s day flags from /dayflags.json…';
+  const others = Array.from({ length: MONTH_FLAGS_KEPT }, (_, i) => `${2015 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`);
+  /** @type {Array<{url: string, signal: AbortSignal, answer: () => void}>} */
+  const asked = [];
+  /** @type {null | (() => void)} */
+  let dropBody = null;
+  /** @param {string} url @param {{signal: AbortSignal}} init */
+  const ask = (url, init) => {
+    if (url.includes('from=2019-02-01') && asked.length === 0) {
+      asked.push({ url, signal: init.signal, answer: () => {} });
+      const body = new ReadableStream({ start: (c) => { dropBody = () => c.error(new DOMException('aborted', 'AbortError')); } });
+      return Promise.resolve(new Response(body, { status: 503 }));
+    }
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      asked.push({ url, signal: init.signal, answer: () => resolve(Response.json({ days: [] })) });
+    });
+  };
+  const page = (await monthFlagPage(false)).mount({ feed: 'gdfl', shown: '2019-02', db: { dayBandInstrument: 'NSE-INDEX-SAMPLE', fetchedAt: 1, dayBand: null, dayBandLoading: false, dayBandSpan: null } }, ask);
+  const { monthFlagWhy } = page.api;
+  flushSync();
+  await settle();
+  assert.equal(asked.length, 1);
+  assert.equal(monthFlagWhy('2019-02'), READING, 'answered 503, its body still being read: Reading');
+  for (const ym of others) {
+    page.view.shown = ym;
+    flushSync();
+  }
+  assert.equal(asked.length, MONTH_FLAGS_KEPT + 1);
+  assert.equal(asked[0].signal.aborted, true, 'every kept month was a read out: Feb 2019 is let go with its read aborted');
+  assert.equal(monthFlagWhy('2019-02'), NONE);
+  asked[1].answer();
+  await settle();
+  flushSync();
+  assert.equal(monthFlagWhy(others[0]), '', 'the first other month answered');
+  /** @type {() => void} */ (/** @type {unknown} */ (dropBody))();
+  await settle();
+  flushSync();
+  assert.equal(monthFlagWhy('2019-02'), NONE, 'the aborted read wrote no refusal for the month it let go');
+  assert.equal(monthFlagWhy(others[0]), '', 'and took no answered month’s slot');
+  page.view.shown = '2019-02';
+  flushSync();
+  assert.equal(asked.length, MONTH_FLAGS_KEPT + 2, 'shown again, it is asked for again');
+  assert.equal(monthFlagWhy('2019-02'), READING);
+  page.stop();
+});
+
 test('no_master_wording_on_a_feed_without_a_master', () => {
   // GDFL publishes no master: neither the list's tooltip nor Everything's row says "this feed's master".
   for (const said of [instrumentListWhy(true, 'GDFL'), everythingWhy(true, 'GDFL')]) {
@@ -1074,7 +1132,8 @@ test('every_special_day_lists_as_many_bars_as_the_calendar_owes', () => {
   assert.equal(both.find((r) => r.key === '10:00')?.detail, 'halted · 2 days in view');
   const m1010 = /** @type {any} */ (both.find((r) => r.key === '10:10'));
   assert.equal(m1010.detail, 'halted · 2 days in view');
-  assert.match(m1010.why, /Halted at this minute, in the reopening call auction of 13 Mar 2020 — the record calls it a suspected halt/);
+  // Both days are suspected in the record, and the doubt names both (repair round 4: "it" named neither).
+  assert.match(m1010.why, /Halted at this minute, in the reopening call auction of 13 Mar 2020 — the record calls the halts of 13 Mar 2020 and 23 Mar 2020 suspected halts, UNVERIFIED \(D-3320\): no NSE circular is recorded\. /);
   assert.equal(both.length, 375);
   // Two days whose auctions share a minute: said as the auction, with both days named.
   const twin = { ...halt, date: '2020-03-12' };
@@ -1244,4 +1303,125 @@ test('the edges of the shortfall fold and the hidden clause', () => {
   // A row with no segment field is folded under an empty segment, said as nothing.
   assert.equal(spotShortfalls([], [{ underlying: 'X', month: '2020-01', timeframe: '1min', rows: 1, expiry: null }]).get('X')?.get('1min')?.seg, '');
   assert.equal(hiddenText(3, { from: '2018-01-01' }, fmt), ' 3 more month(s) are held outside your window and hidden — "Show them, labelled" under the dates brings them in.');
+});
+
+test('a_shared_halted_minute_names_its_suspected_day', () => {
+  // REPAIR ROUND 4 (mutant H07). Two halt days in view whose halts share a minute, one the record calls a
+  // suspected halt (D-3320) and one it does not (an invented sourced copy dated 2020-03-12): the minute keeps
+  // the doubt of the suspected one — never less doubt than the record holds — and names whose it is, where
+  // "it" left the reader to guess which of two days was meant. Every day here is invented or the record's own.
+  const suspected = { date: '2020-03-13', kind: 'suspected halt', windows: [{ from: 555, to: 561 }, { from: 621, to: 929 }], halt: true, halted: [{ from: 562, to: 620 }], reopening: [{ from: 606, to: 620 }], suspected: true };
+  const sourced = { ...suspected, date: '2020-03-12', kind: 'halt', suspected: false };
+  const TAIL = 'A halted minute is neither owed nor missing (D-3336 §1), and a print inside a halt is still a bar (pull::calendar); listed so a bar the store holds here can still be reached.';
+  /** The 09:30 row with only these halt days in view (each counts as a regular session). @param {any[]} specials */
+  const at930 = (specials) => /** @type {any} */ (timeListRows(sessionGrid(60, [], {}), { specials, regular: specials.length, held: [], step: 1, open: SESSION_OPEN_MINUTE }).find((r) => r.key === '09:30'));
+  for (const specials of [[sourced, suspected], [suspected, sourced]]) {
+    const r = at930(specials);
+    assert.equal(r.detail, 'halted · 2 days in view');
+    assert.ok(r.why.endsWith(`. Halted at this minute — the record calls the halt of 13 Mar 2020 a suspected halt, UNVERIFIED (D-3320): no NSE circular is recorded. ${TAIL}`), r.why);
+    assert.doesNotMatch(r.why, /12 Mar 2020 a suspected/, 'the sourced day is not said to be suspected');
+  }
+  // Both suspected: both named, in the plural.
+  assert.ok(at930([{ ...sourced, suspected: true }, suspected]).why.includes('Halted at this minute — the record calls the halts of 12 Mar 2020 and 13 Mar 2020 suspected halts, UNVERIFIED (D-3320): no NSE circular is recorded. '));
+  // Neither: no doubt is said that the record does not hold.
+  const sure = at930([sourced, { ...suspected, kind: 'halt', suspected: false }]);
+  assert.equal(sure.detail, 'halted · 2 days in view');
+  assert.doesNotMatch(sure.why, /UNVERIFIED|record calls/);
+  assert.ok(sure.why.endsWith(`. Halted at this minute. ${TAIL}`), sure.why);
+  // One halt day alone is still "it".
+  assert.ok(at930([suspected]).why.includes('Halted at this minute — the record calls it a suspected halt, UNVERIFIED (D-3320)'));
+});
+
+/**
+ * THE LINK READER'S DAY-WINDOW EFFECT, cut out of `selectionSeeds` in
+ * selection.svelte.js and run over a plain `db` — the real body, not a copy:
+ * the effect whose body reads `const want = linkDays;`. `linkDays` is the
+ * closure's own variable, declared here and handed back after the run.
+ */
+function linkWindowEffect() {
+  const wrapped = '<script module>' + dbSource('../src/lib/db/selection.svelte.js') + '</script>';
+  const program = /** @type {any} */ (parse(wrapped)).module?.content;
+  const seeds = program.body.find((/** @type {any} */ n) => n.type === 'ExportNamedDeclaration' && n.declaration?.id?.name === 'selectionSeeds')?.declaration;
+  const bodies = (seeds?.body?.body ?? [])
+    .filter((/** @type {any} */ n) => n.type === 'ExpressionStatement' && n.expression.type === 'CallExpression' && n.expression.callee.name === '$effect')
+    .map((/** @type {any} */ n) => wrapped.slice(n.expression.arguments[0].start, n.expression.arguments[0].end))
+    .filter((/** @type {string} */ text) => text.includes('const want = linkDays;'));
+  assert.equal(bodies.length, 1, 'the link window effect seam');
+  const run = new Function('db', 'want', 'untrack', 'vetDayWindow', 'dayText', `let linkDays = want; (${bodies[0]})(); return linkDays;`);
+  /** @param {any} db @param {any} want */
+  return (db, want) => run(db, want, (/** @type {() => void} */ f) => f(), vetDayWindow, dayText);
+}
+
+test('a_link_that_leaves_a_side_out_opens_it_on_the_held_span', () => {
+  // REPAIR ROUND 4 (R302-04: a To box always holds a day). A link naming only From left the To box empty —
+  // refused under itself as `To date "" is not a date`, while the grid read the window as unbounded on that
+  // side, which is the held span's end said by no box. A side the address reader dropped (from= blank, not a
+  // day, too long) arrives at this effect left out in the same way. Now a side left out opens on the HELD
+  // span's edge; with only the feed's era known it stays empty, and the empty box says nothing. Invented days.
+  const effect = linkWindowEffect();
+  const HELD = { lo: '2018-09-03', hi: '2026-09-30' };
+  const ERA = { lo: '2018-09-01', hi: '2026-09-24' };
+  const REASON = 'This selection holds 03 Sep 2018 to 30 Sep 2026 (the census’s first and last bar).';
+  /** The page as the link reader leaves it: the linked days applied, the seed marked as a link's. @param {{lo: string, hi: string}} held @param {{from?: string, to?: string}} linked */
+  const dbOf = (held, linked) => ({
+    deco: [{}], reconciling: false, scopeMissing: false, linkNotes: [], dayReason: REASON,
+    heldDays: held, dayBounds2: { lo: held.lo || ERA.lo, hi: held.hi || ERA.hi },
+    fromDay: linked.from ?? '', toDay: linked.to ?? '', daySeed: { from: '\u0000', to: '\u0000' }
+  });
+  /** What each box says under itself, as DbControls hands it its props. @param {any} db */
+  const said = (db) => [
+    dayFieldWhy({ typed: null, value: db.fromDay, label: 'From date', min: db.dayBounds2.lo, max: db.dayBounds2.hi, before: db.toDay }),
+    dayFieldWhy({ typed: null, value: db.toDay, label: 'To date', min: db.dayBounds2.lo, max: db.dayBounds2.hi, after: db.fromDay })
+  ];
+  const none = { from: false, to: false };
+
+  // From only: the To box opens on the held span's end, and the window stays the reader's (narrowed).
+  const fromOnly = dbOf(HELD, { from: '2024-11-01' });
+  assert.equal(effect(fromOnly, { from: '2024-11-01', to: '', refused: none }), null, 'the linked window is checked once');
+  assert.deepEqual([fromOnly.fromDay, fromOnly.toDay], ['2024-11-01', '2026-09-30']);
+  assert.deepEqual(fromOnly.daySeed, { from: '\u0000', to: '\u0000' }, 'a narrowed window is not taken for the seed');
+  assert.deepEqual(fromOnly.linkNotes, []);
+  assert.deepEqual(said(fromOnly), [null, null]);
+  // To only (or from= dropped by the address reader): the From box opens on the held span's start.
+  const toOnly = dbOf(HELD, { to: '2025-01-31' });
+  effect(toOnly, { from: '', to: '2025-01-31', refused: none });
+  assert.deepEqual([toOnly.fromDay, toOnly.toDay], ['2018-09-03', '2025-01-31']);
+  assert.deepEqual(said(toOnly), [null, null]);
+  // A side that lands on the span's edge with the other: the whole span, which is the seed.
+  const whole = dbOf(HELD, { from: '2018-09-03' });
+  effect(whole, { from: '2018-09-03', to: '', refused: none });
+  assert.deepEqual([whole.fromDay, whole.toDay], ['2018-09-03', '2026-09-30']);
+  assert.deepEqual(whole.daySeed, { from: '2018-09-03', to: '2026-09-30' });
+
+  // Only the era known (no held span): a side left out stays empty — the era's end is not what this
+  // selection holds — and the empty box says nothing.
+  const eraOnly = dbOf({ lo: '', hi: '' }, { from: '2024-11-01' });
+  effect(eraOnly, { from: '2024-11-01', to: '', refused: none });
+  assert.deepEqual([eraOnly.fromDay, eraOnly.toDay], ['2024-11-01', '']);
+  assert.deepEqual(said(eraOnly), [null, null]);
+  // A side the era refused opens on the box's own bound, as before (R3-01).
+  const eraRefused = dbOf({ lo: '', hi: '' }, { from: '2024-11-01' });
+  effect(eraRefused, { from: '2024-11-01', to: '', refused: { from: false, to: true } });
+  assert.deepEqual([eraRefused.fromDay, eraRefused.toDay], ['2024-11-01', '2026-09-24']);
+  // The same two on the From side.
+  const eraTo = dbOf({ lo: '', hi: '' }, { to: '2024-11-01' });
+  effect(eraTo, { from: '', to: '2024-11-01', refused: none });
+  assert.deepEqual([eraTo.fromDay, eraTo.toDay], ['', '2024-11-01']);
+  assert.deepEqual(said(eraTo), [null, null]);
+  const eraFrom = dbOf({ lo: '', hi: '' }, { to: '2024-11-01' });
+  effect(eraFrom, { from: '', to: '2024-11-01', refused: { from: true, to: false } });
+  assert.deepEqual([eraFrom.fromDay, eraFrom.toDay], ['2018-09-01', '2024-11-01']);
+  // A linked side outside the held span is refused in words and opens on its edge.
+  const outside = dbOf(HELD, { from: '2024-11-01', to: '2027-01-01' });
+  effect(outside, { from: '2024-11-01', to: '2027-01-01', refused: none });
+  assert.deepEqual([outside.fromDay, outside.toDay], ['2024-11-01', '2026-09-30']);
+  assert.equal(outside.linkNotes.length, 1);
+  assert.match(outside.linkNotes[0], /The To date opens on 30 Sep 2026 instead$/);
+
+  // Nothing is checked until the census holds the selection.
+  const early = dbOf(HELD, { from: '2024-11-01' });
+  const want = { from: '2024-11-01', to: '', refused: none };
+  assert.equal(effect({ ...early, scopeMissing: true }, want), want);
+  assert.equal(effect(early, null), null);
+  assert.equal(early.toDay, '');
 });

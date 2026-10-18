@@ -368,7 +368,9 @@ export function cutText(raw, max, label) {
 
 /**
  * WHAT A DAY BOX SAYS UNDER ITSELF (R3-02; DB-045 and the absurd-input
- * probes), as one string, or `null` when the day it holds is fine.
+ * probes), as one string, or `null` when the day it holds is fine — or when it
+ * holds nothing and nothing was typed into it, which is no bound, not a
+ * malformed day (repair round 4).
  *
  * Four refusals, each naming what was actually crossed:
  *
@@ -407,7 +409,12 @@ export function dayFieldWhy(o) {
   const label = o.label ?? 'Date';
   if (o.cut) return `${o.cut} — cut, not applied: the field still holds ${o.value ? dayText(o.value) : 'no bound'}.`;
   const text = o.typed ?? o.value;
-  if (o.typed !== null && o.typed.trim() === '') return null;
+  /* A BOX THAT HOLDS NOTHING SAYS NOTHING (repair round 4). Blank typed text
+     is an emptied box, and an untyped box holding no day is "no bound" — a
+     selection with no held span leaves both boxes so. It fell through to the
+     shape check and was refused as `To date "" is not a date …`, marked
+     `aria-invalid`, over a box nothing was typed into. */
+  if (text.trim() === '') return null;
   const iso = parseDay(text);
   if (iso === '') {
     const shape = /** @type {{ok: false, why: string}} */ (checkDay(text, { label, lo: o.min, hi: o.max }));
@@ -773,7 +780,13 @@ export function timeListRows(grid, o) {
       const s = /** @type {SpecialDay[]} */ (stopped);
       const auction = auctionBy.get(row.key);
       const what = auction?.length === s.length ? 'reopening auction' : 'halted';
-      const doubt = s.some((d) => d.suspected) ? ' — the record calls it a suspected halt, UNVERIFIED (D-3320): no NSE circular is recorded' : '';
+      /* THE DOUBT NAMES ITS DAY (repair round 4): with several halt days sharing a minute, "it" left the
+         reader to guess which, and one suspected day among sourced ones is still said — a minute never
+         carries less doubt than the record holds. */
+      const doubted = s.filter((d) => d.suspected);
+      const which = doubted.map((d) => dayText(d.date)).join(' and ');
+      const whose = s.length === 1 ? 'it a suspected halt' : doubted.length === 1 ? `the halt of ${which} a suspected halt` : `the halts of ${which} suspected halts`;
+      const doubt = doubted.length ? ` — the record calls ${whose}, UNVERIFIED (D-3320): no NSE circular is recorded` : '';
       out.push({
         key: row.key,
         name: row.name,

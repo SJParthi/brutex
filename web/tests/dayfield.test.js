@@ -335,3 +335,40 @@ test('a_cut_search_is_said_under_the_search_box', async () => {
   const plain = render(await inState('Picker.svelte', { open: true, drive: `search('Invented');` }), { props: { rows, label: 'instruments', filter: true } }).body;
   assert.equal(/<p class="phint([^"]*)"( role="status")?>([^<]*)<\/p>/.exec(plain)?.[3], 'Matches name or detail');
 });
+
+test('an_empty_box_nothing_was_typed_into_says_nothing', async () => {
+  // REPAIR ROUND 4. A box that holds no day and was not typed into — a selection with no held span leaves
+  // both boxes so, and before this round a link naming one side left the other so — fell through to the
+  // shape check: `To date "" is not a date this field can read …` under it, `aria-invalid`, over a box the
+  // reader never touched. It is no bound, and says nothing; the base said nothing there too.
+  for (const label of ['From date', 'To date']) {
+    for (const bounds of [{}, HELD, { ...HELD, after: '2026-09-10' }, { ...HELD, before: '2026-09-20' }]) {
+      assert.equal(dayFieldWhy({ typed: null, value: '', label, ...bounds }), null, `${label} holding nothing, ${JSON.stringify(bounds)}`);
+    }
+    // Emptied by the reader is the same; text typed into an empty box that is not a day still refuses.
+    assert.equal(dayFieldWhy({ typed: '', value: '', label, ...HELD }), null);
+    assert.equal(dayFieldWhy({ typed: 'garbage', value: '', label, ...HELD }), `${label} "garbage" is not a date this field can read — it takes dd Mon yyyy or YYYY-MM-DD, like 01 Sep 2026.`);
+  }
+
+  // THE REAL BOX, both labels, with the props /db hands each (DbControls: the held span as min/max, the
+  // other box's day as the order bound, the span's edge as `empty`) and with none at all.
+  const DayField = await dayField();
+  const boxes = [
+    { label: 'From date', value: '', min: HELD.min, max: HELD.max, before: '2026-09-20', beforeLabel: 'To date', empty: HELD.min, boundsReason: HELD.reason },
+    { label: 'To date', value: '', min: HELD.min, max: HELD.max, after: '2026-09-10', afterLabel: 'From date', empty: HELD.max, boundsReason: HELD.reason },
+    { label: 'From date', value: '' },
+    { label: 'To date', value: '' }
+  ];
+  for (const props of boxes) {
+    const html = render(DayField, { props }).body;
+    assert.equal(refusal(html), null, `${props.label}: an empty box nothing was typed into says nothing`);
+    assert.match(html, /aria-invalid="false"/, `${props.label}: and is not marked invalid`);
+    assert.equal(boxText(html), '', `${props.label}: and shows no day`);
+  }
+  // The same box with text typed into it still refuses, and is marked: only the untouched box is silent.
+  for (const props of boxes) {
+    const html = render(await inState('DayField.svelte', { drive: `type('garbage');` }), { props }).body;
+    assert.match(String(refusal(html)), new RegExp(`^${props.label} "garbage" is not a date this field can read`), props.label);
+    assert.match(html, /aria-invalid="true"/);
+  }
+});
