@@ -1007,6 +1007,38 @@ fn outcomes_for(rows: u32, exits: u32, rng: &mut Seeded) -> Vec<Outcome> {
         .collect()
 }
 
+/// The batches a parallel walk splits, found from the visited nodes alone:
+/// each (node, free row) whose node has at least `split_support` rows and two
+/// or more visited children fixing that row. Returns the tasks they spawn (one
+/// per child) and how many batches there are.
+fn batches(visited: &Collect, split_support: u64) -> (u64, u64) {
+    let free = free_rows();
+    let last_fixed = |key: &MixKey| {
+        free.iter()
+            .rev()
+            .find(|id| key.0[id.index()] != OPEN)
+            .copied()
+    };
+    let support: HashMap<MixKey, u64> = visited
+        .nodes
+        .iter()
+        .map(|(key, rows, ..)| (*key, rows.len() as u64))
+        .collect();
+    let mut children: BTreeMap<(MixKey, usize), u64> = BTreeMap::new();
+    for (key, ..) in &visited.nodes {
+        if let Some(id) = last_fixed(key) {
+            let parent = with(*key, id, OPEN);
+            *children.entry((parent, id.index())).or_default() += 1;
+        }
+    }
+    children
+        .iter()
+        .filter(|((parent, _), count)| **count > 1 && support[parent] >= split_support)
+        .fold((0, 0), |(tasks, batches), (_, count)| {
+            (tasks + count, batches + 1)
+        })
+}
+
 /// FM-F053: a work-stealing walk at 1, 4 and 12 threads hands every node to
 /// forked visitors that, absorbed in visit order, equal the sequential walk
 /// byte for byte — the scored cards included — and its tally is the same. A
@@ -1065,13 +1097,18 @@ fn work_stealing_equals_sequential_bytes() {
                 "{threads} threads, {schedule:?}"
             );
             assert_eq!(spread.tally, walked.tally);
+            let (tasks, batches) = batches(&collected, split_support);
             if budget == 1 {
                 assert_eq!(spread.spread.tasks, 0);
-                assert!(spread.spread.inline_for_budget > 0);
+                assert_eq!(spread.spread.inline_for_budget, batches);
             } else {
-                assert!(spread.spread.tasks > 0);
+                assert_eq!(spread.spread.tasks, tasks);
                 assert_eq!(spread.spread.inline_for_budget, 0);
             }
+            assert!(
+                tasks > batches && batches > 0,
+                "{tasks} tasks in {batches} batches"
+            );
             let mut nodes = Collect::default();
             pool.install(|| walk(&table, 6, schedule, &mut nodes).unwrap());
             assert_eq!(nodes, collected);
