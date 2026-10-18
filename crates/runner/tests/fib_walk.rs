@@ -728,6 +728,12 @@ fn a_book_with_no_ask_supplies_nothing_and_the_fill_moves_to_the_next_second() {
         quiet(at(15, 9, 0), P, 1_000),
     ]);
     day.marks = Some(vec![BookMark { ask: false, ..both }, both, both]);
+    // A day walked with book marks says so, and its clock is measured.
+    let index = day
+        .index(&second_profile(), &set_of(Search::Long, vec![STOP_ONLY]))
+        .expect("indexes");
+    assert!(index.book_observed());
+    assert!(!index.seconds_trust_unchecked());
     let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert_eq!(out.first_entry_second, at(10, 0, 1));
     assert_eq!(out.entry_value_paisa, i128::from(100 * (P + 20)));
