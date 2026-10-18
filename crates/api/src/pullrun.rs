@@ -11151,4 +11151,81 @@ mod cloud_tests_1018 {
             "{one_unnamed}"
         );
     }
+
+    /// **A record that would not decode casts doubt on a carried run only
+    /// when it lies after that run's opening record.** Three runs are
+    /// carried, opened at records 5, 200 and 250, and the record at 200 would
+    /// not decode. It may be the closing record of the run opened at 5. It
+    /// cannot close the run opened at 200, whose opening record it would
+    /// have to be, nor the one opened at 250, after it. Kills `>` turned to
+    /// `>=` in `decorate`'s undecoded-close doubt (pullrun.rs:2371), which
+    /// doubted the run whose own opening record the damage was filed at.
+    /// Only an index whose `runs` and `faults` files both name one position
+    /// could reach that tie through `restart_scan`, and the index this code
+    /// writes never does. The contract this test holds is the one
+    /// [`CLOSE_UNDECODED`] states: a record AFTER the opening record.
+    #[test]
+    fn damage_casts_doubt_only_on_a_run_opened_before_it() {
+        let span = Span {
+            records: 1_000,
+            scan_first: 0,
+            settled: false,
+            weak_close: None,
+            runs_unread: 0,
+        };
+        let mut run = Interrupted {
+            ordinal: 300,
+            ..newest(4, vec![other(5), other(200), other(250)])
+        };
+        decorate(
+            &mut run,
+            &[(200, std::borrow::Cow::Borrowed("bad"))],
+            None,
+            span,
+        );
+        let doubts = run
+            .also_open
+            .iter()
+            .map(|other| (other.ordinal, other.doubt))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            doubts,
+            [(5, Some(CLOSE_UNDECODED)), (200, None), (250, None)]
+        );
+    }
+
+    /// **A newer run may be open only when the close the walk could not pair
+    /// lies after the oldest damaged record.** The close may then belong to
+    /// the damaged record, and the run the walk closed with it may be open.
+    /// A close at the damaged position itself would be that record decoded,
+    /// and one before it cannot belong to it. Kills `>` turned to `>=` in
+    /// `decorate`'s `newer_may_be_open` (pullrun.rs:2360). Like the doubt
+    /// above, the tie is reachable through `restart_scan` only from an index
+    /// whose two files both name one position.
+    #[test]
+    fn a_newer_run_may_be_open_only_after_a_close_past_the_damage() {
+        let may_be_open = |weak_close: Option<u64>| {
+            let mut run = newest(1, Vec::new());
+            decorate(
+                &mut run,
+                &[
+                    (200, std::borrow::Cow::Borrowed("bad")),
+                    (240, std::borrow::Cow::Borrowed("also bad")),
+                ],
+                None,
+                Span {
+                    records: 1_000,
+                    scan_first: 0,
+                    settled: false,
+                    weak_close,
+                    runs_unread: 0,
+                },
+            );
+            run.newer_may_be_open
+        };
+        assert!(may_be_open(Some(201)), "a close after the oldest damage");
+        assert!(!may_be_open(Some(200)), "a close at the damage is no close");
+        assert!(!may_be_open(Some(199)), "a close before the damage");
+        assert!(!may_be_open(None), "no close the walk could not pair");
+    }
 }
