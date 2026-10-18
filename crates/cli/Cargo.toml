@@ -156,3 +156,11 @@ workspace = true
 name    = "ratio"
 harness = false
 test    = false
+
+# The FIB bench target (FIB-1, D-6318): the shared FIB harness and the row
+# modules under `benches/fib_rows/` its later packages fill. Not a
+# dependency; the [dependencies] table above is unchanged.
+[[bench]]
+name    = "fib"
+harness = false
+test    = false

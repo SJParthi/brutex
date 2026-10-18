@@ -50,3 +50,11 @@ workspace = true
 name    = "ratio"
 harness = false
 test    = false
+
+# The FIB bench target (FIB-1, D-6318): the cell code and the containment test
+# of `fib_cube` through the shared FIB harness. Not a dependency: the tables
+# above stay empty.
+[[bench]]
+name    = "fib_cube"
+harness = false
+test    = false
