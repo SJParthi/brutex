@@ -229,6 +229,20 @@ export function askOnce() {
 }
 
 /**
+ * A READ'S ANSWER ONLY FOR THE SET IT WAS ASKED FOR (R3-03 repair 1): the read
+ * when its `for` is `key`, else `null`. The extremes fold waits for a new row
+ * set to settle before it asks, and until then the previous set's answer was
+ * still offered as the set on screen's — its "over all N bar(s) of this
+ * query", its Go to buttons, and the widest range the grid scales its range
+ * bars by. An empty key is no set, so nothing answers it.
+ *
+ * @template {{for: string}} T
+ * @param {T | null | undefined} read @param {string} key
+ * @returns {T | null}
+ */
+export const readFor = (read, key) => (read && key !== '' && read.for === key ? read : null);
+
+/**
  * THE STORE'S STATE AS ONE ANSWER SAW IT: its total and every series' own
  * count. Two pages of one read that see different states were read across a
  * write.

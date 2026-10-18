@@ -12,9 +12,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   MAX_SORT_DEPTH, MAX_READ_HELD, servedPages, isServed, lastServed, clampServed, stepServed, pageItems,
-  parsePageBox, pageToRead, askOnce, generationOf, joinPage, joinSlices
+  parsePageBox, pageToRead, askOnce, readFor, generationOf, joinPage, joinSlices
 } from '../src/lib/db/pager.js';
-import { windowQuery, seriesPlan, rowKey, acrossDay, FIT_SLACK, istInstant } from '../src/lib/db/bars-plan.js';
+import { windowQuery, seriesPlan, rowKey, acrossDay, FIT_SLACK, MIN_USEFUL_ROWS, ROW, istInstant } from '../src/lib/db/bars-plan.js';
 import { sortRefusal, segmentOfKey, localSortAdvice, readFailure, NO_VOLUME_SORT, NO_OI_SORT } from '../src/lib/db/notes-bars.js';
 import { dbSource } from './database-page-fixture.js';
 
@@ -125,6 +125,28 @@ test('one change of the selection sends one page read and one extremes read, and
   assert.match(script, /const barsReady = \$derived\(\s*!db\.linkDaysPending && \(db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\) && !db\.reconciling\s*\);/);
 });
 
+test('the extremes of the set before are not offered for the set on screen', () => {
+  // R3-03 repair 1. The fold waits for a new row set to settle before it asks,
+  // and until then its last answer was the set BEFORE's: the panel said its
+  // "over all N bar(s) of this query", offered its Go to buttons, and the grid
+  // scaled its range bars by its widest bar.
+  const before = { for: 'set-a', loading: false, value: { range: 9 } };
+  assert.equal(readFor(before, 'set-a'), before);
+  assert.equal(readFor(before, 'set-b'), null, 'a new set is not answered by the old one');
+  assert.equal(readFor(before, ''), null, 'no set, no answer');
+  assert.equal(readFor({ for: '', loading: false, value: null }, ''), null);
+  assert.equal(readFor(null, 'set-a'), null);
+  assert.equal(readFor(undefined, 'set-a'), null);
+  const asking = { for: 'set-b', loading: true, value: null };
+  assert.equal(readFor(asking, 'set-b'), asking, 'the read in flight for the set is its own');
+  // Every reader of the fold reads it through this.
+  const extremes = dbSource('../src/routes/db/DbExtremes.svelte');
+  assert.match(extremes, /const readNow = \$derived\(readFor\(extremesRead, want\)\);/);
+  assert.match(extremes, /const extremesNow = \$derived\(readNow && !readNow\.loading \? readNow\.value : null\);/);
+  assert.match(extremes, /extremesRead: \{ get: \(\) => readNow \},/);
+  assert.doesNotMatch(extremes, /extremesRead: \{ get: \(\) => extremesRead \}/);
+});
+
 test('the_pager_offers_no_page_past_the_served_depth', () => {
   // THE SERVER'S OWN NUMBERS, read out of the Rust source.
   assert.equal(MAX_SORT_DEPTH, rustConst('bars.rs', 'MAX_SORT_DEPTH'));
@@ -198,6 +220,50 @@ test('the_pager_offers_no_page_past_the_served_depth', () => {
   assert.ok(long.every((i) => !i.dead));
   assert.deepEqual(pageItems(1000, servedPages({ total: 8_000, size: 8, wire: 'ts' })).map((i) => (i.gap ? '…' : i.p)), [1, '…', 997, 998, 999, 1000]);
 
+  // AT A PAGE SIZE THAT DOES NOT DIVIDE THE DEPTH (R3-03 repair 1). Every
+  // depth above is at 8 or 1,000 rows a page, which divide 100,000, so a
+  // rounding the wrong way at either end gave the same answer and survived as
+  // a mutant. The live Fit size on /db is 9.
+  // A time-of-day order over the 153,107-row contract: 17,012 pages, the
+  // front ends at 11,111 (offset + limit 99,999); 11,112 keeps 100,008 rows.
+  const tod9 = servedPages({ total: 153_107, size: 9, wire: 'tod' });
+  assert.deepEqual([tod9.count, tod9.front, tod9.tail], [17_012, 11_111, null]);
+  assert.equal(isServed(tod9, 11_111), true);
+  assert.equal(isServed(tod9, 11_112), false, 'the server refuses it sort_too_deep');
+  assert.equal(lastServed(tod9), 11_111);
+  assert.equal(clampServed(tod9, 17_012), 11_111);
+  // A value order no index serves, over 1,153,107 read rows: 128,123 pages,
+  // the tail starts at 117,013 (99,999 rows from the end); 117,012 starts
+  // 100,008 rows from it.
+  const tail9 = servedPages({ total: 1_153_107, size: 9, wire: 'c', report: { indexed_rows: 0, scanned_rows: 1_153_107 } });
+  assert.deepEqual([tail9.count, tail9.front, tail9.tail], [128_123, 11_111, 117_013]);
+  assert.equal(isServed(tail9, 117_012), false, 'the server refuses it sort_too_deep');
+  assert.equal(isServed(tail9, 117_013), true);
+  assert.equal(stepServed(tail9, 11_111, 1), 117_013, 'Next jumps to the first page the tail serves');
+  assert.equal(stepServed(tail9, 117_013, -1), 11_111);
+  // And against the route's own rule (`bars_sort.rs`, D-3349), page by page at
+  // each edge, for sizes that do and do not divide the depth: a page is served
+  // while offset + limit <= MAX_SORT_DEPTH, or, nothing indexed, while
+  // total - offset <= MAX_SORT_DEPTH.
+  const route = (/** @type {number} */ total, /** @type {number} */ size, /** @type {number} */ p, /** @type {boolean} */ fromEnd) =>
+    (p - 1) * size + size <= MAX_SORT_DEPTH || (fromEnd && total - (p - 1) * size <= MAX_SORT_DEPTH);
+  for (const size of [1, 3, 7, 8, 9, 11, 13, 25, 50, 97, 999, 1000, 1001]) {
+    for (const total of [153_107, 1_153_107, 2_000_003]) {
+      for (const [wire, report, fromEnd] of /** @type {[string, any, boolean][]} */ ([
+        ['tod', undefined, false],
+        ['c', { indexed_rows: 0, scanned_rows: 2_000_003 }, true],
+        ['v', { indexed_rows: 4, scanned_rows: 2_000_003 }, false]
+      ])) {
+        const s = servedPages({ total, size, wire, report });
+        const edges = [s.front - 1, s.front, s.front + 1, s.count];
+        if (s.tail !== null) edges.push(s.tail - 1, s.tail, s.tail + 1);
+        for (const p of edges.filter((x) => x >= 1 && x <= s.count)) {
+          assert.equal(isServed(s, p), route(total, size, p, fromEnd), `${wire} ${total} rows at ${size} a page: page ${p}`);
+        }
+      }
+    }
+  }
+
   // THE PAGER DRAWS THESE: no button, box or step that reaches a dead page.
   const pager = dbSource('../src/routes/db/DbPager.svelte');
   assert.match(pager, /\{#each pageItems\(db\.pageNow, db\.served\) as item \(item\.k\)\}/);
@@ -221,6 +287,8 @@ test('the page box refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in
   assert.match(/** @type {any} */ (parsePageBox('0', s)).why, /is outside 1 to 48,89,433/);
   assert.deepEqual(parsePageBox('4889433', s), { ok: true, page: 4_889_433 });
   assert.deepEqual(parsePageBox(null, servedPages({ total: 10, size: 8, wire: 'ts' })), { ok: false, why: 'Type a page number, 1 to 2.' });
+  // A number is read as what it prints: 0 is the page it names, not an empty box.
+  assert.deepEqual(parsePageBox(0, servedPages({ total: 10, size: 8, wire: 'ts' })), { ok: false, why: 'Page "0" is outside 1 to 2: this selection has 2 page(s) at this many rows a page. Type 1 to 2.' });
 });
 
 test('the store state two pages are compared by is the total and every series count', () => {
@@ -416,6 +484,45 @@ test('Rows per page: no "Fit · 50" before the box is measured, and the heading 
   assert.match(gridScript(), /db\.view !== 'bars' \|\| barState\.local \|\| !barState\.answer \? pageNow : clampServed\(served, barState\.page\)/);
   // The pager is its own file, rendered by the snippet the shell renders.
   assert.match(grid, /\{#snippet pager\(\/\*\* @type \{any\} \*\/ db\)\}[\s\S]*<DbPager \{db\} \/>\s*\{\/snippet\}/);
+});
+
+test('the grid box at its floor holds ten rows by the Fit’s own count', () => {
+  // R3-03 repair 1. The floor named ten rows and gave nine: every box is
+  // border-box, so the `.tbl` floor holds its own 1px border above and below,
+  // and the scroll box under it was 458px — 458 - 52 - 8 = 398, nine 40px rows.
+  const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
+  const theme = dbSource('../src/lib/theme.css');
+  assert.match(theme, /\*\s*\{\s*box-sizing: border-box;/, 'every box is border-box');
+  /** A theme length, in px. @param {string} name */
+  const token = (name) => {
+    const m = theme.match(new RegExp(`${name}: ([0-9.]+)px;`));
+    if (!m) throw new Error(`no ${name} in theme.css`);
+    return Number(m[1]);
+  };
+  /** A `calc()` of `Npx`, `N * Npx` and `N * var(--x)` terms, in px. @param {string} expr */
+  const calc = (expr) => expr.split(' + ').reduce((sum, term) => {
+    const m = term.trim().match(/^(?:([0-9.]+) \* )?(?:([0-9.]+)px|var\((--[a-z0-9-]+)\))$/);
+    if (!m) throw new Error(`a calc() term this test cannot read: ${term}`);
+    return sum + Number(m[1] ?? 1) * (m[2] !== undefined ? Number(m[2]) : token(/** @type {string} */ (m[3])));
+  }, 0);
+  const rule = (/** @type {string} */ selector) => {
+    const m = grid.match(new RegExp(`\\n  ${selector.replace('.', '\\.')} \\{([^}]*)\\}`));
+    if (!m) throw new Error(`no ${selector} rule`);
+    return m[1];
+  };
+  const tbl = rule('.tbl');
+  const floor = calc(/** @type {string[]} */ (tbl.match(/min-height: calc\((.*)\);/))[1]);
+  const border = Number(/** @type {string[]} */ (tbl.match(/border: ([0-9]+)px solid/))[1]);
+  const notes = calc(/** @type {string[]} */ (rule('.bnotes').match(/height: calc\((.*)\);/))[1]);
+  // The scroll box is what is left inside the border once the notes strip stands.
+  const scroll = floor - 2 * border - notes;
+  // The heading's two rows as the floor's own comment names them, measured at
+  // 52px on the shadow (22px band, 30px labels).
+  const head = 22 + 30;
+  assert.equal(scroll, 460);
+  assert.equal(ROW, 40);
+  assert.equal(Math.max(1, Math.floor((scroll - head - FIT_SLACK) / ROW)), 10);
+  assert.ok(Math.floor((scroll - head - FIT_SLACK) / ROW) >= MIN_USEFUL_ROWS, 'the fold is not asked for by the floor itself');
 });
 
 test('a Change % measured across the overnight gap says so on the row', () => {

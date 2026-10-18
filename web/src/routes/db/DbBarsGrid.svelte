@@ -1436,19 +1436,35 @@
      * reader is looking at — the first row on screen — else the window's own
      * last day. `HH:MM` lands on the minute's first bar (DB-005, R3-03).
      *
+     * A GO TO IS SPENT ONCE IT IS USED (R3-03 repair 1). The picker is single,
+     * so its rows are radios, and it showed `db.goTime` as the checked one. A
+     * checked radio fires no `change` when it is clicked again, so after a
+     * landing — and after First page moved the grid off it — picking the same
+     * minute sent no read, marked no row and left the grid where it was. The
+     * minute is cleared once the landing (or its refusal) is settled, so the
+     * same minute is a new click every time. It is cleared AFTER a `tick`, not
+     * in the same turn: Svelte skips a `checked` write whose value did not
+     * change, and set-then-cleared in one turn is no change, which would leave
+     * the browser's own tick on the radio.
+     *
      * @param {string} [at] the time to land on
      */
-    function jumpToTime(at = db.goTime) {
-      if (dayRung) {
-        jumpWhy = `Every bar at ${db.timeframe} opens at the same minute, so there is no minute to choose between them.`;
-        return;
+    async function jumpToTime(at = db.goTime) {
+      try {
+        if (dayRung) {
+          jumpWhy = `Every bar at ${db.timeframe} opens at the same minute, so there is no minute to choose between them.`;
+          return;
+        }
+        const got = parseGoto(String(at ?? ''), dayOnScreen(), gotoSpan());
+        if ('why' in got) {
+          jumpWhy = got.why;
+          return;
+        }
+        await jumpToInstant(got.at, got.label, '', got.minute);
+      } finally {
+        await tick();
+        db.goTime = '';
       }
-      const got = parseGoto(String(at ?? ''), dayOnScreen(), gotoSpan());
-      if ('why' in got) {
-        jumpWhy = got.why;
-        return;
-      }
-      void jumpToInstant(got.at, got.label, '', got.minute);
     }
 
     /**
@@ -2918,7 +2934,12 @@
     /* R3-03: the heading's two rows (22px band, 30px labels), the Fit's 8px
        slack, ten rows and the one-line notes strip that now always stands
        under them. */
-    min-height: calc(22px + 30px + 8px + 10 * 40px + 2 * var(--s3) + 1.55 * var(--fs-xs) + 1px);
+    /* AND THE BOX'S OWN BORDER, 1px above and below (R3-03 repair 1). Every
+       box is `border-box` (theme.css), so the floor holds its border too, and
+       without these 2px the scroll box was 458px: 458 - 52 - 8 = 398, nine
+       rows by the Fit's own count where this rule promises ten, and the fold's
+       `MIN_USEFUL_ROWS` (10) was missed at the floor on every window. */
+    min-height: calc(2 * 1px + 22px + 30px + 8px + 10 * 40px + 2 * var(--s3) + 1.55 * var(--fs-xs) + 1px);
     display: flex;
     flex-direction: column;
     position: relative;

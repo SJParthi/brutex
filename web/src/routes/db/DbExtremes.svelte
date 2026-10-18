@@ -32,7 +32,7 @@
   import { fmt } from '$lib/db/notes-labels.js';
   import { windowQuery, paisaText } from '$lib/db/bars-plan.js';
   import { readWindowPage } from '$lib/database-pages.js';
-  import { askOnce } from '$lib/db/pager.js';
+  import { askOnce, readFor } from '$lib/db/pager.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
 
   /** Where this browser remembers whether the panel is open. */
@@ -142,8 +142,14 @@
     });
     $effect(() => () => flight?.abort());
 
+    /* THE READ FOR THE ROW SET ASKED NOW, else `null` (R3-03 repair 1). While a
+       new set settles the effect above asks nothing yet, and `extremesRead`
+       still holds the set before it: the panel, the grid's newest close and
+       its range scale all read it through this, so none of them takes the
+       old set's fold for the new one's. */
+    const readNow = $derived(readFor(extremesRead, want));
     /** The fold's values when they answer the row set on screen, else `null`. */
-    const extremesNow = $derived(extremesRead && !extremesRead.loading ? extremesRead.value : null);
+    const extremesNow = $derived(readNow && !readNow.loading ? readNow.value : null);
 
     /** @param {boolean} open */
     function setExtremesOpen(open) {
@@ -157,7 +163,7 @@
 
     Object.defineProperties(db, {
       extremesOpen: { get: () => extremesOpen, set: (v) => setExtremesOpen(Boolean(v)) },
-      extremesRead: { get: () => extremesRead },
+      extremesRead: { get: () => readNow },
       extremesNow: { get: () => extremesNow }
     });
   }

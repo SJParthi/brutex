@@ -61,12 +61,15 @@ export function parseGoto(text, day, span = {}) {
   if (!d) return { why: `${quote(s)} names no day and no bar is on screen to take one from. Type the day too: 2019-03-15 ${t}.` };
   const at = istInstant(d, t);
   if (at === null) return { why: `${quote(s)} is not a real IST instant: the day must exist and the time be 00:00:00 to 23:59:59.` };
-  const what = span.what ?? 'this selection';
+  /* `||`, NOT `??` (R3-03 repair 1): the grid's span gives `''` for an end it
+     does not know, and an empty end or name is none — it said "Pick a day from
+     15 Mar 2019 to ." and "after 's last day". */
+  const what = span.what || 'this selection';
   if (span.lo && d < span.lo) {
-    return { why: `${dayText(d)} is before ${what}'s first day, ${dayText(span.lo)}: no bar of it lies that early. Pick a day from ${dayText(span.lo)} to ${dayText(span.hi ?? span.lo)}.` };
+    return { why: `${dayText(d)} is before ${what}'s first day, ${dayText(span.lo)}: no bar of it lies that early. Pick a day from ${dayText(span.lo)} to ${dayText(span.hi || span.lo)}.` };
   }
   if (span.hi && d > span.hi) {
-    return { why: `${dayText(d)} is after ${what}'s last day, ${dayText(span.hi)}: no bar of it lies that late. Pick a day from ${dayText(span.lo ?? span.hi)} to ${dayText(span.hi)}.` };
+    return { why: `${dayText(d)} is after ${what}'s last day, ${dayText(span.hi)}: no bar of it lies that late. Pick a day from ${dayText(span.lo || span.hi)} to ${dayText(span.hi)}.` };
   }
   const minute = t.length === 5;
   return { at, label: `${d} ${minute ? `${t}:00` : t}`, minute };
