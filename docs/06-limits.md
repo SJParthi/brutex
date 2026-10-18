@@ -19739,15 +19739,16 @@ RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 4 -> 5: `fib`'s
 
 Measured 18 October 2026 on THIS HOST: the cloud container FIB-3 was built in
 (4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`, 15 GiB, Linux 6.18,
-rustc 1.97.1, the `bench` profile), branch `cloud/fib3-20261018` at the commit
-that added the detector's bench rows (the FIB-3 report,
-`reports/cloud-fib3-20261018.md`, names it), the one target alone with no build
-or test beside it (one-minute load average 0.97 during the run). Timer
-granularity 25 ns; the pointer-chase probe's last-level-cache estimate
-16,384 KiB; 4 workers. Every time is a percentile OF BATCH MEANS (2,000 batches
-of 1,000 calls after a warm-up), in picoseconds per call, at each scale as p50 /
-p99 / max; the work counter (deque slots and candles touched) is exact. None of
-these is a Mac number: the Mac re-measures with
+rustc 1.97.1, the `bench` profile), branch `cloud/fib3-20261018` on the final
+detector code (the FIB-3 report, `reports/cloud-fib3-20261018.md`, names the
+commit), the one target alone with no build or test beside it (one-minute load
+average 0.82 at its start, 0.99 at its end; 2 min 44 s). Timer granularity
+25 ns; the pointer-chase probe's last-level-cache estimate 32,768 KiB; 4
+workers. Every time is a percentile OF BATCH MEANS (2,000 batches of 1,000
+calls after a warm-up), in picoseconds per call, at each scale as p50 / p99 /
+max; the work counter (deque slots and candles touched) is exact. A first run at
+the commit that added the rows gave every work figure below identically and
+every verdict the same. None of these is a Mac number: the Mac re-measures with
 `cargo bench -p indicators --bench fibflag`.
 
 One call folds ONE closed candle of a 375-candle one-minute session and emits
@@ -19761,11 +19762,11 @@ part is asserted at compile time in `crates/indicators/tests/fib_base.rs`).
 
 | ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
 |---|---|---|---|---|---|---|---|
-| C-FIB3-01 | fold one candle, rest length 2, the start moving every candle | AMORTISED, period one day (375 calls) | 1, 100, 1,000 days (FIXED-STATE) | 1,823,224 / 3,659,187 / 8,860,944; 1,845,564 / 3,869,547 / 25,974,430; 1,806,812 / 2,871,549 / 4,244,610 | p50 106, p99 108, max 108, mean 105.170 | mean time 0.961x, p99 time 0.784x, work 1.000x | PASS |
-| C-FIB3-02 | fold one candle, rest length 16, the start moving every candle | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 3,228,047 / 6,293,249 / 8,922,452; 3,201,032 / 6,499,896 / 19,444,104; 3,189,907 / 5,847,260 / 6,297,673 | p50 210, p99 212, max 212, mean 206.301 | mean time 0.953x, p99 time 0.929x, work 1.000x | PASS |
-| C-FIB3-03 | fold one candle, the rest growing to 375 candles (a whole one-minute session) | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 5,255,740 / 10,853,286 / 11,710,501; 5,289,498 / 10,219,084 / 15,487,725; 5,227,804 / 10,517,138 / 12,464,419 | p50 145, p99 252, p99.9 1,172, max 1,172, mean 154.208 | mean time 0.988x, p99 time 0.969x, work 1.000x | PASS |
-| C-FIB3-04 | fold one candle, the rest's start jumping 374 candles once a day | BOUNDED, O(session candles) at the jump, amortised O(1) | 1, 100, 1,000 days (FIXED-STATE) | 5,314,931 / 10,967,363 / 12,541,365; 5,266,746 / 11,199,221 / 13,567,640; 5,253,026 / 10,753,767 / 14,544,268 | p50 145, p99 252, max 1,172, mean 154.074 | p99 time 0.980x, work 1.000x | BOUNDED |
-| C-FIB3-05 | `touch_recount_worst`: every high one paisa above the last, every touch count recounting its window | BOUNDED, O(window candles x touch levels) per recount | 1, 100, 1,000 days (FIXED-STATE) | 6,876,255 / 13,369,677 / 15,513,581; 6,759,699 / 13,284,609 / 18,410,223; 6,767,450 / 13,988,346 / 38,904,379 | p50 1,007, p99 1,891, p99.9 2,167, max 2,167, mean 1,052.076 | p99 time 1.046x, work 1.000x | BOUNDED |
+| C-FIB3-01 | fold one candle, rest length 2, the start moving every candle | AMORTISED, period one day (375 calls) | 1, 100, 1,000 days (FIXED-STATE) | 1,784,170 / 2,358,606 / 5,033,675; 1,789,753 / 2,442,307 / 4,451,678; 1,795,285 / 2,791,988 / 3,646,499 | p50 106, p99 108, max 108, mean 105.170 | mean time 1.014x, p99 time 1.183x, work 1.000x | PASS |
+| C-FIB3-02 | fold one candle, rest length 16, the start moving every candle | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 3,151,604 / 5,889,829 / 7,061,850; 3,193,007 / 6,490,973 / 8,758,868; 3,156,607 / 6,152,609 / 6,794,825 | p50 210, p99 212, max 212, mean 206.301 | mean time 1.006x, p99 time 1.044x, work 1.000x | PASS |
+| C-FIB3-03 | fold one candle, the rest growing to 375 candles (a whole one-minute session) | AMORTISED, period one day | 1, 100, 1,000 days (FIXED-STATE) | 5,087,547 / 10,400,327 / 10,961,746; 5,082,666 / 9,088,500 / 12,611,709; 5,134,415 / 10,214,683 / 12,873,867 | p50 145, p99 252, p99.9 1,172, max 1,172, mean 154.208 | mean time 1.010x, p99 time 0.982x, work 1.000x | PASS |
+| C-FIB3-04 | fold one candle, the rest's start jumping 374 candles once a day | BOUNDED, O(session candles) at the jump, amortised O(1) | 1, 100, 1,000 days (FIXED-STATE) | 5,079,297 / 8,200,405 / 14,837,781; 5,134,726 / 8,643,123 / 11,580,506; 5,132,415 / 9,499,036 / 18,715,738 | p50 145, p99 252, max 1,172, mean 154.074 | p99 time 1.158x, work 1.000x | BOUNDED |
+| C-FIB3-05 | `touch_recount_worst`: every high one paisa above the last, every touch count recounting its window | BOUNDED, O(window candles x touch levels) per recount | 1, 100, 1,000 days (FIXED-STATE) | 6,719,846 / 13,017,948 / 21,400,428; 6,654,082 / 13,295,879 / 14,882,629; 6,799,904 / 13,181,007 / 35,086,374 | p50 1,007, p99 1,891, p99.9 2,167, max 2,167, mean 1,052.076 | p99 time 1.012x, work 1.000x | BOUNDED |
 
 Per day of each synthetic stream (the setup's first day): C-FIB3-01 2,202
 snapshots, 749 touch recounts visiting 1,496 candles; C-FIB3-02 3,718
