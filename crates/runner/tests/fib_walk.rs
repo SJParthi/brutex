@@ -4027,3 +4027,26 @@ fn a_seed_median_at_its_boundary_adds_nothing_and_one_past_it_adds_one() {
     assert_eq!(count(hold(&zero)), 4);
     assert_eq!(count(hold(&one)), 8);
 }
+
+/// The index's counts are counts: none on a clean day, two for two.
+#[test]
+fn the_index_counts_none_on_a_clean_day_and_two_for_two() {
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    let counts = |tail: &[Candle]| {
+        let index = second_day(tail)
+            .index(&second_profile(), &exits)
+            .expect("indexes");
+        (index.corrupt_bars(), index.dropped_after_auto_exit())
+    };
+    assert_eq!(counts(&[quiet(at(15, 9, 0), P, 1_000)]), (0, 0));
+    assert_eq!(
+        counts(&[
+            corrupt(at(10, 0, 5), 100, 100, 0, 100, 1_000),
+            corrupt(at(10, 0, 6), P + 500, P + 10, P - 10, P, 1_000),
+            quiet(at(15, 9, 0), P, 1_000),
+            quiet(at(15, 10, 0), P, 1_000),
+            quiet(at(15, 20, 0), P, 1_000),
+        ]),
+        (2, 2)
+    );
+}
