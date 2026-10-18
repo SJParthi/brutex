@@ -46,15 +46,28 @@ enum Phase {
     Done,
 }
 
-/// What arms an entry.
+/// What arms an entry: CLOSE names neither level and arms on the first
+/// admitted bar; BREAK arms on the first bar whose high reaches the break
+/// level; RETEST on the first bar whose low reaches the retest level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Trigger {
-    /// CLOSE: the first admitted bar.
-    Immediate,
-    /// BREAK: the first bar whose high reaches the break level.
-    AtOrAbove(i128),
-    /// RETEST: the first bar whose low reaches the retest level.
-    AtOrBelow(i128),
+struct Trigger {
+    /// The level a bar's high must reach.
+    above: Option<i128>,
+    /// The level a bar's low must reach.
+    below: Option<i128>,
+}
+
+impl Trigger {
+    /// Whether the trigger arms before any bar.
+    fn immediate(self) -> bool {
+        self.above.is_none() && self.below.is_none()
+    }
+
+    /// Whether `bar` arms it.
+    fn armed_by(self, bar: &SideBar) -> bool {
+        self.above.is_none_or(|level| bar.hi >= level)
+            && self.below.is_none_or(|level| bar.lo <= level)
+    }
 }
 
 /// One exit order being filled.
@@ -143,10 +156,20 @@ fn levels(
     let risk_decision =
         mirror(plan.entry_ref) - mirror(plan.base_edge) + i128::from(day.decision_tick);
     let risk = risk_decision * g;
+    let edge = mirror(plan.trigger_edge) * g;
     let trigger = match plan.style {
-        EntryStyle::Close => Trigger::Immediate,
-        EntryStyle::Break => Trigger::AtOrAbove(mirror(plan.trigger_edge) * g + day.tick),
-        EntryStyle::Retest => Trigger::AtOrBelow(mirror(plan.trigger_edge) * g),
+        EntryStyle::Close => Trigger {
+            above: None,
+            below: None,
+        },
+        EntryStyle::Break => Trigger {
+            above: Some(edge + day.tick),
+            below: None,
+        },
+        EntryStyle::Retest => Trigger {
+            above: None,
+            below: Some(edge),
+        },
     };
     let stop = match variant.stop {
         StopLoss::Absent => None,
@@ -388,7 +411,7 @@ impl<'a> Stepper<'a> {
             status: SlotStatus::Priced,
             entry_start,
             entry_end,
-            armed: levels.trigger == Trigger::Immediate,
+            armed: levels.trigger.immediate(),
             decision_qty,
             planned_qty,
             swing_cursor,
@@ -640,11 +663,7 @@ impl<'a> Stepper<'a> {
             return bar.volume;
         }
         if !self.armed {
-            self.armed = match self.levels.trigger {
-                Trigger::Immediate => true,
-                Trigger::AtOrAbove(level) => bar.hi >= level,
-                Trigger::AtOrBelow(level) => bar.lo <= level,
-            };
+            self.armed = self.levels.trigger.armed_by(bar);
         }
         if !self.armed || self.remaining == 0 {
             return bar.volume;
@@ -745,9 +764,11 @@ impl<'a> Stepper<'a> {
         let Some((list, buffer)) = self.levels.swing else {
             return;
         };
-        let Some(events) = self.side.swings.get(list).map(|l| &l.events) else {
-            return;
-        };
+        let events = self
+            .side
+            .swings
+            .get(list)
+            .map_or(&[][..], |l| l.events.as_slice());
         while let Some(event) = events.get(self.swing_cursor).copied() {
             if event.confirm_second > second {
                 break;
@@ -1019,11 +1040,9 @@ impl<'a> Stepper<'a> {
     /// deep, the window's worst price if its summed volume holds the open
     /// quantity, else the whole slot is unpriceable; stage A, the 15:09
     /// minute's worst price, else unpriceable. Either way the slot carries
-    /// Dhan's square-off.
+    /// Dhan's square-off. Its one caller, `step`, has already returned for a
+    /// finished slot.
     fn forced_exit(&mut self) {
-        if self.phase == Phase::Done {
-            return;
-        }
         if self.filled == 0 {
             self.window_closed();
             return;

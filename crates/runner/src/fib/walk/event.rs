@@ -209,22 +209,22 @@ impl Events {
 
     /// The extremes of `[from, to)`, or `None` for an empty range.
     pub(super) fn extremes(&self, bars: &[SideBar], from: usize, to: usize) -> Option<Extremes> {
-        let low = bars.get(self.lows.range(bars, Keep::LowestLow, from, to)?)?;
-        let first = bars.get(
-            self.highs_first
-                .range(bars, Keep::HighestHighFirst, from, to)?,
-        )?;
-        let last = bars.get(
-            self.highs_last
-                .range(bars, Keep::HighestHighLast, from, to)?,
-        )?;
-        Some(Extremes {
-            best_raw: first.hi_raw,
-            best: first.hi,
-            best_first: first.second,
-            best_last: last.second,
-            worst_raw: low.lo_raw,
-        })
+        let pick =
+            |table: &Table, keep| table.range(bars, keep, from, to).and_then(|k| bars.get(k));
+        match (
+            pick(&self.lows, Keep::LowestLow),
+            pick(&self.highs_first, Keep::HighestHighFirst),
+            pick(&self.highs_last, Keep::HighestHighLast),
+        ) {
+            (Some(low), Some(first), Some(last)) => Some(Extremes {
+                best_raw: first.hi_raw,
+                best: first.hi,
+                best_first: first.second,
+                best_last: last.second,
+                worst_raw: low.lo_raw,
+            }),
+            _ => None,
+        }
     }
 
     /// The bytes the tables hold.
@@ -235,5 +235,86 @@ impl Events {
             + table(&self.highs_last)
             + self.next_special.len())
             * core::mem::size_of::<u32>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plain bar at `second` with raw `lo..=hi`.
+    fn bar(second: u32, lo: i64, hi: i64) -> SideBar {
+        SideBar {
+            second,
+            hi: i128::from(hi),
+            lo: i128::from(lo),
+            op: i128::from(lo),
+            hi_raw: hi,
+            lo_raw: lo,
+            volume: 1,
+            bits: 0,
+            gap_missing: 0,
+            witness_lo: 0,
+            witness_hi: 0,
+        }
+    }
+
+    /// Four bars: highs 5, 9, 9, 7 and lows 3, 2, 4, 1.
+    fn four() -> Vec<SideBar> {
+        vec![bar(10, 3, 5), bar(11, 2, 9), bar(12, 4, 9), bar(13, 1, 7)]
+    }
+
+    /// An index past the bars keeps the first of the two: the tables never
+    /// ask, and the answer is defined anyway.
+    #[test]
+    fn better_keeps_the_first_when_a_bar_is_missing() {
+        let bars = four();
+        assert_eq!(better(&bars, Keep::LowestLow, 1, 9), 1);
+        assert_eq!(better(&bars, Keep::LowestLow, 9, 1), 9);
+        assert_eq!(better(&bars, Keep::LowestLow, 0, 1), 1);
+        assert_eq!(better(&bars, Keep::HighestHighFirst, 1, 2), 1);
+        assert_eq!(better(&bars, Keep::HighestHighLast, 1, 2), 2);
+    }
+
+    /// No bars: no levels, no range, every descent ends at zero.
+    #[test]
+    fn an_empty_side_has_no_table_and_no_extremes() {
+        let events = Events::build(&[], 0, true);
+        assert!(events.lows.levels.is_empty());
+        assert_eq!(events.extremes(&[], 0, 0), None);
+        assert_eq!(events.low_reaches(&[], 0, 0), 0);
+        assert_eq!(events.next_special(0), 0);
+        assert_eq!(events.bytes(), 0);
+    }
+
+    /// A descent from past the end answers the bar count; an empty range has
+    /// no extremes; a full one has the tie rules.
+    #[test]
+    fn descents_ranges_and_bytes_of_four_bars() {
+        let bars = four();
+        let events = Events::build(&bars, 0, false);
+        assert_eq!(events.high_reaches(&bars, 4, 0), 4);
+        assert_eq!(events.high_reaches(&bars, 9, 0), 4);
+        assert_eq!(events.high_reaches(&bars, 0, 8), 1);
+        assert_eq!(events.high_above(&bars, 2, 8), 2);
+        assert_eq!(events.low_reaches(&bars, 0, 1), 3);
+        assert_eq!(events.low_reaches(&bars, 0, 0), 4);
+        assert_eq!(events.extremes(&bars, 2, 2), None);
+        assert_eq!(events.extremes(&bars, 3, 2), None);
+        assert_eq!(
+            events.extremes(&bars, 0, 4),
+            Some(Extremes {
+                best_raw: 9,
+                best: 9,
+                best_first: 11,
+                best_last: 12,
+                worst_raw: 1,
+            })
+        );
+        assert_eq!(events.next_special(0), 4);
+        assert_eq!(events.next_special(7), 4);
+        // Levels of 4, 3 and 1 entries in each of three tables, and one
+        // next-special entry per bar, four bytes each.
+        assert_eq!(events.bytes(), (3 * (4 + 3 + 1) + 4) * 4);
     }
 }

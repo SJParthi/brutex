@@ -814,13 +814,11 @@ impl Shared<'_> {
         let win_min = window_minima(&lows, w);
         let mut events = Vec::new();
         for j in w..n.saturating_sub(w) {
-            let (Some(low), Some(left), Some(right)) = (
-                lows.get(j).copied(),
-                win_min.get(j - 1).copied(),
-                win_min.get(j + w).copied(),
-            ) else {
-                continue;
-            };
+            // `w <= j < n - w`, so all three are present; a missing one reads
+            // as no swing.
+            let low = lows.get(j).copied().unwrap_or(i64::MAX);
+            let left = win_min.get(j - 1).copied().unwrap_or(i64::MIN);
+            let right = win_min.get(j + w).copied().unwrap_or(i64::MIN);
             if low == i64::MAX || low >= left || low >= right {
                 continue;
             }

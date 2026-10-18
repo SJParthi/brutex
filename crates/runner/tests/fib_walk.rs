@@ -3526,3 +3526,207 @@ fn the_event_walk_matches_on_a_trending_day_with_a_give_back_and_jumps_the_hold(
     assert!(forward.work() > 3_000, "{}", forward.work());
     assert!(by_events.work() < 40, "{}", by_events.work());
 }
+
+// ------------------------------------------------ the index's last paths --
+
+#[test]
+fn the_index_counts_its_bytes_and_more_bars_or_widths_hold_more() {
+    let stop = set_of(Search::Long, vec![STOP_ONLY]);
+    let swing = set_of(
+        Search::Long,
+        vec![ExitVariant {
+            trailing_stop: TrailingStop::Swing {
+                width: 1,
+                buffer_paisa: 0,
+            },
+            ..ExitVariant::REFERENCE
+        }],
+    );
+    let few = minute_day(&[]);
+    let hour: Vec<Candle> = (0..60).map(|m| quiet(at(10, m, 0), P, 1_000)).collect();
+    let many = minute_day(&hour);
+    let bytes = |day: &Day, exits: &ExitSet| {
+        day.index(&minute_profile(), exits)
+            .expect("indexes")
+            .bytes()
+    };
+    assert!(bytes(&few, &stop) > 0);
+    assert!(bytes(&many, &stop) > bytes(&few, &stop));
+    assert!(bytes(&many, &swing) > bytes(&many, &stop), "the swing list");
+    let index = many.index(&minute_profile(), &stop).expect("indexes");
+    assert_eq!(index.bars(), 62);
+}
+
+#[test]
+fn an_incomplete_or_short_trail_candle_is_never_a_swing() {
+    // The swing day of the trail test above: its 10:02 candle is the swing.
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, 99_950, P + 50, 1_000),
+        bar(at(10, 1, 0), P + 100, 100_200, 100_060, P + 100, 1_000),
+        bar(at(10, 2, 0), P + 100, 100_150, 100_020, P + 100, 1_000),
+        bar(at(10, 3, 0), P + 100, 100_300, 100_080, P + 100, 1_000),
+        bar(at(10, 4, 0), P + 100, 100_250, 100_010, P + 100, 1_000),
+    ]);
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width: 1,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let exits = set_of(Search::Long, vec![variant]);
+    assert_eq!(
+        minute_slot(&day, long_plan(at(10, 0, 0)), variant).exit_reason,
+        ExitReason::TrailingStopLoss
+    );
+    let withheld = |edit: fn(&mut FibCandle)| {
+        let mut day = day.clone();
+        edit(&mut day.trail[3]);
+        day
+    };
+    for day in [
+        withheld(|c| c.complete = false),
+        withheld(|c| c.missing_minutes = 1),
+    ] {
+        let index = day.index(&minute_profile(), &exits).expect("indexes");
+        // The long side has no window that would hold a swing; the short
+        // side's two swing highs, 10:01 and 10:03, each cross the withheld
+        // candle and are holes.
+        assert_eq!(index.trail_holes(), 2);
+        let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+        assert_eq!(out.exit_reason, ExitReason::Forced, "no swing at 10:02");
+        assert!(!has(&out, TradeFlag::TrailHole));
+    }
+}
+
+#[test]
+fn a_halt_during_a_partly_filled_entry_cancels_the_rest_and_is_unpriced() {
+    let mut day = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 10, P - 10, P, 30),
+        quiet(at(10, 30, 0), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.halts = vec![HaltRange {
+        start_second: at(10, 0, 10),
+        end_second: at(10, 30, 0),
+    }];
+    let out = walk_one(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(out.status, SlotStatus::Unpriceable(UnpricedReason::Halt));
+    assert_eq!(out.filled_qty, 30);
+    assert!(has(&out, TradeFlag::PartialEntry));
+    assert!(has(&out, TradeFlag::Halt));
+}
+
+#[test]
+fn a_feed_hole_inside_the_entry_window_before_any_fill_is_entry_unfilled() {
+    // The hole day's 10:20:00 second lies inside this window: the silence
+    // before it covers traded Zerodha minutes, so the order's fate is
+    // unknown; with Zerodha silent too the order fills there.
+    let mut plan = long_plan(at(10, 10, 0));
+    plan.entry_window_end = at(10, 30, 0);
+    let out = second_slot(&hole_day(true), plan, STOP_ONLY);
+    assert_eq!(
+        out.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::FeedHole)
+    );
+    assert_eq!(out.filled_qty, 0);
+    let filled = second_slot(&hole_day(false), plan, STOP_ONLY);
+    assert_eq!(filled.first_entry_second, at(10, 20, 0));
+}
+
+#[test]
+fn every_component_value_reaches_the_set_s_bytes() {
+    use runner::fib::walk::exits::{ExitSetRefusal, FillSet};
+    let target = |take_profit| {
+        set_of(
+            Search::Long,
+            vec![ExitVariant {
+                take_profit,
+                ..ExitVariant::REFERENCE
+            }],
+        )
+        .bytes()
+    };
+    let golden = target(TakeProfit::FibRung {
+        rung_permille: 1_618,
+    });
+    assert_ne!(
+        golden,
+        target(TakeProfit::FibRung {
+            rung_permille: 2_618
+        })
+    );
+    assert_ne!(golden, target(TakeProfit::NextRung));
+    assert_ne!(target(TakeProfit::NextRung), target(TakeProfit::Absent));
+    let fills = |window, participation| {
+        FillSet::new(
+            Search::Long,
+            1,
+            vec![FillVariant {
+                window,
+                participation,
+            }],
+        )
+        .expect("valid")
+        .bytes()
+    };
+    let deadline = |seconds| fills(EntryWindow::Deadline { seconds }, Participation::NoCap);
+    assert_ne!(deadline(30), deadline(60));
+    assert_ne!(
+        deadline(30),
+        fills(EntryWindow::NextClose, Participation::NoCap)
+    );
+    let cap = |permille| fills(EntryWindow::NextClose, Participation::Cap { permille });
+    assert_ne!(cap(250), cap(500));
+    assert_ne!(
+        cap(250),
+        fills(EntryWindow::NextClose, Participation::NoCap)
+    );
+    // A set over u16 variants is refused before any is read.
+    let many: Vec<FillVariant> = (1..=u32::from(u16::MAX) + 1)
+        .map(|seconds| FillVariant {
+            window: EntryWindow::Deadline { seconds },
+            participation: Participation::NoCap,
+        })
+        .collect();
+    assert_eq!(
+        FillSet::new(Search::Long, 1, many),
+        Err(ExitSetRefusal::TooManyVariants { count: 65_536 })
+    );
+    // Widths are kept ascending and once each, whatever order they come in.
+    let swing = |width| ExitVariant {
+        trailing_stop: TrailingStop::Swing {
+            width,
+            buffer_paisa: 0,
+        },
+        ..ExitVariant::REFERENCE
+    };
+    let mut wide = swing(2);
+    wide.stop = StopLoss::BeyondBase { extra_ticks: 0 };
+    let set = set_of(Search::Long, vec![swing(2), swing(1), wide]);
+    assert_eq!(set.widths(), &[1, 2]);
+    // A median participation beyond u16 is no cap, never a wrapped one.
+    let huge = samples(&[(0, 70_000)]);
+    assert_eq!(
+        seed_fill_set(Search::Long, 1, &huge)
+            .expect("fills")
+            .variants()
+            .len(),
+        2
+    );
+    let real = samples(&[(0, 300)]);
+    assert_eq!(
+        seed_fill_set(Search::Long, 1, &real)
+            .expect("fills")
+            .variants()
+            .len(),
+        4
+    );
+}
