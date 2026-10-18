@@ -179,7 +179,7 @@ pub struct Row {
 
 /// The rows of schema v1, by row index, by name. Implicit discriminants, so no
 /// row index is ever typed: the declaration order IS [`ROWS`]' order, proved at
-/// compile time by `row_ids_in_order`.
+/// compile time by `ids_in_order`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RowId {
     /// Row 0: the trade's side against the stock's own move.
@@ -520,11 +520,11 @@ pub const ROWS: [Row; ROW_COUNT] = [
     TIMEFRAME_ROW,
 ];
 
-/// Whether every row index of [`RowId::ALL`] is its position, and every
-/// [`RowId::row`] is the row [`ROWS`] holds there, at compile time.
-const fn row_ids_in_order() -> bool {
-    let mut ids: &[RowId] = &RowId::ALL;
-    let mut rows: &[Row] = &ROWS;
+/// Whether every id of `ids` has its position as its row index and names the
+/// row `rows` holds there, and the two lists have one length; asserted at
+/// compile time over [`RowId::ALL`] and [`ROWS`].
+const fn ids_in_order(ids: &[RowId], rows: &[Row]) -> bool {
+    let (mut ids, mut rows) = (ids, rows);
     let mut expected = 0;
     let mut ordered = true;
     while let ([id, rest @ ..], [row, more @ ..]) = (ids, rows) {
@@ -534,7 +534,7 @@ const fn row_ids_in_order() -> bool {
         ids = rest;
         rows = more;
     }
-    ordered
+    ordered && ids.is_empty() && rows.is_empty()
 }
 
 /// Byte equality of two names, usable at compile time.
@@ -550,7 +550,7 @@ const fn same_name(a: &str, b: &str) -> bool {
     a.is_empty() && b.is_empty()
 }
 
-const _: () = assert!(row_ids_in_order());
+const _: () = assert!(ids_in_order(&RowId::ALL, &ROWS));
 
 /// The number of entry-style names a variant may carry.
 pub const ENTRY_STYLE_NAMES: usize = ENTRY_STYLE_ROW.labels.len();
@@ -2978,7 +2978,20 @@ mod tests {
         );
         assert_eq!(ROW_COUNT, 24);
         assert_eq!(FIB_CUBE_VERSION, 1);
-        assert!(row_ids_in_order());
+        assert!(ids_in_order(&RowId::ALL, &ROWS));
+        // Each way the order can break is refused: an index off its place, a
+        // row of another name, and lists of two lengths.
+        assert!(!ids_in_order(
+            &[RowId::Side, RowId::Side],
+            &[SIDE_ROW, SIDE_ROW]
+        ));
+        assert!(!ids_in_order(
+            &[RowId::Side, RowId::MoverRank],
+            &[MOVER_RANK_ROW, SIDE_ROW]
+        ));
+        assert!(!ids_in_order(&[RowId::Side], &[SIDE_ROW, MOVER_RANK_ROW]));
+        assert!(!ids_in_order(&[RowId::Side, RowId::MoverRank], &[SIDE_ROW]));
+        assert!(ids_in_order(&[RowId::Side], &[SIDE_ROW]));
         assert!(same_name("abc", "abc"));
         assert!(!same_name("abc", "abd"));
         assert!(!same_name("ab", "abc"));
