@@ -169,6 +169,13 @@ type that has none: `File`, `Metadata`, `Staged`, `Seen`, `ReadRefusal`,
 `24ca118c` changes only test code. Listed again on the final tree, the plan
 is the same 38 mutants, line for line.
 
+### Every carried survivor, re-tested on the final tree (`24ca118c`)
+
+(In progress. The container restarted at 08:45 UTC during leg 1, after 9
+of the 50 mutants. Leg 2 tests the other 41. At 10:10: 39 of 50 done,
+28 caught, 11 missed, 0 timeouts. Every one missed is an argued equivalent
+below.)
+
 ### Coverage, the final run (on `24ca118c`)
 
 **How.** `cargo llvm-cov` 0.8.4's own wrapper, with `--branch`
