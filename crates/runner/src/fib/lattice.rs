@@ -343,16 +343,17 @@ fn place(out: &mut [u32], start: &mut usize, value: u32) {
 /// One stable counting sort of `order` by `key`, whose values are all below
 /// `domain`: O(order + domain).
 fn stable_by(order: &[u32], domain: usize, key: impl Fn(u32) -> usize) -> Vec<u32> {
-    let mut starts = vec![0_usize; domain + 1];
+    let mut starts = vec![0_usize; domain];
     for at in order {
-        if let Some(count) = starts.get_mut(key(*at) + 1) {
+        if let Some(count) = starts.get_mut(key(*at)) {
             *count += 1;
         }
     }
     let mut run = 0;
     for start in &mut starts {
-        run += *start;
+        let width = *start;
         *start = run;
+        run += width;
     }
     let mut out = vec![0_u32; order.len()];
     for at in order {
@@ -595,7 +596,7 @@ impl RowTable {
         let field = |pick: fn(&Decision) -> u32| {
             let low = decisions.iter().map(pick).min().unwrap_or(0);
             let high = decisions.iter().map(pick).max().unwrap_or(0);
-            let domain = (high - low) as usize + 1;
+            let domain = high.abs_diff(low) as usize + 1;
             let key = move |at: u32| {
                 decisions
                     .get(at as usize)
