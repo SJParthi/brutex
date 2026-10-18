@@ -1789,19 +1789,20 @@ mod tests {
         assert_eq!(d.counts().rest_resets, 0, "no candle broke the chain");
     }
 
-    /// A generated lane keeps live touch counts only while it is shorter than
-    /// the maximal rest. Candle 1 shares no price with candle 0, so the rest
-    /// starts at candle 1 and is `t` candles long at candle `t`: the lane of
-    /// four is first emittable, and first counted, at candle 5.
+    /// A generated lane keeps live touch counts only while it is longer than
+    /// the micro3 base and shorter than the maximal rest. Candle 1 shares no
+    /// price with candle 0, so the rest starts at candle 1 and is `t` candles
+    /// long at candle `t`: the lane of four is first emittable, and first
+    /// counted, at candle 5; the lane of three, micro3's own length, never.
     #[test]
     fn a_lane_is_counted_only_while_it_is_shorter_than_the_rest() {
-        let mut d = Detector::new(params(16, 1, 1)).unwrap();
+        let mut d = Detector::new(params(16, 2, 1)).unwrap();
         let day = DayInput {
             ist_day: 20_500,
             session_candles: 16,
             observed_tick: 1,
             long: DirectionDay {
-                rest_lengths: &[4],
+                rest_lengths: &[3, 4],
                 touch_bp: Some(&[0]),
             },
             short: DirectionDay {
@@ -1818,18 +1819,19 @@ mod tests {
                 (7_105, 7_110, 7_100, 7_105)
             };
             d.fold(&candle(20_500, slot, bar)).unwrap();
-            let lane = d.lanes.first().unwrap();
-            live.push((d.rest_start, lane.length, lane.long.valid));
+            let lane = |i: usize| d.lanes.get(i).map(|l| (l.length, l.long.valid));
+            live.push((d.rest_start, lane(0), lane(1)));
         }
+        let (three, four) = (Some((3, false)), Some((4, false)));
         assert_eq!(
             live,
             [
-                (0, 4, false),
-                (1, 4, false),
-                (1, 4, false),
-                (1, 4, false),
-                (1, 4, false),
-                (1, 4, true)
+                (0, three, four),
+                (1, three, four),
+                (1, three, four),
+                (1, three, four),
+                (1, three, four),
+                (1, three, Some((4, true)))
             ]
         );
     }
