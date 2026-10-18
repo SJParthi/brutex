@@ -1454,12 +1454,6 @@ impl Generation {
         &self.layout
     }
 
-    /// The schema version this generation reads ([`FIB_CUBE_VERSION`]).
-    #[must_use]
-    pub const fn schema_version(&self) -> u32 {
-        FIB_CUBE_VERSION
-    }
-
     /// Whether walk-forward step `step` may read this version: only versions
     /// born at or before the step (R1).
     #[must_use]
@@ -1579,10 +1573,11 @@ fn check_timeframes(widths: &[u16]) -> Result<(), CubeRefusal> {
         }
         previous = *minutes;
     }
-    within_u8(RowId::Timeframe, widths.len()).map(|_| ())
+    Ok(())
 }
 
-/// Refuses rank edges below rank one, descending, or too many.
+/// Refuses rank edges below rank one or descending. Too many is
+/// [`radices_of`]'s refusal, as for every row.
 fn check_rank_edges(edges: &[u16]) -> Result<(), CubeRefusal> {
     let mut previous = 1;
     for (at, edge) in edges.iter().enumerate() {
@@ -1591,7 +1586,7 @@ fn check_rank_edges(edges: &[u16]) -> Result<(), CubeRefusal> {
         }
         previous = *edge;
     }
-    within_u8(RowId::MoverRank, edges.len() + 1).map(|_| ())
+    Ok(())
 }
 
 /// Checks one time-of-day list: per width, every cut a positive whole number
@@ -1651,7 +1646,6 @@ fn check_cut_lists(parts: &GenerationParts) -> Result<(), CubeRefusal> {
         if list.row == RowId::TimeOfDay {
             check_time_cuts(list)?;
         }
-        within_u8(list.row, list.cuts.len() + 1)?;
         if previous.is_some_and(|before| before >= list.context()) {
             return Err(CubeRefusal::CutListsNotCanonical { row: row.name });
         }
@@ -3997,7 +3991,6 @@ mod tests {
     #[test]
     fn a_generation_reports_what_it_holds() {
         let g = generation();
-        assert_eq!(g.schema_version(), FIB_CUBE_VERSION);
         assert_eq!(g.parts(), &parts());
         assert!(!g.usable_at(5), "born at step 6");
         assert!(g.usable_at(6));
@@ -4593,6 +4586,55 @@ mod tests {
             numeric_literals("x5 _5").is_empty(),
             "an identifier is not a literal"
         );
+    }
+
+    /// `code_only` blanks EXACTLY every comment, string and character literal
+    /// — no more, no less — and keeps every newline: each case is the whole
+    /// output, not the literals found in it.
+    #[test]
+    fn code_only_blanks_exactly_every_comment_string_and_character_literal() {
+        let shown = |src: &str| code_only(src).into_iter().collect::<String>();
+        let spaces = |n: usize| " ".repeat(n);
+        // A line comment runs to the end of its line, the newline kept.
+        assert_eq!(shown("a // b\nc"), "a     \nc");
+        assert_eq!(shown("a // b"), "a     ");
+        // A block comment nests, keeps its newlines, and an unterminated one
+        // runs to the end.
+        let nested = "/* b /* c */ d */";
+        assert_eq!(
+            shown(&format!("a {nested} e")),
+            format!("a {} e", spaces(nested.len()))
+        );
+        assert_eq!(shown("x/*\n*/y"), "x  \n  y");
+        assert_eq!(shown("x /* y"), "x     ");
+        assert_eq!(shown("x /* a */ / * y"), "x         / * y");
+        // A raw string closes only on a quote followed by all its hashes.
+        let raw = "r##\"a\"#b\"##";
+        assert_eq!(
+            shown(&format!("x {raw} y")),
+            format!("x {} y", spaces(raw.len()))
+        );
+        assert_eq!(shown("x r\"a\\\" y"), format!("x{}y", spaces(7)));
+        // After `b` it is still raw (a byte string); after another word
+        // character it is an identifier followed by an ordinary string, in
+        // which a backslash escapes the quote.
+        assert_eq!(shown("br\"a\\\"b"), "b     b");
+        assert_eq!(shown("xr\"a\\\"b"), "xr     ");
+        assert_eq!(shown("r#x 5"), "r#x 5", "a raw identifier is code");
+        assert_eq!(shown("r#\"a\"#"), spaces(6));
+        assert_eq!(shown("r##x"), "r##x");
+        // An ordinary string: escapes, newlines kept, unterminated to the end.
+        assert_eq!(shown("a \"b\\\"c\" d"), "a        d");
+        assert_eq!(shown("\"a\nb\" c"), "  \n   c");
+        assert_eq!(shown("\"ab\\"), spaces(4));
+        // Character literals, escaped or not, and a lifetime left alone.
+        assert_eq!(
+            shown("f('\\'', '\\n', 'x', &'a u8)"),
+            "f(    ,     ,    , &'a u8)"
+        );
+        assert_eq!(shown("'\\u{35}' 7"), "         7");
+        assert_eq!(shown("'"), "'");
+        assert_eq!(shown("a/b*c"), "a/b*c", "a lone slash is code");
     }
 
     #[test]
