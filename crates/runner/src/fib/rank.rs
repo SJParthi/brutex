@@ -726,12 +726,12 @@ impl BeyondW0 {
         }
         let beyond = u64::from(rank > self.widest);
         match self.years.last_mut() {
+            Some((last, _, _)) if *last > year => {
+                return Err(RankRefusal::YearOutOfOrder { year, last: *last });
+            }
             Some((last, decisions, count)) if *last == year => {
                 *decisions += 1;
                 *count += beyond;
-            }
-            Some((last, _, _)) if *last > year => {
-                return Err(RankRefusal::YearOutOfOrder { year, last: *last });
             }
             _ => self.years.push((year, 1, beyond)),
         }
