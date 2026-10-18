@@ -1958,8 +1958,8 @@ pub enum OrderFlowReading {
 impl OrderFlowReading {
     /// The reading of one window call for a trade of `search`'s direction
     /// (FM-F004). No loop: a few comparisons and one signed subtraction in
-    /// `i128`. A pure zero (classified volume, delta zero) is `balanced` and
-    /// never pooled with a missing record.
+    /// `i128`. A pure zero (classified volume, order flow delta zero) is
+    /// `balanced` and never pooled with a missing record.
     #[must_use]
     pub fn of(window: OrderFlowWindow, search: Search) -> Self {
         match window {
@@ -1971,9 +1971,9 @@ impl OrderFlowReading {
                 sell,
                 unclassified,
             } => {
-                let delta = i128::from(buy) - i128::from(sell);
+                let order_flow_delta = i128::from(buy) - i128::from(sell);
                 let classified = u128::from(buy) + u128::from(sell);
-                match (classified, unclassified, delta.signum(), search) {
+                match (classified, unclassified, order_flow_delta.signum(), search) {
                     (0, 0, _, _) => Self::Absent(AbsentReason::Empty),
                     (0, _, _, _) => Self::Unclassified,
                     (_, _, 0, _) => Self::Balanced,

@@ -154,7 +154,7 @@ fn fib_identity_changes_when_any_one_term_changes() {
     let pool = pool_bytes();
     let other_pool = Pool::Development {
         label: "dev-3",
-        names: &["ALPHA", "BETA", "DELTA"],
+        names: &["ALPHA", "BETA", "OMEGA"],
     }
     .bytes()
     .unwrap();
