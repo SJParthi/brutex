@@ -67835,6 +67835,104 @@ CODE-14.
 `the_codes_and_their_severity_are_the_designs`,
 `format_v1_holds_every_fact_it_names`.
 
+### D-4810 — Zerodha answers are kept: each body deflated in a per-month pack beside a fixed receipt, for the vendor-pulled rungs — 2026-10-14
+
+**Implemented by** IA-8 (`crates/pull/src/response_keep.rs`). **Design**
+§6.3 "Keep", §17 Q3, finding F7.
+
+**Decision.** A broker's answer for a bar window is kept, not decoded and
+dropped: the body text, deflated, in one pack per (vendor, instrument and
+contract, timeframe, month), with a 128-byte receipt per window
+(`docs/02-store-format.md` §36), for the rungs pulled from the vendor (1min and
+1day). Never a header and never a token: the keeper is handed the body text
+and nothing else. The caller that holds the store root keeps it, after the
+landing returns (D-4859); `fetch::land` stays a pure row converter. A pack
+segment holds at most 64 MiB of bodies and 1,024 receipts; overflow is named
+(`pack_full`, `receipts_full`), never dropped silently.
+
+**Amended at landing (the rules audit, RA-075).** A full segment rolls to the
+next, up to eight per month, with an audited error event naming the roll, so
+keeping goes on instead of stopping at the first cap; the named refusals apply
+in the last segment. The verification half of the design's D-4810 row (minute
+by minute against the kept answer) is IA-9's and lands with it.
+
+**Amended in IA-8's verify round 1 (16 Oct 2026): the refused rows are a third
+cap, with the same two outcomes.** A segment's `.rsx` holds at most
+`REFUSAL_ROOM` = 2,796,202 records (64 MiB of 24-byte records). The first
+build skipped a window's refused rows once they did not fit, still wrote the
+receipt `rows_refused=N refusals=0` and returned `Ok` with no event, and no
+roll looked at the `.rsx` (the checker's probe: 5 rows dropped). Now a window
+whose rows do not fit rolls the month to the next segment like a full body (a
+repeated body included: it is kept again in the new segment rather than
+written `kept=2` without its rows); where no segment can take them (the last
+segment's room, or more rows than any segment holds) nothing is written and
+the append is refused `refusals_full`, its audited error event counting the
+rows left unkept. Refusing the whole append rather than writing the receipt
+with a new reason byte follows `receipts_full`, and keeps the receipt's one
+reason byte about the body: a body `pack_full` whose rows also could not be
+written would have needed two reasons. Two smaller bounds land with it: a
+reader refuses a receipt whose lengths pass the caps before allocating for
+them, and at most `MAX_PARKED_WAITERS` = 4 lock waiters stay parked per pack
+lock behind a holder that never lets go. Repair round 1 (17 Oct 2026) closes three edges of the same
+rule: more rows than any segment holds are refused before a roll taken for a
+full receipts or body file could hand them to an empty segment past its room;
+the writer refuses a CRC-valid receipt whose body or records end past the
+caps (`pack_damaged`) instead of rolling on it or overflowing its sum; and a
+window over months asks every later month for room before the first keeps
+anything, so `receipts_full` writes nothing, as its text says. The writer itself
+refuses rows past the room `refusals_full`, in every build, where it held only
+a `debug_assert` that a release build would have skipped.
+Repair round 2 (17 Oct 2026) corrects two things the second check found in
+round 1. The parked-waiter bound counted every waiter in `flock`, including
+one whose caller was still inside its 30 s wait, so a sixth healthy
+concurrent append of one pack was refused at once with a false "holder that
+has not let go" (the checker: 20 threads, 6 kept, 14 refused). Only a waiter
+whose caller's wait ran out is counted now, under the same mutex the waiter
+decides under when it finally gets the lock, so the two can never both think
+the other holds it. And every roll is an audited error event naming the
+month and the new segment's receipts file: a later month of a window that
+rolled used to roll with no event at all.
+Repair round 3 (18 Oct 2026) makes a window over months all-or-detectable. The
+third check killed a 20-thread writer five times on one pack and left two June
+receipts with no July pointer, every file CRC-whole, named by nothing and
+repaired by nothing. The choice: a 64-byte journal record per pack directory
+(`windows.rsw`), `open` before the first month's receipt and `closed` after the
+last pointer, so **the closing record is the commit of a window over months**
+(a window inside one month still commits with its receipt). The next append,
+under the pack lock and before anything else, finishes an open window: every
+missing pointer is written exactly as the interrupted append would have
+(`completed`), or, with no first receipt, the record is closed `abandoned`;
+both are an audited error event, and `response_keep::unfinished` names an open
+window to a reader meanwhile. Rejected: a flag in the first receipt (a receipt
+is never rewritten once trusted, so the flag could not be cleared without an
+in-place write), and repair by a reader (a reader takes no lock and writes
+nothing). The journal's look is one `stat` and at most 128 bytes per append
+(L-IA-52); a journal with no room for two more records refuses a window over
+months `windows_full` with nothing written. Every pack file's first write and
+every directory the keeper creates now syncs its parent; that is tested as a
+call, and its survival of a power loss is NOT PROVED.
+
+**Proof.** `the_kept_answer_decodes_to_the_rows_the_pull_landed`,
+`a_kept_answer_never_holds_a_header_or_token` (`crates/pull/src/http.rs`),
+`a_full_pack_is_named_never_silently_dropped`,
+`refused_rows_past_the_rsx_room_roll_or_are_refused_by_name`,
+`a_receipt_naming_lengths_past_the_caps_is_refused_before_reading`,
+`waiters_parked_on_a_held_pack_lock_are_bounded`,
+`more_refused_rows_than_a_segment_holds_are_refused_before_any_roll`,
+`the_writer_refuses_rows_past_the_room_by_name_in_every_build`,
+`a_receipt_naming_lengths_past_the_caps_is_damage_to_the_writer`,
+`a_window_over_months_writes_nothing_when_a_later_month_is_full`,
+`healthy_contention_on_one_pack_waits_rather_than_refusing`,
+`only_an_abandoned_waiter_is_counted_as_parked`,
+`a_window_over_months_killed_after_its_first_receipt_is_finished_by_the_next`,
+`every_kill_point_of_a_window_over_months_is_finished_or_named_abandoned`,
+`a_torn_window_journal_is_written_over_and_a_damaged_one_refused`,
+`a_full_window_journal_refuses_a_window_over_months_by_name`,
+`every_directory_created_and_every_first_write_syncs_its_parent`
+(`crates/pull/src/response_keep_tests.rs`), and the two roll rows and the
+finished-window row of `every_emit_site_in_this_crate_reaches_a_file`
+(`crates/pull/src/emit_sites.rs`).
+
 ### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
 
 **Implemented by** IA-5. **Design** §6.4, §6.5, §6.6, VERIFY-19, ATTACK-20;
@@ -67911,6 +68009,50 @@ little-endian with explicit offsets. In short:
 `the_bytes_sit_at_the_offsets_section_35_states`,
 `the_series_bytes_are_pinned`, `the_handle_cache_is_bounded`; bench C-VD-01,
 C-VD-02, C-VD-04.
+
+### D-4859 — Kept answers: the pack path carries the contract; body, refused rows, then receipt, each synced; readers trust receipts only; a repeated body is kept once — 2026-10-14
+
+**Implemented by** IA-8. **Design** §6.3, §11, critic round 3 SF-5 and
+BL-6, DB-B26, DB-G46.
+
+**Decision.**
+
+1. Path: `<store>/responses/<vendor>/<EXCH>/<SEG>/<SYMBOL>[/<contract>]/<tf>/<yyyy-mm>.rsb`
+   (bodies), `.rsr` (receipts) and `.rsx` (refused rows), the bar path's own
+   segments and validation. The design wrote `<SEG>/<SYMBOL>`; the exchange
+   level is kept so one rule builds both paths. A window's body goes into its
+   first month's pack; each further month gets a receipt only (`kept=3`).
+2. The 128-byte receipt is the design's offsets (asked span, stamps, body
+   place and size, rows decoded, landed and refused, run, HTTP status, rung,
+   kept and reason, landing rules version, door, BLAKE3, key hash, the
+   duplicate's ordinal, CRC-32C). The design's reserved bytes now carry: 71,
+   the segment holding the body; 116..124, the receipt's refused-row records
+   (first index, count). `kept` gains 3 (body in the first month) and 4 (a
+   refused answer's head, RA-299); the reason gains 4 `later_month` and 5
+   `refused_answer`.
+3. **Every refused row is kept with its cause (DB-G46)**: one 24-byte record
+   per row the landing refused by name, owned by its receipt, so a stored hole
+   is explained per minute. The cause is each ROW's own: every landing refuses
+   through `fetch::Refused::note`, which records the cause beside the second
+   (`causes`, parallel to `local_seconds`), because the per-(day, cause)
+   groups cannot name a row's cause once one day's rows of two causes
+   interleave. `RefusedRow::all_of` reads the two lists together and refuses
+   a record whose lists differ (`ListsDiffer`) rather than zip it short.
+4. Order: body, refused rows, receipt, each written at the place the trusted
+   receipts name and synced; a reader trusts receipts only; a torn tail is
+   overwritten by the next append; damage before the tail is refused by name
+   (D-4865).
+5. A body whose BLAKE3 a receipt of the newest segment holds is not written
+   again: a receipt only, `kept=2 reason=duplicate_body`, naming the receipt
+   that holds it.
+6. Land, keep, spool, in that order, after both landing doors
+   (`ingest::from_window` and `ingest::repair_window`); the receipt records
+   the door. The hook into the api's pull path is IA-10b/IA-10c's (D-4920).
+
+**Proof.** `an_interrupted_keep_is_repaired_by_the_next`,
+`each_contract_keeps_its_own_pack`, `a_repeated_body_is_kept_once`,
+`both_landing_doors_keep_and_count_their_refusals`,
+`a_window_over_months_keeps_its_body_once`.
 
 ### D-4861 — The CI rows land with each package — 2026-10-10
 
@@ -67989,6 +68131,58 @@ explain. A key with no record on a day not imported answers `owed
 `the_codes_and_their_severity_are_the_designs`,
 `format_v1_holds_every_fact_it_names`,
 `a_key_without_a_record_never_shows_another_keys_code`.
+
+### D-4920 — `window_answered_async` beside `window_async`; one writer per month behind the pack lock — 2026-10-14
+
+**Implemented by** IA-8. **Design** critic round 7, IA-8-1 and IA-8-2
+(amends D-4859 before it was minted).
+
+**Decision.**
+
+1. `HttpSource::window_answered_async` returns
+   `Answered { window, body, digest, status }` (no header field), and on a
+   refusal `Unanswered { error, refused }`, where `error` is exactly the
+   `FetchError` `window_async` returns and `refused` is the first 4 KiB of a
+   2xx body that was a refusal or did not decode (RA-299). `window_async`
+   keeps its signature and behaviour as a wrapper that drops the body, so
+   no caller changes in IA-8: `crates/api`'s production caller moves to the
+   new function with IA-10c, when it adds the keep.
+2. `response_keep::append` takes the pack directory's `keep.lock`
+   exclusively around "read the receipts, write the body, write the receipt"
+   and every further month's receipt: one `try_lock` when uncontended;
+   contended, a blocking `flock` on one named waiter thread (`keep-lock`),
+   bounded by 30 s, then `lock_stalled` by name (the D-4924 bound). A 10 ms
+   `try_lock` poll, as the verdict store's, starved: the holder re-takes the
+   lock microseconds after letting go, so under load the second landing was
+   refused after 2,128 tries while the first never paused (measured in the
+   full `pull` suite, 14 Oct 2026).
+   Two landings of one month never interleave a pack. The critic named one
+   lock per month (`<pack>.rsr.lock`); one per directory is taken instead, so
+   the store does not gain a lock file per instrument-month (the operator's
+   disk rule), and a window over several months is kept under one lock.
+
+**Proof.** `two_landings_of_one_month_never_interleave_a_pack` (2 threads,
+1,000 appends each), `a_pack_lock_held_past_the_wait_is_refused_by_name`,
+`a_refused_200_hands_back_its_head`.
+
+#### Cited, never written
+
+`pull::response_keep` names two receipt fields after numbers of the
+ingest-automation design (its section 15, kept outside the repository) that
+head no entry here. IA-8 decides neither; it only reserves the field each one
+fills (found by `every_cited_decision_heads_an_entry_or_is_named_pending`
+after `feat/db-fix` was merged into IA-8's branch, 17 Oct 2026).
+
+* **D-4843.** The design's "rule sets": verification compares a unit under
+  the rules that built it, and for Zerodha that is the landing rules version
+  each receipt carries. `Receipt::rules_version` (offset 69) is that byte;
+  IA-8 records the version its caller hands it and numbers no rule set.
+  The design lands the entry with IA-6, the verification package.
+* **D-4880.** The design's one runs ledger for the store, both feeds: every
+  landing takes a durable run id. `Receipt::run` (offset 60) is that id's
+  field; IA-8 records the run its caller hands it and allocates none. The
+  design lands the entry with IA-2, and IA-10b threads the id into the
+  Zerodha landings.
 
 ### D-4922 — A writer's temporary is born `O_EXCL` by one shared helper, `store::staging`: a name that exists is never opened, truncated or written through — 2026-10-12
 
