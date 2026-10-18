@@ -1603,6 +1603,10 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// and the 64 MiB window is not spent on `GET /_app/immutable/...`. A
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
+///
+/// The failed-request ration is [`failed_line_admitted`], kept apart only so
+/// this function stays under clippy's line limit (GF-1, gate 6b, 18 Oct
+/// 2026); what it does is unchanged.
 pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1646,33 +1650,7 @@ pub async fn note_request(
     // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`]. A
     // refused `/db` read's access record is under the same ration.
-    let mut admitted = true;
-    if level != telemetry::Level::Debug {
-        let admit = FAILED_LINES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admit(from_another_site, now);
-        if let Some(suppressed) = admit.summary {
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::new(
-                    telemetry::Level::Warn,
-                    "api.request",
-                    suppression_message(from_another_site),
-                )
-                .with("suppressed", telemetry::Value::Uint(suppressed))
-                .with(
-                    "origin",
-                    telemetry::Value::Str(if from_another_site {
-                        "cross-site"
-                    } else {
-                        "same-origin"
-                    }),
-                )
-                .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
-            );
-        }
-        admitted = admit.write;
-    }
+    let admitted = level == telemetry::Level::Debug || failed_line_admitted(from_another_site, now);
     if let Some(ref selection) = selection
         && !status.is_server_error()
     {
@@ -1977,6 +1955,37 @@ pub const FAILED_LINES_PER_WINDOW: u64 = 50;
 /// 9.3 MB an hour, so a sustained flood of both still takes some seven hours
 /// to roll the 64 MiB retained log (`docs/06-limits.md`).
 pub const LOCAL_FAILED_LINES_PER_WINDOW: u64 = 200;
+
+/// Whether one failed request's line is written under [`FAILED_LINES`]'s
+/// ration for its origin class, emitting the window's suppression summary
+/// first when the ration says one is due. [`note_request`] asks it only for a
+/// request that is not `Debug`.
+fn failed_line_admitted(from_another_site: bool, now: u64) -> bool {
+    let admit = FAILED_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(from_another_site, now);
+    if let Some(suppressed) = admit.summary {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "api.request",
+                suppression_message(from_another_site),
+            )
+            .with("suppressed", telemetry::Value::Uint(suppressed))
+            .with(
+                "origin",
+                telemetry::Value::Str(if from_another_site {
+                    "cross-site"
+                } else {
+                    "same-origin"
+                }),
+            )
+            .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
+        );
+    }
+    admit.write
+}
 
 /// The summary line's message for one origin class.
 pub(crate) const fn suppression_message(from_another_site: bool) -> &'static str {
