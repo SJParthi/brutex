@@ -2213,10 +2213,11 @@ fn the_first_month_has_no_month_before_it() {
         (1970, 1),
         PreviousReference::TradableDay,
         &interim(),
+        false,
     )
     .unwrap();
     assert!(check.previous_month.starts_with("absent"));
-    assert_eq!(check.loaded, "store_key_absent");
+    assert_eq!(check.stock.loaded, "store_key_absent");
 }
 
 /// A tail witness that keeps one day's early end and cuts every other's.
@@ -2408,11 +2409,19 @@ fn a_month_the_store_lacks_beside_one_it_holds_is_absent() {
         (2025, 3),
         PreviousReference::TradableDay,
         &authorities,
+        false,
     )
     .unwrap();
-    assert_eq!(check.loaded, "absent");
+    assert_eq!(check.stock.loaded, "absent");
     assert_eq!(check.previous_month, "read for the carried close");
-    assert!(check.month.days.iter().all(|day| day.counts.real == 0));
+    assert!(
+        check
+            .stock
+            .input
+            .days
+            .iter()
+            .all(|day| day.counts.real == 0)
+    );
 }
 
 /// The accepted close's exact arithmetic: a ratio that is not one on either
@@ -2580,9 +2589,543 @@ fn a_seconds_day_with_no_bar_is_empty() {
         slots: Vec::new(),
         ranges: Vec::new(),
         bars: Vec::new(),
+        longest_gap: 0,
     };
     assert!(empty.is_empty());
     assert_eq!(empty.len(), 0);
+    assert!(empty.bars().is_empty());
     assert_eq!(empty.at(9 * 3_600 + 15 * 60), None);
     assert_eq!(empty.range(9 * 3_600 + 15 * 60), None);
+}
+
+// ------------------------------------------------------------ stock-day --
+
+/// One daily bar at IST midnight of `day`, closing at `close`.
+fn daily_bar(day: i64, close: i64) -> Candle {
+    Candle {
+        ts_micros: instant(day, 0),
+        open: close - 30,
+        high: close + 40,
+        low: close - 60,
+        close,
+        volume: 11,
+        open_interest: i64::MIN,
+    }
+}
+
+/// The reader's spec for SBIN's development series.
+fn sbin_spec<'a>(
+    authorities: &Authorities,
+    widths: &'a [u16],
+    seconds: bool,
+) -> StockMonthSpec<'a> {
+    StockMonthSpec {
+        symbol: "SBIN",
+        series: authorities
+            .pool
+            .member_named("SBIN", day_of(2025, 3, 1))
+            .unwrap()
+            .series_id,
+        when: (2025, 3),
+        widths,
+        reference: PreviousReference::TradableDay,
+        seconds,
+    }
+}
+
+/// THE STOCK-DAY READER (D-6453): one read hands every later stage its day —
+/// the real minutes (a padded minute is not one), every width's candles, the
+/// seconds kept, refused or absent by name with their longest gap, the
+/// labelled variant across the month boundary, and the carried close.
+#[test]
+fn the_stock_day_reader_hands_each_stage_its_day() {
+    let store = Scratch::new("reader");
+    let (friday, monday, tuesday, wednesday) = (
+        day_of(2025, 2, 28),
+        day_of(2025, 3, 3),
+        day_of(2025, 3, 4),
+        day_of(2025, 3, 5),
+    );
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 2),
+        &full(friday, 3_131_000),
+    );
+    let mut march = full(monday, 3_132_000);
+    march.extend(full(tuesday, 3_133_000));
+    // Wednesday's 11:00 minute is padding: no volume, flat at the close
+    // before it.
+    let mut wednesday_minutes = full(wednesday, 3_134_000);
+    let padded_at = usize::from(hm(11, 0) - hm(9, 15));
+    let before = wednesday_minutes[padded_at - 1].close;
+    let padded = &mut wednesday_minutes[padded_at];
+    padded.open = before;
+    padded.high = before;
+    padded.low = before;
+    padded.close = before;
+    padded.volume = 0;
+    let padded_ts = padded.ts_micros;
+    march.extend(wednesday_minutes);
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &march,
+    );
+    // The labelled variant: Friday's daily bar lies in the month before.
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::DAY_1,
+        (2025, 2),
+        &[daily_bar(friday, 3_131_777)],
+    );
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::DAY_1,
+        (2025, 3),
+        &[daily_bar(monday, 3_132_777)],
+    );
+    let open = 9 * 3_600 + 15 * 60;
+    write_month(
+        &store.0,
+        Vendor::Gdfl,
+        &cash_key("SBIN"),
+        Timeframe::SECOND_1,
+        (2025, 3),
+        &[
+            second(monday, open, 3_132_001),
+            second(monday, open + 1, 3_132_002),
+            // Three seconds missing between two kept ones.
+            second(monday, open + 5, 3_132_003),
+            // One second: no gap between two kept ones.
+            second(tuesday, open + 7, 3_133_001),
+        ],
+    );
+    let authorities = interim();
+    let widths = [1, 7];
+    let mut state = StockState::first_day();
+    let february = read_stock_month(
+        &store.0,
+        &StockMonthSpec {
+            when: (2025, 2),
+            ..sbin_spec(&authorities, &widths, false)
+        },
+        &authorities,
+        &mut state,
+    )
+    .unwrap();
+    assert_eq!(february.loaded, "minutes");
+    assert_eq!(state.tradable.unwrap().day, friday);
+    let month = read_stock_month(
+        &store.0,
+        &sbin_spec(&authorities, &widths, true),
+        &authorities,
+        &mut state,
+    )
+    .unwrap();
+    assert_eq!(month.loaded, "minutes");
+    assert!(month.key_absent.is_empty());
+    assert_eq!(month.days().count(), month.input.days.len());
+    assert_eq!(
+        month.days().map(|day| day.input.day).collect::<Vec<_>>(),
+        [monday, tuesday, wednesday]
+    );
+    // Monday: every minute, both widths, the seconds kept with their gap,
+    // the carried close from February and its labelled variant.
+    let first = month.day(monday).unwrap();
+    assert_eq!(first.input.day, monday);
+    assert_eq!(first.input.minutes, full(monday, 3_132_000));
+    assert_eq!(
+        first
+            .input
+            .candles
+            .iter()
+            .map(|width| width.width)
+            .collect::<Vec<_>>(),
+        widths
+    );
+    let DaySeconds::Held(seconds) = first.seconds else {
+        panic!("Monday's seconds: {:?}", first.seconds);
+    };
+    assert_eq!(first.seconds.word(), "held");
+    assert_eq!(
+        seconds
+            .bars()
+            .iter()
+            .map(|bar| bar.close)
+            .collect::<Vec<_>>(),
+        [3_132_001, 3_132_002, 3_132_003]
+    );
+    assert_eq!(seconds.longest_gap(), 3);
+    assert_eq!(first.halt, None);
+    let carried = first.input.previous().accepted().unwrap().carried;
+    assert_eq!(carried.day, friday);
+    assert_eq!(first.input.variant_1day_close, Some(3_131_777));
+    assert_eq!(
+        month.day(tuesday).unwrap().input.variant_1day_close,
+        Some(3_132_777)
+    );
+    // Tuesday keeps one second (the store's writer refuses a duplicate or a
+    // disorder, so a refused day is the rename test's); Wednesday has none.
+    let DaySeconds::Held(single) = month.day(tuesday).unwrap().seconds else {
+        panic!("Tuesday's second");
+    };
+    assert_eq!(single.len(), 1);
+    assert_eq!(single.longest_gap(), 0);
+    assert_eq!(single.at(open + 7).unwrap().close, 3_133_001);
+    let none = month.day(wednesday).unwrap();
+    assert_eq!(none.seconds, DaySeconds::NoExecutionSeconds);
+    assert_eq!(none.seconds.word(), "no_execution_seconds");
+    // Wednesday's padded minute is a hole: not among the walker's bars.
+    assert_eq!(none.input.minutes.len(), 374);
+    assert!(
+        none.input
+            .minutes
+            .iter()
+            .all(|bar| bar.ts_micros != padded_ts)
+    );
+    assert_eq!(none.input.counts.no_trade, 1);
+    // A day the month holds no input for, and days outside the month.
+    assert!(month.day(day_of(2025, 3, 1)).is_none());
+    assert!(month.day(day_of(2025, 3, 31)).is_none());
+    assert!(month.day(friday).is_none());
+    assert!(month.day(day_of(2025, 4, 1)).is_none());
+    assert!(month.day(i64::MIN).is_none());
+    // Stage A reads no second, and says so.
+    let mut state = StockState::first_day();
+    let stage_a = read_stock_month(
+        &store.0,
+        &sbin_spec(&authorities, &widths, false),
+        &authorities,
+        &mut state,
+    )
+    .unwrap();
+    assert!(stage_a.seconds.is_none());
+    assert!(
+        stage_a
+            .days()
+            .all(|day| day.seconds == DaySeconds::NotRead && day.seconds.word() == "not_read")
+    );
+    assert_eq!(stage_a.cash_digest, month.cash_digest);
+    // The same inputs give the same month, byte for byte (§3 rule 5).
+    let mut again = StockState::first_day();
+    let february_again = read_stock_month(
+        &store.0,
+        &StockMonthSpec {
+            when: (2025, 2),
+            ..sbin_spec(&authorities, &widths, false)
+        },
+        &authorities,
+        &mut again,
+    )
+    .unwrap();
+    assert_eq!(february_again.input, february.input);
+    let month_again = read_stock_month(
+        &store.0,
+        &sbin_spec(&authorities, &widths, true),
+        &authorities,
+        &mut again,
+    )
+    .unwrap();
+    assert_eq!(month_again.input, month.input);
+    assert_eq!(month_again.seconds, month.seconds);
+}
+
+/// A halt day hands the walker the cash market's halted seconds; every
+/// other day hands it none.
+#[test]
+fn a_halt_day_hands_the_walker_its_halt_seconds() {
+    let store = Scratch::new("reader-halt");
+    let (thursday, halt_day) = (day_of(2020, 3, 12), day_of(2020, 3, 13));
+    let mut bars = full(thursday, 3_141_000);
+    bars.extend(minutes(halt_day, hm(9, 15), hm(9, 20), 3_142_000));
+    bars.extend(minutes(halt_day, hm(10, 21), hm(15, 29), 3_142_000));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2020, 3),
+        &bars,
+    );
+    let authorities = interim();
+    let mut state = StockState::first_day();
+    let month = read_stock_month(
+        &store.0,
+        &StockMonthSpec {
+            when: (2020, 3),
+            ..sbin_spec(&authorities, &[1, 5], false)
+        },
+        &authorities,
+        &mut state,
+    )
+    .unwrap();
+    let halted = month.day(halt_day).unwrap();
+    let expected = pull::calendar::halt_on(halt_day)
+        .unwrap()
+        .seconds(Venue::NseCash);
+    assert_eq!(halted.halt, Some(expected));
+    assert_eq!(
+        (expected.from, expected.resume),
+        (9 * 3_600 + 21 * 60 + 9, 10 * 3_600 + 21 * 60)
+    );
+    assert!(!halted.input.admitted());
+    assert!(halted.input.exposure.is_some());
+    assert_eq!(month.day(thursday).unwrap().halt, None);
+}
+
+/// The reader refuses by name: a vanished root, and a stored `1day` month
+/// that is there and unreadable (never read as an absent variant, FM-F099).
+#[test]
+fn the_stock_day_reader_halts_by_name_and_never_counts_a_refusal_as_absence() {
+    let store = Scratch::new("reader-halts");
+    let authorities = interim();
+    let widths = [1];
+    let mut state = StockState::first_day();
+    let gone = read_stock_month(
+        &store.0.join("not-there"),
+        &sbin_spec(&authorities, &widths, false),
+        &authorities,
+        &mut state,
+    )
+    .unwrap_err();
+    assert_eq!(gone.word, "store_root_vanished");
+    assert!(gone.detail.contains("not-there"), "{gone}");
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &full(day_of(2025, 3, 3), 3_151_000),
+    );
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::DAY_1,
+        YearMonth::new(2025, 3).unwrap(),
+        FileKind::Bars,
+    )
+    .unwrap()
+    .to_path_buf(&store.0);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"synthetic garbage where a daily month should be").unwrap();
+    let corrupt = read_stock_month(
+        &store.0,
+        &sbin_spec(&authorities, &widths, false),
+        &authorities,
+        &mut state,
+    )
+    .unwrap_err();
+    assert_eq!(corrupt.word, "corrupt", "{corrupt}");
+    assert_eq!(
+        state,
+        StockState::first_day(),
+        "a halted read commits nothing"
+    );
+    // A width set build_month refuses halts the read as month_refused.
+    std::fs::remove_file(&path).unwrap();
+    let refused = read_stock_month(
+        &store.0,
+        &sbin_spec(&authorities, &[], false),
+        &authorities,
+        &mut state,
+    )
+    .unwrap_err();
+    assert_eq!(refused.word, "month_refused");
+}
+
+/// FM-F093 for the seconds: a renamed series' seconds are read under each
+/// day's own symbol, and a day both keys hold with differing seconds is
+/// refused `rename_overlap_conflict`.
+#[test]
+fn a_renamed_series_reads_its_seconds_under_each_days_symbol() {
+    let store = Scratch::new("reader-rename");
+    let (old_day, switch_day) = (day_of(2025, 3, 7), day_of(2025, 3, 10));
+    let next_day = day_of(2025, 3, 11);
+    let mut zerodha_old = full(old_day, 3_161_000);
+    zerodha_old.extend(full(switch_day, 3_162_000));
+    let mut zerodha_new = full(switch_day, 3_162_000);
+    zerodha_new.extend(full(next_day, 3_163_000));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &zerodha_old,
+    );
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("INFY"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &zerodha_new,
+    );
+    let open = 9 * 3_600 + 15 * 60;
+    // Both keys hold the switch day's seconds, with different prices.
+    write_month(
+        &store.0,
+        Vendor::Gdfl,
+        &cash_key("SBIN"),
+        Timeframe::SECOND_1,
+        (2025, 3),
+        &[
+            second(old_day, open, 3_161_001),
+            second(switch_day, open, 3_162_001),
+        ],
+    );
+    write_month(
+        &store.0,
+        Vendor::Gdfl,
+        &cash_key("INFY"),
+        Timeframe::SECOND_1,
+        (2025, 3),
+        &[
+            second(switch_day, open, 3_162_009),
+            second(next_day, open, 3_163_001),
+        ],
+    );
+    let pool = renamed(switch_day, "SBIN", "INFY");
+    let mut authorities = interim();
+    authorities.pool = Box::new(pool);
+    let mut state = StockState::first_day();
+    let month = read_stock_month(
+        &store.0,
+        &StockMonthSpec {
+            series: SeriesId(7),
+            ..sbin_spec(&interim(), &[1], true)
+        },
+        &authorities,
+        &mut state,
+    )
+    .unwrap();
+    let held = |day: i64| match month.day(day).unwrap().seconds {
+        DaySeconds::Held(seconds) => seconds.bars().first().unwrap().close,
+        other => panic!("{}: {other:?}", date(day)),
+    };
+    assert_eq!(held(old_day), 3_161_001, "the old key's day");
+    assert_eq!(held(next_day), 3_163_001, "the new key's day");
+    assert_eq!(
+        month.day(switch_day).unwrap().seconds,
+        DaySeconds::Refused("rename_overlap_conflict")
+    );
+}
+
+/// `day-check --deep` prints the deep stage's reading of each day, in
+/// text and JSON; without it the JSON says the seconds were not read.
+#[test]
+fn day_check_seconds_renders_the_deep_reading_of_each_day() {
+    let store = Scratch::new("reader-page");
+    let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut bars = full(monday, 3_171_000);
+    bars.extend(full(tuesday, 3_172_000));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &bars,
+    );
+    let open = 9 * 3_600 + 15 * 60;
+    write_month(
+        &store.0,
+        Vendor::Gdfl,
+        &cash_key("SBIN"),
+        Timeframe::SECOND_1,
+        (2025, 3),
+        &[
+            second(monday, open - 1, 3_171_000),
+            second(monday, open, 3_171_001),
+            second(monday, open + 3, 3_171_002),
+        ],
+    );
+    let words = [
+        "SBIN",
+        "2025-03",
+        "--deep",
+        "--seconds",
+        "unchecked",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ];
+    let request = parse(&words).unwrap();
+    assert!(request.seconds);
+    assert!(!request.json);
+    assert!(!request.reference_table);
+    let authorities = interim();
+    let mut out = String::new();
+    assert_eq!(
+        run(&store.0, &request, &authorities, &mut out),
+        crate::OK,
+        "{out}"
+    );
+    assert!(
+        out.contains("\nseconds 2025-03-03 held 2 seconds, longest gap 2 s; halt none\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\nseconds 2025-03-04 no_execution_seconds; halt none\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "count seconds held days 1; refused days 0; no_execution_seconds 1; \
+             outside_continuous 1"
+        ),
+        "{out}"
+    );
+    let json_request = Request {
+        json: true,
+        ..request.clone()
+    };
+    let mut json = String::new();
+    assert_eq!(
+        run(&store.0, &json_request, &authorities, &mut json),
+        crate::OK
+    );
+    assert!(
+        json.contains(
+            "\"seconds\":{\"outside_continuous\":1,\"days\":[{\"day\":\"2025-03-03\",\
+             \"seconds\":\"held\",\"held\":2,\"longest_gap\":2,\"halt\":null},\
+             {\"day\":\"2025-03-04\",\"seconds\":\"no_execution_seconds\",\"held\":0,\
+             \"longest_gap\":0,\"halt\":null}]}}"
+        ),
+        "{json}"
+    );
+    let without = Request {
+        seconds: false,
+        ..json_request
+    };
+    let mut json = String::new();
+    assert_eq!(run(&store.0, &without, &authorities, &mut json), crate::OK);
+    assert!(json.trim_end().ends_with(",\"seconds\":null}"), "{json}");
+    let mut text = String::new();
+    assert_eq!(
+        run(
+            &store.0,
+            &Request {
+                seconds: false,
+                ..request
+            },
+            &authorities,
+            &mut text
+        ),
+        crate::OK
+    );
+    assert!(!text.contains("\nseconds "), "{text}");
+    assert!(!text.contains("count seconds"), "{text}");
 }

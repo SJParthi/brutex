@@ -73727,3 +73727,66 @@ shared 3.0x ceiling, with one lookup a call at every scale. The range column is
 
 **Proof.** `the_seconds_loader_keeps_continuous_seconds_and_names_every_refusal`;
 `crates/cli/benches/fib.rs` (C-F8-09).
+
+### D-6453 — The stock-day reader: one read hands every later stage its stock-day — the real minutes, the seconds by name, the halt, the trail candles and the day's longest second gap (FIB-8) — 2026-10-19
+
+**Number** the fourteenth of FIB-8's block D-6440..D-6459. `grep` over
+`docs/05-decisions.md` of `feat/db-fix` (`267e4080`) and of
+`cloud/fib2-20261018`, `cloud/fib3-20261018`, `cloud/fib5-20261018`,
+`cloud/fib6-20261018` and `cloud/fib6-20261019` on 19 Oct 2026 found no
+heading in D-6453..D-6459: only the sentences naming the whole block.
+
+**What is decided.** `cli::fib::day::read_stock_month(root, &StockMonthSpec,
+&Authorities, &mut StockState)` is THE stock-day reader. It reads one series'
+month — its Zerodha minutes under each day's own symbol through the classified
+door (D-6449, D-6450), its stored `1day` bars for the labelled variant (the
+month before too: the first day's reference day lies there), its dated cash
+closes, and, when `seconds` asks, its GDFL `1s` bars stitched by the minutes'
+rule (FM-F093: a day two keys hold with differing seconds is refused
+`rename_overlap_conflict`) — builds the day input (D-6440) and advances the
+carried state. It returns a `StockMonth`, whose `day(day)` answers a
+`StockDay { input, seconds, halt }` in O(1) (one probe of the month's day
+table, one of the seconds' index) and whose `days()` walks them in order:
+
+- `input.minutes`: the day's REAL Zerodha minutes inside the continuous
+  window, in order; a padded no-trade minute (FM-F095) is a hole and is not
+  there. Stage A's bars, and the deep stage's decision basis.
+- `input.candles`: every Generation width's folded candles, complete or
+  withheld by name — the walker's trail.
+- `seconds`: `Held(&SecondsDay)` (`bars()`, ascending, unique, continuous,
+  inside the window; `longest_gap()`, the most consecutive missing seconds
+  between two kept seconds), `Refused(name)`, `NoExecutionSeconds`, or
+  `NotRead` when stage A asked for none — never an answer of absence for a
+  read that was not made.
+- `halt`: the cash market's recorded halt of the day, `[from, resume)` seconds
+  after IST midnight, from `pull::calendar::halt_on` — FIB-5's `HaltRange`.
+
+`fib day-check` reads through it, and `--deep` adds each day's seconds verdict,
+its longest gap and its halt to the page (`--seconds WORD` already names the
+seconds-trust authority, so the flag is `--deep`).
+
+A stored `1day` month that is there and refuses now halts the read by name; it
+was read through `stored::load(..).ok()`, which counted a lock or a corrupt
+file as an absent variant (FM-F099 forbids exactly that).
+
+**Why.** FIB-5's walker (`runner::fib::walk::DayInput`, branch
+`cloud/fib5-20261018`) takes one stock-day's bars at the walk's resolution, its
+Zerodha minutes, its halts, its trail candles and the own-past longest gap, and
+its report says the reader that assembles them is FIB-8's and that no command
+existed to run its real-data proofs. `runner` cannot name `cli` (the arrow runs
+the other way, `CLAUDE.md` §5), so the walker's caller is FIB-9's `cli` run,
+and the reader hands it every ingredient by type: FIB-9 maps `input.minutes` or
+`SecondsDay::bars()` to `bars`, `input.minutes` to `zerodha_minutes`, `halt` to
+`halts`, each `WidthCandles` to a `TrailCandles`, and folds `longest_gap()` over
+the committed past into `max_second_gap` (FIB-2's `MaxSecondGap`).
+
+**Look-ahead.** Nothing new: the reader reads the month, and every value a
+decision bar reads is the day input's (D-6440). `longest_gap` is the day's own
+reading after its close, for the committed past only.
+
+**Proof.** `the_stock_day_reader_hands_each_stage_its_day`,
+`a_halt_day_hands_the_walker_its_halt_seconds`,
+`the_stock_day_reader_halts_by_name_and_never_counts_a_refusal_as_absence`,
+`a_renamed_series_reads_its_seconds_under_each_days_symbol`,
+`day_check_seconds_renders_the_deep_reading_of_each_day`; `crates/cli/benches/fib.rs`
+(C-F8-12). Invariants FIB8-29..FIB8-32.

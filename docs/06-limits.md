@@ -19866,3 +19866,16 @@ walk at a time. Every row did one unit of work a call at every scale in every
 run; what grew was the cost of reaching memory past the cache, which the
 pointer-chase probe printed beside each run (about 4 ns a dependent load at
 512 KiB, 25 ns at 2 MiB, 300 ns at 256 MiB).
+
+## The stock-day reader (FIB-8, D-6453; 19 October 2026)
+
+What the stock-day reader (`cli::fib::day::read_stock_month`, `StockMonth`,
+`StockDay`) leaves bounded or unbuilt. Its one lookup is measured by C-F8-12
+(`cargo bench -p cli --bench fib`), on THIS HOST below; the Mac re-measures it.
+
+| ID | Limit | Why it is not O(1), or not done | Bound |
+|---|---|---|---|
+| L-FIB8-24 | `read_stock_month` reads and builds a whole stock-month | the month's minutes, its `1day` bars (two months), its cash masters and, when asked, its seconds are each read once through the classified door, and the day input is built from them (L-FIB8-01, L-FIB8-04) | O(minutes + seconds + days) per stock-month, once; each later `StockMonth::day` is one probe of the month's day table and one of the seconds' index: C-F8-12 |
+| L-FIB8-25 | A stock-month holds each day's real minutes beside its candles | the walker's stage-A bars and the deep stage's decision basis are the minutes themselves, not a fold of them | one more copy of a day's minutes, 375 × 56 = 21,000 bytes a full day |
+| L-FIB8-26 | `SecondsDay::longest_gap` is one day's reading | FIB-2's `MaxSecondGap` folds the committed past's days; the fold is FIB-2's and FIB-9's | one subtraction a kept second while the day is indexed; the fold over the committed past is not built here |
+| L-FIB8-27 | The dated cash closes and the `1day` variant are read under one symbol | `StockMonthSpec::symbol` names it; the minutes and the seconds are read under each day's own symbol (FM-F093) | the development pool names one symbol a month ("renames not stitched"); a rename's other spelling's masters wait for PIT-1 (FIB-10) |

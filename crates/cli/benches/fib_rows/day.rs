@@ -16,6 +16,7 @@
 //! | C-F8-09 | one GDFL second's range looked up (`SecondsDay::range`) in a deep walk | WORST-CASE | days of seconds held |
 //! | C-F8-10 | one reference stamp joined (FM-F087), trades in time order | WORST-CASE | indices in the table |
 //! | C-F8-11 | one record of a sealed FIB file, one a block, ascending | BOUNDED, one block | records in the file |
+//! | C-F8-12 | one stock-day of the stock-day reader (`StockMonth::day`: its day table, `SecondsMonth::verdict`, `halt_on`; D-6453), the pool's months a day at a time | WORST-CASE | stock-months held |
 //!
 //! The store read itself (`cli::stored::load`) is not in these rows: it is
 //! the store's own cost and its own rows measure it.
@@ -26,8 +27,9 @@ use std::path::{Path, PathBuf};
 
 use cli::fib::authorities::{Authorities, BasisVerdictAuthority as _, DaySlots, Member, SeriesId};
 use cli::fib::day::{
-    MonthSpec, PreviousReference, SecondRange, SecondsMonth, StockState, build_month,
-    doubling_ladder, instant, seconds_of,
+    DaySeconds, MinuteClose, MonthSpec, PreviousReference, SecondRange, SecondsMonth, StockMonth,
+    StockMonthSpec, StockState, build_month, doubling_ladder, instant, read_stock_month,
+    seconds_of,
 };
 use cli::fib::files::{CandidateRecord, FibFile, Header, Kind, Put, Record as _, Scope};
 use cli::fib::reference::{IndexSource, ReferenceMonth, build_reference};
@@ -545,6 +547,151 @@ fn seconds_op(state: &mut Seconds, i: u64) -> u64 {
         .map_or(0, |range| u64::try_from(range.low).unwrap())
 }
 
+/// `months` stock-months of the pool held at once, each read through the
+/// stock-day reader with its seconds, and where FIB-9's walk is.
+pub(crate) struct Reader {
+    months: Vec<StockMonth>,
+    /// Every calendar day of the month, weekends and holidays included.
+    days: Vec<i64>,
+    lookups: u64,
+    bytes: u64,
+    /// (day position, stock-month position) of the next lookup.
+    next: (usize, usize),
+}
+
+/// Writes one synthetic month of `bars` for SBIN into `root`.
+fn write_bars(
+    root: &Path,
+    vendor: brutex_core::vendor::Vendor,
+    timeframe: store::path::Timeframe,
+    bars: &[Candle],
+) {
+    let key = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "SBIN",
+    )
+    .unwrap();
+    let path = store::path::StorePath::for_key(
+        vendor,
+        &key,
+        timeframe,
+        store::path::YearMonth::new(2025, 3).unwrap(),
+        store::path::FileKind::Bars,
+    )
+    .unwrap();
+    let rows: Vec<store::format::Bar> = bars
+        .iter()
+        .map(|bar| store::format::Bar {
+            ts_micros: bar.ts_micros,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            volume: bar.volume,
+            open_interest: bar.open_interest,
+        })
+        .collect();
+    let id = brutex_core::universe::fnv1a("SBIN") as u32;
+    store::file::BarFile::open_or_create(root, path, id)
+        .unwrap()
+        .append(&rows)
+        .unwrap();
+}
+
+/// One SBIN month of 2025-03 in a scratch store (a full day of minutes and a
+/// minute of seconds each tradable day), read once through the stock-day
+/// reader with its seconds and held `months` times: the pool's stock-months
+/// of one month.
+fn reader(months: u64) -> Reader {
+    let store = Scratch::new("reader", months);
+    let authorities = Authorities::interim(&|_: &str| true).unwrap();
+    let tradable = tradable_days(&authorities, 2025, 3);
+    let minutes: Vec<Candle> = tradable
+        .iter()
+        .flat_map(|day| (555..=929).map(move |at| minute(*day, at, 1_000_000 + i64::from(at))))
+        .collect();
+    let seconds: Vec<Candle> = tradable
+        .iter()
+        .flat_map(|day| {
+            (OPEN_SECOND..OPEN_SECOND + 60).map(move |second| Candle {
+                ts_micros: instant(*day, second),
+                open: 1_000_000,
+                high: 1_000_000,
+                low: 1_000_000,
+                close: 1_000_000,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+        })
+        .collect();
+    write_bars(
+        &store.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        store::path::Timeframe::MINUTE_1,
+        &minutes,
+    );
+    write_bars(
+        &store.0,
+        brutex_core::vendor::Vendor::Gdfl,
+        store::path::Timeframe::SECOND_1,
+        &seconds,
+    );
+    let series = authorities
+        .pool
+        .member_named("SBIN", tradable[0])
+        .unwrap()
+        .series_id;
+    let spec = StockMonthSpec {
+        symbol: "SBIN",
+        series,
+        when: (2025, 3),
+        widths: &[1, 5],
+        reference: PreviousReference::TradableDay,
+        seconds: true,
+    };
+    let mut state = StockState::first_day();
+    let month = read_stock_month(&store.0, &spec, &authorities, &mut state).unwrap();
+    let one = month
+        .days()
+        .map(|day| {
+            let candles: usize = day.input.candles.iter().map(|w| w.candles.len()).sum();
+            let held = match day.seconds {
+                DaySeconds::Held(held) => held.len(),
+                _ => 0,
+            };
+            day.input.minutes.len() * size_of::<Candle>()
+                + candles * size_of::<indicators::fibflag::types::FibCandle>()
+                + day.input.closes.len() * size_of::<MinuteClose>()
+                + held * (size_of::<Candle>() + size_of::<SecondRange>())
+        })
+        .sum::<usize>() as u64;
+    let first = day_of(2025, 3, 1);
+    Reader {
+        months: (0..months).map(|_| month.clone()).collect(),
+        days: (first..first + 31).collect(),
+        lookups: 0,
+        bytes: one * months,
+        next: (0, 0),
+    }
+}
+
+/// Production order (FIB-9, a day at a time across the pool): the day of
+/// every stock-month in turn, then the next calendar day; past the month's
+/// last day the walk starts again.
+fn reader_op(state: &mut Reader, _i: u64) -> u64 {
+    let (day_at, month_at) = state.next;
+    let found = state.months[month_at].day(state.days[day_at]);
+    state.lookups += 1;
+    state.next = if month_at + 1 < state.months.len() {
+        (day_at, month_at + 1)
+    } else {
+        ((day_at + 1) % state.days.len(), 0)
+    };
+    found.map_or(0, |day| {
+        day.input.minutes.len() as u64 + u64::from(matches!(day.seconds, DaySeconds::Held(_)))
+    })
+}
+
 /// A month's reference table of `indices` indices, and the trade being
 /// stamped.
 pub(crate) struct Table {
@@ -611,7 +758,7 @@ fn table_op(state: &mut Table, i: u64) -> u64 {
 /// The rows, run and reported. False when any row failed.
 #[expect(
     clippy::too_many_lines,
-    reason = "ten rows, each one literal; split, they would be ten one-call functions"
+    reason = "twelve rows, each one literal; split, they would be twelve one-call functions"
 )]
 pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     let mut verdicts = Vec::new();
@@ -787,6 +934,21 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
         bytes: |state| state.month.indices.len() as u64 * 31 * 375 * 24,
     };
     verdicts.push(run(&reference, host, out));
+    let stock_day = Row {
+        id: "C-F8-12",
+        name: "StockMonth::day, one stock-day of the stock-day reader (its day table, its seconds verdict, its halt), the pool's months a day at a time",
+        class: Some(Class::WorstCase),
+        axis: Some(Axis::Data {
+            unit: "stock-months held (the pool's shares, one month each)",
+            production: Some(208),
+        }),
+        scales: [2, 20, 200],
+        setup: reader,
+        op: reader_op,
+        work: |state| state.lookups,
+        bytes: |state| state.bytes,
+    };
+    verdicts.push(run(&stock_day, host, out));
     let _ = writeln!(out);
     verdicts.iter().all(|verdict| !verdict.fails())
 }

@@ -622,6 +622,11 @@ pub struct DayInput {
     pub window: Option<Window>,
     /// The day's minute counts.
     pub counts: MinuteCounts,
+    /// The day's real Zerodha minutes inside the continuous window, in
+    /// order: a padded no-trade minute (FM-F095) is a hole and is not here.
+    /// Stage A's bars and the deep stage's decision basis (FIB-5's walker;
+    /// D-6453).
+    pub minutes: Vec<Candle>,
     /// Each width's candles: admitted tradable days only.
     pub candles: Vec<WidthCandles>,
     /// The halt-day exposure input, on a halt day only.
@@ -1160,6 +1165,7 @@ fn build_day(
         no_trades_after,
         window,
         counts,
+        minutes: real,
         candles,
         exposure,
         closes,
@@ -1575,6 +1581,23 @@ pub fn load_series_month(
     series: SeriesId,
     when: (u16, u8),
 ) -> Result<SeriesMonth, Halt> {
+    load_series(root, pool, series, when, (Vendor::Zerodha, "1min"))
+}
+
+/// One series' month of `rung` bars from `vendor`, each IST day read from the
+/// symbol the series traded under that day (FM-F093), stitched by
+/// [`stitch`]: the one rule for Zerodha minutes and GDFL seconds alike.
+///
+/// # Errors
+///
+/// A [`Halt`] from any load.
+fn load_series(
+    root: &Path,
+    pool: &dyn super::authorities::PoolAuthority,
+    series: SeriesId,
+    when: (u16, u8),
+    (vendor, rung): (Vendor, &str),
+) -> Result<SeriesMonth, Halt> {
     // One slot probe and one read per day (FM-F086), never a walk of the pool.
     let symbol_of = |day: i64| {
         pool.slot_of(series, day)
@@ -1598,7 +1621,7 @@ pub fn load_series_month(
     let mut months = Vec::new();
     let mut key_absent = Vec::new();
     for symbol in symbols {
-        match load_month(root, Vendor::Zerodha, &symbol, "1min", when)? {
+        match load_month(root, vendor, &symbol, rung, when)? {
             MonthMinutes::Minutes(bars) => months.push((symbol, bars)),
             MonthMinutes::Absent => months.push((symbol, Vec::new())),
             MonthMinutes::KeyAbsent => key_absent.push(symbol),
@@ -1624,6 +1647,8 @@ pub struct SecondsDay {
     /// read, sixteen bytes a second instead of a slot and a bar (L-FIB8-18).
     ranges: Vec<SecondRange>,
     bars: Vec<Candle>,
+    /// The most consecutive missing seconds between two kept seconds.
+    longest_gap: u32,
 }
 
 /// One GDFL second's price range, paisa: what a worst-price fill reads (a
@@ -1667,6 +1692,21 @@ impl SecondsDay {
         self.bars.get(index)
     }
 
+    /// The kept seconds, ascending and unique, every one continuous and
+    /// inside the day's window: the deep walk's bars (FIB-5's walker; D-6453).
+    #[must_use]
+    pub fn bars(&self) -> &[Candle] {
+        &self.bars
+    }
+
+    /// The most consecutive missing seconds between two kept seconds of the
+    /// day: the day's own reading of the silence FIB-2's `MaxSecondGap` folds
+    /// over the committed past (D-6453). Zero for a day of one second.
+    #[must_use]
+    pub const fn longest_gap(&self) -> u32 {
+        self.longest_gap
+    }
+
     /// Seconds held.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1692,9 +1732,9 @@ pub struct SecondsMonth {
     pub no_execution_seconds: Vec<i64>,
     /// Seconds outside the continuous phase: counted, never used.
     pub outside_continuous: u64,
-    /// Each answered day's position in `days`, `None` for a refused one:
-    /// one probe a day.
-    index: std::collections::HashMap<i64, Option<usize>>,
+    /// Each answered day's position in `days`, or its refusal: one probe a
+    /// day.
+    index: std::collections::HashMap<i64, Result<usize, &'static str>>,
 }
 
 impl SecondsMonth {
@@ -1704,8 +1744,23 @@ impl SecondsMonth {
         self.index
             .get(&day)
             .copied()
-            .flatten()
+            .and_then(Result::ok)
             .and_then(|at| self.days.get(at))
+    }
+
+    /// What the month says of `day`'s seconds: kept, refused by name, or
+    /// none kept (`no_execution_seconds`). O(1): one probe.
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
+    #[must_use]
+    pub fn verdict(&self, day: i64) -> DaySeconds<'_> {
+        match self.index.get(&day) {
+            Some(Ok(at)) => self
+                .days
+                .get(*at)
+                .map_or(DaySeconds::NoExecutionSeconds, DaySeconds::Held),
+            Some(Err(why)) => DaySeconds::Refused(why),
+            None => DaySeconds::NoExecutionSeconds,
+        }
     }
 }
 
@@ -1724,6 +1779,17 @@ struct SecondsTaken {
 /// `no_execution_seconds`.
 #[must_use]
 pub fn seconds_of(bars: &[Candle], minute_days: &[i64], cash: &CashCloses) -> SecondsMonth {
+    seconds_with_conflicts(bars, minute_days, cash, &[])
+}
+
+/// [`seconds_of`] over a stitched series' seconds, with the days two keys
+/// hold with differing seconds refused `rename_overlap_conflict` (FM-F093).
+fn seconds_with_conflicts(
+    bars: &[Candle],
+    minute_days: &[i64],
+    cash: &CashCloses,
+    conflicts: &[i64],
+) -> SecondsMonth {
     let mut month = SecondsMonth {
         days: Vec::new(),
         refused: Vec::new(),
@@ -1782,14 +1848,20 @@ pub fn seconds_of(bars: &[Candle], minute_days: &[i64], cash: &CashCloses) -> Se
     if let Some(done) = taken {
         finish_seconds(done, cash, &mut month);
     }
+    // The stitch kept no second of a conflicting day.
+    month.refused.extend(
+        conflicts
+            .iter()
+            .map(|day| (*day, DayRefusal::RenameOverlapConflict.name())),
+    );
     // Every day the month answered for — kept or refused — keyed once, so
     // each minute day is one probe.
     month.index.reserve(month.days.len() + month.refused.len());
     for (at, held) in month.days.iter().enumerate() {
-        month.index.insert(held.day, Some(at));
+        month.index.insert(held.day, Ok(at));
     }
-    for (day, _) in &month.refused {
-        month.index.insert(*day, None);
+    for (day, why) in &month.refused {
+        month.index.insert(*day, Err(*why));
     }
     for day in minute_days {
         if !month.index.contains_key(day) {
@@ -1816,6 +1888,8 @@ fn finish_seconds(taken: SecondsTaken, cash: &CashCloses, month: &mut SecondsMon
     let mut ranges = vec![NO_SECOND; span];
     let offered = taken.bars.len();
     let mut bars = Vec::with_capacity(offered);
+    let mut longest_gap = 0;
+    let mut kept_last: Option<u32> = None;
     for bar in taken.bars {
         let second = ist_day_second(bar.ts_micros).1;
         let offset = second
@@ -1829,6 +1903,11 @@ fn finish_seconds(taken: SecondsTaken, cash: &CashCloses, month: &mut SecondsMon
                 low: bar.low,
             };
             bars.push(bar);
+            // The seconds are sorted and unique, so a gap is one subtraction.
+            if let Some(last) = kept_last {
+                longest_gap = longest_gap.max(second - last - 1);
+            }
+            kept_last = Some(second);
         }
     }
     // A second the phase calls continuous that the window does not hold:
@@ -1843,6 +1922,7 @@ fn finish_seconds(taken: SecondsTaken, cash: &CashCloses, month: &mut SecondsMon
         slots,
         ranges,
         bars,
+        longest_gap,
     });
 }
 
@@ -1867,12 +1947,245 @@ pub fn load_seconds(
     Ok(seconds_of(&bars, minute_days, cash))
 }
 
+// ------------------------------------------------------------ stock-day --
+
+/// One stock-day's GDFL seconds as the deep stage reads them (D-6453).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaySeconds<'a> {
+    /// Not read: stage A reads no second. Never an answer of absence.
+    NotRead,
+    /// The day's kept seconds.
+    Held(&'a SecondsDay),
+    /// The day's seconds were refused, by name: `seconds_duplicate`,
+    /// `seconds_unsorted`, `seconds_corrupt`, `session_unverified`,
+    /// `rename_overlap_conflict`.
+    Refused(&'static str),
+    /// Zerodha minutes and no GDFL second kept: `no_execution_seconds`,
+    /// counted, deep stage only.
+    NoExecutionSeconds,
+}
+
+impl DaySeconds<'_> {
+    /// The counted word: `not_read`, `held`, the refusal's name, or
+    /// `no_execution_seconds`.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::NotRead => "not_read",
+            Self::Held(_) => "held",
+            Self::Refused(why) => why,
+            Self::NoExecutionSeconds => "no_execution_seconds",
+        }
+    }
+}
+
+/// One stock-day as every later stage reads it: FIB-5's walker — stage A's
+/// bars ([`DayInput::minutes`]), the deep stage's seconds
+/// ([`SecondsDay::bars`]), the halt, the trail candles
+/// ([`DayInput::candles`]) and the day's longest second gap
+/// ([`SecondsDay::longest_gap`]) — and FIB-9's run (D-6453).
+#[derive(Clone, Copy, Debug)]
+pub struct StockDay<'a> {
+    /// The day input: the calendar verdict, the refusal, the real minutes,
+    /// every width's candles, the closes table, both previous closes, the
+    /// sides and the stamps.
+    pub input: &'a DayInput,
+    /// The day's GDFL seconds.
+    pub seconds: DaySeconds<'a>,
+    /// The cash market's recorded halt of the day, `[from, resume)` seconds
+    /// after IST midnight (`pull::calendar::halt_on`, the shares' seconds):
+    /// FIB-5's `HaltRange { start_second, end_second }`.
+    pub halt: Option<pull::calendar::HaltSeconds>,
+}
+
+/// What [`read_stock_month`] is asked for.
+#[derive(Clone, Copy, Debug)]
+pub struct StockMonthSpec<'a> {
+    /// The symbol the series' dated cash closes and its stored `1day` bars
+    /// (the labelled variant) are read under. The minutes and the seconds
+    /// are read under each day's own symbol (FM-F093).
+    pub symbol: &'a str,
+    /// The series.
+    pub series: SeriesId,
+    /// The month.
+    pub when: (u16, u8),
+    /// The Generation's timeframe set, whole minutes, strictly increasing.
+    pub widths: &'a [u16],
+    /// The deciding previous-close reference.
+    pub reference: PreviousReference,
+    /// Whether the GDFL seconds are read: the deep stage's; stage A reads
+    /// none.
+    pub seconds: bool,
+}
+
+/// One stock-month as every later stage reads it (D-6453).
+#[derive(Clone, Debug)]
+pub struct StockMonth {
+    /// The month's day input.
+    pub input: MonthInput,
+    /// What the minute load found: `minutes`, `absent` or
+    /// `store_key_absent`.
+    pub loaded: &'static str,
+    /// Symbols whose directory the store does not hold inside the series'
+    /// life: `store_key_absent`, counted.
+    pub key_absent: Vec<String>,
+    /// The month's GDFL seconds, when they were asked for.
+    pub seconds: Option<SecondsMonth>,
+    /// The dated cash closes' digest.
+    pub cash_digest: [u8; vocab::fib_cube::DIGEST_BYTES],
+    /// The month's first IST day.
+    first_day: i64,
+    /// Each day of the month's position in `input.days`: one probe a day.
+    at: Vec<Option<usize>>,
+}
+
+impl StockMonth {
+    /// The stock-day of IST day `day`, or `None` for a day the month holds
+    /// no input for (a day the calendar excludes that holds no minute). O(1):
+    /// one probe of the month's day table, one of the seconds' index.
+    /// Measured: `crates/cli/benches/fib.rs` (FIB-8's rows).
+    #[must_use]
+    pub fn day(&self, day: i64) -> Option<StockDay<'_>> {
+        let offset = usize::try_from(day.checked_sub(self.first_day)?).ok()?;
+        let at = (*self.at.get(offset)?)?;
+        self.input.days.get(at).map(|input| self.stock_day(input))
+    }
+
+    /// Every stock-day of the month, in order.
+    pub fn days(&self) -> impl Iterator<Item = StockDay<'_>> {
+        self.input.days.iter().map(|input| self.stock_day(input))
+    }
+
+    /// One day input with its seconds and its halt.
+    fn stock_day<'a>(&'a self, input: &'a DayInput) -> StockDay<'a> {
+        StockDay {
+            input,
+            seconds: self
+                .seconds
+                .as_ref()
+                .map_or(DaySeconds::NotRead, |month| month.verdict(input.day)),
+            halt: pull::calendar::halt_on(input.day).map(|halt| halt.seconds(Venue::NseCash)),
+        }
+    }
+}
+
+/// THE STOCK-DAY READER (D-6453): reads one series' month — its Zerodha
+/// minutes under each day's own symbol through the classified door, its
+/// stored `1day` bars for the labelled variant (the month before too: the
+/// first day's reference day lies there), its dated cash closes, and, when
+/// asked, its GDFL seconds stitched by the same rule — builds the day input,
+/// and advances `state`. A refusal is never counted as absence (FM-F099).
+///
+/// # Errors
+///
+/// A [`Halt`]: `store_root_vanished`, every load's classified refusal,
+/// `cash_closes`, `month_refused`.
+pub fn read_stock_month(
+    root: &Path,
+    spec: &StockMonthSpec<'_>,
+    authorities: &Authorities,
+    state: &mut StockState,
+) -> Result<StockMonth, Halt> {
+    if !root.is_dir() {
+        return Err(Halt {
+            word: "store_root_vanished",
+            detail: format!("{} is not a directory", root.display()),
+        });
+    }
+    let pool = authorities.pool.as_ref();
+    let minutes = load_series(
+        root,
+        pool,
+        spec.series,
+        spec.when,
+        (Vendor::Zerodha, "1min"),
+    )?;
+    let mut daily = Vec::new();
+    for when in [month_before(spec.when), Some(spec.when)]
+        .into_iter()
+        .flatten()
+    {
+        if let MonthMinutes::Minutes(bars) =
+            load_month(root, Vendor::Zerodha, spec.symbol, "1day", when)?
+        {
+            daily.extend(bars);
+        }
+    }
+    let minute_days = minutes
+        .minutes
+        .iter()
+        .map(|bar| ist_day_second(bar.ts_micros).0);
+    let cash =
+        stored::load_cash_closes(root, spec.symbol, minute_days).map_err(halt_as("cash_closes"))?;
+    let month_spec = MonthSpec {
+        symbol: spec.symbol,
+        series: spec.series,
+        year: spec.when.0,
+        month: spec.when.1,
+        widths: spec.widths,
+        reference: spec.reference,
+        daily: Some(&daily),
+        rename_conflicts: &minutes.conflicts,
+    };
+    let input = build_month(&month_spec, &minutes.minutes, &cash, authorities, state)
+        .map_err(halt_as("month_refused"))?;
+    let seconds = if spec.seconds {
+        let held = load_series(root, pool, spec.series, spec.when, (Vendor::Gdfl, "1s"))?;
+        let days: Vec<i64> = input.days.iter().map(|day| day.day).collect();
+        Some(seconds_with_conflicts(
+            &held.minutes,
+            &days,
+            &cash,
+            &held.conflicts,
+        ))
+    } else {
+        None
+    };
+    // build_month accepted the month, so it is a civil month.
+    let (first_day, last_day) =
+        pull::session::Day::new(spec.when.0, spec.when.1, 1).map_or((1, 0), |first| {
+            (
+                i64::from(first.days_from_epoch()),
+                i64::from(first.end_of_month().days_from_epoch()),
+            )
+        });
+    // The days are in order, so one cursor meets each once.
+    let mut inputs = input.days.iter().enumerate().peekable();
+    let at = (first_day..=last_day)
+        .map(|day| {
+            inputs
+                .next_if(|(_, held)| held.day == day)
+                .map(|(position, _)| position)
+        })
+        .collect();
+    let loaded = if !minutes.minutes.is_empty() {
+        "minutes"
+    } else if minutes.key_absent.is_empty() {
+        "absent"
+    } else {
+        "store_key_absent"
+    };
+    Ok(StockMonth {
+        input,
+        loaded,
+        key_absent: minutes.key_absent,
+        seconds,
+        cash_digest: cash.digest(),
+        first_day,
+        at,
+    })
+}
+
 // ------------------------------------------------------------ day-check --
 
 /// `cli fib day-check SYM YYYY-MM --previous REF (--authorities interim |
-/// --<kind> WORD ...) [--json]`: one stock-month's day input, its excluded
-/// days and its refusal counts, read-only. The words are judged before the
-/// store is looked for, so a misuse is a misuse wherever the store is.
+/// --<kind> WORD ...) [--json] [--reference] [--deep]`: one stock-month's
+/// day input through the stock-day reader ([`read_stock_month`]), its
+/// excluded days and its refusal counts, read-only; `--reference` adds the
+/// month's reference table and `--deep` the deep stage's reading of each
+/// day (its GDFL seconds, their longest gap, its halt). The words are judged
+/// before the store is looked for, so a misuse is a misuse wherever the store
+/// is.
 pub(super) fn command(arguments: &[&str], out: &mut String) -> u8 {
     command_at(arguments, out, &crate::store_root)
 }
@@ -1932,6 +2245,8 @@ pub struct Request {
     pub json: bool,
     /// The month's reference table too.
     pub reference_table: bool,
+    /// The month's GDFL seconds too, read through the stock-day reader.
+    pub seconds: bool,
 }
 
 /// Reads `day-check`'s words.
@@ -1941,7 +2256,7 @@ pub struct Request {
 /// A misuse by name: a missing or malformed month, a missing reference or
 /// authority, a word that names no swept share.
 pub fn parse(arguments: &[&str]) -> Result<Request, String> {
-    let (positional, json, reference_table) = positional_words(arguments);
+    let (positional, bare) = positional_words(arguments);
     let [symbol, month] = positional.as_slice() else {
         return Err(
             "`fib day-check` takes SYM YYYY-MM --previous traded-session|tradable-day \
@@ -1964,8 +2279,9 @@ pub fn parse(arguments: &[&str]) -> Result<Request, String> {
         when,
         reference,
         words,
-        json,
-        reference_table,
+        json: bare.json,
+        reference_table: bare.reference,
+        seconds: bare.deep,
     })
 }
 
@@ -1994,6 +2310,7 @@ pub fn run(root: &Path, request: &Request, authorities: &Authorities, out: &mut 
         request.when,
         request.reference,
         authorities,
+        request.seconds,
     );
     let table = if request.reference_table {
         Some(reference_check(root, request.when, authorities))
@@ -2114,27 +2431,39 @@ fn render_reference(table: &super::reference::ReferenceMonth, out: &mut String) 
     );
 }
 
-/// The words that are not flags or flag values, and the two flags that take
-/// no value: one pass over the command line.
-fn positional_words<'a>(arguments: &[&'a str]) -> (Vec<&'a str>, bool, bool) {
+/// The flags of `day-check` that take no value. `--deep`, not `--seconds`:
+/// `--seconds WORD` names the seconds-trust authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BareFlags {
+    /// `--json`.
+    json: bool,
+    /// `--reference`.
+    reference: bool,
+    /// `--deep`.
+    deep: bool,
+}
+
+/// The words that are not flags or flag values, and the flags that take no
+/// value: one pass over the command line.
+fn positional_words<'a>(arguments: &[&'a str]) -> (Vec<&'a str>, BareFlags) {
     let mut out = Vec::new();
+    let mut bare = BareFlags {
+        json: false,
+        reference: false,
+        deep: false,
+    };
     let mut skip = false;
-    let mut json = false;
-    let mut reference = false;
     for word in arguments {
-        if skip {
-            skip = false;
-        } else if *word == "--json" {
-            json = true;
-        } else if *word == "--reference" {
-            reference = true;
-        } else if word.starts_with("--") {
-            skip = true;
-        } else {
-            out.push(*word);
+        match *word {
+            _ if skip => skip = false,
+            "--json" => bare.json = true,
+            "--reference" => bare.reference = true,
+            "--deep" => bare.deep = true,
+            flag if flag.starts_with("--") => skip = true,
+            positional => out.push(positional),
         }
     }
-    (out, json, reference)
+    (out, bare)
 }
 
 /// The value after `flag`.
@@ -2149,28 +2478,25 @@ fn flag_value<'a>(arguments: &[&'a str], flag: &str) -> Option<&'a str> {
 /// What `day-check` read and built.
 #[derive(Clone, Debug)]
 pub struct DayCheck {
-    /// The month.
-    pub month: MonthInput,
+    /// The month, through the stock-day reader.
+    pub stock: StockMonth,
     /// The widths folded.
     pub widths: Vec<u16>,
     /// Whether the previous month was read for the carried state.
     pub previous_month: &'static str,
-    /// What the month load found.
-    pub loaded: &'static str,
     /// The authorities' versions.
     pub versions: Vec<super::authorities::AuthorityVersion>,
     /// The deciding reference.
     pub reference: PreviousReference,
-    /// The dated cash closes' digest.
-    pub cash_digest: [u8; vocab::fib_cube::DIGEST_BYTES],
 }
 
-/// Reads the previous month (for the carried state) and the month, and
-/// builds the day input.
+/// Reads the previous month (for the carried state) and the month through
+/// the stock-day reader ([`read_stock_month`]), the month's GDFL seconds
+/// when `seconds` asks.
 ///
 /// # Errors
 ///
-/// A [`Halt`] from either load.
+/// A [`Halt`] from either read.
 pub fn day_check(
     root: &Path,
     symbol: &str,
@@ -2178,84 +2504,33 @@ pub fn day_check(
     when: (u16, u8),
     reference: PreviousReference,
     authorities: &Authorities,
+    seconds: bool,
 ) -> Result<DayCheck, Halt> {
-    if !root.is_dir() {
-        return Err(Halt {
-            word: "store_root_vanished",
-            detail: format!("{} is not a directory", root.display()),
-        });
-    }
     let widths = doubling_ladder();
-    let before = month_before(when);
-    let previous = before
-        .map(|before| load_series_month(root, authorities.pool.as_ref(), series, before))
-        .transpose()?;
-    let current = load_series_month(root, authorities.pool.as_ref(), series, when)?;
-    let daily: Vec<Candle> = [before, Some(when)]
-        .into_iter()
-        .flatten()
-        .filter_map(|(year, month)| {
-            stored::load(root, Vendor::Zerodha, symbol, "1day", year, month).ok()
-        })
-        .flat_map(|loaded| loaded.bars)
-        .collect();
-    let all_days: Vec<i64> = previous
-        .iter()
-        .chain([&current])
-        .flat_map(|month| {
-            month
-                .minutes
-                .iter()
-                .map(|bar| ist_day_second(bar.ts_micros).0)
-        })
-        .collect();
-    let cash = stored::load_cash_closes(root, symbol, all_days).map_err(halt_as("cash_closes"))?;
     let mut state = StockState::first_day();
-    let previous_month = match (&previous, before) {
-        (Some(month), Some((year, month_of_year))) if !month.minutes.is_empty() => {
-            let spec = MonthSpec {
-                symbol,
-                series,
-                year,
-                month: month_of_year,
-                widths: &widths,
-                reference,
-                daily: Some(&daily),
-                rename_conflicts: &month.conflicts,
-            };
-            build_month(&spec, &month.minutes, &cash, authorities, &mut state)
-                .map_err(halt_as("month_refused"))?;
-            "read for the carried close"
-        }
-        _ => "absent: the month's first day has no previous close",
-    };
-    let loaded = if !current.minutes.is_empty() {
-        "minutes"
-    } else if current.key_absent.is_empty() {
-        "absent"
-    } else {
-        "store_key_absent"
-    };
-    let spec = MonthSpec {
+    let spec = |when: (u16, u8), seconds: bool| StockMonthSpec {
         symbol,
         series,
-        year: when.0,
-        month: when.1,
+        when,
         widths: &widths,
         reference,
-        daily: Some(&daily),
-        rename_conflicts: &current.conflicts,
+        seconds,
     };
-    let month = build_month(&spec, &current.minutes, &cash, authorities, &mut state)
-        .map_err(halt_as("month_refused"))?;
+    let previous = month_before(when)
+        .map(|before| read_stock_month(root, &spec(before, false), authorities, &mut state))
+        .transpose()?;
+    let previous_month = if previous.is_some_and(|month| month.loaded == "minutes") {
+        "read for the carried close"
+    } else {
+        "absent: the month's first day has no previous close"
+    };
+    let stock = read_stock_month(root, &spec(when, seconds), authorities, &mut state)?;
     Ok(DayCheck {
-        month,
+        stock,
         widths,
         previous_month,
-        loaded,
         versions: authorities.versions(),
         reference,
-        cash_digest: cash.digest(),
     })
 }
 
@@ -2291,12 +2566,12 @@ fn render_text(
     words: &[(super::authorities::AuthorityKind, String)],
     out: &mut String,
 ) {
-    let month = &report.month;
+    let month = &report.stock.input;
     let _ = writeln!(
         out,
         "fib day-check {} {}-{:02}: Zerodha 1min through the stored door ({}), folded in-run \
          from 09:15 (D-6440); GDFL never read for candles, the move or the rank",
-        month.symbol, month.year, month.month, report.loaded
+        month.symbol, month.year, month.month, report.stock.loaded
     );
     let _ = writeln!(
         out,
@@ -2331,10 +2606,13 @@ fn render_text(
          previous month {}; cash closes {}",
         report.reference.word(),
         report.previous_month,
-        short_hex(&report.cash_digest)
+        short_hex(&report.stock.cash_digest)
     );
-    for day in &month.days {
-        day_line(day, out);
+    for day in report.stock.days() {
+        day_line(day.input, out);
+        if report.stock.seconds.is_some() {
+            seconds_line(&day, out);
+        }
     }
     let excluded: Vec<String> = month
         .excluded
@@ -2351,6 +2629,41 @@ fn render_text(
         }
     );
     render_counts(month, out);
+    if let Some(seconds) = &report.stock.seconds {
+        let _ = writeln!(
+            out,
+            "count seconds held days {}; refused days {}; no_execution_seconds {}; \
+             outside_continuous {}",
+            seconds.days.len(),
+            seconds.refused.len(),
+            seconds.no_execution_seconds.len(),
+            seconds.outside_continuous
+        );
+    }
+}
+
+/// The deep stage's reading of one stock-day: its seconds and its halt.
+fn seconds_line(day: &StockDay<'_>, out: &mut String) {
+    let held = match day.seconds {
+        DaySeconds::Held(seconds) => format!(
+            " {} seconds, longest gap {} s",
+            seconds.len(),
+            seconds.longest_gap()
+        ),
+        DaySeconds::NotRead | DaySeconds::Refused(_) | DaySeconds::NoExecutionSeconds => {
+            String::new()
+        }
+    };
+    let _ = writeln!(
+        out,
+        "seconds {} {}{held}; halt {}",
+        date(day.input.day),
+        day.seconds.word(),
+        day.halt.map_or_else(
+            || "none".to_owned(),
+            |halt| format!("[{}, {})", halt.from, halt.resume)
+        )
+    );
 }
 
 /// One day's line of the day-check page.
@@ -2475,7 +2788,7 @@ fn render_json(
     table: Option<&super::reference::ReferenceMonth>,
     out: &mut String,
 ) {
-    let month = &report.month;
+    let month = &report.stock.input;
     let authorities: Vec<String> = report
         .versions
         .iter()
@@ -2545,36 +2858,67 @@ fn render_json(
         out,
         "{{\"symbol\":{},\"month\":{},\"loaded\":{},\"research\":true,\"reference\":{},\
          \"widths\":[{}],\"authorities\":[{}],\"days\":[{}],\"excluded\":[{}],\"counts\":{},\
-         \"reference_table\":{}}}",
+         \"reference_table\":{},\"seconds\":{}}}",
         json_string(&month.symbol),
         json_string(&format!("{}-{:02}", month.year, month.month)),
-        json_string(report.loaded),
+        json_string(report.stock.loaded),
         json_string(report.reference.word()),
         widths.join(","),
         authorities.join(","),
         days.join(","),
         excluded.join(","),
         json_string(counts.trim_end()),
-        table.map_or_else(
-            || "null".to_owned(),
-            |table| {
-                let holes: Vec<String> = table
-                    .indices
-                    .iter()
-                    .zip(&table.holes)
-                    .map(|(name, holes)| {
-                        format!("{{\"index\":{},\"holes\":{holes}}}", json_string(name))
-                    })
-                    .collect();
-                format!(
-                    "{{\"days\":{},\"screen\":{},\"indices\":[{}]}}",
-                    table.days,
-                    json_string(table.screen_label),
-                    holes.join(",")
-                )
-            }
-        )
+        table.map_or_else(|| "null".to_owned(), reference_json),
+        seconds_json(&report.stock)
     );
+}
+
+/// The reference table's summary as JSON.
+fn reference_json(table: &super::reference::ReferenceMonth) -> String {
+    let holes: Vec<String> = table
+        .indices
+        .iter()
+        .zip(&table.holes)
+        .map(|(name, holes)| format!("{{\"index\":{},\"holes\":{holes}}}", json_string(name)))
+        .collect();
+    format!(
+        "{{\"days\":{},\"screen\":{},\"indices\":[{}]}}",
+        table.days,
+        json_string(table.screen_label),
+        holes.join(",")
+    )
+}
+
+/// The month's seconds as JSON: `null` when they were not read.
+fn seconds_json(stock: &StockMonth) -> String {
+    let Some(seconds) = &stock.seconds else {
+        return "null".to_owned();
+    };
+    let days: Vec<String> = stock
+        .days()
+        .map(|day| {
+            let (held, gap) = match day.seconds {
+                DaySeconds::Held(held) => (held.len(), held.longest_gap()),
+                DaySeconds::NotRead | DaySeconds::Refused(_) | DaySeconds::NoExecutionSeconds => {
+                    (0, 0)
+                }
+            };
+            format!(
+                "{{\"day\":{},\"seconds\":{},\"held\":{held},\"longest_gap\":{gap},\"halt\":{}}}",
+                json_string(&date(day.input.day)),
+                json_string(day.seconds.word()),
+                day.halt.map_or_else(
+                    || "null".to_owned(),
+                    |halt| format!("[{},{}]", halt.from, halt.resume)
+                )
+            )
+        })
+        .collect();
+    format!(
+        "{{\"outside_continuous\":{},\"days\":[{}]}}",
+        seconds.outside_continuous,
+        days.join(",")
+    )
 }
 
 #[cfg(test)]
