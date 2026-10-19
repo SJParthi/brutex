@@ -512,6 +512,7 @@ fn factor_command(arguments: &[&str], out: &mut String) -> u8 {
             return MISUSED;
         }
     };
+    let started = Instant::now();
     let index = match FactorIndex::load(&lookup.dir, month) {
         Ok(index) => index,
         Err(why) => {
@@ -519,10 +520,13 @@ fn factor_command(arguments: &[&str], out: &mut String) -> u8 {
             return FAILED;
         }
     };
+    // The load's own time (read, whole check, index), so its cost is
+    // measured where it is paid, once per month (docs/06-limits.md).
+    let loaded = started.elapsed().as_micros();
     let answer = index.factor_of(&lookup.symbol, lookup.day);
     let _ = writeln!(
         out,
-        "file {} blake3 {}",
+        "file {} blake3 {} loaded in {loaded} us",
         index.file.display(),
         hex(&index.digest)
     );
@@ -2702,6 +2706,9 @@ pub(crate) fn carried(dir: &Path, month: YearMonth) -> Result<Carried, String> {
             ..Carried::default()
         });
     }
+    // A CUT OR DAMAGED FILE HANDS NOTHING ON: it would silently drop the
+    // history of every share whose carry line it lost (D-5174 item 6).
+    whole(&text, &file, before)?;
     let shares = text
         .lines()
         .filter(|line| line.starts_with("# carry,"))
@@ -3582,8 +3589,18 @@ pub struct FactorIndex {
 ///
 /// # Errors
 ///
-/// No version file, or one that cannot be read.
+/// No version file, one that cannot be read, one of another format, or one
+/// that is cut or damaged (D-5174 item 6).
 pub fn file_digest(dir: &Path, month: YearMonth) -> Result<(PathBuf, [u8; 32]), String> {
+    let (file, _, digest) = read_newest(dir, month)?;
+    Ok((file, digest))
+}
+
+/// The newest FULL version file of `month` in `dir`, read in one piece and
+/// checked whole: its path, its text and the BLAKE3 of its bytes. The one
+/// door [`FactorIndex::load`] and [`file_digest`] read through, so a run
+/// identity never names a file the reader refuses (D-5174 item 6).
+fn read_newest(dir: &Path, month: YearMonth) -> Result<(PathBuf, String, [u8; 32]), String> {
     let (file, _) = newest(dir, month)?.ok_or_else(|| {
         format!(
             "`{}` holds no feed-reconcile file for {month}",
@@ -3592,7 +3609,94 @@ pub fn file_digest(dir: &Path, month: YearMonth) -> Result<(PathBuf, [u8; 32]), 
     })?;
     let bytes =
         std::fs::read(&file).map_err(|why| format!("reading `{}`: {why}", file.display()))?;
-    Ok((file, brutex_core::blake3::hash(&bytes)))
+    let digest = brutex_core::blake3::hash(&bytes);
+    let text =
+        String::from_utf8(bytes).map_err(|_| format!("`{}` is not UTF-8 text", file.display()))?;
+    if text.lines().next() != Some(FORMAT) {
+        return Err(format!(
+            "`{}` is not `{FORMAT}`; an older format is never read as this one",
+            file.display()
+        ));
+    }
+    whole(&text, &file, month)?;
+    Ok((file, text, digest))
+}
+
+/// Whether `text`, a version file of `month` at `file`, is WHOLE (D-5174
+/// item 6): it ends with a newline after its own month's
+/// `# summary: feed-reconcile YYYY-MM:` line, the line [`render`] writes last,
+/// so a file cut at any byte has lost it; every share with a row under its
+/// stored key has a `# carry,` line; and the carry lines, with the shares
+/// whose names are not keys (which carry nothing), number at least the
+/// shares the summary counts. A file that fails is refused by name and never
+/// read as whole: a lost carry line would silently drop a share's history
+/// from the next month. One pass over the lines; rows of one share are
+/// consecutive, as `render` writes them, so each share is checked once.
+fn whole(text: &str, file: &Path, month: YearMonth) -> Result<(), String> {
+    let cut = || {
+        format!(
+            "`{}` is cut or damaged: its last line is not the `# summary: feed-reconcile \
+             {month}:` line written last, newline-ended, so it is never read as whole (D-5174 \
+             item 6)",
+            file.display()
+        )
+    };
+    let last = text
+        .strip_suffix('\n')
+        .and_then(|body| body.rsplit('\n').next())
+        .ok_or_else(cut)?;
+    let shares: usize = last
+        .strip_prefix(format!("# summary: feed-reconcile {month}: ").as_str())
+        .and_then(|rest| rest.split_once(" shares ("))
+        .and_then(|(count, _)| count.parse().ok())
+        .ok_or_else(cut)?;
+    let carries = text
+        .lines()
+        .filter(|line| line.starts_with("# carry,"))
+        .count();
+    let mut held = std::collections::HashSet::with_capacity(carries);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# carry,") {
+            held.insert(rest.split(',').next().unwrap_or_default());
+        }
+    }
+    let mut lines = text.lines().skip_while(|line| line.starts_with('#'));
+    let symbol_at = lines
+        .next()
+        .and_then(|header| header.split(',').position(|name| name == "symbol"))
+        .ok_or_else(|| {
+            format!(
+                "`{}` is damaged: it has no column line naming `symbol` (D-5174 item 6)",
+                file.display()
+            )
+        })?;
+    let mut keyless = 0_usize;
+    let mut previous = None;
+    for line in lines.take_while(|line| !line.starts_with('#')) {
+        let symbol = line.split(',').nth(symbol_at).unwrap_or_default();
+        if previous == Some(symbol) {
+            continue;
+        }
+        previous = Some(symbol);
+        if not_a_key(symbol).is_some() {
+            keyless += 1;
+        } else if !held.contains(symbol) {
+            return Err(format!(
+                "`{}` is damaged: share `{symbol}` has rows and no `# carry,` line, so the next \
+                 month would lose its history (D-5174 item 6)",
+                file.display()
+            ));
+        }
+    }
+    if carries + keyless < shares {
+        return Err(format!(
+            "`{}` is damaged: its summary counts {shares} shares and it holds {carries} carry \
+             lines and {keyless} shares without a key, so a share's carry is lost (D-5174 item \
+             6)",
+            file.display()
+        ));
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -3618,6 +3722,17 @@ fn cell_of(
         text.parse()
             .map_err(|_| format!("column `{name}` holds `{text}`"))
     };
+    // A PAISA PRICE IS AT LEAST 1: a 0 or a negative price in a pair would be
+    // served as a factor whose conversion divides by it (D-5174 item 6).
+    let price = |name: &str| -> Result<i64, String> {
+        let value = int(name)?;
+        if value < 1 {
+            return Err(format!(
+                "column `{name}` holds `{value}`: a paisa price is at least 1 (D-5174 item 6)"
+            ));
+        }
+        Ok(value)
+    };
     // An empty pair of bounds is an intersection that emptied.
     let span = |low: &str, high: &str| -> Result<Option<(Frac, Frac)>, String> {
         match (get(low)?, get(high)?) {
@@ -3635,9 +3750,9 @@ fn cell_of(
         "not_aligned" => Err(FactorRefusal::NotAligned),
         "matched" => {
             let pair = FactorPair {
-                median: (int("median_z")?, int("median_g")?),
-                min: (int("min_z")?, int("min_g")?),
-                max: (int("max_z")?, int("max_g")?),
+                median: (price("median_z")?, price("median_g")?),
+                min: (price("min_z")?, price("min_g")?),
+                max: (price("max_z")?, price("max_g")?),
                 interval: span("interval_lo", "interval_hi")?,
                 range: span("range_lo", "range_hi")?,
                 lag: get("applied_lag")?
@@ -3666,18 +3781,11 @@ impl FactorIndex {
     ///
     /// # Errors
     ///
-    /// No file, a file of another format, or a row that does not parse.
+    /// No file, a file of another format, a cut or damaged file, or a row
+    /// that does not parse (D-5174 item 6).
     pub fn load(dir: &Path, month: YearMonth) -> Result<Self, String> {
-        let (file, digest) = file_digest(dir, month)?;
-        let text = std::fs::read_to_string(&file)
-            .map_err(|why| format!("reading `{}`: {why}", file.display()))?;
-        let mut lines = text.lines();
-        if lines.next() != Some(FORMAT) {
-            return Err(format!(
-                "`{}` is not `{FORMAT}`; an older format is never read as this one",
-                file.display()
-            ));
-        }
+        let (file, text, digest) = read_newest(dir, month)?;
+        let mut lines = text.lines().skip(1);
         let header = lines
             .find(|line| !line.starts_with('#'))
             .ok_or_else(|| format!("`{}` has no column line", file.display()))?;
@@ -3705,7 +3813,8 @@ impl FactorIndex {
             if slot == next {
                 index.cells.resize((next + 1) * MAX_DAYS, None);
             }
-            let cell = cell_of(&fields, &at)?;
+            let cell = cell_of(&fields, &at)
+                .map_err(|why| format!("`{}` {symbol} {day}: {why}", index.file.display()))?;
             if day == "-" {
                 for d in 0..MAX_DAYS {
                     if let Some(place) = index.cells.get_mut(slot * MAX_DAYS + d) {

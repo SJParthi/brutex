@@ -72418,9 +72418,32 @@ rule and a test:
 3. `file_digest(dir, month)` names the newest file and the BLAKE3 of its
    bytes, so a run that converted levels names exactly which factors it used
    (CLAUDE.md §3 rule 3).
-4. An older format (version 1) is refused by name, never read as version 2.
+4. An older format is refused by name, never read as this one (the format
+   is 3 since D-5178 item 4).
 5. `cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]`
    answers one lookup from the shell and times `N` of them.
+6. **A cut or damaged file is refused by name, never read as whole**
+   (DATA-1 verification round 1, fifth pass, 19 Oct 2026: `FactorIndex::load`
+   served a file cut at a line boundary as if it were whole, and the next
+   month's carry silently lost the history of every share whose carry line
+   was gone; a paisa price of 0 in a pair was served, `median 283090/0`, and
+   `to_gdfl` then divided by it or returned 0). One check, `whole`, is read
+   by `FactorIndex::load`, `file_digest` and the next month's carry alike, so
+   a run identity never names a file the reader refuses: the file must end
+   with a newline after its `# summary: feed-reconcile YYYY-MM:` line for
+   its own month (the line `render` writes last, so any cut loses it); every
+   share with a row under its stored key must have a `# carry,` line; and
+   the carry lines, with the shares whose names are not keys (which carry
+   nothing), must number at least the shares the summary counts. And
+   `FactorIndex::load`, the one reader of the pairs, refuses a matched row
+   whose median, min or max pair holds a paisa price below 1. A refusal
+   names the file and the first thing wrong; the run that needed the carry
+   stops `FEED RECONCILE FAILED` with nothing written. Proof:
+   `a_cut_or_damaged_file_is_refused_by_name` (a whole file loads; a file
+   without its last line, one cut among its rows, one without a share's
+   carry line and one whose summary names another month are each refused by
+   `load`, `file_digest` and the carry; a 0 and a negative price in a pair
+   are refused by `load`, by the column's name).
 
 ### D-5175 — The Zerodha-to-GDFL clock alignment has one owner: the feed reconcile's lag scan — 2026-10-16
 
@@ -72515,14 +72538,22 @@ rule and a test:
    `--symbols` run changes no later month's bytes and no other share's
    answer. A `--symbols` file repeats no unlisted share's carry line.
 3. **Refused, nothing written**: a `--symbols` key for which neither feed
-   holds a share directory of the month (named in the refusal); a month for
-   which neither feed holds any share directory; a month where no listed
-   share holds a bar of either feed (a share can hold only a directory,
-   because Zerodha's day bars are filed by a longer partition than the
-   month); a store root that is not a
+   holds a share directory (named in the refusal); a store where neither
+   feed holds any share directory; a month where no listed share holds a
+   bar of either feed; a store root that is not a
    directory; an `--out` inside the store anywhere but under its audit area
    `audit/` (compared on canonical paths). Each prints `FEED RECONCILE
-   REFUSED` or `FAILED` with the reason and exits 1.
+   REFUSED` or `FAILED` with the reason and exits 1. **The listing is of
+   share directories, not of one month's files** (corrected before merge,
+   DATA-1 verification round 1, fourth pass): a share directory
+   `bars/<vendor>/NSE/CASH/<symbol>/` holds every month's files of every
+   rung, the day bars included (one file a month, `1day/2018-01.bin` on),
+   so the first two refusals are not checks of the month, and their texts
+   say "in YYYY-MM or any other month". A held key with no file of the month
+   reads as no row; a month where no listed key has one is the third
+   refusal. The first draft of this item tied the share directory to the
+   month and gave a wrong reason (a day-bar partition longer than a month)
+   for a directory without a bar.
 4. **Format 3** (`# brutex feed-reconcile 3`), so no format-2 file (which may
    hold a partial authority, and ex-dates judged under D-5177's rule) is ever
    carried into, or read as, this format.
@@ -72536,14 +72567,22 @@ rule and a test:
    generated worker count goes back to the fastest count when a doubling's
    full round was slower, instead of keeping the slower one. A typed
    `--workers` is still capped only by the share count: the operator's rule
-   (17:15 item 5) says it overrides.
+   (17:15 item 5) says it overrides. `factor --repeat` is bounded by its
+   timing buffer, `MAX_REPEAT` = 1,000,000 lookups (8 MB of timings), and a
+   larger count is refused by name: `--repeat 18446744073709551615` aborted
+   the process with a capacity overflow (fourth pass). A `kill -9` between
+   creating a publish's temporary and removing it leaves that dot-named
+   temporary (`.feed-reconcile-YYYY-MM.tmp-<pid>-<nanos>`) beside the
+   versions: it is never read as a version and never replaces one, and the
+   verb does not sweep it, because another run may own it (docs/06-limits.md).
 6. **Proof**: `a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month`,
    `the_out_directory_may_sit_in_the_store_only_under_its_audit_area`,
    `an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud`,
    `a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary`,
    `the_scheduler_doubles_while_throughput_rises_and_returns_to_the_fastest_count`,
    `publishing_takes_the_next_free_version_and_replaces_nothing`,
-   `names_with_an_ampersand_are_read_by_their_stored_key`.
+   `names_with_an_ampersand_are_read_by_their_stored_key`,
+   `the_arguments_parse_to_what_they_name` (the `--repeat` bound).
 
 ### D-5179 — An ex-date is judged only on an interval that holds the day's own median pair — 2026-10-19
 
@@ -72570,12 +72609,38 @@ rule and a test:
    judged against nothing and hands nothing on; the next day is compared with
    the last day that had a basis (the carry). Two days whose median ratios
    are equal then always share that ratio, so **no ex-date can fire between
-   equal median ratios** (0 by construction, and 0 measured below). A day
+   equal median ratios** (0 by construction, and 0 measured in item 3). A day
    whose two intersections both emptied is still `unchecked:no_interval`.
    This amends D-5177 item 2 (which basis) and corrects D-5176 item 3's
    claim that such a minute always empties the range intersection.
-3. **What remains, measured** (format 3, the same 105 months, READ-ONLY, 19
-   Oct 2026): RESULT_LINE. Every remaining flag is still `unsourced`: no
+3. **What remains, measured** (format 3, the same 105 months, oldest first,
+   READ-ONLY, `--workers 4`, 19 Oct 2026 20:22-20:30 IST, 505 s, by a
+   stamped release build of `abce27790` made by the verifier of DATA-1
+   verification round 1, fifth pass: the run is
+   `scratch/verify-DATA-1-r1e-runs/full/` (`out/` holds the 105 files,
+   `done.txt` ends `EXIT 0`), its gates and binaries
+   `state/fix/round2/logs-verify-DATA-1-r1e/`; every figure below was counted
+   again from that `out/` by the repair that wrote this item, with the same
+   result): 635,381 rows, 0 `read_failed`. `ex_date` is set on **4,504 days of 102
+   shares** (11 on the close basis, 4,493 on the range basis), against
+   6,839 days of 118 shares in format 2, and **0 of them sit between days
+   whose median ratios are equal** (format 2: 136). 5,687 rows are
+   `unchecked:interval_excludes_median` and 17,018 `unchecked:no_interval`
+   (format 2: 0 and 17,018). The proof months 2019-03 / 2025-03 / 2026-08
+   give 63 / 1 / 2 ex-date days (format 2: 103 / 1 / 2). Joined on share and
+   day with the format-2 span, every row of both joins, and every column is
+   byte for byte format 2's except `ex_date` (6,972 rows), the `ex_date`
+   flag in `flags` (2,831) and `grid_z` (289, item 4). 17 flags follow an
+   unchecked day whose median ratio equals their own: the move came on or
+   before that unchecked day, which had no basis to be judged on, and the
+   flag lands on the next day that has one. The verifier's independent
+   format-3 run (`68f7437e4`, `scratch/verify-DATA-1-r1d-runs/full/`) gave
+   the same figures, byte for byte on every one of the 105 files except the
+   `# month` line naming the commit. The first draft of this item shipped a
+   placeholder where these figures stand, and the second cited a run
+   directory that a stopped build had left empty; both were caught before
+   the merge. Every remaining flag is
+   still `unsourced`: no
    corporate-action source is merged (R4-26), and a flag between two
    slightly different median ratios may still be a narrow interval rather than
    an action; only that source can say which.
@@ -72588,7 +72653,24 @@ rule and a test:
    middle day is `unchecked:interval_excludes_median:range`, the third is
    `no:close` judged against the first, and the month has 0 ex-date days),
    `an_adjusted_day_is_an_exact_pair_and_a_disjoint_interval_is_an_ex_date`
-   (a real basis change still fires, and `grid_z` per day).
+   (a real basis change still fires, and `grid_z` per day), and for item 6
+   `a_days_basis_is_the_first_intersection_holding_its_own_median` and the
+   end of the first test (the reader gives the 4th and the 6th a close basis
+   and the 5th none).
+6. **The consumer's rule, stated** (DATA-1 verification round 1, fourth
+   pass: `factor_of` refuses `FactorNotConstant` on about 99.9% of real
+   days, even where the median is `n/n`, so a consumer had no stated rule
+   for using a factor at all): **a consumer (FIB-10, OF-2) converts a
+   Zerodha-basis level into GDFL raw prices only on a day whose pair has a
+   basis**, read as `FactorPair::basis()`, whether `factor_of` answered `Ok`
+   or `FactorNotConstant` (whose pair it carries). `basis()` is the item 2
+   rule, computed by the same function (`basis_of`) as the `ex_date`
+   judgement, so the reader and the column can never disagree about which
+   days have one factor. A day with no basis (`None`: neither intersection
+   holds its own median) has no single factor; the consumer refuses it by
+   name and never picks a factor of its own. `Ok` alone is not enough
+   either: a close intersection can survive off the median, and then the
+   range intersection, or nothing, is the basis.
 
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 

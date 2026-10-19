@@ -2010,6 +2010,10 @@ fn the_factor_reader_answers_every_day_from_the_newest_file() {
     assert_eq!(code, OK, "{said}");
     assert!(said.contains("factor median 216053/432106"), "{said}");
     assert!(said.contains("(n=200)"), "{said}");
+    assert!(
+        said.contains(&format!("blake3 {} loaded in ", super::hex(&digest))),
+        "the load is timed where it is paid: {said}"
+    );
     let (code, said) = run_with(&store.0, &["factor", "SYNR", "2025-03-03", "--dir", &dir]);
     assert_eq!(code, OK, "{said}");
     assert!(said.contains("refused not_aligned"), "{said}");
@@ -2035,6 +2039,162 @@ fn an_older_format_is_never_read_as_this_one() {
     assert!(FactorIndex::load(&dir.0, ym(2025, 2)).is_err());
     let none = carried(&dir.0, ym(2025, 5)).unwrap();
     assert_eq!(none.note, "none:no_file_for_2025-04");
+}
+
+/// What the reader, the digest and the next month's carry say of `text`
+/// published as the only 2025-03 file of a new directory: each one's
+/// refusal, or an empty string where it read the file.
+fn refusals_of(text: &str) -> [String; 3] {
+    let dir = Dir::new("damaged");
+    fs::write(dir.0.join("feed-reconcile-2025-03.v1.csv"), text).unwrap();
+    [
+        FactorIndex::load(&dir.0, ym(2025, 3))
+            .err()
+            .unwrap_or_default(),
+        file_digest(&dir.0, ym(2025, 3)).err().unwrap_or_default(),
+        carried(&dir.0, ym(2025, 4)).err().unwrap_or_default(),
+    ]
+}
+
+/// `text` with the `column` of `symbol`'s row of `day` set to `value`.
+fn with_field(text: &str, symbol: &str, day: &str, column: &str, value: &str) -> String {
+    let at = COLUMNS.split(',').position(|n| n == column).unwrap();
+    let changed: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            if !line.starts_with('#') && fields[0] == symbol && fields[1] == day {
+                fields[at] = value;
+            }
+            fields.join(",")
+        })
+        .collect();
+    let changed = changed.join("\n") + "\n";
+    assert_ne!(changed, text, "the row of {symbol} {day} is in the file");
+    changed
+}
+
+/// A CUT OR DAMAGED FILE IS NEVER READ AS WHOLE (D-5174 item 6). A file cut
+/// at a line boundary used to load as if whole and hand the next month a
+/// carry without the shares it lost; a 0 in a pair was served as a factor.
+/// SYNR and SYNS have rows; SYNT holds only a February file, so March gives
+/// it a carry line and no row, and only the summary's share count can miss it.
+#[test]
+fn a_cut_or_damaged_file_is_refused_by_name() {
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    let next = on(2025, 3, 4, hm(9, 15), 4);
+    let mut fixture = Fixture::default();
+    seeded(&mut fixture, "SYNR")
+        .gdfl("SYNR", next, 10)
+        .minutes("SYNR", next, (1, 2), 20)
+        .gdfl("SYNR", on(2025, 4, 1, hm(9, 15), 2), 10);
+    seeded(&mut fixture, "SYNS").gdfl("SYNT", on(2025, 2, 28, hm(9, 15), 2), 10);
+    fixture.write(&store.0);
+    let (code, text) = reconcile(&store.0, &out.0, &[]);
+    assert_eq!(code, OK, "{text}");
+    let whole = file(&out.0, "2025-03", 1);
+    assert!(whole.contains("# carry,SYNT,"), "{whole}");
+    assert!(
+        !rows(&whole).iter().any(|row| row["symbol"] == "SYNT"),
+        "SYNT has no row of March: {whole}"
+    );
+    assert!(
+        whole.contains("# summary: feed-reconcile 2025-03: 3 shares ("),
+        "{whole}"
+    );
+    // The whole file: read by all three, and the factor is served.
+    assert_eq!(
+        refusals_of(&whole),
+        [String::new(), String::new(), String::new()]
+    );
+    let dir = Dir::new("whole");
+    fs::write(dir.0.join("feed-reconcile-2025-03.v1.csv"), &whole).unwrap();
+    let index = FactorIndex::load(&dir.0, ym(2025, 3)).unwrap();
+    let pair = index
+        .factor_of("SYNR", Day::new(2025, 3, 4).unwrap())
+        .unwrap();
+    assert_eq!(pair.median, (216_053, 432_106));
+
+    let lines: Vec<&str> = whole.lines().collect();
+    let first_row = lines.iter().position(|line| *line == COLUMNS).unwrap() + 1;
+    let joined = |kept: &[&str]| kept.join("\n") + "\n";
+    let cuts = [
+        ("without its last line", joined(&lines[..lines.len() - 1])),
+        ("without its last byte", whole[..whole.len() - 1].to_owned()),
+        ("cut among its rows", joined(&lines[..=first_row])),
+        ("with a blank line after", format!("{whole}\n")),
+        (
+            "with another month's summary",
+            whole.replace(
+                "# summary: feed-reconcile 2025-03:",
+                "# summary: feed-reconcile 2025-02:",
+            ),
+        ),
+    ];
+    for (what, text) in &cuts {
+        for (reader, why) in ["load", "file_digest", "carry"]
+            .iter()
+            .zip(refusals_of(text))
+        {
+            assert!(
+                why.contains("is cut or damaged") && why.contains("summary"),
+                "a file {what}: {reader} said `{why}`"
+            );
+            assert!(why.contains("D-5174 item 6"), "{why}");
+        }
+    }
+    // A share with rows and no carry line, named.
+    let missing_with_rows: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("# carry,SYNS,"))
+        .collect();
+    for why in refusals_of(&joined(missing_with_rows.as_slice())) {
+        assert!(
+            why.contains("share `SYNS` has rows and no `# carry,` line"),
+            "{why}"
+        );
+    }
+    // A share with no row and no carry line: only the count sees it.
+    let missing_without_a_row: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("# carry,SYNT,"))
+        .collect();
+    for why in refusals_of(&joined(missing_without_a_row.as_slice())) {
+        assert!(
+            why.contains("its summary counts 3 shares and it holds 2 carry lines"),
+            "{why}"
+        );
+    }
+    // A paisa price below 1 in a pair: the reader of the pairs names it.
+    for (column, value) in [("median_g", "0"), ("min_z", "-7"), ("max_g", "0")] {
+        let damaged = with_field(&whole, "SYNR", "2025-03-04", column, value);
+        let [load, digest, carry] = refusals_of(&damaged);
+        assert!(
+            load.contains(&format!("column `{column}` holds `{value}`"))
+                && load.contains("a paisa price is at least 1"),
+            "{load}"
+        );
+        assert!(load.contains("SYNR 2025-03-04"), "{load}");
+        assert_eq!((digest, carry), (String::new(), String::new()));
+    }
+    // The run that needs a cut file's carry stops and writes nothing.
+    let cut = Dir::new("cut");
+    fs::write(cut.0.join("feed-reconcile-2025-03.v1.csv"), &cuts[0].1).unwrap();
+    let (code, text) = reconcile_month(&store.0, &cut.0, "2025-04", &[]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(text.contains("FEED RECONCILE FAILED"), "{text}");
+    assert!(text.contains("is cut or damaged"), "{text}");
+    assert_eq!(
+        fs::read_dir(&cut.0).unwrap().count(),
+        1,
+        "nothing was written beside the cut file"
+    );
+    let dir = cut.0.display().to_string();
+    let (code, said) = run_with(&store.0, &["factor", "SYNR", "2025-03-04", "--dir", &dir]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("FACTOR REFUSED"), "{said}");
 }
 
 // -------------------------------------------------------------- the parts

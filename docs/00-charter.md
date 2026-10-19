@@ -1311,6 +1311,38 @@ in D-5172. Where the store is mounted is machine layout and is not recorded.
 | 2025-03 | 337 (208 / 104 / 0 / 25) | 3,952 / 1,976 / 0 / 0 / 0 / 0 | 49 (931) | 1 (0 / 1) | 3,948 | 27 | 8 | 0 |
 | 2026-08 | 337 (208 / 100 / 0 / 29) | 4,368 / 2,094 / 0 / 0 / 0 / 0 | 2 (14) | 2 (0 / 2) | 4,366 | 1 | 0 | 4,366 |
 
+**Which run the table is, and what format 3 changed** (19 Oct 2026,
+D-5178, D-5179). The table above is the format-2 runs of two months each
+(2019-02..03, 2025-02..03, 2026-07..08, each first month with no previous
+file, `state/fix/round2/data1-real-r5-20261018/`). The whole-span run, where
+every month carries its lags and intervals from the month before since
+2018-01, gives the same figures except three: `factor_not_constant` 3,136 and
+`range_not_constant` 266 in 2019-03, and `range_not_constant` 14 in 2025-03
+(a different applied lag on a few days; format 2 and format 3 agree on all
+three). **Format 3** (D-5179: an ex-date is judged only on an interval that
+holds the day's own median pair) changes three columns and no other: `ex_date`,
+the `ex_date` flag in `flags`, and `grid_z`. Measured READ-ONLY on 19 Oct
+2026 over the same 105 months, oldest
+first, `--workers 4`, by a stamped release build of `abce27790`
+(`scratch/verify-DATA-1-r1e-runs/full/`, D-5179 item 3): 635,381 rows, 0
+`read_failed`; `ex_date` is set on **63 / 1 / 2** days in the three months
+(all on the range basis; 63 on 15 shares in 2019-03, against 103 on 21 in
+format 2), and on **4,504 days of 102 shares** over the span (11 on the
+close basis, 4,493 on the range basis), against 6,839 days of 118 shares in
+format 2. **None of the 4,504 sits between days whose median ratios are
+equal** (format 2: 136, 27 of them both exactly `n/n`). 5,687 rows are
+`unchecked:interval_excludes_median` (judged against nothing, handing nothing
+on) and 17,018 `unchecked:no_interval`, as in format 2. 17 ex-date days
+follow an unchecked day whose median ratio equals their own: the move came on
+or before that unchecked day, and the flag lands on the first day after it
+that has a basis. The single-day candidates of 2019-03 named below (BSE
+03-18 and 03-19, MCX 03-08) are no longer flagged in format 3; NMDC
+2025-03-21, INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 still are. Every
+other column of every row is byte for byte the format-2 value; `ex_date`
+differs on 6,972 rows, `flags` on 2,831 (the `ex_date` flag) and `grid_z`, now
+the grid as of the row's own day, on 289 (joined on share and day, every row
+of both runs joined).
+
 What the code relies on, and what is not known:
 
 - **Zerodha adjusted, GDFL raw — prices and volumes.** On an unadjusted
@@ -1340,7 +1372,8 @@ What the code relies on, and what is not known:
   (a dividend taken off before scaling) would do this; that is a hypothesis,
   not a measurement. 2019-03's 103 `ex_date` days fall on 21 adjusted shares,
   most of them repeatedly (TECHM 11, ASHOKLEY 10, UNIONBANK, LICHSGFIN and
-  BANKBARODA 9 each): a level-dependent ratio moves a day's interval as the
+  BANKBARODA 9 each; in format 3, 63 days on 15 shares, LICHSGFIN and
+  BANKBARODA 9, UNIONBANK and TECHM 7): a level-dependent ratio moves a day's interval as the
   price moves, so `ex_date` marks two days no single factor explains, a
   corporate action or a level move, and which is which is R4-26's to confirm
   (WIPRO, NTPC and IDEA have one such day each in the month). A
@@ -1383,7 +1416,10 @@ What the code relies on, and what is not known:
   measured. Causes UNVERIFIED. `ex_date` is set on 6,839 days of 118 shares:
   6,399 of them on 20 shares that repeat it as their level moves (UNIONBANK
   632, TECHM 629, BPCL 510), while 82 shares have at most three, the
-  single-day candidates R4-26 is to confirm.
+  single-day candidates R4-26 is to confirm (format 2; in format 3, D-5179,
+  4,504 days of 102 shares: 4,374 on 20 repeating shares, UNIONBANK 488,
+  TECHM 477 and LICHSGFIN 393, while 76 shares have at most three, on 97
+  days).
 - **The untracked scratch check of 15 Oct, joined on (share, day)**
   (`state/fix/round2/data1-real-r5-20261018/compare-vs-scratch.txt`): it wrote
   3,249, 3,914 and 4,326 rows for the three months and the verb holds every

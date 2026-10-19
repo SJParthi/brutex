@@ -19532,7 +19532,38 @@ was shared with other agents' builds and the API, so a tail can be the host's.
   inserted into) and four bounded sorts (the lower median over at most 1,440
   ratios, and per-run timing percentiles). `crates/cli/src/store_write.rs`
   rose from 4 to 5 membership probes: `feed-reconcile` writes only with
-  `--out`, a probe of the verb's own argument slice.
+  `--out`, a probe of the verb's own argument slice. A `--symbols` key is
+  checked against the share listing by one probe of a hash set sized from
+  that listing (D-5178), never by a search of the sorted listing: the first
+  repair's `binary_search_by` was refused by gate 11 rule 1 and is gone.
+- **`factor --repeat` is bounded (D-5178 item 5).** At most `MAX_REPEAT` =
+  1,000,000 timed lookups, whose timings take 8 MB; a larger count is
+  refused by name before anything is allocated.
+- **Loading a month checks the whole file once (D-5174 item 6).**
+  `FactorIndex::load`, `file_digest` and the next month's carry each read
+  the newest file in one piece and pass over its lines once more to check it
+  is whole (its own month's summary line last, a carry line for every
+  share with rows, through one hash set sized from the carry-line count):
+  O(lines of one month's file, at most 2.3 MB measured) per LOAD, never per
+  lookup; `factor_of` is unchanged, one hash and one multiply-add. Every
+  `factor` call prints the load's own time (`loaded in N us`: read, whole
+  check and index together), so the cost is measured where it is paid; the
+  extra pass is not timed apart from the rest of the load. The figures of a
+  release build over the 105 format-3 files are in the package's repair
+  report (`state/fix/round2/fix-DATA-1.json`, 19 Oct 2026), not restated
+  here.
+- **A killed publish can leave one temporary (D-5178 item 5), named here
+  rather than swept.** `publish` writes
+  `.feed-reconcile-YYYY-MM.tmp-<pid>-<nanos>` in `--out`, makes it durable,
+  links it to the next version name and removes it; every failure it can
+  see removes it too. A `kill -9` (or a power cut) between the create and
+  the remove leaves it: before the link it is a partial or whole unpublished
+  file, after the link a second name of the published version. It is never
+  read as a version (the reader takes only `feed-reconcile-YYYY-MM.v<N>.csv`
+  and `.symbols.v<N>.csv` names), never replaces one, and costs one listing
+  entry per publish. The verb does not sweep it, because a concurrent run
+  may own a temporary of the same month; removing one whose process is gone
+  is the operator's, by hand. NOT measured: how often this happens.
 - **NOT measured:** a cold page cache (the runs read months the host had
   cached or not as it happened), more than 4 workers on the real store (the
   read-only rule of this run), and the generated worker count on the real
