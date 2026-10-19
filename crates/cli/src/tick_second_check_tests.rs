@@ -1177,6 +1177,28 @@ fn an_out_directory_inside_the_store_and_a_held_lock_are_refused_before_anything
     assert_eq!(code, FAILED);
     assert!(out.contains("never writes the store"), "{out}");
     assert!(!inside.exists(), "nothing was made inside the store");
+    // Nor inside the tick store a landing may be compared with.
+    let ticks = root.join("ticks");
+    std::fs::create_dir_all(&ticks).unwrap();
+    std::fs::write(ticks.join("FORMAT.md"), b"synthetic tick store\n").unwrap();
+    let env = env_of(vec![(
+        crate::gdfl_import_command::TICKSTORE_VAR,
+        ticks.clone().into_os_string(),
+    )]);
+    let in_ticks = ticks.join("cm").join("reports");
+    let mut out = String::new();
+    let code = command_with(
+        &["2025", "--out", in_ticks.to_str().unwrap()],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, FAILED);
+    assert!(out.contains("lies inside the tick store"), "{out}");
+    assert!(
+        !ticks.join("cm").exists(),
+        "nothing was made inside the tick store"
+    );
     let out_dir = root.join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
     let held = std::fs::File::create(out_dir.join(LOCK_NAME)).unwrap();
@@ -1331,6 +1353,26 @@ fn the_index_round_trips_and_refuses_what_is_not_its_format() {
     );
     assert!(index::encode(2025, &[("ZZA", day(2024, 12, 31), a)], 0, [0; 32]).is_err());
     assert!(index::encode(2025, &[("A\nB", on, a)], 0, [0; 32]).is_err());
+    // A leap year holds 366 records a share: its 29 February and its last day
+    // are their own cells, and the next year's first day is none of them.
+    let leap = index::encode(
+        2024,
+        &[("ZZA", day(2024, 2, 29), a), ("ZZA", day(2024, 12, 31), b)],
+        1,
+        [2; 32],
+    )
+    .unwrap();
+    assert_eq!(
+        leap.len(),
+        index::HEADER_LEN + "ZZA\n".len() + 366 * index::STRIDE
+    );
+    let leap = index::YearIndex::decode(&leap, path, 1).unwrap();
+    assert_eq!(leap.status_of("ZZA", day(2024, 2, 29)), Ok(a));
+    assert_eq!(leap.status_of("ZZA", day(2024, 12, 31)), Ok(b));
+    assert_eq!(
+        leap.status_of("ZZA", day(2024, 3, 1)),
+        Err(NotChecked::NotChecked { version: 1 })
+    );
     // Two versions: the digest every answer came from changes with them.
     let dir = scratch("digest");
     std::fs::write(dir.join("tick-to-second-2025.v001.idx"), &image).unwrap();
@@ -1345,6 +1387,50 @@ fn the_index_round_trips_and_refuses_what_is_not_its_format() {
     assert_eq!(
         SecondChecks::open(&dir.join("absent")).unwrap(),
         SecondChecks::default()
+    );
+}
+
+/// A special session whose store equals rule A (not rule T) is never
+/// `trusted()`: the index files it as `ExactA`, while the same session equal
+/// to rule T stays `SpecialSession` and trusted. The landing row outranks
+/// the extra row of its share-day, whatever their order.
+#[test]
+fn a_special_session_equal_to_rule_a_is_never_trusted_as_rule_t() {
+    let label = |role, source| Label {
+        role,
+        source,
+        source_name: "invented.zip!STOCKS/x.zip!ZZALPHA.NSE.csv".to_owned(),
+        landing: "prv:0@g1:def4".to_owned(),
+    };
+    let line = |symbol: &str, compare: &str, role, source| {
+        let mut r = Row::blank(symbol, d(MUHURAT), "ZZALPHA.NSE.csv", label(role, source));
+        compare.clone_into(&mut r.compare);
+        r.status = status_word(compare, &r.session);
+        csv_line(&r, "c0ffee")
+    };
+    let a = line("ZZALPHA", "exact_A", Role::Landing, Source::ArchiveMember);
+    let t = line("ZZBETA", "exact_T", Role::Landing, Source::ArchiveMember);
+    let extra = line(
+        "ZZBETA",
+        "exact_T",
+        Role::Extra,
+        Source::NotTheLandingSource,
+    );
+    assert!(a.contains(",special_session,exact_A,"), "{a}");
+    let cells = cells_of(&[a.as_str(), t.as_str(), extra.as_str()]).unwrap();
+    assert_eq!(cells.len(), 2, "one answer per share-day: {cells:?}");
+    let (_, _, alpha) = cells.iter().find(|(s, _, _)| s == "ZZALPHA").unwrap();
+    assert_eq!(alpha.status, Status::ExactA);
+    assert!(!alpha.trusted());
+    let (_, _, beta) = cells.iter().find(|(s, _, _)| s == "ZZBETA").unwrap();
+    assert_eq!(
+        (beta.status, beta.source),
+        (Status::SpecialSession, Source::ArchiveMember)
+    );
+    assert!(beta.trusted());
+    assert_eq!(
+        beta.row, 2,
+        "the landing row answers, not the extra row after it"
     );
 }
 

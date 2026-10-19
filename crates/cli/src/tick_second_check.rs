@@ -2878,6 +2878,15 @@ pub(crate) fn cells_of(lines: &[&str]) -> Result<Vec<(String, Day, SecondStatus)
         let day = parse_day(cells.get("day")).ok_or_else(|| format!("not a day: {line}"))?;
         let status = Status::of_word(cells.get("status"))
             .ok_or_else(|| format!("not a status of this layout: {line}"))?;
+        // A special session compared exact under rule A holds rule A's bars,
+        // not rule T's: the index says `ExactA`, so `trusted()` never claims
+        // the rule-T seconds of a day that does not hold them. The CSV keeps
+        // `special_session` and its `compare`.
+        let status = if status == Status::SpecialSession && cells.get("compare") == "exact_A" {
+            Status::ExactA
+        } else {
+            status
+        };
         let source = Source::of_word(cells.get("source"))
             .ok_or_else(|| format!("not a source of this layout: {line}"))?;
         let sat = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
@@ -3319,6 +3328,18 @@ fn run(
             store.display()
         ));
     }
+    let tick_root =
+        crate::gdfl_import_command::root(crate::gdfl_import_command::TICKSTORE_VAR, env);
+    if let Ok(ticks) = &tick_root
+        && inside(&ask.out, ticks)
+    {
+        return Err(format!(
+            "--out {} lies inside the tick store {}; this check never writes a source it \
+             compares with",
+            ask.out.display(),
+            ticks.display()
+        ));
+    }
     std::fs::create_dir_all(&ask.out).map_err(|w| format!("{}: {w}", ask.out.display()))?;
     let lock_path = ask.out.join(LOCK_NAME);
     let lock = std::fs::OpenOptions::new()
@@ -3507,8 +3528,6 @@ fn run(
         .values()
         .flat_map(|j| j.items.iter().map(|(i, _, _)| i.clone()))
         .collect();
-    let tick_root =
-        crate::gdfl_import_command::root(crate::gdfl_import_command::TICKSTORE_VAR, env);
     let sources = Sources::open(
         &all_items,
         ask.archive.as_deref().map(|p| (p, &same_paths)),

@@ -73,9 +73,12 @@ const _: () = assert!(STRIDE == 4 + 4 * 4);
 pub enum Status {
     /// The store equals rule T (trades only) in every field and the digest.
     ExactT,
-    /// The store equals rule A (every row's price in high and low).
+    /// The store equals rule A (every row's price in high and low), on any
+    /// day, a special session's included.
     ExactA,
-    /// A special session (`pull::calendar`) whose comparison was exact.
+    /// A special session (`pull::calendar`) whose store equals rule T. One
+    /// that equals rule A is [`Self::ExactA`] in the index (its CSV row still
+    /// says `special_session`, with `compare` `exact_A`).
     SpecialSession,
     /// The store differs from rule T; the CSV names the fields.
     Differs,
