@@ -265,9 +265,11 @@ fn minute_of(second: u32) -> usize {
     usize::try_from(u64::from(second) / SECONDS_PER_MINUTE).unwrap_or(usize::MAX)
 }
 
-/// How many minutes a day has.
+/// How many minutes a day has: a day is a whole number of minutes, so the
+/// ceiling is exact (and a division a mutation could turn into a product,
+/// sixty times every per-minute table, is not written at all; D-6393).
 fn minutes_per_day() -> usize {
-    usize::try_from(SECONDS_PER_DAY / SECONDS_PER_MINUTE).unwrap_or(usize::MAX)
+    usize::try_from(SECONDS_PER_DAY.div_ceil(SECONDS_PER_MINUTE)).unwrap_or(usize::MAX)
 }
 
 /// `value x scale`, refused unless one more factor of a million still fits:

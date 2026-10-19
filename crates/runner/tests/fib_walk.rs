@@ -4094,7 +4094,9 @@ fn an_unarmed_break_jumps_to_the_bar_that_arms_it() {
     );
     assert_eq!(out.first_entry_second, at(11, 0, 0));
     assert!(forward > 3_600, "{forward}");
-    assert!(events < 20, "{events}");
+    // Exactly: the window's first second stepped, one jump to the arming
+    // second, that second stepped, one jump to 15:09:00, the forced step.
+    assert_eq!(events, 5);
     plan.trigger_edge = P + 900;
     let (out, forward, events) = work_of(
         &day,
@@ -4109,7 +4111,31 @@ fn an_unarmed_break_jumps_to_the_bar_that_arms_it() {
         SlotStatus::EntryUnfilled(UnfilledReason::NeverTriggered)
     );
     assert!(forward > 3_600, "{forward}");
-    assert!(events < 10, "{events}");
+    // The first second, one jump to the 15:09:00 second past the window's
+    // end, and the step that closes the window there.
+    assert_eq!(events, 3);
+    // A trigger the very next second reaches leaves nothing to jump: an
+    // empty jump moves nothing and counts nothing.
+    plan.trigger_edge = P + 200;
+    let next = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 20, P - 20, P, 50),
+        bar(at(10, 0, 1), P + 150, P + 300, P + 150, P + 250, 500),
+        bar(at(10, 0, 2), P + 250, P + 270, P + 230, P + 250, 50),
+        quiet(at(15, 9, 0), P + 250, 10_000),
+    ]);
+    let (out, forward, events) = work_of(
+        &next,
+        &second_profile(),
+        plan,
+        STOP_ONLY,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(out.first_entry_second, at(10, 0, 1));
+    assert_eq!(forward, 4);
+    // The first second, the arming second, one jump over 10:00:02, the
+    // forced step.
+    assert_eq!(events, 4);
 }
 
 // ------------------------------------------------------ the proof halves --

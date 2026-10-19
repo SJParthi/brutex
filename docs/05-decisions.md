@@ -73880,7 +73880,12 @@ cursor reads its unread slice; `Stepper::run` and `Stepper::run_events` take
 at most one step per bar and one more (`most_steps`: every step that does not
 finish the slot moves the cursor at least one bar), so a cursor that failed
 to move ends the walk early and wrong, never hangs it; `ExitSet::passes` is
-`(0..count).step_by(budget)`. The outputs are unchanged, byte for byte
+`(0..count).step_by(budget)`. One loop is bounded by a number rather than a
+counter, and that number had the same exposure: the day's minute count was
+`SECONDS_PER_DAY / SECONDS_PER_MINUTE`, whose `/` made `*` grows every
+per-minute table sixty-fold, so every test still passes, only too slowly to
+finish (the run's one timeout); it is now `div_ceil`, exact because a day is
+a whole number of minutes. The outputs are unchanged, byte for byte
 (`fib_walk`'s 121 tests and `fib::`'s 35 pass unchanged, the event walk's
 equivalence tests among them). The cost is unchanged: each loop still does
 the same reads, now counted by its range.
