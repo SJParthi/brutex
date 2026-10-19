@@ -73802,7 +73802,8 @@ order; a run of empty bars; and each kind of bar that stops a leg.
 O(log bars x (1 + events)) whatever its spills' lengths, BOUNDED by its events
 as D-6390 declared (C-F5-09; the every-bar step of a spilling exit is C-F5-08).
 The build adds O(bars), three 16-byte prefix entries and two 4-byte stops per
-bar per side (L-FIB5-19).
+bar per side (L-FIB5-19). Gate 11 rule 1 declares the two `partition_point`s
+("Gate 11 — FIB-5, declared" in `docs/06-limits.md`).
 
 ### D-6392 — The real-data proof's plans and counts are pure walker code; its loading is FIB-8's day input, run on the Mac (FIB-5) — 2026-10-19
 
@@ -73856,5 +73857,30 @@ stocks of 2025-03 the share of stock-days with no GDFL second in
 **Proved on synthetic days.** `the_proof_plans_one_close_plan_per_usable_candle_on_each_side`
 and `the_proof_tally_counts_every_slot_by_status_reason_and_flag` (with the
 unit test `a_worse_r_replaces_the_worst_and_an_incomparable_one_is_counted`).
-No measurement on real data is claimed; none was taken. Gate 11 rule 1 declares the two `partition_point`s
-("Gate 11 — FIB-5, declared" in `docs/06-limits.md`).
+No measurement on real data is claimed; none was taken.
+
+### D-6393 — Every walker loop ends by its shape: a range, a slice, or the bar count (FIB-5) — 2026-10-19
+
+**Why.** The mutation gate (`.github/mutation_gate.rs`) never credits a
+timeout as a caught mutation, and a loop driven by a counter has mutations no
+test can catch any other way: `k -= 1` made `k /= 1`, or `next += 1` made
+`next *= 1`, leaves the counter where it was and the loop never ends. The 19
+Oct mutant run met one at once (`Table::descend`), and seven more sat in the
+walker's files: the sparse table's level loop, the second-to-bar map, the two
+halt pointers, the swings' minute pointer, the swing cursor, the step cursor
+under `run` and `run_events`, and `ExitSet::passes` (`start < count` made
+`<=`).
+
+**What is decided.** No walker loop may depend on a counter's change to end.
+The sparse table's levels are `1..=log2(n)` and its descent
+`(0..=log2(n)).rev()`; the second-to-bar map grows by `resize` to each bar's
+second (the bars are ascending and unique); the halt and swing pointers
+advance by `take_while(..).count()` over the slice ahead of them; the swing
+cursor reads its unread slice; `Stepper::run` and `Stepper::run_events` take
+at most one step per bar and one more (`most_steps`: every step that does not
+finish the slot moves the cursor at least one bar), so a cursor that failed
+to move ends the walk early and wrong, never hangs it; `ExitSet::passes` is
+`(0..count).step_by(budget)`. The outputs are unchanged, byte for byte
+(`fib_walk`'s 121 tests and `fib::`'s 35 pass unchanged, the event walk's
+equivalence tests among them). The cost is unchanged: each loop still does
+the same reads, now counted by its range.
