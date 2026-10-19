@@ -660,6 +660,10 @@ fn reading_one_cancels_the_remainder_at_the_next_close_and_reading_two_fills_on(
     let one = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert_eq!(one.filled_qty, 30);
     assert!(has(&one, TradeFlag::PartialEntry));
+    // The 30 filled are held on past the window's close, to the forced exit.
+    assert_eq!(one.status, SlotStatus::Priced);
+    assert_eq!(one.exit_reason, ExitReason::Forced);
+    assert_eq!(one.exit_value_paisa, i128::from(30 * (P - 10)));
     let two = walk_one(
         &day,
         &second_profile(),
