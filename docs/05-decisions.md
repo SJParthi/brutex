@@ -73840,6 +73840,18 @@ stocks of 2025-03 the share of stock-days with no GDFL second in
    therefore a scratch program with path dependencies, written for the Mac and
    run once FIB-8 is merged; the FIB-5 report (`reports/cloud-fib5-20261019.md`,
    NEEDS THE MAC) carries its exact steps.
+3. **A merge-back finding, recorded for the Mac.** The driver was
+   compile-checked on 19 Oct against a local merge of this branch with
+   `origin/cloud/fib8-20261018` at `ceae9644` (never pushed). That merge does
+   not compile as pushed: FIB-8's `crates/cli/src/fib/files.rs` builds
+   `runner::fib::types::SlotOutcome` by struct literal in its `deep` file
+   kind's `decode` and `stride` with FIB-1's thirteen fields only, and FIB-5
+   appended thirteen more (`status` .. `forced_exit`, D-6385, D-6386,
+   FM-F125), as `types.rs`'s header says later packages do. Whichever of the
+   two merges second must carry FIB-5's fields through that file kind; the
+   choice of codec — FIB-8's `deep` kind or FIB-5's `OutcomeRecord` (D-6385,
+   one record per (decision, variant)) — is a merge-back decision with both
+   owners, not FIB-5's to take alone.
 
 **Proved on synthetic days.** `the_proof_plans_one_close_plan_per_usable_candle_on_each_side`
 and `the_proof_tally_counts_every_slot_by_status_reason_and_flag` (with the
