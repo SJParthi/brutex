@@ -344,7 +344,30 @@ fn month_answer(
     to_micros: Option<i64>,
     cancel: &bars::Cancel,
 ) -> Result<(axum::http::StatusCode, String), String> {
-    let file = asked.open(site, asked.month)?;
+    // AN ABSENT MONTH AND A DAMAGED ONE EACH ANSWER WITH THEIR OWN CODE
+    // (R3-07). Both were a 400 — the status of a malformed question — and an
+    // absent month wrote a warning on every request. An absent month is now
+    // 404 `month_absent`, counted (`bars::absent_answered`); a file cut short
+    // of its records or with no valid header is 500 `month_damaged`, "this
+    // month's file is damaged", and keeps its warning line. Every other
+    // refusal is the sentence it was, so a retired contract stays 410 and a
+    // writer's hold stays 503 with `Retry-After`.
+    let file = match crate::bars::open_classified(
+        &site.store_root,
+        store::path::PathParts {
+            vendor: asked.vendor,
+            exchange: &asked.exchange,
+            segment: &asked.segment,
+            symbol: &asked.symbol,
+            contract: asked.contract,
+            timeframe: asked.timeframe,
+            month: asked.month,
+            file: store::path::FileKind::Bars,
+        },
+    ) {
+        Ok(file) => file,
+        Err(refusal) => return refused_month(refusal),
+    };
     // THE WINDOW IS ADDRESSED, NOT FILTERED, and it used to be filtered.
     //
     // This read the WHOLE month — `page(&file, 0, n_valid)` — and handed the
@@ -481,6 +504,48 @@ fn month_answer(
     }
     Ok((axum::http::StatusCode::OK, out))
 }
+
+/// The answer for a month that would not open: 404 `month_absent`, 500
+/// `month_damaged`, or the refusal sentence for the caller to map (R3-07).
+///
+/// # Errors
+///
+/// Any other refusal, as its sentence.
+fn refused_month(
+    refusal: crate::bars::OpenRefusal,
+) -> Result<(axum::http::StatusCode, String), String> {
+    let coded = |status, code: &str, why: &str| {
+        Ok((
+            status,
+            format!(
+                r#"{{"error":{},"code":{}}}"#,
+                render::json_string(why),
+                render::json_string(code)
+            ),
+        ))
+    };
+    if matches!(refusal.kind, crate::bars::OpenRefusalKind::Absent) {
+        return coded(
+            axum::http::StatusCode::NOT_FOUND,
+            MONTH_ABSENT,
+            &format!("this month is not held: {}", refusal.message),
+        );
+    }
+    if refusal.damaged {
+        return coded(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            MONTH_DAMAGED,
+            &format!("this month's file is damaged: {}", refusal.message),
+        );
+    }
+    Err(refusal.message)
+}
+
+/// The code `/bars.json` answers an absent month with (R3-07).
+pub(super) const MONTH_ABSENT: &str = "month_absent";
+
+/// The code `/bars.json` answers a damaged month file with (R3-07).
+pub(super) const MONTH_DAMAGED: &str = "month_damaged";
 
 /// The paging parameters `/bars/window.json` reads and `/bars.json` does not.
 const NOT_TAKEN_HERE: [&str; 3] = ["limit", "page", "offset"];
@@ -651,7 +716,7 @@ impl WindowAsk {
         let series = Self::series(query)?;
         let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
             format!(
-                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi, tod.",
+                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi, tod, chg.",
                 param(query, "sort")
             )
         })?;
@@ -914,36 +979,62 @@ pub(super) async fn bars_window_json(
         Err(why) => return refuse(why),
     };
     let scanned = asked.sort.scans() || asked.want_extremes;
-    // THE SCAN POOL ALSO HOLDS THE WORK THAT GROWS WITH DAYS. A time-of-day
-    // bound locates every day's window and `coverage=1` counts every held
-    // month's days: O(days), measured at 0.9 to 1.7 s for a first request
-    // over NIFTY's 97 one-second months (most without a `.tix`), and 0.6 ms
-    // once the month's runs are memoised. Either would hold a seek slot for
-    // that second, so it waits where the sorts wait (D-3326, DB-066).
-    let heavy = scanned || asked.filter.tod.is_some() || asked.coverage;
+    // ADMITTED BY WHAT IT WILL READ (R3-07, DB-061). A time-of-day bound and
+    // `coverage=1` PLAN in O(days) — a month whose summary keeps no
+    // time-of-day index is located two `.tix` lookups a day, and coverage
+    // counts every held month's days — so they wait where the scans wait.
+    // Every other request is planned with the cheap reads and runs there
+    // while what it reads beyond its page stays within
+    // `bars::CHEAP_READ_BUDGET`: an INDEXED sort, served from the months'
+    // `.srt`, and extremes the index runs summarise go with the seeks. A
+    // request whose plan would read more answers `needs_scan_pool` before it
+    // reads a record and is asked again in the bounded scan pool, where it
+    // waits, and is refused with `Retry-After` when that is full, by name.
+    let plans_in_days = asked.filter.tod.is_some() || asked.coverage;
     let root = site.store_root.clone();
     let query = asked.query();
-    // STOPPED WHEN THE CLIENT GOES (DB-N15): the window looks at the flag
-    // between its plan and its read, and every few thousand rows of a read.
-    let work = move |cancel: &bars::Cancel| {
-        let window = bars::window_cancellable(&root, &query, cancel);
-        note_cancelled("/bars/window.json", &window);
-        let window = window?;
-        // A MONTH BEING WRITTEN IS "ASK AGAIN", NOT "READ IN PART" (R3-08,
-        // NEW-21): when every fault of the answer is a month a writer held
-        // past the read's patience — nothing damaged, nothing withheld — the
-        // set is short only for as long as the writer holds it. The answer is
-        // the writers' sentences alone, made where every being-written body
-        // is made, never the rows the read got from an unheld month first.
-        let waiting_on_writer = if window.faulted_records == 0 {
-            crate::detail::being_written_answer(&window.faults)
-        } else {
-            None
-        };
-        Ok::<_, String>((render_window(&window, scanned), waiting_on_writer))
+    let make = |budget: Option<u64>| {
+        let root = root.clone();
+        let query = query.clone();
+        // STOPPED WHEN THE CLIENT GOES (DB-N15): the window looks at the flag
+        // between its plan and its read, and every few thousand rows of a read.
+        move |cancel: &bars::Cancel| {
+            let window = bars::window_admitted(&root, &query, cancel, budget);
+            if !matches!(&window, Err(why) if bars::needs_scan(why)) {
+                note_cancelled("/bars/window.json", &window);
+            }
+            let mut window = window?;
+            // WHICH POOL ANSWERED, ON THE WIRE (R3-07): `store_read` for a
+            // request that read within the cheap budget, `scan` for one that
+            // waited where the scans wait.
+            window.admitted = if budget.is_some() {
+                "store_read"
+            } else {
+                "scan"
+            };
+            // A MONTH BEING WRITTEN IS "ASK AGAIN", NOT "READ IN PART" (R3-08,
+            // NEW-21): when every fault of the answer is a month a writer held
+            // past the read's patience — nothing damaged, nothing withheld — the
+            // set is short only for as long as the writer holds it. The answer is
+            // the writers' sentences alone, made where every being-written body
+            // is made, never the rows the read got from an unheld month first.
+            let waiting_on_writer = if window.faulted_records == 0 {
+                crate::detail::being_written_answer(&window.faults)
+            } else {
+                None
+            };
+            Ok::<_, String>((render_window(&window, scanned), waiting_on_writer))
+        }
     };
     // OFF THE ASYNC WORKERS, AND A SCAN APART FROM A SEEK (DB-066).
-    let answered = cancellable(heavy, work).await;
+    let mut heavy = plans_in_days;
+    let work = make((!heavy).then_some(bars::CHEAP_READ_BUDGET));
+    let mut answered = cancellable(heavy, work).await;
+    if matches!(&answered, Ok(Err(why)) if bars::needs_scan(why)) {
+        heavy = true;
+        let work = make(None);
+        answered = cancellable(heavy, work).await;
+    }
     let ((body, withheld, faulted), waiting_on_writer) = match answered {
         Ok(Ok(rendered)) => rendered,
         // A SERIES THE DECODER REFUSES IS GONE, not malformed: 410, with the
@@ -1065,6 +1156,28 @@ fn faults_json(faults: &[&str]) -> String {
 
 /// What a value sort served from sort indexes and what it read, as JSON, or
 /// `null` for a time-ordered page (D-3349).
+/// `tod_index` on the wire (R3-07, DB-B57): how a time-of-day bound was cut
+/// — months whose runs were kept, months cut from their time-of-day index
+/// with no bar file opened, months located day by day and the first reason —
+/// or `null` without a bound.
+fn tod_index_json(report: Option<&bars::TodReport>) -> String {
+    report.map_or_else(
+        || "null".to_owned(),
+        |report| {
+            format!(
+                r#"{{"kept":{},"indexed":{},"located":{},"why":{}}}"#,
+                report.kept,
+                report.indexed,
+                report.located,
+                report
+                    .why
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), render::json_string)
+            )
+        },
+    )
+}
+
 fn sort_index_json(report: Option<&bars::SortReport>) -> String {
     report.map_or_else(
         || "null".to_owned(),
@@ -1309,7 +1422,7 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
         }))
     };
     let body = format!(
-        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"sort_index":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faulted_records":{},"faults":{},"bars":{rows}}}"#,
+        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"sort_index":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"admitted":{},"tod_index":{},"coverage":{coverage},"faulted_records":{},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.offset,
         window.months_read,
@@ -1324,6 +1437,12 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
             .extremes_why
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
+        if window.admitted.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(window.admitted)
+        },
+        tod_index_json(window.tod_index.as_ref()),
         window.faulted_records,
         faults_json(&faults)
     );
@@ -1750,10 +1869,11 @@ mod tests {
     /// * **the file cut one record short of what its header names.** The
     ///   store refuses that file when it is OPENED (`n_valid claims more
     ///   records than the file holds`), so no record is read, the past-end
-    ///   decision is never reached, and the route answers 400 with the
-    ///   store's sentence. The first version of this test expected the full
-    ///   read and a 206 here, and failed on this branch: the store's open
-    ///   refuses the file first, which is the louder answer.
+    ///   decision is never reached, and the route answers 500
+    ///   `month_damaged` with the store's sentence (R3-07; it was 400). The
+    ///   first version of this test expected the full read and a 206 here,
+    ///   and failed on this branch: the store's open refuses the file first,
+    ///   which is the louder answer.
     #[tokio::test]
     async fn a_zero_filled_tail_still_takes_the_full_read() {
         let held = 3;
@@ -1802,11 +1922,18 @@ mod tests {
             if damage == 1 {
                 // REFUSED AT THE OPEN, before any record is read: the seam
                 // with its flag set and the plain call give the same
-                // sentence, and the handler answers 400 with it.
+                // sentence. SINCE R3-07 it is a damaged month, not a
+                // malformed question: 500 `month_damaged`, "this month's
+                // file is damaged", naming the file and the disagreement.
                 let sentence = "n_valid claims more records than the file holds";
                 for got in [started, answer(&site, from, None)] {
                     assert!(
-                        got.as_ref().is_err_and(|why| why.contains(sentence)),
+                        got.as_ref().is_ok_and(|(status, body)| {
+                            *status == axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                                && body.contains(sentence)
+                                && body.contains(MONTH_DAMAGED)
+                                && body.contains("this month's file is damaged")
+                        }),
                         "{what}: refused by name at the open: {got:?}"
                     );
                 }
@@ -1818,10 +1945,11 @@ mod tests {
                     bars_json(axum::extract::State(std::sync::Arc::clone(&site)), uri).await;
                 assert_eq!(
                     status,
-                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     "{what}: {body}"
                 );
                 assert!(body.contains(sentence), "{what}: {body}");
+                assert!(body.contains(MONTH_DAMAGED), "{what}: {body}");
                 assert!(!body.contains("\"bars\""), "{what}: no bars: {body}");
                 continue;
             }
@@ -2008,10 +2136,15 @@ mod tests {
     /// **A FULL SCAN POOL REFUSES A SCAN BY NAME, AND A SEEK IS STILL
     /// ANSWERED.** D-3326, DB-066, DB-G80: every window ran on a Tokio worker
     /// with no admission, so a few 97-month sorts could hold every worker and
-    /// queue every route behind them. A sort or an extremes fold now waits in
-    /// a pool of [`MAX_SCAN_CONCURRENT`] slots apart from the seek pool; when
-    /// it is full the scan answers 429 naming that bound, and a time-ordered
-    /// page in the same instant is served from the other pool.
+    /// queue every route behind them. Work that grows with days (a
+    /// time-of-day bound, `coverage=1`) waits in a pool of
+    /// [`MAX_SCAN_CONCURRENT`] slots apart from the seek pool; when it is full
+    /// that work answers 429 naming the bound, and a time-ordered page in the
+    /// same instant is served from the other pool. SINCE R3-07 a value sort is
+    /// admitted by what it will READ: this five-bar month's close sort reads
+    /// five rows, inside `bars::CHEAP_READ_BUDGET`, so it is served beside the
+    /// seeks (`an_indexed_sort_is_admitted_with_the_cheap_reads` holds the
+    /// case that is a real scan).
     #[tokio::test]
     async fn a_full_scan_pool_refuses_a_scan_by_name_and_a_seek_is_still_answered() {
         let root = store_root("scanpool");
@@ -2072,12 +2205,23 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
             assert!(body.contains("a bar window scan not admitted"), "{body}");
         }
-        assert_eq!(scan, axum::http::StatusCode::TOO_MANY_REQUESTS, "{refused}");
+        // A CLOSE SORT THAT READS FIVE ROWS IS NOT A SCAN (R3-07): it never
+        // waits on the scan pool, whatever the seek pool answers.
         assert!(
-            refused.contains("a bar window scan not admitted")
-                && refused.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
-            "the refusal names the pool and its bound: {refused}"
+            !refused.contains("a bar window scan"),
+            "a five-row sort never waits on the scan pool: {refused}"
         );
+        if scan == axum::http::StatusCode::OK {
+            assert!(refused.contains(r#""admitted":"store_read""#), "{refused}");
+        } else {
+            assert_eq!(scan, axum::http::StatusCode::TOO_MANY_REQUESTS, "{refused}");
+        }
+        for (_, body) in [(timed, &timed_body), (covered, &covered_body)] {
+            assert!(
+                body.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
+                "the refusal names the pool and its bound: {body}"
+            );
+        }
         // A seek may itself meet a full seek pool shared with other tests;
         // that is a 429 naming the OTHER pool, never the scan's.
         assert!(
@@ -2187,5 +2331,222 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("the scan pool stayed full");
+    }
+
+    /// One invented bar a second from 2024-01-02 09:15:00 IST, `n` of them,
+    /// as GDFL NIFTY 1s; the root, the site and the month's bar file path.
+    fn second_month(name: &str, n: i64) -> (std::path::PathBuf, Loaded, std::path::PathBuf) {
+        let root = store_root(name);
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::SECOND_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let open = (19_724 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60) * 1_000_000;
+        if n > 0 {
+            let rows: Vec<store::format::Bar> = (0..n)
+                .map(|at| store::format::Bar {
+                    ts_micros: open + at * 1_000_000,
+                    open: 1_000 + at % 13,
+                    high: 1_020 + at % 13,
+                    low: 990 + at % 13,
+                    close: 1_005 + (at * 7) % 13,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                })
+                .collect();
+            let mut file =
+                store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+            file.append(&rows).expect("legal bars");
+        }
+        let loaded = std::sync::Arc::new(Site::serving(&masters(name, None, None), &root));
+        (root.clone(), loaded, path.to_path_buf(&root))
+    }
+
+    /// **AN INDEXED SORT IS ADMITTED WITH THE CHEAP READS; A REAL SCAN WAITS
+    /// IN THE SCAN POOL** (R3-07, DB-061). With every scan slot taken, a
+    /// close sort over a month its `.srt` orders reads only its page and is
+    /// answered beside the seeks (`"admitted":"store_read"`), where before it
+    /// was refused 429 with the scans. A time-of-day ORDER over the same
+    /// 70,000 rows has no index, would read every row — past
+    /// `bars::CHEAP_READ_BUDGET` — and so goes to the scan pool, which is full:
+    /// 429 naming it. With the slots free again it is answered there
+    /// (`"admitted":"scan"`).
+    #[tokio::test]
+    async fn an_indexed_sort_is_admitted_with_the_cheap_reads() {
+        let rows = 70_000_i64;
+        assert!(u64::try_from(rows).expect("rows") > bars::CHEAP_READ_BUDGET);
+        let (_root, loaded, _) = second_month("r307-admit", rows);
+        let ask = |sort: &str| {
+            let uri: axum::http::Uri = format!(
+                "/bars/window.json?feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1s&from=2024-01&to=2024-01&limit=5&sort={sort}&desc=1"
+            )
+            .parse()
+            .expect("a uri");
+            bars_window_json(axum::extract::State(std::sync::Arc::clone(&loaded)), uri)
+        };
+        let crowd = crate::detail::crowd(crate::detail::Named::Scan);
+        let (indexed, _, indexed_body) = ask("c").await;
+        let (scan, _, scan_body) = ask("tod").await;
+        drop(crowd);
+        assert!(
+            !indexed_body.contains("a bar window scan"),
+            "an indexed sort never waits on the scan pool: {indexed_body}"
+        );
+        if indexed == axum::http::StatusCode::OK {
+            let got: serde_json::Value = serde_json::from_str(&indexed_body).expect("JSON");
+            assert_eq!(got["admitted"], "store_read", "{indexed_body}");
+            assert_eq!(
+                got["scan_rows"], 0,
+                "the page alone is read: {indexed_body}"
+            );
+            assert_eq!(got["bars"].as_array().map(Vec::len), Some(5));
+        } else {
+            // The SEEK pool is shared with other tests; a refusal there names
+            // that pool, never the scan's.
+            assert_eq!(
+                indexed,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "{indexed_body}"
+            );
+        }
+        assert_eq!(
+            scan,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "{scan_body}"
+        );
+        assert!(
+            scan_body.contains("a bar window scan not admitted")
+                && scan_body.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
+            "a real scan waits where the scans wait, named: {scan_body}"
+        );
+        for _ in 0..400 {
+            let (status, _, body) = ask("tod").await;
+            if status == axum::http::StatusCode::OK {
+                let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+                assert_eq!(got["admitted"], "scan", "{body}");
+                assert_eq!(got["scan_rows"], rows, "{body}");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the scan pool stayed full for two seconds after the slots were returned");
+    }
+
+    /// `/bars.json` for NIFTY 1s January 2024 under `loaded`, any query tail.
+    async fn month_json(loaded: &Loaded, tail: &str) -> (axum::http::StatusCode, String) {
+        let uri: axum::http::Uri = format!(
+            "/bars.json?feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s\
+             &month=2024-01{tail}"
+        )
+        .parse()
+        .expect("a uri");
+        let (status, _, body) = bars_json(axum::extract::State(loaded.clone()), uri).await;
+        (status, body)
+    }
+
+    /// **AN ABSENT MONTH IS COUNTED, NOT LOGGED** (R3-07, DB-065). Every
+    /// `/bars.json` for a month that is not held wrote one `read refused`
+    /// warning and answered 400, the status of a malformed question. It is
+    /// now 404 `month_absent`, the count `bars::absent_answered` moves by one
+    /// a request, and no warning names it.
+    #[tokio::test]
+    async fn an_absent_month_is_counted_not_logged() {
+        let (_root, loaded, _) = second_month("r307-absent", 0);
+        let from = crate::emitted::mark();
+        let before = bars::absent_answered();
+        for _ in 0..40 {
+            let (status, body) = month_json(&loaded, "").await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
+            let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(got["code"], MONTH_ABSENT, "{body}");
+            assert!(
+                got["error"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("not held") && why.contains("2024-01")),
+                "{body}"
+            );
+        }
+        assert!(
+            bars::absent_answered() >= before + 40,
+            "every absent answer is counted"
+        );
+        let warned = crate::emitted::landed(from, "api.bars", "read refused");
+        let mine = warned
+            .iter()
+            .filter(|line| crate::emitted::says(line, "symbol", "NIFTY"))
+            .filter(|line| crate::emitted::says(line, "month", "2024-01"))
+            .filter(|line| crate::emitted::says(line, "timeframe", "1s"))
+            .count();
+        assert_eq!(mine, 0, "an absent month writes no warning: {warned:?}");
+        // NAMED ONCE, AT ITS FIRST ANSWER: one INFO line for forty answers.
+        let counted = crate::emitted::landed(from, "api.bars", "absent month counted");
+        let named = counted
+            .iter()
+            .filter(|line| crate::emitted::says(line, "symbol", "NIFTY"))
+            .filter(|line| crate::emitted::says(line, "path", "r307-absent"))
+            .count();
+        assert_eq!(named, 1, "the month is named once: {counted:?}");
+    }
+
+    /// **A CUT-SHORT OR HEADERLESS MONTH IS NAMED DAMAGED** (R3-07). A bar
+    /// file shorter than its header's records, and one with no valid header
+    /// at all, are not malformed questions: each answers 500
+    /// `month_damaged`, "this month's file is damaged", naming the file.
+    #[tokio::test]
+    async fn a_cut_short_month_is_named_damaged() {
+        let (_root, loaded, bars_path) = second_month("r307-cut", 40);
+        let (status, body) = month_json(&loaded, "").await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "whole, it reads: {body}"
+        );
+        // CUT SHORT: the header names forty records and the bytes hold
+        // twenty (the header region, then twenty records).
+        let cut = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bars_path)
+            .expect("the owned scratch file");
+        cut.set_len(store::format::HEADER_LEN + 20 * store::format::RECORD_STRIDE)
+            .expect("cut short");
+        drop(cut);
+        let (status, body) = month_json(&loaded, "").await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{body}"
+        );
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(got["code"], MONTH_DAMAGED, "{body}");
+        assert!(
+            got["error"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("this month's file is damaged")),
+            "{body}"
+        );
+        // HEADERLESS: the file is there and holds no header at all.
+        std::fs::write(&bars_path, b"").expect("the owned scratch file");
+        let (status, body) = month_json(&loaded, "").await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{body}"
+        );
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(got["code"], MONTH_DAMAGED, "{body}");
     }
 }
