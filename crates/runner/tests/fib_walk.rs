@@ -3721,6 +3721,386 @@ fn the_event_walk_jumps_under_a_minute_target_and_a_new_high_trail() {
     assert!(events < 10, "{events}");
 }
 
+// ----------------------------------------------------- spills by events --
+
+/// A thin deep day from 10:00:00: `count` seconds of a few shares each (some
+/// none), with an occasional silence; the book's sides, the print flags and
+/// the Zerodha minutes perturbed so a spill meets every kind of second it
+/// must step; one-minute trail candles from the Zerodha minutes; sometimes a
+/// halt; and sometimes a forced window.
+fn thin_day(rng: &mut Seeded, count: u32) -> Day {
+    let mut bars = vec![quiet(at(9, 59, 0), P - 50, 1_000)];
+    let mut price = P;
+    let mut second = at(10, 0, 0);
+    for _ in 0..count {
+        let open = price;
+        price += rng.range(-40, 40);
+        let high = open.max(price) + rng.range(0, 20);
+        let low = open.min(price) - rng.range(0, 20);
+        bars.push(bar(second, open, high, low, price, rng.range(0, 6)));
+        second += if rng.below(25) == 0 {
+            u32::try_from(rng.range(2, 9)).unwrap()
+        } else {
+            1
+        };
+    }
+    if rng.coin() && second < at(15, 9, 0) {
+        let window = bar(
+            at(15, 9, 0),
+            price,
+            price + 30,
+            price - 30,
+            price,
+            rng.range(0, 3_000),
+        );
+        bars.push(window);
+    }
+    let mut day = Day::seconds(bars);
+    // A narrowed minute makes some of its seconds outliers; a dropped one
+    // leaves its seconds unwitnessed.
+    let mut zerodha = Vec::with_capacity(day.zerodha.len());
+    for (k, minute) in day.zerodha.iter().enumerate() {
+        match rng.below(6) {
+            // The 09:59 minute stays: a deep day needs one.
+            0 if k > 0 => {}
+            1 => {
+                let mid = i64::midpoint(minute.high, minute.low);
+                let narrow = Candle {
+                    high: minute.high.max(mid + 1).min(mid + 10),
+                    low: minute.low.min(mid - 1).max(mid - 10),
+                    ..*minute
+                };
+                let narrow = Candle {
+                    open: narrow.low,
+                    close: narrow.high,
+                    ..narrow
+                };
+                zerodha.push(narrow);
+            }
+            _ => zerodha.push(*minute),
+        }
+    }
+    day.zerodha = zerodha;
+    day.trail = day.zerodha.iter().map(candle_of).collect();
+    let marks = (0..day.bars.len())
+        .map(|_| BookMark {
+            ask: rng.below(30) != 0,
+            bid: rng.below(30) != 0,
+            flagged_print: rng.below(40) == 0,
+        })
+        .collect();
+    day.marks = Some(marks);
+    if rng.below(4) == 0 {
+        let start = at(10, 0, 0) + u32::try_from(rng.range(30, 600)).unwrap();
+        day.halts = vec![HaltRange {
+            start_second: start,
+            end_second: start + u32::try_from(rng.range(1, 60)).unwrap(),
+        }];
+    }
+    if rng.coin() {
+        day.max_gap = u32::try_from(rng.range(0, 6)).unwrap();
+    }
+    day
+}
+
+/// A deep fill variant: every window reading, with a cap one time in four.
+fn spill_fill(rng: &mut Seeded) -> FillVariant {
+    FillVariant {
+        window: match rng.below(3) {
+            0 => EntryWindow::NextClose,
+            1 => EntryWindow::UntilForced,
+            _ => EntryWindow::Deadline {
+                seconds: u32::try_from(rng.range(1, 900)).unwrap(),
+            },
+        },
+        participation: if rng.below(4) == 0 {
+            Participation::Cap {
+                permille: u16::try_from(rng.range(1, 1_000)).unwrap(),
+            }
+        } else {
+            Participation::NoCap
+        },
+    }
+}
+
+/// Spills walked by events, through every kind of second a spill must step,
+/// are the forward walk's bytes; the trials reach long entry and exit spills,
+/// their completion inside a run, their meeting with the forced window and
+/// with every flag a spilled second can raise.
+#[test]
+fn spill_by_events_equals_forward_pass() {
+    let mut rng = Seeded(0x5_B111);
+    let (mut long_entries, mut long_exits, mut to_forced) = (0, 0, 0);
+    let mut flags = std::collections::HashSet::with_capacity(32);
+    let mut statuses = std::collections::HashSet::with_capacity(32);
+    for trial in 0..700 {
+        let count = u32::try_from(rng.range(60, 900)).unwrap();
+        let day = thin_day(&mut rng, count);
+        let mut plan = random_plan(&mut rng);
+        plan.decision_second = at(10, 0, 0) + u32::try_from(rng.range(0, 120)).unwrap();
+        plan.entry_window_end = plan.decision_second + 60 * u32::try_from(rng.range(1, 5)).unwrap();
+        plan.base_edge = P - rng.range(50, 900);
+        let variant = random_variant(&mut rng);
+        let profile = WalkProfile {
+            exit_fill: ExitFill::SpillByVolume,
+            ..random_profile(&mut rng, Resolution::Second)
+        };
+        let fill = spill_fill(&mut rng);
+        let size = if rng.coin() {
+            TradeSize::Small
+        } else {
+            TradeSize::Large
+        };
+        let forward = walk_one(&day, &profile, plan, variant, fill, size);
+        let events = walk_events(&day, &profile, plan, variant, fill, size);
+        assert_eq!(
+            forward, events,
+            "trial {trial}: {plan:?} {variant:?} {profile:?} {fill:?}"
+        );
+        if forward.last_entry_second > forward.first_entry_second + 30 {
+            long_entries += 1;
+        }
+        if forward.exit_spill_seconds > 30 {
+            long_exits += 1;
+        }
+        if has(&forward, TradeFlag::ExitSpillToForced) {
+            to_forced += 1;
+        }
+        for flag in [
+            TradeFlag::PartialEntry,
+            TradeFlag::OneSidedBook,
+            TradeFlag::FlaggedPrintFill,
+            TradeFlag::CrossFeedOutlier,
+            TradeFlag::EntryCancelledByExit,
+            TradeFlag::SilenceInTrade,
+            TradeFlag::EntryBeyondStop,
+        ] {
+            if has(&forward, flag) {
+                flags.insert(flag.name());
+            }
+        }
+        statuses.insert(forward.status.name());
+    }
+    assert!(long_entries > 40, "long entry spills: {long_entries}");
+    assert!(long_exits > 40, "long exit spills: {long_exits}");
+    assert!(to_forced >= 5, "spills into the forced window: {to_forced}");
+    assert_eq!(flags.len(), 7, "{flags:?}");
+    assert!(statuses.len() >= 6, "{statuses:?}");
+}
+
+/// The slot's outcome and work, walked forward and by events, after checking
+/// the outcomes agree.
+fn work_of(
+    day: &Day,
+    profile: &WalkProfile,
+    plan: Plan,
+    variant: ExitVariant,
+    fill: FillVariant,
+    size: TradeSize,
+) -> (SlotOutcome, u64, u64) {
+    let exits = set_of(plan.direction, vec![variant]);
+    let index = day.index(profile, &exits).expect("indexes");
+    let mut forward =
+        runner::fib::walk::Stepper::new(&index, &plan, 0, &variant, fill, size).expect("a slot");
+    let mut by_events = forward.clone();
+    forward.run();
+    by_events.run_events();
+    assert_eq!(forward.outcome(), by_events.outcome());
+    (forward.outcome(), forward.work(), by_events.work())
+}
+
+/// A stop leaves 100 shares into 2,000 seconds of one share each: the
+/// forward walk steps a hundred seconds, the event walk one run, and both
+/// book every share at its own second's low.
+#[test]
+fn an_exit_spill_over_a_hundred_seconds_is_one_binary_search() {
+    let mut tail = vec![bar(at(10, 1, 0), P, P, 98_990, 98_990, 1)];
+    tail.extend((1..2_000).map(|k| bar(at(10, 1, 0) + k, 98_990, 98_990, 98_980, 98_985, 1)));
+    tail.push(quiet(at(15, 9, 0), P, 1_000));
+    let day = second_day(&tail);
+    let (out, forward, events) = work_of(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_spill_seconds, 99);
+    let own = out.own_exit.expect("the stop's order");
+    assert_eq!((own.filled_qty, own.last_fill_second), (100, at(10, 2, 39)));
+    assert_eq!(own.exit_value_paisa, i128::from(98_990 + 99 * 98_980));
+    assert_eq!(out.exit_second, at(10, 2, 39));
+    assert!(forward > 100, "{forward}");
+    assert!(events < 10, "{events}");
+}
+
+/// A spill that has not completed by 15:09:00 takes every share of its run,
+/// then the forced rules price the rest.
+#[test]
+fn a_spill_run_short_of_the_order_takes_its_all_and_the_rest_is_forced() {
+    let mut tail = vec![bar(at(10, 1, 0), P, P, 98_990, 98_990, 1)];
+    tail.extend((1..60).map(|k| bar(at(10, 1, 0) + k, 98_990, 98_990, 98_980, 98_985, 1)));
+    tail.push(bar(at(10, 2, 0), 98_990, 98_990, 98_980, 98_985, 0));
+    tail.push(quiet(at(15, 9, 0), P, 1_000));
+    let (out, forward, events) = work_of(
+        &second_day(&tail),
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert!(has(&out, TradeFlag::ExitSpillToForced));
+    let own = out.own_exit.expect("the stop's order");
+    // The last second gave nothing: the order's last fill is the one before.
+    assert_eq!((own.filled_qty, own.last_fill_second), (60, at(10, 1, 59)));
+    assert_eq!(out.forced_exit.expect("the rest").filled_qty, 40);
+    assert_eq!(out.exit_spill_seconds, 60);
+    assert!(forward > 60, "{forward}");
+    assert!(events < 10, "{events}");
+}
+
+/// An entry under reading 2 spills over a thousand one-share seconds while
+/// its filled part is held: one run by the volume prefix, then the hold.
+#[test]
+fn an_entry_spill_until_the_forced_window_is_one_binary_search() {
+    let tail: Vec<Candle> = (1..1_500)
+        .map(|k| bar(at(10, 0, 0) + k, P, P + 20, P - 20, P, 1))
+        .chain([quiet(at(15, 9, 0), P, 10_000)])
+        .collect();
+    let mut bars = vec![bar(at(10, 0, 0), P, P + 20, P - 20, P, 1)];
+    bars.extend(tail);
+    let day = Day::seconds(bars);
+    let until = FillVariant {
+        window: EntryWindow::UntilForced,
+        participation: Participation::NoCap,
+    };
+    let (out, forward, events) = work_of(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        until,
+        TradeSize::Large,
+    );
+    assert_eq!(out.planned_qty, 500);
+    assert_eq!(out.filled_qty, 500);
+    assert_eq!(
+        (out.first_entry_second, out.last_entry_second),
+        (at(10, 0, 0), at(10, 0, 0) + 499)
+    );
+    assert_eq!(out.entry_value_paisa, i128::from(500 * (P + 20)));
+    assert_eq!(out.max_participation_permille, 1_000);
+    assert!(!has(&out, TradeFlag::PartialEntry));
+    assert!(forward > 1_400, "{forward}");
+    assert!(events < 20, "{events}");
+    // Under a participation cap the entry is stepped second by second
+    // (L-FIB5-03): the same bytes, at one step per second of the spill.
+    let capped = FillVariant {
+        participation: Participation::Cap { permille: 500 },
+        ..until
+    };
+    let many: Vec<Candle> = (0..1_500)
+        .map(|k| bar(at(10, 0, 0) + k, P, P + 20, P - 20, P, 4))
+        .chain([quiet(at(15, 9, 0), P, 10_000)])
+        .collect();
+    let (out, _, events) = work_of(
+        &Day::seconds(many),
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        capped,
+        TradeSize::Large,
+    );
+    assert_eq!(out.last_entry_second, at(10, 0, 0) + 249);
+    assert_eq!(out.max_participation_permille, 500);
+    assert!(events > 250, "{events}");
+}
+
+/// A spilling entry's run takes each second's volume at that second's own
+/// high, an empty second giving nothing, and the completing second only the
+/// rest; the participation stays the whole second the order first took.
+#[test]
+fn an_entry_run_takes_each_second_s_volume_at_its_own_high() {
+    let until = FillVariant {
+        window: EntryWindow::UntilForced,
+        participation: Participation::NoCap,
+    };
+    // 100 wanted: 10 at 10:00:00, 5 at :01, nothing at :02, 85 of 400 at :03.
+    let day = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 20, P - 20, P, 10),
+        bar(at(10, 0, 1), P, P + 25, P - 20, P, 5),
+        bar(at(10, 0, 2), P, P + 20, P - 20, P, 0),
+        bar(at(10, 0, 3), P, P + 30, P - 20, P, 400),
+        quiet(at(15, 9, 0), P, 10_000),
+    ]);
+    let (out, _, _) = work_of(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        until,
+        TradeSize::Small,
+    );
+    assert_eq!(out.filled_qty, 100);
+    assert_eq!(
+        (out.first_entry_second, out.last_entry_second),
+        (at(10, 0, 0), at(10, 0, 3))
+    );
+    assert_eq!(out.max_participation_permille, 1_000);
+    assert_eq!(
+        out.entry_value_paisa,
+        i128::from(10 * (P + 20) + 5 * (P + 25) + 85 * (P + 30))
+    );
+    assert!(!has(&out, TradeFlag::PartialEntry));
+}
+
+/// A BREAK plan whose level is reached an hour after its decision jumps
+/// there in one descent; one that never arms ends at its window's close.
+#[test]
+fn an_unarmed_break_jumps_to_the_bar_that_arms_it() {
+    let mut plan = long_plan(at(10, 0, 0));
+    plan.style = EntryStyle::Break;
+    plan.trigger_edge = P + 200;
+    plan.entry_window_end = at(11, 30, 0);
+    let mut bars: Vec<Candle> = (0..3_600)
+        .map(|k| bar(at(10, 0, 0) + k, P, P + 20, P - 20, P, 50))
+        .collect();
+    bars.push(bar(at(11, 0, 0), P + 150, P + 300, P + 150, P + 250, 500));
+    bars.extend((1..600).map(|k| bar(at(11, 0, 0) + k, P + 250, P + 270, P + 230, P + 250, 50)));
+    bars.push(quiet(at(15, 9, 0), P + 250, 10_000));
+    let day = Day::seconds(bars);
+    let (out, forward, events) = work_of(
+        &day,
+        &second_profile(),
+        plan,
+        STOP_ONLY,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(out.first_entry_second, at(11, 0, 0));
+    assert!(forward > 3_600, "{forward}");
+    assert!(events < 20, "{events}");
+    plan.trigger_edge = P + 900;
+    let (out, forward, events) = work_of(
+        &day,
+        &second_profile(),
+        plan,
+        STOP_ONLY,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(
+        out.status,
+        SlotStatus::EntryUnfilled(UnfilledReason::NeverTriggered)
+    );
+    assert!(forward > 3_600, "{forward}");
+    assert!(events < 10, "{events}");
+}
+
 // ------------------------------------------------ the index's last paths --
 
 #[test]

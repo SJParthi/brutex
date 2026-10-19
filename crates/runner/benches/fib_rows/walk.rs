@@ -244,20 +244,124 @@ const PLAN: Plan = Plan {
     trail: 0,
 };
 
+/// The spill rows' lengths, in seconds: an exit order of that many shares
+/// leaving into one-share seconds.
+const SPILLS: [u64; 3] = [10, 1_000, 20_000];
+/// The spill rows' deep days in the ring.
+const THIN_DAYS: usize = 8;
+/// The spill rows' time exit: ten seconds after the open.
+const SPILL_EXIT: u32 = OPEN + 10;
+
+/// One thin synthetic stock-day: the 09:15:00 second trades a billion shares
+/// (any entry fills there), every later second to 15:09:59 one share, a
+/// random walk around Rs 500.00, with its Zerodha minutes.
+fn thin(day: usize) -> (Vec<Candle>, Vec<Candle>) {
+    let (mut bars, _, _) = synthetic(day, Resolution::Second);
+    for (k, bar) in bars.iter_mut().enumerate() {
+        bar.volume = if k == 0 { 1_000_000_000 } else { 1 };
+    }
+    let mut minutes: Vec<Candle> = Vec::new();
+    for b in &bars {
+        let start = b.ts_micros - b.ts_micros.rem_euclid(60_000_000);
+        match minutes.last_mut() {
+            Some(m) if m.ts_micros == start => {
+                m.high = m.high.max(b.high);
+                m.low = m.low.min(b.low);
+                m.close = b.close;
+                m.volume += b.volume;
+            }
+            _ => minutes.push(Candle::new(
+                start, b.open, b.high, b.low, b.close, b.volume, OI_NULL,
+            )),
+        }
+    }
+    (bars, minutes)
+}
+
+/// The spill rows' one exit: no stop, no target, no trail, a time exit at
+/// 09:15:10.
+const SPILL_VARIANT: ExitVariant = ExitVariant {
+    time_exit: TimeExit::Clock { second: SPILL_EXIT },
+    ..ExitVariant::REFERENCE
+};
+
+fn thin_ring() -> &'static Ring {
+    static RING: OnceLock<Ring> = OnceLock::new();
+    RING.get_or_init(|| {
+        let exits = ExitSet::new(Search::Long, 1, 0, vec![SPILL_VARIANT]).unwrap();
+        let profile = WalkProfile {
+            resolution: Resolution::Second,
+            price_map: PriceMap::Identity,
+            exit_fill: ExitFill::SpillByVolume,
+            snapshot_edge: SnapshotEdge::StampOpensInterval,
+            halt_rule: HaltRule::WorstSeenThroughHalt,
+            cross_feed: CrossFeed::SecondsOnly,
+            beyond_target: BeyondTarget::FiresOnFirstBar,
+            clock_rule: ClockRule::RefuseShifted,
+        };
+        let mut days = Vec::with_capacity(THIN_DAYS);
+        let mut build_ns = Vec::with_capacity(THIN_DAYS);
+        for day in 0..THIN_DAYS {
+            let (bars, minutes) = thin(day);
+            let input = DayInput {
+                bars: &bars,
+                book: BookEvidence::NotObserved,
+                halts: &[],
+                zerodha_minutes: &minutes,
+                raw_tick: 5,
+                decision_tick: 5,
+                max_second_gap: u32::MAX,
+                clock_lag: ClockLag::Measured(0),
+                trail: &[TrailCandles {
+                    tf_minutes: 1,
+                    candles: &[],
+                }],
+            };
+            let start = Instant::now();
+            days.push(index_day(&profile, &input, &exits).unwrap());
+            build_ns.push(start.elapsed().as_nanos());
+        }
+        Ring {
+            exits,
+            days,
+            build_ns,
+        }
+    })
+}
+
+/// A long whose small size buys `shares`: its entry reference is the size
+/// over the shares, its base far below every price.
+fn spill_plan(shares: u64) -> Plan {
+    let size_paisa = 100_000 * 100;
+    Plan {
+        entry_ref: size_paisa / i64::try_from(shares).unwrap(),
+        base_edge: 1,
+        trigger_edge: size_paisa / i64::try_from(shares).unwrap(),
+        fib_zero: 1,
+        ..PLAN
+    }
+}
+
 /// The walker's state for one row: slots stepping one at a time over a ring.
 pub(crate) struct Walking {
     ring: &'static Ring,
     variant: ExitVariant,
+    plan: Plan,
     slots: Vec<Stepper<'static>>,
     at: usize,
     turns: usize,
     work: u64,
 }
 
-fn stepper(ring: &'static Ring, day: usize, variant: &ExitVariant) -> Stepper<'static> {
+fn stepper(
+    ring: &'static Ring,
+    day: usize,
+    variant: &ExitVariant,
+    plan: &Plan,
+) -> Stepper<'static> {
     Stepper::new(
         &ring.days[day % ring.days.len()],
-        &PLAN,
+        plan,
         0,
         variant,
         FillVariant::STAGE_A,
@@ -266,19 +370,29 @@ fn stepper(ring: &'static Ring, day: usize, variant: &ExitVariant) -> Stepper<'s
     .unwrap()
 }
 
-fn walking(ring: &'static Ring, id: u16, slots: u64) -> Walking {
+fn walking_plan(ring: &'static Ring, id: u16, slots: u64, plan: Plan) -> Walking {
     let variant = *ring.exits.get(id).unwrap();
     let slots = (0..slots as usize)
-        .map(|j| stepper(ring, j, &variant))
+        .map(|j| stepper(ring, j, &variant, &plan))
         .collect();
     Walking {
         ring,
         variant,
+        plan,
         slots,
         at: 0,
         turns: 0,
         work: 0,
     }
+}
+
+fn walking(ring: &'static Ring, id: u16, slots: u64) -> Walking {
+    walking_plan(ring, id, slots, PLAN)
+}
+
+/// Sixteen slots of the thin ring whose exits spill `seconds` seconds.
+fn spilling(seconds: u64) -> Walking {
+    walking_plan(thin_ring(), 0, 16, spill_plan(seconds))
 }
 
 /// One bar step of the current slot; a finished slot restarts on the next
@@ -290,7 +404,12 @@ fn step(state: &mut Walking, _i: u64) -> u64 {
     state.work += slot.work() - before;
     if !more {
         state.turns += 1;
-        *slot = stepper(state.ring, state.at + state.turns, &state.variant);
+        *slot = stepper(
+            state.ring,
+            state.at + state.turns,
+            &state.variant,
+            &state.plan,
+        );
         state.at = (state.at + 1) % state.slots.len();
     }
     state.work
@@ -304,7 +423,12 @@ fn pair_by_events(state: &mut Walking, _i: u64) -> u64 {
     slot.run_events();
     state.work += slot.work();
     state.turns += 1;
-    *slot = stepper(state.ring, state.at + state.turns, &state.variant);
+    *slot = stepper(
+        state.ring,
+        state.at + state.turns,
+        &state.variant,
+        &state.plan,
+    );
     state.at = (state.at + 1) % state.slots.len();
     state.work
 }
@@ -421,7 +545,48 @@ pub(crate) fn report(host: &Host, out: &mut String) -> bool {
     ] {
         ok &= !run(&row, host, out).fails();
     }
+    ok &= report_spills(host, out);
     report_builds(out);
+    ok
+}
+
+/// C-F5-08 and C-F5-09: an exit spilling by volume, stepped and by events
+/// (D-6391). False when either failed.
+fn report_spills(host: &Host, out: &mut String) -> bool {
+    let spill_steps = Row {
+        id: "C-F5-08",
+        name: "deep: one bar step of one slot whose exit order spills by volume, 16 slots",
+        class: Some(Class::WorstCase),
+        axis: Some(Axis::Data {
+            unit: "spill in seconds (an exit of that many shares into one-share seconds)",
+            production: None,
+        }),
+        scales: SPILLS,
+        setup: spilling,
+        op: step,
+        work,
+        bytes,
+    };
+    let spill_events = Row {
+        id: "C-F5-09",
+        name: "deep: one whole pair walked by events, its exit order spilling by volume, 16 slots",
+        class: Some(Class::Bounded {
+            bound: "O(log bars) per spill run: one binary search on the volume prefix (D-6391)",
+        }),
+        axis: Some(Axis::Data {
+            unit: "spill in seconds (an exit of that many shares into one-share seconds)",
+            production: None,
+        }),
+        scales: SPILLS,
+        setup: spilling,
+        op: pair_by_events,
+        work,
+        bytes,
+    };
+    let mut ok = true;
+    for row in [spill_steps, spill_events] {
+        ok &= !run(&row, host, out).fails();
+    }
     ok
 }
 

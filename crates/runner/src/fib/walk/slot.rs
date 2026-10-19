@@ -26,11 +26,12 @@ use super::super::types::{
     BeyondTarget, ExitFill, ExitOrder, ExitReason, HaltRule, Resolution, SlotOutcome, SlotRefusal,
     SlotStatus, TradeFlag, TradeFlags, TradeSize, UnfilledReason, UnpricedReason,
 };
+use super::event::Leg;
 use super::exits::{
     EntryWindow, ExitVariant, FillVariant, Participation, StopLoss, TakeProfit, TimeExit,
     TrailingStop, TrailingTakeProfit,
 };
-use super::index::{Bit, DayIndex, SideBar, SideIndex};
+use super::index::{Bit, DayIndex, SideBar, SideIndex, SwingEvent};
 use super::{Plan, WalkRefusal};
 
 /// Where a slot stands.
@@ -92,8 +93,14 @@ impl Order {
 
     /// Books `qty` shares at `price` (raw, mirrored) in `second`.
     fn book(&mut self, qty: u64, price: i64, second: u32) {
+        self.book_many(qty, i128::from(qty) * i128::from(price), second);
+    }
+
+    /// Books `qty` shares worth `value` (raw, mirrored) whose last fill was
+    /// in `second`.
+    fn book_many(&mut self, qty: u64, value: i128, second: u32) {
         self.qty += qty;
-        self.value += i128::from(qty) * i128::from(price);
+        self.value += value;
         self.last_second = second;
     }
 
@@ -483,13 +490,23 @@ impl<'a> Stepper<'a> {
     /// Runs the slot to its end by EVENTS (FM-F030): a held position jumps
     /// over every bar that cannot change it, straight to its next touch, time
     /// instant, swing, new high (while a give-back or an R-step trails), halt,
-    /// corrupt bar, silence or the forced window, and steps that bar as
+    /// corrupt bar, silence or the forced window; an entry waiting for its
+    /// trigger jumps to the bar that arms it; a deep entry or exit SPILLING
+    /// over seconds takes a whole run of plain seconds by one binary search
+    /// on the volume prefix (D-6391). Each then steps the next bar as
     /// [`Self::run`] would. The outcome is the same, byte for byte
-    /// (`event_walk_equals_forward_pass`); the work is O(log bars) per event.
+    /// (`event_walk_equals_forward_pass`,
+    /// `spill_by_events_equals_forward_pass`); the work is O(log bars) per
+    /// event.
     pub fn run_events(&mut self) {
         loop {
-            if self.phase == Phase::Holding && !self.after_halt {
-                self.jump();
+            if !self.after_halt {
+                match self.phase {
+                    Phase::Holding => self.jump(),
+                    Phase::Entering => self.jump_entering(),
+                    Phase::Exiting => self.jump_exit_spill(),
+                    Phase::Done => {}
+                }
             }
             if !self.step() {
                 break;
@@ -497,16 +514,37 @@ impl<'a> Stepper<'a> {
         }
     }
 
+    /// The first second of the forced window.
+    fn forced_start() -> u32 {
+        u32::try_from(SESSION_FORCED_WINDOW_START_SECS).unwrap_or(u32::MAX)
+    }
+
+    /// The next swing event this slot has not read, when its trail has one.
+    fn next_swing(&self) -> Option<&SwingEvent> {
+        self.levels
+            .swing
+            .and_then(|(list, _)| self.side.swings.get(list))
+            .and_then(|list| list.events.get(self.swing_cursor))
+    }
+
     /// Moves a held position's cursor to its next event bar, folding the
     /// skipped bars' extremes into its excursions.
     fn jump(&mut self) {
+        let from = self.cursor;
+        let to = self.held_bound(from);
+        self.skip(from, to);
+    }
+
+    /// The first bar at or after `from` that a held position must step: a
+    /// full-step bar, the forced window, a bar reaching a stop level or the
+    /// target, the time exit's instant, the next swing's confirming close, or
+    /// a new high while a give-back or an R-step trails.
+    fn held_bound(&self, from: usize) -> usize {
         let bars = &self.side.bars;
         let events = &self.side.events;
-        let from = self.cursor;
-        let forced_start = u32::try_from(SESSION_FORCED_WINDOW_START_SECS).unwrap_or(u32::MAX);
         let mut to = events
             .next_special(from)
-            .min(self.day.first_bar_at(forced_start));
+            .min(self.day.first_bar_at(Self::forced_start()));
         for level in [self.levels.stop, self.trail, self.ttp]
             .into_iter()
             .flatten()
@@ -528,18 +566,21 @@ impl<'a> Stepper<'a> {
         if let Some(at) = self.time_at {
             to = to.min(self.day.first_bar_at(at));
         }
-        let next_swing = self
-            .levels
-            .swing
-            .and_then(|(list, _)| self.side.swings.get(list))
-            .and_then(|list| list.events.get(self.swing_cursor));
-        if let Some(event) = next_swing {
+        if let Some(event) = self.next_swing() {
             to = to.min(self.day.first_bar_at(event.confirm_second));
         }
         if self.levels.giveback.is_some() || self.levels.rstep.is_some() {
             to = to.min(events.high_above(bars, from, self.best_raw));
         }
-        let Some(skipped) = events.extremes(bars, from, to) else {
+        to
+    }
+
+    /// Moves the cursor from `from` to `to`, past bars an open position only
+    /// tracks, folding their extremes into its excursions. An empty range
+    /// moves nothing.
+    fn skip(&mut self, from: usize, to: usize) {
+        let bars = &self.side.bars;
+        let Some(skipped) = self.side.events.extremes(bars, from, to) else {
             return;
         };
         if skipped.best_raw > self.best_raw {
@@ -557,6 +598,122 @@ impl<'a> Stepper<'a> {
             .map(|b| b.second);
         self.cursor = to;
         self.work += 1;
+    }
+
+    /// An entry's jump. Waiting for its trigger, it jumps to the first bar
+    /// that may arm it; a deep entry spilling with no participation cap takes
+    /// the run of plain seconds ahead of it by the volume prefix. The window's
+    /// first bar is always stepped: a silence before it is measured from the
+    /// window's start, not from a previous bar.
+    fn jump_entering(&mut self) {
+        if self.previous.is_none() {
+            return;
+        }
+        if !self.armed {
+            self.jump_to_trigger();
+        } else if self.filled > 0
+            && self.cap.is_none()
+            && self.day.resolution() == Resolution::Second
+        {
+            self.jump_entry_spill();
+        }
+    }
+
+    /// Moves an unarmed entry to the first bar that may arm it, the window's
+    /// end, or the next full-step bar. A bar before it changes nothing but
+    /// the slot's previous bar (its swings are read unread by the next step).
+    fn jump_to_trigger(&mut self) {
+        let bars = &self.side.bars;
+        let events = &self.side.events;
+        let from = self.cursor;
+        let mut arm = from;
+        if let Some(level) = self.levels.trigger.above {
+            arm = arm.max(events.high_reaches(bars, from, level));
+        }
+        if let Some(level) = self.levels.trigger.below {
+            arm = arm.max(events.low_reaches(bars, from, level));
+        }
+        // The window ends at or before 15:09:00, so its end bounds the
+        // forced window's first bar too.
+        let to = events
+            .next_special(from)
+            .min(self.day.first_bar_at(self.entry_end))
+            .min(arm);
+        if to > from {
+            self.previous = bars.get(to - 1).map(|b| b.second);
+            self.cursor = to;
+            self.work += 1;
+        }
+    }
+
+    /// A deep entry still spilling while its filled part is held: the plain
+    /// seconds before the held position's next event, the window's end, a
+    /// second the fill would flag, or a high at or below the planned stop
+    /// (bounded by the lows, which reach it first), fill by the volume
+    /// prefix. Their trailing levels cannot move: a new high is an event.
+    fn jump_entry_spill(&mut self) {
+        let bars = &self.side.bars;
+        let events = &self.side.events;
+        let from = self.cursor;
+        let to = self
+            .held_bound(from)
+            .min(self.day.first_bar_at(self.entry_end))
+            .min(events.next_stop(Leg::Buy, from))
+            .min(events.low_reaches(bars, from, self.levels.planned_stop));
+        if to <= from {
+            return;
+        }
+        let spill = events.spill(bars, Leg::Buy, from, to, self.remaining);
+        self.filled += spill.qty;
+        self.open += spill.qty;
+        self.remaining -= spill.qty;
+        self.entry_value += spill.value;
+        // An uncapped order still spilling took some second's whole volume,
+        // so its participation is already one whole unit: no second of the
+        // run can raise it.
+        if let Some(second) = spill.last.and_then(|k| bars.get(k)).map(|b| b.second) {
+            self.last_entry_second = second;
+        }
+        if self.remaining == 0 {
+            self.phase = Phase::Holding;
+        }
+        self.skip(from, spill.end);
+    }
+
+    /// A deep exit order spilling over seconds: the plain seconds before the
+    /// forced window, the next swing's confirming close or a second the fill
+    /// would flag give their volume by the volume prefix, each at its own
+    /// worst price, until the order completes. Only a deep exit under
+    /// `spill_by_volume` is ever still exiting after its touching second;
+    /// stage A's locked minutes are stepped.
+    fn jump_exit_spill(&mut self) {
+        if self.day.resolution() == Resolution::Minute {
+            return;
+        }
+        let bars = &self.side.bars;
+        let events = &self.side.events;
+        let from = self.cursor;
+        let mut to = events
+            .next_stop(Leg::Sell, from)
+            .min(self.day.first_bar_at(Self::forced_start()));
+        if let Some(event) = self.next_swing() {
+            to = to.min(self.day.first_bar_at(event.confirm_second));
+        }
+        if to <= from {
+            return;
+        }
+        let spill = events.spill(bars, Leg::Sell, from, to, self.open);
+        if let Some(second) = spill.last.and_then(|k| bars.get(k)).map(|b| b.second) {
+            self.own.book_many(spill.qty, spill.value, second);
+            self.open -= spill.qty;
+        }
+        // Every second read is after the touching one.
+        let read = u32::try_from(spill.end - from).unwrap_or(u32::MAX);
+        self.spill_seconds = self.spill_seconds.saturating_add(read);
+        self.skip(from, spill.end);
+        if self.open == 0 {
+            self.finish(SlotStatus::Priced);
+        }
     }
 
     /// Ends the slot with `status`.

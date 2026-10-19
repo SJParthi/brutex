@@ -73723,3 +73723,83 @@ under 40 units of work by events against over 3,000 stepped
 The FM-F030 spill by binary search on a volume prefix is not used: a spill is a
 handful of seconds in practice and is stepped, so no binary search enters the
 walker (gate 11 rule 1).
+
+### D-6391 — The event walk takes a spill by one binary search on the volume prefix, and an unarmed entry by one descent (FIB-5; FM-F030; amends D-6390) — 2026-10-19
+
+**What D-6390 left out, and why it is built now.** D-6390's event walk jumped
+only a HELD position with no order open; an entry waiting for its trigger, an
+entry spilling over seconds and an exit spilling over seconds were stepped bar
+by bar, one step per second, and its last paragraph said no binary search
+enters the walker. That made the event walk's cost per pair grow with the
+seconds a spill reads — under the operator's FILLS rule a spill lasts as many
+seconds as the order needs volume, which nothing in the rule bounds, and under
+reading 2 of the entry window (17:15 item 3) an order may fill until 15:09:00;
+how long real spills run is unmeasured (NEEDS THE MAC) — which is the scan
+FM-F030 names
+("spill by binary search on the volume prefix"). The 19 Oct continuation of
+FIB-5 (`cloud/fib5-20261019`) builds it; nothing of D-6390's every-bar walk
+changes.
+
+**What is decided.**
+
+1. Per side of a stock-day, `DayIndex::build` adds to the event tables, once in
+   O(bars): the volume before each bar (`u128`), the sum of volume times the
+   buy price (the bar's high) and of volume times the sell price (its low)
+   before each bar (`i128`, summed WRAPPING, so the difference of two entries
+   is exact whenever the range's own sum fits an `i128` — exactly when the
+   walk's own order value fits it), and for each leg the next bar a spill must
+   step: a full-step bar of D-6390, or a bar whose fill the walk would flag
+   (no book side for the leg, a PREC-3 flagged print, a deep price outside its
+   Zerodha minute's converted range, or no minute at all).
+2. **An exit spilling** (deep, `spill_by_volume`; the only exit order still
+   open after its touching second) takes the run of plain seconds before the
+   next leg stop, the forced window and its next swing confirmation by ONE
+   `partition_point` on the volume prefix: the bars before the completing bar
+   give their whole volume at their own low, the completing bar the rest at
+   its low, read as two prefix reads and one product. Its spill seconds, its
+   order's last fill second and its excursions (two sparse-table reads) are
+   the forward walk's. A run that cannot complete the order gives all it
+   holds; its last fill is the last bar with volume (a second `partition_point`
+   for the run's total), and the next bar is stepped.
+3. **An entry spilling while its filled part is held** (deep, no participation
+   cap) takes the run of plain seconds before the held position's next event
+   (D-6390's descents), the window's end, the next buy-leg stop and the first
+   bar whose low reaches the planned stop (a high at or below the planned
+   stop flags `entry_beyond_stop`; the lows reach it first, so the bound is
+   conservative and never late) by the same search at the bars' highs. No
+   trailing level moves inside the run (a new high is a D-6390 event), the
+   target cannot become `entry_beyond_target` inside it (every bar's high is
+   below the target, so the average stays below), and the participation is
+   already one whole unit (an uncapped order still spilling took some second's
+   whole volume).
+4. **An unarmed entry** (BREAK or RETEST waiting for its level, either
+   resolution) jumps to the first bar whose high (BREAK) or low (RETEST)
+   reaches its level by one descent of D-6390's tables, bounded by the
+   window's end and the next full-step bar. The bars it passes change nothing
+   but the slot's previous bar; the swings confirmed among them are read
+   unread by the next step, as the forward walk reads them before a first
+   fill. The window's first bar is always stepped: a silence before it is
+   measured from the window's start.
+5. **Still stepped, by name.** A capped entry spill (17:15 item 4: each second
+   supplies `floor(c x volume / 1000)`, a prefix per generated cap the index
+   is not given), an armed entry that has filled nothing yet (its first
+   capable bar fills), stage A's locked minutes (FM-F042), and every bar a
+   spill stops at. Each is one O(1) step (L-FIB5-03).
+
+**Same bytes, proved.** `spill_by_events_equals_forward_pass` walks 700
+seeded thin deep days — volumes of 0 to 6 shares a second, silences, halts,
+one-sided seconds, flagged prints, narrowed and missing Zerodha minutes, swing
+trails from the minutes, every window reading, caps one time in four — under
+every reading and component, and finds every outcome identical to the
+every-bar walk's, with long entry spills, long exit spills, spills into the
+forced window and seven flags a spilled second can raise all reached.
+`event_walk_equals_forward_pass` (D-6390) still holds unchanged. Unit tests in
+`fib::walk::event` pin the search: a completing bar inside the run, exactly at
+a bar's volume, from an empty bar, at the run's last bar; a run short of the
+order; a run of empty bars; and each kind of bar that stops a leg.
+
+**Cost.** O(log bars) per spill run and per trigger descent, so a pair is
+O(log bars x (1 + events)) whatever its spills' lengths, BOUNDED by its events
+as D-6390 declared (C-F5-08). The build adds O(bars) and five words per bar
+per side (L-FIB5-15). Gate 11 rule 1 declares the two `partition_point`s
+("Gate 11 — FIB-5, declared" in `docs/06-limits.md`).
