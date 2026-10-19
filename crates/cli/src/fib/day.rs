@@ -1955,14 +1955,15 @@ fn seconds_with_conflicts(
             .map(|day| (*day, DayRefusal::RenameOverlapConflict.name())),
     );
     // Every day the month answered for — kept or refused — keyed once, so
-    // each minute day is one probe.
-    month.index.reserve(month.days.len() + month.refused.len());
-    for (at, held) in month.days.iter().enumerate() {
-        month.index.insert(held.day, Ok(at));
-    }
-    for (day, why) in &month.refused {
-        month.index.insert(*day, Err(*why));
-    }
+    // each minute day is one probe; `extend` sizes the map from the chain.
+    month.index.extend(
+        month
+            .days
+            .iter()
+            .enumerate()
+            .map(|(at, held)| (held.day, Ok(at)))
+            .chain(month.refused.iter().map(|(day, why)| (*day, Err(*why)))),
+    );
     for day in minute_days {
         if !month.index.contains_key(day) {
             month.no_execution_seconds.push(*day);
