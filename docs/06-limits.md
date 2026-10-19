@@ -19730,6 +19730,317 @@ a figure.
 | L-IA-57 | Naming who holds a busy lock (IA-2 repair 1) | a census verb refused beside v4 runs reads the kind locks; a press refused its sink probes its claim lock | O(1): at most three kind-lock probes (shared, non-blocking, ≤ 1 KiB each) or one claim-lock probe. Measured (`ia2_repair_timings`): census verb refused beside 3 v4 runs n=2,000 p50 71.7 µs, p99 129.0 µs, max 267.9 µs; plan refused before its sink n=2,000 p50 19.7 µs, p99 41.5 µs, max 112.3 µs | IA-2 |
 | L-IA-58 | A run's end line in `/imports.json` (IA-2 repair 1) | each `run <id> ended=` line is folded into its run | O(1) per line: one id-index probe and the run's own fields. Measured (`end_line_fold_timing`, ignored test): 100,000 end lines folded beside 100,000 runs, each timed, p50 458 ns, p99 1.46 µs, max 72.3 µs. The route over the real store's journal (24 runs), n=200 sequential GETs on :8401: p50 9.24 ms, p99 10.10 ms, max 12.83 ms | IA-2 |
 
+## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5130
+
+`crates/costs` package CHG-1: `schedule`, `stack` (precise, the default) and
+`dhan_calc` (Dhan's calculator, comparison only). §27 above still describes
+the index-options round trip, which this package leaves unchanged. Every gap
+below is UNVERIFIED in the sense `CLAUDE.md` §3 rule 1 uses the word.
+
+### Nothing here has been checked against a real contract note
+
+The precise mode reproduces **the operator's five contract-note vectors**
+(V1 ₹73.90, V2 ₹403.39, V3 ₹0.78, V4 ₹1,829.14, V5 ₹400.63) exactly, each
+re-derived from the rules rather than copied
+(`costs::stack::the_five_contract_note_vectors_rederive_from_the_rules`). Those
+vectors are the operator's own derivation, not a broker's document. **Full
+precision needs the operator's real Dhan contract notes**: until one is
+compared line by line, "the rule as written" and "what Dhan bills" are two
+claims and only the first is proven.
+
+### The direction of an exact half is a choice
+
+Every precise line rounds **half-up** (`exact::round_half_up`,
+`exact::Ratio::apply`): brokerage per order and the exchange charge, the SEBI
+fee and the GST per day to the paisa; STT and stamp duty to the paisa per
+security and then on the client's day total to the rupee (D-5121). The rupee
+step's direction **is** stated — `NSE/CMTR/5588` section D and
+`NCL/CMPT/43115` item 2 both send 50 paise up — so ₹76.50 of STT is ₹77 on
+the circulars' own words (the D1 sell day). Which way an exact half **paisa**
+goes — in the VWAP, in each security's figure, in every other line — no
+source read states; half-up is a choice. Of the five vectors only V4's
+exchange line (308.535) lands on such a half, and it is an operator figure,
+not a broker's. UNVERIFIED (D-5113).
+
+### The aggregation level of three lines is assumed
+
+The exchange charge (IPFT folded in, one line), the SEBI fee and the GST are
+computed on the **client-security-day's** turnover and rounded once. A contract
+note may instead total them across every security on the note, or per order,
+before rounding. **The vectors cannot decide it: they were built under these
+assumptions** (D-5122, correcting D-5113's "evidence for the levels"). The 15
+Oct attack run recomputed them under the alternatives: NSE's ₹306.99 and the
+IPFT's ₹0.01 rounded as two lines, as Dhan's pricing page lists them, give V2
+₹403.38 and V4 ₹1,829.12; the SEBI fee rounded per leg gives V1 ₹73.91; a
+CGST 9% + SGST 9% split rounded line by line gives V1 ₹73.89, V2 ₹403.38, V4
+₹1,829.13, V5 ₹400.64. The stack keeps the choices that reproduce the
+operator's five figures, and every one of those choices is UNVERIFIED.
+
+### GST basis nuances
+
+GST is 18% of brokerage + exchange charge (IPFT included) + SEBI fee, rounded
+once. The DP charge and the broker square-off fee carry their own 18% as
+separate lines. Whether a contract note puts the SEBI fee inside the GST base
+is how the precise mode and Dhan's calculator differ (the calculator leaves it
+out); the precise mode follows the brief. Whether stamp duty or STT ever enters
+the base (they do not here) is not stated by any source recorded. UNVERIFIED.
+
+### Effective dates were not seen
+
+The cloud session that wrote the code could read no source
+(`nsearchives.nseindia.com` and `dhan.co` were refused by its network policy).
+The local merge cites what the 13 Oct and 15 Oct runs read instead (D-5123):
+`NSE/FA/73061` dated 2026-02-27, effective 2026-03-01; `NSE/FATAX/73524` dated
+2026-03-31, under which futures STT became 0.05% and options STT and exercise
+STT 0.15% from 2026-04-01; `NCL/CMPT/43115` and `43116` from trade date
+2020-07-01. **What was not read is every superseded rate before those
+dates**, so `RateSelector::Dated` still **refuses** equity and futures on
+every date rather than guess one; only today's table prices them, labelled
+"today's rates applied to <date>" (D-5115). No digest of any circular body is
+recorded in this repository.
+
+### Today's rates on a 2018 trade are today's rates
+
+The default selector applies the 16 Oct 2026 table to every trade date. For
+2018-2024 that over- or under-states every rate that has moved since — the
+options STT tripled between 2018 and 2026 — and the label says so on every
+output. It is the operator's choice for backtests, not an accuracy claim
+(D-5115).
+
+### The dated options exchange charge depends on package CHG-0
+
+Under `RateSelector::Dated`, an NSE options day before 2026-03-01 is priced at
+the regime's 0.03503% plus the 0.0005% IPFT (= 0.03553%, FA64232's total); from
+2026-03-01 at the regime row alone, which `FA73061` states with the IPFT folded
+in. **Until CHG-0's 0.03553% row lands in `regime.rs`, a dated NSE options day
+on or after 2026-03-01 is priced at 0.03503% — under by the IPFT.**
+`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+is `#[ignore = "needs CHG-0's FA73061 regime row"]` and fails today by exactly
+that (₹5.01 against ₹5.08 on the NIFTY 25300 CE reading); the local merge
+un-ignores it. If CHG-0 instead splits the row (₹3,552 + ₹1 per crore with the
+IPFT kept separate), that test fails after the merge and says so.
+
+### Dhan's calculator total: the page's last paisa is not reproduced
+
+Every **line** of all 49 readings is reproduced exactly (343 lines). The
+**total**, computed as the exact sum of the unrounded lines rounded half-up to
+the paisa, equals the page on 34 readings and misses by exactly one paisa on
+15: eight where the page shows a paisa more and seven where it shows a paisa
+less (`costs::dhan_calculator::the_one_paisa_total_misses_are_listed_with_their_direction`).
+Neither truncation nor ceiling fits all 15 (the Yes Bank delivery reading
+needs a floor, the NIFTY 25300 CE reading a ceiling). The page's own rule is
+UNVERIFIED. All 49 readings are held: the cloud brief carried 48, and the
+49th — the UI reading of the V1 inputs — was added at the local merge (D-5126).
+
+**A search for a rule that fits all 48 found none** (the 49th equals V1, so the
+result carries to 49). This search is the cloud session's report and was NOT
+reproduced at the local merge: its test was thrown away. On 16 Oct 2026 a
+throwaway test (not committed) tried every combination of:
+
+- each line exact, or rounded to the paisa half-up, down or up;
+- the exchange line rounded to 10⁻⁴ rupee;
+- brokerage rounded per order;
+- three GST bases;
+- four final roundings.
+
+That is 262,500 rules over the whole-trade lines. A second pass of 941,192
+rules rounded each line per side (buy and sell priced apart, GST per side).
+
+- The best rule fits **41 of 48**: the SEBI fee and stamp rounded half-up to
+  the paisa before the sum, everything else exact.
+- No per-side rule fits 44.
+- The 41-of-48 rule still misses seven readings, and they pull in opposite
+  directions: D1 needs the SEBI fee unrounded where V3 needs it rounded.
+
+Floating-point accumulation cannot explain the misses either: the D1 total sits
+0.0055 rupee from the page's figure, orders of magnitude beyond a double's
+error at these sizes. The replica keeps the brief's stated rule (33 exact)
+rather than adopting a 41-of-48 fit no source supports; the pinned miss list is
+what a future rule must reproduce.
+
+### Partly squared delivery days and open intraday days are refused
+
+A delivery or MTF day with buys and sells of unequal size needs the FIFO order
+sequence to split non-delivery from delivery quantity (`NCL/CMPT/43115`), and a
+day's running totals do not carry it: refused by name
+(`ChargeError::PartlySquaredDay`), not guessed. An intraday day that does not
+square off is refused too (`ChargeError::OpenIntradayPosition`) — the page's
+two buy-only intraday readings are therefore refused in precise mode. A same-day
+round trip under the delivery product is priced as non-delivery (the exchange
+nets it); Dhan's own brokerage on such a day (nil here, as for delivery) is
+UNVERIFIED.
+
+### What is not priced at all
+
+MTF interest; physical settlement of stock F&O (Dhan's 0.10% of contract value,
+sources row B-06, and the delivery-leg STT, row S-06, which is itself
+UNVERIFIED) — an option exercise names its settlement and
+`Settlement::PhysicalDelivery` is refused by name
+(`schedule::PHYSICAL_DELIVERY_REFUSAL`, D-5130), while a stock **future** held
+to expiry has no settlement entry at all: the stack prices executed orders
+only, and whether any charge falls on an expiry settlement is UNVERIFIED;
+BSE futures (no rate recorded: `ChargeError::NoRate`); BSE F&O in
+calculator mode (never read from the page: `ChargeError::NotOnPage`); exchange
+or stamp charges on an option exercise (only the exercise STT is levied); **the
+SEBI fee on the notional value of an exercised or assigned option** (`FA40632`,
+sources row F-02 — the stack levies the fee on premium only); call-and-trade
+fees (₹50 per desk order, row B-08); ETFs and commodities, refused by name
+(`ChargeError::OutOfScope`, D-5125); the auto square-off fee on F&O is applied
+when the caller asks but its F&O applicability and cut-off time are UNVERIFIED
+(the brief names the 15:10 equity ceiling).
+
+### The broker square-off fee is priced on top of the order's brokerage
+
+Dhan's pricing page states ₹20 per order + GST "for intraday order
+automatically squared by our team", and does not say whether that replaces the
+square-off order's own brokerage (the lower of ₹20 and 0.03%) or comes on top
+of it. The stack prices it **on top**, the costlier reading. UNVERIFIED
+(D-5122); a contract note with a broker square-off on it decides it.
+
+### Client-day rounding, F&O, and a trade's share of it
+
+`ClientDay` rounds STT and stamp duty once across one client's day in one
+segment of one exchange, as the two cash-market circulars state (D-5121). Three
+limits follow.
+
+- **F&O.** No circular on the F&O method was read; the same two steps
+  (per contract to the paisa, the client's day to the rupee) are applied to
+  futures and options and are UNVERIFIED there.
+- **A trade's own charges are priced alone.** `NetTrade` nets each trade of
+  its days priced as if its security were the client's only one that day.
+  When a client trades several securities on one day, the client-day's STT
+  and stamp duty differ from the sum of the per-trade figures by at most half
+  a rupee per security for each of the two taxes (each rounding moves a figure
+  by at most ₹0.50); the client-day figure is exact for the day and the
+  per-trade figure is the per-trade attribution. Which of the two a backtest
+  reports per trade is CHG-2's to label.
+- **The VWAP's half paisa.** `NSE/CMTR/5588` rounds the VWAP "off to two
+  decimals" without saying where an exact half paisa goes; half-up is a choice.
+
+### Measured cost, and what the figures are not
+
+`crates/costs/benches/stack.rs`, two final runs on the 4-core cloud container of
+16 Oct 2026, 20,000 batches of 16 calls each: one executed order p50 26.8–27.3
+ns, p99 28.5–40.7 ns; one client-security-day (open, two orders, settle) p50
+201.9–202.6 ns, p99 337.8–415.6 ns; one calculator quote p50 47.8–48.3 ns. The
+**max** column (up to half a millisecond for a batch) is the container's
+scheduler, not the stack: the code holds no loop over orders, no allocation and
+no lock. The absolute figures belong to that machine; only the ratios
+(C-CHG-01..05) are gated, and one run of seven before the final two put
+C-CHG-03 at 1.651× without reproducing.
+
+**The widest day is a different constant.** A day at the widest `i64` allows
+(10^9 units at ₹4 crore a side) costs p50 254–255 ns, 1.26× a normal day, in
+both final runs: its rate products pass 2^64, where `i128` division leaves the
+64-bit fast path for the compiler's software routine. That routine is bounded
+by the 128-bit width, not by the magnitude, so the cost is still constant — a
+second constant, printed and not gated (D-5118).
+
+**Reproduced on the operator's Mac (19 Oct 2026, the third local merge),
+three runs of the same bench binary, 20,000 batches of 16 calls, the machine
+shared with other agents' builds (load average 8–11 on 14 cores):** one
+executed order `add` p50 10.3–10.4 ns, p99 13.0 ns; the backtest ledger's `add`
+p50 5.1–5.2 ns, p99 7.8–13.0 ns, max 252.5 ns; a whole client-security-day
+p50 122.3–125.0 ns, p99 135.4–153.6 ns; a ledger close of 2,000,000 orders
+p50 109.3–114.5 ns, p99 125.0–140.6 ns, in precise mode, and p50 67.7 ns, p99
+75.5 ns in calculator mode; a calculator quote p50 15.6–18.1 ns. Every gated
+ratio C-CHG-01 to C-CHG-08 was between 0.86× and 1.07×. **One p99 did not
+hold in one run:** "settle: a day of 2,000,000 orders" reached p99 304.6 ns
+beside 114.5 ns for a day of 2 in the first run, and 127.6 ns and 130.1 ns
+(beside 125.0 ns) in the next two; the same settle reached through the
+ledger's close stayed at 1.02–1.05× in all three. It is read as the shared
+machine, not the stack — `settle` holds no loop over orders — and it is
+recorded rather than dropped. Logs:
+`state/fix/round2/chg1-logs-r6/bench.log`, `bench-run2.log`, `bench-run3.log`.
+
+### Line coverage of the CHG-1 modules is not 100%, and why
+
+`cargo llvm-cov -p costs --locked` at the third local merge (19 Oct 2026,
+`state/fix/round2/chg1-logs-r6/cov.log`): `charge_error` and `exact` 100% of
+lines; `stack` 99.73%, `schedule` 99.43%, `dhan_calc` 99.36%, `ledger`
+99.14%. What is left unexecuted, by kind: (1) the error arm of a `?` that
+closes a multi-line call, in three `stack.rs` lines: the paisa sum of a day's
+trade STT and exercise STT (each at most 0.15% of an `i64` value, so the sum
+stays inside `i64`, as `every_new_overflow_site_is_refused_by_name` shows at
+the widest exercise), the `i128` sum of the calculator total and the square-off
+fee with its GST (values of `i64` scale cannot overflow `i128`), and the
+narrowing of a charge rounded to the rupee (the largest is `...800`, inside
+`i64`, pinned by the same test) — each arm is unreachable and is kept because
+the alternative is an `expect`, which the workspace lints refuse; (2) the
+compile-time `NoDefault`
+witness in `ledger.rs` (five lines), which proves at build time that neither
+`DayLedger` nor `RateSelector` has a `Default` and never runs; (3) the
+message arguments of three `assert!`s in `schedule.rs`'s tests, evaluated
+only when the assertion fails; (4) three `dhan_calc.rs` lines that the
+report counts but does not itemise (it warned of 11 functions with
+mismatched profile data on the shared target directory). Two lines were real
+gaps and are now tested: `schedule::dhan_brokerage_units` refusing a
+commodity, reached by `ledger::order_lines_unrounded` before any rate card is
+read, and the overflow guard on the calculator day's fees, reached with
+square-off fees near `i64::MAX` set directly on the running totals.
+
+### The backtest ledger: what it assumes (D-5127)
+
+`costs::ledger::DayLedger` is the stack's own arithmetic behind the API a
+backtest drives, so every limit above applies to it unchanged. What it adds:
+
+- **A part-filled order is one executed order, and that is UNVERIFIED for
+  Dhan.** `ExecutedOrder::with_part` joins the parts and the brokerage is
+  charged once on the whole order. Dhan's pricing page says "per executed
+  order" and does not say how a part-filled order counts; a Dhan contract note
+  showing one decides it. Until then a backtest that splits one order across
+  several one-second fills is priced as one order, which is the cheaper
+  reading.
+- **The caller decides which fills are one order.** The ledger cannot see
+  order ids and never guesses: a fill is joined to its order before the order
+  is added. A caller that adds each fill as its own order is charged brokerage
+  per fill.
+- **One order's unrounded lines are shares, not a contract note.**
+  `order_lines_unrounded` gives each order its exact share of the linear lines,
+  which sum to the day's; three lines do not sum exactly. GST is 18% of the
+  order's own unrounded base (half-up to 10⁻⁹ rupee), where the day's GST is
+  on the billed, rounded base and, on the calculator page, on the exchange line
+  rounded to 10⁻⁴ rupee first. Precise intraday STT is half the order's value
+  at the rate, where the day's is on the squared quantity at the VWAP rounded
+  to the paisa — equal when the VWAP is exact. DP is carried by every delivery
+  or MTF sell order as if it were the day's only sell, where the day charges
+  it once.
+- **A ledger rounds STT and stamp duty for its own security.** A client's day
+  across several securities still goes through `stack::ClientDay`, which
+  rounds them once across all of them; a ledger closed alone is the
+  one-security case.
+- **The calculator mode carries the broker square-off fee, which the page
+  has no input for**, as two extra lines on top of the page's own, so the two
+  modes stay comparable on a day the broker exited. It refuses an exercise and
+  the dated rate set by name: the page has neither.
+- **Rate-set versions are bumped by hand and caught by a fingerprint.**
+  `RateSelector::version` is a string; the test that pins it beside a
+  fingerprint of the table makes a changed rate fail until the string moves.
+  Package CHG-0's FA73061 row changes the dated regime, so its merge must bump
+  `DATED_RATES_VERSION` to `dated-regime/r2` and re-pin
+  `DATED_FINGERPRINT`.
+
+### The winner-gate page's charges (D-5128)
+
+`state/pages-20261016/winner-gate.html` shows ₹82.65 and ₹224.43 for an
+equal-price NSE equity intraday round trip at ₹1,00,000 and ₹5,00,000. Those
+are the calculator replica's figures. The precise stack gives ₹82.68 and
+₹224.61: ₹0.03 and ₹0.18 more, all of it GST on the SEBI fee
+(`costs::ledger::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks`).
+The page is marked for correction; the stack was not tuned to it.
+
+### A shared target directory can test another worktree's crate (D-5129)
+
+Cargo identifies a workspace member by its path relative to the workspace, so
+two worktrees building into one target directory produce the same artifact
+names. An artifact the other worktree built later than this worktree's
+sources were last touched is taken as fresh. At this package's merge the
+integration tests were compiled against another worktree's `costs`, which
+had no `charge_error` module, and failed to resolve it. Touching the
+worktree's sources forced the rebuild. Every gate result this package reports
+was taken after that rebuild. Other packages on shared target directories are
+exposed to the same thing.
+
 ## Read pools and the being-written answer: what R3-08 leaves bounded or unmeasured (R3-08; decision numbers at landing, A6)
 
 Every store read runs in a named pool (`api::detail::Named`), waits at most

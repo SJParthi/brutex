@@ -1288,6 +1288,61 @@ record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
 
+## CHG-1 charge-stack rate sources — read 13, 15 and 16 Oct 2026 (D-5110 to D-5129)
+
+`CLAUDE.md` §3 rule 1: every rate `crates/costs/src/schedule.rs` and
+`crates/costs/src/dhan_calc.rs` apply traces to a row here. **How these were
+obtained, stated first because it bounds every row below.** Two agent runs of
+this project read the primary pages themselves and recorded what they read, row
+by row, with the URL, the date on the document and the date it was read: the
+13 Oct 2026 sources run (`state/fno-winners-20261013/sources-charges.json`, 45
+rows, ids such as `E-01` and `S-05` below) and the 15 Oct 2026 attack run
+(`state/charges-deep-check-20261015.json`, keys `rates` and `rateVerdicts`: 13
+of 15 rows confirmed on the primary source). The cloud session that first wrote
+the code (16 Oct) could fetch none of them — `nsearchives.nseindia.com` and
+`dhan.co` were refused by its network policy — and wrote "no circular body was
+read"; that was true of that session only, and the local merge (D-5123) cites
+the two runs instead. **No digest of any circular body is recorded in this
+repository**: a row below says what an agent read on a date, not a hash. A row
+whose figure a read source states is `Cited`; a row with no read source, or
+with an unverified zero in it, is `UNVERIFIED`, is still priced (the operator
+orders it), and every output that uses it lists it
+(`stack::DayCharges::unverified_sources`).
+
+| Rate | Figure, exactly | Source (as read) | Status | Where applied |
+|---|---|---|---|---|
+| NSE cash transaction charge + IPFT | Rs 306.99 + Rs 0.01 per crore each side = 30,700 / 10^9 | NSE circular `NSE/FA/73061` dated 2026-02-27, effective 2026-03-01, `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf` (rows `E-01`, `E-04`, read 13 Oct; confirmed 15 Oct). The same circular shows the old outflow as Rs 297 + Rs 10 IPFT = Rs 307, so the combined rate did not change on 2026-03-01 | Cited (the figure); **combining the two parts into one rounded line is UNVERIFIED** (D-5122) | `schedule::NSE_EQUITY_EXCHANGE` |
+| NSE futures transaction charge + IPFT | Rs 182.99 + Rs 0.01 per crore = 18,300 / 10^9 | `NSE/FA/73061` (row `E-02`) | Cited | `schedule::NSE_FUTURES_EXCHANGE` |
+| NSE options transaction charge + IPFT | Rs 3,552.99 + Rs 0.01 per crore of premium = 355,300 / 10^9 (0.03553%) | `NSE/FA/73061` (row `E-03`) | Cited — today's table only; the dated path reads `crate::regime` (package CHG-0 adds the dated row) | `schedule::NSE_OPTIONS_EXCHANGE` |
+| BSE cash, all-in | Rs 375 per crore = 375 / 10^7 | none read; Dhan's calculator uses 0.000038 | **UNVERIFIED** | `schedule::BSE_EQUITY_EXCHANGE` |
+| BSE SENSEX/Bankex options | Rs 3,250 per crore of premium + BSE IPFT taken as 0 | BSE notice of 27-Sep-2024 (`regime::BSE_EXCHANGE_CHARGE`); the IPFT zero is `rate::BSE_IPFT`'s, UNVERIFIED | **UNVERIFIED** (the zero) | `schedule::BSE_OPTIONS_EXCHANGE` |
+| SEBI turnover fee | Rs 10 per crore each side = 10 / 10^7 | SEBI notification of 2019-03-22 in force 2019-04-01, annexed to NSE `FA40632`, `https://nsearchives.nseindia.com/content/circulars/FA40632.pdf` (rows `F-01`, `F-02`) | Cited. `F-02` also levies it on the notional value of an exercised or assigned option: **not priced** (`docs/06-limits.md` §CHG-1) | `schedule::SEBI_FEE` |
+| STT, equity intraday | 0.025% of the non-delivery value, seller: min(day buy qty, day sell qty) x the day's VWAP, VWAP = (BVAL + SVAL) / (BQTY + SQTY) rounded to two decimals; each security's STT to two decimals; the client's day total to the nearest rupee (50 paise up) | rate: `NSE/FATAX/73524` dated 2026-03-31 (row `S-01`); method: NSE circular `NSE/CMTR/5588` dated 2004-11-10, `https://nsearchives.nseindia.com/content/circulars/cmtr5588.htm` (15 Oct verdict) | Cited (rate and method); the direction of an exact half of a paisa in the VWAP is UNVERIFIED | `schedule::STT_EQUITY_NON_DELIVERY`, `stack::ClientSecurityDay`, `stack::ClientDay` |
+| STT, equity delivery and MTF | 0.1% each side = 1 / 10^3 | `NSE/FATAX/73524` (row `S-05`, "settled by the actual delivery or transfer of such share or unit"), `https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf` | Cited | `schedule::STT_EQUITY_DELIVERY` |
+| STT, futures | 0.05% of the sell value = 5 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-02`, "Sale of a futures in securities has been revised to 0.05%") | Cited | `schedule::STT_FUTURES` |
+| STT, options | 0.15% of the sell premium = 15 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-03`); the `regime::STT_OPTIONS` row (DEC-COST-003) | Cited | `schedule::STT_OPTIONS` |
+| STT, options exercise | 0.15% of intrinsic value = 15 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-04`); the `regime::STT_EXERCISE` row (DEC-COST-004) | Cited | `schedule::STT_EXERCISE` |
+| Stamp duty, equity intraday | 0.003% of the FIFO buy value of the non-deliverable quantity, buyer; each security's duty to two decimals; the client's day total to the nearest rupee | NSE Clearing `NCL/CMPT/43115` dated 2020-01-03, from trade date 2020-07-01 per `NCL/CMPT/44032` (rows `T-01`, `R-02`; 15 Oct verdict) | Cited | `schedule::STAMP_EQUITY_NON_DELIVERY` |
+| Stamp duty, equity delivery and MTF | 0.015% of the buy value = 15 / 10^5 | NSE's levies page `https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies` (row `T-04`) | Cited | `schedule::STAMP_EQUITY_DELIVERY` |
+| Stamp duty, futures | 0.002% of the buy value = 2 / 10^5 | NSE Clearing `NCL/CMPT/43116`, `https://nsearchives.nseindia.com/content/circulars/CMPT43116.zip` (row `T-02`, "Equity Futures 0.002% Buyer") | Cited | `schedule::STAMP_FUTURES` |
+| Stamp duty, options | 0.003% of the buy premium = 3 / 10^5 | `NCL/CMPT/43116` (row `T-03`, "option trade shall be valued at premium"); `rate::STAMP_DUTY_BUY_SIDE` (`COSTS_VERIFIED` §6) | Cited | `schedule::STAMP_OPTIONS` |
+| GST | 18% of brokerage + exchange charge (IPFT included) + SEBI fee = 18 / 100 | Dhan pricing page (row `G-02`); GST on the SEBI fee from 2022-07-18 per `NSE/FATAX/52993` (row `G-03`); `rate::GST_ON_FEE_BASE` | Cited; the legal basis for GST on the exchange charge (row `G-04`) and the rounding of a CGST + SGST split are **UNVERIFIED** | `schedule::GST` |
+| Dhan brokerage, equity intraday and MTF | the lower of Rs 20 and 0.03% of the order value, per executed order | Dhan pricing page `https://dhan.co/pricing/`, read 13 and 15 Oct 2026 (rows `B-01`; 15 Oct verdict). MTF taken as intraday is the 16 Oct capture's assumption | Cited (intraday); MTF **as stated by the capture**, not by the page | `schedule::dhan_brokerage` |
+| Dhan brokerage, equity delivery | Rs 0 | Dhan pricing page (row `B-02`) | Cited | `schedule::dhan_brokerage` |
+| Dhan brokerage, F&O | Rs 20 per executed order, also on an option expired, exercised or assigned | Dhan pricing page (rows `B-03`, `B-04`, `B-05`). The regulatory cap, the higher of 2.5% of premium and Rs 100 per lot (NSE circular `https://nsearchives.nseindia.com/content/circulars/INSP53297.pdf`, effective 2014-07-16, restated 2022-08-12, row `B-14`), is never below Rs 100 for one lot, so it cannot bind a Rs 20 order (a compile-time check in `schedule.rs`) | Cited | `schedule::DHAN_FNO_BROKERAGE` |
+| Dhan DP charge | Rs 12.50 per instruction per ISIN + GST on a delivery or MTF sell | Dhan pricing page (row `B-10`) | Cited | `schedule::DHAN_DP_CHARGE` |
+| Dhan auto square-off | Rs 20 per order + 18% GST, applied only when the caller says the exit was the broker's | Dhan pricing page (row `B-07`; 15 Oct verdict) | Cited (the amount); whether it replaces or comes **on top of** the normal brokerage, and its F&O applicability, are **UNVERIFIED** (D-5116, D-5122) | `schedule::DHAN_SQUARE_OFF_FEE` |
+| Dhan brokerage on a part-filled order | one executed order, whatever the number of fills: brokerage charged once on the whole order (`ledger::ExecutedOrder::with_part`) | none read — Dhan's pricing page (row `B-01`) says "per executed order" and does not say how a part-filled order counts | **UNVERIFIED** until a Dhan contract note shows a part-filled order (D-5127) | `ledger::DayLedger::add` |
+| Dhan calculator constants (comparison only) | brokerage 0.0003 capped at Rs 20; exchange 0.0000307 NSE equity, 0.000038 BSE equity, 0.0000183 futures, 0.0003553 options; SEBI 0.000001; STT 0.00025 / 0.001 / 0.0005 / 0.0015; stamp 0.00003 / 0.00015 / 0.00002 / 0.00003; DP 14.75; GST 0.18 x (brokerage + exchange rounded to 4 decimals) | Dhan calculator `https://dhan.co/calculators/brokerage-calculator/`: 16 readings on 15 Oct 2026 (`state/charges/dhan-golden-20261015.json`, nine through the page's own endpoint, seven through the UI) and 33 through the UI on 16 Oct 2026 (`state/charges/dhan-golden-20261016.json`, 33 screenshots); all 49 pinned in `crates/costs/tests/dhan_calculator.rs` | Cited as **the page's own arithmetic**, never as a statutory rate | `dhan_calc` |
+
+**Rounding directions and aggregation levels are not rates and have no row
+above:** no source read states which way an exact half goes; the NSE and NSE
+Clearing methods above state the per-security and per-client-day roundings of
+STT and stamp duty for the cash market, and nothing read states them for F&O or
+states the level at which the exchange charge, the SEBI fee and the GST are
+rounded on a note. Each is recorded as UNVERIFIED in `docs/06-limits.md`
+§CHG-1 (D-5113, D-5121, D-5122).
+
 ## Dropbox API v2: what the GDFL Dropbox fetch relies on (R4-07, E2E-01; D-4986)
 
 Read 16 Oct 2026 from Dropbox's own published API specification, the Stone
