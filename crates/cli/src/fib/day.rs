@@ -765,6 +765,15 @@ pub fn check_widths(widths: &[u16]) -> Result<(), String> {
     buckets_of(widths).map(|_| ())
 }
 
+/// A width with the fold authority's bucket for it, or `None` for a width
+/// outside `1..=`[`max_width_minutes`] (zero has no bucket).
+fn bucket_of(width: u16) -> Option<(u16, Bucket)> {
+    (u64::from(width) <= max_width_minutes())
+        .then(|| Bucket::of_secs(u32::from(width) * minute_seconds()))
+        .flatten()
+        .map(|bucket| (width, bucket))
+}
+
 /// Each width of a set [`check_widths`] admits, with the fold authority's
 /// bucket for it: the set is judged once a month, so the fold meets no width
 /// it would refuse.
@@ -774,14 +783,10 @@ pub fn check_widths(widths: &[u16]) -> Result<(), String> {
 /// `widths_refused`, naming the set.
 fn buckets_of(widths: &[u16]) -> Result<Vec<(u16, Bucket)>, String> {
     let top = max_width_minutes();
-    // A width of zero has no bucket; one past N_max is filtered out: either
-    // leaves the set short of its widths.
+    // A width with no bucket leaves the set short of its widths.
     let buckets: Vec<(u16, Bucket)> = widths
         .iter()
-        .filter(|width| u64::from(**width) <= top)
-        .filter_map(|width| {
-            Bucket::of_secs(u32::from(*width) * minute_seconds()).map(|bucket| (*width, bucket))
-        })
+        .filter_map(|width| bucket_of(*width))
         .collect();
     let increasing = widths.windows(1 + 1).all(|pair| pair.first() < pair.last());
     if widths.is_empty() || buckets.len() != widths.len() || !increasing {
@@ -1307,25 +1312,62 @@ fn fold_widths(
     buckets: &[(u16, Bucket)],
     cash: &CashCloses,
 ) -> Result<Vec<WidthCandles>, String> {
-    let bars: Vec<Bar> = real.iter().map(|minute| bar_of(*minute)).collect();
-    // present[i]: real minutes among the window's first i minutes.
-    let mut present = Vec::with_capacity(usize::from(window.minutes()) + 1);
-    present.push(0_u32);
-    let mut stream = real.iter().peekable();
-    let mut count = 0_u32;
-    for minute in window.first..=window.last {
-        if stream.next_if(|bar| minute_of(bar) == minute).is_some() {
-            count += 1;
+    let folding = Folding::of(day, real, window);
+    buckets
+        .iter()
+        .map(|width| folding.fold_one(*width, cash))
+        .collect()
+}
+
+/// One day's minutes made ready for the fold: the store's bars and the
+/// presence prefix every width's completeness reads.
+struct Folding {
+    day: i64,
+    window: Window,
+    bars: Vec<Bar>,
+    /// `present[i]`: real minutes among the window's first `i` minutes.
+    present: Vec<u32>,
+}
+
+impl Folding {
+    /// The day's real minutes, in order, in its window.
+    fn of(day: i64, real: &[Candle], window: Window) -> Self {
+        let bars: Vec<Bar> = real.iter().map(|minute| bar_of(*minute)).collect();
+        let mut present = Vec::with_capacity(usize::from(window.minutes()) + 1);
+        present.push(0_u32);
+        let mut stream = real.iter().peekable();
+        let mut count = 0_u32;
+        for minute in window.first..=window.last {
+            if stream.next_if(|bar| minute_of(bar) == minute).is_some() {
+                count += 1;
+            }
+            present.push(count);
         }
-        present.push(count);
+        Self {
+            day,
+            window,
+            bars,
+            present,
+        }
     }
-    let day_open = instant(day, u32::from(window.first) * minute_seconds());
-    let day_close = instant(day, (u32::from(window.last) + 1) * minute_seconds());
-    let mut out = Vec::with_capacity(buckets.len());
-    for (width, bucket) in buckets {
+
+    /// One width folded through the one fold authority, each candle's
+    /// completeness marked.
+    ///
+    /// # Errors
+    ///
+    /// The fold authority's refusal, by name.
+    fn fold_one(
+        &self,
+        (width, bucket): (u16, Bucket),
+        cash: &CashCloses,
+    ) -> Result<WidthCandles, String> {
+        let window = self.window;
+        let day_open = instant(self.day, u32::from(window.first) * minute_seconds());
+        let day_close = instant(self.day, (u32::from(window.last) + 1) * minute_seconds());
         let (folded, notes) = pull::fold::complete_minutes_with_calendar(
-            &bars,
-            *bucket,
+            &self.bars,
+            bucket,
             Venue::NseCash,
             Some(cash.schedule()),
             pull::calendar::Runtime::default(),
@@ -1333,16 +1375,17 @@ fn fold_widths(
         .map_err(|why| format!("fold_refused: {why}"))?;
         let mut withheld = notes;
         let mut candles = Vec::with_capacity(folded.len());
-        let width_micros = i64::from(*width) * micros_per_minute();
+        let width_micros = i64::from(width) * micros_per_minute();
         for bar in folded {
             let start = bar.ts_micros;
             let end = (start + width_micros).min(day_close);
             let from = minutes_between(day_open, start.max(day_open));
             let to = minutes_between(day_open, end);
             let owed = to.saturating_sub(from);
-            let have = present
+            let have = self
+                .present
                 .get(to)
-                .zip(present.get(from))
+                .zip(self.present.get(from))
                 .map_or(0, |(to, from)| to.saturating_sub(*from));
             let missing =
                 u16::try_from(u32::try_from(owed).unwrap_or(u32::MAX).saturating_sub(have))
@@ -1362,20 +1405,59 @@ fn fold_widths(
             }
             candles.push(FibCandle {
                 candle: candle_of(bar),
-                tf_minutes: *width,
+                tf_minutes: width,
                 complete,
                 missing_minutes: missing,
                 close_ts_micros: end,
             });
         }
-        out.push(WidthCandles {
-            width: *width,
-            capacity: window.minutes().div_ceil(*width),
+        Ok(WidthCandles {
+            width,
+            capacity: window.minutes().div_ceil(width),
             candles,
             withheld,
-        });
+        })
     }
-    Ok(out)
+}
+
+impl DayInput {
+    /// One more width folded over the day's own kept minutes, exactly as
+    /// [`build_month`] folds it (17:15 block (1): a new width folds only the
+    /// stock-days that lack it): the admitted day's candles, or a halt day's
+    /// exposure candles. O(minutes) for that width alone; nothing else of the
+    /// day is rebuilt. `cash` is the month's dated closes the day was built
+    /// with. Its per-minute cost is the fold C-F8-01 measures inside the day
+    /// input, through this same `Folding::fold_one`: `crates/cli/benches/fib.rs`.
+    ///
+    /// # Errors
+    ///
+    /// `widths_refused`; `no_candles` naming the day for a day that folds
+    /// none (excluded and no halt exposure, or its minutes refused); the
+    /// fold authority's refusal.
+    pub fn fold_width(&self, width: u16, cash: &CashCloses) -> Result<WidthCandles, String> {
+        let bucket = bucket_of(width).ok_or_else(|| {
+            format!(
+                "widths_refused: [{width}]; a width is whole minutes in 1..={} (R7)",
+                max_width_minutes()
+            )
+        })?;
+        let window = self
+            .window
+            .filter(|_| self.admitted() || self.exposure.is_some())
+            .ok_or_else(|| {
+                format!(
+                    "no_candles: {} folds no candle (excluded or refused)",
+                    date(self.day)
+                )
+            })?;
+        let folded = Folding::of(self.day, &self.minutes, window).fold_one(bucket, cash)?;
+        Ok(match &self.exposure {
+            Some(exposure) => {
+                pre_halt_width(&folded, instant(self.day, exposure.first_halted_second))
+            }
+            None => folded,
+        })
+    }
 }
 
 /// Whole minutes from `from` to `to`.
@@ -1396,18 +1478,23 @@ fn stamp(ts_micros: i64) -> String {
 fn pre_halt(folded: &[WidthCandles], until: i64) -> Vec<WidthCandles> {
     folded
         .iter()
-        .map(|width| WidthCandles {
-            width: width.width,
-            capacity: width.capacity,
-            candles: width
-                .candles
-                .iter()
-                .filter(|candle| candle.close_ts_micros <= until)
-                .copied()
-                .collect(),
-            withheld: Vec::new(),
-        })
+        .map(|width| pre_halt_width(width, until))
         .collect()
+}
+
+/// One width's candles that closed at or before `until`.
+fn pre_halt_width(width: &WidthCandles, until: i64) -> WidthCandles {
+    WidthCandles {
+        width: width.width,
+        capacity: width.capacity,
+        candles: width
+            .candles
+            .iter()
+            .filter(|candle| candle.close_ts_micros <= until)
+            .copied()
+            .collect(),
+        withheld: Vec::new(),
+    }
 }
 
 // -------------------------------------------------------------- loading --

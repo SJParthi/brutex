@@ -3279,3 +3279,58 @@ fn day_check_deep_names_a_halt_and_a_bad_month_refuses_the_reference_table() {
     let refused = reference_check(&store.0, (2020, 13), &authorities).unwrap_err();
     assert_eq!(refused.word, "reference_month", "{refused}");
 }
+
+/// 17:15 block (1): a new width folds only the stock-days that lack it — one
+/// width folded later from a day's own kept minutes is the width a build with
+/// it from the start gives, a halt day's is its exposure, and a day that
+/// folds no candle or a width outside R7 refuses by name.
+#[test]
+fn a_new_width_folds_only_from_the_days_own_minutes() {
+    let days: Vec<i64> = (3..=6).map(|d| day_of(2025, 3, d)).collect();
+    let mut bars = Vec::new();
+    for (n, on) in days.iter().enumerate() {
+        let mut day = full(*on, 4_181_000 + i64::try_from(n).unwrap() * 100);
+        if n == 1 {
+            // A missing minute: every width's bucket over it is withheld.
+            day.retain(|bar| minute_of(bar) != hm(11, 3));
+        }
+        if n == 2 {
+            // A duplicate minute: the day folds nothing.
+            let again = day[10];
+            day.insert(10, again);
+        }
+        bars.extend(day);
+    }
+    let cash = no_master();
+    let mut before = StockState::first_day();
+    let narrow = build(2025, 3, &[1, 5], &bars, &interim(), &mut before);
+    let mut after = StockState::first_day();
+    let wide = build(2025, 3, &[1, 5, 7], &bars, &interim(), &mut after);
+    for on in [days[0], days[1], days[3]] {
+        let later = input(&narrow, on).fold_width(7, &cash).unwrap();
+        assert_eq!(later, input(&wide, on).candles[2], "{}", date(on));
+    }
+    assert!(!input(&wide, days[1]).candles[2].withheld.is_empty());
+    let refused = input(&narrow, days[2]).fold_width(7, &cash).unwrap_err();
+    assert!(refused.starts_with("no_candles: 2025-03-05"), "{refused}");
+    for width in [0, 119] {
+        let refused = input(&narrow, days[0])
+            .fold_width(width, &cash)
+            .unwrap_err();
+        assert!(refused.starts_with("widths_refused"), "{refused}");
+    }
+    // A halt day's exposure: the later width keeps only its pre-halt candles.
+    let (thursday, halt_day) = (day_of(2020, 3, 12), day_of(2020, 3, 13));
+    let mut march = full(thursday, 4_191_000);
+    march.extend(minutes(halt_day, hm(9, 15), hm(9, 20), 4_192_000));
+    march.extend(minutes(halt_day, hm(10, 21), hm(15, 29), 4_192_100));
+    let mut state = StockState::first_day();
+    let with_one = build(2020, 3, &[1], &march, &interim(), &mut state);
+    let mut state = StockState::first_day();
+    let with_five = build(2020, 3, &[1, 5], &march, &interim(), &mut state);
+    let later = input(&with_one, halt_day).fold_width(5, &cash).unwrap();
+    let exposure = input(&with_five, halt_day).exposure.as_ref().unwrap();
+    assert_eq!(later, exposure.candles[1]);
+    assert!(later.candles.iter().all(|candle| candle.close_ts_micros
+        <= instant(halt_day, exposure.first_halted_second)));
+}

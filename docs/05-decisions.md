@@ -73790,3 +73790,28 @@ reading after its close, for the committed past only.
 `a_renamed_series_reads_its_seconds_under_each_days_symbol`,
 `day_check_seconds_renders_the_deep_reading_of_each_day`; `crates/cli/benches/fib.rs`
 (C-F8-12). Invariants FIB8-29..FIB8-32.
+
+### D-6454 — A new width folds only the stock-days that lack it: `DayInput::fold_width` folds one width from the day's own kept minutes (FIB-8) — 2026-10-19
+
+**What is decided.** The specification's 17:15 block (1) says "A new width
+folds only the stock-days that lack it". `DayInput::fold_width(width, cash)`
+folds that one width over the day's own kept minutes (`DayInput::minutes`,
+D-6453) through the same `Folding::fold_one` `build_month` folds every width
+with, so the later width is byte-equal to the width a build with it from the
+start gives: the admitted day's candles, or a halt day's exposure candles (its
+pre-halt candles, FM-F100). A day that folds no candle (excluded with no halt
+exposure, or its minutes refused) is refused `no_candles` by its date, and a
+width outside R7's `1..=N_max` `widths_refused`. Nothing else of the day — its
+closes, its previous close, its wicks, its counts — is rebuilt, and the carried
+state is not touched.
+
+The width set is now judged ONCE per month (`buckets_of`, the fold authority's
+bucket for each width) instead of once per width per day, so the fold never
+meets a width it would refuse.
+
+**Why.** FIB-9 adds a width to a Generation for the stock-days it already
+holds without re-reading or re-building them; the cost is the fold's own, one
+width, per minute (C-F8-01 measures the same `fold_one` inside the day input).
+
+**Proof.** `a_new_width_folds_only_from_the_days_own_minutes`;
+`widths_and_the_ladder_follow_r7`. Invariant FIB8-36.

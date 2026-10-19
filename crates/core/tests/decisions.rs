@@ -123,9 +123,9 @@ fn every_decision_id_is_issued_once() {
         let number = format!("D-{n}");
         assert_eq!(counts.get(number.as_str()), Some(&1), "{number}");
     }
-    // FIB-8's entries, D-6440 to D-6453 (its block moved by D-6311), are
+    // FIB-8's entries, D-6440 to D-6454 (its block moved by D-6311), are
     // present once each.
-    for n in 6440..=6453 {
+    for n in 6440..=6454 {
         let number = format!("D-{n}");
         assert_eq!(counts.get(number.as_str()), Some(&1), "{number}");
     }
