@@ -1361,6 +1361,15 @@ fn an_ampersand_symbol_loads_and_day_check_reads_it() {
     assert!(out.contains("count 2025 calendar closed"));
     assert!(out.contains("count 2025 previous_close first_day 1"));
     assert!(out.contains("widths: 1,2,4,8,16,32,64"));
+    assert!(
+        out.contains("candles 1:375/375/375 2:187/188/188"),
+        "complete/folded/capacity per width: {out}"
+    );
+    assert!(
+        !out.lines()
+            .any(|line| line.starts_with("count ") && line.ends_with(" 0")),
+        "a zero count is never printed: {out}"
+    );
     let json_request = Request {
         json: true,
         ..request.clone()
