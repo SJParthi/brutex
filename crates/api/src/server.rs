@@ -1615,6 +1615,10 @@ pub mod sources;
 // did when it lived here, and every name below is imported back so the rest
 // of this file -- and the test modules that `use super::*` -- resolve it
 // unchanged. A pure move: no route answers differently.
+/// `/bars/export.csv`: every row a bar query keeps, as one streamed CSV
+/// answer at the browser's ceiling, cancelled with its client (R3-10).
+#[path = "bars_export.rs"]
+mod bars_export;
 #[path = "bars_route.rs"]
 mod bars_route;
 #[path = "calendar_route.rs"]
@@ -15645,8 +15649,12 @@ pub const MAX_WINDOW_TARGET_BYTES: usize = 60 * 1024;
 /// most `scrub_route::MAX_KEYS` of them, which fit the ordinary target cap
 /// (DB-B74, WP-81). Any other route, and any other field, still refuses a
 /// repeat.
-const MULTI_VALUED_QUERY_FIELDS: [(&str, &str); 2] =
-    [("/bars/window.json", "key"), ("/scrub.json", "key")];
+const MULTI_VALUED_QUERY_FIELDS: [(&str, &str); 3] = [
+    ("/bars/window.json", "key"),
+    // The same query, written whole (R3-10).
+    (bars_export::ROUTE, "key"),
+    ("/scrub.json", "key"),
+];
 
 /// The most header bytes (every name plus every value) this server reads.
 ///
@@ -15710,7 +15718,9 @@ fn request_bounds_refusal(
     headers: &axum::http::HeaderMap,
 ) -> Option<(axum::http::StatusCode, String)> {
     let target = uri.path_and_query().map_or(0, |pq| pq.as_str().len());
-    let cap = if uri.path() == "/bars/window.json" {
+    // THE EXPORT NAMES THE SAME SERIES AS THE WINDOW (R3-10), so it reads
+    // the same target.
+    let cap = if uri.path() == "/bars/window.json" || uri.path() == bars_export::ROUTE {
         MAX_WINDOW_TARGET_BYTES
     } else {
         MAX_REQUEST_TARGET_BYTES
@@ -16072,6 +16082,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // month wants; the second is what a grid over a store wants, and asking
         // the first for the second is the 2,187-request storm it replaces.
         .route("/bars/window.json", axum::routing::get(bars_window_json))
+        // THE WHOLE QUERY OF THAT WINDOW, STREAMED AS CSV at the browser's
+        // ceiling, one page held at a time and stopped with its client (R3-10).
+        .route(
+            "/bars/export.csv",
+            axum::routing::get(bars_export::bars_export_csv),
+        )
         // THE UNDERLYING'S CLOSE AT AN OPTION BAR'S OWN INSTANT, for `/db`'s
         // moneyness, intrinsic and extrinsic. Exact stamp or a named absence;
         // never a nearest bar. D-2807.
