@@ -73843,7 +73843,8 @@ stocks of 2025-03 the share of stock-days with no GDFL second in
    NEEDS THE MAC) carries its exact steps.
 3. **A merge-back finding, recorded for the Mac.** The driver was
    compile-checked on 19 Oct against a local merge of this branch with
-   `origin/cloud/fib8-20261018` at `ceae9644` (never pushed). That merge does
+   `origin/cloud/fib8-20261018` as pushed at 03:51 UTC that day (the FIB-5
+   report names the commit; the merge was never pushed). That merge does
    not compile as pushed: FIB-8's `crates/cli/src/fib/files.rs` builds
    `runner::fib::types::SlotOutcome` by struct literal in its `deep` file
    kind's `decode` and `stride` with FIB-1's thirteen fields only, and FIB-5

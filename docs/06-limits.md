@@ -19842,8 +19842,8 @@ second of a spill, one O(1) step each (C-F5-08).
 
 Measured 19 October 2026 on THIS HOST: a fresh cloud container (4 vCPUs,
 15 GiB, Linux 6.18, rustc 1.97.1, the `bench` profile), branch
-`cloud/fib5-20261019` at `79946ab9` (the code of D-6391 and D-6392; only the
-report changed after `07628f8a`), `cargo bench -p runner --bench fib` alone
+`cloud/fib5-20261019` at the commit the FIB-5 report of 19 October names (the
+code of D-6391 and D-6392), `cargo bench -p runner --bench fib` alone
 after a 30-second pause on a host up two minutes (one-minute load average
 0.72 before it). Timer granularity 21 ns; the pointer-chase probe's
 last-level-cache estimate 4,096 KiB on this run; every data row's largest
