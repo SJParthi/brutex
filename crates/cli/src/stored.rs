@@ -6827,3 +6827,8 @@ mod tests {
         assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
     }
 }
+
+// The backtest's load over sealed months, alone or beside the raw form (SC-3).
+#[cfg(test)]
+#[path = "stored_sealed_tests.rs"]
+mod sealed_tests;
