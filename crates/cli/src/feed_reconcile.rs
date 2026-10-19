@@ -997,6 +997,45 @@ const fn holds(low: Frac, high: Frac, ratio: Frac) -> bool {
     low.le(ratio) && ratio.le(high)
 }
 
+/// Which of a day's two intersections is its basis (D-5179).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// The intersection of the minutes' close allowances.
+    Close,
+    /// The intersection of the minutes' range allowances (D-5176).
+    Range,
+}
+
+impl Basis {
+    /// The name the `ex_date` column prints.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Range => "range",
+        }
+    }
+}
+
+/// A day's BASIS (D-5179): its close intersection if that holds the ratio of
+/// the day's own median pair, else its range intersection if that holds it,
+/// else none. The one rule the ex-date judgement and every factor consumer
+/// read ([`FactorPair::basis`]), so the two can never disagree about which
+/// days have one factor.
+fn basis_of(
+    median: Option<Frac>,
+    close: Option<(Frac, Frac)>,
+    range: Option<(Frac, Frac)>,
+) -> Option<((Frac, Frac), Basis)> {
+    let ratio = median?;
+    [(close, Basis::Close), (range, Basis::Range)]
+        .into_iter()
+        .find_map(|(span, named)| {
+            span.filter(|(low, high)| holds(*low, *high, ratio))
+                .map(|span| (span, named))
+        })
+}
+
 /// The day's running intersection of allowance intervals, and the minute
 /// that emptied it.
 #[derive(Debug, Clone, Copy, Default)]
@@ -2011,20 +2050,12 @@ fn measure_day(
     // its own day's median cannot be disjoint from another that holds the
     // same ratio, so no ex-date fires between equal ratios.
     let mut ex_date = String::new();
-    let median_ratio = median.map(PairAt::ratio);
-    let holds_median =
-        |(low, high): (Frac, Frac)| median_ratio.is_some_and(|ratio| holds(low, high, ratio));
-    let candidates = [
-        (interval, "close"),
-        (matching.and_then(|m| m.range.interval()), "range"),
-    ];
-    let basis = candidates
-        .iter()
-        .find_map(|(span, named)| span.filter(|span| holds_median(*span)).map(|s| (s, *named)));
-    let excluding: Vec<&str> = candidates
+    let range = matching.and_then(|m| m.range.interval());
+    let basis = basis_of(median.map(PairAt::ratio), interval, range);
+    let excluding: Vec<&str> = [(interval, Basis::Close), (range, Basis::Range)]
         .iter()
         .filter(|(span, _)| span.is_some())
-        .map(|(_, named)| *named)
+        .map(|(_, named)| named.name())
         .collect();
     if basis.is_none() && !excluding.is_empty() {
         // An intersection survived and lies off the day's own median: it is
@@ -2036,12 +2067,12 @@ fn measure_day(
             Some((_, before_low, before_high)) => {
                 if before_high.lt(low) || high.lt(before_low) {
                     flags |= EX_DATE;
-                    format!("yes:unsourced:{named}")
+                    format!("yes:unsourced:{}", named.name())
                 } else {
-                    format!("no:{named}")
+                    format!("no:{}", named.name())
                 }
             }
-            None => format!("unchecked:{ex_date_note}:{named}"),
+            None => format!("unchecked:{ex_date_note}:{}", named.name()),
         };
         carry.interval = Some((inputs.day.epoch, low, high));
     } else if matching.is_some_and(|m| m.used > 0) {
@@ -3433,6 +3464,27 @@ pub struct FactorPair {
 }
 
 impl FactorPair {
+    /// The day's basis (D-5179): which of its intersections holds the ratio
+    /// of its own median pair, with that interval; `None` when neither does.
+    ///
+    /// **THE CONSUMER RULE (D-5179 item 6).** A consumer (FIB-10, OF-2)
+    /// converts a level with [`Self::to_gdfl`] only on a day whose pair has a
+    /// basis, whether [`FactorIndex::factor_of`] answered `Ok` or
+    /// `FactorNotConstant` (whose pair it carries): the close intersection
+    /// empties on almost every real day because the two feeds' minute closes
+    /// are often different trades, so `FactorNotConstant` alone says nothing
+    /// about whether the day has one factor. A day with no basis has none;
+    /// the consumer refuses it by name and never picks a factor of its own.
+    /// This is the same rule the `ex_date` judgement uses, by the same code.
+    #[must_use]
+    pub fn basis(&self) -> Option<((Frac, Frac), Basis)> {
+        let median = Frac {
+            num: i128::from(self.median.0),
+            den: i128::from(self.median.1),
+        };
+        basis_of(Some(median), self.interval, self.range)
+    }
+
     /// A Zerodha-basis paisa level on GDFL's raw basis, exactly:
     /// `level × g / z`, never rounded here (the consumer rounds at its own
     /// grid).
@@ -3477,7 +3529,8 @@ pub enum FactorRefusal {
     NoOverlap,
     /// The day's close allowances do not intersect: the minute that emptied
     /// the intersection, and the day's pairs with its RANGE intersection, so
-    /// a consumer decides by its own stated rule without recomputing.
+    /// a consumer decides by [`FactorPair::basis`] (D-5179 item 6) without
+    /// recomputing.
     FactorNotConstant {
         /// `HH:MM` IST.
         minute: String,

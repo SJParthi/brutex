@@ -26,11 +26,12 @@ use store::format::{Bar, OI_NULL};
 use store::path::{StorePath, Timeframe, YearMonth};
 
 use super::{
-    COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorRefusal, Frac, Grid,
-    LAG_BINS, MAX_REPEAT, PairAt, Running, Scope, Scratch, USAGE, Window, ZMinute, ask, bin,
-    bounds, carried, carry_line, command_with, day_kind, file_digest, flag_text, lag_order,
-    lookup_ask, mode, newest, newest_of, parse_carry, parse_day, parse_frac, parse_month, parts,
-    percent, previous, publish, range_bounds, rank, round_half_up, schedule, symbol_id,
+    Basis, COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorPair,
+    FactorRefusal, Frac, Grid, LAG_BINS, MAX_REPEAT, PairAt, Running, Scope, Scratch, USAGE,
+    Window, ZMinute, ask, bin, bounds, carried, carry_line, command_with, day_kind, file_digest,
+    flag_text, lag_order, lookup_ask, mode, newest, newest_of, parse_carry, parse_day, parse_frac,
+    parse_month, parts, percent, previous, publish, range_bounds, rank, round_half_up, schedule,
+    symbol_id,
 };
 use crate::{FAILED, MISUSED, OK};
 
@@ -968,6 +969,64 @@ fn an_interval_off_its_own_median_is_no_basis_for_an_ex_date() {
     assert!(
         carry.contains("interval=2025-03-06:"),
         "the 6th hands its own interval on: {carry}"
+    );
+    // THE CONSUMER READS THE SAME BASIS (D-5179 item 6): the 4th and the 6th
+    // have one on their closes, the 5th has none although its range
+    // intersection survived, so a consumer refuses it and converts nothing.
+    let index = FactorIndex::load(&out.0, ym(2025, 3)).unwrap();
+    for day in [4, 6] {
+        let pair = index
+            .factor_of("SYNO", Day::new(2025, 3, day).unwrap())
+            .unwrap();
+        assert_eq!(pair.basis().map(|(_, b)| b), Some(Basis::Close), "{pair}");
+    }
+    let Err(FactorRefusal::FactorNotConstant { pair, .. }) =
+        index.factor_of("SYNO", Day::new(2025, 3, 5).unwrap())
+    else {
+        panic!("the 5th's closes emptied");
+    };
+    assert!(pair.range.is_some(), "the range intersection survived");
+    assert_eq!(pair.basis(), None, "and holds no median: no factor");
+}
+
+/// THE BASIS RULE ITSELF (D-5179): the close intersection when it holds the
+/// median's ratio, else the range intersection when it does, else none; an
+/// emptied close intersection is no answer by itself.
+#[test]
+fn a_days_basis_is_the_first_intersection_holding_its_own_median() {
+    let f = |num, den| Frac { num, den };
+    let pair = |interval, range| FactorPair {
+        median: (100, 100),
+        min: (99, 100),
+        max: (101, 100),
+        interval,
+        range,
+        lag: 0,
+    };
+    let holding = (f(99, 100), f(101, 100));
+    let off = (f(102, 100), f(103, 100));
+    assert_eq!(
+        pair(Some(holding), Some(off)).basis(),
+        Some((holding, Basis::Close))
+    );
+    assert_eq!(
+        pair(None, Some(holding)).basis(),
+        Some((holding, Basis::Range)),
+        "an emptied close intersection falls to the ranges"
+    );
+    assert_eq!(
+        pair(Some(off), Some(holding)).basis(),
+        Some((holding, Basis::Range)),
+        "a close intersection off the median is passed over"
+    );
+    assert_eq!(pair(Some(off), Some(off)).basis(), None);
+    assert_eq!(pair(None, None).basis(), None);
+    // The bounds are closed: a median on an end is held.
+    let edge = (f(1, 1), f(2, 1));
+    assert_eq!(pair(Some(edge), None).basis(), Some((edge, Basis::Close)));
+    assert_eq!(
+        (Basis::Close.name(), Basis::Range.name()),
+        ("close", "range")
     );
 }
 
