@@ -7168,6 +7168,69 @@ mod tests {
         );
     }
 
+    /// THE KERNEL'S OWN `ENOSPC`, not a scripted host's. `/dev/full` answers
+    /// every write with `ENOSPC`, so this is the one full disk a test can
+    /// produce without privileged mounting, and it measures what the test
+    /// above can only assume: that the real error kind reaches `classify` as
+    /// `StorageFull` and leaves as `DiskFull` by name, returned and never
+    /// signalled (cloud-attack-law-20261016, lens 8).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernels_own_enospc_from_dev_full_is_disk_full_by_name() {
+        let at = Path::new("/dev/full");
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at)
+            .expect("Linux has /dev/full");
+        assert_eq!(
+            write_fully(&full, at, 0, &[0xAB; 4_096]),
+            Err(StoreError::DiskFull {
+                path: at.to_path_buf(),
+                action: Action::Write,
+            })
+        );
+    }
+
+    /// THE KERNEL'S OWN `ENOSPC` WHERE THERE IS NO `/dev/full` (macOS, the
+    /// operator's machine; PREC-1, ST-43). The test above is compiled for
+    /// Linux only, so on the Mac a real `ENOSPC` was never measured. This one
+    /// fills a file on a volume made small on purpose, named by
+    /// `BRUTEX_FULL_VOLUME`, until the kernel refuses, and the refusal must
+    /// leave `write_fully` as `DiskFull` by name. Bounded: a volume that takes
+    /// 1 GiB without refusing fails the test rather than filling a real disk.
+    #[test]
+    #[ignore = "needs BRUTEX_FULL_VOLUME: a directory on a small volume made to fill (docs/06-limits.md L-PREC1-01)"]
+    fn the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name() {
+        let dir = std::env::var_os("BRUTEX_FULL_VOLUME")
+            .map(PathBuf::from)
+            .expect("BRUTEX_FULL_VOLUME names a directory on a small volume");
+        let at = dir.join("brutex-enospc-probe.bin");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&at)
+            .expect("a new file on the small volume");
+        let chunk = vec![0xAB_u8; 1 << 16];
+        let mut offset = 0_u64;
+        let refused = loop {
+            assert!(offset < 1 << 30, "the volume took 1 GiB without refusing");
+            match write_fully(&file, &at, offset, &chunk) {
+                Ok(()) => offset = offset.saturating_add(1 << 16),
+                Err(refused) => break refused,
+            }
+        };
+        assert_eq!(
+            refused,
+            StoreError::DiskFull {
+                path: at.clone(),
+                action: Action::Write,
+            },
+            "after {offset} bytes"
+        );
+        // THE MEASUREMENT IS PRINTED, so L-PREC1-01 can be taken again.
+        eprintln!("ENOSPC: DiskFull by name after {offset} bytes accepted");
+    }
+
     #[test]
     fn an_empty_write_touches_the_host_at_all() {
         let host = Script::new(&[]);

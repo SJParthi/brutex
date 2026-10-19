@@ -74032,3 +74032,514 @@ this is a narrow or short desktop window.
 `docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
+
+### D-5400 — cloud/attack-law-20261016 merged back onto feat/db-fix one commit at a time, each claim re-measured here rather than trusted; two hunks left because feat/db-fix already held the fix (PREC-1) — 2026-10-17
+
+**Implemented by** PREC-1. **Findings** GC-61 (its Budget Saturday part),
+GC-75, GO-51, ZM-72, ZM-75, FOLD-65 (merging GO-41), ST-43, ST-46, PG-63,
+PG-64, PG-65, PG-66, PG-71, CR-25 and CR-28 of the read-only precision sweep
+of 16 Oct (`state/precision-20261016/catalogue.json`; matrix rows FM-320,
+FM-325, FM-350, FM-384, FM-386, FM-434, FM-457, FM-458, FM-493 to FM-496,
+FM-500, FM-592 and FM-595 in `new-matrix-rows.json`).
+
+**What was observed.** `origin/cloud/attack-law-20261016` is a one-commit
+snapshot of `feat/db-fix` at 4756cce0 (c9e3472e) and fifteen commits over it:
+eight that change code and seven that only write
+`reports/cloud-attack-law-20261016.md` and its lens 2 appendix. It was merged
+nowhere, and the sweep's critic found six cases marked handled whose tests
+existed only there.
+
+1. **Taken with `git cherry-pick -x`, in the branch's order:** 5a15d52d4
+   (cli srt-build dry run), 43f46ac37 (store: reader against writer, the
+   zero-byte reader door, the kernel's ENOSPC), 9119e8d72 (api: four hidden
+   fallbacks, three lax parsers, the write probe), fbb0c4805 (runner: the
+   zero-paisa entry, the exact mean), 883e1d4a1 (pull: census contract,
+   migration receipt, torn gap line, a key withdrawn twice), 72f16e993 (cli:
+   listing entry, detail barrier, run ledger name), 46afc61bb (api: fifteen
+   permission tests where the mode bits bind), 184d1db8d (core, engine,
+   store: two stale doc claims, checked against the code here, and a test
+   that raced inode reuse), and the seven report commits 9748776fb,
+   e52425a29, 8f54e7c4c, 77fad536b, 57f248ca1, fe2bf9bef and 8a7d5eb62.
+   Left: the snapshot c9e3472e, which is `feat/db-fix`'s own history
+   squashed into one commit and would add nothing but a second copy of it.
+2. **Two hunks left, because `feat/db-fix` already held the fix.**
+   `crates/api/src/bars_route.rs` (PG-63): AF-05 had already put the window
+   route on the one strict `bars::month_of_text`; the conflict kept
+   `feat/db-fix`'s side, and the branch's
+   `the_window_refuses_a_month_not_spelled_yyyy_mm` is kept as that route's
+   first test of it. `crates/pull/src/request_minutes.rs` (ZM-72): R3-18's
+   repair had already made every ledger append take the file's `flock`,
+   close a torn last line and refuse a link (`append_named_picking`); the
+   branch's `append_lines` call was left, and its
+   `a_torn_gap_line_is_closed_before_the_next_append` is kept beside R3-18's
+   test. Both conflicts and their resolution are in
+   `state/fix/round2/fix-PREC-1.json`.
+3. **The branch's claims are data, so each was re-measured.** On the
+   operator's Mac as the operator's user, 17 Oct: every fix reverted with
+   every test present (where a test calls a new item, the item kept and its
+   behaviour put back: `series_names` skipping an unreadable entry,
+   `refuse_drifted` answering nothing, `edge` reading Welford's mean, the
+   window route splitting on `-`, `append_synced_with` with no rollback),
+   the named tests built and run red, then the merged tip built and run
+   green. Eighteen failed before: the branch's fifteen, each at the
+   assertion its report names, and this package's own three (the lines
+   are in `fix-PREC-1.json`). Pins, which passed before
+   and are called pins: `the_month_route_names_a_held_or_truncated_month_and_never_answers_it_empty`,
+   the two store door tests, the Budget Saturday import, the two-runs
+   import, the torn gap line (fixed on `feat/db-fix` by R3-18) and the
+   branch's helper test `an_exactly_zero_sum_sample_has_a_zero_mean_and_is_read_long`,
+   which passes whether or not `edge` calls the helper; D-5403 adds the test
+   that goes through `edge`.
+4. **Not re-measurable here, said so.** GC-75's red is uid 0 only: on the
+   Mac the mode bits bind for the operator's user, so the permission tests
+   pass before and after, and D-0995's `where_permission_binds` wrapper is
+   kept for the container that runs as root. ST-43's `/dev/full` test is
+   compiled for Linux only; the Mac's own measurement is D-5404.
+5. **FOLD-65 and GO-41's fifteen invariant rows** (SS-06, MR-34, AF-23,
+   AF-28j, PIF-02, APIC-05, C4-CLI-03-03, AFA-13, ZR-04, ZX-20, AFG-71,
+   GI-01, GI-07 twice, GI-10) had already been corrected on `feat/db-fix`
+   by R3-14's repair of gate 10 (RA-184) before this package ran: each names
+   a test that exists, and a row whose behaviour a later decision reversed
+   says which decision. Gate 10 was run here over the merged tip, numbers
+   in `docs/06-limits.md` L-PREC1-04. Two of them, PIF-02 and AFA-13, kept a
+   claim no named test pinned (the once-per-day sentence for a day with no
+   recorded window); D-5406 names the test that does. No other row was
+   edited.
+
+### D-5401 — An audit-index append that fails is truncated back to the length it started at (PG-71's root cause; PREC-1) — 2026-10-17
+
+**Finding** PG-71 (FM-500), whose test column asks for "the root-cause
+rollback test for append_synced".
+
+**What was observed.** `api::audit`'s index files (`runs`, `faults`,
+`refusals/<source>.idx`) are runs of fixed-size entries read with
+`chunks_exact`. `append_synced` wrote and synced with nothing undone on
+failure, so a short write (a full disk mid-entry) left a fragment, the next
+batch was appended after it, and every later entry was read across two
+frames: counted malformed, and since D-5400's 9119e8d72 every reader walks
+the journal when any entry is malformed. The walk is correct and
+O(journal); the fragment made it permanent.
+
+**Decision.** `append_synced` measures the file's length after opening it,
+under the journal's append lock every caller already holds, writes through
+a seam (`append_synced_with`), and on a failed or short write truncates back
+to that length, as `write_rolled_back` does for a journal record (D-1854).
+Only bytes this call wrote are removed. When the truncation fails too, both
+errors are named, and a reader counts what does not decode as malformed and
+walks. A torn tail left by a power cut, where no error path ran, is not
+repaired by this; it stays malformed and walked (`docs/06-limits.md`
+L-PREC1-02).
+
+**Proof.** `api::audit::tests::a_short_index_append_is_truncated_back_and_the_next_entry_stays_on_its_frame`
+injects half an entry and an error through the seam. Red with the rollback
+removed: its scratch `runs` file was left at 48 bytes, the 32-byte entry and
+the 16-byte fragment. Cost: one `fstat` per index-file append, measured by
+`append_synced_cost_per_entry_is_measured` (L-PREC1-03).
+
+### D-5402 — An unreadable migration receipt is a drift answer by name, and the autopilot starts no pull on a census whose drift is not known to be none (CR-28; PREC-1) — 2026-10-17
+
+**Finding** CR-28 (FM-595).
+
+**What was observed.** `pull::ingest::census_store::legacy_drift` is the
+only warning that a writer built before version 4 filed months the census
+does not read. It read the receipt with `.ok()?`, so a receipt that could
+not be read, or that named no `legacy_bytes`, answered "no drift". The
+autopilot resumes from the census (`api::autopilot::survey`, then
+`frontier`), so months the census misses are owed again and re-pulled at
+today's adjustment basis, the mechanism CR-05 named. The autopilot never
+asked `legacy_drift` at all.
+
+**Decision.**
+1. Only an ABSENT receipt is "not migrated" (`None`). A receipt that cannot
+   be read, or names no readable `legacy_bytes`, answers `Some` with the
+   receipt's path and the reason (883e1d4a1, D-5400).
+2. `api::autopilot::refuse_drifted` runs on every round's census read. A
+   `Held` census for which `legacy_drift` answers anything becomes
+   `Census::Unreadable` carrying the drift's own words, so `survey` halts
+   the feed on its census by name and chooses no unit. Absent and
+   unreadable censuses pass unchanged. A repaired drift revives the feed on
+   the next pass through `manifest_loads`, as a repaired manifest does.
+   Cost: one receipt read and at most three `lstat`s per vendor per round,
+   O(1) in the store (L-PREC1-05).
+3. **Not changed:** the hand F&O pull in `server.rs` keeps its own stated
+   rule that a census which will not read is resumed from the window's
+   first day (a full refetch whose overlap `BarFile::append` verifies). It
+   is a separate decision with its own comment, and CR-28 names the
+   autopilot.
+4. On the real store, read only on 17 Oct: only GDFL is migrated, its
+   receipt reads, and `manifest/gdfl.man` is the recorded 268,430,208
+   bytes, so this halts nothing today.
+
+**Proof.** `a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift`
+(`crates/pull/src/census_store_tests.rs`; red before: "an unreadable
+receipt is named") and `api::autopilot::tests::a_census_whose_drift_is_not_known_starts_no_pull`
+(red with `refuse_drifted` answering nothing: "no pull starts on a
+drift-unknown census").
+
+### D-5403 — Money on the ranking path: a zero-paisa pessimistic entry is a measurement not taken, and `edge` reports the exact mean (CR-25; PREC-1) — 2026-10-17
+
+**Finding** CR-25 (FM-592, critical) and the branch report's lens 5.
+
+1. **A zero entry refuses the path.** `runner::grid::entry_fills` answers
+   its `0` sentinel when the cost model refuses the bar: for a long, a
+   positive low under one tick, which `costs::fill::fills_at`'s
+   printed-extreme sell leg refuses and `Candle::check_evaluable` admits.
+   Options print at 1 to 4 paisa (GO-14). `Candidate::unmeasured` and
+   `refused_at` now treat `entry_pess == 0` as a refused path, so no trade
+   is booked at a 0-paisa entry (fbb0c4805). Fills are at least a tick, so
+   `== 0` and nothing wider.
+2. **The exact mean.** `edge`'s `mean_paisa` is the exact `i128` sum over
+   the count, divided once; Welford's running mean stays for `m2` and the
+   overlap centring. The mean's sign is the whole rule for trading Short,
+   and Welford does not land on zero for a zero sum (fbb0c4805). The
+   branch's test pinned the helper `exact_mean` alone and passed whether or
+   not `edge` used it, so this package adds one through `edge`.
+
+**Proof.** `runner::grid::tests::a_sub_tick_entry_low_refuses_the_path_rather_than_charging_a_zero_entry`
+(red before: "a zero entry is a measurement not taken");
+`runner::outcome::overlap_tests::edge_reports_the_exact_mean_and_a_zero_sum_is_a_positive_zero`
+(red with `edge` reading Welford's mean: `1.6229971724787928` against the
+exact mean three units in the last place away, bits 4609988148633845772
+against 4609988148633845775; on the tip its zero-sum half reports `+0.0`
+where Welford, on the same moves, does not).
+
+### D-5404 — The kernel's own ENOSPC is measured on the operator's Mac through a small volume made to fill (ST-43; PREC-1) — 2026-10-17
+
+**Finding** ST-43 (FM-457).
+
+The branch's `file::tests::the_kernels_own_enospc_from_dev_full_is_disk_full_by_name`
+is `#[cfg(target_os = "linux")]`: macOS has no `/dev/full`, so on the Mac a
+real ENOSPC was never measured. `file::tests::the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name`
+fills a file in the directory `BRUTEX_FULL_VOLUME` names, at most 1 GiB, in
+64 KiB `write_fully` calls until the kernel refuses, and the refusal must
+leave as `StoreError::DiskFull { action: Write }` by name. It is ignored
+with that reason, because a test cannot make a volume without the
+operator's machine mounting one. Run on 17 Oct on a 2 MiB HFS+ image
+mounted under the session's scratch directory with `hdiutil`: 1,900,544
+bytes accepted, then `DiskFull` (L-PREC1-01).
+
+### D-5405 — `/dayflags.json` and the derive ledger read a month by the one strict parser (PG-63, PG-65; PREC-1) — 2026-10-18
+
+**Finding** PG-63's rule, "one strict YYYY-MM parser on every route", and
+PG-65's, "one strict month-file parser", checked on the shadow of the real
+store after the merge rather than taken from the branch.
+
+**What was observed.** On 18 Oct 2026, with this package's build serving a
+shadow of the real store on `127.0.0.1:9302`,
+`/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-%2B1&to=2025-02`
+answered HTTP 200 with `asked.from` = `2025-01-01`, while `/bars/window.json`,
+`/chain.json` and `/bars.json` refused the same spelling by name.
+`api::dayflags::bound` checked only the LENGTHS of a month's two halves and
+handed them to `str::parse`, which takes a leading `+`; `parse_derive`, which
+reads a `derive` line of the coverage ledger, had the same check. These were
+the two sites left after AF-05 and the branch: no other `split_once('-')` in
+`crates/api/src` reads a month (searched 18 Oct).
+
+**Decision.** Both call `crate::bars::month_of_text`, the one strict parser
+(exactly four digits, a dash, two digits, then `YearMonth::new`'s range).
+A day still goes through `import_journal::parse_day`, which already refused
+any spelling that does not print back as itself. O(1): a fixed seven-byte
+pattern, as before.
+
+**Proof.** `api::server::dayflags::tests::a_month_with_a_signed_field_is_refused_on_the_route_and_in_the_derive_ledger`
+(red on the code before this entry, green after; the failing line is in
+`state/fix/round2/fix-PREC-1.json`), and on the shadow the same request now
+answers HTTP 400 naming `from`.
+
+### D-5406 — PREC-1 after `feat/db-fix` moved: two invariant rows name the test that pins their last claim, and the merged tip re-measured (PREC-1) — 2026-10-18
+
+**Findings** FOLD-65 (merging GO-41; matrix row FM-434), and every case of
+D-5400 again, because `feat/db-fix` moved 41 commits (R3-08, R4-07, IA-1,
+IA-8, WEBFLAG-1 among them) after this package's first commit.
+
+1. **Two rows kept a claim no named test pinned.** R3-14's repair of gate 10
+   re-pointed PIF-02 and AFA-13 when WP-13b gave the Muhurat and the
+   disaster-recovery Saturday their recorded windows, and both rows kept the
+   sentence that a day with NO recorded window is still named once, withheld,
+   for its own reason. PIF-02 said only that "the fold module's own tests"
+   held it; AFA-13 named two tests about the DR Saturday folding. The test
+   that pins it is `pull::fold::tests::an_unsized_day_is_one_note_for_its_own_reason_and_counted`
+   (`crates/pull/src/fold.rs`): one note per unsized day, reason
+   `Withheld::Unsized`, never a coverage fault, every bucket counted under
+   it. Both rows now name it, path-qualified, so gate 10 checks it in that
+   file. Each row keeps its own mark (PIF-02 stays a history row).
+2. **The merge.** `feat/db-fix` at 294b24d4f was merged into the package
+   branch. Three conflicts, each two independent additions, both kept:
+   `crates/api/src/chain_route_tests.rs` (the branch's signed-expiry test
+   and R3-08's chain-beside-a-writer test), and the tails of
+   `docs/04-invariants.md` and this file (R3-08's and R4-07's rows and
+   entries first, this package's after them). No hunk of R3-08 was reverted;
+   the two pins that meet its writer rule were run again on the merged tip
+   (results in `state/fix/round2/fix-PREC-1.json`).
+3. **D-5405 re-measured.** The release build of this package from before
+   D-5405 (12:53 IST, 18 Oct, still serving `127.0.0.1:9302` over the
+   shadow) answered
+   `/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-%2B1&to=2025-02`
+   HTTP 200 with `asked.from` `2025-01-01`, and `to=2025-%2B2` HTTP 200 with
+   `asked.to` `2025-02-28`, at 17:43 IST. The after-build's answers are in
+   the same report.
+
+### D-5407 — PREC-1 on the merged tip: `round` kept inside clippy's line bound by `trusted_censuses`, whose wiring to the real drift check is tested, and two reds re-measured (PREC-1) — 2026-10-18
+
+**Findings** CR-28 (FM-595), GC-61 (FM-320), PG-63 and PG-65 (FM-493,
+FM-495), on `feat/db-fix` at 371b1a506 (AH-03 merged after D-5406).
+
+1. **The merge.** `feat/db-fix` at 371b1a506 was merged into the package
+   branch. Three conflicts, each the tail of a ledger
+   (`docs/04-invariants.md`, this file, `docs/06-limits.md`), each two
+   independent additions: AH-03's rows and entries first, this package's
+   after them. No hunk of AH-03 was edited.
+2. **`round` was 101 lines on the merged tip**, one over clippy's
+   `too_many_lines` bound, so `cargo clippy --workspace --all-targets -- -D
+   warnings` was red at `crates/api/src/autopilot.rs` `async fn round`
+   (measured 18 Oct). D-5402's census read (`refuse_drifted` over
+   `census::read_all` with `legacy_drift` as its answer) moved into
+   `trusted_censuses`, one call in `round`, so `round` has the line count
+   it had before D-5402. Nothing else in `round` changed.
+3. **The wiring is now tested, not only the rule.** D-5402's test hands
+   `refuse_drifted` a stand-in answer, so no test showed that `round` asks
+   the real `legacy_drift`.
+   `api::autopilot::tests::the_rounds_census_read_refuses_a_census_whose_migration_receipt_will_not_read`
+   records and migrates a GDFL census on a scratch root through
+   `pull::ingest::census_store`, reads it held through `trusted_censuses`,
+   makes the receipt unreadable, and reads it refused with the drift's own
+   words. Red with `trusted_censuses`' drift answer replaced by `None`
+   (panicked at `crates/api/src/autopilot.rs:5379`, "a census whose
+   migration receipt will not read is refused, never held"), green after.
+4. **Two reds taken again on this tip**, each in a target directory no
+   other worktree builds into (a shared one handed this tree another
+   worktree's `pull`, built later, as fresh; the evidence is in
+   `state/fix/round2/fix-PREC-1.json`). D-5405's
+   `a_month_with_a_signed_field_is_refused_on_the_route_and_in_the_derive_ledger`
+   with the two parser hunks reverted: panicked at
+   `crates/api/src/dayflags.rs:6799`, `from=2025-%2B1` asked as
+   `Day { year: 2025, month: 1, day: 1 }`. GC-61's Budget Saturday test, a
+   pin that passes on `feat/db-fix`, against a mutant whose `kind_of`
+   answers `Closed` for 2025-02-01: `(days_imported, days_closed,
+   days_refused)` was `(0, 1, 0)` against the `(1, 0, 0)` it asserts. Both
+   mutations were undone and the tree checked clean before the gates ran.
+
+### D-5408 — The write probe removes only the file it made: a held probe name fails the probe by name and is left for the operator, so the branch's link rule and R4-06's no-automatic-deletion rule both hold (PREC-1) — 2026-10-19
+
+**Finding** the branch's write-probe repair (9119e8d72, taken by D-5400)
+against R4-06's no-automatic-deletion gate (AUT-05, D-5320 to D-5322), met
+on the merged tip.
+
+**What was observed.** `cargo test --workspace --locked` on the merged tip,
+18 Oct: `pull/tests/no_scheduler_delete.rs`'s `no_scheduler_path_deletes_a_file`
+was red, "a scheduler path deletes or renames:
+crates/api/src/autopilot.rs:791: match std::fs::remove_file(path) {". The
+branch's repair of `probe_io` unlinked whatever held the probe's name before
+opening it with `create_new`: an automatic deletion, on a scheduler path, of
+something the call did not make. R4-06's gate allows exactly one
+`remove_file(path)` there, the probe's own file, and its `File::create`
+allowance was no longer spent either.
+
+**Decision.** Both rules hold; neither is traded for the other.
+1. `probe_io` opens the probe's dot-file with `create_new` and unlinks
+   nothing first. `create_new` refuses any entry at the name, a link
+   included, and never follows one, so nothing is written through a link
+   (the branch's rule) and nothing is removed but the file this call made
+   (R4-06's rule).
+2. A name already held, by a link or by the file of a probe cut off before
+   its removal, fails the probe with the host's `AlreadyExists` and the
+   sentence "something already holds the probe's name ...; the probe neither
+   writes through nor removes what it did not make, so it is left for the
+   operator". The feed stays store-halted with that reason under the
+   probation's own bound (`STORE_PROBES`) until the name is freed by hand.
+3. R4-06's `ALLOWED` loses its `File::create` row, which is no longer a
+   site, and its `remove_file(path)` row's reason is restated; nothing else
+   in `crates/pull/tests/no_scheduler_delete.rs` changed.
+
+**Cost, stated.** A probe cut off between its create and its remove leaves
+its dot-file, and that vendor's probe then fails by name until an operator
+removes it (`docs/06-limits.md` L-PREC1-06). Removing a leftover recognised
+by its name is the automatic deletion R4-06 refuses.
+
+**Proof.** `api::autopilot::tests::the_write_probe_never_writes_through_a_link_at_its_name`
+asserts the refusal, a planted link and a leftover file each kept exactly as
+they were, and a free name written and removed: red with the branch's probe
+put back, green after (the lines are in `state/fix/round2/fix-PREC-1.json`).
+`no_scheduler_path_deletes_a_file` is green on the tip.
+
+### D-5409 — Three mutants that survived PREC-1's diff-scoped mutation run are killed by a test each: the `faults` cover guard and the walked attribution's identity (PREC-1) — 2026-10-19
+
+**Finding** CLAUDE.md section 9 ("no surviving mutant on touched modules")
+against the code D-5400 took from 9119e8d72 for PG-71.
+
+**What was observed.** `cargo mutants` over this package's diff of
+`crates/api` (`--in-diff`, 50 mutants, 19 Oct, the operator's Mac as the
+operator's user): 32 caught, 15 unviable, 3 missed:
+1. `crates/api/src/audit.rs` `Journal::read_index`, the guard
+   `Some(ordinal) if ordinal < covered` on a `faults` entry, replaced by
+   `true`;
+2. the same guard with `<` read as `<=`;
+3. `crates/api/src/audit_json.rs` `attribution`, the field `identity`
+   deleted from the `Attribution` built when the index is malformed.
+
+The first two are one rule no test read: an append lands its index entries
+first and moves the cover after (`write_cover`), so a crash between the two
+leaves a `faults` entry for the ordinal the cover does not yet reach. That
+record is the next one; counting it would report a fault in a record the
+page's total does not include. The third is a cost rule: without the
+journal's `(dev, ino)` the cached walk never matches the next request's
+identity, so every page of a journal with a damaged index walked the whole
+journal again instead of decoding only what was appended since. Both
+behaviours were right; neither was pinned.
+
+**Decision.** No code changes. Two tests:
+1. `api::audit::tests::a_fault_entry_at_or_past_the_cover_is_not_counted`
+   builds an index with a fault at ordinal 2, then writes the cover back to
+   2 records (the crash shape) and asserts `(covered, faults,
+   fault_ordinals, malformed)` is `(2, 0, [], 0)`.
+2. `api::audit_json::tests::an_index_that_lost_a_run_entry_is_walked_and_says_why`
+   also asserts that the walked attribution carries the journal's own
+   `(dev, ino)`.
+
+**Proof.** Each mutant applied by hand and the test run, 19 Oct: the `<=`
+mutant panicked at `crates/api/src/audit.rs:5094`, "a fault at the cover's
+own ordinal is not below it", left `(2, 1, [2], 0)`, right `(2, 0, [], 0)`;
+the guard-to-`true` mutant red at the same assertion; the identity deletion
+panicked at `crates/api/src/audit_json.rs:1893`, "the walk is cached under
+the file it read", left `None`, right `Some((16777232, 559978477))`. Both
+files restored byte-identical (sha-256 checked) and both tests green.
+
+### D-5410 — The pull refusals of `/dayflags.json` and `/ingest` are walked from the journal when its index lost an entry or the symbol's refusal entry will not read, and the answer says why (PG-71; PREC-1) — 2026-10-19
+
+**Finding** PG-71 (FM-500), whose rule is "count into malformed and walk the
+journal with the reason" on `/audit.json` AND `/dayflags.json`. D-5400 (from
+9119e8d72) and D-5401 closed it for `/audit.json` and for the index's own
+appends; the `/dayflags.json` half was re-read here rather than taken as
+handled.
+
+**What was observed** (19 Oct 2026, on this package's branch merged with
+`feat/db-fix` after AH-04; that merge was squashed into the package's one
+commit, so it is not cited by hash):
+1. `dayflags::read_pull_journal` read the journal's index whenever
+   `Journal::read_index` answered, and `pull_indexed` files each refusal
+   under the run the index holds before it. A `runs` entry that will not
+   decode is counted in `Indexed::malformed` and read nowhere, so the lost
+   run's members were filed under the vendor of the run before it. Measured
+   by `an_index_that_lost_a_run_entry_is_walked_for_the_refusals_and_says_why`
+   on the code before this entry: a reference run's refusal (record 4) was
+   read as Zerodha's beside Zerodha's own (record 2), two where the journal
+   holds one, at the test's first assertion on the damaged index.
+2. A refusal entry of the symbol's that will not read makes
+   `Journal::refusal_ordinals` refuse by name (D-5400), and this reader
+   answered that refusal as an unread pull journal (`PullUnread::Failed`):
+   the day's refusals withheld although the journal itself reads. Measured by
+   `a_refusal_entry_that_will_not_read_walks_the_journal_and_says_why`,
+   panicking with "walked, not refused:
+   Failed(... ZZOIL.idx: entry 0 is not a refusal entry ...)".
+3. `warm_pull_journal` skipped the walk at start for any index `read_index`
+   answered, so a damaged index would have left the whole walk to the first
+   request; the same test measured `Ok(0)` records walked at start against
+   the `Ok(4)` it asserts.
+
+**Decision.**
+1. `dayflags::trusted_index` is `read_index` refusing an index whose
+   `malformed` count is not zero, by name ("N of the index's entries cannot
+   be read, so a run may be missing from it and a refusal filed under another
+   run's vendor"): the rule `audit_json::attribution` and
+   `pullrun::older_runs` already keep. `read_pull_journal` and
+   `warm_pull_journal` both read through it, so such a journal is walked at
+   start, off the request path, as one with no index is.
+2. When reading through the index fails for any reason, including a refusal
+   entry that will not read, the journal is walked and `via` is
+   `{"kind": "walk", "why": <the index's own words>}`. The walk is the
+   existing one (DB-A34, DB-N19): outside the tails' lock, cached under the
+   journal's `(dev, ino)`, so later requests read only what was appended. A
+   walk that cannot read the journal is still `PullUnread::Failed`, in its own
+   words.
+3. **Not changed:** a healthy index is read exactly as before; the added cost
+   there is one integer comparison per request (`docs/06-limits.md`
+   L-PREC1-07, measured before and after on the shadow of the real store).
+
+**Proof.** The two tests above, red before and green after
+(`crates/api/src/dayflags.rs`). On a shadow of the operator's store, 19 Oct
+2026, with one byte of a clone of `refusals/NIFTY.idx` flipped: the build before
+this entry answered `/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY`
+with the pull journal unread and no refusal; this build walked the journal
+(`via.kind` `walk`, `why` naming `NIFTY.idx` entry 0) and `/ingest/refusals.json`
+for NIFTY answered the healthy index's answer exactly apart from its `source`
+block (20 refusals; compared as sorted JSON). With a
+`runs` entry flipped too, the walk ran at start and the first request read no
+record. Costs in `docs/06-limits.md` L-PREC1-07.
+
+### D-5411 — PREC-1 after AG-02 merged: the re-key ledger's "read whole or refused" rule is AG-02's code, and GO-51's test is kept on it (GO-51; PREC-1) — 2026-10-19
+
+**Finding** GO-51 (FM-350): a second `superseded` or `retired` line for one
+key with different fields was silently kept as the later one.
+
+**What was observed.** `feat/db-fix` moved to 9c6254ad9 at 15:19 IST on
+19 Oct with AG-02 ("refuse a re-targeted or superseded-and-retired key by
+name"), which rewrote `Withdrawn::parse` in `crates/pull/src/gdfl_rekey.rs`
+around two new methods, `admit_superseded` and `admit_retired`. Merging it
+into this package's branch conflicted in exactly the lines the cloud
+branch's 883e1d4a1 changed (D-5400): the doc comment of `parse` and its two
+record arms, and the test file where both sides appended at one place.
+
+**Decision.**
+1. **`crates/pull/src/gdfl_rekey.rs` is AG-02's side, whole.** It holds the
+   cloud branch's rule and more: a key superseded by two different keys is
+   refused naming both lines, one move or one retirement recorded twice with
+   another account (counts or digest) is refused, a key both superseded and
+   retired is refused, an identical repeat reads once. The cloud branch's
+   two arms would have been a second implementation of the same refusal,
+   which is the shape this repository refuses.
+2. **GO-51's test is kept**, beside AG-02's, because the precision sweep's
+   critic and `docs/04-invariants.md` PREC1-06 name it:
+   `a_key_withdrawn_twice_with_different_records_refuses_the_ledger` now
+   reads AG-02's words ("a key continues under one key", "one retirement
+   has one account", both line numbers) instead of the cloud branch's
+   ("superseded twice", "retired twice"). Its facts are unchanged: two
+   targets refused, two retirement accounts refused, an identical repeat of
+   either is one record (`counts()` (1, 0) and (0, 1)).
+3. Nothing else of either side changed. No other file conflicted; the three
+   ledgers auto-merged and gate 10's id and number checks were re-run on the
+   merged tree.
+
+**Proof.** `pull::gdfl_rekey::tests::a_key_withdrawn_twice_with_different_records_refuses_the_ledger`
+green on the merged tree beside AG-02's
+`a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines`
+and `one_move_or_retirement_recorded_twice_with_another_account_is_refused`;
+red on 17 Oct on the code before D-5400 with the fix reverted (the line is in
+`state/fix/round2/fix-PREC-1.json`).
+
+### D-5412 — The two mutants D-5410's diff left alive are killed by a test of an index ahead of its pull journal (PG-71; PREC-1) — 2026-10-19
+
+**Finding** PG-71 (FM-500), D-5410's lines, measured by mutation rather than
+read.
+
+**What was observed.** `cargo mutants --in-diff` over D-5410's diff
+(`crates/api`, tests `server::dayflags::` and `ingest_refusals`; 19 Oct, the
+operator's Mac as the operator's user, log
+`state/fix/round2/prec1-logs/r6/mut-d5410.log`): 16 mutants in 37 minutes,
+12 caught, 2 unviable, **2 missed**: `replace / with *` in
+`read_pull_journal` (`trusted_index(&journal, whole / stride)`) and in
+`warm_pull_journal` (`whole / crate::audit::RECORD_LEN_U64`). Both hand
+`trusted_index` a count larger than the journal's, and no test asked what
+`read_index` does with the count: it refuses an index that covers more
+records than the journal holds. So a journal cut back, or put back from an
+older copy, beside an index that covers more of it, would be read through
+that index under either mutant, and the start would skip its walk.
+
+**Decision.** One test pins the count both callers pass:
+`an_index_ahead_of_its_journal_is_walked_and_says_why` builds two runs
+(four records, all indexed), cuts the journal back to its first run, and
+asserts that a request walks it with `via.why` naming "covers 4 records and
+the journal holds 2", reads the journal's own two records and answers only
+the first run's refusal; and that `warm_pull_journal` walks the same journal
+at start, two records. No production line changed: the guard is
+`read_index`'s, and D-5410's lines already pass it the journal's count.
+
+**Proof.** Measured 19 Oct in a scratch copy of the tree (never the
+worktree), the file restored byte for byte after each run: the test passes
+on the tree (1 passed); with `whole * stride` in `read_pull_journal` it
+fails at its first assertion on the cut journal, the walk's reason being
+"cannot read record 3 — failed to fill whole buffer" instead of the index's
+refusal; with `whole * crate::audit::RECORD_LEN_U64` in `warm_pull_journal`
+it fails with "an index ahead of its journal is walked at start, every
+record once", left `Ok(0)`, right `Ok(2)`. Logs `green-ahead.log`,
+`red-ahead-request.log` and `red-ahead-warm.log` beside the mutation log.
+`docs/04-invariants.md` PREC1-21.
