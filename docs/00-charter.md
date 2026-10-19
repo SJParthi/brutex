@@ -1319,3 +1319,27 @@ files of `github.com/dropbox/dropbox-api-spec`:
 The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
+
+## GDFL share files rebuilt to seconds and compared with the store — measured 2026-10-16 (D-5180 to D-5183)
+
+`cli tick-to-second-check` (DATA-2) reads the vendor archive named in "GDFL
+capital-market tick files" above READ-ONLY, through the importer's own reader
+and fold, and compares every stored share-day with the seconds that archive
+rebuilds to. **No row of this section is a vendor statement**: each is a count
+this repository's code took, on 16 October 2026 (IST), over the operator's
+archive and the operator's store, both read-only, at four workers. Anyone with
+the two can repeat each figure with the command and year named. **No GDFL row
+is quoted.** Where the archive and the store are mounted is machine layout and
+is not recorded.
+
+| Fact | Value | How measured | Lane |
+|---|---|---|---|
+| A row with LTQ = 0 carries a price | of every share-day's kept rows, 2019: 346,833,013 of 790,237,579 have LTQ = 0 and 1,292,445 of those, in session, a price other than the last traded one; 2025: 209,616,804 of 655,116,344 and 2,361,290; 2026 (to 24 Sep): 118,343,070 of 421,031,527 and 1,663,760 | `cli tick-to-second-check <year>`, the summary's `ltq0_rows` and `ltq0_new_price` | measured, three whole years |
+| What an LTQ = 0 row's price IS | UNVERIFIED: no vendor document is recorded that says whether it is a trade, a last-price refresh or a quote-driven value. The hand-over's reading (rows are about one-second snapshots, LTQ the volume since the one before) is an inference from one file (RELIANCE 2025-03-07), not a source | — | UNVERIFIED |
+| Rows out of time order in share files | 0 in 2019, 2025 and 2026 (every share file the stored scope files) | the summary's `out_of_order` (a kept row stamped below the running maximum) | measured, three whole years |
+| The store against rule T | every share-day of 2019 and 2025 the store holds is equal to rule T (trades only) in second count, OHLC sums, volume, span and a BLAKE3 over every record: 2019 70,697 `exact_T` + 293 on the Muhurat of 2019-10-27; 2025 76,783 + 311 on 2025-02-01 and 311 on 2025-10-21. 2026 (to 2026-09-24): 48,217 + 311 on 2026-02-01, and the auction-era days of the next row | the summary's status table | measured, three whole years |
+| The closing auction's era in the store | every stored share-day of 2026-08-03 to 2026-09-24 with a diverted print holds one or two seconds more than rule T: the import journal closed those days under bar definition 2 (and 3 for 14 renamed shares), which folded the closing-auction prints into the seconds; definition 4 diverts them (D-4878 item 10) | the 2026 run's `differs` rows (7,350, every one a day with `auction_prints` > 0), and `imports/gdfl.journal` `done stocks <day> * definition=2` | measured, 2026 |
+| Trade-for-trade series files not in the store | 2019: 212 share-days (JETAIRWAYS `.BZ` 66 and `.BE` 58, the rest `.BE`); 2025: 651 (`.BE`: RCOM 169, RELINFRA 138, JPASSOCIAT 107, DISHTV 66, RPOWER 58, HCC 58, SAGILITY 36, RAYMOND 10, GVT&D 9); 2026: 377 (`.BE`). The stored scope files them under the share since WP-12f; the store's months predate it | the `raw_only` rows, grouped by the file's series | measured, three whole years |
+| The archive's last stocks day | 2026-09-24. The store's GDFL share seconds of 2026-09-25, 28, 29 and 30 (1,228 share-days) came from the tick store (`run ... source=tickstore` in the import journal), not from this archive | the 2026 run's `store_only` rows, `detail` `after_archive_end:2026-09-24` | measured, 2026 |
+| A share's closing-auction eligibility unknown | 46 files of 2026 (RELINFRA 25, RCOM 13, DISHTV 8) are refused by the decoder with `AuctionEligibilityUnknown`: `core::universe` records no ISIN for them. The store holds seconds on 7 of them (DISHTV 2026-08-14, 17, 19, 21, 09-01, 02 and 15), filed under definition 2 before eligibility was asked; this build refuses those files | the `read_failed:AuctionEligibilityUnknown` rows | measured, 2026 |
+| An exchange price band for a share | UNVERIFIED: none is recorded here, so none is applied; the check counts against the day's own traded range instead (D-5182) | — | UNVERIFIED |

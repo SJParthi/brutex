@@ -73285,3 +73285,221 @@ this is a narrow or short desktop window.
 `docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
+
+### D-5180 — Rule T stays the store's one-second bar; rule A's every-row extremes are a candidate for the fills' worst-case bound, as a new file version on one price basis, never a rewrite (DATA-2, proposal) — 2026-10-16
+
+**The question** (hand-over (4a), FINDING 1): a GDFL row with LTQ = 0 carries
+a real price, so should the seconds the fills use take every row's LTP into
+their high and low (rule A) or only the traded rows' (rule T, today's
+store)?
+
+**Measured** (D-5181; Zerodha 1-minute bars on the raw basis, D-5182; per
+mille of the Zerodha minutes rule T also trades in):
+
+| Year | Minutes compared | High equal T / A / R | Low equal T / A / R | Per share-day median high, T / A (share-days) | Seconds widened by A, high / low | Rows outside the day's traded range |
+|---|---|---|---|---|---|---|
+| 2019 | 14,941,562 | 435 / 435 / 456 | 433 / 433 / 454 | 0 / 0 (42,800) | 2,932,272 / 2,887,703 | 57,847 |
+| 2025 | 19,329,768 | 636 / 647 / 668 | 618 / 632 / 651 | 786 / 802 (51,792) | 1,239,744 / 1,393,797 | 127,901 |
+| 2026 to 24 Sep | 13,977,927 | 761 / 774 / 796 | 742 / 759 / 779 | 808 / 823 (37,648) | 843,217 / 960,043 | 99,619 |
+
+Rule R is every row, every second. 2019's medians are 0 because Zerodha's
+2019 history is adjusted for later corporate actions on about half the
+shares (91 of 171 in March 2019 by the hand-over's feed check) and no
+minute of an adjusted day can match (hand-over FINDING 3); its shares are a
+lower bound under every rule alike.
+
+**Proposal.**
+
+1. **The store stays rule T**, bit for bit (every share-day of 2019 and
+   2025 the store holds is exact under it, and every one of 2026 but the
+   closing-auction days D-5183 names). Volume, open, close and the trade
+   count are trades-only under every rule, and a second with no trade has
+   no bar.
+2. **Rule A is not written into the one-second bars.** Its gain over rule T
+   is 0 to 1.5 points of exact minute highs on the raw basis (1.1 in 2025,
+   1.3 in 2026) and 1.5 to 1.6 points of share-day medians, and part of
+   what it adds are LTQ = 0 prints outside every traded price of the day.
+3. **For the worst-case fill bound** (hand-over: the worse of the GDFL
+   second and the Zerodha minute high/low), rule A's widened high and low
+   are the candidate, filed if adopted as a NEW append-only file version (a
+   sidecar of the month), never an in-place change. Adopting it waits on
+   one measurement, not on the operator: the same minute shares on DATA-1's
+   factor-converted basis. If rule A's per-share-day median high-match
+   stays above rule T's there, the sidecar is built; if not, the bound stays
+   rule T plus the Zerodha minute.
+4. Rule R is reported and never a bar: it would invent seconds.
+
+**Other years**: the cost of 2019, 2025 and 2026 is in `docs/06-limits.md`
+(L-T2S-04); the years 2018 and 2020 to 2024 are store steps for the main
+session (read-only runs, no write to the store).
+
+### D-5181 — `cli tick-to-second-check`: every stored GDFL share-day of a year rebuilt from the raw zip by the importer's own reader and fold, compared by a constant-size signature, read-only (DATA-2) — 2026-10-16
+
+The tick-to-second conversion was checked on 15 October by an untracked
+scratch checker outside this repository, which carried its own row parser,
+its own fold and a fixed 09:15–15:30 window, and read the store through
+`/bars.json` on the operator's app. Its 2025 answer (76,886 share-days,
+75,608 exact under the trades-only rule) was right, but two of its three
+explanations were the checker's own: 983 share-days "differed" because it
+did not URL-encode `&` in `M&M`, `M&MFIN`, `ARE&M` and `GVT&D`, and 295
+because its window was not the 2025 Muhurat's. A check that can disagree
+with the store for reasons of its own is not evidence about the store.
+
+1. **One reader, one fold, one session authority: the importer's.** Rows
+   reach the rebuild only through `pull::gdfl_cm::read_listed` (length and
+   CRC-32 against the archive, the day's session, refused rows by name,
+   closing-auction prints diverted) under the scope `cli gdfl-import stocks`
+   files (`gdfl_import_command::scope_of`, old names filed under the newest
+   symbol, trade-for-trade series files under their share). Seconds are
+   folded by `pull::gdfl_import::convert` (late-row placement included) and
+   kept or dropped by `pull::session::Window::verdict` with the import's
+   window, rung and venue. No change to `crates/pull` was needed: every
+   piece is already public. The census of what the decoder keeps no field
+   for (the quotes, a minus sign, a repeated line) is one pass over the
+   same bytes, kept by a wrapper source so they are the bytes `read_listed`
+   checked; it never makes a bar.
+2. **Rule T** is `convert(ImportKind::Stocks)`: what the store holds.
+   **Rule A** keeps rule T's seconds, opens, closes and volumes and widens
+   each second's high and low by every row placed in it, LTQ = 0 included,
+   taken from `convert(ImportKind::Indices)` (the importer's every-row rule,
+   the same placement). No bar is invented for an untraded second. **Rule
+   R** (every row, every second: the scratch checker's "rule A") is
+   reported only as a minute match.
+3. **A signature per share-day**: second count, sums of O/H/L/C, volume,
+   first and last stamp, BLAKE3 over every record in order (stamp, OHLC,
+   volume, open interest). The store side is read through
+   `BarFile::open_existing` (shared lock, the served generation, nothing
+   created) with one indexed lookup to the day's first second.
+4. **Statuses**: `exact_T`, `exact_A`, `differs:<fields against T>`,
+   `raw_only`, `store_only`, `special_session` (a day
+   `pull::calendar::special_session` records whose comparison was exact;
+   `compare` says which rule), `read_failed:<the refusal's own word>`.
+   CAL-1's `tradable_day` had not merged, so the label is `special_session`
+   plus `kind_of`.
+5. **Counts by reason**, every one a column: the decoder's `zero_ltp`,
+   `off_grid`, `malformed`; the census's `negative_ltp`, `negative_qty`,
+   `crossed_quote` (bid > ask, both positive), `one_sided_quote`,
+   `identical_consecutive`; `outside_trade_band` (D-5182), `out_of_order`,
+   `late_traded`, `ltq0_rows`, `ltq0_new_price`, `auction_prints`,
+   `trades_in_session`, and the rule-T seconds the session filter dropped
+   before the open, at or after the close, and for any other reason.
+6. **Append-only output**: `tick-to-second-<year>.v<N>.csv` and
+   `.v<N>.summary.txt`, each staged through `store::staging::create`, made
+   durable, linked to the first free `N` with `hard_link` (never replaces),
+   the directory made durable. The rows file holds no wall time, so the
+   same archive, store and commit give the same bytes at any worker count.
+   `--out` inside the store root is refused before anything is read.
+7. **Parallel over days**, `--workers` 1 to 12, default 4 (the operator's
+   cap for read-only runs over the real store); store-only days are found
+   per symbol in a second parallel phase. One event per day zip, one per
+   instrument-month, one at the start and the end of the run.
+8. **Exit code**: 0 only when every share-day is `exact_T`, `exact_A` or
+   `special_session`; 1 otherwise, the files written either way.
+
+**Measured, 2025, read-only** (commit `df05ec10`, 4 workers, 435 s wall):
+249 day zips, 78,056 share-days: 76,783 `exact_T`, 622 `special_session`
+(311 on the 2025-02-01 Budget Saturday, 311 on the 2025-10-21 Muhurat, every
+one exact under rule T), 651 `raw_only`, and no `differs`, `store_only` or
+`read_failed`. Every one of the 651 is a trade-for-trade series file
+(`<SYM>.BE.NSE.csv`: RCOM 169, RELINFRA 138, JPASSOCIAT 107, DISHTV 66,
+RPOWER 58, HCC 58, SAGILITY 36, RAYMOND 10, GVT&D 9) that the stored scope
+files under its share since WP-12f and the store has not imported. Against
+the scratch checker's 76,886: all of them are here; 76,591 have the same
+rule-T seconds and volume; the other 295 are the Muhurat, where its fixed
+window kept seconds the session authority drops; the 519 it lacked are old
+names filed under today's symbol (LTIM as LTM 249, TATAMOTORS as TMPV 202,
+ZOMATO as ETERNAL 68). Its 983 `&` share-days are `exact_T` here. Its
+2,334,183 LTQ = 0 rows with a new price are 2,333,404 here on the same
+share-days, the 779 between them all on the Muhurat (counted inside the
+Muhurat's window, not 09:15–15:30); 0 out-of-order rows, as it found.
+RELIANCE 2025-03-07 alone: 20,148 seconds, volume 16,471,155, rule T
+exact, and 292 (rule T) and 322 (rule A) of 375 minutes whose high equals
+Zerodha's, which are FINDING 1's figures.
+
+**Measured, 2019, read-only** (same commit, 4 workers, 516 s): 245 day
+zips, 71,202 share-days: 70,697 `exact_T`, 293 `special_session` (the
+Muhurat of 2019-10-27, every one exact under rule T), 212 `raw_only`, every
+one a trade-for-trade series file (JETAIRWAYS `.BZ` 66 and `.BE` 58, RCOM
+15, TATACOMM, KPITTECH, IIFL, DALBHARAT, AARTIIND and 360ONE 10 each, ABB
+7, CGPOWER `.BZ` 4, ABCAPITAL 2). No `differs`, `store_only` or
+`read_failed`.
+
+**Measured, 2026 to 24 September, read-only** (same commit, 4 workers,
+234 s): 181 day zips, 57,529 share-days: 48,217 `exact_T`, 311
+`special_session` (2026-02-01, exact under rule T), 377 `raw_only` (all
+`.BE`), and three kinds the store's own history explains, none a fault of
+the conversion:
+
+- **7,350 differ, every one in the closing auction's era** (2026-08-03 to
+  2026-09-24) and every one a day whose file holds a diverted
+  closing-auction print: the store holds one second more than rule T (two
+  on 31 days) and more volume. The import journal closed those days
+  `definition=2` (14 renamed shares `definition=3`), bar definitions that
+  folded the print into the seconds; this build's definition 4 diverts it
+  to the `.auc` sidecar (D-4878 item 10). D-5183 names them.
+- **1,228 `store_only`**, every one on 2026-09-25, 28, 29 or 30: the
+  archive's last stocks day is 2026-09-24, and the import journal's run
+  for those days names `source=tickstore`, a later delivery.
+- **46 `read_failed:AuctionEligibilityUnknown`** (RELINFRA 25, RCOM 13,
+  DISHTV 8): `core::universe` records no ISIN for those shares, so their
+  closing-auction eligibility is unknown and the decoder refuses the file
+  by name, as the importer does. The store holds seconds on 7 of them
+  (DISHTV's own file, filed under definition 2 before eligibility was
+  asked).
+
+### D-5182 — The day band is generated from the day's own trades, and the Zerodha minute comparison is on the raw basis until DATA-1's factor merges (DATA-2) — 2026-10-16
+
+The hand-over's worst-case list asks for "a bad print outside the day band"
+to be counted. No exchange price band for a share is recorded in
+`docs/00-charter.md`, so an exchange band here would be invention
+(`CLAUDE.md` §3 rule 1): **UNVERIFIED**, and not used. The band this check
+counts against is generated from the data, a new day computing only
+itself: the lowest low and highest high of that share-day's rule-T seconds
+kept in session. `outside_trade_band` counts kept in-session rows whose LTP
+lies outside it: in practice LTQ = 0 rows, the prints rule A would admit to
+a second's high or low that no trade of the day reached (2025: 127,901).
+
+Zerodha's history is corporate-action adjusted and GDFL's is raw (hand-over
+FINDING 3). DATA-1 derives the per-share-day factor; it has not merged into
+`feat/db-fix`, so the minute high/low match is computed on the RAW basis
+and every row says `zerodha_basis=raw_unadjusted` (or `none` when Zerodha
+holds no minute that day). On an adjusted share-day no minute can match, so
+every share D-5180 reports is a lower bound until the factor is applied.
+
+### D-5183 — A store day built under an earlier bar definition is named by its one difference, and a store-only day after the archive's end says so (DATA-2) — 2026-10-16
+
+The first 2026 run of `cli tick-to-second-check` (D-5181) answered 7,350
+share-days `differs:seconds+open+high+low+close+volume+span+hash` and 1,228
+`store_only` with no word of why. Both had one cause each that the store's
+own journal states, and a status that does not say it is a failure dressed
+as an answer (`CLAUDE.md` §4): a reader cannot tell a conversion fault from
+a store built under an earlier definition.
+
+1. **Folded** is rule T with the decoder's diverted closing-auction prints
+   (`CmFile::auction`, D-3320) put back into file order by line, each
+   identical row restored (`Print::rows`), and folded by the same
+   `pull::gdfl_import::convert` under the same session filter
+   (`tick_second_check::with_prints`). It is computed only when the decoder
+   diverted a print. A store day equal to it in every field and the BLAKE3
+   digest, and to no rule, is `differs:auction_prints_folded` with
+   `compare` `exact_T_with_auction_prints`: the store holds the bars bar
+   definitions 2 and 3 built, which this build restates (D-4878 item 10).
+   It stays a difference (the run is not clean): the store is not what
+   this commit's importer makes of the file. A day equal to neither stays
+   `differs:<fields>`, so the label is earned per share-day by equality,
+   never assumed for the era (`docs/06-limits.md` L-T2S-06).
+2. The rows file carries the folded signature (`folded_seconds`,
+   `folded_volume`, `folded_hash`, empty when no print was diverted) and
+   the prints' traded quantity (`auction_volume`, every identical row
+   counted).
+3. **A `store_only` day after the last day zip the archive holds that year
+   says `after_archive_end:<that day>` in `detail`**; one inside the
+   archive's span says nothing, since the archive alone cannot say why.
+4. The summary adds two timing lines: nanoseconds per raw row over the
+   share-days of at least 10,000 rows (where the fixed per-share-day cost
+   of two store opens is small beside the rows) and microseconds per
+   share-day.
+
+Restating the auction-era days is the importer's (D-4878 item 10 refuses
+them at admission until the months are made again as new generations,
+WP-80); this check only names them.
