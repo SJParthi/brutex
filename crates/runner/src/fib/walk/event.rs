@@ -166,15 +166,13 @@ impl Events {
     pub(super) fn build(bars: &[SideBar], max_gap: u32, deep: bool) -> Self {
         let mut next_special = vec![0; bars.len()];
         let mut next = u32::try_from(bars.len()).unwrap_or(u32::MAX);
-        for (k, bar) in bars.iter().enumerate().rev() {
+        for (k, (slot, bar)) in next_special.iter_mut().zip(bars).enumerate().rev() {
             let special =
                 !bar.usable() || bar.is(Bit::HaltCrossed) || (deep && bar.gap_missing > max_gap);
             if special {
                 next = u32::try_from(k).unwrap_or(u32::MAX);
             }
-            if let Some(slot) = next_special.get_mut(k) {
-                *slot = next;
-            }
+            *slot = next;
         }
         Self {
             lows: Table::build(bars, Keep::LowestLow),

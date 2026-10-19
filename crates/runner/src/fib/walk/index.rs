@@ -886,7 +886,7 @@ fn run_starts(candles: &[FibCandle]) -> Vec<usize> {
 fn window_minima(lows: &[i64], w: usize) -> Vec<i64> {
     let mut win_min = vec![i64::MAX; lows.len()];
     let mut deque: VecDeque<usize> = VecDeque::with_capacity(w.saturating_add(1));
-    for (e, low) in lows.iter().enumerate() {
+    for (e, (slot, low)) in win_min.iter_mut().zip(lows).enumerate() {
         while deque
             .back()
             .is_some_and(|b| lows.get(*b).is_some_and(|l| l >= low))
@@ -897,9 +897,12 @@ fn window_minima(lows: &[i64], w: usize) -> Vec<i64> {
         while deque.front().is_some_and(|f| f.saturating_add(w) <= e) {
             deque.pop_front();
         }
-        if let (Some(slot), Some(front)) = (win_min.get_mut(e), deque.front()) {
-            *slot = lows.get(*front).copied().unwrap_or(i64::MAX);
-        }
+        // `e` itself is never popped for `w >= 1`, so the front is present.
+        *slot = deque
+            .front()
+            .and_then(|front| lows.get(*front))
+            .copied()
+            .unwrap_or(i64::MAX);
     }
     win_min
 }
@@ -911,17 +914,20 @@ fn suffixes(bars: &[SideBar]) -> (Vec<i64>, Vec<i64>) {
     let mut worst_from = vec![i64::MAX; bars.len().saturating_add(1)];
     let mut best = i64::MIN;
     let mut worst = i64::MAX;
-    for (k, bar) in bars.iter().enumerate().rev() {
+    // The zip pairs bar `k` with entry `k`; the entries past the last bar keep
+    // their sentinels.
+    for ((bar, best_slot), worst_slot) in bars
+        .iter()
+        .zip(best_from.iter_mut())
+        .zip(worst_from.iter_mut())
+        .rev()
+    {
         if bar.usable() {
             best = best.max(bar.hi_raw);
             worst = worst.min(bar.lo_raw);
         }
-        if let Some(slot) = best_from.get_mut(k) {
-            *slot = best;
-        }
-        if let Some(slot) = worst_from.get_mut(k) {
-            *slot = worst;
-        }
+        *best_slot = best;
+        *worst_slot = worst;
     }
     (best_from, worst_from)
 }
@@ -960,9 +966,9 @@ fn forced_window(bars: &[SideBar], deep: bool) -> Forced {
                 forced.worst_raw = forced.worst_raw.min(bar.lo_raw);
                 forced.last_second = bar.second;
             }
-        } else if u64::from(bar.second) == SESSION_FORCED_WINDOW_START_SECS
-            && !bar.is(Bit::ExitLocked)
-        {
+        } else if !bar.is(Bit::ExitLocked) {
+            // Stage A's bars are on the minute grid and none is kept from
+            // 15:10:00, so this is the 15:09 minute.
             forced.minute = Some(bar.lo_raw);
         }
     }
@@ -1011,6 +1017,9 @@ fn checked_halts(halts: &[HaltRange]) -> Result<Vec<HaltRange>, WalkRefusal> {
 /// with volume above zero that passes `Candle::check_evaluable`).
 fn zerodha_presence(minutes: &[Candle]) -> Result<Vec<Option<(i64, i64)>>, WalkRefusal> {
     let mut present = vec![None; minutes_per_day()];
+    // A second of the day is always a minute of the day; `spare` only gives
+    // the lookup a place to write if it were not.
+    let mut spare = None;
     for (at, minute) in minutes.iter().enumerate() {
         if !on_grid(minute.ts_micros, Resolution::Minute) {
             return Err(WalkRefusal::BarOffGrid { at });
@@ -1018,9 +1027,9 @@ fn zerodha_presence(minutes: &[Candle]) -> Result<Vec<Option<(i64, i64)>>, WalkR
         if minute.volume <= 0 || minute.check_evaluable().is_err() {
             continue;
         }
-        if let Some(slot) = present.get_mut(minute_of(clock(minute.ts_micros).1)) {
-            *slot = Some((minute.low, minute.high));
-        }
+        *present
+            .get_mut(minute_of(clock(minute.ts_micros).1))
+            .unwrap_or(&mut spare) = Some((minute.low, minute.high));
     }
     Ok(present)
 }

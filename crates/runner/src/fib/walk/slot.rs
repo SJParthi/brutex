@@ -662,7 +662,8 @@ impl<'a> Stepper<'a> {
         if !self.armed {
             self.armed = self.levels.trigger.armed_by(bar);
         }
-        if !self.armed || self.remaining == 0 {
+        // An entering order always has a remainder: it holds once it fills.
+        if !self.armed {
             return bar.volume;
         }
         let capacity = self.entry_capacity(bar);
@@ -895,19 +896,29 @@ impl<'a> Stepper<'a> {
         let target = self.target_touched(bar);
         let time = self.time_at.is_some_and(|at| bar.second >= at);
         let fired = [
-            (ExitReason::StopLoss, stop.is_some()),
-            (ExitReason::TrailingStopLoss, trail.is_some()),
-            (ExitReason::TrailingTakeProfit, giveback.is_some()),
-            (ExitReason::TakeProfit, target),
-            (ExitReason::Time, time),
+            (
+                ExitReason::StopLoss,
+                TradeFlag::FiredStopLoss,
+                stop.is_some(),
+            ),
+            (
+                ExitReason::TrailingStopLoss,
+                TradeFlag::FiredTrailingStopLoss,
+                trail.is_some(),
+            ),
+            (
+                ExitReason::TrailingTakeProfit,
+                TradeFlag::FiredTrailingTakeProfit,
+                giveback.is_some(),
+            ),
+            (ExitReason::TakeProfit, TradeFlag::FiredTakeProfit, target),
+            (ExitReason::Time, TradeFlag::FiredTime, time),
         ];
         let mut reason = None;
-        for (component, hit) in fired {
+        for (component, flag, hit) in fired {
             if hit {
                 reason = reason.or(Some(component));
-                if let Some(flag) = TradeFlag::fired(component) {
-                    self.flag(flag);
-                }
+                self.flag(flag);
             }
         }
         let Some(reason) = reason else {
