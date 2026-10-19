@@ -17,10 +17,10 @@
 //! For every tracked `.rs` file under `crates/` that is not test code, it
 //! reads TOKENS (comments skipped, an item under `#[cfg(test)]` skipped) and
 //! counts two things: the string literals that name a temporary (`"tmp"`, as
-//! `with_extension("tmp")` spells one, or any text holding `.tmp`), and the
-//! calls `staging::create`. A file passes when it names no temporary, when
-//! it calls the door at least once per temporary it names, or when it is in
-//! [`LEGACY`] with exactly the count written there.
+//! `with_extension("tmp")` spells one, or any text holding `.tmp` or, since
+//! AG-05, `.writing`), and the calls `staging::create`. A file passes when it
+//! names no temporary, when it calls the door at least once per temporary it
+//! names, or when it is in [`LEGACY`] with exactly the count written there.
 //!
 //! It COUNTS, it does not trace: a name spelt once and a call made once pass
 //! together even when the call creates another file. What it guarantees is
@@ -64,16 +64,18 @@ const LEGACY: [(&str, usize, &str); 5] = [
          (R3-21, R4-05 own the file)",
     ),
     (
-        "crates/pull/src/census_store.rs",
-        2,
-        "`<vendor>.man.seal.tmp` and `SEALED.tmp` by `create_new`, and the epoch temporary \
-         by `File::create`: create and truncate, the RA-290 open (R3-19 owns the file)",
+        "crates/pull/src/ingest.rs",
+        1,
+        "`<vendor>.man.writing`, the single-file census's whole publish (repair, first \
+         write, upgrade), by `File::create`: create and truncate, the RA-290 open; read \
+         since AG-05 counts `.writing` (IA-16 owns the file next, or R3-19 after GF-1 \
+         and R3-18; docs/06-limits.md L-R316-04)",
     ),
     (
         "crates/pull/src/manifest.rs",
         1,
-        "`EPOCH_TMP_SUFFIX`, the epoch temporary's name that census_store opens \
-         (R3-19 owns the file)",
+        "`EPOCH_TMP_SUFFIX`, the epoch temporary's name only: census_store creates it \
+         through store::staging::create since AG-05 (R3-19 owns the file)",
     ),
 ];
 
@@ -312,9 +314,11 @@ fn skip_item(toks: &[Tok], mut i: usize) -> usize {
 
 // ------------------------------------------------------------ verdict --
 
-/// Whether a string literal's text names a temporary.
+/// Whether a string literal's text names a temporary: `.tmp`, and since AG-05
+/// `.writing`, the staging suffix the single-file census publish uses, which a
+/// `.tmp`-only rule never read (L-R316-03's blind spot, assurance store-1).
 fn names_a_temporary(text: &str) -> bool {
-    text == "tmp" || text.contains(".tmp")
+    text == "tmp" || text.contains(".tmp") || text.contains(".writing")
 }
 
 /// What one file holds: temporary names, and calls of the door.
@@ -615,6 +619,48 @@ mod tests {
             assert_eq!(refused, refuses, "{lines:?}");
             assert!(lines.iter().any(|l| l.contains(says)), "{says}: {lines:?}");
         }
+    }
+
+    /// **A NEW STAGING WRITE NOBODY LISTED FAILS THE GATE, `.writing` AS WELL AS
+    /// `.tmp`** (AG-05): a file that adds a `.writing` staging name opened its own
+    /// way is refused, one that opens it through the door passes, and a word
+    /// that merely holds "writing" names no temporary.
+    #[test]
+    fn a_new_unlisted_staging_write_fails_the_gate_and_the_door_passes_it() {
+        assert!(names_a_temporary("man.writing") && names_a_temporary(".writing"));
+        assert!(!names_a_temporary("writing") && !names_a_temporary("rewriting it"));
+        let cases = [
+            (
+                "fn p(at: &Path) { let t = at.with_extension(\"man.writing\"); File::create(t); }",
+                true,
+                "REFUSED crates/a/src/census.rs: 1 temporary name(s) and 0 call(s)",
+            ),
+            (
+                "fn p(at: &Path) { staging::create(&at.with_extension(\"man.writing\")); }",
+                false,
+                "ok      crates/a/src/census.rs",
+            ),
+        ];
+        for (src, refuses, says) in cases {
+            let (lines, refused) = verdict(&[file("crates/a/src/census.rs", src)], &[]);
+            assert_eq!(refused, refuses, "{lines:?}");
+            assert!(lines.iter().any(|l| l.contains(says)), "{says}: {lines:?}");
+        }
+        // THE TREE AS IT STANDS: census_store is struck from LEGACY, so every
+        // temporary it names is born through the door; ingest.rs's `.writing`
+        // publish is listed, so the remaining open is named.
+        assert!(
+            LEGACY
+                .iter()
+                .all(|(at, _, _)| *at != "crates/pull/src/census_store.rs")
+        );
+        assert!(
+            LEGACY
+                .iter()
+                .any(|(at, n, what)| *at == "crates/pull/src/ingest.rs"
+                    && *n == 1
+                    && what.contains(".writing"))
+        );
     }
 
     #[test]

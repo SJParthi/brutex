@@ -18,8 +18,20 @@
 //! * `feeds` — per vendor with a census: its format, its months and rows,
 //!   the bar bytes those rows occupy at the bar file's own geometry (a LOWER
 //!   BOUND: sidecars and time indexes are not counted), and every census file
-//!   with its role — `current`, `older-epoch`, `superseded`, `sealed-stub` or
-//!   `single` — and bytes.
+//!   with its role — `current`, `older-epoch`, `superseded`, `sealed-stub`,
+//!   `seal-inconsistent`, `unsealed`, `seal-unknown` or `single` — and bytes;
+//!   and its `seal`: whether it is migrated, its seal receipt's state
+//!   (`whole`, `absent`, `torn`, `foreign`, `unreadable`), whether the single
+//!   name holds the stub and the superseded census is a regular file (both
+//!   measured, never taken from the receipt), and whether `manifest/REQUIRES`
+//!   exists (AG-05).
+//! * `faults` — one per vendor whose seal is not whole, each named
+//!   (`census_unsealed`, `census_seal_inconsistent`, `census_seal_unknown`,
+//!   `census_requires_absent`) with
+//!   the step that closes it. A migrated census with no seal receipt still
+//!   holds, at the name a reader built before version 4 opens, the census the
+//!   migration froze; it was labelled `superseded` and nothing said it was
+//!   unsealed (assurance finding store-2; DB-B68, D-3381).
 //! * `census_kept_bytes` — what keeping every older epoch and every superseded
 //!   single file costs today: the census's retention is "keep everything"
 //!   (`CLAUDE.md` §3 rule 8, `census_store` "never deleted"), and this is the
@@ -54,7 +66,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use brutex_core::vendor::Vendor;
-use pull::ingest::census_store::{self, MIGRATION_RECEIPT as MIGRATION_RECEIPT_NAME};
+use pull::ingest::census_store::{self, MIGRATION_RECEIPT as MIGRATION_RECEIPT_NAME, SealReceipt};
 use pull::manifest::{SEGMENTS, manifest_path, parse_epoch_name, segment_dir, vendor_dir};
 
 use super::{Loaded, Site, vendor_census};
@@ -149,33 +161,124 @@ pub(crate) struct CensusFile {
 }
 
 impl CensusFile {
-    /// Whether keeping it is retention rather than the census in use.
+    /// Whether keeping it is retention rather than the census in use. An
+    /// unsealed single file is the census frozen at the migration, kept; so
+    /// is a single file a whole receipt claims sealed when the stub or the
+    /// superseded census is missing (AG-05 repair 1): bytes no seal accounts
+    /// for are kept, never assumed disposable.
     fn kept(&self) -> bool {
-        matches!(self.role, "older-epoch" | "superseded")
+        matches!(
+            self.role,
+            "older-epoch" | "superseded" | "unsealed" | "seal-inconsistent"
+        )
     }
 }
 
-/// Every census file `vendor` has under `root`, each with its role.
+/// Where a vendor's seal stands (AG-05, assurance finding store-2; DB-B68,
+/// D-3381): what `/disk.json` says beside the census files, and the fault it
+/// names when a migrated census is not sealed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SealState {
+    /// Whether `manifest/v4/<vendor>/` is a directory: only a migrated
+    /// census has a seal to stand anywhere.
+    pub(crate) migrated: bool,
+    /// The seal receipt `manifest/v4/<vendor>/SEALED`, read by
+    /// `census_store::seal_receipt` (never trusted for its name): `whole`,
+    /// `absent`, `torn`, `foreign` or `unreadable`; `None` unmigrated.
+    pub(crate) receipt: Option<&'static str>,
+    /// Where the receipt is.
+    pub(crate) receipt_path: PathBuf,
+    /// What the two names a seal leaves hold, measured for every migrated
+    /// vendor and never inferred from the receipt (AG-05 repair 1).
+    pub(crate) held: SealHeld,
+    /// Whether `manifest/REQUIRES` is a regular file.
+    pub(crate) requires: bool,
+    /// Where it is.
+    pub(crate) requires_path: PathBuf,
+    /// The fault's word and its sentence, when the seal is not whole or the
+    /// requirements file is missing.
+    pub(crate) fault: Option<(&'static str, String)>,
+}
+
+/// What a seal leaves at the two names it touches, MEASURED (AG-05 repair 1):
+/// a whole receipt is a claim, and these are what the store holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SealHeld {
+    /// Whether `manifest/<vendor>.man` holds the seal's stub — its length
+    /// and its header, read by `census_store::holds_sealed_stub`.
+    pub(crate) stub: bool,
+    /// Whether `manifest/<vendor>.man.v3-superseded` is a regular file: the
+    /// census a seal keeps.
+    pub(crate) superseded: bool,
+}
+
+impl SealHeld {
+    /// Whether both names hold what a whole seal leaves.
+    const fn whole(self) -> bool {
+        self.stub && self.superseded
+    }
+}
+
+/// Every census file `vendor` has under `root`, each with its role. The
+/// route reads [`census_view`], which measures the seal beside them; the
+/// tests read the files alone.
+#[cfg(test)]
 pub(crate) fn census_files(root: &Path, vendor: Vendor) -> Vec<CensusFile> {
+    census_view(root, vendor).0
+}
+
+/// [`census_files`] and the vendor's [`SealState`].
+///
+/// The single file's role, once the vendor is migrated, is decided by the
+/// seal RECEIPT, not by the superseded file's name, and the receipt is never
+/// taken at its word: `sealed-stub` only when the receipt is whole, the
+/// single name holds the stub and the superseded census is a regular file;
+/// `seal-inconsistent` when the receipt is whole and either is not so (the
+/// census back at its name with the receipt left behind is a seal the store
+/// does not have, and a pre-version-4 reader serves it — AG-05 repair 1);
+/// `unsealed` with no receipt or a torn one — the name a reader
+/// built before version 4 opens still holds what the migration froze, and it
+/// was labelled `superseded` while nothing said it was unsealed (store-2);
+/// `seal-unknown` when the receipt is a format this build does not read or
+/// cannot be read at all.
+///
+/// Cost: one `lstat` each of the vendor directory, the single file, the
+/// superseded file and `manifest/REQUIRES`, one bounded no-follow read of
+/// the receipt (at most 16 KiB), and, for a migrated vendor, one more `lstat`
+/// and one 16-byte read of the single file's header (the stub check), per
+/// vendor — then the listings below.
+pub(crate) fn census_view(root: &Path, vendor: Vendor) -> (Vec<CensusFile>, SealState) {
     let mut out = Vec::new();
     let migrated = std::fs::symlink_metadata(vendor_dir(root, vendor)).is_ok_and(|m| m.is_dir());
     let superseded = census_store::superseded_path(root, vendor);
-    let sealed = std::fs::symlink_metadata(&superseded).is_ok();
+    let superseded_meta = std::fs::symlink_metadata(&superseded).ok();
     let single = manifest_path(root, vendor);
-    if let Ok(meta) = std::fs::symlink_metadata(&single) {
+    let single_meta = std::fs::symlink_metadata(&single).ok();
+    let seal = seal_state(
+        root,
+        vendor,
+        migrated,
+        single_meta.as_ref(),
+        superseded_meta.as_ref(),
+    );
+    if let Some(meta) = &single_meta {
         out.push(CensusFile {
             bytes: meta.len(),
-            role: match (migrated, sealed) {
-                (false, _) => "single",
-                (true, true) => "sealed-stub",
-                // MIGRATED AND NOT SEALED: still the whole v3 census at the
+            role: match seal.receipt {
+                None => "single",
+                // A WHOLE RECEIPT IS A CLAIM, NOT THE SEAL (AG-05 repair 1):
+                // the stub must be at the name and the census kept beside it.
+                Some("whole") if seal.held.whole() => "sealed-stub",
+                Some("whole") => "seal-inconsistent",
+                // MIGRATED AND NOT SEALED: what the migration froze, at the
                 // name a pre-version-4 reader opens (DB-B68).
-                (true, false) => "superseded",
+                Some("absent" | "torn") => "unsealed",
+                Some(_) => "seal-unknown",
             },
             path: single,
         });
     }
-    if let Ok(meta) = std::fs::symlink_metadata(&superseded) {
+    if let Some(meta) = superseded_meta {
         out.push(CensusFile {
             path: superseded,
             bytes: meta.len(),
@@ -183,7 +286,7 @@ pub(crate) fn census_files(root: &Path, vendor: Vendor) -> Vec<CensusFile> {
         });
     }
     if !migrated {
-        return out;
+        return (out, seal);
     }
     for segment in SEGMENTS {
         let dir = segment_dir(root, vendor, segment);
@@ -220,7 +323,240 @@ pub(crate) fn census_files(root: &Path, vendor: Vendor) -> Vec<CensusFile> {
             role: "receipt",
         });
     }
-    out
+    (out, seal)
+}
+
+/// The step that seals `vendor`, as the runbook names it.
+fn seal_step(vendor: Vendor) -> String {
+    format!(
+        "run `cli census-migrate {} --seal` after a snapshot (docs/36 section 2)",
+        vendor.as_str()
+    )
+}
+
+/// What sits at a name that should be a regular file, in the words a fault
+/// sentence uses.
+fn kind_of(meta: &std::fs::Metadata) -> &'static str {
+    if meta.file_type().is_symlink() {
+        "a symbolic link"
+    } else if meta.is_dir() {
+        "a directory"
+    } else {
+        "not a regular file"
+    }
+}
+
+/// What stands at `manifest/REQUIRES`, in a fault's words: a link or a
+/// directory there is said as what it is, never as "absent" (AG-05 repair 1).
+fn requires_said(path: &Path, meta: Option<&std::fs::Metadata>) -> String {
+    match meta {
+        Some(meta) if meta.is_file() => format!("{} exists", path.display()),
+        Some(meta) => format!(
+            "{} is {}, so no build reads it as this census's requirement of version 4",
+            path.display(),
+            kind_of(meta)
+        ),
+        None => format!(
+            "{} is absent, so no build is told this census needs version 4",
+            path.display()
+        ),
+    }
+}
+
+/// The fault of a whole receipt the store contradicts (AG-05 repair 1): the
+/// single name does not hold the stub, or the census the seal kept is not a
+/// regular file at its name — a seal the store does not have, said with what
+/// each name holds. `names` is the single file's and the superseded file's
+/// `lstat`, as [`census_view`] took them.
+fn inconsistent_fault(
+    vendor: Vendor,
+    state: &SealState,
+    at: &str,
+    kept_at: &str,
+    names: (Option<&std::fs::Metadata>, Option<&std::fs::Metadata>),
+    requires_said: &str,
+) -> (&'static str, String) {
+    let (single, superseded) = names;
+    let held = match single {
+        None => format!("{at} is absent"),
+        Some(meta) if state.held.stub => {
+            format!("{at} holds the seal's stub ({} bytes)", meta.len())
+        }
+        Some(meta) if meta.is_file() => format!(
+            "{at} holds {} bytes, not the seal's stub, so a pre-version-4 reader serves \
+             what it holds as the census",
+            meta.len()
+        ),
+        Some(meta) => format!("{at} is {}, not the seal's stub", kind_of(meta)),
+    };
+    let kept = match superseded {
+        None => format!("{kept_at} is absent, so the census the seal kept is not there"),
+        Some(meta) if meta.is_file() => format!("{kept_at} keeps {} bytes", meta.len()),
+        Some(meta) => format!(
+            "{kept_at} is {}, so the census the seal kept is not there",
+            kind_of(meta)
+        ),
+    };
+    (
+        "census_seal_inconsistent",
+        format!(
+            "census {}: its seal receipt {} is whole, but {held} and {kept}: the receipt \
+             claims a seal the store does not have; {}, which completes the seal or \
+             refuses by name; {requires_said}",
+            vendor.as_str(),
+            state.receipt_path.display(),
+            seal_step(vendor)
+        ),
+    )
+}
+
+/// [`SealState`] from what [`census_view`] already measured, plus the
+/// receipt's one bounded read, one `lstat` of `manifest/REQUIRES` and, for a
+/// migrated vendor, the stub check of the single file (one `lstat` and one
+/// 16-byte read).
+fn seal_state(
+    root: &Path,
+    vendor: Vendor,
+    migrated: bool,
+    single: Option<&std::fs::Metadata>,
+    superseded: Option<&std::fs::Metadata>,
+) -> SealState {
+    let receipt_path = vendor_dir(root, vendor).join(census_store::SEAL_RECEIPT);
+    let requires_path = census_store::requires_path(root);
+    let requires_meta = std::fs::symlink_metadata(&requires_path).ok();
+    let requires = requires_meta
+        .as_ref()
+        .is_some_and(std::fs::Metadata::is_file);
+    let mut state = SealState {
+        migrated,
+        receipt: None,
+        receipt_path,
+        held: SealHeld {
+            stub: false,
+            superseded: superseded.is_some_and(std::fs::Metadata::is_file),
+        },
+        requires,
+        requires_path,
+        fault: None,
+    };
+    if !migrated {
+        return state;
+    }
+    // THE STUB IS MEASURED, NEVER TAKEN FROM THE RECEIPT (AG-05 repair 1).
+    state.held.stub = census_store::holds_sealed_stub(&manifest_path(root, vendor));
+    let v = vendor.as_str();
+    let at = manifest_path(root, vendor).display().to_string();
+    let kept_at = census_store::superseded_path(root, vendor)
+        .display()
+        .to_string();
+    let requires_said = requires_said(&state.requires_path, requires_meta.as_ref());
+    let read = census_store::seal_receipt(&state.receipt_path);
+    let (word, torn) = match &read {
+        Ok(SealReceipt::Whole) => ("whole", None),
+        Ok(SealReceipt::Absent) => ("absent", None),
+        Ok(SealReceipt::Torn(why)) => ("torn", Some(why.as_str())),
+        Ok(SealReceipt::Foreign(_)) => ("foreign", None),
+        Err(_) => ("unreadable", None),
+    };
+    state.receipt = Some(word);
+    state.fault = match &read {
+        // A WHOLE RECEIPT WITHOUT THE STUB AT THE NAME, OR WITHOUT THE
+        // CENSUS IT KEPT, IS A SEAL THE STORE DOES NOT HAVE (AG-05 repair 1).
+        Ok(SealReceipt::Whole) if !state.held.whole() => Some(inconsistent_fault(
+            vendor,
+            &state,
+            &at,
+            &kept_at,
+            (single, superseded),
+            &requires_said,
+        )),
+        Ok(SealReceipt::Whole) if requires => None,
+        Ok(SealReceipt::Whole) => Some((
+            "census_requires_absent",
+            format!(
+                "census {v}: sealed, but {requires_said}; rerun `cli census-migrate {v} \
+                 --seal`, which writes the line (docs/36 section 2)"
+            ),
+        )),
+        Ok(SealReceipt::Foreign(format)) => Some((
+            "census_seal_unknown",
+            format!(
+                "census {v}: its seal receipt {} says format={format}, which this build \
+                 does not read, so whether {at} is sealed cannot be told; by the seal's own \
+                 rule a later build's receipt, left as it is; {requires_said}",
+                state.receipt_path.display()
+            ),
+        )),
+        Err(why) => Some((
+            "census_seal_unknown",
+            format!(
+                "census {v}: its seal receipt cannot be read ({why}), so whether {at} \
+                 is sealed cannot be told; {requires_said}"
+            ),
+        )),
+        Ok(SealReceipt::Absent | SealReceipt::Torn(_)) => Some(unsealed_fault(
+            vendor,
+            &state,
+            (&at, &kept_at),
+            (single, superseded),
+            torn,
+            &requires_said,
+        )),
+    };
+    state
+}
+
+/// The fault of a migrated census with no whole seal receipt (store-2): an
+/// interrupted seal, a missing single file and the frozen v3 census at its
+/// name are told apart. `paths` is the single file's and the superseded
+/// file's display; `names` their `lstat`, as [`census_view`] took them;
+/// `torn` the torn receipt's reason, if it is torn.
+fn unsealed_fault(
+    vendor: Vendor,
+    state: &SealState,
+    paths: (&str, &str),
+    names: (Option<&std::fs::Metadata>, Option<&std::fs::Metadata>),
+    torn: Option<&str>,
+    requires_said: &str,
+) -> (&'static str, String) {
+    use std::os::unix::fs::MetadataExt as _;
+    let v = vendor.as_str();
+    let (at, kept_at) = paths;
+    let (single, superseded) = names;
+    let torn = torn.map_or_else(String::new, |why| {
+        format!(
+            " (its receipt {} is torn: {why}; the seal keeps it aside)",
+            state.receipt_path.display()
+        )
+    });
+    // ONE INODE OR TWO: a seal links the census to its superseded name and
+    // only then renames the stub over the single name, so a single name that
+    // is ANOTHER file than the superseded one is a seal interrupted after its
+    // stub. No call beyond the two `lstat`s already taken.
+    let interrupted = single
+        .zip(superseded)
+        .is_some_and(|(single, kept)| (single.dev(), single.ino()) != (kept.dev(), kept.ino()));
+    let sentence = if interrupted {
+        format!(
+            "census {v}: a seal was interrupted: {kept_at} keeps the v3 census and {at} \
+             is another file, but no whole seal receipt was written{torn}; {}; \
+             {requires_said}",
+            seal_step(vendor)
+        )
+    } else if single.is_none() {
+        format!(
+            "census {v}: migrated but not sealed, and {at} is absent, so a pre-version-4 \
+             reader finds no census at all{torn}; {}; {requires_said}",
+            seal_step(vendor)
+        )
+    } else {
+        format!(
+            "census {v}: migrated but not sealed; a pre-version-4 reader would serve the \
+             frozen v3 census at {at}{torn}; {}; {requires_said}",
+            seal_step(vendor)
+        )
+    };
+    ("census_unsealed", sentence)
 }
 
 /// Where `vendor`'s full-block scrub stands, as JSON: its pass, whether it
@@ -415,7 +751,7 @@ fn feed_json(
     out: &mut String,
     root: &Path,
     vendor: Vendor,
-    files: &[CensusFile],
+    (files, seal): (&[CensusFile], &SealState),
     site: Option<&Site>,
 ) -> u64 {
     let kept: u64 = files.iter().filter(|f| f.kept()).map(|f| f.bytes).sum();
@@ -454,10 +790,34 @@ fn feed_json(
             render::json_string(file.role)
         );
     }
-    out.push_str(r#"],"scrub":"#);
+    out.push_str(r#"],"seal":"#);
+    out.push_str(&seal_json(seal));
+    out.push_str(r#","scrub":"#);
     out.push_str(&scrub_json(root, vendor));
     out.push('}');
     kept
+}
+
+/// A feed's `seal` object (AG-05): whether it is migrated, its receipt's
+/// state and where, whether the single name holds the stub and the
+/// superseded census is kept (repair 1), and whether `manifest/REQUIRES`
+/// exists. The fault, when
+/// there is one, is in the answer's `faults`.
+fn seal_json(seal: &SealState) -> String {
+    format!(
+        r#"{{"migrated":{},"receipt":{},"receipt_path":{},"stub":{},"superseded":{},"requires":{},"requires_path":{},"fault":{}}}"#,
+        seal.migrated,
+        seal.receipt
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        render::json_string(&seal.receipt_path.display().to_string()),
+        seal.held.stub,
+        seal.held.superseded,
+        seal.requires,
+        render::json_string(&seal.requires_path.display().to_string()),
+        seal.fault
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), |(word, _)| render::json_string(word)),
+    )
 }
 
 /// The whole answer, measured now.
@@ -483,16 +843,38 @@ pub(crate) fn measured(root: &Path, site: Option<&Site>) -> String {
     out.push_str(r#","feeds":["#);
     let mut kept_total = 0_u64;
     let mut first = true;
+    let mut faults: Vec<(Vendor, &'static str, String)> = Vec::new();
     for vendor in Vendor::ALL {
-        let files = census_files(root, vendor);
-        if files.is_empty() {
+        let (files, seal) = census_view(root, vendor);
+        // A MIGRATED VENDOR IS ANSWERED EVEN WITH NO FILE LEFT TO LIST: its
+        // seal still stands somewhere, or does not (AG-05).
+        if files.is_empty() && !seal.migrated {
             continue;
         }
         if !first {
             out.push(',');
         }
         first = false;
-        kept_total = kept_total.saturating_add(feed_json(&mut out, root, vendor, &files, site));
+        kept_total =
+            kept_total.saturating_add(feed_json(&mut out, root, vendor, (&files, &seal), site));
+        if let Some((word, why)) = seal.fault {
+            faults.push((vendor, word, why));
+        }
+    }
+    // EVERY FAULT NAMED, PER VENDOR (AG-05, store-2): a migrated census
+    // that is not sealed was labelled `superseded` and said nothing more.
+    out.push_str(r#"],"faults":["#);
+    for (n, (vendor, word, why)) in faults.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"feed":{},"fault":{},"why":{}}}"#,
+            render::json_string(vendor.as_str()),
+            render::json_string(word),
+            render::json_string(why)
+        );
     }
     let _ = write!(
         out,
@@ -576,6 +958,11 @@ pub(super) async fn disk_json(
     }
 }
 
+/// A migrated census that is not sealed is named, per vendor (AG-05, store-2).
+#[cfg(test)]
+#[path = "disk_route_seal_tests.rs"]
+mod seal_tests;
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -633,8 +1020,8 @@ mod tests {
         };
         assert_eq!(
             role("gdfl.man"),
-            Some(("superseded", 50)),
-            "unsealed: {files:?}"
+            Some(("unsealed", 50)),
+            "unsealed, and said so (AG-05): {files:?}"
         );
         assert_eq!(role("000001.man"), Some(("older-epoch", 100)));
         assert_eq!(role("000002.man"), Some(("current", 300)));
