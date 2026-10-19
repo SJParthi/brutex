@@ -19880,6 +19880,26 @@ entries of 16 bytes per side (21,300 x 56 x 2 + 96 = 2,385,696; 355 x 56 x 2 +
 96 = 39,856). The build-time rise is not attributed: the two runs were on
 different containers.
 
+Re-measured the same evening on the final code of the FIB-5 continuation
+(D-6393's bounded loops included; the commit is the report's), alone after a
+30-second pause (one-minute load average 0.47), last-level-cache estimate
+8,192 KiB: every row's verdict holds. p50 / p99 / max ps at the three scales:
+C-F5-01 42,563 / 94,778 / 140,394; 41,955 / 94,405 / 170,844; 43,181 /
+105,973 / 1,137,976, PASS p99 1.118x. C-F5-02 107,825 / 158,819 / 244,293;
+89,615 / 145,042 / 291,773; 62,591 / 147,217 / 1,229,876, PASS 0.926x.
+C-F5-03 37,862 / 141,664 / 220,316; 37,346 / 73,106 / 96,703; 37,640 /
+76,730 / 120,796, PASS 0.541x. C-F5-04 140,810 / 211,155 / 568,391; 90,421 /
+140,553 / 230,004; 86,806 / 149,679 / 228,078, PASS 0.708x. C-F5-05 41,181 /
+94,255 / 2,051,989; 39,377 / 108,788 / 2,675,977; 40,519 / 92,947 / 289,002,
+PASS (mean) 0.960x. C-F5-07 49,140,790 / 73,285,130 / 84,404,963; 31,577,420
+/ 52,226,983 / 56,474,959; 29,807,486 / 54,300,876 / 58,107,745, BOUNDED,
+events unchanged (p50 190). C-F5-08 30,127 / 69,792 / 790,012; 24,830 /
+90,399 / 964,904; 25,393 / 73,782 / 326,731, PASS 1.057x. C-F5-09 239,230 /
+566,778 / 1,114,263; 244,381 / 612,131 / 1,810,736; 272,459 / 599,352 /
+4,289,461, BOUNDED, 4 units of work at every scale, p99 1.057x. C-F5-06: deep
+p50 23,728,779 ns (min 16,918,845, max 40,012,067) over 8 builds, stage A p50
+589,559 ns over 100, the same bytes per index.
+
 ### Gate 11 — FIB-5, declared (19 October 2026)
 
 ~~~~text
