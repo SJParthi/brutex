@@ -147,16 +147,19 @@ pub fn load_index_month(
     let ym = YearMonth::new(year, month).map_err(|why| format!("{year}-{month:02}: {why}"))?;
     let opened = open_index_month(root, symbol, ym)
         .map_err(|why| format!("index_key_refused: {symbol}: {why}"))?;
-    let file = match opened {
-        Ok(file) => file,
-        Err(StoreError::Missing { .. }) => return Ok(None),
-        Err(why) => return Err(format!("{symbol} 1min {ym}: {why}")),
-    };
+    // The open and every record read refuse alike: by the store's word,
+    // under the month's label; only a month that is not there is absent.
+    let read = opened.and_then(|file| {
+        (0..file.records())
+            .map(|record| file.read_record(record))
+            .collect::<Result<Vec<Bar>, StoreError>>()
+    });
     let label = format!("{symbol} 1min {ym}");
-    let stored = (0..file.records())
-        .map(|record| file.read_record(record))
-        .collect::<Result<Vec<Bar>, StoreError>>()
-        .map_err(|why| format!("{label}: {why}"))?;
+    let stored = match read {
+        Ok(stored) => stored,
+        Err(StoreError::Missing { .. }) => return Ok(None),
+        Err(why) => return Err(format!("{label}: {why}")),
+    };
     reference_minutes(&stored, (year, month), &label).map(Some)
 }
 
