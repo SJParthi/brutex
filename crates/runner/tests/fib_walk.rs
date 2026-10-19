@@ -4327,6 +4327,15 @@ fn a_peak_inside_the_forced_window_is_the_trade_s_mfe() {
     assert_eq!(out.mfe_second, at(15, 9, 0));
     assert_eq!(out.last_peak_second, at(15, 9, 0));
     assert_eq!(out.mfe_to_horizon_paisa, 400);
+    // A window that only ties the trade's earlier best moves the last peak,
+    // never the MFE's second.
+    let tied = second_day(&[
+        bar(at(12, 0, 0), P, P + 500, P - 20, P, 1_000),
+        bar(at(15, 9, 0), P, P + 500, P - 20, P, 1_000),
+    ]);
+    let out = second_slot(&tied, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.mfe_second, at(12, 0, 0));
+    assert_eq!(out.last_peak_second, at(15, 9, 0));
 }
 
 /// Stage A: a 15:09 minute locked at the day's low cannot take a long's
