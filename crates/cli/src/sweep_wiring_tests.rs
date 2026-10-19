@@ -178,6 +178,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "watchdog"
                 // The tick-store writer (R4-08, D-4967): a store verb.
                 | "tickstore-write"
+                // The tick-to-second check (DATA-2, D-5181): a read-only
+                // store check, never a sweep.
+                | "tick-to-second-check"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

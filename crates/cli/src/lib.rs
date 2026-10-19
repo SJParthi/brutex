@@ -2910,7 +2910,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["gdfl-rekey", arguments @ ..] if !arguments.is_empty() => {
             gdfl_rekey::command(arguments, out)
         }
-        ["tick-to-second-check", arguments @ ..] => tick_second_check::command(arguments, out),
+        ["tick-to-second-check", arguments @ ..] if !arguments.is_empty() => {
+            tick_second_check::command(arguments, out)
+        }
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
         ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),

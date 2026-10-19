@@ -74046,7 +74046,23 @@ measure compares rule A with the STORED bar second by second: a second is
 worse when rule A's high is above the stored high or its low below the
 stored low.
 
-(The measured table is filled by the next commit of this package, from the runs of this commit's build.)
+Measured 19 and 20 October 2026 by the build of commit `4465735a0` at four
+workers, read-only (`state/datacheck/rust-t2s-r6/out/` of the operator's
+work folder, `tick-to-second-<year>.v001.summary.txt`); per mille is rounded
+down:
+
+| Year | Zerodha minutes compared (T and A / R) | High equal T / A / R (per mille) | Low equal T / A / R (per mille) | Per share-day median high match T / A (per mille, share-days with Zerodha minutes) | Stored seconds compared | Rule A worse (high / low / either) | Per share-day either-worse p50 / p99 / max (per mille) |
+|---|---|---|---|---|---|---|---|
+| 2019 | 14,941,562 / 15,463,281 | 435 / 435 / 456 | 433 / 433 / 454 | 0 / 0 (42,800) | 423,343,662 | 2,931,804 / 2,887,269 / 5,804,450 (13 per mille) | 14 / 29 / 103 |
+| 2025 | 19,329,768 / 19,355,249 | 636 / 647 / 668 | 618 / 632 / 651 | 786 / 802 (51,792) | 441,720,723 | 1,237,513 / 1,391,171 / 2,588,708 (5 per mille) | 5 / 18 / 58 |
+| 2026 | 14,277,157 / 14,298,951 | 762 / 775 / 797 | 742 / 760 / 780 | 808 / 824 (38,480) | 305,549,965 | 854,463 / 981,081 / 1,808,534 (5 per mille) | 6 / 18 / 83 |
+
+What the table says: on the raw basis rule A moves the minute-high match up
+by 11 per mille in 2025 and 13 in 2026 (the per-share-day median by 16 in
+both), and moves 2019 by less than one per mille, where the adjusted
+Zerodha basis hides any difference. Rule A's extreme is worse than the
+stored second's on 5 to 13 seconds in a thousand: rare, but present on
+almost every share-day (the per-share-day p50 is 5 to 14 per mille).
 
 Rule R is every row, every second (the scratch checker's "rule A"). 2019's
 per-share-day medians are 0 because Zerodha's 2019 history is adjusted for
@@ -74078,7 +74094,8 @@ rule alike until DATA-1's factor is applied.
    is built (a store step for the main session); if not, the bound stays
    rule T plus the Zerodha minute. The fill-worsening measure above says
    how much a fill priced at a second's extreme moves: rule A is worse in
-   (measured: next commit) of the stored seconds of 2025.
+   2,588,708 of the 441,720,723 stored seconds of 2025 (5.86 per mille;
+   2019 13.71, 2026 5.92).
 5. Rule R is reported only as a minute match and is never a bar: it would
    invent seconds no trade made.
 
@@ -74151,7 +74168,68 @@ verb replaces it; the scratch checker is evidence only.
 commit, over the operator's store, tick store and archive (each run under a
 kernel write lock on all three):
 
-(Filled by the next commit of this package, from the runs of this commit's build.)
+Build of commit `4465735a0`, 19 and 20 October 2026, `--archive` naming
+the vendor archive, output `state/datacheck/rust-t2s-r6/out/` of the
+operator's work folder (run logs beside it):
+
+| Year | Stored share-days | Rows | `exact_T` | `special_session` (compare) | Other | Wall at 4 workers |
+|---|---|---|---|---|---|---|
+| 2019 | 70,990 | 71,202 | 70,697 | 293, 2019-10-27 Muhurat (`exact_T`) | 212 `raw_only` | 250.28 s |
+| 2025 | 77,405 | 78,056 | 76,783 | 622: 311 on 2025-02-01 (budget weekend), 311 on 2025-10-21 Muhurat (all `exact_T`) | 651 `raw_only` | 273.13 s |
+| 2026 (to 30 Sep) | 57,113 | 58,449 | 49,019 | 311, 2026-02-01 budget weekend (`exact_T`) | 7,456 `differs:auction_prints_folded`, 1,228 `store_only`, 383 `raw_only`, 52 `read_failed:AuctionEligibilityUnknown` | 114.87 s |
+
+**Every stored share-day of 2019 and 2025 is rule T, bit for bit** (every
+`compare` of a stored day is `exact_T`), and so is every 2026 day the store
+filed under bar definition 4. What is not exact, row by row:
+
+- **`raw_only`** (651, 212, 383): every one is a trade-for-trade series file
+  (`<SYM>.BE.NSE.csv`: 651, 142 and 377; `<SYM>.BZ.NSE.csv`: 70 in 2019; six
+  tick-store `.bts` days in 2026) of a day the store holds nothing for. The
+  importer's scope files those series under their share
+  (`pull::gdfl_run::scope::of`), so these are days a re-import would add;
+  the landings that made the store did not file them.
+- **`differs:auction_prints_folded`** (2026, 7,456: 7,450 equal to rule T
+  with every diverted closing-auction print folded back, 6 with only the
+  prints the `.auc` sidecar does not hold): days the store filed under bar
+  definition 2 or 3 (D-5183). Each is equal in every field and the digest
+  to that rebuild, and to nothing else.
+- **`store_only`** (2026, 1,228): the extra comparison of 25, 28, 29 and 30
+  September 2026, 307 share-days each. The archive ends on 24 September and
+  holds no day zip for them; their landing rows are the tick store's.
+- **`read_failed:AuctionEligibilityUnknown`** (2026, 52; DISHTV 8, RCOM 16,
+  RELINFRA 28): today's reader refuses those files because a
+  closing-auction candidate row belongs to a share `core::universe`
+  records no ISIN for. 45 of them are days the store does not hold (RCOM
+16, RELINFRA 28, DISHTV 1); the 7 DISHTV days it holds were filed by an
+earlier landing.
+
+**The scratch checker's 2025 result is reproduced and every difference is
+explained.** The scratch checker found 76,886 share-days. All 76,886 are
+among this check's 77,405. The other 519 are days stored under a renamed key
+(LTM 249 from `LTIM.NSE.csv`, TMPV 202 from `TATAMOTORS.NSE.csv`, ETERNAL 68
+from `ZOMATO.NSE.csv`). The scratch checker looked for a file under the
+store's current name; this check follows the landing record, and all 519
+are `exact_T`. On the shared 76,886 days the rule-T seconds and volume
+are equal on 76,591. The other 295 are 2025-10-21, where the scratch
+checker applied the regular 09:15 to 15:30 window to the Muhurat session.
+`Window::verdict` applies the session's own window, and those days are
+`exact_T`: 3,642 fewer seconds and 578,518 fewer shares than the scratch
+checker counted, all in the trades after 14:45 that the store rightly
+drops. The scratch checker's 983 names with `&` are `exact_T` with no
+encoding step: the store is read through `BarFile`, not a URL. Out-of-order
+rows are 0 in both. The scratch checker counted 2,334,183 LTQ = 0 rows with
+a new price; this check counts 2,333,404 on the same days, and all 779 of
+the difference is again 2025-10-21's window. This check counts 22,718 more
+on the 519 renamed days and 5,168 on the `raw_only` files, 2,361,290 in
+all. `raw_rows` counts every data line of a file (2,540,534 more than the
+scratch checker's rows, which kept only lines stamped 09:15 to 15:30).
+
+**Resumable on the real data, byte for byte**: a 2025 run of the same build
+cut off by a usage limit on 19 October after 109 day segments
+(`state/datacheck/rust-t2s-r5/out/`) was started again over the same
+folder. It found 33,937 share-days already answered and checked the other
+256 calendar days in 93.30 s. It wrote segments 110 to 249 and folded a `tick-to-second-2025.v001.csv`, `.idx` and
+`.summary.txt` whose SHA-256 equal the uninterrupted run's.
 
 ### D-5182 — The day band is not counted until a dated, charter-sourced per-share-day band exists, and the Zerodha minute comparison is on the raw basis until DATA-1's factor merges (DATA-2) — 2026-10-16
 
