@@ -439,7 +439,14 @@ fn a_truncated_or_padded_file_is_detected() {
     let body = records(10, 24);
     write(&path, &header(Kind::Downside, 24), &body).unwrap();
     let length = fs::metadata(&path).unwrap().len();
+    let header_len = FibFile::open(&path).unwrap().sealed().header_len;
     let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    // A file that ends exactly after its header holds the whole header and
+    // is short of its body: the length refusal, not the header one.
+    file.set_len(header_len).unwrap();
+    let bare = FibFile::open(&path).unwrap_err();
+    assert_eq!(bare.word, "truncated");
+    assert!(bare.detail.contains("its header implies"), "{bare}");
     file.set_len(length - 1).unwrap();
     let cut = FibFile::open(&path).unwrap_err();
     assert_eq!(cut.word, "truncated", "{cut}");
@@ -1100,4 +1107,19 @@ fn an_orphan_segment_and_a_short_header_are_refused() {
     );
     let short = parse_header(&MAGIC[..MAGIC.len() / 2], &[]).unwrap_err();
     assert_eq!(short.word, "header_short");
+}
+
+/// A header read with bytes after it parses the header alone and leaves the
+/// rest unread.
+#[test]
+fn a_header_followed_by_more_bytes_parses_alone() {
+    let golden = header(Kind::Downside, 24);
+    let bytes = header_bytes(&golden, 10).unwrap();
+    let fixed_len = fixed_header_len();
+    let mut rest = bytes[fixed_len..].to_vec();
+    rest.push(0x5A);
+    let sealed = parse_header(&bytes[..fixed_len], &rest).unwrap();
+    assert_eq!(sealed.header, golden);
+    assert_eq!(sealed.records, 10);
+    assert_eq!(sealed.header_len, u64::try_from(bytes.len()).unwrap());
 }
