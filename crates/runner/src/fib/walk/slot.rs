@@ -1064,7 +1064,8 @@ impl<'a> Stepper<'a> {
             self.best_raw = window.best_raw;
             self.mfe_second = window.best_first;
             self.last_peak_second = window.best_last;
-        } else if window.bars > 0 && window.best_raw == self.best_raw {
+        } else if window.best_raw == self.best_raw {
+            // An empty window's best is `i64::MIN`, never a filled trade's.
             self.last_peak_second = window.best_last;
         }
         self.worst_raw = self.worst_raw.min(window.low_raw);
