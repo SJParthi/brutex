@@ -259,20 +259,32 @@ fn priced(rng: &mut Seeded, second: u32, held: bool) -> Slot {
 
 /// Outcome records for every (row, exit) of a table (see [`priced`] for
 /// `held`).
+///
+/// Each record is written at the index its row names and stamped with that
+/// row's own decision second. Rows are held in canonical order but their
+/// outcome indices follow the order their month was given in, so a record
+/// placed by position would carry another row's second — an exit at a random
+/// second of the day, which blocks like a held one. (It did, until this
+/// session's `C-F6-03` showed it: 116 trades per op at a pool of 2 with no
+/// outcome held.)
 fn outcomes(table: &RowTable, held: bool) -> Vec<Outcome> {
     let mut rng = Seeded(table.len() as u64);
-    (0..table.len() as u32)
-        .flat_map(|r| {
-            let second = table.row(r).unwrap().second;
-            (0..EXITS).map(move |_| second)
-        })
-        .map(|second| Outcome {
-            slots: [
-                priced(&mut rng, second, held),
-                priced(&mut rng, second, held),
-            ],
-        })
-        .collect()
+    let blank = Outcome {
+        slots: [Slot::ZeroQty; SIZE_COUNT],
+    };
+    let mut all = vec![blank; table.len() * usize::from(EXITS)];
+    for r in 0..table.len() as u32 {
+        let row = table.row(r).unwrap();
+        for index in row.outcomes {
+            all[*index as usize] = Outcome {
+                slots: [
+                    priced(&mut rng, row.second, held),
+                    priced(&mut rng, row.second, held),
+                ],
+            };
+        }
+    }
+    all
 }
 
 /// A calendar of every day of a table, with synthetic period keys.
