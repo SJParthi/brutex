@@ -4604,3 +4604,21 @@ fn the_horizon_excursions_start_at_the_fill_s_own_bar() {
     assert_eq!(out.mfe_to_horizon_paisa, (P + 300) - (P + 100));
     assert_eq!(out.mae_to_horizon_paisa, (P + 100) - (P - 50));
 }
+
+/// A bar that opens exactly at the stop is a touch, not a gap through it.
+#[test]
+fn a_bar_opening_exactly_at_the_stop_is_no_gap_through_it() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), 98_995, 99_000, 98_900, 98_950, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert!(!has(&out, TradeFlag::GapThroughStop));
+    let below = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), 98_990, 99_000, 98_900, 98_950, 1_000),
+    ]);
+    let out = minute_slot(&below, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(has(&out, TradeFlag::GapThroughStop));
+}
