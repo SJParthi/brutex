@@ -4731,3 +4731,26 @@ fn an_r_step_trail_climbs_a_step_per_whole_r() {
     assert_eq!(out.exit_second, at(10, 2, 0));
     assert_eq!(out.exit_value_paisa, i128::from(100 * 101_000));
 }
+
+/// Under the until-forced reading an order still filling at 15:09:00 meets
+/// the forced exit with a remainder: the rest is cancelled, flagged, and the
+/// filled part is squared off.
+#[test]
+fn an_order_still_filling_at_the_forced_window_is_a_partial_entry() {
+    let day = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 10, P - 10, P, 30),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = walk_one(
+        &day,
+        &second_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::REFERENCE,
+        TradeSize::Small,
+    );
+    assert_eq!(out.filled_qty, 30);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+    assert!(has(&out, TradeFlag::PartialEntry));
+    assert!(has(&out, TradeFlag::DhanSquareOff));
+}
