@@ -2340,6 +2340,11 @@ fn day_check_renders_refusals_witnessed_tails_and_halt_exposure() {
     assert!(out.contains("kept: no_trades_after"), "{out}");
     assert!(out.contains("; halt exposure before second "), "{out}");
     assert!(out.contains("count 2020 refused tail_cut 1"), "{out}");
+    assert!(
+        !out.lines()
+            .any(|line| line.starts_with("count ") && line.ends_with(" 0")),
+        "a year with a refusal prints only the refusals it counted: {out}"
+    );
     let json_request = Request {
         json: true,
         ..request.clone()
