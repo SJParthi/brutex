@@ -369,16 +369,17 @@ fn first_at_map(kept: &[(usize, Candle, u32)]) -> Vec<u32> {
         .unwrap_or(0)
         .saturating_add(1);
     let mut first_at = Vec::with_capacity(seconds);
-    let mut next = 0;
-    for second in 0..seconds {
-        while kept
-            .get(next)
-            .is_some_and(|(_, _, s)| usize::try_from(*s).is_ok_and(|s| s < second))
-        {
-            next += 1;
-        }
-        first_at.push(u32::try_from(next).unwrap_or(u32::MAX));
+    // Bar `k` is the first at or after every second past bar `k - 1`'s up to
+    // its own: the bars are ascending and unique (`checked_bars`), so each
+    // grows the map, and the seconds past the last bar answer the bar count.
+    for (k, (_, _, s)) in kept.iter().enumerate() {
+        let through = usize::try_from(*s)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+            .min(seconds);
+        first_at.resize(through, u32::try_from(k).unwrap_or(u32::MAX));
     }
+    first_at.resize(seconds, u32::try_from(kept.len()).unwrap_or(u32::MAX));
     first_at
 }
 
@@ -713,25 +714,18 @@ impl Shared<'_> {
             hi_raw,
             lo_raw,
         } = self.prices(long, bar)?;
-        while self
-            .halts
-            .get(running.halt_end)
-            .is_some_and(|h| h.end_second <= second)
-        {
-            running.halt_end += 1;
-        }
+        // Both pointers only move forward, over the halts this bar has passed.
+        running.halt_end += self.halts.get(running.halt_end..).map_or(0, |rest| {
+            rest.iter().take_while(|h| h.end_second <= second).count()
+        });
         let halted = self
             .halts
             .get(running.halt_end)
             .is_some_and(|h| h.start_second <= second);
         let starts_before = running.halt_start;
-        while self
-            .halts
-            .get(running.halt_start)
-            .is_some_and(|h| h.start_second <= second)
-        {
-            running.halt_start += 1;
-        }
+        running.halt_start += self.halts.get(running.halt_start..).map_or(0, |rest| {
+            rest.iter().take_while(|h| h.start_second <= second).count()
+        });
         let mark = self
             .book
             .and_then(|marks| marks.get(at))
@@ -849,12 +843,11 @@ impl Shared<'_> {
         let mut at = 0;
         for minute in 0..=minutes_per_day() {
             let start = u64::try_from(minute).unwrap_or(u64::MAX) * SECONDS_PER_MINUTE;
-            while events
-                .get(at)
-                .is_some_and(|e| u64::from(e.confirm_second) < start)
-            {
-                at += 1;
-            }
+            at += events.get(at..).map_or(0, |rest| {
+                rest.iter()
+                    .take_while(|e| u64::from(e.confirm_second) < start)
+                    .count()
+            });
             by_minute.push(u32::try_from(at).unwrap_or(u32::MAX));
         }
         Ok(SwingList { events, by_minute })

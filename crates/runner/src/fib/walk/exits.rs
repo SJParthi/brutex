@@ -592,14 +592,12 @@ impl ExitSet {
     #[must_use]
     pub fn passes(&self, budget: PassBudget) -> Vec<core::ops::Range<u16>> {
         let count = self.count();
-        let mut out = Vec::with_capacity(usize::from(count.div_ceil(budget.get())));
-        let mut start = 0;
-        while start < count {
-            let end = start.saturating_add(budget.get()).min(count);
-            out.push(start..end);
-            start = end;
-        }
-        out
+        // A budget is never zero (`PassBudget::new`), so each pass starts a
+        // whole budget after the last, over a range that ends.
+        (0..count)
+            .step_by(usize::from(budget.get()))
+            .map(|start| start..start.saturating_add(budget.get()).min(count))
+            .collect()
     }
 }
 

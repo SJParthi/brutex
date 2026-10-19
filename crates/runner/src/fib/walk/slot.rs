@@ -482,9 +482,21 @@ impl<'a> Stepper<'a> {
         self.work
     }
 
+    /// The most steps a walk can take: one per bar, and the one that closes
+    /// the slot. Every step that does not finish the slot moves the cursor on
+    /// by at least one bar, so a walk bounded by it always ends finished; a
+    /// cursor that failed to move would end it early and wrong, never hang it.
+    fn most_steps(&self) -> usize {
+        self.side.bars.len().saturating_add(1)
+    }
+
     /// Steps until the slot is finished.
     pub fn run(&mut self) {
-        while self.step() {}
+        for _ in 0..self.most_steps() {
+            if !self.step() {
+                return;
+            }
+        }
     }
 
     /// Runs the slot to its end by EVENTS (FM-F030): a held position jumps
@@ -499,7 +511,7 @@ impl<'a> Stepper<'a> {
     /// `spill_by_events_equals_forward_pass`); the work is O(log bars) per
     /// event.
     pub fn run_events(&mut self) {
-        loop {
+        for _ in 0..self.most_steps() {
             if !self.after_halt {
                 match self.phase {
                     Phase::Holding => self.jump(),
@@ -509,7 +521,7 @@ impl<'a> Stepper<'a> {
                 }
             }
             if !self.step() {
-                break;
+                return;
             }
         }
     }
@@ -920,10 +932,12 @@ impl<'a> Stepper<'a> {
             .swings
             .get(list)
             .map_or(&[][..], |l| l.events.as_slice());
-        while let Some(event) = events.get(self.swing_cursor).copied() {
-            if event.confirm_second > second {
-                break;
-            }
+        let unread = events.get(self.swing_cursor..).unwrap_or(&[]);
+        for event in unread
+            .iter()
+            .copied()
+            .take_while(|e| e.confirm_second <= second)
+        {
             self.swing_cursor += 1;
             self.work += 1;
             let Some((first, _, _)) = self.first else {

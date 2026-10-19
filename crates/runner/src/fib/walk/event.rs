@@ -74,8 +74,9 @@ impl Table {
                 .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
                 .collect(),
         );
-        let mut k = 1;
-        while (1 << k) <= n {
+        // Level `k` exists while a block of `2^k` bars fits: `k <= log2(n)`.
+        // A range, not a counter, so no change to the loop can make it run on.
+        for k in 1..=log2(n) {
             let half = 1 << (k - 1);
             let level: Vec<u32> = {
                 let previous = levels.last().map_or(&[][..], Vec::as_slice);
@@ -88,7 +89,6 @@ impl Table {
                     .collect()
             };
             levels.push(level);
-            k += 1;
         }
         Self { levels }
     }
@@ -119,8 +119,7 @@ impl Table {
         if at >= n {
             return n;
         }
-        let mut k = log2(n);
-        loop {
+        for k in (0..=log2(n)).rev() {
             let span = 1 << k;
             if at + span <= n
                 && self
@@ -130,10 +129,6 @@ impl Table {
             {
                 at += span;
             }
-            if k == 0 {
-                break;
-            }
-            k -= 1;
         }
         at
     }
