@@ -58,9 +58,11 @@
 //! # Cost
 //!
 //! Bounded, not constant, and named for `docs/06-limits.md`: one export is at
-//! most `EXPORT_CEILING / EXPORT_PAGE` = 20 page reads plus 3 (the first
-//! page is read before the answer starts, and two one-row seeks find the first
-//! and last IST day the file holds, for its name). Each page read is exactly
+//! most `EXPORT_CEILING / EXPORT_PAGE` = 20 page reads plus 2 (the first
+//! page is read before the answer starts; when it is not the whole export, two
+//! one-row seeks find the first and last IST day the file holds, for its name,
+//! and must count the same rows the first page did). A query of one page is
+//! one read. Each page read is exactly
 //! the window route's read of that page -- a seek on `sort=ts`, a scan bounded
 //! by `bars::MAX_SCAN_BARS` on a value sort -- admitted by the same two pools.
 
@@ -344,6 +346,10 @@ pub(super) struct Page {
     pub(super) rows: u64,
     /// The first record or month that would not read, and how many did not.
     pub(super) fault: Option<(String, u64)>,
+    /// The earliest and the latest instant on the page (UTC micros), in any
+    /// order the page was read in: a page that is the whole export names the
+    /// file's days from its own rows, with no further read.
+    pub(super) span: Option<(i64, i64)>,
     /// The records.
     pub(super) csv: Bytes,
 }
@@ -352,12 +358,15 @@ impl Page {
     /// `window`'s rows as CSV records under `columns`.
     pub(super) fn of(window: &bars::Window, columns: &Columns) -> Self {
         let mut csv = String::with_capacity(window.bars.len().saturating_mul(160));
+        let mut span: Option<(i64, i64)> = None;
         for row in &window.bars {
             let instrument = window
                 .series
                 .get(row.series)
                 .map_or("", |held| held.key.as_str());
             push_record(&mut csv, columns, instrument, row);
+            let at = row.bar.ts_micros;
+            span = Some(span.map_or((at, at), |(lo, hi)| (lo.min(at), hi.max(at))));
         }
         let fault = window.faults.first().map(|first| {
             (
@@ -371,8 +380,15 @@ impl Page {
             total: window.total,
             rows: u64::try_from(window.bars.len()).unwrap_or(u64::MAX),
             fault,
+            span,
             csv: Bytes::from(csv),
         }
+    }
+
+    /// The first and last IST day the page holds, when it holds a row.
+    pub(super) fn days(&self) -> Option<(String, String)> {
+        self.span
+            .map(|(lo, hi)| (bars::ist_day(lo), bars::ist_day(hi)))
     }
 }
 
@@ -678,24 +694,73 @@ pub(super) fn plan_of(
 }
 
 /// The IST day of the first row `query` keeps in time order, ascending or
-/// descending: the file name's two ends.
+/// descending -- one of the file name's two ends -- and the query's total as
+/// that read counted it.
 async fn end_day(
     root: std::path::PathBuf,
     query: &bars::WindowQuery,
     desc: bool,
-) -> Result<String, Refused> {
+) -> Result<(String, u64), Refused> {
     let mut ends = query.clone();
     ends.sort = bars::SortKey::Ts;
     ends.desc = desc;
     ends.offset = Some(0);
     ends.limit = 1;
     read_window(root, ends, |window: &bars::Window| {
-        window
+        let day = window
             .bars
             .first()
-            .map_or_else(|| "none".to_owned(), |row| bars::ist_day(row.bar.ts_micros))
+            .map_or_else(|| "none".to_owned(), |row| bars::ist_day(row.bar.ts_micros));
+        (day, window.total)
     })
     .await
+}
+
+/// The file's two days, from the reads that found them.
+///
+/// THE NAME MUST BE THE FILE'S. A page that is the whole export names them
+/// from its own rows and nothing else is read. Otherwise each end read counts
+/// the query again, and when either count is not the first page's a writer
+/// changed the rows between the reads: the name could name a day the file
+/// does not hold, so the export is refused `503 rows_changed` with
+/// `Retry-After` before a byte, never named wrong.
+///
+/// # Errors
+///
+/// The `503` when the reads counted different rows.
+pub(super) fn file_days(
+    first: &Page,
+    ends: Option<((String, u64), (String, u64))>,
+) -> Result<(String, String), Box<axum::response::Response>> {
+    if first.rows == first.total
+        && let Some(days) = first.days()
+    {
+        return Ok(days);
+    }
+    let Some(((lo, lo_total), (hi, hi_total))) = ends else {
+        return Err(Box::new(refused(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "export_not_whole",
+            "the first page is not the whole export and its two ends were not read",
+        )));
+    };
+    if lo_total == first.total && hi_total == first.total {
+        return Ok((lo, hi));
+    }
+    let mut answer = refused(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "rows_changed",
+        &format!(
+            "the query's rows changed while the export began: {} on its first page, {lo_total} \
+             and {hi_total} on the reads of its two ends (a writer added to or replaced a month \
+             it reads) -- ask again",
+            first.total
+        ),
+    );
+    answer
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    Err(Box::new(answer))
 }
 
 /// The file's name, the browser's `barCsvName`: the feed, the rung, the
@@ -898,12 +963,20 @@ pub(super) async fn bars_export_csv(
     if let Some(refusal) = first_page_refusal(&first) {
         return refusal;
     }
-    let (lo, hi) = match (
-        end_day(root.clone(), &query, false).await,
-        end_day(root, &query, true).await,
-    ) {
-        (Ok(lo), Ok(hi)) => (lo, hi),
-        (Err(why), _) | (_, Err(why)) => return refused_read(&why),
+    let ends = if first.rows == first.total {
+        None
+    } else {
+        match (
+            end_day(root.clone(), &query, false).await,
+            end_day(root, &query, true).await,
+        ) {
+            (Ok(lo), Ok(hi)) => Some((lo, hi)),
+            (Err(why), _) | (_, Err(why)) => return refused_read(&why),
+        }
+    };
+    let (lo, hi) = match file_days(&first, ends) {
+        Ok(days) => days,
+        Err(refusal) => return *refusal,
     };
     let name = file_name(&columns, &query, &lo, &hi, first.total);
     let headers = match export_headers(&name, first.total, &lo, &hi) {
@@ -1442,6 +1515,91 @@ mod tests {
         assert_eq!(&f[13..15], ["", "no_earlier_stored_bar"]);
         assert_eq!(&f[15..19], ["", "not_a_derivative", "", "not_a_derivative"]);
         assert_eq!(&f[19..23], ["", "", "", ""]);
+    }
+
+    /// THE NAME IS THE FILE'S DAYS IN ANY ORDER: a value order puts neither
+    /// end first, on one page (named from its own rows) and on several
+    /// (named from the two end reads).
+    #[tokio::test]
+    async fn the_file_names_its_first_and_last_day_in_a_value_order() {
+        let store = Store::new("ends");
+        store.write("INDEX", None, 5, 0, 1_300);
+        for (query, rows, last) in [
+            (
+                "from_day=2025-05-02&to_day=2025-05-03&sort=c",
+                750_u64,
+                "2025-05-03",
+            ),
+            ("sort=c&dir=asc", 1_300, "2025-05-05"),
+        ] {
+            let (status, headers, body) = store
+                .export(&format!("{SPOT}&from=2025-05&to=2025-05&{query}"))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body:?}");
+            assert_eq!(headers["x-export-rows"], rows.to_string().as_str());
+            assert_eq!(headers["x-export-first-day"], "2025-05-02", "{query}");
+            assert_eq!(headers["x-export-last-day"], last, "{query}");
+            assert_eq!(
+                headers["content-disposition"],
+                format!(
+                    "attachment; filename=\"brutex-db-bars_gdfl_1min_NIFTY_2025-05-02_{last}_{rows}rows.csv\""
+                )
+                .as_str()
+            );
+            assert_eq!(records(&body.unwrap()).len() as u64, rows);
+        }
+    }
+
+    /// A WRITER BETWEEN THE FIRST PAGE AND THE END READS: the name could name
+    /// a day the file does not hold, so the export is refused before a byte,
+    /// `503 rows_changed` with `Retry-After`; agreeing counts name the file
+    /// from the end reads, and a page that is the whole export from its rows.
+    #[test]
+    fn the_name_is_refused_when_the_rows_change_between_the_first_page_and_its_ends() {
+        let day = |text: &str| {
+            let (y, rest) = text.split_at(4);
+            let (m, d) = rest[1..].split_at(2);
+            Day::new(
+                y.parse().unwrap(),
+                m.parse().unwrap(),
+                d[1..].parse().unwrap(),
+            )
+            .unwrap()
+            .days_from_epoch()
+        };
+        let at = |text: &str| i64::from(day(text)) * 86_400_000_000 + 13_500_000_000;
+        let part = Page {
+            total: 2_500,
+            rows: 1_000,
+            span: Some((at("2025-05-02"), at("2025-05-04"))),
+            ..Page::default()
+        };
+        let ends =
+            |lo: u64, hi: u64| Some((("2025-05-02".to_owned(), lo), ("2025-06-07".to_owned(), hi)));
+        for (lo, hi) in [(2_500, 2_501), (2_499, 2_500), (0, 0)] {
+            let refused = file_days(&part, ends(lo, hi)).expect_err("counts that disagree");
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(refused.headers()["retry-after"], "1");
+        }
+        assert_eq!(
+            file_days(&part, ends(2_500, 2_500)).expect("counts that agree"),
+            ("2025-05-02".to_owned(), "2025-06-07".to_owned()),
+            "a page that is not the whole export is named from its end reads"
+        );
+        assert_eq!(
+            file_days(&part, None).expect_err("no end reads").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let whole = Page {
+            total: 1_000,
+            rows: 1_000,
+            ..part
+        };
+        assert_eq!(
+            file_days(&whole, None).expect("a whole page"),
+            ("2025-05-02".to_owned(), "2025-05-04".to_owned()),
+            "a page that is the whole export is named from its own rows"
+        );
     }
 
     /// Rows that change between two pages cut the stream with an error and
