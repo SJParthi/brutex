@@ -244,7 +244,11 @@ impl Events {
         let mut buy_stop = vec![0; n];
         let mut sell_stop = vec![0; n];
         let (mut next, mut next_buy, mut next_sell) = (stored(n), stored(n), stored(n));
-        for (k, bar) in bars.iter().enumerate().rev() {
+        let slots = next_special
+            .iter_mut()
+            .zip(buy_stop.iter_mut())
+            .zip(sell_stop.iter_mut());
+        for (k, (((special_at, buy_at), sell_at), bar)) in slots.zip(bars).enumerate().rev() {
             let special =
                 !bar.usable() || bar.is(Bit::HaltCrossed) || (deep && bar.gap_missing > max_gap);
             if special {
@@ -256,15 +260,9 @@ impl Events {
             if special || !plain(bar, Leg::Sell, deep) {
                 next_sell = stored(k);
             }
-            for (slot, value) in [
-                (next_special.get_mut(k), next),
-                (buy_stop.get_mut(k), next_buy),
-                (sell_stop.get_mut(k), next_sell),
-            ] {
-                if let Some(slot) = slot {
-                    *slot = value;
-                }
-            }
+            *special_at = next;
+            *buy_at = next_buy;
+            *sell_at = next_sell;
         }
         let mut volume = Vec::with_capacity(n.saturating_add(1));
         let mut buy_value = Vec::with_capacity(n.saturating_add(1));

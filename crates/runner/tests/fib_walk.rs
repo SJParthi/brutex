@@ -823,6 +823,17 @@ fn a_stop_into_flat_day_low_minutes_exits_at_the_first_unlocked_minute() {
     let out = minute_slot(&deeper, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert_eq!(out.exit_value_paisa, i128::from(100 * 97_850));
     assert_eq!(out.mae_to_exit_paisa, (P + 100) - 97_800);
+    // By events the locked minutes are stepped one by one, never taken as a
+    // volume spill (a minute exits the whole quantity): the same bytes.
+    let by_events = walk_events(
+        &deeper,
+        &minute_profile(),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(by_events, out);
 }
 
 #[test]

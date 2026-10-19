@@ -601,20 +601,19 @@ impl<'a> Stepper<'a> {
     }
 
     /// An entry's jump. Waiting for its trigger, it jumps to the first bar
-    /// that may arm it; a deep entry spilling with no participation cap takes
-    /// the run of plain seconds ahead of it by the volume prefix. The window's
-    /// first bar is always stepped: a silence before it is measured from the
-    /// window's start, not from a previous bar.
+    /// that may arm it; an entry spilling with no participation cap takes the
+    /// run of plain seconds ahead of it by the volume prefix (only a deep
+    /// entry is ever still entering with something filled: a minute fills
+    /// the whole quantity at once). The window's first bar is always stepped:
+    /// a silence before it is measured from the window's start, not from a
+    /// previous bar.
     fn jump_entering(&mut self) {
         if self.previous.is_none() {
             return;
         }
         if !self.armed {
             self.jump_to_trigger();
-        } else if self.filled > 0
-            && self.cap.is_none()
-            && self.day.resolution() == Resolution::Second
-        {
+        } else if self.filled > 0 && self.cap.is_none() {
             self.jump_entry_spill();
         }
     }
