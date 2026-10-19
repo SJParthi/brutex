@@ -1079,7 +1079,9 @@ impl<'a> Stepper<'a> {
                     self.finish(SlotStatus::Unpriceable(locked));
                     return;
                 }
-                (window.capable > 0 && window.capacity >= u128::from(self.open))
+                // Only seconds a sell can take add capacity, and the open
+                // quantity is above zero here.
+                (window.capacity >= u128::from(self.open))
                     .then_some((window.worst_raw, window.last_second))
             }
             Resolution::Minute => window.minute.map(|price| {
