@@ -19879,3 +19879,40 @@ What the stock-day reader (`cli::fib::day::read_stock_month`, `StockMonth`,
 | L-FIB8-25 | A stock-month holds each day's real minutes beside its candles | the walker's stage-A bars and the deep stage's decision basis are the minutes themselves, not a fold of them | one more copy of a day's minutes, 375 × 56 = 21,000 bytes a full day |
 | L-FIB8-26 | `SecondsDay::longest_gap` is one day's reading | FIB-2's `MaxSecondGap` folds the committed past's days; the fold is FIB-2's and FIB-9's | one subtraction a kept second while the day is indexed; the fold over the committed past is not built here |
 | L-FIB8-27 | The dated cash closes and the `1day` variant are read under one symbol | `StockMonthSpec::symbol` names it; the minutes and the seconds are read under each day's own symbol (FM-F093) | the development pool names one symbol a month ("renames not stitched"); a rename's other spelling's masters wait for PIT-1 (FIB-10) |
+
+### Measured on 19 October 2026: FIB-8's bench rows, fourth run (`cargo bench -p cli --bench fib`)
+
+On THIS HOST (a cloud container of 4 vCPUs, 15 GiB, Linux 6.18, rustc 1.97.1,
+`bench` profile), nothing else running, on the code of D-6453 and D-6454 with
+the mutant fixes (the FIB-8 report names the branch commit): timer
+granularity 22 ns, last-level cache estimate 16,384 KiB, the pointer-chase
+probe 1.6 ns a dependent load at 16 KiB, 17 ns at 2 MiB, 168 ns at 16 MiB and
+348 ns at 256 MiB. Times are percentiles of batch means (batches of 1,000
+calls), ps per call, p50 / p99 / max at each scale; the harness is FIB-1's.
+
+| ID | Class | Scales | p50 / p99 / max ps | Work per call | Ratio | Verdict |
+|---|---|---|---|---|---|---|
+| C-F8-01 | AMORTISED, period 375 | 1 / 11 / 110 months | 248,161 / 485,495 / 2,977,880; 256,405 / 589,052 / 1,148,325; 280,160 / 677,632 / 4,272,400 | mean 0.999 | mean 1.317x | FAIL (time), within the 3.0x ceiling |
+| C-F8-02 | AMORTISED, period 360 | 1 / 11 / 110 months | 238,033 / 463,120 / 605,452; 255,560 / 644,841 / 2,570,245; 270,051 / 989,384 / 2,232,458 | mean 1.000 | mean 1.554x | FAIL (time), within the ceiling |
+| C-F8-03 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 24,430 / 90,240 / 223,430; 24,636 / 103,512 / 217,227; 12,557 / 45,177 / 408,485 | 1 | p99 0.500x | PASS |
+| C-F8-04 | WORST-CASE | 25 / 250 / 2,500 members | 7,894 / 43,640 / 456,297; 9,153 / 42,587 / 150,676; 14,640 / 91,200 / 771,330 | 1 | p99 2.089x | FAIL (time), within the ceiling (L-FIB8-23) |
+| C-F8-05 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 996,616 / 1,695,658 / 6,518,125; 988,314 / 1,755,481 / 4,753,664; 959,474 / 2,196,555 / 20,080,218 | 1 | p99 1.295x | FAIL (time) on a state that does not grow: this host's noise |
+| C-F8-06 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 12,734 / 32,395 / 118,127; 12,750 / 55,843 / 2,261,517; 12,783 / 58,479 / 380,707 | 1 | p99 1.805x | FAIL (time) on a state that does not grow: this host's noise |
+| C-F8-07 | WORST-CASE, fixed state | 1 / 10 / 100 records | 180,210 / 483,079 / 2,690,113; 178,393 / 471,513 / 859,870; 181,345 / 426,867 / 604,210 | 83 bytes | p99 0.883x | PASS |
+| C-F8-08 | AMORTISED, period 789 | 10,000 / 100,000 / 1,000,000 records | 219,107 / 642,856 / 1,369,801; 254,845 / 681,426 / 1,907,187; 312,954 / 666,488 / 1,062,436 | mean 83.04 bytes | mean 1.326x | FAIL (time), within the ceiling; EXTRAPOLATION |
+| C-F8-11 | BOUNDED, one block | 10,000 / 100,000 / 1,000,000 records | 204,686,518 / 321,415,431 / 412,448,065; 228,116,122 / 375,258,436 / 437,254,198; 221,891,661 / 370,541,506 / 415,928,647 | 65,519 bytes (p50) | p99 1.152x | BOUNDED (information); EXTRAPOLATION |
+| C-F8-09 | WORST-CASE | 1 / 10 / 100 days | 6,496 / 10,782 / 95,040; 6,720 / 19,406 / 84,614; 6,838 / 33,440 / 112,005 | 1 | p99 3.101x | **FAIL above the 3.0x ceiling** (L-FIB8-22): the process exited 1 |
+| C-F8-10 | WORST-CASE | 2 / 20 / 200 indices | 34,660 / 73,342 / 158,636; 33,164 / 71,336 / 1,535,613; 50,053 / 108,422 / 3,770,012 | 1 | p99 1.478x | FAIL (time), within the ceiling |
+| C-F8-12 | WORST-CASE | 2 / 20 / 200 stock-months | 20,131 / 76,855 / 2,578,978; 23,396 / 118,350 / 699,039; 49,868 / 136,838 / 823,540 | 1 | p99 1.780x | FAIL (time), within the ceiling (L-FIB8-28); EXTRAPOLATION (largest scale below production, 208) |
+
+Every row did ONE unit of work a call at every scale (the AMORTISED rows their
+period's work once a period): no row scans. Two FIXED-STATE rows, whose state
+does not grow with the scale at all, measured 1.295x and 1.805x in this run
+(C-F8-05, C-F8-06), and a third 0.500x (C-F8-03): this host's run-to-run
+spread alone exceeds the 1.25x line. The 18 October third run measured
+C-F8-01 0.974x, C-F8-06 1.006x and C-F8-09 2.545x on the same rows.
+
+| ID | Limit | Why it is not O(1), or not done | Bound |
+|---|---|---|---|
+| L-FIB8-28 | `StockMonth::day` in FIB-9's order exceeds the 1.25x line on this host | one lookup a call at every scale (work 1); a day at a time across 200 stock-months touches each month's day table, day record and seconds index — a few cache lines a month, past the first-level cache at 200 months (p50 20 → 50 ns) | 1.780x in the fourth run, within the shared 3.0x ceiling. NOT closed here; the Mac's run decides it |
+| L-FIB8-29 | C-F8-09 crossed the shared 3.0x ceiling in the fourth run (3.101x; 2.545x in the third, on the same code) | one lookup a call (work 1); p50 6.5 → 6.8 ns from one day held to a hundred (180 MB), p99 10.8 → 33.4 ns; the fixed-state rows of the same run spread 0.5x to 1.8x | the row's own p99 tail on this host; `SecondsDay::range` has no production caller yet (FIB-5's walker indexes `SecondsDay::bars()` itself). NOT closed here; the Mac's run decides it, with L-FIB8-22 |

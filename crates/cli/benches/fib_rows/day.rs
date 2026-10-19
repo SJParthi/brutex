@@ -479,12 +479,17 @@ pub(crate) struct Seconds {
     lookups: u64,
     /// The walk's day (its position in `days`) and its next second.
     walk: (usize, u32),
+    /// Walks left on the walk's day before the next day's begin.
+    left: u64,
 }
 
 /// 09:15:00, the continuous window's first second.
 const OPEN_SECOND: u32 = 33_300;
 /// 15:10:00, the end of the forced-exit minute: no deep walk reads past it.
 const EXIT_END_SECOND: u32 = 54_600;
+/// The most walks one stock-day holds here: how many gate-A survivors a real
+/// stock-day holds is unmeasured, so each day takes a pseudo-random 1 to 4.
+const WALKS_PER_DAY: u64 = 4;
 
 fn seconds(days: u64) -> Seconds {
     let authorities = Authorities::interim(&|_: &str| true).unwrap();
@@ -519,21 +524,31 @@ fn seconds(days: u64) -> Seconds {
     .unwrap();
     Seconds {
         month: seconds_of(&bars, &held, &cash),
+        walk: (held.len() - 1, EXIT_END_SECOND),
         days: held,
         lookups: 0,
-        walk: (0, EXIT_END_SECOND),
+        left: 0,
     }
 }
 
-/// Production order (stage DEEP): a walk reads every second from its entry
-/// to the forced exit's end; the next walk enters on a pseudo-random day and
-/// second, its day found once through the month's index.
+/// Production order (stage DEEP, FIB-5's walker: one `DayIndex` built per
+/// stock-day, every slot of the day walked before the next day's): the days
+/// in ascending order, each found once through the month's index; on each, a
+/// pseudo-random 1 to [`WALKS_PER_DAY`] walks, each from a pseudo-random
+/// entry second to the forced exit's end, one second a call.
 fn seconds_op(state: &mut Seconds, i: u64) -> u64 {
     if state.walk.1 >= EXIT_END_SECOND {
         let mixed = i.wrapping_mul(2_654_435_761);
-        let at = usize::try_from(mixed % state.days.len() as u64).unwrap();
+        let at = if state.left == 0 {
+            let next = (state.walk.0 + 1) % state.days.len();
+            black_box(state.month.day(state.days[next]));
+            state.left = 1 + (mixed >> 8) % WALKS_PER_DAY;
+            next
+        } else {
+            state.walk.0
+        };
+        state.left -= 1;
         let span = u64::from(EXIT_END_SECOND - OPEN_SECOND);
-        black_box(state.month.day(state.days[at]));
         state.walk = (
             at,
             OPEN_SECOND + u32::try_from((mixed >> 16) % span).unwrap(),
