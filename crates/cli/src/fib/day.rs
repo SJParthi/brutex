@@ -878,15 +878,20 @@ fn take_minute(taken: &mut DayMinutes, bar: Candle, day: i64) {
         refuse(taken, DayRefusal::Unsorted);
         return;
     }
-    if let Some(previous) = taken.minutes.last() {
-        if previous.ts_micros == bar.ts_micros {
+    match taken
+        .minutes
+        .last()
+        .map(|previous| previous.ts_micros.cmp(&bar.ts_micros))
+    {
+        Some(std::cmp::Ordering::Equal) => {
             refuse(taken, DayRefusal::DuplicateMinute);
             return;
         }
-        if previous.ts_micros > bar.ts_micros {
+        Some(std::cmp::Ordering::Greater) => {
             refuse(taken, DayRefusal::Unsorted);
             return;
         }
+        Some(std::cmp::Ordering::Less) | None => {}
     }
     let stored = bar_of(bar);
     let off_grid = bar.ts_micros.rem_euclid(micros_per_minute()) != 0;

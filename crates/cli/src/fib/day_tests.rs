@@ -2122,6 +2122,10 @@ fn a_fold_the_authority_refuses_refuses_the_day_by_name() {
     );
     let day = input(&month, halt);
     assert!(day.exposure.is_none(), "{:?}", day.exposure);
+    assert_eq!(
+        day.refusal, None,
+        "a day the calendar excludes is never refused for its fold"
+    );
     assert!(day.candles.is_empty());
 }
 
@@ -2444,4 +2448,56 @@ fn an_accepted_close_scales_and_measures_exactly() {
     assert_eq!(carried_across.move_bp(2_850_000), -500);
     assert_eq!(carried_across.side(3_000_000), MoveSide::Flat);
     assert_eq!(carried_across.side(3_000_001), MoveSide::Gainer);
+}
+
+/// A zero-volume minute is padding only when all four prices are one price:
+/// one equal pair is a range. A day whose last minute closes exactly at the
+/// forced window's start asks no tail witness. A minute closing at zero is
+/// never measured as a wick.
+#[test]
+fn padding_needs_four_equal_prices_and_the_tail_check_stops_at_the_forced_window() {
+    let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut bars = full(monday, 2_323_000);
+    let mut day = full(tuesday, 2_323_100);
+    let at =
+        |day: &[Candle], minute: u16| day.iter().position(|bar| minute_of(bar) == minute).unwrap();
+    // One equal pair, open and high; then low and close.
+    for (minute, open_high) in [(hm(11, 0), true), (hm(11, 30), false)] {
+        let i = at(&day, minute);
+        let before = day[i - 1].close;
+        day[i] = Candle {
+            open: if open_high { before + 20 } else { before + 10 },
+            high: before + 20,
+            low: if open_high { before - 30 } else { before },
+            close: before,
+            volume: 0,
+            ..day[i]
+        };
+    }
+    // A minute closing at zero, with an upper wick.
+    let zero = at(&day, hm(12, 0));
+    day[zero] = Candle {
+        open: 0,
+        high: 50,
+        low: 0,
+        close: 0,
+        ..day[zero]
+    };
+    // The day's last minute is 15:08: it closes at 15:09:00, the forced
+    // window's first second.
+    day.retain(|bar| minute_of(bar) <= hm(15, 8));
+    bars.extend(day);
+    let mut state = StockState::first_day();
+    let month = build(2025, 3, &[1], &bars, &interim(), &mut state);
+    let input = input(&month, tuesday);
+    assert_eq!(input.counts.no_trade, 0, "no minute is padding");
+    assert_eq!(input.counts.zero_volume_with_range, 2);
+    assert_eq!(input.refusal, None, "no tail witness is asked");
+    assert!(!input.no_trades_after);
+    let noon = hm(12, 0) - hm(9, 15);
+    assert!(
+        input.suspect.iter().all(|wick| wick.slot != noon),
+        "{:?}",
+        input.suspect
+    );
 }
