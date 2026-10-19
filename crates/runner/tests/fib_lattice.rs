@@ -1378,6 +1378,25 @@ fn a_survivor_trie_refuses_by_name() {
         Survivors::new(&table, &[with(ok, RowId::Exit, 2)]),
         Err(LatticeRefusal::SurvivorExitOutside { variant: 2 })
     );
+    // An exit set that starts above the run's first variant refuses a survivor
+    // below it, as it refuses one past its end.
+    let upper = fixture::table_of(
+        &generation,
+        Partition {
+            exits: 1..3,
+            ..fixture::partition(Search::Long, 3)
+        },
+        1,
+        vec![],
+    );
+    assert_eq!(
+        Survivors::new(&upper, &[with(upper.root_key(), RowId::Exit, 0)]),
+        Err(LatticeRefusal::SurvivorExitOutside { variant: 0 })
+    );
+    assert_eq!(
+        Survivors::new(&upper, &[with(upper.root_key(), RowId::Exit, 2)]).map(|trie| trie.len()),
+        Ok(1)
+    );
     assert_eq!(
         Survivors::new(&table, &[ok, ok]),
         Err(LatticeRefusal::SurvivorRepeated { key: ok })

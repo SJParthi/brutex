@@ -116,7 +116,13 @@ pub enum Unpriced {
 
 impl Unpriced {
     /// The reason's stable name.
+    ///
+    /// Compiled once, in this crate: nothing in `runner` names a reason, so
+    /// a copy inlined into a caller's crate would leave this crate an
+    /// unused-function coverage record whose hash differs from the copy that
+    /// runs, and `llvm-cov` keeps whichever record it reads first (D-6413).
     #[must_use]
+    #[inline(never)]
     pub const fn name(self) -> &'static str {
         match self {
             Self::NoExecutionSeconds => "no_execution_seconds",
@@ -233,6 +239,35 @@ impl ChargeModel for Gross {
 
     fn close_day(&mut self, _day: u32) -> i128 {
         0
+    }
+}
+
+/// The lanes' charge models as the pass reads them, one per lane in lane
+/// order: one dynamic call per order and per lane's day close, so the pass is
+/// compiled once whatever the model (D-6413). The pass checks one model per
+/// profile when it is built, so `lane` always names one.
+trait Charges {
+    /// Lane `lane`'s [`ChargeModel::scale`].
+    fn scale(&self, lane: usize) -> i128;
+
+    /// Lane `lane`'s [`ChargeModel::add`].
+    fn add(&mut self, lane: usize, order: &Order) -> i128;
+
+    /// Lane `lane`'s [`ChargeModel::close_day`].
+    fn close_day(&mut self, lane: usize, day: u32) -> i128;
+}
+
+impl<C: ChargeModel> Charges for Vec<C> {
+    fn scale(&self, lane: usize) -> i128 {
+        self.get(lane).map_or(1, C::scale)
+    }
+
+    fn add(&mut self, lane: usize, order: &Order) -> i128 {
+        self.get_mut(lane).map_or(0, |model| model.add(order))
+    }
+
+    fn close_day(&mut self, lane: usize, day: u32) -> i128 {
+        self.get_mut(lane).map_or(0, |model| model.close_day(day))
     }
 }
 
@@ -993,15 +1028,16 @@ struct Episode {
     trough_index: u32,
 }
 
-/// One profile's running state inside a pass.
+/// One profile's running state inside a pass. Its charge model is the
+/// [`OrderedPass`]'s, at the lane's index.
 #[derive(Clone, Debug)]
-struct Lane<C> {
+struct Lane {
+    /// The lane's position: its charge model's and its block slots'.
+    index: usize,
     /// The variant's offset inside the table's exits.
     offset: usize,
     /// The size's index in [`SIZES`].
     size: usize,
-    /// The charge model.
-    charges: C,
     /// The months touched this pass.
     touched: Vec<u32>,
     /// The pass each month was last touched in.
@@ -1020,7 +1056,25 @@ struct Lane<C> {
     current: Vec<Option<(u32, Stat)>>,
 }
 
-impl<C> Lane<C> {
+impl Lane {
+    /// Lane `index`, of the variant at `offset` and the size at `size`, with
+    /// empty scratch for `months` months.
+    fn fresh(index: usize, offset: usize, size: usize, months: usize) -> Self {
+        Self {
+            index,
+            offset,
+            size,
+            touched: Vec::with_capacity(months),
+            stamp: vec![0; months],
+            day_r: ZERO,
+            day_traded: false,
+            episode: None,
+            deepest_is_open: false,
+            last_index: 0,
+            current: vec![None; PERIOD_KINDS],
+        }
+    }
+
     /// Records that `month` is written in pass `epoch`, once per pass, so the
     /// next pass empties it: the touched list (FM-F050).
     fn touch(&mut self, month: u32, epoch: u64) {
@@ -1033,9 +1087,19 @@ impl<C> Lane<C> {
 }
 
 /// The ordered pass over one mix's rows for a set of profiles: pre-sized once,
-/// reused for every mix.
+/// reused for every mix. The pass itself is one non-generic [`Pass`]; the
+/// charge models are the only generic part (D-6413).
 #[derive(Clone, Debug)]
 pub struct OrderedPass<C> {
+    /// The pass.
+    pass: Pass,
+    /// One charge model per profile, in lane order.
+    charges: Vec<C>,
+}
+
+/// Everything an [`OrderedPass`] holds but its charge models.
+#[derive(Clone, Debug)]
+struct Pass {
     /// The table's search.
     search: Search,
     /// The table's exit variants.
@@ -1047,7 +1111,7 @@ pub struct OrderedPass<C> {
     /// The ladders.
     rungs: Rungs,
     /// One lane per profile.
-    lanes: Vec<Lane<C>>,
+    lanes: Vec<Lane>,
     /// One card per profile.
     cards: Vec<Card>,
     /// The (profile, stock) block slots, profile-major.
@@ -1108,13 +1172,65 @@ impl<C: ChargeModel> OrderedPass<C> {
         rungs: Rungs,
         charges: Vec<C>,
     ) -> Result<Self, ScoreRefusal> {
+        Pass::new(table, profiles, rungs, charges.len()).map(|pass| Self { pass, charges })
+    }
+
+    /// The profiles, in lane order.
+    pub fn profiles(&self) -> impl Iterator<Item = Profile> + '_ {
+        self.pass.cards.iter().map(|card| card.profile)
+    }
+
+    /// Scores one mix: its rows, ascending, against the outcome records and
+    /// the calendar. The cards are the pass's own and are overwritten by the
+    /// next mix.
+    ///
+    /// # Errors
+    ///
+    /// By name: a table of another shape, a row past the table, an outcome
+    /// index past the records, a day not in the calendar, a priced slot with no
+    /// share, a risk or an entry value that is not positive, money past
+    /// `i128`. A refused mix leaves the cards partly written; the next call
+    /// resets them.
+    pub fn score(
+        &mut self,
+        table: &RowTable,
+        rows: &[u32],
+        outcomes: &[Outcome],
+        calendar: &Calendar,
+    ) -> Result<&[Card], ScoreRefusal> {
+        self.pass
+            .score(table, rows, outcomes, calendar, &mut self.charges)
+    }
+
+    /// A pass of the same shape with fresh charge models and empty scratch.
+    fn clone_fresh(&self, charges: Vec<C>) -> Self {
+        Self {
+            pass: self.pass.clone_fresh(),
+            charges,
+        }
+    }
+}
+
+impl Pass {
+    /// A pass over `table`'s mixes for `profiles`, given `charges` charge
+    /// models.
+    ///
+    /// # Errors
+    ///
+    /// As [`OrderedPass::new`].
+    fn new(
+        table: &RowTable,
+        profiles: &[Profile],
+        rungs: Rungs,
+        charges: usize,
+    ) -> Result<Self, ScoreRefusal> {
         if profiles.is_empty() {
             return Err(ScoreRefusal::ProfilesEmpty);
         }
-        if charges.len() != profiles.len() {
+        if charges != profiles.len() {
             return Err(ScoreRefusal::ChargesPerProfile {
                 profiles: profiles.len(),
-                charges: charges.len(),
+                charges,
             });
         }
         let exits = &table.partition().exits;
@@ -1122,25 +1238,18 @@ impl<C: ChargeModel> OrderedPass<C> {
         let pool = table.pool() as usize;
         let mut lanes = Vec::with_capacity(profiles.len());
         let mut cards = Vec::with_capacity(profiles.len());
-        for (profile, charges) in profiles.iter().zip(charges) {
+        for (index, profile) in profiles.iter().enumerate() {
             if profile.variant < exits.start || profile.variant >= exits.end {
                 return Err(ScoreRefusal::ProfileOutsideExits {
                     variant: profile.variant,
                 });
             }
-            lanes.push(Lane {
-                offset: usize::from(profile.variant - exits.start),
-                size: size_index(profile.size),
-                charges,
-                touched: Vec::with_capacity(months),
-                stamp: vec![0; months],
-                day_r: ZERO,
-                day_traded: false,
-                episode: None,
-                deepest_is_open: false,
-                last_index: 0,
-                current: vec![None; PERIOD_KINDS],
-            });
+            lanes.push(Lane::fresh(
+                index,
+                usize::from(profile.variant - exits.start),
+                size_index(profile.size),
+                months,
+            ));
             cards.push(Card {
                 profile: *profile,
                 months: vec![MonthStats::EMPTY; months],
@@ -1164,11 +1273,6 @@ impl<C: ChargeModel> OrderedPass<C> {
             block: vec![NO_BLOCK; profiles.len().saturating_mul(pool)],
             epoch: 0,
         })
-    }
-
-    /// The profiles, in lane order.
-    pub fn profiles(&self) -> impl Iterator<Item = Profile> + '_ {
-        self.cards.iter().map(|card| card.profile)
     }
 
     /// Empties every card through its touched months: O(touched + periods).
@@ -1202,23 +1306,18 @@ impl<C: ChargeModel> OrderedPass<C> {
         }
     }
 
-    /// Scores one mix: its rows, ascending, against the outcome records and
-    /// the calendar. The cards are the pass's own and are overwritten by the
-    /// next mix.
+    /// Scores one mix through `charges`, one model per lane.
     ///
     /// # Errors
     ///
-    /// By name: a table of another shape, a row past the table, an outcome
-    /// index past the records, a day not in the calendar, a priced slot with no
-    /// share, a risk or an entry value that is not positive, money past
-    /// `i128`. A refused mix leaves the cards partly written; the next call
-    /// resets them.
-    pub fn score(
+    /// As [`OrderedPass::score`].
+    fn score(
         &mut self,
         table: &RowTable,
         rows: &[u32],
         outcomes: &[Outcome],
         calendar: &Calendar,
+        charges: &mut dyn Charges,
     ) -> Result<&[Card], ScoreRefusal> {
         if table.months() as usize != self.months {
             return Err(ScoreRefusal::TableMismatch { what: "months" });
@@ -1238,7 +1337,7 @@ impl<C: ChargeModel> OrderedPass<C> {
                 .ok_or(ScoreRefusal::RowOutOfTable { row: *row })?;
             if today.is_none_or(|(day, _, _)| day != view.day) {
                 if let Some((day, month, keys)) = today {
-                    self.close_day(day, month, &keys);
+                    self.close_day(charges, day, month, &keys);
                 }
                 let keys = calendar
                     .keys(view.day)
@@ -1251,11 +1350,11 @@ impl<C: ChargeModel> OrderedPass<C> {
                 pool: self.pool,
                 rungs: &self.rungs,
             };
-            for (index, (lane, card)) in self.lanes.iter_mut().zip(&mut self.cards).enumerate() {
+            for (lane, card) in self.lanes.iter_mut().zip(&mut self.cards) {
                 Self::offer(
                     &ctx,
                     &mut self.block,
-                    index,
+                    charges,
                     lane,
                     card,
                     *row,
@@ -1265,7 +1364,7 @@ impl<C: ChargeModel> OrderedPass<C> {
             }
         }
         if let Some((day, month, keys)) = today {
-            self.close_day(day, month, &keys);
+            self.close_day(charges, day, month, &keys);
         }
         self.finish();
         Ok(&self.cards)
@@ -1274,13 +1373,14 @@ impl<C: ChargeModel> OrderedPass<C> {
     /// Offers one row to one profile's lane.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the pass's shared reading, the lane's slots, its state and card, and the row"
+        reason = "the pass's shared reading, the lane's slots and charge model, its state and \
+                  card, and the row"
     )]
     fn offer(
         ctx: &Ctx<'_>,
         block: &mut [Block],
-        lane_index: usize,
-        lane: &mut Lane<C>,
+        charges: &mut dyn Charges,
+        lane: &mut Lane,
         card: &mut Card,
         row: u32,
         view: &RowView<'_>,
@@ -1298,7 +1398,7 @@ impl<C: ChargeModel> OrderedPass<C> {
                 index,
                 outcomes: outcomes.len(),
             })?;
-        let at = lane_index * ctx.pool + view.slot as usize;
+        let at = lane.index * ctx.pool + view.slot as usize;
         let current = block.get(at).copied().unwrap_or(NO_BLOCK);
         let blocked =
             current.epoch == ctx.epoch && current.day == view.day && view.second <= current.until;
@@ -1322,7 +1422,7 @@ impl<C: ChargeModel> OrderedPass<C> {
         };
         let next = match slot {
             Slot::Priced(outcome) => {
-                Self::take(ctx, lane, card, row, view, &outcome)?;
+                Self::take(ctx, charges, lane, card, row, view, &outcome)?;
                 Some(written(outcome.exit_second, Blocker::Open))
             }
             Slot::Pending { until_second } => {
@@ -1355,7 +1455,8 @@ impl<C: ChargeModel> OrderedPass<C> {
     /// Prices one trade through the lane's charge model.
     fn price(
         ctx: &Ctx<'_>,
-        lane: &mut Lane<C>,
+        charges: &mut dyn Charges,
+        lane: &Lane,
         row: u32,
         view: &RowView<'_>,
         outcome: &SlotOutcome,
@@ -1394,11 +1495,10 @@ impl<C: ChargeModel> OrderedPass<C> {
             outcome.exit_value_paisa,
             outcome.flags.contains(TradeFlag::DhanSquareOff),
         );
-        let scale = lane.charges.scale();
-        let charges = lane
-            .charges
-            .add(&entry)
-            .checked_add(lane.charges.add(&exit))
+        let scale = charges.scale(lane.index);
+        let charges = charges
+            .add(lane.index, &entry)
+            .checked_add(charges.add(lane.index, &exit))
             .ok_or(ScoreRefusal::MoneyOverflow { row })?;
         let qty = i128::from(outcome.filled_qty);
         let risk = i128::from(outcome.risk_per_share_paisa);
@@ -1433,13 +1533,14 @@ impl<C: ChargeModel> OrderedPass<C> {
     /// its day.
     fn take(
         ctx: &Ctx<'_>,
-        lane: &mut Lane<C>,
+        charges: &mut dyn Charges,
+        lane: &mut Lane,
         card: &mut Card,
         row: u32,
         view: &RowView<'_>,
         outcome: &SlotOutcome,
     ) -> Result<(), ScoreRefusal> {
-        let trade = Self::price(ctx, lane, row, view, outcome)?;
+        let trade = Self::price(ctx, charges, lane, row, view, outcome)?;
         let net_rungs = ctx.rungs.net_r.len();
         let mfe_rungs = ctx.rungs.mfe_r.len();
         let month = view.month as usize;
@@ -1472,9 +1573,9 @@ impl<C: ChargeModel> OrderedPass<C> {
 
     /// Closes one day for every lane: the charge model's adjustment, then
     /// drawdown and the period tables on a day that had a trade.
-    fn close_day(&mut self, day: u32, month: u32, keys: &DayKeys) {
+    fn close_day(&mut self, charges: &mut dyn Charges, day: u32, month: u32, keys: &DayKeys) {
         for (lane, card) in self.lanes.iter_mut().zip(&mut self.cards) {
-            let adjustment = lane.charges.close_day(day);
+            let adjustment = charges.close_day(lane.index, day);
             if adjustment != 0 {
                 let at = month as usize;
                 lane.touch(month, self.epoch);
@@ -1509,7 +1610,7 @@ impl<C: ChargeModel> OrderedPass<C> {
     }
 
     /// Adds one day close to the drawdown.
-    fn draw(lane: &mut Lane<C>, drawdown: &mut Drawdown, day: u32, index: u32, r: Stat) {
+    fn draw(lane: &mut Lane, drawdown: &mut Drawdown, day: u32, index: u32, r: Stat) {
         drawdown.equity_r += r;
         lane.last_index = index;
         let equity = drawdown.equity_r;
@@ -1581,6 +1682,14 @@ pub struct CardSink<'a, C> {
     outcomes: &'a [Outcome],
     /// The calendar.
     calendar: &'a Calendar,
+    /// What it kept.
+    kept: Kept,
+}
+
+/// What a [`CardSink`] keeps, compiled once whatever the charge model
+/// (D-6413).
+#[derive(Debug)]
+struct Kept {
     /// Every kept (mix, card), as bytes, in visit order.
     bytes: Vec<u8>,
     /// Mixes kept.
@@ -1592,59 +1701,21 @@ pub struct CardSink<'a, C> {
     asked: Vec<bool>,
 }
 
-impl<'a, C: ChargeModel + Clone> CardSink<'a, C> {
-    /// A sink over `table`'s mixes for `profiles`.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`OrderedPass::new`] refuses.
-    pub fn new(
-        table: &RowTable,
-        profiles: &[Profile],
-        rungs: Rungs,
-        charges: Vec<C>,
-        outcomes: &'a [Outcome],
-        calendar: &'a Calendar,
-    ) -> Result<Self, ScoreRefusal> {
-        let template = charges.clone();
-        let pass = OrderedPass::new(table, profiles, rungs, charges)?;
-        Ok(Self {
-            pass,
-            template,
-            outcomes,
-            calendar,
+impl Kept {
+    /// Nothing kept.
+    fn new() -> Self {
+        Self {
             bytes: Vec::new(),
             mixes: 0,
             refusals: Vec::new(),
             asked: vec![false; EXIT_VALUES],
-        })
+        }
     }
 
-    /// Every kept (mix, card), as bytes, in visit order.
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// Mixes kept.
-    #[must_use]
-    pub const fn mixes(&self) -> u64 {
-        self.mixes
-    }
-
-    /// Every refused mix.
-    #[must_use]
-    pub fn refusals(&self) -> &[(MixKey, ScoreRefusal)] {
-        &self.refusals
-    }
-}
-
-impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
-    fn visit(&mut self, node: &Node<'_>) {
-        let cards = match self
-            .pass
-            .score(node.table(), node.rows(), self.outcomes, self.calendar)
-        {
+    /// Keeps one visited node's scoring: its refusal, or the card of every
+    /// variant the visit asked for.
+    fn keep(&mut self, node: &Node<'_>, scored: Result<&[Card], ScoreRefusal>) {
+        let cards = match scored {
             Ok(cards) => cards,
             Err(refusal) => {
                 self.refusals.push((*node.key(), refusal));
@@ -1678,19 +1749,7 @@ impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
         }
     }
 
-    fn fork(&self) -> Self {
-        Self {
-            pass: self.pass.clone_fresh(self.template.clone()),
-            template: self.template.clone(),
-            outcomes: self.outcomes,
-            calendar: self.calendar,
-            bytes: Vec::new(),
-            mixes: 0,
-            refusals: Vec::new(),
-            asked: vec![false; EXIT_VALUES],
-        }
-    }
-
+    /// Appends what a later fork kept.
     fn absorb(&mut self, later: Self) {
         self.bytes.extend_from_slice(&later.bytes);
         self.mixes += later.mixes;
@@ -1698,25 +1757,80 @@ impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
     }
 }
 
-impl<C: ChargeModel> OrderedPass<C> {
-    /// A pass of the same shape with fresh charge models and empty scratch.
-    fn clone_fresh(&self, charges: Vec<C>) -> Self {
-        let mut lanes = Vec::with_capacity(self.lanes.len());
-        for (lane, charges) in self.lanes.iter().zip(charges) {
-            lanes.push(Lane {
-                offset: lane.offset,
-                size: lane.size,
-                charges,
-                touched: Vec::with_capacity(self.months),
-                stamp: vec![0; self.months],
-                day_r: ZERO,
-                day_traded: false,
-                episode: None,
-                deepest_is_open: false,
-                last_index: 0,
-                current: vec![None; PERIOD_KINDS],
-            });
+impl<'a, C: ChargeModel + Clone> CardSink<'a, C> {
+    /// A sink over `table`'s mixes for `profiles`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`OrderedPass::new`] refuses.
+    pub fn new(
+        table: &RowTable,
+        profiles: &[Profile],
+        rungs: Rungs,
+        charges: Vec<C>,
+        outcomes: &'a [Outcome],
+        calendar: &'a Calendar,
+    ) -> Result<Self, ScoreRefusal> {
+        let template = charges.clone();
+        OrderedPass::new(table, profiles, rungs, charges).map(|pass| Self {
+            pass,
+            template,
+            outcomes,
+            calendar,
+            kept: Kept::new(),
+        })
+    }
+
+    /// Every kept (mix, card), as bytes, in visit order.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.kept.bytes
+    }
+
+    /// Mixes kept.
+    #[must_use]
+    pub const fn mixes(&self) -> u64 {
+        self.kept.mixes
+    }
+
+    /// Every refused mix.
+    #[must_use]
+    pub fn refusals(&self) -> &[(MixKey, ScoreRefusal)] {
+        &self.kept.refusals
+    }
+}
+
+impl<C: ChargeModel + Clone> Visitor for CardSink<'_, C> {
+    fn visit(&mut self, node: &Node<'_>) {
+        let scored = self
+            .pass
+            .score(node.table(), node.rows(), self.outcomes, self.calendar);
+        self.kept.keep(node, scored);
+    }
+
+    fn fork(&self) -> Self {
+        Self {
+            pass: self.pass.clone_fresh(self.template.clone()),
+            template: self.template.clone(),
+            outcomes: self.outcomes,
+            calendar: self.calendar,
+            kept: Kept::new(),
         }
+    }
+
+    fn absorb(&mut self, later: Self) {
+        self.kept.absorb(later.kept);
+    }
+}
+
+impl Pass {
+    /// A pass of the same shape with empty scratch.
+    fn clone_fresh(&self) -> Self {
+        let lanes = self
+            .lanes
+            .iter()
+            .map(|lane| Lane::fresh(lane.index, lane.offset, lane.size, self.months))
+            .collect();
         let mut cards = self.cards.clone();
         for card in &mut cards {
             card.months.fill(MonthStats::EMPTY);

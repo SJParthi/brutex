@@ -2040,21 +2040,26 @@ mod tests {
 
     /// The one indexed write and read: inside the slice they act, past it they
     /// do nothing and call nothing. Every caller's index is in range by
-    /// construction, so only this test reaches the second arm.
+    /// construction, so only this test reaches the second arm — and it reaches
+    /// both arms through ONE closure each, so one instantiation of each helper
+    /// takes both (coverage scores a generic function by its best single
+    /// instantiation, D-6413).
     #[test]
     fn an_index_past_the_slice_writes_and_reads_nothing() {
         let mut cells = [0_u8; 2];
-        at_mut(&mut cells, 1, |cell| *cell = 7);
-        assert_eq!(cells, [0, 7]);
-        let mut called = false;
-        at_mut(&mut cells, 2, |_| called = true);
-        assert!(!called);
-        assert_eq!(cells, [0, 7]);
-        let mut read = None;
-        at_ref(&cells, 1, |cell| read = Some(*cell));
-        assert_eq!(read, Some(7));
-        at_ref(&cells, 2, |_| called = true);
-        assert!(!called);
+        let mut writes = 0;
+        for at in [1, 2] {
+            at_mut(&mut cells, at, |cell| {
+                *cell = 7;
+                writes += 1;
+            });
+        }
+        assert_eq!((cells, writes), ([0, 7], 1));
+        let mut reads = Vec::new();
+        for at in [1, 2] {
+            at_ref(&cells, at, |cell| reads.push(*cell));
+        }
+        assert_eq!(reads, [7]);
     }
 
     /// A subtree's counters add into its parent's, every field: the schedule's

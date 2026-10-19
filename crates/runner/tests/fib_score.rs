@@ -1073,6 +1073,32 @@ fn the_pass_refuses_by_name() {
         .unwrap_err(),
         ScoreRefusal::ProfileOutsideExits { variant: 1 }
     );
+    // An exit set that starts above the run's first variant refuses a profile
+    // below it, as it refuses one past its end, and takes one inside it.
+    let upper = fixture::table_of(
+        &generation(Search::Long, 2, 2, 3),
+        Partition {
+            exits: 1..3,
+            ..fixture::partition(Search::Long, 3)
+        },
+        4,
+        vec![],
+    );
+    let small = |variant| Profile {
+        variant,
+        size: TradeSize::Small,
+    };
+    assert_eq!(
+        OrderedPass::new(&upper, &[small(0)], no_rungs(), vec![Gross]).unwrap_err(),
+        ScoreRefusal::ProfileOutsideExits { variant: 0 }
+    );
+    assert_eq!(
+        OrderedPass::new(&upper, &[small(2)], no_rungs(), vec![Gross])
+            .unwrap()
+            .profiles()
+            .collect::<Vec<_>>(),
+        [small(2)]
+    );
     let calendar = fixture::calendar(100, 30);
     let mut pass = OrderedPass::new(&table, &profiles, no_rungs(), vec![Gross; 2]).unwrap();
     assert_eq!(

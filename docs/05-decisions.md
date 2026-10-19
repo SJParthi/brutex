@@ -73735,3 +73735,69 @@ this is a narrow or short desktop window.
 `docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
+
+### D-6413 — The scoring pass is compiled once whatever the charge model, so a coverage figure of `score.rs` is a figure of one copy (FIB-6) — 2026-10-19
+
+**Number** the fourteenth of FIB-6's block D-6400..D-6419; `grep` over
+`docs/05-decisions.md` on this branch, and over `feat/db-fix`, `cloud/fib2-20261018`
+and `cloud/fib3-20261018`, found D-6413 only inside the block's own range
+sentence.
+
+**Why.** FIB-6's report of 18 October left "the per-file `llvm-cov` summary of
+`score.rs` reads under 100%" NOT DONE, and branch coverage unmeasured. Both are
+measured now, on this host's pinned 1.97.1 toolchain with `RUSTC_BOOTSTRAP=1`
+(`cargo llvm-cov --branch` needs the compiler's unstable `-Z
+coverage-options=branch`; no second toolchain is installed). Before this entry
+the summary read `lattice.rs` 1,825 of 1,827 regions and 103 of 106 branches,
+`score.rs` 1,161 of 1,182 regions, 90 of 92 branches, one function of 62 never
+run. The union of every record read 1,827 and 1,174 regions, so most of the gap
+was the tool, in three ways, each shown with a scratch reader of `llvm-cov
+export` (never committed):
+
+1. `llvm-cov report` scores a generic function by its best SINGLE
+   instantiation. `OrderedPass<C>` was instantiated once per charge model,
+   and no one model took every path (`Gross` never makes a rounding
+   adjustment; the test models never meet the refusals `Gross` meets), so
+   `price`, `close_day` and `new` read under 100% while their union read
+   100%. The same rule scored `lattice::at_mut` and `at_ref`, generic over
+   their closure, below 100%: no single instantiation took both arms.
+2. `Unpriced::name`, a leaf that nothing in `runner` calls, is inlined into
+   the crate that calls it, so `runner`'s library carries an unused-function
+   coverage record for it whose hash differs from the copy `fib_score`
+   runs; `llvm-cov` warns "functions have mismatched data", keeps the record
+   it reads first, and the summary read the function as never run though
+   `fib_score` calls it five times.
+3. Two branches no test took at all: a survivor key (`Survivors::check`) and
+   a profile (`OrderedPass::new`) whose exit variant is BELOW the table's exit
+   set. Every test's exit set started at the run's first variant, so only the
+   "past its end" half of each check was taken.
+
+**What is decided.**
+
+- `OrderedPass<C>` holds a non-generic `Pass` and its `Vec<C>`. Every branch of
+  the pass is in `Pass`, compiled once; the charge models are read through a
+  private `Charges` trait object (`scale`, `add`, `close_day` per lane, three
+  one-line generic methods with no branch). One dynamic call per order and per
+  lane's day close: O(1), and the same O(1) per row-touch per profile as before
+  (`C-F6-02`, `C-F6-03` re-measured on the final code). `CardSink<C>` keeps
+  what it keeps in a non-generic `Kept` for the same reason. The public types
+  and signatures are unchanged: FIB-11's CHG-1 model still implements
+  `ChargeModel` and nothing else.
+- `Unpriced::name` is `#[inline(never)]`, so it is compiled once, in `runner`,
+  and every binary reads the same record.
+- `at_mut` and `at_ref`'s unit test drives both arms through one closure each.
+- Two tests take the missing halves: a survivor key and a profile whose exit
+  variant is below an exit set of `1..3`, each refused by name beside one
+  inside it that is taken.
+
+No output, count or refusal changes: `fib_lattice` and `fib_score` pass
+unchanged, the byte-identical parallel test among them.
+
+**Measured after it** (`cargo llvm-cov` 0.8.4, the version CI pins;
+`cargo llvm-cov clean --workspace`, then `--branch --no-report -p runner
+--test fib_lattice --test fib_score`, then `--branch --no-report -p runner
+--lib -- fib::`, then `report --branch`): `cargo llvm-cov report`'s own
+per-file rows read **100.00% of regions, functions, lines and branches** for
+both files — `lattice.rs` 1,831 regions, 119 functions, 1,189 lines, 106
+branches; `score.rs` 1,242 regions, 77 functions, 852 lines, 92 branches.
+L-FIB6-13.
