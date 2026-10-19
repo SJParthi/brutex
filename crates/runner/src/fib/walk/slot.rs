@@ -930,7 +930,8 @@ impl<'a> Stepper<'a> {
         }
         self.reason = Some(reason);
         self.fired_at = Some(bar.second);
-        if self.phase == Phase::Entering && self.remaining > 0 {
+        // An order still entering has a remainder (it holds once it fills).
+        if self.phase == Phase::Entering {
             self.flag(TradeFlag::EntryCancelledByExit);
             self.remaining = 0;
         }
