@@ -4763,3 +4763,121 @@ fn an_order_still_filling_at_the_forced_window_is_a_partial_entry() {
     assert!(has(&out, TradeFlag::PartialEntry));
     assert!(has(&out, TradeFlag::DhanSquareOff));
 }
+
+/// With no participation sample on the learning months the fill set seeds
+/// both entry windows with no cap only.
+#[test]
+fn a_fill_set_with_no_participation_sample_seeds_no_cap() {
+    let set = seed_fill_set(Search::Long, 1, &[]).expect("fills");
+    assert_eq!(set.variants().len(), 2);
+    assert!(
+        set.variants()
+            .iter()
+            .all(|v| v.participation == Participation::NoCap)
+    );
+}
+
+/// A decision tick of zero is refused like a raw one.
+#[test]
+fn a_zero_decision_tick_is_refused() {
+    let day = second_day(&[quiet(at(15, 9, 0), P, 1_000)]);
+    let trails = [TrailCandles {
+        tf_minutes: 1,
+        candles: &day.trail,
+    }];
+    let input = DayInput {
+        bars: &day.bars,
+        book: BookEvidence::NotObserved,
+        halts: &[],
+        zerodha_minutes: &day.zerodha,
+        raw_tick: TICK,
+        decision_tick: 0,
+        max_second_gap: u32::MAX,
+        clock_lag: ClockLag::Measured(0),
+        trail: &trails,
+    };
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    assert_eq!(
+        DayIndex::build(&second_profile(), &input, &exits).err(),
+        Some(WalkRefusal::NonpositiveTick)
+    );
+}
+
+/// A corrupt second inside the forced window is never its price: the
+/// window's lowest usable low is.
+#[test]
+fn a_corrupt_second_in_the_forced_window_is_never_its_price() {
+    let day = second_day(&[
+        corrupt(at(15, 9, 10), 100, 100, 0, 100, 5_000),
+        bar(at(15, 9, 30), P, P + 10, P - 30, P, 5_000),
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.status, SlotStatus::Priced);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * (P - 30)));
+}
+
+/// Under the resume reading the event walk steps the halted print and the
+/// first print after it exactly as the forward walk does; a first print that
+/// opens above the stop but trades through it is still a gap, the halt being
+/// the gap.
+#[test]
+fn the_resume_reading_walks_a_halt_by_events_and_its_first_print_is_a_gap() {
+    let resume = WalkProfile {
+        halt_rule: HaltRule::ResumeAtFirstPrint,
+        ..second_profile()
+    };
+    let day = halt_day(bar(at(12, 0, 0), 99_100, 99_100, 98_900, 98_900, 1_000));
+    let plan = long_plan(at(10, 0, 0));
+    let forward = walk_one(
+        &day,
+        &resume,
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    let events = walk_events(
+        &day,
+        &resume,
+        plan,
+        STOP_ONLY,
+        FillVariant::STAGE_A,
+        TradeSize::Small,
+    );
+    assert_eq!(forward, events);
+    assert_eq!(forward.exit_reason, ExitReason::StopLoss);
+    assert_eq!(forward.exit_second, at(12, 0, 0));
+    assert_eq!(forward.exit_value_paisa, i128::from(100 * 98_900));
+    assert!(has(&forward, TradeFlag::GapThroughStop));
+    assert!(has(&forward, TradeFlag::CircuitHalt));
+}
+
+/// A deep touch in a second whose Zerodha minute is absent is unwitnessed,
+/// at a stop and at a target.
+#[test]
+fn a_touch_in_a_second_with_no_zerodha_minute_is_unwitnessed() {
+    let without = |mut day: Day| {
+        let minute = ts(at(10, 1, 0));
+        day.zerodha.retain(|m| m.ts_micros != minute);
+        day
+    };
+    let stopped = without(second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]));
+    let out = second_slot(&stopped, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert!(has(&out, TradeFlag::TouchUnwitnessed));
+    let one_r = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 1_000 },
+        ..STOP_ONLY
+    };
+    let targeted = without(second_day(&[
+        bar(at(10, 1, 0), P, 101_010, P, 101_000, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]));
+    let out = second_slot(&targeted, long_plan(at(10, 0, 0)), one_r);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert!(has(&out, TradeFlag::TouchUnwitnessed));
+}
