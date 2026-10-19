@@ -52,7 +52,7 @@ use series::SeriesPlan;
 /// The one `YYYY-MM` parser every route's `month`, `from` and `to` go through
 /// (app-7, AF-04). Re-exported because `series` is private to this module.
 pub(crate) use series::month_of_text;
-pub use series::{Filter, MAX_SERIES, SeriesKey};
+pub use series::{Filter, MAX_SERIES, SeriesKey, TodReport};
 pub use sort::SortReport;
 
 /// A request's cancellation flag: set when the client that asked went away,
@@ -359,6 +359,58 @@ pub(crate) enum OpenRefusalKind {
 pub(crate) struct OpenRefusal {
     pub(crate) kind: OpenRefusalKind,
     pub(crate) message: String,
+    /// The file is there and its bytes are not a month: cut short of its
+    /// header's records, no valid header, a ragged tail or checksums that do
+    /// not hold (R3-07). `/bars.json` answers it with its own code,
+    /// `month_damaged`, never as a malformed question.
+    pub(crate) damaged: bool,
+}
+
+/// Absent months answered since the process started (R3-07, DB-065). An
+/// absent month is an expected answer — a series not traded that month, a
+/// month not yet imported — so every answer is COUNTED here, and the log
+/// names each absent month ONCE, at INFO, the first time it is answered
+/// ([`ABSENT_SEEN`]), never one warning a request.
+static ABSENT_ANSWERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The absent month files already named on the log, by the path that was
+/// looked for: a bounded memo of two generations (`series::Memo`), so a
+/// month is named again only after it has gone unasked for a whole turn.
+static ABSENT_SEEN: series::Memo<std::path::PathBuf, ()> = series::Memo::new();
+
+/// Absent months answered since the process started.
+#[must_use]
+pub fn absent_answered() -> u64 {
+    ABSENT_ANSWERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Counts one absent month, and names it on the log the first time it is
+/// answered. O(1): one atomic add and one or two hash probes.
+fn note_absent(
+    looked_for: &std::path::Path,
+    vendor: Vendor,
+    symbol: &str,
+    timeframe: Timeframe,
+    month: YearMonth,
+) {
+    let count = ABSENT_ANSWERED
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
+    if ABSENT_SEEN.get(&looked_for.to_path_buf()).is_some() {
+        return;
+    }
+    ABSENT_SEEN.put(looked_for.to_path_buf(), ());
+    let month_text = month.to_string();
+    let path_text = looked_for.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("api.bars", "absent month counted")
+            .with("count", telemetry::Value::Uint(count))
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("symbol", telemetry::Value::Str(symbol))
+            .with("timeframe", telemetry::Value::Str(timeframe.as_str()))
+            .with("month", telemetry::Value::Str(&month_text))
+            .with("path", telemetry::Value::Str(&path_text)),
+    );
 }
 
 /// Preserve absence separately from invalid addresses and unreadable authority.
@@ -397,6 +449,7 @@ pub(crate) fn open_classified(
         OpenRefusal {
             kind: OpenRefusalKind::Invalid,
             message: refusal,
+            damaged: false,
         }
     })?;
     // THE SYMBOL ID IS DERIVED THE WAY `pull::ingest` DERIVES IT. The store
@@ -420,6 +473,7 @@ pub(crate) fn open_classified(
         return Err(OpenRefusal {
             kind: OpenRefusalKind::Invalid,
             message: why,
+            damaged: false,
         });
     }
     #[expect(
@@ -455,13 +509,36 @@ pub(crate) fn open_classified(
         } else {
             OpenRefusalKind::Unreadable
         };
-        let refusal = why.to_string();
-        note_refused(
-            vendor, exchange, segment, symbol, timeframe, month, &refusal,
+        // A FILE CUT SHORT, WITH NO VALID HEADER, OR WHOSE CHECKSUMS DO NOT
+        // HOLD is damaged, and said so by its own code (R3-07).
+        let damaged = matches!(
+            &why,
+            store::file::StoreError::Format { .. }
+                | store::file::StoreError::ShortRead { .. }
+                | store::file::StoreError::RaggedTail { .. }
+                | store::file::StoreError::BlockChecksum { .. }
+                | store::file::StoreError::ChecksumsMissing { .. }
         );
+        let refusal = why.to_string();
+        // AN ABSENT MONTH IS COUNTED, NOT LOGGED ONCE PER REQUEST (R3-07,
+        // DB-065): it is an expected answer. Every other refusal is a line.
+        if matches!(kind, OpenRefusalKind::Absent) {
+            note_absent(
+                &path.to_path_buf(store_root),
+                vendor,
+                symbol,
+                timeframe,
+                month,
+            );
+        } else {
+            note_refused(
+                vendor, exchange, segment, symbol, timeframe, month, &refusal,
+            );
+        }
         OpenRefusal {
             kind,
             message: refusal,
+            damaged,
         }
     })
 }
@@ -798,6 +875,17 @@ pub enum SortKey {
     /// The IST second of the day, so "every bar at 10:00" sorts together
     /// across days (D-3326, DB-006). Ties keep time order.
     TimeOfDay,
+    /// The change against the previous stored bar, in basis points: `chg`,
+    /// the grid's Change % column, ORDERED BY THE SERVER (R3-07, DB-061), so
+    /// the largest change of a month can be found again rather than only on
+    /// the page in hand. A change is a fact about two bars, so no `.srt` run
+    /// orders it: every kept row is read once, keeping the `offset + limit`
+    /// best, exactly as a time-of-day sort is — refused past
+    /// [`MAX_SCAN_BARS`] and [`MAX_SORT_DEPTH`] by name. A row whose change
+    /// is refused (D-3325: no earlier bar, a halt, a phase boundary, an
+    /// unverified corporate action ...) sorts as a null: last in both
+    /// directions, never as a zero.
+    Change,
 }
 
 impl SortKey {
@@ -813,6 +901,7 @@ impl SortKey {
             "v" => Some(Self::Volume),
             "oi" => Some(Self::OpenInterest),
             "tod" => Some(Self::TimeOfDay),
+            "chg" => Some(Self::Change),
             _ => None,
         }
     }
@@ -843,6 +932,9 @@ impl SortKey {
             Self::TimeOfDay => (bar.ts_micros.div_euclid(1_000_000)
                 + pull::session::IST_OFFSET_SECS)
                 .rem_euclid(86_400),
+            // DECIDED FROM TWO BARS, by the scan that holds both: one bar
+            // alone has no change, and this is never read for it.
+            Self::Change => 0,
         }
     }
 }
@@ -1286,6 +1378,9 @@ pub struct MonthCoverage {
 /// One page of bars drawn from a RANGE of months, over one or more series.
 #[derive(Debug, Clone, Default)]
 pub struct Window {
+    /// The pool that answered: `store_read` (within the cheap-read budget)
+    /// or `scan`; empty when no route set it (R3-07).
+    pub admitted: &'static str,
     /// Every row the window keeps, across every series and month, after the
     /// day and time-of-day bounds.
     pub total: u64,
@@ -1330,6 +1425,10 @@ pub struct Window {
     /// The stored keys whose bars the re-key copied into an asked series
     /// (D-3331; WP-12c).
     pub supersedes: Vec<Supersedes>,
+    /// How a time-of-day bound was cut, month by month: from the runs memo,
+    /// from each month's time-of-day index, or located day by day and why
+    /// (R3-07, DB-B57). `None` without a time-of-day bound.
+    pub tod_index: Option<TodReport>,
 }
 
 /// The most missing months named in one answer; the count is always whole.
@@ -1500,15 +1599,60 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
 /// # Errors
 ///
 /// What [`window`] refuses, and `cancelled`.
+pub fn window_cancellable(
+    store_root: &std::path::Path,
+    query: &WindowQuery,
+    cancel: &Cancel,
+) -> Result<Window, String> {
+    window_admitted(store_root, query, cancel, None)
+}
+
+/// The most rows a window admitted WITH THE CHEAP READS may read beyond its
+/// page (R3-07, DB-061): rows no sort index orders, and records an extremes
+/// fold reads that no index run or earlier request summarised. About 3.5 ms
+/// of one thread at the 52 ns a bar measured for a warm scan (WP-31). A
+/// request whose plan says it would read more is not run there: it answers
+/// [`NEEDS_SCAN`] before reading a record, and the route asks again in the
+/// bounded scan pool, where it waits with `Retry-After` when that is full.
+pub const CHEAP_READ_BUDGET: u64 = 65_536;
+
+/// The code a window admitted with the cheap reads answers when its plan
+/// would read past [`CHEAP_READ_BUDGET`]: never shown to a client, it sends
+/// the request to the scan pool.
+pub const NEEDS_SCAN: &str = "needs_scan_pool";
+
+/// Whether `why` is [`NEEDS_SCAN`]'s sentence.
+#[must_use]
+pub fn needs_scan(why: &str) -> bool {
+    why.starts_with(NEEDS_SCAN)
+}
+
+/// The [`NEEDS_SCAN`] sentence for `rows` to be read past `budget`.
+fn needs_scan_sentence(what: &str, rows: u64, budget: u64) -> String {
+    format!(
+        "{NEEDS_SCAN}: {what} would read {rows} records beyond the page, past the {budget} a \
+         request admitted with the cheap reads may read"
+    )
+}
+
+/// [`window_cancellable`], ADMITTED BY WHAT IT WILL READ (R3-07, DB-061):
+/// with `budget`, a request whose plan would read more than `budget` records
+/// beyond its page answers [`NEEDS_SCAN`] before it reads one; with `None` it
+/// reads what it needs, within [`MAX_SCAN_BARS`].
+///
+/// # Errors
+///
+/// What [`window`] refuses, `cancelled`, and [`NEEDS_SCAN`].
 #[expect(
     clippy::too_many_lines,
     reason = "the plan, the three ways a page is answered and the extremes, in \
               the order the doc above states them; each branch is one call"
 )]
-pub fn window_cancellable(
+pub fn window_admitted(
     store_root: &std::path::Path,
     query: &WindowQuery,
     cancel: &Cancel,
+    budget: Option<u64>,
 ) -> Result<Window, String> {
     let Some(months) = months_of(query.from, query.to) else {
         return Err(format!(
@@ -1561,6 +1705,21 @@ pub fn window_cancellable(
     // held series asked for a month it never traded.
     refuse_unknown_series(query, &plans, &out.superseded)?;
     let unplanned = tally(&mut out, &mut plans);
+    // HOW THE TIME-OF-DAY BOUND WAS CUT, SAID ON THE ANSWER (R3-07): a month
+    // located day by day because it keeps no usable summary is counted and
+    // the first reason named, so a slow first window is never silent.
+    if query.filter.tod.is_some() {
+        let mut report = TodReport::default();
+        for plan in &plans {
+            report.kept = report.kept.saturating_add(plan.tod.kept);
+            report.indexed = report.indexed.saturating_add(plan.tod.indexed);
+            report.located = report.located.saturating_add(plan.tod.located);
+            if report.why.is_none() {
+                report.why.clone_from(&plan.tod.why);
+            }
+        }
+        out.tod_index = Some(report);
+    }
     note_holes(&plans);
     if let Some(at) = query.at {
         let index = at_index(store_root, &mut plans, at, query.desc, out.total)?;
@@ -1600,12 +1759,14 @@ pub fn window_cancellable(
                 query,
                 &mut record_faults,
                 cancel,
+                budget,
             ) {
                 Ok((extremes, rows)) => {
                     out.extremes = Some(extremes);
                     out.scan_rows = rows;
                 }
                 Err(why) if why.starts_with("cancelled") => return Err(why),
+                Err(why) if needs_scan(&why) => return Err(why),
                 Err(why) => out.extremes_why = Some(why),
             }
         }
@@ -1624,7 +1785,7 @@ pub fn window_cancellable(
             query,
             (out.offset, limit),
             &mut record_faults,
-            cancel,
+            (cancel, budget),
         )?;
         out.scan_rows = sorted.scanned;
         out.bars = sorted.page;
@@ -1633,6 +1794,13 @@ pub fn window_cancellable(
         out.sort_index = Some(sorted.report);
     } else if query.sort.scans() {
         scan_admitted(out.total, query.sort, out.offset, limit)?;
+        if let Some(budget) = budget.filter(|&budget| out.total > budget) {
+            return Err(needs_scan_sentence(
+                &format!("ordering by {:?}", query.sort),
+                out.total,
+                budget,
+            ));
+        }
         let scanned = scan(
             store_root,
             &mut plans,
@@ -1671,12 +1839,14 @@ pub fn window_cancellable(
                 query,
                 &mut record_faults,
                 cancel,
+                budget,
             ) {
                 Ok((extremes, rows)) => {
                     out.extremes = Some(extremes);
                     out.scan_rows = rows;
                 }
                 Err(why) if why.starts_with("cancelled") => return Err(why),
+                Err(why) if needs_scan(&why) => return Err(why),
                 Err(why) => out.extremes_why = Some(why),
             }
         }
@@ -2249,6 +2419,31 @@ fn candidate_order(desc: bool) -> impl Fn(&Candidate, &Candidate) -> std::cmp::O
     }
 }
 
+/// The change of each row a scan streams when it orders by change (R3-07):
+/// the run's first row against what `behind_of` decides stands behind it,
+/// every later row against the row read just before it. `None` when the
+/// scan orders by anything else.
+struct Changes(Option<(u64, Behind)>);
+
+impl Changes {
+    /// The order value of row `row` and whether it is a null (a change
+    /// refused by name), or `None` when this scan does not order by change.
+    /// A row the read skipped (it would not read) is the next row's
+    /// predecessor: unreadable, never the row before it.
+    fn of_row(&mut self, rules: &change::Rules, row: u64, bar: &Bar) -> Option<(i64, bool)> {
+        let (expected, behind) = self.0.as_mut()?;
+        let stands = if *expected == row {
+            *behind
+        } else {
+            Behind::Unreadable
+        };
+        let (chg, ..) = change_of(rules, stands, bar);
+        *expected = row.saturating_add(1);
+        *behind = Behind::Bar(*bar);
+        Some((chg.unwrap_or(0), chg.is_none()))
+    }
+}
+
 /// Streams every kept row of every series once, in time order, keeping the
 /// `offset + limit` best under the order and folding the extremes.
 ///
@@ -2293,6 +2488,18 @@ fn scan(
             // time-of-day bound a day's window — and every few thousand rows
             // of one (DB-N15).
             cancel.check()?;
+            // THE CHANGE OF A RUN'S FIRST ROW is against the record before
+            // it — in its file, or the last of the month before — decided
+            // once a run by the rule a page uses (`behind_of`); every later
+            // row's is against the row read just before it (R3-07).
+            let mut changes = Changes(matches!(query.sort, SortKey::Change).then(|| {
+                let at = series::Position {
+                    count: 0,
+                    run: run_at as usize,
+                    row: run.start,
+                };
+                (run.start, behind_of(root, plan, at, None, query.lookback))
+            }));
             // ONE FAULT A MONTH THAT WILL NOT READ, never one a row, and a
             // month that will not open is not tried row by row (see
             // `SeriesPlan::read_stretch`).
@@ -2306,14 +2513,19 @@ fn scan(
                     if query.want_extremes {
                         extremes.fold(bar, series, volume);
                     }
+                    let (value, null) =
+                        changes.of_row(series_rules, row, bar).unwrap_or_else(|| {
+                            let null = matches!(query.sort, SortKey::OpenInterest)
+                                && (oi_absent || bar.open_interest == OI_NULL);
+                            (query.sort.of(bar), null)
+                        });
                     let candidate = Candidate {
-                        value: query.sort.of(bar),
+                        value,
                         ts: bar.ts_micros,
                         series: series_at,
                         run: run_at,
                         row,
-                        null: matches!(query.sort, SortKey::OpenInterest)
-                            && (oi_absent || bar.open_interest == OI_NULL),
+                        null,
                     };
                     if bar_to_beat.is_some_and(|worst| order(&candidate, &worst).is_ge()) {
                         return;
@@ -3666,7 +3878,7 @@ mod window_tests {
         // paths: three call sites, plus the definition (D-3326).
         assert_eq!(code.matches("note_unreadable_records(").count(), 4);
         let window = code
-            .split_once("pub fn window_cancellable(")
+            .split_once("pub fn window_admitted(")
             .expect("window exists")
             .1
             .split_once("\n}\n")

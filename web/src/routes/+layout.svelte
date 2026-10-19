@@ -1155,6 +1155,29 @@
   }
   .inspection-banner .build.unstamped { color: var(--bad, var(--ink-2)); }
 
+  /* A NARROW OR SHORT WINDOW SCROLLS THE SHELL'S BANNERS AWAY (AH-04,
+     g-ui-dom-vs-json-10, D-5883). Below 768 px wide or 700 px tall the
+     connection banner, the NO COPY alert and the feed notice took 212 px of a
+     375x812 window and the /db census banner 259-290 more, all fixed above a
+     board left 27% of the screen (72 px at 375x667, and below the viewport at
+     375x568, where `main` and `body` clip and no board control is reachable).
+
+     Here `main` is the scroll container and the page beneath the banners is
+     given main's whole height, so one scroll of the banners' height shows the
+     page at full size; its own scroll regions (the /db board) keep theirs.
+     The banners stay in the flow and on every page — the NO COPY alert is
+     still visible, it scrolls. Only the header (the nav) stays fixed. Nothing
+     changes above these sizes. */
+  @media (max-width: 767px), (max-height: 699px) {
+    .main {
+      overflow-y: auto;
+    }
+    .main > :global(:last-child) {
+      flex: 0 0 auto;
+      height: 100%;
+    }
+  }
+
   /* A narrow window gives navigation its own full-width row. Keeping it in
      the desktop flex row can squeeze its hit area beneath the status buttons.
      The shell must grow the header row with it, rather than clipping at 46px. */

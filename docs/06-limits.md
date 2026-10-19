@@ -19803,3 +19803,28 @@ RULE 2 (`ALLOW_FLOAT`) -- runner/src/fib/score.rs 0 -> 1: `pub type Stat =
 runner/src/fib/lattice.rs meets no rule: its sorts are stable counting sorts,
   its membership tests are range comparisons and pre-sized hash maps.
 ~~~~
+
+## `/audit`'s last commit of a partitioned census, and the narrow-window layout (AH-04, D-5880, D-5883)
+
+Measured 18 October 2026 on two fresh shadows of the real store
+(`state/fix/shadow.sh`, bars linked read-only, `serve.sh` under the kernel
+write lock), GET requests only. Before: a release build of `feat/db-fix`
+94320a4e, which `main`'s squash merge does not keep; its
+`crates/api/src/audit_json.rs` is byte-identical to the `feat/db-fix` this
+change starts from. After: this branch, release, unstamped (built
+from the worktree). Timing: n = 200 per side per case after 20 warm-up
+requests, interleaved one before and one after, each a fresh `curl` reading
+`%{time_total}`; the shared machine's load average was 14 to 19. Layout: the
+pages served by each build (the `feat/db-fix` web build before, this branch's
+after), in a headless Chrome 155 of this package's own driven over the
+DevTools protocol (`Emulation.setDeviceMetricsOverride`, not a phone), 9 s
+after load, measuring `getBoundingClientRect` and, for every rendered control
+inside `.board`, whether `scrollIntoView({block: 'nearest'})` brings it under
+the pointer without scrolling any clipped (`overflow: hidden`) container.
+Scripts and raw figures are in the AH-04 report
+(`state/fix/round2/fix-AH-04.json`, `scratch-AH-04/`).
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AH04-01 | `committed_at` of a migrated vendor is three `metadata` calls, not one | a version-4 census is one current epoch per segment, and the newest of them is the last commit; the census's own parts name the files, so no directory is listed | at most three stats a request, none per row. `/audit.json?feed=gdfl` before p50 0.804 / p99 1.365 / max 1.485 ms, after 0.751 / 1.396 / 1.401 ms; `?feed=zerodha` (one file, unchanged) before 1.723 / 2.490 / 2.826 ms, after 1.660 / 2.567 / 2.635 ms. The stamp is the mtime the file system keeps: a file written in place without its mtime moving (no writer here does) would not move it | AH-04 |
+| L-AH04-02 | Layout has no unit test; the board's share of the window is a measurement | CSS media queries are not run by `node --test` | `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`, board [top, height] px and share of the viewport after scrolling `main` to its end, before → after: 375x812 [595, 218] 27% → [181, 631] 78%; 375x667 [595, 73] 11% → [181, 486] 73%; 375x568 [595, 24] 0%, 0 of 140 board controls reachable → [181, 387] 68%, 140 of 140; 320x568 [673, 24] 0%, 0 of 140 → 68%, 140 of 140; 812x375 [318, 57] 15% → [106, 269] 72%; 1024x600 [298, 302] 50% → [134, 466] 78%; 1280x800 [260, 541] 68% → unchanged, `main` still `overflow: hidden`. Repeated at 375x667 on BANKNIFTY options (35% → 73%), NIFTY options (35% → 73%) and RELIANCE spot (8% → 73%). The connection banner of an unstamped build is taller (235 px at 375 wide), and it scrolls away with the rest; a page other than `/db` keeps its own scroll regions at main's height, measured on `/db` only | AH-04 |

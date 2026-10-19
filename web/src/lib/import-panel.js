@@ -20,6 +20,7 @@
  */
 
 import { stampLabel } from './dates.js';
+import { feedSpan } from './ingest-months.js';
 
 /** How recent the importer's newest `day imported` event must be for the page to say an import is active: a stocks day takes ~3 s, an options day ~45-60 s (p50/p90 measured), so ten minutes without one is not a slow day. */
 export const ACTIVE_WITHIN_MS = 10 * 60 * 1000;
@@ -137,6 +138,8 @@ export function importPanel(summary, store, at) {
     kinds,
     options,
     archiveTo: at.archiveTo ?? null,
+    journalTo: isoDayOf(summary.span?.to),
+    reach: reach(isoDayOf(summary.span?.to), at.archiveTo ?? null),
     optionsLeft: at.optionsLeft ?? null,
     eta,
     counts,
@@ -169,6 +172,76 @@ export function importPanel(summary, store, at) {
 }
 
 /**
+ * A `YYYY-MM-DD` day, or `null` for anything else (absent, a date-time, text).
+ *
+ * @param {unknown} day
+ */
+function isoDayOf(day) {
+  return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+/**
+ * ONE ARCHIVE END FOR EVERY PAGE THAT DRAWS THE PANEL (AH-04,
+ * g-ui-dom-vs-json-9, D-5881): the last day of the feed's `/feeds.json`
+ * `archive`, only where that day BINDS (`to_binds`, R3-05), else `null` — the
+ * rule `/ingest` applies to the same descriptor
+ * (`activeSpan.kind === 'archive' && activeSpan.bindsTo ? activeSpan.to : null`).
+ *
+ * `/audit` passed the IMPORT JOURNAL's last day (`imports.span.to`) as the
+ * archive's end, so one panel said the archive ends 2026-09-24 on `/ingest`
+ * and 2026-09-30 on `/audit`. The journal's last day is a different fact,
+ * and the panel names it apart (`journalTo`).
+ *
+ * @param {any} feed one `/feeds.json` descriptor, or null when none is on hand
+ * @returns {string | null}
+ */
+export function archiveEnd(feed) {
+  const s = feedSpan(feed);
+  return s.kind === 'archive' && s.bindsTo ? s.to : null;
+}
+
+/**
+ * Where the journal's last imported day stands against the archive's end:
+ * `after` (the tick-store append or a later delivery reaches past a dated
+ * measurement), `before` (archive days the journal has not reached), `at`, or
+ * `null` when either day is not known.
+ *
+ * @param {string | null} journalTo
+ * @param {string | null} archiveTo
+ * @returns {'after' | 'before' | 'at' | null}
+ */
+export function reach(journalTo, archiveTo) {
+  const a = isoDayOf(archiveTo);
+  if (journalTo === null || a === null) return null;
+  return journalTo > a ? 'after' : journalTo < a ? 'before' : 'at';
+}
+
+/**
+ * The not-done days as rows, each with an `id` no other row shares (AH-04,
+ * part of g-ui-dom-vs-json-15).
+ *
+ * The rows were keyed `${kind}|${day}`, and one day can be named by more than
+ * one row: two `incomplete` rows under different filters and one `open` row
+ * for `options|2020-09-16`. Svelte refused the duplicate key
+ * (`each_key_duplicate`), and none of the not-done days or their reasons
+ * rendered. The id is the kind, the day, the outcome, the filter and the
+ * journal line; a row equal to an earlier one in all five still gets its own
+ * id, numbered, so no answer the server sends can blank the list.
+ *
+ * @param {any[] | null | undefined} rows `/imports.json` `rows`, any outcome
+ */
+export function notDoneRows(rows) {
+  /** @type {Map<string, number>} */
+  const seen = new Map();
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const r = dayRow(row);
+    const n = seen.get(r.id) ?? 0;
+    seen.set(r.id, n + 1);
+    return n === 0 ? r : { ...r, id: `${r.id}#${n + 1}` };
+  });
+}
+
+/**
  * One not-done day of `/imports.json`, as a row a reader can act on: the
  * day, the kind, the outcome, the stage and the reason, and the importer's
  * own words for it when the log has them.
@@ -180,8 +253,15 @@ export function dayRow(row) {
   const words = logged
     .map((/** @type {any} */ l) => (typeof l?.why === 'string' ? `${l.about ? `${l.about}: ` : ''}${l.why}` : null))
     .filter(Boolean);
+  const filter = typeof row?.filter === 'string' ? row.filter : null;
+  const line = Number.isSafeInteger(row?.line) ? row.line : null;
   return {
+    // The DAY's identity: the same for every row that names the day. A list
+    // keys by `id`, which tells those rows apart (`notDoneRows`).
     key: `${row?.kind}|${row?.day}`,
+    id: `${row?.kind}|${row?.day}|${row?.outcome}|${filter ?? ''}|${line ?? ''}`,
+    filter,
+    line,
     kind: String(row?.kind ?? ''),
     day: String(row?.day ?? ''),
     outcome: String(row?.outcome ?? ''),
