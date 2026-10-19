@@ -3468,10 +3468,21 @@ fn every_flag_is_its_bit_and_named_once() {
     }
     assert_eq!(TradeFlag::ALL.len(), 23);
     assert_eq!(TradeFlag::fired(ExitReason::Forced), None);
-    assert_eq!(
-        TradeFlag::fired(ExitReason::TakeProfit),
-        Some(TradeFlag::FiredTakeProfit)
-    );
+    for (reason, flag) in [
+        (ExitReason::StopLoss, TradeFlag::FiredStopLoss),
+        (
+            ExitReason::TrailingStopLoss,
+            TradeFlag::FiredTrailingStopLoss,
+        ),
+        (
+            ExitReason::TrailingTakeProfit,
+            TradeFlag::FiredTrailingTakeProfit,
+        ),
+        (ExitReason::TakeProfit, TradeFlag::FiredTakeProfit),
+        (ExitReason::Time, TradeFlag::FiredTime),
+    ] {
+        assert_eq!(TradeFlag::fired(reason), Some(flag));
+    }
 }
 
 #[test]
