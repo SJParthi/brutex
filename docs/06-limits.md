@@ -19838,6 +19838,48 @@ second of a spill, one O(1) step each (C-F5-08).
 | L-FIB5-19 | The index holds three prefix sums and two leg-stop arrays per side | the spill's volume and value come from two prefix reads | O(bars) to build per side, inside L-FIB5-01's build; 3 x 16 + 2 x 4 bytes per bar per side, inside L-FIB5-15's `bytes()` | FIB-5 |
 | L-FIB5-20 | How long real spills run is unmeasured | the operator's FILLS rule bounds a spill only by the volume it needs; C-F5-08 and C-F5-09 run on synthetic one-share seconds | the Mac's real-data proof reports the seconds waited and the spill seconds (NEEDS THE MAC) | FIB-5 / FIB-12 |
 
+### The walker's bench rows, measured again (FIB-5, 19 October 2026)
+
+Measured 19 October 2026 on THIS HOST: a fresh cloud container (4 vCPUs,
+15 GiB, Linux 6.18, rustc 1.97.1, the `bench` profile), branch
+`cloud/fib5-20261019` at `79946ab9` (the code of D-6391 and D-6392; only the
+report changed after `07628f8a`), `cargo bench -p runner --bench fib` alone
+after a 30-second pause on a host up two minutes (one-minute load average
+0.72 before it). Timer granularity 21 ns; the pointer-chase probe's
+last-level-cache estimate 4,096 KiB on this run; every data row's largest
+working set (about 127 MB deep, 58 MB stage A) is above it. Every time is a
+percentile OF BATCH MEANS (batches of 1,000 calls), picoseconds per call, p50
+/ p99 / max at each scale; the work counter is exact. The 18 October rows
+above stay as measured; these are the same rows on the new code, plus C-F5-08
+and C-F5-09. None of these is a Mac number.
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-F5-01 | deep: one bar step of one slot, full-day hold | WORST-CASE | 1, 16, 256 active slots | 46,388 / 127,501 / 315,347; 42,621 / 122,028 / 413,273; 41,951 / 110,393 / 648,167 | 1 | p99 time 0.865x, max time 2.055x, work 1.000x | PASS |
+| C-F5-02 | deep: one bar step, 16 slots | WORST-CASE | holds of 10, 1,000, 21,240 s | 51,568 / 129,629 / 1,408,473; 38,921 / 94,992 / 1,597,339; 41,540 / 117,478 / 954,966 | 1 | p99 time 0.906x, max time 0.678x, work 1.000x | PASS |
+| C-F5-03 | stage A: one bar step, full-day hold | WORST-CASE | 1, 16, 256 active slots | 42,280 / 172,526 / 4,985,503; 62,779 / 120,761 / 194,603; 39,814 / 124,082 / 333,635 | 1 | p99 time 0.719x, max time 0.066x, work 1.000x | PASS |
+| C-F5-04 | stage A: one bar step, 16 slots | WORST-CASE | holds of 3, 35, 354 min | 72,415 / 206,235 / 655,938; 97,743 / 150,544 / 217,123; 47,276 / 142,227 / 940,014 | 1 | p99 time 0.689x, max time 1.433x, work 1.000x | PASS |
+| C-F5-05 | deep: one bar step with the swing trail | AMORTISED (period 60) | 1, 16, 256 active slots | 39,747 / 117,544 / 917,375; 38,914 / 119,617 / 1,228,936; 39,596 / 102,998 / 185,899 | p50 1, p99.9 2, max 2, mean 1.003 | mean time 0.960x, p99 time 0.876x | PASS |
+| C-F5-07 | deep: one whole pair by events, full-day hold | BOUNDED, O(log bars x (1 + events)) per pair | 1, 16, 256 active slots | 42,303,821 / 67,469,081 / 79,603,404; 30,440,930 / 52,771,488 / 64,432,469; 31,126,436 / 54,374,585 / 70,944,069 | events p50 190, p99 405 / 250 / 250 | p99 time 0.805x, work 0.617x | BOUNDED (L-FIB5-02) |
+| C-F5-08 | deep: one bar step of one slot whose exit spills by volume, 16 slots | WORST-CASE | spills of 10, 1,000, 20,000 s (that many shares into one-share seconds) | 29,947 / 70,229 / 862,025; 24,488 / 54,167 / 1,136,947; 26,370 / 75,229 / 1,401,895 | 1 | p99 time 1.071x, max time 1.626x, work 1.000x | PASS: the every-bar walk's spill step is O(1) per second |
+| C-F5-09 | deep: one whole pair by events, its exit spilling by volume, 16 slots | BOUNDED, O(log bars) per spill run (D-6391) | spills of 10, 1,000, 20,000 s | 250,928 / 579,238 / 1,321,789; 251,433 / 562,231 / 1,854,480; 246,410 / 558,089 / 1,426,182 | 4 at every percentile and scale | p99 time 0.963x, max time 1.078x, work 1.000x | BOUNDED (L-FIB5-18): a 20,000-second spill in about 0.25 µs at p50 and 4 units of work, against 20,000 steps of C-F5-08 (about 0.5 ms at its p50) |
+
+At the production worker count (4), per worker: C-F5-01 44,746 / 53,684 /
+50,688 ps per call at the three scales; C-F5-02 69,569 / 55,060 / 60,467;
+C-F5-03 54,038 / 54,915 / 54,727; C-F5-04 75,284 / 51,078 / 60,873; C-F5-05
+42,169 / 42,963 / 43,990; C-F5-07 49,411,266 / 36,626,859 / 37,034,258;
+C-F5-08 38,958 / 29,952 / 27,368; C-F5-09 324,746 / 332,647 / 321,752.
+
+C-F5-06 (information): `DayIndex::build` of one deep stock-day of 21,300
+seconds, min 16,335,632 ns, p50 16,981,586 ns, max 19,310,651 ns over 8 builds,
+15,942,528 bytes per index (18 October: 13,556,832); of one stage-A stock-day
+of 355 minutes, min 247,583 ns, p50 503,528 ns, max 1,485,357 ns over 100
+builds, 579,936 bytes per index (18 October: 540,080). Both byte increases are
+exactly L-FIB5-19's: 56 bytes per bar per side plus three leading prefix
+entries of 16 bytes per side (21,300 x 56 x 2 + 96 = 2,385,696; 355 x 56 x 2 +
+96 = 39,856). The build-time rise is not attributed: the two runs were on
+different containers.
+
 ### Gate 11 — FIB-5, declared (19 October 2026)
 
 ~~~~text
