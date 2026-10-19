@@ -4476,3 +4476,42 @@ fn a_slot_reads_its_own_trail_list_at_its_own_width() {
         );
     }
 }
+
+/// Excursions start at the fill: a RETEST order waiting through a minute
+/// that prints Rs 5.00 above the eventual fill never counts that high.
+#[test]
+fn a_high_printed_before_the_fill_is_never_the_trade_s_mfe() {
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P + 200, P + 500, P + 100, P + 200, 1_000),
+        bar(at(10, 1, 0), P, P + 50, P - 100, P, 1_000),
+        quiet(at(10, 2, 0), P, 1_000),
+    ]);
+    let plan = Plan {
+        style: EntryStyle::Retest,
+        trigger_edge: P - 100,
+        entry_window_end: at(10, 5, 0),
+        ..long_plan(at(10, 0, 0))
+    };
+    let out = minute_slot(&day, plan, STOP_ONLY);
+    assert_eq!(out.first_entry_second, at(10, 1, 0));
+    assert_eq!(out.mfe_second, at(10, 1, 0));
+    assert_eq!(out.mfe_to_exit_paisa, 0);
+    // A BREAK order waiting through a minute that dips Rs 8.00: that low is
+    // no adverse excursion of the trade filled after it at Rs 1,001.50.
+    let dipped = minute_day(&[
+        bar(at(10, 0, 0), P, P + 50, P - 800, P, 1_000),
+        bar(at(10, 1, 0), P + 100, P + 150, P + 50, P + 100, 1_000),
+        quiet(at(10, 2, 0), P + 100, 1_000),
+    ]);
+    let plan = Plan {
+        style: EntryStyle::Break,
+        trigger_edge: P + 100,
+        entry_window_end: at(10, 5, 0),
+        ..long_plan(at(10, 0, 0))
+    };
+    let out = minute_slot(&dipped, plan, STOP_ONLY);
+    assert_eq!(out.first_entry_second, at(10, 1, 0));
+    // The fill at the 10:01 high against the lowest low from it on, the
+    // forced minute's 99,990; the 10:00 dip to 99,200 is not counted.
+    assert_eq!(out.mae_to_exit_paisa, (P + 150) - (P - 10));
+}
