@@ -840,8 +840,12 @@ impl<'a> Stepper<'a> {
         self.remaining -= qty;
         self.entry_value += i128::from(qty) * i128::from(bar.hi_raw);
         self.last_entry_second = bar.second;
-        if self.day.resolution() == Resolution::Second && bar.volume > 0 {
-            let permille = u128::from(qty) * u128::from(PERMILLE_PER_UNIT) / u128::from(bar.volume);
+        if self.day.resolution() == Resolution::Second {
+            // A deep fill takes only shares the second traded, so its volume
+            // is never zero here.
+            let permille = (u128::from(qty) * u128::from(PERMILLE_PER_UNIT))
+                .checked_div(u128::from(bar.volume))
+                .unwrap_or(0);
             self.max_participation = self
                 .max_participation
                 .max(u32::try_from(permille).unwrap_or(u32::MAX));
