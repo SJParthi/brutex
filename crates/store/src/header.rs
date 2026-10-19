@@ -115,6 +115,8 @@
 //! returned `Header` is built from, and a copy that caught a write mid-flight
 //! fails that checksum rather than returning half of each.
 
+use std::path::Path;
+
 use crate::crc::crc32c_split;
 use crate::format::{FLAG_CHECKSUMS, FormatError, MAGIC_FAMILY, MAX_SLOTS, SLOT_LEN, SLOT_STRIDE};
 use crate::layout::Layout;
@@ -595,12 +597,49 @@ impl Header {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn read_region(region: &[u8], file_len: u64) -> Result<Self, FormatError> {
+        Self::read_region_audited(region, file_len, None).map(|(header, _)| header)
+    }
+
+    /// [`Header::read_region`] for a file whose path the caller knows, with
+    /// the [`SlotAudit`] of the same region beside the header it chose.
+    ///
+    /// The header is **byte for byte** the one [`Header::read_region`] returns
+    /// for the same region and length: the selection is the same function, run
+    /// once. What this adds is the path on the `store.header.slot_damaged` line
+    /// and the audit itself, so a reader that keeps it (`BarFile::slot_audit`)
+    /// can say afterwards which generation it read and whether a damaged slot
+    /// sat beside it, without reading the region a second time. D-6240.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Header::read_region`]'s.
+    pub fn read_region_at(
+        region: &[u8],
+        file_len: u64,
+        path: &Path,
+    ) -> Result<(Self, SlotAudit), FormatError> {
+        Self::read_region_audited(region, file_len, Some(path))
+    }
+
+    /// The one header read both public doors share: the unchanged selection,
+    /// its two existing log lines, and the slot audit with its own.
+    ///
+    /// The audit is taken against the generation the selection already chose,
+    /// so the search is not repeated: [`MAX_SLOTS`] more 64-byte decodes, once
+    /// per open, and nothing that depends on the region's length.
+    fn read_region_audited(
+        region: &[u8],
+        file_len: u64,
+        path: Option<&Path>,
+    ) -> Result<(Self, SlotAudit), FormatError> {
         let (header, newest, refused) = committed(region, file_len)
             .inspect_err(|&refusal| note_header_unreadable(region, file_len, refusal))?;
         if header.generation != newest {
             note_header_fell_back(&header, newest, file_len, refused);
         }
-        Ok(header)
+        let audit = audit_against(region, file_len, Ok(header.generation));
+        note_slot_damaged(&audit, path, file_len);
+        Ok((header, audit))
     }
 
     /// The 64-byte slot image for this header, checksum computed.
@@ -764,6 +803,456 @@ fn note_header_fell_back(header: &Header, newest: u64, file_len: u64, refusal: F
             .with("file_len", telemetry::Value::Uint(file_len))
             .with("why", telemetry::Value::Str(&why)),
     );
+}
+
+/// What one header slot position holds, as [`slot_audit`] reads it.
+///
+/// One of these per position [`Header::read_region`] reads — exactly
+/// [`MAX_SLOTS`] of them, never more — so a reader can say of every slot
+/// what the selection only acted on. D-6240.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotState {
+    /// All 64 bytes are zero at a position no committed generation has reached
+    /// yet: the second slot of a month that has only its genesis commit.
+    Empty,
+    /// Decodes — magic, a known version, its own checksum, stride, reserved
+    /// tail and flags — sits at the position its generation puts it, and the
+    /// file's length supports what it commits.
+    Valid {
+        /// The commit this slot holds.
+        generation: u64,
+    },
+    /// Anything else, with the reason.
+    Damaged {
+        /// Why the slot is not a candidate.
+        reason: SlotDamage,
+        /// The slot's generation, **only when its own checksum verified it**.
+        ///
+        /// `None` whenever the checksum failed or could not be checked: the
+        /// generation field of a slot whose checksum fails is a number no
+        /// commit is known to have written, and reading it would be the guess
+        /// D-6241 forbids. A `None` beside the generation that was read makes
+        /// the month [`MonthVerdict::Reverted`], never [`MonthVerdict::Clean`].
+        generation: Option<u64>,
+    },
+}
+
+/// Why a slot is [`SlotState::Damaged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotDamage {
+    /// The region handed in ends before this position's 64 bytes do.
+    Truncated,
+    /// All 64 bytes are zero at a position the generation that was read proves
+    /// was written: generation `p` is the first to land on position `p`, and
+    /// generations are consecutive from zero ([`Header::genesis`],
+    /// [`Header::advance`]).
+    Erased,
+    /// The slot is refused by name: by [`Header::decode`] (`crc`, `magic`,
+    /// `version`, `stride`, `reserved`, `flags`, `checksums_required`), by the
+    /// position rule (`wrong_position`), or by [`Header::validate`] against the
+    /// file's length (`beyond_file_len`, `timestamps_out_of_order`).
+    Refused(FormatError),
+}
+
+impl SlotDamage {
+    /// The reason as one stable word, for a log field, a receipt line and a
+    /// gate's tally.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Truncated => "truncated",
+            Self::Erased => "erased",
+            Self::Refused(refusal) => match refusal {
+                FormatError::SlotChecksum { .. } => "crc",
+                FormatError::NotABarFile => "magic",
+                FormatError::UnknownVersion(_)
+                | FormatError::RetiredVersion(_)
+                | FormatError::MagicVersionMismatch(_) => "version",
+                FormatError::StrideMismatch(_) => "stride",
+                FormatError::SlotPositionMismatch { .. } => "wrong_position",
+                FormatError::CounterExceedsFile | FormatError::TooShortForHeader => {
+                    "beyond_file_len"
+                }
+                FormatError::TimestampsOutOfOrder { .. } => "timestamps_out_of_order",
+                FormatError::ReservedNotZero(_) => "reserved",
+                FormatError::UnknownFlags(_) => "flags",
+                FormatError::ChecksumsRequired(_) => "checksums_required",
+                _ => "refused",
+            },
+        }
+    }
+}
+
+impl core::fmt::Display for SlotDamage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated => write!(f, "truncated: the region ends inside this slot"),
+            Self::Erased => write!(
+                f,
+                "erased: all zero where the generation read proves a commit was written"
+            ),
+            Self::Refused(refusal) => write!(f, "{}: {refusal}", self.name()),
+        }
+    }
+}
+
+/// What a month's header region says as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MonthVerdict {
+    /// Every slot is [`SlotState::Valid`] or [`SlotState::Empty`]: the
+    /// generation read is the newest any slot holds.
+    Clean,
+    /// A damaged slot whose verified generation is **older** than the one
+    /// read. Nothing committed was lost by the read; the month is one more
+    /// failure from having no header, and that is named.
+    Damaged {
+        /// The damaged position.
+        slot: u64,
+        /// Why it is damaged.
+        reason: SlotDamage,
+        /// The generation that was read.
+        chosen_generation: u64,
+        /// The damaged slot's verified generation, below `chosen_generation`.
+        damaged_generation: u64,
+    },
+    /// A damaged slot whose generation is **newer** than the one read, or
+    /// cannot be read at all: the month may have reverted to an older
+    /// generation, and every record the lost commit counted is unreadable.
+    Reverted {
+        /// The generation that was read.
+        chosen_generation: u64,
+        /// The damaged position.
+        damaged_slot: u64,
+        /// Why it is damaged.
+        reason: SlotDamage,
+        /// The damaged slot's verified generation when it has one, `None` when
+        /// its checksum failed: "possibly reverted", never "clean".
+        damaged_generation: Option<u64>,
+    },
+    /// No generation could be chosen: [`Header::read_region`] refuses this
+    /// region with exactly this error.
+    Unreadable(FormatError),
+}
+
+impl MonthVerdict {
+    /// The verdict as one stable word.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Damaged { .. } => "damaged",
+            Self::Reverted { .. } => "reverted",
+            Self::Unreadable(_) => "unreadable",
+        }
+    }
+
+    /// The one damaged slot this verdict names, or `None` for a clean or an
+    /// unreadable region (the unreadable one has its own refusal and line).
+    #[must_use]
+    pub const fn named_slot(self) -> Option<NamedSlot> {
+        match self {
+            Self::Clean | Self::Unreadable(_) => None,
+            Self::Damaged {
+                slot,
+                reason,
+                chosen_generation,
+                damaged_generation,
+            } => Some(NamedSlot {
+                slot,
+                reason,
+                chosen_generation,
+                damaged_generation: Some(damaged_generation),
+            }),
+            Self::Reverted {
+                chosen_generation,
+                damaged_slot,
+                reason,
+                damaged_generation,
+            } => Some(NamedSlot {
+                slot: damaged_slot,
+                reason,
+                chosen_generation,
+                damaged_generation,
+            }),
+        }
+    }
+}
+
+/// The damaged slot a [`MonthVerdict`] names, in one shape for both verdicts
+/// that name one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NamedSlot {
+    /// The damaged position.
+    pub slot: u64,
+    /// Why it is damaged.
+    pub reason: SlotDamage,
+    /// The generation that was read.
+    pub chosen_generation: u64,
+    /// The damaged slot's verified generation, `None` when it has none.
+    pub damaged_generation: Option<u64>,
+}
+
+/// Every slot position of one header region, and the month's verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlotAudit {
+    /// One state per position [`Header::read_region`] reads, in position order.
+    pub slots: [SlotState; MAX_SLOTS],
+    /// What the slots say about the generation that was read.
+    pub verdict: MonthVerdict,
+}
+
+impl SlotAudit {
+    /// Whether the verdict is [`MonthVerdict::Clean`].
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        matches!(self.verdict, MonthVerdict::Clean)
+    }
+
+    /// The verdict as one sentence an operator can act on, naming the slot,
+    /// the reason and both generations.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self.verdict {
+            MonthVerdict::Clean => "clean".to_owned(),
+            MonthVerdict::Damaged {
+                slot,
+                reason,
+                chosen_generation,
+                damaged_generation,
+            } => format!(
+                "damaged: slot {slot} ({reason}) holds generation {damaged_generation}, older \
+                 than generation {chosen_generation} that was read; no commit was lost"
+            ),
+            MonthVerdict::Reverted {
+                chosen_generation,
+                damaged_slot,
+                reason,
+                damaged_generation,
+            } => {
+                let lost = damaged_generation.map_or_else(
+                    || "its generation is unreadable, so a newer commit may be lost".to_owned(),
+                    |generation| {
+                        format!("it holds generation {generation}, newer than the one read")
+                    },
+                );
+                format!(
+                    "REVERTED: read generation {chosen_generation}; slot {damaged_slot} \
+                     ({reason}): {lost}"
+                )
+            }
+            MonthVerdict::Unreadable(refusal) => format!("unreadable: {refusal}"),
+        }
+    }
+}
+
+/// Audits every header slot of `region` against `file_len`: one entry per slot
+/// position and a month verdict.
+///
+/// # Why it exists
+///
+/// [`Header::read_region`] keeps the valid slot with the highest generation
+/// and drops every other one as "not a candidate". A newest slot whose
+/// checksum fails is therefore indistinguishable from one that was never
+/// written: the month opens at the older generation, every record the lost
+/// commit counted silently gone, and no line says so — the fall-back reporter
+/// fires only for a slot that DECODED. This names it. D-6240.
+///
+/// # What it reads, and what it does not change
+///
+/// Exactly the [`MAX_SLOTS`] positions [`Header::read_region`] reads, at the
+/// same [`crate::format::SLOT_STRIDE`], whatever the region's length — a
+/// whole mapping costs what the header region costs. The generation it audits
+/// against is the one [`Header::read_region`] would return for the same
+/// arguments, found by the same search; it selects nothing of its own, writes
+/// nothing, repairs nothing and emits nothing. The log line belongs to the
+/// read (`store.header.slot_damaged`), once per open.
+///
+/// # A damaged slot's generation
+///
+/// Read only from a slot whose own checksum verified it; otherwise `None`
+/// (D-6241). With [`MAX_SLOTS`] two, position alone cannot order the other
+/// slot against the one read — `g − 1` and `g + 1` share a parity — so a
+/// checksum-failed neighbour is "possibly newer", and the month is
+/// [`MonthVerdict::Reverted`].
+///
+/// # Examples
+///
+/// ```
+/// # use store::{format::{FLAG_CHECKSUMS, FormatError},
+/// #     header::{Header, MonthVerdict, SlotDamage, SlotState, slot_audit}};
+/// let mut region = vec![0u8; 32_768];
+/// let genesis = Header::genesis(1, 60, FLAG_CHECKSUMS);
+/// let next = genesis.advance(0, 0, 0)?;
+/// for commit in [genesis.commit()?, next.commit()?] {
+///     let at = usize::try_from(commit.offset).unwrap_or(0);
+///     region.iter_mut().skip(at).zip(commit.bytes).for_each(|(dst, src)| *dst = src);
+/// }
+/// assert!(slot_audit(&region, 32_768).is_clean());
+///
+/// // One flipped checksum byte in the newest slot (generation 1, slot 1).
+/// if let Some(byte) = region.get_mut(16_384 + 56) { *byte ^= 0x01; }
+/// let audit = slot_audit(&region, 32_768);
+/// assert!(matches!(audit.slots[1], SlotState::Damaged { generation: None, .. }));
+/// assert!(matches!(audit.verdict, MonthVerdict::Reverted { chosen_generation: 0, damaged_slot: 1, .. }));
+/// // The read itself is unchanged: generation 0, as before.
+/// assert_eq!(Header::read_region(&region, 32_768)?.generation, 0);
+/// # Ok::<(), FormatError>(())
+/// ```
+#[must_use]
+pub fn slot_audit(region: &[u8], file_len: u64) -> SlotAudit {
+    audit_against(
+        region,
+        file_len,
+        committed(region, file_len).map(|(header, _, _)| header.generation),
+    )
+}
+
+/// [`slot_audit`] against a selection already made.
+fn audit_against(region: &[u8], file_len: u64, chosen: Result<u64, FormatError>) -> SlotAudit {
+    let mut slots = [SlotState::Empty; MAX_SLOTS];
+    let mut chunks = region.chunks(SLOT_STRIDE_LEN);
+    for (position, state) in (0u64..).zip(slots.iter_mut()) {
+        *state = slot_state(chunks.next(), position, file_len, chosen.ok());
+    }
+    let verdict = match chosen {
+        Ok(generation) => verdict_of(&slots, generation),
+        Err(refusal) => MonthVerdict::Unreadable(refusal),
+    };
+    SlotAudit { slots, verdict }
+}
+
+/// One position's state. `chosen` is the generation the read selected, when
+/// it selected one: it is what proves an all-zero slot was once written.
+fn slot_state(
+    chunk: Option<&[u8]>,
+    position: u64,
+    file_len: u64,
+    chosen: Option<u64>,
+) -> SlotState {
+    let Some(bytes) = chunk.filter(|bytes| bytes.len() >= SLOT_LEN) else {
+        return SlotState::Damaged {
+            reason: SlotDamage::Truncated,
+            generation: None,
+        };
+    };
+    match Header::decode_parts(bytes) {
+        Ok((header, layout)) => {
+            let expected = header.generation % layout.slot_count();
+            let refusal = if expected == position {
+                header.validate(layout, file_len).err()
+            } else {
+                Some(FormatError::SlotPositionMismatch {
+                    expected,
+                    found: position,
+                })
+            };
+            refusal.map_or(
+                SlotState::Valid {
+                    generation: header.generation,
+                },
+                |refusal| SlotState::Damaged {
+                    reason: SlotDamage::Refused(refusal),
+                    generation: Some(header.generation),
+                },
+            )
+        }
+        Err(refusal) => {
+            if bytes.iter().take(SLOT_LEN).any(|&byte| byte != 0) {
+                SlotState::Damaged {
+                    reason: SlotDamage::Refused(refusal),
+                    generation: None,
+                }
+            } else if chosen.is_some_and(|generation| generation >= position) {
+                SlotState::Damaged {
+                    reason: SlotDamage::Erased,
+                    generation: None,
+                }
+            } else {
+                SlotState::Empty
+            }
+        }
+    }
+}
+
+/// The month verdict for slots audited against the generation `chosen`.
+///
+/// A damaged slot newer than `chosen`, or of unknown generation, is a possible
+/// revert and wins; one provably older is named as damage that lost nothing.
+fn verdict_of(slots: &[SlotState; MAX_SLOTS], chosen: u64) -> MonthVerdict {
+    let mut older = None;
+    for (slot, state) in (0u64..).zip(slots) {
+        let SlotState::Damaged { reason, generation } = *state else {
+            continue;
+        };
+        match generation {
+            Some(damaged) if damaged < chosen => {
+                let _first = older.get_or_insert(MonthVerdict::Damaged {
+                    slot,
+                    reason,
+                    chosen_generation: chosen,
+                    damaged_generation: damaged,
+                });
+            }
+            _ => {
+                return MonthVerdict::Reverted {
+                    chosen_generation: chosen,
+                    damaged_slot: slot,
+                    reason,
+                    damaged_generation: generation,
+                };
+            }
+        }
+    }
+    older.unwrap_or(MonthVerdict::Clean)
+}
+
+/// A read beside a damaged header slot, on the rolling log AND the audit
+/// stream.
+///
+/// # What was invisible
+///
+/// A newest slot whose checksum fails is not a candidate, so the read
+/// returned the older generation with `Ok` and said nothing:
+/// [`note_header_fell_back`] fires only for a slot that decoded. A month that
+/// had lost its newest commit read back as a month that never had one. This
+/// line names the slot, the reason and the generation that was read, with the
+/// path when the caller knows it (`BarFile` does). D-6240.
+///
+/// # Why `Error`, when the fall-back reporter is `Warn`
+///
+/// The fall-back reporter speaks for a slot that decoded and whose records the
+/// file's length cannot hold: the crash table's fourth row, and every byte
+/// returned is real. A slot that does not decode at all is damage to the
+/// file, and a possibly lost commit is a failure an operator must act on;
+/// `Error` is what the audit stream keeps (D-3341 item 3). It fires at most
+/// once per read, never on a clean region, and never for an unreadable one —
+/// that refusal has its own line.
+fn note_slot_damaged(audit: &SlotAudit, path: Option<&Path>, file_len: u64) {
+    let Some(NamedSlot {
+        slot,
+        reason,
+        chosen_generation: chosen,
+        damaged_generation: damaged,
+    }) = audit.verdict.named_slot()
+    else {
+        return;
+    };
+    let detail = reason.to_string();
+    let path = path.map(|path| path.display().to_string());
+    let mut event = telemetry::Event::error("store.header.slot_damaged", "header slot damaged")
+        .with("verdict", telemetry::Value::Str(audit.verdict.name()))
+        .with("slot", telemetry::Value::Uint(slot))
+        .with("reason", telemetry::Value::Str(reason.name()))
+        .with("chosen_generation", telemetry::Value::Uint(chosen))
+        .with("file_len", telemetry::Value::Uint(file_len))
+        .with("why", telemetry::Value::Str(&detail));
+    if let Some(generation) = damaged {
+        event = event.with("damaged_generation", telemetry::Value::Uint(generation));
+    }
+    if let Some(path) = &path {
+        event = event.with("path", telemetry::Value::Str(path));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// A commit that could not be built, on the rolling log.
@@ -976,3 +1465,7 @@ fn le_bytes<const N: usize>(slot: &[u8], offset: usize) -> [u8; N] {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "header_audit_tests.rs"]
+mod audit_tests;
