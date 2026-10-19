@@ -19752,6 +19752,7 @@ processes against a shadow of the real store; nothing else here is measured.
 | L-FIB6-11 | **A whole walk's time per row-touch grows with the table, a node expansion's does not (measured below)** | a large node's region is larger than the cache, so its passes stream from memory; a small node's region is cache-resident | the walk is still O(1) per row-touch in WORK (exact counter); the time ratio is information, measured on this host (calibration table below) |
 | L-FIB6-12 | **A parallel walk holds at most `scratch_budget_bytes` of task scratch at once, at any thread count** (D-6411) | the budget is split down the recursion: the root's allowance is the budget, an inline child keeps its parent's, and a batch runs as tasks only if its scratch fits its node's allowance, its tasks sharing what it leaves in proportion to their scratch | the walk's memory is the table, the root's arena (L-FIB6-02, reserved, committed as written) and at most the budget of task scratch; the visitor's forks are the visitor's own (L-FIB6-03). The decisions follow from the data and the budget alone (`work_stealing_equals_sequential_bytes` recomputes every allowance from the visited nodes). **Measured before the change**: with the budget counted per batch, the 4-thread walk of the bench's 2 x 10^7-row partition at a 10% floor and a 4 GiB budget was OOM-killed at 13,901,196 kB resident on this 15 GiB host, and with the budget split down the recursion it was killed again at 13,897,032 kB: its cell scratch was written in full when made (D-6412). The budget bounds reserved task scratch by construction; what filled the host was every arena written in full, the root's included |
 | L-FIB6-13 | **Coverage of `lattice.rs` and `score.rs` is measured with the compiler's unstable branch instrumentation** (D-6413) | `cargo llvm-cov --branch` passes `-Z coverage-options=branch`, which the pinned 1.97.1 compiler accepts only under `RUSTC_BOOTSTRAP=1`; the flag is the tool's "unstable", and `llvm-cov report` scores a generic function by its best single instantiation and keeps the first of two records that disagree | measured 19 October 2026 on the FIB-6 cloud host (4 vCPUs of an `Intel(R) Xeon(R) Processor @ 2.10GHz`), `cargo llvm-cov` 0.8.4: `report --branch`'s own per-file rows read 100.00% of regions, functions, lines and branches for both files (`lattice.rs` 1,831 / 119 / 1,189 / 106, `score.rs` 1,242 / 77 / 852 / 92). The pass is compiled once whatever the charge model, so these rows are one copy's, not a best instantiation's (D-6413). The Mac re-measures it (the FIB-6 report's NEEDS THE MAC) |
+| L-FIB6-14 | **At 2 x 10^7 rows the parallel walk gained nothing on this host**: 455,068 ms at 1 thread, 461,710 ms at 4, 488,571 ms at 12 (on 4 vCPUs) | measured: 73 batches ran inline because their task scratch passed what their node's allowance held (D-6411's rule, counted in `Spread`). Inferred, not measured: one child of the root holds about 10^7 rows, whose subtree reserves about 21 x 10^7 x 28 bytes (5.9 GB) of task scratch, past the bench's 4 GiB budget, so the largest subtrees, where the row-touches are, run on one thread; and a node of that size streams from memory (L-FIB6-11), which threads share | the outputs are byte-identical at any thread count (`work_stealing_equals_sequential_bytes`); the budget is a memory bound the caller chooses, and a larger one is the trade. The same bench's 10^4 and 10^6-row walks gained 1.84x and 1.30x at 4 threads (the throughput table, 19 October 2026). FM-F053's "12-thread speed-up" on this host is 0.93x at 2 x 10^7 rows; FIB-12 measures the real partitions' |
 
 ### FIB-6 calibration: the walk's size against its floor (measured 18 October 2026 on THIS HOST)
 
@@ -19804,6 +19805,69 @@ RULE 2 (`ALLOW_FLOAT`) -- runner/src/fib/score.rs 0 -> 1: `pub type Stat =
 runner/src/fib/lattice.rs meets no rule: its sorts are stable counting sorts,
   its membership tests are range comparisons and pre-sized hash maps.
 ~~~~
+
+### The FIB-6 bench on the final code (measured 19 October 2026 on THIS HOST)
+
+THIS HOST: the cloud container of the 19 October FIB-6 session — 4 vCPUs of an
+`Intel(R) Xeon(R) Processor @ 2.10GHz`, 15.7 GiB, Linux 6.18, rustc 1.97.1, the
+`bench` profile — NOT the 2.80 GHz host of the calibration table above and not
+the Mac. Branch `cloud/fib6-20261019`, code of `d9a235a3` (D-6413; no source
+changed after it), `cargo bench --locked -p runner --bench fib`, 11:28 to 12:35
+UTC, exit 0, alone: no build, test or other bench ran beside it. Timer
+granularity 26 ns; the pointer-chase probe's last-level-cache estimate 32,768
+KiB. The bench process's peak resident memory was 6,189,528 kB (`VmHWM`,
+sampled from `/proc` every 2 s). Harness times are percentiles OF BATCH MEANS
+(batches of 1,000 calls), picoseconds per call; the work counter is exact. The
+Mac re-measures every row at merge-back.
+
+| ID | Row | Class | Scales (axis) | p50 / p99 / max ps at each scale | Work per call | Ratio, largest / smallest | Verdict |
+|---|---|---|---|---|---|---|---|
+| C-F6-01 | one node's expansion over 64 contiguous rows (every free row: counting pass, scatter, prefix scans) | WORST-CASE | 10^4, 10^6, 2 x 10^7 rows in the partition table | 6,317,460 / 9,585,838 / 19,548,230; 6,564,652 / 9,702,170 / 13,457,524; 6,388,043 / 9,700,317 / 15,680,694 | 2,816 row-touches at every percentile (p99 3,404 and 3,445 ps per row-touch at the smallest and largest scale) | p99 time 1.011x, work 1.000x | PASS |
+| C-F6-02 | scoring one mix of 64 rows at 8 profiles, every row taken, across spans (`per_mix_cost_fixed_support`, FM-F050) | WORST-CASE | 10^3, 10^4, 10^5 days | 35,487,749 / 57,386,339 / 191,381,371; 46,200,168 / 67,550,611 / 80,293,657; 44,804,443 / 65,969,888 / 117,462,325 | 512 (row, profile) touches; 511 to 512 trades per op | p99 time 1.149x, work 1.000x | PASS |
+| C-F6-03 | the same across pools | WORST-CASE | 2, 20, 200 stocks (production 208) | 49,108,790 / 69,203,298 / 88,289,741; 49,564,795 / 71,980,446 / 110,431,282; 49,955,006 / 69,420,557 / 92,769,684 | 512 (row, profile) touches; 511 trades per op | p99 time 1.003x, work 1.000x | PASS |
+
+Held outcomes (untimed, every outcome held up to an hour, 1,000 ops each): 109,
+375 and 495 trades per op at pools of 2, 20 and 200 — a smaller pool blocks
+more rows, which is why the timed rows take every row.
+
+Whole walks, outside the harness (one run each, wall clock, a counting
+visitor; a parallel walk splits nodes of at least max(rows / 64, 256) rows and
+holds at most 4 GiB of task scratch at once):
+
+| Rows | Floor | Threads | Wall time | Nodes | Mixes (x4 exits) | Row-touches | Mixes per second | Row-touches per second | ps per row-touch | Tasks / inline for the budget |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10,000 | 10 permille (100) | 1 | 2,303 ms | 1,672,080 | 6,688,320 | 1,232,642,799 | 2,903,291 | 535,070,221 | 1,868 | 0 / 0 |
+| 10,000 | 10 permille (100) | 4 | 1,253 ms | 1,672,080 | 6,688,320 | 1,232,642,799 | 5,336,806 | 983,561,815 | 1,016 | 715,467 / 0 |
+| 10,000 | 10 permille (100) | 12 | 1,246 ms | 1,672,080 | 6,688,320 | 1,232,642,799 | 5,367,802 | 989,274,322 | 1,010 | 715,467 / 0 |
+| 10,000 | 100 permille (1,000) | 1 | 128 ms | 5,810 | 23,240 | 58,395,158 | 180,252 | 452,921,189 | 2,207 | 0 / 0 |
+| 10,000 | 100 permille (1,000) | 4 | 96 ms | 5,810 | 23,240 | 58,395,158 | 240,931 | 605,388,188 | 1,651 | 1,344 / 0 |
+| 10,000 | 100 permille (1,000) | 12 | 83 ms | 5,810 | 23,240 | 58,395,158 | 276,727 | 695,332,846 | 1,438 | 1,344 / 0 |
+| 1,000,000 | 100 permille (100,000) | 1 | 12,769 ms | 5,515 | 22,060 | 5,662,512,027 | 1,727 | 443,444,082 | 2,255 | 0 / 0 |
+| 1,000,000 | 100 permille (100,000) | 4 | 9,802 ms | 5,515 | 22,060 | 5,662,512,027 | 2,250 | 577,675,013 | 1,731 | 1,220 / 0 |
+| 1,000,000 | 100 permille (100,000) | 12 | 10,178 ms | 5,515 | 22,060 | 5,662,512,027 | 2,167 | 556,316,007 | 1,797 | 1,220 / 0 |
+| 20,000,000 | 100 permille (2,000,000) | 1 | 455,068 ms | 5,513 | 22,052 | 113,239,165,368 | 48 | 248,839,757 | 4,018 | 0 / 0 |
+| 20,000,000 | 100 permille (2,000,000) | 4 | 461,710 ms | 5,513 | 22,052 | 113,239,165,368 | 47 | 245,260,237 | 4,077 | 1,038 / 73 |
+| 20,000,000 | 100 permille (2,000,000) | 12 | 488,571 ms | 5,513 | 22,052 | 113,239,165,368 | 45 | 231,775,810 | 4,314 | 1,038 / 73 |
+
+Every visited mix scored and timed at 8 profiles (sequential): at 10,000 rows
+and 10 permille, 1,672,080 mixes, ns per mix p50 64,373, p99 388,951, max
+36,970,102, and ps per (row, profile) p50 50,876, p99 131,631, max 30,567,926;
+at 1,000,000 rows and 100 permille, 5,515 mixes, ns per mix p50 137,936,092,
+p99 341,260,111, max 690,758,306, and ps per (row, profile) p50 126,256, p99
+160,855, max 201,717.
+
+The shared traversal at 1, 2 and 4 exits (FM-F054; 100,000 rows, floor
+10,000): 22,679, 35,184 and 57,129 ms; 5,660 nodes visited at every exit count;
+11,320, 22,640 and 45,280 mixes scored at 2, 4 and 8 profiles; 14,345,520,
+28,692,216 and 57,380,920 card bytes.
+
+What it says. The three harness rows pass the specification's 1.25x line on
+this host. A whole walk's time per row-touch rises from 1.9 to 2.3 ns at up to
+10^6 rows to 4.0 ns at 2 x 10^7 (L-FIB6-11). The lattice's shape follows the
+floor's share of the rows (about 5,500 nodes at 100 permille at 10^6 and at
+2 x 10^7). And the parallel walk gained 1.84x at 4 threads on the 1% walk of
+10^4 rows and 1.30x on 10^6 rows, but nothing on 2 x 10^7 rows, where 12
+threads on 4 vCPUs ran 0.93x of one thread: L-FIB6-14.
 
 ## `/audit`'s last commit of a partitioned census, and the narrow-window layout (AH-04, D-5880, D-5883)
 
