@@ -299,6 +299,10 @@ fn a_gap_through_the_stop_exits_at_the_bar_low_with_r_below_minus_one() {
     assert_eq!(out.exit_value_paisa, i128::from(100 * 98_000));
     assert!(has(&out, TradeFlag::GapThroughStop));
     assert!(has(&out, TradeFlag::FiredStopLoss));
+    assert_eq!(
+        out.max_participation_permille, 0,
+        "stage A never reads a minute's volume"
+    );
     let r = r_long(&out);
     assert_eq!(
         r,
