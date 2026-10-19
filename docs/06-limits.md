@@ -19950,3 +19950,7 @@ them, except C-F8-04 (2.089x, 2.398x) and C-F8-12 (1.780x, 1.782x).
 | ID | Limit | Why it is not O(1), or not done | Bound |
 |---|---|---|---|
 | L-FIB8-30 | C-F8-09 in FIB-5's order passes on this host | a day's 16-byte range column is walked while it is warm, every walk of the day before the next day's | 0.994x in the fifth run: L-FIB8-22 and L-FIB8-29 measured a fresh random day for every walk, which no production caller does; the Mac re-measures |
+
+| ID | Limit | Why it is not O(1), or not done | Bound |
+|---|---|---|---|
+| L-FIB8-31 | A host refusal after a successful open is not driven by a test in FIB-8's files | a sync, a rename, a directory sync or a segment-index append the host refuses, and a stored index month's record read failing after its open, have no portable trigger; a file cut under an open FIB handle is driven (block, block table, record, footer) | each maps through one shared, tested mapping (`files.rs`'s `io_at`, `reference.rs`'s one read arm), so its word and detail are the tested ones; the `?` early return itself is an unexecuted region, never an unexecuted line |
