@@ -808,6 +808,17 @@ fn a_stop_into_flat_day_low_minutes_exits_at_the_first_unlocked_minute() {
     assert_eq!(out.exit_value_paisa, i128::from(100 * 97_850));
     assert!(has(&out, TradeFlag::LockedMinuteSuspected));
     assert_eq!(out.exit_spill_seconds, 2);
+    // The position is open through the minutes its stop waits on: a locked
+    // minute lower than the exit's own low is its adverse excursion.
+    let deeper = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P, 1_000),
+        bar(at(10, 1, 0), 98_000, 98_000, 98_000, 98_000, 1_000),
+        bar(at(10, 2, 0), 97_800, 97_800, 97_800, 97_800, 1_000),
+        bar(at(10, 3, 0), 97_950, 98_000, 97_850, 97_950, 1_000),
+    ]);
+    let out = minute_slot(&deeper, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 97_850));
+    assert_eq!(out.mae_to_exit_paisa, (P + 100) - 97_800);
 }
 
 #[test]

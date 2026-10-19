@@ -613,27 +613,22 @@ impl<'a> Stepper<'a> {
             // an exit cancels the unfilled entry remainder in this bar
             // (FM-F036). A first fill in this bar meets them after it, so an
             // entry and a stop in one bar stop in that bar.
+            // `enter` fills nothing once an exit fired, and the bar is then
+            // tracked already, so tracking it again changes nothing.
             let held = self.filled > 0;
             if held {
                 self.evaluate_exits(&bar, bar.volume);
             }
-            if self.open_or_entering() {
-                let volume_left = self.enter(&bar);
-                if !held && self.filled > 0 {
-                    self.evaluate_exits(&bar, volume_left);
-                }
+            let volume_left = self.enter(&bar);
+            if !held && self.filled > 0 {
+                self.evaluate_exits(&bar, volume_left);
             }
-            if self.open_or_entering() && self.filled > 0 {
+            if self.filled > 0 {
                 self.update_levels(&bar);
             }
         }
         self.after_halt = false;
         self.phase != Phase::Done
-    }
-
-    /// Whether the slot is filling or holding, with no exit order open.
-    fn open_or_entering(&self) -> bool {
-        matches!(self.phase, Phase::Entering | Phase::Holding)
     }
 
     /// The entry window ended before this bar. In deep, an order that filled
@@ -989,6 +984,9 @@ impl<'a> Stepper<'a> {
         }
         if qty > 0 {
             self.exit_shares(bar, qty, bar.lo_raw);
+        } else {
+            // The position is open through a bar its exit waits on.
+            self.track(bar);
         }
     }
 
