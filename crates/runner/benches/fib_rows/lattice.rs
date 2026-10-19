@@ -239,7 +239,7 @@ fn priced(rng: &mut Seeded, second: u32, held: bool) -> Slot {
     let qty = 1 + rng.next() % 200;
     let entry = 100_000 + i128::from((rng.next() % 50_000) as u32);
     let gain = i128::from((rng.next() % 500) as u32) - 200;
-    let hold = 1 + (rng.next() % 3_600) as u32;
+    let exit_after = 1 + (rng.next() % 3_600) as u32;
     Slot::Priced(SlotOutcome {
         filled_qty: qty,
         entry_value_paisa: entry * i128::from(qty),
@@ -247,7 +247,7 @@ fn priced(rng: &mut Seeded, second: u32, held: bool) -> Slot {
         risk_per_share_paisa: 100,
         first_entry_second: second,
         last_entry_second: second,
-        exit_second: if held { second + hold } else { second },
+        exit_second: if held { second + exit_after } else { second },
         exit_reason: ExitReason::Forced,
         mfe_to_exit_paisa: i64::try_from(rng.next() % 400).unwrap(),
         mae_to_exit_paisa: -i64::try_from(rng.next() % 200).unwrap(),

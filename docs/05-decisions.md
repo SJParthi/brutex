@@ -73565,3 +73565,31 @@ nodes alone, every batch's scratch and every node's allowance as written here,
 and finds the walk's tasks and inline batches equal to it at 1, 4 and 12
 threads and eight (split, budget) pairs, while the scored bytes equal the
 sequential walk's. Bound: `docs/06-limits.md` L-FIB6-12.
+
+### D-6412 — The walk's cell scratch is allocated as zeroed bytes, so a region is committed only when the walk writes it (FIB-6) — 2026-10-19
+
+**Why.** L-FIB6-02 said a walk's scratch is "reserved once and zeroed lazily".
+For the cells it was not. `vec![[0; ROW_COUNT]; n]` takes the standard
+library's lazily zeroed allocation only for arrays of at most 16 elements, and
+a cell is `ROW_COUNT` = 24 bytes, so every arena's cells were written in full
+when it was made: about 24 of every 28 bytes of a reservation of 21 x rows x
+28 bytes, committed before the walk touched any of it. Measured in this
+session with a temporary probe of the bench (never committed) on the 10^6-row
+partition at a 10% floor: the sequential walk's peak resident memory was
+595,184 kB against a largest path of node sizes of 2,977,086 entries (83 MB);
+the 4-thread walk's was 2,509,784 kB and it ran SLOWER than one thread
+(16,192 ms against 11,823 ms), every task writing its whole arena first. At
+2 x 10^7 rows one arena is about 10 GB, which is what the 4-thread walk of the
+bench ran out of on this 15 GiB host even after D-6411.
+
+**What is decided.** Cell scratch (every task arena, a prefix task's scan
+copy, `expand_range`'s `Scratch` and the guided walk's arena) is allocated as
+`vec![0_u8; n x ROW_COUNT]`, which the standard library allocates zeroed and
+lazily, and viewed as cells through the safe `as_chunks_mut::<ROW_COUNT>()`.
+No `unsafe`, no new dependency, no change to any output or count.
+
+**Measured after it, same probe, same host.** Sequential walk: peak 267,156 kB,
+12,312 ms. 4 threads: peak 532,064 kB, 9,384 ms. 12 threads: peak 704,020 kB,
+9,348 ms. The walk's memory is now the table, the pages of its arena that a
+path actually writes (L-FIB6-02), and at most the budget of task scratch
+(D-6411, L-FIB6-12).

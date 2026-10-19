@@ -1017,8 +1017,20 @@ impl Counted {
 /// The width of one count region: one slot per possible value of a row.
 const COUNT_STRIDE: usize = OPEN as usize;
 
-/// The zero cell a fresh scratch region holds.
-const BLANK: Coords = [0; ROW_COUNT];
+/// Zeroed scratch for `n` cells, held as bytes. `vec![[0; ROW_COUNT]; n]` would
+/// write every cell: the standard library takes its lazily zeroed allocation
+/// only for arrays of at most 16 elements, and a cell has `ROW_COUNT` (24), so
+/// a walk's arena was committed whole when it was made. Zeroed bytes are
+/// allocated lazily, so the host commits a page only when the walk writes it
+/// (D-6412).
+fn zeroed_cells(n: usize) -> Vec<u8> {
+    vec![0_u8; n.saturating_mul(ROW_COUNT)]
+}
+
+/// The cells of byte scratch made by [`zeroed_cells`].
+fn cells_mut(bytes: &mut [u8]) -> &mut [Coords] {
+    bytes.as_chunks_mut::<ROW_COUNT>().0
+}
 
 /// Where a task's rows come from.
 #[derive(Clone, Copy)]
@@ -1103,8 +1115,8 @@ struct Bufs<'b> {
 struct Owned {
     /// Row indices.
     rows: Vec<u32>,
-    /// Their cells.
-    cells: Vec<Coords>,
+    /// Their cells, as zeroed bytes ([`zeroed_cells`]).
+    cells: Vec<u8>,
     /// Count regions.
     counts: Vec<u32>,
 }
@@ -1115,7 +1127,7 @@ impl Owned {
         (
             Arena {
                 rows: &mut self.rows,
-                cells: &mut self.cells,
+                cells: cells_mut(&mut self.cells),
             },
             &mut self.counts,
         )
@@ -1144,7 +1156,7 @@ impl Walker<'_> {
         let regions = self.free.len().saturating_sub(next);
         Owned {
             rows: vec![0_u32; rows.saturating_mul(regions)],
-            cells: vec![BLANK; rows.saturating_mul(regions)],
+            cells: zeroed_cells(rows.saturating_mul(regions)),
             counts: vec![0_u32; COUNT_STRIDE * (regions + 1)],
         }
     }
@@ -1266,18 +1278,20 @@ impl Walker<'_> {
                 } = child.source
                 {
                     own_rows = vec![0_u32; rows.len()];
-                    own_cells = vec![BLANK; rows.len()];
+                    own_cells = zeroed_cells(rows.len());
                     let mut region = Arena {
                         rows: &mut own_rows,
-                        cells: &mut own_cells,
+                        cells: cells_mut(&mut own_cells),
                     };
                     let kept = Self::scan(rows, cells, row, group, &mut region, &mut counted);
                     own_rows.truncate(kept);
-                    own_cells.truncate(kept);
+                    own_cells.truncate(kept.saturating_mul(ROW_COUNT));
                 }
                 let (rows, cells) = match child.source {
                     Source::Rows(rows, cells) => (rows, cells),
-                    Source::Prefix { .. } => (own_rows.as_slice(), own_cells.as_slice()),
+                    Source::Prefix { .. } => {
+                        (own_rows.as_slice(), own_cells.as_chunks::<ROW_COUNT>().0)
+                    }
                 };
                 let mut owned = self.owned(rows.len(), next);
                 let (arena, counts) = owned.arena();
@@ -1588,8 +1602,8 @@ pub fn walk<V: Visitor>(
 pub struct Scratch {
     /// Child row indices.
     rows: Vec<u32>,
-    /// Their cells.
-    cells: Vec<Coords>,
+    /// Their cells, as zeroed bytes ([`zeroed_cells`]).
+    cells: Vec<u8>,
     /// Count regions.
     counts: Vec<u32>,
 }
@@ -1600,7 +1614,7 @@ impl Scratch {
     pub fn for_rows(rows: usize) -> Self {
         Self {
             rows: vec![0; rows],
-            cells: vec![BLANK; rows],
+            cells: zeroed_cells(rows),
             counts: vec![0; COUNT_STRIDE + COUNT_STRIDE],
         }
     }
@@ -1664,7 +1678,7 @@ pub fn expand_range<V: Visitor>(
     counted.tally.count(Child::Frequent, 0);
     let arena = Arena {
         rows: &mut scratch.rows,
-        cells: &mut scratch.cells,
+        cells: cells_mut(&mut scratch.cells),
     };
     let node = At {
         rows,
@@ -1958,7 +1972,7 @@ pub fn walk_guided<V: Visitor>(
     let rows = &table.order;
     let regions = rows.len().saturating_mul(free_rows().len());
     let mut arena_rows = vec![0_u32; regions];
-    let mut arena_cells = vec![BLANK; regions];
+    let mut arena_cells = zeroed_cells(regions);
     let mut tally = GuidedTally {
         scored: 0,
         passed_through: 0,
@@ -1974,7 +1988,7 @@ pub fn walk_guided<V: Visitor>(
     };
     let arena = Arena {
         rows: &mut arena_rows,
-        cells: &mut arena_cells,
+        cells: cells_mut(&mut arena_cells),
     };
     at_ref(&survivors.nodes, 0, |trie| {
         guide.descend(trie, root, arena, visitor, &mut tally);
