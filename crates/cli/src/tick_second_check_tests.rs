@@ -1922,3 +1922,38 @@ fn the_restored_prints_rejoin_the_rows_in_file_order_each_identical_row_counted(
         "no print, the rows alone"
     );
 }
+
+/// Every year (no YEAR given) is the months the share's one-second tree
+/// lists, in BOTH forms (D-5899): a month held only as a sealed `.sbar` is a
+/// month the store holds and the read door opens, so it is checked, never
+/// dropped; a month in both forms is one month; a name of neither form, a
+/// month 13 and a directory that does not exist name nothing. With a YEAR the
+/// twelve months are probed through the read door instead.
+#[test]
+fn every_month_of_either_form_is_listed_once_and_nothing_else() {
+    let store = scratch("months");
+    let dir = store.join("bars/gdfl/NSE/CASH/ZZMONTHS/1s");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in [
+        "2024-12.bin",
+        "2025-01.sbar",
+        "2025-02.bin",
+        "2025-02.sbar",
+        "2025-03.tix",
+        "2025-13.bin",
+        "2025-04.bin.tmp",
+        "notes.txt",
+    ] {
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+    let ym = |y, m| YearMonth::new(y, m).unwrap();
+    assert_eq!(
+        store_months(&store, "ZZMONTHS", None).unwrap(),
+        vec![ym(2024, 12), ym(2025, 1), ym(2025, 2)]
+    );
+    assert_eq!(store_months(&store, "ZZABSENT", None).unwrap(), Vec::new());
+    let year = store_months(&store, "ZZABSENT", Some(2025)).unwrap();
+    assert_eq!(year.len(), 12);
+    assert_eq!(year.first(), Some(&ym(2025, 1)));
+    assert_eq!(year.last(), Some(&ym(2025, 12)));
+}

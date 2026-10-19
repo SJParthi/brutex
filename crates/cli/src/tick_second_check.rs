@@ -1623,7 +1623,8 @@ pub(crate) fn store_symbols(
 }
 
 /// The months of `symbol`'s GDFL one-second tree, from the store's own
-/// listing of its `<yyyy-mm>.bin` files, limited to `year` when given.
+/// listing of its `<yyyy-mm>.bin` and sealed `<yyyy-mm>.sbar` files
+/// (D-5899), limited to `year` when given.
 ///
 /// # Errors
 ///
@@ -1656,7 +1657,13 @@ pub(crate) fn store_months(
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if let Some((y, m)) = name.strip_suffix(".bin").and_then(|s| s.split_once('-'))
+        // Both forms of a month (D-5899): a sealed `.sbar` whose `.bin` a
+        // retirement removed is still a month the store holds, and the read
+        // door opens it; listing `.bin` alone would drop it without a word.
+        let stem = name
+            .strip_suffix(".bin")
+            .or_else(|| name.strip_suffix(".sbar"));
+        if let Some((y, m)) = stem.and_then(|s| s.split_once('-'))
             && let (Ok(y), Ok(m)) = (y.parse::<u16>(), m.parse::<u8>())
             && let Ok(ym) = YearMonth::new(y, m)
         {
