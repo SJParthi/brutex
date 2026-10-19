@@ -1367,6 +1367,13 @@ const ALLOW_SEARCH: Allow = &[
     // among a chain's step-born versions are the same bounded bisection.
     // Reason in docs/06-limits.md, "Gate 11 — FIB-1, declared".
     ("crates/vocab/src/fib_cube.rs", 5),
+    // FIB-5, 19 Oct 2026: FM-F030 prescribes a spill as one binary search
+    // on the stock-day's volume prefix; `Events::spill` bisects the run of
+    // plain seconds ahead of the order (at most 86,400) for the completing
+    // bar, and once more for a short run's last bar with volume. O(log bars)
+    // per spill run. Reason in docs/06-limits.md, "Gate 11 — FIB-5,
+    // declared" (D-6391).
+    ("crates/runner/src/fib/walk/event.rs", 2),
 ];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.

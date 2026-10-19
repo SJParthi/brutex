@@ -241,7 +241,7 @@ pub struct DayIndex {
 }
 
 /// Seconds after IST midnight of a timestamp, and its IST day.
-fn clock(ts_micros: i64) -> (i64, u32) {
+pub(super) fn clock(ts_micros: i64) -> (i64, u32) {
     let micros = i128::from(ts_micros) + i128::from(IST_OFFSET_MICROS);
     let day_micros = i128::from(SECONDS_PER_DAY) * i128::from(MICROS_PER_SECOND);
     let second = micros.rem_euclid(day_micros) / i128::from(MICROS_PER_SECOND);
@@ -518,6 +518,14 @@ impl DayIndex {
     #[must_use]
     pub fn bars(&self) -> usize {
         self.long.bars.len()
+    }
+
+    /// The usable bars inside `[15:09:00, 15:10:00)`: zero on a day whose
+    /// forced exit no bar can price, whatever the position (the real-data
+    /// proof counts such stock-days, D-6392).
+    #[must_use]
+    pub const fn forced_window_bars(&self) -> u32 {
+        self.long.forced.bars
     }
 
     /// The bytes the index holds: its working set, for a memory budget.

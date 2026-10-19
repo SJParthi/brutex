@@ -19821,3 +19821,35 @@ harness row): `DayIndex::build` of one deep stock-day of 21,300 seconds, min
 bytes per index; of one stage-A stock-day of 355 minutes, min 210,896 ns, p50
 417,022 ns, max 803,051 ns over 100 builds, 540,080 bytes per index (L-FIB5-01,
 L-FIB5-15).
+
+## The walker's spills by events (FIB-5, D-6391)
+
+Appended 19 October 2026 by the FIB-5 continuation (`cloud/fib5-20261019`).
+The rows above stay as written; L-FIB5-17 NARROWS L-FIB5-03, whose "FM-F030's
+binary search on a volume prefix was not built, so no binary search enters the
+walker" is no longer true of the event walk, and L-FIB5-18 and L-FIB5-19 add
+what the build costs. The every-bar walk is unchanged: it still steps every
+second of a spill, one O(1) step each (C-F5-08).
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FIB5-17 | What the event walk still steps one bar at a time | a capped entry spill (17:15 item 4: each second supplies `floor(c x volume / 1000)`, which needs a prefix per generated cap, and the index is given the exit set, not the fill set), an armed entry that has filled nothing yet, stage A's locked minutes (FM-F042), and every bar a spill's run stops at (a full-step bar, a second whose fill is flagged, one with no book side for the leg) | one O(1) step each; a capped entry spill is O(seconds of the spill) per slot by events as well as every bar | FIB-5 |
+| L-FIB5-18 | A spill by events reads the volume prefix by binary search | FM-F030 prescribes it: the completing bar of a run of plain seconds is found by `partition_point`, and a run short of the order finds its last bar with volume by a second one | BOUNDED: O(log bars) per spill run (C-F5-09), at most two per run; gate 11 rule 1, "Gate 11 — FIB-5, declared" | FIB-5 |
+| L-FIB5-19 | The index holds three prefix sums and two leg-stop arrays per side | the spill's volume and value come from two prefix reads | O(bars) to build per side, inside L-FIB5-01's build; 3 x 16 + 2 x 4 bytes per bar per side, inside L-FIB5-15's `bytes()` | FIB-5 |
+| L-FIB5-20 | How long real spills run is unmeasured | the operator's FILLS rule bounds a spill only by the volume it needs; C-F5-08 and C-F5-09 run on synthetic one-share seconds | the Mac's real-data proof reports the seconds waited and the spill seconds (NEEDS THE MAC) | FIB-5 / FIB-12 |
+
+### Gate 11 — FIB-5, declared (19 October 2026)
+
+~~~~text
+FIB-5's spill by events (D-6391) met gate 11 in one file. Each occurrence was
+read before it was counted; `file old -> new`, the occurrences, and the bound.
+
+RULE 1 (`ALLOW_SEARCH`) -- runner/src/fib/walk/event.rs 0 -> 2: FM-F030
+  prescribes a spill as a binary search on the stock-day's volume prefix.
+  `Events::spill` bisects the volume prefix over the run of plain seconds
+  ahead of the order (at most the day's 86,400 seconds, one side) for the
+  bar that completes it, and, when the run cannot complete it, bisects the
+  same run once more for its last bar with volume. O(log bars) per spill
+  run, at most two per run; the cost per pair stays O(log bars x (1 +
+  events)), BOUNDED by its events as D-6390 declared (C-F5-07, C-F5-09).
+~~~~

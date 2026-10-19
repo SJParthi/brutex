@@ -73800,6 +73800,49 @@ order; a run of empty bars; and each kind of bar that stops a leg.
 
 **Cost.** O(log bars) per spill run and per trigger descent, so a pair is
 O(log bars x (1 + events)) whatever its spills' lengths, BOUNDED by its events
-as D-6390 declared (C-F5-08). The build adds O(bars) and five words per bar
-per side (L-FIB5-15). Gate 11 rule 1 declares the two `partition_point`s
+as D-6390 declared (C-F5-09; the every-bar step of a spilling exit is C-F5-08).
+The build adds O(bars), three 16-byte prefix entries and two 4-byte stops per
+bar per side (L-FIB5-19).
+
+### D-6392 — The real-data proof's plans and counts are pure walker code; its loading is FIB-8's day input, run on the Mac (FIB-5) — 2026-10-19
+
+**What the specification asks.** FIB-5's REAL DATA paragraph: plans
+generated every 15 minutes on both sides with the stop at that 15-minute
+candle's far edge, walked at stage A on Zerodha minutes and in deep on GDFL
+seconds (factor 1 assumed for RELIANCE and a learning month of TECHM only,
+labelled "factor 1 assumed, development only, not a result"), reporting counts
+by exit reason, the gap-through-stop count and the worst R, partial fills at
+both sizes, forced and unpriceable counts, the p99 seconds waited, and for 20
+stocks of 2025-03 the share of stock-days with no GDFL second in
+`[15:09:00, 15:10:00)`. Until this entry no code produced any of it, and the
+18 Oct report said so.
+
+**What is decided.** The proof splits where the ownership splits.
+
+1. FIB-5 owns, in `runner::fib::walk::proof`, the two pure halves:
+   `plans_at_every_close(candles, trail, direction)` — one CLOSE plan at the
+   close of every usable candle of one timeframe that closes before 15:09:00,
+   its base that candle (so the planned stop sits one tick beyond its far
+   edge), its window the next candle, its Fibonacci range the day's range of
+   the usable candles so far in the trade's direction; and `Tally`, which
+   counts walked slots by status, the priced ones by exit reason, the
+   `gap_through_stop`, `partial_entry` and `dhan_square_off` flags, the worst
+   R by exact comparison (a comparison that leaves `i128` is counted
+   `r_incomparable`, never dropped), and keeps each entered slot's seconds
+   waited and spilled in walk order. `DayIndex::forced_window_bars` answers
+   whether a stock-day has any usable second in the forced window. The
+   timeframe is the candles' own and the percentile is the printing
+   program's: no number is typed in the module.
+2. Loading a stock-day — Zerodha minutes through `cli::stored::load`, the
+   in-run fold to 15 minutes, GDFL seconds of the continuous phase, the halts
+   — is FIB-8's day input (`cloud/fib8-20261018`, not merged), and a second
+   loader here would be a second day-input authority. The proof's driver is
+   therefore a scratch program with path dependencies, written for the Mac and
+   run once FIB-8 is merged; the FIB-5 report (`reports/cloud-fib5-20261019.md`,
+   NEEDS THE MAC) carries its exact steps.
+
+**Proved on synthetic days.** `the_proof_plans_one_close_plan_per_usable_candle_on_each_side`
+and `the_proof_tally_counts_every_slot_by_status_reason_and_flag` (with the
+unit test `a_worse_r_replaces_the_worst_and_an_incomparable_one_is_counted`).
+No measurement on real data is claimed; none was taken. Gate 11 rule 1 declares the two `partition_point`s
 ("Gate 11 — FIB-5, declared" in `docs/06-limits.md`).

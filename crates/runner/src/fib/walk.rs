@@ -39,6 +39,7 @@
 mod event;
 pub mod exits;
 mod index;
+pub mod proof;
 mod slot;
 
 pub use index::DayIndex;

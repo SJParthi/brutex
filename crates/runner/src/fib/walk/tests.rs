@@ -9,11 +9,12 @@ fn shipping(source: &str) -> &str {
 }
 
 /// The walker's files, each with its source.
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 8] = [
     ("walk.rs", include_str!("../walk.rs")),
     ("walk/event.rs", include_str!("event.rs")),
     ("walk/exits.rs", include_str!("exits.rs")),
     ("walk/index.rs", include_str!("index.rs")),
+    ("walk/proof.rs", include_str!("proof.rs")),
     ("walk/slot.rs", include_str!("slot.rs")),
     ("codec.rs", include_str!("../codec.rs")),
     ("types.rs", include_str!("../types.rs")),

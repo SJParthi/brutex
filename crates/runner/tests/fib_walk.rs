@@ -4101,6 +4101,171 @@ fn an_unarmed_break_jumps_to_the_bar_that_arms_it() {
     assert!(events < 10, "{events}");
 }
 
+// ------------------------------------------------------ the proof halves --
+
+/// A `tf`-minute decision candle opening at `open_second`, as given (a
+/// broken one is not refused here: the proof must skip it).
+fn decision_candle(open_second: u32, tf: u16, prices: (i64, i64, i64, i64)) -> FibCandle {
+    let (open, high, low, close) = prices;
+    FibCandle {
+        candle: corrupt(open_second, open, high, low, close, 1_000),
+        tf_minutes: tf,
+        complete: true,
+        missing_minutes: 0,
+        close_ts_micros: ts(open_second + 60 * u32::from(tf)),
+    }
+}
+
+/// The proof's plans: one CLOSE plan per usable candle closing before
+/// 15:09:00, its stop beyond the candle's far edge, its window the next
+/// candle, its Fibonacci range the day's so far in the trade's direction; an
+/// incomplete, holed or broken candle is no decision and no part of the range.
+#[test]
+fn the_proof_plans_one_close_plan_per_usable_candle_on_each_side() {
+    use runner::fib::walk::proof::plans_at_every_close;
+    let wide = (P, P + 900, P - 900, P);
+    let candles = [
+        decision_candle(at(9, 15, 0), 15, (P, P + 300, P - 200, P + 100)),
+        FibCandle {
+            complete: false,
+            ..decision_candle(at(9, 30, 0), 15, wide)
+        },
+        FibCandle {
+            missing_minutes: 1,
+            ..decision_candle(at(9, 45, 0), 15, wide)
+        },
+        decision_candle(at(10, 0, 0), 15, (P, P - 1, P, P)),
+        decision_candle(at(10, 15, 0), 15, (P + 100, P + 500, P - 50, P + 400)),
+        decision_candle(at(15, 0, 0), 15, (P, P + 10, P - 10, P)),
+    ];
+    let longs = plans_at_every_close(&candles, 3, Search::Long);
+    assert_eq!(
+        longs,
+        vec![
+            Plan {
+                direction: Search::Long,
+                style: EntryStyle::Close,
+                tf_minutes: 15,
+                decision_second: at(9, 30, 0),
+                entry_window_end: at(9, 45, 0),
+                entry_ref: P + 100,
+                base_edge: P - 200,
+                trigger_edge: P + 100,
+                fib_zero: P - 200,
+                fib_one: P + 300,
+                trail: 3,
+            },
+            Plan {
+                direction: Search::Long,
+                style: EntryStyle::Close,
+                tf_minutes: 15,
+                decision_second: at(10, 30, 0),
+                entry_window_end: at(10, 45, 0),
+                entry_ref: P + 400,
+                base_edge: P - 50,
+                trigger_edge: P + 400,
+                fib_zero: P - 200,
+                fib_one: P + 500,
+                trail: 3,
+            },
+        ]
+    );
+    let shorts = plans_at_every_close(&candles, 3, Search::Short);
+    assert_eq!(shorts.len(), 2);
+    assert_eq!(
+        (shorts[0].base_edge, shorts[0].fib_zero, shorts[0].fib_one),
+        (P + 300, P + 300, P - 200)
+    );
+    assert_eq!(
+        (shorts[1].base_edge, shorts[1].fib_zero, shorts[1].fib_one),
+        (P + 500, P + 500, P - 200)
+    );
+    assert!(shorts.iter().all(|p| p.direction == Search::Short));
+    // A candle closing at 15:09:00 is no decision; one closing a minute
+    // earlier is.
+    let edge = [
+        decision_candle(at(15, 7, 0), 1, (P, P + 10, P - 10, P)),
+        decision_candle(at(15, 8, 0), 1, (P, P + 10, P - 10, P)),
+    ];
+    let plans = plans_at_every_close(&edge, 0, Search::Long);
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].decision_second, at(15, 8, 0));
+    assert_eq!(plans[0].entry_window_end, at(15, 9, 0));
+}
+
+/// The proof's tally counts every slot by status, the priced ones by exit
+/// reason, the gap through the stop and the worst R, the partial entries
+/// and the square-offs, and keeps each entered slot's wait and spill; a day
+/// with no second in the forced window says so.
+#[test]
+fn the_proof_tally_counts_every_slot_by_status_reason_and_flag() {
+    use runner::fib::walk::proof::Tally;
+    let gap = minute_slot(
+        &minute_day(&[
+            bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+            bar(at(10, 1, 0), 98_500, 98_600, 98_000, 98_100, 1_000),
+        ]),
+        long_plan(at(10, 0, 0)),
+        STOP_ONLY,
+    );
+    let quiet_day = minute_day(&[bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000)]);
+    let forced = minute_slot(&quiet_day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    let unfilled = minute_slot(&quiet_day, long_plan(at(11, 0, 0)), STOP_ONLY);
+    let windowed = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 10),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let partial = second_slot(&windowed, long_plan(at(10, 0, 0)), STOP_ONLY);
+    let empty = Day::seconds(vec![bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 10_000)]);
+    let thin = second_slot(&empty, long_plan(at(10, 0, 0)), STOP_ONLY);
+    let exits = set_of(Search::Long, vec![STOP_ONLY]);
+    assert_eq!(
+        windowed
+            .index(&second_profile(), &exits)
+            .expect("indexes")
+            .forced_window_bars(),
+        1
+    );
+    assert_eq!(
+        empty
+            .index(&second_profile(), &exits)
+            .expect("indexes")
+            .forced_window_bars(),
+        0
+    );
+    let mut tally = Tally::empty();
+    for out in [&gap, &forced, &unfilled, &partial, &thin] {
+        tally.add(Search::Long, out);
+    }
+    assert_eq!(tally.slots, 5);
+    assert_eq!(
+        tally.statuses,
+        vec![
+            ("priced", 3),
+            ("entry_unfilled", 1),
+            ("unpriceable_thin", 1)
+        ]
+    );
+    assert_eq!(tally.reasons, vec![("stop_loss", 1), ("forced", 2)]);
+    assert_eq!(tally.gap_through_stop, 1);
+    assert_eq!(tally.worst_r, Some(r_long(&gap)));
+    assert_eq!(tally.r_incomparable, 0);
+    assert_eq!(tally.partial_entries, 1);
+    assert_eq!(tally.square_offs, 3);
+    assert_eq!(tally.waits, vec![0, 0, 0, 0]);
+    assert_eq!(tally.spills, vec![0, 0, 0, 0]);
+    // A spill and a wait are each slot's own.
+    let spilled = second_slot(&spill_day(1_000), long_plan(at(10, 0, 0)), STOP_ONLY);
+    let mut waited_plan = long_plan(at(10, 0, 0));
+    waited_plan.decision_second = at(9, 59, 58);
+    let waited = second_slot(&spill_day(1_000), waited_plan, STOP_ONLY);
+    let mut more = Tally::empty();
+    more.add(Search::Long, &spilled);
+    more.add(Search::Long, &waited);
+    assert_eq!(more.spills, vec![3, 3]);
+    assert_eq!(more.waits, vec![0, 2]);
+}
+
 // ------------------------------------------------ the index's last paths --
 
 #[test]
