@@ -1123,3 +1123,25 @@ fn a_header_followed_by_more_bytes_parses_alone() {
     assert_eq!(sealed.records, 10);
     assert_eq!(sealed.header_len, u64::try_from(bytes.len()).unwrap());
 }
+
+/// A record of a block verified earlier but no longer the cached one is read
+/// on its own, at its own offset.
+#[test]
+fn a_record_of_a_block_verified_before_is_read_at_its_offset() {
+    let scratch = Scratch::new("revisit");
+    let path = scratch.0.join("r.fib");
+    let body = records(6_000, 24);
+    write(&path, &header(Kind::Downside, 24), &body).unwrap();
+    let mut file = FibFile::open(&path).unwrap();
+    let per_block = file.sealed().block_records;
+    assert!(per_block < 3_000, "two blocks at least");
+    assert_eq!(file.record(10).unwrap(), body[10]);
+    assert_eq!(file.record(3_000).unwrap(), body[3_000]);
+    let before = file.bytes_read();
+    assert_eq!(file.record(17).unwrap(), body[17]);
+    assert_eq!(
+        file.bytes_read() - before,
+        24,
+        "one record read, its block already verified"
+    );
+}
