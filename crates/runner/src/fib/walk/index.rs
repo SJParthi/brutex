@@ -1071,4 +1071,55 @@ mod tests {
         assert_eq!(set(once, Bit::Halted, false), once);
         assert_eq!(set(once, Bit::Corrupt, false), once);
     }
+
+    /// An empty range covers no traded minute, even inside one; the walker's
+    /// own callers only ever ask about a silence of at least one second.
+    #[test]
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    fn an_empty_range_covers_no_traded_minute() {
+        use crate::fib::types::{BeyondTarget, ExitFill, HaltRule};
+        let ts = |second: i64| (19_723 * 86_400 + second - 19_800) * 1_000_000;
+        let ten = 36_000;
+        let bars = [Candle::new(
+            ts(ten),
+            100_000,
+            100_010,
+            99_990,
+            100_000,
+            10,
+            indicators::OI_NULL,
+        )];
+        let profile = WalkProfile {
+            resolution: Resolution::Second,
+            price_map: PriceMap::Identity,
+            exit_fill: ExitFill::SpillByVolume,
+            snapshot_edge: SnapshotEdge::StampOpensInterval,
+            halt_rule: HaltRule::WorstSeenThroughHalt,
+            cross_feed: CrossFeed::SecondsOnly,
+            beyond_target: BeyondTarget::FiresOnFirstBar,
+            clock_rule: ClockRule::RefuseShifted,
+        };
+        let input = DayInput {
+            bars: &bars,
+            book: BookEvidence::NotObserved,
+            halts: &[],
+            zerodha_minutes: &bars,
+            raw_tick: 5,
+            decision_tick: 5,
+            max_second_gap: u32::MAX,
+            clock_lag: ClockLag::Measured(0),
+            trail: &[],
+        };
+        let exits = ExitSet::new(
+            Search::Long,
+            1,
+            0,
+            vec![super::super::exits::ExitVariant::REFERENCE],
+        )
+        .expect("a valid set");
+        let index = DayIndex::build(&profile, &input, &exits).expect("indexes");
+        let second = u32::try_from(ten).expect("a second of the day");
+        assert!(index.traded_between(second, second));
+        assert!(!index.traded_between(second + 1, second));
+    }
 }
