@@ -71123,6 +71123,387 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
 
+### D-4981 — Minute-gap admission is causal: a holed day is cut at its first hole, and a recorded halt is a hole from its start (AH-01; lookahead-oos-1, g-zerodha-universe-census-3) — 2026-10-16
+
+Two findings of the 14 October attack run, each confirmed by two skeptics.
+
+**lookahead-oos-1.** `minute_gaps::days_with_minute_holes` plus `withhold`
+dropped EVERY row of a session holding any interior minute hole or any absent
+demanded closing minute, so a 10:00 row disappeared because the vendor lost a
+minute at 14:02: which rows exist depended on minutes after them, the
+look-ahead `CLAUDE.md` §3 rule 7 forbids as D-0943, D-1182 and D-1514 read it,
+recorded in neither `docs/06-limits.md` nor `docs/11-findings.md`. The rows
+from the hole on are a different matter: dropping them is causal and is
+D-0694's documented choice. The skeptics narrowed the bias claim: of the 266
+large-move withheld days 148 are the two halt days and 27-29 listing-shape days
+with one bar before the hole, and the rows the look-ahead removed were not
+enriched in large movers (0.355% against 0.354% >= 10% movers where the first
+hole is at or after 10:00).
+
+**g-zerodha-universe-census-3.** Zerodha NIFTY and BANKNIFTY 1min hold full
+375-bar days on 2020-03-13 and 2020-03-23 with near-constant bars inside both
+`pull::calendar::HALTS` windows; the non-flat minutes (10:06-10:13 and
+10:42-10:49) are the reopening auction's indicative index, not continuous
+trading, and the 2min and 5min rungs fold them. No sweep-path code read
+`HALTS`.
+
+**The change (minute-gap policy 4, `cli::minute_gaps::MINUTE_GAP_POLICY`).**
+
+1. A holed day is CUT, not withheld whole. Its cut instant is the EARLIEST of:
+   its first missing interior minute (seen by the minute after it, cut AT the
+   hole), the demanded closing minute (`indicators::anchored::
+   exact_closing_minute`, with the day's own close) of its first signal bucket
+   whose minute is absent, the start of a recorded halt, and a minute the
+   exact-minute overlay could not source (the retry loops' defence, cut at
+   the minute the refusal names). A signal bar is withheld exactly when its
+   bucket reaches past the cut (`open >= cut - length + 1 µs`); every bar
+   wholly before it is admitted and swept.
+2. **A recorded halt is a hole from its first whole minute** for every rung
+   whose bucket overlaps it, whatever bars the feed served inside it.
+   `pull::calendar::halt_on` over `HALTS` is the one authority; no second list
+   exists. 2020-03-13 cuts at 09:22 and 2020-03-23 at 09:59 (`halted.from`).
+   2021-02-24, the third `HALTS` entry, is unchanged: it is in
+   `indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS`, so the month decode
+   withholds it whole before this census sees it.
+3. The rows from the cut to the session end stay withheld (D-0694, narrowed to
+   them). A trade entered before the cut is refused at it by D-1514's located
+   hole, because the rows after it are absent from the execution series on
+   `1min` and the minute itself is absent on a coarse rung.
+4. **The fold stays whole** (D-1781): the indicator fold steps every bar and
+   gives no row to a bar at or after its day's cut
+   (`indicators::column::AnchoredColumn::build_required_withholding_from`,
+   whose `(day, i64::MIN)` pair is the old whole-day door).
+5. **Identity.** `MINUTE_GAP_POLICY` is 4 and `bind_withheld` binds each
+   cut's day, cut instant, first withheld bar-open and cause, so no version-3
+   run shares an identity with a version-4 run that withheld anything, and
+   two runs that cut one day at different instants never share one. Runs filed
+   before keep their identities (§3 rule 8).
+6. **Reports name each cut**: `YYYY-MM-DD from HH:MM (cause): A admitted
+   before, W withheld`, on `sweep-stored`, `auto-stored`, `audit-range` and
+   `screen`. All five doors (those four and `pool`) call the one census
+   `days_with_minute_holes` and the one `withhold`.
+
+**Measured both ways (operator's rule), read-only over a private shadow of the
+real store** (`state/fix/shadow.sh AH-01`, the test
+`cli::minute_gaps::measure_tests::rows_and_move_rates_both_ways` under
+`state/fix/ro.sh`), 2026-10-16, 41 s: over 210 F&O shares' Zerodha `1min`,
+20,590 months 2018-01..2026-09, the whole-day rule admitted 147,590,087 rows and
+the causal cut admits 150,305,573 (+2,715,486, +1.84%). 21,316 sessions are cut
+and every one keeps a non-empty window before its cut. Of the 393,961 sessions
+with no cut, 3.449% move 5% or more open to close and 0.351% move 10% or more;
+of the 21,316 recovered pre-hole windows (first open to the last admitted
+close), 1.853% and 0.188% do. The recovered rows are not enriched in large
+movers -- the skeptics' correction, reproduced -- so the rule is adopted for
+causality, not for a measured bias. A window is shorter than its session, so
+its move rates are not a like-for-like comparison with a whole session's.
+
+**Cost.** One interior pass over the minutes, one forward cursor over the
+signal, one `halt_on` (three entries) per signal day, two O(d) merges, and one
+hash probe of the bar's day per bar in `withhold` and the fold: O(bars), with an
+O(1) probe per bar however many days are cut. MEASURED 2026-10-16 by
+`cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month` (release
+test binary, read-only shadow, warm page cache, on a machine shared with a
+running test suite; the load is not timed) over 1,678 months -- NIFTY and
+BANKNIFTY `1min` and `15min` and twelve shares' `1min`, 2018-01..2026-09: the
+census plus `withhold` cost p50 5.3 ns, p99 39.6 ns, max 586.1 ns per bar and
+p50 39.6 us, p99 175.8 us, max 622.6 us per month, against policy 3's 5.1,
+39.7 and 410.9 ns and 38.4, 200.2 and 635.4 us on the same months (policy 3 is
+re-implemented statement for statement inside the test). 246 of the months are
+cut; they admit 11,118,854 rows in all against policy 3's 11,019,137. The
+per-bar p99 is a small month's fixed cost (a `15min` month's few hundred bars
+carrying one map and one `halt_on` per day), not a scan.
+
+**Repair round 1 (2026-10-17): a hole at the open, read from the calendar.**
+AH-01's first re-check found that `first_interior_holes` compared only two
+bars of one IST day, so the step into a day's FIRST bar came from the
+previous night and failed the same-day test: a day whose 09:15 minute (or
+09:15..09:2x) the feed lacked had no cut on any rung, and the rule above
+admitted every row after that hole. The re-check measured it on real Zerodha
+`1min`: 132 of 415,277 share-days lacked the open minute, 82 of them also
+carried a later cut, and on those the rule newly admitted 1,155 rows that
+follow a hole (360ONE 2020-01-01: first stored minute 09:23, cut at 09:25,
+"2 admitted before"). The walk now asks the exchange calendar once per day
+(`pull::calendar::kind_of`, the one authority, no second list): a minute is
+MISSING when the day's session expects it and the series lacks it. So:
+
+1. A day whose first held minute is later than its session's first minute is
+   cut AT that first minute with cause `Hole`; every row of the day is
+   withheld on every rung, and the exclusion reads `YYYY-MM-DD from 09:15
+   (minute hole): 0 admitted before, W withheld`.
+2. The gap between a two-window session's windows (2024-03-02 and 2024-05-18,
+   09:15-09:59 and 11:30-12:29 by the calendar's own record) is not a hole:
+   no minute in it is expected. The rule as first written cut those days at
+   10:00 and withheld the second window; a hole inside a window still cuts.
+3. A traded day OUTSIDE the calendar's measured range (`kind_of` answers
+   `Unmeasured` before 2019-12-02 and after 2026-09-04, and Zerodha's `1min`
+   reaches 2018-01 and 2026-09-30) holds bars, so it traded: it is held to
+   the regular session (`pull::calendar::Session::full`, 09:15-15:29), so a
+   missing 09:15 there is a hole at 09:15 too. A special session there that
+   began late would be withheld whole and named, never admitted after a
+   hole (`docs/06-limits.md` L-AH1-11). A day the calendar says was `Closed`,
+   or one whose session length was never measured (`OpenLengthUnmeasured`,
+   the five pre-2025 Muhurats), has no known first minute, so it gets no
+   leading cut, and its interior rule is the calendar-free one: any same-day
+   step longer than a minute is a hole at the minute after the earlier bar.
+4. A hole that ties a recorded halt's start is named the halt
+   (`merge_cuts`), so the operator is not sent to the vendor for an
+   exchange event.
+
+`MINUTE_GAP_POLICY` stays 4: the rule above had not landed on `feat/db-fix`,
+so no filed run carries it, and `bind_withheld` binds each cut's day and
+instant anyway, so a day newly cut at 09:15 or no longer cut at 10:00 changes
+the run's identity. The cost is one `kind_of` per minute-day (at most nine
+comparisons) and two window compares per bar: O(1) per bar.
+
+**Measured again after the repair, 2026-10-17**, the same two tests on a
+fresh private shadow (`state/fix/shadow.sh AH-01`, under `state/fix/ro.sh`,
+the workspace's optimised `test` profile, 36.5 s for both, on a machine
+shared with other agents' builds; logs
+`state/fix/logs-AH-01-r1c/measure.log`). These figures supersede the ones
+above for the rule as it lands.
+
+- **Both ways.** Over 210 F&O shares' Zerodha `1min`, 20,590 months
+  2018-01..2026-09, the whole-day rule admitted 147,590,087 rows and the
+  causal cut now admits 149,840,163 (+2,250,076, +1.52%; +2,715,486 before the
+  repair). 22,579 sessions are cut (21,316 before the repair): 21,086 keep a
+  non-empty window before their cut and 1,493 keep none.
+- **The leading hole.** Those 1,493 are exactly the share-days missing their
+  open minute: 132 inside the calendar's range -- the re-check's count,
+  reproduced -- and 1,361 outside it, held to 09:15 by item 3. Not one row of
+  them is admitted; the test asserts it (`lead_admitted == 0`).
+- **Move rates.** Of the 392,698 sessions with no cut, 3.449% move 5% or more
+  open to close and 0.350% 10% or more; of the 21,086 recovered pre-hole
+  windows, 1.859% and 0.180% do. The recovered rows are still not enriched in
+  large movers, so the rule stands on causality, not on a measured bias.
+- **Cost.** Over the same 1,678 months as above, the census plus `withhold`
+  cost p50 7.8 ns, p99 72.2 ns, max 624.4 ns per bar and p50 58.7 us, p99
+  155.5 us, max 559.5 us per month, against policy 3's 5.9, 48.8 and 141.2 ns
+  and 43.9, 123.2 and 445.3 us measured in the same run. The difference is the
+  one `kind_of` per day and the window compare per bar, both constant. 251 of
+  the months are cut, and they admit 11,116,682 rows in all against policy 3's
+  11,019,137.
+
+**Repair round 2 (2026-10-18): a halt's minutes leave the coarse rung's
+execution series.** AH-01's second re-check found item 3 false for the halt
+cause. A recorded halt cut only the SIGNAL rows. On every coarse rung the
+separately loaded `1min` execution series kept the feed's frozen and
+auction-indicative halt minutes. No minute was missing there, so D-1514's
+located hole could not fire, and a position opened from a row admitted
+before the halt was walked through those minutes to the 15:10 square-off,
+where a stop, target or exit could fill. The re-check's probe (5 minutes on
+2020-03-13) showed it: the last admitted row was 09:15, its entry minute
+09:20, and the next 60 execution minutes were consecutive, 59 of them inside
+`HALTS`' 09:22..10:20. Census-3's exposure ("auction-indicative minutes
+treated as tradable") was still there on coarse rungs.
+
+1. `cli::minute_gaps::withhold_halted_minutes` removes every minute inside
+   a recorded halt's `halted` window (`pull::calendar::halt_on`, the one
+   authority; the window holds the whole minutes with no continuous trading
+   on any segment, reopening auction included) from a coarse rung's
+   execution series. `sweep-stored`, `audit-range`, `screen` and `pool` call
+   it as soon as they load that series, before the floors, the census, the
+   digest and the alignment read it. `auto-stored` opens no execution series.
+   On `1min` the series is the signal itself, and the halt's cut already
+   withholds every row from its start to the session end.
+2. With those minutes gone, a halt is a missing span in the execution series,
+   just as a vendor hole is. A path that crosses it fails
+   `runner::trade::SliceFacts::path_accepts` at the first minute after it.
+   Under D-1514 a level exit strictly before the halt can still be priced;
+   nothing at or after the halt is. A signal whose entry minute would be the
+   halt's first minute has no immediate execution bar, so it is dropped and
+   never delayed.
+3. **Item 3 above, corrected.** A trade entered before a cut is refused at
+   the cut on every rung. On `1min` the slice ends at the cut, so a trade
+   whose horizon reaches past it has no square-off and is not priced. On a
+   coarse rung the cut's minute is absent from the execution series: for a
+   vendor hole or an absent closing minute because the feed lacks it, and
+   for a halt because of item 1. There, D-1514 prices only a level exit
+   strictly before the cut. The two rungs can differ in what they price
+   before a cut. Neither prices anything at or after it.
+4. The exclusion counts the removed minutes (`GapExclusion::
+   with_halted_minutes`), and `sweep-stored`, `audit-range` and `screen`
+   print `HALTED EXECUTION MINUTES WITHHELD: N one-minute bar(s) inside a
+   recorded halt ...` whenever N > 0. `pool`'s page names no cut and no
+   halted minute (`docs/06-limits.md` L-AH1-07).
+5. **Identity.** The removed minutes are absent from the execution slice
+   that each door digests into its data term, so a run under this rule
+   cannot share an identity with a run that kept them. `MINUTE_GAP_POLICY`
+   stays 4, as it did in repair round 1: policy 4 has not landed on
+   `feat/db-fix`, so no filed run carries it.
+6. `audit-stored`, the checksum-audited door, applies no minute-gap rule
+   and keeps its identity (D-0694). It still sweeps and trades both March
+   2020 halt windows. `expression-search-stored` and `expression-search-priced`
+   apply no minute-gap rule either, and price on the whole `1min` series.
+   Both are follow-ons, stated in `docs/06-limits.md` L-AH1-13, and are not
+   done here.
+
+Proved by `cli::halted_execution_tests::a_coarse_rung_trade_never_prices_a_halted_minute`
+(a generated March 2020 store through the `sweep-stored` door on 2, 5 and 15
+minutes: no halted execution minute, 117 counted, every pre-halt row's
+consecutive run ends before the halt, and on the door's own column and
+projection `runner::trade::SliceFacts::first_missing_within` places the hole
+at the first minute after the halt for every swept entry on a halt day while
+`path_accepts` refuses its path to the day's last minute) and
+`cli::minute_gaps::causal_tests::withhold_halted_minutes_removes_exactly_the_halt_window`.
+The test fails before the fix: with the removal turned off it fails at
+`2min: an execution minute inside a halt`, and with the removal off and its
+three direct checks on the series made inert it fails at the runner's check,
+`2min: the path from 1584071220000000 meets no hole` (2020-03-13 09:17 IST).
+The cost is one `halt_on` (three entries) per IST day and two compares per
+minute, in one `retain` pass: O(1) per minute, measured in `docs/06-limits.md`
+L-AH1-14 (p99 2.0 ns per minute, 16.0 us per month, n = 1,678 real months).
+
+### D-4982 — `sweep-stored`'s exit code agrees with its sweep evidence: a walk that is not a whole answer exits FAILED (AH-01; repro-2; extends D-2720) — 2026-10-16
+
+**Observed.** `stored_month_arm` exited on `work_exit`, which reads only a
+refusal line. A `sweep-stored` walk that halted on its candidate budget prints
+`outcome REFUSED the walk stopped short` and `trustworthy as a whole answer NO
+closure is incomplete on the halted frontier`, writes `Completion::Halted` to
+its sweep evidence, and exited 0, so `run_with_sink` logged `phase: completed`
+and `run_durable` recorded `Phase::Completed` for the run. `untrustworthy`
+compared the whole rest of the verdict row with `NO`, which missed exactly the
+halted row with its closure note. `audit-stored` already refused such a walk
+(`ranked_opening`), so the siblings disagreed. The ledger row and the evidence
+were honest.
+
+**The change.** `stored_month_arm` exits through `stored_month_exit`, which is
+`auto_stored_exit`'s predicate called rather than copied: a refusal line or an
+untrustworthy verdict is `FAILED`. `untrustworthy` reads the verdict CELL, the
+first whitespace-separated word after `trustworthy as a whole answer`, so the
+halted row counts and `NO,` in prose does not; this also catches the halted
+case on `auto` and `auto-stored`, the class D-2720 fixed for their other
+untrustworthy verdicts. The lifecycle `phase` and the invocation audit's
+terminal phase are each one function of the exit code (`lifecycle_phase`,
+`audit_phase`), so the three durable records cannot disagree. `audit-stored`'s
+codes do not move.
+
+**Not in this change.** The API's in-process sweep records `Completed` through
+`sweeprun.rs` `settle()` (AF-06's file); it follows on after AF-06.
+
+### D-4983 — `sweep-all` refuses a month whose column swept no bar, with `sweep-stored`'s sentence, and says CEILING only for a candidate-ceiling halt (AH-01; g-zerodha-universe-census-2; with D-0696) — 2026-10-16
+
+**Observed.** `batch::month_lines` labelled every month that did not complete
+`CEILING — depth not reached by extinction`, the summary counted it "stopped
+on the candidate ceiling", a ledger row was filed and the run exited 0, while
+its own sweep evidence finished the month `Refused` and `sweep-stored` refused
+the same month with "AND checkpoint sweep requires a measured, reconciled
+signal column" (`census.swept == 0`). Every zerodha 60min month file holds at
+most 161 bars, below the 200-bar warm-up measured at 15min (the 60min warm-up
+is UNVERIFIED), so a whole-store 60min `sweep-all` would print every month as
+a 0-bar CEILING (the skeptics' extrapolation; never run on the real store).
+
+**The change.**
+
+1. `batch::sweep_prepared` refuses a month whose column swept no bar with the
+   SAME sentence, one const (`and_checkpoint::UNMEASURED_COLUMN`, exported from
+   the file `sweep-stored`'s refusal lives in), adds the bars loaded, finishes
+   the attempt `Refused`, files no ledger row and counts the month refused. A
+   run whose every month refused is refused whole by D-0696's rule and exits
+   `FAILED`.
+2. A row carries the budget its walk breached. `CEILING` is printed, and
+   "stopped on the candidate ceiling" counted, only for `Breach::Candidates`;
+   a pair, memory or workers halt names its own budget, an unhalted incomplete
+   walk says `INCOMPLETE — the closure is not certified`, and those are counted
+   "stopped short of a whole answer".
+
+**Reproduced both ways on real bars** (2026-10-16, a private shadow holding APFS
+clones of zerodha NIFTY `60min`, `1min` and `1day`, cli under
+`state/fix/ro.sh`): `cli sweep-all zerodha 60min 40` on the `feat/db-fix`
+build 4756cce0 printed 76 months as `0 bars  k=0  0 kept  CEILING`, counted
+"76 month(s) stopped on the candidate ceiling" and exited 0; on this change it
+refuses those 76 with the shared sentence (`161 bar(s) loaded, none swept past
+the warm-up`), files no row, refuses the run ("none of the 105 month(s) offered
+was swept and filed") and exits 1. The other 29 refuse as before, for their
+own reasons. One NIFTY run writes 231 files and 1,044 kB of evidence and logs
+into its store; at that rate the 26,736-month whole-store run would write
+about 58,800 files and 266 MB (an extrapolation, not run).
+
+**The batch's exit code, stated (AH-01 repair round 1, the re-check's
+follow-up).** `sweep-stored` exits `FAILED` for one month that is not a whole
+answer (D-4982), and `sweep-all` exits `OK` when some of its months stopped on
+the candidate ceiling or short of a whole answer. That asymmetry is kept and
+is now a decision, not an accident. `sweep-stored`'s page IS one answer, so an
+untrustworthy one fails it; `sweep-all`'s page is a census of many, each row
+carries its own `CEILING`, `INCOMPLETE` or budget word, its ledger row says
+`done NO`, its evidence finishes `Halted`, and the summary names the count
+("N month(s) stopped on the candidate ceiling", "stopped short of a whole
+answer") -- the loud degrade `CLAUDE.md` §4 allows. Failing the whole batch for
+one ceiling month would make every fine-rung whole-store run exit `FAILED` and
+hide which months answered. A caller that needs every month whole reads the
+summary's counts or the ledger's `done` column, never the exit code alone.
+The batch exits `FAILED` when its page carries a refusal (`carries_refusal`,
+P8-03), which D-0696's refusal of a run with no month swept and filed is. A store holding no month of the feed and rung stays a report (exit 0),
+as D-0696 states: a fresh clone has pulled nothing, and that is not a fault.
+
+### D-4984 — The overnight line measures the move into the slice's first session and marks a zero-volume open (AH-01; corp-8, corp-2's line half; amends D-1540 by addition) — 2026-10-16
+
+**Observed.** `runner::audit::largest_overnight_move` looped
+`bars.windows(2)` over the slice, so the move INTO the slice's first session
+had no prior close and was never measured; span doors join months, so only the
+slice's first session was blind. On reachable Zerodha months the skeptics found
+real misses, all market moves: BANDHANBNK 2018-10 (-20.11% into 2018-10-01
+missed, -5.69% named), PNBHOUSING 2021-06 (+20.0% against +10.0%) and SUZLON
+2022-10 (-5.0% against +3.80%). The MOTHERSON -31.5% bonus exists only in GDFL
+1s, which no report door reaches. Separately the line printed a phantom move
+when the open bar traded no volume (TMPV 2025-10-14 printed +22.85%).
+
+**The change, and the basis chosen.** The prior close is the last
+regular-session bar (outside the charter's non-regular days, the loader's own
+exclusion) of the calendar month before the first bar's month, on the SAME
+feed, instrument and rung: one `BarFile::open_existing` and, from the end, one
+positional `read_record` per bar until one is regular, at most 1,440. The basis
+is therefore the one every other move on the line uses, a bar's close to the
+next session's first open, never the daily file's official close, and the line
+names the prior session's date (`close X on YYYY-MM-DD`). The daily context the
+doors load was not chosen because it is a different basis (the official close)
+from the moves it would be compared with. A month that is absent, empty or
+unreadable is NAMED: `THE MOVE INTO THE FIRST SESSION HERE (date) WAS NOT
+MEASURED: <why>`. A move whose open bar traded no volume carries `Its open bar
+traded no volume: the price may never have traded.` The line still names the
+single largest move (D-1540's design); doors that withhold rows pass the whole
+folded series, so a session's last bar is its last held bar.
+
+**Added in repair round 1 (the re-check's follow-up).** On TMPV 2025-10-14 the
+marked untraded +22.85% displaced the -11.84% move the base build had named,
+and the session's first trade -- the move a trade could have met -- was named
+nowhere. When the largest move's open bar traded no volume, the line now adds
+`THE LARGEST MOVE TO A TRADED OPEN: <move> into the <date> session (close X on
+<prior> to the session's first traded open, Y).`, or says none did
+(`runner::audit::largest_traded_overnight_move`: the same pass, each session
+measured to its first bar that traded volume, a session that never traded
+dropped and the next measured from its last close, the same tie rule).
+Measured on a private shadow (release cli of this change, `ro.sh env
+BRUTEX_STORE=<shadow> cli sweep-stored zerodha TMPV 1min 2025 10 2000`, exit
+0): the line names +22.85% into 2025-10-14 (close 457.15 on 2025-10-13 to the
+untraded open 561.65), marked, and beside it -12.72% into the same session (to
+its first traded open, 399.00); the corp-2 skeptics put that move at about
+-12.5% on Zerodha's back-adjusted basis. The headline stays the single largest
+move, so D-1540 is amended by addition only; a report whose largest move traded
+prints no second line, and on traded bars the two measures are equal. One more
+O(bars) pass, at the once-per-report boundary, only when the first move was
+untraded.
+
+### D-4985 — `cli results` names the run on every line (AH-01; repro-5) — 2026-10-16
+
+**Observed.** `results_table` printed feed, rung, combinations, min_hits,
+months, depth, done, worst, best and trades: no underlying, span, identity,
+finish time or bars, so forty NIFTY months with equal figures printed one
+repeated line, and a stale row and a current one for one month could not be
+told apart. `/backtest.json` already carried every field.
+
+**The change.** Each line adds the underlying, the span (`YYYY-MM`, or
+`YYYY-MM..YYYY-MM` for more than one month), the bars, the identity's first
+twelve hex characters (enough to tell two runs on one page apart; the whole
+identity is `/backtest.json`'s `identity`) and the finish time in IST to the
+second; a stamp the calendar cannot place prints as raw microseconds rather
+than being dropped. The BEST COMPLETE line carries the identity prefix and the
+finish time. Two distinct runs never print the same line: a different
+instrument, span, bar count or identity changes a field, and one identity filed
+twice differs in its finish time. MEASURED 2026-10-16 by
+`cli::results_line_tests::results_line_cost_per_row` (release, 1,000 synthetic
+rows, one row per call with its header): p50 2.79 us, p99 6.17 us, max 429 us
+(the first call). O(1) per row: fixed fields, no lookup.
+
 ### D-4975 — The head deadline runs only while no request is in flight: it restarts when a response is complete, not at its first written byte, and a response whose writes stop making progress is cut after the same timeout and logged as cut (amends D-1200 by addition) — 2026-10-15
 
 **Implemented by** AH-02 (`api::server`: `HeadDeadline`, `HeadState`,
