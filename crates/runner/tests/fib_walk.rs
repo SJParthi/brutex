@@ -1254,6 +1254,7 @@ fn an_entry_before_a_halt_is_kept_unpriced_and_one_after_it_is_not_tradable() {
     assert_eq!(out.status, SlotStatus::Unpriceable(UnpricedReason::Halt));
     assert!(has(&out, TradeFlag::Halt));
     assert_eq!(out.filled_qty, 100);
+    assert!(!has(&out, TradeFlag::PartialEntry), "it filled whole");
     assert_eq!(
         out.mae_to_horizon_paisa,
         (P + 100) - (P - 510),
