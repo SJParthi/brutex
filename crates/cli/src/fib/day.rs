@@ -762,18 +762,35 @@ pub struct MonthSpec<'a> {
 ///
 /// `widths_refused`, naming the set.
 pub fn check_widths(widths: &[u16]) -> Result<(), String> {
+    buckets_of(widths).map(|_| ())
+}
+
+/// Each width of a set [`check_widths`] admits, with the fold authority's
+/// bucket for it: the set is judged once a month, so the fold meets no width
+/// it would refuse.
+///
+/// # Errors
+///
+/// `widths_refused`, naming the set.
+fn buckets_of(widths: &[u16]) -> Result<Vec<(u16, Bucket)>, String> {
     let top = max_width_minutes();
-    let in_range = widths
+    // A width of zero has no bucket; one past N_max is filtered out: either
+    // leaves the set short of its widths.
+    let buckets: Vec<(u16, Bucket)> = widths
         .iter()
-        .all(|width| *width >= 1 && u64::from(*width) <= top);
+        .filter(|width| u64::from(**width) <= top)
+        .filter_map(|width| {
+            Bucket::of_secs(u32::from(*width) * minute_seconds()).map(|bucket| (*width, bucket))
+        })
+        .collect();
     let increasing = widths.windows(1 + 1).all(|pair| pair.first() < pair.last());
-    if widths.is_empty() || !in_range || !increasing {
+    if widths.is_empty() || buckets.len() != widths.len() || !increasing {
         return Err(format!(
             "widths_refused: {widths:?}; the timeframe set is whole minutes, strictly \
              increasing, each in 1..={top} (R7)"
         ));
     }
-    Ok(())
+    Ok(buckets)
 }
 
 /// The coarse doubling ladder 1, 2, 4, ... up to `N_max` (R7): `day-check`'s
@@ -805,7 +822,7 @@ pub fn build_month(
     authorities: &Authorities,
     state: &mut StockState,
 ) -> Result<MonthInput, String> {
-    check_widths(spec.widths)?;
+    let buckets = buckets_of(spec.widths)?;
     let first = pull::session::Day::new(spec.year, spec.month, 1)
         .map_err(|why| format!("month_refused: {}-{:02}: {why}", spec.year, spec.month))?;
     let first_day = i64::from(first.days_from_epoch());
@@ -856,7 +873,7 @@ pub fn build_month(
         }
         if let Some(input) = build_day(
             spec,
-            day,
+            (day, &buckets),
             taken,
             cash,
             authorities,
@@ -948,7 +965,7 @@ fn minute_of(candle: &Candle) -> u16 {
 )]
 fn build_day(
     spec: &MonthSpec<'_>,
-    day: i64,
+    (day, buckets): (i64, &[(u16, Bucket)]),
     taken: DayMinutes,
     cash: &CashCloses,
     authorities: &Authorities,
@@ -1072,7 +1089,7 @@ fn build_day(
     let mut candles = Vec::new();
     let mut exposure = None;
     if let (Some(window), true) = (window, admitted || halt.is_some()) {
-        match fold_widths(day, &real, window, spec.widths, cash) {
+        match fold_widths(day, &real, window, buckets, cash) {
             Ok(folded) => {
                 if let Some(halt) = halt {
                     let first_halted_second = halt.seconds(Venue::NseCash).from;
@@ -1287,7 +1304,7 @@ fn fold_widths(
     day: i64,
     real: &[Candle],
     window: Window,
-    widths: &[u16],
+    buckets: &[(u16, Bucket)],
     cash: &CashCloses,
 ) -> Result<Vec<WidthCandles>, String> {
     let bars: Vec<Bar> = real.iter().map(|minute| bar_of(*minute)).collect();
@@ -1304,13 +1321,11 @@ fn fold_widths(
     }
     let day_open = instant(day, u32::from(window.first) * minute_seconds());
     let day_close = instant(day, (u32::from(window.last) + 1) * minute_seconds());
-    let mut out = Vec::with_capacity(widths.len());
-    for width in widths {
-        let bucket = Bucket::of_secs(u32::from(*width) * minute_seconds())
-            .ok_or_else(|| format!("fold_refused: width {width}"))?;
+    let mut out = Vec::with_capacity(buckets.len());
+    for (width, bucket) in buckets {
         let (folded, notes) = pull::fold::complete_minutes_with_calendar(
             &bars,
-            bucket,
+            *bucket,
             Venue::NseCash,
             Some(cash.schedule()),
             pull::calendar::Runtime::default(),
@@ -1800,9 +1815,7 @@ fn seconds_with_conflicts(
     let mut taken: Option<SecondsTaken> = None;
     for bar in bars {
         let (day, second) = ist_day_second(bar.ts_micros);
-        if taken.as_ref().is_some_and(|held| held.day != day)
-            && let Some(done) = taken.take()
-        {
+        if let Some(done) = taken.take_if(|held| held.day != day) {
             finish_seconds(done, cash, &mut month);
         }
         let held = taken.get_or_insert_with(|| SecondsTaken {
@@ -2187,14 +2200,20 @@ pub fn read_stock_month(
 /// before the store is looked for, so a misuse is a misuse wherever the store
 /// is.
 pub(super) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_at(arguments, out, &crate::store_root)
+    command_at(arguments, out, &crate::store_root, &Authorities::interim)
 }
 
-/// [`command`] with the store root resolved by `root_of`.
+/// Builds the authority set, the pool's series presence answered by the
+/// store.
+type AuthoritiesOf<'a> = &'a dyn Fn(&dyn Fn(&str) -> bool) -> Result<Authorities, String>;
+
+/// [`command`] with the store root resolved by `root_of` and the authority
+/// set built by `authorities_of`.
 fn command_at(
     arguments: &[&str],
     out: &mut String,
     root_of: &dyn Fn() -> Result<std::path::PathBuf, stored::Refusal>,
+    authorities_of: AuthoritiesOf<'_>,
 ) -> u8 {
     let request = match parse(arguments) {
         Ok(request) => request,
@@ -2208,7 +2227,7 @@ fn command_at(
         symbol_dir(&root, Vendor::Zerodha, name, "1min", request.when)
             .is_some_and(|dir| dir.is_dir())
     };
-    match Authorities::interim(&present) {
+    match authorities_of(&present) {
         Ok(authorities) => run(&root, &request, &authorities, out),
         Err(why) => crate::fail(out, &why),
     }
@@ -2347,6 +2366,9 @@ fn reference_sources(root: &Path, when: (u16, u8), indices: &[String]) -> Result
     use super::reference::{GIFT_NIFTY, IndexSource, load_index_month};
     use crate::vix_reference::{VIX_REFERENCE_SYMBOL, VixReferenceMonth};
     let halt = halt_as;
+    let ym = store::path::YearMonth::new(when.0, when.1)
+        .map_err(|why| why.to_string())
+        .map_err(halt("reference_month"))?;
     let mut sources = Vec::with_capacity(indices.len());
     let mut vix = None;
     for name in indices {
@@ -2358,8 +2380,6 @@ fn reference_sources(root: &Path, when: (u16, u8), indices: &[String]) -> Result
         let source = match (name.as_str(), held) {
             (GIFT_NIFTY, _) => IndexSource::Unsourced,
             (VIX_REFERENCE_SYMBOL, Some(_)) => {
-                let ym = store::path::YearMonth::new(when.0, when.1)
-                    .map_err(|why| halt("reference_month")(why.to_string()))?;
                 vix = Some(
                     VixReferenceMonth::open(root, Vendor::Zerodha, ym)
                         .map_err(halt("reference_vix"))?,

@@ -1145,3 +1145,126 @@ fn a_record_of_a_block_verified_before_is_read_at_its_offset() {
         "one record read, its block already verified"
     );
 }
+
+/// A profile past `u32::MAX` bytes has no length the header can store.
+#[test]
+fn a_profile_past_a_u32_is_too_long() {
+    assert_eq!(profile_length(7).unwrap(), 7);
+    let past = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+    let refused = profile_length(past).unwrap_err();
+    assert_eq!(refused.word, "profile_too_long");
+    assert!(refused.detail.starts_with(&past.to_string()), "{refused:?}");
+}
+
+/// A file cut short under an open handle refuses every read that reaches the
+/// cut, by its step, and never serves a byte past it.
+#[test]
+fn a_file_cut_under_an_open_handle_refuses_each_read_by_its_step() {
+    let scratch = Scratch::new("cut");
+    let body = records(6_000, 24);
+    let cut = |path: &Path, length: u64| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+    };
+    let fresh = |name: &str| {
+        let path = scratch.0.join(name);
+        write(&path, &header(Kind::Downside, 24), &body).unwrap();
+        let file = FibFile::open(&path).unwrap();
+        (path, file)
+    };
+    // A block the cut reaches.
+    let (path, mut file) = fresh("block.fib");
+    let header_len = file.sealed().header_len;
+    assert_eq!(file.record(10).unwrap(), body[10]);
+    cut(&path, header_len + 24);
+    let refused = file.record(3_000).unwrap_err();
+    assert_eq!(refused.word, "io");
+    assert!(refused.detail.starts_with("read a block of"), "{refused:?}");
+    // The block table the cut reaches, every block intact.
+    let (path, mut file) = fresh("table.fib");
+    cut(&path, header_len + 6_000 * 24);
+    let refused = file.record(10).unwrap_err();
+    assert!(
+        refused.detail.starts_with("read the block table of"),
+        "{refused:?}"
+    );
+    // A record of a block verified before, no longer the cached one.
+    let (path, mut file) = fresh("record.fib");
+    assert_eq!(file.record(10).unwrap(), body[10]);
+    assert_eq!(file.record(3_000).unwrap(), body[3_000]);
+    cut(&path, header_len + 24);
+    let refused = file.record(17).unwrap_err();
+    assert!(
+        refused.detail.starts_with("read a record of"),
+        "{refused:?}"
+    );
+    // The footer the whole check reads last.
+    let (path, mut file) = fresh("footer.fib");
+    let length = fs::metadata(&path).unwrap().len();
+    cut(&path, length - u64::try_from(footer_len()).unwrap());
+    let refused = file.verify_whole().unwrap_err();
+    assert!(
+        refused.detail.starts_with("read the footer of"),
+        "{refused:?}"
+    );
+}
+
+/// A file of a record's kind at another record version is not that record.
+#[test]
+fn a_record_of_another_version_is_the_wrong_kind() {
+    let scratch = Scratch::new("version");
+    let path = scratch.0.join("v2.fib");
+    let stride = CandidateRecord::stride();
+    let v2 = Header {
+        record_version: CandidateRecord::VERSION + 1,
+        ..header(Kind::Candidates, stride)
+    };
+    write(&path, &v2, &records(1, stride)).unwrap();
+    let mut file = FibFile::open(&path).unwrap();
+    let refused = file.read::<CandidateRecord>(0).unwrap_err();
+    assert_eq!(refused.word, "wrong_kind", "{refused:?}");
+}
+
+/// Every closes-record tag refuses a tail, a slot or a close its kind does
+/// not carry, and an unknown tag.
+#[test]
+fn a_closes_record_refuses_every_field_its_tag_does_not_carry() {
+    let bytes = |tag: u8, slot: u16, close: i64, from_day: i64, regime: u16, verdict: u8| {
+        let mut out = Put::default();
+        out.u8(tag);
+        out.i64(20_000);
+        out.u16(slot);
+        out.i64(close);
+        out.i64(from_day);
+        out.u16(regime);
+        out.u8(verdict);
+        out.0
+    };
+    let (absent, previous, none) = (CLOSE_ABSENT, CLOSE_PREVIOUS, CLOSE_NO_PREVIOUS);
+    for (tag, slot, close, from_day, regime, verdict) in [
+        (0, 0, 5, 1, 0, 0),
+        (1, 0, 5, 0, 1, 0),
+        (absent, 0, 5, 0, 0, 0),
+        (absent, 0, 0, 0, 0, 1),
+        (previous, 1, 5, 20_000, 929, 0),
+        (none, 1, 0, 0, 0, 0),
+        (none, 0, 5, 0, 0, 0),
+        (none, 0, 0, 1, 0, 0),
+        (none + 1, 0, 0, 0, 0, 0),
+    ] {
+        let refused =
+            CloseRecord::decode(&bytes(tag, slot, close, from_day, regime, verdict)).unwrap_err();
+        assert!(
+            refused.starts_with("not a closes record"),
+            "tag {tag}: {refused}"
+        );
+    }
+    assert_eq!(
+        CloseRecord::decode(&bytes(none, 0, 0, 0, 0, 0)),
+        Ok(CloseRecord::NoPrevious { day: 20_000 })
+    );
+}

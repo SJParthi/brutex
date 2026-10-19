@@ -703,3 +703,108 @@ fn a_reference_minute_is_sane_on_the_grid_in_its_month_and_in_order() {
         "a negative volume"
     );
 }
+
+/// The validator refuses the first bar of a stored month that is not a
+/// reference minute, naming its record under the month's label.
+#[test]
+fn the_index_month_validator_refuses_its_first_bad_bar_by_record() {
+    let monday = day_of(2025, 3, 3);
+    let to_bar = |candle: Candle| Bar {
+        ts_micros: candle.ts_micros,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+        open_interest: candle.open_interest,
+    };
+    let good = session(monday, 3_210_000);
+    let stored: Vec<Bar> = good.iter().copied().map(to_bar).collect();
+    assert_eq!(
+        reference_minutes(&stored, (2025, 3), "NIFTYIT 1min 2025-03"),
+        Ok(good.clone())
+    );
+    let mut bad = stored.clone();
+    bad[2].low = bad[2].high + 1;
+    let refused = reference_minutes(&bad, (2025, 3), "NIFTYIT 1min 2025-03").unwrap_err();
+    assert!(
+        refused.starts_with(&format!(
+            "NIFTYIT 1min 2025-03 record 2 at {} is not a reference minute",
+            bad[2].ts_micros
+        )),
+        "{refused}"
+    );
+}
+
+/// A stored index month cut short after it was written is refused by name
+/// when its records are read, never served.
+#[test]
+fn a_damaged_index_month_is_refused_when_read() {
+    let store = Scratch::new("damaged");
+    write_index(
+        &store.0,
+        "NIFTYIT",
+        (2025, 3),
+        &session(day_of(2025, 3, 3), 3_220_000),
+    );
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTYIT").unwrap();
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        YearMonth::new(2025, 3).unwrap(),
+        FileKind::Bars,
+    )
+    .unwrap()
+    .to_path_buf(&store.0);
+    let length = std::fs::metadata(&path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let refused = load_index_month(&store.0, "NIFTYIT", (2025, 3)).unwrap_err();
+    assert!(refused.starts_with("NIFTYIT 1min 2025-03"), "{refused}");
+}
+
+/// A file where the index directory should be is refused by name, never
+/// read as no index.
+#[test]
+fn an_index_root_that_is_a_file_is_refused() {
+    let store = Scratch::new("index-file");
+    let dir = index_root(&store.0).unwrap();
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    std::fs::write(&dir, b"synthetic: a file, not a directory").unwrap();
+    let refused = reference_indices(&store.0).unwrap_err();
+    assert!(refused.starts_with("index_root_unreadable"), "{refused}");
+}
+
+/// A bar outside the index session and a bar of the day before the month
+/// stamp nothing: the table holds only the month's session minutes.
+#[test]
+fn bars_outside_the_session_or_the_month_stamp_nothing() {
+    let monday = day_of(2025, 3, 3);
+    let before = day_of(2025, 2, 28);
+    let mut bars = vec![index_minute(before, hm(10, 0), 3_230_000)];
+    bars.extend(session(monday, 3_231_000));
+    bars.push(index_minute(monday, hm(15, 45), 3_239_000));
+    let table = build_reference(
+        (2025, 3),
+        &[("NIFTYIT".to_owned(), IndexSource::Minutes(bars))],
+        &HashMap::new(),
+        &UnscreenedIndices::interim(),
+        &InterimCalendar::interim(),
+        None,
+    );
+    assert_eq!(
+        table.stamp(instant(monday, hm(15, 29)), 0),
+        Some(ReferenceCell::NoPrevious { close: 3_231_374 })
+    );
+    assert_eq!(table.stamp(instant(monday, hm(15, 45)), 0), None);
+    assert_eq!(
+        table.carried.get("NIFTYIT"),
+        Some(&3_231_374),
+        "the 15:45 bar is no session minute and carries nothing"
+    );
+}

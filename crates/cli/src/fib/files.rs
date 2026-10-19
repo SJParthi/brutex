@@ -95,6 +95,13 @@ fn io(path: &Path, action: &str, why: &std::io::Error) -> FileError {
     }
 }
 
+/// [`io`] as the mapping a `map_err` takes: one closure for every host
+/// refusal of a step, so a step the host refuses names its action and path
+/// the same way wherever it is.
+fn io_at<'a>(path: &'a Path, action: &'a str) -> impl FnOnce(std::io::Error) -> FileError + 'a {
+    move |why| io(path, action, &why)
+}
+
 // ---------------------------------------------------------------- bytes --
 
 /// Little-endian appends.
@@ -618,12 +625,7 @@ pub fn block_records(stride: u32) -> u64 {
 ///
 /// `profile_too_long` for a profile past `u32::MAX` bytes.
 pub fn header_bytes(header: &Header, records: u64) -> Result<Vec<u8>, FileError> {
-    let profile_len = u32::try_from(header.profile.len()).or_else(|_| {
-        refuse(
-            "profile_too_long",
-            format!("{} profile bytes", header.profile.len()),
-        )
-    })?;
+    let profile_len = profile_length(header.profile.len())?;
     let mut out = Put::default();
     out.bytes(MAGIC);
     out.u32(FORMAT_VERSION);
@@ -641,6 +643,18 @@ pub fn header_bytes(header: &Header, records: u64) -> Result<Vec<u8>, FileError>
     let digest = hash(&out.0);
     out.bytes(&digest);
     Ok(out.0)
+}
+
+/// A profile's length as the header stores it.
+///
+/// # Errors
+///
+/// `profile_too_long` past `u32::MAX` bytes.
+fn profile_length(bytes: usize) -> Result<u32, FileError> {
+    u32::try_from(bytes).map_err(|_| FileError {
+        word: "profile_too_long",
+        detail: format!("{bytes} profile bytes"),
+    })
 }
 
 /// The header's fixed part, up to and including the profile length: the
@@ -851,7 +865,7 @@ where
         file.sync_all()
             .and_then(|()| fs::rename(&temporary, path))
             .map(|()| filled)
-            .map_err(|why| io(path, "sync and publish", &why))
+            .map_err(io_at(path, "sync and publish"))
     });
     match sealed {
         Ok(filled) => {
@@ -888,7 +902,7 @@ fn sync_directory(path: &Path) -> Result<(), FileError> {
         .unwrap_or_else(|| Path::new("."));
     File::open(directory)
         .and_then(|handle| handle.sync_all())
-        .map_err(|why| io(directory, "sync the directory", &why))
+        .map_err(io_at(directory, "sync the directory"))
 }
 
 /// Writes the whole file into `sink`: a placeholder header, the body, the
@@ -995,22 +1009,22 @@ impl FibFile {
     /// Every [`parse_header`] refusal; `truncated` when the length is not the
     /// header, body, block table and footer the header implies; `io`.
     pub fn open(path: &Path) -> Result<Self, FileError> {
-        let file = File::open(path).map_err(|why| io(path, "open", &why))?;
-        let length = file.metadata().map_err(|why| io(path, "stat", &why))?.len();
+        let file = File::open(path).map_err(io_at(path, "open"))?;
+        let length = file.metadata().map_err(io_at(path, "stat"))?.len();
         let fixed_len = fixed_header_len();
         let mut fixed = vec![0; fixed_len];
         file.read_exact_at(&mut fixed, 0).map_err(|why| FileError {
             word: "truncated",
             detail: format!("{} holds no whole header: {why}", path.display()),
         })?;
+        // The profile length closes the fixed part, which was read whole; a
+        // part too short to hold it (none can be) reads as a length no file
+        // holds and is refused below as a header the file ends inside.
         let mut take = Take::new(&fixed);
         let profile_len = take
             .bytes(fixed_len - size_of::<u32>())
             .and_then(|_| take.u32())
-            .map_err(|why| FileError {
-                word: "header_short",
-                detail: why,
-            })?;
+            .unwrap_or(u32::MAX);
         let rest_len = usize::try_from(profile_len)
             .unwrap_or(usize::MAX)
             .saturating_add(DIGEST);
@@ -1023,7 +1037,7 @@ impl FibFile {
         }
         let mut rest = vec![0; rest_len];
         file.read_exact_at(&mut rest, fixed_u64)
-            .map_err(|why| io(path, "read the header of", &why))?;
+            .map_err(io_at(path, "read the header of"))?;
         let sealed = parse_header(&fixed, &rest)?;
         let expected = expected_length(&sealed);
         if expected != Some(length) {
@@ -1094,25 +1108,29 @@ impl FibFile {
         let seen = self.verified.get(word).is_some_and(|bits| bits & bit != 0);
         if !seen {
             let bytes = self.verify_block(block)?;
-            if let Some(bits) = self.verified.get_mut(word) {
-                *bits |= bit;
-            }
+            // The bitset holds a bit for every block `open` counted.
+            self.verified
+                .get_mut(word)
+                .into_iter()
+                .for_each(|bits| *bits |= bit);
             self.cache = Some((block, bytes));
         }
         let within = index % self.sealed.block_records;
         let start = usize::try_from(within * stride).unwrap_or(usize::MAX);
         let length = usize::try_from(stride).unwrap_or(usize::MAX);
-        if let Some((cached, bytes)) = &self.cache
-            && *cached == block
-            && let Some(record) = bytes.get(start..start.saturating_add(length))
-        {
+        let cached = self
+            .cache
+            .as_ref()
+            .filter(|(cached, _)| *cached == block)
+            .and_then(|(_, bytes)| bytes.get(start..start.saturating_add(length)));
+        if let Some(record) = cached {
             return Ok(record.to_vec());
         }
         let mut record = vec![0; length];
         let at = self.sealed.header_len + index * stride;
         self.file
             .read_exact_at(&mut record, at)
-            .map_err(|why| io(&self.path, "read a record of", &why))?;
+            .map_err(io_at(&self.path, "read a record of"))?;
         self.bytes_read += stride;
         Ok(record)
     }
@@ -1127,13 +1145,13 @@ impl FibFile {
         let at = sealed.header_len + first * stride;
         self.file
             .read_exact_at(&mut bytes, at)
-            .map_err(|why| io(&self.path, "read a block of", &why))?;
+            .map_err(io_at(&self.path, "read a block of"))?;
         let digest_u64 = u64::try_from(DIGEST).unwrap_or(u64::MAX);
         let table_at = sealed.header_len + sealed.records * stride + block * digest_u64;
         let mut stated = [0; DIGEST];
         self.file
             .read_exact_at(&mut stated, table_at)
-            .map_err(|why| io(&self.path, "read the block table of", &why))?;
+            .map_err(io_at(&self.path, "read the block table of"))?;
         self.bytes_read += count * stride + digest_u64;
         if hash(&bytes) != stated {
             return refuse(
@@ -1216,43 +1234,53 @@ pub struct Verified {
 /// Every [`FibFile::open`] and block refusal; `footer` when the footer's count
 /// or magic disagrees; `body_digest` when the body's digest does not match.
 pub fn verify_whole(path: &Path) -> Result<Verified, FileError> {
-    let mut handle = FibFile::open(path)?;
-    let blocks = blocks_of(&handle.sealed);
-    let mut body = Hasher::new();
-    for block in 0..blocks {
-        body.update(&handle.verify_block(block)?);
+    FibFile::open(path)?.verify_whole()
+}
+
+impl FibFile {
+    /// Hashes the whole body, every block and the footer of the open file
+    /// (`fib verify`).
+    ///
+    /// # Errors
+    ///
+    /// Every block refusal; `footer` when the footer's count or magic
+    /// disagrees; `body_digest` when the body's digest does not match; `io`.
+    pub fn verify_whole(&mut self) -> Result<Verified, FileError> {
+        let blocks = blocks_of(&self.sealed);
+        let mut body = Hasher::new();
+        for block in 0..blocks {
+            body.update(&self.verify_block(block)?);
+        }
+        let sealed = self.sealed.clone();
+        let digest_u64 = u64::try_from(DIGEST).unwrap_or(u64::MAX);
+        let footer_at = sealed.header_len
+            + sealed.records * u64::from(sealed.header.stride)
+            + blocks * digest_u64;
+        let mut footer = vec![0; footer_len()];
+        self.file
+            .read_exact_at(&mut footer, footer_at)
+            .map_err(io_at(&self.path, "read the footer of"))?;
+        // The footer was read whole, so each field is there to compare.
+        let mut take = Take::new(&footer);
+        let (count, stated, magic) = (take.u64(), take.digest(), take.bytes(FOOTER_MAGIC.len()));
+        if count != Ok(sealed.records) || magic != Ok(FOOTER_MAGIC) {
+            return refuse(
+                "footer",
+                format!("{}'s footer disagrees with its header", self.path.display()),
+            );
+        }
+        let body_digest = body.finalize();
+        if stated != Ok(body_digest) {
+            return refuse(
+                "body_digest",
+                format!("{}'s body does not match its footer", self.path.display()),
+            );
+        }
+        Ok(Verified {
+            sealed,
+            body_digest,
+        })
     }
-    let sealed = handle.sealed.clone();
-    let digest_u64 = u64::try_from(DIGEST).unwrap_or(u64::MAX);
-    let footer_at =
-        sealed.header_len + sealed.records * u64::from(sealed.header.stride) + blocks * digest_u64;
-    let mut footer = vec![0; footer_len()];
-    handle
-        .file
-        .read_exact_at(&mut footer, footer_at)
-        .map_err(|why| io(path, "read the footer of", &why))?;
-    let mut take = Take::new(&footer);
-    let parsed = (take.u64(), take.digest(), take.bytes(FOOTER_MAGIC.len()));
-    let (Ok(count), Ok(stated), Ok(magic)) = parsed else {
-        return refuse("footer", format!("{} has no whole footer", path.display()));
-    };
-    if count != sealed.records || magic != FOOTER_MAGIC {
-        return refuse(
-            "footer",
-            format!("{}'s footer disagrees with its header", path.display()),
-        );
-    }
-    let body_digest = body.finalize();
-    if body_digest != stated {
-        return refuse(
-            "body_digest",
-            format!("{}'s body does not match its footer", path.display()),
-        );
-    }
-    Ok(Verified {
-        sealed,
-        body_digest,
-    })
 }
 
 // -------------------------------------------------------------- records --
@@ -1536,7 +1564,8 @@ impl Record for ReferenceCell {
                     previous_close,
                 }),
                 (1, close, 0) => Ok(Self::NoPrevious { close }),
-                (tag, 0, 0) if tag > 1 => Ok(Self::Absent(tag - 1 - 1)),
+                // Tags 0 and 1 are the arms above, so this one is a reason.
+                (tag, 0, 0) => Ok(Self::Absent(tag.saturating_sub(1 + 1))),
                 _ => Err(format!("not a reference cell: tag {tag}")),
             }
         })
@@ -2163,11 +2192,11 @@ pub fn append_segment(
         .create(true)
         .append(true)
         .open(&index_path)
-        .map_err(|why| io(&index_path, "open the segment index", &why))?;
+        .map_err(io_at(&index_path, "open the segment index"))?;
     index
         .write_all(&entry.bytes())
         .and_then(|()| index.sync_data())
-        .map_err(|why| io(&index_path, "append to the segment index", &why))?;
+        .map_err(io_at(&index_path, "append to the segment index"))?;
     sync_directory(&index_path)?;
     Ok(entry)
 }
@@ -2180,7 +2209,7 @@ pub fn append_segment(
 /// `segment_index_torn` for a tail that is not a whole entry;
 /// `segment_entry_digest`; `io`.
 pub fn read_segment_index(path: &Path) -> Result<Vec<SegmentEntry>, FileError> {
-    let bytes = fs::read(path).map_err(|why| io(path, "read the segment index", &why))?;
+    let bytes = fs::read(path).map_err(io_at(path, "read the segment index"))?;
     let stride = SegmentEntry::stride();
     if bytes.len() % stride != 0 {
         return refuse(

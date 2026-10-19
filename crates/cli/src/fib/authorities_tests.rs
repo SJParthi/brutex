@@ -507,6 +507,22 @@ fn the_historical_basis_proof_follows_fm_f092() {
     let unmeasured = factors(&[(d1, raw)], &[(d2, raw)], d1);
     let verdict = HistoricalBasis::new(&two, &unmeasured).verdict(series, d1, d2);
     assert_eq!(verdict.outcome, Err(BasisRefusal::Unproven));
+    // A measured D-1 against an unmeasured first minute: never proof.
+    let half = factors(
+        &[(d1, pair(2_000, 1_000, FactorShape::Proportional))],
+        &[(d2, raw)],
+        d1,
+    );
+    let verdict = HistoricalBasis::new(&two, &half).verdict(series, d1, d2);
+    assert_eq!(verdict.outcome, Err(BasisRefusal::Unproven));
+    // An unmeasured pair's shape marks nothing: one landing still proves.
+    let unmeasured_affine = FactorPair {
+        measured: false,
+        ..pair(2_000, 1_000, FactorShape::Affine)
+    };
+    let shapeless = factors(&[(d2, unmeasured_affine)], &[], d1);
+    let verdict = HistoricalBasis::new(&one, &shapeless).verdict(series, d1, d2);
+    assert_eq!(verdict.outcome, Ok(BasisProof::SameLanding));
     // An affine or non-constant day is unreliable, even inside one landing.
     for shape in [FactorShape::Affine, FactorShape::NonConstant] {
         let marked = factors(&[(d2, pair(2_000, 1_000, shape))], &[], d1);

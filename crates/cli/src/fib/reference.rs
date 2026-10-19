@@ -144,37 +144,64 @@ pub fn load_index_month(
     symbol: &str,
     (year, month): (u16, u8),
 ) -> Result<Option<Vec<Candle>>, String> {
-    let key = InstrumentKey::index(Exchange::Nse, symbol)
-        .map_err(|why| format!("index_key_refused: {symbol}: {why}"))?;
     let ym = YearMonth::new(year, month).map_err(|why| format!("{year}-{month:02}: {why}"))?;
+    let opened = open_index_month(root, symbol, ym)
+        .map_err(|why| format!("index_key_refused: {symbol}: {why}"))?;
+    let file = match opened {
+        Ok(file) => file,
+        Err(StoreError::Missing { .. }) => return Ok(None),
+        Err(why) => return Err(format!("{symbol} 1min {ym}: {why}")),
+    };
+    let label = format!("{symbol} 1min {ym}");
+    let stored = (0..file.records())
+        .map(|record| file.read_record(record))
+        .collect::<Result<Vec<Bar>, StoreError>>()
+        .map_err(|why| format!("{label}: {why}"))?;
+    reference_minutes(&stored, (year, month), &label).map(Some)
+}
+
+/// Opens an index symbol's month: the outer refusal is the symbol's (no
+/// index key or month path takes it), the inner one the store's.
+fn open_index_month(
+    root: &Path,
+    symbol: &str,
+    ym: YearMonth,
+) -> Result<Result<BarFile, StoreError>, Box<dyn std::error::Error>> {
+    let key = InstrumentKey::index(Exchange::Nse, symbol)?;
     let path = StorePath::for_key(
         Vendor::Zerodha,
         &key,
         Timeframe::MINUTE_1,
         ym,
         FileKind::Bars,
-    )
-    .map_err(|why| format!("index_key_refused: {symbol}: {why}"))?;
+    )?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the store's symbol id is the low 32 bits of FNV-1a, as every reader asks it"
     )]
     let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
-    let file = match BarFile::open_existing(root, path, symbol_id) {
-        Ok(file) => file,
-        Err(StoreError::Missing { .. }) => return Ok(None),
-        Err(why) => return Err(format!("{symbol} 1min {ym}: {why}")),
-    };
-    let mut bars = Vec::new();
+    Ok(BarFile::open_existing(root, path, symbol_id))
+}
+
+/// A stored index month's bars as candles, every one a reference minute of
+/// `(year, month)` ([`is_reference_minute`]).
+///
+/// # Errors
+///
+/// The first bar that is not one, by its record and its stamp, under
+/// `label`.
+fn reference_minutes(
+    stored: &[Bar],
+    (year, month): (u16, u8),
+    label: &str,
+) -> Result<Vec<Candle>, String> {
+    let mut bars = Vec::with_capacity(stored.len());
     let mut previous: Option<i64> = None;
-    for record in 0..file.records() {
-        let bar = file
-            .read_record(record)
-            .map_err(|why| format!("{symbol} 1min {ym} record {record}: {why}"))?;
-        if !is_reference_minute(&bar, previous, (year, month)) {
+    for (record, bar) in stored.iter().enumerate() {
+        if !is_reference_minute(bar, previous, (year, month)) {
             return Err(format!(
-                "{symbol} 1min {ym} record {record} at {} is not a reference minute: impossible, \
-                 off the grid, outside the month or out of order; refused",
+                "{label} record {record} at {} is not a reference minute: impossible, off the \
+                 grid, outside the month or out of order; refused",
                 bar.ts_micros
             ));
         }
@@ -189,7 +216,7 @@ pub fn load_index_month(
             open_interest: bar.open_interest,
         });
     }
-    Ok(Some(bars))
+    Ok(bars)
 }
 
 /// Whether a stored index bar is a reference minute of `(year, month)`: sane
@@ -249,17 +276,25 @@ fn is_named_index(name: &str) -> bool {
 /// `index_root_unreadable` when the index directory exists and cannot be listed.
 pub fn reference_indices(root: &Path) -> Result<Vec<String>, String> {
     let mut others = Vec::new();
-    if let Some(dir) = index_root(root).filter(|dir| dir.is_dir()) {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|why| format!("index_root_unreadable: {}: {why}", dir.display()))?;
-        for entry in entries {
-            let entry =
-                entry.map_err(|why| format!("index_root_unreadable: {}: {why}", dir.display()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let named = is_named_index(&name);
-            if entry.path().is_dir() && !named {
-                others.push(name);
-            }
+    let dir = index_root(root);
+    // No index directory is no index; one that is there and cannot be
+    // listed (a file where it should be, a host refusal) is refused.
+    let listing = match dir.as_ref().map(std::fs::read_dir).transpose() {
+        Ok(listing) => listing,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
+        Err(why) => {
+            return Err(format!(
+                "index_root_unreadable: {}: {why}",
+                dir.unwrap_or_default().display()
+            ));
+        }
+    };
+    for entry in listing.into_iter().flatten() {
+        let entry = entry.map_err(|why| format!("index_root_unreadable: {why}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let named = is_named_index(&name);
+        if entry.path().is_dir() && !named {
+            others.push(name);
         }
     }
     others.sort_unstable();
@@ -370,7 +405,10 @@ pub fn build_reference<S: BuildHasher>(
         vec![ReferenceCell::Absent(AbsentReason::NoMinute.byte()); days * minutes * indices];
     let mut holes = vec![0_u64; indices];
     let mut carried = HashMap::with_capacity(sources.len());
-    for (slot, (name, source)) in sources.iter().enumerate() {
+    for (slot, ((name, source), hole)) in sources.iter().zip(holes.iter_mut()).enumerate() {
+        // This index's cells, `[day][minute]` in order: every `indices`-th
+        // cell from its slot.
+        let mut column = cells.iter_mut().skip(slot).step_by(indices);
         let mut last_tradable = previous.get(name).copied();
         let mut today_last: Option<i64> = None;
         // Each index's minutes are streamed once, in time order: a day takes
@@ -414,8 +452,7 @@ pub fn build_reference<S: BuildHasher>(
                 _ => AbsentReason::of_screen(screen.screen(name, day)),
             };
             let row = minutes_of(day);
-            for (minute, bar) in row.iter().enumerate() {
-                let at = (day_index * minutes + minute) * indices + slot;
+            for (bar, entry) in row.iter().zip(&mut column) {
                 let cell = match (blank, bar) {
                     (Some(reason), _) => ReferenceCell::Absent(reason.byte()),
                     (None, None) => ReferenceCell::Absent(AbsentReason::NoMinute.byte()),
@@ -427,14 +464,10 @@ pub fn build_reference<S: BuildHasher>(
                         None => ReferenceCell::NoPrevious { close: bar.close },
                     },
                 };
-                if matches!(cell, ReferenceCell::Absent(_))
-                    && let Some(hole) = holes.get_mut(slot)
-                {
+                if matches!(cell, ReferenceCell::Absent(_)) {
                     *hole += 1;
                 }
-                if let Some(entry) = cells.get_mut(at) {
-                    *entry = cell;
-                }
+                *entry = cell;
                 if let Some(bar) = bar {
                     today_last = Some(bar.close);
                 }

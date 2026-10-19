@@ -634,6 +634,7 @@ fn a_duplicate_unsorted_or_corrupt_minute_refuses_only_its_day() {
         ("duplicate", DayRefusal::DuplicateMinute),
         ("unsorted", DayRefusal::Unsorted),
         ("corrupt", DayRefusal::CorruptMinute),
+        ("negative volume", DayRefusal::CorruptMinute),
         ("off-grid", DayRefusal::CorruptMinute),
     ] {
         let mut bars = Vec::new();
@@ -648,6 +649,7 @@ fn a_duplicate_unsorted_or_corrupt_minute_refuses_only_its_day() {
                     "duplicate" => day.insert(at, day[at]),
                     "unsorted" => day.swap(at, at + 1),
                     "corrupt" => day[at].high = day[at].low - 1,
+                    "negative volume" => day[at].volume = -1,
                     _ => day[at].ts_micros += 1,
                 }
             }
@@ -2179,22 +2181,39 @@ fn day_check_resolves_its_store_root_after_its_words() {
     ];
     let mut out = String::new();
     assert_eq!(
-        command_at(&words, &mut out, &|| Err(
-            "synthetic: no store here".to_owned()
-        )),
+        command_at(
+            &words,
+            &mut out,
+            &|| Err("synthetic: no store here".to_owned()),
+            &Authorities::interim
+        ),
         crate::FAILED
     );
     assert!(out.contains("synthetic: no store here"), "{out}");
     let store = Scratch::new("command");
     let root = store.0.clone();
     let mut out = String::new();
+    let at_root = move || Ok(root.clone());
     assert_eq!(
-        command_at(&words, &mut out, &move || Ok(root.clone())),
+        command_at(&words, &mut out, &at_root, &Authorities::interim),
         crate::OK,
         "{out}"
     );
     assert!(
         out.contains("through the stored door (store_key_absent)"),
+        "{out}"
+    );
+    // An authority set that cannot be built fails the command by name, after
+    // the words and the root.
+    let mut out = String::new();
+    assert_eq!(
+        command_at(&words, &mut out, &at_root, &|_| Err(
+            "synthetic: a pool that lists a series twice".to_owned()
+        )),
+        crate::FAILED
+    );
+    assert!(
+        out.contains("synthetic: a pool that lists a series twice"),
         "{out}"
     );
 }
@@ -3016,10 +3035,9 @@ fn a_renamed_series_reads_its_seconds_under_each_days_symbol() {
     };
     assert_eq!(held(old_day), 3_161_001, "the old key's day");
     assert_eq!(held(next_day), 3_163_001, "the new key's day");
-    assert_eq!(
-        month.day(switch_day).unwrap().seconds,
-        DaySeconds::Refused("rename_overlap_conflict")
-    );
+    let conflict = month.day(switch_day).unwrap().seconds;
+    assert_eq!(conflict, DaySeconds::Refused("rename_overlap_conflict"));
+    assert_eq!(conflict.word(), "rename_overlap_conflict");
 }
 
 /// `day-check --deep` prints the deep stage's reading of each day, in
@@ -3128,4 +3146,136 @@ fn day_check_seconds_renders_the_deep_reading_of_each_day() {
     );
     assert!(!text.contains("\nseconds "), "{text}");
     assert!(!text.contains("count seconds"), "{text}");
+}
+
+// -------------------------------------------------------- branch cover --
+
+/// A caller's conflict list out of order — a day before the month, a day
+/// listed twice — still refuses each listed day of the month once.
+#[test]
+fn a_conflict_list_with_stale_and_repeated_days_refuses_each_day_once() {
+    let (before, monday, tuesday) = (day_of(2025, 2, 28), day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut bars = full(monday, 4_141_000);
+    bars.extend(full(tuesday, 4_142_000));
+    let conflicts = [before, monday, monday];
+    let with = MonthSpec {
+        rename_conflicts: &conflicts,
+        ..spec(2025, 3, &[1], PreviousReference::TradableDay)
+    };
+    let mut state = StockState::first_day();
+    let month = build_month(&with, &bars, &no_master(), &interim(), &mut state).unwrap();
+    assert_eq!(
+        input(&month, monday).refusal,
+        Some(DayRefusal::RenameOverlapConflict)
+    );
+    assert_eq!(input(&month, tuesday).refusal, None);
+    assert_eq!(
+        month
+            .counts
+            .refusals
+            .get(2025, DayRefusal::RenameOverlapConflict.index()),
+        1
+    );
+}
+
+/// A tradable day whose only minute lies outside the continuous window has
+/// no real minute: nothing to judge the tail by, no candle, no close carried.
+#[test]
+fn a_day_with_no_real_minute_judges_no_tail_and_carries_no_close() {
+    let monday = day_of(2025, 3, 3);
+    let late = minute(monday, hm(15, 45), 4_151_000);
+    let mut state = StockState::first_day();
+    let month = build(2025, 3, &[1], &[late], &interim(), &mut state);
+    let day = input(&month, monday);
+    assert_eq!(day.refusal, None);
+    assert!(!day.no_trades_after);
+    assert_eq!(day.counts.real, 0);
+    assert_eq!(day.counts.outside_continuous, 1);
+    assert!(day.minutes.is_empty());
+    assert_eq!(day.last_close, None);
+    assert_eq!(state, StockState::first_day());
+}
+
+/// A special session's continuous seconds lie outside the full session's
+/// window the minute input judges by: counted outside, never kept.
+#[test]
+fn a_special_sessions_seconds_outside_the_window_are_counted_never_kept() {
+    let muhurat = day_of(2024, 11, 1);
+    let evening = 18 * 3_600 + 30 * 60;
+    assert_eq!(
+        pull::calendar::phase_at_second(Venue::NseCash, muhurat, evening, CasEligibility::Unknown),
+        Phase::Continuous,
+        "the Muhurat session trades continuously at 18:30"
+    );
+    let month = seconds_of(
+        &[second(muhurat, evening, 4_161_000)],
+        &[muhurat],
+        &no_master(),
+    );
+    assert!(month.days.is_empty());
+    assert_eq!(month.outside_continuous, 1);
+    assert_eq!(month.no_execution_seconds, [muhurat]);
+    assert_eq!(month.verdict(muhurat), DaySeconds::NoExecutionSeconds);
+}
+
+/// `day-check --deep` over a halt day names the cash market's halted
+/// seconds, in text and JSON; a month that is no civil month refuses the
+/// reference table by name.
+#[test]
+fn day_check_deep_names_a_halt_and_a_bad_month_refuses_the_reference_table() {
+    let store = Scratch::new("deep-halt");
+    let (thursday, halt_day) = (day_of(2020, 3, 12), day_of(2020, 3, 13));
+    let mut bars = full(thursday, 4_171_000);
+    bars.extend(minutes(halt_day, hm(9, 15), hm(9, 20), 4_172_000));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2020, 3),
+        &bars,
+    );
+    let request = parse(&[
+        "SBIN",
+        "2020-03",
+        "--deep",
+        "--previous",
+        "tradable-day",
+        "--authorities",
+        "interim",
+    ])
+    .unwrap();
+    let authorities = interim();
+    let mut out = String::new();
+    assert_eq!(
+        run(&store.0, &request, &authorities, &mut out),
+        crate::OK,
+        "{out}"
+    );
+    assert!(
+        out.contains("\nseconds 2020-03-13 no_execution_seconds; halt [33669, 37260)\n"),
+        "{out}"
+    );
+    let mut json = String::new();
+    assert_eq!(
+        run(
+            &store.0,
+            &Request {
+                json: true,
+                ..request
+            },
+            &authorities,
+            &mut json
+        ),
+        crate::OK
+    );
+    assert!(
+        json.contains(
+            "{\"day\":\"2020-03-13\",\"seconds\":\"no_execution_seconds\",\"held\":0,\
+             \"longest_gap\":0,\"halt\":[33669,37260]}"
+        ),
+        "{json}"
+    );
+    let refused = reference_check(&store.0, (2020, 13), &authorities).unwrap_err();
+    assert_eq!(refused.word, "reference_month", "{refused}");
 }
