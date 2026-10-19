@@ -241,11 +241,39 @@ pub fn pointer_path(root: &Path, path: StorePath<'_>) -> PathBuf {
 /// # Errors
 ///
 /// Whatever [`served`] refuses.
+///
+/// # The form, too (SC-3, D-4965)
+///
+/// When the served generation holds the month SEALED, this is its `.sbar`,
+/// the file the read door opens first (`BarFile::open_existing`), so a
+/// month sealed after a cache entry was made is a new key — and a stamp of
+/// the immutable sealed file — never a stale hit on the raw form's. One
+/// `stat` more than before; the raw `.bin` when no `.sbar` is there.
+///
+/// A FINAL LINK IS FOLLOWED, as the door's open follows it: a `.sbar` that
+/// is a link to a sealed file is the file the door serves, so it is the key
+/// here too (verify-SC-3-r1). Keyed by the `.bin` before, a cache entry made
+/// over a linked `.sbar` carried the raw form's path and stamp while the
+/// door answered from the sealed one.
+///
+/// ONLY AN ABSENT `.sbar` KEYS THE `.bin`, because only an absent one sends
+/// the door there (`BarFile::open_sealed_at`: `ENOENT`, a dangling link
+/// included, is no sealed month; anything else at the name is opened or
+/// refused by name). A directory, a FIFO or an unreadable `.sbar` is the
+/// door's refusal, so it is the key here too, and the memo keyed by it cannot
+/// answer a page the door would refuse from the raw form's cached header
+/// (verify-SC-3-r2 follow-up). It keyed the `.bin` for anything not a
+/// regular file before.
 pub fn served_bars_path(root: &Path, path: StorePath<'_>) -> Result<PathBuf, StoreError> {
     let served = served(root, path)?;
-    Ok(path
-        .with_file(FileKind::Bars)
-        .to_path_buf(&served.root(root)))
+    let served_root = served.root(root);
+    let sealed = path
+        .with_file(FileKind::SealedBars)
+        .to_path_buf(&served_root);
+    if fs::metadata(&sealed).is_err_and(|why| why.kind() == ErrorKind::NotFound) {
+        return Ok(path.with_file(FileKind::Bars).to_path_buf(&served_root));
+    }
+    Ok(sealed)
 }
 
 /// Which generation of `path`'s month is served. Any non-bar path is served

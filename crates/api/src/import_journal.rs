@@ -195,8 +195,29 @@ pub(crate) struct RunLine {
     pub(crate) id: u64,
     /// Its line number, from 1.
     pub(crate) line: u64,
-    /// Its `name=value` fields in order, each value percent-decoded.
+    /// Its `name=value` fields in order, each value percent-decoded; the
+    /// run's end line's fields follow its start's (IA-2; DB-A50).
     pub(crate) fields: Vec<(String, String)>,
+    /// The line number of the run's end line (`run <id> ended=..`), when
+    /// the journal holds one: the end is a fact about this run, never a run
+    /// of its own.
+    pub(crate) end_line: Option<u64>,
+}
+
+impl RunLine {
+    /// Folds the run's end line (number `number`, fields `fields`) into it:
+    /// each field it does not carry is added; one it carries with another
+    /// value is kept beside it as `end_<name>`, so neither value is lost.
+    fn end(&mut self, number: u64, fields: Vec<(String, String)>) {
+        self.end_line = Some(number);
+        for (name, value) in fields {
+            match self.fields.iter().find(|(held, _)| *held == name) {
+                Some((_, held)) if *held == value => {}
+                Some(_) => self.fields.push((format!("end_{name}"), value)),
+                None => self.fields.push((name, value)),
+            }
+        }
+    }
 }
 
 /// The key a row is held under: day first, so a range of days is a range of
@@ -353,6 +374,22 @@ impl Parsed {
                     let (name, value) = field.split_once('=')?;
                     decoded.push((name.to_owned(), percent_decoded(value)?));
                 }
+                // THE RUN'S END IS NOT A RUN (IA-2; DB-A50): `run <id> ended=..
+                // outcome=.. definition=..` closes the newest run line of its
+                // id and is folded into it, so `runs_total` counts runs and
+                // `runs[]` lists each once. An end whose start the journal
+                // does not hold is still listed, as itself, never dropped.
+                if decoded.first().is_some_and(|(name, _)| name == "ended")
+                    && let Some(start) = self
+                        .runs_by_id
+                        .get(&id)
+                        .and_then(|lines| lines.last())
+                        .and_then(|at| usize::try_from(*at).ok())
+                    && let Some(run) = self.runs.get_mut(start)
+                {
+                    run.end(number, decoded);
+                    return Some(());
+                }
                 // THE INDEX BESIDE THE LIST, in the same step: a line past
                 // `u32::MAX` runs is not indexed and `runs_unindexed` says so,
                 // rather than a position that wraps and names another run.
@@ -364,6 +401,7 @@ impl Parsed {
                     id,
                     line: number,
                     fields: decoded,
+                    end_line: None,
                 });
             }
             ["begin", kind, day, filter] => {
@@ -768,6 +806,133 @@ pub(crate) mod tests {
         recounted options 2019-11-14 * definition=2 months=3 run=1791300001\n\
         begin options 2019-11-18 *\n\
     ";
+
+    /// **AN END LINE IS FOLDED IN ONE PROBE, WHATEVER THE JOURNAL HOLDS**
+    /// (IA-2 repair 1): each of 100,000 runs' end lines is folded into a
+    /// reader that already holds 100,000 runs, each line timed. Printed for
+    /// `docs/06-limits.md` and the package report, never asserted: a timing
+    /// on a shared machine is evidence, not a gate.
+    #[test]
+    #[ignore = "a timing, printed"]
+    fn end_line_fold_timing() {
+        const RUNS: u64 = 100_000;
+        let mut parsed = Parsed::default();
+        let mut number = 0_u64;
+        for id in 1..=RUNS {
+            number += 1;
+            parsed.line(number, &format!("run {id} source=tickstore started={id}"));
+        }
+        let mut took = Vec::with_capacity(100_000);
+        for id in 1..=RUNS {
+            number += 1;
+            let text = format!("run {id} ended={id} outcome=finished definition=2");
+            let began = std::time::Instant::now();
+            parsed.line(number, &text);
+            took.push(began.elapsed());
+        }
+        assert_eq!(parsed.runs.len(), 100_000);
+        took.sort_unstable();
+        let n = took.len();
+        println!(
+            "end line folded beside {RUNS} runs: n={n} p50={:?} p99={:?} max={:?}",
+            took[n / 2],
+            took[n * 99 / 100],
+            took[n - 1]
+        );
+    }
+
+    /// **A RUN'S END LINE IS NOT A SECOND RUN** (IA-2 repair 1; DB-A50): two
+    /// ledger runs that interleave, each ended by `run <id> ended=..
+    /// outcome=.. definition=..`, are two runs, each with its end attached
+    /// and its end line named; a start line repeated for one id (two
+    /// processes in one second, before the runs ledger) is still two; an end
+    /// whose start the journal does not hold is listed as itself, never
+    /// dropped; an end field that disagrees with the start is kept beside it.
+    /// Read whole and read through the tail in two halves, the answer is one.
+    /// The numbers are invented.
+    #[test]
+    fn a_run_end_line_is_folded_into_its_run_and_never_counted_twice() {
+        const HEAD: &str = "\
+            run 1792000001 source=tickstore started=1792000001 definition=2\n\
+            run 1792000002 source=tickstore started=1792000001 definition=2\n\
+            begin options 2024-04-18 *\n\
+            done options 2024-04-18 * at=1792000005 definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0 run=1792000001\n";
+        const TAIL: &str = "\
+            run 1792000001 ended=1792000009 outcome=finished definition=2\n\
+            run 1792000002 ended=1792000010 outcome=stopped definition=3\n\
+            run 1791000000 source=zip started=1791000000\n\
+            run 1791000000 source=zip started=1791000000\n\
+            run 1790000000 ended=1790000100 outcome=finished definition=2\n";
+        let check = |parsed: &Parsed| {
+            assert_eq!(parsed.foreign_count, 0, "{:?}", parsed.foreign);
+            let ids: Vec<u64> = parsed.runs.iter().map(|run| run.id).collect();
+            assert_eq!(
+                ids,
+                [
+                    1_792_000_001,
+                    1_792_000_002,
+                    1_791_000_000,
+                    1_791_000_000,
+                    1_790_000_000
+                ],
+                "five runs, never seven"
+            );
+            let field = |run: &RunLine, name: &str| {
+                run.fields
+                    .iter()
+                    .find(|(held, _)| held == name)
+                    .map(|(_, value)| value.clone())
+            };
+            let first = &parsed.runs[0];
+            assert_eq!((first.line, first.end_line), (1, Some(5)));
+            assert_eq!(field(first, "ended").as_deref(), Some("1792000009"));
+            assert_eq!(field(first, "outcome").as_deref(), Some("finished"));
+            assert_eq!(
+                field(first, "end_definition"),
+                None,
+                "the same value is not repeated"
+            );
+            let second = &parsed.runs[1];
+            assert_eq!((second.line, second.end_line), (2, Some(6)));
+            assert_eq!(field(second, "outcome").as_deref(), Some("stopped"));
+            assert_eq!(
+                field(second, "definition").as_deref(),
+                Some("2"),
+                "the start's own"
+            );
+            assert_eq!(
+                field(second, "end_definition").as_deref(),
+                Some("3"),
+                "kept beside it"
+            );
+            assert_eq!(parsed.runs_of(1_792_000_002).count(), 1);
+            assert_eq!(
+                parsed.runs_of(1_791_000_000).count(),
+                2,
+                "two starts are two runs"
+            );
+            let orphan = &parsed.runs[4];
+            assert_eq!(
+                (orphan.line, orphan.end_line),
+                (9, None),
+                "listed as itself"
+            );
+            assert_eq!(field(orphan, "outcome").as_deref(), Some("finished"));
+        };
+        let whole = journal("run-end-whole", &format!("{HEAD}{TAIL}"));
+        check(&snapshot(&whole).expect("reads").parsed);
+        // THROUGH THE TAIL: the end lines arrive in a later read than their
+        // starts, as they do while the api serves a live run.
+        let halves = journal("run-end-halves", HEAD);
+        assert_eq!(snapshot(&halves).expect("reads").parsed.runs.len(), 2);
+        let path = pull::gdfl_import::journal_path(&halves);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open to append");
+        std::io::Write::write_all(&mut file, TAIL.as_bytes()).expect("append");
+        check(&snapshot(&halves).expect("reads").parsed);
+    }
 
     /// **EVERY LINE SHAPE D-3317 FIXES, AND THE OLDER ONES, READ BY NAME.**
     /// The last closing line of a key wins, as the importer's loader rules; a

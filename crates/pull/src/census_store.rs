@@ -1673,6 +1673,48 @@ pub struct Migration {
 /// Each refusal above, naming the path; nothing is renamed into place unless
 /// every partition round-tripped.
 pub fn migrate(root: &Path, vendor: Vendor) -> Result<Migration, String> {
+    // NEVER BESIDE A RUN (IA-2, D-4803; IA-GR-14): the GDFL store lock is
+    // taken exclusive, with the probe retry, and claimed `census-migrate`,
+    // so a live import refuses it `run_busy` by name and a press it blocks is
+    // told who holds the store. Released when the migration returns.
+    let hold = census_hold(root, vendor, "census-migrate")?;
+    let migrated = migrate_held(root, vendor);
+    release_hold(hold);
+    migrated
+}
+
+/// The GDFL store lock a census verb holds (IA-2), or none for a vendor whose
+/// imports take no such lock.
+fn census_hold(
+    root: &Path,
+    vendor: Vendor,
+    mode: &str,
+) -> Result<Option<crate::gdfl_run::CensusHold>, String> {
+    if vendor != Vendor::Gdfl {
+        return Ok(None);
+    }
+    crate::gdfl_run::claim_census(root, mode)
+        .map(Some)
+        .map_err(|refused| format!("{refused}. Nothing was written"))
+}
+
+/// Releases a census verb's hold, saying at `error` when a step failed: the
+/// verb's own result stands either way.
+fn release_hold(hold: Option<crate::gdfl_run::CensusHold>) {
+    if let Some(hold) = hold {
+        let run = hold.run;
+        if let Err(why) = hold.release() {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error(TARGET, "census verb lock not released")
+                    .with("run", run)
+                    .with("why", why.as_str()),
+            );
+        }
+    }
+}
+
+/// [`migrate`] under its hold.
+fn migrate_held(root: &Path, vendor: Vendor) -> Result<Migration, String> {
     let dir = vendor_dir(root, vendor);
     let legacy = manifest_path(root, vendor);
     let staging = staging_dir(root, vendor);
@@ -1748,7 +1790,7 @@ pub fn migrate(root: &Path, vendor: Vendor) -> Result<Migration, String> {
     // rewritten. The lock is retaken by the seal, which refuses if a writer
     // got in between.
     let seal = if legacy_meta.is_some() {
-        Some(seal_legacy(root, vendor))
+        Some(seal_held(root, vendor))
     } else {
         // NO SINGLE FILE TO SEAL, and the store still says what this census
         // requires of its reader. A refusal here is carried like a seal's:
@@ -2396,6 +2438,16 @@ pub struct Seal {
 /// Each refusal above, naming the path; and any I/O failure, after which the
 /// name still holds either the census or the stub, never nothing.
 pub fn seal_legacy(root: &Path, vendor: Vendor) -> Result<Seal, String> {
+    // WP-81's `--seal` rewrites `manifest/gdfl.man`: under the GDFL store
+    // lock, as `census-migrate` (IA-2, round 5).
+    let hold = census_hold(root, vendor, "census-migrate")?;
+    let sealed = seal_held(root, vendor);
+    release_hold(hold);
+    sealed
+}
+
+/// [`seal_legacy`] under its hold: [`migrate`] seals under its own.
+fn seal_held(root: &Path, vendor: Vendor) -> Result<Seal, String> {
     let dir = vendor_dir(root, vendor);
     let receipt = dir.join(MIGRATION_RECEIPT);
     let recorded: u64 = fs::read_to_string(&receipt)
@@ -2846,6 +2898,25 @@ pub fn recount(
     span: Span,
     commit: Option<&str>,
 ) -> Result<Recount, String> {
+    // UNDER THE GDFL STORE LOCK, WITH ITS ID FROM THE RUNS LEDGER (IA-2,
+    // D-4803, D-4847; FM-058, IA-GR-14): a recount never walks months an
+    // import is writing, never publishes over its day end, and never closes
+    // a day from a walk taken before the day's months existed. A live import
+    // refuses it `run_busy`, naming the run.
+    let hold = census_hold(root, vendor, "census-recount")?;
+    let counted = recount_held(root, vendor, span, (commit, hold.as_ref().map(|h| h.run)));
+    release_hold(hold);
+    counted
+}
+
+/// [`recount`] under its hold, its `recounted` lines under `run` (the
+/// runs ledger's id) when it has one.
+fn recount_held(
+    root: &Path,
+    vendor: Vendor,
+    span: Span,
+    (commit, run): (Option<&str>, Option<u64>),
+) -> Result<Recount, String> {
     let mut found = Recount::default();
     let mut held: Vec<Held> = Vec::new();
     let base = root.join(store::path::STORE_ROOT).join(vendor.as_str());
@@ -2925,7 +2996,7 @@ pub fn recount(
             refused: &refused_months,
             strays: found.not_store_names,
         };
-        let journal = close_journal(root, span, commit, &checked).map_err(|why| {
+        let journal = close_journal_as(root, span, (commit, run), &checked).map_err(|why| {
             format!(
                 "{why} (the census was recounted and published: {} row(s) offered)",
                 found.offered
@@ -2982,22 +3053,45 @@ fn walk_rung(
     dir: &Path,
     walk: &mut Walk<'_>,
 ) -> Result<(), String> {
+    // The stem of the last month counted from its raw `.bin`: the listing is
+    // sorted by name and `.bin` sorts before `.sbar`, so a month held in BOTH
+    // forms is counted once, from its `.bin`, with no extra `stat`.
+    let mut counted_raw: Option<String> = None;
     for (path, name) in sorted_dir(dir)? {
         // A month's siblings — `.crc`, `.lock`, `.tix`, `.ovl` — are expected
         // here and are not strays; only the bars are counted.
-        let Some(stem) = name.strip_suffix(FileKind::Bars.extension()) else {
-            if !FileKind::ALL
-                .iter()
-                .any(|kind| name.ends_with(kind.extension()))
-            {
-                stray(walk.found, path);
+        //
+        // EITHER FORM IS A MONTH (SC-3, D-4965). A `.sbar` with no `.bin`
+        // beside it — the raw form retired, or a seal whose raw month is gone
+        // — is a month like any other: the read door opens it, and a damaged
+        // one is named unreadable below. It was passed over as a sibling
+        // (verify-SC-2-r1), neither counted nor a stray.
+        let (stem, sealed) = match (
+            name.strip_suffix(FileKind::Bars.extension()),
+            name.strip_suffix(FileKind::SealedBars.extension()),
+        ) {
+            (Some(stem), _) => (stem, false),
+            (None, Some(stem)) => (stem, true),
+            (None, None) => {
+                if !FileKind::ALL
+                    .iter()
+                    .any(|kind| name.ends_with(kind.extension()))
+                {
+                    stray(walk.found, path);
+                }
+                continue;
             }
-            continue;
         };
+        if sealed && counted_raw.as_deref() == Some(stem) {
+            continue;
+        }
         let Some(month) = month_named(stem) else {
             stray(walk.found, path);
             continue;
         };
+        if !sealed {
+            counted_raw = Some(stem.to_owned());
+        }
         walk.found.files_seen += 1;
         if !walk.span.holds(month) {
             continue;
@@ -3182,7 +3276,8 @@ fn note_recounted(vendor: Vendor, span: Span, found: &Recount) {
 const TORN: &str = " (torn)";
 
 /// The verbs the journal holds since D-3317, each a line's first field.
-const JOURNAL_VERBS: [&str; 6] = ["begin", "done", "incomplete", "refused", "run", "recounted"];
+/// `pull::gdfl_import`'s one verb table (IA-2, design §5.4): never a copy.
+const JOURNAL_VERBS: [&str; 6] = crate::gdfl_import::VERB_WORDS;
 
 /// One day the recount closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3298,6 +3393,25 @@ pub fn close_journal(
     commit: Option<&str>,
     checked: &Checked<'_>,
 ) -> Result<JournalClose, String> {
+    close_journal_as(root, span, (commit, None), checked)
+}
+
+/// [`close_journal`] under `run`, the runs ledger's id of the recount that
+/// holds the store lock (IA-2, D-4847). `None` (a caller that holds no
+/// ledger) takes the clock raised past every `run` line, as before. Under a
+/// ledger id each `recounted` line carries ` at=<unix_s>` before its `run=`,
+/// and the append ends with the run's end line, `run <id> ended=<unix_s>
+/// outcome=finished definition=<n>` (DB-A50, D-5884); without one, neither.
+///
+/// # Errors
+///
+/// As [`close_journal`].
+pub fn close_journal_as(
+    root: &Path,
+    span: Span,
+    (commit, run): (Option<&str>, Option<u64>),
+    checked: &Checked<'_>,
+) -> Result<JournalClose, String> {
     let Checked {
         held,
         unreadable,
@@ -3377,6 +3491,11 @@ pub fn close_journal(
         }
         id += 1;
     }
+    // The runs ledger's id, when the recount holds one (IA-2): never given
+    // twice, whatever the clock or the journal says.
+    if let Some(run) = run {
+        id = run;
+    }
     let to = span
         .to
         .map_or_else(|| "open".to_owned(), |to| to.to_string());
@@ -3385,7 +3504,34 @@ pub fn close_journal(
         commit.unwrap_or("unrecorded"),
         span.from
     );
-    for closed in &done.closed {
+    recounted_lines(&mut lines, id, run.is_some(), &done.closed, &states);
+    append_journal(&path, &lines)?;
+    done.run = Some(id);
+    Ok(done)
+}
+
+/// Appends to `lines` one `recounted` line per closed day under run `id`,
+/// and, for a run the runs ledger knows (`ledger`), its clock time on each
+/// and the run's end line. A RECOUNT THE RUNS LEDGER KNOWS IS A LEDGER RUN
+/// (IA-2; DB-A50, D-4803, D-5884, D-5901): each close says when, ` at=<unix_s>`
+/// before `run=` (which stays the line's last field), and the run says it
+/// ended, one more `run` line in the import's own form, in the same append as
+/// its closes. A caller with no ledger id (`close_journal`) writes neither,
+/// so its journal stays a function of its inputs, as a bare import's does.
+fn recounted_lines(
+    lines: &mut String,
+    id: u64,
+    ledger: bool,
+    closed: &[Closed],
+    states: &BTreeMap<String, KeyState>,
+) {
+    let at = ledger.then(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs())
+    });
+    let clock = at.map_or_else(String::new, |at| format!(" at={at}"));
+    for closed in closed {
         let definition = states
             .get(&closed.key)
             .and_then(|state| match state {
@@ -3395,13 +3541,17 @@ pub fn close_journal(
             .unwrap_or("0");
         let _ = writeln!(
             lines,
-            "recounted {} definition={definition} months={} run={id}",
+            "recounted {} definition={definition} months={}{clock} run={id}",
             closed.key, closed.months
         );
     }
-    append_journal(&path, &lines)?;
-    done.run = Some(id);
-    Ok(done)
+    if let Some(at) = at {
+        let _ = writeln!(
+            lines,
+            "run {id} ended={at} outcome=finished definition={}",
+            crate::gdfl_import::BAR_DEFINITION
+        );
+    }
 }
 
 /// The first and last stamps of every row the recount built, by the segment
@@ -3570,6 +3720,14 @@ fn journal_states(
 fn append_journal(path: &Path, lines: &str) -> Result<(), String> {
     use std::io::Seek as _;
     let refused = |why: std::io::Error| format!("{}: {why}", path.display());
+    // Under the journal append lock, as every import line is (IA-2, D-4803,
+    // D-4906, IA-GR-14): a recount beside a run of another kind never tears
+    // or interleaves a line, and never waits for ever.
+    let _held = crate::gdfl_run::locks::take_path_within(
+        &crate::gdfl_import::journal_lock_path(path),
+        crate::gdfl_run::locks::LOCK_WAIT,
+    )
+    .map_err(|fault| format!("{}: {fault}", path.display()))?;
     let mut file = fs::OpenOptions::new()
         .read(true)
         .append(true)
