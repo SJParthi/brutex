@@ -74543,3 +74543,133 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5870 — /db counts that agree: one Bars count on either tab, Coverage follows the From and To window, a month total never proves a month whole where a day may hold bars it does not owe, a future is owed the derivatives count, and a share with no dated auction flag is not judged between the two counts (R3-04; DB-048, DB-014, DB-046, SC-CLOSE-17) — 2026-10-19
+
+**Findings.** DB-048: on one selection and one day window the Bars pager
+read 434 and the Coverage tab's Bars badge 443 (the census's stored count of
+the matched months); the Coverage badge read 4 on Bars and 7 on Coverage
+(matched rows on one tab, matched plus absent months on the other). DB-046:
+the From and To days narrowed Bars and not Coverage, and the text said the
+dates were ignored. DB-014: each month was judged against the fullest peer,
+not the calendar, and a month total let a surplus on one day pay for a hole
+on another. SC-CLOSE-17: a future was owed an index's 375 a session after
+the 15:40 derivatives close (charter §7), and every share on an auction day
+was judged against the eligible count. The header printed a strike in paisa
+(`1165000 CE`) and the whole series' range, not the window in view.
+
+The package was built in the cloud (`origin/cloud/db-R3-04-20261017`) and
+checked on the Mac on a shadow of the real store (`state/fix/shadow.sh`,
+bars linked read-only, GET only). **The Mac pass found three of the cloud's
+fixes did not hold on the real page or the real census**, and amended them
+(items 1, 2 and 4):
+
+- The kept Bars count was keyed by the Bars grid's plan, which is EMPTY off
+  the Bars tab (`DbBarsGrid.svelte` plans nothing for a view nobody reads),
+  so the key never matched on Coverage: GDFL NIFTY 1s, 01-31 Mar 2020, read
+  4,71,828 on Bars and "—" on Coverage after Bars had counted. Keying by the
+  matched rows' identity failed the same way, because opening Coverage reads
+  the whole census and rebuilds the matched array with the same rows.
+- The Coverage count on the Bars tab walked the WHOLE census on every change
+  of selection: timed in node over the real GDFL census (2,098,428 rows), p50
+  23 ms / p99 59 ms for NIFTY spot and p50 91 ms / p99 177 ms for every NIFTY
+  option at 1s, against the 50 ms pause the package's own target allows.
+- A month whose bars in halted minutes exceeded its regular holes read
+  "full 100.00%": GDFL NIFTY 1s 2020-03 holds 4,71,828 bars against
+  4,65,377 owed, its 19 regular days hold 426,942 of their 427,500 seconds
+  (558 missing; 18 of the 19 hold fewer than 22,500, 27 Mar 22,401;
+  `/dayflags.json`), and the halt days' halted-minute bars (owed nothing,
+  D-3336 §1) paid for them. GDFL
+  BANKNIFTY 1s 2020-03 read the same (4,71,855 held).
+
+**Decision.**
+
+1. **The Bars badge is the server's count for the query, on either tab.** It
+   reads the live window answer, or the last SETTLED one kept under the
+   query's key: feed, the matched rows' CONTENT (`selectionKey`: the row
+   count, the census bar count and two order-free 32-bit hash sums of each
+   row's instrument, month and rung), the day and time bounds and the
+   store's re-read stamp — never the page, the order, the grid's plan or the
+   array's identity. With no server count it is "—" with the reason, bound
+   or no bound, never another set's number: the census's stored count is
+   named in the badge's title only, because it counts the files and not the
+   query and differs from the server's on the real store with no bound at
+   all (amended by the second Mac pass, item 11). It sends no request of its
+   own.
+2. **Coverage lists, counts and pages the months the From and To window
+   touches**, judging each listed month whole, and its count is the same on
+   both tabs and in its pager. A window that empties it says so once, both
+   ranges in order. On the Bars tab the count reads the matched
+   instruments' rows from an index of the census built once per census read
+   in slices of about 8 ms with a task between them (DB-G84's rule); until
+   that index is whole the Coverage badge reads "…" with the reason, never a
+   count of part of the census. On Coverage it reads the grid's own index.
+3. **Missing is per day where the series' own held days are read**: missing
+   = max(owed − held, what the sessions holding no bar owe). Held is owed
+   less missing.
+4. **A month total proves a month whole only where no day of it can hold bars
+   it does not owe.** A month holding more than it owes (`surplus`, counted
+   against what is OWED, not against the halt ceiling) with nothing known
+   missing is `over`: no missing count, no ratio, never full, never 100.00%.
+   A month whose span holds a halt day or a session of unknown length, and
+   whose total meets what it owes, is `unmeasured` with the reason named
+   (`halt_unplaced`, `unknown_days`). Only a per-day count can clear either.
+   A month short of what it owes is short by at least that many.
+5. **Percentages are rounded DOWN to two decimals**; a ratio above zero that
+   floors to nothing reads `<0.01%`.
+6. **A future is owed the derivatives venue's count**, `/calendar.json`
+   `owed.derivatives[]` era by era (375 a regular session at 1min to
+   2026-08-02, 385 from 2026-08-03; charter §7), on regular and auction days;
+   special, halt and unsized days are unknown to it; an answer with no
+   derivatives row judges no future, by name; a future at 1s is
+   trade-driven.
+7. **A share on auction days owes 360 when its dated flag is 1 and 375 when
+   0**; with no flag (the census carries none) a count between the two is
+   unmeasured (`cas_unresolved`) and a count under both is short by at least
+   the eligible count's shortfall.
+8. **A `/calendar.json` `special` or `halts` entry with no day is refused by
+   name**, as a malformed `withheld` run is.
+9. **The header beside the tabs prints a strike as a price** (`11,650 CE`)
+   and the From and To window "in view" when it narrows, else the months on
+   disk; the newest stored close shows only when it falls in that window,
+   and one outside it is named as after or before it.
+10. **The special-day lookup of `denseOwed` is one Map probe per day**, as it
+    was before the cloud build (which made it a linear `find` per day).
+11. **Second Mac pass (20 Oct 2026), two amendments.** (a) The census's
+    stored count was the badge's number with no bound and no server count,
+    and on the real store that made one tab read two numbers for one
+    selection: GDFL NIFTY 1s with no bound read 4,41,02,990 on a link
+    straight to Coverage and 4,40,32,544 after one visit to Bars (shadow,
+    `state/fix/round2/fix-R3-04.json`). The badge now shows only the
+    server's count, live or kept, and "—" until Bars has counted (item 1).
+    (b) The counted line above the Coverage grid and the drawer's Missing
+    summed only rows whose missing count is known, so a selection holding
+    only an unplaced surplus read "0 bar(s) missing" and "coverage — of 0
+    owed" (GDFL NIFTY 1s, 01-31 Mar 2020, whose 19 regular days lack 558
+    seconds), and a trade-driven selection, owed no fixed count, read the
+    same (GDFL NIFTY 28 Mar 2019 11,600 CE on 15 Mar 2019): with rows and
+    none counted both figures are a dash and the words name each kind no
+    sum counts (a month total cannot judge it, trade-driven, no calendar);
+    with some counted and some a month total cannot judge, the owed figure
+    says it covers the counted rows and names how many more there are
+    (`countedLine`, `coverTotals.counted` and `uncounted`). No rows at
+    all is nothing owed and reads 0. (c) With the census's count gone from
+    the badge, a settled selection that matches nothing (Expired options
+    with no expiry chosen, which the Bars grid never reads) read "—" and
+    "open Bars" on the Bars tab itself; it reads 0, counted without a read,
+    on either tab — only once the page has settled, never while the census
+    is still read.
+
+**Not done, and owed elsewhere.** A per-day bar count for every month (on
+the census or as a route) would let items 3 and 4 judge every day exactly
+and clear the `over` and `halt_unplaced` months; the census carries month
+totals only. The dated closing-auction flag is not on the series' calendar
+answer, so item 7 cannot judge a share individually. On GDFL NIFTY 1s with no
+bound the census's stored count (4,41,02,990) and the server's count of the
+same months (4,40,32,544) differ by 70,446; the badge shows only the
+server's (item 11), and the difference itself is the census owner's to
+explain (`docs/06-limits.md` L-R304-04).
+
+**Proof.** `web/tests/db-counts.test.js` and `web/tests/completeness.test.js`
+(rows R304-01 to R304-10 of `docs/04-invariants.md`), and the shadow checks
+recorded in `state/fix/round2/fix-R3-04.json`.
