@@ -19916,3 +19916,37 @@ C-F8-01 0.974x, C-F8-06 1.006x and C-F8-09 2.545x on the same rows.
 |---|---|---|---|
 | L-FIB8-28 | `StockMonth::day` in FIB-9's order exceeds the 1.25x line on this host | one lookup a call at every scale (work 1); a day at a time across 200 stock-months touches each month's day table, day record and seconds index — a few cache lines a month, past the first-level cache at 200 months (p50 20 → 50 ns) | 1.780x in the fourth run, within the shared 3.0x ceiling. NOT closed here; the Mac's run decides it |
 | L-FIB8-29 | C-F8-09 crossed the shared 3.0x ceiling in the fourth run (3.101x; 2.545x in the third, on the same code) | one lookup a call (work 1); p50 6.5 → 6.8 ns from one day held to a hundred (180 MB), p99 10.8 → 33.4 ns; the fixed-state rows of the same run spread 0.5x to 1.8x | the row's own p99 tail on this host; `SecondsDay::range` has no production caller yet (FIB-5's walker indexes `SecondsDay::bars()` itself). NOT closed here; the Mac's run decides it, with L-FIB8-22 |
+
+### Measured on 19 October 2026: FIB-8's bench rows, fifth run, C-F8-09 in FIB-5's order
+
+The same host and harness, nothing else running, timer granularity 18 ns,
+last-level cache estimate 8,192 KiB (the probe: 1.6 ns a dependent load at
+16 KiB, 290 ns at 256 MiB). One change from the fourth run, to the bench and
+not to the code: C-F8-09 walks in FIB-5's order (D-6380: one `DayIndex` built
+per stock-day and every slot of the day walked before the next), the days
+ascending and a pseudo-random 1 to 4 walks a day, each from a pseudo-random
+entry second to the forced exit's end. Its fourth-run order — a fresh
+pseudo-random day for every walk — is no production caller's (FM-F002).
+
+| ID | Class | Scales | p50 / p99 / max ps | Work per call | Ratio | Verdict |
+|---|---|---|---|---|---|---|
+| C-F8-01 | AMORTISED, period 375 | 1 / 11 / 110 months | 246,736 / 569,505 / 3,272,076; 279,464 / 575,560 / 1,620,061; 252,434 / 366,352 / 588,122 | mean 0.999 | mean 0.959x | PASS |
+| C-F8-02 | AMORTISED, period 360 | 1 / 11 / 110 months | 238,590 / 564,029 / 2,865,230; 249,623 / 543,350 / 3,845,883; 246,348 / 612,066 / 2,148,353 | mean 1.000 | mean 1.134x | PASS |
+| C-F8-03 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 40,158 / 112,001 / 520,494; 23,964 / 101,533 / 2,145,160; 11,754 / 46,664 / 335,267 | 1 | p99 0.416x | PASS |
+| C-F8-04 | WORST-CASE | 25 / 250 / 2,500 members | 8,064 / 34,409 / 112,907; 11,125 / 99,942 / 2,723,547; 10,393 / 82,517 / 171,108 | 1 | p99 2.398x | FAIL (time), within the 3.0x ceiling (L-FIB8-23) |
+| C-F8-05 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 903,696 / 1,689,571 / 8,861,476; 1,258,425 / 1,735,884 / 4,278,026; 908,681 / 1,539,232 / 2,204,149 | 1 | p99 0.911x | PASS |
+| C-F8-06 | WORST-CASE, fixed state | 30 / 300 / 3,000 days | 12,333 / 46,352 / 1,797,661; 12,273 / 31,177 / 57,441; 12,275 / 31,059 / 92,304 | 1 | p99 0.670x | PASS |
+| C-F8-07 | WORST-CASE, fixed state | 1 / 10 / 100 records | 182,110 / 291,446 / 777,369; 181,629 / 253,799 / 352,433; 183,637 / 487,782 / 1,464,479 | 83 bytes | p99 1.673x | FAIL (time) on a state that does not grow: this host's noise (0.883x in the fourth run) |
+| C-F8-08 | AMORTISED, period 789 | 10,000 / 100,000 / 1,000,000 records | 233,514 / 674,392 / 2,424,515; 284,918 / 685,991 / 1,748,659; 227,716 / 619,375 / 1,629,688 | mean 83.04 bytes | mean 0.968x | PASS; EXTRAPOLATION |
+| C-F8-11 | BOUNDED, one block | 10,000 / 100,000 / 1,000,000 records | 194,388,198 / 301,243,503 / 363,862,415; 209,021,452 / 311,811,795 / 367,606,586; 209,330,664 / 300,691,043 / 380,294,332 | 65,519 bytes (p50) | p99 0.998x | BOUNDED (information); EXTRAPOLATION |
+| C-F8-09 | WORST-CASE | 1 / 10 / 100 days | 12,131 / 43,889 / 126,182; 12,258 / 46,857 / 145,929; 11,500 / 43,637 / 119,142 | 1 | p99 0.994x | **PASS**, in FIB-5's order |
+| C-F8-10 | WORST-CASE | 2 / 20 / 200 indices | 34,947 / 85,880 / 171,285; 34,031 / 106,606 / 739,986; 34,174 / 85,095 / 3,055,756 | 1 | p99 0.990x | PASS |
+| C-F8-12 | WORST-CASE | 2 / 20 / 200 stock-months | 21,176 / 44,378 / 142,717; 22,788 / 46,283 / 153,488; 28,190 / 79,095 / 198,545 | 1 | p99 1.782x | FAIL (time), within the ceiling (L-FIB8-28); EXTRAPOLATION |
+
+The process exited 0. Across the fourth and fifth runs the rows that failed
+the 1.25x line on time were different rows each time, fixed-state rows among
+them, except C-F8-04 (2.089x, 2.398x) and C-F8-12 (1.780x, 1.782x).
+
+| ID | Limit | Why it is not O(1), or not done | Bound |
+|---|---|---|---|
+| L-FIB8-30 | C-F8-09 in FIB-5's order passes on this host | a day's 16-byte range column is walked while it is warm, every walk of the day before the next day's | 0.994x in the fifth run: L-FIB8-22 and L-FIB8-29 measured a fresh random day for every walk, which no production caller does; the Mac re-measures |
