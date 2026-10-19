@@ -38,9 +38,12 @@
 //!
 //! * `generation` — the manifest's commit counter, which advances only when
 //!   bars are filed, and
-//! * `committed_at` — the manifest file's own mtime, in the **server's** clock,
-//!   beside the server's `at`, so the browser subtracts two server numbers and
-//!   never its own possibly-skewed clock.
+//! * `committed_at` — the newest census file's own mtime, in the **server's**
+//!   clock, beside the server's `at`, so the browser subtracts two server
+//!   numbers and never its own possibly-skewed clock. For a vendor migrated to
+//!   version 4 that is the newest CURRENT epoch of its segments, never the
+//!   directory that holds them; `committed_from` names every file stat'ed
+//!   and any that would not stat (AH-04, D-5880).
 //!
 //! The console polls, subtracts, and states what it measured. When nothing is
 //! running both are unchanged, and that is exactly what it will say. It never
@@ -50,7 +53,8 @@
 //!
 //! One `metadata` call for the record count, one page of at most
 //! [`audit::MAX_PAGE_RECORDS`] records read off disk, one manifest header per
-//! vendor, one `metadata` call for the manifest mtime, and one pass over the
+//! vendor, one `metadata` call per current census file (one, or three for a
+//! migrated vendor), and one pass over the
 //! entry region — the same pass `/store.json` already makes. Nothing here walks
 //! a directory.
 //!
@@ -987,6 +991,9 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     // HOW FAR THE CENSUS IS BEHIND ITS IMPORT, AND THE WORD FOR IT (D-3327
     // item 2, DB-G07): the same answer `/store.json`'s headers carry.
     let behind = crate::server::census_behind(site, feed);
+    // ONE STAT PER CURRENT CENSUS FILE (AH-04, D-5880): a migrated census
+    // is its epochs, never its directory. See [`Committed`].
+    let committed = census.map(committed_at);
     let FeedRollup {
         ref months,
         instrument_months,
@@ -995,7 +1002,7 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","store":{{"feed":{},"state":{},"census_state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"headroom":{},"behind_days":{},"behind_from":{},"legacy_drift":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
+        r#","store":{{"feed":{},"state":{},"census_state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"committed_from":{},"capacity":{},"headroom":{},"behind_days":{},"behind_from":{},"legacy_drift":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
         render::json_string(feed.as_str()),
         render::json_string(census.map_or("absent", |c| c.state.name())),
         render::json_string(census.map_or("absent", |c| c.state_word(behind.state_days()))),
@@ -1016,9 +1023,13 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
             || render::json_string(""),
             |c| render::json_string(&c.path.display().to_string())
         ),
-        census
-            .and_then(committed_at)
+        committed
+            .as_ref()
+            .and_then(|c| c.at)
             .map_or_else(|| "null".to_owned(), |secs| secs.to_string()),
+        committed
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), Committed::json),
         capacity(census),
         census
             .and_then(crate::census::VendorCensus::room)
@@ -1101,18 +1112,221 @@ fn census_commits(census: &crate::census::VendorCensus) -> Option<u64> {
     census.counters().map(|(_keys, _rows, entries)| entries)
 }
 
-/// When the manifest was last written, in epoch seconds.
+/// When the census was last written, in epoch seconds, and the files that
+/// answer rests on (AH-04, g-ui-dom-vs-json-4, D-5880).
 ///
-/// One `metadata` call on one file — this is the "did the store grow" signal,
-/// and it has to stay a stat rather than a walk. `None` when the file is not
-/// there or the platform will not say, which the console prints as "unknown"
-/// rather than as "never".
-fn committed_at(census: &crate::census::VendorCensus) -> Option<i64> {
-    std::fs::metadata(&census.path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(ingest::epoch_secs)
+/// # A partitioned census is its epoch files, never its directory
+///
+/// This stat'ed `census.path`, and for a vendor migrated to version 4 that
+/// path is the DIRECTORY `manifest/v4/<vendor>/`. A directory's mtime moves
+/// when an entry is added to it or removed, not when a file under it is
+/// appended to, so `/audit` printed GDFL's last commit as 10 Oct 08:56 IST
+/// ("not written for 110h 27m") while its CASH, FNO and INDEX epochs had been
+/// written on 14 Oct. A migrated census is now the newest mtime among the
+/// CURRENT epoch of each segment, the files the census itself just read
+/// ([`crate::census::Part::path`]): one `metadata` call per part, at most
+/// three, and no directory listing. A single-file census is still its one
+/// file's mtime.
+///
+/// # Nothing unread becomes a zero
+///
+/// A part whose epoch will not stat is named with the refusal and the answer
+/// says `complete: false`; the newest of the others is then a LOWER bound and
+/// says so. A segment with no epoch yet is named as such and contributes
+/// nothing. A census that did not load is stat'ed at its path as before, and a
+/// path that is a directory answers `null`: its mtime is not a commit.
+struct Committed {
+    /// The newest mtime among the files read; `None` when none was.
+    at: Option<i64>,
+    /// What `at` is: `"newest census file"`, `"manifest file"` or `"none"`.
+    basis: &'static str,
+    /// Every file asked, in the census's own order.
+    files: Vec<CommitFile>,
+    /// Why there is no answer, when there is none.
+    note: Option<String>,
 }
+
+/// One file [`committed_at`] asked.
+struct CommitFile {
+    /// The partition's segment; `None` for a single file.
+    segment: Option<&'static str>,
+    /// The partition's current epoch; `None` for a single file or a segment
+    /// with no epoch yet.
+    epoch: Option<u32>,
+    /// The path stat'ed, or the segment directory that holds no epoch.
+    path: String,
+    /// `Ok(Some)` its mtime; `Ok(None)` nothing to stat (no epoch yet, or no
+    /// file at all); `Err` the refusal, in the file system's words.
+    at: Result<Option<i64>, String>,
+}
+
+impl CommitFile {
+    fn json(&self, out: &mut String) {
+        let (at, state, why) = match self.at {
+            Ok(Some(secs)) => (secs.to_string(), "read", "null".to_owned()),
+            Ok(None) if self.segment.is_some() => {
+                ("null".to_owned(), "no epoch", "null".to_owned())
+            }
+            Ok(None) => ("null".to_owned(), "absent", "null".to_owned()),
+            Err(ref why) => ("null".to_owned(), "unread", render::json_string(why)),
+        };
+        let _ = write!(
+            out,
+            r#"{{"segment":{},"epoch":{},"path":{},"at":{at},"state":"{state}","why":{why}}}"#,
+            self.segment
+                .map_or_else(|| "null".to_owned(), render::json_string),
+            self.epoch.map_or_else(
+                || "null".to_owned(),
+                |epoch| render::json_string(&format!("{epoch:06}"))
+            ),
+            render::json_string(&self.path),
+        );
+    }
+}
+
+impl Committed {
+    /// `committed_from`: the basis, whether every file was read, each file
+    /// and the note.
+    fn json(&self) -> String {
+        let mut out = format!(
+            r#"{{"basis":"{}","complete":{},"files":["#,
+            self.basis,
+            self.files.iter().all(|file| file.at.is_ok()),
+        );
+        for (n, file) in self.files.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            file.json(&mut out);
+        }
+        let _ = write!(
+            out,
+            r#"],"note":{}}}"#,
+            self.note
+                .as_deref()
+                .map_or_else(|| "null".to_owned(), render::json_string)
+        );
+        out
+    }
+}
+
+/// The mtime of one path, in epoch seconds: `Ok(None)` when nothing is there.
+fn mtime(path: &std::path::Path) -> Result<Option<i64>, String> {
+    match std::fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(at) => Ok(Some(ingest::epoch_secs(at))),
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(why.to_string()),
+    }
+}
+
+/// When the census was last written. See [`Committed`].
+///
+/// At most three `metadata` calls (one per segment of a migrated vendor), or
+/// one for a single file: the "did the store grow" signal stays a stat, never
+/// a walk. The console prints `null` as "unknown", never as "never".
+fn committed_at(census: &crate::census::VendorCensus) -> Committed {
+    if let crate::census::Census::Held { ref manifest } = census.state
+        && manifest.is_partitioned()
+    {
+        let files: Vec<CommitFile> = manifest
+            .parts()
+            .iter()
+            .map(|part| CommitFile {
+                segment: part.segment().map(brutex_core::instrument::Segment::as_str),
+                epoch: part.epoch(),
+                path: part.path().display().to_string(),
+                at: if part.epoch().is_some() {
+                    mtime(part.path()).and_then(|at| {
+                        at.map(Some).ok_or_else(|| {
+                            "listed as the current epoch when the census was read, and gone \
+                             when it was stat'ed: epochs are never deleted (D-3316 item 2)"
+                                .to_owned()
+                        })
+                    })
+                } else {
+                    Ok(None)
+                },
+            })
+            .collect();
+        let at = files
+            .iter()
+            .filter_map(|file| file.at.as_ref().ok().copied().flatten())
+            .max();
+        let unread: Vec<&str> = files
+            .iter()
+            .filter(|file| file.at.is_err())
+            .map(|file| file.segment.unwrap_or("?"))
+            .collect();
+        let note = match (at, unread.is_empty()) {
+            (_, false) => Some(format!(
+                "{} of {} segment epoch(s) could not be stat'ed ({}); {}",
+                unread.len(),
+                files.len(),
+                unread.join(", "),
+                if at.is_some() {
+                    "the newest of the others is a lower bound, not the last commit"
+                } else {
+                    "no commit time can be stated"
+                }
+            )),
+            (None, true) => {
+                Some("no segment holds an epoch yet: nothing has been committed".to_owned())
+            }
+            (Some(_), true) => None,
+        };
+        return Committed {
+            at,
+            basis: "newest census file",
+            files,
+            note,
+        };
+    }
+    let path = census.path.display().to_string();
+    match std::fs::metadata(&census.path) {
+        Ok(meta) if meta.is_dir() => Committed {
+            at: None,
+            basis: "none",
+            note: Some(format!(
+                "{path} is a directory, the partitioned census's own; it did not load ({}), so no \
+                 epoch file was read, and a directory's mtime is not a commit",
+                census.state.name()
+            )),
+            files: vec![CommitFile {
+                segment: None,
+                epoch: None,
+                path,
+                at: Err("a directory, not a census file".to_owned()),
+            }],
+        },
+        _ => {
+            let at = mtime(&census.path);
+            let read = at.as_ref().ok().copied().flatten();
+            Committed {
+                at: read,
+                basis: if read.is_some() {
+                    "manifest file"
+                } else {
+                    "none"
+                },
+                note: match at {
+                    Ok(Some(_)) => None,
+                    Ok(None) => Some(format!("no census file at {path}")),
+                    Err(ref why) => Some(format!("{path} could not be stat'ed: {why}")),
+                },
+                files: vec![CommitFile {
+                    segment: None,
+                    epoch: None,
+                    path,
+                    at,
+                }],
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "audit_json_commit_tests.rs"]
+mod commit_tests;
 
 #[cfg(test)]
 #[allow(

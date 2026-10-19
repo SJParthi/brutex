@@ -19643,3 +19643,28 @@ processes against a shadow of the real store; nothing else here is measured.
 | L-AH03-2 | **NOT DONE — the server decides `kept_apart` per MONTH, not per day** | `sources.rs` `auction_of` answers `kept_apart` whenever the month's `.auc` file exists, so 2026-09-01..24 of every share whose 2026-09 month gained a `.auc` from the 25-30 Sep append (about 1,340 share-days, plus 15 in 2026-08) read `kept_apart` with no print. The page now says "none is filed for this day" there and never denies the print (D-5836), but the record itself is the month's | owed by AG-04's file (`crates/api/src/sources.rs`), a follow-on after AG-04 lands: a per-day state (`kept_apart` only where the sidecar holds that day) | AH-03 → AG-04 |
 | L-AH03-3 | Opening a closing-auction day of a share costs one `/sources/day.json` read | the day band's records do not carry the auction record; `/sources/day.json` does | one read per (share, day) opened, remembered per URL for the page's life (at most 64); Zerodha's band reads none (its minutes end before the auction). Measured on the AH-03 shadow, `curl` sequential GETs of `/sources/day.json?exchange=NSE&segment=CASH&symbol=RELIANCE&from=2026-09-28&to=2026-09-28`: n = 200, p50 0.995 ms, p99 1.162 ms, max 2.477 ms | AH-03 |
 | L-AH03-4 | The day band's words cost a pass over one page of days | each label is O(1) per day (a fixed set of field checks) and O(phrases) for the index auction label | one `/dayflags.json` page is at most 92 days. Measured in node over the real NIFTY 2026-07..09 answer (92 days), `bandOf` + `sessionCount` + `emptyWindowWhy`, n = 1,000 after 200 warm-up: before p50 0.045 ms, p99 0.352 ms, max 1.586 ms; after p50 0.059 ms, p99 0.351 ms, max 0.997 ms per page | AH-03 |
+
+## `/audit`'s last commit of a partitioned census, and the narrow-window layout (AH-04, D-5880, D-5883)
+
+Measured 18 October 2026 on two fresh shadows of the real store
+(`state/fix/shadow.sh`, bars linked read-only, `serve.sh` under the kernel
+write lock), GET requests only. Before: a release build of `feat/db-fix`
+94320a4e, which `main`'s squash merge does not keep; its
+`crates/api/src/audit_json.rs` is byte-identical to the `feat/db-fix` this
+change starts from. After: this branch, release, unstamped (built
+from the worktree). Timing: n = 200 per side per case after 20 warm-up
+requests, interleaved one before and one after, each a fresh `curl` reading
+`%{time_total}`; the shared machine's load average was 14 to 19. Layout: the
+pages served by each build (the `feat/db-fix` web build before, this branch's
+after), in a headless Chrome 155 of this package's own driven over the
+DevTools protocol (`Emulation.setDeviceMetricsOverride`, not a phone), 9 s
+after load, measuring `getBoundingClientRect` and, for every rendered control
+inside `.board`, whether `scrollIntoView({block: 'nearest'})` brings it under
+the pointer without scrolling any clipped (`overflow: hidden`) container.
+Scripts and raw figures are in the AH-04 report
+(`state/fix/round2/fix-AH-04.json`, `scratch-AH-04/`).
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AH04-01 | `committed_at` of a migrated vendor is three `metadata` calls, not one | a version-4 census is one current epoch per segment, and the newest of them is the last commit; the census's own parts name the files, so no directory is listed | at most three stats a request, none per row. `/audit.json?feed=gdfl` before p50 0.804 / p99 1.365 / max 1.485 ms, after 0.751 / 1.396 / 1.401 ms; `?feed=zerodha` (one file, unchanged) before 1.723 / 2.490 / 2.826 ms, after 1.660 / 2.567 / 2.635 ms. The stamp is the mtime the file system keeps: a file written in place without its mtime moving (no writer here does) would not move it | AH-04 |
+| L-AH04-02 | Layout has no unit test; the board's share of the window is a measurement | CSS media queries are not run by `node --test` | `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`, board [top, height] px and share of the viewport after scrolling `main` to its end, before → after: 375x812 [595, 218] 27% → [181, 631] 78%; 375x667 [595, 73] 11% → [181, 486] 73%; 375x568 [595, 24] 0%, 0 of 140 board controls reachable → [181, 387] 68%, 140 of 140; 320x568 [673, 24] 0%, 0 of 140 → 68%, 140 of 140; 812x375 [318, 57] 15% → [106, 269] 72%; 1024x600 [298, 302] 50% → [134, 466] 78%; 1280x800 [260, 541] 68% → unchanged, `main` still `overflow: hidden`. Repeated at 375x667 on BANKNIFTY options (35% → 73%), NIFTY options (35% → 73%) and RELIANCE spot (8% → 73%). The connection banner of an unstamped build is taller (235 px at 375 wide), and it scrolls away with the rest; a page other than `/db` keeps its own scroll regions at main's height, measured on `/db` only | AH-04 |
