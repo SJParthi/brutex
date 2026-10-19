@@ -1758,15 +1758,17 @@ pub fn seconds_of(bars: &[Candle], minute_days: &[i64], cash: &CashCloses) -> Se
             held.refusal = Some("seconds_corrupt");
             continue;
         }
-        if let Some(previous) = held.bars.last() {
-            if previous.ts_micros == bar.ts_micros {
-                held.refusal = Some("seconds_duplicate");
-                continue;
-            }
-            if previous.ts_micros > bar.ts_micros {
-                held.refusal = Some("seconds_unsorted");
-                continue;
-            }
+        let order = held
+            .bars
+            .last()
+            .map(|previous| previous.ts_micros.cmp(&bar.ts_micros));
+        if let Some(why) = match order {
+            Some(std::cmp::Ordering::Equal) => Some("seconds_duplicate"),
+            Some(std::cmp::Ordering::Greater) => Some("seconds_unsorted"),
+            Some(std::cmp::Ordering::Less) | None => None,
+        } {
+            held.refusal = Some(why);
+            continue;
         }
         let continuous =
             pull::calendar::phase_at_second(Venue::NseCash, day, second, cas_of(day, cash))

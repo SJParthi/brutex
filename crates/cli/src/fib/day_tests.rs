@@ -2561,3 +2561,19 @@ fn an_excluded_day_counts_no_previous_close() {
         "Thursday's first day only"
     );
 }
+
+/// A day of seconds with no bar is empty; one with a bar is not.
+#[test]
+fn a_seconds_day_with_no_bar_is_empty() {
+    let empty = SecondsDay {
+        day: day_of(2025, 3, 3),
+        first_second: 9 * 3_600 + 15 * 60,
+        slots: Vec::new(),
+        ranges: Vec::new(),
+        bars: Vec::new(),
+    };
+    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
+    assert_eq!(empty.at(9 * 3_600 + 15 * 60), None);
+    assert_eq!(empty.range(9 * 3_600 + 15 * 60), None);
+}
