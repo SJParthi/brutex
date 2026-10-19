@@ -37,7 +37,9 @@
    *   · `store.generation`  — the manifest's commit counter. It advances only
    *                           when bars are filed.
    *   · `store.bars`        — the census total.
-   *   · `store.committed_at`— the manifest's mtime, in the SERVER's clock,
+   *   · `store.committed_at`— the newest CURRENT census file's mtime (one
+   *                           stat per segment of a migrated vendor, never
+   *                           its directory; AH-04), in the SERVER's clock,
    *                           beside the server's `at`. Both numbers come from
    *                           the same machine, so the browser subtracts two
    *                           server numbers and never its own clock.
@@ -95,7 +97,8 @@
   // count alone, so it said IDLE while an import wrote a million bars a minute
   // into a census that was refusing them, and no page drew `imports`.
   import ImportPanel from '$lib/ImportPanel.svelte';
-  import { journalStep, newestImportAt, readImportExtras } from '$lib/import-panel.js';
+  import { archiveEnd, journalStep, newestImportAt, readImportExtras } from '$lib/import-panel.js';
+  import { commitLine, journalHeader, sinceCommit as commitAge } from '$lib/audit-header.js';
   import { lastRun } from '$lib/ingest-run.js';
 
   /* ══════════════════════════════════════════════════════════════════════
@@ -489,7 +492,9 @@
   const pulse = $derived.by(() => {
     const store = payload?.store;
     const now = payload?.at ?? 0;
-    const sinceCommit = store?.committed_at == null ? null : now - store.committed_at;
+    // A COMMIT LATER THAN THE SERVER'S OWN CLOCK IS NOT "JUST WROTE" (AH-04):
+    // `commitAge` answers null for it, and the cell names it ahead of the clock.
+    const sinceCommit = commitAge(store, now);
 
     // Growth between the oldest sample still held and the newest. Both numbers
     // are the server's, so the window is the server's too.
@@ -1090,9 +1095,10 @@
         <span class="dot down"></span><span class="txt">/audit.json failed</span>
       </span>
     {:else if payload}
-      <span class="status" title="Round trip to /audit.json, measured. Last answer {stampLabel(load.at)}.">
+      {@const header = journalHeader(payload.journal)}
+      <span class="status" title="{header.title} Round trip to /audit.json, measured. Last answer {stampLabel(load.at)}." data-journal-header>
         <span class="dot up" class:live={load.state === 'refreshing'}></span>
-        <span class="txt">{n0(payload.journal.records)} runs</span>
+        <span class="txt">{header.text}</span>
         <span class="ms">{load.ms} ms</span>
       </span>
     {:else}
@@ -1174,7 +1180,7 @@
             <span class="big warn">JUST WROTE</span>
             <span class="sep">·</span>
             <span>
-              nothing has moved between the last two answers, and the manifest was written
+              nothing has moved between the last two answers, and the newest census file was written
               <b>{dur(pulse.sinceCommit ?? 0)}</b> ago. Either a run is between commits or it has just
               finished.
             </span>
@@ -1182,7 +1188,7 @@
             <span class="big">IDLE</span>
             <span class="sep">·</span>
             <span data-pulse-from="census-and-journals">
-              the store has not been written for <b>{dur(pulse.sinceCommit ?? 0)}</b>, and neither the
+              {#if pulse.sinceCommit == null}the census's last write is not known ({commitLine(payload.store, payload.at ?? null, istStamp)}){:else}the store has not been written for <b>{dur(pulse.sinceCommit)}</b>{/if}, and neither the
               pull journal nor the import journal gained a record between this page's answers. Nothing
               is filing bars.
             </span>
@@ -1201,9 +1207,7 @@
               <em>ago</em>
             </span>
             <span class="n">
-              {payload.store.committed_at == null
-                ? 'the manifest file has no readable mtime'
-                : `${istStamp(payload.store.committed_at)} IST · manifest mtime`}
+              {commitLine(payload.store, payload.at ?? null, istStamp)}
             </span>
           </div>
 
@@ -1318,7 +1322,7 @@
           <ImportPanel
             summary={payload.imports}
             store={payload.store}
-            archiveTo={payload.imports?.span?.to ?? null}
+            archiveTo={archiveEnd(feeds.all.find((f) => f.wire === feeds.active) ?? null)}
             optionsLeft={importExtras.optionsLeft}
             notDone={importExtras.notDone}
             notDoneError={importExtras.notDoneError}

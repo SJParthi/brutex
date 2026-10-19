@@ -70024,6 +70024,299 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
 
+### D-4969 — The re-key plan tells a recorded move or retirement (done) from a pending one, a key continues under one key and is never superseded and retired, a move into a held month is known before the apply, and a cli invocation's ledger lines can name its run — 2026-10-14
+
+**Implemented by** AG-02 (assurance findings rekey-3, rekey-5, rekey-2 and
+stocks-7, 14 October 2026): `pull::gdfl_rekey::{plan, against_ledger,
+held_months, copied_months, census_step, Plan::{recorded_moves, recorded_retired, pending, census},
+CensusStep, Group::check,
+Withdrawn::{parse, counts_for, line_of, superseded_records, retired_records,
+admits}, apply}`, `cli::gdfl_rekey::{render_survey, render_plan}`,
+`cli::operation_audit::{RunClaim, claim_invocation_run}`. **Number** the
+ledger's head + 1 at landing (A6): D-4969, still the head + 1 on 16 October 2026 after AF-03 (D-4963), SC-2 (D-4965), AG-03 (D-4966) and R4-08 (D-4967, D-4968) landed; renumbered again if
+another package took it first (round 3, amendment A6).
+
+**What was observed.** (1) rekey-3: the old keys' files are kept for ever, so
+every plan judged them again and a second `--plan` after the 14 October apply
+still read `13 to move, 3 to retire`; the pinned test said so on purpose
+("a re-run plans the same move and finds it done", WP-12c). The acceptance in
+R4-21, ING-10 and DATA-REKEY-APPLY (`0 to move, 0 to retire`) could never
+pass, and the ledger totals line counted the whole ledger under
+`--underlying`. (2) rekey-5: `Withdrawn::parse` kept the LAST of two
+`superseded` lines of one key with different targets, silently, and refused a
+key superseded and retired without saying which lines; neither `plan`,
+`named_twice` nor `apply` compared a verdict with the ledger, so a later alias
+table could make the apply append either line (latent: no such line exists).
+(3) rekey-2: the plan was pure and `target_state` ran only in the apply, so
+`0 unresolved` did not predict the 14 October apply's three refusals (NIFTY
+`2023-06-29-{1000000,1050000,1100000}-PE` into held 2020-09 months, 186 bars).
+(4) stocks-7: every pull ledger line stamps `run=` from the telemetry sink's
+run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
+`zerodha.repairs` and 76,476 `zerodha.gaps` lines say `run=0`.
+
+**Decided.**
+
+1. **Recorded is done.** A move whose `(underlying, old) -> new` the ledger
+   records, with the month and bar counts the key holds now, and a
+   retirement the ledger records, are `Plan::recorded_moves` and
+   `Plan::recorded_retired`: out of `moves`, `retired` and `changes()`, and
+   `apply` does not redo them. The receipt prints `N moved and M retired
+   already recorded`, lists each as `(recorded in the ledger)`, and prints
+   `PENDING: P` (moves + retirements + unresolved + the census step), the one
+   number a gate reads; the ledger totals follow `--underlying`. This replaces WP-12c's
+   pinned re-plan. **The restated acceptance** for R4-21, ING-10 and
+   DATA-REKEY-APPLY: a second `--plan` reads `PENDING: 0`, and a second
+   `--apply` writes 0 month files, appends 0 ledger lines and installs no
+   epoch. A run cut short is finished by the next: after its lines every key
+   is recorded and the CENSUS STEP is pending (`census: N withdrawn key(s)
+   still listed`, in `PENDING`), and the next apply installs only the epoch;
+   before them the target holds the copy, the plan reads the move pending
+   (not a second name: the same bar count on every day of a month and apply's
+   own `target_state` finding that month `Already`, bar for bar) and the
+   apply finds those months exactly held.
+2. **One target per key.** `Withdrawn::parse`, the one public reader of the
+   two record kinds, refuses a second `superseded` line of one
+   `(underlying, old)` whose `by=` differs, and a key superseded and retired
+   in either order, each naming both line numbers; the same record again
+   reads once at its first line; a second `superseded` line to the same
+   target with other counts or digest, and a second `retired` line of one key
+   with another account, are refused naming both lines (repair r1e). A last line with no newline is torn, never a record:
+   the next append marks it `(torn)` and writes its own line whole, so it can
+   never vanish after having been counted. The writer refuses first: the plan
+   names as unresolved, with the ledger line, a verdict that would re-target a
+   superseded key, retire a superseded key, move a retired key, keep a
+   withdrawn key, or move a recorded key that has grown since; a move into a
+   target the ledger withdraws is unresolved; and `apply` refuses, before it
+   writes a byte, a plan whose lines the parser would refuse
+   (`Withdrawn::admits`).
+3. **A move into a held month is known before the apply.** The month headers
+   the survey read decide every month the target does not hold at or after
+   the moved bars (the apply appends there without reading). A group with a
+   month the target does hold is decided by `Group::check`, the very read and
+   `target_state` the apply runs before its first write: if it refuses, the
+   moves are `target month held: ... needs the repair-door publish (R4-21
+   item 1) (apply's own check: ...)`; if every such month is `Already` (an
+   apply cut short), the move stands and the next apply finishes it. Moves
+   into one month whose spans interleave are unresolved; a group is refused
+   whole, as the apply refuses it. The publish itself is R4-21 item 1's.
+4. **A cli invocation's run.** `cli::operation_audit::RunClaim` holds an
+   attempt id as the sink's run for its life: `claim_run` takes only a free
+   key, the guard releases only what it took, zero and no sink claim nothing
+   (D-0088's zero is "no run"). It belongs at the boundary of a process that
+   runs one command, the `cli` binary: the API process runs work beside other
+   runs, which is why `Attempt::enter` does not claim.
+
+**Repair r1e (16 October 2026; a second agent's check of the first build).**
+Two blocking defects, both reproduced before this repair. (a) The census
+step was not in the plan: an apply stopped after its ledger lines and before
+the epoch (killed, or refused by a census lock another ingest holds at step
+4, which a retirements-only apply reaches without step 2) left every key
+recorded, and the next `--plan` read `PENDING: 0` and "would change nothing"
+while the next `--apply` installed an epoch. Now `Plan::census` is a
+`CensusStep` (`Clear`, `Listed(keys)`, `Unreadable(why)`, `NotRead`), read
+by the plan from the census's current FNO epoch with `Withdrawn::holds`, the
+predicate the apply's withdrawal uses; a listed key counts one in `PENDING`
+and in `changes()`, an unread or unreadable census counts one and fails the
+plan's exit; an empty ledger reads nothing (no census can list what it does
+not withdraw). The check covers the whole ledger even under `--underlying`,
+because the apply withdraws the whole ledger's keys. (b) `copied_into` read
+only headers and day counts, so a target holding other bars under the same
+counts and stamps was taken for an apply cut short: `named_twice` and
+`held_months` skipped it, the plan read one move and no unresolved, and the
+apply refused the move. Now a copy is decided month by month: equal counts on
+every day of the month AND apply's `target_state` finding it `Already`; only
+those months' days are exempt from the second-name check, and a held month
+is decided by `Group::check`. A move killed between its two months (June
+written, July not) now plans as the move the apply finishes, where the first
+build named it a second name. Also taken: the ledger's two-account repeats
+(above, item 2).
+
+**Rejected.** Rewriting the acceptance to a second `--apply` receipt: the
+plan is the gate the one-click ingest reads, and asking "is it done?" must
+not need a write-capable run. Re-verifying each recorded move bar for bar on
+every plan: O(bars) a run for keys whose digest the ledger holds; a pending
+move is still verified exactly by `target_state`. Reading the bars of every
+move into an existing target in the plan: O(bars moved) for the common case
+the headers decide exactly (a month the target does not hold at or after the
+moved bars is appended to without a read, by the apply as by the plan).
+Keeping the plan pure and leaving the census step to the apply's receipt:
+`PENDING` must answer "is it done?" without a write-capable run, and the
+census epoch is read without the lock, as every census reader reads it. Last-wins for a re-targeted key: one
+contract becomes three series and nothing refuses. Claiming the run inside
+`Attempt::enter`: the API's browser tasks enter attempts beside its own pull
+runs, and a claim there would stamp a pull's events with a sweep's id.
+
+**What remains** (`docs/06-limits.md`, L-AG02-4 to L-AG02-7): the API's own
+ledger reader in `crates/api/src/bars_change.rs` still keeps the last line and
+copies lineage to both targets (AF-03's file); the settled key's window label
+while a predecessor is pending (`months_outside_life`, `prev_chg_why
+no_earlier_month`) needs `bars_change.rs` and `bars_series.rs` (AF-03,
+AF-04); the three refused NIFTY moves need R4-21 item 1's publish; and
+`RunClaim` is not yet held by the cli binary, because the one line that holds
+it is in `crates/cli/src/lib.rs` `run_with_sink`, which R3-18, R3-32 and R4-08
+have in flight: until it lands, cli ledger lines still say `run=0`.
+
+**Proved by** `pull::gdfl_rekey::tests::{a_second_plan_after_a_full_apply_has_nothing_pending,
+a_recorded_move_is_reported_as_recorded_not_to_move,
+the_ledger_totals_follow_the_underlying_filter,
+a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines,
+an_identical_repeated_superseded_line_is_idempotent,
+a_key_superseded_and_retired_is_refused_naming_both_lines,
+the_plan_never_retargets_a_superseded_key,
+the_plan_never_retires_a_superseded_key,
+apply_never_writes_a_line_its_parser_refuses,
+a_move_into_a_held_month_is_unresolved_in_the_plan,
+a_held_month_is_decided_by_applys_own_check,
+an_apply_killed_between_two_months_plans_as_the_move_it_finishes,
+a_target_with_the_same_counts_and_other_bars_is_unresolved_not_a_refused_move,
+a_retirements_only_apply_stopped_at_the_census_lock_leaves_step_4_pending,
+a_census_not_read_or_unreadable_is_pending_never_done,
+one_move_or_retirement_recorded_twice_with_another_account_is_refused,
+moves_whose_spans_interleave_in_one_target_month_are_unresolved,
+a_rekey_cut_short_is_reported_truly_and_finished_by_the_next_apply,
+a_ledger_reads_empty_torn_garbage_and_long_exactly,
+every_underlying_reads_done_after_its_apply,
+applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census}`,
+`cli::gdfl_rekey::tests::{the_plan_receipt_prints_recorded_apart_from_pending,
+applying_moves_and_retires_and_a_second_apply_writes_nothing,
+the_plan_receipt_names_a_census_step_left_pending,
+a_census_that_will_not_read_is_named_and_fails_the_plan}`,
+`cli::operation_audit::run_tests::{a_cli_written_repair_line_carries_the_invocations_run,
+a_process_with_no_attempt_writes_run_0,
+two_invocations_in_one_process_each_name_their_own_run,
+a_run_claim_takes_only_a_free_key_and_releases_only_its_own}`.
+
+**Repair r2 (17 October 2026; a second agent's check of repair r1e).** One
+blocking defect, reproduced first: two `--apply` runs planned from one
+ledger. `apply` checked `admits` and filtered `has_line` against the
+`Withdrawn` its caller read before the survey, and appended with no lock and
+no re-read. When anything on the surveyed days changed between two surveys
+(another strike on a retired key's day moves its recorded median; a bar on
+the moved key changes `bars=`), the second run appended a second account of
+the same retirement or move, and `Withdrawn::parse` then refused the WHOLE
+ledger, stopping `gdfl-rekey`, `census-recount` and the import's rename
+check, with no lawful repair of an append-only file. Decided:
+
+1. **One writer, under one lock, from the ledger it planned from.** `apply`
+   takes `<store>/imports/gdfl.lineage.lock` (`ledger_lock_path`; created
+   when absent, never truncated, a non-regular file refused) with
+   `try_lock` after its pure checks and before its first write, and holds it
+   to the epoch. Another apply holding it is refused by the lock's name,
+   never waited on. Under the lock the ledger is re-read; when its re-key
+   lines are not exactly the ones the plan's ledger held, the apply refuses
+   with "the ledger changed since this plan; re-plan", naming a differing
+   line, and writes nothing. The append's torn-tail mark and line filter use
+   the fresh read. Lines of the ledger's other kinds are not compared: no
+   re-key verdict reads them.
+2. **A source counted by the plan is the source moved.** Before a group is
+   written, each source key's months and bars are read again (`source_now`:
+   one listing and one header per month file) and the bars actually read are
+   counted; a source holding other bars or months than the plan counted is a
+   refused move by name ("bars landed under it after the survey; re-plan"),
+   never moved with the plan's stale `bars=` beside this read's digest.
+3. **The reader's last two rules, and the writer never breaks them.**
+   `Withdrawn::parse` refuses, once the whole ledger is read, a `superseded`
+   line into a key the ledger retires and a cycle of `superseded` lines,
+   naming the lines; a chain (A by B, B by C) is lawful history and reads.
+   The plan leaves by name a key bars were moved into instead of retiring
+   it, and `admits` refuses a hand-built plan that retires one, moves into a
+   key the ledger withdraws, or moves into a key it also moves away.
+4. **One rule for both recorded kinds.** A retired key that gained bars or
+   days after its retirement is unresolved by name, exactly as a moved key
+   that did; a retirement whose day merely gained other strikes (its median
+   moved) stays recorded, because the median is the day's, not the key's.
+5. The `--underlying` receipt says the census step is counted over the whole
+   ledger and census.
+
+**Rejected (r2).** A blocking lock: an apply that waited would then find the
+ledger changed and refuse anyway, after an unbounded wait. Comparing the
+ledger's whole bytes: an import appending an `alias` line between plan and
+apply would refuse a re-key no verdict of which changed. Re-surveying under
+the lock: about 470 s on NIFTY with the lock held. Writing the bars count the
+apply read instead of refusing: the plan's verdicts (ladder, held months,
+second names) were judged on the plan's bars, so a grown source needs a new
+plan, not a new count. Refusing chains: a decoder change can lawfully move a
+target on, and the reader resolves a chain.
+
+**What remains (r2)** (`docs/06-limits.md`, L-AG02-10 and L-AG02-11): an
+import writing under a source key during that key's own move, after its
+read and before the epoch, is not excluded by this lock (the GDFL import's
+run lock is the cli's, AF-01); the next plan names it unresolved, never
+recorded. Everything listed under repair r1e's "What remains" stands.
+
+**Proved by (r2)** `pull::gdfl_rekey::tests::{two_applies_planned_from_one_ledger_never_append_two_accounts,
+an_apply_while_another_holds_the_lock_writes_nothing,
+two_applies_at_once_leave_a_ledger_that_reads,
+a_source_that_grew_after_the_survey_is_refused_not_moved_with_a_stale_count,
+a_superseded_line_into_a_retired_key_or_a_cycle_is_refused_by_line,
+the_writer_never_retires_a_target_or_closes_a_cycle,
+a_retired_key_that_grew_is_unresolved_like_a_moved_one}`,
+`cli::gdfl_rekey::tests::{an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing,
+the_plan_receipt_prints_recorded_apart_from_pending}`.
+
+**Repair r4 (18 October 2026; a second agent's third check, of repair r2).** One
+blocking defect, reproduced first: merged into feat/db-fix, this entry's
+`docs/06-limits.md` rows failed `store`'s `cited_commits` gate (D-5820, which
+landed after this package's last merge), because four of its sentences cited a
+build by a commit of this package's branch or of feat/db-fix that `main`'s
+squash merge does not keep. Decided:
+
+1. **The rows name a build by what it was, not by a branch commit.** The
+four sentences now say "the merge base feat/db-fix had before AG-02", "the
+package's first build against this repair", "R3-32 on 17 October 2026" and
+"feat/db-fix (its head of 16 October 2026)"; the kept binaries and logs the
+rows already name identify each build. `cited_commits` is green on the merged
+tree, run in a new target directory.
+
+Three follow-ups of the same check, in this package's files, are taken:
+
+2. **A retirement is written only with the count its key holds under the
+lock.** `apply` re-counts each planned retirement's key (`source_now`, as
+for a move's source) after it takes `imports/gdfl.lineage.lock`; a key
+that gained bars since the survey is refused by name, gets no `retired`
+line and no census withdrawal, and a re-plan retires it with what it holds
+(probe P4: before, the apply appended `bars=1` for a key holding 2).
+3. **The stale-plan comparison reads the plan's own underlyings.** A
+`superseded` or `retired` line names one underlying and a plan's verdicts
+read only its own underlyings' lines, so the ledger re-read under the lock is
+compared with the planned one over those lines only (every line for a plan
+of every underlying), in one O(lines) pass with no sort. Two applies of
+disjoint `--underlying` plans no longer refuse each other (probe P12); a
+plan of the same underlying is still refused.
+4. **An `--underlying` with no stored key is refused, not read as done.**
+`cli gdfl-rekey` names every underlying it walked nothing under after the
+receipt and exits `FAILED` (1), for `--plan` and `--apply`, before anything
+is written, and the receipt's `PENDING:` line says `not answered (--underlying
+names ZZZZ, ...)` instead of a count, so no receipt of a refused name holds
+the words `PENDING: 0` a gate reads. Rejected: a zero exit with a note,
+because `PENDING: 0` with exit 0 is the acceptance R4-21, ING-10 and
+DATA-REKEY-APPLY read, and a misspelled name would pass it. The refused-move
+text now names the repair-door publish (R4-21 item 1) instead of WP-80's
+month regeneration.
+
+**What remains (r4)**: `crates/cli/src/lib.rs` still does not hold
+`RunClaim` around one command (L-AG02-7): on 18 October 2026 eight other
+packages' branches hold `lib.rs` edits feat/db-fix does not, so the line stays with the
+file's next owner. **The line is not one line, measured by reading the
+callers on 18 October 2026:** two commands already take the same
+process-wide key for themselves, `pull::gdfl_import_day`'s `RunKey::claim`
+(the import's journal id, so `/logs.json?run=<id>` answers its per-day
+events, DB-A41) and `cli::zerodha_gaps_command::claim_run` (a reserved id
+its header prints and its `audit/zerodha.gaps` lines carry). `claim_run` is
+a compare-and-exchange from no run, so an invocation-wide claim taken first
+would make both fail: the import would warn "run key held by another run"
+and its days would carry the cli's attempt id, and `zerodha-gaps --apply`
+would print "run 0 ... lines carry run=0" above lines that carry the
+attempt id. The next owner settles which id those two commands' lines and
+events carry (the invocation's attempt, or their own nested inside it) in
+the same change as the line. Everything listed under repair r2 and r1e's
+"What remains" stands.
+
+**Proved by (r4)** `pull::gdfl_rekey::tests::{a_retirement_whose_key_grew_after_the_plan_is_refused_not_retired_stale,
+applies_of_disjoint_underlying_plans_do_not_refuse_each_other}`,
+`cli::gdfl_rekey::tests::an_underlying_with_no_stored_key_is_refused_by_name_and_writes_nothing`,
+and `store`'s `cited_commits` on the merged tree.
+
 ### D-4970 — A log-only import row is made only for the refusals no close of the kind-day owns, and a close's refusals are only those logged in its own run's window; a journal row is an instrument's when its filter NAMES the symbol as a whole name or is `*`, the newest such close winning; a run with no lifecycle event says where it looked — 2026-10-14
 
 **Implemented by** AF-02 (`api::imports::{merged, placed, next_start, Owners,
@@ -73254,3 +73547,145 @@ file's closing-auction count is carried on an INDEX record by design
 `web/tests/db-dayflags-closed.test.js` (`a_two_valued_second_is_not_a_minute_gap`,
 `a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
 `web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
+
+### D-5880 — `/audit`'s last commit of a partitioned census is its newest CURRENT epoch file, never its directory, and the header counts this feed's runs (AH-04, g-ui-dom-vs-json-4) — 2026-10-18
+
+**Number** the first of the block D-5880..D-5883 taken by AH-04 from the
+ledger's head (A6); `grep` over every local branch's `docs/05-decisions.md`
+found no D-587x or D-588x on 18 Oct.
+
+**Finding** g-ui-dom-vs-json-4 (medium, both skeptics confirmed). `committed_at`
+(`crates/api/src/audit_json.rs`) ran `metadata(&census.path)`, and for a vendor
+migrated to version 4 that path is the DIRECTORY `manifest/v4/gdfl`. A
+directory's mtime moves when an entry is added or removed, not when a file
+under it is appended to: `/audit` printed GDFL's last commit as 10 Oct 08:56:23
+IST ("not written for 110h 27m") while `CASH/000001.man`, `FNO/000005.man` and
+`INDEX/000001.man` had been written on 14 Oct, so JUST WROTE could never fire
+for GDFL and the first answer of an open page said IDLE during an import. The
+same header printed `journal.records` (every vendor's pull-journal records,
+4,217,222) as "runs" while `journal.feed_scope` said GDFL holds 0 records in 0
+runs.
+
+**Decision.**
+
+1. For a census read from version-4 partitions, `committed_at` is the newest
+   mtime among the CURRENT epoch of each segment: the files the census itself
+   just read (`census::Part::path`), one `metadata` call per part, at most
+   three, no directory listing, no `census.rs` edit. A single-file census is
+   unchanged: its one file's mtime.
+2. **`store.committed_from`** says what the stamp rests on: `basis`
+   (`newest census file`, `manifest file` or `none`), `complete`, every file
+   asked (`segment`, `epoch`, `path`, `at`, `state` = `read` / `no epoch` /
+   `absent` / `unread`, `why`) and a `note`.
+3. Nothing unread becomes a zero. An epoch that will not stat is named with the
+   file system's refusal (a listed epoch that is gone says "epochs are never
+   deleted", D-3316 item 2), `complete` is `false`, and the newest of the
+   others is a LOWER bound and says so. A segment with no epoch yet is named
+   and contributes nothing; a migrated vendor with no epoch at all has
+   committed nothing (`null`). A census that did not load is stat'ed at its
+   path as before, and a path that is a directory answers `null` with the
+   reason: a directory's mtime is not a commit.
+4. An epoch newer than the server's clock is reported as it is. The page
+   (`web/src/lib/audit-header.js` `commitLine`, `sinceCommit`) names it "AHEAD
+   of the server's clock" and gives it no age, so it is never JUST WROTE.
+5. The label is "newest of N current census file(s)", or "the census file",
+   never "manifest mtime".
+6. The `/audit` header says `<feed>: <runs> runs · <records> records` from
+   `journal.feed_scope`, with the whole journal's record count in its title,
+   named as all feeds'; a scope that failed or is absent says "runs not
+   counted", never 0 (`journalHeader`).
+
+**Cost.** Three `metadata` calls more than a single file for a migrated vendor,
+none per row. Measured on a shadow of the real store (`docs/06-limits.md`
+L-AH04-01).
+
+**Proof.** `crates/api/src/audit_json_commit_tests.rs` (AH04-01 to AH04-04);
+`web/tests/audit-header.test.js` (AH04-05).
+
+### D-5881 — One archive end for `/ingest` and `/audit`, and the import journal's last day named apart (AH-04, g-ui-dom-vs-json-9) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-9 (low). `/audit` handed `ImportPanel` the import
+journal's last day (`imports.span.to`, 2026-09-30, reached by the tick-store
+append) as "an archive ending", while `/ingest` handed it `/feeds.json`'s
+`archive.to` (2026-09-24, and since R3-05 only where `to_binds`). One panel
+said two things for one fact. The reproduce skeptic also found the not-done
+list blank on a clean `/ingest` load (part of g-ui-dom-vs-json-15): rows were
+keyed `${kind}|${day}`, `options|2020-09-16` was named by three rows (two
+`incomplete` under different filters, one `open`), Svelte threw
+`each_key_duplicate`, and none of the 9 not-done days rendered.
+
+**Decision.**
+
+1. `import-panel.js` `archiveEnd(feed)` is the archive's last day from the
+   feed's `/feeds.json` descriptor only where it binds, else `null`: the rule
+   `/ingest` applies inline to the same descriptor. `/audit` passes
+   `archiveEnd` of the active feed's descriptor; it no longer passes the
+   journal's last day.
+2. `ImportPanel` names the journal's last imported day apart: "The import
+   journal reaches <day> (its last imported day, any kind)", with "past the
+   archive end" or "short of the archive end" where both are known. With no
+   binding end it says "/feeds.json states no binding archive end".
+   `optionsLeft` and the ETA are unchanged (`readImportExtras`).
+3. Each not-done row has an `id` of kind, day, outcome, filter and journal line
+   (`notDoneRows`); a row equal to an earlier one in all five is numbered, so
+   no answer can blank the list. The day key `key` is unchanged. A row shows
+   its filter (when not `*`) and line.
+
+**Proof.** `web/tests/import-panel-archive.test.js` (AH04-06, AH04-07).
+
+### D-5882 — `/markets` counts an options-only listing as held (AH-04, g-ui-dom-vs-json-5) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-5 (medium/low). `/instruments.json`'s `bars` counts
+a row's spot series only; 17 GDFL rows (FINNIFTY, MIDCPNIFTY, NIFTYNXT50 and
+14 renamed or removed share underlyings) are `spot: false, options: true,
+bars: 0`, holding 57,731 option contracts and 470,617,527 one-second bars.
+`/markets` read neither flag: "346 held + 17 not stored", "0 = measured zero",
+"The feed LISTS it, so it can be pulled — it just has not been", "Pull it from
+Ingest".
+
+**Decision.**
+
+1. `web/src/lib/markets-held.js` `barStateOf` has a fifth state, `options`:
+   `bars` 0 and `options: true`. It is HELD (`isHeld`), drawn "options only",
+   and counted in the footer as `N held (M options only, spot not stored)`.
+   Two field reads per row: O(1) per row, O(rows) once per master.
+2. `bars` absent or not a whole number is `unread` whatever `options` says,
+   and the reason names the options flag. An older server that sends no
+   `options` flag leaves the row a measured zero, as before.
+3. The detail view of an options-only row says "Options only for X", names its
+   option holdings, offers "Open its options on /db", and never "it can be
+   pulled". Where its spot is filed comes from one `GET
+   /aliases.json?symbol=X` when such a row is opened (compile-time tables on
+   the server, O(1)), kept per symbol: an INDEX key (FINNIFTY under
+   NIFTYFINSERVICE), a rename with its newest symbol, the table's own reason
+   for not aliasing, or "names no other key" — never a guessed key.
+4. The legend reads "0 = measured zero, no spot and no options · options only
+   = option contracts held, spot not stored under this name".
+
+**Proof.** `web/tests/markets-options-only.test.js` (AH04-08, AH04-09).
+
+### D-5883 — Below 768 px wide or 700 px tall the shell's banners scroll with the page and the /db census banner is bounded (AH-04, g-ui-dom-vs-json-10) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-10 (low). At 375x812 the fixed region (header 93
+px, connection banner 73, NO COPY alert 139, the /db census banner 259-290)
+left the board 27% of the window; at 375x667 about 72 px; at 375x568 the board
+started below the viewport, and with `main` and `body` clipping, all of its
+controls were unreachable. No phone reaches the app (127.0.0.1, FM-200), so
+this is a narrow or short desktop window.
+
+**Decision.**
+
+1. In `web/src/routes/+layout.svelte`, under `@media (max-width: 767px),
+   (max-height: 699px)`, `main` scrolls and the page beneath the banners is
+   given main's whole height. The banners stay in the flow on every page; the
+   NO COPY alert stays visible and scrolls; only the header (the nav) stays
+   fixed. A page's own scroll regions (the /db board) keep theirs.
+2. In `web/src/routes/db/DbCensusBanner.svelte`, under the same query, the
+   census banner is at most `min(5.5rem, 16dvh)` tall and scrolls inside
+   itself; every line and button stays reachable.
+3. Nothing changes above those sizes.
+
+**Proof.** A measurement, since no unit test can measure layout:
+`docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
+board control is reachable, before and after, at 375x812, 375x667, 375x568,
+320x568, 812x375 and 1280x800).
