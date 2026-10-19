@@ -342,6 +342,24 @@ fn parse_count(flag: &str, value: &str) -> Result<usize, String> {
     }
 }
 
+/// The most lookups one `factor --repeat` times. Every lookup's time is kept
+/// (8 bytes) to rank its p50, p99 and max, so the bound is that buffer, 8 MB;
+/// a larger count is refused by name rather than handed to an allocation
+/// that aborts the process (`--repeat 18446744073709551615` did, with a
+/// capacity overflow). It bounds a measurement, not a market value.
+pub(crate) const MAX_REPEAT: usize = 1_000_000;
+
+fn parse_repeat(flag: &str, value: &str) -> Result<usize, String> {
+    let count = parse_count(flag, value)?;
+    if count > MAX_REPEAT {
+        return Err(format!(
+            "{flag} `{value}`: at most {MAX_REPEAT} lookups, the timing buffer's bound \
+             ({MAX_REPEAT} x 8 bytes)"
+        ));
+    }
+    Ok(count)
+}
+
 /// The arguments of a month run, or the first thing wrong with them.
 pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let [first, flags @ ..] = arguments else {
@@ -394,7 +412,7 @@ pub(crate) fn lookup_ask(arguments: &[&str]) -> Result<Lookup, String> {
         let value = rest.next().ok_or_else(|| format!("{flag} takes a value"))?;
         let fresh = match *flag {
             "--dir" => dir.replace(PathBuf::from(value)).is_none(),
-            "--repeat" => repeat.replace(parse_count(flag, value)?).is_none(),
+            "--repeat" => repeat.replace(parse_repeat(flag, value)?).is_none(),
             other => return Err(format!("`{other}` is not a flag of factor")),
         };
         if !fresh {
@@ -703,25 +721,32 @@ fn listed(symbol: String) -> Listed {
     Listed { symbol, refused }
 }
 
-/// The `--symbols` shares, each checked against the month's own listing: a
-/// key neither feed holds a directory of is refused by name before a file is
-/// opened or written (D-5178), so a typo never publishes a file of no row.
+/// The `--symbols` shares, each checked against the share directories either
+/// feed holds: a key neither feed holds a directory of is refused by name
+/// before a file is opened or written (D-5178), so a typo never publishes a
+/// file of no row. A share directory holds every month's files, so this is
+/// not a check of `month`: a held key with no bar of the month reads as no
+/// row, and a run where no listed key holds one is refused in [`run`].
+/// Membership is one probe of a hash set sized from the listing (gate 11
+/// rule 7), never a search of it.
 fn chosen(root: &Path, month: YearMonth, symbols: &[String]) -> Result<Vec<Listed>, String> {
     let held = listing(root, month)?;
+    let mut keys = std::collections::HashSet::with_capacity(held.len());
+    for share in &held {
+        keys.insert(share.symbol.as_str());
+    }
     let missing: Vec<&str> = symbols
         .iter()
-        .filter(|symbol| {
-            held.binary_search_by(|listed| listed.symbol.as_str().cmp(symbol.as_str()))
-                .is_err()
-        })
         .map(String::as_str)
+        .filter(|symbol| !keys.contains(symbol))
         .collect();
     if missing.is_empty() {
         Ok(symbols.iter().cloned().map(listed).collect())
     } else {
         Err(format!(
-            "refused: --symbols {}: neither feed holds a share directory of that key for \
-             {month} under `{}`; no bar was read and nothing was written (D-5178)",
+            "refused: --symbols {}: neither feed holds a share directory of that key, in \
+             {month} or any other month, under `{}`; no bar was read and nothing was written \
+             (D-5178)",
             missing
                 .iter()
                 .map(|symbol| format!("`{symbol}`"))
@@ -2847,12 +2872,14 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
         Some(symbols) => chosen(root, ask.month, symbols)?,
         None => listing(root, ask.month)?,
     };
-    // A MONTH NEITHER FEED HOLDS A SHARE OF IS REFUSED, never published as an
-    // authority of no row (D-5178).
+    // A STORE WITH NO SHARE DIRECTORY IS REFUSED, never published as an
+    // authority of no row (D-5178). A share directory holds every month's
+    // files, so this listing is not of the month: a month with directories
+    // but no bar is refused after the read, below.
     if listing.is_empty() {
         return Err(format!(
-            "refused: neither feed holds a share directory for {} under `{}`; no bar was read \
-             and nothing was written (D-5178)",
+            "refused: neither feed holds any share directory, for {} or any other month, under \
+             `{}`; no bar was read and nothing was written (D-5178)",
             ask.month,
             root.display()
         ));
@@ -2882,10 +2909,11 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
                 },
             )
         })?;
-    // NO ROW, NO FILE: a listed share can hold only a directory (Zerodha's
-    // day bars are filed by a longer partition than the month), so a month
-    // where no listed share holds a bar of either feed is refused rather
-    // than published as an authority of no row (D-5178).
+    // NO ROW, NO FILE: a share directory holds every month's files (each
+    // rung, the day bars included, is filed one file per month), so a listed
+    // share may hold no file of this month; a month where no listed share
+    // holds a bar of either feed is refused rather than published as an
+    // authority of no row (D-5178).
     if results.iter().all(|result| result.lines.is_empty()) {
         return Err(format!(
             "refused: none of the {} listed shares holds a bar of {} in either feed under \
@@ -3120,15 +3148,9 @@ pub(crate) fn rank(sorted: &[u64], percentile: usize) -> u64 {
     sorted.get(at).copied().unwrap_or(0)
 }
 
-fn render(
-    root: &Path,
-    ask: &Ask,
-    commit: Option<&str>,
-    carried: &Carried,
-    results: &[StockResult],
-    pooled: &[u32; LAG_BINS],
-    summary: &str,
-) -> String {
+/// The file's comment header: the format line, the run's own facts, its
+/// scope and the rules every column is computed by.
+fn header(root: &Path, ask: &Ask, commit: Option<&str>, carried: &Carried) -> String {
     let symbols = ask
         .symbols
         .as_ref()
@@ -3193,6 +3215,19 @@ fn render(
          minute_sum_allowance = 0 unadjusted, ceil((printed minutes + 1)/2) adjusted or \
          unknown; session cut = gdfl trades in a continuous-phase minute after zerodha's last"
     );
+    body
+}
+
+fn render(
+    root: &Path,
+    ask: &Ask,
+    commit: Option<&str>,
+    carried: &Carried,
+    results: &[StockResult],
+    pooled: &[u32; LAG_BINS],
+    summary: &str,
+) -> String {
+    let mut body = header(root, ask, commit, carried);
     let _ = writeln!(body, "{COLUMNS}");
     for result in results {
         for line in &result.lines {

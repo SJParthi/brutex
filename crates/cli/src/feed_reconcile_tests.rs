@@ -27,10 +27,10 @@ use store::path::{StorePath, Timeframe, YearMonth};
 
 use super::{
     COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorRefusal, Frac, Grid,
-    LAG_BINS, PairAt, Running, Scope, Scratch, USAGE, Window, ZMinute, ask, bin, bounds, carried,
-    carry_line, command_with, day_kind, file_digest, flag_text, lag_order, lookup_ask, mode,
-    newest, newest_of, parse_carry, parse_day, parse_frac, parse_month, parts, percent, previous,
-    publish, range_bounds, rank, round_half_up, schedule, symbol_id,
+    LAG_BINS, MAX_REPEAT, PairAt, Running, Scope, Scratch, USAGE, Window, ZMinute, ask, bin,
+    bounds, carried, carry_line, command_with, day_kind, file_digest, flag_text, lag_order,
+    lookup_ask, mode, newest, newest_of, parse_carry, parse_day, parse_frac, parse_month, parts,
+    percent, previous, publish, range_bounds, rank, round_half_up, schedule, symbol_id,
 };
 use crate::{FAILED, MISUSED, OK};
 
@@ -459,6 +459,20 @@ fn the_arguments_parse_to_what_they_name() {
         ("M&M", Day::new(2025, 3, 4).unwrap(), 9)
     );
     assert_eq!(lookup.dir, PathBuf::from("/d"));
+    // --repeat IS BOUNDED by its timing buffer: the largest count is taken,
+    // one more and usize::MAX are refused by name (usize::MAX used to abort
+    // the process with a capacity overflow).
+    let most = MAX_REPEAT.to_string();
+    let taken = lookup_ask(&["M&M", "2025-03-04", "--dir", "/d", "--repeat", &most]).unwrap();
+    assert_eq!(taken.repeat, MAX_REPEAT);
+    for over in [(MAX_REPEAT + 1).to_string(), usize::MAX.to_string()] {
+        let refused = lookup_ask(&["M&M", "2025-03-04", "--dir", "/d", "--repeat", &over])
+            .expect_err("a count above the bound is refused");
+        assert!(
+            refused.contains(&format!("at most {MAX_REPEAT} lookups")),
+            "{refused}"
+        );
+    }
 }
 
 #[test]
@@ -874,13 +888,14 @@ fn both_feeds(
 
 /// AN INTERVAL OFF ITS OWN DAY'S MEDIAN IS NO BASIS FOR AN EX-DATE (D-5179).
 /// Three days on one unchanged basis, factor 1. The 4th and the 6th are
-/// tight: each feed prints the same two trades, the close intersection holds
-/// 1. On the 5th the closes are different trades (so the close intersection
-/// empties, as on almost every real day) and ONE minute is discordant: its
-/// Zerodha range lies 90 paisa above GDFL's. That minute narrows the range
-/// intersection to about [1 + 8/q, 1 + 82/q], which excludes the day's own
-/// median ratio 1 and is disjoint from the 4th's interval. Judged on it, the
-/// 5th and then the 6th were ex-dates on a basis that never moved.
+/// tight: each feed prints the same two trades, so the close intersection
+/// holds the ratio 1. On the 5th the closes are different trades (so the
+/// close intersection empties, as on almost every real day) and ONE minute is
+/// discordant: its Zerodha range lies 90 paisa above GDFL's. That minute
+/// narrows the range intersection to about [1 + 8/q, 1 + 82/q], which
+/// excludes the day's own median ratio 1 and is disjoint from the 4th's
+/// interval. Judged on it, the 5th and then the 6th were ex-dates on a basis
+/// that never moved.
 #[test]
 fn an_interval_off_its_own_median_is_no_basis_for_an_ex_date() {
     let (store, out) = (Dir::new("store"), Dir::new("out"));
@@ -1217,9 +1232,13 @@ fn a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month() {
     let (code, text) = reconcile_month(&store.0, &probed.0, "2025-03", &["--symbols", "SYNA,SYNZ"]);
     assert_eq!(code, FAILED, "{text}");
     assert!(
-        text.contains("--symbols `SYNZ`: neither feed holds a share directory"),
-        "{text}"
+        text.contains(
+            "--symbols `SYNZ`: neither feed holds a share directory of that key, in 2025-03 \
+             or any other month"
+        ),
+        "the listing is of share directories, never of one month's files: {text}"
     );
+    assert!(!text.contains("`SYNA`"), "a held key is not named: {text}");
     assert_eq!(contents(&probed.0), held, "nothing was written");
 }
 
@@ -1764,8 +1783,11 @@ fn an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud() {
     let (code, text) = reconcile_month(&bare.0, &out.0, "2025-03", &[]);
     assert_eq!(code, FAILED, "{text}");
     assert!(
-        text.contains("neither feed holds a share directory for 2025-03"),
-        "{text}"
+        text.contains(
+            "neither feed holds any share directory, for 2025-03 or any other month, under"
+        ),
+        "a share directory holds every month's files, so the refusal is not of one month: \
+         {text}"
     );
     assert!(contents(&out.0).0.is_empty(), "nothing written");
     let (code, text) = reconcile_month(&store.0, &out.0, "2025-03", &[]);
