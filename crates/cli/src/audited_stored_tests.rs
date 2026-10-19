@@ -292,6 +292,12 @@ impl Fixture {
     }
 }
 
+/// The UTC microsecond stamp of `minute_of_day` IST on IST day `day`: where a
+/// causal cut (minute-gap policy 4) falls.
+fn ist_minute(day: i64, minute_of_day: i64) -> i64 {
+    day * 86_400_000_000 + minute_of_day * 60_000_000 - indicators::IST_OFFSET_MICROS
+}
+
 /// Moves record `index`'s stamp by `delta_micros` in place, resealing its
 /// checksum block and, at either end, the header slot, exactly as the writer
 /// would have.
@@ -437,7 +443,14 @@ fn stored_screens_scale_support_to_swept_bars_and_disclose_holed_sessions() {
     // `swept` is the ledger's `bars`: what the column folded past warm-up, as
     // every door records it since D-1661. Support is scaled to the same rows
     // since D-2101: the warm-up bars of `retained` can carry no hit.
-    for (rung, retained, withheld, swept) in [("1min", 2_625, 374, 1_500), ("5min", 525, 75, 300)] {
+    //
+    // CAUSAL (minute-gap policy 4, lookahead-oos-1): 2025-05-05 loses 11:45,
+    // so its 150 one-minute rows and 30 five-minute rows before the hole stay
+    // and only the rows from it on are withheld. Under policy 3 the whole day
+    // went (374 and 75); those rows fall inside the warm-up, so `swept` holds.
+    for (rung, retained, withheld, swept, before) in
+        [("1min", 2_775, 224, 1_500, 150), ("5min", 555, 45, 300, 30)]
+    {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
         let source = fixture.path(5, Timeframe::MINUTE_1);
@@ -461,7 +474,12 @@ fn stored_screens_scale_support_to_swept_bars_and_disclose_holed_sessions() {
         );
         assert_eq!(crate::results::read_field(&row.timeframe), rung);
         assert!(report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
-        assert!(report.contains("2025-05-05"), "{report}");
+        assert!(
+            report.contains(&format!(
+                "2025-05-05 from 11:45 (minute hole): {before} admitted before, {withheld} withheld"
+            )),
+            "{report}"
+        );
         assert!(
             report.contains(&format!("{withheld} signal bar(s)")),
             "{report}"
@@ -664,26 +682,37 @@ fn a_damaged_newest_header_slot_screens_as_the_previous_commit() {
     crate::knobs::clear_all();
 }
 
+/// Every session loses 09:16. Under the causal rule (minute-gap policy 4,
+/// lookahead-oos-1) a `5min` session is withheld whole, because its first
+/// bucket holds the hole, so nothing is left and the screen refuses before an
+/// attempt; on `1min` each session keeps its 09:15 row, which no later minute
+/// may take away, so the all-withheld refusal is not this door's answer.
 #[test]
 fn stored_screens_refuse_when_every_signal_session_is_withheld() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
-    fixture.omit_owned_minutes(&[2, 5, 6, 7, 8, 9, 12, 13]);
-    for rung in ["1min", "5min"] {
-        let refusal = fixture
-            .screen(rung, 20_000)
-            .expect_err("no retained session");
-        assert_eq!(
-            refusal,
-            "every signal session has a minute gap; no screenable bars remain"
-        );
-        assert!(!crate::results::Results::path(&fixture.root).exists());
-        assert_eq!(
-            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
-            None
-        );
-    }
+    fixture.rewrite_owned_minutes(|_, rows| {
+        rows.remove(1);
+    });
+    let refusal = fixture
+        .screen("5min", 20_000)
+        .expect_err("no retained session");
+    assert_eq!(
+        refusal,
+        "every signal session has a minute gap; no screenable bars remain"
+    );
+    assert!(!crate::results::Results::path(&fixture.root).exists());
+    assert_eq!(
+        crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
+        None
+    );
+    let minute = fixture.screen("1min", 20_000);
+    assert_ne!(
+        minute.as_ref().err().map(String::as_str),
+        Some("every signal session has a minute gap; no screenable bars remain"),
+        "the 09:15 rows before each hole are admitted: {minute:?}"
+    );
     crate::knobs::clear_all();
 }
 
@@ -2172,9 +2201,13 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
     // `swept` is what the column folded past warm-up: the ledger's `bars`
     // (AC-whp-law-2, D-1661). It pinned `retained`, the slice length, which
     // counts warming bars the sweep never folded.
-    for (rung, retained, withheld, swept) in [
-        ("1min", 2_625_u64, 374_u64, 1_500_u64),
-        ("5min", 525, 75, 300),
+    // CAUSAL (minute-gap policy 4, lookahead-oos-1): the hole is 11:45, so the
+    // session keeps its 150 one-minute and 30 five-minute rows before it and
+    // withholds the rest. Policy 3 withheld all 374 and 75 here.
+    let cut = ist_minute(holed, 11 * 60 + 45);
+    for (rung, retained, withheld, swept, before) in [
+        ("1min", 2_775_u64, 224_u64, 1_500_u64, 150_u64),
+        ("5min", 555, 45, 300, 30),
     ] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
@@ -2183,13 +2216,21 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
 
         let inputs = crate::stored_sweep_inputs(&fixture.month_request(rung)).expect("inputs");
         assert_eq!(inputs.loaded.bars.len() as u64, retained, "{rung}");
+        let on_holed: Vec<i64> = inputs
+            .loaded
+            .bars
+            .iter()
+            .map(|bar| bar.ts_micros)
+            .filter(|ts| indicators::ist_day(*ts) == holed)
+            .collect();
+        assert_eq!(
+            on_holed.len() as u64,
+            before,
+            "{rung}: the rows before the hole stay"
+        );
         assert!(
-            inputs
-                .loaded
-                .bars
-                .iter()
-                .all(|bar| indicators::ist_day(bar.ts_micros) != holed),
-            "{rung}: no bar of the holed session may reach the column"
+            on_holed.iter().all(|ts| *ts < cut),
+            "{rung}: no bar of the holed session from its hole on may reach the column"
         );
         let gaps = inputs
             .minute_gaps
@@ -2197,6 +2238,12 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
             .expect("this door applies the minute-gap rule");
         assert_eq!(gaps.day_numbers(), &[holed]);
         assert_eq!(gaps.signal_bars(), withheld);
+        assert_eq!(gaps.cuts()[0].at_micros, cut, "{rung}: cut at the hole");
+        assert_eq!(
+            (gaps.cuts()[0].admitted, gaps.cuts()[0].withheld),
+            (before, withheld),
+            "{rung}"
+        );
         // WHICH SERIES LOST THE DAY. This asserted zero minute bars on both
         // rungs, "the execution minutes stay whole", and on `1min` they do not:
         // there the signal bars ARE the execution bars. AF-19.
@@ -2224,8 +2271,10 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
         let report = fixture.sweep(rung).expect("the holed month sweeps");
         assert!(
             report.contains(&format!(
-                "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: 2025-05-05. \
-                 The sweep uses the remaining {retained} signal bars."
+                "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: 2025-05-05 \
+                 from 11:45 (minute hole): {before} admitted before, {withheld} withheld. Each \
+                 day is cut at its first hole (policy 4): rows wholly before it are swept, rows \
+                 from it on are not. The sweep uses the remaining {retained} signal bars."
             )),
             "{report}"
         );
@@ -2242,24 +2291,40 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
 
 /// **A month with every session holed leaves nothing to sweep, and the
 /// ordinary door refuses before it opens an attempt.** D-0694.
+///
+/// Every session loses 09:16. On `5min` the first bucket of each session holds
+/// the hole, so the causal cut (minute-gap policy 4) withholds the whole day
+/// and the door refuses; on `1min` each session keeps its 09:15 row, which no
+/// later minute may take away (lookahead-oos-1).
 #[test]
 fn the_ordinary_stored_sweep_refuses_when_every_session_is_withheld() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
-    fixture.omit_owned_minutes(&[2, 5, 6, 7, 8, 9, 12, 13]);
-    for rung in ["1min", "5min"] {
-        let refusal = fixture.sweep(rung).expect_err("no retained session");
-        assert_eq!(
-            refusal,
-            "every signal session has a minute gap; no sweepable bars remain"
-        );
-        assert!(!crate::results::Results::path(&fixture.root).exists());
-        assert_eq!(
-            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
-            None
-        );
-    }
+    fixture.rewrite_owned_minutes(|_, rows| {
+        rows.remove(1);
+    });
+    let refusal = fixture.sweep("5min").expect_err("no retained session");
+    assert_eq!(
+        refusal,
+        "every signal session has a minute gap; no sweepable bars remain"
+    );
+    assert!(!crate::results::Results::path(&fixture.root).exists());
+    assert_eq!(
+        crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
+        None
+    );
+    let inputs = crate::stored_sweep_inputs(&fixture.month_request("1min"))
+        .expect("each 09:15 row is admitted");
+    assert_eq!(inputs.loaded.bars.len(), 8, "one 09:15 row a session");
+    assert!(
+        inputs
+            .loaded
+            .bars
+            .iter()
+            .all(|bar| bar.ts_micros == ist_minute(indicators::ist_day(bar.ts_micros), 555)),
+        "only the rows before each hole"
+    );
     crate::knobs::clear_all();
 }
 
@@ -2440,10 +2505,12 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
     // the next number and the earlier ones keep meaning what they always
     // meant (`CLAUDE.md` §3 rule 8). The literal still refuses a silent
     // renumbering.
+    // Rule 4 (lookahead-oos-1) cuts a holed day at its first hole and admits
+    // every row wholly before it, and a recorded halt is a hole from its start.
     assert_eq!(
         crate::minute_gaps::MINUTE_GAP_POLICY,
-        3,
-        "renumbering the rule re-keys every ordinary stored sweep recorded since D-1781"
+        4,
+        "renumbering the rule re-keys every ordinary stored sweep recorded since the causal cut"
     );
     for rung in ["1min", "5min"] {
         let fixture = Fixture::warmed();
@@ -2468,10 +2535,10 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         drop(ledger);
         assert_eq!(
             ordinary_row.identity,
-            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[3])),
-            "{rung}: the ordinary door binds minute-gap rule 3"
+            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[4])),
+            "{rung}: the ordinary door binds minute-gap rule 4"
         );
-        for older in [1, 2] {
+        for older in [1, 2, 3] {
             assert_ne!(
                 ordinary_row.identity,
                 month_identity(
@@ -2479,7 +2546,7 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
                     month_digest(&ordinary),
                     legacy.with_policy(&[older])
                 ),
-                "{rung}: rule {older}'s word must not name rule 3's computation"
+                "{rung}: rule {older}'s word must not name rule 4's computation"
             );
         }
         let bound = audited.bind_digest(month_digest(audited.data()));
@@ -2490,7 +2557,7 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         );
         assert_ne!(
             audited_row.identity,
-            month_identity(audited.data(), bound, legacy.with_policy(&[3])),
+            month_identity(audited.data(), bound, legacy.with_policy(&[4])),
             "{rung}: the rule did not reach the audited door"
         );
     }
@@ -2876,12 +2943,12 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
         "the interior walk cannot see a session that stops early"
     );
     assert_eq!(
-        crate::minute_gaps::days_with_minute_holes(
+        crate::minute_gaps::days_of(&crate::minute_gaps::days_with_minute_holes(
             &signal.bars,
             &minutes.bars,
             signal_length,
             crate::stored::nse_session_close_minute
-        ),
+        )),
         days
     );
     // On `1min` no signal bar demands the missing minutes, so none is withheld.
@@ -2902,12 +2969,12 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
         .filter(|bar| indicators::ist_day(bar.ts_micros) != days[0])
         .collect();
     assert!(
-        crate::minute_gaps::days_with_minute_holes(
+        crate::minute_gaps::days_of(&crate::minute_gaps::days_with_minute_holes(
             &signal.bars,
             &no_minutes,
             signal_length,
             crate::stored::nse_session_close_minute
-        )
+        ))
         .contains(&days[0])
     );
 
@@ -2987,7 +3054,7 @@ fn every_stored_stock_report_names_its_largest_overnight_move() {
             let report = report.expect(door);
             let flat = report.split_whitespace().collect::<Vec<_>>().join(" ");
             let named = "LARGEST OVERNIGHT MOVE IN THESE BARS: -50.49% into the 2025-05-09 \
-                         session (close 1010.00 to open 500.00). NO THRESHOLD";
+                         session (close 1010.00 on 2025-05-08 to open 500.00). NO THRESHOLD";
             assert_eq!(flat.contains(named), stock, "{symbol} {door}:\n{report}");
             assert_eq!(
                 report.contains("LARGEST OVERNIGHT MOVE"),
@@ -3247,10 +3314,14 @@ fn the_5min_fold_is_the_unholed_months_less_the_held_day(clean: &Traded, holed: 
     let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed");
     let gaps = inputs.minute_gaps.as_ref().expect("the rule is applied");
     assert_eq!(gaps.day_numbers(), &[day], "premise: the hole is measured");
+    // CAUSAL (minute-gap policy 4): the hole is the 151st minute, 11:45, so
+    // the day's first 30 buckets are swept and its last 45 withheld.
+    let from = gaps.cuts()[0].from_micros;
+    let withheld = |stamp: i64| indicators::ist_day(stamp) == day && stamp >= from;
     assert_eq!(
         gaps.signal_bars(),
-        75,
-        "premise: the day's 75 bars are withheld"
+        45,
+        "premise: the day's 45 bars from its hole on are withheld"
     );
     assert_eq!(
         inputs.folded.as_deref(),
@@ -3258,25 +3329,37 @@ fn the_5min_fold_is_the_unholed_months_less_the_held_day(clean: &Traded, holed: 
         "the folded series is the whole month"
     );
     assert!(
+        !inputs.loaded.bars.iter().any(|bar| withheld(bar.ts_micros)),
+        "the swept slice holds no bar of the holed day from its hole on"
+    );
+    assert_eq!(
         inputs
             .loaded
             .bars
             .iter()
-            .all(|bar| indicators::ist_day(bar.ts_micros) != day),
-        "the swept slice holds no bar of the holed day"
+            .filter(|bar| indicators::ist_day(bar.ts_micros) == day)
+            .count(),
+        30,
+        "the holed day's buckets wholly before the hole are swept"
     );
     let availability = stored::vwap_availability(&inputs.loaded.key);
     let whole = crate::stored_month_column(&whole_inputs, signal, availability).expect("whole");
     let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded");
     let expected: Vec<_> = rows_by_stamp(&whole, &whole_inputs.loaded.bars)
         .into_iter()
-        .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+        .filter(|(stamp, _, _)| !withheld(*stamp))
         .collect();
     let actual = rows_by_stamp(&folded, &inputs.loaded.bars);
     assert!(actual.len() > 600, "premise: the fixture is warm");
+    assert!(
+        actual
+            .iter()
+            .any(|(stamp, _, _)| indicators::ist_day(*stamp) == day),
+        "premise: a row before the hole is swept"
+    );
     assert_eq!(
         actual, expected,
-        "every swept row is the unholed fold's row, and no row is on the holed day"
+        "every swept row is the unholed fold's row, and no row is on the holed day from its hole on"
     );
 
     // THE DEFECT THIS REPLACES, MEASURED: the column built from the spliced
@@ -3338,11 +3421,20 @@ fn the_1min_fold_is_the_whole_holed_series_outside_the_overlay(holed: &Traded, d
     let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed 1min");
     let availability = stored::vwap_availability(&inputs.loaded.key);
     let whole_series = inputs.folded.as_deref().expect("a day was withheld");
+    // CAUSAL (minute-gap policy 4): the day keeps 374 minutes; the 150 before
+    // its 11:45 hole are swept, the 224 from it on folded and not swept.
     assert_eq!(
         whole_series.len() - inputs.loaded.bars.len(),
-        374,
-        "premise: the holed day keeps 374 of its minutes, folded and not swept"
+        224,
+        "premise: the holed day's 224 minutes from its hole on are folded and not swept"
     );
+    let from = inputs
+        .minute_gaps
+        .as_ref()
+        .expect("the rule is applied")
+        .cuts()[0]
+        .from_micros;
+    let withheld = |stamp: i64| indicators::ist_day(stamp) == day && stamp >= from;
     let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded 1min");
     let widths = indicators::evaluator::Widths::pinned().expect("pinned widths");
     let mut evaluator = indicators::anchored::AnchoredEvaluator::new(
@@ -3363,7 +3455,7 @@ fn the_1min_fold_is_the_whole_holed_series_outside_the_overlay(holed: &Traded, d
     };
     let outside = |rows: Vec<(i64, vocab::ConditionMask, vocab::ConditionMask)>| -> Vec<_> {
         rows.into_iter()
-            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+            .filter(|(stamp, _, _)| !withheld(*stamp))
             .map(|(stamp, bits, known)| (stamp, strip(bits), strip(known)))
             .collect()
     };
@@ -3372,7 +3464,15 @@ fn the_1min_fold_is_the_whole_holed_series_outside_the_overlay(holed: &Traded, d
     assert_eq!(
         actual.len(),
         folded.len(),
-        "no 1min row is on the holed day"
+        "no 1min row is on the holed day from its hole on"
+    );
+    assert_eq!(
+        actual
+            .iter()
+            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) == day)
+            .count(),
+        150,
+        "the 150 minutes before the hole are swept"
     );
     assert_eq!(
         actual, expected,
@@ -3587,7 +3687,10 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
     .expect("the fixture master installs");
 
     let signal = [minute(855)];
-    let minutes: Vec<indicators::Candle> = (855..=914).map(minute).collect();
+    // FROM THE SESSION'S FIRST MINUTE (09:15): a day whose minutes began at
+    // 14:15 is holed at the open and withheld whole (AH-01 repair round 1),
+    // which would hide the dated close this test is about.
+    let minutes: Vec<indicators::Candle> = (555..=914).map(minute).collect();
     let rung = 75 * 60_000_000;
     let share = brutex_core::instrument::InstrumentKey::cash(
         brutex_core::instrument::Exchange::Nse,
@@ -3602,12 +3705,12 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
         .is_empty()
     );
     assert_eq!(
-        crate::minute_gaps::days_with_minute_holes(
+        crate::minute_gaps::days_of(&crate::minute_gaps::days_with_minute_holes(
             &signal,
             &minutes,
             rung,
             crate::stored::nse_session_close_minute
-        ),
+        )),
         vec![MONDAY_2026_08_03],
         "the venue-blind close demands 15:29 and withholds the day"
     );

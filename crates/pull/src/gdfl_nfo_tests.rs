@@ -799,6 +799,55 @@ fn every_row_fault_is_refused_by_name_at_its_line() {
     );
 }
 
+/// **NO OPTIONS ROW ALLOCATES A FIELD LIST** (`cloud/attack-o1-20261016`).
+///
+/// The capital-market reader's `parse_row` splits into a fixed `[&str; 10]`
+/// and `csv::decode_rows` was made to (D-1203); this reader still collected a
+/// `Vec<&str>` per row, on a tree of 27.6 million rows a day. The allocation
+/// has no observable output, so its absence is asserted on the source of
+/// `decode_capped`, as `csv::the_decode_loop_collects_no_field_vector` does.
+/// The needles are assembled at run time so this test cannot match itself.
+#[test]
+fn the_options_row_loop_collects_no_field_vector() {
+    let source = include_str!("gdfl_nfo.rs");
+    let start = source
+        .find(&format!("{}{}", "fn decode_", "capped("))
+        .expect("decode_capped exists");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("decode_capped ends")];
+    for needle in [
+        format!("{}{}", "Vec<&", "str>"),
+        format!("{}{}", ".coll", "ect()"),
+        format!("{}{}", "Vec::", "new()"),
+    ] {
+        assert!(
+            !body.contains(&needle),
+            "decode_capped holds {needle:?}: a per-row allocation or an unreserved \
+             row vector is back"
+        );
+    }
+    assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
+}
+
+/// An eleventh field is refused at the line it is on, however many follow:
+/// a row of a thousand commas is the same `MalformedRow` as one of eleven
+/// fields, and the rows before it still decode in a file that has none.
+#[test]
+fn a_row_of_many_fields_is_malformed_at_its_line() {
+    let good = rows(&[(33_300, "10", 1, 5)])[0].clone();
+    let wide = format!("{good}{}", ",0".repeat(1_000));
+    let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), wide]);
+    assert_eq!(
+        decode(&bytes, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 3 })
+    );
+    let bytes = csv(&rows(&[(33_299, "10", 1, 5), (33_300, "10", 1, 5)]));
+    assert_eq!(
+        decode(&bytes, STEM, trade()).map(|file| file.rows.len()),
+        Ok(2)
+    );
+}
+
 #[test]
 fn a_zero_price_is_admitted_only_on_a_row_with_no_trade() {
     let bytes = csv(&rows(&[(33_300, "0", 0, 9)]));
@@ -2039,4 +2088,170 @@ fn the_real_window_sweep_lists_every_event_the_detector_declares() {
         eprintln!("  {event}");
     }
     assert!(days > 0 && underlying_days > 0, "no vendor day in range");
+}
+
+/// The row loop `decode_capped` ran until D-5800, kept here as the oracle the
+/// fixed array is checked against on real days: one `Vec<&str>` per row and an
+/// unreserved row vector. Test-only; nothing in the crate calls it.
+fn decode_by_field_vector(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile, NfoRefusal> {
+    let cap = crate::fetch::MAX_ROWS;
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let mut lines = body.split(|&b| b == b'\n');
+    match lines
+        .next()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+    {
+        Some(h)
+            if h == HEADER_OPEN_INTEREST.as_bytes()
+                || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
+        _ => return Err(NfoRefusal::HeaderUnknown),
+    }
+    let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
+    let mut rows = Vec::new();
+    let mut quoted_rows = 0_u32;
+    for (index, raw) in lines.enumerate() {
+        let line = u32::try_from(index.saturating_add(2)).unwrap_or(u32::MAX);
+        if rows.len() >= cap {
+            return Err(NfoRefusal::RowsOverCap { cap });
+        }
+        let malformed = NfoRefusal::MalformedRow { line };
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        let text = core::str::from_utf8(raw).map_err(|_| malformed.clone())?;
+        let fields: Vec<&str> = text.split(',').collect();
+        let &[
+            ticker,
+            row_date,
+            time,
+            ltp,
+            bid,
+            bid_qty,
+            ask,
+            ask_qty,
+            ltq,
+            oi,
+        ] = fields.as_slice()
+        else {
+            return Err(malformed);
+        };
+        if ticker != stem {
+            return Err(NfoRefusal::TickerMismatch { line });
+        }
+        if row_date != date {
+            return Err(NfoRefusal::DateMismatch { line });
+        }
+        let sod = second_of_day(time).ok_or_else(|| malformed.clone())?;
+        if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
+            return Err(malformed);
+        }
+        if !(is_zero_decimal(bid) && is_zero_decimal(ask)) {
+            quoted_rows = quoted_rows.saturating_add(1);
+        }
+        let ltq: u64 = if is_digits(ltq) {
+            ltq.parse().ok()
+        } else {
+            None
+        }
+        .ok_or_else(|| malformed.clone())?;
+        if !is_digits(oi) {
+            return Err(malformed);
+        }
+        let oi: i64 = oi
+            .parse()
+            .map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
+        let paisa = if is_decimal(ltp) {
+            crate::csv::paisa(ltp)
+        } else {
+            None
+        }
+        .ok_or(NfoRefusal::PriceRefused { line })?;
+        if ltq > 0 && paisa < 1 {
+            return Err(NfoRefusal::PriceRefused { line });
+        }
+        rows.push(NfoRow {
+            line,
+            sod,
+            ltp: paisa,
+            ltq,
+            oi,
+        });
+    }
+    Ok(NfoFile { rows, quoted_rows })
+}
+
+/// The oracle agrees with the fixed array on invented files: a good file, a
+/// row of eleven fields, a row of nine, a quoted row and a bad price, so the
+/// real-day check below compares two readers that are known to agree here.
+#[test]
+fn the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files() {
+    let good = rows(&[(33_300, "10.05", 75, 300), (33_301, "0", 0, 300)]);
+    let wide = format!("{},0", good[0]);
+    let narrow = good[0].rsplit_once(',').map(|(head, _)| head.to_owned());
+    let quoted = good[0].replace(",0,0,0,0,", ",10.00,75,10.10,75,");
+    let bad_price = good[0].replace("10.05", "10.x");
+    for file in [
+        csv(&good),
+        csv(&[good[0].clone(), wide]),
+        csv(&[narrow.expect("a comma")]),
+        csv(&[quoted]),
+        csv(&[bad_price]),
+        b"Ticker,Date\r\n".to_vec(),
+    ] {
+        assert_eq!(
+            decode(&file, STEM, trade()),
+            decode_by_field_vector(&file, STEM, trade())
+        );
+    }
+}
+
+/// **D-5800 ON REAL DAYS, READ-ONLY.** Every option file of NIFTY,
+/// BANKNIFTY and RELIANCE on the first options day of the tick store
+/// (2018-09-03, the early day form), a special session (the 2023-11-12
+/// Muhurat session) and 2026-08-03 (11,524 files) decodes through the fixed
+/// array with exactly the outcome the field vector gave: the same rows, or
+/// the same refusal. `BRUTEX_GDFL_TICKSTORE` is the tick store root, opened
+/// read-only by `NfoTickStore`; only counts are printed, no vendor row
+/// reaches the repository.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_TICKSTORE (the tick store root); read-only"]
+fn the_fixed_array_decodes_real_days_as_the_field_vector_did() {
+    let root = std::env::var_os("BRUTEX_GDFL_TICKSTORE").expect("BRUTEX_GDFL_TICKSTORE");
+    let store = NfoTickStore::new(Path::new(&root));
+    for on in [day(2018, 9, 3), day(2023, 11, 12), day(2026, 8, 3)] {
+        let listing = store.day(on).unwrap().expect("a tick-store day");
+        let (mut files, mut rows, mut refused) = (0_u64, 0_u64, 0_u64);
+        let (mut fixed_ns, mut vector_ns) = (0_u128, 0_u128);
+        for file in listing.entries() {
+            let Some(name) = listing.ticker_of(file) else {
+                continue;
+            };
+            let Ok(ticker) = decode_ticker(name, on) else {
+                continue;
+            };
+            if !["NIFTY", "BANKNIFTY", "RELIANCE"].contains(&ticker.underlying.as_str()) {
+                continue;
+            }
+            let bytes = store.fetch(file).unwrap();
+            crate::gdfl_cm::verify(file, &bytes).unwrap();
+            let stem = format!("{name}{ROW_SUFFIX}");
+            let at = std::time::Instant::now();
+            let fixed = decode(&bytes, &stem, on);
+            fixed_ns += at.elapsed().as_nanos();
+            let at = std::time::Instant::now();
+            let vector = decode_by_field_vector(&bytes, &stem, on);
+            vector_ns += at.elapsed().as_nanos();
+            assert_eq!(fixed, vector, "{on} {name}");
+            files += 1;
+            match fixed {
+                Ok(read) => rows += u64::try_from(read.rows.len()).unwrap(),
+                Err(_) => refused += 1,
+            }
+        }
+        eprintln!(
+            "{on}: {files} NIFTY/BANKNIFTY/RELIANCE option files, {rows} rows, {refused} refused \
+             files, both readers equal; fixed array {} ms, field vector {} ms (debug build)",
+            fixed_ns / 1_000_000,
+            vector_ns / 1_000_000
+        );
+        assert!(files > 0, "{on}: the day holds the three underlyings");
+    }
 }

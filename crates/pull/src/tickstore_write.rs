@@ -11,14 +11,18 @@
 //! [`crate::gdfl_tickstore`] reads a day file from this writer and one from
 //! the separate tool alike. Only the zstd encoder differs. The tool links C
 //! zstd and writes level 9; that binding is what `CLAUDE.md` §2 forbids, so
-//! nothing of it is ported. Every frame here is written by `ruzstd` 0.8.2,
-//! the workspace's one zstd crate (D-2801), at its `Fastest` level, the only
-//! compressing level that crate implements (`Default`, `Better` and `Best`
-//! are `unimplemented!()` in its `encoding/frame_compressor.rs`). Any valid
-//! frame decodes in any decoder, so the file is the format's; it is NOT the
-//! tool's bytes, and identity is therefore defined on the decoded entries
-//! (name, size, CRC-32, DOS time and rebuilt bytes), never on `.bts` bytes
-//! (FM-249). [`WRITER`] names this writer on every log line and event.
+//! nothing of it is ported. Every frame here is written by `ruzstd` 0.9.1,
+//! the workspace's one zstd crate (D-2801, D-5090), at its `Fastest` level,
+//! the only compressing level that crate implements (`Default`, `Better` and
+//! `Best` are still `unimplemented!()` in 0.9.1's
+//! `encoding/frame_compressor.rs`). Any valid frame decodes in any decoder,
+//! so the file is the format's; it is NOT the tool's bytes, and identity is
+//! therefore defined on the decoded entries (name, size, CRC-32, DOS time and
+//! rebuilt bytes), never on `.bts` bytes (FM-249). That is also why a day
+//! this writer held under `ruzstd` 0.8.2 still verifies: 0.9.1's `Fastest`
+//! writes different bytes for some inputs (D-5090 point 8), never different
+//! entries. [`WRITER`] names this writer and the encoder it links on every
+//! log line and event, and a test holds the name to `Cargo.lock`.
 //!
 //! No memory mapping (a mapped file raises a signal when it is cut short
 //! under the reader, `CLAUDE.md` §4, FM-250): the zip and the day file are
@@ -97,8 +101,12 @@ use store::safe_open::{Found, ReadRefusal};
 
 /// This writer, named on every log line and event: which code and which
 /// encoder produced a day file (FM-249). The separate tool's files are
-/// `C zstd level 9`; a store holding both lists both.
-pub const WRITER: &str = "pull::tickstore_write/1 ruzstd-0.8.2 Fastest";
+/// `C zstd level 9`; a store holding both lists both. The version is the
+/// `ruzstd` in `Cargo.lock`, held there by
+/// `the_writer_names_the_ruzstd_cargo_lock_links`: a dependency bump that
+/// leaves this behind fails the build instead of labelling every write with
+/// an encoder it no longer runs (D-5090 point 8).
+pub const WRITER: &str = "pull::tickstore_write/1 ruzstd-0.9.1 Fastest";
 
 /// The append-only log of every outcome, one line each, in the tick store's
 /// root: the day file, the writer, the run, the counts, the verdict.

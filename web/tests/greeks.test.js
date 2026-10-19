@@ -34,8 +34,8 @@ test('a priced row carries the server figures and an unpriced row carries its re
   assert.equal(cellOf({ t: 1, why: null, iv: null }, null).why, 'greeks_request_failed');
   assert.match(greekWhyText({ ...r, why: 'mystery', detail: null }), /^unknown \(mystery\)$/);
   for (const why of ['rate_unset', 'rate_unreadable', 'rate_before_series', 'rate_stale', 'tenor_refused',
-    'iv_unsolved', 'below_zero_carry_bound', 'no_option_bar', 'no_option_file', 'option_unreadable', 'option_order_broken',
-    'no_spot_bar', 'no_spot_in_session', 'no_spot_file', 'spot_unreadable', 'spot_order_broken', 't_outside_month',
+    'iv_unsolved', 'below_zero_carry_bound', 'no_option_bar', 'no_option_file', 'option_unreadable', 'option_being_written', 'option_order_broken',
+    'no_spot_bar', 'no_spot_in_session', 'no_spot_file', 'spot_unreadable', 'spot_being_written', 'spot_order_broken', 't_outside_month',
     't_off_grid', 'greeks_request_failed', 'greeks_pending']) {
     assert.equal(typeof /** @type {Record<string, string>} */ (GREEK_WHY)[why], 'string', why);
   }

@@ -894,9 +894,14 @@ pub struct Sink {
     /// See [`Health::rationed`].
     rationed: AtomicU64,
     /// The exclusive lock on `<dir>/events.lock`, held for the life of the
-    /// sink and released by the kernel when the file closes. `None` for a sink
-    /// around a target this crate did not open. See [`Sink::open`].
+    /// sink and released by the kernel when the file closes, or earlier by
+    /// [`Sink::close`]. `None` for a sink around a target this crate did not
+    /// open. See [`Sink::open`].
     held_lock: Option<File>,
+    /// Set once by [`Sink::close`], under the ring's lock; never cleared. A
+    /// closed sink writes nothing more: every later event is [`Emitted::Dropped`]
+    /// and counted.
+    closed: AtomicBool,
 }
 
 impl core::fmt::Debug for Sink {
@@ -908,7 +913,10 @@ impl core::fmt::Debug for Sink {
             .field("max_file_bytes", &self.max_file_bytes)
             .field("keep_files", &self.keep_files)
             .field("dropped", &self.dropped.load(Ordering::Relaxed))
-            .field("holds_directory", &self.held_lock.is_some())
+            .field(
+                "holds_directory",
+                &(self.held_lock.is_some() && !self.closed.load(Ordering::Relaxed)),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1061,6 +1069,7 @@ impl Sink {
             flood_lines: config.flood_lines,
             rationed: AtomicU64::new(0),
             held_lock: None,
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -1367,6 +1376,15 @@ impl Sink {
         // refusing to log because an earlier log panicked is the one behaviour
         // guaranteed to lose the events that explain the panic.
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        // A CLOSED SINK WRITES NOTHING (R3-14): its directory may already
+        // belong to the next process, so a late line (an abandoned thread's,
+        // say) is dropped and counted, never appended to that process's file.
+        // Read under the ring's lock, which `close` sets it under, so no line
+        // lands after the close. See `Sink::close`.
+        if self.closed.load(Ordering::Relaxed) {
+            drop(guard);
+            return self.after_close(event);
+        }
         let inner = &mut *guard;
         // THE CLOCK IS READ HERE, INSIDE THE LOCK, AND CLAMPED. Reading it
         // before the lock put `seq` in lock-acquisition order and `ms` in
@@ -1546,6 +1564,61 @@ impl Sink {
             let why = format!(
                 "{}: the events were written and not synced — {e}",
                 current_path(&self.dir).display()
+            );
+            self.report(&why);
+            why
+        })
+    }
+
+    /// An event that came after [`Sink::close`]: dropped, counted and named.
+    #[cold]
+    fn after_close(&self, event: &Event<'_>) -> Emitted {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+        self.report(&format!(
+            "{}: an event ({} / {}) came after the sink was closed at the process's end and \
+             was not written",
+            self.dir.display(),
+            event.target(),
+            event.message()
+        ));
+        Emitted::Dropped
+    }
+
+    /// Ends this sink's hold on its directory, for a process that is about to
+    /// end: syncs what was written, marks the sink closed, closes the audit
+    /// stream and releases `<dir>/events.lock`, in that order. Idempotent.
+    ///
+    /// # Why a process closes its sink before it frees its port (R3-14)
+    ///
+    /// The lock is otherwise held until the process's last instant, and a
+    /// server's successor is started the moment the old one's port is free.
+    /// When the port went first, a successor could start inside the gap,
+    /// find this lock still held and run its whole life with no log and no
+    /// audit stream. Closing the sink first means a free port means a free
+    /// log directory.
+    ///
+    /// After the close every event is [`Emitted::Dropped`], counted in
+    /// [`Health::dropped`] and named once on stderr, never written: the
+    /// directory may already be the successor's. [`Sink::audit_health`] is
+    /// `None` from then on.
+    ///
+    /// # Errors
+    ///
+    /// The sync's or the unlock's failure in its own words; the sink is
+    /// closed and the lock's file handle dropped with the process either way.
+    pub fn close(&self) -> Result<(), String> {
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.closed.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let synced = guard.target.sync();
+        guard.audit = None;
+        drop(guard);
+        let unlocked = self.held_lock.as_ref().map_or(Ok(()), File::unlock);
+        synced.and(unlocked).map_err(|e| {
+            let why = format!(
+                "{}: the sink was closed, and its sync or its unlock failed — {e}",
+                self.dir.display()
             );
             self.report(&why);
             why
@@ -5396,6 +5469,85 @@ mod tests {
                 .is_written()
         );
         drop(reopened);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3-14: **A CLOSED SINK FREES ITS DIRECTORY AND WRITES NOTHING MORE.**
+    /// A server's successor starts the moment the old one's port is free, and
+    /// the old one closes its sink first, so the successor's `open` must
+    /// succeed while the closed sink is still alive in the ending process.
+    /// Before `close` existed the lock lived until the process's last instant
+    /// and the successor ran with no log. A line after the close is dropped
+    /// and counted, never appended to the successor's file; a second close is
+    /// a no-op.
+    #[test]
+    fn a_closed_sink_frees_its_directory_and_writes_nothing_more() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("closed-sink");
+        let ending = Sink::open(&Config::new(&dir)).expect("the ending process's sink");
+        assert!(
+            ending
+                .emit(&Event::info("t", "before the close"))
+                .is_written()
+        );
+        assert!(
+            Sink::open(&Config::new(&dir)).is_err(),
+            "the premise: an open sink holds its directory"
+        );
+        assert!(format!("{ending:?}").contains("holds_directory: true"));
+        assert!(
+            ending.audit_health().is_some(),
+            "the premise: it keeps an audit stream"
+        );
+        ending.close().expect("a clean close");
+        assert!(format!("{ending:?}").contains("holds_directory: false"));
+        assert_eq!(ending.audit_health(), None, "the audit stream is closed");
+        let successor = Sink::open(&Config::new(&dir))
+            .expect("the directory is free while the closed sink lives");
+        assert_eq!(
+            ending.emit(&Event::error("t", "a late line from the ending process")),
+            Emitted::Dropped
+        );
+        let health = ending.health();
+        assert_eq!(health.dropped, 1, "the late line is counted");
+        let said = health.last_error.expect("and named");
+        assert!(said.contains("after the sink was closed"), "{said}");
+        assert!(
+            said.contains("a late line from the ending process"),
+            "{said}"
+        );
+        assert!(
+            successor
+                .emit(&Event::info("t", "the successor's line"))
+                .is_written()
+        );
+        ending.close().expect("a second close is a no-op");
+        let text = std::fs::read_to_string(current_path(&dir)).expect("the log");
+        assert!(text.contains("before the close") && text.contains("the successor's line"));
+        assert!(
+            !text.contains("a late line"),
+            "nothing landed after the close: {text}"
+        );
+        drop(successor);
+        drop(ending);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3-14: a close whose sync fails still closes, and returns the failure.
+    #[test]
+    fn a_close_whose_sync_fails_still_closes_and_says_so() {
+        let dir = scratch("closed-brittle");
+        let brittle = Arc::new(Brittle::default());
+        let sink =
+            Sink::with_target(&Config::new(&dir), Box::new(Arc::clone(&brittle))).expect("opens");
+        brittle.refuse();
+        let said = sink.close().expect_err("the refused sync is returned");
+        assert!(
+            said.contains("closed") && said.contains("no space left"),
+            "{said}"
+        );
+        assert_eq!(sink.emit(&Event::info("t", "after")), Emitted::Dropped);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

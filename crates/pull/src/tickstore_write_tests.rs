@@ -454,6 +454,132 @@ fn the_writer_links_no_c() {
     assert!(code.contains("ruzstd::encoding::{CompressionLevel, compress_to_vec}"));
 }
 
+// ── the encoder this writer links (D-5090 point 8) ─────────────────────────
+
+/// Invented bytes from a fixed seed: no structure a match finder can use.
+fn invented_noise(len: usize, mut seed: u64) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            seed.to_be_bytes()[1]
+        })
+        .collect()
+}
+
+/// **THE WRITER NAMES THE `ruzstd` `Cargo.lock` LINKS.** [`WRITER`] is the
+/// encoder's provenance on every log line and event, and `ruzstd` 0.9.1's
+/// `Fastest` writes different bytes from 0.8.2's for the same input, so a
+/// label left at an old version is a false record on every write. Exactly
+/// one `ruzstd` is locked; the label and the module's doc carry its version.
+#[test]
+fn the_writer_names_the_ruzstd_cargo_lock_links() {
+    let lock_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock");
+    let lock = std::fs::read_to_string(lock_path).unwrap();
+    let mut versions = Vec::new();
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        if line == "name = \"ruzstd\"" {
+            let version = lines.next().unwrap_or_default();
+            let version = version
+                .strip_prefix("version = \"")
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("a version line after the name: {version}"));
+            versions.push(version.to_owned());
+        }
+    }
+    assert_eq!(versions.len(), 1, "one ruzstd is locked: {versions:?}");
+    let version = &versions[0];
+    let named = format!(" ruzstd-{version} Fastest");
+    assert!(WRITER.ends_with(&named), "{WRITER} must end {named}");
+    let doc = include_str!("tickstore_write.rs")
+        .lines()
+        .take_while(|line| line.starts_with("//!"))
+        .map(|line| line.trim_start_matches("//!").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        doc.contains(&format!("written by `ruzstd` {version},")),
+        "the module doc names the encoder it links"
+    );
+}
+
+/// The bytes a frame stores for its blocks, walked by RFC 8878's headers
+/// (frame header §3.1.1.1, block header §3.1.1.2): a Raw or Compressed
+/// block's content, an RLE block's one byte. The walk must end at the
+/// frame's end, its checksum aside.
+fn stored_block_bytes(frame: &[u8]) -> usize {
+    assert_eq!(frame[..4], [0x28, 0xB5, 0x2F, 0xFD], "zstd magic");
+    let descriptor = frame[4];
+    let single_segment = descriptor & 0x20 != 0;
+    let checksum = descriptor & 0x04 != 0;
+    let mut at = 5 + usize::from(!single_segment);
+    at += [0, 1, 2, 4][usize::from(descriptor & 0x03)];
+    at += match descriptor >> 6 {
+        0 => usize::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let mut stored = 0;
+    loop {
+        let header = u32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], 0]);
+        let size = (header >> 3) as usize;
+        let content = if (header >> 1) & 3 == 1 { 1 } else { size };
+        stored += content;
+        at += 3 + content;
+        if header & 1 == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        at + if checksum { 4 } else { 0 },
+        frame.len(),
+        "walked to the end"
+    );
+    stored
+}
+
+/// **NO BLOCK IS STORED LARGER THAN THE BYTES IT HOLDS.** `ruzstd` 0.9.1's
+/// `Fastest` writes a block Raw when compressing it would not make it smaller
+/// (its `encoding/levels/fastest.rs`); 0.8.2 kept the larger compressed
+/// block. That is the change in this writer's output bytes the bump made
+/// (D-5090 point 8: 512 invented noise bytes were a 529-byte frame, now 525),
+/// and it fails under 0.8.2. The blocks of every frame store at most the
+/// input: empty, one byte, either side of the 128 KiB block size, several
+/// blocks, and text that compresses; each is rebuilt through the reader.
+#[test]
+fn no_block_is_stored_larger_than_the_bytes_it_holds() {
+    const BLOCK: usize = 128 * 1_024;
+    let text: Vec<u8> = b"T,1,2.5\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(BLOCK * 2)
+        .collect();
+    let mut inputs: Vec<Vec<u8>> = [0_usize, 1, 512, 4_096, BLOCK - 1, BLOCK, BLOCK + 1, 300_000]
+        .into_iter()
+        .map(|len| invented_noise(len, 9_001))
+        .collect();
+    inputs.push(text.clone());
+    inputs.push([invented_noise(BLOCK, 7), text].concat());
+    for data in &inputs {
+        let frame = zstd(data).unwrap();
+        let stored = stored_block_bytes(&frame);
+        assert!(
+            stored <= data.len(),
+            "{} B stored as {stored} B of blocks",
+            data.len()
+        );
+        // Rebuilt through the reader, whichever kind §4 gave it.
+        let _kind = round_trip(data);
+    }
+    // Noise is stored as itself, byte for byte, in Raw blocks.
+    let noise = invented_noise(512, 9_001);
+    assert_eq!(stored_block_bytes(&zstd(&noise).unwrap()), 512);
+}
+
 // ── the extreme cases ──────────────────────────────────────────────────────
 
 /// **A BAD CRC IS REFUSED AND NOTHING IS WRITTEN**: no day file, no
@@ -1292,7 +1418,8 @@ fn measure_real_days_against_the_tools_files() {
 /// 32,768-byte header, then 56-byte rows). For each: the rows as one frame,
 /// and as 256-bar frames (the only way a page stays O(1)), bytes a bar in
 /// thousandths, and one 256-bar frame's decode p50/p99/max over 2,000 random
-/// pages. Writes nothing.
+/// pages. Writes nothing. Proof of the page's cost: this test,
+/// `pull::tickstore_write::tests::measure_ruzstd_fastest_on_bar_months`.
 #[test]
 #[ignore = "a measurement on copies of real bar months, run by hand with its inputs named"]
 fn measure_ruzstd_fastest_on_bar_months() {

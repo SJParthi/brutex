@@ -82,6 +82,19 @@ not read, kept the omission until D-0683, which also corrects D-0453's list.
 
 The graph is **acyclic**, which is §5's actual requirement, and that much holds.
 
+**One file edge the manifests do not show, and it is test-only.** `pull`'s
+`gdfl_tickstore` test module includes `crates/lake/src/zstd_v082_frames.rs` by
+`#[path]`: six frames `ruzstd` 0.8.2's own encoder wrote, frozen as hex, so that
+`lake`'s page decode and `pull`'s `unzstd` — the workspace's two zstd decode
+call sites — are held to ONE copy of the frames every earlier file was written
+with (D-5090). It compiles only under `#[cfg(test)]`, names nothing of `lake`'s
+API and is not a Cargo dependency: there is no `pull -> lake` arrow in the
+table, in the manifests or in `cargo metadata`, and the gate above rightly
+finds none. It is the only `#[path]` under `crates/` that leaves its own crate
+(measured 17 Oct 2026 by a grep of `#[path` over `crates/`; every other one
+stays inside its crate directory). A change to that file is a change to both
+crates' tests, and both suites run it.
+
 ### The six that a second repository can take
 
 `core`, `vocab`, `greeks`, `costs`, `indicators`, `engine` — every one declares

@@ -1272,7 +1272,9 @@ pub const SHORT_DAYS: [ShortDay; 2] = [
 ];
 
 /// The [`ShortDay`] on `epoch_day`, if one was recorded. A walk of the
-/// two-entry [`SHORT_DAYS`]: O(1), no allocation.
+/// two-entry [`SHORT_DAYS`]: O(1), no allocation. Timed inside
+/// [`record_of`] by `pull::calendar::record_tests::calendar_of_record_costs`,
+/// an ignored test: UNVERIFIED as a gated measurement.
 #[must_use]
 pub fn short_day_on(epoch_day: i64) -> Option<ShortDay> {
     SHORT_DAYS

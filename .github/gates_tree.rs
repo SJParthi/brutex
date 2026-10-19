@@ -2480,6 +2480,56 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
      wp16-order wp16-order-durable wp16-torn-open wp16-workers x019-03-28 years zero-padded \
      zero_ltp zip";
 
+// WP-62 AFTER THE ROUND'S FULL-GATE RUN (GF-1, 14 Oct 2026). WP-62's runtime
+// repairs merged after the 12 Oct run and ran no CI gate, so its four new
+// literals were met here undeclared. Each was read first. `1421286` and
+// `1421400` are ordinals of two records of the store's own `audit/pull.journal`,
+// cited as the evidence of the calendar's two measured short days
+// (2019-08-02, 2022-03-07) and asserted by the test that reads them.
+// `calendar_past_record` is a coverage code of `request_minutes` (`Why::
+// PastRecord`, DB-B25): a receipt's and an event's reason word for a day past
+// the calendar of record. `request-before-record` is the label of one case of
+// `tests/derive.rs`. None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const WP62_LITERAL: &str = "1421286 1421400 calendar_past_record request-before-record";
+
+// THE KEPT VENDOR ANSWERS (IA-8; D-4810, D-4859, D-4920; 14 Oct 2026). Every
+// word was read before it was listed, and they are of four kinds. (1) The
+// keeper's refusal and reason words, written into receipts, events and the
+// verdict's detail: `pack_full`, `storage_full`, `duplicate_body`,
+// `later_month`, `refused_answer`, `receipts_full`, `refusals_full` (verify
+// round 1: no segment can take a window's refused rows), `lock_stalled`,
+// `pack_damaged`, `not_a_regular_file`, `source_refused`, `body_mismatch`,
+// `body_not_kept`, `path_refused`, `io`, and the host operations an `Io`
+// refusal names (`create`, `deflate`, `decode`). (2) Its directory and file
+// words: `responses` (the root under the store, beside `bars`), `rsb` and
+// `rsx` (bodies and refused rows, as the test-only fault seam names
+// them). (3) Event field
+// names: `pack`, `detail`, `refused_rows` (the rows a refusal left unkept);
+// and `keep-lock`, the name of the thread a
+// contended pack lock waits on.
+// (4) Test-only: scratch tags (`doors`, `dup`, `race`, `shapes`, `odd-dir`,
+// `oversize`, `torn-body`, `disk`, `ia8-session`, `ia8-causes`), invented
+// months and a contract prefix (`2019-12`, `2020-01`, `2020-02`,
+// `2019-06-27-`), and the marked header, cookie and token a test proves never
+// reach a pack (`ia8-*-secret`, `ia8-header-mark`, `set-cookie`, `x-marker`).
+// (5) Repair rounds 2 and 3 (verify-IA-8-r3 blocking 2; each read before it
+// was listed): the window journal's file word `rsw` (`windows.rsw`, and the
+// fault seam's name for it), its refusal `windows_full`, its closing states
+// `completed` and `abandoned`, the event field `pointers_written`; and
+// test-only words: the scratch tags `healthy-contention`, `unkept-pointer`,
+// `ia8-dir-sync`, `ia8-kill-points`, `ia8-killed-window`, `ia8-torn-journal`
+// and `ia8-windows-full`, and the invented bodies `window` and `august` of
+// the emit-site drive.
+// None names an account, an organisation or an environment.
+const KEPT_ANSWER_LITERAL: &str = "keep-lock 2019-06-27- 2019-12 2020-01 2020-02 abandoned august body_mismatch body_not_kept \
+     completed create decode deflate healthy-contention ia8-dir-sync ia8-kill-points ia8-killed-window ia8-torn-journal \
+     ia8-windows-full pointers_written rsw unkept-pointer window windows_full \
+     detail disk doors dup duplicate_body ia8-causes ia8-cookie-secret ia8-header-mark ia8-session ia8-token-secret \
+     io later_month lock_stalled not_a_regular_file odd-dir oversize pack pack_damaged \
+     pack_full path_refused race receipts_full refusals_full refused_answer refused_rows responses rsb rsx set-cookie \
+     shapes source_refused storage_full torn-body x-marker";
+
 // WP-12f, THE GDFL CAPITAL-MARKET SCOPE (D-4878; 14 Oct 2026). The package's
 // rounds added literals under crates/pull and ran no CI gate; its fifth round
 // ran gate 1d and declares them here, each read before it was listed. Four
@@ -2512,9 +2562,217 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
 // an account, an environment, a vendor credential or a field of a parameter
 // path.
 const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
+// R4-07 (D-4986, D-4987): the GDFL Dropbox fetch and the shared disk
+// projection. The package's first rounds added literals under crates/pull
+// and did not run gate 1d; its repair round 2 ran it at the merged head and
+// at feat/db-fix, and declares here exactly the words the head adds, each
+// read before it was listed (every one is in `pull/src/gdfl_dropbox*.rs`,
+// `pull/src/disk_projection*.rs` or `pull/benches/ratio*`). Five kinds.
+// (1) The fetch journal's verbs and fields: `picks`, `downloading`,
+// `downloaded`, `verified`, `handed`, `waiting`, `wait`, `restarted`, `stop`,
+// `held_new`, `refused_new`, `of`, `how`, `earlier`, `detail`, `verdict`,
+// `waited_ms`, `plan_bytes`, `hash`, `sha256`, `link`, `complete`, `wanted`,
+// `pages`, `end`. (2) Its refusal, wait and hold
+// codes, each a word the journal and the run's report print: from
+// `accept_link_print`, `content_duplicate` and `disk_floor` to
+// `zip_unreadable`, with `held_import_done`, `held_tick_store`, `run_busy`
+// and `journal_error`. (3) Words of the Dropbox HTTP API the client sends or
+// reads, and of the transport around it: the routes `list_folder`, `continue`,
+// `get_shared_link_file` and `sharing`; the fields `has_more`, `cursor`,
+// `path_display`, `rev`, `size`, `content_hash`, `shared_link`, `recursive`,
+// `error_summary` (and `items`, the renamed field a test server sends in
+// place of `entries`); the error tags `shared_link_not_found`,
+// `not_found`, `not_folder`, `invalid_access_token`; the headers
+// `dropbox-api-arg`, `content-length`, `range`; the media words
+// `octet-stream`, `html`, `text`; the proxy variables `https_proxy`,
+// `all_proxy` and the scheme `https`; `sh`, the shared-folder component of an
+// invented link; and `dropbox_token`, the KEY of the config line whose value
+// is never in the repository (CLAUDE.md section 8). (4) The projection's
+// unit and class words: `dropbox_zip`, `index`, `index_options`, `stock`,
+// `stock_options`, `ticks`, `floor`, `space`, `tolerance`. (5) Test words:
+// scratch-directory tags (every `r1-*`, `r4-07-test`, `bad-link`, `crash`,
+// `dropbox-*`, `floor-mid`, `unplug`, `send`, `shape`, ...), invented fixture
+// values (`fixture0000`, `n4999`, the revision `0123456789a`, the run id
+// `1-1-1`, `hello`, `same`, `quoted`, `lots`, `red`, `steal`, `bulk`), the
+// dates `01072019` and `02082019` of invented `GFDLNFO_TICK_*` names, and the
+// floor-setting inputs `15`, `4096`, `007`, `1000000000` a test refuses or
+// reads. Repair round 2 adds, from its own follow-ups: the config key
+// `accept_listing_count`, the journal verb `reverify_failed`, the host label
+// `evil` of an invented foreign link a test refuses, and the scratch tags
+// `reverify`, `shrink-accept`, `r2-writer-sha` and `r2-writer-hash`. Repair
+// round 3 adds: the config key `accept_listing_shrink` (the retired
+// `accept_listing_count` stays, as the key a test refuses), the journal
+// fields `shrink`, `was` and `accepted_shrink` of a listing line, the scratch
+// tags `r3-reverify-floor`, `r3-dup-of-refused` and `r3-torn-boundary`, and
+// the invented shrink tokens `1-2-3`, `1-`, `1--2` and `1-a` a test refuses
+// or names as stale.
+// None names an account, an environment, a vendor credential or a
+// field of a parameter path.
+const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 15 4096 accept_link_print \
+     accept_listing_count accept_listing_shrink accepted_shrink shrink was 1-2-3 1- 1--2 1-a \
+     r3-reverify-floor r3-dup-of-refused r3-torn-boundary evil r2-writer-hash r2-writer-sha reverify reverify_failed shrink-accept \
+     all_proxy bad-link bulk busy complete content-length content_duplicate \
+     content_hash continue crash crc_mismatch cursor deleted detail disk_floor \
+     download download_cut downloaded downloading dropbox-api-arg dropbox-cap \
+     dropbox-home dropbox-home-open dropbox-overlap dropbox_config_too_open \
+     dropbox_link_malformed dropbox_link_missing dropbox_token dropbox_token_dead \
+     dropbox_token_missing dropbox_zip earlier end enospc error_summary five-kinds \
+     fixture0000 floor floor-mid free_space_unknown gdfl-dropbox \
+     get_shared_link_file handed has_more hash hash-corrected held_import_done \
+     held_new held_tick_store hello how html http_status https https_proxy \
+     import-done index index_options invalid_access_token invented-filler- items \
+     journal_error journal_unreadable journal_unwritable link link-changed \
+     link_changed link_holds_no_gdfl_day_zip link_is_a_file link_revoked \
+     link_unreachable list_folder listing_incomplete listing_shape_unknown \
+     listing_shrank lots member_over_byte_cap member_size_mismatch member_unreadable \
+     missing-link n4999 name_taken name_unsafe names names_collide no-gdfl \
+     no-overwrite not_a_day_zip not_a_zip not_folder not_found not_refused \
+     octet-stream of out_of_scope_exchange paged pages path_display picks plan_bytes \
+     projection_unknown quoted r1-dup r1-endless r1-foreign r1-held r1-measure \
+     r1-presses-at-once r1-readonly r1-repeat r1-scheme r1-status-utf8 \
+     r1-status-wide r1-stop-listing r1-stop-silent r1-stop-sleep r1-torn-nul \
+     r1-torn-short r1-torn-utf8 r1-torn-v r1-torn-v-nul r1-total r1-unwritable \
+     r4-07-test range range_ignored recursive red redelivered redirect-ok \
+     redirect_refused redirected refused_for_the_test refused_new remote_changed \
+     remote_gone restarted rev rev-corrected revoked run_busy same sample_duplicate \
+     sample_holds_no_day send server_error sh sha256 shape shared_link \
+     shared_link_not_found sharing size size_mismatch size_unlikely space staging \
+     staging_overlaps_published staging_unreadable staging_write_failed steal stock \
+     stock_options stop store_not_writable text throttle ticks tok-dead tok-one \
+     tolerance two_files_for_one_day unplug value verdict verified wait waited_ms \
+     waiting wanted zip_holds_no_member zip_unreadable";
+
+// THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
+// (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
+// (the shared file doors: the tick store's day-name refusals), SC-1 (codec 1,
+// whose allocation test lives in pull's tests) and the alert queue's
+// replacement tests added these literals under crates/pull and ran no gate
+// 1d. Each was read before it was listed, in three kinds. (1) Words of a
+// refusal's or an event's text: `cache` ("existing cache lock", "existing
+// cache retained"), `retained`, `dangling`, `pipe` and `unplugged` (a day
+// name that is a dangling link, a FIFO, or a volume unplugged mid-read).
+// (2) Test labels and scratch tags: `observer`, `race`, `ready` (the lock
+// tests' thread roles and their hand-off word; `ready` is also met inside
+// `already`), `decode_frame` and `decode_stamps` (the allocation test's
+// names for the two codec calls it counts). (3) A test runner's flag the
+// lock and import tests print in their run hints: `--test-threads`.
+// None names an account, an environment, a vendor credential or a field of
+// a parameter path.
+const MERGED_AFTER_GF1_LITERAL: &str = "--test-threads cache dangling decode_frame decode_stamps \
+     observer pipe race ready retained unplugged";
+
+// THE PACKAGES MERGED ON 16 OCTOBER 2026, AFTER GF-1'S RUN OF THAT DAY
+// (GF-1, 16 Oct 2026). R4-08 (the tick-store writer, `pull::tickstore_write`,
+// its tests and its bench) and R3-18 (the Zerodha repair plan's short
+// sessions and the stored-month gap ledger, `pull::ingest::gap_backfill` and
+// `tests/zerodha_gaps.rs`) added these literals under crates/pull and ran no
+// gate 1d. Each was read before it was listed, in five kinds. (1) The
+// writer's refusal codes and log and event field names, each the
+// `snake_case` word its `Display`, its log line or its `telemetry` event
+// prints: `block_overlap` .. `zip_unavailable`, `csv_bytes`, `raw_fallbacks`,
+// `stored_bytes`, `millis`, `writer`, `minutes`, `raced`, `stored_short`, and
+// the step words of a write failure (`create`, `fsync`, `rename`). (2) Test
+// labels and scratch folder tags the writer's tests and the gap tests pass
+// as a run id or a folder name: the `tsw-*` tags, `writer-a`/`writer-b`,
+// `linked-*`, `via-link`, `rt-1`, `nfo-1`, `a-file`, `after-crash`,
+// `2026-10-14_a`, `lockdir`, `logdir`, `in`, `ours`, `share`, `typo`,
+// `flip`, `blind`, `bad`, `bad-crc`, `dated`, `hex`, `stamped`, `opened`,
+// `unlocked`, `folder`, `measure`, `staging_linked`. (3) Invented field
+// values a fixture decodes: `-17`, `1e5`, `12345678901234567`,
+// `123456789012345678`, `ff`, `deadbeef`, the `12` of an invented
+// `31/12/1999` CSV date, `2019-10` (a month the gap test asserts) and the
+// bench labels `10x` and `100x`. (4) Crate names the no-C test refuses in
+// pull's manifest and its `dependencies` section word: `zstd`, `zstd-sys`,
+// `zstd-safe`, `zstd_sys`, `zstd_safe`, `memmap2`, `libc`. (5) LOCAL
+// filesystem directory names in the hand-run measurement's guard that
+// refuses to write under the operator's store (`brutex`, `fresh-20260919`,
+// `tickstore-data`): directories on this Mac, never a Parameter Store path.
+// And one of GF-1's own, from the cost test it added to
+// `tests/zerodha_gaps.rs` the same day: `2022`, the label of the year whose
+// days it times.
+// None names an account, an environment, a vendor credential or a field of
+// a parameter path.
+const MERGED_16_OCT_LITERAL: &str = "-17 100x 10x 12 12345678901234567 123456789012345678 \
+     1e5 2019-10 2026-10-14_a a-file after-crash bad bad-crc blind block_overlap brutex \
+     commit_invalid create csv_bytes dated day_locked day_too_large deadbeef dependencies \
+     duplicate_entry encode_failed ff flip folder fresh-20260919 fsync held_day_differs hex \
+     in inner_folder_mismatch libc linked-cm linked-month linked-root linked_folder \
+     lock_failed lockdir logdir measure member_corrupt member_too_large memmap2 millis \
+     minutes name_not_canonical name_not_utf8 name_too_long nfo-1 no_file_in_day \
+     not_regular_file opened ours raced raw_fallbacks rename root_missing rt-1 \
+     run_id_invalid share staging_linked stale_temp stamped stored_bytes stored_short \
+     temp_not_created temp_raced tickstore-data tsw-big tsw-bounds tsw-changed tsw-commit \
+     tsw-crc tsw-cut tsw-dirs tsw-empty tsw-entries tsw-flip tsw-folder tsw-full tsw-hex \
+     tsw-linkcm tsw-linked tsw-linkmonth tsw-linkroot tsw-lock tsw-lockdir tsw-logdir \
+     tsw-name tsw-nfo tsw-noroot tsw-other tsw-pipe tsw-race tsw-rerun tsw-rt tsw-run \
+     tsw-share tsw-tmp tsw-two tsw-zipcut typo unlocked verify_failed via-link write_failed \
+     writer writer-a writer-b zip_corrupt_on_verify zip_refused zip_unavailable zstd \
+     zstd-safe zstd-sys zstd_safe zstd_sys 2022";
+
+// THE PACKAGES MERGED ON 16 AND 17 OCTOBER 2026 AFTER GF-1'S LAST RUN
+// (GF-1, 17 Oct 2026). R3-06 (the month summary and the gap audit that reads
+// it) added `gaps::tests::a_recorded_halt_is_not_owed_by_any_classifier_door`,
+// whose four classifier doors are labelled by name in its assertion
+// messages: `table` (the dated table, an NSE cash stock), `derivatives` (the
+// derivatives venue's hours) and `cash` (the cash door); the fourth, `spot
+// index`, holds a space and is prose. Test labels only, read before they
+// were listed: none names an account, an environment, a vendor credential or
+// a field of a parameter path.
+const MERGED_17_OCT_LITERAL: &str = "cash derivatives table";
+
+// DENY-1 AND AG-04, MERGED ON 17 OCTOBER 2026 AFTER GF-1'S RUN OF THAT DAY
+// (GF-1, 17 Oct 2026), each read before it was listed. DENY-1: `ruzstd`, the
+// crate name `tickstore_write_tests` reads out of `Cargo.lock` and names in
+// the writer's stamp, and `lake`, the crate directory in the `#[path]` that
+// mounts `lake`'s zstd fixture into those tests. AG-04: the scratch
+// directory names of `gdfl_cm_auction_v2_tests` (`ag04-` and the case), and
+// the record fields it flips a bit in (`time`, `price`, `quantity`,
+// `checksum`). None names an account, an environment, a vendor credential or
+// a field of a parameter path.
+const MERGED_17_OCT_B_LITERAL: &str = "ag04-concurrent ag04-dirsync ag04-flip ag04-full \
+     ag04-garbage ag04-head ag04-header-only ag04-lock ag04-max ag04-order \
+     ag04-same-second ag04-swap ag04-torn ag04-v1-append checksum lake price \
+     quantity ruzstd time";
+
+// R4-06, MERGED ON 17 OCTOBER 2026 AFTER GF-1'S RUN OF THAT DAY (GF-1, 18
+// Oct 2026): the rehearse-then-run gate (`pull::rehearsal`, its tests, the
+// `drive_rehearsal` site of `emit_sites.rs`) and `tests/no_scheduler_delete.rs`.
+// Each was read before it was listed, in four kinds. (1) The keys, tables and
+// states of the repository's own store-step list, `config/store-steps.toml`
+// (`step`, `id`, `state`, `pending`, `withdrawn`, `prerequisites`,
+// `operator_yes`, `check`, `rehearsed_ms`, `rehearsed_bytes`,
+// `rehearsed_commit`, `writer_changed`, `snapshot`, `package`, `merged`,
+// `false`, and `config`, the list's own directory), and the gate's part and
+// refusal words (`dry_run`, `last_bulk_write_unknown`, `not_rehearsed`,
+// `not_ready`, `operator_pending`, `step_closed`, `never_automatic`,
+// `list_unreadable`, `not_evaluated`, `passed`, `failed`, `part`). (2) Two
+// compile-time word lists: `NEVER_AUTOMATIC`, the words that make a kind one
+// no scheduler starts (`delete`, `remove`, `prune`, `retire`, `credential`,
+// `password`), and `PERSON_ONLY`, the words that make an operator item a
+// person's decision (`approv`, `approval`, `yes`, `decision`, `owner`,
+// `sign-off`). Neither is a field of a parameter path: they are matched
+// inside a step's kind or item text to REFUSE an automatic start. (3) Test
+// labels and invented kinds and commits: `abc1234`, `checks`, `maybe`,
+// `kind-9999`, `no-such-dir`, `run-17`, `run-18`, `run-19`,
+// `tick-day-import`, `gap-fill`, `prune-logs`, `retire-raw-months`,
+// `credential-rotate`, `token-refresh`, `emit-site-fixture-kind`. (4) The
+// names `tests/no_scheduler_delete.rs` searches the scheduler's source for,
+// and its planted counter-example's text: `rm`, `-rf`, `rmdir`, `unlink`,
+// `unlinkat`, `remove_file`, `remove_dir`, `remove_dir_all`, `set_len`,
+// `truncate`, `ftruncate`. None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks config \
+     credential credential-rotate decision delete dry_run emit-site-fixture-kind failed false \
+     ftruncate gap-fill id kind-9999 last_bulk_write_unknown list_unreadable maybe merged \
+     never_automatic no-such-dir not_evaluated not_ready not_rehearsed operator_pending \
+     operator_yes owner package part passed password pending prerequisites prune prune-logs \
+     rehearsed_bytes rehearsed_commit rehearsed_ms remove remove_dir remove_dir_all remove_file \
+     retire retire-raw-months rm rmdir run-17 run-18 run-19 set_len sign-off snapshot state \
+     step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
+     writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 62] = [
+const DECLARED: [&str; 70] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2575,8 +2833,16 @@ const DECLARED: [&str; 62] = [
     GDFL_JOINED_PIECE,
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
+    WP62_LITERAL,
+    KEPT_ANSWER_LITERAL,
     WP12F_LITERAL,
+    MERGED_AFTER_GF1_LITERAL,
+    MERGED_16_OCT_LITERAL,
+    MERGED_17_OCT_LITERAL,
+    MERGED_17_OCT_B_LITERAL,
+    MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
+    R4_07_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4254,6 +4520,31 @@ mod tests {
         ] {
             assert!(d.contains(w), "{w}");
         }
+    }
+
+    #[test]
+    fn gate_1d_declares_the_r4_07_fetch_words() {
+        // R4-07 repair 2: the words its second agent named as undeclared.
+        let d = declared();
+        for w in [
+            "dropbox_token",
+            "accept_link_print",
+            "listing_shrank",
+            "tok-one",
+            "fixture0000",
+            "01072019",
+            "1000000000",
+            "zip_unreadable",
+            "007",
+            "accept_listing_count",
+            "accept_listing_shrink",
+            "r3-dup-of-refused",
+            "reverify_failed",
+            "r2-writer-sha",
+        ] {
+            assert!(d.contains(w), "{w}");
+        }
+        assert!(!d.contains("acmeorg"));
     }
 
     #[test]

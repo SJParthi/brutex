@@ -65,6 +65,9 @@ use std::time::Instant;
 #[path = "ratio/safe_files.rs"]
 mod safe_files;
 
+#[path = "ratio/months.rs"]
+mod months;
+
 use brutex_core::vendor::Vendor;
 use store::block;
 use store::crc::crc32c;
@@ -1483,6 +1486,7 @@ fn main() {
     ok &= generation_write_stays_n_log_n();
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
     ok &= safe_files::run();
+    ok &= months::run();
     if ok {
         println!("all ratios within the ceiling");
     } else {

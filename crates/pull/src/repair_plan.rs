@@ -196,7 +196,9 @@ pub enum Owes {
 /// that would leave more than [`MAX_WINDOWS`] windows, is [`Owes::Unsized`].
 ///
 /// O(1): one calendar answer, at most two dated-table walks of fixed length
-/// and one walk of the three-entry halt table.
+/// and one walk of the three-entry halt table. Proof:
+/// `crates/pull/tests/zerodha_gaps.rs`
+/// (`what_a_day_owes_costs_the_same_on_every_date_of_the_window`).
 #[must_use]
 pub fn owed(segment: &str, number: u32) -> Owes {
     let session = match exchange_kind_of(i64::from(number)) {

@@ -179,6 +179,65 @@ fn a_non_utf8_component_is_counted_and_never_dropped() {
     );
 }
 
+/// EVERY NON-UTF-8 SHAPE IS COUNTED BY THE WALK'S OWN STEP, ON EVERY HOST.
+/// GF-1. `tests/catalog.rs` builds these five names on disk, and APFS and
+/// HFS+ refuse every one of them (EILSEQ, `os error 92`), so on macOS that walk
+/// never meets one. Here the same five paths and the real month beside them go
+/// through `admit` — the step `walk` hands each directory entry to — with a
+/// regular file's type as `read_dir` reports it, and the census must come out
+/// exactly as the on-disk walk's does where the volume accepts the names.
+#[test]
+fn every_non_utf8_shape_is_counted_by_the_walks_own_step_on_every_host() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let bars = Path::new("/s/bars");
+    let file = std::fs::symlink_metadata(std::env::current_exe().expect("the test binary"))
+        .expect("its metadata")
+        .file_type();
+    assert!(file.is_file(), "the premise: a regular file's type");
+    let bad = OsStr::from_bytes(b"\xFFCE");
+    let shape = |head: &[&str], tail: &[&str]| -> PathBuf {
+        head.iter()
+            .map(OsStr::new)
+            .chain([bad])
+            .chain(tail.iter().map(OsStr::new))
+            .collect()
+    };
+    let rels = [
+        shape(&["groww", "NSE", "FNO", "NIFTY"], &["1min", "2024-01.bin"]),
+        shape(&["groww", "NSE", "INDEX"], &["1min", "2024-01.bin"]),
+        shape(&["groww", "NSE", "INDEX", "NIFTY"], &["2024-01.bin"]),
+        ["groww", "NSE", "INDEX", "NIFTY", "1min"]
+            .iter()
+            .map(OsStr::new)
+            .chain([OsStr::from_bytes(b"2024-01\xFF.bin")])
+            .collect(),
+        shape(&[], &["NSE", "INDEX", "NIFTY", "1min", "2024-01.bin"]),
+        PathBuf::from("groww/NSE/INDEX/NIFTY/1min/2024-02.bin"),
+    ];
+    let mut stack = Vec::new();
+    let mut out = Holdings::default();
+    for rel in &rels {
+        admit(Ok((file, bars.join(rel))), bars, &mut stack, &mut out);
+    }
+    assert!(
+        stack.is_empty(),
+        "a file is never descended into: {stack:?}"
+    );
+    let expected = Census {
+        seen: 6,
+        non_utf8: 5,
+        spot: 1,
+        ..Census::default()
+    };
+    assert_eq!(out.census, expected);
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1, "{:?}", out.held);
+    let held = out.held.first().expect("the one real month");
+    assert_eq!(held.symbol, "NIFTY");
+    assert_eq!(held.month.to_string(), "2024-02");
+}
+
 /// Re-run where the mode bits bind: as root a mode-000 root is still
 /// searchable and the `os error 13` arm never runs (audit-root, D-1485).
 #[test]

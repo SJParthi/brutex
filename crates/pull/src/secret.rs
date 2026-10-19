@@ -54,26 +54,39 @@
 //! whole mechanism: a token that a vendor rejected and that Parameter Store
 //! still holds is a token nothing in this repository can fix.
 //!
-//! # UNWIRED — the mechanism above exists, is proven, and no run reaches it
+//! # Where the re-read actually runs: `api::credential_law` (D-0948)
 //!
-//! Everything in the section above describes a function, not a behaviour of any
-//! pull, and the difference matters enough to say here rather than to leave a
-//! maintainer to discover it: **[`CredentialReader`] has no caller outside
-//! `cfg(test)`.** `crates/pull/tests/unit.rs` drives both of its methods against
-//! a double, and `crates/pull/src/emit_sites.rs` — itself a `#[cfg(test)]`
-//! module — drives them for their log lines. Nothing that ships calls either.
+//! Everything in the section above describes a function, and that function is
+//! still not what a shipped pull calls: **[`CredentialReader`] has no caller
+//! outside `cfg(test)`.** `crates/pull/tests/unit.rs` drives both of its methods
+//! against a double, and `crates/pull/src/emit_sites.rs` — itself a
+//! `#[cfg(test)]` module — drives them for their log lines. Nothing that ships
+//! calls either.
 //!
-//! The credential a real pull uses is read somewhere else entirely.
-//! `crates/api/src/server.rs`'s `read_credential` calls
-//! [`crate::ssm::get_parameter`] directly, once per field named by the feed's
-//! auth row, and hands the value to `crate::http::Credential`. That path holds
-//! no [`SecretSource`], no [`CredentialReader`], and therefore **no re-read**: a
-//! vendor that answers 401 or 403 becomes a `fetch::FetchError::VendorRefused`
-//! and the run stops there, with the stale value never read a second time. So
-//! `CLAUDE.md` §8's re-read sentence is satisfied by this file and **not** by
-//! the pull.
+//! **The rule is live anyway, through another seam.** The credential a real
+//! pull uses is read by `crates/api/src/server.rs`'s `read_credential`, which
+//! calls [`crate::ssm::get_parameter`] once per field the feed's auth row
+//! names — the `access-token`, and for a vendor whose row names a key field
+//! (Zerodha's `api-key`, the `PrefixedPair` scheme in [`crate::vendor`]) that
+//! one too — and hands the values to `crate::http::Credential`. A vendor's 401
+//! or 403 on that path goes to `crates/api/src/credential_law.rs`: its
+//! `Watch::reread` reads Parameter Store once more, compares the fresh value
+//! with the rejected one by fingerprint, and either hands back a rotated source
+//! or stops the run with `CredentialStop::SameValue`. That is `CLAUDE.md` §8's
+//! re-read sentence on the path that ships. D-0948 wired it into the three
+//! credentialed loops in `crates/api/src/server.rs`: `broker_run_by` (through
+//! `credential_halts`), and `fno_land` and `roll_every` (through
+//! `reread_wire`).
 //!
-//! ## How it came to be unwired, which is the part worth not repeating
+//! **One credentialed path does no re-read: the masters refresh.**
+//! `crates/api/src/mastersrun.rs`'s `credentialed_zerodha` reads one credential
+//! for one download and has no loop to halt, so a rejection there refuses that
+//! refresh with the vendor's answer and the value is not read a second time.
+//! D-0948 lists it under "Not changed". It is not closed by wiring this port in
+//! beside `credential_law`: two re-reads of one rejection would give two halt
+//! verdicts in two wordings.
+//!
+//! ## How the port came to be bypassed, which is the part worth not repeating
 //!
 //! The section below predicted that the change making the first live call would
 //! write one `impl ParameterStore` over an SDK client. The live call arrived by
@@ -81,19 +94,15 @@
 //! vendors use, takes no AWS SDK at all, and exposes a free function rather than
 //! an implementation of this port. It went **around** the port instead of
 //! through it — which is why [`ParameterStore`] still has no implementor outside
-//! the test double, and why the guard hanging off the port went with it.
+//! the test double. The guard that hangs off the port was re-made where the
+//! live call is, as `credential_law`, instead of being moved here.
 //!
-//! ## What wiring it needs, and why it is not done here
+//! ## Why the port is kept
 //!
-//! An `impl SecretSource` (or `impl ParameterStore`) over [`crate::ssm`], and a
-//! call site in `crates/api`'s broker route that hands a rejected value back for
-//! the second read. Both are edits to other files, and one of them is in another
-//! crate; this note is the honest state until they are made. `CLAUDE.md` §3
-//! rule 6 — never claim a bound that was not met.
-//!
-//! **This is not dead code to delete.** The re-read is a `CLAUDE.md` §8
-//! requirement and the port is the seam D-0035 deferred the SDK behind; what was
-//! wrong was the header reading as though the guard were live.
+//! **This is not dead code to delete.** The port is the seam D-0035 deferred
+//! the SDK behind, and [`CredentialReader`] states the §8 rule as a function a
+//! double can drive. A maintainer asking "is the §8 guard live" should read
+//! `credential_law` first: that is the one that runs.
 //!
 //! # Nothing here ever prints a credential
 //!
@@ -466,12 +475,14 @@ impl<S: SecretSource> CredentialReader<S> {
     /// re-minted — a local mint would invalidate the token another system
     /// shares.
     ///
-    /// **No caller outside `cfg(test)` reaches this**, so no pull performs the
-    /// re-read today — the live credential path goes through
-    /// [`crate::ssm::get_parameter`] and never comes here. This module's header
-    /// says what that leaves and what wiring it would take; the note is here as
-    /// well because this signature is where a maintainer checking "is the §8
-    /// guard live" arrives, and the answer is not visible from it.
+    /// **No caller outside `cfg(test)` reaches this.** The live credential path
+    /// reads through [`crate::ssm::get_parameter`] and never comes here; its
+    /// re-read is `crates/api/src/credential_law.rs`'s `Watch::reread`
+    /// (D-0948), which the broker, F&O-landing and roll loops call, and the
+    /// masters refresh is the one credentialed path that re-reads nothing. This
+    /// module's header says so in full; the note is here as well because this
+    /// signature is where a maintainer checking "is the §8 guard live" arrives,
+    /// and the answer is not visible from it.
     ///
     /// # Errors
     ///

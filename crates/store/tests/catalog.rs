@@ -293,16 +293,43 @@ fn a_non_utf8_component_is_counted_and_never_shortens_the_path() {
             )
             .collect(),
     ];
+    // APFS and HFS+ keep names as Unicode and refuse any other byte string
+    // with EILSEQ, `os error 92` on macOS, so there the volume itself never
+    // holds one of these names and this walk cannot meet one (GF-1: the test
+    // failed on every macOS run). That refusal is asserted, never skipped, and
+    // the five shapes are driven through the walk's own per-entry step on
+    // every host by `catalog::catalog_tests::
+    // every_non_utf8_shape_is_counted_by_the_walks_own_step_on_every_host`.
+    let mut refused_by_the_volume = 0_u64;
     for rel in &paths {
         let full = root.join("bars").join(rel);
-        std::fs::create_dir_all(full.parent().expect("a parent")).expect("parents are creatable");
-        std::fs::write(&full, b"").expect("file is writable");
+        let made = std::fs::create_dir_all(full.parent().expect("a parent"))
+            .and_then(|()| std::fs::write(&full, b""));
+        match made {
+            Ok(()) => {}
+            Err(why) if cfg!(target_os = "macos") && why.raw_os_error() == Some(92) => {
+                refused_by_the_volume += 1;
+            }
+            Err(why) => panic!("{} could not be made: {why}", full.display()),
+        }
     }
+    assert!(
+        refused_by_the_volume == 0 || refused_by_the_volume == paths.len() as u64,
+        "a volume refuses every non-UTF-8 name or none: {refused_by_the_volume}"
+    );
+    if refused_by_the_volume > 0 {
+        eprintln!(
+            "this volume refused all {refused_by_the_volume} non-UTF-8 names (os error 92); \
+             the walk is checked on what it holds and the five shapes by \
+             every_non_utf8_shape_is_counted_by_the_walks_own_step_on_every_host"
+        );
+    }
+    let made = paths.len() as u64 - refused_by_the_volume;
     put(&root, "groww/NSE/INDEX/NIFTY/1min/2024-02.bin");
     let found = catalog::walk(&root).expect("the walk runs");
     let c = found.census;
-    assert_eq!(c.seen, paths.len() as u64 + 1);
-    assert_eq!(c.non_utf8, paths.len() as u64, "{c:?}");
+    assert_eq!(c.seen, made + 1);
+    assert_eq!(c.non_utf8, made, "{c:?}");
     assert_eq!(c.spot, 1, "only the real month is spot: {c:?}");
     assert_eq!(
         c.with_contract + c.wrong_depth + c.malformed_month + c.unknown_vendor,
@@ -740,17 +767,14 @@ fn a_signed_month_field_is_malformed_not_a_second_spelling() {
 /// bar file, so a FIFO named `2026-09.bin` at spot depth became a held spot
 /// month (found by a review; `mkfifo` gave `held=["2026-08", "2026-09"]`). A
 /// FIFO with no writer blocks a reader's open. A socket stands in for the FIFO
-/// here because the standard library can make one: it is bound at a short
-/// path, as a socket path has a length limit, and renamed into place.
+/// here because the standard library can make one: it is bound at its place
+/// in the tree by [`socket_at`], as a socket address has a length limit.
 #[test]
 fn a_socket_named_like_a_month_is_not_a_held_month() {
     let root = scratch("socket");
     put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
-    let short = std::env::temp_dir().join(format!("bcs-{}", std::process::id()));
-    let _ = std::fs::remove_file(&short);
-    let listener = std::os::unix::net::UnixListener::bind(&short).expect("a socket is bindable");
     let at = root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-09.bin");
-    std::fs::rename(&short, &at).expect("the socket moves into the tree");
+    let listener = socket_at(&at, "month");
     let out = catalog::walk(&root).expect("the walk runs");
     drop(listener);
     assert_eq!(
@@ -765,6 +789,77 @@ fn a_socket_named_like_a_month_is_not_a_held_month() {
     let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
     assert_eq!(months, vec!["2026-08".to_owned()]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A UNIX socket bound AT `path` itself, whatever `path`'s length.
+///
+/// A socket address holds a short path (`sun_path`: 104 bytes on macOS, 108
+/// on Linux). The test above bound one at a short name under the temporary
+/// root and renamed it into the tree, and under a long TMPDIR that short name
+/// was already too long, so the bind panicked before the walk was reached
+/// (GF-1, gate 1e on macOS). The bind now goes through a symbolic link to
+/// `path`'s directory, named in the temporary root or else `/tmp`: the kernel
+/// follows the link, so the socket file is made in `path`'s own directory
+/// under its own name and only the address is the short spelling. The link
+/// is removed at once. No short directory that can hold the link is a panic
+/// naming each one tried and why, never a skip.
+/// `socket_at_binds_where_a_direct_bind_cannot` pins it.
+fn socket_at(path: &std::path::Path, tag: &str) -> std::os::unix::net::UnixListener {
+    let dir = path.parent().expect("a socket path inside a directory");
+    let file = path.file_name().expect("a socket path naming a file");
+    let mut tried = Vec::new();
+    for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+        let link = base.join(format!("brutex-sock-{}-{tag}", std::process::id()));
+        let _stale = std::fs::remove_file(&link);
+        if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
+            tried.push(format!("{}: {why}", link.display()));
+            continue;
+        }
+        let bound = std::os::unix::net::UnixListener::bind(link.join(file));
+        let _unlinked = std::fs::remove_file(&link);
+        match bound {
+            Ok(listener) => return listener,
+            Err(why) => tried.push(format!("{}: {why}", link.display())),
+        }
+    }
+    panic!(
+        "no short directory carries a socket to {}: {}",
+        path.display(),
+        tried.join("; ")
+    )
+}
+
+/// **A socket is bound at a path too long for a socket address.** GF-1.
+/// Bound directly, the path is refused with `InvalidInput` wherever TMPDIR
+/// is; [`socket_at`] makes the socket at that very path, and leaves no link.
+#[test]
+fn socket_at_binds_where_a_direct_bind_cannot() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let root = scratch("long-socket");
+    let dir = root.join("d".repeat(120));
+    std::fs::create_dir_all(&dir).expect("a deep directory");
+    let path = dir.join("2026-09.bin");
+    let direct = std::os::unix::net::UnixListener::bind(&path);
+    assert!(
+        matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+        "the premise: this path does not fit a socket address: {direct:?}"
+    );
+    let listener = socket_at(&path, "long");
+    let found = std::fs::symlink_metadata(&path).expect("something at the path itself");
+    assert!(
+        found.file_type().is_socket(),
+        "the socket itself, not a link: {:?}",
+        found.file_type()
+    );
+    for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+        let link = base.join(format!("brutex-sock-{}-long", std::process::id()));
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "no link is left at {}",
+            link.display()
+        );
+    }
+    drop(listener);
 }
 
 #[test]

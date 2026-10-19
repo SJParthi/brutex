@@ -653,6 +653,31 @@ pub fn answer(
     }
 }
 
+/// Builds `feed`'s kept answer now, off the request path: the walk
+/// [`HeldIndexKeeper::symbols`] pays once per census commit, paid by the
+/// thread that warms the caches at start or re-reads a changed census
+/// (`census_cache::start`; R3-09, RA-093). A feed that publishes a master is
+/// joined over the universe on each request and keeps nothing here.
+///
+/// # Errors
+///
+/// The census did not load: its note, as the route would refuse with.
+pub fn warm(site: &crate::server::Site, feed: Vendor) -> Result<(), String> {
+    if feed.publishes_master() {
+        return Ok(());
+    }
+    let (stamps, now) = crate::server::vendor_census(site, feed);
+    let Some(census) = now.census() else {
+        return Err(format!(
+            "{}: the census read returned no row for this feed",
+            feed.as_str()
+        ));
+    };
+    HELD_INDEX
+        .symbols(census, stamps.modified(census))
+        .map(drop)
+}
+
 /// `503`, naming why a census-listed feed could not be listed.
 fn census_refused(why: &str) -> (axum::http::StatusCode, String) {
     (

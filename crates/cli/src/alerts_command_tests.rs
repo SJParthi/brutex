@@ -615,3 +615,90 @@ fn days_and_moments_are_printed_as_calendar_text() {
     assert_eq!(moment_text(86_399), "1970-01-01T23:59:59Z");
     assert_eq!(moment_text(1_614_168_000 + 3_661), "2021-02-24T13:01:01Z");
 }
+
+/// GF-1: three mutants of `render_page` survived the round's mutation run.
+/// A torn tail is named only when there is one (`torn > 0` mutated to `== 0`
+/// and to `< 0`), and the "records after this page fail their CRC" line only
+/// when some do (`later_damaged > 0` mutated to `>= 0`). Driven on a page in
+/// memory, so each line's condition is the only thing that moves.
+#[test]
+fn the_torn_and_later_damaged_lines_appear_exactly_when_there_is_something_to_name() {
+    let store = Path::new("/nonexistent-store-for-render");
+    let clean = alerts::Page {
+        exists: true,
+        first: 1,
+        records: 1,
+        ..alerts::Page::default()
+    };
+    let mut out = String::new();
+    assert_eq!(render_page(&mut out, store, None, &clean), OK, "{out}");
+    assert!(!out.contains("torn append"), "no torn tail, no line: {out}");
+    assert!(
+        !out.contains("fail their CRC"),
+        "no later damage, no line: {out}"
+    );
+
+    let torn = alerts::Page {
+        torn: 37,
+        ..clean.clone()
+    };
+    let mut out = String::new();
+    assert_eq!(render_page(&mut out, store, None, &torn), OK, "{out}");
+    assert!(
+        out.contains("37 bytes of a torn append follow the last whole record"),
+        "{out}"
+    );
+    assert!(!out.contains("fail their CRC"), "{out}");
+
+    let later = alerts::Page {
+        later_damaged: 2,
+        ..clean
+    };
+    let mut out = String::new();
+    assert_eq!(render_page(&mut out, store, None, &later), FAILED, "{out}");
+    assert!(
+        out.contains("2 records after this page fail their CRC"),
+        "{out}"
+    );
+    assert!(!out.contains("torn append"), "{out}");
+}
+
+/// GF-1: `newer_damaged > 0` mutated to `>= 0` in `render_older` survived:
+/// the line naming damaged records among the newest is printed only when
+/// there are some.
+#[test]
+fn the_older_listing_names_newer_damage_only_when_there_is_some() {
+    let store = Path::new("/nonexistent-store-for-render");
+    let clean = alerts::Older {
+        exists: true,
+        ..alerts::Older::default()
+    };
+    let mut out = String::new();
+    assert_eq!(render_older(&mut out, store, &clean), OK, "{out}");
+    assert!(
+        !out.contains("an acknowledgement among them could not be applied"),
+        "{out}"
+    );
+    let newer = alerts::Older {
+        newer_damaged: 3,
+        ..clean
+    };
+    let mut out = String::new();
+    let _code = render_older(&mut out, store, &newer);
+    assert!(
+        out.contains(&format!(
+            "3 of the newest {} records fail their CRC",
+            alerts::WINDOW
+        )),
+        "{out}"
+    );
+}
+
+/// GF-1: `command` replaced by `0` survived the filtered run: the verb as
+/// dispatched answers a misuse with its usage and a non-zero code.
+#[test]
+fn the_dispatched_verb_refuses_a_flag_it_does_not_know() {
+    let mut out = String::new();
+    assert_eq!(command(&["--no-such-flag"], &mut out), MISUSED, "{out}");
+    assert!(out.contains("ALERTS MISUSED"), "{out}");
+}

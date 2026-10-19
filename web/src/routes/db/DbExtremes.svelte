@@ -29,9 +29,10 @@
    */
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { fmt } from '$lib/db/notes-labels.js';
+  import { fmt, extremeAuctionFlag } from '$lib/db/notes-labels.js';
   import { windowQuery, paisaText } from '$lib/db/bars-plan.js';
   import { readWindowPage } from '$lib/database-pages.js';
+  import { askOnce, readFor } from '$lib/db/pager.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
 
   /** Where this browser remembers whether the panel is open. */
@@ -68,19 +69,32 @@
    */
   export function extremesState(db) {
     let extremesOpen = $state(rememberedOpen());
-    /** @typedef {{ for: string, loading: boolean, value: any, why: string | null, total: number, ms: number }} ExtremesRead */
+    /** @typedef {{ for: string, loading: boolean, value: any, why: string | null, total: number, ms: number, newest?: any }} ExtremesRead */
     let extremesRead = $state.raw(/** @type {ExtremesRead | null} */ (null));
 
     /** The row set to fold, or `''` when nothing is to be asked. A string, so
         a recomputed plan with the same series, months and bounds asks nothing. */
     const want = $derived(extremesOpen && db.view === 'bars' ? db.barSetKey : '');
 
+    /* ONE FOLD PER ROW SET, AND NONE FOR A SELECTION STILL SETTLING (R3-03).
+       The fold was asked the moment the row set's key moved, so a change of
+       Side or Segment folded each intermediate selection in turn — contracts
+       and months the final one does not hold — and a re-run of this effect
+       for the same set aborted the fold in flight and asked it again. It now
+       waits on the bar read's own readiness (`db.barsReady`), asks a set
+       once, and only a newer set or a closed panel stops the one in flight. */
+    const asks = askOnce();
+    let flight = /** @type {AbortController | null} */ (null);
     $effect(() => {
       const key = want;
       if (!key) {
+        flight?.abort();
+        flight = null;
+        asks.forget();
         extremesRead = null;
         return;
       }
+      if (!db.barsReady) return;
       const feed = untrack(() => feeds.active);
       const plan = untrack(() => db.barQueryPlan);
       const bounds = untrack(() => db.barBounds);
@@ -88,7 +102,10 @@
         extremesRead = null;
         return;
       }
+      if (!asks.fresh(key)) return;
+      flight?.abort();
       const controller = new AbortController();
+      flight = controller;
       const started = performance.now();
       extremesRead = { for: key, loading: true, value: null, why: null, total: 0, ms: 0 };
       readWindowPage(
@@ -104,7 +121,11 @@
             value: answer.extremes ?? null,
             why: answer.extremes ? null : (answer.extremes_why ?? 'the server folded no extremes for this query'),
             total: answer.total,
-            ms: Math.round(performance.now() - started)
+            ms: Math.round(performance.now() - started),
+            /* THE NEWEST BAR OF THE SET, which this read is (ts, newest
+               first, one row): the grid's newest close takes it from here
+               rather than asking again (R3-03). */
+            newest: answer.bars[0] ?? null
           };
         })
         .catch((why) => {
@@ -118,11 +139,17 @@
             ms: Math.round(performance.now() - started)
           };
         });
-      return () => controller.abort();
     });
+    $effect(() => () => flight?.abort());
 
+    /* THE READ FOR THE ROW SET ASKED NOW, else `null` (R3-03 repair 1). While a
+       new set settles the effect above asks nothing yet, and `extremesRead`
+       still holds the set before it: the panel, the grid's newest close and
+       its range scale all read it through this, so none of them takes the
+       old set's fold for the new one's. */
+    const readNow = $derived(readFor(extremesRead, want));
     /** The fold's values when they answer the row set on screen, else `null`. */
-    const extremesNow = $derived(extremesRead && !extremesRead.loading ? extremesRead.value : null);
+    const extremesNow = $derived(readNow && !readNow.loading ? readNow.value : null);
 
     /** @param {boolean} open */
     function setExtremesOpen(open) {
@@ -136,7 +163,7 @@
 
     Object.defineProperties(db, {
       extremesOpen: { get: () => extremesOpen, set: (v) => setExtremesOpen(Boolean(v)) },
-      extremesRead: { get: () => extremesRead },
+      extremesRead: { get: () => readNow },
       extremesNow: { get: () => extremesNow }
     });
   }
@@ -160,6 +187,27 @@
 
   /** The instant of an extreme, as the grid prints a bar's. @param {number} t */
   const when = (t) => `${dayLabel(t * 1000)} ${barTimeLabel(t * 1000, tfSecs)}`;
+  /* AN EXTREME IN THE CLOSING-AUCTION SESSION IS SAID (AH-03,
+     g-ui-dom-vs-json-3): the fold is faithful to the stored bars, and a
+     month imported before D-3320's rule holds the auction's print as one, so
+     a heaviest bar at 15:29 may be the auction's. The fold sends no phase;
+     the flag is the feed's window rule, and the bar's own phase decides. */
+  const feed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
+  const soleKey = $derived(db.barQueryPlan?.keys.length === 1 ? db.barQueryPlan.keys[0] : null);
+  /* THE DAY'S CALENDAR CODE, where the page has read it (AH-03 repair 1):
+     the day band's cells, folded once per band load into a Map, so a day
+     the calendar codes otherwise than X (a special session, a halt) is not
+     flagged, and one it has not read says so. One probe per extreme. */
+  const codeByDay = $derived.by(() => {
+    /** @type {Map<string, string>} */
+    const m = new Map();
+    for (const c of db.dayBandCells ?? []) if (typeof c?.day === 'string' && typeof c?.code === 'string') m.set(c.day, c.code);
+    return m;
+  });
+  /** @param {string} iso */
+  const codeOf = (iso) => codeByDay.get(iso) ?? null;
+  /** @param {any} x */
+  const casFlag = (x) => extremeAuctionFlag(x, feed, x.key ?? soleKey, tfSecs, codeOf);
 </script>
 
 {#if db.view === 'bars' && (db.barQueryPlan?.keys.length ?? 0) > 0}
@@ -192,10 +240,14 @@
             <li class="xf">
               <span class="xl">{e.label}</span>
               {#if x}
+                {@const cas = casFlag(x)}
                 <b class="xv">{extremeText(x, e.unit)}</b>
                 <span class="xw" title="{when(x.t)} IST{x.key ? ` · ${x.key}` : ''}"
                   >{when(x.t)}{#if several && x.key}<span class="xk"> · {x.key}</span>{/if}</span
                 >
+                {#if cas}
+                  <span class="xcas" title={cas.text}>{cas.short}</span>
+                {/if}
                 <button
                   class="btn ghost sm"
                   type="button"
@@ -278,6 +330,13 @@
     font-variant-numeric: tabular-nums;
     font-weight: var(--w-semi);
     color: var(--ink);
+  }
+  .xcas {
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    border: 1px solid currentColor;
+    border-radius: var(--r2, 3px);
+    padding: 0 var(--s2);
   }
   .xw {
     font-family: var(--mono);

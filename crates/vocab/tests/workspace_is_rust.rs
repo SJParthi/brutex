@@ -606,12 +606,22 @@ fn the_dependency_set_has_not_moved_without_review() {
     // PACKAGE (D-2801): `pull` names `ruzstd` 0.8.2 to read the GDFL tick store.
     // The package was already in the lock under `lake` with the same features,
     // the count is unchanged, and it is pure Rust with no `build.rs` (D-0056).
-    // 0x8ACF_7E51_E4A6_F150 -> 0x0D06_2B04_5053_8A00 IS `rustix` 1.1.4 AND
+    // 0x8ACF_7E51_E4A6_F150 -> 0xFFDD_76EA_1ADA_B2F7 IS TWO VERSION BUMPS, NOT A
+    // NEW PACKAGE (D-5090): `ruzstd` 0.8.2 -> 0.9.1 (RUSTSEC-2026-0344) and
+    // `rustls` 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346..0349). The count is still
+    // 195 and neither dependency list moved. The scan: `ruzstd` 0.9.1 ships no
+    // `build.rs` and no .c/.cc/.h/.S/.asm (its only new non-Rust files are a
+    // LICENSE and three `.zst` test fixtures); `rustls` 0.23.46's file set
+    // outside .rs/.md/.toml/.json equals 0.23.45's and its `build.rs` is
+    // byte-identical to the one already in the tree.
+    // 0xFFDD_76EA_1ADA_B2F7 -> 0x8070_52EA_72E5_1027 IS `rustix` 1.1.4 AND
     // `linux-raw-sys` 0.12.1 ARRIVING WITH THE ONE NEW ARROW `api -> rustix`
-    // (D-5240); the scan is recorded beside the count above, and no other
-    // package's `dependencies` list moved.
+    // (D-5240), merged onto the two bumps above; on its own branch, from
+    // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
+    // The scan is recorded beside the count above, and no other package's
+    // `dependencies` list moved.
     assert_eq!(
-        h, 0x0D06_2B04_5053_8A00,
+        h, 0x8070_52EA_72E5_1027,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

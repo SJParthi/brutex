@@ -1108,11 +1108,24 @@ fn write_short_read(
     )
 }
 
+/// A month a writer holds: BEING WRITTEN, NOT DAMAGED, and who holds it
+/// (R3-08, NEW-21; `crate::flock::holder_note`). Lifted out of the `Display`
+/// match for the hundred-line ceiling [`write_not_a_bar_path`] names.
+fn write_locked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "{}: another writer holds {} ({})",
+        crate::flock::BEING_WRITTEN,
+        path.display(),
+        crate::flock::holder_note(path)
+    )
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
-            Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::Locked { path } => write_locked(f, path),
             Self::DiskFull { path, action } => write_host(f, "disk full", action, path),
             Self::Denied { path, action } => write_host(f, "permission denied", action, path),
             Self::ReadOnly { path, action } => write_host(f, "read-only filesystem", action, path),
@@ -1679,7 +1692,7 @@ impl BarFile {
         // Everything below this line assumes exactly one writer. Every `?`
         // below it releases the month through the guard's explicit unlock.
         refuse_link(&lock_path)?;
-        let lock = Flock::try_lock(
+        let lock = Flock::try_lock_noted(
             writer_open(open_lock_hooked(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
@@ -1930,8 +1943,11 @@ impl BarFile {
         // file to hold a lock on would be the very write this function exists
         // to avoid.
         let lock = match open_read(&lock_path) {
+            // PATIENT WHEN THE CALLER ASKED TO BE (R3-08, NEW-21): a page
+            // read on the server's pools waits briefly for a writer, then is
+            // refused as being written (`crate::flock::with_patience`).
             Ok(handle) => Some(
-                Flock::try_lock_shared(handle, lock_path.clone())
+                Flock::try_lock_shared_patiently(handle, lock_path.clone())
                     .map_err(|refusal| lock_fault(&lock_path, refusal))?,
             ),
             Err(why) if why.is_absent() => None,
@@ -2036,7 +2052,7 @@ impl BarFile {
         // that is not there is `ENOENT`, named, before the lock is touched.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
         refuse_link(&lock_path)?;
-        let lock = Flock::try_lock(
+        let lock = Flock::try_lock_noted(
             writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )

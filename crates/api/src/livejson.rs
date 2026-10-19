@@ -138,11 +138,24 @@ fn respond(root: Result<PathBuf, String>) -> (axum::http::StatusCode, JsonHeader
 
     let mut out = String::with_capacity(runs.len().saturating_mul(2_400).saturating_add(128));
     out.push_str(r#"{"runs":["#);
+    // THE HARD RESPONSE CEILING EVERY OTHER JSON ROUTE HOLDS (D-5801). The
+    // census admits `LIVE_RUN_LIMIT` runs of `LIVE_ROW_LIMIT` rows, 32,768
+    // rows of about 395 encoded bytes each at their widest, so a store of stale
+    // live files encodes past `MAX_RESPONSE_BYTES`, and until D-5801 nothing
+    // here refused it. Encoding STOPS at the first run that carries the body
+    // past the ceiling, so a refused census costs the ceiling plus one run's
+    // rows, never the whole admitted census; the one check after the trailer
+    // below refuses it, and also a body the trailer alone carries over.
+    let mut encoded = 0_usize;
     for (nth, run) in runs.iter().enumerate() {
         if nth > 0 {
             out.push(',');
         }
         write_run(&mut out, run);
+        encoded = nth.saturating_add(1);
+        if out.len() > crate::detail::MAX_RESPONSE_BYTES {
+            break;
+        }
     }
     // `strays` AND `skipped` ARE TWO FACTS AND ARE SERVED AS TWO. `skipped`
     // means "something is there and I cannot read it" — a corruption alarm —
@@ -163,6 +176,19 @@ fn respond(root: Result<PathBuf, String>) -> (axum::http::StatusCode, JsonHeader
             census.listed
         ),
     );
+    if out.len() > crate::detail::MAX_RESPONSE_BYTES {
+        // Refused whole, by name, with an empty run list: a cut list would
+        // read as every run in flight.
+        return unavailable(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the live census of {} run(s) passed the hard response ceiling of {} bytes at {} bytes, after {encoded} run(s) were encoded; encoding stopped there. No oversized JSON and no partial list was returned",
+                runs.len(),
+                crate::detail::MAX_RESPONSE_BYTES,
+                out.len()
+            ),
+        );
+    }
     (axum::http::StatusCode::OK, json, out)
 }
 
@@ -587,6 +613,96 @@ mod tests {
             body.contains(r#""strays":1"#),
             "it is counted, and counted apart — an uncounted stray would be the \
              silent skip the census exists to refuse: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A FULL LIVE CENSUS IS REFUSED PAST THE RESPONSE CEILING, BY NAME**
+    /// (`cloud/attack-o1-20261016`).
+    ///
+    /// The census admits `LIVE_RUN_LIMIT` runs of `LIVE_ROW_LIMIT` rows, and
+    /// killed runs leave their files, so a store can reach it without a single
+    /// run in flight. Every other JSON route here refuses a body past
+    /// `detail::MAX_RESPONSE_BYTES`; this one encoded whatever the census held
+    /// and answered 200. Here: the admitted maximum, each row at its widest
+    /// encoding, which the census still admits whole.
+    #[test]
+    fn a_full_live_census_is_refused_past_the_response_ceiling() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-livejson-ceiling-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        for run in 0..cli::live::LIVE_RUN_LIMIT {
+            let mut identity = [0x5a_u8; 32];
+            identity[..8].copy_from_slice(&u64::try_from(run).expect("small").to_le_bytes());
+            let mut live = cli::live::Live::open(&root, &identity).expect("a live file opens");
+            let rows: Vec<cli::frontier::Row> = (1..=cli::live::LIVE_ROW_LIMIT)
+                .map(|rank| cli::frontier::Row {
+                    identity,
+                    rank: u16::try_from(rank).expect("a rank fits"),
+                    mask_words: [u64::MAX; 6],
+                    hits: u64::MAX,
+                    n: u64::MAX,
+                    mean_milli_paisa: i64::MIN,
+                    t_milli: i64::MIN,
+                    payoff_bp: i64::MIN,
+                    wins: u64::MAX,
+                    trades: 0,
+                    cell_wins: 0,
+                    pessimistic: 0,
+                    worst_trade: 0,
+                    max_drawdown: 0,
+                    min_win: 0,
+                    gross_win: 0,
+                    gross_loss: 0,
+                    direction: cli::frontier::Direction::Short,
+                    rules: cli::Rules::elite(400, 25),
+                })
+                .collect();
+            live.publish(
+                &rows,
+                cli::live::Summary {
+                    trials: u64::MAX,
+                    bar_milli: i64::MAX,
+                    priced: u64::MAX,
+                },
+            )
+            .expect("the rows publish");
+        }
+
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "a census past the response ceiling is refused, not served: {} bytes",
+            body.len()
+        );
+        assert!(
+            body.len() <= crate::detail::MAX_RESPONSE_BYTES,
+            "the refusal itself is small: {} bytes",
+            body.len()
+        );
+        assert!(
+            body.contains("hard response ceiling") && body.contains(r#""runs":[]"#),
+            "it names the ceiling and serves no partial list: {body}"
+        );
+        // ENCODING STOPPED AT THE CEILING (D-5801): the refusal names how many
+        // runs were encoded, and that is fewer than the census holds, so the
+        // route did not encode all 128 runs to then throw them away.
+        let encoded: usize = body
+            .split("after ")
+            .nth(1)
+            .and_then(|tail| tail.split(' ').next())
+            .and_then(|count| count.parse().ok())
+            .expect("the refusal names the runs encoded");
+        assert!(
+            encoded > 0 && encoded < cli::live::LIVE_RUN_LIMIT,
+            "encoding stops at the ceiling: {encoded} of {} runs encoded",
+            cli::live::LIVE_RUN_LIMIT
         );
         let _ = std::fs::remove_dir_all(&root);
     }

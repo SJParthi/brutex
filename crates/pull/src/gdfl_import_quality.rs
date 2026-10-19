@@ -225,8 +225,12 @@ pub fn session_seconds(session: &Session) -> u64 {
         .sum()
 }
 
-/// The parts of `halt` inside `spans`, each `[from, to)`.
-fn halted_spans(spans: &[(u32, u32)], halt: Option<(u32, u32)>) -> Vec<(u32, u32)> {
+/// The parts of `halt` inside `spans`, each `[from, to)`: a span that only
+/// touches the halt shares no second with it and is no part. `pub(super)` so
+/// the import's tests can ask it directly (GF-1): its two callers add up
+/// lengths, to which an empty part adds nothing, so only its own answer shows
+/// whether an empty part is kept.
+pub(super) fn halted_spans(spans: &[(u32, u32)], halt: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     let Some((from, resume)) = halt else {
         return Vec::new();
     };

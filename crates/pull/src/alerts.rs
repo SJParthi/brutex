@@ -467,10 +467,11 @@ pub fn fit_text(text: &str) -> (String, bool) {
     if clean.len() <= TEXT_MAX {
         return (clean, false);
     }
-    let mut end = TEXT_MAX;
-    while end > 0 && !clean.is_char_boundary(end) {
-        end -= 1;
-    }
+    // The standard library's own walk down to a boundary. The hand-written
+    // loop it replaces guarded `end > 0`, which `is_char_boundary(0)` already
+    // made unreachable: `>` mutated to `>=` was an equivalent mutant no test
+    // could kill, and `-=` mutated to `/=` hung instead of failing (GF-1).
+    let end = clean.floor_char_boundary(TEXT_MAX);
     (clean.get(..end).unwrap_or("").to_owned(), true)
 }
 
@@ -514,7 +515,11 @@ impl Span {
     /// The slot index of an ordinal inside this span.
     fn index(&self, ordinal: u64) -> Option<usize> {
         let at = usize::try_from(ordinal.checked_sub(self.first)?).ok()?;
-        (at < self.slots.len()).then_some(at)
+        // `get`, the same answer as `at < len`. The comparison's `<` mutated
+        // to `<=` was an equivalent mutant (GF-1): two callers index a vector
+        // no longer than `slots` with the answer, and the other two never ask
+        // for the ordinal one past the span, so no test could tell them apart.
+        self.slots.get(at).map(|_| at)
     }
 
     /// The newest good record among the first `live` slots.
@@ -771,9 +776,11 @@ struct Writer {
     names: Names,
     file: File,
     _lock: Flock<File>,
+    /// The window's records. A bad last one stays in it: every reader of a
+    /// span skips a slot that failed its CRC, so the writer keeps no count of
+    /// the slots that stand (GF-1: that count's `-= 1` mutated to `/= 1` and
+    /// to `+= 1` was an equivalent mutant, read by nothing that could differ).
     span: Span,
-    /// Slots of `span` that stand: all of them, or all but a bad last one.
-    live: usize,
     /// The ordinal the next record takes.
     next: u64,
     /// The offset of a bad last record the next write goes over.
@@ -815,17 +822,19 @@ impl Writer {
             .map_err(|why| AlertError::io("open the queue", &why))?;
         let shape = shape(&file)?;
         let span = span(&file, shape.records)?;
-        let mut live = span.slots.len();
         let mut next = shape.records + 1;
         let mut over = None;
         if matches!(span.slots.last(), Some(Slot::Bad)) {
-            let before = live.checked_sub(2).and_then(|at| span.slots.get(at));
+            let before = span
+                .slots
+                .len()
+                .checked_sub(2)
+                .and_then(|at| span.slots.get(at));
             if matches!(before, Some(Slot::Bad)) {
                 return Err(AlertError::Damaged {
                     offset: offset_of(shape.records - 1),
                 });
             }
-            live -= 1;
             next = shape.records;
             over = Some(offset_of(shape.records));
         }
@@ -834,7 +843,6 @@ impl Writer {
             file,
             _lock: lock,
             span,
-            live,
             next,
             over,
             torn: shape.torn,
@@ -843,7 +851,9 @@ impl Writer {
     }
 
     fn open_now(&self) -> u32 {
-        self.span.newest_good(self.live).map_or(0, |r| r.open_after)
+        self.span
+            .newest_good(self.span.slots.len())
+            .map_or(0, |r| r.open_after)
     }
 
     /// Appends `record` at the next ordinal.
@@ -861,9 +871,9 @@ impl Writer {
         Ok((ordinal, reserve))
     }
 
-    /// Whether an acknowledgement among the live slots after `from` names `k`.
+    /// Whether an acknowledgement among the slots after `from` names `k`.
     fn acked_after(&self, from: usize, k: u32) -> bool {
-        for slot in self.span.slots.iter().take(self.live).skip(from) {
+        for slot in self.span.slots.iter().skip(from) {
             if let Slot::Good(r) = slot
                 && r.kind_of_record == TYPE_ACK
                 && r.acked == k
@@ -953,8 +963,8 @@ fn put_with(
     // Newest first: an acknowledgement is always newer than its alert, so it
     // is met before the alert it names (D-4895: an acknowledged key is put
     // again; only an open alert makes a duplicate).
-    let mut acked = vec![false; writer.live];
-    for (at, slot) in writer.span.slots.iter().enumerate().take(writer.live).rev() {
+    let mut acked = vec![false; writer.span.slots.len()];
+    for (at, slot) in writer.span.slots.iter().enumerate().rev() {
         let Slot::Good(record) = slot else { continue };
         if record.kind_of_record == TYPE_ACK {
             if let Some(mark) = writer
@@ -1393,7 +1403,11 @@ pub fn page_settled(root: &Path, before: u32) -> Result<Page, AlertError> {
     let last = u64::from(before).saturating_sub(1).min(top);
     let mut carried = BTreeSet::new();
     let mut from = last + 1;
-    while from <= top {
+    // As many reads as the records after the page take, counted before the
+    // first (GF-1): a `while from <= top` walk spun for ever when a mutant
+    // left `count` at 0, so a broken count hung the suite instead of
+    // failing it. The reads and their order are those of that walk.
+    for _ in 0..top.saturating_sub(last).div_ceil(WINDOW) {
         let count = (top - from + 1).min(WINDOW);
         // Every record of this span is newer than the page, so an
         // acknowledgement of anything at or below `last` is "older" to it.
@@ -1445,8 +1459,11 @@ fn listed(span: &Span) -> Page {
                 // never acknowledges ordinal 0 or a record that does not
                 // exist yet, and an acknowledgement that names one (a
                 // crafted record) takes nothing off any older count.
+                // `1..first` as a range (GF-1): the span holds `first`, so an
+                // ordinal that missed it was never `first` and `<` mutated to
+                // `<=` was an equivalent mutant no test could kill.
                 None => {
-                    if record.acked >= 1 && u64::from(record.acked) < span.first {
+                    if (1..span.first).contains(&u64::from(record.acked)) {
                         page.acked_older.push(record.acked);
                     }
                 }
@@ -1523,7 +1540,11 @@ pub fn older(root: &Path) -> Result<Older, AlertError> {
         ..Older::default()
     };
     let mut end = span.first.saturating_sub(1);
-    while end > 0 {
+    // As many reads as the records before the window take, counted before
+    // the first (GF-1), as in [`page_settled`]: `while end > 0` spun for ever
+    // at `end` 0 when mutated to `>=`, and so did `end -= count` mutated to
+    // `/=`. The reads and their order are those of that walk.
+    for _ in 0..end.div_ceil(WINDOW) {
         let count = end.min(WINDOW);
         let mut part = listed(&view.read(end - count + 1, count)?);
         settle(&mut part, &mut carried);
@@ -1582,7 +1603,10 @@ pub fn of_file(path: &Path, each: &mut dyn FnMut(Kept)) -> Result<KeptShape, Ale
     let body = len.saturating_sub(HEADER_LEN);
     let records = body / RECORD_LEN;
     let mut done = 0;
-    while done < records {
+    // As many reads as the records take, counted before the first (GF-1):
+    // `while done < records` spun for ever when mutated to `<=`, and so did
+    // `done += count` mutated to `*=`. The reads are those of that walk.
+    for _ in 0..records.div_ceil(WINDOW) {
         let count = (records - done).min(WINDOW);
         let part = span_from(&file, done + 1, count)?;
         for (at, slot) in part.slots.iter().enumerate() {
@@ -1670,8 +1694,14 @@ fn keep(names: &Names, now: u64) -> Result<PathBuf, AlertError> {
             let path = entry.path();
             let same = fs::symlink_metadata(&path)
                 .is_ok_and(|meta| meta.dev() == queue.dev() && meta.ino() == queue.ino());
-            if same && already.as_ref().is_none_or(|kept| path < *kept) {
-                already = Some(path);
+            // The smallest such name, by `Ord::min` (GF-1): `path < kept`
+            // mutated to `<=` was an equivalent mutant, two entries of one
+            // directory never carrying one name.
+            if same {
+                already = Some(match already {
+                    Some(kept) => kept.min(path),
+                    None => path,
+                });
             }
         }
         if let Some(kept) = already {
@@ -1857,11 +1887,11 @@ pub const EVENT_KEY_MAX: usize = 160;
 /// A key as an event carries it: cut at the largest character boundary at or
 /// below [`EVENT_KEY_MAX`] bytes.
 fn event_key(key: &str) -> &str {
-    let mut end = key.len().min(EVENT_KEY_MAX);
-    while end > 0 && !key.is_char_boundary(end) {
-        end -= 1;
-    }
-    key.get(..end).unwrap_or("")
+    // As in [`fit_text`]: the hand-written walk's `end > 0` could not be
+    // reached, so `>` mutated to `>=` was equivalent and `-=` mutated to `/=`
+    // hung (GF-1). `floor_char_boundary` of an index past the end is the end.
+    key.get(..key.floor_char_boundary(EVENT_KEY_MAX))
+        .unwrap_or("")
 }
 
 fn key_bytes(key: &str) -> telemetry::Value<'static> {

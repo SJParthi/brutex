@@ -25,6 +25,7 @@
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
+  import { askAgainWhileWritten } from '$lib/being-written.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { calendarUrl, readLedger, ledgerDay, ledgerSpan, monthSpan, epochDayOfIso, isoOfEpochDay } from '$lib/calendar-owed.js';
@@ -170,7 +171,7 @@
       const got = new Map();
       try {
         for (let page = 0, pages = 1; page < pages; page += 1) {
-          const r = await ask(dayflagsUrl(feed, inst, `${y}-01-01`, `${y}-12-31`, page), { cache: 'no-store', signal: ticket.signal });
+          const r = await askAgainWhileWritten(ask, dayflagsUrl(feed, inst, `${y}-01-01`, `${y}-12-31`, page), { cache: 'no-store', signal: ticket.signal });
           if (!ticket.current()) return;
           if (!r.ok) {
             flagsWhy = await refusalFrom('/dayflags.json', r);

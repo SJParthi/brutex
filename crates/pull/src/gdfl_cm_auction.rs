@@ -25,11 +25,15 @@
 //! or one stated twice is UNVERIFIED (charter; HDFCBANK carries two), so the
 //! quantity is the row's own and is never summed.
 //!
-//! # The `.auc` sidecar, format version 1
+//! # The `.auc` sidecar
 //!
 //! One file per instrument-month, beside the month's one-second bar file and
 //! never inside it: `bars/gdfl/NSE/CASH/<SYM>/1s/<YYYY-MM>.auc` beside
-//! `<YYYY-MM>.bin`. Every integer is little-endian.
+//! `<YYYY-MM>.bin`. Every integer is little-endian. Two format versions
+//! exist; this module is their byte authority until WP-99 transcribes both
+//! into `docs/02-store-format.md` §8 (D-3320 item 3).
+//!
+//! ## Format version 1 (no checksum)
 //!
 //! | Bytes | Field | Value |
 //! |---|---|---|
@@ -49,9 +53,44 @@
 //! | 24..28 | `rows`: identical consecutive rows merged | `u32` |
 //! | 28..32 | reserved | `u32`, 0 |
 //!
-//! A file whose length is not 16 plus a whole number of records, or whose
-//! header is not this one, is refused by name and never repaired.
-//! `docs/02-store-format.md` §8 is WP-99's to transcribe.
+//! Version 1 checks only its shape: the header, a whole number of records,
+//! the reserved fields zero. A flipped bit in a price, a quantity, a row
+//! count or a time is not detectable in it, so a reader labels every
+//! version-1 file **unchecked** ([`Sidecar::checked`]).
+//!
+//! ## Format version 2 (checksummed; every new file since AG-04)
+//!
+//! | Bytes | Field | Value |
+//! |---|---|---|
+//! | 0..8 | magic | ASCII `BRTXAUC1` (the family's magic, unchanged) |
+//! | 8..10 | version | `u16`, 2 |
+//! | 10..12 | record length | `u16`, 32 |
+//! | 12..16 | header checksum | `u32`, CRC-32C of bytes 0..12 |
+//!
+//! then the records, each the version-1 record with its last four bytes
+//! replaced:
+//!
+//! | Bytes | Field | Type |
+//! |---|---|---|
+//! | 0..28 | as version 1 | |
+//! | 28..32 | record checksum: CRC-32C of bytes 0..28 followed by the record's zero-based ordinal in the file as a `u64` | `u32` |
+//!
+//! The ordinal is bound into the checksum exactly as the `.prv` record's is
+//! (`store::provenance`), so a flipped bit anywhere in a record, and two
+//! records swapped or one moved to another position, fail the check and are
+//! refused by name with the ordinal. CRC-32C is `store::crc`'s.
+//!
+//! ## What both versions refuse, by name, never repaired
+//!
+//! A file shorter than its header; a magic, version or record length this
+//! build does not write; a version-2 header whose checksum does not match;
+//! a length that is not the header plus whole records (a torn tail, named by
+//! the ordinal of the torn record); a version-1 reserved field set; a
+//! version-2 record whose checksum does not match (named by its ordinal); a
+//! record whose IST day is earlier than the record before it (out of order,
+//! named by its ordinal). An empty file (a first append that never wrote its
+//! header) is refused as that. Repairing a refused file is IA-16's (FM-099),
+//! never this module's.
 //!
 //! # Append-only, idempotent (`CLAUDE.md` §3 rules 5 and 8)
 //!
@@ -61,31 +100,60 @@
 //! month already holds, is refused by name: it is a new generation of the
 //! month (WP-80), never an in-place change or an insertion.
 //!
+//! **A version-1 file stays version 1.** An append to it writes version-1
+//! records after version-1 records, so no file mixes the two and no held
+//! byte is rewritten; only a NEW file is version 2. A month re-imported as a
+//! new generation (WP-80) is a new file, and so version 2.
+//!
+//! **An append is all or nothing.** The day's records are written in one
+//! call under the file's exclusive lock; if that write fails (a full disk),
+//! the bytes it managed to write are cut back to the length the file had
+//! when the lock was taken and the failure is named. No reader sees them:
+//! a reader takes the shared lock ([`read`]). That is the append undone
+//! before it was ever visible, not an in-place change of a held record.
+//! A process killed inside the write leaves a torn tail no one cut back,
+//! which every reader and the next append refuse by name (IA-16 repairs).
+//!
+//! **A new file's directory is synced.** When an append creates the file
+//! (or finds it empty), the file's directory, and the parent of every
+//! directory the append had to create, are synced after the records, so a
+//! crash cannot lose the entry of a file whose bytes were reported written.
+//!
 //! # Cost
 //!
 //! One append reads the month's sidecar whole (a few records a day, at most
 //! a month of days: bounded by the month, not by the store), takes the
-//! file's exclusive advisory lock, writes the day's records once and syncs
-//! them. Not a constant-time claim; it is O(records in the month) per
-//! appended day, off every read path.
+//! file's exclusive advisory lock (waiting at most [`LOCK_WAIT`] for a
+//! reader), writes the day's records once and syncs them. Not a
+//! constant-time claim; it is O(records in the month) per appended day, off
+//! every read path. One [`read`] is one open, a shared lock held for one
+//! read of the file, and one pass over its records: O(records in the month),
+//! a handful a day, with one CRC-32C of 36 bytes per version-2 record.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use brutex_core::instrument::InstrumentKey;
 use brutex_core::vendor::Vendor;
+use store::crc::{crc32c, crc32c_split};
 use store::flock::Flock;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 use super::{CmRefusal, CmRow};
 use crate::session::{Day, IST_OFFSET_SECS};
 
-/// The sidecar's magic, `BRTXAUC1`.
+/// The sidecar's magic, `BRTXAUC1`, shared by both versions.
 pub const MAGIC: [u8; 8] = *b"BRTXAUC1";
 
-/// The format version this module writes and reads.
-pub const VERSION: u16 = 1;
+/// The format version this module writes into every NEW sidecar: 2, the
+/// checksummed one (AG-04, store-3).
+pub const VERSION: u16 = 2;
+
+/// The first format version, with no checksum: read, labelled unchecked,
+/// and appended to in its own kind, never rewritten.
+pub const VERSION_1: u16 = 1;
 
 /// The header's length in bytes.
 pub const HEADER_LEN: usize = 16;
@@ -93,8 +161,17 @@ pub const HEADER_LEN: usize = 16;
 /// One record's length in bytes.
 pub const RECORD_LEN: usize = 32;
 
+/// The bytes of a record its version-2 checksum covers, before the ordinal.
+const RECORD_BODY: usize = 28;
+
 /// The sidecar's file extension.
 pub const EXTENSION: &str = "auc";
+
+/// The longest a reader waits for an append's exclusive lock, and an append
+/// for a reader's shared one, before refusing by name. A reader holds its
+/// lock for one read of a few hundred bytes and an append for one write and
+/// one sync, so a wait this long is a stuck holder, said so.
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
 
 /// One auction print as the reader diverted it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +221,35 @@ pub struct Record {
     pub rows: u32,
 }
 
+/// Copies `part` into `out` at `at`, where it fits.
+fn put(out: &mut [u8], at: usize, part: &[u8]) {
+    if let Some(slot) = out.get_mut(at..at + part.len()) {
+        slot.copy_from_slice(part);
+    }
+}
+
+/// `N` bytes of `bytes` at `at`, zeros where `bytes` is shorter.
+fn take<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
+    bytes
+        .get(at..at + N)
+        .and_then(|slice| slice.try_into().ok())
+        .unwrap_or([0; N])
+}
+
+/// A version-2 record's checksum: CRC-32C of its first 28 bytes followed by
+/// its ordinal, little-endian.
+fn record_crc(bytes: &[u8], ordinal: u64) -> u32 {
+    crc32c_split(
+        bytes.get(..RECORD_BODY).unwrap_or_default(),
+        &ordinal.to_le_bytes(),
+    )
+}
+
+/// The IST day number of a UTC microsecond.
+const fn ist_day(t_micros: i64) -> i64 {
+    (t_micros.div_euclid(1_000_000) + IST_OFFSET_SECS).div_euclid(86_400)
+}
+
 impl Record {
     /// `print` of `day` as a record.
     #[must_use]
@@ -158,80 +264,288 @@ impl Record {
         }
     }
 
-    /// The record's 32 bytes.
+    /// The record's 32 bytes in format version 1: the reserved field zero.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; RECORD_LEN] {
+        self.encode(VERSION_1, 0)
+    }
+
+    /// The record's 32 bytes in format `version` at `ordinal`, its
+    /// zero-based position in the file. Version 2's last four bytes are its
+    /// checksum over the first 28 and the ordinal; version 1's are zero and
+    /// the ordinal is not written.
+    #[must_use]
+    pub fn encode(&self, version: u16, ordinal: u64) -> [u8; RECORD_LEN] {
         let mut out = [0_u8; RECORD_LEN];
-        let parts: [&[u8]; 4] = [
-            &self.t_micros.to_le_bytes(),
-            &self.price_paisa.to_le_bytes(),
-            &self.quantity.to_le_bytes(),
-            &self.rows.to_le_bytes(),
-        ];
-        let mut at = 0;
-        for part in parts {
-            if let Some(slot) = out.get_mut(at..at + part.len()) {
-                slot.copy_from_slice(part);
-            }
-            at += part.len();
+        put(&mut out, 0, &self.t_micros.to_le_bytes());
+        put(&mut out, 8, &self.price_paisa.to_le_bytes());
+        put(&mut out, 16, &self.quantity.to_le_bytes());
+        put(&mut out, 24, &self.rows.to_le_bytes());
+        if version != VERSION_1 {
+            let crc = record_crc(&out, ordinal);
+            put(&mut out, 28, &crc.to_le_bytes());
         }
         out
     }
 
-    /// A record read back, or `None` when `bytes` is not one.
+    /// A version-1 record read back, or `None` when `bytes` is not one.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let field = |at: usize| -> Option<[u8; 8]> { bytes.get(at..at + 8)?.try_into().ok() };
-        let rows: [u8; 4] = bytes.get(24..28)?.try_into().ok()?;
-        let reserved: [u8; 4] = bytes.get(28..32)?.try_into().ok()?;
-        (bytes.len() == RECORD_LEN && reserved == [0; 4]).then_some(())?;
-        Some(Self {
-            t_micros: i64::from_le_bytes(field(0)?),
-            price_paisa: i64::from_le_bytes(field(8)?),
-            quantity: u64::from_le_bytes(field(16)?),
-            rows: u32::from_le_bytes(rows),
+        Self::decode(bytes, VERSION_1, 0).ok()
+    }
+
+    /// The record `bytes` holds at `ordinal` in a file of `version`.
+    ///
+    /// # Errors
+    ///
+    /// Not 32 bytes; version 1's reserved field set; version 2's checksum,
+    /// which covers the ordinal, not matching. Named, never repaired.
+    pub fn decode(bytes: &[u8], version: u16, ordinal: u64) -> Result<Self, String> {
+        if bytes.len() != RECORD_LEN {
+            return Err(format!(
+                "{} bytes, not one {RECORD_LEN}-byte record",
+                bytes.len()
+            ));
+        }
+        let tail = take::<4>(bytes, RECORD_BODY);
+        if version == VERSION_1 {
+            if tail != [0; 4] {
+                return Err("its reserved field is not zero".to_owned());
+            }
+        } else if u32::from_le_bytes(tail) != record_crc(bytes, ordinal) {
+            return Err(
+                "its checksum does not match: a flipped bit, a torn write, or a record moved \
+                 from another position"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            t_micros: i64::from_le_bytes(take::<8>(bytes, 0)),
+            price_paisa: i64::from_le_bytes(take::<8>(bytes, 8)),
+            quantity: u64::from_le_bytes(take::<8>(bytes, 16)),
+            rows: u32::from_le_bytes(take::<4>(bytes, 24)),
         })
     }
 }
 
-/// The header's 16 bytes.
+/// The 16 header bytes of format `version`: version 1's last four reserved
+/// (zero), version 2's the CRC-32C of the first twelve.
 #[must_use]
-pub fn header() -> [u8; HEADER_LEN] {
+pub fn header_of(version: u16) -> [u8; HEADER_LEN] {
     let mut out = [0_u8; HEADER_LEN];
-    if let Some(slot) = out.get_mut(..8) {
-        slot.copy_from_slice(&MAGIC);
-    }
-    if let Some(slot) = out.get_mut(8..10) {
-        slot.copy_from_slice(&VERSION.to_le_bytes());
-    }
-    if let Some(slot) = out.get_mut(10..12) {
-        slot.copy_from_slice(&u16::try_from(RECORD_LEN).unwrap_or(0).to_le_bytes());
+    put(&mut out, 0, &MAGIC);
+    put(&mut out, 8, &version.to_le_bytes());
+    put(
+        &mut out,
+        10,
+        &u16::try_from(RECORD_LEN).unwrap_or(0).to_le_bytes(),
+    );
+    if version != VERSION_1 {
+        let crc = crc32c(out.get(..12).unwrap_or_default());
+        put(&mut out, 12, &crc.to_le_bytes());
     }
     out
 }
 
-/// Every record of a sidecar's bytes.
+/// The header every new sidecar is written with: [`VERSION`]'s.
+#[must_use]
+pub fn header() -> [u8; HEADER_LEN] {
+    header_of(VERSION)
+}
+
+/// Every record of one sidecar, and the format version it was written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sidecar {
+    /// The format version: [`VERSION_1`] or [`VERSION`].
+    pub version: u16,
+    /// Every record, in file order.
+    pub records: Vec<Record>,
+}
+
+impl Sidecar {
+    /// Whether every record was checked against a checksum: `false` for a
+    /// version-1 file, which carries none.
+    #[must_use]
+    pub const fn checked(&self) -> bool {
+        self.version != VERSION_1
+    }
+
+    /// Why a reader cannot vouch for the records' values, or `None` where
+    /// it can.
+    #[must_use]
+    pub const fn unchecked_why(&self) -> Option<&'static str> {
+        if self.checked() {
+            None
+        } else {
+            Some(
+                "version 1 carries no checksum: its prices, quantities, row counts and times \
+                 are served as written and a flipped bit in them cannot be detected",
+            )
+        }
+    }
+}
+
+/// Why a sidecar's bytes were refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The zero-based ordinal of the record at fault, where one is.
+    pub ordinal: Option<u64>,
+    /// What is wrong, in words.
+    pub why: String,
+}
+
+impl Refused {
+    fn file(why: String) -> Self {
+        Self { ordinal: None, why }
+    }
+
+    fn record(ordinal: usize, why: &str) -> Self {
+        Self {
+            ordinal: Some(u64::try_from(ordinal).unwrap_or(u64::MAX)),
+            why: format!("record {ordinal}: {why}"),
+        }
+    }
+}
+
+impl core::fmt::Display for Refused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+/// Every record of a sidecar's bytes, either version.
 ///
 /// # Errors
 ///
-/// A header that is not version 1's, or a length that is not the header
-/// plus whole records, named.
-pub fn parse(bytes: &[u8]) -> Result<Vec<Record>, String> {
-    let (head, body) = bytes
-        .split_at_checked(HEADER_LEN)
-        .ok_or_else(|| format!("{} bytes, shorter than the header", bytes.len()))?;
-    if head != header() {
-        return Err("the header is not BRTXAUC1 version 1 with 32-byte records".to_owned());
-    }
-    if body.len() % RECORD_LEN != 0 {
-        return Err(format!(
-            "{} bytes after the header, not a whole number of {RECORD_LEN}-byte records",
-            body.len()
+/// [`Refused`], naming what the module header lists, with the record's
+/// ordinal where one record is at fault.
+pub fn parse(bytes: &[u8]) -> Result<Sidecar, Refused> {
+    if bytes.is_empty() {
+        return Err(Refused::file(
+            "0 bytes: the file exists and holds no header: its first append is in progress, \
+             or failed and was undone (that append's refusal names why)"
+                .to_owned(),
         ));
     }
-    body.chunks(RECORD_LEN)
-        .map(|chunk| Record::from_bytes(chunk).ok_or_else(|| "a record is not one".to_owned()))
-        .collect()
+    let (head, body) = bytes.split_at_checked(HEADER_LEN).ok_or_else(|| {
+        Refused::file(format!(
+            "{} bytes, shorter than the {HEADER_LEN}-byte header: a truncated header",
+            bytes.len()
+        ))
+    })?;
+    if take::<8>(head, 0) != MAGIC {
+        return Err(Refused::file("the magic is not BRTXAUC1".to_owned()));
+    }
+    let version = u16::from_le_bytes(take::<2>(head, 8));
+    if version != VERSION_1 && version != VERSION {
+        return Err(Refused::file(format!(
+            "format version {version} is not one this build reads ({VERSION_1} or {VERSION})"
+        )));
+    }
+    if head != header_of(version) {
+        return Err(Refused::file(if version == VERSION_1 {
+            "the version-1 header is not BRTXAUC1 with 32-byte records and a zero reserved field"
+                .to_owned()
+        } else {
+            "the version-2 header's checksum does not match, or its record length is not 32"
+                .to_owned()
+        }));
+    }
+    let whole = body.len() / RECORD_LEN;
+    if body.len() % RECORD_LEN != 0 {
+        return Err(Refused {
+            ordinal: Some(u64::try_from(whole).unwrap_or(u64::MAX)),
+            why: format!(
+                "{} bytes after the header, not a whole number of {RECORD_LEN}-byte records: \
+                 record {whole} is torn ({} of its {RECORD_LEN} bytes)",
+                body.len(),
+                body.len() % RECORD_LEN
+            ),
+        });
+    }
+    let mut records = Vec::with_capacity(whole);
+    let mut last_day = i64::MIN;
+    for (ordinal, chunk) in body.chunks(RECORD_LEN).enumerate() {
+        let record = Record::decode(chunk, version, u64::try_from(ordinal).unwrap_or(u64::MAX))
+            .map_err(|why| Refused::record(ordinal, &why))?;
+        let day = ist_day(record.t_micros);
+        if day < last_day {
+            return Err(Refused::record(
+                ordinal,
+                "its IST day is earlier than the record before it: out of order, which no \
+                 append writes",
+            ));
+        }
+        last_day = day;
+        records.push(record);
+    }
+    Ok(Sidecar { version, records })
+}
+
+/// The sidecar at `path`, read under a shared lock so a read beside an
+/// append sees the file before the append or after it, never between;
+/// `Ok(None)` where there is no file.
+///
+/// # Errors
+///
+/// [`Refused`]: the file cannot be opened, locked within [`LOCK_WAIT`] or
+/// read, or [`parse`] refuses its bytes. Each names the path.
+pub fn read(path: &Path) -> Result<Option<Sidecar>, Refused> {
+    let named = |why: String| Refused::file(format!("{}: {why}", path.display()));
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(why) => return Err(named(why.to_string())),
+    };
+    let lock = hold(&file, path, Hold::Shared, LOCK_WAIT).map_err(&named)?;
+    let mut bytes = Vec::new();
+    let mut reader: &File = &lock;
+    let got = reader.read_to_end(&mut bytes);
+    lock.release().map_err(|why| named(why.to_string()))?;
+    got.map_err(|why| named(why.to_string()))?;
+    parse(&bytes).map(Some).map_err(|refused| Refused {
+        why: format!("{}: {}", path.display(), refused.why),
+        ..refused
+    })
+}
+
+/// Which lock [`hold`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    Shared,
+    Exclusive,
+}
+
+/// Takes `kind` of lock on `file`, waiting at most `bound` for the holder of
+/// the other kind.
+fn hold<'a>(
+    file: &'a File,
+    path: &Path,
+    kind: Hold,
+    bound: Duration,
+) -> Result<Flock<&'a File>, String> {
+    let started = Instant::now();
+    loop {
+        let tried = match kind {
+            Hold::Shared => Flock::try_lock_shared(file, path.to_path_buf()),
+            Hold::Exclusive => Flock::try_lock(file, path.to_path_buf()),
+        };
+        match tried {
+            Ok(lock) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < bound => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(format!(
+                    "the lock is held by another reader or writer past {} ms",
+                    bound.as_millis()
+                ));
+            }
+            Err(std::fs::TryLockError::Error(why)) => {
+                return Err(format!("cannot be locked: {why}"));
+            }
+        }
+    }
 }
 
 /// The sidecar beside `key`'s one-second month file of `day`'s month.
@@ -272,7 +586,8 @@ pub struct Appended {
 ///
 /// [`CmRefusal::AuctionSidecar`] naming why: the path, the file, its lock or
 /// its bytes; a day older than one the month holds; a day whose records
-/// differ from those held for it.
+/// differ from those held for it; a write that failed (undone) or a
+/// directory that could not be synced.
 pub fn append(
     store_root: &Path,
     key: &InstrumentKey,
@@ -289,7 +604,15 @@ pub fn append(
         return Ok(appended);
     }
     let path = path(store_root, key, day).map_err(refuse)?;
+    // THE DIRECTORIES THIS APPEND MAKES, so their entries are synced with
+    // the file's: the parent of each holds its entry.
+    let mut made: Vec<PathBuf> = Vec::new();
     if let Some(parent) = path.parent() {
+        let mut at = Some(parent);
+        while let Some(dir) = at.filter(|dir| !dir.as_os_str().is_empty() && !dir.exists()) {
+            made.push(dir.to_path_buf());
+            at = dir.parent();
+        }
         std::fs::create_dir_all(parent)
             .map_err(|why| refuse(format!("{}: {why}", parent.display())))?;
     }
@@ -299,29 +622,36 @@ pub fn append(
         .create(true)
         .open(&path)
         .map_err(|why| refuse(format!("{}: {why}", path.display())))?;
-    let lock = Flock::try_lock(file, path.clone()).map_err(|why| {
+    let lock = hold(&file, &path, Hold::Exclusive, LOCK_WAIT).map_err(|why| {
         refuse(format!(
             "{} is busy or cannot be locked: {why}",
             path.display()
         ))
     })?;
-    let written = write_day(&lock, &path, day, &offered).map_err(refuse);
+    let written = write_day(&lock, &path, day, &offered, &made).map_err(refuse);
     lock.release().map_err(|why| {
         refuse(format!(
             "{}: the lock was not released: {why}",
             path.display()
         ))
     })?;
-    let written = written?;
-    note_filed(key, day, &path, offered.len(), written);
+    let (written, version) = written?;
+    note_filed(key, day, &path, offered.len(), written, version);
     Ok(Appended {
         written,
         ..appended
     })
 }
 
-/// Under the lock: reads the held records, decides, and appends.
-fn write_day(file: &File, path: &Path, day: Day, offered: &[Record]) -> Result<usize, String> {
+/// Under the lock: reads the held records, decides, and appends in the
+/// file's own version. Returns the records written and that version.
+fn write_day(
+    file: &File,
+    path: &Path,
+    day: Day,
+    offered: &[Record],
+    made: &[PathBuf],
+) -> Result<(usize, u16), String> {
     let mut bytes = Vec::new();
     let mut reader = file;
     reader
@@ -329,20 +659,24 @@ fn write_day(file: &File, path: &Path, day: Day, offered: &[Record]) -> Result<u
         .map_err(|why| format!("{}: {why}", path.display()))?;
     let fresh = bytes.is_empty();
     let held = if fresh {
-        Vec::new()
+        Sidecar {
+            version: VERSION,
+            records: Vec::new(),
+        }
     } else {
         parse(&bytes).map_err(|why| format!("{}: {why}", path.display()))?
     };
     let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
     let end = start + 86_400 * 1_000_000;
     let held_day: Vec<Record> = held
+        .records
         .iter()
         .filter(|r| r.t_micros >= start && r.t_micros < end)
         .copied()
         .collect();
     if !held_day.is_empty() {
         if held_day == offered {
-            return Ok(0);
+            return Ok((0, held.version));
         }
         return Err(format!(
             "{}: {day} holds {} records and {} different ones were offered; a new generation, \
@@ -352,7 +686,7 @@ fn write_day(file: &File, path: &Path, day: Day, offered: &[Record]) -> Result<u
             offered.len()
         ));
     }
-    if held.last().is_some_and(|last| last.t_micros >= end) {
+    if held.records.last().is_some_and(|last| last.t_micros >= end) {
         return Err(format!(
             "{}: the month holds a day after {day}; {day} is a new generation, never an \
              insertion",
@@ -361,22 +695,93 @@ fn write_day(file: &File, path: &Path, day: Day, offered: &[Record]) -> Result<u
     }
     let mut out = Vec::with_capacity(HEADER_LEN + offered.len() * RECORD_LEN);
     if fresh {
-        out.extend_from_slice(&header());
+        out.extend_from_slice(&header_of(held.version));
     }
-    for record in offered {
-        out.extend_from_slice(&record.to_bytes());
+    let first = held.records.len();
+    for (at, record) in offered.iter().enumerate() {
+        let ordinal = u64::try_from(first + at).unwrap_or(u64::MAX);
+        out.extend_from_slice(&record.encode(held.version, ordinal));
+    }
+    if let Err(why) = put_bytes(file, &out).and_then(|()| file.sync_data()) {
+        let before = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let undone = file.set_len(before).and_then(|()| file.sync_data());
+        return Err(match undone {
+            Ok(()) => format!(
+                "{}: {why}; the append was undone, the file is its {before} bytes again and \
+                 nothing is half-written",
+                path.display()
+            ),
+            Err(also) => format!(
+                "{}: {why}; undoing the append to {before} bytes failed too ({also}): the file \
+                 may end in a torn tail every reader refuses",
+                path.display()
+            ),
+        });
+    }
+    if fresh {
+        let mut dirs: Vec<&Path> = path.parent().into_iter().collect();
+        dirs.extend(made.iter().filter_map(|dir| dir.parent()));
+        for dir in dirs {
+            sync_dir(dir).map_err(|why| {
+                format!(
+                    "{}: written and synced, but its directory {} was not synced: {why}",
+                    path.display(),
+                    dir.display()
+                )
+            })?;
+        }
+    }
+    Ok((offered.len(), held.version))
+}
+
+/// Writes `bytes` at the file's end in one call.
+fn put_bytes(file: &File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(after) = seam::FAIL_AFTER.with(std::cell::Cell::take) {
+        let mut writer = file;
+        writer.write_all(bytes.get(..after).unwrap_or(bytes))?;
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "no space left on device (injected)",
+        ));
     }
     let mut writer = file;
-    writer
-        .write_all(&out)
-        .and_then(|()| file.sync_data())
-        .map_err(|why| format!("{}: {why}", path.display()))?;
-    Ok(offered.len())
+    writer.write_all(bytes)
+}
+
+/// Syncs the directory `dir`, so the entries it holds survive a crash.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    seam::SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+    File::open(dir)?.sync_all()
+}
+
+/// The test seams: a write that fails after so many bytes, as a full disk
+/// does, and the directories synced, in order. Per thread, so tests running
+/// at once never see each other's.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+
+    thread_local! {
+        /// The next append's write stops after this many bytes and fails.
+        pub(crate) static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+        /// Every directory synced on this thread.
+        pub(crate) static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
 }
 
 /// One `info` line per filed day (D-3320): the share, the day, the prints
-/// offered and written, and the sidecar.
-fn note_filed(key: &InstrumentKey, day: Day, path: &Path, offered: usize, written: usize) {
+/// offered and written, the sidecar and its format version.
+fn note_filed(
+    key: &InstrumentKey,
+    day: Day,
+    path: &Path,
+    offered: usize,
+    written: usize,
+    version: u16,
+) {
     let day_text = day.to_string();
     let path_text = path.display().to_string();
     let _dropped_when_filtered = telemetry::emit(
@@ -385,6 +790,11 @@ fn note_filed(key: &InstrumentKey, day: Day, path: &Path, offered: usize, writte
             .with("day", day_text.as_str())
             .with("prints", offered)
             .with("written", written)
+            .with("version", usize::from(version))
             .with("sidecar", path_text.as_str()),
     );
 }
+
+#[cfg(test)]
+#[path = "gdfl_cm_auction_v2_tests.rs"]
+mod v2_tests;

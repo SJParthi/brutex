@@ -363,7 +363,7 @@ impl BarFile {
         refuse_links_below(store_root, &bars_path)?;
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
         refuse_link(&lock_path)?;
-        let lock = Flock::try_lock(
+        let lock = Flock::try_lock_noted(
             writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )

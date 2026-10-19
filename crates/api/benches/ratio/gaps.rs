@@ -142,7 +142,8 @@ const MONTH_ROUNDS: usize = 600;
 /// the same machine over the same wall time and a stall is as likely to land
 /// in any of them. The ceiling is unchanged: a kept answer that read the
 /// bars would still grow with them, and the answer's own words (`kept`, zero
-/// bar records read) are asserted on every sample.
+/// bar records read) are asserted on every sample. Proof: this bench, run by
+/// `crates/api/benches/ratio.rs`, which fails on a breach.
 fn months_are_flat(runtime: &tokio::runtime::Runtime) -> bool {
     let query = "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2024-06";
     let must = r#""summary":"kept","summary_fallback":null,"bar_records_read":0"#;

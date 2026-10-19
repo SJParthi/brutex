@@ -1,5 +1,14 @@
 //! `facets.rs`'s tests: the index, its moves, the route's answers.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+
 use super::*;
 use crate::server::tests::{agreeing, site};
 use brutex_core::instrument::Contract;
@@ -453,13 +462,35 @@ fn a_delta_answers_only_what_changed_and_an_old_generation_is_refused() {
         "with its current totals"
     );
 
-    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS NOT HELD.
+    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS READ BACK FROM
+    // THE FILE (R3-09, RA-008): the future the base's last entry named, and
+    // the weekly appended after it.
+    let older = generation.checked_sub(1).expect("a generation");
+    let read_back = json(
+        &render_answer(
+            &index,
+            &asked_for(&format!(
+                "feed=gdfl&segment=FNO&underlying=NIFTY&since={older}"
+            )),
+            "held",
+            None,
+        )
+        .expect("read back"),
+    );
+    let expiries = read_back["expiries"].as_array().expect("a list");
+    assert_eq!(expiries.len(), 2, "{read_back}");
+    assert_eq!(read_back["since"], older);
+
+    // AND REFUSED, NEVER GUESSED, ONCE THE FILE IS NOT THE ONE THE BASE WAS
+    // READ FROM: the same bytes installed by rename are another inode.
+    let path = manifest_path(&disk.root, Vendor::Gdfl);
+    let bytes = std::fs::read(&path).expect("read");
+    let tmp = path.with_extension("man.writing");
+    std::fs::write(&tmp, &bytes).expect("written");
+    std::fs::rename(&tmp, &path).expect("renamed");
     let (code, body) = render_answer(
         &index,
-        &asked_for(&format!(
-            "feed=gdfl&segment=FNO&since={}",
-            generation.checked_sub(1).expect("a generation")
-        )),
+        &asked_for(&format!("feed=gdfl&segment=FNO&since={older}")),
         "held",
         None,
     )
@@ -1414,4 +1445,183 @@ fn a_rows_answer_reads_the_same_keys_at_ten_times_the_census() {
     assert_eq!(few.len(), 25);
     assert_eq!(few, many, "the same probes, whatever else the census holds");
     assert_eq!(sums_small, sums_large);
+}
+
+/// **A RETIRED INDEX IS TAKEN APART IN PACED STEPS, ITS CENSUS READ LAST**
+/// (R3-09 repair 1, blocking item 4). Freed in one burst, GDFL's FNO index
+/// stalled every request of the process 67 to 138 ms at each census change.
+/// [`dismantle`] pauses after every `step` nodes, frees every node it
+/// counts, and lets the census read go only after the last pause: while it
+/// runs, the read is still held.
+#[test]
+fn a_retired_index_is_taken_apart_in_paced_steps_and_its_census_read_last() {
+    let slot = slot_of(&chain());
+    let index = built(Segment::Fno, &slot);
+    let nodes: usize = index
+        .underlyings
+        .values()
+        .map(|one| {
+            one.expiries
+                .values()
+                .map(|expiry| expiry.contracts.len() + expiry.months.len() + 1)
+                .sum::<usize>()
+                + one.months.len()
+                + one.cells.len()
+                + 1
+        })
+        .sum::<usize>()
+        + index.denoms.len()
+        + index.cells.len();
+    assert!(nodes >= 8, "the chain indexes {nodes} nodes");
+    let held = Arc::strong_count(&slot);
+    assert_eq!(held, 2, "the index holds its read");
+    let mut pauses = 0usize;
+    let mut held_at_each_pause = Vec::new();
+    let freed = dismantle(index, 2, &mut || {
+        pauses += 1;
+        held_at_each_pause.push(Arc::strong_count(&slot));
+    });
+    // EVERY NODE COUNTED: each contract, month and expiry, each
+    // underlying's months, cells and itself, and the segment's own sums.
+    assert_eq!(freed, nodes);
+    // A PAUSE AFTER A STEP, AND ONE MORE BEFORE THE CENSUS READ.
+    assert!(pauses >= 2, "{pauses} pauses for {freed} nodes");
+    assert!(
+        held_at_each_pause.iter().all(|&count| count == held),
+        "the census read was let go before the nodes: {held_at_each_pause:?}"
+    );
+    assert_eq!(Arc::strong_count(&slot), 1, "and then let go");
+    // A STEP OF ZERO IS A STEP OF ONE, never a division by it: a pause after
+    // every expiry, every underlying and the segment's sums, and the last.
+    let index = built(Segment::Fno, &slot);
+    let steps = index
+        .underlyings
+        .values()
+        .map(|one| one.expiries.len() + 1)
+        .sum::<usize>()
+        + 1;
+    let mut zero_step = 0usize;
+    assert_eq!(dismantle(index, 0, &mut || zero_step += 1), freed);
+    assert_eq!(zero_step, steps + 1);
+    // A STEP NO INDEX REACHES pauses once, before the census read.
+    let mut one = 0usize;
+    assert_eq!(
+        dismantle(built(Segment::Fno, &slot), usize::MAX, &mut || one += 1),
+        freed
+    );
+    assert_eq!(one, 1);
+    // AN EMPTY INDEX frees nothing and pauses once, before its (absent) read.
+    let mut empty = 0usize;
+    assert_eq!(dismantle(Index::default(), 2, &mut || empty += 1), 0);
+    assert_eq!(empty, 1);
+}
+
+/// What the two counters must equal: every expiry's contracts summed, and
+/// each expiry's distinct option strikes, walked the way the answers walked
+/// them before the counters existed.
+fn walked(index: &Index) -> Vec<(u64, Vec<u64>)> {
+    index
+        .underlyings()
+        .map(|(_, under)| {
+            let contracts = under
+                .expiries
+                .values()
+                .map(|chain| u64::try_from(chain.contracts.len()).expect("fits"))
+                .sum();
+            let strikes = under
+                .expiries
+                .values()
+                .map(|chain| {
+                    let set: BTreeSet<i64> = chain
+                        .contracts
+                        .keys()
+                        .filter_map(|id| match *id {
+                            ContractId::Option { strike, .. } => Some(strike),
+                            ContractId::Future => None,
+                        })
+                        .collect();
+                    u64::try_from(set.len()).expect("fits")
+                })
+                .collect();
+            (contracts, strikes)
+        })
+        .collect()
+}
+
+/// The counters the index keeps.
+fn counted(index: &Index) -> Vec<(u64, Vec<u64>)> {
+    index
+        .underlyings()
+        .map(|(_, under)| {
+            (
+                under.contracts,
+                under.expiries.values().map(|chain| chain.strikes).collect(),
+            )
+        })
+        .collect()
+}
+
+/// **THE UNDERLYINGS ANSWER READS A COUNTER, NOT EVERY EXPIRY**
+/// (`cloud/attack-o1-20261016`).
+///
+/// With no underlying asked, `render_answer` summed the contracts of every
+/// expiry of every underlying, and with no expiry asked it collected every
+/// contract of every expiry into a set to count strikes: O(contracts of the
+/// segment) per request, growing with every stored month. `Index::apply`
+/// now counts both as a contract is first seen. Here the counters equal the
+/// walk on a fresh build, after a move that adds rows and grows one, and
+/// after a CE's PE lands at a strike already counted; and the answer sites
+/// hold no walk, asserted on the source (needles assembled at run time).
+#[test]
+fn the_contract_and_strike_counts_are_counters_kept_by_apply() {
+    let rows = chain();
+    let (first, rest) = rows.split_at(1);
+    let mut disk = OnDisk::new("counted", first);
+    let before = disk.read(None);
+    let mut index = built(Segment::Fno, &before);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(counted(&index), vec![(1, vec![1])], "one CE, one strike");
+
+    // THE PE AT THE SAME STRIKE: one more contract, no more strikes.
+    disk.append(&rest[..1]);
+    let moved = disk.read(Some(before.census()));
+    advance(&mut index, Segment::Fno, &moved);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(counted(&index), vec![(2, vec![1])]);
+
+    // THE REST, AND A KEY THAT GROWS: a grown key is no new contract.
+    let mut grown = rest[1..].to_vec();
+    grown.push(held(
+        fno("2019-03-28-1150000-CE", Timeframe::SECOND_1, month(2019, 3)),
+        11,
+        0,
+        110,
+        7_101,
+    ));
+    disk.append(&grown);
+    let after = disk.read(Some(moved.census()));
+    advance(&mut index, Segment::Fno, &after);
+    assert_eq!(counted(&index), walked(&index));
+    assert_eq!(
+        counted(&index),
+        vec![(5, vec![1, 2])],
+        "five contracts; 03-07 one strike, 03-28 two"
+    );
+    let fresh = built(Segment::Fno, &after);
+    assert_eq!(counted(&fresh), counted(&index), "moved equals fresh");
+
+    let source = include_str!("facets.rs");
+    for needle in [
+        format!(
+            "{}{}",
+            ".map(|chain| chain.contracts.len())", "\n            .sum()"
+        ),
+        format!("{}{}", "let strikes: BTreeSet", "<i64> = chain"),
+    ] {
+        assert!(
+            !source.contains(&needle),
+            "an answer walks the contracts again: {needle:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&disk.root);
 }

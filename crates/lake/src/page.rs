@@ -142,6 +142,19 @@ impl fmt::Display for Codec {
 /// four-byte block, demands gigabytes.
 const MAX_PAGE_BYTES: usize = 64 << 20;
 
+/// **THE LARGEST WINDOW A ZSTD PAGE FRAME MAY DECLARE: 128 MiB.** It is
+/// `ruzstd` 0.9.1's own `DEFAULT_MAX_WINDOW_SIZE`, passed explicitly so a later
+/// version that moves its default cannot move this reader's (D-5090).
+///
+/// [`MAX_PAGE_BYTES`] bounds what a page may decode TO; this bounds what the
+/// decoder may hold before any of it can be read. Until a decoder's buffer
+/// outgrows the frame's declared window nothing is collectable, so the one-byte
+/// `take` cap below cannot act before then. Under 0.8.2 that window was
+/// unbounded here, measured: its 100 MiB ceiling was checked only when a
+/// decoder was reset for a second frame, and this reader builds one per page,
+/// so a frame declaring 8 GiB was accepted.
+const MAX_ZSTD_WINDOW: u64 = 128 << 20;
+
 /// Walks the pages of one column chunk, decompressing each.
 pub(crate) struct LakePageReader {
     chunk: Bytes,
@@ -256,8 +269,11 @@ impl LakePageReader {
                          page; refusing rather than reserving it"
                     )));
                 }
-                let dec = ruzstd::decoding::StreamingDecoder::new(body)
-                    .map_err(|e| ParquetError::General(format!("zstd frame refused: {e}")))?;
+                let dec = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+                    body,
+                    MAX_ZSTD_WINDOW,
+                )
+                .map_err(|e| ParquetError::General(format!("zstd frame refused: {e}")))?;
 
                 // ONE BYTE PAST THE PROMISE, and that byte is the whole
                 // mechanism: a cap of exactly `expect` would let a frame with
@@ -1017,6 +1033,120 @@ mod tests {
             }
             other => panic!("expected a data page, got {other:?}"),
         }
+    }
+
+    // ── the `ruzstd` 0.8.2 -> 0.9.1 bump (RUSTSEC-2026-0344, D-5090) ─────────
+
+    use crate::zstd_v082_frames as v082;
+
+    /// **EVERY FRAME 0.8.2 WROTE DECODES THROUGH THE PAGE PATH TO THE BYTES IT
+    /// WAS WRITTEN FROM**, and a header that states one byte more or one less
+    /// is still refused. The frames were written by 0.8.2 before the bump and
+    /// are frozen in [`v082::CASES`]; the inputs are regenerated here, so this
+    /// compares bytes, not lengths.
+    #[test]
+    fn frames_ruzstd_0_8_2_wrote_decode_to_their_input_through_the_page_path() {
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+        for case in &v082::CASES {
+            let input = v082::input(case.name);
+            let frame = v082::frame(case);
+            let page = r
+                .decode(&frame, input.len())
+                .unwrap_or_else(|e| panic!("{}: an old frame is refused: {e}", case.name));
+            assert_eq!(&page[..], input.as_slice(), "{}: byte for byte", case.name);
+            assert!(
+                r.decode(&frame, input.len() + 1).is_err(),
+                "{}: a header one byte long is refused",
+                case.name
+            );
+            if let Some(short) = input.len().checked_sub(1) {
+                assert!(
+                    r.decode(&frame, short).is_err(),
+                    "{}: a header one byte short is refused",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// **THE FROZEN FRAMES HOLD ALL THREE BLOCK TYPES**, read from their
+    /// headers: without this the round trip above could be proving one block
+    /// type six times.
+    #[test]
+    fn the_fixtures_cover_every_block_type() {
+        let mut seen = [0_usize; 3];
+        for case in &v082::CASES {
+            for block in v082::block_types(&v082::frame(case)) {
+                seen[usize::from(block)] += 1;
+            }
+        }
+        assert!(
+            seen.iter().all(|n| *n > 0),
+            "Raw, RLE and Compressed blocks each appear: {seen:?}"
+        );
+    }
+
+    /// **A TORN PAGE IS REFUSED AT EVERY LENGTH.** Every proper prefix of every
+    /// frozen frame, behind a header that states the whole input.
+    #[test]
+    fn every_truncation_of_an_old_frame_is_refused() {
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+        for case in &v082::CASES {
+            let input = v082::input(case.name);
+            let frame = v082::frame(case);
+            for cut in 0..frame.len() {
+                assert!(
+                    r.decode(&frame[..cut], input.len()).is_err(),
+                    "{}: the first {cut} of {} bytes were accepted",
+                    case.name,
+                    frame.len()
+                );
+            }
+        }
+    }
+
+    /// **A BLOCK WIDER THAN ITS WINDOW IS REFUSED — THE ADVISORY'S CLASS.**
+    /// RUSTSEC-2026-0344: a block's decoded size was never held to RFC 8878's
+    /// `Block_Maximum_Size`, so a small frame could expand without bound
+    /// inside the decoder, where the one-byte `take` cap cannot reach. Under
+    /// 0.8.2 this ten-byte frame decoded to 4,096 bytes and was ACCEPTED by a
+    /// header promising 4,096 (measured); that acceptance is the defect.
+    #[test]
+    fn a_block_wider_than_its_window_is_refused() {
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+        let text = r
+            .decode(
+                &v082::RLE_WIDER_THAN_WINDOW,
+                v082::RLE_WIDER_THAN_WINDOW_BYTES,
+            )
+            .expect_err("a block four times its window must be refused")
+            .to_string();
+        assert!(
+            text.contains("zstd decode refused"),
+            "refused while decoding, with its reason: {text}"
+        );
+    }
+
+    /// **THE WINDOW CEILING IS 128 MiB, EXACTLY.** At the ceiling a frame is
+    /// read; one byte past it is refused before anything is decoded. Under
+    /// 0.8.2 the byte-past frame was accepted (measured): its ceiling was
+    /// checked only on a reused decoder, and this reader never reuses one.
+    #[test]
+    fn the_declared_window_ceiling_is_128_mib_exactly() {
+        assert_eq!(MAX_ZSTD_WINDOW, v082::WINDOW_CEILING);
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+        let at = r
+            .decode(&v082::WINDOW_AT_CEILING, 0)
+            .expect("a frame whose window is the ceiling is read");
+        assert!(at.is_empty(), "and decodes to its empty block");
+        let text = r
+            .decode(&v082::WINDOW_PAST_CEILING, 0)
+            .expect_err("one byte past the ceiling is refused")
+            .to_string();
+        assert!(
+            text.contains("zstd frame refused") && text.contains("134217729"),
+            "refused at the frame header, naming the window it asked for: {text}"
+        );
     }
 
     #[test]

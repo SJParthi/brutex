@@ -96,6 +96,13 @@ leftovers = [
   "RA-063",
   "DB-G55",
   "CMP-01", "CMP-02", "CMP-08", "CMP-07",
+  # The owed runs of config/owed-runs.toml (R4-06, AUT-07): gate 30 holds each
+  # to exactly one step here.
+  "OWED-01", "OWED-02", "OWED-03", "OWED-04", "OWED-05", "OWED-06", "OWED-07",
+  "OWED-08", "OWED-09", "OWED-10", "OWED-11", "OWED-12", "OWED-13", "OWED-14",
+  "OWED-15", "OWED-16", "OWED-17", "OWED-18", "OWED-19", "OWED-20", "OWED-21",
+  "OWED-22", "OWED-23", "OWED-24", "OWED-25", "OWED-26", "OWED-27", "OWED-28",
+  "OWED-29", "OWED-30", "OWED-31",
 ]
 
 # ------------------------------------------------------------- environment --
@@ -115,6 +122,14 @@ means = "The directory of the vendor's yearly options zips; on the operator's Ma
 [[env]]
 name = "BRUTEX_GDFL_TICKSTORE"
 means = "The verified tick store's root, which holds 2026-09-25, 28, 29 and 30 that the zips end before; on the operator's Mac brutex/tickstore-data on the drive. Read only."
+
+[[env]]
+name = "BRUTEX_MASTERS"
+means = "The exchange masters root the app and the cli read (the source.masters setting's environment fallback). Read only, except where a step says it installs a reference file there."
+
+[[env]]
+name = "BRUTEX_SCRATCH_STORE"
+means = "A scratch store a pull was made into before its bars are copied into the store (a repair --from-store reads it). Never the real store, never a shadow whose bars/ links into it."
 
 # ---------------------------------------------------------------- packages --
 # Every package a step or a rule names. `merged` is checked against the
@@ -192,7 +207,7 @@ title = "GDFL capital-market scope: trade-for-trade spells, stem hand-overs, ali
 
 [[package]]
 name = "R3-18"
-merged = false
+merged = true
 title = "Zerodha repair plan lists every short session; a gap ledger for the months already stored"
 
 [[package]]
@@ -219,6 +234,73 @@ title = "Small-month rule in the writer: no time index and no sort index under 1
 name = "SC-7"
 merged = false
 title = "The sweep: which months are closed, workers, disk floor, state file, events, Stop and resume"
+
+# Round-3 packages a step below waits for (R4-06, AUT-07). None is merged.
+
+[[package]]
+name = "R4-09"
+merged = false
+title = "backup verb and its drill"
+
+[[package]]
+name = "R4-14"
+merged = false
+title = "the gap queue: holes filed and pulled in one press"
+
+[[package]]
+name = "R4-16"
+merged = false
+title = "the chain into a separate store root and the store compare"
+
+[[package]]
+name = "R4-18"
+merged = false
+title = "Zerodha quarantine of pre-listing, zero-price and foreign-level months"
+
+[[package]]
+name = "R4-20"
+merged = false
+title = "fold-audit receipts and the refold of disagreeing months"
+
+[[package]]
+name = "R4-21"
+merged = false
+title = "re-key across renames and into held months, and the restate of 2020-09-16"
+
+[[package]]
+name = "R4-22"
+merged = false
+title = "old-name sources, retry of refused rows"
+
+[[package]]
+name = "R4-23"
+merged = false
+title = "request ladder in one window, restate plans, non-F&O equities from Zerodha"
+
+[[package]]
+name = "R4-25"
+merged = false
+title = "option day-ledger v=3"
+
+[[package]]
+name = "R4-26"
+merged = false
+title = "reference tables: corporate actions, F&O membership, basis runs"
+
+[[package]]
+name = "R4-27"
+merged = false
+title = "padded-minute decision and AUT-10's decisions"
+
+[[package]]
+name = "R4-28"
+merged = false
+title = "Zerodha futures 1day"
+
+[[package]]
+name = "R4-29"
+merged = false
+title = "widened indices and non-F&O equities from GDFL"
 
 # ------------------------------------------------------------------- rules --
 
@@ -254,8 +336,7 @@ title = "Snapshot of the drive before a bulk write, with the restore drill"
 state = "pending"
 writes = "An APFS local snapshot (outside the store's files). Nothing in the store."
 command = [
-  "tmutil localsnapshot",
-  "tmutil listlocalsnapshots /Volumes/WD_BLACK",
+  "planned: cli snapshot take (a name proposed here: no package builds a snapshot verb yet, so until one does the operator takes the APFS local snapshot of the drive by hand with tmutil, as the note says)",
 ]
 dry_run = [
   "the drill of docs/36-ops-runbook.md section 4 with BRUTEX_STORE on a private copy on a scratch APFS volume first: take the snapshot, write one month into a scratch store there, mount the snapshot read-only, copy that month back by name, compare shasum -a 256 with the copy taken before",
@@ -274,7 +355,7 @@ check = [
 closes = ["RA-288", "RA-329"]
 not_rehearsed = "waits for operator: the drill, on a scratch volume first and then once on this drive"
 disk = "UNVERIFIED: a kept snapshot pins every block replaced after it (repair generations, compacted census epochs, rolled logs) as space no file listing shows; the drill's step 5 measures df before and after. Delete it once the run it guarded is checked green (tmutil deletelocalsnapshots)."
-note = "Take it and restore it with the app and every cli run stopped (R-02, FM-221): a copy taken while a writer appends holds torn months or a census that disagrees with them. No verb takes every census lock for a copy (NOT DONE in code). Since this list was written, the 13 and 14 Oct bulk writes (S-09, S-10, S-30, S-31 and the partial runs of S-14, S-16, S-19, S-28) ran with no snapshot taken. man tmutil gives localsnapshot no mount point, and this drive is excluded from Time Machine, so the first command is NOT PROVED to snapshot it. The GDFL recount spans leave out 2018-11-06 and 2018-11-09, the two option days the vendor refused (D-3317 item 5): the recount closes as recounted every day of its span whose last journal line is an incomplete with no stage, and those two days end in one (read 15 Oct, read only), so a span over either would mark it done and no import would retry its refused files (verify-R3-36-r3). Their months are still recounted, because the recount rebuilds every month a day of its span touches. Gate 30 reads the excluded days from D-3317 item 5 and refuses a span that covers one."
+note = "Take it and restore it with the app and every cli run stopped (R-02, FM-221): by hand today with `tmutil localsnapshot`, then `tmutil listlocalsnapshots` on the drive, which R4-06 moved here from the command list because a store step's command is a cli verb or a POST (AUT-07). a copy taken while a writer appends holds torn months or a census that disagrees with them. No verb takes every census lock for a copy (NOT DONE in code). Since this list was written, the 13 and 14 Oct bulk writes (S-09, S-10, S-30, S-31 and the partial runs of S-14, S-16, S-19, S-28) ran with no snapshot taken. man tmutil gives localsnapshot no mount point, and this drive is excluded from Time Machine, so the first command is NOT PROVED to snapshot it. The GDFL recount spans leave out 2018-11-06 and 2018-11-09, the two option days the vendor refused (D-3317 item 5): the recount closes as recounted every day of its span whose last journal line is an incomplete with no stage, and those two days end in one (read 15 Oct, read only), so a span over either would mark it done and no import would retry its refused files (verify-R3-36-r3). Their months are still recounted, because the recount rebuilds every month a day of its span touches. Gate 30 reads the excluded days from D-3317 item 5 and refuses a span that covers one."
 
 [[step]]
 id = "S-02"
@@ -355,7 +436,7 @@ env = ["BRUTEX_STORE"]
 prerequisites = ["WP-39"]
 check = ["the same two commands again: every line 'kept', exit 0; a whole-history sort on /db reads sort_index.scanned_rows 0"]
 closes = ["RA-002"]
-ran = "2026-10-11 19:35:06 to 19:35:29 UTC (01:05 IST 12 Oct), build app13, after WP-39's rehearsal on a private copy: dry runs 30 ms and 24 ms, builds 11,497 ms and 11,184 ms; 97 months each, 0 refused, 194 index files (4.25 GB). Live whole-history sorts p50 3.3 ms, p99 19.4 ms (main session's board)."
+ran = "2026-10-11 19:35:06 to 19:35:29 UTC (01:05 IST 12 Oct), build app13, after WP-39's rehearsal on a private copy: dry runs 30 ms and 24 ms, builds 11,497 ms and 11,184 ms; 97 months each, 0 refused, 194 index files (4.25 GB). Live whole-history sorts p50 3.3 ms, p99 19.4 ms (main session's board). Its record is the store's logs/cli/audit.ndjson, cli.lifecycle (read by R4-06 on 17 Oct): runs 5202 and 5303 (the dry runs, 19:35:06.542 to .572 and 19:35:18.112 to .136) and runs 5204 and 5305 (the builds, 19:35:06.582 to 19:35:18.079 and 19:35:18.141 to 19:35:29.325), seq 5202 to 5403, each 'command finished' exit_code 0."
 ran_ms = 22681
 approval = "operator, 10 Oct and 11 Oct (as S-02)"
 
@@ -452,7 +533,7 @@ check = [
   "GET /dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2026-09-23&to=2026-09-30: 25, 28, 29 and 30 held",
   "store imports/gdfl.journal: a done line for each of 2026-09-25, 28, 29 and 30 under stocks *, indices * and the options run's key",
 ]
-closes = ["SC-CLOSE-1"]
+closes = ["SC-CLOSE-1", "OWED-31"]
 ran = "14 Oct 2026, by the main session on build app18 (its batches late-sep and A1): stocks 02:28:52 to 02:29:02 UTC, run 1791944932, 4 days, 288 files a day, failures 0; indices 02:29:02 to 02:29:05 UTC, run 1791944942, 4 days, 9 files a day, failures 0; options 06:48:01 to 06:49:46 UTC, run 1791960481, 4 days, failures 0, its key the 277 stock-option names plus NIFTY and BANKNIFTY (imports/gdfl.journal lines 16827 to 16844 and 19260 to 19266). The 9 index files a day wrote 2026-09 months for the 7 alias index rows starting on 25 Sep."
 ran_ms = 118000
 ran_out_of_order = "the capital-market half ran before S-18 and S-19 and the whole step before S-01 (no snapshot taken). What CMP-03 warned of is now in the store: INDIAVIX, NIFTYCPSE, NIFTYFINSERVICE, NIFTYFPI150, NIFTYIT, NIFTYMIDSELECT and NIFTYNEXT50 hold a 2026-09 month that starts on 25 Sep, so S-18 back-fills their 1 to 24 Sep sessions as new generations of those months (it carries CMP-03 now)."
@@ -567,23 +648,23 @@ title = "Zerodha re-pull of every other series with the same holes: the shares (
 state = "pending"
 writes = "New generations of each listed series' Zerodha months with their derived rungs refolded, audit/zerodha.repairs, audit/zerodha.gaps, census."
 command = [
-  "POST /pull/repair <each body that cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX lists>",
-  "POST /pull/repair <each body that cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH lists; shares use target=equities>",
+  "planned: POST /ingest/queue vendor=zerodha segment=INDEX from=2018-01-01 to=2026-09-30 (R4-14's gap queue: one press files the holes the read-only plan lists and pulls them one month a request)",
+  "planned: POST /ingest/queue vendor=zerodha segment=CASH from=2018-01-01 to=2026-09-30 (the same for the shares, target=equities)",
 ]
 dry_run = [
   "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX",
   "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH",
 ]
 env = ["BRUTEX_STORE"]
-prerequisites = ["WP-13c", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
+prerequisites = ["WP-13c", "R4-14", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
 after = ["S-13"]
 check = [
   "the two dry-run commands again name no month that needs a repair",
   "GET /pull/repair.json?feed=zerodha&instrument=BANKNIFTY&from=2018-01-01&to=2026-09-30: totals.repair_sessions 0 (today: 42 repair sessions in 10 months; read 15 Oct)",
 ]
-closes = ["DB-012", "DB-G33"]
+closes = ["DB-012", "DB-G33", "OWED-03", "OWED-30"]
 helps = ["CMP-19"]
-not_rehearsed = "waits for operator: a Kite access token valid on the day, for the index series"
+not_rehearsed = "waits for R4-14: the gap queue that files the plan's holes in one press is not built (until then each month is one POST /pull/repair from the /pull form, as S-13 lists NIFTY's); then for operator: a Kite access token valid on the day, for the index series"
 last_run = "13 Oct 2026, by the main session on build app18 (batch Z4, about 18:01 to 18:13 UTC): the shares' 42 hole sessions in 10 months, 1,933 symbol-months, each copied by cli zerodha-repair <SYMBOL> <FROM> <TO> --segment CASH --from-store <a scratch store of a fresh pull> --reason <batch Z4>: 15,302 repair lines in audit/zerodha.repairs (a new generation per month and rung, every held bar kept). No index series was in it, so DB-012 and the NIFTY and BANKNIFTY half of DB-G33 stay open."
 disk = "measured on the dry run"
 
@@ -592,20 +673,33 @@ id = "S-15"
 title = "Zerodha: the 12 further NIFTY months behind the 213 missing minutes (short sessions the plan does not list yet)"
 state = "pending"
 writes = "New generations of those NIFTY Zerodha 1min months with their derived rungs, audit/zerodha.repairs, census."
-command = ["planned: POST /pull/repair for each of the 12 NIFTY months R3-18's plan lists (2019-04, 2019-08, 2019-09, 2020-02, 2020-03, 2020-08, 2021-02, 2022-03, 2023-06, 2023-07, 2023-08, 2024-04)"]
+command = [
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2019-04-01&to=2019-04-30&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2019-08-01&to=2019-08-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2019-09-01&to=2019-09-30&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2020-02-01&to=2020-02-29&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2020-03-01&to=2020-03-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2020-08-01&to=2020-08-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2021-02-01&to=2021-02-28&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2022-03-01&to=2022-03-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2023-06-01&to=2023-06-30&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2023-07-01&to=2023-07-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2023-08-01&to=2023-08-31&repair_reason=R3-36 S-15",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=NIFTY&from=2024-04-01&to=2024-04-30&repair_reason=R3-36 S-15",
+]
 dry_run = ["cli zerodha-repair NIFTY 2019-04-01 2024-04-30"]
 env = ["BRUTEX_STORE"]
 prerequisites = ["R3-18", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
 after = ["S-13"]
 check = ["GET /pull/repair.json?feed=zerodha&instrument=NIFTY&from=2018-01-01&to=2026-09-30: in each of the 12 months, bars equals 375 for each held regular session (today: 12 months short, from 2019-04 with 7,122 of 7,125 to 2024-04 with 7,494 of 7,500; 2021-02 holds 7,179 of 7,500; read 15 Oct)"]
 closes = ["DB-A12"]
-not_rehearsed = "waits for R3-18: today's plan counts a session with one held minute as held, so it lists 2 of the 14 months"
-note = "After R3-18 the dry run lists every short session, not only whole missing ones; until then it lists only the whole missing sessions of S-13."
+not_rehearsed = "waits for operator: a Kite access token valid on the day (R3-18 has merged, so the dry run now lists the short sessions; the twelve months are written out one request a line above)"
+note = "Before R3-18 the plan counted a session with one held minute as held and listed 2 of the 14 months; R3-18 merged on feat/db-fix, and the twelve months are the ones its plan names (R4-06 wrote them out, one POST a month, in place of a planned loop)."
 disk = "about the size of S-13's measured month generations times 12 (extrapolation)"
 
 [[step]]
 id = "S-16"
-title = "Refold the Zerodha derived rungs whose minutes are already held: the 4 irregular days, 2018-01 to 2019-11, and 2026-09"
+title = "Refold the Zerodha derived rungs whose minutes are already held: the 4 irregular days of NIFTY and BANKNIFTY (the month ranges moved to S-38)"
 state = "pending"
 writes = "A new generation of each touched 1min month holding exactly its held minutes, and new generations of its derived-rung months (2, 3, 5, 10, 15, 30 and 60 min) refolded from them (a repair is at 1min: a derived --rung is refused, D-3321), audit/zerodha.repairs, census. No minute changes."
 command = [
@@ -613,8 +707,10 @@ command = [
   "cli zerodha-repair NIFTY 2024-03-02 2024-03-02 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
   "cli zerodha-repair NIFTY 2024-05-18 2024-05-18 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
   "cli zerodha-repair NIFTY 2025-10-21 2025-10-21 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
-  "cli zerodha-repair <SYMBOL> 2018-01-01 2019-11-30 --segment <INDEX|CASH> --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold', for each series the dry run lists",
-  "cli zerodha-repair <SYMBOL> 2026-09-05 2026-09-30 --segment <INDEX|CASH> --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold', for each series the dry run lists",
+  "cli zerodha-repair BANKNIFTY 2021-02-24 2021-02-24 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
+  "cli zerodha-repair BANKNIFTY 2024-03-02 2024-03-02 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
+  "cli zerodha-repair BANKNIFTY 2024-05-18 2024-05-18 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
+  "cli zerodha-repair BANKNIFTY 2025-10-21 2025-10-21 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold'",
 ]
 dry_run = [
   "cli zerodha-repair NIFTY 2021-02-24 2021-02-24 --from-store $BRUTEX_STORE --reason 'R3-36 S-16 refold' with BRUTEX_STORE on a private copy holding NIFTY's Zerodha months of those days",
@@ -628,7 +724,7 @@ check = [
   "GET /bars/window.json?feed=zerodha&timeframe=5min&key=NSE-INDEX-NIFTY&from=2024-03&to=2024-03&from_day=2024-03-02&to_day=2024-03-02&limit=1: total 21, as the rehearsal folded (0 today, 105 minutes held)",
   "GET /bars/window.json?feed=zerodha&timeframe=5min&key=NSE-INDEX-NIFTY&from=2025-10&to=2025-10&from_day=2025-10-21&to_day=2025-10-21&limit=1: total above 0 (0 today, 60 minutes held)",
 ]
-closes = ["DB-A13", "DB-013", "DB-G35"]
+closes = ["DB-A13", "OWED-10"]
 rehearsed_ms = 2508
 rehearsed_bytes = 146188525
 rehearsed_files = 117
@@ -636,7 +732,7 @@ rehearsed_on = "build bc641f47 (a stamped commit of this branch whose crates equ
 rehearsed_result = "2021-02-24: 1,285 ms, exit 1: no minute added, the complete buckets folded (2min +27, 3min +18, 5min +10, 10min +5, 15min +3, 30min +1, as DB-A13 counts), 13 incomplete buckets withheld by name (the 166 minutes Zerodha lacks after the outage, S-15); 2024-03-02: 1,223 ms, exit 0: 2min +54, 3min +35, 5min +21, 10min +12, 15min +7, 30min +5, 60min +3. Each run wrote a new generation of each touched month and rewrote the Zerodha census and repair ledger on the copy (73 MB, an upper bound)."
 last_run = "13 Oct 2026 19:16:42 to 19:47:34 UTC, by the main session on build app18 (batch Z7): every disagreeing share-month refolded from the stored minutes (cli zerodha-repair <SYMBOL> <FROM> <TO> --segment CASH --from-store <the live store> --reason <batch Z7>), PIIND 2018-12 to 2020-01 skipped (mixed price bases): 31,818 repair lines in audit/zerodha.repairs. The fold-audit after it still finds 204 of 208 shares disagreeing in 14 month-rungs (for example 2026-08 2min: stored 3,780 bars, folded 0, the fold withheld by the derive policy), so DB-G35 is NOT closed; no index series was refolded (DB-A13, DB-013)."
 disk = "about 1.8 MB of new month generations per NIFTY day refolded (measured); the share and month-range lines scale with the dry run's list"
-note = "Read 15 Oct: the month ranges are already folded for the series checked, so the range lines run only for what the dry run still lists. NIFTY 5min 2018-01 to 2019-11 holds 35,094 bars against 175,481 minutes and 2026-09-05 to 30 holds 1,275; BAJFINANCE 5min 2026-09 holds 1,512 against 7,560 minutes. The 2026-09 check this step first carried passed before any run (verify-R3-36-r1), so it is gone; the four irregular days are what fails today."
+note = "Read 15 Oct: the month ranges are already folded for the series checked, so the range lines run only for what the dry run still lists. NIFTY 5min 2018-01 to 2019-11 holds 35,094 bars against 175,481 minutes and 2026-09-05 to 30 holds 1,275; BAJFINANCE 5min 2026-09 holds 1,512 against 7,560 minutes. The 2026-09 check this step first carried passed before any run (verify-R3-36-r1), so it is gone; the four irregular days are what fails today. R4-06 (17 Oct) moved the two month-range lines, a loop written in prose, to S-38 with DB-013 and DB-G35, and added BANKNIFTY's four days for ING-03 (OWED-10): the rehearsal above ran NIFTY's 2021-02-24 and 2024-03-02 only, and the BANKNIFTY lines are the same verb on the same days, not rehearsed."
 
 [[step]]
 id = "S-17"
@@ -644,10 +740,11 @@ title = "An independent copy of the raw archives and the store on a second drive
 state = "pending"
 writes = "The copy on the second drive, and one line appended to <store>/ops/backups.log: copied=<UTC> dest=<path> raw_bytes=<n> store_bytes=<n> by=<who>."
 command = [
-  "rsync -a RAW_ARCHIVES STORE SECOND_DRIVE",
+  "planned: cli backup <SECOND_DRIVE> (R4-09: the first full copy of the raw archives and the store)",
+  "planned: cli backup <SECOND_DRIVE> --drill 3 (R4-09: the restore drill on three months)",
 ]
 dry_run = ["rsync -a --dry-run --stats RAW_ARCHIVES STORE SECOND_DRIVE"]
-prerequisites = ["WP-81", "operator: a second drive of at least the store plus the raw archives", "operator: every writer stopped (the app and every cli run) while the copy is taken"]
+prerequisites = ["WP-81", "R4-09", "operator: a second drive of at least the store plus the raw archives", "operator: every writer stopped (the app and every cli run) while the copy is taken"]
 check = [
   "GET /disk.json answers backup.recorded true and backup.last the copied= instant, and every page's standing no-copy line is gone (recorded:false today: ops/backups.log does not exist; read 15 Oct)",
   "cli census-recount gdfl --from 2018-09-03 --to 2018-11-05 with BRUTEX_STORE on the copy, before any other writer starts on it (this check writes the copy's GDFL census and GDFL import journal, so it is the first writer on the copy): every count equals the census copied",
@@ -658,8 +755,8 @@ check = [
   "cli scrub-blocks zerodha with BRUTEX_STORE on the copy, the same (this check writes the copy's audit/scrub-blocks.zerodha.log and .cursor)",
 ]
 env = ["BRUTEX_STORE"]
-closes = ["DB-B73"]
-not_rehearsed = "waits for operator: no second drive is attached"
+closes = ["DB-B73", "OWED-21"]
+not_rehearsed = "waits for R4-09: cli backup is not built; then for operator: no second drive is attached"
 disk = "on the second drive: the store plus the raw archives (about 3.6 TiB used on this drive on 13 Oct); on this drive: one log line"
 note = "RAW_ARCHIVES, STORE and SECOND_DRIVE are the operator's three paths. The copy is append-only: no --delete-after, so a file removed from this drive is never removed from the copy (the store is append-only, CLAUDE.md section 3 rule 8; verify-R3-36-r1 followup). The dry run writes nothing on either side. The GDFL recount spans leave out 2018-11-06 and 2018-11-09 for the reason S-01's note gives (D-3317 item 5, verify-R3-36-r3), and the Zerodha one starts at the oldest Zerodha month the store holds, not at the GDFL archive's first day."
 
@@ -703,7 +800,7 @@ check = [
   "GET /spot.json?feed=gdfl&exchange=NSE&symbol=<U>&timeframe=1s&month=<its month>&t=<T> at the first and the last option bar of every underlying GET /census/facets.json?feed=gdfl&segment=FNO lists: no no_spot_file (today: 8 of 694 reads, all index underlyings, FINNIFTY 2021-01, MIDCPNIFTY 2022-01, NIFTYCPSE 2018-10 twice, NIFTYFPI 2026-08, NIFTYIT 2018-09 and 2020-06, NIFTYNXT50 2024-04; the 339 share underlyings, old names included, answer a spot file since the 14 Oct runs; read 15 Oct, DB-069, DB-G53)",
   "GET /dayflags.json?feed=gdfl&instrument=NSE-CASH-ADANIPOWER&from=2021-06-15&to=2021-06-15: held.bars above 0 inside its trade-for-trade spell, not 'nothing traded' (0 today, DB-B06)",
 ]
-closes = ["DB-069", "DB-G53", "CMP-08"]
+closes = ["DB-069", "DB-G53", "CMP-08", "OWED-16", "OWED-17"]
 helps = ["DB-B06", "DB-B12"]
 rehearsed_ms = 363415
 rehearsed_bytes = 172909868
@@ -748,7 +845,7 @@ check = [
   "DISHTV 2018-11-29 2700 PE holds a 2018-11 month (today only 2018-10: its only November trade was on 2018-11-07, DB-G69), and SBIN 2019-11-28 21500 CE holds a 2019-10 month (absent today)",
   "store imports/gdfl.journal: 'done options 2018-11-07 *' and 'done options 2019-10-27 *'",
 ]
-closes = ["CMP-12", "DB-G69"]
+closes = ["CMP-12", "DB-G69", "OWED-11"]
 helps = ["DB-G55"]
 rehearsed_ms = 30148
 rehearsed_bytes = 855040003
@@ -763,16 +860,16 @@ id = "S-22"
 title = "Supersede the 13 old-symbol option directories under the lineage head (IDFCBANK, NIITTECH, INFRATEL, CADILAHC, MOTHERSUMI, SRTRANSFIN, PVR, AMARAJABAT, L&TFH, MCDOWELL-N, IBULHSGFIN, GMRINFRA, TATAMOTORS)"
 state = "pending"
 writes = "Each old key's months copied under the filed key as new generations and one superseded record per old key; the old directories stay byte for byte."
-command = ["planned: cli gdfl-rekey taught an underlying move (fix-WP-12e store write 1: no package builds it)"]
-dry_run = ["planned: the same verb's --plan form"]
+command = ["planned: cli gdfl-rekey --apply --underlying IDFCFIRSTB,COFORGE,INDUSTOWER,ZYDUSLIFE,MOTHERSON,SHRIRAMFIN,PVRINOX,'ARE&M',LTF,UNITDSPR,SAMMAANCAP,GMRAIRPORT,TMPV (R4-21 teaches gdfl-rekey the underlying move; fix-WP-12e store write 1)"]
+dry_run = ["planned: cli gdfl-rekey --plan --underlying with the same 13 names, which must judge 0 unreadable and 0 unresolved"]
 env = ["BRUTEX_STORE"]
-prerequisites = ["WP-12e", "operator: an owner for gdfl-rekey's underlying move (fix-WP-12e: NOT DONE in that package)"]
+prerequisites = ["WP-12e", "R4-21"]
 check = [
   "an options import over a day of a renamed underlying is no longer refused by name for the split",
   "GET /census/facets.json?feed=gdfl&segment=FNO&underlying=IDFCBANK&expiry=2019-01-31 and the same for IDFCFIRSTB: the expiry's contracts under one underlying, as /db shows them (today: 2 underlyings, IDFCBANK months 2018-12 and 2019-01 with 20 strikes, IDFCFIRSTB 2019-01 with 22; read 15 Oct, DB-B62)",
 ]
-closes = ["DB-B05", "DB-B11", "DB-B62"]
-not_rehearsed = "waits for operator: no package builds the underlying move yet"
+closes = ["DB-B05", "DB-B11", "DB-B62", "OWED-19"]
+not_rehearsed = "waits for R4-21: gdfl-rekey's underlying move is not built (fix-WP-12e left it NOT DONE; round 3 gives it to R4-21)"
 disk = "the 13 directories' months copied once (about 13,000 contracts; to be measured on the rehearsal)"
 note = "Must run before any stock-options import (S-21, S-28): the import refuses a split by name until then."
 
@@ -781,7 +878,7 @@ id = "S-23"
 title = "Restate the option days closed under bar definition 2 or 3 as new generations (open interest as the last row of the second)"
 state = "pending"
 writes = "New generations of the restated option months, census, journal; files whose bars are the same answer AlreadyPresent."
-command = ["planned: R3-22's restate door, read again with restate=1 (ingest design section 6.8 V-6)"]
+command = ["planned: cli gdfl-restate options 2018-09-03 2026-09-24 --reason 'open interest as the last row of the second (operator answer 10)' (R3-22's restate door, the days it lists closed under definition 2 or 3; ingest design section 6.8 V-6)"]
 dry_run = ["planned: the restate plan, which shows the count and its cost first (L-IA-28)"]
 env = ["BRUTEX_STORE", "BRUTEX_GDFL_NFO_ARCHIVES"]
 prerequisites = ["R3-22", "IA-4"]
@@ -797,12 +894,12 @@ id = "S-24"
 title = "Re-read the 94 option files of 2020-09-16 refused on 12 Oct, as a new generation"
 state = "pending"
 writes = "A new generation of each 2020-09 option month that holds the half-written day, census, journal."
-command = ["planned: R3-22's restate door for options 2020-09-16 (IA-4 rows checked one by one)"]
+command = ["planned: cli gdfl-restate options 2020-09-16 2020-09-16 --complete --reason 'half-filed by the run stopped 6 Oct 2026' (R4-21; R3-22's restate door, IA-4's rows checked one by one)"]
 dry_run = ["planned: the restate plan for 2020-09-16"]
 env = ["BRUTEX_STORE", "BRUTEX_GDFL_NFO_ARCHIVES"]
-prerequisites = ["R3-22", "IA-4"]
+prerequisites = ["R3-22", "IA-4", "R4-21"]
 check = ["store imports/gdfl.journal: 'done options 2020-09-16 ...' and no open key left for that day"]
-closes = ["DB-B63"]
+closes = ["DB-B63", "OWED-20"]
 helps = ["CMP-14"]
 not_rehearsed = "waits for R3-22: a plain re-run hits the refusal that already refused the 94 files (events.ndjson seq 5505)"
 disk = "the 2020-09 option months that hold the day, copied once (to be measured on the rehearsal)"
@@ -812,7 +909,10 @@ id = "S-25"
 title = "Source records (.prv) for the months already stored"
 state = "pending"
 writes = "A .prv beside each month that has none (634,561 months, 74.4% of the store, on 12 Oct), through a rebuild of each month as a new generation."
-command = ["planned: R3-22's restate door for option months; no package builds the capital-market and Zerodha rebuild"]
+command = [
+  "planned: cli gdfl-restate options 2018-09-03 2026-09-24 --reason 'source records' (R3-22's restate door, the option months that hold no .prv)",
+  "planned: cli gdfl-restate stocks 2018-09-03 2026-09-24 --reason 'source records' (no package builds the capital-market and Zerodha rebuild; the operator prerequisite names the missing owner)",
+]
 dry_run = ["planned: the restate plan"]
 env = ["BRUTEX_STORE"]
 prerequisites = ["R3-22", "operator: an owner for the rebuild of capital-market and Zerodha months (no package builds it)"]
@@ -840,7 +940,7 @@ id = "S-27"
 title = "Seal the closed months into the compressed form"
 state = "pending"
 writes = "A sealed .sbar beside each closed month (with its own sort index); the old files stay until their own retirement step, which is a deletion and needs its own yes."
-command = ["planned: SC-7's sweep over the closed months (store-compression design)"]
+command = ["planned: cli seal-sweep (SC-7's sweep over the closed months, store-compression design)"]
 dry_run = ["planned: SC-7's sweep on a private copy of the store (the design's rehearsal, SC-10)"]
 env = ["BRUTEX_STORE"]
 prerequisites = ["SC-0", "SC-7"]
@@ -852,7 +952,7 @@ disk = "ADDS about 80 GiB while the old files stay (extrapolation, store-compres
 
 [[step]]
 id = "S-28"
-title = "GDFL stock options import, 2020-09-16 to 2026-09-30"
+title = "GDFL options import, 2020-09-16 to 2026-09-30, for every underlying: the stock options and FINNIFTY, MIDCPNIFTY and NIFTYNXT50"
 state = "pending"
 writes = "Stock option months, census, journal, day ledger, lots and lineage ledgers."
 command = [
@@ -861,14 +961,14 @@ command = [
 ]
 dry_run = ["cli gdfl-import options zip 2020-09-16 2020-09-18 with BRUTEX_STORE on a private copy"]
 env = ["BRUTEX_STORE", "BRUTEX_GDFL_NFO_ARCHIVES", "BRUTEX_GDFL_TICKSTORE"]
-prerequisites = ["SC-0", "operator: S-22, the underlying move of the 13 renamed underlyings (no package builds it; the import refuses them by name, D-3354)"]
+prerequisites = ["SC-0", "R4-21"]
 after = ["S-22", "S-24"]
 check = [
   "store imports/gdfl.journal: a done line for every options day 2020-09-16 to 2026-09-30 under the run's key",
   "GET /census/facets.json?feed=gdfl&segment=FNO&underlying=TATAMOTORS, and the key S-22 files it under: option bars after 2020-09-15, as /db lists them (today: 25 months under TATAMOTORS, the last bar on 2020-09-15, none under TMPV; RELIANCE, imported by O1, already runs to 2026-09-30; read 15 Oct)",
 ]
-closes = ["DB-G55"]
-not_rehearsed = "waits for operator: the 13 renamed underlyings wait for S-22"
+closes = ["DB-G55", "OWED-01", "OWED-02"]
+not_rehearsed = "waits for R4-21: the 13 renamed underlyings are refused by name (D-3354) until S-22 moves them, and an unfiltered options run is refused underlying_split until then; FINNIFTY, MIDCPNIFTY and NIFTYNXT50, never in O1's list of 277, are read by the same unfiltered run, and so are the tick-store days 2026-09-25 to 30 (OWED-02)"
 last_run = "14 Oct 2026, by the main session on build app18 once SC-0 had merged (batch O1): cli gdfl-import options zip 2020-09-16 2026-09-24 <277 names: every stock-option underlying but the 13 renames, D-3354>, 01:57:40 to 06:47:22 UTC, run 1791943060: 'run finished' days 1,495, files 14,812,312, failures 67 (logs/cli/audit.ndjson), exit 1; the journal's done lines carry 10 of the failures, all on 2026-04-16; and the same names over the tick store for 2026-09-25 to 30 inside S-09's run. Left: the 13 renamed underlyings (after S-22) and the 67 refused files, named in that run's events."
 disk = "about 1 TiB without SC-0, about 0.3 TiB with it (extrapolation, completeness board 13 Oct); sealing then shrinks it"
 note = "The 12 Oct run's journal key is 'BANKNIFTY,NIFTY' and O1's key is its 277 names, so each run names its underlyings and the held NIFTY and BANKNIFTY days are not read again."
@@ -878,14 +978,15 @@ id = "S-29"
 title = "The 3 NIFTY re-key moves refused on 14 Oct: a 2023-06-29 key whose settled 2023-06-28 month already holds later bars"
 state = "pending"
 writes = "A new generation of each settled key's 2020-09 month holding both the moved and the held bars, one superseded line per key, a census FNO epoch. The old directories stay byte for byte."
-command = ["planned: gdfl-rekey taught to move a key into a month that already holds later bars, as a new generation (no package builds it)"]
+command = ["planned: cli gdfl-rekey --apply (R4-21 teaches it the move into a month that already holds later bars, as a new generation)"]
 dry_run = ["planned: the same verb's --plan form, which names the 3 keys"]
 env = ["BRUTEX_STORE"]
-prerequisites = ["WP-12c", "operator: an owner for a re-key move into a month that already holds later bars (refused by name on 14 Oct: NSE-FNO-NIFTY-2023-06-29-1000000-PE, -1050000-PE and -1100000-PE into their 2023-06-28 keys' 2020-09 months)"]
+prerequisites = ["WP-12c", "R4-21"]
+note = "Refused by name on 14 Oct: NSE-FNO-NIFTY-2023-06-29-1000000-PE, -1050000-PE and -1100000-PE into their 2023-06-28 keys' 2020-09 months."
 after = ["S-10"]
 check = ["cli gdfl-rekey --plan judges 0 to move, 0 to retire, 0 unresolved, and the census lists no NIFTY expiry 2023-06-29"]
-closes = ["DB-A17"]
-not_rehearsed = "waits for operator: no package builds the move into a held month"
+closes = ["DB-A17", "OWED-18"]
+not_rehearsed = "waits for R4-21: the move into a held month is not built"
 disk = "the 3 settled keys' 2020-09 months copied once (a few MB; to be measured on the rehearsal)"
 
 [[step]]
@@ -893,7 +994,20 @@ id = "S-30"
 title = "The 12 GDFL special-session days for the shares, unfiltered (2018-11-07 to 2025-10-21, with 2022-03-07)"
 state = "done"
 writes = "New months, or new generations of months that held later days, for each share that traded on those days, audit/gdfl.repairs, census, journal, day ledger."
-command = ["cli gdfl-import stocks zip <DAY> <DAY>, once for each of 2018-11-07 2019-10-27 2020-11-14 2021-02-24 2021-11-04 2022-03-07 2022-10-24 2023-11-12 2024-03-02 2024-05-18 2024-11-01 2025-10-21"]
+command = [
+  "cli gdfl-import stocks zip 2018-11-07 2018-11-07",
+  "cli gdfl-import stocks zip 2019-10-27 2019-10-27",
+  "cli gdfl-import stocks zip 2020-11-14 2020-11-14",
+  "cli gdfl-import stocks zip 2021-02-24 2021-02-24",
+  "cli gdfl-import stocks zip 2021-11-04 2021-11-04",
+  "cli gdfl-import stocks zip 2022-03-07 2022-03-07",
+  "cli gdfl-import stocks zip 2022-10-24 2022-10-24",
+  "cli gdfl-import stocks zip 2023-11-12 2023-11-12",
+  "cli gdfl-import stocks zip 2024-03-02 2024-03-02",
+  "cli gdfl-import stocks zip 2024-05-18 2024-05-18",
+  "cli gdfl-import stocks zip 2024-11-01 2024-11-01",
+  "cli gdfl-import stocks zip 2025-10-21 2025-10-21",
+]
 dry_run = ["cli gdfl-import stocks zip 2018-11-07 2018-11-07 with BRUTEX_STORE on a private copy holding the shares' 2018-11 months"]
 env = ["BRUTEX_STORE", "BRUTEX_GDFL_CM_ARCHIVE"]
 prerequisites = ["WP-12a", "WP-12d"]
@@ -902,11 +1016,12 @@ check = [
   "GET /bars/window.json?feed=gdfl&timeframe=1s&key=NSE-CASH-RELIANCE&from=2018-11&to=2018-11&from_day=2018-11-07&to_day=2018-11-07&limit=1: total above 0 (0 before, DB-G87)",
   "store imports/gdfl.journal: 'done stocks <DAY> * definition=3 ... failures=0' for each special day",
 ]
-closes = ["DB-G87", "DB-072"]
+closes = ["DB-G87", "DB-072", "OWED-13"]
 ran = "13 Oct 2026 18:13:27 to 18:16:55 UTC, by the main session on build app18 (batch G6): 11 runs, 1791915207 to 1791915393, one day each, failures 0 (2018-11-07: 255 files, 295,346 seconds; 2019-10-27: 257 files, 252,622 seconds); 2022-03-07 ended with exit 0 and no new journal line (the first stocks import had closed it under *, journal line 5697, definition 2). imports/gdfl.journal lines 16218 to 16248; logs/cli/audit.ndjson 'run finished' 18:13:42.530 to 18:16:55.383."
 ran_ms = 207965
 ran_out_of_order = "ran before S-01: no snapshot was taken"
 approval = "the main session, under the operator's standing permission of 13 Oct for store writes without a per-step yes"
+note = "OWED-13 (G6) asked for these days again because the 13 Oct batch log kept only its last three receipt lines and an exit 0 does not prove a landing. The record above is the store's own, which is what a run is closed by: the journal's done lines and the audit stream's run finished events, failures 0, read again by R4-06 on 17 Oct (read only). A re-run would add no line: each day is done under *, so R4-06 closes OWED-13 here rather than owing a second run. The twelve lines above are the eleven runs plus 2022-03-07's, which wrote nothing new."
 
 [[step]]
 id = "S-31"
@@ -938,7 +1053,7 @@ id = "S-32"
 title = "GDFL shares of the auction era (2026-08-03 to 2026-09-24) made again under bar definition 4, closing-auction prints as their own labelled rows"
 state = "pending"
 writes = "New generations of the GDFL CASH 2026-08 and 2026-09 months with the auction prints out of the 1s bars and in their own labelled rows (operator answer 3, D-3320 item 4), census, journal ('done stocks <day> * definition=4' for each of the 38 days)."
-command = ["planned: the restate door (R3-22) for the 38 auction-era stock days, or the re-import WP-80 names; an ordinary gdfl-import over the range only adds one refused line per key (fix-WP-12f)"]
+command = ["planned: cli gdfl-restate stocks 2026-08-03 2026-09-24 --reason 'bar definition 4: closing-auction prints as their own rows (operator answer 3)' (R3-22's restate door; an ordinary gdfl-import over the range only adds one refused line per key, fix-WP-12f)"]
 dry_run = ["planned: the restate plan for stocks 2026-08-03 to 2026-09-24, which shows the count and cost first"]
 env = ["BRUTEX_STORE", "BRUTEX_GDFL_CM_ARCHIVE"]
 prerequisites = ["WP-12f", "R3-22"]
@@ -950,3 +1065,294 @@ check = [
 closes = ["CMP-07"]
 not_rehearsed = "waits for R3-22: the restate door is not merged (WP-12f, its other prerequisite, merged on 15 Oct)"
 disk = "the GDFL CASH 2026-08 and 2026-09 months copied once as new generations (to be measured on the rehearsal)"
+
+# ------------------------------------------- the owed runs (R4-06, AUT-07) --
+# One step per owed run of config/owed-runs.toml that no step above names.
+# Each command is a bare `cli <verb>` or a `POST` of the app's route, built or
+# `planned:`; the package that builds a planned verb flips its line.
+
+[[step]]
+id = "S-33"
+title = "Zerodha bars from 2026-10-01 onward (DLY-01), once the operator moves the window"
+state = "pending"
+writes = "New Zerodha months from 2026-10 on, 1day then 1min, their derived rungs folded, census, journal."
+command = [
+  "POST /pull/spot target=swept&vendor=zerodha&granularity=1day&from=2026-10-01&to=<YESTERDAY>",
+  "POST /pull/spot target=swept&vendor=zerodha&granularity=1min&from=2026-10-01&to=<YESTERDAY>",
+]
+dry_run = ["cli zerodha-repair NIFTY 2026-10-01 2026-10-31, the read-only plan for the first month, which names what the pull would add"]
+env = ["BRUTEX_STORE"]
+prerequisites = [
+  "operator: approval, and a docs/05-decisions.md entry moving the window past 2026-09-30 (the window is 2018-01-01 to 2026-09-30; WIN-2026END was cancelled)",
+  "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)",
+]
+check = ["cli zerodha-repair NIFTY 2026-10-01 <YESTERDAY> names no missing session, and cli fold-audit zerodha NIFTY 2026 10 2026 10 exits 0"]
+closes = ["OWED-04"]
+not_rehearsed = "waits for operator: the window ends on 2026-09-30 until a decision moves it, so the pull refuses every later day"
+disk = "about one month of the swept series' Zerodha generations a month (to be measured on the first month)"
+
+[[step]]
+id = "S-34"
+title = "Zerodha non-F&O equities (NIFTY Total Market), 2018-01-01 to 2026-09-30, 1day then 1min (DATA-14)"
+state = "pending"
+writes = "New Zerodha CASH series for the non-F&O equities, every rung, census, journal; stored, never swept (CLAUDE.md section 1)."
+command = [
+  "POST /pull/spot target=equities&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30",
+  "POST /pull/spot target=equities&vendor=zerodha&granularity=1min&from=2018-01-01&to=2026-09-30",
+]
+dry_run = ["the same two requests with five names, with BRUTEX_STORE on a private copy (R4-23's rehearsal; the plan prints the projected bytes first)"]
+env = ["BRUTEX_STORE"]
+prerequisites = [
+  "R4-23",
+  "operator: approval of the non-F&O equities pull (DATA-14)",
+  "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)",
+]
+check = ["census: a Zerodha CASH row for each NIFTY Total Market name outside the F&O list, and cli fold-audit zerodha <SYMBOL> 2018 1 2026 9 exits 0 for five of them"]
+closes = ["OWED-05"]
+not_rehearsed = "waits for R4-23: the ladder that keeps the pull inside one request window is not built; then for operator: the approval"
+disk = "about 66 GB (an extrapolation: the 208 stored F&O shares average 122 MB across ten rungs, and thin names hold fewer bars)"
+
+[[step]]
+id = "S-35"
+title = "GDFL non-F&O equities, 2018-09-03 to 2026-09-24, after the options import (DATA-15)"
+state = "pending"
+writes = "New GDFL CASH months for the non-F&O equities, census, journal; stored, never swept."
+command = ["planned: cli gdfl-import stocks zip 2018-09-03 2026-09-24 --scope equities (R4-29 builds --scope)"]
+dry_run = ["planned: the same with 20 liquid and 20 thin names, with BRUTEX_STORE on a private copy, checked against IA-6's oracle (R4-29's sample)"]
+env = ["BRUTEX_STORE", "BRUTEX_GDFL_CM_ARCHIVE"]
+prerequisites = ["R4-29", "operator: approval of the non-F&O equities import (DATA-15), above the operator's 1 TB free-space rule"]
+after = ["S-28"]
+check = ["store imports/gdfl.journal: a done line for every stocks day 2018-09-03 to 2026-09-24 under the equities run's key, failures 0"]
+closes = ["OWED-06"]
+not_rehearsed = "waits for R4-29: the equities scope is not built; then for operator: the approval"
+disk = "unknown until R4-29's 40-name sample is measured (bytes a share, seconds a day)"
+
+[[step]]
+id = "S-36"
+title = "NSE's symbolchange.csv, fetched by the operator and installed under the masters root (G2)"
+state = "pending"
+writes = "One reference file under the masters root, with its sha256; no bar."
+command = ["planned: cli masters-install symbolchange <FILE> (a name proposed here: no package builds the install; until one does, the operator places the file under the masters root by hand and R4-22 cites its sha256 in core::alias, D-3332)"]
+dry_run = ["planned: the same verb's --plan form, which names the rows the file adds to core::alias and changes nothing"]
+env = ["BRUTEX_MASTERS"]
+prerequisites = ["operator: NSE's symbolchange.csv downloaded from nsearchives.nseindia.com by the operator (this repository fetches nothing from NSE on its own)"]
+check = ["the file's sha256 equals the one R4-22 records in core::alias, and the five renamed shares of G2 (ANGELONE, NAM-INDIA, UNOMINDA, GVT&D, PATANJALI) each have a sourced row"]
+closes = ["OWED-07"]
+not_rehearsed = "waits for operator: the download"
+disk = "about 69 KB (the 7 Oct copy was 69,052 bytes)"
+
+[[step]]
+id = "S-37"
+title = "The five shares G2 sources as renamed, over the whole archive under their newest symbol"
+state = "pending"
+writes = "New GDFL CASH months, or new generations of held months, under the newest symbol, audit/gdfl.repairs, census, journal."
+command = ["cli gdfl-import stocks zip 2018-09-03 2026-09-24 ANGELONE NAM-INDIA UNOMINDA 'GVT&D' PATANJALI"]
+dry_run = ["cli gdfl-import stocks zip 2018-09-03 2018-09-07 ANGELONE with BRUTEX_STORE on a private copy holding its months"]
+env = ["BRUTEX_STORE", "BRUTEX_GDFL_CM_ARCHIVE"]
+prerequisites = ["R4-22"]
+after = ["S-18", "S-19", "S-36"]
+check = ["store imports/gdfl.journal: done lines under the five names' key for 2018-09-03 to 2026-09-24, failures 0, and the census lists no old symbol of the five apart from its newest"]
+closes = ["OWED-08"]
+not_rehearsed = "waits for R4-22: the old-name rows are not sourced yet"
+disk = "the five shares' months, about 122 MB a share (the stored F&O average, an extrapolation)"
+
+[[step]]
+id = "S-38"
+title = "Refold the Zerodha months the fold-audit marks large: 2026-08 and 2026-09, 2024-03, 2024-05, 2021-02, 2020-03 and 2019, for the shares and the indices"
+state = "pending"
+writes = "New generations of the 1min months of the listed series and months holding exactly their minutes, and new generations of their derived-rung months refolded from them, audit/zerodha.repairs, census. No minute changes."
+command = [
+  "planned: cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH --rung 1min --from-store $BRUTEX_STORE --reason 'R3-36 S-38 refold of the months fold-audit marks large' (R4-20 teaches the range form over the months fold-audit lists; today a repair names one INSTRUMENT, never ALL)",
+  "planned: cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX --rung 1min --from-store $BRUTEX_STORE --reason 'R3-36 S-38 refold of the months fold-audit marks large' (the same, for the indices)",
+]
+dry_run = [
+  "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH",
+  "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX",
+]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-20"]
+after = ["S-14", "S-16"]
+check = ["cli fold-audit zerodha NIFTY 2018 1 2026 9 exits 0, and the same for BANKNIFTY and for the shares the dry run lists (204 of 208 shares disagreed in 14 month-rungs after batch Z7, S-16's last_run)"]
+closes = ["DB-013", "DB-G35", "OWED-09"]
+not_rehearsed = "waits for R4-20: the fold-audit receipts and the range refold are not built"
+disk = "about 1.8 MB of new month generations per series-day refolded (S-16's measured NIFTY day); the dry run's list gives the count"
+note = "S-16's two month-range lines (2018-01 to 2019-11 and 2026-09, for each series the dry run lists) are here, written as one range line a segment in place of a loop (R4-06)."
+
+[[step]]
+id = "S-39"
+title = "The NIFTY and BANKNIFTY option days of the ten later special sessions (2020-11-14 to 2025-10-21)"
+state = "done"
+writes = "The ten days' NIFTY and BANKNIFTY option months, census, journal, day ledger."
+command = ["cli gdfl-import options zip 2020-09-16 2026-09-24 BANKNIFTY NIFTY"]
+dry_run = ["cli gdfl-import options zip 2020-11-14 2020-11-14 BANKNIFTY NIFTY with BRUTEX_STORE on a private copy holding their 2020-11 months"]
+env = ["BRUTEX_STORE", "BRUTEX_GDFL_NFO_ARCHIVES"]
+prerequisites = ["WP-12d"]
+check = ["store imports/gdfl.journal: 'done options <DAY> BANKNIFTY,NIFTY definition=3 ... failures=0' for each of 2020-11-14, 2021-02-24, 2021-11-04, 2022-03-07, 2022-10-24, 2023-11-12, 2024-03-02, 2024-05-18, 2024-11-01 and 2025-10-21"]
+closes = ["OWED-12"]
+ran = "12 Oct 2026 00:50:53.227 to 01:36:48.436 UTC, run 1791766253 (logs/cli/audit.ndjson seq 5405 'run started' kind options only BANKNIFTY,NIFTY, seq 8684 'run finished' days 1,495, failures 95, done_with_refusals 1, incomplete 1): the ten days each closed 'done options <DAY> BANKNIFTY,NIFTY definition=3 ... failures=0 ... run=1791766253' at imports/gdfl.journal lines 9292, 9430, 9772, 9938, 10252, 10774, 10928, 11028, 11258 and 11738 (read 17 Oct by R4-06, read only)."
+ran_ms = 2755209
+approval = "the main session, under the operator's standing permission for store writes"
+note = "The run was the whole range, not the ten days alone, so ran_ms is the range's. The 95 failures and the incomplete day are 2020-09-16's half-filed day (S-24) and the range's other refusals, none on these ten days. O1 (S-28's last_run) closed the same ten days for the 277 stock-option names (journal lines 16335 to 18799)."
+
+[[step]]
+id = "S-40"
+title = "The Zerodha daily half of batch Z4 (special-session and front-of-month 1day bars from the 13 Oct scratch pull)"
+state = "pending"
+writes = "New generations of the shares' Zerodha 1day months, audit/zerodha.repairs, census."
+command = ["planned: cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH --rung 1day --from-store $BRUTEX_SCRATCH_STORE --reason 'Z4: special-session and front-of-month daily bars from the 13 Oct scratch pull' (R4-20: the range form, with receipts that name the failure of a month)"]
+dry_run = ["cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH --rung 1day"]
+env = ["BRUTEX_STORE", "BRUTEX_SCRATCH_STORE"]
+prerequisites = ["R4-20", "operator: the 13 Oct scratch store of batch Z4 still on the drive, its root in BRUTEX_SCRATCH_STORE"]
+after = ["S-14"]
+check = ["cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH --rung 1day shows interior 0 and front 0 outside FORCEMOT's withdrawal and the pre-listing months"]
+closes = ["OWED-14"]
+not_rehearsed = "waits for R4-20: 639 refold months of batch Z4 ended rc=1 with no named cause, and the range form is not built"
+disk = "about one 1day month generation a share-month (a few KB each; to be measured on the rehearsal)"
+
+[[step]]
+id = "S-41"
+title = "The two BANKNIFTY option days closed done with refusals (2018-11-06, 2018-11-09) and the 2022-03-07 index day, read again"
+state = "pending"
+writes = "New generations of BANKNIFTY's 2018-11 option months for the refused files that now read, census, journal."
+command = [
+  "cli gdfl-import options zip 2018-11-06 2018-11-06 BANKNIFTY --retry-refused",
+  "cli gdfl-import options zip 2018-11-09 2018-11-09 BANKNIFTY --retry-refused",
+  "cli gdfl-import indices zip 2022-03-07 2022-03-07 --retry-refused",
+]
+dry_run = ["cli gdfl-import options zip 2018-11-06 2018-11-06 BANKNIFTY --retry-refused with BRUTEX_STORE on a private copy holding BANKNIFTY's 2018-11 months"]
+env = ["BRUTEX_STORE", "BRUTEX_GDFL_NFO_ARCHIVES", "BRUTEX_GDFL_CM_ARCHIVE"]
+prerequisites = ["IA-4", "R4-22"]
+check = ["store imports/gdfl.journal: a done line for options 2018-11-06 and 2018-11-09 under BANKNIFTY with failures 0, or each refused file named by its cause; and for indices 2022-03-07"]
+closes = ["OWED-15"]
+not_rehearsed = "waits for R4-22: the re-import of refused rows is not built (IA-4 judges the rows first)"
+disk = "BANKNIFTY's 2018-11 option months copied once (a few hundred MB; to be measured on the rehearsal)"
+note = "Filtered to BANKNIFTY: an unfiltered options run is refused underlying_split until R4-21 applies (S-22). The 2022-03-07 index line runs only if that day is still refused or incomplete after WP-12f. These two option days stay outside every census-recount span (D-3317 item 5)."
+
+[[step]]
+id = "S-42"
+title = "One month of every kind built by the chain into a NEW separate store root and compared with the production store (E2E-07)"
+state = "pending"
+writes = "Nothing in the operator's store: a NEW store root that the chain fills with one month of every kind, and the compare's report."
+command = ["planned: cli store-compare <SLICE_ROOT> $BRUTEX_STORE --month <YYYY-MM> (R4-16)"]
+dry_run = ["planned: the chain into a NEW empty root on a one-day slice (R4-16's rehearsal)"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-16", "operator: the full 2018-09 to 2026-09 rebuild only on the operator's yes and above the free-space floor"]
+check = ["the compare reports every month of the slice equal, or each difference named by series, rung and second"]
+closes = ["OWED-22"]
+not_rehearsed = "waits for R4-16: the chain into a separate root and the store compare are not built"
+disk = "the slice root: one month of every kind (to be measured); the full rebuild is about 2 TB (an extrapolation, measured first)"
+
+[[step]]
+id = "S-43"
+title = "Zerodha quarantine of the pre-listing and zero-price months (IRFC, KFINTECH, MAZDOCK) and of PIIND's foreign-level spell"
+state = "pending"
+writes = "A quarantine record for each named month (the months stay byte for byte; reads answer them as quarantined), audit/zerodha.repairs, census."
+command = [
+  "planned: cli zerodha-quarantine IRFC <FIRST_MONTH> <LAST_PRE_LISTING_MONTH> --cause before_listing --reason <WHY> --apply (R4-18)",
+  "planned: cli zerodha-quarantine KFINTECH <FIRST_MONTH> <LAST_PRE_LISTING_MONTH> --cause before_listing --reason <WHY> --apply (R4-18)",
+  "planned: cli zerodha-quarantine MAZDOCK <FIRST_MONTH> <LAST_PRE_LISTING_MONTH> --cause before_listing --reason <WHY> --apply (R4-18)",
+  "planned: cli zerodha-quarantine MAZDOCK 2018-01-01 2018-07-31 --cause zero_price --reason <WHY> --apply (R4-18)",
+  "planned: cli zerodha-quarantine PIIND 2018-12-01 2020-01-31 --cause foreign_level --reason <WHY> --apply (R4-18, after a scratch re-pull compare)",
+]
+dry_run = ["planned: the same five lines with --plan in place of --apply"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-18", "operator: a Kite access token valid on the day, for PIIND's scratch re-pull compare (read from Parameter Store; this repository never mints one)"]
+check = ["cli fold-audit zerodha IRFC 2018 1 2026 9 exits 0, and the same for KFINTECH, MAZDOCK and PIIND"]
+closes = ["OWED-23"]
+not_rehearsed = "waits for R4-18: the quarantine verb is not built"
+disk = "one quarantine record a month (a few hundred bytes); no bar copied"
+
+[[step]]
+id = "S-44"
+title = "FORCEMOT 1min 2023-09-01 to 2024-03-31 through the request ladder in one window, and the restate plan of every share classed vendor restated"
+state = "pending"
+writes = "New generations of FORCEMOT's Zerodha 1min months of the span and their derived rungs, audit/zerodha.repairs, census."
+command = ["POST /pull/repair target=equities&vendor=zerodha&granularity=1min&member=FORCEMOT&from=2023-09-01&to=2024-03-31&repair_reason=R4-23 ladder in one window"]
+dry_run = ["cli zerodha-repair FORCEMOT 2023-09-01 2024-03-31 --segment CASH"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-23", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
+check = ["cli zerodha-repair FORCEMOT 2023-09-01 2024-03-31 --segment CASH names no missing session, and cli fold-audit zerodha FORCEMOT 2023 9 2024 3 exits 0"]
+closes = ["OWED-24"]
+not_rehearsed = "waits for R4-23: the ladder that keeps the span inside one request window is not built"
+disk = "FORCEMOT's seven month generations at every rung (a few MB; to be measured on the rehearsal)"
+note = "A share classed vendor restated gets its restate plan from R4-23 and runs only on the operator's yes; each becomes its own step when the plan names it."
+
+[[step]]
+id = "S-45"
+title = "The options day-ledger v=3 lines recomputed for the past days, 2018-09-03 to 2026-09-24 (bars untouched)"
+state = "pending"
+writes = "Appended v=3 lines in the options day ledger; no bar changes."
+command = ["planned: cli option-sanity --from 2018-09-03 --to 2026-09-24 (R4-25)"]
+dry_run = ["planned: the same with BRUTEX_STORE on a private copy, one writer at a time"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-25"]
+check = ["the options day ledger holds a v=3 line for every options day 2018-09-03 to 2026-09-24 that the journal closes done"]
+closes = ["OWED-25"]
+not_rehearsed = "waits for R4-25: the v=3 ledger line is not built"
+disk = "one ledger line a day and underlying (a few MB in all; to be measured on the rehearsal)"
+
+[[step]]
+id = "S-46"
+title = "The reference tables: corporate actions installed with its receipt, F&O membership inferred, basis runs recorded"
+state = "pending"
+writes = "reference/corporate_actions.csv with its receipt, the F&O membership table, the basis-run records; no bar."
+command = [
+  "planned: cli corporate-actions-install <FILE> (R4-26: the file installed with its receipt)",
+  "planned: cli fno-membership --infer (R4-26)",
+  "planned: cli basis-runs (R4-26)",
+]
+dry_run = ["planned: the three with BRUTEX_STORE on a private copy (R4-26's rehearsal)"]
+env = ["BRUTEX_STORE", "BRUTEX_MASTERS"]
+prerequisites = ["R4-26"]
+check = ["the three tables answer their receipts' row counts, and the F&O membership of NIFTY's and BANKNIFTY's underlyings is inferred for 2018-09 to 2026-09"]
+closes = ["OWED-26"]
+not_rehearsed = "waits for R4-26: the three reference verbs are not built"
+disk = "a few MB of reference tables (to be measured on the rehearsal)"
+
+[[step]]
+id = "S-47"
+title = "The derived months the padded-minute decision changes, refolded as new generations, and what AUT-10's decisions choose"
+state = "pending"
+writes = "New generations of the derived-rung months the decision changes, audit/zerodha.repairs, census."
+command = ["planned: cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX --rung 1min --from-store $BRUTEX_STORE --reason 'R4-27 padded-minute decision' (the range form R4-20 builds, over the months the decision changes)"]
+dry_run = ["planned: the decision's own plan, which lists the months it changes"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-27", "R4-20"]
+after = ["S-38"]
+check = ["cli fold-audit zerodha NIFTY 2018 1 2026 9 exits 0 under the decision, and the same for the series it changes"]
+closes = ["OWED-27"]
+not_rehearsed = "waits for R4-27: the padded-minute decision is not made"
+disk = "unknown until the decision lists its months"
+note = "AUT-10's four decisions (a riskfree row type, the definition-2 restate through R3-22's door, an OI rewrite or none) each become their own step on the operator's yes."
+
+[[step]]
+id = "S-48"
+title = "Zerodha futures 1day for the F&O underlyings inside the window"
+state = "pending"
+writes = "New Zerodha futures 1day series for the F&O underlyings, census, journal; stored, never swept (CLAUDE.md section 1)."
+command = ["planned: POST /pull/fno series=fut&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30 (R4-28 builds the form for all F&O underlyings at once: the route refuses this body today, as it takes one underlying= a request, and it stores an expired contract at 1min only, by the operator rule of 2026-08-19 that R4-28 must reconcile with this 1day step; the slug is fut, not futures; crates/api/tests/store_step_forms.rs pins the refusals)"]
+dry_run = ["planned: the same request for one underlying with BRUTEX_STORE on a private copy (R4-28's rehearsal)"]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R4-28", "operator: approval of the futures pull", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
+check = ["census: a Zerodha futures 1day series for each F&O underlying, 2018-01 to 2026-09"]
+closes = ["OWED-28"]
+not_rehearsed = "waits for R4-28: the futures pull is not built; then for operator: the approval"
+disk = "a few KB a contract-month at 1day (to be measured on the rehearsal)"
+
+[[step]]
+id = "S-49"
+title = "The widened GDFL index files: the zip range, then the tick store 2026-09-25 to 2026-09-30; then each VIX month still absent named vendor-absent"
+state = "pending"
+writes = "New GDFL index months for the widened index rows, census, journal."
+command = [
+  "cli gdfl-import indices zip 2018-09-03 2026-09-24",
+  "cli gdfl-import indices tickstore 2026-09-25 2026-09-30",
+]
+dry_run = ["cli gdfl-import indices zip 2018-09-03 2018-09-07 with BRUTEX_STORE on a private copy holding the index months"]
+env = ["BRUTEX_STORE", "BRUTEX_GDFL_CM_ARCHIVE", "BRUTEX_GDFL_TICKSTORE"]
+prerequisites = ["R4-29"]
+after = ["S-18"]
+check = ["store imports/gdfl.journal: a done line for every indices day 2018-09-03 to 2026-09-30 under *, failures 0, and the census names each VIX month still absent as vendor-absent"]
+closes = ["OWED-29"]
+not_rehearsed = "waits for R4-29: the widened index rows are not built"
+disk = "the widened index rows' months, about 9 files a day (the 14 Oct S-09 run's figure; to be measured on the rehearsal)"

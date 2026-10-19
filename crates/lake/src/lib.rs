@@ -94,3 +94,8 @@ mod footer;
 mod page;
 pub mod reader;
 pub mod schema;
+
+/// Frames `ruzstd` 0.8.2 wrote, frozen before the 0.9.1 bump (D-5090). Test
+/// only; `pull`'s tick-store tests read the same file.
+#[cfg(test)]
+mod zstd_v082_frames;

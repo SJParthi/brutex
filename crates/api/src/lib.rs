@@ -114,6 +114,9 @@ pub mod merge;
 /// against NSE's own ISIN-bearing Total Market file. D-3314.
 pub mod nse_identity;
 pub mod operation_audit;
+/// `POST /page-report`: a page says it failed, 1 KiB a report, rationed and
+/// audited (R3-14).
+pub mod page_report_route;
 pub mod pullrun;
 pub(crate) mod recovery;
 pub(crate) mod recovery_control;
@@ -121,6 +124,11 @@ pub(crate) mod recovery_journal;
 pub mod render;
 pub mod selectionv6json;
 pub mod server;
+/// THE APP MEASURES ITSELF (R3-14): fixed time buckets per route, one audited
+/// line per route per minute, the open minute written at shutdown.
+pub mod speed;
+/// `GET /speed.json`: [`speed`]'s report (R3-14).
+pub mod speed_route;
 pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was
 /// missing, because a page that reports on work it cannot start needs a
