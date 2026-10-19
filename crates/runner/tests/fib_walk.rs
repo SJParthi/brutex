@@ -4711,3 +4711,23 @@ fn an_r_step_trail_is_no_stop_until_a_whole_step_is_earned() {
     let out = minute_slot(&day, long_plan(at(10, 0, 0)), step_only);
     assert_eq!(out.exit_reason, ExitReason::Forced);
 }
+
+/// An R-step trail climbs one step per whole R earned: a run-up of 2,100
+/// paisa earns two steps of 1,005, so the trail is 98,995 + 2,010 = 101,005
+/// and a low of 101,000 stops the trade.
+#[test]
+fn an_r_step_trail_climbs_a_step_per_whole_r() {
+    let variant = ExitVariant {
+        trailing_stop: TrailingStop::RStep { milli_r: 1_000 },
+        ..ExitVariant::REFERENCE
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), 101_000, 102_100, 100_100, 102_000, 1_000),
+        bar(at(10, 2, 0), 101_500, 101_600, 101_000, 101_200, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), variant);
+    assert_eq!(out.exit_reason, ExitReason::TrailingStopLoss);
+    assert_eq!(out.exit_second, at(10, 2, 0));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 101_000));
+}
