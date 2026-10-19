@@ -691,10 +691,10 @@ impl<'a> Stepper<'a> {
             };
             self.finish(SlotStatus::EntryUnfilled(why));
         } else {
-            if self.remaining > 0 {
-                self.flag(TradeFlag::PartialEntry);
-                self.remaining = 0;
-            }
+            // Still entering, so some of the order is unfilled: an order
+            // turns to holding the moment it fills.
+            self.flag(TradeFlag::PartialEntry);
+            self.remaining = 0;
             self.phase = Phase::Holding;
         }
     }
