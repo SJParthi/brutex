@@ -60,8 +60,14 @@
 //! the widest value is one of the candidates, so exceptions are emitted only
 //! when they make the stream SHORTER, and a stream is at most
 //! [`MAX_STREAM_LEN`] bytes at 256 rows: a frame is at most [`MAX_FRAME_LEN`]
-//! (`4 + 70 + 7 × 2,062 = 14,508`), whatever the rows hold (`docs/06-limits.md`
-//! L-SC-12: incompressible bars cost at most 57 bytes each, 1 more than raw).
+//! (`4 + 70 + 7 × 2,062 = 14,508`), whatever the rows hold. A frame of `m`
+//! rows is at most [`max_frame_len`]`(m)` = `4 + 70 + 7 × (22 + 8 × (m − 1))`
+//! = `56m + 172` bytes, which is 57 bytes a bar or less only from `m = 172`
+//! (`docs/06-limits.md` L-SC-12, D-5902): a full frame of incompressible bars
+//! costs at most 14,508 / 256 = 56.672 bytes a bar, but a short one costs
+//! more a bar, and a frame of one random bar is 102 bytes against 56 raw. A
+//! month's last frame is short unless its bars are a multiple of 256, and a
+//! month under 256 bars is one short frame.
 //!
 //! # The decoder refuses by name, never by panic
 //!
@@ -79,8 +85,15 @@
 //! One frame is the unit of every read (`docs/06-limits.md` L-SC-1): serving one
 //! row decodes at most `block_rows` rows and checksums at most
 //! [`MAX_FRAME_LEN`] bytes, a bound that does not move with the month. The
-//! decoder allocates nothing beyond the rows it appends; the encoder holds two
-//! scratch vectors of `m − 1` residuals.
+//! decoders' only allocation is the caller's buffer, grown by one
+//! `Vec::reserve` of the checked rows after the whole frame is checked. That
+//! promises at least the rows, not exactly (SC1-09, D-5902): nothing into a
+//! buffer with the room, and onto one short of it `Vec`'s amortised growth,
+//! to the largest of twice its capacity, its length plus the rows, and 4. A
+//! buffer that never allocated (capacity 0) so takes exactly the rows when
+//! they are 4 or more and a capacity of 4 for 1 to 3; a cleared buffer keeps
+//! its capacity and follows the same rule. The encoder holds two scratch
+//! vectors of `m − 1` residuals.
 //!
 //! Specification: `state/design/store-compression-20261012.md` §4.2.5 (SC-1).
 
@@ -589,9 +602,25 @@ pub fn encode_frame(
 ///
 /// A [`FrameError`] naming the first malformed part. On an error `out` is
 /// left exactly as it was handed in: never a partial frame, and nothing
-/// reserved. Every part of the frame is checked before `out` grows, so the
-/// most one call reserves is the checked head's rows times
-/// `size_of::<Bar>()`, at most `block_rows` rows (FM-284).
+/// reserved. Every part of the frame is checked before `out` grows (FM-284).
+///
+/// # Allocation
+///
+/// One `out.reserve(rows)` of the checked head's rows, at most `block_rows`,
+/// and nothing after it. `Vec::reserve` promises at least the rows, not
+/// exactly (SC1-09, D-5902): into a buffer with the room it allocates
+/// nothing; onto a buffer short of the room, one call of `Vec`'s amortised
+/// growth, to a capacity of the largest of twice the old, the length plus
+/// the rows, and 4 (today's `std`, not a promise of `Vec`'s; the allocation
+/// tests pin it). So into a buffer that never allocated (capacity 0) it is
+/// exactly the rows times `size_of::<Bar>()` when they are 4 or more, and 4
+/// rows' worth for 1 to 3 (224 bytes for one bar); a cleared buffer keeps its
+/// capacity, so 256 rows into one of capacity 200 take 400; and a 256-row
+/// frame onto a full 10,000-row buffer is one call of 20,000 × 56 bytes. A
+/// caller that needs the bound in its own rows pre-sizes `out`; a caller
+/// decoding frame after frame into one buffer pays amortised O(1) a row
+/// (`docs/06-limits.md` L-SC-1). `reserve_exact` would turn every frame of
+/// that caller into a reallocation and a copy, quadratic over a month.
 pub fn decode_frame(
     frame: &[u8],
     crc: u32,
@@ -603,8 +632,9 @@ pub fn decode_frame(
     let first = first_row(&mut cursor, flags, origin_micros)?;
     let streams = parse_streams(&mut cursor, rows - 1)?;
     // Every byte of the frame is checked before the first byte of `out` is
-    // reserved: a refused frame allocates nothing, and an accepted one
-    // reserves exactly the rows its checked head states (FM-284).
+    // reserved: a refused frame allocates nothing (FM-284). An accepted one
+    // reserves at least the rows its checked head states, once; how much
+    // more is `Vec`'s amortised growth (# Allocation above, D-5902).
     let start = out.len();
     out.reserve(rows);
     out.push(first);
@@ -623,6 +653,14 @@ pub fn decode_frame(
 /// # Errors
 ///
 /// As [`decode_frame`]; on an error `out` is left as it was.
+///
+/// # Allocation
+///
+/// As [`decode_frame`]'s, at `size_of::<i64>()` = 8 bytes a stamp: one
+/// `out.reserve(rows)` after the whole frame is checked, which is at least
+/// the rows, not exactly; 32 bytes for one stamp into a buffer that never
+/// allocated, and 20,000 × 8 bytes for a 256-row frame onto a full
+/// 10,000-stamp buffer (SC1-09, D-5902).
 pub fn decode_stamps(
     frame: &[u8],
     crc: u32,
@@ -633,7 +671,8 @@ pub fn decode_stamps(
     let (rows, flags, mut cursor) = open(frame, crc, block_rows)?;
     let first = first_row(&mut cursor, flags, origin_micros)?;
     let [stamp, ..] = parse_streams(&mut cursor, rows - 1)?;
-    // As in `decode_frame`: nothing is reserved until the whole frame passed.
+    // As in `decode_frame`: nothing is reserved until the whole frame passed,
+    // and then at least the rows, by `Vec`'s amortised growth (D-5902).
     let mut values = stamp.values();
     out.reserve(rows);
     out.push(first.ts_micros);
