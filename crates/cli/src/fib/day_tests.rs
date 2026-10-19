@@ -2401,3 +2401,47 @@ fn a_month_the_store_lacks_beside_one_it_holds_is_absent() {
     assert_eq!(check.previous_month, "read for the carried close");
     assert!(check.month.days.iter().all(|day| day.counts.real == 0));
 }
+
+/// The accepted close's exact arithmetic: a ratio that is not one on either
+/// side, and moves that do not floor to zero.
+#[test]
+fn an_accepted_close_scales_and_measures_exactly() {
+    let carried = CarriedClose {
+        close: 2_000_000,
+        day: day_of(2025, 3, 3),
+        landing: None,
+        regime_last_minute: hm(15, 29),
+        refused: false,
+    };
+    let same = AcceptedClose {
+        carried,
+        proof: BasisProof::SameLanding,
+        landing_only: false,
+    };
+    assert_eq!(same.scaled(), (2_000_000, 1));
+    assert_eq!(same.move_bp(2_100_000), 500);
+    assert_eq!(same.move_bp(1_900_000), -500);
+    assert_eq!(
+        same.move_bp(1_999_999),
+        -1,
+        "floored, never rounded to zero"
+    );
+    assert_eq!(same.side(2_000_001), MoveSide::Gainer);
+    assert_eq!(same.side(2_000_000), MoveSide::Flat);
+    assert_eq!(same.side(1_999_999), MoveSide::Loser);
+    // A 3:2 record: the old close on the new basis is 3,000,000 / 2.
+    let record = BasisBreak {
+        numerator: 3,
+        denominator: 2,
+        source: "synthetic PREC-10 row",
+    };
+    let carried_across = AcceptedClose {
+        proof: BasisProof::BreakRecord(record),
+        ..same
+    };
+    assert_eq!(carried_across.scaled(), (6_000_000, 2));
+    assert_eq!(carried_across.move_bp(3_150_000), 500);
+    assert_eq!(carried_across.move_bp(2_850_000), -500);
+    assert_eq!(carried_across.side(3_000_000), MoveSide::Flat);
+    assert_eq!(carried_across.side(3_000_001), MoveSide::Gainer);
+}
