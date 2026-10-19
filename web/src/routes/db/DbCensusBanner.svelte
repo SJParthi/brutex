@@ -629,6 +629,19 @@
     gap: var(--s1);
     padding: var(--s2) var(--s5);
   }
+  /* A NARROW OR SHORT WINDOW BOUNDS THE BANNER (AH-04, g-ui-dom-vs-json-10,
+     D-5883): 259-290 px of census sentences above a 375 px wide board left it
+     a quarter of the screen. Here the banner is at most about four lines (and
+     at most a sixth of a short window's height) and scrolls inside itself;
+     every line and button in it stays reachable, and the board keeps at
+     least half of the viewport. Nothing changes above these sizes. */
+  @media (max-width: 767px), (max-height: 699px) {
+    .cbanner {
+      max-height: min(5.5rem, 16dvh);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+  }
   .cline {
     margin: 0;
     font-size: var(--fs-xs);
