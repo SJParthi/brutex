@@ -73325,6 +73325,372 @@ shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
 of the journal changes; a line closed before this change kept only its newline
 and reads as it did.
 
+### D-5860 — /db's bar grid asks one page read a change: a change of order reads page one itself, a question is asked once, and nothing is read while the selection reconciles (R3-03) — 2026-10-17
+
+**Number** taken at landing from the ledger's head under amendment A6 of the
+round-3 package list (no block was assigned to R3-03). The highest number on
+`feat/db-fix` when this was written was D-5830 and the highest on any local branch or
+worktree D-5831 (P-AG-05); D-5860 to D-5864 leave D-5832 to D-5859 to the
+packages already in flight. Built in the cloud on `cloud/db-R3-03-20261017`
+(cut from `origin/feat/db-fix` at its R3-35 merge) and run, fixed and measured on the Mac on
+`fix/db-R3-03`.
+
+**Findings** DB-021, DB-N02 and the requests-per-change half of DB-063 and
+RA-296 (11 Oct re-check controls: "Sort change at a deep page", "three
+requests at once", "every request the page made during a change of Side and
+of Segment").
+
+**What was wrong.** One change of order sent two requests: the read effect ran
+first with the new order at the OLD offset (offset 899 x 8 of a Close sort,
+read and thrown away) and the page reset asked page one after it. A change of
+instrument, Segment or Side is applied rung by rung, and each pass in between
+was a request for a contract or a month the final selection does not hold. The
+Fit box measured 4, then 3, then 8 rows on one load and each was a request. A
+newest-close seek went out beside the page read and the extremes read, three
+requests where two already carry the newest bar.
+
+**Decision.**
+
+1. The read computes the page it asks with `pageToRead`: a change of order or
+   row set reads page one in the same run; a page an act chose with the order
+   (an address's `page`, a Go to's landing) is kept.
+2. `askOnce` remembers the question asked; a re-run of the effect that would ask
+   it again sends nothing, and a re-run that asks nothing new does not cancel
+   the request in flight. A read for another row set is stopped at once.
+3. Nothing is read while `db.reconciling` or before Fit has been measured and
+   applied; the extremes read (`DbExtremes.svelte`) waits on the same
+   `barsReady`.
+4. The newest close is taken from the extremes read or from page one newest
+   first, and asked alone only when a bound narrows or neither has it, once per
+   selection.
+5. The readout prints the page whose rows are on screen, with "opening page N"
+   while one is read.
+
+**Proof.** `web/tests/db-pager.test.js`:
+`a_sort_change_at_a_deep_page_sends_one_request`, `one change of the
+selection sends one page read and one extremes read, and nothing while it
+settles`. On the R3-03 shadow (:9502, real store read through the bars link,
+GET only, 17 Oct): `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s&page=900`, Close
+pressed: exactly one `/bars/window.json`, `sort=c&offset=0&limit=9`; Next,
+Next, Prev: one read each (`offset=9`, `18`, `9`); NIFTY 26 Mar 2020 12,000 CE
+to PE: one page read and one extremes read, both for the PE key; BANKNIFTY
+options (expiry 2020-03-26) to Spot: one page read and one extremes read for
+`NSE-INDEX-BANKNIFTY`; `/db` opened at 1440 x 900: two reads (`limit=9`, the
+extremes `limit=1`), Fit summary `Fit · measuring` then `Fit · 9`.
+
+**Repair 1 (18 Oct, after the second agent's check).** The extremes fold is
+read through `readFor` (`web/src/lib/db/pager.js`): the panel, the grid's
+newest close and its range scale take only the read whose `for` is the row set
+asked now, so while a new set settles none of them offers the set before's fold
+as this one's (latent, found by reading `DbExtremes.svelte`, not seen). Test:
+`the extremes of the set before are not offered for the set on screen`. On the
+repaired shadow (:9502, the merged tree's own api and bundle, real store read
+through the bars link, GET only, 18 Oct): NIFTY 26 Mar 2020 12,000 CE to PE and
+BANKNIFTY options to Spot each sent one page read and one extremes read
+(`limit=10`, `limit=1`), and the panel read "folding every bar of this query…"
+from 8 ms after the change until the new set's fold came back; `/db` opened at
+1440 x 900, 1440 x 700, 1440 x 1100 and 1280 x 800 sent two reads each
+(`limit=10` and the extremes `limit=1`), `Fit · measuring` then `Fit · 10`
+(D-5863, repair 1). `readFor` timed in node, n = 20,000 calls: p50 41 ns, p99
+83 ns, max 3.6 ms (one collector pause).
+
+**Cost.** No server change. Per change: one page read, one extremes read, and a
+third (the newest-close seek) only when a day or time bound narrows
+(L-R303-03).
+
+### D-5861 — The pager offers only pages the server serves, and the page box refuses in words (R3-03) — 2026-10-17
+
+**Finding** the 11 Oct re-check's EXTRA 1 and its probes of the "Go to page"
+box (0, -5, 2.5, 1e308, empty, letters, 6,000 digits, 4,890,334): typed
+pages, Next and Last landed past row 100,000 of a time-of-day order of the
+153,107-row 11,600 CE on a `sort_too_deep` refusal, and absurd numbers were
+clamped without a word.
+
+**Decision.** `web/src/lib/db/pager.js` mirrors `bars::MAX_SORT_DEPTH`
+(100,000) and `bars_sort::MAX_READ_HELD` (1,000,000), and reads the answer's
+own `sort_index` report: time order serves every page; a time-of-day order
+serves the front 100,000 rows; a value order that read at most 1,000,000 rows
+serves every page, past it the front (and the end, when no row came from an
+index and the column is not open interest). Pages past them are not drawn,
+stepped to, or accepted; the elided stretch carries the reason. The page box is
+text and is read by `parsePageBox`. Both constants are read out of the Rust
+source by a test, so the mirror cannot drift unseen. The pager moved to
+`DbPager.svelte` and its arithmetic to `pager.js`, so later packages do not
+queue on the grid.
+
+**Proof.** `the_pager_offers_no_page_past_the_served_depth`, `the page box
+refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in words`
+(`web/tests/db-pager.test.js`). Shadow: the 11,600 CE, `sort=tod&rows=25`:
+buttons stop at 4,000 with the dead stretch named; Last lands on 4,000 and its
+read is `offset=99975&limit=25` (200); Next is disabled there with the reason;
+4001, 6125, 0, -5, 2.5, 1e308, empty, abc and 6,000 digits are each refused
+under the box with no request. Under `sort=c` the answer read 153,107 rows, so
+every page is offered and Last reads `offset=153100` (200). The server itself:
+`sort=tod&offset=99992&limit=8` 200, `offset=100000&limit=8` 400
+`sort_too_deep`.
+
+**Repair 1 (18 Oct, the second agent's blocking finding).** Every depth test
+was at 8 or 1,000 rows a page, which divide 100,000, so a front rounded up or a
+tail rounded down gave the same pages, and two hand mutants of `pager.js`
+(`Math.floor` to `Math.ceil` on the front, `Math.ceil` to `Math.floor` on the
+tail) survived all 32 tests of the three files. The test now holds a page size
+that does not divide the depth, the live Fit size then, 9: a time-of-day order
+over the 153,107-row CE serves pages 1 to 11,111 (offset + limit 99,999;
+11,112 keeps 100,008), and a value order no index serves, over 1,153,107 read
+rows, serves the tail from page 117,013 (99,999 rows from the end; 117,012
+starts 100,008 from it). It also checks every page at each edge against the
+route's own rule (`bars_sort.rs`, D-3349) for 13 page sizes and three orders.
+Both mutants now fail, and a hand sweep of operator swaps over `pager.js` (111
+mutants) and `goto.js` (31) leaves three, each equivalent (L-R303-08). The
+route agrees on the shadow (n = 200 GETs each): `sort=tod&offset=99990&limit=9`
+200 (p50 13.8, p99 19.3, max 19.9 ms), `offset=99999&limit=9` 400
+`sort_too_deep` (p50 0.8, p99 1.7, max 2.4 ms); at the repaired Fit of 10,
+`offset=99990&limit=10` 200 (p50 14.6, p99 19.2, max 20.8 ms) and
+`offset=100000&limit=10` 400 (p50 0.9, p99 9.8, max 12.4 ms). `servedPages`
+with `isServed` at size 9 over 1,153,107 rows, timed in node, n = 20,000: p50
+1.2 µs, p99 1.5 µs, max 85 µs.
+
+### D-5862 — Go to asks the instant ascending in either direction, and a minute lands on its first bar (DB-005, R3-03) — 2026-10-17
+
+**Finding** DB-005's remainder and the 11 Oct probes of Go to: newest first,
+the server's `at=` rule is "at or before", so 10:02 marked 10:01:59 whenever no
+bar opened on the minute's first second; a second Go to to the same minute
+marked nothing; a time alone, seconds, and 1969 were not read as they should
+be.
+
+**Decision.** `web/src/lib/db/goto.js`: `gotoAsk` sends `at=` with `dir=asc`
+and `limit=1` whatever the grid's direction; `landing` puts the row at
+`total - 1 - at_index` newest first; a time typed without seconds names a
+minute and lands on its first bar; `parseGoto` takes a day and a time, a time
+alone for the day on screen, or seconds, and refuses an empty box, more than 32
+characters (by length, never echoed), a day or time that does not exist, and a
+day outside the held days or the date window, in words.
+
+**Proof.** `go_to_a_minute_lands_on_its_first_bar_in_both_directions`, `Go to
+takes a time alone, exact seconds, and refuses 1969, 2099 and nonsense in
+words` (`web/tests/db-goto.test.js`). Shadow: the 11,600 CE on 15 Mar 2019,
+10:00 to 10:04 (142 rows): 10:02 newest first lands on 10:02:03, row 81 of 142,
+page 9; oldest first on the same bar, row 62, page 7; First page then 10:02
+again marks it again; 10:02:07 lands on 10:02:08 and says so; 1969-12-31
+23:59:59, 2099-01-01 10:00:00, 2019-02-30 10:00:00, 25:61:61, abc, empty and
+6,000 characters are refused in words with no request.
+
+**Repair 1 (18 Oct, the second agent's blocking finding).** "First page then
+10:02 again marks it again" was true of the typed Go to box and not of the
+minute picker the spec probes. The picker is single, so its rows are radios; it
+showed `db.goTime` as the checked one, and nothing cleared `db.goTime`, so after
+a landing a click on the same minute fired no `change`: no read, no mark, the
+grid left where First page put it. `jumpToTime` now spends the minute: once its
+landing or its refusal is settled, and after a render (`tick`, because Svelte
+skips a `checked` write whose value did not change, and set-then-cleared in one
+turn is no change), it clears `db.goTime`. The radio is never left checked, the
+same minute is a new pick every time, the summary asks for the next one ("Pick
+a minute"), and the line under the strip still says where the grid landed.
+`parseGoto` also reads an empty end or name of its span as none (`||`, not
+`??`): the grid gives `''` for an end it does not know, which printed "Pick a
+day from 15 Mar 2019 to ." and "after 's last day". Tests that fail on
+the first R3-03 head: `the_minute_picker_lands_again_on_the_minute_it_already_landed_on`
+and `a minute the picker refuses is offered again too` (they cut the picker's
+`selected` and `onchange` out of `DbControls.svelte` and `jumpToTime` out of
+`DbBarsGrid.svelte`, and refuse a click on a checked radio as the browser
+does), and `an end of the span the grid does not know is no end, and a number
+typed is read as its text` (`web/tests/db-goto.test.js`). Shadow (:9502, 18
+Oct, 1440 x 900, Fit 10): the 11,600 CE on 15 Mar 2019, 10:00 to 10:04, newest
+first: pick 10:02 sends one `at=` read and one page read and lands on page 9 of
+15 with 10:02:03 marked (row 81); 10:02 again on that page, one `at=` read,
+marked again; First page, then 10:02 again, one `at=` read and one page read
+(`offset=80&limit=10`), page 9, the bar marked and in view; oldest first the
+same on page 7, row 62. NIFTY spot GDFL 1s, the whole series: 10:00, 10:00
+again, First page, 10:00 again, the same pattern on page 1,980. Before every
+pick no radio was checked. The reads a re-pick sends, n = 200 GETs each: the
+CE's `at=` p50 1.1, p99 4.1, max 8.4 ms and its page p50 1.0, p99 5.5, max
+9.0 ms; NIFTY spot's `at=` p50 1.9, p99 3.1, max 4.2 ms and its page p50 1.9,
+p99 2.8, max 3.1 ms. `parseGoto` with an empty span end, in node, n = 20,000:
+p50 1.0 µs, p99 1.8 µs, max 66 µs.
+
+**Repair 2 (18 Oct, the second agent's follow-ups).** A Go to's answer was
+applied whenever it came back. Two quick picks with the first answer held
+900 ms (10:02, then 10:04) ended on 10:02's page with 10:02 marked; a Side
+change 150 ms after a Go to moved the new contract's 22 rows to page 3 of 3,
+and "row 81 of 142" stayed under the strip after any change of selection.
+`gotoTurns` (`goto.js`) now holds one Go to at a time: asking stops the read
+before it, and `jumpToInstant` applies an answer only while it is still the
+latest Go to AND the row set it was asked of (`setKey`) is still the one on
+screen, checked after the read and again after the re-sort's render. When the
+row set moves, `dropGoto` stops the Go to that is out and clears the line
+under the strip, the mark and a landing whose page is not yet read; on its
+first reading it clears nothing, so a remount keeps the line. A refused Go to
+stops the one before it, so a late answer cannot land after the refusal's
+words; a failure is said only for the latest Go to; and a query whose page
+read already answered no bar is not asked again (`NO_LANDING`, the words
+`landing` says). Tests that fail on the first R3-03 repair:
+`a_go_to_lands_only_for_the_question_still_on_screen`, `a late Go to answer
+lands nowhere: a later Go to, a moved row set, a failure of a stopped one`
+(the grid's own `gotoTurn`, `stopGoto`, `jumpToInstant` and `dropGoto` cut out
+of `DbBarsGrid.svelte` and run over a scope whose reads the test answers late
+or never) and `a minute the picker refuses is offered again too` (each refusal
+stops what is out). Each step is O(1): one counter and one abort. Measured in
+node on a loaded machine (18 Oct, `performance.now`, n = 20,000 each, 10,000
+for `drop`): `ask` p50 2.3, p99 10.8, max 2,979 µs (it makes an
+`AbortController`); `current` p50 0.04, p99 0.13, max 13 µs; `drop` p50 3.0,
+p99 20.0, max 2,981 µs. Shadow (:9502, 18 Oct, the second agent's attacks
+re-run): two quick picks with the first `at=` read held 900 ms end on 10:04's
+page 3 with 10:04:00 marked, the first read cancelled; a Side change 80 ms
+after a Go to whose read is held 1,500 ms, and under a uniform 300 ms latency
+by picker and by typed box, leaves the PE on page 1 of 3 with no line under
+the strip and no mark, the `at=` read cancelled; with no latency the landing
+on page 9 is made and the Side change then clears it; a blocked `at=` read
+says "Go to could not be answered: Failed to fetch" and the same minute again
+lands on page 9; a Go to typed on the empty 03:00 to 04:00 window sends no
+read and says the `NO_LANDING` words.
+
+**Repair 3 (19 Oct, the second agent's blocking finding: the proof, not the
+behaviour).** Four statement mutants of repair 2's Go to code survived the
+whole web suite: `dropGoto` without `jumpWhy = ''`, the typed box's refusal
+without `stopGoto()`, the picker's parse refusal without `stopGoto()`, and the
+picker's clear made unconditional (`db.goTime = ''` whatever minute is
+picked). The grid behaved correctly on real data; no test could tell. Each
+was reproduced on a copy of the repair 2 head (each passed all 252 tests of
+the 19 test files that read the grid, the Go to or the pager code), and so
+were eight more of the same kind: the
+parse refusal without `db.landedRk = ''`, `jumpWhy = got.why` or `return`,
+the typed refusal without the same three, `dropGoto` without
+`anchorRk = ''`, and the typed box with no read at all. The code is
+unchanged; the harness that cuts the grid's Go to out of `DbBarsGrid.svelte`
+now cuts `jumpToText`, `jumpToTime` and `gotoSpan` with it, declared so they
+call `jumpToInstant` by name as the component does, and four tests ask what
+none did: `a_moved_row_set_clears_what_a_landing_said_and_the_series_row_it_meant`
+(a landing that said "Landed on the first bar after it", and an extreme's
+series row, each gone with the row set), `a_typed_instant_the_box_refuses_stops_the_go_to_still_out_says_why_and_asks_nothing`,
+`a_picked_minute_the_parse_refuses_stops_the_go_to_still_out_too` (both: the
+held read aborted, the refusal's own words, the mark cleared, no second read,
+and the late answer landing nowhere) and
+`an_earlier_pick_settling_leaves_a_later_pick_its_minute_until_its_own_landing`
+(10:02 then 10:04, the first answer settling first: the picker still holds
+10:04 until 10:04 lands). Each of the twelve mutants fails at least one of
+them, and none of the twelve hangs: a refusal is checked one turn after it
+is made, so a mutant that went on to ask a read the test never answers fails
+the check instead of waiting out the timeout. The sweep of repair 2's lines
+with statement deletions as well as operator swaps is in `docs/06-limits.md`
+L-R303-08. Invariant R303-12.
+
+### D-5863 — Fit measures the heading's two rows and the notes strip is one fixed line, so no "Fit · 50" and no row under a notice (DB-N02, R3-03) — 2026-10-17
+
+**Decision.** The Fit takes the heading's measured height (`fitHead`, the group
+band and the labels) instead of `HEAD`, and `FIT_SLACK` goes from 24 to 8: the
+24 was sized to the warnings strip arriving after the bars, and the strip is
+now always in the box at one line's height (the first note, cut with an
+ellipsis; every note opens over the grid on a press). Until the box is measured
+the summary reads `Fit · measuring`, never the declared 50.
+
+**Proof.** `Rows per page: no "Fit · 50" before the box is measured, and the
+heading is measured with it (DB-N02)` (`web/tests/db-pager.test.js`). Shadow:
+at 1440 x 700, 900 and 1100 the last of 9 rows ends inside the box, before and
+after a note appears (a refused Change % on 1s), and the box does not scroll.
+
+**Repair 1 (18 Oct, the second agent's follow-up).** The floor's comment
+promised ten rows and the floor gave nine: every box is `border-box`
+(`theme.css`), so `.tbl`'s `min-height` holds its own 1px border above and
+below, and the scroll box at the floor was 458px, `(458 - 52 - 8) / 40` = 9.95,
+nine rows by the Fit's own count and one short of the fold's
+`MIN_USEFUL_ROWS`. The box sits at its floor on every window measured (about
+1,245px down the page), so the Fit was nine everywhere. The floor now adds the
+2px: the scroll box is 460px and the Fit is 10. Test: `the grid box at its
+floor holds ten rows by the Fit’s own count` (`web/tests/db-pager.test.js`; on
+the first R3-03 head it reads 458). Shadow, 18 Oct: at 1440 x 900, 1440 x 700, 1440 x
+1100 and 1280 x 800 the box is 460px, `Fit · measuring` then `Fit · 10`, ten
+rows, the last ending 8px above the notes strip, and nothing scrolls.
+
+### D-5864 — Words by who refused, sorts only where they mean something, and empty grids that blame nothing they cannot know (DB-016, DB-062, DB-063, R3-03) — 2026-10-17
+
+**Decision.**
+
+1. `readFailure`: a refusal the page made before asking is not "the server's
+   own" nor "a failed read"; a 4xx is the server's; Try again is offered only
+   for a failed read, and it asks the page again (not the census).
+2. `sortRefusal`: Volume on an index, and open interest on an index or a share,
+   are disabled with the reason; a sort carried onto such a selection reads
+   time order and says so.
+3. A column the browser orders itself is refused before the sort moves when the
+   count on screen is past `LOCAL_SORT_BUDGET`, and the advice works for the
+   rung (`localSortAdvice`: "a day alone is not enough" on 1s). A sort that was
+   already on (an address's `&sort=dte`, or a selection grown past the budget)
+   cannot be kept; its sentence says the grid is back in time order rather than
+   "keeps the order it had" (found on the shadow, 17 Oct).
+4. A Change % measured across the overnight gap carries an `overnight` mark with
+   the bar it was measured against (`acrossDay`).
+5. No answer yet draws loading rows, never "No bar came back"; the census
+   disagreement is said only when the census has not moved; a time-of-day
+   window that keeps nothing names the window, not the import.
+6. Two pages of one read are compared by total and every series' count
+   (`generationOf`, `joinPage`, `joinSlices`); a row already shown is dropped
+   and the move named.
+
+**Proof.** `no_sort_is_offered_on_a_column_without_values`, `a sort the page
+cannot do keeps the sort that was on, with advice that works for the rung`, `a
+sort already on that the page cannot do says the grid went back to time order,
+and no sentence loses a space`, `a_page_made_refusal_is_not_called_the_servers`,
+`the_store_growing_between_two_pages_repeats_no_row`, `an empty answer is said
+only once it is in, and a time window is not blamed on the import (DB-016)`, `a
+Change % measured across the overnight gap says so on the row`
+(`web/tests/db-pager.test.js`). Shadow: NIFTY spot Zerodha 1min, Sep 2026:
+Volume and Open interest disabled with the reason, Change % sorted shows
+`overnight` on the 09:15 rows with the previous session's 15:29 bar named;
+NIFTY spot GDFL 1s at page 3: Change % refused with the 333-minute advice, the
+sort and page kept, no request; `&sort=dte&dir=desc` on the 11,600 CE: refused,
+time order, "The grid is back in time order, newest first."; 03:00 to 04:00 on
+15 Mar 2019: the time window named; 2024-03-02: the drill session's day flags,
+no census accusation; six selections opened by address: no "census and the
+files disagree" and no "No bar came back" drawn at any moment.
+
+**Repair 2 (18 Oct, the second agent's blocking finding).** R303-04 said no
+sort is offered on a column with no value on the selection, and the page
+refused only Volume and open interest. On NIFTY spot · Zerodha 1min (1 to 30
+Sep 2026, 7,875 rows) Expiry, Days to exp, Type and Strike were enabled over
+cells that all read `—`; Days to exp read every row in eight requests, put its
+caret up and wrote `sort=dte` into the address, and ordered nothing.
+`seriesKinds` (`notes-bars.js`) reads the selection's series once per
+selection, by the same parse of the stored name the cells use (`expiryOf`,
+`contractOf` in `decoration.js`), and `refusalFor` is one look-up a header:
+Expiry and Days to exp are refused when no series is a contract, Type and
+Strike when none is an option, and TF when the selection is read at one rung
+(every row carries the same one), each with its reason on the disabled header,
+and a sort carried onto such a selection reads time order and says so, as
+Volume's does. A column empty by its DATA rather than its kind (a contract
+whose feed stamps no open interest) is not known before the read and stays
+offered: named in `docs/06-limits.md` L-R303-11, and R303-04 says exactly
+this much. Test: `no_sort_is_offered_on_a_column_without_values` checks every
+header a press can order against an index, a share, a future, an option and
+mixes; on the first R3-03 repair it fails at the index ("an index": only
+`vol`, `oi` and `oichg` were refused). Cost: `seriesKinds` is one pass over the
+series a selection (L-R303-05, measured there), where the offer it replaced
+was a pass a header a render. Shadow (:9502, 18 Oct, 1440 x 900): NIFTY spot ·
+Zerodha 1min, 1 to 30 Sep 2026: TF, Volume, Open interest, OI chg %, Expiry,
+Days to exp, Type and Strike disabled with their reasons, a press on Days to
+exp or TF sends no request and leaves the address as it was; the same address
+with `&sort=dte&dir=desc` opens with its three ordinary reads, says "Days to
+exp is not an order on this selection", reads time order and drops the sort
+from the address; the 11,600 CE on 15 Mar 2019 keeps every contract header
+and Days to exp still orders it.
+
+**Repair 3 (19 Oct, the second agent's follow-up on cost).** `seriesKinds`
+read every series of the selection, and a selection of NIFTY options is all
+70,458 option directories the GDFL store holds (counted by `ls`, read-only):
+p50 38.2, p99 221.5, max 276.9 ms once per selection on this machine at a load
+average near 46 (n = 200, `performance.now`; the second agent measured 15.6 /
+20.3 / 21.6 ms on a lighter load). Each of the four kinds it reports moves one
+way only (`allIndex` and `noDerivative` from true to false, `expiry` and
+`option` from false to true), so once all four have moved no later series can
+change the answer, and the pass now stops there. An option decides all four
+at once, so an option chain is read to its first key: p50 0.0007, p99 0.0027,
+max 0.0049 ms over the same 70,458. A selection with no option still reads
+every key; the largest the store holds today is the 346 GDFL cash and index
+series, p50 0.055, p99 0.338, max 5.45 ms (synthetic keys of the same count
+and kinds). The answer is unchanged for every selection, which the existing
+header-by-kind assertions hold; `no_sort_is_offered_on_a_column_without_values`
+now also counts the keys read (a `Proxy` over the list) and fails without the
+stop. Bound and figures in `docs/06-limits.md` L-R303-05; invariant R303-13.
+
 ### D-5835 — /db names a re-keyed contract's successor and predecessor, and a key the census withdrew is explained by its lineage, never by the filters (AH-03, g-ui-dom-vs-json-2) — 2026-10-16
 
 *Numbers D-5835 to D-5838 were first taken as D-5330 to D-5333, were
