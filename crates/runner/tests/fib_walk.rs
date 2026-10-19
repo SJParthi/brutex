@@ -4526,3 +4526,48 @@ fn a_high_printed_before_the_fill_is_never_the_trade_s_mfe() {
     // forced minute's 99,990; the 10:00 dip to 99,200 is not counted.
     assert_eq!(out.mae_to_exit_paisa, (P + 150) - (P - 10));
 }
+
+/// The window-end feed-hole rule is about an order that filled nothing: a
+/// partly filled one meeting the same silence keeps its fill and is an
+/// execution feed hole; and a silence exactly at the committed past's
+/// limit is no hole.
+#[test]
+fn the_window_end_hole_is_for_an_unfilled_order_and_starts_past_the_limit() {
+    // 30 filled at 10:00:00 of 100; GDFL then silent to 10:05:00 over traded
+    // Zerodha minutes.
+    let mut partial = Day::seconds(vec![
+        bar(at(10, 0, 0), P, P + 10, P - 10, P, 30),
+        quiet(at(10, 5, 0), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    partial.max_gap = 30;
+    for minute in 1..5 {
+        partial.zerodha.push(quiet(at(10, minute, 0), P, 500));
+    }
+    partial.zerodha.sort_by_key(|m| m.ts_micros);
+    let out = second_slot(&partial, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.filled_qty, 30);
+    assert!(has(&out, TradeFlag::PartialEntry));
+    assert_eq!(
+        out.status,
+        SlotStatus::Unpriceable(UnpricedReason::ExecutionFeedHole)
+    );
+    // The hole day's window of 10:10:00 to 10:11:00 holds no second: the
+    // silence to its end is 60 seconds, a hole beyond a limit of 59 and not
+    // at a limit of 60.
+    let mut plan = long_plan(at(10, 10, 0));
+    plan.entry_window_end = at(10, 11, 0);
+    let unfilled = |limit| {
+        let mut day = hole_day(true);
+        day.max_gap = limit;
+        second_slot(&day, plan, STOP_ONLY).status
+    };
+    assert_eq!(
+        unfilled(59),
+        SlotStatus::EntryUnfilled(UnfilledReason::FeedHole)
+    );
+    assert_eq!(
+        unfilled(60),
+        SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
+    );
+}
