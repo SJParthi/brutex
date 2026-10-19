@@ -4661,3 +4661,36 @@ fn a_target_touch_beyond_the_converted_minute_is_unwitnessed() {
     assert_eq!(out.exit_reason, ExitReason::TakeProfit);
     assert!(!has(&out, TradeFlag::TouchUnwitnessed));
 }
+
+/// A stop that waits through a second with no bid fills nothing there, so
+/// that second's flagged print is no fill's: only the next second's fill is
+/// marked, and it carries none.
+#[test]
+fn a_second_an_exit_waits_through_marks_no_fill() {
+    let both = BookMark {
+        ask: true,
+        bid: true,
+        flagged_print: false,
+    };
+    let mut day = second_day(&[
+        bar(at(10, 1, 0), P, P, 98_990, 98_990, 1_000),
+        bar(at(10, 1, 1), 98_990, 98_990, 98_980, 98_980, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    day.marks = Some(vec![
+        both,
+        BookMark {
+            bid: false,
+            flagged_print: true,
+            ..both
+        },
+        both,
+        both,
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert_eq!(out.exit_second, at(10, 1, 1));
+    assert_eq!(out.exit_value_paisa, i128::from(100 * 98_980));
+    assert!(has(&out, TradeFlag::OneSidedBook));
+    assert!(!has(&out, TradeFlag::FlaggedPrintFill));
+}
