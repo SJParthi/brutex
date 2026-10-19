@@ -73323,7 +73323,7 @@ uncapped per-second participation.
 **Not built here, said.** The worse-of-both cross-feed reading waits for
 PREC-15 (D-6383). The real-data proofs are the Mac's
 (`reports/cloud-fib5-20261018.md`, NEEDS THE MAC). Proved by
-`crates/runner/tests/fib_walk.rs`; invariants FIB5-01..FIB5-57.
+`crates/runner/tests/fib_walk.rs`; invariants FIB5-01..FIB5-62.
 
 ### D-6381 — The forced exit is priced only from `[15:09:00, 15:10:00)`, never later and never carried forward (FIB-5; refines D-0436) — 2026-10-18
 
