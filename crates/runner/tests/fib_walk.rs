@@ -1429,6 +1429,18 @@ fn a_flagged_print_fill_is_kept_and_an_outlier_second_is_flagged() {
     day.zerodha[0].high = P + 90;
     let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert!(has(&out, TradeFlag::CrossFeedOutlier));
+    // A minute whose low is above the fill at P + 100: an outlier too.
+    day.zerodha[0] = Candle::new(
+        ts(at(10, 0, 0)),
+        P + 150,
+        P + 200,
+        P + 150,
+        P + 150,
+        500,
+        OI_NULL,
+    );
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(has(&out, TradeFlag::CrossFeedOutlier));
 }
 
 #[test]
