@@ -13,14 +13,23 @@
 //!   `per_mix_cost_fixed_support`, the span axis).
 //! * `C-F6-03` the same across pools of 2, 20 and 200 stocks (the pool axis).
 //!
+//! In both scoring rows every row is taken: each outcome exits at its decision
+//! second, so no row blocks a later one. A taken row costs more than a blocked
+//! one, so this is the pass's worst case, and it is the same at every scale; a
+//! held outcome would block more rows in a smaller pool and make the pool axis
+//! measure the share of rows taken rather than the pool. The trades per op are
+//! reported under each row.
+//!
 //! Then, outside the harness and labelled so: whole walks at 10^4, 10^6 and
 //! 2 x 10^7 rows at 1 thread, at this host's worker count and at 12 threads
 //! (mixes per second, row-touches per second, scratch bytes per worker), the
 //! per-visited-mix time distribution, and the shared traversal at three exit
 //! counts (FM-F054). Every input is synthetic.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hint::black_box;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -28,7 +37,8 @@ use runner::fib::lattice::{
     Decision, FREE_ROWS, Node, Partition, RowTable, Schedule, Scratch, Visitor, expand_range, walk,
 };
 use runner::fib::score::{
-    Calendar, CardSink, DayKeys, Gross, OrderedPass, Outcome, Profile, Rungs, Slot, profiles_of,
+    Calendar, CardSink, DayKeys, Gross, OrderedPass, Outcome, Profile, Rungs, SIZE_COUNT, Slot,
+    profiles_of,
 };
 use runner::fib::types::{ExitReason, SlotOutcome, TradeFlags};
 use vocab::fib_cube::{
@@ -222,11 +232,14 @@ fn expand_op(state: &mut Expand, i: u64) -> u64 {
     count.0
 }
 
-/// One synthetic priced slot: invented paisa, risk 100 a share.
-fn priced(rng: &mut Seeded, second: u32) -> Slot {
+/// One synthetic priced slot: invented paisa, risk 100 a share. Held up to an
+/// hour when `held`, so a later decision of the same stock can be blocked;
+/// otherwise it exits at its decision second and blocks nothing later.
+fn priced(rng: &mut Seeded, second: u32, held: bool) -> Slot {
     let qty = 1 + rng.next() % 200;
     let entry = 100_000 + i128::from((rng.next() % 50_000) as u32);
     let gain = i128::from((rng.next() % 500) as u32) - 200;
+    let hold = 1 + (rng.next() % 3_600) as u32;
     Slot::Priced(SlotOutcome {
         filled_qty: qty,
         entry_value_paisa: entry * i128::from(qty),
@@ -234,7 +247,7 @@ fn priced(rng: &mut Seeded, second: u32) -> Slot {
         risk_per_share_paisa: 100,
         first_entry_second: second,
         last_entry_second: second,
-        exit_second: second + 1 + (rng.next() % 3_600) as u32,
+        exit_second: if held { second + hold } else { second },
         exit_reason: ExitReason::Forced,
         mfe_to_exit_paisa: i64::try_from(rng.next() % 400).unwrap(),
         mae_to_exit_paisa: -i64::try_from(rng.next() % 200).unwrap(),
@@ -244,8 +257,9 @@ fn priced(rng: &mut Seeded, second: u32) -> Slot {
     })
 }
 
-/// Outcome records for every (row, exit) of a table.
-fn outcomes(table: &RowTable) -> Vec<Outcome> {
+/// Outcome records for every (row, exit) of a table (see [`priced`] for
+/// `held`).
+fn outcomes(table: &RowTable, held: bool) -> Vec<Outcome> {
     let mut rng = Seeded(table.len() as u64);
     (0..table.len() as u32)
         .flat_map(|r| {
@@ -253,7 +267,10 @@ fn outcomes(table: &RowTable) -> Vec<Outcome> {
             (0..EXITS).map(move |_| second)
         })
         .map(|second| Outcome {
-            slots: [priced(&mut rng, second), priced(&mut rng, second)],
+            slots: [
+                priced(&mut rng, second, held),
+                priced(&mut rng, second, held),
+            ],
         })
         .collect()
 }
@@ -284,11 +301,48 @@ pub(crate) struct Score {
     calendar: Calendar,
     pass: OrderedPass<Gross>,
     touched: u64,
+    /// Trades taken over every profile, and ops run.
+    trades: u64,
+    ops: u64,
 }
 
-fn score_state(rows: u64, per_day: u64, pool: u64) -> Score {
+/// Trades and ops of the scoring states, by (rows, pool), added as each
+/// state is dropped and reported under its row.
+static TRADES: Mutex<BTreeMap<(u64, u64), (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+impl Drop for Score {
+    fn drop(&mut self) {
+        let key = (self.table.len() as u64, u64::from(self.table.pool()));
+        if let Ok(mut all) = TRADES.lock() {
+            let sums = all.entry(key).or_insert((0, 0));
+            sums.0 += self.trades;
+            sums.1 += self.ops;
+        }
+    }
+}
+
+/// Reports the trades per op of every scoring state since the last report:
+/// the worst case is every row taken, at every scale alike.
+fn trades_per_op(out: &mut String) {
+    let all = std::mem::take(&mut *TRADES.lock().unwrap());
+    for ((rows, pool), (trades, ops)) in all {
+        let _ = writeln!(
+            out,
+            "  rows {rows}, pool {pool}: {} trades per op over every profile (of {} rows x profiles), \
+             mean over {ops} ops",
+            trades.checked_div(ops).unwrap_or(0),
+            u64::from(SUPPORT) * u64::from(EXITS) * SIZE_COUNT as u64
+        );
+    }
+}
+
+/// A scoring state. The harness rows pass `held = false`: every row exits at
+/// its decision second, so no row blocks a later one and every op takes all
+/// of its rows at every scale, the worst case of the pass held equal across
+/// the axis.
+fn score_state(rows: u64, per_day: u64, pool: u64, held: bool) -> Score {
     let table = table(rows, per_day, pool);
-    let outcomes = outcomes(&table);
+    let outcomes = outcomes(&table, held);
     let calendar = calendar(&table);
     let profiles: Vec<Profile> = profiles_of(&table);
     let pass = OrderedPass::new(
@@ -308,6 +362,8 @@ fn score_state(rows: u64, per_day: u64, pool: u64) -> Score {
         calendar,
         pass,
         touched: 0,
+        trades: 0,
+        ops: 0,
     }
 }
 
@@ -321,7 +377,10 @@ fn score_op(state: &mut Score, i: u64) -> u64 {
         .unwrap();
     let raw: u64 = cards.iter().map(|card| card.counts.raw).sum();
     state.touched += raw;
-    cards[0].counts.trades
+    let trades: u64 = cards.iter().map(|card| card.counts.trades).sum();
+    state.trades += trades;
+    state.ops += 1;
+    trades
 }
 
 fn score_bytes(state: &Score) -> u64 {
@@ -359,28 +418,28 @@ fn harness_rows(host: &Host, out: &mut String) -> bool {
     };
     let span = Row {
         id: "C-F6-02",
-        name: "scoring one mix of 64 rows at 8 profiles, across spans (16 decisions a day)",
+        name: "scoring one mix of 64 rows at 8 profiles, every row taken, across spans (16 decisions a day)",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "days in the span",
             production: None,
         }),
         scales: [1_000, 10_000, 100_000],
-        setup: |days| score_state(days * 16, 16, 208),
+        setup: |days| score_state(days * 16, 16, 208, false),
         op: score_op,
         work: |state| state.touched,
         bytes: score_bytes,
     };
     let pool = Row {
         id: "C-F6-03",
-        name: "scoring one mix of 64 rows at 8 profiles, across pools (10^6 rows)",
+        name: "scoring one mix of 64 rows at 8 profiles, every row taken, across pools (10^6 rows)",
         class: Some(Class::WorstCase),
         axis: Some(Axis::Data {
             unit: "stocks in the pool",
             production: Some(208),
         }),
         scales: [2, 20, 200],
-        setup: |stocks| score_state(1_000_000, 100, stocks),
+        setup: |stocks| score_state(1_000_000, 100, stocks, false),
         op: score_op,
         work: |state| state.touched,
         bytes: score_bytes,
@@ -390,9 +449,29 @@ fn harness_rows(host: &Host, out: &mut String) -> bool {
     ok &= !run(&expand, host, out).fails();
     progress(out, "C-F6-02");
     ok &= !run(&span, host, out).fails();
+    trades_per_op(out);
     progress(out, "C-F6-03");
     ok &= !run(&pool, host, out).fails();
+    trades_per_op(out);
+    progress(out, "C-F6-03, held outcomes (untimed)");
+    held_shares(out);
     ok
+}
+
+/// Untimed: the trades per op the pool axis takes when every outcome is held
+/// up to an hour. A smaller pool blocks more rows, so its ops take fewer.
+fn held_shares(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "  untimed, the same pool axis with every outcome held up to an hour (1,000 ops each):"
+    );
+    for pool in [2, 20, 200] {
+        let mut state = score_state(1_000_000, 100, pool, true);
+        for i in 0..1_000 {
+            black_box(score_op(&mut state, i));
+        }
+    }
+    trades_per_op(out);
 }
 
 /// The nearest-rank quantile of a sorted list.
@@ -516,7 +595,7 @@ fn throughput(host: &Host, out: &mut String) {
 
 /// Scores and times every mix a sequential walk visits.
 fn time_mixes(table: &RowTable, min: u64, out: &mut String) {
-    let outcomes = outcomes(table);
+    let outcomes = outcomes(table, true);
     let calendar = calendar(table);
     let profiles = profiles_of(table);
     let mut visitor = Timed {
@@ -596,7 +675,7 @@ fn shared_exits(out: &mut String) {
             let flat: Vec<u32> = paired.iter().flat_map(|(_, o)| o.iter().copied()).collect();
             table.push_month(month, &sorted, &flat).unwrap();
         }
-        let outcomes = outcomes(&base);
+        let outcomes = outcomes(&base, true);
         let calendar = calendar(&table);
         let profiles = profiles_of(&table);
         let mut sink = CardSink::new(
