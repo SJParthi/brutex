@@ -3335,3 +3335,30 @@ fn a_new_width_folds_only_from_the_days_own_minutes() {
     assert!(later.candles.iter().all(|candle| candle.close_ts_micros
         <= instant(halt_day, exposure.first_halted_second)));
 }
+
+/// FM-F100 at the boundary: the 2021-02-24 outage halts the cash market at
+/// 11:40:00 exactly, so the 11:39 minute and the 11:35 five-minute bucket
+/// close AT the first halted second — decisions a live trader had, kept in
+/// the exposure input — and nothing after it is.
+#[test]
+fn the_outage_exposure_keeps_the_candles_that_close_at_the_halt() {
+    let (tuesday, outage) = (day_of(2021, 2, 23), day_of(2021, 2, 24));
+    let mut bars = full(tuesday, 4_201_000);
+    bars.extend(minutes(outage, hm(9, 15), hm(11, 39), 4_202_000));
+    let mut state = StockState::first_day();
+    let month = build(2021, 2, &[1, 5], &bars, &interim(), &mut state);
+    let day = input(&month, outage);
+    let exposure = day.exposure.as_ref().unwrap();
+    let until = instant(outage, exposure.first_halted_second);
+    assert_eq!(exposure.first_halted_second, 11 * 3_600 + 40 * 60);
+    assert_eq!(exposure.candles[0].candles.len(), 145, "09:15..11:39");
+    assert_eq!(
+        exposure.candles[0].candles.last().unwrap().close_ts_micros,
+        until
+    );
+    assert_eq!(exposure.candles[1].candles.len(), 29, "09:15..11:35");
+    assert_eq!(
+        day.fold_width(5, &no_master()).unwrap(),
+        exposure.candles[1]
+    );
+}
