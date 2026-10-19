@@ -1646,6 +1646,7 @@ fn widths_and_the_ladder_follow_r7() {
     assert_eq!(max_width_minutes(), 118);
     assert_eq!(doubling_ladder(), [1, 2, 4, 8, 16, 32, 64]);
     assert_eq!(check_widths(&[1, 2, 7, 64]), Ok(()));
+    assert_eq!(check_widths(&[118]), Ok(()), "N_max itself is a width");
     for refused in [&[][..], &[0][..], &[119][..], &[2, 2][..], &[3, 2][..]] {
         assert!(
             check_widths(refused)
