@@ -74250,6 +74250,165 @@ its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
 written. (6) A runs ledger whose last id is `u64::MAX` refuses
 `runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
 
+### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.4, §6; its proposed D-4929, renumbered here at landing: the ledger's
+head was D-5834 on `feat/db-fix` and D-5884 on unmerged branches) gives a
+closed month a second form, the sealed `.sbar` of D-4965. SC-3 is the read
+half of that decision.
+
+**The door.** `BarFile::open_existing` resolves the served generation, then
+opens `<yyyy-mm>.sbar`; on `ENOENT` the raw `.bin`; when the `.bin` is absent
+too, or its shared lock is refused, `.sbar` once more, because a retirement
+(design §4.7, SC-9, off until the operator's decision) may have run between
+the two opens. At most three opens and no directory listing, so the cost of
+choosing a form is constant. Overlay and greeks files have no sealed form.
+
+**Same bytes, same cache.** A sealed handle holds the raw month's committed
+header (the head copies it), takes no lock (an immutable file published by
+rename has no writer), and fills the handle's one cached block with a decoded
+frame's 56-byte record images: the cache grows from 4,088 to 14,336 bytes
+(`CACHED_BLOCK_LEN`; the raw verify path keeps its 4,088-byte stack buffers,
+D-0914). `read_record`, the bisection, `already_stored`, every page and every
+run identity see the same records from either form. `read_range` (the page
+path: one read of adjacent directory entries, one of adjacent frames) and
+`read_rows_at` (the sorted page path: each frame decoded once) are new on
+`BarFile` for both forms. Time lookups use the sealed time table
+(`TimeLookup::Sealed`); `index_existing` answers `Reindexed::Sealed` and
+writes nothing.
+
+**Never the other form instead.** A sealed month that fails any check is
+`StoreError::SealedRefused` naming the `.sbar`, its stable reason and the block
+or field. Answering from the `.bin` would be the hidden fallback `CLAUDE.md` §4
+bans: the door opened the sealed form, and the sealed form is what is reported.
+A page reader that meets a refused frame reads record by record so each
+refused row is named in the fault log.
+
+**Provenance, listings, the audited door.** `provenance::read` reads the
+packed section of a sealed month first (and once more after a `.prv` that is
+absent). `generation::served_bars_path` names the `.sbar` when the served
+generation holds one, so every cache keyed by it changes key when a month is
+sealed. `store::catalog`, the census recount and `api`'s held months count a
+month in either form once; a lone `.sbar` is a month, and a damaged one is
+named unreadable, never passed over as a sibling (verify-SC-2-r1). The audited
+door decodes the sealed form whole, audits the raw form, and refuses unless
+both state one header and one records BLAKE3; a sealed month with no raw form
+beside it has no strict receipt and says so.
+
+**Not decided here.** The write door (`StoreError::Sealed`, `AlreadyPresent`
+for a re-offer) is SC-4's; `.srt` v2 is SC-5's; sealing is SC-6's; retiring the
+raw form is SC-9's and needs the operator's decision. Until SC-6 lands nothing
+in the store writes a `.sbar`, so this door changes no answer the live app
+gives today.
+
+### D-5900 — The read door's key follows the file it serves, `cli tix-rebuild` names a sealed month, a route figure counts only answers that were 200, and a month held in both forms is one instrument-month (SC-3 repairs 1 and 2, verify-SC-3-r1 and r2) — 2026-10-18
+
+A second agent re-checked D-5899 on the package branch and failed it on two
+claims in `docs/06-limits.md` L-SC-24, not on the code. Three choices follow,
+each an addition to D-5899, none a change to it.
+
+**A figure is the time of an answer, never of a refusal.** L-SC-24 gave
+`/calendar.json` "0.25 ms" over sealed months. The timing script recorded no
+HTTP status, and on a private root holding the listed months but not the rest
+of a series the census holds, that route answers 202 (`building`: the
+calendar is built in the background, retry) and then 503 (95 BANKNIFTY bar
+files the census holds could not be opened, so no calendar is answered), by
+design: it refuses rather than answer a calendar over months it cannot open. The route
+figures are now re-measured with every answer's status recorded
+(`state/fix/round2/sc3r1-warm.txt`, `all200=yes` on every quoted line), on a
+root holding every month of each series it serves. A line with any status but
+200 is never quoted as the route's figure.
+
+**First requests are named, not denied.** L-SC-24 said every max was under
+50 ms. The first request after a start fills in-process memos and costs
+more, in both forms. Its floor, about 38 ms even for a one-month window, is
+paid once a process by whichever GDFL bar route comes first: it parses the
+whole GDFL lineage ledger (`bars::change::Lineage::read`, 50 of 54 samples
+of that request), and a later series' first request costs 1 to 2 ms. Above
+the floor, a series' first request over N months builds its plan, month
+extremes, time-of-day runs and sort view from every month in range, O(N)
+bounded by `MAX_WINDOW_MONTHS`, and a share's first request on a day from
+2026-08-03 loads that day's closing-auction master (L-AG04-02). L-SC-25
+gives those figures and their cause, and
+`the_sealed_route_limits_time_answers_and_name_first_requests` holds that
+row and L-SC-24 to the bound in the code and the parse they name; the warm
+figures stay in L-SC-24. Prewarming the memos at start was not chosen: it would move
+O(every month held) of work into every start, which is the cost the memos
+exist to avoid paying for months nobody asks for.
+
+**The key is the file the door serves.** The door's open follows a final link
+exactly as the raw reader's does (only the writer door refuses links, D-2686),
+so `generation::served_bars_path` asks `stat`, not `lstat`: a `.sbar` that is
+a link to a sealed file is the key, and a link that points nowhere is no sealed
+month to either. `cli tix-rebuild` prints `sealed` for `Reindexed::Sealed`
+and `TimeLookup::Sealed`, tallies `sealed N` in both receipts, reads the month
+back through the sealed table, writes nothing beside it and is clean; before,
+it REFUSED the month as "an outcome this build does not know". The receipt
+line `small N,` is now followed by `sealed N,` in both runs.
+
+**Repair 2 (verify-SC-3-r2): a month held in both forms is one
+instrument-month.** The second agent failed the package on one claim, and it
+was right: `store::catalog::walk` returned one `Held` per month in either form
+(the dedup did that), but `Census::spot` counted every `.sbar` beside its
+`.bin` as well, and `cli sweep-all` prints `spot` as "store holds N spot
+instrument-month(s)". On a private root whose 1,176 months were each sealed
+beside their raw form it printed 2,328 (1,176 `.bin` + 1,152 `.sbar`), where an
+APFS clone of the same months, raw only, printed 1,176; the package's own test
+pinned the double count (`spot == 4` for three months). Nothing showed it on
+the real store, which holds no `.sbar`; it would have shown on the first sealed
+month.
+
+Chosen: **`spot` counts months; the second file of a month is a bucket of its
+own, `Census::sealed_twin`**, which `Census::reconciles` sums, so every file
+seen is still filed exactly once. The twins are counted after the walk, as the
+rows the dedup removed: a `Held` is the whole path but its extension, parsed
+exactly, so two files are one row only when they are `<month>.bin` and
+`<month>.sbar` in one directory. That costs no system call and cannot
+disagree with what the walk saw, where asking for the `.bin` beside each
+`.sbar` would have cost a stat per sealed month and could race a retirement.
+`Census::sealed` is one per sealed month (a sub-count of `spot`, not a
+bucket). A `.sbar` whose `.bin` is a link is the month: the link is `linked`,
+not held, so there is no twin.
+
+Rejected: printing the deduplicated `held.len()` in `cli` and leaving `spot`
+as files. Every other reader of `spot` (`cli research`, which called it "spot files" and now says
+"spot instrument-months"; the pool page's uncatalogued premise) would have
+kept a number that means files on one store and months on another, and the
+next caller would have printed it as months again. Invariant SC3-13; tests
+`the_catalog_holds_a_month_in_either_form_once` (store) and
+`a_month_in_both_forms_is_one_instrument_month_on_the_report` (cli), each of
+which fails on the code before this repair.
+
+**Repair 2, a follow-up taken with it: the provenance door opens the `.sbar`
+the bar door serves.** The same check named a smaller split: `BarFile`'s
+sealed open follows a final link at the `.sbar` (as the raw reader's open
+follows one at the `.bin`), while `provenance::read` opened the same name with
+`O_NOFOLLOW` and refused it, so a month whose `.sbar` is a link answered its
+bars from the sealed file and refused its provenance. Both are loud, so no
+answer was wrong, but one month had two answers to "which file is it".
+Chosen: `provenance::read` opens the `.sbar` through
+`store::file::open_read_existing`, the bar door's own open (`O_NONBLOCK`, a
+final link followed, a non-regular file refused by name, a dangling link
+absent), so the packed image it reads is always the one the bar door serves.
+The raw `.prv` sidecar keeps `O_NOFOLLOW`: it is a separate file the bar door
+never opens, and nothing here changes it. Invariant SC3-14; test
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it with the link refused.
+
+**And a second follow-up: only an absent `.sbar` keys the `.bin`.**
+`generation::served_bars_path` keyed a month by its `.sbar` only when that was
+a regular file, so a directory (or any non-regular file) at the `.sbar` keyed
+the `.bin`, while the door refuses such a `.sbar` by name and never opens the
+`.bin` past it. The api's header and runs memos are keyed by that path and its
+stamp, so a month cached raw kept answering from the raw form's cached header
+after the door had begun to refuse it. Chosen: the key mirrors the door's own
+rule: `ENOENT` (a dangling link included) is the only answer that keys the
+`.bin`; anything else at the name is the key, and the door's refusal follows.
+Still one `stat`. Invariant SC3-15; the directory case of
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it.
+
 ### D-5901 — IA-2 repair 2: the journal keeps each key's hole reason, first landing and last done; every import ledger closes a torn or zeroed tail with the mark under the journal lock, the re-key's included; a recount the runs ledger knows closes as a ledger run — 2026-10-19
 
 **Number** free on every local branch on 2026-10-19 (the highest seen was
