@@ -1454,9 +1454,24 @@ fn a_touch_by_a_second_beyond_the_converted_minute_is_unwitnessed() {
         !has(&out, TradeFlag::TouchUnwitnessed),
         "the minute saw 98,990"
     );
-    day.zerodha[1].low = 99_000;
+    // A far target the trade never reached is no touch to witness.
+    let far = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 900_000 },
+        ..STOP_ONLY
+    };
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), far);
+    assert_eq!(out.exit_reason, ExitReason::StopLoss);
+    assert!(!has(&out, TradeFlag::TouchUnwitnessed));
+    // An evaluable minute whose low stayed above the stop's 98,995: the
+    // second's touch is beyond what the minute saw.
+    let minute = |low| Candle::new(ts(at(10, 1, 0)), P, P, low, low, 1_000, OI_NULL);
+    day.zerodha[1] = minute(99_000);
     let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert!(has(&out, TradeFlag::TouchUnwitnessed));
+    // A minute whose low is the stop itself witnessed the touch.
+    day.zerodha[1] = minute(98_995);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    assert!(!has(&out, TradeFlag::TouchUnwitnessed));
 }
 
 #[test]
@@ -4621,4 +4636,28 @@ fn a_bar_opening_exactly_at_the_stop_is_no_gap_through_it() {
     ]);
     let out = minute_slot(&below, long_plan(at(10, 0, 0)), STOP_ONLY);
     assert!(has(&out, TradeFlag::GapThroughStop));
+}
+
+/// A deep target touch is unwitnessed when the second's Zerodha minute
+/// stayed below the target, and witnessed when the minute reached it.
+#[test]
+fn a_target_touch_beyond_the_converted_minute_is_unwitnessed() {
+    // One R above the entry reference: 100,000 + 1,005.
+    let one_r = ExitVariant {
+        take_profit: TakeProfit::RMultiple { milli_r: 1_000 },
+        ..STOP_ONLY
+    };
+    let mut day = second_day(&[
+        bar(at(10, 1, 0), P, 101_010, P, 101_000, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let minute = |high| Candle::new(ts(at(10, 1, 0)), P, high, P, P, 1_000, OI_NULL);
+    day.zerodha[1] = minute(101_000);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), one_r);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert!(has(&out, TradeFlag::TouchUnwitnessed));
+    day.zerodha[1] = minute(101_005);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), one_r);
+    assert_eq!(out.exit_reason, ExitReason::TakeProfit);
+    assert!(!has(&out, TradeFlag::TouchUnwitnessed));
 }
