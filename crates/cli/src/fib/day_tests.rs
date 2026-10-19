@@ -2457,7 +2457,10 @@ fn an_accepted_close_scales_and_measures_exactly() {
 #[test]
 fn padding_needs_four_equal_prices_and_the_tail_check_stops_at_the_forced_window() {
     let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
-    let mut bars = full(monday, 2_323_000);
+    let wednesday = day_of(2025, 3, 5);
+    // A pre-open minute on Monday: outside the continuous window, counted.
+    let mut bars = vec![minute(monday, hm(9, 14), 2_322_900)];
+    bars.extend(full(monday, 2_323_000));
     let mut day = full(tuesday, 2_323_100);
     let at =
         |day: &[Candle], minute: u16| day.iter().position(|bar| minute_of(bar) == minute).unwrap();
@@ -2487,17 +2490,74 @@ fn padding_needs_four_equal_prices_and_the_tail_check_stops_at_the_forced_window
     // window's first second.
     day.retain(|bar| minute_of(bar) <= hm(15, 8));
     bars.extend(day);
+    // Wednesday: one minute with a wick wider than every committed day's.
+    let mut third = full(wednesday, 2_323_200);
+    let wide = at(&third, hm(13, 0));
+    third[wide].high += 5_000;
+    bars.extend(third);
     let mut state = StockState::first_day();
     let month = build(2025, 3, &[1], &bars, &interim(), &mut state);
-    let input = input(&month, tuesday);
-    assert_eq!(input.counts.no_trade, 0, "no minute is padding");
-    assert_eq!(input.counts.zero_volume_with_range, 2);
-    assert_eq!(input.refusal, None, "no tail witness is asked");
-    assert!(!input.no_trades_after);
+    let second = input(&month, tuesday);
+    assert_eq!(second.counts.no_trade, 0, "no minute is padding");
+    assert_eq!(second.counts.zero_volume_with_range, 2);
+    assert_eq!(second.refusal, None, "no tail witness is asked");
+    assert!(!second.no_trades_after);
     let noon = hm(12, 0) - hm(9, 15);
     assert!(
-        input.suspect.iter().all(|wick| wick.slot != noon),
+        second.suspect.iter().all(|wick| wick.slot != noon),
         "{:?}",
-        input.suspect
+        second.suspect
+    );
+    // The zero close was never committed as the widest wick, so Wednesday's
+    // wide wick is measured against Tuesday's real ones.
+    let one = hm(13, 0) - hm(9, 15);
+    assert!(
+        input(&month, wednesday)
+            .suspect
+            .iter()
+            .any(|wick| wick.slot == one && wick.upper),
+        "{:?}",
+        input(&month, wednesday).suspect
+    );
+    assert_eq!(month.counts.admitted, 3);
+    assert_eq!(month.counts.zero_volume_with_range, 2);
+    assert_eq!(month.counts.outside_continuous, 1);
+}
+
+/// A day the calendar excludes counts neither its refused nor its accepted
+/// previous close: 2020-03-13 (a halt) alone, and after a tradable day.
+#[test]
+fn an_excluded_day_counts_no_previous_close() {
+    let (thursday, halt) = (day_of(2020, 3, 12), day_of(2020, 3, 13));
+    let mut state = StockState::first_day();
+    let alone = build(
+        2020,
+        3,
+        &[1],
+        &full(halt, 2_424_000),
+        &interim(),
+        &mut state,
+    );
+    assert!(!input(&alone, halt).admitted());
+    assert_eq!(
+        alone
+            .counts
+            .previous
+            .get(2020, CloseRefusal::NoPrevious.index()),
+        0
+    );
+    let mut bars = full(thursday, 2_424_100);
+    bars.extend(full(halt, 2_424_200));
+    let mut state = StockState::first_day();
+    let after = build(2020, 3, &[1], &bars, &interim(), &mut state);
+    assert!(input(&after, halt).previous().accepted().is_some());
+    assert_eq!(after.counts.landing_only, 0, "the halt day is not admitted");
+    assert_eq!(
+        after
+            .counts
+            .previous
+            .get(2020, CloseRefusal::NoPrevious.index()),
+        1,
+        "Thursday's first day only"
     );
 }
