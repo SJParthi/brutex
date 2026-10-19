@@ -3367,3 +3367,95 @@ fn the_outage_exposure_keeps_the_candles_that_close_at_the_halt() {
         exposure.candles[1]
     );
 }
+
+/// SC-3's one read door (D-4965): a seconds month held SEALED (`.sbar`)
+/// hands the deep stage exactly the seconds its raw form does, and a sealed
+/// month the door refuses halts the read by name — never read as absent
+/// seconds, never answered from the raw form beside it — with nothing
+/// committed to the carried state (FIB8-31).
+#[test]
+fn a_sealed_seconds_month_reads_as_its_raw_form_and_a_refused_one_halts_by_name() {
+    let store = Scratch::new("reader-sealed");
+    let (monday, tuesday) = (day_of(2025, 3, 3), day_of(2025, 3, 4));
+    let mut march = full(monday, 3_171_000);
+    march.extend(full(tuesday, 3_172_000));
+    write_month(
+        &store.0,
+        Vendor::Zerodha,
+        &cash_key("SBIN"),
+        Timeframe::MINUTE_1,
+        (2025, 3),
+        &march,
+    );
+    let open = 9 * 3_600 + 15 * 60;
+    let seconds = [
+        second(monday, open, 3_171_001),
+        second(monday, open + 4, 3_171_002),
+        second(tuesday, open + 2, 3_172_001),
+    ];
+    write_month(
+        &store.0,
+        Vendor::Gdfl,
+        &cash_key("SBIN"),
+        Timeframe::SECOND_1,
+        (2025, 3),
+        &seconds,
+    );
+    let authorities = interim();
+    let widths = [1];
+    let read = |state: &mut StockState| {
+        read_stock_month(
+            &store.0,
+            &sbin_spec(&authorities, &widths, true),
+            &authorities,
+            state,
+        )
+    };
+    let raw = read(&mut StockState::first_day()).unwrap();
+    // Sealed as SC-3's sealer seals: built from the raw month's own header
+    // and rows, published by rename beside the raw form.
+    let key = cash_key("SBIN");
+    let at = StorePath::for_key(
+        Vendor::Gdfl,
+        &key,
+        Timeframe::SECOND_1,
+        YearMonth::new(2025, 3).unwrap(),
+        FileKind::Bars,
+    )
+    .unwrap();
+    let id = brutex_core::universe::fnv1a("SBIN") as u32;
+    let header = BarFile::open_existing(&store.0, at, id).unwrap().header();
+    let rows: Vec<Bar> = seconds.iter().map(|bar| bar_of(*bar)).collect();
+    let built = store::sealed::build(at, &header, &rows, None, None).unwrap();
+    let sbar = at.with_file(FileKind::SealedBars).to_path_buf(&store.0);
+    let staged = sbar.with_extension("staged");
+    std::fs::write(&staged, built.to_bytes()).unwrap();
+    std::fs::rename(&staged, &sbar).unwrap();
+    assert_eq!(
+        BarFile::open_existing(&store.0, at, id).unwrap().form(),
+        store::file::Form::Sealed
+    );
+    let sealed = read(&mut StockState::first_day()).unwrap();
+    assert_eq!(sealed.input, raw.input);
+    assert_eq!(sealed.seconds, raw.seconds);
+    let DaySeconds::Held(kept) = sealed.day(monday).unwrap().seconds else {
+        panic!("Monday's sealed seconds");
+    };
+    assert_eq!(kept.longest_gap(), 3);
+    // One byte short of the length its head states: the door refuses it.
+    let length = std::fs::metadata(&sbar).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sbar)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let mut state = StockState::first_day();
+    let refused = read(&mut state).unwrap_err();
+    assert_eq!(refused.word, "corrupt", "{refused}");
+    assert_eq!(
+        state,
+        StockState::first_day(),
+        "a halted read commits nothing"
+    );
+}

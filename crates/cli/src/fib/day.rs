@@ -2228,20 +2228,25 @@ pub fn read_stock_month(
         daily: Some(&daily),
         rename_conflicts: &minutes.conflicts,
     };
-    let input = build_month(&month_spec, &minutes.minutes, &cash, authorities, state)
-        .map_err(halt_as("month_refused"))?;
-    let seconds = if spec.seconds {
-        let held = load_series(root, pool, spec.series, spec.when, (Vendor::Gdfl, "1s"))?;
-        let days: Vec<i64> = input.days.iter().map(|day| day.day).collect();
-        Some(seconds_with_conflicts(
-            &held.minutes,
-            &days,
-            &cash,
-            &held.conflicts,
-        ))
+    // Every load comes before `build_month` advances `state`, the seconds'
+    // included: a halted read commits nothing.
+    let held = if spec.seconds {
+        Some(load_series(
+            root,
+            pool,
+            spec.series,
+            spec.when,
+            (Vendor::Gdfl, "1s"),
+        )?)
     } else {
         None
     };
+    let input = build_month(&month_spec, &minutes.minutes, &cash, authorities, state)
+        .map_err(halt_as("month_refused"))?;
+    let seconds = held.map(|held| {
+        let days: Vec<i64> = input.days.iter().map(|day| day.day).collect();
+        seconds_with_conflicts(&held.minutes, &days, &cash, &held.conflicts)
+    });
     // build_month accepted the month, so it is a civil month.
     let (first_day, last_day) =
         pull::session::Day::new(spec.when.0, spec.when.1, 1).map_or((1, 0), |first| {
