@@ -4572,3 +4572,19 @@ fn the_window_end_hole_is_for_an_unfilled_order_and_starts_past_the_limit() {
         SlotStatus::EntryUnfilled(UnfilledReason::WindowExpired)
     );
 }
+
+/// The excursions to the horizon start at the fill's own bar: its low and
+/// the very next bar's high count.
+#[test]
+fn the_horizon_excursions_start_at_the_fill_s_own_bar() {
+    let day = second_day(&[
+        bar(at(10, 0, 1), P, P + 300, P, P, 1_000),
+        quiet(at(10, 30, 0), P, 1_000),
+        quiet(at(15, 9, 0), P, 1_000),
+    ]);
+    let out = second_slot(&day, long_plan(at(10, 0, 0)), STOP_ONLY);
+    // Filled at the 10:00:00 high, P + 100.
+    assert_eq!(out.first_entry_second, at(10, 0, 0));
+    assert_eq!(out.mfe_to_horizon_paisa, (P + 300) - (P + 100));
+    assert_eq!(out.mae_to_horizon_paisa, (P + 100) - (P - 50));
+}
