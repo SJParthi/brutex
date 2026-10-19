@@ -12,7 +12,7 @@ use crate::ingest::{Filed as Landed, Ingested, from_rows, repair_rows};
 use crate::manifest::Held;
 use crate::session::Day;
 
-use super::causes::{ImportRefusal, Stage};
+use super::causes::ImportRefusal;
 use super::day::{Ctx, Mark, Staged, note_staged};
 use super::journal::BAR_DEFINITION;
 #[cfg(test)]
@@ -279,12 +279,18 @@ impl Drop for Finishing<'_> {
 /// coordinating thread serving the [`BeginGate`] meanwhile, and answers each
 /// job's result at its index. `Err` when no thread could be started, with
 /// why; a worker that panics is a panic of the run, resumed here.
+///
+/// A worker asks `stop` before it takes each job, never inside one (IA-2,
+/// D-4853): once a stop is seen no worker takes a new job, each finishes the
+/// one in hand, and the jobs answered are a prefix of `jobs` (an index is
+/// taken only after the ask, and indices are taken in order).
 pub(super) fn on_workers<J: Sync, T: Send>(
     workers: usize,
     jobs: &[J],
     gate: &BeginGate,
     write_begin: &mut dyn FnMut() -> Result<u64, ImportRefusal>,
     job: &(dyn Fn(&J) -> T + Sync),
+    stop: Option<&crate::gdfl_run::stop::StopControl>,
 ) -> Result<Vec<T>, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let want = workers.min(jobs.len()).max(1);
@@ -301,6 +307,9 @@ pub(super) fn on_workers<J: Sync, T: Send>(
                     let _finishing = Finishing(gate);
                     let mut done = Vec::new();
                     loop {
+                        if stop.is_some_and(crate::gdfl_run::stop::StopControl::requested) {
+                            break;
+                        }
                         let index = next.fetch_add(1, Ordering::Relaxed);
                         let Some(one) = jobs.get(index) else {
                             break;
@@ -504,7 +513,7 @@ impl Filing<'_> {
                 filed.refused = true;
                 filed
                     .failures
-                    .push(note_staged(run, self.day, &file.name, Stage::File, &why));
+                    .push(note_staged(run, self.day, &file.name, &why));
                 return (filed, false);
             }
         };
@@ -522,7 +531,7 @@ impl Filing<'_> {
             Err(why) => {
                 filed
                     .failures
-                    .push(note_staged(run, self.day, "journal", Stage::Journal, &why));
+                    .push(note_staged(run, self.day, "journal", &why));
                 return (filed, false);
             }
         };
@@ -557,7 +566,6 @@ impl Filing<'_> {
                             run,
                             self.day,
                             &handed.file.name,
-                            Stage::File,
                             &refusal,
                         )),
                     }
@@ -578,26 +586,18 @@ impl Filing<'_> {
                 Ok(confirmed) => filed.confirmed = confirmed,
                 Err(why) => {
                     let refusal = ImportRefusal::Filing { why };
-                    filed.failures.push(note_staged(
-                        run,
-                        self.day,
-                        &file.name,
-                        Stage::File,
-                        &refusal,
-                    ));
+                    filed
+                        .failures
+                        .push(note_staged(run, self.day, &file.name, &refusal));
                 }
             }
         }
         filed.held = done.pending;
         for failure in done.failures {
             let refusal = ImportRefusal::Filing { why: failure.why };
-            filed.failures.push(note_staged(
-                run,
-                self.day,
-                &file.name,
-                Stage::File,
-                &refusal,
-            ));
+            filed
+                .failures
+                .push(note_staged(run, self.day, &file.name, &refusal));
         }
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::debug(TARGET, "filed")
@@ -809,7 +809,7 @@ pub(super) struct DayFiler<'a> {
     pub(super) source: Option<Result<DaySource, String>>,
     pub(super) workers: usize,
     /// The day's `begin` line, once written.
-    begin: Option<u64>,
+    pub(super) begin: Option<u64>,
     pub(super) report: &'a mut Report,
     pub(super) held: Vec<Held>,
     pub(super) failures: Vec<Staged>,
@@ -833,6 +833,10 @@ pub(super) struct DayFiler<'a> {
     pub(super) confirmed: usize,
     /// Which files the day's reader is asked for (D-4878).
     pub(super) ask: Ask,
+    /// Whether a stop left a file of the day untaken (IA-2, D-4853): the
+    /// day then closes `incomplete stage=run reason=stopped` when its `begin`
+    /// was written, and writes no line when not.
+    pub(super) stopped: bool,
 }
 
 impl<'a> DayFiler<'a> {
@@ -874,6 +878,7 @@ impl<'a> DayFiler<'a> {
             confirm: left_open,
             confirmed: 0,
             ask: Ask::All,
+            stopped: false,
         }
     }
 }
@@ -893,6 +898,7 @@ impl DayFiler<'_> {
     ) -> Vec<JobRead> {
         let session = self.ledger.as_ref().map(|ledger| *ledger.session());
         let batch = self.batch.as_ref().filter(|_| self.enters);
+        let stop = self.ctx.options.stop;
         let filing = Filing {
             run: self.ctx.run,
             day: self.day,
@@ -924,6 +930,7 @@ impl DayFiler<'_> {
                         Err(refused) => JobDone::Refused(refused),
                     }
                 },
+                stop,
             );
             self.begin = gate.written();
             match threaded {
@@ -953,8 +960,10 @@ impl DayFiler<'_> {
                 Ok(written)
             };
             let _in_the_day = batch.map(store::file::DurableBatch::enter);
+            // The stop is asked before each file is taken (D-4853).
             let all = jobs
                 .iter()
+                .take_while(|_| !stop.is_some_and(crate::gdfl_run::stop::StopControl::requested))
                 .map(|job| match read(job) {
                     Ok((handed, contract)) => match filing.file(&handed, &begin, Door::Append) {
                         (_, true) => JobDone::BackFill(Box::new(handed), contract),
@@ -966,6 +975,11 @@ impl DayFiler<'_> {
             self.begin = line.get();
             all
         });
+        // A file left untaken is a stop inside the day: the jobs answered are
+        // a prefix of `jobs` on both paths.
+        if done.len() < jobs.len() {
+            self.stopped = true;
+        }
         let done = back_fill(&filing, self.begin, done);
         done.into_iter()
             .map(|one| match one {

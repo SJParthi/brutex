@@ -73214,6 +73214,196 @@ request sidecar (D-4902).
 `a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does`; cli
 `a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol`.
 Invariants IA1-06, IA1-12 and IA1-15 in `docs/04-invariants.md`.
+
+### D-4803 — The lock layout follows the census layout; every journal append takes the journal lock (IA-2) — 2026-10-18
+
+**Number** the design's own (`state/design/ingest-automation.md` §15, outside
+the repository), free at this head and cited nowhere before (A6, as D-4902).
+
+**Decision.** On a version-3 census a GDFL run holds `imports/gdfl.lock`
+exclusive: one GDFL run per store, whatever its kind. On version 4 it holds
+`imports/gdfl.lock` shared and `imports/gdfl.<kind>.lock` exclusive, its own
+kind's and no other, so kinds run beside each other and one kind is one run.
+`census-migrate`, its `--seal` and `census-recount` hold `imports/gdfl.lock`
+exclusive (`pull::gdfl_run::claim_census`, taken inside
+`census_store::migrate`, `seal_legacy` and `recount`), so a live run refuses
+them `run_busy` naming the run, and they refuse a press the same way. Every
+taker retries a busy lock `PROBE_RETRY` = 10 times 10 ms apart (D-4849). A run
+locates the census again after its locks and refuses `census_layout_changed`
+when a migration finished in between. A lock file is a regular file with one
+name, opened without following a link, and after its flock is taken its
+device and inode are compared with the name's: one removed or replaced under
+a live run (RA-285) is refused `lock_replaced`, and a run's release says at
+`error` when its lock was replaced meanwhile. **`imports/gdfl.journal.lock`**
+is taken by every append to the journal (`Journal::write`), by
+`census_store::append_journal`, and by `append_lines`, the one appender of the
+day, lineage, lots and scope ledgers beside it.
+
+**What it does not yet do.** `cli gdfl-dayflags` takes no kind lock (its
+appends are under the journal lock); WP-12c's `gdfl_rekey` keeps its own
+appender; a run does not re-check its lock's identity at each day's end, only
+at release. Each is named in IA-2's report.
+
+**Implemented by** IA-2. **Proof:** IA2-07, IA2-09, IA2-17, IA2-18.
+
+### D-4804 — A run's liveness is its lock file's claim; the journal gains no verb (IA-2) — 2026-10-18
+
+**Number** the design's own, free at this head.
+
+**Decision.** After its locks, a run takes the runs ledger lock, allocates
+its id (D-4847), writes its request sidecar when it has one (D-4907), writes
+its claim into the lock that holds it (truncate, write, `sync_all`), and
+releases the ledger lock. The claim is one line of at most 1,024 bytes, every
+field bounded (`docs/02-store-format.md` §37.2): the filter by count and a
+16-hex BLAKE3 digest, the host percent-encoded and cut on a whole escape at
+64 bytes (RA-307), `auto_resume=0` for every cli claim (the design's D-4848, IA-10a's to land). Release
+truncates the claim to 0 bytes and syncs it, removes the stop file and the
+request sidecar, and releases the flocks; a process that dies leaves its
+claim and the kernel frees the flock, which a probe reads as
+`Interrupted`. A lock taken over a dead holder's claim says "run superseded"
+with the old claim's text. `cli gdfl-import`'s door (AF-01, D-4977) now takes
+its lock through this authority, so a cli run and an api child take the same
+locks, the same kind of id and write the same claim; §41's holder record is
+retired for new runs and still read as a dead holder's.
+
+The journal gains no verb and no line type: `Stage::Run` (word `run`, last in
+`Stage::ALL`, searched second by `decisive()`), the reason `stopped`, and two
+fields: ` at=<unix_s>` on every close of a run the ledger knows, before its
+`run=` (DB-A50), and one more `run` line when such a run ends,
+`run <id> ended=<unix_s> outcome=<finished|stopped|code> definition=<n>`,
+which every reader since 3f65ad43 reads as a `run` line. A run with no ledger
+id (a test's bare reader) writes neither, so its journal stays a function of
+its inputs.
+
+**Implemented by** IA-2. **Proof:** IA2-10, IA2-11, IA2-14, IA2-16.
+
+### D-4826 — Retired by name: a run id stepped past the journal's ids (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** Round 1's "the run's start,
+raised past every id a `run` line holds" (`Journal::fresh_run`) is no longer
+how a run that holds a claim is named: its id is the runs ledger's (D-4847),
+handed to the importer as `RunOptions::run`. `fresh_run` stays only for a
+caller that holds no ledger (a test's bare reader), where it was always a
+pure function of the journal. Retired by name, not renumbered.
+
+### D-4827 — A stop is a stop file, written before the asker is answered and read before each file (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** One stop file per run process,
+beside the lock that holds its claim (`imports/gdfl.stop` on v3,
+`imports/gdfl.<kind>.stop` on v4; `docs/02-store-format.md` §37.4), born at a
+staging name, synced, renamed and its directory synced before the asker is
+answered, so an acknowledged stop survives a crash of either side. The run
+asks `StopControl::requested` before each file it takes and before each day,
+never inside a file: one atomic load and, while no stop is seen, one
+`metadata` (L-IA-16). `cli gdfl-stop (KIND | --run ID)` writes it for a run
+any process holds (`pull::gdfl_run::stop::request_stop`); it is exempt by
+name from the unstamped-build refusal (D-4894): a stop must never be refused.
+A second stop of the same run keeps the first asker (RA-336). The asker emits
+"stop requested" (audited, D-4893) and the run's "run stopped" carries
+`stop_by` and `requested`, read before release removes the file.
+
+**Implemented by** IA-2 (the run's half and the cli); the api's route and its
+shutdown are IA-10a's. **Proof:** IA2-13, IA2-14.
+
+### D-4847 — One runs ledger gives every run its id (IA-2) — 2026-10-18
+
+**Number** the design's own, as amended by D-4880. **Decision.**
+`<store>/audit/runs.ledger`: fixed 128-byte ASCII records ending in a CRC-32C
+(`docs/02-store-format.md` §37.5), allocated under `audit/runs.ledger.lock`
+(within `LOCK_WAIT`, D-4906) with one or two positional 128-byte reads, one
+write and one sync: `id = max(now, last + 1)`. A torn tail and a whole last
+record whose CRC fails are written over; an unborn ledger is seeded with
+`<n> seed - - 0 <now>`, `n` the journal's largest `run` id (L-IA-23); two bad
+records at the tail refuse `runs_ledger_damaged{offset}` with an error event
+and an alert keyed per offset, and nothing is written until the operator has
+looked. A record may carry ` resumes=<id>` (RA-230), so the chain of resumes
+reads back for ever. A clock before the calendar's first day, more than 366
+days past the last day its sources cover, or more than a day behind the
+newest record is refused `clock_implausible` (RA-292, RA-326): one start
+under a wrong clock would otherwise lift every later id for ever.
+
+**Implemented by** IA-2 (the GDFL runs and the census verbs); the Zerodha
+pull run's hook is IA-10b's. **Proof:** IA2-01 to IA2-05.
+
+### D-4849 — Probes never make a press busy; a claimed child runs only on `go` (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** `pull::gdfl_run::locks::lock_state`
+opens the GDFL lock files that exist (never creating one), tries each shared
+and non-blocking, reads at most 1 KiB and releases: `Free`, `Held{claim}` or
+`Interrupted{claim, stop_requested}`. Every taker retries a busy lock
+`PROBE_RETRY` = 10 times at 10 ms (L-IA-25). The child's half of the two-phase
+start (round 4, BL-A) is `pull::gdfl_run::start::await_go`: it prints
+`claimed run=<id> kind=<k>`, waits at most `GO_WAIT` = 15 s, runs on `go`, and
+on `release`, any other line, end of input or silence releases everything
+(claim truncated, sidecar removed, flocks freed), emits "run released before
+start" and leaves its id used in the ledger. The api's half (who sends `go`,
+the 409) is IA-10a's.
+
+**Proof:** IA2-08, IA2-12.
+
+### D-4853 — How a stop closes a day (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** Workers ask the stop before each
+file they take, so the files answered are a prefix of the day's. When a file
+was left untaken: if the day's `begin` was written, the day's batch is made
+durable, the census is published, its day-ledger line is not written (it
+would describe files never read), and it closes `incomplete <key> <stats>
+stage=run reason=stopped at=<t> run=<id>`; if no `begin` was written, no
+closing line is written at all. When the stop came after the day's last file,
+the day closes as it would have and the run stops before the next day. The
+run ends `ImportRefusal::Stopped{kind, day, by, requested, done}` (code
+`stopped`, `Stage::Run`, closes no day), and a resume reads the stopped day
+again and converges (D-2803).
+
+**Proof:** IA2-14, IA2-15.
+
+### D-4880 — One runs ledger for the store, both feeds (IA-2) — 2026-10-18
+
+**Number** the design's own; named pending in D-4971's list until now.
+**Decision.** D-4847's ledger is the store's, not GDFL's: its modes include
+`pull`, `pull-spot`, `pull-fno`, `pull-repair`, `zerodha-repair`,
+`zerodha-verify` and `verify-merge` beside the GDFL modes, and
+`pull::gdfl_run::ledger::allocate` gives an id to a run that writes no claim.
+A GDFL claim is written under the same hold as its id. **Implemented by**
+IA-2 (the ledger, its modes and the GDFL claims); IA-10b threads the id into
+the Zerodha landings (`Receipt::run`, D-4880's pending note). **Proof:**
+IA2-03.
+
+### D-4905 — A journal ordinal is counted under the journal lock (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-1). **Decision.** `Journal::write`
+takes `imports/gdfl.journal.lock`, then reads only the bytes appended since
+this run last knew the journal's length (O(bytes other writers appended),
+FM-094; a journal shorter than that is read again whole and said at `error`),
+closes a torn tail, appends and syncs, all under the lock: the line number
+`Journal::append` answers is the line this run wrote, so a `.prv` record's
+`journal_ordinal` names its own `begin` line with two kinds appending
+(FM-093). **Proof:** IA2-17; the timing in `docs/06-limits.md` L-IA-53.
+
+### D-4906 — No lock of this design waits for ever: `lock_stalled` (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-2); named pending in D-4971's list;
+D-4924 adopted it for the verdict commit lock. **Decision.** The journal lock
+and the runs ledger lock are taken through `locks::take_within` /
+`take_path_within`: a `try_lock` every 10 ms for at most `LOCK_WAIT` = 30 s,
+then `lock_stalled{lock}` with an error event naming the lock and the wait. A
+journal append refused so is a journal refusal at `Stage::Journal`; a ledger
+allocation refused so refuses the start. The audit-ledger and alert-queue
+locks are IA-16's and IA-11a's. **Proof:** IA2-06.
+
+### D-4907 — The request sidecar: a CRC, its digest in the claim, never torn; only a verified one is resumed (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-3). **Decision.** A run under a filter
+or a snapshot name writes its request line (D-4902) as the request sidecar
+beside its claim's lock, with ` crc=<8 hex>`, born at a staging name, synced,
+renamed (`docs/02-store-format.md` §37.3); the claim names the sidecar's
+16-hex BLAKE3 in `request=`, or `request=-`, in which case a sidecar a dead run
+left is removed. `locks::read_sidecar` answers `Verified(line)`, `None` or
+`Stale(why)` (missing, torn, CRC, another digest); a claim that does not parse
+is `Unreadable`. Auto-resume (IA-10a) fires only on `request=-` or a verified
+sidecar. This also records the snapshot name IA-1 found recorded nowhere
+(D-5831's NOT DONE). **Proof:** IA2-10, IA2-11.
+
 ### D-5833 — R4-07 repair 2: a shrunk listing is accepted by an exact count the operator writes; a link's host is what a URL reader connects to; a free-space answer no filesystem gives is refused; the package's gate 11 and gate 1d accounts are settled — 2026-10-18
 
 Renumbered at the merge into feat/db-fix from D-5831 (and its sequel from D-5832 to D-5834): IA-1 had taken D-5831 first (amendment A6).
@@ -74033,6 +74223,327 @@ this is a narrow or short desktop window.
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
 
+### D-5884 — IA-2 repair 1: a run's end line is folded into its run by every reader; stop askers write in turn under the journal lock; a busy store lock on v4 names its runs; a held lock is named before its sink; a census verb is never promised a stop — 2026-10-18
+
+**Number** free on every local branch on 2026-10-18 (the highest seen was
+D-5883); A6 renumbers it at landing from the ledger's head. **Amends** D-4804
+(the end line), D-4827 (the stop file) and D-4803 (the census verbs' refusal).
+**Decision.** (1) `run <id> ended=.. outcome=.. definition=..` is a fact about
+run `<id>`, never a run of its own: `/imports.json`'s reader folds it into the
+newest `run` line of its id (fields it lacks are added; a disagreeing one is
+kept as `end_<name>`; `end_line` names it), so `runs_total` counts runs. An end
+whose start the journal does not hold is listed as itself. (2) Stop askers
+write in turn under the journal lock beside the stop file (`imports/
+gdfl.journal.lock`, at most `LOCK_WAIT`): each reads the file under the lock
+and, when it names its run, writes nothing and is answered with that line;
+otherwise it stages under a name of its own (`<stop>.<pid>-<n>.tmp`) and
+renames it into place. Every asker of a run is answered with the one line the
+file holds. A `link(2)` without the lock was tried and refused by its own
+test: replacing a stop file of an ended run cannot be made atomic without one. (3) On v4 the store lock's own text is empty while runs hold it
+shared, so a refused census verb names each live run from the kind locks (run,
+kind, pid, by, started), and the empty-holder words say no claim names the
+holder yet rather than claim one is being written. (4) A second run of a held
+lock is refused its sink before any lock; the plan then probes that lock
+shared and answers `run_busy` naming the holder in the door's words, never
+`log_unavailable` alone. (5) A census verb reads no stop file, so a stop of
+its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
+written. (6) A runs ledger whose last id is `u64::MAX` refuses
+`runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
+
+### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.4, §6; its proposed D-4929, renumbered here at landing: the ledger's
+head was D-5834 on `feat/db-fix` and D-5884 on unmerged branches) gives a
+closed month a second form, the sealed `.sbar` of D-4965. SC-3 is the read
+half of that decision.
+
+**The door.** `BarFile::open_existing` resolves the served generation, then
+opens `<yyyy-mm>.sbar`; on `ENOENT` the raw `.bin`; when the `.bin` is absent
+too, or its shared lock is refused, `.sbar` once more, because a retirement
+(design §4.7, SC-9, off until the operator's decision) may have run between
+the two opens. At most three opens and no directory listing, so the cost of
+choosing a form is constant. Overlay and greeks files have no sealed form.
+
+**Same bytes, same cache.** A sealed handle holds the raw month's committed
+header (the head copies it), takes no lock (an immutable file published by
+rename has no writer), and fills the handle's one cached block with a decoded
+frame's 56-byte record images: the cache grows from 4,088 to 14,336 bytes
+(`CACHED_BLOCK_LEN`; the raw verify path keeps its 4,088-byte stack buffers,
+D-0914). `read_record`, the bisection, `already_stored`, every page and every
+run identity see the same records from either form. `read_range` (the page
+path: one read of adjacent directory entries, one of adjacent frames) and
+`read_rows_at` (the sorted page path: each frame decoded once) are new on
+`BarFile` for both forms. Time lookups use the sealed time table
+(`TimeLookup::Sealed`); `index_existing` answers `Reindexed::Sealed` and
+writes nothing.
+
+**Never the other form instead.** A sealed month that fails any check is
+`StoreError::SealedRefused` naming the `.sbar`, its stable reason and the block
+or field. Answering from the `.bin` would be the hidden fallback `CLAUDE.md` §4
+bans: the door opened the sealed form, and the sealed form is what is reported.
+A page reader that meets a refused frame reads record by record so each
+refused row is named in the fault log.
+
+**Provenance, listings, the audited door.** `provenance::read` reads the
+packed section of a sealed month first (and once more after a `.prv` that is
+absent). `generation::served_bars_path` names the `.sbar` when the served
+generation holds one, so every cache keyed by it changes key when a month is
+sealed. `store::catalog`, the census recount and `api`'s held months count a
+month in either form once; a lone `.sbar` is a month, and a damaged one is
+named unreadable, never passed over as a sibling (verify-SC-2-r1). The audited
+door decodes the sealed form whole, audits the raw form, and refuses unless
+both state one header and one records BLAKE3; a sealed month with no raw form
+beside it has no strict receipt and says so.
+
+**Not decided here.** The write door (`StoreError::Sealed`, `AlreadyPresent`
+for a re-offer) is SC-4's; `.srt` v2 is SC-5's; sealing is SC-6's; retiring the
+raw form is SC-9's and needs the operator's decision. Until SC-6 lands nothing
+in the store writes a `.sbar`, so this door changes no answer the live app
+gives today.
+
+### D-5900 — The read door's key follows the file it serves, `cli tix-rebuild` names a sealed month, a route figure counts only answers that were 200, and a month held in both forms is one instrument-month (SC-3 repairs 1 and 2, verify-SC-3-r1 and r2) — 2026-10-18
+
+A second agent re-checked D-5899 on the package branch and failed it on two
+claims in `docs/06-limits.md` L-SC-24, not on the code. Three choices follow,
+each an addition to D-5899, none a change to it.
+
+**A figure is the time of an answer, never of a refusal.** L-SC-24 gave
+`/calendar.json` "0.25 ms" over sealed months. The timing script recorded no
+HTTP status, and on a private root holding the listed months but not the rest
+of a series the census holds, that route answers 202 (`building`: the
+calendar is built in the background, retry) and then 503 (95 BANKNIFTY bar
+files the census holds could not be opened, so no calendar is answered), by
+design: it refuses rather than answer a calendar over months it cannot open. The route
+figures are now re-measured with every answer's status recorded
+(`state/fix/round2/sc3r1-warm.txt`, `all200=yes` on every quoted line), on a
+root holding every month of each series it serves. A line with any status but
+200 is never quoted as the route's figure.
+
+**First requests are named, not denied.** L-SC-24 said every max was under
+50 ms. The first request after a start fills in-process memos and costs
+more, in both forms. Its floor, about 38 ms even for a one-month window, is
+paid once a process by whichever GDFL bar route comes first: it parses the
+whole GDFL lineage ledger (`bars::change::Lineage::read`, 50 of 54 samples
+of that request), and a later series' first request costs 1 to 2 ms. Above
+the floor, a series' first request over N months builds its plan, month
+extremes, time-of-day runs and sort view from every month in range, O(N)
+bounded by `MAX_WINDOW_MONTHS`, and a share's first request on a day from
+2026-08-03 loads that day's closing-auction master (L-AG04-02). L-SC-25
+gives those figures and their cause, and
+`the_sealed_route_limits_time_answers_and_name_first_requests` holds that
+row and L-SC-24 to the bound in the code and the parse they name; the warm
+figures stay in L-SC-24. Prewarming the memos at start was not chosen: it would move
+O(every month held) of work into every start, which is the cost the memos
+exist to avoid paying for months nobody asks for.
+
+**The key is the file the door serves.** The door's open follows a final link
+exactly as the raw reader's does (only the writer door refuses links, D-2686),
+so `generation::served_bars_path` asks `stat`, not `lstat`: a `.sbar` that is
+a link to a sealed file is the key, and a link that points nowhere is no sealed
+month to either. `cli tix-rebuild` prints `sealed` for `Reindexed::Sealed`
+and `TimeLookup::Sealed`, tallies `sealed N` in both receipts, reads the month
+back through the sealed table, writes nothing beside it and is clean; before,
+it REFUSED the month as "an outcome this build does not know". The receipt
+line `small N,` is now followed by `sealed N,` in both runs.
+
+**Repair 2 (verify-SC-3-r2): a month held in both forms is one
+instrument-month.** The second agent failed the package on one claim, and it
+was right: `store::catalog::walk` returned one `Held` per month in either form
+(the dedup did that), but `Census::spot` counted every `.sbar` beside its
+`.bin` as well, and `cli sweep-all` prints `spot` as "store holds N spot
+instrument-month(s)". On a private root whose 1,176 months were each sealed
+beside their raw form it printed 2,328 (1,176 `.bin` + 1,152 `.sbar`), where an
+APFS clone of the same months, raw only, printed 1,176; the package's own test
+pinned the double count (`spot == 4` for three months). Nothing showed it on
+the real store, which holds no `.sbar`; it would have shown on the first sealed
+month.
+
+Chosen: **`spot` counts months; the second file of a month is a bucket of its
+own, `Census::sealed_twin`**, which `Census::reconciles` sums, so every file
+seen is still filed exactly once. The twins are counted after the walk, as the
+rows the dedup removed: a `Held` is the whole path but its extension, parsed
+exactly, so two files are one row only when they are `<month>.bin` and
+`<month>.sbar` in one directory. That costs no system call and cannot
+disagree with what the walk saw, where asking for the `.bin` beside each
+`.sbar` would have cost a stat per sealed month and could race a retirement.
+`Census::sealed` is one per sealed month (a sub-count of `spot`, not a
+bucket). A `.sbar` whose `.bin` is a link is the month: the link is `linked`,
+not held, so there is no twin.
+
+Rejected: printing the deduplicated `held.len()` in `cli` and leaving `spot`
+as files. Every other reader of `spot` (`cli research`, which called it "spot files" and now says
+"spot instrument-months"; the pool page's uncatalogued premise) would have
+kept a number that means files on one store and months on another, and the
+next caller would have printed it as months again. Invariant SC3-13; tests
+`the_catalog_holds_a_month_in_either_form_once` (store) and
+`a_month_in_both_forms_is_one_instrument_month_on_the_report` (cli), each of
+which fails on the code before this repair.
+
+**Repair 2, a follow-up taken with it: the provenance door opens the `.sbar`
+the bar door serves.** The same check named a smaller split: `BarFile`'s
+sealed open follows a final link at the `.sbar` (as the raw reader's open
+follows one at the `.bin`), while `provenance::read` opened the same name with
+`O_NOFOLLOW` and refused it, so a month whose `.sbar` is a link answered its
+bars from the sealed file and refused its provenance. Both are loud, so no
+answer was wrong, but one month had two answers to "which file is it".
+Chosen: `provenance::read` opens the `.sbar` through
+`store::file::open_read_existing`, the bar door's own open (`O_NONBLOCK`, a
+final link followed, a non-regular file refused by name, a dangling link
+absent), so the packed image it reads is always the one the bar door serves.
+The raw `.prv` sidecar keeps `O_NOFOLLOW`: it is a separate file the bar door
+never opens, and nothing here changes it. Invariant SC3-14; test
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it with the link refused.
+
+**And a second follow-up: only an absent `.sbar` keys the `.bin`.**
+`generation::served_bars_path` keyed a month by its `.sbar` only when that was
+a regular file, so a directory (or any non-regular file) at the `.sbar` keyed
+the `.bin`, while the door refuses such a `.sbar` by name and never opens the
+`.bin` past it. The api's header and runs memos are keyed by that path and its
+stamp, so a month cached raw kept answering from the raw form's cached header
+after the door had begun to refuse it. Chosen: the key mirrors the door's own
+rule: `ENOENT` (a dangling link included) is the only answer that keys the
+`.bin`; anything else at the name is the key, and the door's refusal follows.
+Still one `stat`. Invariant SC3-15; the directory case of
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it.
+
+### D-5901 — IA-2 repair 2: the journal keeps each key's hole reason, first landing and last done; every import ledger closes a torn or zeroed tail with the mark under the journal lock, the re-key's included; a recount the runs ledger knows closes as a ledger run — 2026-10-19
+
+**Number** free on every local branch on 2026-10-19 (the highest seen was
+D-5900); A6 renumbers it at landing from the ledger's head. **Amends** D-4803
+and D-4906 (which appends take the journal lock), D-2814 (the torn mark, now
+every import ledger's), D-4851 and D-4882 (what a reader keeps), and D-5884
+(the end line, now the recount's too). **Decision.** (1) `Journal::read_line`
+keeps, per key, the `reason=` of its last `incomplete` line, the definition
+and `run=` of its first close whose `seconds=` is above zero, and the
+definition and `run=` of its last `done` close; a `recounted` line is not a
+`done` close and leaves the last one. Each map holds one entry a key, so the
+load stays O(1) a line and O(keys) in memory. A line's acceptance is
+unchanged: a `seconds=` that is not a count lands nothing. The reader's public
+door is `JournalReader::history`; the plan, Resume and verification detail 17
+(IA-16, IA-6) read it there and never read `audit/gdfl.repairs` for it. (2)
+The shared ledger append closes a torn tail, and a tail of NUL bytes a power
+cut can leave (FM-128), with ` (torn)` before the next line, said at `warn`
+(`closing a torn ledger line`), where it closed one with a bare newline that
+left the fragment a line a reader could take for data. (3) `cli gdfl-rekey
+--apply` appends its `superseded` and `retired` lines through that one append,
+so they wait for the journal lock (`lock_stalled` by name past `LOCK_WAIT`,
+nothing written) and the torn tail is decided from the file's last byte while
+the lock is held, never from the ledger read the plan was made from (which
+glued its first record to a fragment appended since, or wrote a mark line for
+a tail another writer had closed). Its own unlocked append is removed. A plan
+with a line to write first waits for that lock once and lets it go, so a stall
+is refused before a month moves (`nothing was written`): refused only at the
+append, after its moves, a re-run found the decoded key holding the moved days
+with no `superseded` line naming them its copy and named the move twice
+(`ContractNamedTwice`) instead of finishing it. (4) A
+census recount holding a runs-ledger id (IA-2) writes ` at=<unix_s>` before
+`run=` on every `recounted` line and ends the same append with `run <id>
+ended=<unix_s> outcome=finished definition=4`, the import's own end line; a
+caller with no ledger id writes neither, so its journal stays a function of
+its inputs. (5) Amends D-4880: a runs ledger whose last record fails its CRC
+has it written over, as before, but its id is no longer assumed unused (bit
+rot reads the same as an unfinished append): the allocation reads the
+journal once and raises the new id past its largest `run` id, and says so at
+`warn` (`runs ledger last record written over`). The bad bytes are never
+parsed for an id. O(journal) on that rare path only. Not decided here: the
+re-key taking the GDFL store lock as a census verb does (named for IA-16).
+**Proof:** IA2-27 to IA2-31.
+
+#### Cited, never written
+
+Each number below is cited under `crates/` by IA-2 repair 2 and heads no
+entry here. Each says where its citation resolves.
+
+* **D-4851 and D-4882.** Numbers the ingest-automation design
+  (`state/design/ingest-automation.md` §15, outside this repository) gives to
+  "a failure never strands an earlier day" (holes are reasons, not closes)
+  and "the rule set of a stored unit is its landing's". Neither has been
+  written as an entry here: their whole rules land with IA-16 and IA-6. The
+  part `pull`'s journal reader cites them for, what a reader keeps of each
+  key's closes (the last `incomplete` line's `reason=`, the first close that
+  wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
+  citation of either resolves to D-5901 until its own entry is written.
+
+### D-5902 — The sealed codec's bounds say what the code does: an accepted frame grows the caller's buffer by `Vec`'s amortised rule, not by its rows, and a frame of `m` rows is at most `56m + 172` bytes; D-4939 #5 amended by addition (AH-05, g-sc1-codec-3, g-sc1-codec-4) — 2026-10-19
+
+**Findings** g-sc1-codec-3 and g-sc1-codec-4 (both low; the 14 October attack
+run, each confirmed by two skeptics). Both are claims, not code: the codec
+(SC-1, D-4939) was right, and the documents stated bounds it does not keep.
+
+1. **g-sc1-codec-3.** `decode_frame` and `decode_stamps` call
+   `out.reserve(rows)` once, after the whole frame is checked. SC1-09, L-SC-1's
+   memory clause, the `decode_frame` doc and its comment ("reserves exactly the
+   rows its checked head states"), D-4939 #5 and the comment in
+   `crates/pull/tests/allocation.rs` said the caller's buffer grows by the
+   checked rows and no more. `Vec::reserve` promises at least the rows: onto a
+   full 10,000-row buffer a 256-row frame is one `realloc` to a capacity of
+   20,000 (1,120,000 bytes, 9,744 rows more than asked), and 1 to 3 rows into
+   an empty buffer take a capacity of 4 (224 bytes for one 56-byte bar). "Bytes
+   a call = rows × 56" cannot hold for a full non-empty buffer under any API,
+   since a `realloc` asks for the new total.
+2. **g-sc1-codec-4.** The module doc, SC1-02 and L-SC-12 put random fields at
+   57 bytes a bar or less in any frame. A frame of `m` rows is at most
+   `max_frame_len(m)` = `4 + 70 + 7 × (22 + 8 × (m − 1))` = `56m + 172` bytes,
+   which is 57 a bar or less only from `m = 172`, and one random bar is 102
+   bytes. The proof cited, `no_frame_exceeds_the_bound`, measured 256-row
+   frames only.
+
+**Decided.**
+
+1. **No code changes.** `reserve_exact` would make a caller that decodes a
+   month frame after frame into one buffer reallocate and copy on every frame,
+   quadratic over the month; amortised doubling is the class `CLAUDE.md` §3
+   rule 4 already names for result append. FM-284's promise is unchanged and
+   still pinned: nothing is allocated before the whole frame is checked, and a
+   refused frame allocates 0 bytes in 0 calls.
+2. **The growth bound is restated** in SC1-09, L-SC-1, the module doc, both
+   decoders' `# Allocation` docs and comments, and the allocation tests'
+   comments: one `Vec::reserve` of the checked rows; nothing into a buffer with
+   the room; onto a buffer short of the room, a capacity of the largest of
+   twice the old, its length plus the rows, and 4. So into an empty buffer
+   that never allocated (capacity 0) it is exactly the rows when they are 4 or
+   more and a capacity of 4 for 1 to 3, while a cleared buffer keeps its
+   capacity and doubles like any other (256 rows into one of capacity 200
+   take 400). That rule is today's `std`, not a documented promise of `Vec`;
+   the tests pin it, so a change in it is seen rather than assumed. A caller
+   that needs the bound in its own rows pre-sizes its buffer.
+3. **The byte bound is restated** in SC1-02, L-SC-12 and the module doc: a
+   frame of `m` rows is at most `56m + 172` bytes; a full 256-row frame of
+   random fields 57 a bar or less; a short one more, measured at every `m`; a
+   month of `n` bars in `f` frames at most `56n + 172f` bytes, above 57 a bar
+   by that bound only for months of 1 to 171, 257 to 343 and 513 to 515 bars.
+4. **D-4939 #5 is amended by addition, not rewritten.** Its "an accepted frame
+   reserves its checked rows once" is one `reserve` call of the checked rows;
+   the capacity that call leaves is item 2's. `docs/02-store-format.md`'s
+   sentence (one reserve of the head's rows) is true and is not edited here
+   (it is AF-01's file this round).
+5. The store test `an_accepted_block_grows_the_buffer_by_its_rows` is renamed
+   `an_accepted_block_grows_an_empty_buffer_by_its_rows`, which is what it
+   tests. `pull`'s `an_accepted_block_reserves_its_stated_rows_and_no_more`
+   keeps its name, since into an empty buffer it is exact, and its doc says so.
+
+**Cost.** No route or operation changes. Measured by a counted allocator
+(`a_month_decoded_into_one_buffer_reallocates_by_doubling`): 2,022 full frames
+decoded one after another into one empty buffer make 12 allocating calls
+(capacity 256 doubling to 524,288 rows for 517,632 held), bytes a call p50 0,
+p99 0, max 29,360,128; into a buffer pre-sized for the month, 0 calls. The code
+is unchanged, so before and after are the same.
+
+**Proof.** `crates/store/src/sealed_codec_tests.rs`
+`every_frame_meets_its_documented_byte_bound`;
+`crates/store/tests/sealed_codec_alloc.rs`
+`a_one_row_frame_into_an_empty_buffer_takes_the_minimum_capacity`,
+`a_full_buffer_grows_by_amortised_doubling_not_by_rows`,
+`an_accepted_block_grows_an_empty_buffer_by_its_rows`,
+`the_documents_state_the_bounds_the_codec_keeps`;
+`crates/pull/tests/allocation.rs` `sealed_codec::` the same two pins under a
+counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
+and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
+L-SC-12.
+
 ### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
 
 **Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026
@@ -74162,7 +74673,19 @@ fallback `CLAUDE.md` §4 bans.
    absolute. Off macOS D-5240 stands: `statvfs(2)` in `f_frsize` fragments and
    the walk upward. `filesystem.source` names the call made, `statfs` on macOS
    and `statvfs` elsewhere. No page reads `source` (`web/src` has no reader of
-   it), so the change is the label only.
+   it), so the change is the label only. **ON APFS `used_bytes` IS NOT `df`'s
+   USED.** `total_bytes`, `free_bytes` and `mount` are what `/bin/df -Pk`
+   printed, byte for byte; `used_bytes` is too off APFS. On APFS several
+   volumes share one container, `f_blocks` and `f_bfree` are the container's,
+   and `df` prints the volume's own allocation in its Used column, which no
+   field of `statfs(2)` carries (how `df` reads it was not read: UNVERIFIED).
+   There `used_bytes` is the container's allocation, at least `df`'s figure
+   and above it by what the container's other volumes and reserves hold: on
+   the operator's machine about 90.9 GB on the boot volume and 0.86 GB
+   (855,900,160 bytes, the same on every quiet round) on the external drive
+   holding the store, `docs/06-limits.md` L-RUST1-1. No page reads
+   `used_bytes` (`web/src/lib/disk.js` shows free of total); an API reader
+   tells which call measured it by `filesystem.source`.
 2. **An answer no filesystem can give is refused by name**, never turned into
    a number: a fragment of 0 bytes, more free or more available fragments
    than there are, and a byte count above 64 bits. The refusal is the
@@ -74171,11 +74694,18 @@ fallback `CLAUDE.md` §4 bans.
 
 **Proof.** `the_filesystem_numbers_are_what_the_call_returns`,
 `counts_no_filesystem_can_have_are_refused_by_name` and, on macOS only,
-`on_macos_the_answer_is_what_bin_df_printed` in `crates/api/src/disk_route.rs`
-(RUST1-05, RUST1-08, RUST1-09): the last compares the route with `/bin/df -Pk`
-started by the test, byte for byte and mount for mount, on the temporary
-directory (the boot volume behind the firmlink) and on the crate's own
-directory (the external drive), three quiet reads each.
+`on_macos_total_free_and_mount_are_what_bin_df_printed` in
+`crates/api/src/disk_route.rs` (RUST1-05, RUST1-08, RUST1-09). The last starts
+`/bin/df -Pk` from the test and, on the temporary directory (the boot volume
+behind the firmlink) and on the crate's own directory (the external drive),
+three quiet rounds each, holds `total_bytes`, `free_bytes` and `mount` equal
+to `df`'s byte for byte, and `used_bytes` equal to `df`'s Used off APFS and at
+least it on APFS; it prints each pair. A round whose counts moved between the
+reads around it, or whose total or free bytes still disagree, is retried, up
+to 200 (L-RUST1-4). *Proof and the APFS sentence of item 1 corrected on 19 Oct
+2026, before this entry landed: it named a test that does not exist and
+claimed `df`'s figures byte for byte with no APFS exception (D-5244, the
+re-check that found it).*
 
 ### D-5242 — `rustix` stays as `/disk.json`'s one new dependency: no crate already in `Cargo.lock` gives a safe `statvfs`; its build script's `rustc` probes are measured and listed, not exempted (RUST-1 merge-back) — 2026-10-17
 
@@ -74256,3 +74786,154 @@ to show a page in the operator's browser is known here), which stays R3-32's.
 **Proof.** `no_shipped_code_starts_a_program_outside_the_allowlist` failed
 before the entry with the line above and passes after it;
 `the_allowlist_is_the_two_browser_openers_alone` (RUST1-01).
+
+*Entry narrowed on 19 Oct 2026, before it landed: the allowlist names a
+function by its whole path in its file, `<Notify for Opener>::notify`, so
+another `notify` (`RecordOnly`'s, or one in a nested module) no longer shares
+the count; a spawn in one fails as not allowed (D-5244).*
+
+### D-5244 — The spawn gate is a model of `rustc` and Cargo that claims only the spellings it lists and refuses what it cannot place: import groups, macro variables and repetitions, shebang lines, whitespace and escapes as `rustc` reads them, what shipped code reaches under `tests/`, every directory and manifest; an allowlist entry is a function's whole path (RUST-1, repair round 1) — 2026-10-19
+
+**Finding.** A re-check of `fix/db-CLOUD-RUST1` at `8929f991` (19 Oct 2026,
+`state/fix/round2/verify-CLOUD-RUST1-r1.json`) planted spawns in shipped code
+and found six the gate (D-5240) passed with nothing allowed, each compiling
+under `#![forbid(unsafe_code)]` with rustc 1.97.1: `use std::process::{self as
+q}` then `q::Command`; the same from `tokio`; `use std::process::{*}`; a macro
+body `std::process::$t::new(..)` called as `mk!(Command)`; a first line
+`#!/x "`, which `rustc` drops as a shebang and the gate lexed as a string
+opening that hid the rest of the file; and a shipped `#[path =
+"../tests/h.rs"] pub mod h;`, whose file the gate exempted for sitting under
+`tests/`. Its walk skipped every directory named `target` at any depth, so
+`crates/api/src/target/mod.rs` went unread, and its allowlist matched a file
+and a bare function name, so `mod sneaky { fn open_unless_suppressed() { .. }
+}` in `server.rs` took the entry over. Reproduced here with the checker's own
+probe before any change: the six MISSED and the spoof passed. The gate's
+header, RUST1-02, RUST1-03 and L-RUST1-2 claimed coverage it did not have. Two
+more were found while fixing: a `#[path]` on `pub mod name;` was dropped,
+because the visibility was read as the item's start and took the attributes
+with it; and an integration test that `#[path]`s the crate root in made the
+crate root, and every module it declares, test code.
+
+**A second pass on 20 Oct 2026, before landing** (repair round 1b), attacked
+the repaired gate the same way. A 30-case probe (26 spellings, 4 controls)
+found all 26 passed, and two placements besides; each compiled with rustc
+1.97.1 on the operator's APFS drive and started `/bin/echo`, the four
+manifest ones as a crate Cargo built (`scratch/fix-CLOUD-RUST1-r1b/compile/`,
+`manifest/`, `state/fix/round2/logs-CLOUD-RUST1/r1b-manifest-cargo-build.log`): a macro repetition
+joining the path (`$($s::)*Command`, `$(::$b)*::Command`, `$($p)*::Command`),
+the module before a variable or a repetition (`std::process $(::$t)*`,
+`std::process $b $a`), a macro body handing one half on beside a variable
+(`j!($($s)* Command)`, `j!(std process $t)`, `k!(Command, $($s)*)`); a
+left-to-right mark inside the path, whitespace to `rustc` and not to
+`char::is_whitespace` (a right-to-left one after `::` was refused by chance); `include!` in brackets or braces, under
+`r#include`, or imported under another name; `#[r#path]`; the first of two
+`#[path]`s (the gate kept the last); a path spelled with `\x2f` or `\u{2f}`,
+which the lexer did not decode; an inline module given a `#[path]` or an
+inner `#![path]`; an `include!` or a `#[path] mod` in a `macro_rules!` body
+called from another directory, which `rustc` resolves at the call; a
+`#[path]` inside an inline module of a `#[path]`-loaded file, read without
+its stem; and in a manifest, a quoted key, a `#` inside a value, a
+multi-line value and a `\u002F` escape. Found while fixing, planted in the
+gate's tests and not built: a nested package's manifest, which went unread,
+and a value spelling `["test"]` on its own line, read as a `[[test]]` header.
+The two placements: a
+name in another case, which the case-insensitive disk finds, and an
+`include!` of a `.md` file. The title this entry
+had, "reads what `rustc` reads", claimed what a lexer cannot claim.
+
+**Decision.** Each is closed at its cause in
+`crates/vocab/tests/no_runtime_spawn.rs`, the gate claims only what it lists
+and plants, and what is still not seen is said:
+
+1. **Spellings.** Refused, besides the path, a group holding the type,
+   `process::*` and `process as`: a `process::{..}` group holding at any
+   nesting a `*`, a `self as` or a macro variable; a path going on from
+   `process::` with anything but a plain name, and the module's name straight
+   before a macro variable or a repetition; the type after a `::` that
+   follows no identifier (a generated segment, a group, a repetition),
+   straight after a repetition, or straight after a macro variable
+   (`$m::Command`, or `$s Command` where `$s` is `::`); two variables joined
+   (`$m::$t`); a `use` built from a macro variable; a macro invocation handed
+   the bare module name and the type apart, or either beside a macro
+   variable; `mod $name;`; an `include!` of no plain string, and a `use`
+   naming `include`. `$crate`, `x::`, `<S as T>::` before the type are plain
+   paths. Attribute bodies are read for the same spellings.
+2. **Lexing.** A leading byte-order mark and then a shebang line are dropped
+   as `rustc_lexer::strip_shebang` drops one: `#!` whose next token, past
+   whitespace and plain comments, is not `[`. `#!` before `[` is an inner
+   attribute and is read. Checked against rustc 1.97.1 on 19 Oct 2026 with
+   `--emit=metadata` on six scratch files: `#!/x "` and then code compiles
+   (the line is dropped), with a byte-order mark before it or not;
+   `#! /* c */ [allow(unused)]`, and `#!` with `[allow(unused)]` on the next
+   line, compile as inner attributes; `#! /// doc` with `[allow(unused)]` on
+   the next line fails with "expected item, found `[`", the doc comment having
+   ended the search, as this lexer reads it. `\r\n` is `\n`; whitespace is
+   `rustc_lexer::is_whitespace`'s set; a string's escapes are decoded (`\x`,
+   `\u{..}`, a line continuation and the whitespace after it); a raw
+   identifier is the same name (`r#include`, `r#path`).
+3. **What ships.** A file is test code by RUST1-03's rules and shipped
+   whenever shipped code reaches it: a `mod` by its default paths, its first
+   `#[path]` and every later one, or a `cfg_attr` path; an `include!` in any
+   delimiters; a module beside a `#[path]`-loaded file, and what a
+   non-`mod.rs` file declares looked for both under its stem and as a
+   `mod.rs` names it; a manifest target other than a `[[test]]`, the manifest
+   read as TOML; and a crate root the build compiles (the library, a binary,
+   the build script, a bench or an example) whatever else names it, so an
+   integration test that `#[path]`s one in exempts nothing. Closed over what
+   each reached file declares, under `tests/` or not. Only `#![cfg(test)]`
+   keeps a declared file test code.
+4. **What it cannot place is refused by name** (RUST1-13): a shipped
+   declaration with no `.rs` file where the model looks; an inline module
+   given a `#[path]` and any inner `#![path]`; an `include!` or `mod name;` in
+   a `macro_rules!` body; a manifest target of another kind or naming no
+   source; a manifest value in a multi-line string; and a shipped declaration,
+   a manifest target, a path dependency, a `[patch]` or a workspace member
+   outside `crates/`. A model that cannot place a file now fails loudly
+   where it used to pass quietly, which is what made most of the second
+   pass's spellings possible.
+5. **The walk.** Nothing under `crates/` is skipped by name; every
+   `Cargo.toml` there at any depth and the workspace's are read; every other
+   file is listed unread; a link is refused by name rather than passed over.
+6. **The allowlist.** An entry is the function's whole path in its file:
+   inline modules, traits, `impl` headers with generics and `where` dropped,
+   enclosing functions. The watchdog's entry is `<Notify for Opener>::notify`
+   (D-5243's note); `the_allowlist_is_the_two_browser_openers_alone` also
+   checks the file still has `impl Notify for Opener {`.
+
+**Still not seen**, and said in the gate's header and L-RUST1-2: a spelling
+the header does not list (the list is the claim, not a proof that no other
+exists); a dependency's own code, its re-export of the type under another
+name, and a dependency's macro whose own body spells the type; what a
+procedural macro or a build script generates; a foreign call (gate 16 closes
+it); the `cfg` predicates the gate does not evaluate, which it reads as
+shipped, erring towards failing; a build that sets `test` outside the harness
+(`--cfg test` in `RUSTFLAGS` or a `.cargo/config.toml`, a build script's
+`cargo:rustc-cfg=test`); and a file Cargo reads unasked outside `crates/`,
+such as a `.cargo/config.toml` overriding a dependency's source.
+`Cargo.lock` holds no crate whose run-time API starts a program besides
+`std` and `tokio` among `open`, `duct`, `subprocess`, `xshell`, `which`,
+`async-process`, `cmd_lib`, `execute`, `run_script`, `command-group`,
+`opener`, `webbrowser` and `nix` (none is in it; `cc` is, as a build
+dependency of `ring`, L-RUST1-3), checked on 20 Oct 2026.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` (RUST1-02),
+`test_code_is_what_cfg_test_compiles_followed_through_module_files`
+(RUST1-03), `the_allowlist_is_exact_about_file_function_and_count`
+(RUST1-04), `what_shipped_code_reaches_is_shipped_even_under_tests`
+(RUST1-11), `the_walk_reads_everything_under_crates_and_names_each_link`
+(RUST1-12), `what_this_scan_cannot_place_is_refused_by_name` and
+`what_a_macro_body_pastes_is_refused_by_name` (RUST1-13). The
+checker's probe (`scratch/verify-CLOUD-RUST1-c7-probe/gate/probe.rs`: 27
+cases and the spoof) run against the final gate: every case AS-CLAIMED and
+the spoof refused (`state/fix/round2/logs-CLOUD-RUST1/r1b-c7-probe-on-new-gate.log`).
+Its planted tree (`scratch/verify-CLOUD-RUST1-c7-plant`) fails naming all
+five plants: `disk_route.rs:207`, `target/mod.rs:1`, `zz_selfas.rs:1`,
+`zz_shebang.rs:2`, `zz_tokio_selfas.rs:1` (`r1b-plant-c7.log`). The second
+pass's 30-case probe (26 spellings and 4 controls,
+`scratch/fix-CLOUD-RUST1-r1b/probe/cases2.rs`): before, 26 missed
+(`r1b-probe-on-old-gate.log`); after, all 30 as expected
+(`r1b-probe-on-new-gate.log`). The five tests this pass changed or added, run against the gate before this
+pass, fail (`r1b-new-tests-on-old-gate.log`); all nine pass after.
+A copy of the tree merged with `feat/db-fix` at `dad1a760` with four of the
+new spellings planted fails naming each (`r1b-plant-merged.log`); the tree
+itself is green with its two entries.
