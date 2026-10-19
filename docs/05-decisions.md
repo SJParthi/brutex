@@ -73666,3 +73666,80 @@ this is a narrow or short desktop window.
 `docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
+
+### D-5902 — The sealed codec's bounds say what the code does: an accepted frame grows the caller's buffer by `Vec`'s amortised rule, not by its rows, and a frame of `m` rows is at most `56m + 172` bytes; D-4939 #5 amended by addition (AH-05, g-sc1-codec-3, g-sc1-codec-4) — 2026-10-19
+
+**Findings** g-sc1-codec-3 and g-sc1-codec-4 (both low; the 14 October attack
+run, each confirmed by two skeptics). Both are claims, not code: the codec
+(SC-1, D-4939) was right, and the documents stated bounds it does not keep.
+
+1. **g-sc1-codec-3.** `decode_frame` and `decode_stamps` call
+   `out.reserve(rows)` once, after the whole frame is checked. SC1-09, L-SC-1's
+   memory clause, the `decode_frame` doc and its comment ("reserves exactly the
+   rows its checked head states"), D-4939 #5 and the comment in
+   `crates/pull/tests/allocation.rs` said the caller's buffer grows by the
+   checked rows and no more. `Vec::reserve` promises at least the rows: onto a
+   full 10,000-row buffer a 256-row frame is one `realloc` to a capacity of
+   20,000 (1,120,000 bytes, 9,744 rows more than asked), and 1 to 3 rows into
+   an empty buffer take a capacity of 4 (224 bytes for one 56-byte bar). "Bytes
+   a call = rows × 56" cannot hold for a full non-empty buffer under any API,
+   since a `realloc` asks for the new total.
+2. **g-sc1-codec-4.** The module doc, SC1-02 and L-SC-12 put random fields at
+   57 bytes a bar or less in any frame. A frame of `m` rows is at most
+   `max_frame_len(m)` = `4 + 70 + 7 × (22 + 8 × (m − 1))` = `56m + 172` bytes,
+   which is 57 a bar or less only from `m = 172`, and one random bar is 102
+   bytes. The proof cited, `no_frame_exceeds_the_bound`, measured 256-row
+   frames only.
+
+**Decided.**
+
+1. **No code changes.** `reserve_exact` would make a caller that decodes a
+   month frame after frame into one buffer reallocate and copy on every frame,
+   quadratic over the month; amortised doubling is the class `CLAUDE.md` §3
+   rule 4 already names for result append. FM-284's promise is unchanged and
+   still pinned: nothing is allocated before the whole frame is checked, and a
+   refused frame allocates 0 bytes in 0 calls.
+2. **The growth bound is restated** in SC1-09, L-SC-1, the module doc, both
+   decoders' `# Allocation` docs and comments, and the allocation tests'
+   comments: one `Vec::reserve` of the checked rows; nothing into a buffer with
+   the room; onto a buffer short of the room, a capacity of the largest of
+   twice the old, its length plus the rows, and 4. So into an empty buffer
+   that never allocated (capacity 0) it is exactly the rows when they are 4 or
+   more and a capacity of 4 for 1 to 3, while a cleared buffer keeps its
+   capacity and doubles like any other (256 rows into one of capacity 200
+   take 400). That rule is today's `std`, not a documented promise of `Vec`;
+   the tests pin it, so a change in it is seen rather than assumed. A caller
+   that needs the bound in its own rows pre-sizes its buffer.
+3. **The byte bound is restated** in SC1-02, L-SC-12 and the module doc: a
+   frame of `m` rows is at most `56m + 172` bytes; a full 256-row frame of
+   random fields 57 a bar or less; a short one more, measured at every `m`; a
+   month of `n` bars in `f` frames at most `56n + 172f` bytes, above 57 a bar
+   by that bound only for months of 1 to 171, 257 to 343 and 513 to 515 bars.
+4. **D-4939 #5 is amended by addition, not rewritten.** Its "an accepted frame
+   reserves its checked rows once" is one `reserve` call of the checked rows;
+   the capacity that call leaves is item 2's. `docs/02-store-format.md`'s
+   sentence (one reserve of the head's rows) is true and is not edited here
+   (it is AF-01's file this round).
+5. The store test `an_accepted_block_grows_the_buffer_by_its_rows` is renamed
+   `an_accepted_block_grows_an_empty_buffer_by_its_rows`, which is what it
+   tests. `pull`'s `an_accepted_block_reserves_its_stated_rows_and_no_more`
+   keeps its name, since into an empty buffer it is exact, and its doc says so.
+
+**Cost.** No route or operation changes. Measured by a counted allocator
+(`a_month_decoded_into_one_buffer_reallocates_by_doubling`): 2,022 full frames
+decoded one after another into one empty buffer make 12 allocating calls
+(capacity 256 doubling to 524,288 rows for 517,632 held), bytes a call p50 0,
+p99 0, max 29,360,128; into a buffer pre-sized for the month, 0 calls. The code
+is unchanged, so before and after are the same.
+
+**Proof.** `crates/store/src/sealed_codec_tests.rs`
+`every_frame_meets_its_documented_byte_bound`;
+`crates/store/tests/sealed_codec_alloc.rs`
+`a_one_row_frame_into_an_empty_buffer_takes_the_minimum_capacity`,
+`a_full_buffer_grows_by_amortised_doubling_not_by_rows`,
+`an_accepted_block_grows_an_empty_buffer_by_its_rows`,
+`the_documents_state_the_bounds_the_codec_keeps`;
+`crates/pull/tests/allocation.rs` `sealed_codec::` the same two pins under a
+counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
+and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
+L-SC-12.

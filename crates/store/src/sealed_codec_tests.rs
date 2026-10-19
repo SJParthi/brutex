@@ -370,10 +370,108 @@ fn no_frame_exceeds_the_bound() {
         largest = largest.max(frame.len());
     }
     assert!(largest <= MAX_FRAME_LEN, "{largest}");
-    // Random fields are incompressible: at most 57 bytes a bar (L-SC-12), and
-    // never far below the 56 raw bytes.
+    // Random fields are incompressible: a FULL 256-row frame of them costs at
+    // most 57 bytes a bar (L-SC-12), and never far below the 56 raw bytes. A
+    // short frame costs more a bar: `every_frame_meets_its_documented_byte_bound`.
     assert!(largest <= 57 * 256, "{largest}");
     assert!(largest > 50 * 256, "{largest}");
+}
+
+/// **EVERY FRAME MEETS ITS DOCUMENTED BYTE BOUND, AT EVERY ROW COUNT.**
+/// g-sc1-codec-4, D-5902, SC1-02, L-SC-12.
+///
+/// The bound a frame of `m` rows keeps whatever its rows hold is
+/// `max_frame_len(m)` = `4 + 70 + 7 × (22 + 8 × (m − 1))` = `56m + 172`
+/// bytes. That is 57 bytes a bar or less only from `m = 172`, and a frame of
+/// random fields costs more than 57 a bar well below that: one random bar is
+/// a 4-byte head, seven 10-byte varints and seven 4-byte empty streams, 102
+/// bytes against 56 raw. Until D-5902 the module doc, SC1-02 and L-SC-12 said
+/// random fields cost at most 57 bytes a bar for ANY frame, and the only proof
+/// measured 256-row frames; written against that text this test fails at
+/// every `m` up to the crossover it prints.
+///
+/// 200 frames of random fields at every `m` from 1 to 256 (51,200 frames).
+#[test]
+fn every_frame_meets_its_documented_byte_bound() {
+    // The formula the documents state, and where it crosses 57 a bar.
+    for m in 1..=BLOCK_ROWS {
+        assert_eq!(max_frame_len(m), 56 * usize::from(m) + 172, "m = {m}");
+    }
+    assert_eq!(max_frame_len(1), 228);
+    assert!(
+        max_frame_len(171) > 57 * 171,
+        "the formula is above 57 a bar"
+    );
+    assert!(
+        max_frame_len(172) <= 57 * 172,
+        "and at most 57 from 172 rows"
+    );
+    assert_eq!(max_frame_len(BLOCK_ROWS), MAX_FRAME_LEN);
+    // A month of `n` bars is full frames and at most one short last frame, so
+    // its bound is the sum of theirs, `56m + 172` a frame of `m`: above 57 a
+    // bar for months of 1 to 171, 257 to 343 and 513 to 515 bars, and never
+    // from 516 (L-SC-12).
+    let block = usize::from(BLOCK_ROWS);
+    let month = |n: usize| {
+        let last = n % block;
+        let short = if last == 0 {
+            0
+        } else {
+            max_frame_len(last as u16)
+        };
+        n / block * MAX_FRAME_LEN + short
+    };
+    let over: Vec<usize> = (1..=16 * block).filter(|&n| month(n) > 57 * n).collect();
+    let want: Vec<usize> = (1..=171).chain(257..=343).chain(513..=515).collect();
+    assert_eq!(over, want, "the months the formula puts above 57 a bar");
+
+    let mut rng = Rng(0x5C1_C0DE_0004);
+    let mut largest = vec![0_usize; usize::from(BLOCK_ROWS) + 1];
+    for m in 1..=BLOCK_ROWS {
+        let rows = usize::from(m);
+        for _ in 0..200 {
+            let (frame, _) = sealed(&noise(&mut rng, rows));
+            largest[rows] = largest[rows].max(frame.len());
+        }
+        assert!(
+            largest[rows] <= max_frame_len(m),
+            "m = {m}: {} bytes above the documented {}",
+            largest[rows],
+            max_frame_len(m)
+        );
+    }
+
+    // Where the old claim, at most 57 bytes a bar for any frame, is false.
+    let above: Vec<usize> = (1..=usize::from(BLOCK_ROWS))
+        .filter(|&m| largest[m] > 57 * m)
+        .collect();
+    // Hundredths of a byte a bar, in integers: prices and sizes stay off floats.
+    let per_bar = |m: usize| largest[m] * 100 / m;
+    for m in [1, 2, 3, 4, 16, 64, 95, 96, 97, 171, 172, 255, 256] {
+        eprintln!(
+            "SHORT m={m}: largest {} bytes = {}.{:02} a bar (bound {}, raw {})",
+            largest[m],
+            per_bar(m) / 100,
+            per_bar(m) % 100,
+            max_frame_len(m as u16),
+            56 * m
+        );
+    }
+    eprintln!("SHORT above 57 a bar at m = {above:?}");
+
+    // One random bar: head 4, seven 10-byte varints, seven empty streams.
+    assert_eq!(largest[1], 4 + 7 * 10 + 7 * 4, "one random bar");
+    assert!(largest[1] > 57, "the old per-bar claim fails at one bar");
+    // The measured crossover is one unbroken run from one row, short of the
+    // formula's own crossover at 172, and the generator is seeded, so it is
+    // the 100 that SC1-02 and L-SC-12 state (a change to the encoder or to
+    // this generator that moves it moves those rows with it).
+    let last = *above.last().expect("short frames cost more than 57 a bar");
+    assert_eq!(above, (1..=last).collect::<Vec<_>>(), "{above:?}");
+    assert_eq!(last, 100, "the crossover SC1-02 and L-SC-12 state");
+    // A full frame keeps 57 a bar, measured and proved.
+    assert!(largest[256] <= 57 * 256, "{}", largest[256]);
+    assert!(largest[256] > 56 * 256, "a full random frame is above raw");
 }
 
 #[test]
