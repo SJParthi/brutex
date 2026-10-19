@@ -73323,7 +73323,7 @@ uncapped per-second participation.
 **Not built here, said.** The worse-of-both cross-feed reading waits for
 PREC-15 (D-6383). The real-data proofs are the Mac's
 (`reports/cloud-fib5-20261018.md`, NEEDS THE MAC). Proved by
-`crates/runner/tests/fib_walk.rs`; invariants FIB5-01..FIB5-42.
+`crates/runner/tests/fib_walk.rs`; invariants FIB5-01..FIB5-57.
 
 ### D-6381 — The forced exit is priced only from `[15:09:00, 15:10:00)`, never later and never carried forward (FIB-5; refines D-0436) — 2026-10-18
 
@@ -73395,6 +73395,12 @@ held from earlier bars meets the bar's exits FIRST: an exit cancels the
 unfilled entry remainder in that bar (`entry_cancelled_by_exit`) and applies to
 the filled quantity only (FM-F036). A target reached before the first fill is
 `target_before_fill`.
+
+**Excursions.** The MFE and MAE start at the first fill (a high or low printed
+while a BREAK or RETEST order waited is no excursion of the trade) and run
+through every bar the position is open: a bar a fired exit waits on (a stage-A
+minute locked at the day's low, a deep second with no bid) is one of them, and
+so is the forced window to 15:09:59. To the horizon, they run to 15:09:59.
 
 **Why.** The operator's FILLS rule (worst price of each second, spill into
 later seconds) and D-0802 B1-B3; a minute bar holds nothing finer than its

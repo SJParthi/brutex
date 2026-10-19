@@ -4401,8 +4401,8 @@ fn next_rung_is_the_first_rung_strictly_above_the_entry() {
 }
 
 /// A slot reads the swings of its own trail list at its own width: with two
-/// lists and two widths, list 1 at width two is the fourth, and list 0 (flat
-/// candles, no swing at all) is never read for it.
+/// lists and two widths, list 1 at width two is the fourth, and list 0
+/// (quiet candles of one low each, no swing at all) is never read for it.
 #[test]
 fn a_slot_reads_its_own_trail_list_at_its_own_width() {
     // Width one: 10:02's low (100,060) is a swing, confirmed at 10:04:00,
