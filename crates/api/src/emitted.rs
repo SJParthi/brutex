@@ -1949,7 +1949,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // a_reader_that_stops_reading_is_closed_and_logged_as_cut` and
     // `a_client_that_closes_mid_body_is_logged_as_its_close_not_a_cut`.
     // (That branch counted 27 -> 28; the package's site is added here.)
-    const REACHED_IN_SERVER_TESTS: usize = 31;
+    // 31 -> 32 at R3-10: `api.bars export written`, `export stopped short`
+    // and `export abandoned; work stopped`, the one site of
+    // `server::bars_export::ExportBody::end`, read back by `server::
+    // bars_export::tests::a_streamed_export_stops_when_cancelled`,
+    // `the_export_is_every_page_of_the_window_in_its_order` and
+    // `rows_that_change_mid_export_cut_the_stream_with_a_warning`.
+    const REACHED_IN_SERVER_TESTS: usize = 32;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2170,9 +2176,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 94 -> 95 at R3-07 (DB-065): `api.bars absent month counted`, a row in
     // the table above.
+    //
+    // 95 -> 96 at R3-10: the streamed export's one line
+    // (`server::bars_export::ExportBody::end`), named above
+    // `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 95,
+        lib_sites, 96,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
