@@ -1,6 +1,6 @@
 # FIB-14: Report and pages: winner gate first, plain comparison tables, O(1) api routes with a served schema, the /fib page and the movie export
 
-Depends on: FIB-13
+Depends on: FIB-13, FIB-3b, FIB-16
 
 Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 universe = today's F&O stocks; 15:57 four decisions; 16:11 IST minimum returns are gate numbers). Operator blocks at the end supersede earlier text.
 
@@ -112,3 +112,8 @@ OPERATOR 18 Oct 2026 ~16:11 IST - MINIMUM RETURNS ARE GATE NUMBERS (option B; op
 (4) A pair below any of the five minimums is refused by name ("below the operator's minimum weekly return: 0.9% < 1.5%"), with all five measured averages shown, so the closest misses stay visible.
 (5) Changing any of these numbers is an operator decision made BEFORE a run, recorded as a new gate version, and counted in the luck check.
 
+AMENDMENT 19 Oct 2026 (operator): pattern reports (state/fib-run-20261016/patterns-amendment.txt). FIB-14 now also names FIB-3b and FIB-16, whose catalogues and files it renders. Binding on top of the text above.
+(1) Per side, side by side: the Layer 1 catalogue table (every named chart pattern with its count and its gate verdict, or the extinct subset that proved it below the floor, or UNFINISHED; the NOT BUILT entries with their reasons; the mark 'name source UNVERIFIED' until docs/00-charter.md records the books); the Layer 2 table (every candlestick entry at both anchors); Layer 3 (levels reached, nodes per level, the longest frequent sequence per side, both readings of the level letters, ordered sequences and unordered sets); and the 15:40 IST accounting per layer and side: tested + extinct + unfinished = the enumerated space.
+(2) A Layer 4 block labelled 'outcome-first mined (hindsight label)', in the words 'walk-forward passer (selected on these months)' until the luck test and the exam are passed: the jackpot base rate per side, size, stop rung and tail rung; the number of nodes tested; how many finds the shuffled-label draws produce beside the real count; a funnel row; every trial in /fib/luck.json.
+(3) An UNFINISHED run is shown as UNFINISHED with its frontier size, never as done.
+The routes stay O(1) as above.

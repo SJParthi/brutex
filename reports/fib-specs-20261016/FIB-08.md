@@ -28,3 +28,5 @@ FIB-8: new sibling kinds 'downside v1' and 'downside refs v1' (docs/02-store-for
 
 REQUIREMENTS FROM FIB-15 LIVE PROOF (18 Oct 2026; FIB-15.md section (12); the freeze of a live setup is refused until each lands):
 - RQ-4 FIB-8 (amend FM-F092) with the ingest stage: the per-stock-day basis-verdict authority (4.8). Until: freeze refused 'rule_missing:basis_verdict'.
+
+NOTE 19 Oct 2026 (patterns amendment, state/fib-run-20261016/patterns-amendment.txt; one owner for one Measure slot; binding on top of the text above): the Measure WickBp named in item (11) (FM-F096) is appended to crates/indicators/src/fibflag/hist.rs by FIB-3b, first after MaeMilliR, exactly as item (11) defines it (FIB-03b item (13): one global Measure append order FIB-2, FIB-8, FIB-3b, FIB-16), because FIB-8's branch is cut without hist.rs. FIB-8 never edits hist.rs; its suspect-wick rule stays in its own files.

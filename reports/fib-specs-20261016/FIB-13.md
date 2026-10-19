@@ -1,6 +1,6 @@
 # FIB-13: Walk-forward unseen-month check (gate B detail, procedure portfolio, luck with bootstrap), the sealed final exam verb and the generation-2 rule
 
-Depends on: FIB-12
+Depends on: FIB-12, FIB-16
 
 Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 universe = today's F&O stocks; 15:57 four decisions; 16:11 IST minimum returns are gate numbers). Operator blocks at the end supersede earlier text.
 
@@ -131,3 +131,10 @@ OPERATOR 18 Oct 2026 ~16:11 IST - MINIMUM RETURNS ARE GATE NUMBERS (option B; op
 (4) A pair below any of the five minimums is refused by name ("below the operator's minimum weekly return: 0.9% < 1.5%"), with all five measured averages shown, so the closest misses stay visible.
 (5) Changing any of these numbers is an operator decision made BEFORE a run, recorded as a new gate version, and counted in the luck check.
 
+AMENDMENT 19 Oct 2026 (operator): Layer 4 and the pattern layers inside the walk-forward (state/fib-run-20261016/patterns-amendment.txt). FIB-13 now depends on FIB-16. Binding on top of the text above.
+(1) FIB-16's labels and mining run INSIDE the walk-forward: once per (scheme S, step m) on that scheme's learning window W(S, m) only (the rule of item (9) for refinement), under that step's Generation version (alphabet, cuts, stop ladder and tail ladder), because whether a moment is a jackpot depends on the window; JackpotLabel records are keyed by that version and per-month prefix sums are used only inside one version, never across versions (FIB-16 item (4)); the extinction count is label-free (raw rows). FIB-3b's alphabet refinement runs the same way (one R2 round per step by pooled trade count under FIB-01's 19 Oct note, learning months only; every alphabet version a trial).
+(2) Exam months are never labelled before the exam verb opens them; the selection, every Layer 1-4 find included, is fixed before the exam.
+(3) Every Layer 4 node tested, stop rung, tail rung, size, shape-code version, window, scheme, step and permutation draw is a trial in the same luck ledger; Layer 4's draws re-run the mining (FIB-16 item (6)).
+(4) The MFE-rung lift counters of item (1) also run per Layer 4 label class.
+(5) NO COMBINATION MISSED (15:40 IST): nothing in the walk-forward procedure prunes a combination except the pooled trade floor; a machine limit is UNFINISHED with its frontier saved, never done.
+LEDGER: the next free ids of D-6540..D-6559.

@@ -1,6 +1,8 @@
 # Fib Flag Breakout engine: cloud build rules (16 Oct 2026)
 
-These 14 files are the specifications for the Fib Flag Breakout engine, one per part.
+These 17 files are the specifications for the Fib Flag Breakout engine, one per part
+(FIB-1 .. FIB-16 and FIB-3b; the `FIB-NN.md` files are generated from
+`state/fib-run-20261016/plan.json` by `state/fib-run-20261016/gen-specs.sh`).
 Each part is built by its own cloud session on its own branch, and merged back into
 `feat/db-fix` on the operator's Mac. This folder is planning material: it is never
 merged into `feat/db-fix`.
@@ -12,8 +14,9 @@ merged into `feat/db-fix`.
 | 1 | FIB-1 | `cloud/fib-base-20261016` |
 | 2 | FIB-2, FIB-3, FIB-5, FIB-6, FIB-8 | `cloud/fib1-20261016` once FIB-1's report says `STATUS: DONE` |
 | 3 | FIB-4 (after FIB-3), FIB-7 (after FIB-6) | the branch of the part it depends on |
-| 4 | FIB-9 | FIB-2, FIB-4, FIB-5, FIB-7 and FIB-8 merged together |
-| later | FIB-10 .. FIB-14 | on the Mac: they need the stored data and the new-work parts |
+| 3b | FIB-3b (after FIB-2, FIB-3, FIB-4 and FIB-6 with its 19 Oct amendment; its indicators half may start once FIB-2 and FIB-3 are done, except the new base kinds and the level letters, which wait for FIB-4) | `cloud/fib3-20261018` with `cloud/fib2-20261018` merged |
+| 4 | FIB-9 | FIB-2, FIB-3b, FIB-4, FIB-5, FIB-7 and FIB-8 merged together |
+| later | FIB-10 .. FIB-16 (FIB-16 after FIB-12; FIB-13 after FIB-16; FIB-15 last) | on the Mac: they need the stored data and the new-work parts |
 
 ## What changes in the cloud
 

@@ -1,6 +1,6 @@
 # FIB-9: cli orchestration: fib run (stage A passes), fib deep, fib sample and fib verify - identity first, append-only, resumable, parallel
 
-Depends on: FIB-2, FIB-4, FIB-5, FIB-7, FIB-8
+Depends on: FIB-2, FIB-4, FIB-5, FIB-7, FIB-8, FIB-3b
 
 Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 universe = today's F&O stocks; 15:57 four decisions; 16:11 IST minimum returns are gate numbers). Operator blocks at the end supersede earlier text.
 
@@ -86,3 +86,12 @@ OPERATOR 18 Oct 2026 ~16:11 IST - MINIMUM RETURNS ARE GATE NUMBERS (option B; op
 (4) A pair below any of the five minimums is refused by name ("below the operator's minimum weekly return: 0.9% < 1.5%"), with all five measured averages shown, so the closest misses stay visible.
 (5) Changing any of these numbers is an operator decision made BEFORE a run, recorded as a new gate version, and counted in the luck check.
 
+AMENDMENT 19 Oct 2026 (operator): patterns and no combination missed (state/fib-run-20261016/patterns-amendment.txt). FIB-9 now depends on FIB-3b, so the first full run includes every pattern layer. Binding on top of the text above.
+(1) 'fib run' folds FIB-3b's per-candle stream (the scores beyond FIB-3, the factors, the Layer 1 detections, the Layer 2 labels and the Layer 3 letters in both readings) for every width beside the detector, and joins it to each candidate at stamp_candle (FIB-04 19 Oct item (4)) in O(1); it passes F3's input (NSE-NIFTY's candles of the same width and day, from the stored minutes, a reference input only) and F5's previous close (the previous tradable day's last minute, CAL-1); an index is context only (18 Oct 15:55 IST) and its volume items read 'no_volume'.
+(2) The Layer 2 flags, the unordered letter sets and the Layer 3 tree enter the lattice through FIB-6's 19 Oct amendment; the run's Generation carries the alphabet cut lists and the occupied-alphabet tables per direction and width; the identity hashes the schema v2 descriptor, the catalogue digest and the alphabet versions (R1).
+(3) New file kinds - the letter arrays per (stock-day, width), the alphabet table, the Layer 2 label bitsets, the catalogue digest, the ExtKey side tables and the frontier checkpoint for resume - are registered by this part in crates/cli/src/fib/files.rs as OUTSIDE OWNERSHIP lines (FIB-8 is DONE before FIB-9 starts), with FIB-3b's byte codecs, and documented by this part in docs/02-store-format.md (one appended section, 'FIB pattern and lattice file kinds', with every new kind's fixed-stride layout and version; CLAUDE.md section 10 makes that document the authority over bytes on disk).
+(4) 'fib verify' adds: a sampled recomputation of every candidate's pattern stamps from the stored candles; the catalogue digest equals vocab's; the visited flag and tree nodes reconcile with the Tally; every rejection candidate's decision candle carries FIB-3b's 'rejection at rung k' letter (FIB-04 19 Oct item (5)(d)); tested + extinct + unfinished = the enumerated space.
+(5) 'fib sample' measures the pattern stream and the flag and tree traversal on its sample, so FIB-12's projection covers Layers 1-3.
+(6) NO COMBINATION MISSED (15:40 IST): a run never refuses or stops for a budget; a machine limit ends it with status UNFINISHED and its exact frontier saved; 'fib run --resume <run-id>' continues from the frontier and the result is byte-identical to an uninterrupted run; an UNFINISHED run is never reported, summarised or sealed as done.
+(7) The first full run refuses to start when FIB-3b's stream is not wired ('patterns_not_wired'), so no run silently omits a layer.
+TESTS: the join at stamp_candle for CLOSE, BREAK and RETEST; an index run reads no_volume and is counted; resume equals an uninterrupted run byte for byte; patterns_not_wired refuses. LEDGER: the next free ids of D-6460..D-6479.

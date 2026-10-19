@@ -1,6 +1,6 @@
 # FIB-15: Live proof: a daily forward paper-trading record of each frozen long + short setup on newly delivered data, with the same code and full charges, judged by the Winner Gate and the downside checks, with an automatic brake
 
-Depends on: FIB-13, FIB-14, FIB-7, FIB-9, FIB-10, FIB-11, FIB-12; outside parts: CHG-1, CHG-2, CAL-1, PIT-1, DATA-1, DATA-2, OF-1, R4-06, R4-07, R4-11, R4-12, R4-26
+Depends on: FIB-13, FIB-14, FIB-7, FIB-9, FIB-10, FIB-11, FIB-12, FIB-3b, FIB-16; outside parts: CHG-1, CHG-2, CAL-1, PIT-1, DATA-1, DATA-2, OF-1, R4-06, R4-07, R4-11, R4-12, R4-26
 
 Specification as of 18 Oct 2026 (amended 18 Oct: five downside checks, every market situation, walk-forward family, daily profit focus, mover persistence, FIB-15 live proof; FIB decision ids moved +1000 to D-6300..D-6579; 15:55 universe = today's F&O stocks; 15:57 four decisions; 16:11 IST minimum returns are gate numbers). Operator blocks at the end supersede earlier text.
 
@@ -912,3 +912,4 @@ OPERATOR 18 Oct 2026 ~16:11 IST - MINIMUM RETURNS ARE GATE NUMBERS (option B; op
 (4) A pair below any of the five minimums is refused by name ("below the operator's minimum weekly return: 0.9% < 1.5%"), with all five measured averages shown, so the closest misses stay visible.
 (5) Changing any of these numbers is an operator decision made BEFORE a run, recorded as a new gate version, and counted in the luck check.
 
+AMENDMENT 19 Oct 2026 (operator): patterns in the live proof (state/fib-run-20261016/patterns-amendment.txt). FIB-15 now also names FIB-3b and FIB-16. Binding on top of the text above. A frozen setup whose coordinates use any Layer 1-4 dimension is paper-traded by the same code: FIB-3b's per-candle stream and catalogue digest, FIB-16's shape code and its frozen stop and tail rungs, and the frozen alphabet and shape-code versions. No mining after the freeze; a re-mine is generation 2 and is counted as trials. A Layer 4 setup carries 'outcome-first mined (hindsight label)' until the exam and the live record decide. A frozen setup whose catalogue or alphabet digest differs from the running code's is refused by name, never re-coded silently.
