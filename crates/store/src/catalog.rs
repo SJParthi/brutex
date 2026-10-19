@@ -37,7 +37,9 @@
 //!
 //! [`walk`] returns a [`Census`] as well as the rows, and the census
 //! [`reconciles`](Census::reconciles): every file seen is either a spot
-//! instrument-month, a contract path, or one of the named refusals, and a
+//! instrument-month, the sealed twin of one (its `.sbar` beside its `.bin`,
+//! counted once as a month, verify-SC-3-r2), a contract path, or one of the
+//! named refusals, and a
 //! directory the walk could not list is counted as `unreadable` rather than
 //! skipped (D-0765), and a symbolic link is counted as `linked` rather than
 //! followed (D-0766), and an entry that is not a regular file is counted as
@@ -102,8 +104,19 @@ pub struct Census {
     /// symbolic link, which is not followed (D-0766), and every entry that is
     /// not a regular file (D-0769).
     pub seen: u64,
-    /// Files that became a [`Held`].
+    /// Spot instrument-months: files that became a [`Held`], **each month
+    /// once whatever its form**. A month held both raw (`.bin`) and sealed
+    /// (`.sbar`) is one here and its second file is [`Census::sealed_twin`]:
+    /// `cli sweep-all` prints this bucket as "store holds N spot
+    /// instrument-month(s)", and counting both files printed 2,328 for the
+    /// 1,176 months a raw-only clone of the same root held (verify-SC-3-r2).
     pub spot: u64,
+    /// The second file of a month already counted in [`Census::spot`]: a
+    /// month's sealed `.sbar` beside its raw `.bin`, the state every sealed
+    /// month is in until SC-9 retires the raw form. A file, so it is filed
+    /// here and [`Census::reconciles`] still balances; not a month, so it is
+    /// not in `spot`. SC-3, verify-SC-3-r2.
+    pub sealed_twin: u64,
     /// Paths carrying a contract level — a future or an option.
     ///
     /// **Counted, not returned.** `CLAUDE.md` §1 sweeps spot only, so a contract
@@ -139,9 +152,10 @@ pub struct Census {
     /// rather than read with the name dropped, which shortened the path by one
     /// level and filed it at another depth. D-0768.
     pub non_utf8: u64,
-    /// Of [`Census::spot`], the files that were a month's SEALED form
-    /// (`.sbar`, SC-3, D-4965). Counted inside `spot`, not beside it: a month
-    /// held in both forms is two files and one [`Held`].
+    /// Of the months in [`Census::spot`], those held in their SEALED form
+    /// (`.sbar`, SC-3, D-5899), with or without their raw `.bin` beside it:
+    /// one per month, so never more than `spot`. A sub-count, not a bucket:
+    /// it is not in [`Census::reconciles`]' sum.
     pub sealed: u64,
     /// An entry below `bars/` that is neither a regular file, a directory nor
     /// a symbolic link: a FIFO, a socket or a device node. The store's writer
@@ -202,6 +216,7 @@ impl Census {
     /// compares with `seen`.
     const fn filed(&self) -> u64 {
         self.spot
+            .saturating_add(self.sealed_twin)
             .saturating_add(self.with_contract)
             .saturating_add(self.other_kind)
             .saturating_add(self.unknown_vendor)
@@ -320,8 +335,28 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
         }
     }
     out.held.sort_unstable();
+    let files = out.held.len();
     out.held.dedup();
+    out.census.file_twins(files, out.held.len());
     Ok(out)
+}
+
+impl Census {
+    /// Moves the files the walk's dedup folded into a month already held from
+    /// [`Census::spot`] to [`Census::sealed_twin`], so `spot` counts months.
+    ///
+    /// A [`Held`] is the whole path but its extension, parsed exactly (the
+    /// feed and rung compared byte for byte, the month by width and value), so
+    /// two files are one row only when they are `<month>.bin` and
+    /// `<month>.sbar` in one directory: the dedup removes exactly one row per
+    /// month held in both forms. Counted after the walk and not by asking for
+    /// the `.bin` beside each `.sbar`, so it costs no system call and cannot
+    /// disagree with what the walk itself saw.
+    fn file_twins(&mut self, files: usize, months: usize) {
+        let twins = u64::try_from(files.saturating_sub(months)).unwrap_or(u64::MAX);
+        self.spot = self.spot.saturating_sub(twins);
+        self.sealed_twin = self.sealed_twin.saturating_add(twins);
+    }
 }
 
 /// Where one directory entry goes: a descent, or exactly one census bucket.

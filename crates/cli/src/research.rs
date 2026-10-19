@@ -211,7 +211,7 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
          Discovery policy requested: no charges; no statistical validation. \
          Execution correctness checks remain required.\n\
          No stock search was started; no winner or runtime guarantee is made.\n\
-         Catalog: {} paths seen; {} spot files; {} contract files excluded.",
+         Catalog: {} paths seen; {} spot instrument-months; {} contract files excluded.",
         window.through(),
         holdings.census.seen,
         holdings.census.spot,

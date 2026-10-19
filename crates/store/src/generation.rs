@@ -255,16 +255,25 @@ pub fn pointer_path(root: &Path, path: StorePath<'_>) -> PathBuf {
 /// here too (verify-SC-3-r1). Keyed by the `.bin` before, a cache entry made
 /// over a linked `.sbar` carried the raw form's path and stamp while the
 /// door answered from the sealed one.
+///
+/// ONLY AN ABSENT `.sbar` KEYS THE `.bin`, because only an absent one sends
+/// the door there (`BarFile::open_sealed_at`: `ENOENT`, a dangling link
+/// included, is no sealed month; anything else at the name is opened or
+/// refused by name). A directory, a FIFO or an unreadable `.sbar` is the
+/// door's refusal, so it is the key here too, and the memo keyed by it cannot
+/// answer a page the door would refuse from the raw form's cached header
+/// (verify-SC-3-r2 follow-up). It keyed the `.bin` for anything not a
+/// regular file before.
 pub fn served_bars_path(root: &Path, path: StorePath<'_>) -> Result<PathBuf, StoreError> {
     let served = served(root, path)?;
     let served_root = served.root(root);
     let sealed = path
         .with_file(FileKind::SealedBars)
         .to_path_buf(&served_root);
-    if fs::metadata(&sealed).is_ok_and(|meta| meta.is_file()) {
-        return Ok(sealed);
+    if fs::metadata(&sealed).is_err_and(|why| why.kind() == ErrorKind::NotFound) {
+        return Ok(path.with_file(FileKind::Bars).to_path_buf(&served_root));
     }
-    Ok(path.with_file(FileKind::Bars).to_path_buf(&served_root))
+    Ok(sealed)
 }
 
 /// Which generation of `path`'s month is served. Any non-bar path is served

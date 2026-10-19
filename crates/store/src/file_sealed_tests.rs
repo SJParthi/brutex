@@ -626,6 +626,14 @@ fn a_sealed_handle_is_shared_across_threads_and_answers_alike() {
     });
 }
 
+/// **A month in either form is one row AND one instrument-month in the
+/// census** (verify-SC-3-r2). `Census::spot` counted every `.sbar` beside its
+/// `.bin`, so a sealed root printed 2,328 instrument-months in `cli sweep-all`
+/// for the 1,176 its raw-only clone printed, and this test pinned `spot == 4`
+/// for three months. The second file of June is `sealed_twin`, so the census
+/// still reconciles; `sealed` is one per sealed month. August's `.bin` is a
+/// link, which the walk does not follow and does not hold, so its lone `.sbar`
+/// is the month and no twin.
 #[test]
 fn the_catalog_holds_a_month_in_either_form_once() {
     // EVERY TEST HERE APPENDS OR IS REFUSED, so it emits: the sink is held
@@ -654,10 +662,48 @@ fn the_catalog_holds_a_month_in_either_form_once() {
         .map(|held| (held.month.year(), held.month.month()))
         .collect();
     assert_eq!(months, [(2031, 5), (2031, 6), (2031, 7)], "one row a month");
-    assert_eq!(found.census.spot, 4, "four month files: two forms of June");
-    assert_eq!(found.census.sealed, 2, "June's and July's sealed forms");
-    assert!(found.census.reconciles(), "{:?}", found.census);
-    assert_eq!(found.census.unoffered_report(), "");
+    let census = found.census;
+    assert_eq!(census.spot, 3, "three months, June once: {census:?}");
+    assert_eq!(census.sealed_twin, 1, "June's second file: {census:?}");
+    assert_eq!(census.sealed, 2, "June and July are sealed: {census:?}");
+    // Four bar files (May's `.bin`, June's `.bin` and `.sbar`, July's
+    // `.sbar`) and the two raw months' sidecars, which the catalog files as
+    // `other_kind`: every file seen is in exactly one bucket.
+    assert_eq!(
+        (census.seen, census.other_kind),
+        (8, 4),
+        "four bar files and four sidecars: {census:?}"
+    );
+    assert!(census.reconciles(), "{census:?}");
+    assert_eq!(census.unoffered_report(), "");
+    // The walk is idempotent: a second walk files every file the same way.
+    assert_eq!(crate::catalog::walk(&root.0).unwrap().census, census);
+
+    // August: a `.sbar` whose `.bin` is a link. The link is `linked`, not a
+    // month, so the `.sbar` is August's one file and not a twin.
+    let august = path_at(None, Timeframe::SECOND_1, YearMonth::new(2031, 8).unwrap());
+    write_raw(&elsewhere.0, august, &shifted(&seconds(3), 92));
+    let sbar = august.with_file(FileKind::SealedBars).to_path_buf(&root.0);
+    fs::write(&sbar, sealed_bytes(&elsewhere.0, august)).unwrap();
+    std::os::unix::fs::symlink(
+        august.to_path_buf(&elsewhere.0),
+        august.to_path_buf(&root.0),
+    )
+    .unwrap();
+    let linked = crate::catalog::walk(&root.0).unwrap();
+    assert_eq!(linked.held.len(), 4, "August is held by its .sbar");
+    let census = linked.census;
+    assert_eq!(
+        (
+            census.spot,
+            census.sealed_twin,
+            census.sealed,
+            census.linked
+        ),
+        (4, 1, 3, 1),
+        "{census:?}"
+    );
+    assert!(census.reconciles(), "{census:?}");
 }
 
 /// `bars` moved `days` days later, into the next months of 2031.
@@ -707,4 +753,75 @@ fn a_sealed_month_carries_its_provenance_to_the_reader() {
         "the sealed section reads as the sidecar did"
     );
     assert!(sealed_answer.contains("Unborn"), "{sealed_answer}");
+}
+
+#[test]
+fn a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars() {
+    // verify-SC-3-r2 follow-up: the bar door follows a final link at the
+    // `.sbar` and serves the month from it, while `provenance::read` opened
+    // the same name with `O_NOFOLLOW` and refused it, so one month answered
+    // its bars and refused its provenance. Both now open the followed file,
+    // and a link that points nowhere is no sealed month to either.
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("provenance-linked");
+    let path = month_path(None);
+    let bars = seconds(10);
+    write_raw(&root.0, path, &bars);
+    fs::write(root.file(path, FileKind::Provenance), [0u8; 40]).unwrap();
+    let raw_answer = format!("{:?}", crate::provenance::read(&root.0, path));
+    assert!(raw_answer.contains("Unborn"), "{raw_answer}");
+    let elsewhere = Root::new("provenance-linked-target");
+    let target = elsewhere.0.join("sealed-elsewhere.sbar");
+    fs::write(&target, sealed_bytes(&root.0, path)).unwrap();
+    fs::rename(
+        root.file(path, FileKind::Provenance),
+        elsewhere.0.join("aside.prv"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, root.file(path, FileKind::SealedBars)).unwrap();
+
+    let door = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(door.form(), Form::Sealed, "the bar door follows the link");
+    assert_eq!(door.read_range(0, 10).unwrap(), bars);
+    assert_eq!(
+        format!("{:?}", crate::provenance::read(&root.0, path)),
+        raw_answer,
+        "the provenance door follows the same link to the same packed image"
+    );
+
+    // Dangling: the bar door serves the raw form, and the raw form has no
+    // sidecar now, so the month's provenance is absent, not refused.
+    fs::remove_file(&target).unwrap();
+    let door = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(door.form(), Form::Raw, "a dangling link is no sealed month");
+    assert!(
+        matches!(
+            crate::provenance::read(&root.0, path),
+            Ok(crate::provenance::Found::Absent)
+        ),
+        "{:?}",
+        crate::provenance::read(&root.0, path)
+    );
+
+    // A DIRECTORY at the `.sbar` is refused by both doors, by name, and it
+    // is the month's key: a memo keyed by the `.bin` would answer a page the
+    // door refuses from the raw form's cached header (verify-SC-3-r2
+    // follow-up; `served_bars_path` keyed the `.bin` for anything not a
+    // regular file).
+    fs::remove_file(root.file(path, FileKind::SealedBars)).unwrap();
+    fs::create_dir(root.file(path, FileKind::SealedBars)).unwrap();
+    assert!(matches!(
+        BarFile::open_existing(&root.0, path, SYMBOL),
+        Err(StoreError::IsADirectory { .. })
+    ));
+    assert_eq!(
+        crate::generation::served_bars_path(&root.0, path).unwrap(),
+        root.file(path, FileKind::SealedBars),
+        "the key names the file the door refused"
+    );
+    let refused = format!("{:?}", crate::provenance::read(&root.0, path));
+    assert!(
+        refused.starts_with("Err(") && refused.contains("sbar"),
+        "{refused}"
+    );
 }

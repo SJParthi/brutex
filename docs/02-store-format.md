@@ -1120,9 +1120,13 @@ page (`BarFile::read_range`) and a sorted page (`BarFile::read_rows_at`) see
 the same record bytes from either form. Time lookups use the sealed time
 table. A sealed month that fails any check is `StoreError::SealedRefused`,
 naming the block or field; it is never answered from the `.bin` instead.
-`provenance::read` reads the packed section first; `generation::served_bars_path`
-names the `.sbar` when there is one; the month listings (`store::catalog`,
-the census recount, `api`'s held months) count a month in either form once.
+`provenance::read` reads the packed section first, opening the `.sbar` exactly
+as the bar door does (a final link followed, verify-SC-3-r2);
+`generation::served_bars_path` names the `.sbar` unless it is absent (a
+directory there is the key, and the door refuses it); the month listings (`store::catalog`,
+the census recount, `api`'s held months) count a month in either form once;
+`store::catalog`'s `Census::spot` counts months, and a month's `.sbar` beside
+its `.bin` is filed as `Census::sealed_twin` (verify-SC-3-r2).
 The audited door (`open_existing_audited`) decodes the sealed form whole, then
 audits the raw form, and refuses unless the two have one header and one
 records BLAKE3; a sealed month with no raw form beside it has no strict

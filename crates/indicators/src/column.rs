@@ -455,8 +455,26 @@ impl AnchoredColumn {
         evaluator: &mut AnchoredEvaluator<'_>,
         withheld_days: &[i64],
     ) -> Result<Self, MissingDailyReference> {
+        Self::build_required_withholding_from(bars, evaluator, &whole_days(withheld_days))
+    }
+
+    /// [`Self::build_required_withholding`] with each withheld day CUT rather
+    /// than whole: `withheld_from` pairs an IST day with the first bar-open
+    /// stamp withheld on it, so a bar of that day opening earlier keeps its
+    /// row and every later one is folded and given none. A whole day is
+    /// `(day, i64::MIN)`. Causal minute-gap admission, version 4
+    /// (lookahead-oos-1); the fold is unchanged (D-1781).
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::build_required`].
+    pub fn build_required_withholding_from(
+        bars: &[Candle],
+        evaluator: &mut AnchoredEvaluator<'_>,
+        withheld_from: &[(i64, i64)],
+    ) -> Result<Self, MissingDailyReference> {
         let mut next = *evaluator;
-        let (column, withheld) = Column::build_withholding_from(bars, &mut next, withheld_days);
+        let (column, withheld) = Column::build_withholding_from(bars, &mut next, withheld_from);
         let built = Self {
             column,
             references: next.reference_census(),
@@ -635,7 +653,7 @@ impl Column {
         evaluator: &mut Evaluator,
         withheld_days: &[i64],
     ) -> (Self, u64) {
-        Self::build_withholding_from(bars, evaluator, withheld_days)
+        Self::build_withholding_from(bars, evaluator, &whole_days(withheld_days))
     }
 
     /// Shared forward fold for regular and stored-daily-anchored evaluators.
@@ -643,13 +661,22 @@ impl Column {
         Self::build_withholding_from(bars, evaluator, &[]).0
     }
 
-    /// The fold [`Self::build_withholding`] documents, for either evaluator.
+    /// The fold [`Self::build_withholding`] documents, for either evaluator,
+    /// with each withheld day given as `(IST day, first withheld bar-open)`:
+    /// a bar of a listed day is withheld when it opens at or after that stamp.
     fn build_withholding_from<E: ColumnEvaluation>(
         bars: &[Candle],
         evaluator: &mut E,
-        withheld_days: &[i64],
+        withheld_from: &[(i64, i64)],
     ) -> (Self, u64) {
-        let withheld_set: std::collections::HashSet<i64> = withheld_days.iter().copied().collect();
+        let mut withheld_set: std::collections::HashMap<i64, i64> =
+            std::collections::HashMap::with_capacity(withheld_from.len());
+        for &(day, from) in withheld_from {
+            withheld_set
+                .entry(day)
+                .and_modify(|held| *held = (*held).min(from))
+                .or_insert(from);
+        }
         let mut withheld: usize = 0;
         let spec = evaluator.replay_spec();
         let mut bits = Vec::with_capacity(bars.len());
@@ -663,7 +690,11 @@ impl Column {
             // FOLDED, NEVER SWEPT. The step happens first and unconditionally,
             // so a withheld day moves the state every later row reads.
             let stepped = evaluator.step_with_warmth(bar);
-            if !withheld_set.is_empty() && withheld_set.contains(&crate::ist_day(bar.ts_micros)) {
+            if !withheld_set.is_empty()
+                && withheld_set
+                    .get(&crate::ist_day(bar.ts_micros))
+                    .is_some_and(|from| bar.ts_micros >= *from)
+            {
                 withheld = withheld.saturating_add(1);
                 continue;
             }
@@ -1232,6 +1263,12 @@ fn overlay_exact(
         outside(mask).union(&exact_truth),
         outside(known).union(&exact_known).union(&exact_truth),
     )
+}
+
+/// Whole withheld days as the `(day, first withheld bar-open)` pairs the fold
+/// takes: every bar of the day, `i64::MIN` on.
+fn whole_days(days: &[i64]) -> Vec<(i64, i64)> {
+    days.iter().map(|day| (*day, i64::MIN)).collect()
 }
 
 #[cfg(test)]

@@ -1152,10 +1152,19 @@ fn sealed(root: &Path, path: StorePath<'_>) -> Result<Option<Found>, ProvenanceE
     use crate::sealed::{HEAD_LEN, Head, SealedMonth};
     const _: () = assert!(HEAD_LEN == 512);
     let at = path.with_file(FileKind::SealedBars).to_path_buf(root);
-    let file = match crate::open_flags::open_read_no_follow(&at) {
-        Ok(file) => file,
-        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(why) => return Err(opened(&at, why)),
+    // OPENED AS THE BAR DOOR OPENS IT (`BarFile::open_sealed_at`): a final
+    // link followed, a dangling one absent. `O_NOFOLLOW` here refused a
+    // linked `.sbar` whose bars the door served (verify-SC-3-r2 follow-up).
+    let file = match crate::file::open_read_existing(&at) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(None),
+        Err(why) => {
+            return Err(io_error(
+                &at,
+                "opening the sealed month",
+                io::Error::other(why.to_string()),
+            ));
+        }
     };
     let refused = |why: crate::sealed::SealedError| {
         io_error(

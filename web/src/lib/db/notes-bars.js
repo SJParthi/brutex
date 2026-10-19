@@ -20,6 +20,7 @@
  * are relative for the same reason — `$lib` is a Vite alias node cannot see.
  */
 import { fmt } from './notes-labels.js';
+import { contractOf, expiryOf } from './decoration.js';
 
 /* ---------------------------------------------------------------------
    WHAT HAS NO SOURCE, SAID ONCE EACH.
@@ -278,25 +279,23 @@ export const BAR_GROUPS = [
    `data-ungrouped` — the same debug-attribute convention `data-boxh` and
    `data-fit` already earned on this grid — so the answer is one inspection
    away instead of a puzzle. `CLAUDE.md` §4: degrade loudly, name the reason. */
-export const GROUPED_KEYS = new Set(BAR_GROUPS.flatMap((g) => g.keys));
-export const BAR_UNGROUPED = BAR_COLS.filter((c) => !GROUPED_KEYS.has(c.key)).map((c) => c.key);
+/**
+ * The keys of `cols` no group in `groups` names, in column order.
+ * @param {{key: string}[]} cols @param {{keys: string[]}[]} groups
+ */
+export function ungrouped(cols, groups) {
+  const named = new Set(groups.flatMap((g) => g.keys));
+  return cols.filter((c) => !named.has(c.key)).map((c) => c.key);
+}
+export const BAR_UNGROUPED = ungrouped(BAR_COLS, BAR_GROUPS);
 
 
 /** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
 export const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
 export const BAR_UNSOURCED = BAR_COLS.length - BAR_SOURCED;
 
-/* ---------------------------------------------------------------------
-   THE READ BUDGET - a CHOICE, not a count the page took for the reader.
-
-   `/bars.json` is one month per request and about 81 bytes per bar on the
-   wire, so "read everything that matched" is a request storm on a 206-row
-   census. The budget is a control with its cost on its face; `0` means
-   every matched instrument-month and the option says so.
-   --------------------------------------------------------------------- */
-export const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
-/** @param {number} n */
-export const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
+/* THE READ BUDGET (`READ_BUDGETS`, `budgetLabel`) WENT IN R3-03: the control
+   left with the per-month reads (D-3326) and nothing read either name since. */
 
 /**
  * Why one bar's percentage is not a number. One code, one sentence — EVERY
@@ -345,5 +344,184 @@ export const BAR_WHY = {
 };
 /** @param {string | null} code */
 export const barWhyText = (code) =>
-  (code === null ? null : /** @type {any} */ (BAR_WHY)[code]) ??
+  /** @type {any} */ (BAR_WHY)[String(code)] ??
   'unknown, and this page did not record why - which is a defect here, not a fact about the store.';
+
+/* ---------------------------------------------------------------------
+   R3-03 — WHAT THE GRID OFFERS, AND WHAT IT SAYS WHEN IT CANNOT.
+   --------------------------------------------------------------------- */
+
+/** The segment a census key names, its second token: `INDEX`, `CASH` or `FNO`. @param {string} key */
+export const segmentOfKey = (key) => String(key).split('-')[1] ?? '';
+
+export const NO_VOLUME_SORT =
+  'an index has no traded volume (D-2802, D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under a Volume caret.';
+export const NO_OI_SORT =
+  'an index or a share has no open interest (D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_EXPIRY_SORT =
+  'no series of this selection is a contract, and only a future or an option carries an expiry in its stored name: every row of this selection reads —, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_OPTION_SORT =
+  'no series of this selection is an option, and only an option carries a side and a strike in its stored name: every row of this selection reads —, so there is nothing to order — the rows would come back in time order under this caret.';
+export const NO_RUNG_SORT =
+  'this selection is read at one rung, so every row carries the same one: there is nothing to order — the rows would come back in time order under this caret.';
+
+/**
+ * WHAT THE SELECTION'S SERIES CAN CARRY, read once per selection (R3-03).
+ *
+ * One pass over the series keys, so a header's refusal is one look-up on
+ * every render and every press rather than a pass over the series each time:
+ * a whole option chain is thousands of keys and the grid asks about
+ * twenty-five headers several times a render. The contract facts are read
+ * off the stored name by the SAME parse the cells use (`expiryOf`,
+ * `contractOf` in `decoration.js`), so a header cannot be offered over a
+ * column whose cells that parse leaves empty, nor refused over one it fills.
+ *
+ * @param {string[]} keys the selection's series
+ * @param {string} [timeframe] the rung the selection is read at, `''` for none chosen
+ */
+export function seriesKinds(keys, timeframe = '') {
+  let allIndex = true;
+  let noDerivative = true;
+  let expiry = false;
+  let option = false;
+  for (const k of keys) {
+    const seg = segmentOfKey(k);
+    if (seg !== 'INDEX') allIndex = false;
+    if (seg !== 'INDEX' && seg !== 'CASH') noDerivative = false;
+    if (!expiry && expiryOf(String(k)) !== null) expiry = true;
+    if (!option && contractOf(String(k)) !== null) option = true;
+    /* DECIDED, SO DONE (R3-03 repair 3): each of the four moves one way only,
+       so once all four have moved no later key can change the answer. An
+       option chain is decided by its first key, where every key was read
+       before (all 70,458 NIFTY option series on disk, once per selection).
+       A selection with no option still reads every key, once per selection;
+       both are measured in L-R303-05. */
+    if (!allIndex && !noDerivative && expiry && option) break;
+  }
+  return { n: keys.length, allIndex, noDerivative, expiry, option, oneRung: timeframe !== '' };
+}
+
+/**
+ * WHETHER A SORT MEANS SOMETHING ON THIS SELECTION (R3-03): `null` when it
+ * does, else the reason its button is disabled. One look-up: the selection is
+ * read once, by `seriesKinds`.
+ *
+ * Volume on an index and open interest on an index or a share are n/a on
+ * every row, by the server's own rule (`bars_change.rs`: an `INDEX` bar has no
+ * traded volume, an `INDEX` or `CASH` bar no open interest, D-3322). Ordering
+ * them answered time order wearing a Volume caret (the 11 Oct re-check, NIFTY
+ * spot · Zerodha 1min). A selection with any derivative keeps the sort.
+ *
+ * THE CONTRACT COLUMNS TOO (R3-03 repair 2). Expiry and Days to exp read `—`
+ * on every row of a selection with no future or option, Type and Strike on
+ * every row of one with no option, and they were offered: Days to exp on
+ * NIFTY spot · Zerodha 1min read all 7,875 rows in eight requests and
+ * ordered nothing, with the caret on it and `sort=dte` in the address. And
+ * TF, which the grid reads at one rung, so every row carries the same one.
+ *
+ * @param {string} key the grid's column key @param {ReturnType<typeof seriesKinds>} kinds
+ * @returns {string | null}
+ */
+export function refusalFor(key, kinds) {
+  if (kinds.n === 0) return null;
+  if (key === 'vol' && kinds.allIndex) return NO_VOLUME_SORT;
+  if ((key === 'oi' || key === 'oichg') && kinds.noDerivative) return NO_OI_SORT;
+  if ((key === 'exp' || key === 'dte') && !kinds.expiry) return NO_EXPIRY_SORT;
+  if ((key === 'side' || key === 'strike') && !kinds.option) return NO_OPTION_SORT;
+  if (key === 'tf' && kinds.oneRung) return NO_RUNG_SORT;
+  return null;
+}
+
+/**
+ * `refusalFor` over a list of series, for a caller that asks once.
+ * @param {string} key @param {string[]} keys @param {string} [timeframe]
+ */
+export const sortRefusal = (key, keys, timeframe = '') => refusalFor(key, seriesKinds(keys, timeframe));
+
+/**
+ * WHAT TO DO WHEN THE BROWSER WILL NOT ORDER A COLUMN (R3-03, DB-B50): advice
+ * that WORKS for this rung and this many series.
+ *
+ * The old sentence told every reader to "narrow to a day". A whole IST day
+ * holds at most `86,400 / rung seconds` bars of one series — 1,440 one-minute
+ * bars, but 86,400 one-second bars, past the 20,000 the browser orders — so
+ * on a one-second series the advice could not work. A day is offered only
+ * where a day of every series fits; otherwise the time of day it must be
+ * narrowed to as well is named in minutes. Every figure is arithmetic on the
+ * rung and the budget; no session length is assumed.
+ *
+ * WHAT HAPPENED TO THE ORDER IS SAID AS IT HAPPENED (R3-03, shadow 17 Oct).
+ * A header press is refused before the sort moves, so the grid keeps the
+ * order it had (`kept`, the default). A sort that was ALREADY on — from an
+ * address such as `&sort=dte`, or a selection grown past the budget under
+ * it — cannot be kept, and the grid goes back to time order, newest first:
+ * the sentence said "keeps the order it had" over a grid that had just
+ * left it.
+ *
+ * @param {{label: string, total: number, budget: number, tfSecs: number, series: number, stored: string[], kept?: boolean}} o
+ */
+export function localSortAdvice({ label, total, budget, tfSecs, series, stored, kept = true }) {
+  const n = Math.max(1, series);
+  const perDay = n * Math.ceil(86_400 / Math.max(1, tfSecs));
+  const ways = [];
+  if (perDay <= budget) {
+    ways.push(`narrow to one day (a day holds at most ${fmt(perDay)} bar(s) of ${n === 1 ? 'this series' : `these ${fmt(n)} series`} at this rung)`);
+  } else {
+    const minutes = Math.floor(budget / (n * Math.max(1, Math.ceil(60 / Math.max(1, tfSecs)))));
+    ways.push(
+      minutes >= 1
+        ? `narrow to one day AND a time of day of at most ${fmt(minutes)} minute(s) — a whole day of ${n === 1 ? 'this series' : `these ${fmt(n)} series`} can hold ${fmt(perDay)} bar(s) at this rung, so a day alone is not enough`
+        : `choose fewer series — one minute of these ${fmt(n)} series is already past it`
+    );
+  }
+  if (n > 1) ways.push(`choose one strike or one side (${fmt(n)} series now)`);
+  ways.push(`or sort by a stored column (${stored.join(', ')}), which the server orders over any number`);
+  return `${label} cannot be ordered here: this query keeps ${fmt(total)} bar(s), and the browser orders at most ${fmt(budget)} of a column the server cannot sort. ${kept ? 'The grid keeps the order it had.' : 'The grid is back in time order, newest first.'} To order by ${label}: ${ways.join('; ')}.`;
+}
+
+/**
+ * WHY A PAGE OF BARS IS NOT ON SCREEN, IN WORDS THAT ARE TRUE ABOUT WHO SAID
+ * IT (R3-03).
+ *
+ * The grid called every missing page "a failed or refused read" and "the
+ * server's own" sentence, with Try again under it — also when the PAGE had
+ * refused the selection before asking anything (too many series, two rungs, a
+ * window outside the held months), where no server had spoken and pressing
+ * Try again asked the same impossible question. Three cases now:
+ *
+ * - `page`: this page refused before any request; nothing was read; the fix
+ *   is to change the selection, so no Try again.
+ * - `server`: the server answered 4xx with its reason; the same question gets
+ *   the same answer, so no Try again.
+ * - `failed`: no answer, a 5xx, a 408/429 past its retries, or an answer
+ *   that did not check; asking again can help, so Try again is offered.
+ *
+ * @param {{made: 'page' | 'read', status: number}} o
+ * @returns {{kind: 'page' | 'server' | 'failed', title: string, says: string, retry: boolean}}
+ */
+export function readFailure({ made, status }) {
+  if (made === 'page') {
+    return {
+      kind: 'page',
+      title: 'This selection is not read as one page',
+      says: 'This page refused it before asking the server, so nothing was read and no store was consulted. Change the selection as the sentence above says.',
+      retry: false
+    };
+  }
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    return {
+      kind: 'server',
+      title: 'The server refused this page',
+      says: `The sentence above is the server's own (HTTP ${status}). Asking again asks the same question, so it is not offered: change what it names.`,
+      retry: false
+    };
+  }
+  return {
+    kind: 'failed',
+    title: 'This page of bars could not be read',
+    says: status !== 0 && status !== 200
+      ? `The server answered HTTP ${status} and no page. Nothing is drawn rather than a plausible blank; asking again may answer.`
+      : 'No answer arrived, or the answer did not check. Nothing is drawn rather than a plausible blank; asking again may answer.',
+    retry: true
+  };
+}

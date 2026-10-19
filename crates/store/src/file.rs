@@ -9942,6 +9942,29 @@ fn open_read(path: &Path) -> Result<File, ReadOpen> {
     }
 }
 
+/// [`open_read`] for a door outside this module that reads a month's file
+/// as the bar door opens it: a final link followed, never a blocking open,
+/// never a non-regular file, and an absent name — a link that points nowhere
+/// included — `None`.
+///
+/// `provenance::read` opens a sealed month's `.sbar` through this, so the
+/// file whose packed provenance it reads is the file the bar door serves.
+/// It opened with `O_NOFOLLOW` before and refused a `.sbar` that is a link,
+/// while the bar door followed that link and served the month's bars
+/// (verify-SC-3-r2 follow-up, D-5900).
+///
+/// # Errors
+///
+/// The open's named refusal ([`StoreError::IsADirectory`],
+/// [`StoreError::NotARegularFile`], or the host's own, classified).
+pub(crate) fn open_read_existing(path: &Path) -> Result<Option<File>, StoreError> {
+    match open_read(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(why) if why.is_absent() => Ok(None),
+        Err(why) => Err(why.refusal(path)),
+    }
+}
+
 /// Why [`open_read`] gave no handle.
 #[derive(Debug)]
 enum ReadOpen {

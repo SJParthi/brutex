@@ -70024,6 +70024,299 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
 
+### D-4969 — The re-key plan tells a recorded move or retirement (done) from a pending one, a key continues under one key and is never superseded and retired, a move into a held month is known before the apply, and a cli invocation's ledger lines can name its run — 2026-10-14
+
+**Implemented by** AG-02 (assurance findings rekey-3, rekey-5, rekey-2 and
+stocks-7, 14 October 2026): `pull::gdfl_rekey::{plan, against_ledger,
+held_months, copied_months, census_step, Plan::{recorded_moves, recorded_retired, pending, census},
+CensusStep, Group::check,
+Withdrawn::{parse, counts_for, line_of, superseded_records, retired_records,
+admits}, apply}`, `cli::gdfl_rekey::{render_survey, render_plan}`,
+`cli::operation_audit::{RunClaim, claim_invocation_run}`. **Number** the
+ledger's head + 1 at landing (A6): D-4969, still the head + 1 on 16 October 2026 after AF-03 (D-4963), SC-2 (D-4965), AG-03 (D-4966) and R4-08 (D-4967, D-4968) landed; renumbered again if
+another package took it first (round 3, amendment A6).
+
+**What was observed.** (1) rekey-3: the old keys' files are kept for ever, so
+every plan judged them again and a second `--plan` after the 14 October apply
+still read `13 to move, 3 to retire`; the pinned test said so on purpose
+("a re-run plans the same move and finds it done", WP-12c). The acceptance in
+R4-21, ING-10 and DATA-REKEY-APPLY (`0 to move, 0 to retire`) could never
+pass, and the ledger totals line counted the whole ledger under
+`--underlying`. (2) rekey-5: `Withdrawn::parse` kept the LAST of two
+`superseded` lines of one key with different targets, silently, and refused a
+key superseded and retired without saying which lines; neither `plan`,
+`named_twice` nor `apply` compared a verdict with the ledger, so a later alias
+table could make the apply append either line (latent: no such line exists).
+(3) rekey-2: the plan was pure and `target_state` ran only in the apply, so
+`0 unresolved` did not predict the 14 October apply's three refusals (NIFTY
+`2023-06-29-{1000000,1050000,1100000}-PE` into held 2020-09 months, 186 bars).
+(4) stocks-7: every pull ledger line stamps `run=` from the telemetry sink's
+run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
+`zerodha.repairs` and 76,476 `zerodha.gaps` lines say `run=0`.
+
+**Decided.**
+
+1. **Recorded is done.** A move whose `(underlying, old) -> new` the ledger
+   records, with the month and bar counts the key holds now, and a
+   retirement the ledger records, are `Plan::recorded_moves` and
+   `Plan::recorded_retired`: out of `moves`, `retired` and `changes()`, and
+   `apply` does not redo them. The receipt prints `N moved and M retired
+   already recorded`, lists each as `(recorded in the ledger)`, and prints
+   `PENDING: P` (moves + retirements + unresolved + the census step), the one
+   number a gate reads; the ledger totals follow `--underlying`. This replaces WP-12c's
+   pinned re-plan. **The restated acceptance** for R4-21, ING-10 and
+   DATA-REKEY-APPLY: a second `--plan` reads `PENDING: 0`, and a second
+   `--apply` writes 0 month files, appends 0 ledger lines and installs no
+   epoch. A run cut short is finished by the next: after its lines every key
+   is recorded and the CENSUS STEP is pending (`census: N withdrawn key(s)
+   still listed`, in `PENDING`), and the next apply installs only the epoch;
+   before them the target holds the copy, the plan reads the move pending
+   (not a second name: the same bar count on every day of a month and apply's
+   own `target_state` finding that month `Already`, bar for bar) and the
+   apply finds those months exactly held.
+2. **One target per key.** `Withdrawn::parse`, the one public reader of the
+   two record kinds, refuses a second `superseded` line of one
+   `(underlying, old)` whose `by=` differs, and a key superseded and retired
+   in either order, each naming both line numbers; the same record again
+   reads once at its first line; a second `superseded` line to the same
+   target with other counts or digest, and a second `retired` line of one key
+   with another account, are refused naming both lines (repair r1e). A last line with no newline is torn, never a record:
+   the next append marks it `(torn)` and writes its own line whole, so it can
+   never vanish after having been counted. The writer refuses first: the plan
+   names as unresolved, with the ledger line, a verdict that would re-target a
+   superseded key, retire a superseded key, move a retired key, keep a
+   withdrawn key, or move a recorded key that has grown since; a move into a
+   target the ledger withdraws is unresolved; and `apply` refuses, before it
+   writes a byte, a plan whose lines the parser would refuse
+   (`Withdrawn::admits`).
+3. **A move into a held month is known before the apply.** The month headers
+   the survey read decide every month the target does not hold at or after
+   the moved bars (the apply appends there without reading). A group with a
+   month the target does hold is decided by `Group::check`, the very read and
+   `target_state` the apply runs before its first write: if it refuses, the
+   moves are `target month held: ... needs the repair-door publish (R4-21
+   item 1) (apply's own check: ...)`; if every such month is `Already` (an
+   apply cut short), the move stands and the next apply finishes it. Moves
+   into one month whose spans interleave are unresolved; a group is refused
+   whole, as the apply refuses it. The publish itself is R4-21 item 1's.
+4. **A cli invocation's run.** `cli::operation_audit::RunClaim` holds an
+   attempt id as the sink's run for its life: `claim_run` takes only a free
+   key, the guard releases only what it took, zero and no sink claim nothing
+   (D-0088's zero is "no run"). It belongs at the boundary of a process that
+   runs one command, the `cli` binary: the API process runs work beside other
+   runs, which is why `Attempt::enter` does not claim.
+
+**Repair r1e (16 October 2026; a second agent's check of the first build).**
+Two blocking defects, both reproduced before this repair. (a) The census
+step was not in the plan: an apply stopped after its ledger lines and before
+the epoch (killed, or refused by a census lock another ingest holds at step
+4, which a retirements-only apply reaches without step 2) left every key
+recorded, and the next `--plan` read `PENDING: 0` and "would change nothing"
+while the next `--apply` installed an epoch. Now `Plan::census` is a
+`CensusStep` (`Clear`, `Listed(keys)`, `Unreadable(why)`, `NotRead`), read
+by the plan from the census's current FNO epoch with `Withdrawn::holds`, the
+predicate the apply's withdrawal uses; a listed key counts one in `PENDING`
+and in `changes()`, an unread or unreadable census counts one and fails the
+plan's exit; an empty ledger reads nothing (no census can list what it does
+not withdraw). The check covers the whole ledger even under `--underlying`,
+because the apply withdraws the whole ledger's keys. (b) `copied_into` read
+only headers and day counts, so a target holding other bars under the same
+counts and stamps was taken for an apply cut short: `named_twice` and
+`held_months` skipped it, the plan read one move and no unresolved, and the
+apply refused the move. Now a copy is decided month by month: equal counts on
+every day of the month AND apply's `target_state` finding it `Already`; only
+those months' days are exempt from the second-name check, and a held month
+is decided by `Group::check`. A move killed between its two months (June
+written, July not) now plans as the move the apply finishes, where the first
+build named it a second name. Also taken: the ledger's two-account repeats
+(above, item 2).
+
+**Rejected.** Rewriting the acceptance to a second `--apply` receipt: the
+plan is the gate the one-click ingest reads, and asking "is it done?" must
+not need a write-capable run. Re-verifying each recorded move bar for bar on
+every plan: O(bars) a run for keys whose digest the ledger holds; a pending
+move is still verified exactly by `target_state`. Reading the bars of every
+move into an existing target in the plan: O(bars moved) for the common case
+the headers decide exactly (a month the target does not hold at or after the
+moved bars is appended to without a read, by the apply as by the plan).
+Keeping the plan pure and leaving the census step to the apply's receipt:
+`PENDING` must answer "is it done?" without a write-capable run, and the
+census epoch is read without the lock, as every census reader reads it. Last-wins for a re-targeted key: one
+contract becomes three series and nothing refuses. Claiming the run inside
+`Attempt::enter`: the API's browser tasks enter attempts beside its own pull
+runs, and a claim there would stamp a pull's events with a sweep's id.
+
+**What remains** (`docs/06-limits.md`, L-AG02-4 to L-AG02-7): the API's own
+ledger reader in `crates/api/src/bars_change.rs` still keeps the last line and
+copies lineage to both targets (AF-03's file); the settled key's window label
+while a predecessor is pending (`months_outside_life`, `prev_chg_why
+no_earlier_month`) needs `bars_change.rs` and `bars_series.rs` (AF-03,
+AF-04); the three refused NIFTY moves need R4-21 item 1's publish; and
+`RunClaim` is not yet held by the cli binary, because the one line that holds
+it is in `crates/cli/src/lib.rs` `run_with_sink`, which R3-18, R3-32 and R4-08
+have in flight: until it lands, cli ledger lines still say `run=0`.
+
+**Proved by** `pull::gdfl_rekey::tests::{a_second_plan_after_a_full_apply_has_nothing_pending,
+a_recorded_move_is_reported_as_recorded_not_to_move,
+the_ledger_totals_follow_the_underlying_filter,
+a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines,
+an_identical_repeated_superseded_line_is_idempotent,
+a_key_superseded_and_retired_is_refused_naming_both_lines,
+the_plan_never_retargets_a_superseded_key,
+the_plan_never_retires_a_superseded_key,
+apply_never_writes_a_line_its_parser_refuses,
+a_move_into_a_held_month_is_unresolved_in_the_plan,
+a_held_month_is_decided_by_applys_own_check,
+an_apply_killed_between_two_months_plans_as_the_move_it_finishes,
+a_target_with_the_same_counts_and_other_bars_is_unresolved_not_a_refused_move,
+a_retirements_only_apply_stopped_at_the_census_lock_leaves_step_4_pending,
+a_census_not_read_or_unreadable_is_pending_never_done,
+one_move_or_retirement_recorded_twice_with_another_account_is_refused,
+moves_whose_spans_interleave_in_one_target_month_are_unresolved,
+a_rekey_cut_short_is_reported_truly_and_finished_by_the_next_apply,
+a_ledger_reads_empty_torn_garbage_and_long_exactly,
+every_underlying_reads_done_after_its_apply,
+applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census}`,
+`cli::gdfl_rekey::tests::{the_plan_receipt_prints_recorded_apart_from_pending,
+applying_moves_and_retires_and_a_second_apply_writes_nothing,
+the_plan_receipt_names_a_census_step_left_pending,
+a_census_that_will_not_read_is_named_and_fails_the_plan}`,
+`cli::operation_audit::run_tests::{a_cli_written_repair_line_carries_the_invocations_run,
+a_process_with_no_attempt_writes_run_0,
+two_invocations_in_one_process_each_name_their_own_run,
+a_run_claim_takes_only_a_free_key_and_releases_only_its_own}`.
+
+**Repair r2 (17 October 2026; a second agent's check of repair r1e).** One
+blocking defect, reproduced first: two `--apply` runs planned from one
+ledger. `apply` checked `admits` and filtered `has_line` against the
+`Withdrawn` its caller read before the survey, and appended with no lock and
+no re-read. When anything on the surveyed days changed between two surveys
+(another strike on a retired key's day moves its recorded median; a bar on
+the moved key changes `bars=`), the second run appended a second account of
+the same retirement or move, and `Withdrawn::parse` then refused the WHOLE
+ledger, stopping `gdfl-rekey`, `census-recount` and the import's rename
+check, with no lawful repair of an append-only file. Decided:
+
+1. **One writer, under one lock, from the ledger it planned from.** `apply`
+   takes `<store>/imports/gdfl.lineage.lock` (`ledger_lock_path`; created
+   when absent, never truncated, a non-regular file refused) with
+   `try_lock` after its pure checks and before its first write, and holds it
+   to the epoch. Another apply holding it is refused by the lock's name,
+   never waited on. Under the lock the ledger is re-read; when its re-key
+   lines are not exactly the ones the plan's ledger held, the apply refuses
+   with "the ledger changed since this plan; re-plan", naming a differing
+   line, and writes nothing. The append's torn-tail mark and line filter use
+   the fresh read. Lines of the ledger's other kinds are not compared: no
+   re-key verdict reads them.
+2. **A source counted by the plan is the source moved.** Before a group is
+   written, each source key's months and bars are read again (`source_now`:
+   one listing and one header per month file) and the bars actually read are
+   counted; a source holding other bars or months than the plan counted is a
+   refused move by name ("bars landed under it after the survey; re-plan"),
+   never moved with the plan's stale `bars=` beside this read's digest.
+3. **The reader's last two rules, and the writer never breaks them.**
+   `Withdrawn::parse` refuses, once the whole ledger is read, a `superseded`
+   line into a key the ledger retires and a cycle of `superseded` lines,
+   naming the lines; a chain (A by B, B by C) is lawful history and reads.
+   The plan leaves by name a key bars were moved into instead of retiring
+   it, and `admits` refuses a hand-built plan that retires one, moves into a
+   key the ledger withdraws, or moves into a key it also moves away.
+4. **One rule for both recorded kinds.** A retired key that gained bars or
+   days after its retirement is unresolved by name, exactly as a moved key
+   that did; a retirement whose day merely gained other strikes (its median
+   moved) stays recorded, because the median is the day's, not the key's.
+5. The `--underlying` receipt says the census step is counted over the whole
+   ledger and census.
+
+**Rejected (r2).** A blocking lock: an apply that waited would then find the
+ledger changed and refuse anyway, after an unbounded wait. Comparing the
+ledger's whole bytes: an import appending an `alias` line between plan and
+apply would refuse a re-key no verdict of which changed. Re-surveying under
+the lock: about 470 s on NIFTY with the lock held. Writing the bars count the
+apply read instead of refusing: the plan's verdicts (ladder, held months,
+second names) were judged on the plan's bars, so a grown source needs a new
+plan, not a new count. Refusing chains: a decoder change can lawfully move a
+target on, and the reader resolves a chain.
+
+**What remains (r2)** (`docs/06-limits.md`, L-AG02-10 and L-AG02-11): an
+import writing under a source key during that key's own move, after its
+read and before the epoch, is not excluded by this lock (the GDFL import's
+run lock is the cli's, AF-01); the next plan names it unresolved, never
+recorded. Everything listed under repair r1e's "What remains" stands.
+
+**Proved by (r2)** `pull::gdfl_rekey::tests::{two_applies_planned_from_one_ledger_never_append_two_accounts,
+an_apply_while_another_holds_the_lock_writes_nothing,
+two_applies_at_once_leave_a_ledger_that_reads,
+a_source_that_grew_after_the_survey_is_refused_not_moved_with_a_stale_count,
+a_superseded_line_into_a_retired_key_or_a_cycle_is_refused_by_line,
+the_writer_never_retires_a_target_or_closes_a_cycle,
+a_retired_key_that_grew_is_unresolved_like_a_moved_one}`,
+`cli::gdfl_rekey::tests::{an_apply_while_the_rekey_lock_is_held_stops_and_writes_nothing,
+the_plan_receipt_prints_recorded_apart_from_pending}`.
+
+**Repair r4 (18 October 2026; a second agent's third check, of repair r2).** One
+blocking defect, reproduced first: merged into feat/db-fix, this entry's
+`docs/06-limits.md` rows failed `store`'s `cited_commits` gate (D-5820, which
+landed after this package's last merge), because four of its sentences cited a
+build by a commit of this package's branch or of feat/db-fix that `main`'s
+squash merge does not keep. Decided:
+
+1. **The rows name a build by what it was, not by a branch commit.** The
+four sentences now say "the merge base feat/db-fix had before AG-02", "the
+package's first build against this repair", "R3-32 on 17 October 2026" and
+"feat/db-fix (its head of 16 October 2026)"; the kept binaries and logs the
+rows already name identify each build. `cited_commits` is green on the merged
+tree, run in a new target directory.
+
+Three follow-ups of the same check, in this package's files, are taken:
+
+2. **A retirement is written only with the count its key holds under the
+lock.** `apply` re-counts each planned retirement's key (`source_now`, as
+for a move's source) after it takes `imports/gdfl.lineage.lock`; a key
+that gained bars since the survey is refused by name, gets no `retired`
+line and no census withdrawal, and a re-plan retires it with what it holds
+(probe P4: before, the apply appended `bars=1` for a key holding 2).
+3. **The stale-plan comparison reads the plan's own underlyings.** A
+`superseded` or `retired` line names one underlying and a plan's verdicts
+read only its own underlyings' lines, so the ledger re-read under the lock is
+compared with the planned one over those lines only (every line for a plan
+of every underlying), in one O(lines) pass with no sort. Two applies of
+disjoint `--underlying` plans no longer refuse each other (probe P12); a
+plan of the same underlying is still refused.
+4. **An `--underlying` with no stored key is refused, not read as done.**
+`cli gdfl-rekey` names every underlying it walked nothing under after the
+receipt and exits `FAILED` (1), for `--plan` and `--apply`, before anything
+is written, and the receipt's `PENDING:` line says `not answered (--underlying
+names ZZZZ, ...)` instead of a count, so no receipt of a refused name holds
+the words `PENDING: 0` a gate reads. Rejected: a zero exit with a note,
+because `PENDING: 0` with exit 0 is the acceptance R4-21, ING-10 and
+DATA-REKEY-APPLY read, and a misspelled name would pass it. The refused-move
+text now names the repair-door publish (R4-21 item 1) instead of WP-80's
+month regeneration.
+
+**What remains (r4)**: `crates/cli/src/lib.rs` still does not hold
+`RunClaim` around one command (L-AG02-7): on 18 October 2026 eight other
+packages' branches hold `lib.rs` edits feat/db-fix does not, so the line stays with the
+file's next owner. **The line is not one line, measured by reading the
+callers on 18 October 2026:** two commands already take the same
+process-wide key for themselves, `pull::gdfl_import_day`'s `RunKey::claim`
+(the import's journal id, so `/logs.json?run=<id>` answers its per-day
+events, DB-A41) and `cli::zerodha_gaps_command::claim_run` (a reserved id
+its header prints and its `audit/zerodha.gaps` lines carry). `claim_run` is
+a compare-and-exchange from no run, so an invocation-wide claim taken first
+would make both fail: the import would warn "run key held by another run"
+and its days would carry the cli's attempt id, and `zerodha-gaps --apply`
+would print "run 0 ... lines carry run=0" above lines that carry the
+attempt id. The next owner settles which id those two commands' lines and
+events carry (the invocation's attempt, or their own nested inside it) in
+the same change as the line. Everything listed under repair r2 and r1e's
+"What remains" stands.
+
+**Proved by (r4)** `pull::gdfl_rekey::tests::{a_retirement_whose_key_grew_after_the_plan_is_refused_not_retired_stale,
+applies_of_disjoint_underlying_plans_do_not_refuse_each_other}`,
+`cli::gdfl_rekey::tests::an_underlying_with_no_stored_key_is_refused_by_name_and_writes_nothing`,
+and `store`'s `cited_commits` on the merged tree.
+
 ### D-4970 — A log-only import row is made only for the refusals no close of the kind-day owns, and a close's refusals are only those logged in its own run's window; a journal row is an instrument's when its filter NAMES the symbol as a whole name or is `*`, the newest such close winning; a run with no lifecycle event says where it looked — 2026-10-14
 
 **Implemented by** AF-02 (`api::imports::{merged, placed, next_start, Owners,
@@ -70829,6 +71122,387 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 `an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
+
+### D-4981 — Minute-gap admission is causal: a holed day is cut at its first hole, and a recorded halt is a hole from its start (AH-01; lookahead-oos-1, g-zerodha-universe-census-3) — 2026-10-16
+
+Two findings of the 14 October attack run, each confirmed by two skeptics.
+
+**lookahead-oos-1.** `minute_gaps::days_with_minute_holes` plus `withhold`
+dropped EVERY row of a session holding any interior minute hole or any absent
+demanded closing minute, so a 10:00 row disappeared because the vendor lost a
+minute at 14:02: which rows exist depended on minutes after them, the
+look-ahead `CLAUDE.md` §3 rule 7 forbids as D-0943, D-1182 and D-1514 read it,
+recorded in neither `docs/06-limits.md` nor `docs/11-findings.md`. The rows
+from the hole on are a different matter: dropping them is causal and is
+D-0694's documented choice. The skeptics narrowed the bias claim: of the 266
+large-move withheld days 148 are the two halt days and 27-29 listing-shape days
+with one bar before the hole, and the rows the look-ahead removed were not
+enriched in large movers (0.355% against 0.354% >= 10% movers where the first
+hole is at or after 10:00).
+
+**g-zerodha-universe-census-3.** Zerodha NIFTY and BANKNIFTY 1min hold full
+375-bar days on 2020-03-13 and 2020-03-23 with near-constant bars inside both
+`pull::calendar::HALTS` windows; the non-flat minutes (10:06-10:13 and
+10:42-10:49) are the reopening auction's indicative index, not continuous
+trading, and the 2min and 5min rungs fold them. No sweep-path code read
+`HALTS`.
+
+**The change (minute-gap policy 4, `cli::minute_gaps::MINUTE_GAP_POLICY`).**
+
+1. A holed day is CUT, not withheld whole. Its cut instant is the EARLIEST of:
+   its first missing interior minute (seen by the minute after it, cut AT the
+   hole), the demanded closing minute (`indicators::anchored::
+   exact_closing_minute`, with the day's own close) of its first signal bucket
+   whose minute is absent, the start of a recorded halt, and a minute the
+   exact-minute overlay could not source (the retry loops' defence, cut at
+   the minute the refusal names). A signal bar is withheld exactly when its
+   bucket reaches past the cut (`open >= cut - length + 1 µs`); every bar
+   wholly before it is admitted and swept.
+2. **A recorded halt is a hole from its first whole minute** for every rung
+   whose bucket overlaps it, whatever bars the feed served inside it.
+   `pull::calendar::halt_on` over `HALTS` is the one authority; no second list
+   exists. 2020-03-13 cuts at 09:22 and 2020-03-23 at 09:59 (`halted.from`).
+   2021-02-24, the third `HALTS` entry, is unchanged: it is in
+   `indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS`, so the month decode
+   withholds it whole before this census sees it.
+3. The rows from the cut to the session end stay withheld (D-0694, narrowed to
+   them). A trade entered before the cut is refused at it by D-1514's located
+   hole, because the rows after it are absent from the execution series on
+   `1min` and the minute itself is absent on a coarse rung.
+4. **The fold stays whole** (D-1781): the indicator fold steps every bar and
+   gives no row to a bar at or after its day's cut
+   (`indicators::column::AnchoredColumn::build_required_withholding_from`,
+   whose `(day, i64::MIN)` pair is the old whole-day door).
+5. **Identity.** `MINUTE_GAP_POLICY` is 4 and `bind_withheld` binds each
+   cut's day, cut instant, first withheld bar-open and cause, so no version-3
+   run shares an identity with a version-4 run that withheld anything, and
+   two runs that cut one day at different instants never share one. Runs filed
+   before keep their identities (§3 rule 8).
+6. **Reports name each cut**: `YYYY-MM-DD from HH:MM (cause): A admitted
+   before, W withheld`, on `sweep-stored`, `auto-stored`, `audit-range` and
+   `screen`. All five doors (those four and `pool`) call the one census
+   `days_with_minute_holes` and the one `withhold`.
+
+**Measured both ways (operator's rule), read-only over a private shadow of the
+real store** (`state/fix/shadow.sh AH-01`, the test
+`cli::minute_gaps::measure_tests::rows_and_move_rates_both_ways` under
+`state/fix/ro.sh`), 2026-10-16, 41 s: over 210 F&O shares' Zerodha `1min`,
+20,590 months 2018-01..2026-09, the whole-day rule admitted 147,590,087 rows and
+the causal cut admits 150,305,573 (+2,715,486, +1.84%). 21,316 sessions are cut
+and every one keeps a non-empty window before its cut. Of the 393,961 sessions
+with no cut, 3.449% move 5% or more open to close and 0.351% move 10% or more;
+of the 21,316 recovered pre-hole windows (first open to the last admitted
+close), 1.853% and 0.188% do. The recovered rows are not enriched in large
+movers -- the skeptics' correction, reproduced -- so the rule is adopted for
+causality, not for a measured bias. A window is shorter than its session, so
+its move rates are not a like-for-like comparison with a whole session's.
+
+**Cost.** One interior pass over the minutes, one forward cursor over the
+signal, one `halt_on` (three entries) per signal day, two O(d) merges, and one
+hash probe of the bar's day per bar in `withhold` and the fold: O(bars), with an
+O(1) probe per bar however many days are cut. MEASURED 2026-10-16 by
+`cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month` (release
+test binary, read-only shadow, warm page cache, on a machine shared with a
+running test suite; the load is not timed) over 1,678 months -- NIFTY and
+BANKNIFTY `1min` and `15min` and twelve shares' `1min`, 2018-01..2026-09: the
+census plus `withhold` cost p50 5.3 ns, p99 39.6 ns, max 586.1 ns per bar and
+p50 39.6 us, p99 175.8 us, max 622.6 us per month, against policy 3's 5.1,
+39.7 and 410.9 ns and 38.4, 200.2 and 635.4 us on the same months (policy 3 is
+re-implemented statement for statement inside the test). 246 of the months are
+cut; they admit 11,118,854 rows in all against policy 3's 11,019,137. The
+per-bar p99 is a small month's fixed cost (a `15min` month's few hundred bars
+carrying one map and one `halt_on` per day), not a scan.
+
+**Repair round 1 (2026-10-17): a hole at the open, read from the calendar.**
+AH-01's first re-check found that `first_interior_holes` compared only two
+bars of one IST day, so the step into a day's FIRST bar came from the
+previous night and failed the same-day test: a day whose 09:15 minute (or
+09:15..09:2x) the feed lacked had no cut on any rung, and the rule above
+admitted every row after that hole. The re-check measured it on real Zerodha
+`1min`: 132 of 415,277 share-days lacked the open minute, 82 of them also
+carried a later cut, and on those the rule newly admitted 1,155 rows that
+follow a hole (360ONE 2020-01-01: first stored minute 09:23, cut at 09:25,
+"2 admitted before"). The walk now asks the exchange calendar once per day
+(`pull::calendar::kind_of`, the one authority, no second list): a minute is
+MISSING when the day's session expects it and the series lacks it. So:
+
+1. A day whose first held minute is later than its session's first minute is
+   cut AT that first minute with cause `Hole`; every row of the day is
+   withheld on every rung, and the exclusion reads `YYYY-MM-DD from 09:15
+   (minute hole): 0 admitted before, W withheld`.
+2. The gap between a two-window session's windows (2024-03-02 and 2024-05-18,
+   09:15-09:59 and 11:30-12:29 by the calendar's own record) is not a hole:
+   no minute in it is expected. The rule as first written cut those days at
+   10:00 and withheld the second window; a hole inside a window still cuts.
+3. A traded day OUTSIDE the calendar's measured range (`kind_of` answers
+   `Unmeasured` before 2019-12-02 and after 2026-09-04, and Zerodha's `1min`
+   reaches 2018-01 and 2026-09-30) holds bars, so it traded: it is held to
+   the regular session (`pull::calendar::Session::full`, 09:15-15:29), so a
+   missing 09:15 there is a hole at 09:15 too. A special session there that
+   began late would be withheld whole and named, never admitted after a
+   hole (`docs/06-limits.md` L-AH1-11). A day the calendar says was `Closed`,
+   or one whose session length was never measured (`OpenLengthUnmeasured`,
+   the five pre-2025 Muhurats), has no known first minute, so it gets no
+   leading cut, and its interior rule is the calendar-free one: any same-day
+   step longer than a minute is a hole at the minute after the earlier bar.
+4. A hole that ties a recorded halt's start is named the halt
+   (`merge_cuts`), so the operator is not sent to the vendor for an
+   exchange event.
+
+`MINUTE_GAP_POLICY` stays 4: the rule above had not landed on `feat/db-fix`,
+so no filed run carries it, and `bind_withheld` binds each cut's day and
+instant anyway, so a day newly cut at 09:15 or no longer cut at 10:00 changes
+the run's identity. The cost is one `kind_of` per minute-day (at most nine
+comparisons) and two window compares per bar: O(1) per bar.
+
+**Measured again after the repair, 2026-10-17**, the same two tests on a
+fresh private shadow (`state/fix/shadow.sh AH-01`, under `state/fix/ro.sh`,
+the workspace's optimised `test` profile, 36.5 s for both, on a machine
+shared with other agents' builds; logs
+`state/fix/logs-AH-01-r1c/measure.log`). These figures supersede the ones
+above for the rule as it lands.
+
+- **Both ways.** Over 210 F&O shares' Zerodha `1min`, 20,590 months
+  2018-01..2026-09, the whole-day rule admitted 147,590,087 rows and the
+  causal cut now admits 149,840,163 (+2,250,076, +1.52%; +2,715,486 before the
+  repair). 22,579 sessions are cut (21,316 before the repair): 21,086 keep a
+  non-empty window before their cut and 1,493 keep none.
+- **The leading hole.** Those 1,493 are exactly the share-days missing their
+  open minute: 132 inside the calendar's range -- the re-check's count,
+  reproduced -- and 1,361 outside it, held to 09:15 by item 3. Not one row of
+  them is admitted; the test asserts it (`lead_admitted == 0`).
+- **Move rates.** Of the 392,698 sessions with no cut, 3.449% move 5% or more
+  open to close and 0.350% 10% or more; of the 21,086 recovered pre-hole
+  windows, 1.859% and 0.180% do. The recovered rows are still not enriched in
+  large movers, so the rule stands on causality, not on a measured bias.
+- **Cost.** Over the same 1,678 months as above, the census plus `withhold`
+  cost p50 7.8 ns, p99 72.2 ns, max 624.4 ns per bar and p50 58.7 us, p99
+  155.5 us, max 559.5 us per month, against policy 3's 5.9, 48.8 and 141.2 ns
+  and 43.9, 123.2 and 445.3 us measured in the same run. The difference is the
+  one `kind_of` per day and the window compare per bar, both constant. 251 of
+  the months are cut, and they admit 11,116,682 rows in all against policy 3's
+  11,019,137.
+
+**Repair round 2 (2026-10-18): a halt's minutes leave the coarse rung's
+execution series.** AH-01's second re-check found item 3 false for the halt
+cause. A recorded halt cut only the SIGNAL rows. On every coarse rung the
+separately loaded `1min` execution series kept the feed's frozen and
+auction-indicative halt minutes. No minute was missing there, so D-1514's
+located hole could not fire, and a position opened from a row admitted
+before the halt was walked through those minutes to the 15:10 square-off,
+where a stop, target or exit could fill. The re-check's probe (5 minutes on
+2020-03-13) showed it: the last admitted row was 09:15, its entry minute
+09:20, and the next 60 execution minutes were consecutive, 59 of them inside
+`HALTS`' 09:22..10:20. Census-3's exposure ("auction-indicative minutes
+treated as tradable") was still there on coarse rungs.
+
+1. `cli::minute_gaps::withhold_halted_minutes` removes every minute inside
+   a recorded halt's `halted` window (`pull::calendar::halt_on`, the one
+   authority; the window holds the whole minutes with no continuous trading
+   on any segment, reopening auction included) from a coarse rung's
+   execution series. `sweep-stored`, `audit-range`, `screen` and `pool` call
+   it as soon as they load that series, before the floors, the census, the
+   digest and the alignment read it. `auto-stored` opens no execution series.
+   On `1min` the series is the signal itself, and the halt's cut already
+   withholds every row from its start to the session end.
+2. With those minutes gone, a halt is a missing span in the execution series,
+   just as a vendor hole is. A path that crosses it fails
+   `runner::trade::SliceFacts::path_accepts` at the first minute after it.
+   Under D-1514 a level exit strictly before the halt can still be priced;
+   nothing at or after the halt is. A signal whose entry minute would be the
+   halt's first minute has no immediate execution bar, so it is dropped and
+   never delayed.
+3. **Item 3 above, corrected.** A trade entered before a cut is refused at
+   the cut on every rung. On `1min` the slice ends at the cut, so a trade
+   whose horizon reaches past it has no square-off and is not priced. On a
+   coarse rung the cut's minute is absent from the execution series: for a
+   vendor hole or an absent closing minute because the feed lacks it, and
+   for a halt because of item 1. There, D-1514 prices only a level exit
+   strictly before the cut. The two rungs can differ in what they price
+   before a cut. Neither prices anything at or after it.
+4. The exclusion counts the removed minutes (`GapExclusion::
+   with_halted_minutes`), and `sweep-stored`, `audit-range` and `screen`
+   print `HALTED EXECUTION MINUTES WITHHELD: N one-minute bar(s) inside a
+   recorded halt ...` whenever N > 0. `pool`'s page names no cut and no
+   halted minute (`docs/06-limits.md` L-AH1-07).
+5. **Identity.** The removed minutes are absent from the execution slice
+   that each door digests into its data term, so a run under this rule
+   cannot share an identity with a run that kept them. `MINUTE_GAP_POLICY`
+   stays 4, as it did in repair round 1: policy 4 has not landed on
+   `feat/db-fix`, so no filed run carries it.
+6. `audit-stored`, the checksum-audited door, applies no minute-gap rule
+   and keeps its identity (D-0694). It still sweeps and trades both March
+   2020 halt windows. `expression-search-stored` and `expression-search-priced`
+   apply no minute-gap rule either, and price on the whole `1min` series.
+   Both are follow-ons, stated in `docs/06-limits.md` L-AH1-13, and are not
+   done here.
+
+Proved by `cli::halted_execution_tests::a_coarse_rung_trade_never_prices_a_halted_minute`
+(a generated March 2020 store through the `sweep-stored` door on 2, 5 and 15
+minutes: no halted execution minute, 117 counted, every pre-halt row's
+consecutive run ends before the halt, and on the door's own column and
+projection `runner::trade::SliceFacts::first_missing_within` places the hole
+at the first minute after the halt for every swept entry on a halt day while
+`path_accepts` refuses its path to the day's last minute) and
+`cli::minute_gaps::causal_tests::withhold_halted_minutes_removes_exactly_the_halt_window`.
+The test fails before the fix: with the removal turned off it fails at
+`2min: an execution minute inside a halt`, and with the removal off and its
+three direct checks on the series made inert it fails at the runner's check,
+`2min: the path from 1584071220000000 meets no hole` (2020-03-13 09:17 IST).
+The cost is one `halt_on` (three entries) per IST day and two compares per
+minute, in one `retain` pass: O(1) per minute, measured in `docs/06-limits.md`
+L-AH1-14 (p99 2.0 ns per minute, 16.0 us per month, n = 1,678 real months).
+
+### D-4982 — `sweep-stored`'s exit code agrees with its sweep evidence: a walk that is not a whole answer exits FAILED (AH-01; repro-2; extends D-2720) — 2026-10-16
+
+**Observed.** `stored_month_arm` exited on `work_exit`, which reads only a
+refusal line. A `sweep-stored` walk that halted on its candidate budget prints
+`outcome REFUSED the walk stopped short` and `trustworthy as a whole answer NO
+closure is incomplete on the halted frontier`, writes `Completion::Halted` to
+its sweep evidence, and exited 0, so `run_with_sink` logged `phase: completed`
+and `run_durable` recorded `Phase::Completed` for the run. `untrustworthy`
+compared the whole rest of the verdict row with `NO`, which missed exactly the
+halted row with its closure note. `audit-stored` already refused such a walk
+(`ranked_opening`), so the siblings disagreed. The ledger row and the evidence
+were honest.
+
+**The change.** `stored_month_arm` exits through `stored_month_exit`, which is
+`auto_stored_exit`'s predicate called rather than copied: a refusal line or an
+untrustworthy verdict is `FAILED`. `untrustworthy` reads the verdict CELL, the
+first whitespace-separated word after `trustworthy as a whole answer`, so the
+halted row counts and `NO,` in prose does not; this also catches the halted
+case on `auto` and `auto-stored`, the class D-2720 fixed for their other
+untrustworthy verdicts. The lifecycle `phase` and the invocation audit's
+terminal phase are each one function of the exit code (`lifecycle_phase`,
+`audit_phase`), so the three durable records cannot disagree. `audit-stored`'s
+codes do not move.
+
+**Not in this change.** The API's in-process sweep records `Completed` through
+`sweeprun.rs` `settle()` (AF-06's file); it follows on after AF-06.
+
+### D-4983 — `sweep-all` refuses a month whose column swept no bar, with `sweep-stored`'s sentence, and says CEILING only for a candidate-ceiling halt (AH-01; g-zerodha-universe-census-2; with D-0696) — 2026-10-16
+
+**Observed.** `batch::month_lines` labelled every month that did not complete
+`CEILING — depth not reached by extinction`, the summary counted it "stopped
+on the candidate ceiling", a ledger row was filed and the run exited 0, while
+its own sweep evidence finished the month `Refused` and `sweep-stored` refused
+the same month with "AND checkpoint sweep requires a measured, reconciled
+signal column" (`census.swept == 0`). Every zerodha 60min month file holds at
+most 161 bars, below the 200-bar warm-up measured at 15min (the 60min warm-up
+is UNVERIFIED), so a whole-store 60min `sweep-all` would print every month as
+a 0-bar CEILING (the skeptics' extrapolation; never run on the real store).
+
+**The change.**
+
+1. `batch::sweep_prepared` refuses a month whose column swept no bar with the
+   SAME sentence, one const (`and_checkpoint::UNMEASURED_COLUMN`, exported from
+   the file `sweep-stored`'s refusal lives in), adds the bars loaded, finishes
+   the attempt `Refused`, files no ledger row and counts the month refused. A
+   run whose every month refused is refused whole by D-0696's rule and exits
+   `FAILED`.
+2. A row carries the budget its walk breached. `CEILING` is printed, and
+   "stopped on the candidate ceiling" counted, only for `Breach::Candidates`;
+   a pair, memory or workers halt names its own budget, an unhalted incomplete
+   walk says `INCOMPLETE — the closure is not certified`, and those are counted
+   "stopped short of a whole answer".
+
+**Reproduced both ways on real bars** (2026-10-16, a private shadow holding APFS
+clones of zerodha NIFTY `60min`, `1min` and `1day`, cli under
+`state/fix/ro.sh`): `cli sweep-all zerodha 60min 40` on the `feat/db-fix`
+build 4756cce0 printed 76 months as `0 bars  k=0  0 kept  CEILING`, counted
+"76 month(s) stopped on the candidate ceiling" and exited 0; on this change it
+refuses those 76 with the shared sentence (`161 bar(s) loaded, none swept past
+the warm-up`), files no row, refuses the run ("none of the 105 month(s) offered
+was swept and filed") and exits 1. The other 29 refuse as before, for their
+own reasons. One NIFTY run writes 231 files and 1,044 kB of evidence and logs
+into its store; at that rate the 26,736-month whole-store run would write
+about 58,800 files and 266 MB (an extrapolation, not run).
+
+**The batch's exit code, stated (AH-01 repair round 1, the re-check's
+follow-up).** `sweep-stored` exits `FAILED` for one month that is not a whole
+answer (D-4982), and `sweep-all` exits `OK` when some of its months stopped on
+the candidate ceiling or short of a whole answer. That asymmetry is kept and
+is now a decision, not an accident. `sweep-stored`'s page IS one answer, so an
+untrustworthy one fails it; `sweep-all`'s page is a census of many, each row
+carries its own `CEILING`, `INCOMPLETE` or budget word, its ledger row says
+`done NO`, its evidence finishes `Halted`, and the summary names the count
+("N month(s) stopped on the candidate ceiling", "stopped short of a whole
+answer") -- the loud degrade `CLAUDE.md` §4 allows. Failing the whole batch for
+one ceiling month would make every fine-rung whole-store run exit `FAILED` and
+hide which months answered. A caller that needs every month whole reads the
+summary's counts or the ledger's `done` column, never the exit code alone.
+The batch exits `FAILED` when its page carries a refusal (`carries_refusal`,
+P8-03), which D-0696's refusal of a run with no month swept and filed is. A store holding no month of the feed and rung stays a report (exit 0),
+as D-0696 states: a fresh clone has pulled nothing, and that is not a fault.
+
+### D-4984 — The overnight line measures the move into the slice's first session and marks a zero-volume open (AH-01; corp-8, corp-2's line half; amends D-1540 by addition) — 2026-10-16
+
+**Observed.** `runner::audit::largest_overnight_move` looped
+`bars.windows(2)` over the slice, so the move INTO the slice's first session
+had no prior close and was never measured; span doors join months, so only the
+slice's first session was blind. On reachable Zerodha months the skeptics found
+real misses, all market moves: BANDHANBNK 2018-10 (-20.11% into 2018-10-01
+missed, -5.69% named), PNBHOUSING 2021-06 (+20.0% against +10.0%) and SUZLON
+2022-10 (-5.0% against +3.80%). The MOTHERSON -31.5% bonus exists only in GDFL
+1s, which no report door reaches. Separately the line printed a phantom move
+when the open bar traded no volume (TMPV 2025-10-14 printed +22.85%).
+
+**The change, and the basis chosen.** The prior close is the last
+regular-session bar (outside the charter's non-regular days, the loader's own
+exclusion) of the calendar month before the first bar's month, on the SAME
+feed, instrument and rung: one `BarFile::open_existing` and, from the end, one
+positional `read_record` per bar until one is regular, at most 1,440. The basis
+is therefore the one every other move on the line uses, a bar's close to the
+next session's first open, never the daily file's official close, and the line
+names the prior session's date (`close X on YYYY-MM-DD`). The daily context the
+doors load was not chosen because it is a different basis (the official close)
+from the moves it would be compared with. A month that is absent, empty or
+unreadable is NAMED: `THE MOVE INTO THE FIRST SESSION HERE (date) WAS NOT
+MEASURED: <why>`. A move whose open bar traded no volume carries `Its open bar
+traded no volume: the price may never have traded.` The line still names the
+single largest move (D-1540's design); doors that withhold rows pass the whole
+folded series, so a session's last bar is its last held bar.
+
+**Added in repair round 1 (the re-check's follow-up).** On TMPV 2025-10-14 the
+marked untraded +22.85% displaced the -11.84% move the base build had named,
+and the session's first trade -- the move a trade could have met -- was named
+nowhere. When the largest move's open bar traded no volume, the line now adds
+`THE LARGEST MOVE TO A TRADED OPEN: <move> into the <date> session (close X on
+<prior> to the session's first traded open, Y).`, or says none did
+(`runner::audit::largest_traded_overnight_move`: the same pass, each session
+measured to its first bar that traded volume, a session that never traded
+dropped and the next measured from its last close, the same tie rule).
+Measured on a private shadow (release cli of this change, `ro.sh env
+BRUTEX_STORE=<shadow> cli sweep-stored zerodha TMPV 1min 2025 10 2000`, exit
+0): the line names +22.85% into 2025-10-14 (close 457.15 on 2025-10-13 to the
+untraded open 561.65), marked, and beside it -12.72% into the same session (to
+its first traded open, 399.00); the corp-2 skeptics put that move at about
+-12.5% on Zerodha's back-adjusted basis. The headline stays the single largest
+move, so D-1540 is amended by addition only; a report whose largest move traded
+prints no second line, and on traded bars the two measures are equal. One more
+O(bars) pass, at the once-per-report boundary, only when the first move was
+untraded.
+
+### D-4985 — `cli results` names the run on every line (AH-01; repro-5) — 2026-10-16
+
+**Observed.** `results_table` printed feed, rung, combinations, min_hits,
+months, depth, done, worst, best and trades: no underlying, span, identity,
+finish time or bars, so forty NIFTY months with equal figures printed one
+repeated line, and a stale row and a current one for one month could not be
+told apart. `/backtest.json` already carried every field.
+
+**The change.** Each line adds the underlying, the span (`YYYY-MM`, or
+`YYYY-MM..YYYY-MM` for more than one month), the bars, the identity's first
+twelve hex characters (enough to tell two runs on one page apart; the whole
+identity is `/backtest.json`'s `identity`) and the finish time in IST to the
+second; a stamp the calendar cannot place prints as raw microseconds rather
+than being dropped. The BEST COMPLETE line carries the identity prefix and the
+finish time. Two distinct runs never print the same line: a different
+instrument, span, bar count or identity changes a field, and one identity filed
+twice differs in its finish time. MEASURED 2026-10-16 by
+`cli::results_line_tests::results_line_cost_per_row` (release, 1,000 synthetic
+rows, one row per call with its header): p50 2.79 us, p99 6.17 us, max 429 us
+(the first call). O(1) per row: fixed fields, no lookup.
 
 ### D-4975 — The head deadline runs only while no request is in flight: it restarts when a response is complete, not at its first written byte, and a response whose writes stop making progress is cut after the same timeout and logged as cut (amends D-1200 by addition) — 2026-10-15
 
@@ -72651,6 +73325,372 @@ shrink passed unrefused (R407-31). Whole lines keep their grammar, so no reader
 of the journal changes; a line closed before this change kept only its newline
 and reads as it did.
 
+### D-5860 — /db's bar grid asks one page read a change: a change of order reads page one itself, a question is asked once, and nothing is read while the selection reconciles (R3-03) — 2026-10-17
+
+**Number** taken at landing from the ledger's head under amendment A6 of the
+round-3 package list (no block was assigned to R3-03). The highest number on
+`feat/db-fix` when this was written was D-5830 and the highest on any local branch or
+worktree D-5831 (P-AG-05); D-5860 to D-5864 leave D-5832 to D-5859 to the
+packages already in flight. Built in the cloud on `cloud/db-R3-03-20261017`
+(cut from `origin/feat/db-fix` at its R3-35 merge) and run, fixed and measured on the Mac on
+`fix/db-R3-03`.
+
+**Findings** DB-021, DB-N02 and the requests-per-change half of DB-063 and
+RA-296 (11 Oct re-check controls: "Sort change at a deep page", "three
+requests at once", "every request the page made during a change of Side and
+of Segment").
+
+**What was wrong.** One change of order sent two requests: the read effect ran
+first with the new order at the OLD offset (offset 899 x 8 of a Close sort,
+read and thrown away) and the page reset asked page one after it. A change of
+instrument, Segment or Side is applied rung by rung, and each pass in between
+was a request for a contract or a month the final selection does not hold. The
+Fit box measured 4, then 3, then 8 rows on one load and each was a request. A
+newest-close seek went out beside the page read and the extremes read, three
+requests where two already carry the newest bar.
+
+**Decision.**
+
+1. The read computes the page it asks with `pageToRead`: a change of order or
+   row set reads page one in the same run; a page an act chose with the order
+   (an address's `page`, a Go to's landing) is kept.
+2. `askOnce` remembers the question asked; a re-run of the effect that would ask
+   it again sends nothing, and a re-run that asks nothing new does not cancel
+   the request in flight. A read for another row set is stopped at once.
+3. Nothing is read while `db.reconciling` or before Fit has been measured and
+   applied; the extremes read (`DbExtremes.svelte`) waits on the same
+   `barsReady`.
+4. The newest close is taken from the extremes read or from page one newest
+   first, and asked alone only when a bound narrows or neither has it, once per
+   selection.
+5. The readout prints the page whose rows are on screen, with "opening page N"
+   while one is read.
+
+**Proof.** `web/tests/db-pager.test.js`:
+`a_sort_change_at_a_deep_page_sends_one_request`, `one change of the
+selection sends one page read and one extremes read, and nothing while it
+settles`. On the R3-03 shadow (:9502, real store read through the bars link,
+GET only, 17 Oct): `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s&page=900`, Close
+pressed: exactly one `/bars/window.json`, `sort=c&offset=0&limit=9`; Next,
+Next, Prev: one read each (`offset=9`, `18`, `9`); NIFTY 26 Mar 2020 12,000 CE
+to PE: one page read and one extremes read, both for the PE key; BANKNIFTY
+options (expiry 2020-03-26) to Spot: one page read and one extremes read for
+`NSE-INDEX-BANKNIFTY`; `/db` opened at 1440 x 900: two reads (`limit=9`, the
+extremes `limit=1`), Fit summary `Fit · measuring` then `Fit · 9`.
+
+**Repair 1 (18 Oct, after the second agent's check).** The extremes fold is
+read through `readFor` (`web/src/lib/db/pager.js`): the panel, the grid's
+newest close and its range scale take only the read whose `for` is the row set
+asked now, so while a new set settles none of them offers the set before's fold
+as this one's (latent, found by reading `DbExtremes.svelte`, not seen). Test:
+`the extremes of the set before are not offered for the set on screen`. On the
+repaired shadow (:9502, the merged tree's own api and bundle, real store read
+through the bars link, GET only, 18 Oct): NIFTY 26 Mar 2020 12,000 CE to PE and
+BANKNIFTY options to Spot each sent one page read and one extremes read
+(`limit=10`, `limit=1`), and the panel read "folding every bar of this query…"
+from 8 ms after the change until the new set's fold came back; `/db` opened at
+1440 x 900, 1440 x 700, 1440 x 1100 and 1280 x 800 sent two reads each
+(`limit=10` and the extremes `limit=1`), `Fit · measuring` then `Fit · 10`
+(D-5863, repair 1). `readFor` timed in node, n = 20,000 calls: p50 41 ns, p99
+83 ns, max 3.6 ms (one collector pause).
+
+**Cost.** No server change. Per change: one page read, one extremes read, and a
+third (the newest-close seek) only when a day or time bound narrows
+(L-R303-03).
+
+### D-5861 — The pager offers only pages the server serves, and the page box refuses in words (R3-03) — 2026-10-17
+
+**Finding** the 11 Oct re-check's EXTRA 1 and its probes of the "Go to page"
+box (0, -5, 2.5, 1e308, empty, letters, 6,000 digits, 4,890,334): typed
+pages, Next and Last landed past row 100,000 of a time-of-day order of the
+153,107-row 11,600 CE on a `sort_too_deep` refusal, and absurd numbers were
+clamped without a word.
+
+**Decision.** `web/src/lib/db/pager.js` mirrors `bars::MAX_SORT_DEPTH`
+(100,000) and `bars_sort::MAX_READ_HELD` (1,000,000), and reads the answer's
+own `sort_index` report: time order serves every page; a time-of-day order
+serves the front 100,000 rows; a value order that read at most 1,000,000 rows
+serves every page, past it the front (and the end, when no row came from an
+index and the column is not open interest). Pages past them are not drawn,
+stepped to, or accepted; the elided stretch carries the reason. The page box is
+text and is read by `parsePageBox`. Both constants are read out of the Rust
+source by a test, so the mirror cannot drift unseen. The pager moved to
+`DbPager.svelte` and its arithmetic to `pager.js`, so later packages do not
+queue on the grid.
+
+**Proof.** `the_pager_offers_no_page_past_the_served_depth`, `the page box
+refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in words`
+(`web/tests/db-pager.test.js`). Shadow: the 11,600 CE, `sort=tod&rows=25`:
+buttons stop at 4,000 with the dead stretch named; Last lands on 4,000 and its
+read is `offset=99975&limit=25` (200); Next is disabled there with the reason;
+4001, 6125, 0, -5, 2.5, 1e308, empty, abc and 6,000 digits are each refused
+under the box with no request. Under `sort=c` the answer read 153,107 rows, so
+every page is offered and Last reads `offset=153100` (200). The server itself:
+`sort=tod&offset=99992&limit=8` 200, `offset=100000&limit=8` 400
+`sort_too_deep`.
+
+**Repair 1 (18 Oct, the second agent's blocking finding).** Every depth test
+was at 8 or 1,000 rows a page, which divide 100,000, so a front rounded up or a
+tail rounded down gave the same pages, and two hand mutants of `pager.js`
+(`Math.floor` to `Math.ceil` on the front, `Math.ceil` to `Math.floor` on the
+tail) survived all 32 tests of the three files. The test now holds a page size
+that does not divide the depth, the live Fit size then, 9: a time-of-day order
+over the 153,107-row CE serves pages 1 to 11,111 (offset + limit 99,999;
+11,112 keeps 100,008), and a value order no index serves, over 1,153,107 read
+rows, serves the tail from page 117,013 (99,999 rows from the end; 117,012
+starts 100,008 from it). It also checks every page at each edge against the
+route's own rule (`bars_sort.rs`, D-3349) for 13 page sizes and three orders.
+Both mutants now fail, and a hand sweep of operator swaps over `pager.js` (111
+mutants) and `goto.js` (31) leaves three, each equivalent (L-R303-08). The
+route agrees on the shadow (n = 200 GETs each): `sort=tod&offset=99990&limit=9`
+200 (p50 13.8, p99 19.3, max 19.9 ms), `offset=99999&limit=9` 400
+`sort_too_deep` (p50 0.8, p99 1.7, max 2.4 ms); at the repaired Fit of 10,
+`offset=99990&limit=10` 200 (p50 14.6, p99 19.2, max 20.8 ms) and
+`offset=100000&limit=10` 400 (p50 0.9, p99 9.8, max 12.4 ms). `servedPages`
+with `isServed` at size 9 over 1,153,107 rows, timed in node, n = 20,000: p50
+1.2 µs, p99 1.5 µs, max 85 µs.
+
+### D-5862 — Go to asks the instant ascending in either direction, and a minute lands on its first bar (DB-005, R3-03) — 2026-10-17
+
+**Finding** DB-005's remainder and the 11 Oct probes of Go to: newest first,
+the server's `at=` rule is "at or before", so 10:02 marked 10:01:59 whenever no
+bar opened on the minute's first second; a second Go to to the same minute
+marked nothing; a time alone, seconds, and 1969 were not read as they should
+be.
+
+**Decision.** `web/src/lib/db/goto.js`: `gotoAsk` sends `at=` with `dir=asc`
+and `limit=1` whatever the grid's direction; `landing` puts the row at
+`total - 1 - at_index` newest first; a time typed without seconds names a
+minute and lands on its first bar; `parseGoto` takes a day and a time, a time
+alone for the day on screen, or seconds, and refuses an empty box, more than 32
+characters (by length, never echoed), a day or time that does not exist, and a
+day outside the held days or the date window, in words.
+
+**Proof.** `go_to_a_minute_lands_on_its_first_bar_in_both_directions`, `Go to
+takes a time alone, exact seconds, and refuses 1969, 2099 and nonsense in
+words` (`web/tests/db-goto.test.js`). Shadow: the 11,600 CE on 15 Mar 2019,
+10:00 to 10:04 (142 rows): 10:02 newest first lands on 10:02:03, row 81 of 142,
+page 9; oldest first on the same bar, row 62, page 7; First page then 10:02
+again marks it again; 10:02:07 lands on 10:02:08 and says so; 1969-12-31
+23:59:59, 2099-01-01 10:00:00, 2019-02-30 10:00:00, 25:61:61, abc, empty and
+6,000 characters are refused in words with no request.
+
+**Repair 1 (18 Oct, the second agent's blocking finding).** "First page then
+10:02 again marks it again" was true of the typed Go to box and not of the
+minute picker the spec probes. The picker is single, so its rows are radios; it
+showed `db.goTime` as the checked one, and nothing cleared `db.goTime`, so after
+a landing a click on the same minute fired no `change`: no read, no mark, the
+grid left where First page put it. `jumpToTime` now spends the minute: once its
+landing or its refusal is settled, and after a render (`tick`, because Svelte
+skips a `checked` write whose value did not change, and set-then-cleared in one
+turn is no change), it clears `db.goTime`. The radio is never left checked, the
+same minute is a new pick every time, the summary asks for the next one ("Pick
+a minute"), and the line under the strip still says where the grid landed.
+`parseGoto` also reads an empty end or name of its span as none (`||`, not
+`??`): the grid gives `''` for an end it does not know, which printed "Pick a
+day from 15 Mar 2019 to ." and "after 's last day". Tests that fail on
+the first R3-03 head: `the_minute_picker_lands_again_on_the_minute_it_already_landed_on`
+and `a minute the picker refuses is offered again too` (they cut the picker's
+`selected` and `onchange` out of `DbControls.svelte` and `jumpToTime` out of
+`DbBarsGrid.svelte`, and refuse a click on a checked radio as the browser
+does), and `an end of the span the grid does not know is no end, and a number
+typed is read as its text` (`web/tests/db-goto.test.js`). Shadow (:9502, 18
+Oct, 1440 x 900, Fit 10): the 11,600 CE on 15 Mar 2019, 10:00 to 10:04, newest
+first: pick 10:02 sends one `at=` read and one page read and lands on page 9 of
+15 with 10:02:03 marked (row 81); 10:02 again on that page, one `at=` read,
+marked again; First page, then 10:02 again, one `at=` read and one page read
+(`offset=80&limit=10`), page 9, the bar marked and in view; oldest first the
+same on page 7, row 62. NIFTY spot GDFL 1s, the whole series: 10:00, 10:00
+again, First page, 10:00 again, the same pattern on page 1,980. Before every
+pick no radio was checked. The reads a re-pick sends, n = 200 GETs each: the
+CE's `at=` p50 1.1, p99 4.1, max 8.4 ms and its page p50 1.0, p99 5.5, max
+9.0 ms; NIFTY spot's `at=` p50 1.9, p99 3.1, max 4.2 ms and its page p50 1.9,
+p99 2.8, max 3.1 ms. `parseGoto` with an empty span end, in node, n = 20,000:
+p50 1.0 µs, p99 1.8 µs, max 66 µs.
+
+**Repair 2 (18 Oct, the second agent's follow-ups).** A Go to's answer was
+applied whenever it came back. Two quick picks with the first answer held
+900 ms (10:02, then 10:04) ended on 10:02's page with 10:02 marked; a Side
+change 150 ms after a Go to moved the new contract's 22 rows to page 3 of 3,
+and "row 81 of 142" stayed under the strip after any change of selection.
+`gotoTurns` (`goto.js`) now holds one Go to at a time: asking stops the read
+before it, and `jumpToInstant` applies an answer only while it is still the
+latest Go to AND the row set it was asked of (`setKey`) is still the one on
+screen, checked after the read and again after the re-sort's render. When the
+row set moves, `dropGoto` stops the Go to that is out and clears the line
+under the strip, the mark and a landing whose page is not yet read; on its
+first reading it clears nothing, so a remount keeps the line. A refused Go to
+stops the one before it, so a late answer cannot land after the refusal's
+words; a failure is said only for the latest Go to; and a query whose page
+read already answered no bar is not asked again (`NO_LANDING`, the words
+`landing` says). Tests that fail on the first R3-03 repair:
+`a_go_to_lands_only_for_the_question_still_on_screen`, `a late Go to answer
+lands nowhere: a later Go to, a moved row set, a failure of a stopped one`
+(the grid's own `gotoTurn`, `stopGoto`, `jumpToInstant` and `dropGoto` cut out
+of `DbBarsGrid.svelte` and run over a scope whose reads the test answers late
+or never) and `a minute the picker refuses is offered again too` (each refusal
+stops what is out). Each step is O(1): one counter and one abort. Measured in
+node on a loaded machine (18 Oct, `performance.now`, n = 20,000 each, 10,000
+for `drop`): `ask` p50 2.3, p99 10.8, max 2,979 µs (it makes an
+`AbortController`); `current` p50 0.04, p99 0.13, max 13 µs; `drop` p50 3.0,
+p99 20.0, max 2,981 µs. Shadow (:9502, 18 Oct, the second agent's attacks
+re-run): two quick picks with the first `at=` read held 900 ms end on 10:04's
+page 3 with 10:04:00 marked, the first read cancelled; a Side change 80 ms
+after a Go to whose read is held 1,500 ms, and under a uniform 300 ms latency
+by picker and by typed box, leaves the PE on page 1 of 3 with no line under
+the strip and no mark, the `at=` read cancelled; with no latency the landing
+on page 9 is made and the Side change then clears it; a blocked `at=` read
+says "Go to could not be answered: Failed to fetch" and the same minute again
+lands on page 9; a Go to typed on the empty 03:00 to 04:00 window sends no
+read and says the `NO_LANDING` words.
+
+**Repair 3 (19 Oct, the second agent's blocking finding: the proof, not the
+behaviour).** Four statement mutants of repair 2's Go to code survived the
+whole web suite: `dropGoto` without `jumpWhy = ''`, the typed box's refusal
+without `stopGoto()`, the picker's parse refusal without `stopGoto()`, and the
+picker's clear made unconditional (`db.goTime = ''` whatever minute is
+picked). The grid behaved correctly on real data; no test could tell. Each
+was reproduced on a copy of the repair 2 head (each passed all 252 tests of
+the 19 test files that read the grid, the Go to or the pager code), and so
+were eight more of the same kind: the
+parse refusal without `db.landedRk = ''`, `jumpWhy = got.why` or `return`,
+the typed refusal without the same three, `dropGoto` without
+`anchorRk = ''`, and the typed box with no read at all. The code is
+unchanged; the harness that cuts the grid's Go to out of `DbBarsGrid.svelte`
+now cuts `jumpToText`, `jumpToTime` and `gotoSpan` with it, declared so they
+call `jumpToInstant` by name as the component does, and four tests ask what
+none did: `a_moved_row_set_clears_what_a_landing_said_and_the_series_row_it_meant`
+(a landing that said "Landed on the first bar after it", and an extreme's
+series row, each gone with the row set), `a_typed_instant_the_box_refuses_stops_the_go_to_still_out_says_why_and_asks_nothing`,
+`a_picked_minute_the_parse_refuses_stops_the_go_to_still_out_too` (both: the
+held read aborted, the refusal's own words, the mark cleared, no second read,
+and the late answer landing nowhere) and
+`an_earlier_pick_settling_leaves_a_later_pick_its_minute_until_its_own_landing`
+(10:02 then 10:04, the first answer settling first: the picker still holds
+10:04 until 10:04 lands). Each of the twelve mutants fails at least one of
+them, and none of the twelve hangs: a refusal is checked one turn after it
+is made, so a mutant that went on to ask a read the test never answers fails
+the check instead of waiting out the timeout. The sweep of repair 2's lines
+with statement deletions as well as operator swaps is in `docs/06-limits.md`
+L-R303-08. Invariant R303-12.
+
+### D-5863 — Fit measures the heading's two rows and the notes strip is one fixed line, so no "Fit · 50" and no row under a notice (DB-N02, R3-03) — 2026-10-17
+
+**Decision.** The Fit takes the heading's measured height (`fitHead`, the group
+band and the labels) instead of `HEAD`, and `FIT_SLACK` goes from 24 to 8: the
+24 was sized to the warnings strip arriving after the bars, and the strip is
+now always in the box at one line's height (the first note, cut with an
+ellipsis; every note opens over the grid on a press). Until the box is measured
+the summary reads `Fit · measuring`, never the declared 50.
+
+**Proof.** `Rows per page: no "Fit · 50" before the box is measured, and the
+heading is measured with it (DB-N02)` (`web/tests/db-pager.test.js`). Shadow:
+at 1440 x 700, 900 and 1100 the last of 9 rows ends inside the box, before and
+after a note appears (a refused Change % on 1s), and the box does not scroll.
+
+**Repair 1 (18 Oct, the second agent's follow-up).** The floor's comment
+promised ten rows and the floor gave nine: every box is `border-box`
+(`theme.css`), so `.tbl`'s `min-height` holds its own 1px border above and
+below, and the scroll box at the floor was 458px, `(458 - 52 - 8) / 40` = 9.95,
+nine rows by the Fit's own count and one short of the fold's
+`MIN_USEFUL_ROWS`. The box sits at its floor on every window measured (about
+1,245px down the page), so the Fit was nine everywhere. The floor now adds the
+2px: the scroll box is 460px and the Fit is 10. Test: `the grid box at its
+floor holds ten rows by the Fit’s own count` (`web/tests/db-pager.test.js`; on
+the first R3-03 head it reads 458). Shadow, 18 Oct: at 1440 x 900, 1440 x 700, 1440 x
+1100 and 1280 x 800 the box is 460px, `Fit · measuring` then `Fit · 10`, ten
+rows, the last ending 8px above the notes strip, and nothing scrolls.
+
+### D-5864 — Words by who refused, sorts only where they mean something, and empty grids that blame nothing they cannot know (DB-016, DB-062, DB-063, R3-03) — 2026-10-17
+
+**Decision.**
+
+1. `readFailure`: a refusal the page made before asking is not "the server's
+   own" nor "a failed read"; a 4xx is the server's; Try again is offered only
+   for a failed read, and it asks the page again (not the census).
+2. `sortRefusal`: Volume on an index, and open interest on an index or a share,
+   are disabled with the reason; a sort carried onto such a selection reads
+   time order and says so.
+3. A column the browser orders itself is refused before the sort moves when the
+   count on screen is past `LOCAL_SORT_BUDGET`, and the advice works for the
+   rung (`localSortAdvice`: "a day alone is not enough" on 1s). A sort that was
+   already on (an address's `&sort=dte`, or a selection grown past the budget)
+   cannot be kept; its sentence says the grid is back in time order rather than
+   "keeps the order it had" (found on the shadow, 17 Oct).
+4. A Change % measured across the overnight gap carries an `overnight` mark with
+   the bar it was measured against (`acrossDay`).
+5. No answer yet draws loading rows, never "No bar came back"; the census
+   disagreement is said only when the census has not moved; a time-of-day
+   window that keeps nothing names the window, not the import.
+6. Two pages of one read are compared by total and every series' count
+   (`generationOf`, `joinPage`, `joinSlices`); a row already shown is dropped
+   and the move named.
+
+**Proof.** `no_sort_is_offered_on_a_column_without_values`, `a sort the page
+cannot do keeps the sort that was on, with advice that works for the rung`, `a
+sort already on that the page cannot do says the grid went back to time order,
+and no sentence loses a space`, `a_page_made_refusal_is_not_called_the_servers`,
+`the_store_growing_between_two_pages_repeats_no_row`, `an empty answer is said
+only once it is in, and a time window is not blamed on the import (DB-016)`, `a
+Change % measured across the overnight gap says so on the row`
+(`web/tests/db-pager.test.js`). Shadow: NIFTY spot Zerodha 1min, Sep 2026:
+Volume and Open interest disabled with the reason, Change % sorted shows
+`overnight` on the 09:15 rows with the previous session's 15:29 bar named;
+NIFTY spot GDFL 1s at page 3: Change % refused with the 333-minute advice, the
+sort and page kept, no request; `&sort=dte&dir=desc` on the 11,600 CE: refused,
+time order, "The grid is back in time order, newest first."; 03:00 to 04:00 on
+15 Mar 2019: the time window named; 2024-03-02: the drill session's day flags,
+no census accusation; six selections opened by address: no "census and the
+files disagree" and no "No bar came back" drawn at any moment.
+
+**Repair 2 (18 Oct, the second agent's blocking finding).** R303-04 said no
+sort is offered on a column with no value on the selection, and the page
+refused only Volume and open interest. On NIFTY spot · Zerodha 1min (1 to 30
+Sep 2026, 7,875 rows) Expiry, Days to exp, Type and Strike were enabled over
+cells that all read `—`; Days to exp read every row in eight requests, put its
+caret up and wrote `sort=dte` into the address, and ordered nothing.
+`seriesKinds` (`notes-bars.js`) reads the selection's series once per
+selection, by the same parse of the stored name the cells use (`expiryOf`,
+`contractOf` in `decoration.js`), and `refusalFor` is one look-up a header:
+Expiry and Days to exp are refused when no series is a contract, Type and
+Strike when none is an option, and TF when the selection is read at one rung
+(every row carries the same one), each with its reason on the disabled header,
+and a sort carried onto such a selection reads time order and says so, as
+Volume's does. A column empty by its DATA rather than its kind (a contract
+whose feed stamps no open interest) is not known before the read and stays
+offered: named in `docs/06-limits.md` L-R303-11, and R303-04 says exactly
+this much. Test: `no_sort_is_offered_on_a_column_without_values` checks every
+header a press can order against an index, a share, a future, an option and
+mixes; on the first R3-03 repair it fails at the index ("an index": only
+`vol`, `oi` and `oichg` were refused). Cost: `seriesKinds` is one pass over the
+series a selection (L-R303-05, measured there), where the offer it replaced
+was a pass a header a render. Shadow (:9502, 18 Oct, 1440 x 900): NIFTY spot ·
+Zerodha 1min, 1 to 30 Sep 2026: TF, Volume, Open interest, OI chg %, Expiry,
+Days to exp, Type and Strike disabled with their reasons, a press on Days to
+exp or TF sends no request and leaves the address as it was; the same address
+with `&sort=dte&dir=desc` opens with its three ordinary reads, says "Days to
+exp is not an order on this selection", reads time order and drops the sort
+from the address; the 11,600 CE on 15 Mar 2019 keeps every contract header
+and Days to exp still orders it.
+
+**Repair 3 (19 Oct, the second agent's follow-up on cost).** `seriesKinds`
+read every series of the selection, and a selection of NIFTY options is all
+70,458 option directories the GDFL store holds (counted by `ls`, read-only):
+p50 38.2, p99 221.5, max 276.9 ms once per selection on this machine at a load
+average near 46 (n = 200, `performance.now`; the second agent measured 15.6 /
+20.3 / 21.6 ms on a lighter load). Each of the four kinds it reports moves one
+way only (`allIndex` and `noDerivative` from true to false, `expiry` and
+`option` from false to true), so once all four have moved no later series can
+change the answer, and the pass now stops there. An option decides all four
+at once, so an option chain is read to its first key: p50 0.0007, p99 0.0027,
+max 0.0049 ms over the same 70,458. A selection with no option still reads
+every key; the largest the store holds today is the 346 GDFL cash and index
+series, p50 0.055, p99 0.338, max 5.45 ms (synthetic keys of the same count
+and kinds). The answer is unchanged for every selection, which the existing
+header-by-kind assertions hold; `no_sort_is_offered_on_a_column_without_values`
+now also counts the keys read (a `Proxy` over the list) and fails without the
+stop. Bound and figures in `docs/06-limits.md` L-R303-05; invariant R303-13.
+
 ### D-5835 — /db names a re-keyed contract's successor and predecessor, and a key the census withdrew is explained by its lineage, never by the filters (AH-03, g-ui-dom-vs-json-2) — 2026-10-16
 
 *Numbers D-5835 to D-5838 were first taken as D-5330 to D-5333, were
@@ -72851,6 +73891,148 @@ file's closing-auction count is carried on an INDEX record by design
 `a_5_second_hole_is_not_called_a_minute`, the index auction label test) and
 `web/tests/db-dayflags.test.js` (the DB-G96 pin). Invariant AH03-05.
 
+### D-5880 — `/audit`'s last commit of a partitioned census is its newest CURRENT epoch file, never its directory, and the header counts this feed's runs (AH-04, g-ui-dom-vs-json-4) — 2026-10-18
+
+**Number** the first of the block D-5880..D-5883 taken by AH-04 from the
+ledger's head (A6); `grep` over every local branch's `docs/05-decisions.md`
+found no D-587x or D-588x on 18 Oct.
+
+**Finding** g-ui-dom-vs-json-4 (medium, both skeptics confirmed). `committed_at`
+(`crates/api/src/audit_json.rs`) ran `metadata(&census.path)`, and for a vendor
+migrated to version 4 that path is the DIRECTORY `manifest/v4/gdfl`. A
+directory's mtime moves when an entry is added or removed, not when a file
+under it is appended to: `/audit` printed GDFL's last commit as 10 Oct 08:56:23
+IST ("not written for 110h 27m") while `CASH/000001.man`, `FNO/000005.man` and
+`INDEX/000001.man` had been written on 14 Oct, so JUST WROTE could never fire
+for GDFL and the first answer of an open page said IDLE during an import. The
+same header printed `journal.records` (every vendor's pull-journal records,
+4,217,222) as "runs" while `journal.feed_scope` said GDFL holds 0 records in 0
+runs.
+
+**Decision.**
+
+1. For a census read from version-4 partitions, `committed_at` is the newest
+   mtime among the CURRENT epoch of each segment: the files the census itself
+   just read (`census::Part::path`), one `metadata` call per part, at most
+   three, no directory listing, no `census.rs` edit. A single-file census is
+   unchanged: its one file's mtime.
+2. **`store.committed_from`** says what the stamp rests on: `basis`
+   (`newest census file`, `manifest file` or `none`), `complete`, every file
+   asked (`segment`, `epoch`, `path`, `at`, `state` = `read` / `no epoch` /
+   `absent` / `unread`, `why`) and a `note`.
+3. Nothing unread becomes a zero. An epoch that will not stat is named with the
+   file system's refusal (a listed epoch that is gone says "epochs are never
+   deleted", D-3316 item 2), `complete` is `false`, and the newest of the
+   others is a LOWER bound and says so. A segment with no epoch yet is named
+   and contributes nothing; a migrated vendor with no epoch at all has
+   committed nothing (`null`). A census that did not load is stat'ed at its
+   path as before, and a path that is a directory answers `null` with the
+   reason: a directory's mtime is not a commit.
+4. An epoch newer than the server's clock is reported as it is. The page
+   (`web/src/lib/audit-header.js` `commitLine`, `sinceCommit`) names it "AHEAD
+   of the server's clock" and gives it no age, so it is never JUST WROTE.
+5. The label is "newest of N current census file(s)", or "the census file",
+   never "manifest mtime".
+6. The `/audit` header says `<feed>: <runs> runs · <records> records` from
+   `journal.feed_scope`, with the whole journal's record count in its title,
+   named as all feeds'; a scope that failed or is absent says "runs not
+   counted", never 0 (`journalHeader`).
+
+**Cost.** Three `metadata` calls more than a single file for a migrated vendor,
+none per row. Measured on a shadow of the real store (`docs/06-limits.md`
+L-AH04-01).
+
+**Proof.** `crates/api/src/audit_json_commit_tests.rs` (AH04-01 to AH04-04);
+`web/tests/audit-header.test.js` (AH04-05).
+
+### D-5881 — One archive end for `/ingest` and `/audit`, and the import journal's last day named apart (AH-04, g-ui-dom-vs-json-9) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-9 (low). `/audit` handed `ImportPanel` the import
+journal's last day (`imports.span.to`, 2026-09-30, reached by the tick-store
+append) as "an archive ending", while `/ingest` handed it `/feeds.json`'s
+`archive.to` (2026-09-24, and since R3-05 only where `to_binds`). One panel
+said two things for one fact. The reproduce skeptic also found the not-done
+list blank on a clean `/ingest` load (part of g-ui-dom-vs-json-15): rows were
+keyed `${kind}|${day}`, `options|2020-09-16` was named by three rows (two
+`incomplete` under different filters, one `open`), Svelte threw
+`each_key_duplicate`, and none of the 9 not-done days rendered.
+
+**Decision.**
+
+1. `import-panel.js` `archiveEnd(feed)` is the archive's last day from the
+   feed's `/feeds.json` descriptor only where it binds, else `null`: the rule
+   `/ingest` applies inline to the same descriptor. `/audit` passes
+   `archiveEnd` of the active feed's descriptor; it no longer passes the
+   journal's last day.
+2. `ImportPanel` names the journal's last imported day apart: "The import
+   journal reaches <day> (its last imported day, any kind)", with "past the
+   archive end" or "short of the archive end" where both are known. With no
+   binding end it says "/feeds.json states no binding archive end".
+   `optionsLeft` and the ETA are unchanged (`readImportExtras`).
+3. Each not-done row has an `id` of kind, day, outcome, filter and journal line
+   (`notDoneRows`); a row equal to an earlier one in all five is numbered, so
+   no answer can blank the list. The day key `key` is unchanged. A row shows
+   its filter (when not `*`) and line.
+
+**Proof.** `web/tests/import-panel-archive.test.js` (AH04-06, AH04-07).
+
+### D-5882 — `/markets` counts an options-only listing as held (AH-04, g-ui-dom-vs-json-5) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-5 (medium/low). `/instruments.json`'s `bars` counts
+a row's spot series only; 17 GDFL rows (FINNIFTY, MIDCPNIFTY, NIFTYNXT50 and
+14 renamed or removed share underlyings) are `spot: false, options: true,
+bars: 0`, holding 57,731 option contracts and 470,617,527 one-second bars.
+`/markets` read neither flag: "346 held + 17 not stored", "0 = measured zero",
+"The feed LISTS it, so it can be pulled — it just has not been", "Pull it from
+Ingest".
+
+**Decision.**
+
+1. `web/src/lib/markets-held.js` `barStateOf` has a fifth state, `options`:
+   `bars` 0 and `options: true`. It is HELD (`isHeld`), drawn "options only",
+   and counted in the footer as `N held (M options only, spot not stored)`.
+   Two field reads per row: O(1) per row, O(rows) once per master.
+2. `bars` absent or not a whole number is `unread` whatever `options` says,
+   and the reason names the options flag. An older server that sends no
+   `options` flag leaves the row a measured zero, as before.
+3. The detail view of an options-only row says "Options only for X", names its
+   option holdings, offers "Open its options on /db", and never "it can be
+   pulled". Where its spot is filed comes from one `GET
+   /aliases.json?symbol=X` when such a row is opened (compile-time tables on
+   the server, O(1)), kept per symbol: an INDEX key (FINNIFTY under
+   NIFTYFINSERVICE), a rename with its newest symbol, the table's own reason
+   for not aliasing, or "names no other key" — never a guessed key.
+4. The legend reads "0 = measured zero, no spot and no options · options only
+   = option contracts held, spot not stored under this name".
+
+**Proof.** `web/tests/markets-options-only.test.js` (AH04-08, AH04-09).
+
+### D-5883 — Below 768 px wide or 700 px tall the shell's banners scroll with the page and the /db census banner is bounded (AH-04, g-ui-dom-vs-json-10) — 2026-10-18
+
+**Finding** g-ui-dom-vs-json-10 (low). At 375x812 the fixed region (header 93
+px, connection banner 73, NO COPY alert 139, the /db census banner 259-290)
+left the board 27% of the window; at 375x667 about 72 px; at 375x568 the board
+started below the viewport, and with `main` and `body` clipping, all of its
+controls were unreachable. No phone reaches the app (127.0.0.1, FM-200), so
+this is a narrow or short desktop window.
+
+**Decision.**
+
+1. In `web/src/routes/+layout.svelte`, under `@media (max-width: 767px),
+   (max-height: 699px)`, `main` scrolls and the page beneath the banners is
+   given main's whole height. The banners stay in the flow on every page; the
+   NO COPY alert stays visible and scrolls; only the header (the nav) stays
+   fixed. A page's own scroll regions (the /db board) keep theirs.
+2. In `web/src/routes/db/DbCensusBanner.svelte`, under the same query, the
+   census banner is at most `min(5.5rem, 16dvh)` tall and scrolls inside
+   itself; every line and button stays reachable.
+3. Nothing changes above those sizes.
+
+**Proof.** A measurement, since no unit test can measure layout:
+`docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
+board control is reachable, before and after, at 375x812, 375x667, 375x568,
+320x568, 812x375 and 1280x800).
+
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
 The store-compression design (`state/design/store-compression-20261012.md`
@@ -72903,7 +74085,7 @@ raw form is SC-9's and needs the operator's decision. Until SC-6 lands nothing
 in the store writes a `.sbar`, so this door changes no answer the live app
 gives today.
 
-### D-5900 — The read door's key follows the file it serves, `cli tix-rebuild` names a sealed month, and a route figure counts only answers that were 200 (SC-3 repair 1, verify-SC-3-r1) — 2026-10-18
+### D-5900 — The read door's key follows the file it serves, `cli tix-rebuild` names a sealed month, a route figure counts only answers that were 200, and a month held in both forms is one instrument-month (SC-3 repairs 1 and 2, verify-SC-3-r1 and r2) — 2026-10-18
 
 A second agent re-checked D-5899 on the package branch and failed it on two
 claims in `docs/06-limits.md` L-SC-24, not on the code. Three choices follow,
@@ -72947,3 +74129,65 @@ and `TimeLookup::Sealed`, tallies `sealed N` in both receipts, reads the month
 back through the sealed table, writes nothing beside it and is clean; before,
 it REFUSED the month as "an outcome this build does not know". The receipt
 line `small N,` is now followed by `sealed N,` in both runs.
+
+**Repair 2 (verify-SC-3-r2): a month held in both forms is one
+instrument-month.** The second agent failed the package on one claim, and it
+was right: `store::catalog::walk` returned one `Held` per month in either form
+(the dedup did that), but `Census::spot` counted every `.sbar` beside its
+`.bin` as well, and `cli sweep-all` prints `spot` as "store holds N spot
+instrument-month(s)". On a private root whose 1,176 months were each sealed
+beside their raw form it printed 2,328 (1,176 `.bin` + 1,152 `.sbar`), where an
+APFS clone of the same months, raw only, printed 1,176; the package's own test
+pinned the double count (`spot == 4` for three months). Nothing showed it on
+the real store, which holds no `.sbar`; it would have shown on the first sealed
+month.
+
+Chosen: **`spot` counts months; the second file of a month is a bucket of its
+own, `Census::sealed_twin`**, which `Census::reconciles` sums, so every file
+seen is still filed exactly once. The twins are counted after the walk, as the
+rows the dedup removed: a `Held` is the whole path but its extension, parsed
+exactly, so two files are one row only when they are `<month>.bin` and
+`<month>.sbar` in one directory. That costs no system call and cannot
+disagree with what the walk saw, where asking for the `.bin` beside each
+`.sbar` would have cost a stat per sealed month and could race a retirement.
+`Census::sealed` is one per sealed month (a sub-count of `spot`, not a
+bucket). A `.sbar` whose `.bin` is a link is the month: the link is `linked`,
+not held, so there is no twin.
+
+Rejected: printing the deduplicated `held.len()` in `cli` and leaving `spot`
+as files. Every other reader of `spot` (`cli research`, which called it "spot files" and now says
+"spot instrument-months"; the pool page's uncatalogued premise) would have
+kept a number that means files on one store and months on another, and the
+next caller would have printed it as months again. Invariant SC3-13; tests
+`the_catalog_holds_a_month_in_either_form_once` (store) and
+`a_month_in_both_forms_is_one_instrument_month_on_the_report` (cli), each of
+which fails on the code before this repair.
+
+**Repair 2, a follow-up taken with it: the provenance door opens the `.sbar`
+the bar door serves.** The same check named a smaller split: `BarFile`'s
+sealed open follows a final link at the `.sbar` (as the raw reader's open
+follows one at the `.bin`), while `provenance::read` opened the same name with
+`O_NOFOLLOW` and refused it, so a month whose `.sbar` is a link answered its
+bars from the sealed file and refused its provenance. Both are loud, so no
+answer was wrong, but one month had two answers to "which file is it".
+Chosen: `provenance::read` opens the `.sbar` through
+`store::file::open_read_existing`, the bar door's own open (`O_NONBLOCK`, a
+final link followed, a non-regular file refused by name, a dangling link
+absent), so the packed image it reads is always the one the bar door serves.
+The raw `.prv` sidecar keeps `O_NOFOLLOW`: it is a separate file the bar door
+never opens, and nothing here changes it. Invariant SC3-14; test
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it with the link refused.
+
+**And a second follow-up: only an absent `.sbar` keys the `.bin`.**
+`generation::served_bars_path` keyed a month by its `.sbar` only when that was
+a regular file, so a directory (or any non-regular file) at the `.sbar` keyed
+the `.bin`, while the door refuses such a `.sbar` by name and never opens the
+`.bin` past it. The api's header and runs memos are keyed by that path and its
+stamp, so a month cached raw kept answering from the raw form's cached header
+after the door had begun to refuse it. Chosen: the key mirrors the door's own
+rule: `ENOENT` (a dangling link included) is the only answer that keys the
+`.bin`; anything else at the name is the key, and the door's refusal follows.
+Still one `stat`. Invariant SC3-15; the directory case of
+`a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars`
+(store), which fails on the code before it.
