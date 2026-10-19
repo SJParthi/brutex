@@ -260,23 +260,7 @@ fn a_recount_records_what_the_bar_headers_hold_and_closes_its_days() {
     let tail = text
         .strip_prefix(JOURNAL)
         .expect("appended, never rewritten");
-    let lines: Vec<&str> = tail.lines().collect();
-    assert_eq!(lines.len(), 3, "{tail}");
-    assert!(lines[0].starts_with("run "), "{tail}");
-    assert!(
-        lines[0].contains(" source=recount commit=abc123 started="),
-        "{tail}"
-    );
-    assert!(lines[0].ends_with(" from=2019-11-14 to=open"), "{tail}");
-    let run = lines[0].split(' ').nth(1).expect("a run id");
-    assert_eq!(
-        lines[1],
-        format!("recounted options 2019-11-28 * definition=2 months=1 run={run}")
-    );
-    assert_eq!(
-        lines[2],
-        format!("recounted options 2019-12-26 * definition=2 months=1 run={run}")
-    );
+    the_recount_closes_as_a_ledger_run(tail);
 
     let before = std::fs::read(manifest_path(&root, Vendor::Gdfl)).expect("bytes");
     let mut again = String::new();
@@ -308,6 +292,39 @@ fn a_recount_records_what_the_bar_headers_hold_and_closes_its_days() {
         "{none}"
     );
     assert!(none.contains("in range            0"), "{none}");
+}
+
+/// What [`a_recount_records_what_the_bar_headers_hold_and_closes_its_days`]'s
+/// recount appended to the journal (`tail`). The recount holds a runs-ledger
+/// id (IA-2), so it is a ledger run: its `run` line, each close carrying
+/// ` at=<unix_s>` before its `run=`, and the run's end line (DB-A50, D-5884,
+/// D-5901). Before IA-2 repair 2 the closes had no ` at=` and no end line
+/// was written.
+fn the_recount_closes_as_a_ledger_run(tail: &str) {
+    let lines: Vec<&str> = tail.lines().collect();
+    assert_eq!(lines.len(), 4, "{tail}");
+    assert!(lines[0].starts_with("run "), "{tail}");
+    assert!(
+        lines[0].contains(" source=recount commit=abc123 started="),
+        "{tail}"
+    );
+    assert!(lines[0].ends_with(" from=2019-11-14 to=open"), "{tail}");
+    let run = lines[0].split(' ').nth(1).expect("a run id");
+    for (line, day) in lines[1..3].iter().zip(["2019-11-28", "2019-12-26"]) {
+        let (head, rest) = line.split_once(" at=").expect("a clock time");
+        assert_eq!(
+            head,
+            format!("recounted options {day} * definition=2 months=1")
+        );
+        let (at, last) = rest.split_once(' ').expect("at= then run=");
+        assert!(at.parse::<u64>().expect("unix seconds") > 1_700_000_000);
+        assert_eq!(last, format!("run={run}"));
+    }
+    assert!(lines[3].starts_with(&format!("run {run} ended=")), "{tail}");
+    assert!(
+        lines[3].ends_with(" outcome=finished definition=4"),
+        "{tail}"
+    );
 }
 
 /// A DAY THE CENSUS CANNOT BE SHOWN TO HOLD IS LEFT OPEN, AND THE VERB FAILS:
