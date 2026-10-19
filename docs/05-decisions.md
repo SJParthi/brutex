@@ -73214,6 +73214,196 @@ request sidecar (D-4902).
 `a_refusals_report_keeps_the_newest_failures_as_a_finished_run_does`; cli
 `a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol`.
 Invariants IA1-06, IA1-12 and IA1-15 in `docs/04-invariants.md`.
+
+### D-4803 — The lock layout follows the census layout; every journal append takes the journal lock (IA-2) — 2026-10-18
+
+**Number** the design's own (`state/design/ingest-automation.md` §15, outside
+the repository), free at this head and cited nowhere before (A6, as D-4902).
+
+**Decision.** On a version-3 census a GDFL run holds `imports/gdfl.lock`
+exclusive: one GDFL run per store, whatever its kind. On version 4 it holds
+`imports/gdfl.lock` shared and `imports/gdfl.<kind>.lock` exclusive, its own
+kind's and no other, so kinds run beside each other and one kind is one run.
+`census-migrate`, its `--seal` and `census-recount` hold `imports/gdfl.lock`
+exclusive (`pull::gdfl_run::claim_census`, taken inside
+`census_store::migrate`, `seal_legacy` and `recount`), so a live run refuses
+them `run_busy` naming the run, and they refuse a press the same way. Every
+taker retries a busy lock `PROBE_RETRY` = 10 times 10 ms apart (D-4849). A run
+locates the census again after its locks and refuses `census_layout_changed`
+when a migration finished in between. A lock file is a regular file with one
+name, opened without following a link, and after its flock is taken its
+device and inode are compared with the name's: one removed or replaced under
+a live run (RA-285) is refused `lock_replaced`, and a run's release says at
+`error` when its lock was replaced meanwhile. **`imports/gdfl.journal.lock`**
+is taken by every append to the journal (`Journal::write`), by
+`census_store::append_journal`, and by `append_lines`, the one appender of the
+day, lineage, lots and scope ledgers beside it.
+
+**What it does not yet do.** `cli gdfl-dayflags` takes no kind lock (its
+appends are under the journal lock); WP-12c's `gdfl_rekey` keeps its own
+appender; a run does not re-check its lock's identity at each day's end, only
+at release. Each is named in IA-2's report.
+
+**Implemented by** IA-2. **Proof:** IA2-07, IA2-09, IA2-17, IA2-18.
+
+### D-4804 — A run's liveness is its lock file's claim; the journal gains no verb (IA-2) — 2026-10-18
+
+**Number** the design's own, free at this head.
+
+**Decision.** After its locks, a run takes the runs ledger lock, allocates
+its id (D-4847), writes its request sidecar when it has one (D-4907), writes
+its claim into the lock that holds it (truncate, write, `sync_all`), and
+releases the ledger lock. The claim is one line of at most 1,024 bytes, every
+field bounded (`docs/02-store-format.md` §37.2): the filter by count and a
+16-hex BLAKE3 digest, the host percent-encoded and cut on a whole escape at
+64 bytes (RA-307), `auto_resume=0` for every cli claim (the design's D-4848, IA-10a's to land). Release
+truncates the claim to 0 bytes and syncs it, removes the stop file and the
+request sidecar, and releases the flocks; a process that dies leaves its
+claim and the kernel frees the flock, which a probe reads as
+`Interrupted`. A lock taken over a dead holder's claim says "run superseded"
+with the old claim's text. `cli gdfl-import`'s door (AF-01, D-4977) now takes
+its lock through this authority, so a cli run and an api child take the same
+locks, the same kind of id and write the same claim; §41's holder record is
+retired for new runs and still read as a dead holder's.
+
+The journal gains no verb and no line type: `Stage::Run` (word `run`, last in
+`Stage::ALL`, searched second by `decisive()`), the reason `stopped`, and two
+fields: ` at=<unix_s>` on every close of a run the ledger knows, before its
+`run=` (DB-A50), and one more `run` line when such a run ends,
+`run <id> ended=<unix_s> outcome=<finished|stopped|code> definition=<n>`,
+which every reader since 3f65ad43 reads as a `run` line. A run with no ledger
+id (a test's bare reader) writes neither, so its journal stays a function of
+its inputs.
+
+**Implemented by** IA-2. **Proof:** IA2-10, IA2-11, IA2-14, IA2-16.
+
+### D-4826 — Retired by name: a run id stepped past the journal's ids (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** Round 1's "the run's start,
+raised past every id a `run` line holds" (`Journal::fresh_run`) is no longer
+how a run that holds a claim is named: its id is the runs ledger's (D-4847),
+handed to the importer as `RunOptions::run`. `fresh_run` stays only for a
+caller that holds no ledger (a test's bare reader), where it was always a
+pure function of the journal. Retired by name, not renumbered.
+
+### D-4827 — A stop is a stop file, written before the asker is answered and read before each file (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** One stop file per run process,
+beside the lock that holds its claim (`imports/gdfl.stop` on v3,
+`imports/gdfl.<kind>.stop` on v4; `docs/02-store-format.md` §37.4), born at a
+staging name, synced, renamed and its directory synced before the asker is
+answered, so an acknowledged stop survives a crash of either side. The run
+asks `StopControl::requested` before each file it takes and before each day,
+never inside a file: one atomic load and, while no stop is seen, one
+`metadata` (L-IA-16). `cli gdfl-stop (KIND | --run ID)` writes it for a run
+any process holds (`pull::gdfl_run::stop::request_stop`); it is exempt by
+name from the unstamped-build refusal (D-4894): a stop must never be refused.
+A second stop of the same run keeps the first asker (RA-336). The asker emits
+"stop requested" (audited, D-4893) and the run's "run stopped" carries
+`stop_by` and `requested`, read before release removes the file.
+
+**Implemented by** IA-2 (the run's half and the cli); the api's route and its
+shutdown are IA-10a's. **Proof:** IA2-13, IA2-14.
+
+### D-4847 — One runs ledger gives every run its id (IA-2) — 2026-10-18
+
+**Number** the design's own, as amended by D-4880. **Decision.**
+`<store>/audit/runs.ledger`: fixed 128-byte ASCII records ending in a CRC-32C
+(`docs/02-store-format.md` §37.5), allocated under `audit/runs.ledger.lock`
+(within `LOCK_WAIT`, D-4906) with one or two positional 128-byte reads, one
+write and one sync: `id = max(now, last + 1)`. A torn tail and a whole last
+record whose CRC fails are written over; an unborn ledger is seeded with
+`<n> seed - - 0 <now>`, `n` the journal's largest `run` id (L-IA-23); two bad
+records at the tail refuse `runs_ledger_damaged{offset}` with an error event
+and an alert keyed per offset, and nothing is written until the operator has
+looked. A record may carry ` resumes=<id>` (RA-230), so the chain of resumes
+reads back for ever. A clock before the calendar's first day, more than 366
+days past the last day its sources cover, or more than a day behind the
+newest record is refused `clock_implausible` (RA-292, RA-326): one start
+under a wrong clock would otherwise lift every later id for ever.
+
+**Implemented by** IA-2 (the GDFL runs and the census verbs); the Zerodha
+pull run's hook is IA-10b's. **Proof:** IA2-01 to IA2-05.
+
+### D-4849 — Probes never make a press busy; a claimed child runs only on `go` (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** `pull::gdfl_run::locks::lock_state`
+opens the GDFL lock files that exist (never creating one), tries each shared
+and non-blocking, reads at most 1 KiB and releases: `Free`, `Held{claim}` or
+`Interrupted{claim, stop_requested}`. Every taker retries a busy lock
+`PROBE_RETRY` = 10 times at 10 ms (L-IA-25). The child's half of the two-phase
+start (round 4, BL-A) is `pull::gdfl_run::start::await_go`: it prints
+`claimed run=<id> kind=<k>`, waits at most `GO_WAIT` = 15 s, runs on `go`, and
+on `release`, any other line, end of input or silence releases everything
+(claim truncated, sidecar removed, flocks freed), emits "run released before
+start" and leaves its id used in the ledger. The api's half (who sends `go`,
+the 409) is IA-10a's.
+
+**Proof:** IA2-08, IA2-12.
+
+### D-4853 — How a stop closes a day (IA-2) — 2026-10-18
+
+**Number** the design's own. **Decision.** Workers ask the stop before each
+file they take, so the files answered are a prefix of the day's. When a file
+was left untaken: if the day's `begin` was written, the day's batch is made
+durable, the census is published, its day-ledger line is not written (it
+would describe files never read), and it closes `incomplete <key> <stats>
+stage=run reason=stopped at=<t> run=<id>`; if no `begin` was written, no
+closing line is written at all. When the stop came after the day's last file,
+the day closes as it would have and the run stops before the next day. The
+run ends `ImportRefusal::Stopped{kind, day, by, requested, done}` (code
+`stopped`, `Stage::Run`, closes no day), and a resume reads the stopped day
+again and converges (D-2803).
+
+**Proof:** IA2-14, IA2-15.
+
+### D-4880 — One runs ledger for the store, both feeds (IA-2) — 2026-10-18
+
+**Number** the design's own; named pending in D-4971's list until now.
+**Decision.** D-4847's ledger is the store's, not GDFL's: its modes include
+`pull`, `pull-spot`, `pull-fno`, `pull-repair`, `zerodha-repair`,
+`zerodha-verify` and `verify-merge` beside the GDFL modes, and
+`pull::gdfl_run::ledger::allocate` gives an id to a run that writes no claim.
+A GDFL claim is written under the same hold as its id. **Implemented by**
+IA-2 (the ledger, its modes and the GDFL claims); IA-10b threads the id into
+the Zerodha landings (`Receipt::run`, D-4880's pending note). **Proof:**
+IA2-03.
+
+### D-4905 — A journal ordinal is counted under the journal lock (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-1). **Decision.** `Journal::write`
+takes `imports/gdfl.journal.lock`, then reads only the bytes appended since
+this run last knew the journal's length (O(bytes other writers appended),
+FM-094; a journal shorter than that is read again whole and said at `error`),
+closes a torn tail, appends and syncs, all under the lock: the line number
+`Journal::append` answers is the line this run wrote, so a `.prv` record's
+`journal_ordinal` names its own `begin` line with two kinds appending
+(FM-093). **Proof:** IA2-17; the timing in `docs/06-limits.md` L-IA-53.
+
+### D-4906 — No lock of this design waits for ever: `lock_stalled` (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-2); named pending in D-4971's list;
+D-4924 adopted it for the verdict commit lock. **Decision.** The journal lock
+and the runs ledger lock are taken through `locks::take_within` /
+`take_path_within`: a `try_lock` every 10 ms for at most `LOCK_WAIT` = 30 s,
+then `lock_stalled{lock}` with an error event naming the lock and the wait. A
+journal append refused so is a journal refusal at `Stage::Journal`; a ledger
+allocation refused so refuses the start. The audit-ledger and alert-queue
+locks are IA-16's and IA-11a's. **Proof:** IA2-06.
+
+### D-4907 — The request sidecar: a CRC, its digest in the claim, never torn; only a verified one is resumed (IA-2) — 2026-10-18
+
+**Number** the critic's (round 7, IA-2-3). **Decision.** A run under a filter
+or a snapshot name writes its request line (D-4902) as the request sidecar
+beside its claim's lock, with ` crc=<8 hex>`, born at a staging name, synced,
+renamed (`docs/02-store-format.md` §37.3); the claim names the sidecar's
+16-hex BLAKE3 in `request=`, or `request=-`, in which case a sidecar a dead run
+left is removed. `locks::read_sidecar` answers `Verified(line)`, `None` or
+`Stale(why)` (missing, torn, CRC, another digest); a claim that does not parse
+is `Unreadable`. Auto-resume (IA-10a) fires only on `request=-` or a verified
+sidecar. This also records the snapshot name IA-1 found recorded nowhere
+(D-5831's NOT DONE). **Proof:** IA2-10, IA2-11.
+
 ### D-5833 — R4-07 repair 2: a shrunk listing is accepted by an exact count the operator writes; a link's host is what a URL reader connects to; a free-space answer no filesystem gives is refused; the package's gate 11 and gate 1d accounts are settled — 2026-10-18
 
 Renumbered at the merge into feat/db-fix from D-5831 (and its sequel from D-5832 to D-5834): IA-1 had taken D-5831 first (amendment A6).
@@ -74032,3 +74222,88 @@ this is a narrow or short desktop window.
 `docs/06-limits.md` L-AH04-02 (the board's top and height and whether every
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
+
+### D-5884 — IA-2 repair 1: a run's end line is folded into its run by every reader; stop askers write in turn under the journal lock; a busy store lock on v4 names its runs; a held lock is named before its sink; a census verb is never promised a stop — 2026-10-18
+
+**Number** free on every local branch on 2026-10-18 (the highest seen was
+D-5883); A6 renumbers it at landing from the ledger's head. **Amends** D-4804
+(the end line), D-4827 (the stop file) and D-4803 (the census verbs' refusal).
+**Decision.** (1) `run <id> ended=.. outcome=.. definition=..` is a fact about
+run `<id>`, never a run of its own: `/imports.json`'s reader folds it into the
+newest `run` line of its id (fields it lacks are added; a disagreeing one is
+kept as `end_<name>`; `end_line` names it), so `runs_total` counts runs. An end
+whose start the journal does not hold is listed as itself. (2) Stop askers
+write in turn under the journal lock beside the stop file (`imports/
+gdfl.journal.lock`, at most `LOCK_WAIT`): each reads the file under the lock
+and, when it names its run, writes nothing and is answered with that line;
+otherwise it stages under a name of its own (`<stop>.<pid>-<n>.tmp`) and
+renames it into place. Every asker of a run is answered with the one line the
+file holds. A `link(2)` without the lock was tried and refused by its own
+test: replacing a stop file of an ended run cannot be made atomic without one. (3) On v4 the store lock's own text is empty while runs hold it
+shared, so a refused census verb names each live run from the kind locks (run,
+kind, pid, by, started), and the empty-holder words say no claim names the
+holder yet rather than claim one is being written. (4) A second run of a held
+lock is refused its sink before any lock; the plan then probes that lock
+shared and answers `run_busy` naming the holder in the door's words, never
+`log_unavailable` alone. (5) A census verb reads no stop file, so a stop of
+its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
+written. (6) A runs ledger whose last id is `u64::MAX` refuses
+`runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
+
+### D-5901 — IA-2 repair 2: the journal keeps each key's hole reason, first landing and last done; every import ledger closes a torn or zeroed tail with the mark under the journal lock, the re-key's included; a recount the runs ledger knows closes as a ledger run — 2026-10-19
+
+**Number** free on every local branch on 2026-10-19 (the highest seen was
+D-5900); A6 renumbers it at landing from the ledger's head. **Amends** D-4803
+and D-4906 (which appends take the journal lock), D-2814 (the torn mark, now
+every import ledger's), D-4851 and D-4882 (what a reader keeps), and D-5884
+(the end line, now the recount's too). **Decision.** (1) `Journal::read_line`
+keeps, per key, the `reason=` of its last `incomplete` line, the definition
+and `run=` of its first close whose `seconds=` is above zero, and the
+definition and `run=` of its last `done` close; a `recounted` line is not a
+`done` close and leaves the last one. Each map holds one entry a key, so the
+load stays O(1) a line and O(keys) in memory. A line's acceptance is
+unchanged: a `seconds=` that is not a count lands nothing. The reader's public
+door is `JournalReader::history`; the plan, Resume and verification detail 17
+(IA-16, IA-6) read it there and never read `audit/gdfl.repairs` for it. (2)
+The shared ledger append closes a torn tail, and a tail of NUL bytes a power
+cut can leave (FM-128), with ` (torn)` before the next line, said at `warn`
+(`closing a torn ledger line`), where it closed one with a bare newline that
+left the fragment a line a reader could take for data. (3) `cli gdfl-rekey
+--apply` appends its `superseded` and `retired` lines through that one append,
+so they wait for the journal lock (`lock_stalled` by name past `LOCK_WAIT`,
+nothing written) and the torn tail is decided from the file's last byte while
+the lock is held, never from the ledger read the plan was made from (which
+glued its first record to a fragment appended since, or wrote a mark line for
+a tail another writer had closed). Its own unlocked append is removed. A plan
+with a line to write first waits for that lock once and lets it go, so a stall
+is refused before a month moves (`nothing was written`): refused only at the
+append, after its moves, a re-run found the decoded key holding the moved days
+with no `superseded` line naming them its copy and named the move twice
+(`ContractNamedTwice`) instead of finishing it. (4) A
+census recount holding a runs-ledger id (IA-2) writes ` at=<unix_s>` before
+`run=` on every `recounted` line and ends the same append with `run <id>
+ended=<unix_s> outcome=finished definition=4`, the import's own end line; a
+caller with no ledger id writes neither, so its journal stays a function of
+its inputs. (5) Amends D-4880: a runs ledger whose last record fails its CRC
+has it written over, as before, but its id is no longer assumed unused (bit
+rot reads the same as an unfinished append): the allocation reads the
+journal once and raises the new id past its largest `run` id, and says so at
+`warn` (`runs ledger last record written over`). The bad bytes are never
+parsed for an id. O(journal) on that rare path only. Not decided here: the
+re-key taking the GDFL store lock as a census verb does (named for IA-16).
+**Proof:** IA2-27 to IA2-31.
+
+#### Cited, never written
+
+Each number below is cited under `crates/` by IA-2 repair 2 and heads no
+entry here. Each says where its citation resolves.
+
+* **D-4851 and D-4882.** Numbers the ingest-automation design
+  (`state/design/ingest-automation.md` §15, outside this repository) gives to
+  "a failure never strands an earlier day" (holes are reasons, not closes)
+  and "the rule set of a stored unit is its landing's". Neither has been
+  written as an entry here: their whole rules land with IA-16 and IA-6. The
+  part `pull`'s journal reader cites them for, what a reader keeps of each
+  key's closes (the last `incomplete` line's `reason=`, the first close that
+  wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
+  citation of either resolves to D-5901 until its own entry is written.
