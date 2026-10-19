@@ -14,11 +14,12 @@
 //! store's writer keeps as it appends, so a close or volume page — first or
 //! last, either direction — is asserted flat between 1x and 100x like a seek.
 //!
-//! **What is not here, said so.** A time-of-day bound locates two instants
-//! per day and keeps windows no index run is cut to: it grows with the window
-//! by design (D-3326 states it), so a flatness ratio would assert the wrong
-//! thing. Its cost is printed beside the ratios, unasserted, and its p50/p99
-//! on real data is in the WP-31 report for `docs/06-limits.md`.
+//! **A time-of-day bound, asserted since R3-07.** A window never asked before
+//! is cut from each month's time-of-day index (built from its kept summary)
+//! rather than located through the `.tix` day by day, so its p99 over 200
+//! distinct windows is asserted within twice a kept window's p99 at every
+//! size. Its growth with the window's rows is still printed, unasserted: it
+//! keeps the rows no index run is cut to (D-3349).
 //!
 //! Run by `crates/api/benches/ratio.rs`'s `main`.
 
@@ -219,8 +220,57 @@ pub(crate) fn seeks_are_flat() -> bool {
             started.elapsed().as_micros()
         );
     }
+    ok &= tod_windows_cost_what_kept_ones_cost(&months);
     for (_, root) in months {
         let _ignored = std::fs::remove_dir_all(root);
+    }
+    ok
+}
+
+/// A NEW TIME-OF-DAY WINDOW COSTS WHAT A KEPT ONE COSTS (R3-07, DB-B57),
+/// ASSERTED: each month keeps its summary, so a window never asked before is
+/// cut from the month's time-of-day index in memory, and its p99 over 200
+/// distinct windows stays within twice the p99 of 200 repeats of one kept
+/// window, at every month size.
+fn tod_windows_cost_what_kept_ones_cost(months: &[(usize, std::path::PathBuf)]) -> bool {
+    let mut ok = true;
+    for (n, root) in months {
+        let mut fresh = Vec::with_capacity(200);
+        let mut kept = Vec::with_capacity(200);
+        for k in 0_u32..200 {
+            let from = 2 + k * 3;
+            let tod = Filter {
+                from: None,
+                to: None,
+                tod: Some((from, from + 60)),
+            };
+            let asked = query(&["NIFTY"], Some(0), None, tod);
+            let started = Instant::now();
+            black_box(page(root, &asked));
+            fresh.push(started.elapsed().as_nanos());
+            let started = Instant::now();
+            black_box(page(root, &asked));
+            kept.push(started.elapsed().as_nanos());
+        }
+        fresh.sort_unstable();
+        kept.sort_unstable();
+        let at = |sorted: &[u128], rank: usize| sorted.get(rank).copied().unwrap_or(0);
+        let p99 = |sorted: &[u128]| at(sorted, 197) * 1_000;
+        println!(
+            "  window tod n={n:<7} new p50 {} ns p99 {} ns max {} ns; kept p50 {} ns p99 {} ns max {} ns (n=200 each)",
+            at(&fresh, 100),
+            at(&fresh, 197),
+            at(&fresh, 199),
+            at(&kept, 100),
+            at(&kept, 197),
+            at(&kept, 199)
+        );
+        ok &= ratio(
+            &format!("window tod new/kept p99 n={n}"),
+            p99(&kept),
+            p99(&fresh),
+            2_000,
+        );
     }
     ok
 }
