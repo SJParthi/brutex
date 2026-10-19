@@ -561,7 +561,7 @@ impl DayIndex {
             .ok()
             .and_then(|s| self.first_at.get(s))
             .and_then(|at| usize::try_from(*at).ok())
-            .unwrap_or_else(|| self.bars())
+            .unwrap_or(self.bars())
     }
 
     /// Whether a traded Zerodha minute covers any second of `[from, to]`.
