@@ -51,8 +51,8 @@ use brutex_core::vendor::Vendor;
 use crate::gdfl_archive::Archive;
 use crate::gdfl_cm::CmScope;
 use crate::gdfl_import::{
-    Durability, ImportKind, ImportRefusal, Journal, Observer, Origin, Refreshed, Report, Run,
-    RunOptions, SourceKind, Workers, journal_path, run_cm_from, run_nfo_from,
+    Durability, ImportKind, ImportRefusal, Journal, KeyHistory, Observer, Origin, Refreshed,
+    Report, Run, RunOptions, SourceKind, Workers, journal_path, run_cm_from, run_nfo_from,
 };
 use crate::gdfl_nfo::{NfoTickStore, NfoZips};
 use crate::gdfl_tickstore::TickStore;
@@ -1754,6 +1754,16 @@ impl JournalReader {
     #[must_use]
     pub fn runs_and_open(&self) -> (usize, usize) {
         self.journal.runs_and_open()
+    }
+
+    /// What the journal keeps of `kind`'s `day` under `filter` (IA-2;
+    /// design §5.4): the hole's reason (the last `incomplete` line's
+    /// `reason=`), the first close that wrote seconds and the last `done`
+    /// close, each with its definition and `run=`. Three hash probes.
+    #[must_use]
+    pub fn history(&self, kind: ImportKind, day: Day, filter: &str) -> KeyHistory<'_> {
+        self.journal
+            .history(&format!("{} {day} {filter}", kind.as_str()))
     }
 
     /// The bytes of whole lines read.

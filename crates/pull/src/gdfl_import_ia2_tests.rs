@@ -531,3 +531,263 @@ fn a_nul_tail_after_a_power_cut_is_closed_and_named() {
         "every later load reads past it"
     );
 }
+
+/// **IA-2 (design §5.4 "What a reader keeps of each line"; D-4851, D-4882,
+/// round 6 SF-6): A READER KEEPS EACH KEY'S HOLE REASON, ITS FIRST LANDING
+/// AND ITS LAST `done`.** Per key, in O(1) a line: the `reason=` of the last
+/// `incomplete` line; the definition and `run=` of the first close whose
+/// `seconds=` is above zero (never replaced); the definition and `run=` of
+/// the last `done` close (a `refused` or `recounted` line leaves it). A
+/// close written before D-3317 carries no `run=` and is kept as such. The
+/// incremental reader keeps them as the whole load does. Every line is
+/// invented.
+#[test]
+fn the_journal_keeps_each_keys_hole_reason_first_landing_and_last_done() {
+    let store = scratch("history");
+    let path = journal_path(&store);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let key = "options 2024-05-14 NIFTY";
+    let old = "indices 2019-01-02 *";
+    let mut text = String::new();
+    for line in [
+        "run 1790000100 source=unrecorded commit=unrecorded started=1790000100 definition=3"
+            .to_owned(),
+        format!("begin {key}"),
+        format!(
+            "incomplete {key} definition=3 files=0 seconds=0 failures=2 stage=file \
+             reason=filing at=1790000101 run=1790000100"
+        ),
+        format!(
+            "incomplete {key} definition=3 files=16 seconds=1827 failures=0 stage=run \
+             reason=stopped at=1790000201 run=1790000200"
+        ),
+        format!("done {old} definition=2 files=2 seconds=300 failures=0"),
+        format!(
+            "done {key} definition=4 files=16 seconds=22500 failures=0 at=1790000301 \
+             run=1790000300"
+        ),
+        format!(
+            "refused {key} definition=4 stage=census reason=census_refused failures=0 \
+             run=1790000400"
+        ),
+    ] {
+        writeln!(text, "{line}").unwrap();
+    }
+    std::fs::write(&path, &text).unwrap();
+
+    let read = Journal::read_only(path.clone()).unwrap();
+    let got = read.history(key);
+    assert_eq!(got.hole_reason, Some("stopped"), "the LAST incomplete's");
+    assert_eq!(
+        got.first_landing,
+        Some(ClosedBy {
+            definition: Some(3),
+            run: Some(1_790_000_200),
+        }),
+        "the first close with seconds above zero, not the seconds=0 one"
+    );
+    assert_eq!(
+        got.last_done,
+        Some(ClosedBy {
+            definition: Some(4),
+            run: Some(1_790_000_300),
+        }),
+        "a later refused close leaves the last done"
+    );
+    let legacy = read.history(old);
+    assert_eq!(legacy.hole_reason, None);
+    let unrun = Some(ClosedBy {
+        definition: Some(2),
+        run: None,
+    });
+    assert_eq!(legacy.first_landing, unrun, "a close with no run= says so");
+    assert_eq!(legacy.last_done, unrun);
+    assert_eq!(
+        read.history("indices 2024-05-15 *"),
+        KeyHistory::default(),
+        "a key the journal never closed"
+    );
+    the_incremental_reader_keeps_the_same_history(&store, (key, old), unrun);
+}
+
+/// The second half of
+/// [`the_journal_keeps_each_keys_hole_reason_first_landing_and_last_done`],
+/// on its journal: the incremental reader, refreshed over three more lines,
+/// moves the last done to a later `done`, leaves it for a `recounted` line,
+/// keeps the first landing, and names a later `incomplete`'s reason as the
+/// hole's.
+fn the_incremental_reader_keeps_the_same_history(
+    store: &Path,
+    (key, old): (&str, &str),
+    unrun: Option<ClosedBy>,
+) {
+    let path = journal_path(store);
+    let mut reader = crate::gdfl_run::JournalReader::open(store).unwrap();
+    let mut more = String::new();
+    for line in [
+        format!(
+            "done {key} definition=4 files=16 seconds=22500 failures=0 at=1790000501 \
+             run=1790000500"
+        ),
+        format!("recounted {key} definition=4 months=1 at=1790000601 run=1790000600"),
+        format!(
+            "incomplete {old} definition=4 files=2 seconds=10 failures=1 stage=file \
+             reason=disk_full at=1790000701 run=1790000700"
+        ),
+    ] {
+        writeln!(more, "{line}").unwrap();
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, more.as_bytes()).unwrap();
+    drop(file);
+    reader.refresh().unwrap();
+    let on = Day::new(2024, 5, 14).unwrap();
+    let got = reader.history(ImportKind::Options, on, "NIFTY");
+    assert_eq!(
+        got.last_done,
+        Some(ClosedBy {
+            definition: Some(4),
+            run: Some(1_790_000_500),
+        }),
+        "the newest done; the recount is not a done close"
+    );
+    assert_eq!(got.first_landing.unwrap().run, Some(1_790_000_200));
+    assert_eq!(got.hole_reason, Some("stopped"));
+    let legacy = reader.history(ImportKind::Indices, Day::new(2019, 1, 2).unwrap(), "*");
+    assert_eq!(legacy.hole_reason, Some("disk_full"));
+    assert_eq!(
+        legacy.first_landing, unrun,
+        "the first landing is never replaced"
+    );
+    assert_eq!(legacy.last_done, unrun);
+}
+
+/// **IA-2 (D-2814, FM-128; design §5.4 round 3 SF-10): EVERY IMPORT LEDGER
+/// CLOSES A TORN OR ZEROED TAIL WITH THE MARK, AS THE JOURNAL DOES.** The
+/// day, lineage, lots and scope ledgers share one append: a fragment a
+/// killed append left, and a tail of NUL bytes a power cut left, are each
+/// closed with ` (torn)` before the next line, so a reader knows the line
+/// for torn and the next line is whole. Before IA-2 repair 2 the shared
+/// append closed both with a bare newline, the NUL tail read as a line.
+#[test]
+fn every_import_ledger_closes_a_torn_or_zeroed_tail_with_the_mark() {
+    let store = scratch("ledger-torn");
+    let ledger = store.join("imports").join("gdfl.lineage");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    for (tail, closed) in [
+        (b"lot NIFTY 2024-0".to_vec(), "lot NIFTY 2024-0 (torn)"),
+        (b"\0\0\0\0\0\0\0\0".to_vec(), "\0\0\0\0\0\0\0\0 (torn)"),
+    ] {
+        let mut bytes = b"whole one\n".to_vec();
+        bytes.extend_from_slice(&tail);
+        std::fs::write(&ledger, &bytes).unwrap();
+        append_lines(&ledger, &["next one".to_owned()]).unwrap();
+        let text = std::fs::read_to_string(&ledger).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines, ["whole one", closed, "next one"], "{text:?}");
+    }
+    // A whole tail gets no mark; nothing to append opens nothing.
+    append_lines(&ledger, &["third".to_owned()]).unwrap();
+    append_lines(&ledger, &[]).unwrap();
+    let text = std::fs::read_to_string(&ledger).unwrap();
+    assert!(text.ends_with("next one\nthird\n"), "{text:?}");
+    assert_eq!(text.matches(" (torn)").count(), 1, "{text:?}");
+}
+
+/// **IA-2 REPAIR 2: WHAT THE NEW KEEPING COSTS.** Timed, not asserted (run
+/// with `--ignored --nocapture`): p50, p99 and max of one `read_line` of a
+/// closing line while 100,000 keys are kept (each key closed `incomplete`
+/// and then `done`, so every map holds 100,000 entries), of one
+/// `history` probe, and of one locked, synced ledger append on a ledger of
+/// 1,000 lines. Every line is invented.
+#[test]
+#[ignore = "a timing, printed for docs/06-limits.md and the package report"]
+fn ia2_repair2_timings() {
+    fn pct(mut v: Vec<std::time::Duration>) -> String {
+        v.sort_unstable();
+        let n = v.len();
+        format!(
+            "n={n} p50={:?} p99={:?} max={:?}",
+            v[n / 2],
+            v[n * 99 / 100],
+            v[n - 1]
+        )
+    }
+    let keys = 100_000_u32;
+    let lines: Vec<String> = (0..keys)
+        .flat_map(|i| {
+            let key = format!("options 2024-05-{:02} N{i}", 1 + i % 28);
+            [
+                format!(
+                    "incomplete {key} definition=4 files=1 seconds={} failures=1 stage=file \
+                     reason=filing at=1790000001 run={}",
+                    i % 2,
+                    1_790_000_000 + u64::from(i)
+                ),
+                format!(
+                    "done {key} definition=4 files=1 seconds=60 failures=0 at=1790000002 run={}",
+                    1_790_100_000 + u64::from(i)
+                ),
+            ]
+        })
+        .collect();
+    let mut journal = Journal::default();
+    let mut took = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let began = std::time::Instant::now();
+        journal.read_line(&fields).unwrap();
+        took.push(began.elapsed());
+    }
+    println!(
+        "IA-2 r2 read_line of a closing line, 100,000 keys kept: {}",
+        pct(took)
+    );
+    let mut took = Vec::with_capacity(100_000);
+    for i in 0..100_000_u32 {
+        let key = format!("options 2024-05-{:02} N{i}", 1 + i % 28);
+        let began = std::time::Instant::now();
+        let got = journal.history(&key);
+        took.push(began.elapsed());
+        assert!(got.last_done.is_some());
+    }
+    println!("IA-2 r2 history probe, 100,000 keys: {}", pct(took));
+
+    let store = scratch("r2-append");
+    let ledger = store.join("imports").join("gdfl.lineage");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let mut seed = String::with_capacity(16_000);
+    for i in 0..1_000 {
+        writeln!(seed, "alias seed{i}").unwrap();
+    }
+    std::fs::write(&ledger, seed).unwrap();
+    let mut took = Vec::with_capacity(300);
+    for i in 0..300 {
+        let line = vec![format!("alias timed{i}")];
+        let began = std::time::Instant::now();
+        append_lines(&ledger, &line).unwrap();
+        took.push(began.elapsed());
+    }
+    println!(
+        "IA-2 r2 locked ledger append (lock, last byte, write, sync): {}",
+        pct(took)
+    );
+    // The re-key's lock check before its first month moves: one uncontended
+    // take and release of the same journal lock.
+    let lock = journal_lock_path(&ledger);
+    let mut took = Vec::with_capacity(1_000);
+    for _ in 0..1_000 {
+        let began = std::time::Instant::now();
+        crate::gdfl_run::locks::take_path_within(&lock, crate::gdfl_run::locks::LOCK_WAIT)
+            .map(drop)
+            .unwrap();
+        took.push(began.elapsed());
+    }
+    println!(
+        "IA-2 r2 re-key lock check (take and release, uncontended): {}",
+        pct(took)
+    );
+}

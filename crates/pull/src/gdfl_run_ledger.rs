@@ -285,7 +285,9 @@ impl LedgerHold {
 
     /// Allocates the next id for `entry` (its `id` ignored, its `started`
     /// the clock), writes its record and syncs it. O(1): one or two 128-byte
-    /// reads and one write (seeding once per store); measured by
+    /// reads and one write (seeding once per store, and one pass over the
+    /// journal when a damaged last record is written over, which is rare and
+    /// said at `warn`: O(journal) then, bounded by L-IA-23's seed); measured by
     /// `pull::gdfl_run::ia2_tests::ia2_timings` (C-GR-08).
     ///
     /// # Errors
@@ -309,21 +311,33 @@ impl LedgerHold {
             }
         };
         // (offset to write at, the last record's id and start; `None` when
-        // the ledger is unborn and is seeded at 0).
-        let (mut at, last) = if whole == 0 {
-            (0, None)
+        // the ledger is unborn and is seeded at 0; and, when a damaged last
+        // record is written over, the largest run id the journal holds).
+        let (mut at, last, used) = if whole == 0 {
+            (0, None, None)
         } else {
             let tail = (whole - 1) * RECORD;
             match read(tail)? {
-                Some(last) => (whole * RECORD, Some(last)),
-                None if whole == 1 => (0, None),
+                Some(last) => (whole * RECORD, Some(last), None),
+                None if whole == 1 => (0, None, None),
                 None => {
                     let Some(before) = read(tail - RECORD)? else {
                         let offset = tail - RECORD;
                         note_damaged(&self.store, &path, offset);
                         return Err(RunsLedgerFault::Damaged { offset });
                     };
-                    (tail, Some(before))
+                    // A DAMAGED LAST RECORD IS NOT ASSUMED UNUSED (IA-2
+                    // repair 2; D-4880, D-5901): an append whose sync never
+                    // finished is the likely cause, but a record a run was
+                    // given and then lost to bit rot reads the same. Its id
+                    // is never parsed from the bad bytes; the journal, which
+                    // holds every id a run wrote a line under, is read once
+                    // and the new id is raised past it, so a clock behind
+                    // the lost record cannot hand that id out again.
+                    let used = largest_journal_run(&self.store)
+                        .map_err(|why| RunsLedgerFault::Io { why })?;
+                    note_written_over(&path, tail, used);
+                    (tail, Some(before), Some(used))
                 }
             }
         };
@@ -361,7 +375,16 @@ impl LedgerHold {
                 ),
             });
         };
-        let id = now.max(next);
+        let past_journal = match used {
+            None => 0,
+            Some(used) => used.checked_add(1).ok_or_else(|| RunsLedgerFault::Entry {
+                why: format!(
+                    "the journal's largest run id is {used}, the largest an id can be: no \
+                     later id exists, so none was allocated and nothing was written"
+                ),
+            })?,
+        };
+        let id = now.max(next).max(past_journal);
         let mine = Entry {
             id,
             ..entry.clone()
@@ -427,6 +450,20 @@ pub fn clock_check(now: u64, last: Option<&Entry>) -> Result<(), RunsLedgerFault
             Err(RunsLedgerFault::ClockImplausible { now, why })
         }
     }
+}
+
+/// Says, at `warn`, that the ledger at `path` had one damaged last record at
+/// byte `offset`, which this allocation writes over, and the journal's
+/// largest run id the new id is raised past (IA-2 repair 2; D-5901): one bad
+/// record is a torn or rotted append, named rather than silently replaced.
+fn note_written_over(path: &Path, offset: u64, journal_run: u64) {
+    let shown = path.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(TARGET, "runs ledger last record written over")
+            .with("ledger", shown.as_str())
+            .with("offset", offset)
+            .with("journal_run", journal_run),
+    );
 }
 
 /// The error event and the alert of a damaged ledger, keyed per offset so a

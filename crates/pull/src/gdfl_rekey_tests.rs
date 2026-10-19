@@ -692,7 +692,6 @@ fn the_ledger_is_read_whole_or_refused_by_line() {
     );
     let read = Withdrawn::parse(&text).unwrap();
     assert_eq!(read.counts(), (1, 1));
-    assert!(!read.torn_tail);
     let row = |contract: &str| EntryKey {
         contract: Some(c(contract)),
         exchange: Exchange::Nse,
@@ -708,7 +707,11 @@ fn the_ledger_is_read_whole_or_refused_by_line() {
         segment: Segment::Index,
         ..row(STATED)
     }));
-    assert!(Withdrawn::parse(&pointer.line()).unwrap().torn_tail);
+    // The read no longer remembers whether the tail was torn (IA-2 repair
+    // 2): the append decides that from the file under the journal lock
+    // (`a_torn_tail_is_closed_from_the_file_under_the_lock_not_from_the_earlier_read`).
+    // An unterminated last record still reads as the record it is.
+    assert_eq!(Withdrawn::parse(&pointer.line()).unwrap().counts(), (1, 0));
     let bad = Withdrawn::parse(&format!(
         "{}\nretired NSE-FNO-NIFTY-{STATED} why=x\n",
         pointer.line()
@@ -844,4 +847,128 @@ fn a_recount_does_not_count_a_withdrawn_key_back() {
     assert_eq!(recounted.withdrawn, 5, "four keys, five months");
     let (_, after) = census_keys(root);
     assert_eq!(after, settled, "nothing withdrawn came back");
+}
+
+/// The journal append lock of `root`'s import ledgers.
+fn ledger_lock(root: &Path) -> PathBuf {
+    crate::gdfl_import::journal_lock_path(&lineage_path(root))
+}
+
+/// **IA-2 (D-4803, D-4906; design §5.4 round 3 SF-10): THE RE-KEY'S LEDGER
+/// LINES GO UNDER THE ONE JOURNAL LOCK.** With the lock held by another open
+/// file, the re-key's append WAITS for it (a v4 import's lineage append is
+/// never interleaved with it), and past the wait it is refused
+/// `lock_stalled`, naming the lock, before a month or a ledger line is
+/// written, so the re-run that follows the release finishes the move (a
+/// stall found only at the append, after the months moved, left a re-run
+/// naming the move twice: `lines_written` 3, not 4). Before IA-2 repair 2
+/// the re-key appended at once, through an append of its own that took no
+/// lock.
+#[test]
+fn the_rekey_appends_its_ledger_under_the_journal_lock() {
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new("rekey-lock");
+    fixture.counted();
+    let root = fixture.root();
+    std::fs::create_dir_all(lineage_path(root).parent().unwrap()).unwrap();
+
+    // Held past the wait: refused by name, nothing appended.
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    let held =
+        crate::gdfl_run::locks::take_path_within(&ledger_lock(root), Duration::from_millis(50))
+            .unwrap();
+    let why =
+        apply_within(root, (&found, &decided, &ledger), Duration::from_millis(80)).unwrap_err();
+    assert!(why.contains("lock_stalled"), "{why}");
+    assert!(why.contains("gdfl.journal.lock"), "{why}");
+    assert!(why.contains("nothing was written"), "{why}");
+    assert!(why.contains("run again to finish"), "{why}");
+    assert!(
+        std::fs::read_to_string(lineage_path(root))
+            .unwrap_or_default()
+            .is_empty(),
+        "no ledger line was written"
+    );
+    // Refused before step 1, so no month moved either: a re-run is the
+    // first run again, never one that finds the decoded key already holding
+    // the moved days with no `superseded` line naming them its own copy.
+    assert!(
+        !key_dir(root, "NIFTY", SETTLED).exists(),
+        "no month was written under the decoded key"
+    );
+
+    // Held a while, then released: the public verb waits for it, then
+    // appends every line, each whole.
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    let began = Instant::now();
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    let waited = began.elapsed();
+    releaser.join().unwrap();
+    assert!(
+        waited >= Duration::from_millis(250),
+        "the append waited for the lock: {waited:?}"
+    );
+    assert_eq!(done.lines_written, 4);
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
+}
+
+/// **IA-2 (D-2814 under the lock): A TORN TAIL IS DECIDED FROM THE FILE AS
+/// IT IS WHEN THE LOCK IS HELD, NEVER FROM THE READ THE PLAN WAS MADE
+/// FROM.** A fragment appended after the re-key read the ledger is closed
+/// with the mark, so the re-key's first record is whole and the ledger reads
+/// back; a torn tail the re-key saw that another writer closed before the
+/// append gets no second, spurious mark line. Before IA-2 repair 2 the first
+/// case glued the record to the fragment (the ledger then refused every
+/// later read) and the second wrote a line ` (torn)`.
+#[test]
+fn a_torn_tail_is_closed_from_the_file_under_the_lock_not_from_the_earlier_read() {
+    // A fragment appended after the read.
+    let fixture = Fixture::new("rekey-torn-after");
+    fixture.counted();
+    let root = fixture.root();
+    let lineage = lineage_path(root);
+    std::fs::create_dir_all(lineage.parent().unwrap()).unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    std::fs::write(&lineage, "superseded NSE-FNO-NIF").unwrap();
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!(done.lines_written, 4);
+    let text = std::fs::read_to_string(&lineage).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "superseded NSE-FNO-NIF (torn)", "{text}");
+    assert!(
+        lines[1].starts_with(&format!("superseded NSE-FNO-NIFTY-{STATED} by=")),
+        "{text}"
+    );
+    assert_eq!(lines.len(), 5, "{text}");
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3), "{text}");
+
+    // A torn tail the read saw, closed by another writer before the append.
+    let fixture = Fixture::new("rekey-torn-closed");
+    fixture.counted();
+    let root = fixture.root();
+    let lineage = lineage_path(root);
+    std::fs::create_dir_all(lineage.parent().unwrap()).unwrap();
+    std::fs::write(&lineage, "alias NIF").unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    std::fs::write(&lineage, "alias NIF (torn)\n").unwrap();
+    apply(root, &found, &decided, &ledger).unwrap();
+    let text = std::fs::read_to_string(&lineage).unwrap();
+    assert!(
+        !text.lines().any(|line| line.trim() == "(torn)"),
+        "no spurious mark line: {text}"
+    );
+    assert_eq!(text.lines().count(), 5, "{text}");
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
 }

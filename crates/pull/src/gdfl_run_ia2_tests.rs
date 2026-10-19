@@ -209,6 +209,41 @@ fn a_garbage_runs_ledger_tail_is_named_never_read_as_an_id() {
     assert_eq!(refusal.code(), "runs_ledger_damaged");
 }
 
+/// **IA-2 repair 2 (D-4880, D-5901): A DAMAGED LAST RECORD'S ID IS NEVER
+/// HANDED OUT AGAIN, EVEN WHEN IT WAS USED.** A run was given an id, wrote
+/// its `run` line, and then its ledger record rotted (its CRC fails). With
+/// the clock at that run's start, the next allocation writes over the bad
+/// record and is raised past the journal's largest run, never repeating the
+/// lost id. Before the repair it took `max(now, before + 1)`, which is the
+/// lost id itself.
+#[test]
+fn a_damaged_last_record_that_a_run_used_is_never_handed_out_again() {
+    let store = scratch("rotted");
+    let first = allocate(&store, NOW).unwrap();
+    let lost = allocate(&store, NOW + 10).unwrap();
+    assert_eq!((first, lost), (NOW, NOW + 10));
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    std::fs::write(
+        crate::gdfl_import::journal_path(&store),
+        format!("run {lost} source=unrecorded\nbegin indices 2024-04-01 *\n"),
+    )
+    .unwrap();
+    let path = store.join(ledger::LEDGER);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let len = bytes.len();
+    bytes[len - 10] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let next = allocate(&store, NOW + 10).unwrap();
+    assert_eq!(next, lost + 1, "raised past the journal's run, not {lost}");
+    assert_eq!(std::fs::read(&path).unwrap().len(), len, "written over");
+    let ids: Vec<u64> = ledger::read_all(&store)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.unwrap().id)
+        .collect();
+    assert_eq!(ids.last(), Some(&(lost + 1)), "{ids:?}");
+}
+
 /// **L-IA-23: THE LEDGER IS SEEDED PAST EVERY ID THE JOURNAL HOLDS.** A store
 /// whose journal names run 1,900,000,000 gives its first ledger id past it.
 #[test]

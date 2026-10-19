@@ -25,10 +25,10 @@ use store::path::{Timeframe, YearMonth};
 use super::{
     Checked, FEATURE_CENSUS_V4, Location, MIGRATION_RECEIPT, Mode, REQUIRES_CAP, REQUIRES_FORMAT,
     REQUIRES_VOID, SEAL_RECEIPT, SEALED_VERSION, Span, Target, V4_READER_SINCE, close_journal,
-    count_growing, current_epoch, cycle, holds_sealed_stub, install_epoch, install_run,
-    legacy_drift, locate, migrate, parse_day, read_epoch, reader_refusal, record, require_feature,
-    requires_path, seal_legacy, sealed_stub, staging_dir, superseded_path, target_for,
-    target_for_plan,
+    close_journal_as, count_growing, current_epoch, cycle, holds_sealed_stub, install_epoch,
+    install_run, legacy_drift, locate, migrate, parse_day, read_epoch, reader_refusal, record,
+    require_feature, requires_path, seal_legacy, sealed_stub, staging_dir, superseded_path,
+    target_for, target_for_plan,
 };
 use crate::manifest::{
     Closes, Entry, EntryKey, FNO_FLOOR, Held, Layout, Manifest, ManifestError, ManifestHeader,
@@ -605,6 +605,111 @@ fn the_recount_closes_only_the_census_refused_days_it_can_prove() {
 
     // Twice: both days are done now, so nothing is written.
     let again = close_journal(root, span, None, &checked).expect("closes nothing");
+    assert!(again.closed.is_empty() && again.run.is_none());
+    assert_eq!(std::fs::read_to_string(&journal).expect("journal"), text);
+}
+
+/// **DB-A50 FOR THE RECOUNT (IA-2; D-4803, D-5884): A RECOUNT THE RUNS LEDGER
+/// KNOWS IS A LEDGER RUN, SO EACH OF ITS CLOSES SAYS WHEN AND THE RUN SAYS IT
+/// ENDED.** The import's rule (`a_ledger_runs_closes_carry_a_clock_time_and_its_end_a_line`
+/// in `gdfl_import_ia2_tests.rs`) for the census recount's own lines: under a
+/// ledger id every `recounted` line carries ` at=<unix_s>` before `run=`,
+/// which stays its last field, and the same append ends with `run <id>
+/// ended=<unix_s> outcome=finished definition=4`; the import's loader reads
+/// it, the end line is not a second run, and a second closing that closes
+/// nothing writes no second end. Before IA-2 repair 2 neither was written.
+#[test]
+fn a_ledger_recounts_closes_carry_a_clock_time_and_its_end_a_line() {
+    let scratch = Scratch::new("JOURNAL-AT");
+    let root = scratch.root();
+    let journal = root.join("imports").join("gdfl.journal");
+    std::fs::create_dir_all(journal.parent().expect("imports")).expect("imports");
+    std::fs::write(&journal, JOURNAL).expect("journal");
+    let held = [
+        row_at(0, ym(2019, 11), 5, nov(1), nov(14)),
+        row_at(1, ym(2019, 11), 5, nov(14), nov(15)),
+        row_at(2, ym(2019, 11), 5, nov(15), nov(18)),
+        row_at(3, ym(2019, 11), 5, nov(15), nov(15)),
+    ];
+    let span = Span {
+        from: Day::new(2019, 11, 14).expect("a day"),
+        to: Some(Day::new(2019, 11, 30).expect("a day")),
+    };
+    let refused: HashSet<YearMonth> = HashSet::new();
+    let checked = Checked {
+        held: &held,
+        unreadable: &[],
+        refused: &refused,
+        strays: 0,
+    };
+    let id = 1_790_000_777_u64;
+    let done =
+        close_journal_as(root, span, (Some("0123abcd"), Some(id)), &checked).expect("closes");
+    assert_eq!(done.run, Some(id));
+    assert_eq!(done.closed.len(), 2);
+    let text = std::fs::read_to_string(&journal).expect("journal");
+    let tail: Vec<&str> = text
+        .strip_prefix(JOURNAL)
+        .expect("appended, never rewritten")
+        .lines()
+        .collect();
+    assert_eq!(tail.len(), 5, "{tail:?}");
+    assert_eq!(tail[0], " (torn)");
+    assert!(
+        tail[1].starts_with(&format!("run {id} source=recount ")),
+        "{tail:?}"
+    );
+    for (line, key) in tail[2..4]
+        .iter()
+        .zip(["options 2019-11-14 *", "options 2019-11-15 *"])
+    {
+        assert!(
+            line.starts_with(&format!("recounted {key} definition=2 months=")),
+            "{line}"
+        );
+        let (before, at) = line
+            .split_once(" at=")
+            .expect("every close of a ledger run says when");
+        assert!(!before.contains(" run="), "at= comes before run=: {line}");
+        let (at, run) = at.split_once(' ').expect("at= then run=");
+        assert!(
+            at.parse::<u64>().expect("unix seconds") > 1_700_000_000,
+            "{line}"
+        );
+        assert_eq!(
+            run,
+            format!("run={id}"),
+            "run= stays the last field: {line}"
+        );
+    }
+    let end = tail[4];
+    let ended: u64 = end
+        .strip_prefix(&format!("run {id} ended="))
+        .and_then(|rest| rest.strip_suffix(" outcome=finished definition=4"))
+        .expect("the run's end line")
+        .parse()
+        .expect("unix seconds");
+    assert!(ended > 1_700_000_000, "{end}");
+
+    // The import's loader reads every line, and the end is not a second run.
+    let reader = crate::gdfl_run::JournalReader::open(root).expect("the import reads it");
+    assert_eq!(
+        reader.runs_and_open().0,
+        1,
+        "one run line id, its end folded"
+    );
+    let on = Day::new(2019, 11, 14).expect("a day");
+    let history = reader.history(crate::gdfl_import::ImportKind::Options, on, "*");
+    assert_eq!(history.last_done, None, "a recount is not a done close");
+    assert_eq!(
+        history.first_landing.map(|c| (c.definition, c.run)),
+        Some((Some(2), None)),
+        "the import's first close that wrote seconds, before run= existed"
+    );
+
+    // Nothing left to close: nothing written, no second end.
+    let again =
+        close_journal_as(root, span, (None, Some(id + 1)), &checked).expect("closes nothing");
     assert!(again.closed.is_empty() && again.run.is_none());
     assert_eq!(std::fs::read_to_string(&journal).expect("journal"), text);
 }

@@ -1625,7 +1625,11 @@ one file that wrote no bar), so the receipt prints the comparison and the
 commit=<sha> started=<unix_s> from=<day> to=<day|open>` line and one
 `recounted <kind> <day> <filter> definition=<n> months=<n> run=<id>` line per
 day, after closing a torn last line (D-2814); it writes nothing when no day
-closes. `--from` is required: the span is what excludes days refused for any
+closes. A recount holding a runs-ledger id (every GDFL `cli census-recount`
+since IA-2) is a ledger run: each `recounted` line carries ` at=<unix_s>`
+before its `run=`, and the same append ends with `run <id> ended=<unix_s>
+outcome=finished definition=<n>`, the import's end line (DB-A50, D-5884,
+D-5901). `--from` is required: the span is what excludes days refused for any
 other reason (2018-11-06 and 2018-11-09).
 
 ---

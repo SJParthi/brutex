@@ -394,13 +394,13 @@ use self::filing::symbol_id_of;
 use self::filing::{BeginGate, JobRead, ReadJob, on_workers, take_quality};
 pub(crate) use self::journal::Journal;
 pub use self::journal::Refreshed;
-pub(crate) use self::journal::append_lines;
 #[cfg(test)]
 pub(crate) use self::journal::load_warning;
 pub use self::journal::{
-    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, VERB_WORDS, definition_is_current, done_whole_days,
-    journal_lock_path, journal_path,
+    BAR_DEFINITION, ClosedBy, JOURNAL_LOAD_WARN_BYTES, KeyHistory, VERB_WORDS,
+    definition_is_current, done_whole_days, journal_lock_path, journal_path,
 };
+pub(crate) use self::journal::{append_lines, append_lines_within};
 #[cfg(test)]
 use self::journal::{closing_line, count_of, torn_fragment};
 

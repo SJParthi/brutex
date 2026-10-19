@@ -3162,7 +3162,10 @@ pub fn close_journal(
 
 /// [`close_journal`] under `run`, the runs ledger's id of the recount that
 /// holds the store lock (IA-2, D-4847). `None` (a caller that holds no
-/// ledger) takes the clock raised past every `run` line, as before.
+/// ledger) takes the clock raised past every `run` line, as before. Under a
+/// ledger id each `recounted` line carries ` at=<unix_s>` before its `run=`,
+/// and the append ends with the run's end line, `run <id> ended=<unix_s>
+/// outcome=finished definition=<n>` (DB-A50, D-5884); without one, neither.
 ///
 /// # Errors
 ///
@@ -3265,7 +3268,34 @@ pub fn close_journal_as(
         commit.unwrap_or("unrecorded"),
         span.from
     );
-    for closed in &done.closed {
+    recounted_lines(&mut lines, id, run.is_some(), &done.closed, &states);
+    append_journal(&path, &lines)?;
+    done.run = Some(id);
+    Ok(done)
+}
+
+/// Appends to `lines` one `recounted` line per closed day under run `id`,
+/// and, for a run the runs ledger knows (`ledger`), its clock time on each
+/// and the run's end line. A RECOUNT THE RUNS LEDGER KNOWS IS A LEDGER RUN
+/// (IA-2; DB-A50, D-4803, D-5884, D-5901): each close says when, ` at=<unix_s>`
+/// before `run=` (which stays the line's last field), and the run says it
+/// ended, one more `run` line in the import's own form, in the same append as
+/// its closes. A caller with no ledger id (`close_journal`) writes neither,
+/// so its journal stays a function of its inputs, as a bare import's does.
+fn recounted_lines(
+    lines: &mut String,
+    id: u64,
+    ledger: bool,
+    closed: &[Closed],
+    states: &BTreeMap<String, KeyState>,
+) {
+    let at = ledger.then(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs())
+    });
+    let clock = at.map_or_else(String::new, |at| format!(" at={at}"));
+    for closed in closed {
         let definition = states
             .get(&closed.key)
             .and_then(|state| match state {
@@ -3275,13 +3305,17 @@ pub fn close_journal_as(
             .unwrap_or("0");
         let _ = writeln!(
             lines,
-            "recounted {} definition={definition} months={} run={id}",
+            "recounted {} definition={definition} months={}{clock} run={id}",
             closed.key, closed.months
         );
     }
-    append_journal(&path, &lines)?;
-    done.run = Some(id);
-    Ok(done)
+    if let Some(at) = at {
+        let _ = writeln!(
+            lines,
+            "run {id} ended={at} outcome=finished definition={}",
+            crate::gdfl_import::BAR_DEFINITION
+        );
+    }
 }
 
 /// The first and last stamps of every row the recount built, by the segment

@@ -73067,3 +73067,61 @@ shared and answers `run_busy` naming the holder in the door's words, never
 its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
 written. (6) A runs ledger whose last id is `u64::MAX` refuses
 `runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
+
+### D-5901 — IA-2 repair 2: the journal keeps each key's hole reason, first landing and last done; every import ledger closes a torn or zeroed tail with the mark under the journal lock, the re-key's included; a recount the runs ledger knows closes as a ledger run — 2026-10-19
+
+**Number** free on every local branch on 2026-10-19 (the highest seen was
+D-5900); A6 renumbers it at landing from the ledger's head. **Amends** D-4803
+and D-4906 (which appends take the journal lock), D-2814 (the torn mark, now
+every import ledger's), D-4851 and D-4882 (what a reader keeps), and D-5884
+(the end line, now the recount's too). **Decision.** (1) `Journal::read_line`
+keeps, per key, the `reason=` of its last `incomplete` line, the definition
+and `run=` of its first close whose `seconds=` is above zero, and the
+definition and `run=` of its last `done` close; a `recounted` line is not a
+`done` close and leaves the last one. Each map holds one entry a key, so the
+load stays O(1) a line and O(keys) in memory. A line's acceptance is
+unchanged: a `seconds=` that is not a count lands nothing. The reader's public
+door is `JournalReader::history`; the plan, Resume and verification detail 17
+(IA-16, IA-6) read it there and never read `audit/gdfl.repairs` for it. (2)
+The shared ledger append closes a torn tail, and a tail of NUL bytes a power
+cut can leave (FM-128), with ` (torn)` before the next line, said at `warn`
+(`closing a torn ledger line`), where it closed one with a bare newline that
+left the fragment a line a reader could take for data. (3) `cli gdfl-rekey
+--apply` appends its `superseded` and `retired` lines through that one append,
+so they wait for the journal lock (`lock_stalled` by name past `LOCK_WAIT`,
+nothing written) and the torn tail is decided from the file's last byte while
+the lock is held, never from the ledger read the plan was made from (which
+glued its first record to a fragment appended since, or wrote a mark line for
+a tail another writer had closed). Its own unlocked append is removed. A plan
+with a line to write first waits for that lock once and lets it go, so a stall
+is refused before a month moves (`nothing was written`): refused only at the
+append, after its moves, a re-run found the decoded key holding the moved days
+with no `superseded` line naming them its copy and named the move twice
+(`ContractNamedTwice`) instead of finishing it. (4) A
+census recount holding a runs-ledger id (IA-2) writes ` at=<unix_s>` before
+`run=` on every `recounted` line and ends the same append with `run <id>
+ended=<unix_s> outcome=finished definition=4`, the import's own end line; a
+caller with no ledger id writes neither, so its journal stays a function of
+its inputs. (5) Amends D-4880: a runs ledger whose last record fails its CRC
+has it written over, as before, but its id is no longer assumed unused (bit
+rot reads the same as an unfinished append): the allocation reads the
+journal once and raises the new id past its largest `run` id, and says so at
+`warn` (`runs ledger last record written over`). The bad bytes are never
+parsed for an id. O(journal) on that rare path only. Not decided here: the
+re-key taking the GDFL store lock as a census verb does (named for IA-16).
+**Proof:** IA2-27 to IA2-31.
+
+#### Cited, never written
+
+Each number below is cited under `crates/` by IA-2 repair 2 and heads no
+entry here. Each says where its citation resolves.
+
+* **D-4851 and D-4882.** Numbers the ingest-automation design
+  (`state/design/ingest-automation.md` §15, outside this repository) gives to
+  "a failure never strands an earlier day" (holes are reasons, not closes)
+  and "the rule set of a stored unit is its landing's". Neither has been
+  written as an entry here: their whole rules land with IA-16 and IA-6. The
+  part `pull`'s journal reader cites them for, what a reader keeps of each
+  key's closes (the last `incomplete` line's `reason=`, the first close that
+  wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
+  citation of either resolves to D-5901 until its own entry is written.

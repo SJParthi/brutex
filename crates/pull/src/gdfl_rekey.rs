@@ -80,7 +80,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::{ErrorKind, Write as _};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use brutex_core::instrument::{Contract, Exchange, Expiry, Kind, OptionSide, Segment};
@@ -169,8 +169,6 @@ pub struct Withdrawn {
     superseded: HashMap<(Symbol, Contract), SupersededRecord>,
     retired: HashMap<(Symbol, Contract), RetiredRecord>,
     lines: HashSet<String>,
-    /// Whether the file's last line has no newline: a torn append.
-    torn_tail: bool,
 }
 
 impl Withdrawn {
@@ -188,7 +186,6 @@ impl Withdrawn {
             superseded: HashMap::with_capacity(64),
             retired: HashMap::with_capacity(16),
             lines: HashSet::with_capacity(80),
-            torn_tail: !text.is_empty() && !text.ends_with('\n'),
         };
         for (number, line) in text.lines().enumerate() {
             let at = number.saturating_add(1);
@@ -1160,33 +1157,6 @@ impl Group<'_> {
     }
 }
 
-/// Appends `lines` to the ledger at `path` in one write, synced; a torn last
-/// line is closed with the `(torn)` mark first (D-2814's rule).
-fn append_lines(path: &Path, lines: &[String], torn_tail: bool) -> Result<(), String> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-    }
-    let mut text = String::with_capacity(lines.len().saturating_mul(160).saturating_add(8));
-    if torn_tail {
-        text.push_str(" (torn)\n");
-    }
-    for line in lines {
-        text.push_str(line);
-        text.push('\n');
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened to append: {why}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|why| format!("{} could not be appended to: {why}", path.display()))
-}
-
 /// Applies `plan` to the store at `root` (module doc, steps 1 to 4).
 ///
 /// # Errors
@@ -1196,14 +1166,32 @@ fn append_lines(path: &Path, lines: &[String], torn_tail: bool) -> Result<(), St
 /// cycle, the ledger or the withdrawal that refuses, naming what was already
 /// done — every step is idempotent, so a re-run finishes it. A MOVE whose
 /// target refuses is not an error: it is named in [`Applied::refused`] and
-/// nothing of it is written.
+/// nothing of it is written. The ledger lines go through the one locked
+/// append every import ledger takes (IA-2): under `imports/gdfl.journal.lock`,
+/// a torn tail closed with the mark from the file's last byte read while the
+/// lock is held, and `lock_stalled` by name past
+/// [`crate::gdfl_run::locks::LOCK_WAIT`].
 pub fn apply(
     root: &Path,
     survey: &Survey,
     plan: &Plan,
     ledger: &Withdrawn,
 ) -> Result<Applied, String> {
+    apply_within(
+        root,
+        (survey, plan, ledger),
+        crate::gdfl_run::locks::LOCK_WAIT,
+    )
+}
+
+/// [`apply`], the journal lock waited for at most `wait`.
+fn apply_within(
+    root: &Path,
+    (survey, plan, ledger): (&Survey, &Plan, &Withdrawn),
+    wait: std::time::Duration,
+) -> Result<Applied, String> {
     preflight(root, survey)?;
+    ledger_lock_free(root, plan, ledger, wait)?;
     let mut out = Applied::default();
     let rows = move_all(root, plan, &mut out);
     if !rows.is_empty() {
@@ -1222,7 +1210,7 @@ pub fn apply(
         .chain(plan.retired.iter().map(RetiredRecord::line))
         .filter(|line| !ledger.has_line(line))
         .collect();
-    append_lines(&lineage_path(root), &lines, ledger.torn_tail).map_err(|why| {
+    crate::gdfl_import::append_lines_within(&lineage_path(root), &lines, wait).map_err(|why| {
         format!("{why} (the moved months are written and counted; run again to finish)")
     })?;
     out.lines_written = u64::try_from(lines.len()).unwrap_or(u64::MAX);
@@ -1234,6 +1222,46 @@ pub fn apply(
     })?;
     note_applied(&out, plan);
     Ok(out)
+}
+
+/// Waits at most `wait` for the journal lock the ledger append of step 3
+/// takes, and lets it go at once (IA-2; D-4906, D-5901). A plan with a line
+/// to write whose append would stall (`lock_stalled`, the lock named) is
+/// refused HERE, before a month is written: refused after step 1 instead,
+/// a re-run would find the decoded key holding the moved days, with no
+/// `superseded` line to say they are the move's own copy, and name the move
+/// twice (`ContractNamedTwice`) rather than finish it. The append still
+/// takes the lock itself; this only moves a stall the plan can foresee
+/// ahead of the writes. A plan with nothing to write takes nothing and
+/// creates nothing. One lock wait, O(1) in the store.
+fn ledger_lock_free(
+    root: &Path,
+    plan: &Plan,
+    ledger: &Withdrawn,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    let writes = !plan.moves.is_empty()
+        || plan
+            .retired
+            .iter()
+            .any(|record| !ledger.has_line(&record.line()));
+    if !writes {
+        return Ok(());
+    }
+    let lineage = lineage_path(root);
+    if let Some(dir) = lineage.parent() {
+        fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+    }
+    let lock = crate::gdfl_import::journal_lock_path(&lineage);
+    crate::gdfl_run::locks::take_path_within(&lock, wait)
+        .map(drop)
+        .map_err(|fault| {
+            format!(
+                "{}: {fault} (the ledger append would wait past it; nothing was written; \
+                 run again to finish)",
+                lock.display()
+            )
+        })
 }
 
 /// The refusals [`apply`] makes before anything is written: a survey that
