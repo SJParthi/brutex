@@ -4694,3 +4694,20 @@ fn a_second_an_exit_waits_through_marks_no_fill() {
     assert!(has(&out, TradeFlag::OneSidedBook));
     assert!(!has(&out, TradeFlag::FlaggedPrintFill));
 }
+
+/// An R-step trail arms only once a whole step is earned: with no stop loss
+/// and a gain of 100 paisa against a step of 1,005, a dip through the
+/// planned stop exits nothing, and the trade is forced.
+#[test]
+fn an_r_step_trail_is_no_stop_until_a_whole_step_is_earned() {
+    let step_only = ExitVariant {
+        trailing_stop: TrailingStop::RStep { milli_r: 1_000 },
+        ..ExitVariant::REFERENCE
+    };
+    let day = minute_day(&[
+        bar(at(10, 0, 0), P, P + 100, P - 50, P + 50, 1_000),
+        bar(at(10, 1, 0), 99_000, 99_000, 98_990, 99_000, 1_000),
+    ]);
+    let out = minute_slot(&day, long_plan(at(10, 0, 0)), step_only);
+    assert_eq!(out.exit_reason, ExitReason::Forced);
+}
