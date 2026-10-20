@@ -2193,39 +2193,106 @@ fn requirement_refusal(text: &str, vendor: Vendor) -> Option<String> {
 /// this `vendor`; flushes the file and its directory. Returns whether a line
 /// was written. The caller holds the census lock the change was made under.
 ///
-/// **Never through a link and never waiting** (AG-05 repair 1): one
-/// no-follow, non-blocking open for read and append, then the handle's own
-/// `fstat`. A symbolic link at the name, dangling or not, is refused by name
-/// (the host's `ELOOP`), and so are a name that is not a regular file (a pipe
-/// opens at once and is refused, never read) and a regular file with more
-/// than one name, whose append would grow another name's bytes — each before
-/// a byte is written. It used to `read_to_string` the name, which waits on a
-/// pipe, and then open it again with `create` and `append`, following a link.
+/// **Never through a link and never waiting** (AG-05 repair 1): every open is
+/// no-follow and non-blocking, then the handle's own `fstat`. A symbolic link
+/// at the name, dangling or not, is refused by name (the host's `ELOOP`), and
+/// so are a name that is not a regular file (a pipe opens at once and is
+/// refused, never read) and a regular file with more than one name, whose
+/// append would grow another name's bytes — each before a byte is written.
+/// It used to `read_to_string` the name, which waits on a pipe, and then open
+/// it again with `create` and `append`, following a link.
+///
+/// **An idempotent call opens nothing for writing** (AG-05 repair 2): the
+/// name is read first through a read-only open, and a line already in force
+/// answers `Ok(false)` there. It used to open for append before it looked, so
+/// a `REQUIRES` the operator made read-only failed a re-seal that had nothing
+/// to write with the host's `EACCES`. Only a line still to write opens the
+/// name for append, and that open checks the name again.
 ///
 /// # Errors
 ///
 /// The path and the host's words, or what stands at the name. Nothing is
 /// truncated or rewritten: the file is opened for append only.
 pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<bool, String> {
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let at = requires_path(root);
-    let mut file = fs::OpenOptions::new()
+    let wanted = format!("requires={feature} vendor={} ", vendor.as_str());
+    let in_force = |held: &str| -> usize { held.rfind('\n').map_or(0, |end| end + 1) };
+    let names = |held: &str| {
+        held.get(..in_force(held))
+            .unwrap_or("")
+            .split('\n')
+            .any(|line| line.starts_with(&wanted))
+    };
+    // READ FIRST, FOR READ ALONE: nothing to write opens nothing for writing.
+    if let Some(mut file) = open_requires(&at, false)? {
+        let mut held = String::new();
+        file.read_to_string(&mut held)
+            .map_err(|why| format!("{}: {why}", at.display()))?;
+        if names(&held) {
+            return Ok(false);
+        }
+    }
+    let Some(mut file) = open_requires(&at, true)? else {
+        return Err(format!(
+            "{} could not be created for the requirement; nothing was written",
+            at.display()
+        ));
+    };
+    let mut held = String::new();
+    file.read_to_string(&mut held)
+        .map_err(|why| format!("{}: {why}", at.display()))?;
+    if names(&held) {
+        return Ok(false);
+    }
+    let whole = held.get(..in_force(&held)).unwrap_or("");
+    let mut lines = String::new();
+    // A TORN TAIL IS ENDED FIRST, AS A VOID LINE, so the new line starts at
+    // a line's start and the unfinished bytes neither join it nor become a
+    // requirement nobody wrote.
+    if held.len() > whole.len() {
+        lines.push_str(REQUIRES_VOID);
+        lines.push('\n');
+    }
+    if !whole.split('\n').any(|line| line == REQUIRES_FORMAT) {
+        lines.push_str(REQUIRES_FORMAT);
+        lines.push('\n');
+    }
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let _ = writeln!(lines, "{wanted}since={V4_READER_SINCE} at={at_unix}");
+    file.write_all(lines.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|why| format!("{}: {why}", at.display()))?;
+    at.parent().map_or(Ok(()), sync_dir)?;
+    Ok(true)
+}
+
+/// Opens `manifest/REQUIRES` no-follow and non-blocking: for read alone
+/// (`append` false, `Ok(None)` when nothing is at the name), or for read and
+/// append, created when absent. Before a byte is read or written it refuses,
+/// by name, a symbolic link (the host's `ELOOP`), a name that is not a
+/// regular file and a regular file with more than one name.
+fn open_requires(at: &Path, append: bool) -> Result<Option<fs::File>, String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let opened = fs::OpenOptions::new()
         .read(true)
-        .append(true)
-        .create(true)
+        .append(append)
+        .create(append)
         .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
-        .open(&at)
-        .map_err(|why| {
-            if why.raw_os_error() == Some(store::open_flags::ELOOP) {
-                format!(
-                    "{} is a symbolic link, and no requirement is appended through one; \
-                     nothing was written",
-                    at.display()
-                )
-            } else {
-                format!("{}: {why}", at.display())
-            }
-        })?;
+        .open(at);
+    let file = match opened {
+        Ok(file) => file,
+        Err(why) if !append && why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) if why.raw_os_error() == Some(store::open_flags::ELOOP) => {
+            return Err(format!(
+                "{} is a symbolic link, and no requirement is appended through one; \
+                 nothing was written",
+                at.display()
+            ));
+        }
+        Err(why) => return Err(format!("{}: {why}", at.display())),
+    };
     let meta = file
         .metadata()
         .map_err(|why| format!("{}: {why}", at.display()))?;
@@ -2244,37 +2311,7 @@ pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<boo
             meta.nlink()
         ));
     }
-    let mut held = String::new();
-    file.read_to_string(&mut held)
-        .map_err(|why| format!("{}: {why}", at.display()))?;
-    let wanted = format!("requires={feature} vendor={} ", vendor.as_str());
-    let in_force = held
-        .rfind('\n')
-        .map_or("", |end| held.get(..=end).unwrap_or(""));
-    if in_force.split('\n').any(|line| line.starts_with(&wanted)) {
-        return Ok(false);
-    }
-    let mut lines = String::new();
-    // A TORN TAIL IS ENDED FIRST, AS A VOID LINE, so the new line starts at
-    // a line's start and the unfinished bytes neither join it nor become a
-    // requirement nobody wrote.
-    if held.len() > in_force.len() {
-        lines.push_str(REQUIRES_VOID);
-        lines.push('\n');
-    }
-    if !in_force.split('\n').any(|line| line == REQUIRES_FORMAT) {
-        lines.push_str(REQUIRES_FORMAT);
-        lines.push('\n');
-    }
-    let at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    let _ = writeln!(lines, "{wanted}since={V4_READER_SINCE} at={at_unix}");
-    file.write_all(lines.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|why| format!("{}: {why}", at.display()))?;
-    at.parent().map_or(Ok(()), sync_dir)?;
-    Ok(true)
+    Ok(Some(file))
 }
 
 // ═══ The seal: a migrated vendor's single file refuses an old reader ════════
@@ -2599,10 +2636,24 @@ pub enum SealReceipt {
 ///
 /// A name that is not a regular file, or cannot be read: by name.
 pub fn seal_receipt(path: &Path) -> Result<SealReceipt, String> {
+    seal_receipt_kept_bytes(path).map(|(receipt, _)| receipt)
+}
+
+/// [`seal_receipt`] and, for a whole receipt, the `superseded_bytes=` it
+/// records: the length of the census the seal kept (AG-05 repair 2). A reader
+/// that takes the receipt as a seal compares it with what the superseded name
+/// holds, so a superseded file cut short or replaced under a whole receipt is
+/// named rather than read as sealed. The same one bounded read; `None` for
+/// every receipt that is not whole.
+///
+/// # Errors
+///
+/// As [`seal_receipt`].
+pub fn seal_receipt_kept_bytes(path: &Path) -> Result<(SealReceipt, Option<u64>), String> {
     let named = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
     let file = match store::open_flags::open_read_no_follow(path) {
         Ok(file) => file,
-        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(SealReceipt::Absent),
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok((SealReceipt::Absent, None)),
         Err(why) => return Err(named(&why)),
     };
     if !file.metadata().map_err(|why| named(&why))?.is_file() {
@@ -2623,30 +2674,38 @@ pub fn seal_receipt(path: &Path) -> Result<SealReceipt, String> {
     };
     match value("format") {
         Some(format) if SEAL_RECEIPT_FORMAT.strip_prefix("format=") != Some(format) => {
-            return Ok(SealReceipt::Foreign(format.to_owned()));
+            return Ok((SealReceipt::Foreign(format.to_owned()), None));
         }
         Some(_) => {}
         None => {
-            return Ok(SealReceipt::Torn(format!(
-                "it holds {} byte(s) and no whole {SEAL_RECEIPT_FORMAT} line",
-                bytes.len()
-            )));
+            return Ok((
+                SealReceipt::Torn(format!(
+                    "it holds {} byte(s) and no whole {SEAL_RECEIPT_FORMAT} line",
+                    bytes.len()
+                )),
+                None,
+            ));
         }
     }
     let commit = |value: &str| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit());
     if !value("reader_since").is_some_and(commit) {
-        return Ok(SealReceipt::Torn(
-            "it names no whole reader_since=<commit> line".to_owned(),
+        return Ok((
+            SealReceipt::Torn("it names no whole reader_since=<commit> line".to_owned()),
+            None,
         ));
     }
-    if value("superseded").is_none_or(str::is_empty)
-        || value("superseded_bytes").is_none_or(|bytes| bytes.parse::<u64>().is_err())
-    {
-        return Ok(SealReceipt::Torn(
-            "it names no whole superseded= and superseded_bytes= line".to_owned(),
-        ));
+    let kept_bytes = value("superseded_bytes").and_then(|bytes| bytes.parse::<u64>().ok());
+    match kept_bytes {
+        Some(kept_bytes) if value("superseded").is_some_and(|kept| !kept.is_empty()) => {
+            Ok((SealReceipt::Whole, Some(kept_bytes)))
+        }
+        _ => Ok((
+            SealReceipt::Torn(
+                "it names no whole superseded= and superseded_bytes= line".to_owned(),
+            ),
+            None,
+        )),
     }
-    Ok(SealReceipt::Whole)
 }
 
 /// Leaves a whole seal receipt under `path`: returns whether one was written,

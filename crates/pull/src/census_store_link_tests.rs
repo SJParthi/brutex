@@ -661,6 +661,38 @@ fn the_requires_append_never_writes_through_a_link() {
     assert_eq!(std::fs::read(&witness).expect("witness"), said);
 }
 
+/// **AN IDEMPOTENT REQUIREMENT OPENS NOTHING FOR WRITING** (AG-05 repair 2,
+/// a follow-up of verify-AG-05-r2): `require_feature` opened `REQUIRES` for
+/// append before it looked whether the line was in force, so a `REQUIRES`
+/// made read-only (`chmod 444`) failed a re-seal that had nothing to write
+/// with the host's `EACCES`. Now the line in force answers `Ok(false)`
+/// through a read-only open, and a line still to write on a read-only file
+/// is refused with the path and the host's words, the file unchanged.
+#[test]
+fn an_idempotent_requirement_opens_nothing_for_writing() {
+    let scratch = Scratch::new("REQRO");
+    let root = scratch.root();
+    let at = requires_path(root);
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(true)
+    );
+    let before = std::fs::read(&at).expect("written");
+    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    let again = require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4);
+    let other = require_feature(root, Vendor::Zerodha, FEATURE_CENSUS_V4);
+    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    assert_eq!(
+        again,
+        Ok(false),
+        "in force: nothing to write, nothing opened for it"
+    );
+    let why = other.expect_err("a line still to write on a read-only file");
+    assert!(why.contains(&at.display().to_string()), "{why}");
+    assert!(why.contains("ermission denied"), "the host's words: {why}");
+    assert_eq!(std::fs::read(&at).expect("unchanged"), before);
+}
+
 /// p50, p99 and max of `micros`, sorted in place.
 fn percentiles(micros: &mut [u128]) -> (u128, u128, u128) {
     micros.sort_unstable();

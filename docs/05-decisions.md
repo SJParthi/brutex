@@ -74653,3 +74653,54 @@ Tests: `pull::ingest::census_store::link_tests::*` and
 `a_new_unlisted_staging_write_fails_the_gate_and_the_door_passes_it`.
 Invariants AG05-01 to AG05-11 in docs/04-invariants.md; limits L-AG05-01 to
 L-AG05-05 in docs/06-limits.md.
+
+**Repair 2 (verify-AG-05-r2, 2026-10-20).** Two figures the repair-1 roles
+introduced were wrong, and both are fixed at their one cause, the sum.
+`census_kept_bytes` is now computed by `api::server::disk_route::kept_bytes`
+from each census name's `retained` flag and its file identity
+`(st_dev, st_ino)`, taken from the `lstat` the view already made, so no call
+is added. Locked choices:
+
+1. A single file that reads `seal-unknown` is retention unless the name
+   holds the stub, measured. A receipt this build cannot read (a later
+   format, a pipe, a directory, a link) says nothing about the bytes at the
+   name, and bytes no seal accounts for are kept, never assumed disposable.
+   Before, the role was outside the kept set and a whole frozen census
+   dropped out of the figure (268430208 bytes on a real-store shadow).
+2. Each FILE is counted once across every feed, at its first retained name.
+   A retained name of a file that a name in use also holds (the current
+   epoch, the stub, an unmigrated single file) costs nothing. A seal killed
+   after its link and before its stub leaves one inode at two names, and the
+   per-name sum counted it twice. The roles and the fault words are
+   unchanged. The `census_unsealed` sentence now names that state as a seal
+   interrupted after its link, and it names a 0-byte single file as empty
+   rather than as the frozen census.
+3. `pull::census_store::require_feature` reads `manifest/REQUIRES` through a
+   read-only no-follow open before it opens anything for append. A line
+   already in force answers `Ok(false)` there, so a read-only `REQUIRES` no
+   longer fails an idempotent re-seal with `EACCES`. The append open keeps
+   every repair-1 refusal.
+4. A whole receipt's `superseded_bytes` is compared with what
+   `<vendor>.man.v3-superseded` holds. `census_store::seal_receipt_kept_bytes`
+   returns the figure from the receipt's one bounded read, and
+   `seal_receipt` delegates to it, so `SealReceipt` keeps its shape. A kept
+   census of any other length is not the census the seal kept: the seal's
+   `superseded` is `false`, the single name reads `seal-inconsistent`, and
+   the `census_seal_inconsistent` sentence names both lengths. Before this,
+   such a file read `sealed-stub` with no fault. The `lstat` was already
+   taken, so no call is added.
+5. A name at `manifest/v4/<vendor>` that is not a directory (a symbolic
+   link, a regular file, anything else) is named by the new fault
+   `census_v4_not_a_directory`. The vendor still reads as not migrated and
+   its single file keeps the role `single`, but the answer no longer passes
+   it over as a census nobody touched. A feed with no single file left is
+   still answered for its fault.
+
+Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
+`seal_tests::a_seal_killed_after_its_link_counts_its_one_file_once`,
+`seal_tests::an_empty_single_file_is_not_told_as_the_frozen_census`,
+`seal_tests::a_kept_census_cut_short_under_a_whole_receipt_is_seal_inconsistent`,
+`seal_tests::a_name_at_the_v4_directory_that_is_not_one_is_named` and
+`link_tests::an_idempotent_requirement_opens_nothing_for_writing`. Each one
+failed on the code before it. Invariants AG05-12 to AG05-17; limits
+L-AG05-06 and L-AG05-07.
