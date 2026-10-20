@@ -196,10 +196,14 @@ pub(super) fn stop_at_census(
         cause,
         failure: failure_on(day, &format!("{day} census"), words),
     });
+    // No listing sum: the census stopped the run before the day closed, so
+    // the line says `skipped=` alone and the re-read that closes the day
+    // writes what its listing was (DB-A49).
     let _incomplete = close_day(
         ctx,
         (key, day),
         (before, &report, max_back_s),
+        None,
         &mut failures,
     );
     report

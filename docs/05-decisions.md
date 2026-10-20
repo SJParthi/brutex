@@ -74863,3 +74863,327 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
+
+**What was observed.** `Header::read_region` decodes each of the `MAX_SLOTS`
+slot positions and keeps the valid slot with the highest generation; a slot
+that is "empty, stale, half-written, corrupt or in the wrong position is simply
+not a candidate". A newest slot whose checksum fails therefore made the month
+open at the older generation, every record the lost commit counted unreadable,
+with `Ok` and no line at all: `note_header_fell_back` fires only when the
+newest slot DECODED and then failed `Header::validate`. `BarFile::validated`'s
+`claimed > n_valid` refusal does not see it either, because `highest_claim`
+counts only slots that decode. `cli::stored::load` reads through `BarFile`, so
+a backtest would have read the shorter month silently.
+
+**Decided.**
+1. `store::header::slot_audit(region, file_len) -> SlotAudit`: one
+   `SlotState` per position read — `Empty`, `Valid { generation }`,
+   `Damaged { reason, generation }` — and a `MonthVerdict`: `Clean`,
+   `Damaged` (a slot whose verified generation is older than the one read:
+   nothing lost), `Reverted` (newer, or of unknown generation: possibly lost)
+   or `Unreadable(FormatError)` (the read refuses). `SlotDamage` is
+   `Truncated`, `Erased` or `Refused(FormatError)`, and `SlotDamage::name`
+   gives one stable word: `crc`, `magic`, `version`, `stride`,
+   `wrong_position`, `beyond_file_len`, `timestamps_out_of_order`, `reserved`,
+   `flags`, `checksums_required`, `truncated`, `erased`, else `refused`. It is
+   public and its signature is stable, so that PROVEN-GATE can call it over
+   every month file an admitted day reads; that call is PROVEN-GATE's own and
+   does not exist at this commit (R4-09a builds no gate).
+2. It reads exactly the `MAX_SLOTS` positions `read_region` reads and audits
+   against the generation `read_region` selects, found by the same search; it
+   selects, writes, repairs and emits nothing.
+3. **The selection is unchanged.** `read_region` returns the same header for
+   every input, the crash-table cases included; `Header::read_region_at(region,
+   file_len, path)` is the same read returning the audit beside the header,
+   and `BarFile` keeps it from the region it already read
+   (`BarFile::slot_audit`), so no reader reads the region twice.
+4. Every read whose verdict is `Damaged` or `Reverted` writes ONE
+   `store.header.slot_damaged` line at `Error` (so the audit stream keeps it)
+   with `verdict`, `slot`, `reason`, `chosen_generation`, `file_len`, `why`,
+   `damaged_generation` when verified, and `path` when the caller has one
+   (`BarFile` does). A clean read, a first-commit read and an unreadable
+   region (which keeps its own `no committed header` line) write none. A
+   newest slot that decoded but counts records past the file's end
+   (`beyond_file_len`) writes this line beside the existing `Warn` fall-back
+   line: the fall-back line says the read walked back, this one names the slot
+   and keeps it in the audit stream. No new crate arrow (`core telemetry <-
+   store`).
+
+**Cost.** O(1) per read: `MAX_SLOTS` (two) 64-byte decodes and checksums
+beyond the selection, independent of the region and the file. C-HA-01 holds it
+flat at 1x, 10x and 100x the region; `docs/06-limits.md` L-HA-01 has the
+per-call numbers. **Proof.** `crates/store/tests/slot_audit.rs`,
+`crates/store/tests/slot_damaged_log.rs`, `store::header::audit_tests`,
+`store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`.
+Invariants HA-01 to HA-04, C-HA-01.
+
+### D-6241 — A damaged slot's generation is read only from a slot whose own checksum verified it; an unknown one beside the generation read is a revert, never clean (R4-09a) — 2026-10-18
+
+**What was observed.** The checksum covers every byte of a slot except its own
+four. When it fails, nothing in the format says which bytes are the commit's:
+a torn write leaves a mix of the old and the new image, a bit flip leaves the
+old one damaged, and both read as a plausible generation field.
+
+**Decided.**
+1. A `Damaged` slot carries `generation: Some(g)` only when `Header::decode`
+   accepted it — magic, a version this build knows, its own checksum, stride,
+   reserved tail and flags — and it then failed only the position rule or
+   `Header::validate`. In every other case the generation is `None`. It is
+   never read from bytes the checksum did not vouch for.
+2. Position does not order it either: slot position is `generation %
+   slot_count`, and with two slots `g - 1` and `g + 1` share a parity. So a
+   `None` beside the generation read makes the month `Reverted` with
+   `damaged_generation: None` ("possibly reverted"), never `Clean`. A
+   verified generation equal to or above the one read is `Reverted` too; only
+   a verified generation below it is `Damaged`.
+3. All 64 bytes zero is `Empty` at a position no committed generation has
+   reached, and `Erased` (generation unknown, so `Reverted`) at a position the
+   generation read proves was written: generations are consecutive from zero
+   (`Header::genesis`, `Header::advance`), so generation `p` was the first to
+   land on position `p`, and any read generation at or above `p` proves it.
+   A slot with any non-zero byte that fails to decode is damage, never empty.
+
+**Cost.** None beyond D-6240. **Proof.**
+`slot_audit::every_single_bit_flip_in_the_newest_slot_is_named_and_never_moves_the_read`,
+`slot_audit::a_newest_slot_torn_at_every_prefix_is_named_and_the_older_header_is_returned`,
+`slot_audit::a_zeroed_slot_the_generation_proves_was_written_is_erased`,
+`store::header::audit_tests`. Invariant HA-02.
+
+### D-6242 — `cli census-recount` names every month whose header slot audit is not clean, by path and reason; a reverted month offers no row and closes no day (R4-09a) — 2026-10-18
+
+**What was observed.** The recount rebuilds census rows from each month
+file's committed header. A month that silently reverted would have been
+recorded at the OLDER generation's count — writing the loss into the census,
+where the importer's later header-against-census check could no longer see it —
+and its import days closed as counted.
+
+**Decided.**
+1. `pull::census_store::recount` keeps `BarFile::slot_audit` for every month
+   file in range and lists EVERY non-clean one in `Recount::slot_damaged`,
+   with its audit, in walk order. The receipt prints a count line
+   (`header slot damage  N month(s), R reverted to an older generation (not
+   recorded, no day closed)`) and one line per month, `<path>:
+   <SlotAudit::describe>`, all of them: no "and N more", because the month an
+   operator is looking for is exactly the one a cap would hide.
+2. A `Reverted` month offers no row and its month joins
+   `Recount::months_unreadable`, so none of its days is closed. A `Damaged`
+   month (an older slot damaged, nothing lost) offers its row. Either makes
+   `Recount::clean` false, so the verb exits FAILED.
+3. Nothing here repairs or rewrites a header. Recovery is the operator's store
+   step with a yes (R3-20, or R4-09's importer re-import of a reverted month).
+
+**Cost.** None beyond D-6240: the audit is the one `BarFile` took at open; the
+walk stays one header read and two record reads per month. **Proof.**
+`cli::census_recount::tests::a_month_whose_newest_header_slot_is_damaged_is_named_and_never_recorded`,
+`cli::census_recount::tests::an_older_damaged_slot_is_named_and_its_month_is_still_recorded`,
+`cli::census_recount::tests::a_clean_recount_says_no_header_slot_is_damaged`,
+`cli::census_recount::tests::a_month_that_reverted_to_an_empty_generation_is_named_and_never_counted_empty`.
+Invariant HA-05.
+
+### D-6243 — A month served in its sealed form has no slot audit: `BarFile::slot_audit` is `None` there, and nothing is named for it (R4-09a, after SC-3) — 2026-10-20
+
+**What was observed.** SC-3 (D-5899, D-5900) merged one read door for both
+forms of a month while R4-09a was open: `BarFile::open_existing` opens the
+`.sbar` first and builds the handle from its one head
+(`sealed::Head::bar_header`), never through `Header::read_region`. That head
+has no slot pair. It is under its own checksum and is refused by name
+(`head_checksum`) when damaged, and there is no older copy a read could fall
+back to.
+
+**Decided.**
+1. `BarFile::slot_audit` returns `Option<SlotAudit>`: `Some` for a month opened
+   in its raw form (the audit of the region the open read, D-6240), `None` for
+   one opened in its sealed form. A sealed handle never carries a made-up
+   clean pair of slots: "no slots" and "two clean slots" are different facts.
+2. `pull::census_store::recount` names only `Some` audits that are not clean.
+   A month read in its sealed form names nothing and offers its row from the
+   sealed head; the census audits the form the door actually serves.
+3. `store::header::slot_audit(region, file_len)` is unchanged and stays the
+   function PROVEN-GATE calls on a raw month's header region; for a sealed
+   month the sealed head's own refusal is the signal.
+
+**Proof.** `crates/store/tests/slot_audit_sealed.rs`
+(`a_month_opened_in_its_sealed_form_has_no_slot_audit`,
+`a_damaged_sealed_head_is_refused_never_read_short`);
+`cli::census_recount::tests::a_month_read_in_its_sealed_form_names_no_slot_and_is_recorded`.
+Invariant HA-06.
+
+### D-4818 — A container fault refuses its own day, never the archive, and never closes the day — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_archive.rs`,
+`crates/pull/src/gdfl_import_causes.rs`). **Findings** F13, F38 of the
+ingest-automation design; FM-040, FM-044 and FM-026 of the failure matrix.
+
+**What was observed.** `Archive::from_source` refused the WHOLE capital-market
+outer zip for one compressed day zip (`archive_member_compressed`) or for two
+day zips of one day (`archive_duplicate_day`), so one packaging slip stopped
+every day of every run, while the options year zips refused only that day.
+And `cm_cause` gave those two codes and `archive_method_unknown`
+`Cause::vendor`, which CLOSES a day, though removing a copy, re-zipping it or
+a build that reads the method fills the day.
+
+**Decided.** (1) Every fault of a day zip is decided per (tree, day) when the
+outer directory is read once, and answered by `CmSource::day` for that day
+only: two copies of the day wherever each lies are `archive_duplicate_day`; a
+lone copy under another folder than its own name's is `day_zip_misfiled
+{found, expected}` (D-4834's rule, the same for the archive, the loose zips
+and the tick store, D-4866); a lone copy the reader cannot take as it is
+stored is `archive_member_compressed` or `archive_member_encrypted`. Every
+other day reads. (2) The general-purpose flag's bit 0 refuses a member
+`archive_member_encrypted{member}` before any byte is inflated, in every
+zip reader (`member_bytes`, `stored_span`), never as a corrupt member or a
+CRC mismatch. (3) A zip whose central directory, as its end record states it,
+ends before the next record actually starts is `archive_prefixed{bytes}`:
+the ZIP64 end record is found from the end record (76 bytes before it when it
+states the size of a record with no extensible data), not from the locator's
+stated offset, and the check runs before the directory is read. Offsets are
+never adjusted. (4) None of these closes a day: `cm_cause` gives
+`archive_duplicate_day`, `archive_member_compressed`,
+`archive_method_unknown`, `archive_member_encrypted`, `archive_prefixed`,
+`day_zip_misfiled` and `day_file_misfiled` `Cause::open(Stage::Vendor, ..)`
+in the same change that made them per day, so no build closes a day for one.
+No second code is minted. (5) The names beside the day zips are an archive
+census: folder entries and stray files counted, misfiled and invalid
+day-zip names counted and the first 16 of each named (D-4817).
+
+**Cost.** Unchanged: the directory is read once, O(entries), and walked
+twice in memory to size and fill the dense day table, whose cell now holds
+the day zip or the refusal of its day (24 bytes as `Option<Slot>`, as the
+plain cell was, so the table's stated worst case stands); a day is one index.
+No map and no sort is added to the reader (CM-13's pin).
+
+**Proof.** `outer_member_not_stored_refuses`, `two_members_for_one_day_refuse`
+(both changed to day level), `an_encrypted_member_is_refused_by_its_own_name`,
+`a_zip_with_bytes_before_its_first_record_is_refused_by_name`,
+`a_misfiled_day_zip_is_named_where_it_was_found`,
+`an_impossible_day_zip_name_is_named`, `no_container_fault_closes_a_day`
+(IA-GR-27), `names_that_are_not_day_zips_are_ignored_and_counted`, in
+`crates/pull/src/gdfl_archive.rs`.
+
+### D-4817 — Near-miss names are named, not just counted: at most 16 per reason per source — 2026-10-20
+
+**Implemented by** IA-3. A day-zip name under another folder than its own, a
+day-zip name whose date is not real or lies outside the calendar's measured
+span, and a stray entry of a loose-zip root or a tick-store tree are each
+counted, and the first 16 of each reason are kept by name (4 for a loose
+root's strays, the run line's bound, design §8 A19) in the source's census
+(`ArchiveCensus`, `DayZipsCensus`, `DayTable`). A count with no names was
+the gap: 43 of 50 index files of 2018-11-07 appear nowhere today. Showing
+these names on `/ingest` is IA-10a's and IA-12a's; the run line's
+`ignored_entries` field is IA-1's door. **Proof.**
+`an_impossible_day_zip_name_is_named`, `a_loose_zip_in_the_wrong_kind_or_month_folder_is_named`,
+`the_tick_stores_writer_files_are_never_opened`.
+
+### D-4828 — A CM day zip may name its files with `\` as well as `/` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_cm.rs`, with the two readers of
+a day folder's names in `crates/pull/src/gdfl_import.rs`, `cm_jobs` and
+`cm_present`). The options reader already accepted both separators
+(`entry_ticker`); the CM listing took only `/` and skipped every other entry,
+so a day zip written by another tool would have closed `done files=0`. Now
+`gdfl_cm::in_folder` reads `<folder>/` and `<folder>\` alike, the listing,
+the import's job list and the member probe all use it (one reading of a day
+folder's names, so a probe and a read never disagree), `ListedFile::name`
+splits at either, and the listing counts the files named with `\`
+(`DayListing::backslash`), the count D-4841's `separator_backslash` field
+records when its owner lands the ledger's `v=2` lines. **Proof.**
+`a_cm_day_zip_with_backslash_paths_reads_like_forward_slashes` (a filtered and
+an unfiltered run) in `crates/pull/src/gdfl_ia3_tests.rs`.
+
+### D-4835 — A wanted stem with no extension is refused `extension_missing`, never skipped — 2026-10-20
+
+**Implemented by** IA-3. `NIFTY 50.NSE_IDX` or `RELIANCE.NSE` with no
+extension was split at its last dot into the foreign stem `NIFTY 50` and
+skipped, so the day read as if the file were absent. Now an entry whose WHOLE
+name is a stem of the listing's scope is `extension_missing{stem}`: the
+ticker slot holds it whatever order its names came in, `locate` and
+`read_listed` refuse it, and the import refuses it where the run wants the
+series it would be filed under, once per ticker (a second name of the ticker
+is a skip, as for twins). It is the vendor's own name for the file, read the
+same way every time, so it closes the day `done` with that refusal
+(`Cause::vendor`). **Proof.** `a_wanted_stem_with_no_extension_is_refused_by_name`.
+
+### D-4815 — Loose day zips are a third GDFL source kind, `dayzips` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_dayzips.rs`): `DayZips` is a
+`CmSource` and an `NfoSource`, so the 12 loose zips of 2026-09-25..30 (which
+neither archive holds) read with the same import and, for V-2b, the same
+cold verify as the archives. Not yet a source WORD: `gdfl_run`'s
+`SourceWord`, `SourceId` and `BRUTEX_GDFL_DAYZIPS`, and `Origin`'s
+measurement of the root, are the run's door (IA-1's file) and are named NOT
+DONE in IA-3's report.
+
+### D-4834 — `dayzips` reads one layout and nothing else, walked once and capped — 2026-10-20
+
+**Implemented by** IA-3. `<ROOT>/{INDICES,STOCKS,OPTIONS}/<MON_yyyy>/<name>.zip`,
+`<name>` the day's own folder name. The root is walked once when the source
+opens, links never followed, at most 100,000 entries
+(`dayzips_too_many_entries`: the root is refused whole and no day is filed
+from a walk that did not finish). Every name is filed in a map by kind and
+day, so a day is one hash probe and a far-dated name sizes nothing. A name
+with a day prefix whose date is not real or outside the calendar's measured
+span (`calendar::exchange_kind_of` answers `Unmeasured`) is
+`day_zip_name_invalid`, named in the census and never filed. Two copies of a
+day wherever each lies (another month folder, a `... (1).zip` beside it)
+are `archive_duplicate_day`; a lone copy under another folder is
+`day_zip_misfiled{found, expected}`; a link, pipe or device at a day zip's
+name is a copy the store's reading door refuses by name when the day is
+asked; a zip gone since the walk is `archive_unavailable` (not found), never
+a day the source does not hold. Each refuses its day only and never closes it
+(D-4818). **Proof.** the ten tests of `crates/pull/src/gdfl_dayzips_tests.rs`.
+
+### D-4866 — The tick store as a source: its day table, misfiled day files and the writer's files — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_tickstore.rs` for the `cm`
+tree, `crates/pull/src/gdfl_nfo.rs` for the `options` tree). Each tree is
+walked once, the first time a day is asked (`DayTable::walk`, at most
+1,000,000 entries), links never followed and dot-names never descended.
+A `.bts` outside its `<tree>/<yyyy>/<MON_yyyy>/` folder is
+`day_file_misfiled{found, expected}` for its day, whether or not a copy also
+sits at its own place (the archives' rule, D-4818), and never closes it; until
+now that day read `day_not_held`, silently. A `*.bts.tmp`, the writer's own
+`.lock` and `ingest-log.tsv`, its logs and tools are stray entries: counted,
+the first 16 named, never opened, locked or written. A day's own place is
+still opened by its exact path, so a day the writer publishes by rename after
+the walk is read whole (`FORMAT.md` §2; the writer's own code is outside this
+repository, UNVERIFIED). A walk that could not finish refuses every day the
+tree lacks at its own place with its fault, never reads it as absent.
+**Proof.** `a_misfiled_tick_store_day_is_named_where_it_was_found`,
+`the_tick_stores_writer_files_are_never_opened` (every stray entry a pipe, so
+an open would hang the test).
+
+### D-5903 — A day's close records what its listing was: `skipped=`, `entries=` and `listing=` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_import_day.rs`,
+`crates/pull/src/gdfl_import.rs`, `crates/pull/src/gdfl_cm.rs`). **Finding**
+DB-A49 (FM-119): the 2018-09-03 indices zip holds 54 files and its journal
+line said `files=2`; the other 52 were named nowhere, `files_skipped` was a
+run total printed to the cli's stdout, and the event log that carried a
+day's info lines rotates (the 6 October import's are gone).
+
+**Decided.** Every `done` and `incomplete` line appends, after the D-2822
+stats and before any later field, ` skipped=<n>`: the day's entries that
+were not wanted files (off the scope, outside the filter, a second name of a
+ticker, not a file of the day folder); and, when the day's listing was read,
+` entries=<n> listing=<64 hex>`: the listing's entry count and the BLAKE3 of
+every entry's name, a zero byte, its stated length and its stated CRC-32
+(eight and four bytes, little-endian), in the source's order
+(`gdfl_cm::ListingSum`). Two closes that agree on the digest were made from
+listings naming the same files with the same sizes and checksums, so what a
+day skipped is counted for ever and can be identified against any copy of
+the source. A day a census stop cut short writes `skipped=` alone and no
+listing: it claims no listing nobody read. A day whose listing was refused,
+or that the source does not hold, closes `refused` as before, a line that
+carries no counts at all. Readers find every field by name
+(`count_of`), so no earlier field moved and every older line still reads.
+The cost is the listing's own O(entries) pass, once per day.
+
+**Not decided here.** The per-file names of the skipped entries (the digest
+identifies them against the source, the names live in the source); serving
+the counts on a page is R3-23's.
+
+**Proof.** `the_close_line_carries_skipped_and_the_listing` and
+`a_day_with_no_listing_claims_none` in `crates/pull/src/gdfl_ia3_tests.rs`;
+the pinned close line of `gdfl_import_tests`.
