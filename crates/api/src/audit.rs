@@ -1382,6 +1382,55 @@ pub fn journal_path(root: &Path) -> PathBuf {
     root.join("audit").join("pull.journal")
 }
 
+/// How long one append to the pull journal (and its whole-note file) waits
+/// for the append lock another writer holds before it is refused: **1 s**
+/// (AG-06, code-5, FM-162; D-6244).
+///
+/// # Why a wait, and why this one
+///
+/// The lock was taken with `try_lock` and refused at once, so a run whose
+/// opening record met another writer's append ran with no opening record, and
+/// a process that died before the run's close left the restart scan
+/// answering "clean" (code-5). One append holds the lock for an open, a
+/// `stat`, one write, one `fsync` (`F_FULLFSYNC` on macOS) and the index
+/// catch-up: measured on a clone of the operator's 1.08 GB journal in
+/// `docs/06-limits.md` (AG-06 rows), uncontended p99 3.7 to 12.5 ms. One
+/// second is about eighty of those holds queued ahead of an append; it is also
+/// `store::flock`'s one ceiling ([`store::flock::MAX_PATIENCE`]), which cuts
+/// any longer bound, so it cannot be raised here alone. The wait is
+/// `store::flock`'s one loop: 1 ms doubling to [`store::flock::MAX_PAUSE`],
+/// so a lock freed a moment later is taken within a millisecond or two.
+///
+/// # What it does not cover
+///
+/// A from-scratch index build holds the same lock for the whole build (about
+/// 1.33 s per GiB, once per journal file, at the first start after the index
+/// is absent): an append that meets it waits this bound and is then refused,
+/// naming the holder ("doing the journal index build" when `build_index`
+/// runs it, "doing a pull audit journal append" when the build runs inside an
+/// append). Readers never take this lock, so no reader waits on this bound.
+/// `docs/06-limits.md` names both, and that a contended append blocks the
+/// thread that calls it for up to this bound.
+pub const APPEND_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+// A bound above the ceiling would be cut without a word, so it is refused at
+// compile time instead.
+const _: () = assert!(
+    APPEND_LOCK_WAIT.as_nanos() <= store::flock::MAX_PATIENCE.as_nanos(),
+    "APPEND_LOCK_WAIT above store::flock::MAX_PATIENCE would be cut silently"
+);
+
+/// What a journal append says it is doing while it holds the append lock, so
+/// an append it refuses names it through `store::flock::holder_note`.
+pub const APPEND_DOING: &str = "a pull audit journal append";
+
+/// What a whole-note append says it is doing while it holds the notes lock.
+pub const NOTE_DOING: &str = "a pull audit whole-note append";
+
+/// What `Journal::build_index` says it is doing while it holds the append
+/// lock for a whole from-scratch build.
+pub const INDEX_BUILD_DOING: &str = "the journal index build";
+
 impl Journal {
     /// The journal beneath a store root.
     #[must_use]
@@ -1509,7 +1558,7 @@ impl Journal {
     ///
     /// As [`Self::append`]: the opening record did not reach the journal.
     pub fn open_run(&self, head: &Record) -> Result<Thread, String> {
-        self.appended_images(|_ordinal| head.image().to_vec())
+        self.appended_images(head, |_ordinal| head.image().to_vec())
             .map(|first| Thread {
                 head: head.clone(),
                 first,
@@ -1596,7 +1645,7 @@ impl Journal {
         let note = format!("{}; late", head.note);
         late.note = keep(&note, NOTE_CAPACITY);
         late.note_bytes = saturating_len(&note);
-        self.appended_images(|_ordinal| {
+        self.appended_images(record, |_ordinal| {
             let mut out = Vec::with_capacity(2 * RECORD_LEN);
             out.extend_from_slice(&late.image());
             out.extend_from_slice(&record.image());
@@ -1619,7 +1668,7 @@ impl Journal {
     ) -> Result<(), String> {
         let mut written = 1u64;
         let first = self
-            .appended_images(|ordinal| {
+            .appended_images(record, |ordinal| {
                 let mut out = Vec::with_capacity(2 * RECORD_LEN);
                 let mut at = ordinal;
                 if ordinal != thread.last.saturating_add(1) {
@@ -1664,7 +1713,7 @@ impl Journal {
     fn appended(&self, record: &Record, whole: Option<&str>) -> Result<(), String> {
         // THE WHOLE NOTE FIRST, while this journal's lock fixes the ordinal the
         // record will have. Only for a member failure whose note was cut.
-        self.appended_images(|ordinal| {
+        self.appended_images(record, |ordinal| {
             self.with_whole_note(record, whole, ordinal)
                 .image()
                 .to_vec()
@@ -1681,10 +1730,32 @@ impl Journal {
     /// Its bytes are one `write_all`: a failed or short write is rolled back to
     /// the length measured under the lock, all of it.
     ///
+    /// `what` is the record the refusal names when the lock cannot be taken
+    /// within [`APPEND_LOCK_WAIT`].
+    ///
     /// # Errors
     ///
     /// As [`Self::append`].
-    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {
+    fn appended_images(
+        &self,
+        what: &Record,
+        build: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<u64, String> {
+        self.appended_within(APPEND_LOCK_WAIT, what, build)
+    }
+
+    /// [`Self::appended_images`] with the lock wait `bound` given, so a test
+    /// can drive a zero bound and a short one without waiting the real one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`].
+    fn appended_within(
+        &self,
+        bound: std::time::Duration,
+        what: &Record,
+        build: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<u64, String> {
         let named =
             |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", self.path.display());
         // ONE LEVEL, NEVER THE ROOT. `create_dir_all` made every missing
@@ -1712,7 +1783,16 @@ impl Journal {
         // success path once the record is synced: closing the descriptor would
         // leave the lock alive on any duplicate a child spawned by another
         // thread still holds (D-0693).
-        let mut file = Flock::try_lock(
+        //
+        // A BOUNDED WAIT, NOT A REFUSAL AT ONCE (AG-06, code-5, FM-162;
+        // D-6244). Another writer's append holds this lock for milliseconds;
+        // refusing at once lost the record it met, a run's opening record
+        // among them. The wait loop, the queue in this process and the
+        // registry that names the holder are `store::flock`'s, one each; past
+        // the bound the refusal names the bound (as cut by the ceiling), the
+        // record, and the holder in `store::flock::holder_note`'s words.
+        let bound = bound.min(store::flock::MAX_PATIENCE);
+        let mut file = Flock::try_lock_patiently(
             std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
@@ -1720,16 +1800,32 @@ impl Journal {
                 .open(&self.path)
                 .map_err(|e| named("cannot open the journal", &e))?,
             self.path.as_path(),
+            bound,
+            APPEND_DOING,
         )
         .map_err(|e| {
             format!(
-                "{}: cannot take the journal append lock; another writer may be appending, so this record was refused rather than interleaved — {e}",
-                self.path.display()
+                "{}: cannot take the journal append lock for a {} record ({}) within its {} ms bound (APPEND_LOCK_WAIT): {e}; so this record was refused rather than interleaved",
+                self.path.display(),
+                what.kind.label(),
+                what.outcome.label(),
+                bound.as_millis(),
             )
         })?;
         let meta = file
             .metadata()
             .map_err(|e| named("cannot measure the locked journal", &e))?;
+        // THE FILE LOCKED MUST STILL BE THE JOURNAL. The wait widened the
+        // moment between `open` and the lock from nothing to up to the bound:
+        // a journal moved aside or replaced in it leaves this descriptor on a
+        // file nobody reads, and an append there would be a record lost
+        // behind a success. One `stat`, refused by name (AG-06).
+        if !same_file(&meta, &self.path) {
+            return Err(named(
+                "the journal at this path was replaced or moved while this append waited for its lock, so the locked file is no longer the journal; refused rather than appended where no reader looks",
+                &std::io::Error::other("its device and inode differ from the path's"),
+            ));
+        }
         let bytes = meta.len();
         let torn = bytes % RECORD_LEN_U64;
         if torn != 0 {
@@ -1741,13 +1837,7 @@ impl Journal {
         }
         let first = bytes / RECORD_LEN_U64;
         let images = build(first);
-        write_rolled_back(
-            &mut file,
-            &self.path,
-            bytes,
-            &images,
-            std::io::Write::write_all,
-        )?;
+        write_rolled_back(&mut file, &self.path, bytes, &images, journal_write)?;
         file.sync_all()
             .map_err(|e| named("the record was written and not synced", &e))?;
         // THE RECORD IS DURABLE FROM HERE, SO NOTHING BELOW MAY REFUSE THE
@@ -1795,7 +1885,7 @@ impl Journal {
     fn append_note(&self, ordinal: u64, whole: &str) -> Result<u64, String> {
         let path = self.notes_path();
         let named = |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", path.display());
-        let mut file = Flock::try_lock(
+        let mut file = Flock::try_lock_patiently(
             std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
@@ -1803,11 +1893,14 @@ impl Journal {
                 .open(&path)
                 .map_err(|e| named("cannot open the notes file", &e))?,
             path.as_path(),
+            APPEND_LOCK_WAIT,
+            NOTE_DOING,
         )
         .map_err(|e| {
             format!(
-                "{}: cannot take the notes append lock — {e}",
-                path.display()
+                "{}: cannot take the notes append lock within its {} ms bound (APPEND_LOCK_WAIT) — {e}",
+                path.display(),
+                APPEND_LOCK_WAIT.as_millis()
             )
         })?;
         let at = file
@@ -1950,6 +2043,29 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// The journal record write: `write_all`, and under `cfg(test)` a one-shot
+/// per-thread refusal first when a test armed one, because no developer's
+/// disk fills on request and the disk-full arm after a patiently taken lock
+/// must still be driven (AG-06).
+fn journal_write(file: &mut std::fs::File, image: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(kind) = lock_wait_tests::take_write_refusal() {
+        return Err(std::io::Error::new(
+            kind,
+            "write refused by the audit test seam",
+        ));
+    }
+    std::io::Write::write_all(file, image)
+}
+
+/// Whether `path` still names the file `locked` was measured from: one
+/// `stat`, compared by device and inode. A path that cannot be measured is
+/// not the same file.
+fn same_file(locked: &std::fs::Metadata, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).is_ok_and(|now| (now.dev(), now.ino()) == (locked.dev(), locked.ino()))
 }
 
 /// Writes `image` at the end of a journal that held exactly `at` bytes under
@@ -2938,7 +3054,17 @@ impl Journal {
             }
             Err(e) => return Err(format!("{}: {e}", self.path.display())),
         };
-        let Ok(locked) = Flock::try_lock(file, self.path.as_path()) else {
+        // NAMED WHILE IT BUILDS, so an append that waits out its bound behind
+        // a long build says what it waited for: a zero bound keeps the old
+        // `try_lock` answer (busy at once when anyone holds or awaits the
+        // lock), and the guard registers the build in `store::flock`'s one
+        // registry while it holds it (AG-06).
+        let Ok(locked) = Flock::try_lock_patiently(
+            file,
+            self.path.as_path(),
+            std::time::Duration::ZERO,
+            INDEX_BUILD_DOING,
+        ) else {
             return Ok(IndexBuilt {
                 busy: true,
                 ..IndexBuilt::default()
@@ -3133,6 +3259,26 @@ fn note_index(path: &Path, outcome: &Result<IndexBuilt, String>) {
     let _dropped_when_filtered =
         telemetry::emit(&event.with("path", telemetry::Value::Str(&shown)));
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+#[path = "audit_lock_wait_tests.rs"]
+mod lock_wait_tests;
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::print_stdout
+)]
+#[path = "audit_lock_wait_measure.rs"]
+mod lock_wait_measure;
 
 #[cfg(test)]
 #[allow(
@@ -4399,9 +4545,9 @@ mod tests {
     fn nothing_after_the_sync_can_refuse_an_append() {
         let body = include_str!("audit.rs")
             .split_once(
-                "    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {\n",
+                "        build: impl FnOnce(u64) -> Vec<u8>,\n    ) -> Result<u64, String> {\n        let named =",
             )
-            .expect("`appended_images` is in this file")
+            .expect("`appended_within`, the body of `appended_images`, is in this file")
             .1
             .split_once("\n    }\n")
             .expect("`appended` ends")
