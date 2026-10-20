@@ -6254,7 +6254,7 @@ fn rules_json() -> Value {
                 "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; null where neither measured the day",
                 rules::FROZEN_MIN_S
             ),
-            "outside_day_range": "a minute's high above the day's Zerodha 1day bar's high, or its low below its low; null on GDFL, whose seconds this route does not read whole (up to 22,500 reads a day)",
+            "outside_day_range": "a minute's high above the day's Zerodha 1day bar's high, or its low below its low, flagged inside a recorded halt too (above_in_halt, below_in_halt say where); null on GDFL, whose seconds this route does not read whole (up to 22,500 reads a day)",
             "source": "DB-B20's detector: chosen, not sourced; flags only, the bars are served unchanged",
         },
         "peer": "a share's peer count is looked up under its other names from the sourced symbol changes where its own name holds no month (DB-031), and peer_as says which",

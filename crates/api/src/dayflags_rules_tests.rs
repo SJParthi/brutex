@@ -1561,6 +1561,63 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
         says,
         vec!["intraday low 0.04 points below the day bar's low, at 00:01 (1min)".to_owned()]
     );
+    assert_eq!(json["outside_day_range"]["below_in_halt"], false);
+    assert_eq!(json["outside_day_range"]["above_in_halt"], Value::Null);
+    // A VALUE OUTSIDE THE RANGE INSIDE A RECORDED HALT is still flagged, and
+    // says where it is (2020-03-13: Zerodha's 10:07 low, inside the halt the
+    // band names that day). The halt is `[from, resume)`: a stamp at its
+    // resumption is outside it.
+    let in_halt = IndexDay {
+        halt: Some((0, 61)),
+        scan: Some(DayScan {
+            bars: 2,
+            high: Some((11, 60_000_000)),
+            low: Some((1, 60_000_000)),
+            frozen_runs: 0,
+            longest: None,
+        }),
+        ..low
+    };
+    let (json, says) = in_halt.json();
+    assert_eq!(json["outside_day_range"]["flagged"], true);
+    assert_eq!(json["outside_day_range"]["above_in_halt"], true);
+    assert_eq!(json["outside_day_range"]["below_in_halt"], true);
+    assert_eq!(
+        says,
+        vec![
+            "intraday high 0.01 points above the day bar's high, at 00:01 (1min), inside the \
+             recorded halt"
+                .to_owned(),
+            "intraday low 0.04 points below the day bar's low, at 00:01 (1min), inside the \
+             recorded halt"
+                .to_owned(),
+        ]
+    );
+    let at_resume = IndexDay {
+        halt: Some((0, 60)),
+        ..in_halt
+    };
+    let (json, says) = at_resume.json();
+    assert_eq!(json["outside_day_range"]["below_in_halt"], false);
+    assert_eq!(json["outside_day_range"]["above_in_halt"], false);
+    assert!(says.iter().all(|said| !said.contains("halt")), "{says:?}");
+    // A stamp before the day's midnight is never inside a halt that starts
+    // at 0 (the division floors, it does not truncate toward zero).
+    let before_midnight = IndexDay {
+        midnight: 60_000_000,
+        scan: Some(DayScan {
+            bars: 1,
+            high: Some((10, 0)),
+            low: Some((1, 59_999_999)),
+            frozen_runs: 0,
+            longest: None,
+        }),
+        ..in_halt
+    };
+    assert_eq!(
+        before_midnight.json().0["outside_day_range"]["below_in_halt"],
+        false
+    );
 }
 
 // ══ A renamed share's peer ══════════════════════════════════════════════════

@@ -74799,5 +74799,15 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     `bar_definition` is `null` there and no phrase is said; the band never
     marks a day that owes nothing as built under an older definition.
 
-**Proof:** R313-01 to R313-27 (`docs/04-invariants.md`); the limits are
+17. **A value outside the day's range inside a recorded halt is still
+    flagged, and says where it is** (the Mac's second re-check on the real
+    store: Zerodha NIFTY 2020-03-13 read "intraday low 79.00 points below the
+    day bar's low, at 10:07" beside "halt (suspected) 09:22-10:20" with
+    nothing joining the two). `outside_day_range` gains `above_in_halt` and
+    `below_in_halt` (`null` where that side is not flagged), true where the
+    extreme's stamp lies inside the calendar's recorded halt `[from, resume)`,
+    and the phrase ends ", inside the recorded halt". No cause is claimed for
+    the value: why the index printed there is UNVERIFIED.
+
+**Proof:** R313-01 to R313-28 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-3 (`docs/06-limits.md`).

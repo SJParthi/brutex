@@ -885,18 +885,31 @@ impl IndexDay {
             (Some(scan), Some((day_high, day_low))) => {
                 let above = scan.high.filter(|(high, _)| *high > day_high);
                 let below = scan.low.filter(|(low, _)| *low < day_low);
+                // A VALUE OUTSIDE THE RANGE INSIDE A RECORDED HALT IS STILL
+                // FLAGGED, AND SAYS WHERE IT IS (R3-13, the Mac's re-check):
+                // 2020-03-13's Zerodha 10:07 low lies inside the halt the
+                // band names on the same day. No cause is claimed for it.
+                let where_ = |at: i64| {
+                    if self.in_halt(at) {
+                        ", inside the recorded halt"
+                    } else {
+                        ""
+                    }
+                };
                 if let Some((high, at)) = above {
                     says.push(format!(
-                        "intraday high {} points above the day bar's high, at {} ({rung})",
+                        "intraday high {} points above the day bar's high, at {} ({rung}){}",
                         points(high - day_high),
-                        clock_of(self.midnight, at)
+                        clock_of(self.midnight, at),
+                        where_(at)
                     ));
                 }
                 if let Some((low, at)) = below {
                     says.push(format!(
-                        "intraday low {} points below the day bar's low, at {} ({rung})",
+                        "intraday low {} points below the day bar's low, at {} ({rung}){}",
                         points(day_low - low),
-                        clock_of(self.midnight, at)
+                        clock_of(self.midnight, at),
+                        where_(at)
                     ));
                 }
                 serde_json::json!({
@@ -906,8 +919,10 @@ impl IndexDay {
                     "day_low": day_low,
                     "above_by": above.map(|(high, _)| high - day_high),
                     "above_at": above.map(|(_, at)| clock_of(self.midnight, at)),
+                    "above_in_halt": above.map(|(_, at)| self.in_halt(at)),
                     "below_by": below.map(|(low, _)| day_low - low),
                     "below_at": below.map(|(_, at)| clock_of(self.midnight, at)),
+                    "below_in_halt": below.map(|(_, at)| self.in_halt(at)),
                 })
             }
             _ => serde_json::Value::Null,
@@ -980,6 +995,15 @@ impl IndexDay {
             "auction_window": self.auction_json(),
             "line": line,
         })
+    }
+
+    /// Whether the stamp `ts` (epoch microseconds) lies inside the day's
+    /// recorded halt `[from, resume)`, the window [`in_window`] reads.
+    fn in_halt(&self, ts: i64) -> bool {
+        in_window(
+            self.halt,
+            ts.saturating_sub(self.midnight).div_euclid(1_000_000),
+        )
     }
 
     /// The phrase that names the auction's window beside the halt, where the
