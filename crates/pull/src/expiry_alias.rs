@@ -707,6 +707,17 @@ fn previous_open_in(stated: Day, kind_of: impl Fn(i64) -> DayKind) -> Result<Day
 ///
 /// Every [`SettleRefusal`] (module doc). None is a fallback.
 pub fn settle(underlying: &str, stated: Day, trade: Option<Day>) -> Result<Settled, SettleRefusal> {
+    settle_by(underlying, stated, trade, sourced_kind_of)
+}
+
+/// [`settle`] against the calendar `kind_of`: the one body, so a rekey plan
+/// ([`rekey_plan`]) settles under a newer calendar by exactly the same rule.
+fn settle_by(
+    underlying: &str,
+    stated: Day,
+    trade: Option<Day>,
+    kind_of: impl Fn(i64) -> DayKind + Copy,
+) -> Result<Settled, SettleRefusal> {
     let settled = if let Some(row) = alias_of(underlying, stated) {
         if let (AliasKind::VendorRedated, Some(trade)) = (row.kind, trade) {
             let renamed_on = day_of(row.first_day)?;
@@ -719,9 +730,9 @@ pub fn settle(underlying: &str, stated: Day, trade: Option<Day>) -> Result<Settl
             settlement: Settlement::Aliased(row),
         }
     } else {
-        match sourced_kind_of(i64::from(stated.days_from_epoch())) {
+        match kind_of(i64::from(stated.days_from_epoch())) {
             DayKind::Closed => Settled {
-                expiry: previous_open_session(stated)?,
+                expiry: previous_open_in(stated, kind_of)?,
                 settlement: Settlement::ClosedDayRule,
             },
             DayKind::Unmeasured => Settled {
@@ -751,6 +762,76 @@ pub fn settle(underlying: &str, stated: Day, trade: Option<Day>) -> Result<Settl
         ),
         None => Ok(settled),
     }
+}
+
+/// One contract whose settlement a calendar extension changes (FM-109): it
+/// was kept as stated because the calendar had not measured its stated day
+/// ([`Settlement::AsStatedUnmeasured`]), and the newer calendar settles it
+/// otherwise, or refuses it. The key it was filed under is SUPERSEDED, never
+/// silently re-filed: applying the plan is the rekey writer's (R4-21's
+/// gdfl-rekey), which appends a superseded record per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Rekey<'a> {
+    /// The contract's underlying.
+    pub underlying: &'a str,
+    /// The stated expiry, which is also the key it is filed under today.
+    pub stated: Day,
+    /// What the newer calendar settles it as, or why it refuses.
+    pub now: Result<Settled, SettleRefusal>,
+}
+
+impl Rekey<'_> {
+    /// The plan line, in D-3317's line rules:
+    /// `rekey <underlying> stated=<day> was=<day> now=<day|refused> settlement=<word> v=1`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let (now, settlement) = match self.now {
+            Ok(settled) => (settled.expiry.to_string(), settled.settlement.as_str()),
+            Err(_) => ("refused".to_owned(), "refused"),
+        };
+        format!(
+            "rekey {} stated={} was={} now={now} settlement={settlement} v=1",
+            self.underlying, self.stated, self.stated
+        )
+    }
+}
+
+/// The rekey plan a calendar extension needs (FM-109): every contract of
+/// `contracts` that today settles [`Settlement::AsStatedUnmeasured`] and that
+/// `newer` settles on another day, under another settlement, or refuses.
+/// A contract the newer calendar keeps on its stated day as a session is not
+/// listed: its key does not change. O(contracts), one settle each under
+/// each calendar, bounded by [`CLOSED_WALK_DAYS`].
+///
+/// Nothing is applied here: the plan is a list for the rekey writer and for
+/// the operator, so an extension never re-files a series in silence.
+#[must_use]
+pub fn rekey_plan<'a>(
+    contracts: impl IntoIterator<Item = (&'a str, Day)>,
+    newer: impl Fn(i64) -> DayKind + Copy,
+) -> Vec<Rekey<'a>> {
+    contracts
+        .into_iter()
+        .filter(|(underlying, stated)| {
+            settle_by(underlying, *stated, None, sourced_kind_of)
+                .is_ok_and(|was| was.settlement == Settlement::AsStatedUnmeasured)
+        })
+        .filter_map(|(underlying, stated)| {
+            let now = settle_by(underlying, stated, None, newer);
+            let unchanged = now.is_ok_and(|now| {
+                now.expiry == stated
+                    && matches!(
+                        now.settlement,
+                        Settlement::AsStated | Settlement::AsStatedUnmeasured
+                    )
+            });
+            (!unchanged).then_some(Rekey {
+                underlying,
+                stated,
+                now,
+            })
+        })
+        .collect()
 }
 
 /// One D-3331 `alias` record: the vendor's stated text kept beside the
@@ -1509,5 +1590,84 @@ mod tests {
                 assert!(day_of(expiry).unwrap().days_from_epoch() > ex.days_from_epoch());
             }
         }
+    }
+
+    /// FM-109. Extending the calendar past its record must LIST every
+    /// contract kept as stated whose settlement the extension changes, as a
+    /// rekey plan of superseded keys -- never re-file it in silence. The
+    /// newer calendar here is invented: the record of today, then 2027 by the
+    /// weekday rule with one invented weekday holiday, 2027-01-28, and
+    /// nothing measured from 2028.
+    #[test]
+    fn extending_the_calendar_lists_changed_settlements() {
+        use crate::calendar::{SOURCED_LAST_DAY, Session, weekday_of};
+        let holiday = i64::from(d(2027, 1, 28).days_from_epoch());
+        let end = i64::from(d(2027, 12, 31).days_from_epoch());
+        let newer = move |day: i64| -> DayKind {
+            if day <= SOURCED_LAST_DAY {
+                sourced_kind_of(day)
+            } else if day > end {
+                DayKind::Unmeasured
+            } else if day == holiday || weekday_of(day).is_weekend() {
+                DayKind::Closed
+            } else {
+                DayKind::Open(Session::full())
+            }
+        };
+        let contracts = [
+            // Kept as stated today; the extension closes its stated day.
+            ("NIFTY", d(2027, 1, 28)),
+            // Kept as stated today; the extension opens it: same key.
+            ("NIFTY", d(2027, 2, 25)),
+            // Inside the record today: not this plan's.
+            ("BANKNIFTY", d(2026, 10, 27)),
+            // A sourced alias row (NSE/FAOP/68747): settled by the row.
+            ("NIFTY", d(2027, 6, 24)),
+            // Past the newer calendar too: still unmeasured, same key.
+            ("NIFTY", d(2028, 1, 27)),
+            // A share, the same rule.
+            ("RELIANCE", d(2027, 1, 28)),
+        ];
+        assert_eq!(
+            settle("NIFTY", d(2027, 1, 28), None).map(|s| s.settlement),
+            Ok(Settlement::AsStatedUnmeasured),
+            "today the stated day is past the record"
+        );
+        let plan = rekey_plan(contracts, newer);
+        assert_eq!(
+            plan.iter()
+                .map(|rekey| (rekey.underlying, rekey.stated))
+                .collect::<Vec<_>>(),
+            vec![("NIFTY", d(2027, 1, 28)), ("RELIANCE", d(2027, 1, 28))],
+            "exactly the contracts whose key changes"
+        );
+        for rekey in &plan {
+            assert_eq!(
+                rekey.now,
+                Ok(Settled {
+                    expiry: d(2027, 1, 27),
+                    settlement: Settlement::ClosedDayRule
+                })
+            );
+        }
+        assert_eq!(
+            plan[0].line(),
+            "rekey NIFTY stated=2027-01-28 was=2027-01-28 now=2027-01-27 \
+             settlement=closed_day_rule v=1"
+        );
+        // Nothing to extend, nothing listed; an empty set lists nothing.
+        assert!(rekey_plan(contracts, sourced_kind_of).is_empty());
+        assert!(rekey_plan(std::iter::empty::<(&str, Day)>(), newer).is_empty());
+        // A newer calendar that closes every day refuses by name.
+        let closed = rekey_plan([("NIFTY", d(2027, 1, 28))], |day: i64| {
+            if day <= SOURCED_LAST_DAY {
+                sourced_kind_of(day)
+            } else {
+                DayKind::Closed
+            }
+        });
+        assert_eq!(closed.len(), 1);
+        assert!(closed[0].now.is_err());
+        assert!(closed[0].line().contains("now=refused settlement=refused"));
     }
 }

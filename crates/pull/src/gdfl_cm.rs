@@ -931,20 +931,60 @@ impl CmScope {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::stored_with(
+            &alias::INDEX_ROWS,
+            &alias::SYMBOL_CHANGES,
+            option_underlyings,
+        )
+    }
+
+    /// [`CmScope::stored`] over the reference tables a store holds, loaded by
+    /// THE ONE LOADER ([`crate::reference_data::load`], R3-30): a row added
+    /// to the store's `index_identity` or `symbol_changes` table enters the
+    /// next import's scope with no code change
+    /// (`a_row_added_to_the_index_table_is_imported_without_a_code_change`).
+    ///
+    /// # Errors
+    ///
+    /// A table the loader refused, BY NAME (never the compiled rows in
+    /// silence), and every refusal of [`CmScope::stored`].
+    pub fn stored_from<I, S>(
+        reference: &crate::reference_data::Reference,
+        option_underlyings: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let indices = reference.indices.table().map_err(ToString::to_string)?;
+        let renames = reference.renames.table().map_err(ToString::to_string)?;
+        Self::stored_with(indices.applied(), renames.rows(), option_underlyings)
+    }
+
+    /// The one body of [`CmScope::stored`] and [`CmScope::stored_from`].
+    fn stored_with<I, S>(
+        index_rows: &'static [IndexRow],
+        changes: &[alias::SymbolChange],
+        option_underlyings: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut scope = Self {
             stored: true,
             series: true,
             indices: Vec::new(),
             ..Self::swept()
         };
-        for row in &alias::INDEX_ROWS {
+        for row in index_rows {
             let swept = InstrumentKey::index(Exchange::Nse, row.store_key)
                 .is_ok_and(|key| key.is_sweepable());
             if row.status.applies() && !swept {
                 scope.indices.push(row);
             }
         }
-        for change in &alias::SYMBOL_CHANGES {
+        for change in changes {
             if change.status.applies() {
                 scope.add_share(change.old)?;
                 scope.add_share(change.new)?;

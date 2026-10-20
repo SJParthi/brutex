@@ -978,9 +978,11 @@ pub fn land_rows(
         let mut verdict = match request
             .window
             // THE VENUE DECIDES THE HOURS, and the listing decides the venue.
-            // NSE's 2026-08-03 CAS change put the index close at 15:15 and left
-            // cash at 15:30; passing the listing through is what lets `verdict`
-            // tell those apart instead of applying one number to both.
+            // NSE's 2026-08-03 change moved the derivatives close to 15:40 and
+            // left the index and cash at 15:30 (a closing-auction-eligible share
+            // ends continuous trading at 15:15); passing the listing through is
+            // what lets `verdict` tell those apart instead of applying one number
+            // to all (SC-CLOSE-24).
             .verdict(
                 epoch_utc,
                 request.granularity.cadence(),
