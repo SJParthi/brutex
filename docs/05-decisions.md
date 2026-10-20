@@ -76094,8 +76094,11 @@ run of CASH minutes on the 1-minute grid. A minute whose open lies more than
 5. **`JUMP_BPS` = 3,000 was PROVISIONAL (superseded by point 6).** The work package requires it measured
    first, read-only, over every stored Zerodha CASH minute, per share (p99,
    p999, max). It must show zero trips on split and bonus ex-dates, a trip on
-   PIIND's interleave (the 09:15 close 821.65 against the 09:16 open 89.90 is
-   81,395 bps by this measure), and none on a clean share. The cloud session
+   PIIND's interleave (a close about nine times the next minute's open; an
+   invented close of 100.00 against an open of 11.00 is 80,909 bps by this
+   measure, `pull::series_identity::jump_bps`'s own unit test; the real
+   prices are not quoted, the repository being public), and none on a clean
+   share. The cloud session
    that wrote this has no store. `cli series-identity ALL --segment CASH
    --feed zerodha` prints exactly that distribution per share, and the
    operator's run of it is the measurement. Until it is recorded beside the
