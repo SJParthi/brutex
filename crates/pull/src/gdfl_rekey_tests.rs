@@ -993,6 +993,64 @@ fn a_torn_tail_is_closed_from_the_file_under_the_lock_not_from_the_earlier_read(
     assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
 }
 
+/// A key superseded twice to different targets, or retired twice with
+/// different records, refuses the ledger by line; an identical repeat — a
+/// crash re-writing the same line — is still one record
+/// (cloud-attack-law-20261016, lens 2). The second line silently replaced the
+/// first, so the later target won in a ledger read "whole or refused".
+///
+/// GO-51's pin (PREC-1, D-5400). Since AG-02 the refusals are
+/// `Withdrawn::admit_superseded`'s and `admit_retired`'s, which name both
+/// lines; this test reads their words, and AG-02's own
+/// `a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines`
+/// and `one_move_or_retirement_recorded_twice_with_another_account_is_refused`
+/// stand beside it (merge of 19 Oct, PREC-1, D-5411).
+#[test]
+fn a_key_withdrawn_twice_with_different_records_refuses_the_ledger() {
+    let pointer = SupersededRecord {
+        underlying: sym("NIFTY"),
+        old: c(STATED),
+        new: c(SETTLED),
+        kind: AliasKind::VendorRedated,
+        months: 2,
+        bars: 3,
+        digest: [7; 32],
+    };
+    let elsewhere = SupersededRecord {
+        new: c("2023-06-27-1000000-PE"),
+        ..pointer
+    };
+    let why = Withdrawn::parse(&format!("{}\n{}\n", pointer.line(), elsewhere.line())).unwrap_err();
+    assert!(why.contains("line 1") && why.contains("line 2"), "{why}");
+    assert!(why.contains("a key continues under one key"), "{why}");
+    assert!(
+        why.contains(SETTLED) && why.contains("2023-06-27-1000000-PE"),
+        "{why}"
+    );
+    let repeated = Withdrawn::parse(&format!("{0}\n{0}\n", pointer.line())).unwrap();
+    assert_eq!(
+        repeated.counts(),
+        (1, 0),
+        "an identical repeat is one record"
+    );
+
+    let refusal = RetiredRecord {
+        underlying: sym("NIFTY"),
+        key: c(IMPOSSIBLE[0]),
+        why: RetiredWhy::StrikeImplausible,
+        day: d(2019, 5, 30),
+        median: Some(1_180_000),
+        days: 1,
+        bars: 5,
+    };
+    let other = RetiredRecord { days: 2, ..refusal };
+    let why = Withdrawn::parse(&format!("{}\n{}\n", refusal.line(), other.line())).unwrap_err();
+    assert!(why.contains("line 1") && why.contains("line 2"), "{why}");
+    assert!(why.contains("one retirement has one account"), "{why}");
+    let repeated = Withdrawn::parse(&format!("{0}\n{0}\n", refusal.line())).unwrap();
+    assert_eq!(repeated.counts(), (0, 1));
+}
+
 // ═══ AG-02: done versus pending, one target per key, held months ══════════
 
 /// The fixture's plan applied whole: what every "after" below starts from.

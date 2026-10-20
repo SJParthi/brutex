@@ -204,8 +204,19 @@ fn directory(root: &Path) -> Result<std::fs::Metadata, String> {
 /// A sentence naming `root`: it does not exist, it cannot be measured (the
 /// call's own error, such as a path through a regular file, or an answer no
 /// filesystem can give), it is not a directory, or its mount point cannot be
-/// found.
+/// found; or `root` is empty, which names no directory (D-5247).
 fn measure(root: &Path) -> Result<Filesystem, String> {
+    // AN EMPTY ROOT IS REFUSED BY NAME: `statfs("")` answers ENOENT, and the
+    // sentence it gave named nothing. The server refuses an empty
+    // `BRUTEX_STORE` at start (`server::store_dir_from`, CE-33); this is any
+    // other caller's door.
+    if root.as_os_str().is_empty() {
+        return Err(
+            "the store root is empty: it names no directory, so no filesystem is measured \
+             for it"
+                .to_owned(),
+        );
+    }
     let (counts, mount) = counts_and_mount(root)?;
     let (total, used, free) = counts.in_bytes(root)?;
     Ok(Filesystem {
@@ -1345,6 +1356,22 @@ mod tests {
         assert_eq!(parsed["filesystem"]["error"], why.as_str());
         assert!(parsed["filesystem"].get("free_bytes").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN EMPTY STORE ROOT IS REFUSED BY NAME (D-5247)**, by `measure` and as
+    /// the whole answer's `filesystem.error`: the sentence says the root is
+    /// empty, where `statfs("")` gave one that named nothing.
+    #[test]
+    fn an_empty_root_is_refused_by_name() {
+        let empty = Path::new("");
+        let why = measure(empty).expect_err("refused");
+        assert_eq!(
+            why,
+            "the store root is empty: it names no directory, so no filesystem is measured for it"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&measured(empty, None)).expect("JSON");
+        assert_eq!(parsed["filesystem"]["error"], why.as_str());
+        assert!(parsed["filesystem"].get("free_bytes").is_none());
     }
 
     /// **A STORE ROOT THAT IS NO DIRECTORY IS REFUSED (D-5240)**: a regular

@@ -60,6 +60,7 @@ use brutex_core::instrument::{Contract, Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use store::file::BarFile;
+use store::header::{MonthVerdict, SlotAudit};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 use crate::manifest::{
@@ -1781,11 +1782,36 @@ fn write_receipt(
 #[must_use]
 pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
     let receipt = vendor_dir(root, vendor).join(MIGRATION_RECEIPT);
-    let text = fs::read_to_string(&receipt).ok()?;
-    let recorded: u64 = text
+    // ONLY AN ABSENT RECEIPT IS "NOT MIGRATED". This was `.ok()?` and `?` on
+    // the parse, so a receipt that could not be read, or that names no
+    // `legacy_bytes`, answered "no drift" — and this is the only warning that
+    // a pre-version-4 writer filed months the census does not read
+    // (`api::store_route`, `cli census-recount`). Every receipt `migrate`
+    // writes carries the line (cloud-attack-law-20261016).
+    let text = match fs::read_to_string(&receipt) {
+        Ok(text) => text,
+        Err(why) if why.kind() == ErrorKind::NotFound => return None,
+        Err(why) => {
+            return Some(format!(
+                "{} cannot be read ({why}), so whether a writer built before version 4 has \
+                 written to {} since the migration is not known",
+                receipt.display(),
+                manifest_path(root, vendor).display()
+            ));
+        }
+    };
+    let Some(recorded) = text
         .lines()
         .find_map(|line| line.strip_prefix("legacy_bytes="))
-        .and_then(|value| value.parse().ok())?;
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Some(format!(
+            "{} names no readable legacy_bytes, so drift of {} since the migration cannot \
+             be measured",
+            receipt.display(),
+            manifest_path(root, vendor).display()
+        ));
+    };
     let legacy = manifest_path(root, vendor);
     let superseded = superseded_path(root, vendor);
     if let Ok(kept) = fs::symlink_metadata(&superseded) {
@@ -2603,8 +2629,16 @@ pub struct Recount {
     pub unreadable: u64,
     /// The first [`NAMED`] of them, with why.
     pub unreadable_named: Vec<(PathBuf, String)>,
-    /// Months holding an unreadable file: no day of these is closed.
+    /// Months holding an unreadable file, or one whose header reverted to an
+    /// older generation ([`Recount::slot_damaged`]): no day of these is closed.
     pub months_unreadable: Vec<YearMonth>,
+    /// EVERY month file in range whose header slot audit is not clean
+    /// (`store::header::slot_audit`), with the audit, in walk order. A
+    /// `reverted` month offers no row — its header is the OLDER generation, and
+    /// recording it would write the loss into the census — and closes no day; a
+    /// `damaged` month (an older slot damaged, nothing lost) offers its row.
+    /// Both make the recount not clean. Nothing here repairs a header. D-6242.
+    pub slot_damaged: Vec<(PathBuf, SlotAudit)>,
     /// Directory entries that are not part of a store path, counted, so a
     /// stray file is visible and never silently read as a month.
     pub not_store_names: u64,
@@ -2635,6 +2669,7 @@ impl Recount {
     #[must_use]
     pub fn clean(&self) -> bool {
         self.unreadable == 0
+            && self.slot_damaged.is_empty()
             && self.refused() == 0
             && self
                 .journal
@@ -2885,8 +2920,25 @@ fn walk_rung(
         }
         walk.found.files_in_range += 1;
         match header_row(at, contract, timeframe, month) {
-            Ok(Some(row)) => walk.held.push(row),
-            Ok(None) => walk.found.files_empty += 1,
+            // A HEADER THAT REVERTED IS NAMED AND OFFERS NOTHING (D-6242): the
+            // row it would offer is the older generation's, and the days of
+            // its month stay open until the operator recovers or re-imports it.
+            // A month served in its sealed form has no slots (`None`, D-6243).
+            Ok((row, audit)) => {
+                let named = audit.filter(|audit| !audit.is_clean());
+                let reverted = named
+                    .is_some_and(|audit| matches!(audit.verdict, MonthVerdict::Reverted { .. }));
+                if let Some(audit) = named {
+                    walk.found.slot_damaged.push((path, audit));
+                }
+                if reverted {
+                    let _ = walk.unreadable_months.insert(month);
+                } else if let Some(row) = row {
+                    walk.held.push(row);
+                } else {
+                    walk.found.files_empty += 1;
+                }
+            }
             Err(why) => {
                 walk.found.unreadable += 1;
                 let _ = walk.unreadable_months.insert(month);
@@ -2911,7 +2963,7 @@ fn header_row(
     contract: Option<Contract>,
     timeframe: Timeframe,
     month: YearMonth,
-) -> Result<Option<Held>, String> {
+) -> Result<(Option<Held>, Option<SlotAudit>), String> {
     let path = StorePath::new(PathParts {
         vendor: at.vendor,
         exchange: at.exchange.as_str(),
@@ -2932,14 +2984,14 @@ fn header_row(
     let file = BarFile::open_existing(at.root, path, symbol_id).map_err(|why| why.to_string())?;
     let header = file.header();
     if header.n_valid == 0 {
-        return Ok(None);
+        return Ok((None, file.slot_audit()));
     }
     let first = file.read_record(0).map_err(|why| why.to_string())?;
     let last = file
         .read_record(header.n_valid - 1)
         .map_err(|why| why.to_string())?;
     let closes = Closes::known(first.close, last.close).map_err(|why| why.to_string())?;
-    Ok(Some(Held::new(
+    let row = Held::new(
         Entry {
             key: EntryKey {
                 contract,
@@ -2954,7 +3006,8 @@ fn header_row(
             last_ts_micros: header.last_ts_micros,
         },
         closes,
-    )))
+    );
+    Ok((Some(row), file.slot_audit()))
 }
 
 /// The rung a directory name is, if it is one.
