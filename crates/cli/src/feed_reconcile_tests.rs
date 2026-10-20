@@ -56,13 +56,16 @@ impl Dir {
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        // Only ever a directory this file made, under the temp dir.
-        if self.0.starts_with(std::env::temp_dir())
-            && self
-                .0
-                .to_string_lossy()
-                .contains("brutex-cli-feed-reconcile-")
-        {
+        // Only ever a directory `Dir::new` made in THIS process: directly
+        // under the temp dir, named with this file's prefix and this
+        // process's id (gate 23 clause C: no temporary path without it).
+        let under_temp = self.0.parent() == Some(std::env::temp_dir().as_path());
+        let pid = format!("-{}-", std::process::id());
+        let own = self.0.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("brutex-cli-feed-reconcile-") && name.contains(pid.as_str())
+        });
+        if under_temp && own {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
