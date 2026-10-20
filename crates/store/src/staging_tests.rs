@@ -47,11 +47,22 @@ fn a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported() {
     let path = dir.join("a.tmp");
     fs::write(&path, b"half a file").unwrap();
     let before = fs::metadata(&path).unwrap().ino();
+    // HELD OPEN, so the old inode stays allocated: a filesystem may hand a
+    // just-freed inode number to the next file it creates, and the inequality
+    // below then failed for a new file that merely reused the number — a test
+    // red for a reason that is not true (cloud-attack-law-20261016, measured
+    // once in a full `cargo test -p store` run here).
+    let leftover = fs::File::open(&path).unwrap();
     let staged = create(&path).unwrap();
     assert_eq!(staged.cleared, Some(11), "the leftover's bytes are named");
     let after = fs::metadata(&path).unwrap();
     assert_eq!(after.len(), 0, "the new file is empty");
     assert_ne!(after.ino(), before, "it is a new file, not the old one cut");
+    assert_eq!(
+        leftover.metadata().unwrap().len(),
+        11,
+        "the leftover's own bytes were not cut in place"
+    );
 }
 
 /// Every temporary name the tree spells today, as its writer builds it, and

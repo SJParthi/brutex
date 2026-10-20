@@ -2371,6 +2371,16 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         recent.observe(source, r, forward.exit_at(source).unwrap_or(source));
     }
 
+    // THE REPORTED MEAN IS THE EXACT SUM OVER THE COUNT, NOT WELFORD'S RUNNING
+    // MEAN. Its SIGN picks the traded side (`mean_paisa < 0.0` is Short, at
+    // `Edge::largest_gain_paisa`, `cli::side_of_evidence`, `validate`) and which
+    // way the side-dependent ratios read, and "exactly zero is Long". Welford's
+    // `mean += delta / count` does not land on zero for a zero sum: moves
+    // `[-7, -5, 7, 5]` leave it at -2.22e-16, so a sample with no edge at all was
+    // traded Short. The exact `i128` sum is already held in `sides`; dividing it
+    // once gives a zero for a zero sum and the sum's own sign otherwise. Welford
+    // stays for `m2` and the overlap centring (cloud-attack-law-20261016).
+    let mean_exact = exact_mean(sides.win_sum.saturating_add(sides.loss_sum), n);
     // ONE ASSEMBLY POINT FOR BOTH EXITS. The early return and the final one
     // differ in exactly one field, `t`, and every other field was spelled twice
     // -- which is how a field can be added to one and forgotten in the other.
@@ -2379,7 +2389,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         mismatched,
         refused,
         missing,
-        mean_paisa: mean,
+        mean_paisa: mean_exact,
         // CARRIED, not zeroed, on the `t = 0.0` path. A single observation has
         // no `t` -- there is no spread to divide by -- but it did move one way
         // or the other, and `payoff_bp` refuses a one-sided sample on its own
@@ -2494,7 +2504,28 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         reason = "the observation count is bounded by the column length."
     )]
     let count = n as f64;
-    assemble(newey_west_t(count, mean, recent.sum_squares(m2, mean)))
+    assemble(newey_west_t(
+        count,
+        mean_exact,
+        recent.sum_squares(m2, mean),
+    ))
+}
+
+/// The mean of `n` observations whose exact sum is `net`, or `0.0` for none.
+///
+/// One rounding, in the final divide, so the result is zero exactly when `net`
+/// is and otherwise carries `net`'s sign — which Welford's running mean does
+/// not promise. Exact below 2^53 paisa, the bound [`wide`] documents.
+fn exact_mean(net: i128, n: u64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the observation count is bounded by the column length."
+    )]
+    let count = n as f64;
+    wide(net) / count
 }
 
 /// The t-statistic of `mean` over `count` observations whose long-run sum of
@@ -2540,8 +2571,8 @@ fn newey_west_t(count: f64, mean: f64, sum_squares: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        Edge, FORCED_EXIT_MINUTE, Horizon, SessionBounds, Sides, edge, forward,
-        long_run_sum_squares, median_step_micros, milli, prefix_median_steps_over,
+        Edge, FORCED_EXIT_MINUTE, Horizon, SessionBounds, Sides, edge, exact_mean, forward,
+        long_run_sum_squares, median_step_micros, milli, prefix_median_steps_over, wide,
     };
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
@@ -3702,6 +3733,63 @@ mod tests {
         );
     }
 
+    /// A sample whose exact sum is zero reports a zero mean and is read LONG
+    /// (cloud-attack-law-20261016, lens 5). Welford's running mean over the
+    /// moves `[-9, -3, 7, 5]` lands on -2.22e-16, and `mean_paisa < 0.0` is the
+    /// whole rule for trading Short, so a sample with no edge took the short
+    /// side and the side-dependent ratios read the short's figures.
+    #[test]
+    fn an_exactly_zero_sum_sample_has_a_zero_mean_and_is_read_long() {
+        let moves = [-9_i32, -3, 7, 5];
+        let mut welford = 0.0_f64;
+        for (seen, &x) in (1_u32..).zip(&moves) {
+            welford += (f64::from(x) - welford) / f64::from(seen);
+        }
+        assert!(welford < 0.0, "the witness: Welford misses zero, {welford}");
+
+        let mut sides = Sides::default();
+        for &x in &moves {
+            sides.observe(i64::from(x));
+        }
+        let net = sides.win_sum.saturating_add(sides.loss_sum);
+        assert_eq!(net, 0);
+        let exact = exact_mean(net, 4);
+        assert_eq!(
+            exact.to_bits(),
+            0.0_f64.to_bits(),
+            "a zero sum is a positive zero"
+        );
+        assert_eq!(exact_mean(0, 0).to_bits(), 0.0_f64.to_bits());
+        assert!(
+            exact_mean(-1, 3) < 0.0 && exact_mean(1, 3) > 0.0,
+            "the sum's own sign"
+        );
+
+        let edge_at = |mean_paisa: f64| Edge {
+            n: 4,
+            mean_paisa,
+            wins: sides.wins,
+            win_sum: wide(sides.win_sum),
+            losses: sides.losses,
+            loss_sum: wide(sides.loss_sum),
+            min_win_paisa: wide(i128::from(sides.min_win)),
+            max_win_paisa: wide(i128::from(sides.max_win)),
+            max_loss_paisa: wide(i128::from(sides.max_loss)),
+            min_loss_paisa: wide(i128::from(sides.min_loss)),
+            ..Edge::default()
+        };
+        assert_eq!(
+            edge_at(exact).worst_reward_risk_bp(),
+            edge_at(1.0).worst_reward_risk_bp(),
+            "the exact mean reads the long's figures"
+        );
+        assert_ne!(
+            edge_at(welford).worst_reward_risk_bp(),
+            edge_at(exact).worst_reward_risk_bp(),
+            "Welford's mean reads the short's, which is the defect"
+        );
+    }
+
     #[test]
     fn an_identical_sample_reports_zero_rather_than_an_infinite_t() {
         // A perfectly flat series: every forward move is the same, so the
@@ -4830,6 +4918,104 @@ mod overlap_tests {
         let one = forward(&bars, &column, Horizon::bars(1).expect("positive"));
         let e1 = edge(&column, &one, &ConditionMask::default());
         assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+    }
+
+    /// `edge` REPORTS THE EXACT MEAN, and a zero sum is a positive zero
+    /// (PREC-1, D-5403; cloud-attack-law-20261016 lens 5). The helper test in
+    /// `tests` pins `exact_mean` alone and passes whether or not `edge` calls
+    /// it; this one goes through `edge`. A varied walk over eight synthetic
+    /// sessions is shown first to separate Welford's running mean from the
+    /// exact `i128` sum over the count in the last bits, and `edge` must report
+    /// the exact one. Then the bar after the last hit is moved so the sample's
+    /// whole sum is exactly zero, Welford is shown to miss zero on it, and
+    /// `edge` must report `+0.0`: `mean_paisa < 0.0` is the whole rule for
+    /// trading Short, so a sample with no edge was traded Short.
+    #[test]
+    fn edge_reports_the_exact_mean_and_a_zero_sum_is_a_positive_zero() {
+        let base = crate::synthetic::sessions(8);
+        let walk = |moved: Option<(usize, i64)>| -> Vec<Candle> {
+            let mut close = 1_000_000_i64;
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+            base.iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let step = i64::try_from(seed >> 58).unwrap_or(0) - 31;
+                    close = close.saturating_add(step.saturating_mul(7));
+                    let at = match moved {
+                        Some((index, by)) if index == i => close.saturating_add(by),
+                        _ => close,
+                    };
+                    Candle::new(
+                        c.ts_micros,
+                        at,
+                        at.saturating_add(10),
+                        at.saturating_sub(10),
+                        at,
+                        100,
+                        indicators::OI_NULL,
+                    )
+                })
+                .collect()
+        };
+        let measure = |bars: &[Candle]| {
+            let column = Column::build(bars, &mut evaluator());
+            let f = forward(bars, &column, Horizon::bars(1).expect("positive"));
+            let moves = hits(bars, &column, &f);
+            let mut welford = 0.0_f64;
+            let mut sum = 0_i128;
+            for (seen, &(_, x, _)) in (1_u32..).zip(&moves) {
+                welford += (x - welford) / f64::from(seen);
+                #[allow(clippy::cast_possible_truncation, reason = "a fixture's integer move")]
+                let paisa = x as i64;
+                sum = sum.saturating_add(i128::from(paisa));
+            }
+            let e = edge(&column, &f, &ConditionMask::default());
+            (moves, welford, sum, e)
+        };
+
+        let bars = walk(None);
+        let (moves, welford, sum, e) = measure(&bars);
+        assert!(moves.len() >= 20, "the fixture measures a sample");
+        assert_eq!(e.n, u64::try_from(moves.len()).unwrap_or(0));
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a fixture's small sum and count"
+        )]
+        let exact = sum as f64 / moves.len() as f64;
+        assert_ne!(
+            welford.to_bits(),
+            exact.to_bits(),
+            "the witness: on this walk Welford's mean is not the exact one"
+        );
+        assert_eq!(
+            e.mean_paisa.to_bits(),
+            exact.to_bits(),
+            "edge reports the exact mean, {} against Welford's {welford}",
+            e.mean_paisa
+        );
+
+        let last = moves.last().map_or(0, |hit| hit.0);
+        let zeroed = walk(Some((
+            last.saturating_add(1),
+            -i64::try_from(sum).unwrap_or(0),
+        )));
+        let (moves, welford, sum, e) = measure(&zeroed);
+        assert_eq!(sum, 0, "the fixture's whole sum is exactly zero");
+        assert!(moves.len() >= 20);
+        assert_ne!(
+            welford.to_bits(),
+            0.0_f64.to_bits(),
+            "the witness: Welford misses zero on a zero sum, {welford}"
+        );
+        assert_eq!(
+            e.mean_paisa.to_bits(),
+            0.0_f64.to_bits(),
+            "a zero sum is a positive zero, so the sample reads Long: {}",
+            e.mean_paisa
+        );
     }
 }
 

@@ -1502,6 +1502,106 @@ mod tests {
         let _cleanup = std::fs::remove_dir_all(&root);
     }
 
+    /// **A TORN LAST LINE IS CLOSED BEFORE THE NEXT APPEND** (cloud-attack-law-20261016,
+    /// lens 4). A crash left `gap TORN` with no line end, and the next run's
+    /// first line was glued onto it — one fault where there were two lines,
+    /// and the real gap line read as part of the fragment. Every GDFL ledger
+    /// already closed a torn line (D-2826); this one did not.
+    #[test]
+    fn a_torn_gap_line_is_closed_before_the_next_append() {
+        let root = std::env::temp_dir().join(format!("brutex-LEDGER-TORN-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&root);
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        let path = root.join("audit").join("zerodha.gaps");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"gap TORN").unwrap();
+        append_ledger(&root, vendor, &["gap NIFTY 2026-01-02 x".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN\ngap NIFTY 2026-01-02 x\n"
+        );
+        append_ledger(&root, vendor, &["gap NEXT".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN\ngap NIFTY 2026-01-02 x\ngap NEXT\n",
+            "a whole last line gains no blank line"
+        );
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+
+    /// **CONCURRENT WRITERS OF ONE LEDGER LAND WHOLE, CONTIGUOUS BATCHES**
+    /// (ZM-72, FM-127; PREC-1). The api's pull and `cli zerodha-repair` both
+    /// append `audit/zerodha.gaps` and `.repairs` through this module, each
+    /// from its own open of the file. Eight writers, each with its own open
+    /// file description (the same contention two processes have under
+    /// `flock`), append 3-line batches to both ledgers at once; every line
+    /// must arrive whole, exactly once, and each batch's three lines together.
+    /// A pin: it passed before PREC-1 (R3-18 serialised the appends), and it
+    /// holds the serialisation the lock test above proves deterministically.
+    #[test]
+    fn concurrent_writers_of_one_ledger_land_whole_contiguous_batches() {
+        const WRITERS: usize = 8;
+        const BATCHES: usize = 40;
+        let root =
+            std::env::temp_dir().join(format!("brutex-LEDGER-CONCURRENT-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&root);
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let root = &root;
+                let _joined_by_the_scope = scope.spawn(move || {
+                    for batch in 0..BATCHES {
+                        let lines: Vec<String> = (0..3)
+                            .map(|part| {
+                                format!("gap W{writer:02} B{batch:03} P{part} {}", "x".repeat(40))
+                            })
+                            .collect();
+                        append_ledger(root, vendor, &lines).unwrap();
+                        let repairs: Vec<String> = lines
+                            .iter()
+                            .map(|line| line.replacen("gap", "repair", 1))
+                            .collect();
+                        append_named(root, vendor, "repairs", &repairs).unwrap();
+                    }
+                });
+            }
+        });
+        for (name, head) in [("zerodha.gaps", "gap"), ("zerodha.repairs", "repair")] {
+            let text = std::fs::read_to_string(root.join("audit").join(name)).unwrap();
+            assert!(text.ends_with('\n'), "{name} ends on a whole line");
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(
+                lines.len(),
+                WRITERS * BATCHES * 3,
+                "{name}: every line once"
+            );
+            let unique: std::collections::BTreeSet<&str> = lines.iter().copied().collect();
+            assert_eq!(unique.len(), lines.len(), "{name}: no line twice");
+            for batch in lines.chunks_exact(3) {
+                let stem =
+                    |line: &str| line.get(..line.len().saturating_sub(43)).map(str::to_owned);
+                let first = batch.first().copied().unwrap_or_default();
+                assert!(
+                    first.starts_with(head) && first.contains(" P0 "),
+                    "{name}: {batch:?}"
+                );
+                for (part, line) in batch.iter().enumerate() {
+                    assert_eq!(
+                        stem(line),
+                        stem(first),
+                        "{name}: a batch's lines arrive together: {batch:?}"
+                    );
+                    assert!(line.contains(&format!(" P{part} ")), "{name}: {batch:?}");
+                    assert!(
+                        line.ends_with(&"x".repeat(40)),
+                        "{name}: a whole line: {line:?}"
+                    );
+                }
+            }
+        }
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+
     /// The derive line names the census key, the rung and the month.
     #[test]
     fn a_derive_line_carries_the_folds_four_counts() {

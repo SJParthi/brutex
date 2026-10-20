@@ -1258,6 +1258,37 @@ fn scan_every(root: &Path, ask: &Ask, symbols: &[String], workers: usize) -> Vec
     slots.into_iter().flatten().collect()
 }
 
+/// The series directory names one segment directory lists, IN NAME ORDER so
+/// two runs print the same table; a name that is not a symbol is not a series.
+///
+/// # Errors
+///
+/// An entry the listing could not read. This was `filter_map(Result::ok)`,
+/// which dropped that entry without a word: the table then left a series
+/// out, nothing marked the run degraded, and the verb could exit `OK` over a
+/// store it had not walked (CLAUDE.md §4; cloud-attack-law-20261016). The
+/// quarantine works from this list, so a missed series is a missed refusal.
+pub(crate) fn series_names(
+    dir: &Path,
+    entries: impl IntoIterator<Item = std::io::Result<std::ffi::OsString>>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut symbols = std::collections::BTreeSet::new();
+    for entry in entries {
+        let name = entry.map_err(|why| {
+            format!(
+                "an entry of {} could not be read: {why}; no partial table is printed",
+                dir.display()
+            )
+        })?;
+        if let Some(name) = name.to_str()
+            && brutex_core::symbol::Symbol::new(name).is_ok()
+        {
+            symbols.insert(name.to_owned());
+        }
+    }
+    Ok(symbols)
+}
+
 fn all(run: &Run<'_>, out: &mut String) -> u8 {
     let (root, ask) = (run.root, run.ask);
     let dir = root
@@ -1276,14 +1307,16 @@ fn all(run: &Run<'_>, out: &mut String) -> u8 {
             return FAILED;
         }
     };
-    // IN NAME ORDER, so two runs print the same table.
-    let symbols: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-        .filter(|name| brutex_core::symbol::Symbol::new(name).is_ok())
-        .collect::<std::collections::BTreeSet<String>>()
-        .into_iter()
-        .collect();
+    // IN NAME ORDER, so two runs print the same table; an entry the listing
+    // could not read refuses the run (`series_names`, PREC-1).
+    let symbols: Vec<String> =
+        match series_names(&dir, entries.map(|entry| entry.map(|e| e.file_name()))) {
+            Ok(symbols) => symbols.into_iter().collect(),
+            Err(why) => {
+                let _ = writeln!(out, "SERIES IDENTITY REFUSED: {why}");
+                return FAILED;
+            }
+        };
     let workers = worker_count(ask.workers, symbols.len());
     let _ = writeln!(
         out,
