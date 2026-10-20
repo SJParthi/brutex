@@ -420,11 +420,13 @@ fn bound(text: &str, name: &str, end: bool) -> Result<Day, String> {
     if let Some(day) = super::import_journal::parse_day(text) {
         return Ok(day);
     }
-    let month = text.split_once('-').and_then(|(year, month)| {
-        let canonical = year.len() == 4 && month.len() == 2;
-        let day = Day::new(year.parse().ok()?, month.parse().ok()?, 1).ok()?;
-        canonical.then_some(day)
-    });
+    // THE ONE STRICT MONTH SPELLING (PG-63; PREC-1, D-5405). This checked the
+    // halves' LENGTHS and handed them to `str::parse`, which takes a leading
+    // `+`, so `from=2025-%2B1` answered January 2025 under HTTP 200 — measured
+    // on the shadow of the real store, 18 Oct 2026 — after `/bars/window.json`,
+    // `/chain.json` and `/sources.json` had stopped reading such a spelling.
+    let month = crate::bars::month_of_text(text)
+        .and_then(|month| Day::new(month.year(), month.month(), 1).ok());
     match month {
         Some(first) if end => Ok(first.end_of_month()),
         Some(first) => Ok(first),
@@ -2375,10 +2377,9 @@ fn parse_derive(number: u64, text: &str) -> Result<(String, String, DeriveLine),
         .filter(|rung| Timeframe::KNOWN.iter().any(|known| known.as_str() == *rung))
         .ok_or("no rung this store files")?;
     let month_word = words.next().unwrap_or_default();
-    let month = month_word
-        .split_once('-')
-        .filter(|(year, month)| year.len() == 4 && month.len() == 2)
-        .and_then(|(year, month)| YearMonth::new(year.parse().ok()?, month.parse().ok()?).ok())
+    // One strict month spelling in a ledger line too (PG-65; PREC-1, D-5405):
+    // the same length check let `2020-+1` through as January 2020.
+    let month = crate::bars::month_of_text(month_word)
         .ok_or_else(|| format!("{month_word:?} is not a month as YYYY-MM"))?;
     let want = ["v", "days", "buckets", "withheld", "partial", "run"];
     let got = named_fields(words, &want)?;
@@ -2794,8 +2795,10 @@ fn pull_refusal(number: u64, record: &crate::audit::Record) -> Option<PullRefusa
 }
 
 /// The pull journal at `root`, for `symbol`'s refusals: through the journal's
-/// index when it covers the journal ([`crate::audit::Journal::read_index`]),
-/// else by a walk that says why.
+/// index when it covers the journal and every entry it holds decodes
+/// ([`trusted_index`]) and the symbol's refusal entries all read
+/// ([`crate::audit::Journal::refusal_ordinals`]), else by a walk that says
+/// why (PG-71; D-5410).
 ///
 /// # Cost, stated (WP-33c; DB-A34)
 ///
@@ -2845,16 +2848,20 @@ fn read_pull_journal(root: &Path, symbol: &str) -> Result<PullRead, PullUnread> 
     let len = meta.len();
     let stride = crate::audit::RECORD_LEN_U64;
     let whole = len - len % stride;
-    let (parsed, read_now, via) = match journal.read_index(whole / stride) {
-        Ok(indexed) => {
-            let (parsed, read_now) = pull_indexed(&journal, &indexed, symbol, whole / stride)
-                .map_err(PullUnread::Failed)?;
-            let via = Via::Index {
-                covered: indexed.covered,
-                runs: crate::audit::as_u64(indexed.runs.len()),
-            };
-            (parsed, read_now, via)
-        }
+    // AN INDEX THAT CANNOT ANSWER WHOLE IS WALKED, AND THE ANSWER SAYS WHY
+    // (PG-71; PREC-1, D-5410): an index that lost an entry, or a refusal entry
+    // of this symbol's that will not read, was read as a whole index or
+    // answered as an unread journal. The walk reads the journal itself.
+    let through_index = trusted_index(&journal, whole / stride).and_then(|indexed| {
+        let (parsed, read_now) = pull_indexed(&journal, &indexed, symbol, whole / stride)?;
+        let via = Via::Index {
+            covered: indexed.covered,
+            runs: crate::audit::as_u64(indexed.runs.len()),
+        };
+        Ok((parsed, read_now, via))
+    });
+    let (parsed, read_now, via) = match through_index {
+        Ok(read) => read,
         Err(why) => {
             let (parsed, read_now) = pull_walked(&path, Some((meta.dev(), meta.ino())), whole)?;
             (parsed, read_now, Via::Walk { why })
@@ -2911,6 +2918,35 @@ pub(crate) fn zerodha_refusals_of(
             "via": via,
         }),
     ))
+}
+
+/// The journal's index, when this reader may read the refusals through it.
+///
+/// [`pull_indexed`] files each refusal under the run the index holds before
+/// it, so a `runs` entry that will not decode, a run the index can no longer
+/// show, filed that run's members under the vendor of the run before it.
+/// [`crate::audit::Indexed::malformed`] counts it (and a `faults` entry that
+/// will not decode), and an index holding any is refused by name here, so the
+/// journal is walked and the answer says why: the rule `/audit.json`'s
+/// attribution and `pullrun::older_runs` already keep (PG-71; PREC-1, D-5410).
+///
+/// # Errors
+///
+/// [`crate::audit::Journal::read_index`]'s, or an index holding an entry that
+/// will not decode, with the count.
+fn trusted_index(
+    journal: &crate::audit::Journal,
+    total: u64,
+) -> Result<crate::audit::Indexed, String> {
+    let indexed = journal.read_index(total)?;
+    if indexed.malformed > 0 {
+        return Err(format!(
+            "{} of the index's entries cannot be read, so a run may be missing from it and a \
+             refusal filed under another run's vendor",
+            indexed.malformed
+        ));
+    }
+    Ok(indexed)
 }
 
 /// `symbol`'s Zerodha refusals through the index: the records its `refusals`
@@ -3085,10 +3121,15 @@ pub(crate) fn warm_pull_journal(root: &Path) -> Result<PullWarmed, String> {
     let len = meta.len();
     let whole = len - len % crate::audit::RECORD_LEN_U64;
     // A JOURNAL ITS INDEX COVERS IS NOT WALKED (WP-33c): a request reads it
-    // through the index, so a walk at start would read 1 GiB for nobody.
-    if crate::audit::Journal::at(root)
-        .read_index(whole / crate::audit::RECORD_LEN_U64)
-        .is_ok()
+    // through the index, so a walk at start would read 1 GiB for nobody. An
+    // index that lost an entry is not one a request reads through
+    // ([`trusted_index`], D-5410), so that journal is walked here, off the
+    // request path, as one with no index is.
+    if trusted_index(
+        &crate::audit::Journal::at(root),
+        whole / crate::audit::RECORD_LEN_U64,
+    )
+    .is_ok()
     {
         return Ok(PullWarmed {
             present: true,
@@ -7805,6 +7846,47 @@ mod tests {
         assert_eq!(span.page, 1);
     }
 
+    /// **ONE STRICT MONTH SPELLING HERE TOO** (PG-63, PG-65; PREC-1, D-5405).
+    /// `bound` and `parse_derive` checked only the LENGTHS of a month's halves
+    /// and handed them to `str::parse`, which takes a leading `+`: on the
+    /// shadow of the real store, 18 Oct 2026, `from=2025-%2B1` answered
+    /// January 2025 under HTTP 200. Every signed or padded spelling is
+    /// refused, in `from`, in `to` and in a derive ledger line, and the one
+    /// spelling still reads.
+    #[test]
+    fn a_month_with_a_signed_field_is_refused_on_the_route_and_in_the_derive_ledger() {
+        for bad in ["2025-%2B1", "%2B025-01", "2025-1", "02025-01", "2025-001"] {
+            for query in [
+                format!("feed=gdfl&instrument=NSE-INDEX-NIFTY&from={bad}&to=2025-02"),
+                format!("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-01&to={bad}"),
+            ] {
+                let why = asked(&query).expect_err(&query);
+                assert!(why.contains("neither a day"), "{query}: {why}");
+            }
+        }
+        let span = asked("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-01&to=2025-02")
+            .expect("the one spelling reads");
+        assert_eq!(
+            (span.from, span.to),
+            (
+                Day::new(2025, 1, 1).expect("a day"),
+                Day::new(2025, 2, 28).expect("a day")
+            )
+        );
+        let line = |month: &str| {
+            format!(
+                "derive NSE-INDEX-NIFTY 5min {month} v=1 days=1 buckets=1 withheld=0 partial=0 \
+                 run=1"
+            )
+        };
+        for bad in ["2020-+1", "+020-01", "2020-1", "2020-001"] {
+            let why = parse_derive(1, &line(bad)).expect_err(bad);
+            assert!(why.contains("is not a month as YYYY-MM"), "{bad}: {why}");
+        }
+        let (_, _, kept) = parse_derive(1, &line("2020-01")).expect("the one spelling reads");
+        assert_eq!(kept.month, YearMonth::new(2020, 1).expect("a month"));
+    }
+
     /// **A CENSUS KEY NAMES ITS CONTRACT INSIDE IT**, a symbol may hold a
     /// dash, and `contract=` agreeing with the key is the same contract.
     #[test]
@@ -8366,6 +8448,227 @@ mod tests {
             "the two indexed, and the one past the cover"
         );
         assert_eq!(read.parsed.by_symbol["ZZOIL"].len(), 2);
+    }
+
+    /// **AN INDEX THAT LOST A RUN ENTRY IS WALKED FOR THE REFUSALS, AT START
+    /// AND ON A REQUEST, AND SAYS WHY** (PG-71, FM-500; PREC-1, D-5410).
+    /// `pull_indexed` files each refusal under the run the index holds before
+    /// it, so a `runs` entry that will not decode filed the lost run's members
+    /// under the run before it: below, a reference run's refusal was read as
+    /// Zerodha's, two where the journal holds one. `/audit.json` and
+    /// `pullrun::older_runs` already refused such an index; this reader read
+    /// it as a whole one.
+    #[test]
+    fn an_index_that_lost_a_run_entry_is_walked_for_the_refusals_and_says_why() {
+        let whole = "conflicting vendor candles at 1578853800; refused before append";
+        let build = |name: &str| {
+            let root = root_of(name);
+            pull_run(
+                &root,
+                "zerodha_nse_checked fixture",
+                &[("ZZOIL", "2018-01-01", "2026-09-30", whole)],
+            );
+            pull_run(
+                &root,
+                "Reference indices",
+                &[("ZZOIL", "2018-01-01", "2026-09-30", whole)],
+            );
+            root
+        };
+        let held = build("pull-index-whole-runs");
+        let truth = read_pull_journal(&held, "ZZOIL").unwrap();
+        assert_eq!(
+            truth.via,
+            Via::Index {
+                covered: 4,
+                runs: 2
+            },
+            "the premise: a whole index is read"
+        );
+        assert_eq!(
+            (
+                truth.parsed.by_symbol["ZZOIL"].len(),
+                truth.parsed.other_vendor
+            ),
+            (1, 1),
+            "the premise: one Zerodha refusal, one other vendor's"
+        );
+
+        // A `runs` ENTRY THAT WILL NOT DECODE: the reference run's.
+        let lose_the_second_run = |root: &Path| {
+            let runs = crate::audit::Journal::at(root).index_dir().join("runs");
+            let mut bytes = std::fs::read(&runs).unwrap();
+            assert_eq!(bytes.len(), 64, "two run records, two entries");
+            bytes[32 + 3] ^= 0xff;
+            std::fs::write(&runs, &bytes).unwrap();
+        };
+        let root = build("pull-index-lost-run");
+        lose_the_second_run(&root);
+        let read = read_pull_journal(&root, "ZZOIL").unwrap();
+        assert_eq!(
+            read.parsed.by_symbol["ZZOIL"], truth.parsed.by_symbol["ZZOIL"],
+            "Zerodha's refusal only: the reference run's is not filed under Zerodha"
+        );
+        assert_eq!(read.parsed.other_vendor, 1);
+        assert!(
+            matches!(
+                read.via,
+                Via::Walk { ref why } if why.contains("1 of the index's entries cannot be read")
+            ),
+            "{:?}",
+            read.via
+        );
+        // THE WALK AT START TAKES IT TOO: an index that lost an entry is not
+        // one a request may read through, so the start does not leave it to
+        // the first request.
+        let warmed = build("pull-index-lost-run-warm");
+        lose_the_second_run(&warmed);
+        assert_eq!(
+            warm_pull_journal(&warmed).map(|walked| walked.read),
+            Ok(4),
+            "a damaged index is walked at start, every record once"
+        );
+        let after = read_pull_journal(&warmed, "ZZOIL").unwrap();
+        assert_eq!(after.read_now, 0, "the walk at start was installed");
+        assert_eq!(
+            after.parsed.by_symbol["ZZOIL"],
+            truth.parsed.by_symbol["ZZOIL"]
+        );
+        let _ = std::fs::remove_dir_all(&held);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&warmed);
+    }
+
+    /// **A REFUSAL ENTRY THAT WILL NOT READ WALKS THE JOURNAL, AND SAYS WHY**
+    /// (PG-71, FM-500; PREC-1, D-5410). `refusal_ordinals` refuses a symbol's
+    /// index file holding an entry that is not a refusal entry (D-5400), and
+    /// this reader answered that refusal as an unread pull journal: the day's
+    /// refusals were withheld although the journal itself reads. It now walks
+    /// the journal, finds every refusal, and names the damaged entry.
+    #[test]
+    fn a_refusal_entry_that_will_not_read_walks_the_journal_and_says_why() {
+        let root = root_of("pull-index-damaged-refusal");
+        pull_run(
+            &root,
+            "zerodha_nse_checked fixture",
+            &[
+                (
+                    "ZZOIL",
+                    "2018-01-01",
+                    "2026-09-30",
+                    "conflicting vendor candles at 1578853800; refused before append",
+                ),
+                (
+                    "ZZOIL",
+                    "2018-01-01",
+                    "2026-09-30",
+                    "conflicting vendor candles at 1578853860; refused before append",
+                ),
+            ],
+        );
+        let truth = read_pull_journal(&root, "ZZOIL").unwrap();
+        assert!(
+            matches!(truth.via, Via::Index { .. }),
+            "the premise: {:?}",
+            truth.via
+        );
+        assert_eq!(truth.parsed.by_symbol["ZZOIL"].len(), 2, "the premise");
+        let refusals = crate::audit::Journal::at(&root)
+            .index_dir()
+            .join("refusals")
+            .join("ZZOIL.idx");
+        let mut image = std::fs::read(&refusals).unwrap();
+        assert_eq!(image.len(), 32, "two refusals, two entries");
+        image[3] ^= 0xff;
+        std::fs::write(&refusals, &image).unwrap();
+        let read = read_pull_journal(&root, "ZZOIL").expect("walked, not refused");
+        assert!(
+            matches!(
+                read.via,
+                Via::Walk { ref why } if why.contains("is not a refusal entry")
+                    && why.contains("ZZOIL.idx")
+            ),
+            "{:?}",
+            read.via
+        );
+        assert_eq!(
+            read.parsed.by_symbol["ZZOIL"], truth.parsed.by_symbol["ZZOIL"],
+            "every refusal the journal holds, none lost with the entry"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN INDEX AHEAD OF ITS JOURNAL IS WALKED, AT START AND ON A REQUEST,
+    /// AND SAYS WHY** (PG-71; PREC-1, D-5412). [`trusted_index`] is asked
+    /// with the journal's own count of whole records, so an index covering
+    /// records the journal no longer holds (a journal cut back, or put back
+    /// from an older copy) is refused by `read_index` and the refusals are
+    /// read from the journal itself. Any other count handed to it (the
+    /// surviving mutant `whole * stride` of D-5410's line) read this index as
+    /// whole: the request answered through it, and the start skipped the walk.
+    #[test]
+    fn an_index_ahead_of_its_journal_is_walked_and_says_why() {
+        let build = |name: &str| {
+            let root = root_of(name);
+            for at in ["1578853800", "1578853860"] {
+                let why = format!("conflicting vendor candles at {at}; refused before append");
+                pull_run(
+                    &root,
+                    "zerodha_nse_checked fixture",
+                    &[("ZZOIL", "2018-01-01", "2026-09-30", why.as_str())],
+                );
+            }
+            let whole = read_pull_journal(&root, "ZZOIL").unwrap();
+            assert_eq!(
+                (whole.via.clone(), whole.parsed.by_symbol["ZZOIL"].len()),
+                (
+                    Via::Index {
+                        covered: 4,
+                        runs: 2
+                    },
+                    2
+                ),
+                "the premise: two runs, four records, all four indexed"
+            );
+            // CUT THE JOURNAL BACK TO ITS FIRST RUN: the index still covers
+            // the second run's two records, which the journal no longer holds.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&whole.path)
+                .unwrap()
+                .set_len(2 * crate::audit::RECORD_LEN_U64)
+                .unwrap();
+            root
+        };
+        let root = build("pull-index-ahead");
+        let read = read_pull_journal(&root, "ZZOIL").unwrap();
+        assert!(
+            matches!(
+                read.via,
+                Via::Walk { ref why } if why.contains("covers 4 records and the journal holds 2")
+            ),
+            "{:?}",
+            read.via
+        );
+        assert_eq!(
+            (
+                read.records,
+                read.read_now,
+                read.parsed.by_symbol["ZZOIL"].len()
+            ),
+            (2, 2, 1),
+            "the journal's own two records, walked: the first run's refusal only"
+        );
+        // AT START TOO: an index ahead of its journal is not one a request
+        // may read through, so the start walks the journal.
+        let warmed = build("pull-index-ahead-warm");
+        assert_eq!(
+            warm_pull_journal(&warmed).map(|walked| walked.read),
+            Ok(2),
+            "an index ahead of its journal is walked at start, every record once"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&warmed);
     }
 
     /// Put the walk-at-start mark on `path`'s tail, with nothing read: a walk
