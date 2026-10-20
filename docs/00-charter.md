@@ -1319,3 +1319,25 @@ files of `github.com/dropbox/dropbox-api-spec`:
 The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
+
+## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-5903)
+
+§9 and D-0151 record that from 2026-08-03 every share an NSE index is
+computed from leaves continuous trading at 15:15 for the cash closing auction,
+while the index's own session keeps its 15:30 close (`pull::vendor`'s
+`NSE_INDEX_SESSIONS`, `CAS_INDEX_CIRCULAR`), and §9 left "whether an index
+level freezes during the auction" UNVERIFIED. This is what both feeds hold
+there, measured, not what NSE publishes about it.
+
+| What | Measured | How |
+|---|---|---|
+| Zerodha NIFTY and BANKNIFTY `1min`, 15:15 onward | On **every** session 2026-08-03..2026-09-30 (42 each), exactly one run of minutes with `O = H = L = C`, each equal to the one before, starting **15:15** and lasting **780 or 840 s** (to 15:27 or 15:28); on **none** of the sessions 2026-07-20..2026-07-31 | `GET /dayflags.json?feed=zerodha&instrument=NSE-INDEX-{NIFTY,BANKNIFTY}&from=2026-07-20&to=2026-09-30` on a read-only shadow of the operator's store (bars linked, `state/fix/shadow.sh`), R3-13's build before the auction window was set aside: `index.frozen.longest_from` and `longest_s` per day |
+| GDFL NIFTY seconds, 15:15 onward | The import's day ledger measures the index unchanged from **15:15:00** for **838, 860, 864 and 799 s** on 2026-09-25, -28, -29 and -30 (`flat_max_s`, `flat_max_at`; BANKNIFTY 839 s from 15:14:59 on 2026-09-25) | `<store>/imports/gdfl.dayflags` lines 107-136, read 2026-10-20 through the same shadow |
+
+So the index **holds still from 15:15 until the auction's close is printed**
+on both feeds, every session of the auction era measured. R3-13 sets that
+window aside from the frozen-index flag as it sets a recorded halt aside
+(D-5903 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
+recomputing the index, or computes it from constituents that no longer
+trade), and whether a session outside the measured span differs; no NSE page
+read here says either.

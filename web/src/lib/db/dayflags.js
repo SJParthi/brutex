@@ -29,16 +29,79 @@ export const DAYFLAGS_PAGE_DAYS = 92;
 /**
  * The `/dayflags.json` URL for one feed, instrument and day span.
  *
+ * THE GRID'S RUNG RIDES ALONG (R3-13 goal 1): `timeframe` is the rung the
+ * grid shows, so the band counts what the grid shows — a Zerodha `1day` grid
+ * asks for day bars, and a session that holds minutes and no day bar is the
+ * day bar missing. `expiry` narrows an option family (`NSE-FNO-NIFTY`) to one
+ * expiry, so the days after it read expired and owe nothing (SC-CLOSE-12).
+ * Either is left out when empty, and the server counts the feed's finest.
+ *
  * @param {string} feed
  * @param {string} instrument a census key, contract included
  * @param {string} from `YYYY-MM-DD`
  * @param {string} to `YYYY-MM-DD`
  * @param {number} [page]
+ * @param {{ timeframe?: string, expiry?: string }} [at]
  */
-export function dayflagsUrl(feed, instrument, from, to, page = 0) {
+export function dayflagsUrl(feed, instrument, from, to, page = 0, at = {}) {
   const q = new URLSearchParams({ feed, instrument, from, to, order: 'asc' });
   if (page > 0) q.set('page', String(page));
+  if (at.timeframe) q.set('timeframe', at.timeframe);
+  if (at.expiry) q.set('expiry', at.expiry);
   return `/dayflags.json?${q}`;
+}
+
+/**
+ * THE ONE INSTRUMENT A DAY FLAG IS ABOUT, from the rows the selection
+ * matches at the grid's rung: the exact key when there is one series (a spot
+ * series, or ONE CONTRACT — R3-13: the band asks about that contract, never
+ * the whole option family), else the underlying's options as a kind
+ * (`NSE-FNO-NIFTY`), whose calendar and import days still answer though no
+ * one contract's bars can be counted. `''` when the selection spans
+ * instruments. A row of another rung than the grid's is not one the grid
+ * shows and does not count; `rung` `''` counts every row.
+ *
+ * @param {any[]} rows
+ * @param {string} [rung] the grid's rung
+ */
+export function bandInstrument(rows, rung = '') {
+  let one = '';
+  let base = '';
+  for (const r of rows) {
+    if (r.absent || (rung && r.timeframe && r.timeframe !== rung)) continue;
+    if (one === '') one = r.instrument;
+    else if (one !== r.instrument) one = '\u0000';
+    const parts = String(r.instrument).split('-');
+    const kind = parts.length > 2 ? `${parts[0]}-${parts[1]}-${r.underlying ?? parts.slice(2).join('-')}` : '';
+    if (base === '') base = kind;
+    else if (base !== kind) base = '\u0000';
+  }
+  if (one !== '' && one !== '\u0000') return one;
+  return base !== '' && base !== '\u0000' ? base : '';
+}
+
+/**
+ * THE ONE EXPIRY AN OPTION FAMILY'S ROWS SHARE (SC-CLOSE-12), or `''`: a
+ * selection of one expiry at any strike asks the family, and the days after
+ * that expiry then read expired and owe nothing, never a hole. Sent only
+ * where the band asks the family: a contract carries its expiry in its key.
+ *
+ * @param {any[]} rows
+ * @param {string} instrument what `bandInstrument` answered
+ * @param {string} [rung] the grid's rung
+ */
+export function bandExpiry(rows, instrument, rung = '') {
+  const family = String(instrument).split('-')[1] === 'FNO' && !/-\d{4}-\d{2}-\d{2}-/.test(String(instrument));
+  if (!family) return '';
+  let expiry = '';
+  for (const r of rows) {
+    if (r.absent || (rung && r.timeframe && r.timeframe !== rung)) continue;
+    const e = typeof r.expiry === 'string' ? r.expiry : '';
+    if (e === '') return '';
+    if (expiry === '') expiry = e;
+    else if (expiry !== e) return '';
+  }
+  return expiry;
 }
 
 /**
@@ -68,6 +131,16 @@ export const DAY_KINDS = [
   // 10 bps apart — no time is missing (DB-G96).
   { kind: 'dual', word: 'two values in one second', tone: 'warn' },
   { kind: 'junk', word: 'junk row', tone: 'warn' },
+  // AN INDEX THAT STOPPED CHANGING, OR PRINTED OUTSIDE ITS DAY'S RANGE
+  // (DB-B20): a frozen dissemination is not a halt and not a vendor gap.
+  { kind: 'frozen', word: 'index frozen in session', tone: 'warn' },
+  { kind: 'outside_range', word: 'intraday value outside the day range', tone: 'warn' },
+  // A CLOSED DAY THE OTHER FEED TRADED (DB-A15): evidence the calendar,
+  // measured from Zerodha's own bars, cannot give by itself.
+  { kind: 'peer_on_closed', word: 'other feed traded on a closed day', tone: 'warn' },
+  // A DAY BUILT UNDER A BAR DEFINITION THIS BUILD WOULD NOT BUILD (R3-13
+  // goal 3): labelled until it is restated.
+  { kind: 'old_definition', word: 'built under an older bar definition', tone: 'warn' },
   { kind: 'incomplete_other', word: 'import incomplete for other files', tone: 'warn' },
   { kind: 'late', word: 'late rows deferred', tone: 'warn' },
   { kind: 'fills', word: 'mostly zero-volume minutes', tone: 'warn' },
@@ -75,6 +148,8 @@ export const DAY_KINDS = [
   { kind: 'special', word: 'special session', tone: 'info' },
   { kind: 'unmeasured', word: 'session of unmeasured length', tone: 'info' },
   { kind: 'cas', word: 'closing auction from 15:15', tone: 'info' },
+  // A DAY AFTER A CONTRACT'S EXPIRY OWES NOTHING (SC-CLOSE-12): never a hole.
+  { kind: 'expired', word: 'after expiry', tone: 'quiet' },
   { kind: 'not_reached', word: 'not imported yet', tone: 'quiet' },
   { kind: 'no_trade', word: 'no trade (trade-driven)', tone: 'quiet' },
   // `/feeds.json` `archive` is the vendor's archive AS MEASURED (R3-05): its
@@ -95,9 +170,12 @@ export const DAY_KINDS = [
 /** @type {Map<string, { kind: string, word: string, tone: string }>} */
 const KIND = new Map(DAY_KINDS.map((k) => [k.kind, k]));
 
+/** The word of a closing-auction day whose dated flag no master holds (SC-CLOSE-8). */
+export const CAS_UNHELD = 'closing-auction window, flag not held';
+
 /** The kinds that are facts about the day, not flags: an ordinary or closed
  *  day, a day outside a span, a trade-driven day with no trade. */
-const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'before_archive', 'no_trade']);
+const QUIET = new Set(['session', 'closed', 'outside', 'outside_archive', 'before_archive', 'no_trade', 'expired']);
 
 /**
  * The exchange calendar's session codes (`pull::calendar`, D-3319): a
@@ -226,10 +304,16 @@ export function kindsOf(rec, ctx = {}) {
   // day nothing traded, never a store gap; a Zerodha minute series, which
   // sends a candle for every minute of a session, is not one.
   const segment = segmentOf(rec?.instrument);
-  const tradeDriven = segment === 'FNO' || (segment === 'CASH' && rec?.held?.rung === '1s');
+  // THE FINEST RUNG DECIDES IT, whatever rung the grid counts (R3-13): `held`
+  // may be the grid's coarser rung, `finest` is the feed's own.
+  const tradeDriven = segment === 'FNO' || (segment === 'CASH' && (rec?.finest?.rung ?? rec?.held?.rung) === '1s');
   if (before) out.push('before_archive');
   else if (beyond) out.push('outside_archive');
-  if (session && !beyond && held === 0 && outcome !== 'refused' && !(outcome === 'incomplete' && out.includes('incomplete'))) {
+  // A DAY AFTER EXPIRY OWES NOTHING (SC-CLOSE-12): no store gap, no "no
+  // trade", no "not imported yet" — `/gaps.json` calls it expired too.
+  const expired = rec?.calendar?.expired === true || rec?.contract?.expired === true;
+  if (expired) out.push('expired');
+  if (session && !beyond && !expired && held === 0 && outcome !== 'refused' && !(outcome === 'incomplete' && out.includes('incomplete'))) {
     out.push(tradeDriven ? 'no_trade' : 'store_gap');
   }
   if (rec?.refused_front === true) out.push('front');
@@ -248,22 +332,47 @@ export function kindsOf(rec, ctx = {}) {
     if (idx && Number(idx.dual_spread_s) > 0) out.push('dual');
   }
   if (Array.isArray(rec?.junk) && rec.junk.length > 0) out.push('junk');
+  if (rec?.index?.frozen?.flagged === true) out.push('frozen');
+  if (rec?.index?.outside_day_range?.flagged === true) out.push('outside_range');
+  const peer = barsOf(rec?.peer);
+  if (code === '.' && peer !== null && peer > 0) out.push('peer_on_closed');
+  if (rec?.bar_definition?.current === false) out.push('old_definition');
   if (Number(rec?.import?.late) > 0) out.push('late');
   // HELD IS NOT TRADED (DB-B16): a share's day whose minute bars are mostly
   // zero-volume candles reads complete by count alone.
-  const fills = Number.isSafeInteger(rec?.held?.zero_volume) ? rec.held.zero_volume : null;
-  if (held !== null && held > 0 && fills !== null && fills * 2 >= held) out.push('fills');
+  // The minutes are the finest rung's: on a coarser grid they ride on `finest`.
+  const minutes = minutesOf(rec);
+  const minuteBars = barsOf(minutes);
+  const fills = Number.isSafeInteger(minutes?.zero_volume) ? minutes.zero_volume : null;
+  if (minuteBars !== null && minuteBars > 0 && fills !== null && fills * 2 >= minuteBars) out.push('fills');
   if (code === 'H' || rec?.events?.halt) out.push('halt');
   if (code === 'P') out.push('special');
   if (code === 'U') out.push('unmeasured');
-  if (code === 'X' && segmentOf(rec?.instrument) === 'CASH') out.push('cas');
-  if (session && !beyond && outcome === 'none' && rec?.import?.reached === false) out.push('not_reached');
+  // THE CLOSING AUCTION ONLY ON A DAY THE SHARE'S DATED FLAG IS 1 (SC-CLOSE-9):
+  // the calendar's `X` says the day has an auction for eligible shares, and
+  // `calendar.cas.eligible` says whether this share was one that day. Flag 0
+  // is an ordinary session. A flag no master holds keeps the kind — its
+  // 15:15-15:29 window is the day record's `unverified` phase, which the chart
+  // draws as such (`chart.js` `dayBands`) — and its WORD says the flag is not
+  // held (`cellOf`), never that the day has an auction.
+  if (code === 'X' && segmentOf(rec?.instrument) === 'CASH' && rec?.calendar?.cas?.eligible !== false) out.push('cas');
+  if (session && !beyond && !expired && outcome === 'none' && rec?.import?.reached === false) out.push('not_reached');
   if (code === '.') out.push('closed');
   if (code === '-') out.push('outside');
   if (out.length === 0) out.push('session');
   // ONE KIND ONCE, in the fixed order of `DAY_KINDS`.
   const seen = new Set(out);
   return DAY_KINDS.map((k) => k.kind).filter((k) => seen.has(k));
+}
+
+/**
+ * The count a record's zero-volume minutes are counted in: `finest` where the
+ * grid's rung is another one (R3-13), else `held`.
+ *
+ * @param {any} rec
+ */
+function minutesOf(rec) {
+  return rec?.finest && typeof rec.finest === 'object' ? rec.finest : rec?.held;
 }
 
 /** @param {unknown} key */
@@ -302,7 +411,12 @@ function saysOf(rec) {
  */
 export function cellOf(rec, ctx = {}) {
   const kinds = kindsOf(rec, ctx);
-  const lead = KIND.get(kinds[0]) ?? { kind: kinds[0], word: kinds[0], tone: 'quiet' };
+  // EVERY KIND `kindsOf` ANSWERS IS ONE OF `DAY_KINDS` (it filters by them, and
+  // always answers one), so the lookup always finds it.
+  const known = /** @type {(typeof DAY_KINDS)[number]} */ (KIND.get(kinds[0]));
+  // A CLOSING-AUCTION DAY WHOSE FLAG NO MASTER HOLDS is said as that
+  // (SC-CLOSE-8, SC-CLOSE-9): never "closing auction from 15:15".
+  const lead = known.kind === 'cas' && rec?.calendar?.cas?.eligible !== true ? { ...known, word: CAS_UNHELD } : known;
   return {
     day: String(rec?.day ?? ''),
     code: String(rec?.calendar?.code ?? '-'),
@@ -317,13 +431,71 @@ export function cellOf(rec, ctx = {}) {
     peerWhy: typeof rec?.peer?.why === 'string' ? rec.peer.why : null,
     // ZERO-VOLUME BARS, where the route counted them (a Zerodha share's
     // minutes, DB-B16); `null` is "not counted", never zero.
-    fills: Number.isSafeInteger(rec?.held?.zero_volume) ? rec.held.zero_volume : null,
+    fills: Number.isSafeInteger(minutesOf(rec)?.zero_volume) ? minutesOf(rec).zero_volume : null,
     // REFUSALS AN EARLIER RUN LOGGED (DB-B45): history, with the run that
     // logged them where the journal records it — never the current reason.
     superseded: Array.isArray(rec?.import?.refusals?.superseded) ? rec.import.refusals.superseded : [],
     says: saysOf(rec),
+    // THE GRID'S RUNG AND THE FINEST BESIDE IT (R3-13 goal 1): `held` counts
+    // what the grid shows; `finest` is the feed's finest rung where the two
+    // differ, `null` otherwise.
+    rung: typeof rec?.held?.rung === 'string' ? rec.held.rung : '',
+    finest: barsOf(rec?.finest),
+    finestRung: typeof rec?.finest?.rung === 'string' ? rec.finest.rung : '',
+    // THE BAR DEFINITION THAT BUILT THE DAY (R3-13 goal 3), or `null`.
+    definition: definitionOf(rec?.bar_definition),
+    // THE CLOSING-AUCTION FLAG (SC-CLOSE-8): `true`, `false`, or `null` when
+    // no master holds it or none applies.
+    cas: typeof rec?.calendar?.cas?.eligible === 'boolean' ? rec.calendar.cas.eligible : null,
+    auctionSidecar: typeof rec?.auction_sidecar === 'boolean' ? rec.auction_sidecar : null,
+    // DAY-LEDGER FIELDS THIS PAGE HAS NO NAME FOR (R3-13 goal 5), drawn by
+    // the names they were written under.
+    unknown: unknownFieldsOf(rec?.quality),
     flagged: kinds.some((k) => !QUIET.has(k))
   };
+}
+
+/**
+ * The bar definition of a day, as the band says it: `null` where the record
+ * names none.
+ *
+ * @param {any} d `rec.bar_definition`
+ * @returns {{ value: number, current: boolean, means: string, from: string, thisBuild: number | null } | null}
+ */
+export function definitionOf(d) {
+  if (!d || typeof d !== 'object' || !Number.isSafeInteger(d.value)) return null;
+  return {
+    value: d.value,
+    current: d.current === true,
+    means: typeof d.means === 'string' ? d.means : '',
+    from: typeof d.from === 'string' ? d.from : '',
+    thisBuild: Number.isSafeInteger(d.this_build) ? d.this_build : null
+  };
+}
+
+/**
+ * Every day-ledger field the server serves and this page has no name for,
+ * kind by kind: the ones a line lists under `unknown`, with their values.
+ * A field a later writer adds (R3-26) appears here with no change to this
+ * page.
+ *
+ * @param {any} quality `rec.quality`
+ * @returns {{ kind: string, name: string, value: string }[]}
+ */
+export function unknownFieldsOf(quality) {
+  /** @type {{ kind: string, name: string, value: string }[]} */
+  const out = [];
+  if (!quality || typeof quality !== 'object') return out;
+  for (const kind of ['indices', 'stocks', 'options']) {
+    const line = quality[kind];
+    if (!line || typeof line !== 'object' || !Array.isArray(line.unknown)) continue;
+    for (const name of line.unknown) {
+      if (typeof name !== 'string' || !(name in line)) continue;
+      const value = line[name];
+      out.push({ kind, name, value: value === null ? 'null' : String(value) });
+    }
+  }
+  return out;
 }
 
 /**
@@ -404,10 +576,74 @@ export function deriveOf(lines) {
  * @param {ReturnType<typeof cellOf>[]} cells
  */
 export function tally(cells) {
-  /** @type {Map<string, number>} */
+  // BY KIND AND THE CELL'S OWN WORD: a closing-auction day whose flag is not
+  // held is counted apart from one whose flag is 1 (SC-CLOSE-9).
+  /** @type {Map<string, { n: number, word: string }[]>} */
   const by = new Map();
-  for (const c of cells) by.set(c.kind, (by.get(c.kind) ?? 0) + 1);
-  return DAY_KINDS.filter((k) => by.has(k.kind)).map((k) => ({ ...k, n: by.get(k.kind) ?? 0 }));
+  for (const c of cells) {
+    const words = by.get(c.kind) ?? [];
+    const seen = words.find((w) => w.word === c.word);
+    if (seen) seen.n += 1;
+    else words.push({ word: c.word, n: 1 });
+    by.set(c.kind, words);
+  }
+  return DAY_KINDS.flatMap((k) => (by.get(k.kind) ?? []).map((w) => ({ ...k, word: w.word, n: w.n })));
+}
+
+/**
+ * The band's closing-auction line, counted (SC-CLOSE-8, SC-CLOSE-9): of the
+ * cells whose only kind is `cas`, the days the share's dated flag is 1
+ * (`days`), the rest, whose flag no master holds (`unheld`), and of the
+ * first only, the days whose month keeps the print apart in its sidecar
+ * (`apart`). An unheld day is never counted apart: the line says "kept
+ * apart" of a closing-auction day, and that day is not known to be one.
+ *
+ * And over EVERY cell that shows `cas`, alone or beside a fault: the days
+ * whose dated flag is 1 (`sessions`, the count AH-03's run sentence names),
+ * of them those whose month's sidecar the server stated (`sidecarSaid`), and
+ * of those the ones it holds (`sidecarHeld`). One pass, O(cells).
+ *
+ * @param {ReturnType<typeof cellOf>[]} cells
+ */
+export function casCounts(cells) {
+  const lone = cells.filter((c) => c.kind === 'cas' && c.kinds.length === 1);
+  const flagged = lone.filter((c) => c.cas === true);
+  const run = cells.filter((c) => c.kinds.includes('cas') && c.cas === true);
+  const said = run.filter((c) => typeof c.auctionSidecar === 'boolean');
+  return {
+    days: flagged.length,
+    unheld: lone.length - flagged.length,
+    apart: flagged.filter((c) => c.auctionSidecar === true).length,
+    sessions: run.length,
+    sidecarSaid: said.length,
+    sidecarHeld: said.filter((c) => c.auctionSidecar === true).length
+  };
+}
+
+/**
+ * WHAT THE BAND'S CLOSING-AUCTION LINE ADDS ABOUT THE SIDECAR (SC-CLOSE-9),
+ * after AH-03's run sentence (`auctionBandSentence`): only for a feed that
+ * files the print apart (`closing_auction.handling` `print_kept_apart`), and
+ * only over the flag-1 days whose sidecar the server read (a GDFL share's
+ * `auction_sidecar`). The server's `auction_sidecar` is `true` only where the
+ * month's sidecar files a print stamped on THAT day (per day, never per month:
+ * `docs/06-limits.md` L-AH03-2), so "kept apart" is never said of a day the
+ * sidecar does not hold; `''` where nothing was read. O(1).
+ *
+ * @param {any} feed the active feed's `/feeds.json` row
+ * @param {ReturnType<typeof casCounts>} cas
+ */
+export function casSidecarWords(feed, cas) {
+  if (feed?.closing_auction?.handling !== 'print_kept_apart' || cas.sidecarSaid === 0) return '';
+  const unsaid = cas.sessions - cas.sidecarSaid;
+  const rest = unsaid > 0 ? ` Whether ${unsaid} other day(s) have a print filed apart is not stated.` : '';
+  if (cas.sidecarHeld === cas.sidecarSaid) {
+    return `Every one of the ${cas.sidecarSaid} day(s) whose sidecar was read has its auction print filed apart from trades in the month's sidecar.${rest}`;
+  }
+  if (cas.sidecarHeld > 0) {
+    return `${cas.sidecarHeld} of the ${cas.sidecarSaid} day(s) whose sidecar was read have their auction print filed apart in the month's sidecar; the rest have none filed there, so where the vendor's file holds their print it is an ordinary one-second bar.${rest}`;
+  }
+  return `No day's auction print is filed apart in a sidecar, so where the vendor's file holds the print it is an ordinary one-second bar here.${rest}`;
 }
 
 /**

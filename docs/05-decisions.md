@@ -74543,3 +74543,115 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5903 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
+
+**Number** free on `feat/db-fix` on 2026-10-20 (the highest heading was
+D-5902); A6 renumbers it at landing from the ledger's head. Built in the cloud
+(branch `cloud/db-R3-13-20261017`, 17 Oct) and finished on the Mac (20 Oct).
+**Findings:** DB-029, DB-031, DB-053, DB-A15, DB-B20, DB-G38, DB-G40,
+SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
+
+1. `/dayflags.json` takes `timeframe=` (a rung `store::path::Timeframe::KNOWN`
+   names) and counts `held` at it; the feed's finest rung is counted beside it
+   as `finest` where the two differ. Absent, the finest is counted, so every
+   existing caller is unchanged. `Asked` gains no field (`sources.rs` builds it
+   by name); the rung travels as `dayflags_rules::Band`. Every caller of the
+   band, the L-IA-39 bench's `imports::day_band_json` included, parses its
+   query with one function, `dayflags::query_of`.
+2. `expiry=` narrows an option family key (`NSE-FNO-NIFTY`) to one expiry; a
+   contract's own key names its expiry and a disagreeing `expiry=` is refused,
+   as is one on a spot key. A day after the expiry is `expired`:
+   `owed_minutes` and `unverified_minutes` 0, as `/gaps.json`.
+3. A share's phases are built with its dated master flag
+   (`pull::cash_session_cache`, read as `bars_change::Rules::eligibility` reads
+   it): flag 1 owes 360 continuous minutes, flag 0 375, no master 360 and 15
+   unverified, with the reader's reason in `calendar.cas.why` and the notes. A
+   failed load is kept by the request only (AF-03's rule). Nothing is read for
+   a closed day; a session after today (IST) is `basis: "not_yet"`, never a
+   refusal. A loaded master is kept for the process (one per session day read).
+4. **"Kept apart from trades" is decided PER DAY, never per month** (closes
+   `docs/06-limits.md` L-AH03-2 for the band; `sources.rs` stays AG-04's): a
+   GDFL share month's `.auc` sidecar is read once a request a month, and a day
+   is `auction_sidecar: true` only where a record is stamped on it. A month
+   whose sidecar files nothing that day says so; a sidecar that will not read
+   is named in the notes and never said absent. An index record says the
+   prints are "counted by the import". The page calls the session's last print
+   the auction's only where it equals the official day close (0 bps), and never
+   claims the print's book.
+5. FROZEN: an index value unchanged for **180 s or more** in session, outside
+   any recorded halt and, from 2026-08-03, outside the cash closing auction's
+   window the index is computed through (item 15). Chosen, not sourced
+   (DB-B20's detector); the cause of a frozen dissemination is UNVERIFIED. Zerodha: from the day's one-minute bars
+   (`O = H = L = C`, equal minute to minute, no minute missing), scanned once
+   per (month file's device and inode, day's first row) and kept with the end
+   row it was read to; a page's first scans run on one scoped thread a month,
+   each on the month's own handle. GDFL: from the day ledger's `flat_max_s`,
+   counting only the run's seconds outside the recorded halt and the auction's
+   window (`judged_s`; 2020-03-13's run from 09:21:09 is the halt's), and a
+   run with no stamp on a halt or auction day is not flagged. OUTSIDE THE DAY RANGE: a minute's high above the
+   Zerodha `1day` bar's high, or its low below its low; not judged on GDFL at
+   read time (its seconds are up to 22,500 reads a day). Flags only; the bars
+   are served unchanged.
+6. A `recounted` day keeps the `late=` and `max_back_s=` of the last `done`,
+   `incomplete` or `refused` close of its kind, day and filter, named by
+   `late_line`. The count is said over all of the kind-day's files for a `*`
+   run, and over the files its run read, named by its filter, otherwise.
+7. `bar_definition`: the import journal's deciding line, else the day ledger's
+   line; current by `pull::gdfl_import::definition_is_current`. Said on every
+   option day and on any day not current.
+8. A day-ledger field this reader has no name for is served under its own name
+   on the line's object and listed in `unknown`; the names `scope`, `line` and
+   `unknown` are the object's own and refuse the line, as does a field written
+   twice.
+9. A share's peer count is looked up under its other names from
+   `brutex_core::alias::LINEAGE` (D-3333) where its own name holds no month
+   (`peer.as`).
+10. A GDFL share's `sampled` names the market index `NIFTY` (`of: "market"`)
+    and the share's own first held second (CMP-06).
+11. The previous held `1day` bar is looked for up to 12 opens back and then up
+    to 144 more months by probe, one open (DB-031); a history found empty there
+    is not probed again by `series_start`. **A month is held in either form and
+    in the generation the read door serves** (`store::generation::served_bars_path`,
+    D-5899): a month held only as `.sbar`, or served from a repair generation,
+    is never looked past, and a name the door would refuse is held, so the open
+    that follows names the refusal instead of an older month standing in.
+12. The band's peer feed and each feed's finest rung come from one function,
+    `dayflags_rules::feed_rungs` (R3-34 points it at the feed table).
+13. **Every count the band adds is a month fault** (R3-08's `month_faults`):
+    the grid's rung, a renamed share's other name and every failed read in a
+    month that opened, so damage beside a writer-held month is answered as
+    damage, never as "being written, ask again".
+14. On the page, a share is trade-driven, and its zero-volume minutes are
+    counted, by the feed's finest rung, whatever rung the grid counts; the
+    closing-auction line counts "kept apart" only on days whose dated flag is 1
+    (`casCounts`). Goal 4 reads `/sources/day.json`'s `basis`; a day whose
+    `basis.factor` is not a number is unmeasured and neither joins nor breaks a
+    run. Whether a percentage statistic on an adjusted run is refused stays
+    D-3323's and is not built here.
+15. **THE CASH CLOSING AUCTION'S WINDOW IS SET ASIDE ON AN INDEX DAY, AS A
+    HALT IS** (the Mac finish, found on the real store on 2026-10-20): from
+    2026-08-03 every NIFTY and BANKNIFTY session read "index value frozen in
+    session" from 15:15 on both feeds, because the index holds still while
+    its constituents are in the cash closing auction. The window is
+    `[the CAS-eligible share close, the index's close)` from the session
+    tables (`Venue::share_hours_on`, `Venue::hours_on`; 15:15:00-15:30:00),
+    on the index venue only and only from 2026-08-03
+    (`dayflags_rules::auction_window`). A Zerodha minute inside it never
+    starts or extends a frozen run; a GDFL ledger run counts only its seconds
+    outside the halt and the window, the two counted once where they meet.
+    The window is served as `index.frozen.auction_window` and named in the
+    phrase. Where either session row carries no verified hours nothing is set
+    aside, so a run there is flagged, never hidden. The stillness itself is a
+    MEASURED fact (`docs/00-charter.md`, "An NSE index through the cash
+    closing auction"), not the cause: why the index holds still there is
+    UNVERIFIED.
+16. **A day after expiry names no bar definition** (the Mac finish of
+    SC-CLOSE-12 and goal 3, found on the real store: the family narrowed to
+    2019-03-28 read "bar definition 3 built this day" beside "expired" over
+    2024-10). The kind-day's import built nothing of an expired contract, so
+    `bar_definition` is `null` there and no phrase is said; the band never
+    marks a day that owes nothing as built under an older definition.
+
+**Proof:** R313-01 to R313-27 (`docs/04-invariants.md`); the limits are
+L-R3-13-1 to L-R3-13-3 (`docs/06-limits.md`).
