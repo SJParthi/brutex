@@ -85,6 +85,14 @@ struct Boundary {
     levels: Vec<Vec<Piece>>,
 }
 
+/// The refusal of a column that swept no bar or does not reconcile. One
+/// sentence for every stored door: `sweep-stored` refuses with it here, and
+/// `sweep-all` refuses a month whose column swept nothing with the same words
+/// (g-zerodha-universe-census-2), so the two cannot describe one month two
+/// ways.
+pub(crate) const UNMEASURED_COLUMN: &str =
+    "AND checkpoint sweep requires a measured, reconciled signal column";
+
 pub(crate) fn run(
     root: &Path,
     attempt: &Attempt,
@@ -99,7 +107,7 @@ pub(crate) fn run(
         || !census.reconciles()
         || census.swept != u64::try_from(column.bits().len()).map_err(error)?
     {
-        return Err("AND checkpoint sweep requires a measured, reconciled signal column".into());
+        return Err(UNMEASURED_COLUMN.into());
     }
     let bits = engine::column::Column::try_from_rows(column.bits()).map_err(error)?;
     let sweep = walk(

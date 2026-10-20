@@ -18,6 +18,14 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
     store_root.join("imports").join("gdfl.journal")
 }
 
+/// The journal append lock beside the journal at `journal` (D-4803): every
+/// append to `imports/gdfl.journal` and to the ledgers beside it (the day,
+/// lineage, lots and scope ledgers) takes it, within `LOCK_WAIT` (D-4906).
+#[must_use]
+pub fn journal_lock_path(journal: &Path) -> PathBuf {
+    journal.with_file_name("gdfl.journal.lock")
+}
+
 /// The journal size past which a whole load says so out loud
 /// (`docs/06-limits.md` L-IA-2, RA-091): 64 MiB, about 4.8 times the
 /// real journal of 14 Oct 2026 (14,027,805 bytes in 23,270 lines). A run
@@ -264,16 +272,25 @@ pub(super) fn torn_fragment(fragment: &str) -> bool {
         }
         break;
     }
-    !rest.is_empty()
+    // A POWER CUT CAN LEAVE A FILE'S UNSYNCED EXTENSION AS ZEROS (FM-128;
+    // UNVERIFIED for APFS, which this rule does not need to know): a tail of
+    // NUL bytes, alone or after the start of a line, is a torn append, closed
+    // with the mark and said like any other ("closing a torn journal line"),
+    // never read as data. A NUL anywhere else is still foreign.
+    let unzeroed = rest.trim_end_matches('\0');
+    if unzeroed.len() < rest.len() && unzeroed.is_empty() {
+        return true;
+    }
+    !unzeroed.is_empty()
         && VERBS
             .into_iter()
-            .any(|verb| verb.starts_with(rest) || rest.starts_with(verb))
+            .any(|verb| verb.starts_with(unzeroed) || unzeroed.starts_with(verb))
 }
 
 /// Every verb the journal holds, each with the space after it: `refused`,
 /// `run` and `recounted` since D-3317 (`recounted` is written by `cli
 /// census-recount`, D-3316).
-const VERBS: [&str; 6] = [
+pub(super) const VERBS: [&str; 6] = [
     "begin ",
     "done ",
     "incomplete ",
@@ -281,6 +298,11 @@ const VERBS: [&str; 6] = [
     "run ",
     "recounted ",
 ];
+
+/// Every verb the journal holds, as a line's first field: the ONE verb table
+/// (IA-2, design §5.4), which `census_store`'s journal reader reads by, so no
+/// second copy can drift. [`VERBS`] is the same words with their space.
+pub const VERB_WORDS: [&str; 6] = ["begin", "done", "incomplete", "refused", "run", "recounted"];
 
 /// The journal, read once per run: the keys done under [`BAR_DEFINITION`]
 /// (and which of them closed with refusals), the keys begun and not
@@ -304,6 +326,25 @@ pub(crate) struct Journal {
     /// is not written again ([`Ctx::close`]), so a re-run over a special
     /// session or a day the source lacks writes nothing (D-2803).
     pub(super) refused_close: HashMap<String, String>,
+    /// WHAT A READER KEEPS OF EACH KEY'S CLOSES (design §5.4 "What a reader
+    /// keeps of each line", round 3 SF-11/SF-12/BL-5, round 6 SF-6; D-4851,
+    /// D-4882; IA-2). Each map holds at most one entry per key, so the load
+    /// stays O(1) per line and O(keys) in memory:
+    ///
+    /// the `reason=` of the key's LAST `incomplete` line: a hole is known by
+    /// its reason, never read again to learn it (D-4851). Kept after a later
+    /// `done`, because it is the last such line's; whether the key is still
+    /// a hole is [`Journal::is_done`]'s answer, not this map's.
+    pub(super) hole_reason: HashMap<String, String>,
+    /// The definition and `run=` of the key's FIRST close that wrote
+    /// seconds (`seconds=` above zero): the rule set the stored bars were
+    /// built under (D-4882). Never replaced by a later close.
+    pub(super) first_landing: HashMap<String, ClosedBy>,
+    /// The definition and `run=` of the key's LAST `done` close: the run a
+    /// verification names as having closed the day (design §6.1 detail 17,
+    /// round 6 SF-6), so none reads `audit/gdfl.repairs` for it. A
+    /// `recounted` line is not a `done` line and leaves it as it was.
+    pub(super) last_done: HashMap<String, ClosedBy>,
     /// The journal's length in bytes and in whole lines as this run last
     /// knew them, so the line a `begin` lands on can be named in a
     /// provenance record (D-3334's `journal_ordinal`). A journal another
@@ -522,6 +563,38 @@ fn shares_of(filter: &str) -> Option<impl Iterator<Item = &str>> {
 /// A closing line's `scope=`, `None` when it carries none (D-4878).
 fn scope_of<'l>(stats: &[&'l str]) -> Option<&'l str> {
     stats.iter().find_map(|field| field.strip_prefix("scope="))
+}
+
+/// The `reason=` a closing line names, if any. O(fields).
+fn reason_of<'l>(stats: &[&'l str]) -> Option<&'l str> {
+    stats.iter().find_map(|field| field.strip_prefix("reason="))
+}
+
+/// A close of one key as the journal states it (IA-2; D-4882, design §5.4):
+/// the bar definition the line names (`None` when it names none and is not
+/// D-2811's shape), and its `run=` (`None` for a line written before D-3317,
+/// which carries none — so "whether the line carries `run=`" is
+/// `run.is_some()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosedBy {
+    /// The bar definition the line names.
+    pub definition: Option<u32>,
+    /// The line's `run=`, when it carries one.
+    pub run: Option<u64>,
+}
+
+/// What the journal keeps of one key's closes (IA-2; design §5.4 "What a
+/// reader keeps of each line"; D-4851, D-4882, round 6 SF-6), each `None`
+/// when no such line was read. Three hash probes, O(1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyHistory<'j> {
+    /// The `reason=` of the key's last `incomplete` line: the hole's reason.
+    pub hole_reason: Option<&'j str>,
+    /// The key's first close with `seconds=` above zero: the rule set the
+    /// stored bars were built under.
+    pub first_landing: Option<ClosedBy>,
+    /// The key's last `done` close: the run that closed the day.
+    pub last_done: Option<ClosedBy>,
 }
 
 /// Whether `kind` and `day`, as a journal line spells them, are a share's day
@@ -849,6 +922,57 @@ impl Journal {
         self.done.contains(key)
     }
 
+    /// What the journal keeps of `key`'s closes ([`KeyHistory`]): three
+    /// hash probes.
+    pub(crate) fn history(&self, key: &str) -> KeyHistory<'_> {
+        KeyHistory {
+            hole_reason: self.hole_reason.get(key).map(String::as_str),
+            first_landing: self.first_landing.get(key).copied(),
+            last_done: self.last_done.get(key).copied(),
+        }
+    }
+
+    /// Keeps what a closing line of `key` adds to [`Journal::history`]
+    /// (IA-2; design §5.4): its `reason=` when it is `incomplete`, it as the
+    /// key's first landing when it is the first to write seconds, and it as
+    /// the key's last `done`. `definition` is what the line's own arm read
+    /// (a `done` line's [`built_under`]). O(fields) and at most three hash
+    /// writes.
+    fn keep_close(
+        &mut self,
+        (verb, key): (&str, &str),
+        stats: &[&str],
+        definition: Option<u32>,
+    ) -> Result<(), ()> {
+        let closed = ClosedBy {
+            definition,
+            run: run_of(stats)?,
+        };
+        if verb == "incomplete" {
+            match reason_of(stats) {
+                Some(reason) => {
+                    let _ = self.hole_reason.insert(key.to_owned(), reason.to_owned());
+                }
+                None => {
+                    let _ = self.hole_reason.remove(key);
+                }
+            }
+        }
+        // Which lines a load accepts is each arm's rule, unchanged here: a
+        // `seconds=` this journal never writes (not a count) lands nothing,
+        // and the line is read exactly as before.
+        let landed = count_of(stats, "seconds")
+            .unwrap_or(None)
+            .is_some_and(|seconds| seconds > 0);
+        if landed && !self.first_landing.contains_key(key) {
+            let _ = self.first_landing.insert(key.to_owned(), closed);
+        }
+        if verb == "done" {
+            let _ = self.last_done.insert(key.to_owned(), closed);
+        }
+        Ok(())
+    }
+
     /// How many runs its `run` lines name, and how many keys are begun and
     /// not closed.
     pub(crate) fn runs_and_open(&self) -> (usize, usize) {
@@ -991,6 +1115,7 @@ impl Journal {
             (definition, run, scope_of(stats)),
         );
         let key = format!("{kind} {day} {only}");
+        self.keep_close(("done", &key), stats, definition)?;
         self.refused_close.remove(&key);
         self.open.remove(&key);
         self.incomplete.remove(&key);
@@ -1071,11 +1196,12 @@ impl Journal {
                 let run = run_of(stats)?;
                 self.auction_line(verb, (*kind, *day, *only), (built, run, scope_of(stats)));
                 let key = key(kind, day, only);
+                self.keep_close((verb, &key), stats, built)?;
                 if *verb == "refused" {
                     let unrun: Vec<&str> = fields
                         .iter()
                         .copied()
-                        .filter(|field| !field.starts_with("run="))
+                        .filter(|field| !field.starts_with("run=") && !field.starts_with("at="))
                         .collect();
                     self.refused_close.insert(key.clone(), unrun.join(" "));
                 } else {
@@ -1098,6 +1224,7 @@ impl Journal {
                     (definition, run, scope_of(stats)),
                 );
                 let key = key(kind, day, only);
+                self.keep_close(("recounted", &key), stats, definition)?;
                 self.refused_close.remove(&key);
                 self.open.remove(&key);
                 self.incomplete.remove(&key);
@@ -1147,6 +1274,19 @@ impl Journal {
         };
         // The journal always sits in `imports/` under the store root.
         std::fs::create_dir_all(self.path.with_file_name("")).map_err(refused)?;
+        // EVERY APPEND UNDER THE JOURNAL LOCK (IA-2; D-4803, D-4905, D-4906):
+        // two kinds' runs, a recount and the day ledger append to one
+        // directory, so the count of the lines another process appended, the
+        // torn-tail check and this run's write are one step no other writer
+        // can enter, and the ordinal [`Journal::append`] answers is the line
+        // this run wrote. Taken within `LOCK_WAIT`, never for ever.
+        let _held = crate::gdfl_run::locks::take_path_within(
+            &journal_lock_path(&self.path),
+            crate::gdfl_run::locks::LOCK_WAIT,
+        )
+        .map_err(|fault| ImportRefusal::Journal {
+            why: format!("{}: {fault}", self.path.display()),
+        })?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -1155,9 +1295,29 @@ impl Journal {
             .map_err(refused)?;
         let mut text = String::new();
         let at = file.metadata().map_err(refused)?.len();
-        if at != self.known.get().0 {
-            // Another process appended since this run last wrote: its lines
-            // are counted once, so the next line's number is the file's.
+        let (known_bytes, known_lines) = self.known.get();
+        if at > known_bytes {
+            // Another process appended since this run last wrote: only ITS
+            // bytes are read and counted (O(bytes appended since), FM-094),
+            // so the next line's number is the file's.
+            let mut bytes = Vec::with_capacity(usize::try_from(at - known_bytes).unwrap_or(0));
+            file.seek(std::io::SeekFrom::Start(known_bytes))
+                .map_err(refused)?;
+            file.read_to_end(&mut bytes).map_err(refused)?;
+            self.known.set((
+                known_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                known_lines.saturating_add(newlines(&bytes)),
+            ));
+        } else if at < known_bytes {
+            // Shorter than this run last knew it: not an append. Counted
+            // again whole, and said, never trusted.
+            let shown = self.path.display().to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error(TARGET, "journal shorter than this run last knew it")
+                    .with("journal", shown.as_str())
+                    .with("known", known_bytes)
+                    .with("found", at),
+            );
             let mut bytes = Vec::new();
             file.seek(std::io::SeekFrom::Start(0)).map_err(refused)?;
             file.read_to_end(&mut bytes).map_err(refused)?;
@@ -1207,15 +1367,33 @@ pub(super) fn newlines(bytes: &[u8]) -> u64 {
 
 /// Appends `lines`, each with a newline, to the ledger at `path`, durably:
 /// one write and one `fsync`, after closing a last line a crash left torn
-/// with a bare newline (that fragment is then one line a reader counts as a
-/// fault, never glued to the next). Creates the file and its directory.
-/// Nothing to append opens nothing. Shared by the day, lineage and lot
-/// ledgers (D-3335, D-3331, D-3343).
+/// with the [`TORN`] mark, as the journal closes one (D-2814): a tail of NUL
+/// bytes a power cut left (FM-128) alike. The fragment is then one line
+/// every reader of these ledgers knows for torn (the re-key's own reader
+/// skips a line ending in the mark; the others count or step over a line
+/// they cannot read), never glued to the next, and the close is said at
+/// `warn`. Creates the file and its directory. Nothing to append opens
+/// nothing. Shared by the day, lineage, lot and scope ledgers and the
+/// re-key's lineage records (D-3335, D-3331, D-3343, D-4878; IA-2).
 ///
 /// # Errors
 ///
-/// The path and why.
+/// The path and why; `lock_stalled` when the journal lock is held past
+/// [`crate::gdfl_run::locks::LOCK_WAIT`].
 pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> {
+    append_lines_within(path, lines, crate::gdfl_run::locks::LOCK_WAIT)
+}
+
+/// [`append_lines`], the journal lock waited for at most `wait`.
+///
+/// # Errors
+///
+/// As [`append_lines`], `lock_stalled` past `wait`.
+pub(crate) fn append_lines_within(
+    path: &Path,
+    lines: &[String],
+    wait: std::time::Duration,
+) -> Result<(), String> {
     use std::io::{Read as _, Seek as _};
     if lines.is_empty() {
         return Ok(());
@@ -1224,6 +1402,14 @@ pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(refused)?;
     }
+    // Under the journal append lock, as every journal line is (IA-2, round
+    // 3 SF-10; D-4803, D-4906): two runs of two kinds append the day ledger
+    // and the lineage ledger at once on a v4 store, and the re-key appends
+    // the lineage ledger beside them. The torn-tail check below is made
+    // while the lock is held, from the file's last byte, never from a read
+    // made before it.
+    let _held = crate::gdfl_run::locks::take_path_within(&journal_lock_path(path), wait)
+        .map_err(|fault| format!("{}: {fault}", path.display()))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1236,6 +1422,13 @@ pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> 
         file.seek(std::io::SeekFrom::End(-1)).map_err(refused)?;
         file.read_exact(&mut last).map_err(refused)?;
         if last != *b"\n" {
+            let shown = path.display().to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::warn(TARGET, "closing a torn ledger line")
+                    .with("ledger", shown.as_str())
+                    .with("nul_tail", last == [0]),
+            );
+            text.push_str(TORN);
             text.push('\n');
         }
     }

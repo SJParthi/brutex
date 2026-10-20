@@ -537,10 +537,18 @@ fn applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census
     let found = survey(root, None).unwrap();
     let ledger = withdrawn(root).unwrap();
     let again = plan(&found, &ledger);
-    assert_eq!(again.moves.len(), 1, "the same move, planned again");
-    assert_eq!(again.retired.len(), 3);
+    // DONE, NOT PENDING (AG-02, rekey-3; this test pinned the same move
+    // planned again until then): the move and the three retirements are
+    // the ledger's, so nothing is to move or retire.
+    assert!(again.moves.is_empty() && again.retired.is_empty());
+    assert_eq!(
+        (again.recorded_moves.len(), again.recorded_retired.len()),
+        (1, 3)
+    );
+    assert_eq!(again.pending(), 0);
+    assert!(!again.changes());
     let done = apply(root, &found, &again, &ledger).unwrap();
-    assert_eq!((done.months_written, done.months_already), (0, 2));
+    assert_eq!((done.months_written, done.months_already), (0, 0));
     assert_eq!(done.lines_written, 0);
     assert!(done.withdrawal.is_none());
     assert_eq!(std::fs::read(lineage_path(root)).unwrap(), ledger_bytes);
@@ -594,21 +602,23 @@ fn after_the_rekey_a_resumed_import_extends_the_one_decoded_series() {
 }
 
 /// A decoded key whose month already holds OTHER bars where the moved ones
-/// would go — the import resumed on a D-3331 build before the re-key ran —
-/// refuses that move by name, and nothing of it is written; a retirement in
-/// the same plan still lands.
+/// would go — the import resumed on a D-3331 build between the plan and the
+/// apply — refuses that move by name, and nothing of it is written; a
+/// retirement in the same plan still lands. (The plan names the same move
+/// itself when the bars are there before it is made:
+/// `a_move_into_a_held_month_is_unresolved_in_the_plan`.)
 #[test]
 fn a_target_month_holding_other_bars_refuses_the_move_and_writes_nothing_of_it() {
     let fixture = Fixture::new("collide");
     fixture.counted();
     let root = fixture.root();
-    // The decoded key already holds a LATER day of July: the moved July bar
-    // would precede it, and a month is never rewritten in place.
-    put(root, "NIFTY", SETTLED, &[bar(d(2020, 7, 20), 34_000, 999)]);
     let found = survey(root, None).unwrap();
     let ledger = withdrawn(root).unwrap();
     let decided = plan(&found, &ledger);
     assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
+    // THEN the decoded key gains a LATER day of July: the moved July bar
+    // would precede it, and a month is never rewritten in place.
+    put(root, "NIFTY", SETTLED, &[bar(d(2020, 7, 20), 34_000, 999)]);
     let settled_june = key_dir(root, "NIFTY", SETTLED).join("1s/2020-06.bin");
     let done = apply(root, &found, &decided, &ledger).unwrap();
     assert!(done.moved.is_empty());
@@ -692,7 +702,6 @@ fn the_ledger_is_read_whole_or_refused_by_line() {
     );
     let read = Withdrawn::parse(&text).unwrap();
     assert_eq!(read.counts(), (1, 1));
-    assert!(!read.torn_tail);
     let row = |contract: &str| EntryKey {
         contract: Some(c(contract)),
         exchange: Exchange::Nse,
@@ -708,7 +717,13 @@ fn the_ledger_is_read_whole_or_refused_by_line() {
         segment: Segment::Index,
         ..row(STATED)
     }));
-    assert!(Withdrawn::parse(&pointer.line()).unwrap().torn_tail);
+    // The read no longer remembers whether the tail was torn (IA-2 repair
+    // 2): the append decides that from the file under the journal lock
+    // (`a_torn_tail_is_closed_from_the_file_under_the_lock_not_from_the_earlier_read`).
+    // An unterminated last record is passed over (AG-02): an append a crash
+    // cut short, which that locked append closes with the mark and writes
+    // whole after it.
+    assert_eq!(Withdrawn::parse(&pointer.line()).unwrap().counts(), (0, 0));
     let bad = Withdrawn::parse(&format!(
         "{}\nretired NSE-FNO-NIFTY-{STATED} why=x\n",
         pointer.line()
@@ -724,8 +739,16 @@ fn the_ledger_is_read_whole_or_refused_by_line() {
         median: None,
         ..refusal
     };
+    // AG-02 (rekey-5): the refusal names BOTH lines, so the append-only file
+    // can be answered by a later line rather than an edit.
     let bad = Withdrawn::parse(&format!("{}\n{}\n", pointer.line(), both.line())).unwrap_err();
-    assert!(bad.contains("both superseded and retired"), "{bad}");
+    assert!(
+        bad.contains(&format!(
+            "line 1 supersedes NSE-FNO-NIFTY-{STATED} by NSE-FNO-NIFTY-{SETTLED} and line 2 \
+             retires it; a key is one or the other"
+        )),
+        "{bad}"
+    );
 }
 
 /// The re-key's two records are one line each and read back exactly; a
@@ -844,4 +867,1878 @@ fn a_recount_does_not_count_a_withdrawn_key_back() {
     assert_eq!(recounted.withdrawn, 5, "four keys, five months");
     let (_, after) = census_keys(root);
     assert_eq!(after, settled, "nothing withdrawn came back");
+}
+
+/// The journal append lock of `root`'s import ledgers.
+fn ledger_lock(root: &Path) -> PathBuf {
+    crate::gdfl_import::journal_lock_path(&lineage_path(root))
+}
+
+/// **IA-2 (D-4803, D-4906; design §5.4 round 3 SF-10): THE RE-KEY'S LEDGER
+/// LINES GO UNDER THE ONE JOURNAL LOCK.** With the lock held by another open
+/// file, the re-key's append WAITS for it (a v4 import's lineage append is
+/// never interleaved with it), and past the wait it is refused
+/// `lock_stalled`, naming the lock, before a month or a ledger line is
+/// written, so the re-run that follows the release finishes the move (a
+/// stall found only at the append, after the months moved, left a re-run
+/// naming the move twice: `lines_written` 3, not 4). Before IA-2 repair 2
+/// the re-key appended at once, through an append of its own that took no
+/// lock.
+#[test]
+fn the_rekey_appends_its_ledger_under_the_journal_lock() {
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new("rekey-lock");
+    fixture.counted();
+    let root = fixture.root();
+    std::fs::create_dir_all(lineage_path(root).parent().unwrap()).unwrap();
+
+    // Held past the wait: refused by name, nothing appended.
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    let held =
+        crate::gdfl_run::locks::take_path_within(&ledger_lock(root), Duration::from_millis(50))
+            .unwrap();
+    let why =
+        apply_within(root, (&found, &decided, &ledger), Duration::from_millis(80)).unwrap_err();
+    assert!(why.contains("lock_stalled"), "{why}");
+    assert!(why.contains("gdfl.journal.lock"), "{why}");
+    assert!(why.contains("nothing was written"), "{why}");
+    assert!(why.contains("run again to finish"), "{why}");
+    assert!(
+        std::fs::read_to_string(lineage_path(root))
+            .unwrap_or_default()
+            .is_empty(),
+        "no ledger line was written"
+    );
+    // Refused before step 1, so no month moved either: a re-run is the
+    // first run again, never one that finds the decoded key already holding
+    // the moved days with no `superseded` line naming them its own copy.
+    assert!(
+        !key_dir(root, "NIFTY", SETTLED).exists(),
+        "no month was written under the decoded key"
+    );
+
+    // Held a while, then released: the public verb waits for it, then
+    // appends every line, each whole.
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    let began = Instant::now();
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    let waited = began.elapsed();
+    releaser.join().unwrap();
+    assert!(
+        waited >= Duration::from_millis(250),
+        "the append waited for the lock: {waited:?}"
+    );
+    assert_eq!(done.lines_written, 4);
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
+}
+
+/// **IA-2 (D-2814 under the lock): A TORN TAIL IS DECIDED FROM THE FILE AS
+/// IT IS WHEN THE LOCK IS HELD, NEVER FROM THE READ THE PLAN WAS MADE
+/// FROM.** A fragment appended after the re-key read the ledger is closed
+/// with the mark, so the re-key's first record is whole and the ledger reads
+/// back; a torn tail the re-key saw that another writer closed before the
+/// append gets no second, spurious mark line. Before IA-2 repair 2 the first
+/// case glued the record to the fragment (the ledger then refused every
+/// later read) and the second wrote a line ` (torn)`.
+#[test]
+fn a_torn_tail_is_closed_from_the_file_under_the_lock_not_from_the_earlier_read() {
+    // A fragment appended after the read.
+    let fixture = Fixture::new("rekey-torn-after");
+    fixture.counted();
+    let root = fixture.root();
+    let lineage = lineage_path(root);
+    std::fs::create_dir_all(lineage.parent().unwrap()).unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    std::fs::write(&lineage, "superseded NSE-FNO-NIF").unwrap();
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!(done.lines_written, 4);
+    let text = std::fs::read_to_string(&lineage).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "superseded NSE-FNO-NIF (torn)", "{text}");
+    assert!(
+        lines[1].starts_with(&format!("superseded NSE-FNO-NIFTY-{STATED} by=")),
+        "{text}"
+    );
+    assert_eq!(lines.len(), 5, "{text}");
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3), "{text}");
+
+    // A torn tail the read saw, closed by another writer before the append.
+    let fixture = Fixture::new("rekey-torn-closed");
+    fixture.counted();
+    let root = fixture.root();
+    let lineage = lineage_path(root);
+    std::fs::create_dir_all(lineage.parent().unwrap()).unwrap();
+    std::fs::write(&lineage, "alias NIF").unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    std::fs::write(&lineage, "alias NIF (torn)\n").unwrap();
+    apply(root, &found, &decided, &ledger).unwrap();
+    let text = std::fs::read_to_string(&lineage).unwrap();
+    assert!(
+        !text.lines().any(|line| line.trim() == "(torn)"),
+        "no spurious mark line: {text}"
+    );
+    assert_eq!(text.lines().count(), 5, "{text}");
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
+}
+
+// ═══ AG-02: done versus pending, one target per key, held months ══════════
+
+/// The fixture's plan applied whole: what every "after" below starts from.
+fn applied(tag: &str) -> Fixture {
+    let fixture = Fixture::new(tag);
+    fixture.counted();
+    let root = fixture.root();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let done = apply(root, &found, &plan(&found, &ledger), &ledger).unwrap();
+    assert_eq!((done.moved.len(), done.lines_written), (1, 4));
+    fixture
+}
+
+/// The ledger's text plus `lines`, written back: a ledger as another run (or
+/// a later alias table) left it. Only scratch stores are written.
+fn append_ledger(root: &Path, lines: &[String]) {
+    let path = lineage_path(root);
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+}
+
+/// A superseded line of `old` by `new` under NIFTY, invented digest.
+fn pointer(old: &str, new: &str) -> SupersededRecord {
+    SupersededRecord {
+        underlying: sym("NIFTY"),
+        old: c(old),
+        new: c(new),
+        kind: AliasKind::VendorRedated,
+        months: 2,
+        bars: 3,
+        digest: [7; 32],
+    }
+}
+
+/// A retired line of `key` under NIFTY.
+fn refusal_of(key: &str) -> RetiredRecord {
+    RetiredRecord {
+        underlying: sym("NIFTY"),
+        key: c(key),
+        why: RetiredWhy::ExpiryUnsettled,
+        day: d(2019, 5, 30),
+        median: None,
+        days: 1,
+        bars: 1,
+    }
+}
+
+/// rekey-3: AFTER A FULL APPLY NOTHING IS PENDING. A second plan names the
+/// move and the three retirements as recorded, a second apply writes no
+/// month, no line and no epoch: the acceptance R4-21, ING-10 and
+/// DATA-REKEY-APPLY read.
+#[test]
+fn a_second_plan_after_a_full_apply_has_nothing_pending() {
+    let fixture = applied("pending");
+    let root = fixture.root();
+    let ledger_bytes = std::fs::read(lineage_path(root)).unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let again = plan(&found, &ledger);
+    assert_eq!(
+        again.pending(),
+        0,
+        "{:?} {:?}",
+        again.moves,
+        again.unresolved
+    );
+    assert!(again.unresolved.is_empty());
+    let done = apply(root, &found, &again, &ledger).unwrap();
+    assert_eq!(
+        (done.months_written, done.months_already, done.lines_written),
+        (0, 0, 0)
+    );
+    assert!(done.withdrawal.is_none(), "no epoch installed");
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), ledger_bytes);
+}
+
+/// rekey-3: a recorded move is DONE — out of `moves`, out of `changes()`,
+/// listed apart with its own counts — while a move not yet recorded stays
+/// pending beside it.
+#[test]
+fn a_recorded_move_is_reported_as_recorded_not_to_move() {
+    let fixture = applied("recorded");
+    let root = fixture.root();
+    let found = survey(root, None).unwrap();
+    let decided = plan(&found, &withdrawn(root).unwrap());
+    assert!(decided.moves.is_empty());
+    let recorded = &decided.recorded_moves[0];
+    assert_eq!((recorded.from, recorded.to), (c(STATED), c(SETTLED)));
+    assert_eq!((recorded.bars, recorded.months.len()), (3, 2));
+    assert_eq!(
+        decided
+            .recorded_retired
+            .iter()
+            .map(|record| record.key)
+            .collect::<Vec<_>>(),
+        IMPOSSIBLE.iter().map(|key| c(key)).collect::<Vec<_>>()
+    );
+    assert!(!decided.changes());
+    // THE SAME STORE BEFORE ITS APPLY: pending, nothing recorded.
+    let fresh = Fixture::new("recorded-before");
+    let before = plan(&survey(fresh.root(), None).unwrap(), &Withdrawn::default());
+    assert_eq!((before.moves.len(), before.retired.len()), (1, 3));
+    assert!(before.recorded_moves.is_empty() && before.recorded_retired.is_empty());
+    assert_eq!(before.pending(), 4);
+}
+
+/// rekey-3: the ledger totals a receipt prints follow `--underlying`; an
+/// underlying with no record counts none, and no filter counts them all.
+#[test]
+fn the_ledger_totals_follow_the_underlying_filter() {
+    let banknifty = SupersededRecord {
+        underlying: sym("BANKNIFTY"),
+        ..pointer(STATED, SETTLED)
+    };
+    let text = format!(
+        "{}\n{}\n{}\n",
+        pointer(STATED, SETTLED).line(),
+        banknifty.line(),
+        refusal_of(IMPOSSIBLE[0]).line()
+    );
+    let read = Withdrawn::parse(&text).unwrap();
+    let only = |names: &[&str]| names.iter().map(|name| sym(name)).collect::<BTreeSet<_>>();
+    assert_eq!(read.counts_for(None), (2, 1));
+    assert_eq!(read.counts_for(Some(&only(&["NIFTY"]))), (1, 1));
+    assert_eq!(read.counts_for(Some(&only(&["BANKNIFTY"]))), (1, 0));
+    assert_eq!(read.counts_for(Some(&only(&["FINNIFTY"]))), (0, 0));
+    assert_eq!(
+        read.counts_for(Some(&only(&["NIFTY", "BANKNIFTY"]))),
+        (2, 1)
+    );
+}
+
+/// rekey-5: one key superseded by two different keys is refused, naming both
+/// lines; a renamed underlying's same contract is another key.
+#[test]
+fn a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines() {
+    let first = pointer(STATED, SETTLED);
+    let second = pointer(STATED, "2023-06-27-1000000-PE");
+    let text = format!(
+        "alias * stated=2023-06-29 settled=2023-06-28 kind=vendor_redated first_day=2023-06-28 contracts=1 v=1\n{}\n{}\n",
+        first.line(),
+        second.line()
+    );
+    let why = Withdrawn::parse(&text).unwrap_err();
+    assert!(
+        why.contains("line 2 supersedes NSE-FNO-NIFTY-2023-06-29-1000000-PE by NSE-FNO-NIFTY-2023-06-28-1000000-PE and line 3 by NSE-FNO-NIFTY-2023-06-27-1000000-PE"),
+        "{why}"
+    );
+    // THE SAME CONTRACT UNDER ANOTHER UNDERLYING (a rename) is its own key.
+    let renamed = SupersededRecord {
+        underlying: sym("NIFTYNXT50"),
+        ..second
+    };
+    let read = Withdrawn::parse(&format!("{}\n{}\n", first.line(), renamed.line())).unwrap();
+    assert_eq!(read.counts(), (2, 0));
+}
+
+/// rekey-5: the same `superseded` line twice — the same fact — reads as
+/// once, at its first line. (A second line to the same key with other
+/// counts read as the first until repair r1e; it is now refused naming both
+/// lines: `one_move_or_retirement_recorded_twice_with_another_account_is_refused`.)
+#[test]
+fn an_identical_repeated_superseded_line_is_idempotent() {
+    let line = pointer(STATED, SETTLED).line();
+    let read = Withdrawn::parse(&format!("{line}\n{line}\n{line}\n")).unwrap();
+    assert_eq!(read.counts(), (1, 0));
+    assert_eq!(read.line_of(sym("NIFTY"), c(STATED)), Some(1));
+    assert_eq!(read.superseded(sym("NIFTY"), c(STATED)).unwrap().bars, 3);
+    assert_eq!(read.superseded_records().count(), 1);
+}
+
+/// rekey-5: superseded and retired, in EITHER order, is refused naming both
+/// lines; a repeated `retired` line reads as once.
+#[test]
+fn a_key_superseded_and_retired_is_refused_naming_both_lines() {
+    let moved = pointer(STATED, SETTLED).line();
+    let gone = refusal_of(STATED).line();
+    let why = Withdrawn::parse(&format!("{moved}\nlineage x\n{gone}\n")).unwrap_err();
+    assert!(
+        why.contains("line 1 supersedes NSE-FNO-NIFTY-2023-06-29-1000000-PE by NSE-FNO-NIFTY-2023-06-28-1000000-PE and line 3 retires it"),
+        "{why}"
+    );
+    // OUT OF ORDER: the retirement first.
+    let why = Withdrawn::parse(&format!("{gone}\n{moved}\n")).unwrap_err();
+    assert!(
+        why.contains("line 1 retires NSE-FNO-NIFTY-2023-06-29-1000000-PE and line 2 supersedes it by NSE-FNO-NIFTY-2023-06-28-1000000-PE"),
+        "{why}"
+    );
+    let read = Withdrawn::parse(&format!("{gone}\n{gone}\n")).unwrap();
+    assert_eq!(read.counts(), (0, 1));
+    assert_eq!(read.retired_records().count(), 1);
+}
+
+/// rekey-5, the writer: a key the ledger supersedes by ANOTHER key is never
+/// moved again; the plan names it with the line it contradicts.
+#[test]
+fn the_plan_never_retargets_a_superseded_key() {
+    let fixture = Fixture::new("retarget");
+    let root = fixture.root();
+    append_ledger(root, &[pointer(STATED, "2023-06-27-1000000-PE").line()]);
+    let decided = plan(&survey(root, None).unwrap(), &withdrawn(root).unwrap());
+    assert!(decided.moves.is_empty(), "{:?}", decided.moves);
+    let left = decided
+        .unresolved
+        .iter()
+        .find(|one| one.key == format!("NSE-FNO-NIFTY-{STATED}"))
+        .unwrap();
+    assert!(
+        left.why
+            .contains("ledger line 1 supersedes it by NSE-FNO-NIFTY-2023-06-27-1000000-PE"),
+        "{}",
+        left.why
+    );
+    // A RECORDED MOVE WHOSE KEY GREW since is left too, never moved twice.
+    let fixture = applied("grown");
+    let root = fixture.root();
+    put(root, "NIFTY", STATED, &[bar(d(2020, 7, 2), 30_000, 337)]);
+    let decided = plan(&survey(root, None).unwrap(), &withdrawn(root).unwrap());
+    assert!(decided.moves.is_empty() && decided.recorded_moves.is_empty());
+    assert!(
+        decided.unresolved[0]
+            .why
+            .contains("with 3 bar(s) in 2 month(s), and it holds 4 bar(s)"),
+        "{}",
+        decided.unresolved[0].why
+    );
+}
+
+/// rekey-5, the writer: a key the ledger supersedes is never retired, and a
+/// key it retires is never moved or kept silently.
+#[test]
+fn the_plan_never_retires_a_superseded_key() {
+    let fixture = Fixture::new("noretire");
+    let root = fixture.root();
+    append_ledger(
+        root,
+        &[
+            pointer(IMPOSSIBLE[0], "2020-06-25-1150000-CE").line(),
+            refusal_of(STATED).line(),
+            refusal_of(LADDER[0]).line(),
+        ],
+    );
+    let decided = plan(&survey(root, None).unwrap(), &withdrawn(root).unwrap());
+    assert!(
+        decided
+            .retired
+            .iter()
+            .all(|record| record.key != c(IMPOSSIBLE[0]))
+    );
+    assert!(decided.moves.is_empty(), "the retired put is not moved");
+    let why = |key: &str| {
+        decided
+            .unresolved
+            .iter()
+            .find(|one| one.key == format!("NSE-FNO-NIFTY-{key}"))
+            .map_or_else(
+                || panic!("{key}: {:?}", decided.unresolved),
+                |one| one.why.clone(),
+            )
+    };
+    assert!(why(IMPOSSIBLE[0]).contains("ledger line 1 supersedes it by"));
+    assert!(why(STATED).contains("ledger line 2 retires it: a retired key is not moved"));
+    assert!(why(LADDER[0]).contains("admits every day where it is, and ledger line 3 retires it"));
+}
+
+/// rekey-5: APPLY THEN PARSE ROUND-TRIPS for every plan the planner makes,
+/// over every ledger shape here, and a plan that would append a line the
+/// parser refuses is refused before a byte is written.
+#[test]
+fn apply_never_writes_a_line_its_parser_refuses() {
+    let shapes: [&[String]; 5] = [
+        &[],
+        &[pointer(STATED, "2023-06-27-1000000-PE").line()],
+        &[pointer(IMPOSSIBLE[0], "2020-06-25-1150000-CE").line()],
+        &[refusal_of(STATED).line()],
+        &[pointer("2023-06-29-1050000-PE", STATED).line()],
+    ];
+    for (at, lines) in shapes.iter().enumerate() {
+        let fixture = Fixture::new(&format!("roundtrip{at}"));
+        fixture.counted();
+        let root = fixture.root();
+        append_ledger(root, lines);
+        for _ in 0..2 {
+            let found = survey(root, None).unwrap();
+            let ledger = withdrawn(root).unwrap();
+            let decided = plan(&found, &ledger);
+            let _ = apply(root, &found, &decided, &ledger).unwrap();
+            assert!(withdrawn(root).is_ok(), "shape {at}: {:?}", withdrawn(root));
+        }
+    }
+    // A PLAN BUILT BY HAND that re-targets a superseded key is refused whole.
+    let fixture = Fixture::new("handmade");
+    fixture.counted();
+    let root = fixture.root();
+    append_ledger(root, &[pointer(STATED, "2023-06-27-1000000-PE").line()]);
+    let before = std::fs::read(lineage_path(root)).unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let mut forced = plan(&found, &Withdrawn::default());
+    assert_eq!(forced.moves.len(), 1);
+    let why = apply(root, &found, &forced, &ledger).unwrap_err();
+    assert!(
+        why.contains("ledger line 1 supersedes it by NSE-FNO-NIFTY-2023-06-27-1000000-PE"),
+        "{why}"
+    );
+    assert!(why.contains("nothing was written"), "{why}");
+    assert!(!key_dir(root, "NIFTY", SETTLED).exists());
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), before);
+    // Retiring a superseded key, moving a retired one, and moving one key
+    // twice or both moving and retiring it: each refused the same way.
+    forced.moves.clear();
+    forced.retired = vec![RetiredRecord {
+        key: c(STATED),
+        ..refusal_of(STATED)
+    }];
+    let why = apply(root, &found, &forced, &ledger).unwrap_err();
+    assert!(why.contains("which ledger line 1 supersedes"), "{why}");
+    let retired = Withdrawn::parse(&format!("{}\n", refusal_of(STATED).line())).unwrap();
+    let moving = plan(&found, &Withdrawn::default());
+    let why = apply(root, &found, &moving, &retired).unwrap_err();
+    assert!(why.contains("which ledger line 1 retires"), "{why}");
+    let mut twice = moving.clone();
+    let mut again = twice.moves[0].clone();
+    again.to = c("2023-06-27-1000000-PE");
+    twice.moves.push(again);
+    let why = apply(root, &found, &twice, &Withdrawn::default()).unwrap_err();
+    assert!(why.contains("to two keys"), "{why}");
+    let mut both = moving;
+    both.retired.push(RetiredRecord {
+        key: c(STATED),
+        ..refusal_of(STATED)
+    });
+    let why = apply(root, &found, &both, &Withdrawn::default()).unwrap_err();
+    assert!(why.contains("both moves and retires"), "{why}");
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), before);
+    // A SECOND ACCOUNT (repair r1e): moving again a key the ledger records
+    // as moved to that very key, and retiring a retired key with another
+    // account, would each append a line the parser now refuses.
+    let recorded = Withdrawn::parse(&format!("{}\n", pointer(STATED, SETTLED).line())).unwrap();
+    let moving = plan(&found, &Withdrawn::default());
+    let why = apply(root, &found, &moving, &recorded).unwrap_err();
+    assert!(why.contains("which ledger line 1 already records"), "{why}");
+    let mut other = refusal_of(IMPOSSIBLE[0]);
+    other.bars = 5;
+    let held_line = Withdrawn::parse(&format!("{}\n", other.line())).unwrap();
+    let mut retiring = plan(&found, &Withdrawn::default());
+    retiring.moves.clear();
+    let why = apply(root, &found, &retiring, &held_line).unwrap_err();
+    assert!(
+        why.contains("and ledger line 1 retires it as")
+            && why.contains("one retirement has one account"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), before);
+}
+
+/// rekey-2: A MOVE INTO A MONTH THAT ALREADY HOLDS LATER BARS is known to
+/// the plan, from the month headers the survey read: unresolved by name, so
+/// "0 unresolved" predicts an apply that refuses nothing.
+#[test]
+fn a_move_into_a_held_month_is_unresolved_in_the_plan() {
+    let fixture = Fixture::new("held");
+    fixture.counted();
+    let root = fixture.root();
+    put(root, "NIFTY", SETTLED, &[bar(d(2020, 7, 20), 34_000, 999)]);
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert!(decided.moves.is_empty(), "{:?}", decided.moves);
+    let left = decided
+        .unresolved
+        .iter()
+        .find(|one| one.key == format!("NSE-FNO-NIFTY-{STATED}"))
+        .unwrap();
+    assert!(
+        left.why.starts_with(&format!(
+            "target month held: NSE-FNO-NIFTY-{SETTLED} 2020-07 already holds 1 bar(s)"
+        )),
+        "{}",
+        left.why
+    );
+    assert!(left.why.contains("R4-21 item 1"), "{}", left.why);
+    // AND APPLY AGREES: nothing of the move is written, nothing refused at
+    // apply that the plan did not name.
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(done.refused.is_empty() && done.moved.is_empty());
+    assert!(
+        !key_dir(root, "NIFTY", SETTLED)
+            .join("1s/2020-06.bin")
+            .exists()
+    );
+    // A LATER BAR IN AN EARLIER MONTH only: the moved months follow it, so
+    // the move is planned and lands.
+    let fixture = Fixture::new("held-earlier");
+    fixture.counted();
+    let root = fixture.root();
+    put(root, "NIFTY", SETTLED, &[bar(d(2020, 5, 20), 34_000, 998)]);
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(done.refused.is_empty(), "{:?}", done.refused);
+    assert_eq!(done.months_written, 2);
+}
+
+/// rekey-2: two sources whose spans interleave in one target month are
+/// named in the plan, the way apply's merge would refuse them.
+#[test]
+fn moves_whose_spans_interleave_in_one_target_month_are_unresolved() {
+    let june = YearMonth::new(2020, 6).unwrap();
+    let stored = |contract: &str, first: i64, last: i64| Stored {
+        underlying: sym("NIFTY"),
+        contract: c(contract),
+        expiry: d(2023, 6, 29),
+        strike: 1_000_000,
+        side: OptionSide::Put,
+        months: vec![Month {
+            month: june,
+            rows: 2,
+            first_ts_micros: first,
+            last_ts_micros: last,
+        }],
+        days: BTreeMap::from([(d(2020, 6, 15), 2)]),
+    };
+    let one = stored(STATED, 10, 30);
+    let two = stored("2023-06-30-1000000-PE", 20, 40);
+    let held: HashMap<(Symbol, Contract), &Stored> = [&one, &two]
+        .into_iter()
+        .map(|key| ((key.underlying, key.contract), key))
+        .collect();
+    let move_of = |key: &Stored| Move {
+        underlying: key.underlying,
+        from: key.contract,
+        to: c(SETTLED),
+        kind: AliasKind::VendorRedated,
+        months: vec![june],
+        bars: 2,
+    };
+    let mut out = Plan {
+        moves: vec![move_of(&one), move_of(&two)],
+        ..Plan::default()
+    };
+    held_months(&mut out, &held, Path::new(""));
+    assert!(out.moves.is_empty());
+    assert_eq!(out.unresolved.len(), 2);
+    assert!(
+        out.unresolved[0]
+            .why
+            .contains("interleaved or repeated seconds in 2020-06")
+    );
+    // Apart in time, they would be merged and planned.
+    let two = stored("2023-06-30-1000000-PE", 31, 40);
+    let held: HashMap<(Symbol, Contract), &Stored> = [&one, &two]
+        .into_iter()
+        .map(|key| ((key.underlying, key.contract), key))
+        .collect();
+    let mut out = Plan {
+        moves: vec![move_of(&one), move_of(&two)],
+        ..Plan::default()
+    };
+    held_months(&mut out, &held, Path::new(""));
+    assert_eq!(out.moves.len(), 2);
+}
+
+/// FM-273, A RUN CUT SHORT, the next plan tells done from pending truly.
+/// After step 1 (the target holds the copy, no ledger line): pending, not a
+/// second name, and the next apply finishes it. After step 3 (lines
+/// written, no epoch): recorded, nothing pending, and the next apply
+/// installs only the epoch.
+#[test]
+fn a_rekey_cut_short_is_reported_truly_and_finished_by_the_next_apply() {
+    // AFTER STEP 1.
+    let fixture = Fixture::new("cut1");
+    fixture.counted();
+    let root = fixture.root();
+    let mut copy = held(root, "NIFTY", STATED, YearMonth::new(2020, 6).unwrap());
+    copy.extend(held(
+        root,
+        "NIFTY",
+        STATED,
+        YearMonth::new(2020, 7).unwrap(),
+    ));
+    put(root, "NIFTY", SETTLED, &copy);
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
+    assert!(decided.unresolved.is_empty(), "{:?}", decided.unresolved);
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!((done.months_written, done.months_already), (0, 2));
+    assert_eq!(done.lines_written, 4);
+    assert_eq!(
+        done.withdrawal.as_ref().map(|epoch| epoch.to_epoch),
+        Some(2)
+    );
+    let ledger_text = std::fs::read_to_string(lineage_path(root)).unwrap();
+
+    // AFTER STEP 3: the same copy and the same four lines, the census still
+    // at its first epoch.
+    let fixture = Fixture::new("cut3");
+    fixture.counted();
+    let root = fixture.root();
+    put(root, "NIFTY", SETTLED, &copy);
+    let counted: Vec<Held> = [6, 7]
+        .into_iter()
+        .map(|m| census_row_of(root, "NIFTY", SETTLED, YearMonth::new(2020, m).unwrap()))
+        .collect();
+    let _ = census_store::record(root, Vendor::Gdfl, &counted).unwrap();
+    append_ledger(
+        root,
+        &ledger_text.lines().map(str::to_owned).collect::<Vec<_>>(),
+    );
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert_eq!(
+        (decided.recorded_moves.len(), decided.recorded_retired.len()),
+        (1, 3)
+    );
+    assert!(
+        decided.moves.is_empty() && decided.retired.is_empty() && decided.unresolved.is_empty(),
+        "{:?}",
+        decided.unresolved
+    );
+    // STEP 4 IS PENDING (AG-02 repair r1e, blocking item 1; this test read
+    // `pending 0` here and then watched the apply install an epoch): the
+    // census still lists the four keys the ledger now withdraws.
+    let mut listed: Vec<String> = IMPOSSIBLE
+        .iter()
+        .chain([&STATED])
+        .map(|key| format!("NSE-FNO-NIFTY-{key}"))
+        .collect();
+    listed.sort();
+    assert_eq!(decided.census, CensusStep::Listed(listed));
+    assert_eq!(decided.pending(), 4);
+    assert!(decided.changes());
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!((done.months_written, done.lines_written), (0, 0));
+    assert_eq!(
+        done.withdrawal.as_ref().map(|epoch| epoch.to_epoch),
+        Some(2)
+    );
+    let (_, keys) = census_keys(root);
+    assert!(!keys.iter().any(|key| key.contains(STATED)), "{keys:?}");
+    assert!(
+        keys.contains(&format!("NIFTY {SETTLED} 2020-07")),
+        "{keys:?}"
+    );
+    // AND THEN DONE: `pending 0` means an apply of that plan writes no
+    // month, appends no line and installs no epoch.
+    let found = survey(root, None).unwrap();
+    let after = plan(&found, &ledger);
+    assert_eq!(after.census, CensusStep::Clear);
+    assert_eq!((after.pending(), after.changes()), (0, false));
+    let bytes = std::fs::read(lineage_path(root)).unwrap();
+    let none = apply(root, &found, &after, &ledger).unwrap();
+    assert_eq!((none.months_written, none.lines_written), (0, 0));
+    assert!(none.withdrawal.is_none());
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes);
+}
+
+/// The ladder and the three impossible strikes of [`Fixture`] and nothing
+/// else, counted: a store whose only re-key work is three retirements.
+fn retirements_only(tag: &str) -> Scratch {
+    let scratch = Scratch::new(tag);
+    let root = scratch.root();
+    let on = d(2019, 5, 30);
+    let month = YearMonth::new(2019, 5).unwrap();
+    let mut rows = Vec::new();
+    for (at, key) in LADDER.iter().enumerate() {
+        let price = 101 + i64::try_from(at).unwrap();
+        put(
+            root,
+            "NIFTY",
+            key,
+            &[bar(on, 33_300, price), bar(on, 33_301, price)],
+        );
+        rows.push(census_row_of(root, "NIFTY", key, month));
+    }
+    for (at, key) in IMPOSSIBLE.iter().enumerate() {
+        put(
+            root,
+            "NIFTY",
+            key,
+            &[bar(on, 40_000 + u32::try_from(at).unwrap(), 9)],
+        );
+        rows.push(census_row_of(root, "NIFTY", key, month));
+    }
+    partitioned(root, &rows);
+    scratch
+}
+
+/// AG-02 repair r1e, blocking item 1, THE LOCK RACE: an apply whose only
+/// work is retirements skips step 2, appends its lines at step 3, and meets
+/// a census lock another ingest holds at step 4. The next plan names the
+/// census step pending (also under `--underlying` naming an underlying
+/// with no keys, because the apply withdraws the whole ledger's keys); once
+/// the lock is free the next apply installs the epoch and nothing else, and
+/// after it `pending 0` means an apply changes nothing.
+#[test]
+fn a_retirements_only_apply_stopped_at_the_census_lock_leaves_step_4_pending() {
+    let scratch = retirements_only("lockrace");
+    let root = scratch.root();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let first = plan(&found, &ledger);
+    assert_eq!(
+        (
+            first.moves.len(),
+            first.retired.len(),
+            first.unresolved.len()
+        ),
+        (0, 3, 0),
+        "{:?}",
+        first.unresolved
+    );
+    assert_eq!(
+        (first.census.clone(), first.pending()),
+        (CensusStep::Clear, 3)
+    );
+
+    // ANOTHER INGEST HOLDS THE CENSUS LOCK.
+    let lock_path = census_store::target_for(root, Vendor::Gdfl, Segment::Fno)
+        .unwrap()
+        .lock_path();
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock().unwrap();
+    let why = apply(root, &found, &first, &ledger).unwrap_err();
+    assert!(
+        why.contains("another ingest holds the census lock"),
+        "{why}"
+    );
+    let ledger = withdrawn(root).unwrap();
+    assert_eq!(ledger.counts(), (0, 3), "step 3 ran: the lines are written");
+    assert_eq!(census_keys(root).0, 1, "step 4 did not run");
+
+    let found = survey(root, None).unwrap();
+    let second = plan(&found, &ledger);
+    assert_eq!(second.recorded_retired.len(), 3);
+    assert!(second.moves.is_empty() && second.retired.is_empty() && second.unresolved.is_empty());
+    let listed: Vec<String> = IMPOSSIBLE
+        .iter()
+        .map(|key| format!("NSE-FNO-NIFTY-{key}"))
+        .collect();
+    assert_eq!(second.census, CensusStep::Listed(listed));
+    assert_eq!((second.pending(), second.changes()), (3, true));
+    let only: BTreeSet<Symbol> = [sym("BANKNIFTY")].into_iter().collect();
+    let narrowed = plan(&survey(root, Some(&only)).unwrap(), &ledger);
+    assert_eq!((narrowed.keys, narrowed.pending()), (0, 3));
+
+    // THE LOCK FREED: the next apply finishes step 4 and only it.
+    holder.unlock().unwrap();
+    drop(holder);
+    let done = apply(root, &found, &second, &ledger).unwrap();
+    assert_eq!((done.months_written, done.lines_written), (0, 0));
+    assert_eq!(
+        done.withdrawal.as_ref().map(|epoch| epoch.to_epoch),
+        Some(2)
+    );
+    let found = survey(root, None).unwrap();
+    let third = plan(&found, &ledger);
+    assert_eq!(
+        (third.census.clone(), third.pending(), third.changes()),
+        (CensusStep::Clear, 0, false)
+    );
+    let bytes = std::fs::read(lineage_path(root)).unwrap();
+    let none = apply(root, &found, &third, &ledger).unwrap();
+    assert_eq!((none.months_written, none.lines_written), (0, 0));
+    assert!(none.withdrawal.is_none(), "PENDING 0 installs no epoch");
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes);
+}
+
+/// A census step the plan cannot answer is pending, never done: a survey
+/// built by hand names no store (not read); a garbage current epoch will not
+/// read (unreadable, naming the file). A ledger that withdraws nothing needs
+/// no census at all, because no census can list a key it withdraws.
+#[test]
+fn a_census_not_read_or_unreadable_is_pending_never_done() {
+    let hand = plan(&Survey::default(), &Withdrawn::default());
+    assert_eq!(
+        (hand.census.clone(), hand.pending()),
+        (CensusStep::NotRead, 1)
+    );
+    assert!(hand.changes());
+
+    let fixture = applied("garbage-census");
+    let root = fixture.root();
+    std::fs::write(
+        epoch_path(root, Vendor::Gdfl, Segment::Fno, 9),
+        b"not a census",
+    )
+    .unwrap();
+    let decided = plan(&survey(root, None).unwrap(), &withdrawn(root).unwrap());
+    let CensusStep::Unreadable(why) = &decided.census else {
+        panic!("{:?}", decided.census);
+    };
+    assert!(why.contains("000009"), "{why}");
+    assert_eq!(decided.pending(), 1);
+    assert!(decided.changes());
+
+    let fresh = Fixture::new("no-ledger");
+    let before = plan(&survey(fresh.root(), None).unwrap(), &Withdrawn::default());
+    assert_eq!(before.census, CensusStep::Clear);
+}
+
+/// AG-02 repair r1e, blocking item 2: A TARGET THAT AGREES WITH THE SOURCE
+/// ON EVERY DAY COUNT AND MONTH STAMP BUT HOLDS OTHER BARS is not an apply
+/// cut short. The plan used to exempt it on the headers alone and plan a
+/// move the apply then refused; now apply's own `target_state` decides, so
+/// it is a second name of the contract (`ContractNamedTwice`) and the apply
+/// of that plan refuses nothing. Two shapes: other open interest under the
+/// same stamps, and that plus an earlier extra day. A third, the same bars
+/// plus an earlier extra day, IS a copy: it plans as a move the apply
+/// finishes without writing a month.
+#[test]
+fn a_target_with_the_same_counts_and_other_bars_is_unresolved_not_a_refused_move() {
+    for (tag, other_bars, extra_day) in [
+        ("other-oi", true, false),
+        ("extra-day", true, true),
+        ("copy-extra-day", false, true),
+    ] {
+        let fixture = Fixture::new(tag);
+        fixture.counted();
+        let root = fixture.root();
+        let mut copy: Vec<Bar> = [6, 7]
+            .into_iter()
+            .flat_map(|m| held(root, "NIFTY", STATED, YearMonth::new(2020, m).unwrap()))
+            .collect();
+        if other_bars {
+            for one in &mut copy {
+                one.open_interest += 1;
+            }
+        }
+        if extra_day {
+            copy.insert(0, bar(d(2020, 6, 1), 30_000, 444));
+        }
+        put(root, "NIFTY", SETTLED, &copy);
+        let found = survey(root, None).unwrap();
+        let ledger = withdrawn(root).unwrap();
+        let decided = plan(&found, &ledger);
+        let done = apply(root, &found, &decided, &ledger).unwrap();
+        assert!(
+            done.refused.is_empty(),
+            "{tag}: the plan predicts the apply: {:?}",
+            done.refused
+        );
+        if other_bars {
+            assert!(decided.moves.is_empty(), "{tag}: {:?}", decided.moves);
+            let left = decided
+                .unresolved
+                .iter()
+                .find(|one| one.key == format!("NSE-FNO-NIFTY-{STATED}"))
+                .unwrap();
+            assert!(
+                left.why.contains("ContractNamedTwice"),
+                "{tag}: {}",
+                left.why
+            );
+            assert_eq!(done.months_written, 0);
+        } else {
+            assert_eq!(decided.moves.len(), 1, "{tag}: {:?}", decided.unresolved);
+            assert!(
+                decided.unresolved.is_empty(),
+                "{tag}: {:?}",
+                decided.unresolved
+            );
+            assert_eq!((done.months_written, done.months_already), (0, 2));
+            assert_eq!(done.moved.len(), 1);
+        }
+    }
+
+    // THE SAME BARS WITH ANOTHER DAY BETWEEN TWO OF THE SOURCE'S DAYS: every
+    // count and stamp the headers hold agrees, and the bars are not where
+    // the apply looks for them (the second agent's shape R2).
+    let scratch = Scratch::new("between");
+    let root = scratch.root();
+    let source = [
+        bar(d(2020, 6, 15), 34_000, 333),
+        bar(d(2020, 6, 15), 34_001, 334),
+        bar(d(2020, 6, 25), 34_000, 336),
+    ];
+    put(root, "NIFTY", STATED, &source);
+    let mut target = source.to_vec();
+    target.insert(2, bar(d(2020, 6, 19), 34_000, 777));
+    put(root, "NIFTY", SETTLED, &target);
+    let june = YearMonth::new(2020, 6).unwrap();
+    partitioned(
+        root,
+        &[
+            census_row_of(root, "NIFTY", STATED, june),
+            census_row_of(root, "NIFTY", SETTLED, june),
+        ],
+    );
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert!(decided.moves.is_empty(), "{:?}", decided.moves);
+    assert!(
+        decided
+            .unresolved
+            .iter()
+            .any(|one| one.key == format!("NSE-FNO-NIFTY-{STATED}")
+                && one.why.contains("ContractNamedTwice")),
+        "{:?}",
+        decided.unresolved
+    );
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(done.refused.is_empty(), "{:?}", done.refused);
+}
+
+/// The plan's held-month verdict IS apply's: a target month holding another
+/// bar after the moved ones is unresolved with apply's own words beside the
+/// plan's.
+#[test]
+fn a_held_month_is_decided_by_applys_own_check() {
+    let fixture = Fixture::new("held-check");
+    fixture.counted();
+    let root = fixture.root();
+    put(root, "NIFTY", SETTLED, &[bar(d(2020, 7, 20), 34_000, 999)]);
+    let found = survey(root, None).unwrap();
+    let decided = plan(&found, &withdrawn(root).unwrap());
+    let left = decided
+        .unresolved
+        .iter()
+        .find(|one| one.key == format!("NSE-FNO-NIFTY-{STATED}"))
+        .unwrap();
+    assert!(left.why.starts_with("target month held: "), "{}", left.why);
+    assert!(
+        left.why.contains("(apply's own check: ")
+            && left.why.contains("would precede or contradict"),
+        "{}",
+        left.why
+    );
+    // ONE ROUTE NAMED (AG-02 repair r4): both halves of the sentence name
+    // the repair-door publish; the apply's half no longer names WP-80's
+    // regeneration beside it.
+    assert!(!left.why.contains("WP-80"), "{}", left.why);
+    assert_eq!(
+        left.why
+            .matches("repair-door publish (R4-21 item 1)")
+            .count(),
+        2,
+        "{}",
+        left.why
+    );
+}
+
+/// An apply killed between the two months of one move (FM-273 step 1 cut
+/// short: June copied, July not) plans as the move the next apply finishes,
+/// writing July only; the first build named it a second name of the
+/// contract, because its header check asked for every month at once.
+#[test]
+fn an_apply_killed_between_two_months_plans_as_the_move_it_finishes() {
+    let fixture = Fixture::new("killed-between-months");
+    fixture.counted();
+    let root = fixture.root();
+    let june = held(root, "NIFTY", STATED, YearMonth::new(2020, 6).unwrap());
+    put(root, "NIFTY", SETTLED, &june);
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
+    assert!(decided.unresolved.is_empty(), "{:?}", decided.unresolved);
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(done.refused.is_empty(), "{:?}", done.refused);
+    assert_eq!((done.months_written, done.months_already), (1, 1));
+    assert_eq!(done.moved.len(), 1);
+}
+
+/// The follow-up of repair r1e: ONE MOVE OR ONE RETIREMENT RECORDED TWICE
+/// WITH ANOTHER ACCOUNT is refused naming both lines, never read as the
+/// first; an identical repeat of either reads once at its first line.
+#[test]
+fn one_move_or_retirement_recorded_twice_with_another_account_is_refused() {
+    let first = pointer(STATED, SETTLED);
+    let mut more = first;
+    more.bars = 4;
+    let why = Withdrawn::parse(&format!("{}\n{}\n", first.line(), more.line())).unwrap_err();
+    assert!(
+        why.contains("line 1 supersedes") && why.contains("and line 2 with 2 month(s), 4 bar(s)"),
+        "{why}"
+    );
+    let mut other = first;
+    other.digest = [8; 32];
+    let why = Withdrawn::parse(&format!("{}\n\n{}\n", first.line(), other.line())).unwrap_err();
+    assert!(
+        why.contains("line 1 supersedes") && why.contains("and line 3 with"),
+        "{why}"
+    );
+    assert!(
+        why.contains("0707070707070707") && why.contains("0808080808080808"),
+        "{why}"
+    );
+
+    let retired = refusal_of(IMPOSSIBLE[0]);
+    let mut grown = retired;
+    grown.bars = 2;
+    let why = Withdrawn::parse(&format!("{}\n{}\n", retired.line(), grown.line())).unwrap_err();
+    assert!(
+        why.contains("line 1 retires") && why.contains("and line 2 as"),
+        "{why}"
+    );
+    let twice = Withdrawn::parse(&format!("{}\n{}\n", retired.line(), retired.line())).unwrap();
+    assert_eq!(
+        (
+            twice.counts(),
+            twice.line_of(sym("NIFTY"), c(IMPOSSIBLE[0]))
+        ),
+        ((0, 1), Some(1))
+    );
+}
+
+/// A ledger's edges: empty; nothing but a torn tail; a complete record cut
+/// before its newline, which is passed over and then written whole by the
+/// next apply; a garbage `superseded` line, refused by line; and ten
+/// thousand records, read whole.
+#[test]
+fn a_ledger_reads_empty_torn_garbage_and_long_exactly() {
+    let empty = Withdrawn::parse("").unwrap();
+    assert_eq!(empty.counts(), (0, 0));
+    let torn = Withdrawn::parse("superseded NSE-FNO-NIFTY-2023-0").unwrap();
+    assert_eq!(torn.counts(), (0, 0));
+    let cut = Withdrawn::parse(&pointer(STATED, SETTLED).line()).unwrap();
+    assert_eq!(cut.counts(), (0, 0));
+    let why = Withdrawn::parse("superseded garbage\n").unwrap_err();
+    assert!(
+        why.contains("line 1 does not parse as a `superseded` record"),
+        "{why}"
+    );
+
+    // THE CUT RECORD, FINISHED: the store's apply marks it torn and writes
+    // its own line whole, and the ledger then reads it once.
+    let fixture = Fixture::new("torn");
+    fixture.counted();
+    let root = fixture.root();
+    std::fs::create_dir_all(lineage_path(root).parent().unwrap()).unwrap();
+    std::fs::write(lineage_path(root), "retired NSE-FNO-NIFTY-2020-06-25-19125").unwrap();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let done = apply(root, &found, &plan(&found, &ledger), &ledger).unwrap();
+    assert_eq!(done.lines_written, 4);
+    let text = std::fs::read_to_string(lineage_path(root)).unwrap();
+    assert!(
+        text.starts_with("retired NSE-FNO-NIFTY-2020-06-25-19125 (torn)\n"),
+        "{text}"
+    );
+    assert_eq!(withdrawn(root).unwrap().counts(), (1, 3));
+
+    // TEN THOUSAND RECORDS, one key each.
+    let mut long = String::with_capacity(10_000 * 160);
+    for at in 0..10_000_i64 {
+        let record = SupersededRecord {
+            old: c(&format!("2023-06-29-{}-PE", 100_000 + at * 100)),
+            new: c(&format!("2023-06-28-{}-PE", 100_000 + at * 100)),
+            ..pointer(STATED, SETTLED)
+        };
+        long.push_str(&record.line());
+        long.push('\n');
+    }
+    let started = std::time::Instant::now();
+    let read = Withdrawn::parse(&long).unwrap();
+    let took = started.elapsed();
+    assert_eq!(read.counts(), (10_000, 0));
+    assert_eq!(
+        read.line_of(sym("NIFTY"), c("2023-06-29-1099900-PE")),
+        Some(10_000)
+    );
+    eprintln!("LEDGER_PARSE lines=10000 micros={}", took.as_micros());
+}
+
+/// NIFTY FIRST, THEN THE SAME CODE ON BANKNIFTY, A STOCK AND AN ILLIQUID
+/// STRIKE: one stated-2023-06-29 key of a single bar per underlying, moved,
+/// then a second plan pending nothing — no underlying is a special case.
+#[test]
+fn every_underlying_reads_done_after_its_apply() {
+    let scratch = Scratch::new("every");
+    let root = scratch.root();
+    let mut rows = Vec::new();
+    for (under, strike) in [
+        ("NIFTY", "1000000"),
+        ("BANKNIFTY", "2500000"),
+        ("RELIANCE", "180000"),
+        ("NIFTY", "1050000"),
+    ] {
+        let stated = format!("2023-06-29-{strike}-PE");
+        put(root, under, &stated, &[bar(d(2020, 6, 15), 36_000, 7)]);
+        rows.push(census_row_of(
+            root,
+            under,
+            &stated,
+            YearMonth::new(2020, 6).unwrap(),
+        ));
+    }
+    partitioned(root, &rows);
+    let found = survey(root, None).unwrap();
+    let decided = plan(&found, &withdrawn(root).unwrap());
+    assert_eq!(decided.moves.len(), 4, "{:?}", decided.unresolved);
+    let ledger = withdrawn(root).unwrap();
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!(done.moved.len(), 4);
+    let found = survey(root, None).unwrap();
+    let again = plan(&found, &withdrawn(root).unwrap());
+    assert_eq!(again.pending(), 0, "{:?}", again.unresolved);
+    assert_eq!(again.recorded_moves.len(), 4);
+    let only: BTreeSet<Symbol> = [sym("BANKNIFTY")].into_iter().collect();
+    assert_eq!(withdrawn(root).unwrap().counts_for(Some(&only)), (1, 0));
+}
+
+/// A synthetic survey of `n` NIFTY option keys: nine in ten a June-2019
+/// ladder strike the decoder keeps, one in ten a stated-2023-06-29 put it
+/// moves, and a ledger recording the move of half of those. Invented keys,
+/// no bar file: the plan reads nothing.
+fn synthetic(n: usize) -> (Survey, Withdrawn) {
+    let under = sym("NIFTY");
+    let mut keys = Vec::with_capacity(n);
+    let mut ledger = String::new();
+    for at in 0..n {
+        let stated = at % 10 == 9;
+        let (expiry, day) = if stated {
+            (d(2023, 6, 29), d(2020, 6, 15))
+        } else {
+            (d(2019, 6, 27), d(2019, 6, 3))
+        };
+        let strike = 1_000_000 + 5_000 * i64::try_from(at / 2).unwrap();
+        let side = if at % 2 == 0 { "PE" } else { "CE" };
+        let text = format!("{expiry}-{strike}-{side}");
+        let contract = c(&text);
+        let ts = (i64::from(day.days_from_epoch()) * 86_400 - 19_800 + 34_000) * 1_000_000;
+        keys.push(Stored {
+            underlying: under,
+            contract,
+            expiry,
+            strike,
+            side: if at % 2 == 0 {
+                OptionSide::Put
+            } else {
+                OptionSide::Call
+            },
+            months: vec![Month {
+                month: day.year_month().unwrap(),
+                rows: 2,
+                first_ts_micros: ts,
+                last_ts_micros: ts + 1_000_000,
+            }],
+            days: BTreeMap::from([(day, 2)]),
+        });
+        if stated && at % 20 == 19 {
+            let to = c(&format!("2023-06-28-{strike}-{side}"));
+            let record = SupersededRecord {
+                underlying: under,
+                old: contract,
+                new: to,
+                kind: AliasKind::VendorRedated,
+                months: 1,
+                bars: 2,
+                digest: [9; 32],
+            };
+            ledger.push_str(&record.line());
+            ledger.push('\n');
+        }
+    }
+    keys.sort_by(|a, b| a.contract.as_str().cmp(b.contract.as_str()));
+    (
+        Survey {
+            keys,
+            ..Survey::default()
+        },
+        Withdrawn::parse(&ledger).unwrap(),
+    )
+}
+
+/// THE PLAN'S PER-KEY COST, MEASURED (AG-02): `plan()` over synthetic
+/// surveys of 1,000 and 10,000 keys, 200 runs each, nanoseconds per key.
+/// Run with `--ignored --nocapture plan_cost`; prints p50, p99 and max.
+#[test]
+#[ignore = "a measurement, run by hand: --ignored --nocapture plan_cost"]
+fn plan_cost_per_key_is_flat_in_the_number_of_keys() {
+    for n in [1_000_usize, 10_000] {
+        let (found, ledger) = synthetic(n);
+        let mut per_key: Vec<u128> = Vec::with_capacity(200);
+        let mut judged = 0;
+        for _ in 0..200 {
+            let started = std::time::Instant::now();
+            let decided = plan(&found, &ledger);
+            per_key.push(started.elapsed().as_nanos() / n as u128);
+            judged = decided.keys;
+        }
+        assert_eq!(judged, n as u64);
+        per_key.sort_unstable();
+        eprintln!(
+            "PLAN_COST n_keys={n} runs=200 ns_per_key p50={} p99={} max={}",
+            per_key[99], per_key[197], per_key[199]
+        );
+    }
+}
+
+/// THE CENSUS STEP'S COST (AG-02 repair r1e): one load of the current FNO
+/// epoch and one walk of its keys per plan, flat per entry. A synthetic
+/// epoch of 10,000 and of 100,000 invented option entries and a ledger
+/// withdrawing 13 of them (the real ledger's count), 200 plans' census step
+/// each: p50, p99 and max per plan, and per entry. Run with
+/// `--ignored --nocapture census_step_cost`.
+#[test]
+#[ignore = "a measurement, run by hand: --ignored --nocapture census_step_cost"]
+fn census_step_cost_is_one_load_per_plan_flat_per_entry() {
+    for n in [10_000_usize, 100_000] {
+        let scratch = Scratch::new(&format!("census-cost-{n}"));
+        let root = scratch.root();
+        let under = sym("NIFTY");
+        let month = YearMonth::new(2020, 6).unwrap();
+        let mut census =
+            Manifest::partition_genesis(Vendor::Gdfl, Segment::Fno, u64::try_from(n).unwrap())
+                .unwrap();
+        let mut ledger = String::new();
+        for at in 0..n {
+            let key = c(&format!("2023-06-28-{}-PE", 100_000 + at * 5));
+            let ts = 1_592_193_400_000_000 + i64::try_from(at).unwrap();
+            census
+                .record_held(Held::unknown(Entry {
+                    key: EntryKey {
+                        contract: Some(key),
+                        exchange: Exchange::Nse,
+                        segment: Segment::Fno,
+                        symbol: under,
+                        timeframe: RUNG,
+                        month,
+                    },
+                    rows: 1,
+                    first_ts_micros: ts,
+                    last_ts_micros: ts,
+                }))
+                .unwrap();
+            if at < 13 {
+                ledger.push_str(
+                    &RetiredRecord {
+                        key,
+                        ..refusal_of("2019-05-30-1150000-CE")
+                    }
+                    .line(),
+                );
+                ledger.push('\n');
+            }
+        }
+        let path = epoch_path(root, Vendor::Gdfl, Segment::Fno, 1);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, census.image()).unwrap();
+        let ledger = Withdrawn::parse(&ledger).unwrap();
+        let mut per_plan: Vec<u128> = Vec::with_capacity(200);
+        let mut listed = 0;
+        for _ in 0..200 {
+            let started = std::time::Instant::now();
+            let step = census_step(root, &ledger);
+            per_plan.push(started.elapsed().as_nanos());
+            listed = step.pending();
+        }
+        assert_eq!(listed, 13);
+        per_plan.sort_unstable();
+        let per_entry = |ns: u128| ns / n as u128;
+        eprintln!(
+            "CENSUS_STEP_COST entries={n} plans=200 us_per_plan p50={} p99={} max={} \
+             ns_per_entry p50={} p99={} max={}",
+            per_plan[99] / 1_000,
+            per_plan[197] / 1_000,
+            per_plan[199] / 1_000,
+            per_entry(per_plan[99]),
+            per_entry(per_plan[197]),
+            per_entry(per_plan[199])
+        );
+    }
+}
+
+// ═══ AG-02 repair r2: two writers, a stale plan, the reader's last two rules
+
+/// One writer's view: its survey, the ledger it read, and its plan.
+fn view(root: &Path) -> (Survey, Withdrawn, Plan) {
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let decided = plan(&found, &ledger);
+    (found, ledger, decided)
+}
+
+/// The two changes another writer's survey can see that the first's did
+/// not: three more strikes on the retired keys' day (the day's median
+/// moves, so every retirement's account changes), and one more bar under
+/// the moved key (its `bars=` changes).
+fn between_surveys(root: &Path, ladder: bool) {
+    if ladder {
+        for (at, key) in [
+            "2019-05-30-1400000-CE",
+            "2019-05-30-1450000-CE",
+            "2019-05-30-1500000-CE",
+        ]
+        .iter()
+        .enumerate()
+        {
+            put(
+                root,
+                "NIFTY",
+                key,
+                &[bar(d(2019, 5, 30), 33_500 + u32::try_from(at).unwrap(), 70)],
+            );
+        }
+    } else {
+        put(root, "NIFTY", STATED, &[bar(d(2020, 7, 1), 35_100, 336)]);
+    }
+}
+
+/// BLOCKING r2: TWO APPLIES PLANNED FROM ONE LEDGER never append two
+/// accounts of one key, whichever applies first and whatever changed
+/// between their surveys. The second is refused before a byte — "the ledger
+/// changed since this plan; re-plan" — the ledger reads whole after both,
+/// and a fresh plan then finishes the work to nothing pending. At cb237766d
+/// the second apply appended a second account and the whole ledger was
+/// refused.
+#[test]
+fn two_applies_planned_from_one_ledger_never_append_two_accounts() {
+    for ladder in [true, false] {
+        for first_is_older in [true, false] {
+            let tag = format!("twowriters-{ladder}-{first_is_older}");
+            let fixture = Fixture::new(&tag);
+            fixture.counted();
+            let root = fixture.root();
+            let older = view(root);
+            between_surveys(root, ladder);
+            let newer = view(root);
+            let (first, second) = if first_is_older {
+                (&older, &newer)
+            } else {
+                (&newer, &older)
+            };
+            let one = apply(root, &first.0, &first.2, &first.1).unwrap();
+            assert!(one.lines_written > 0, "{tag}: the first apply wrote");
+            let bytes = std::fs::read(lineage_path(root)).unwrap();
+            let why = apply(root, &second.0, &second.2, &second.1).unwrap_err();
+            assert!(
+                why.contains("the ledger changed since this plan; re-plan")
+                    && why.contains("nothing was written"),
+                "{tag}: {why}"
+            );
+            assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes, "{tag}");
+            let read = withdrawn(root);
+            assert!(read.is_ok(), "{tag}: {:?}", read.err());
+            // A FRESH PLAN finishes whatever the first left, then nothing.
+            let (found, ledger, decided) = view(root);
+            let _ = apply(root, &found, &decided, &ledger).unwrap();
+            let (_, _, last) = view(root);
+            assert_eq!(
+                last.pending(),
+                0,
+                "{tag}: {:?} {:?}",
+                last.moves,
+                last.unresolved
+            );
+            assert!(withdrawn(root).is_ok(), "{tag}");
+        }
+    }
+}
+
+/// BLOCKING r2: an apply while another holds the re-key's lock is refused by
+/// the lock's name and writes nothing: no month, no line, no epoch.
+#[test]
+fn an_apply_while_another_holds_the_lock_writes_nothing() {
+    let fixture = Fixture::new("lockheld");
+    fixture.counted();
+    let root = fixture.root();
+    let (found, ledger, decided) = view(root);
+    let at = ledger_lock_path(root);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let file = std::fs::File::create(&at).unwrap();
+    let held = store::flock::Flock::try_lock(&file, at.as_path()).unwrap();
+    let census_before = census_keys(root);
+    let why = apply(root, &found, &decided, &ledger).unwrap_err();
+    assert!(
+        why.contains("gdfl.lineage.lock") && why.contains("held by another re-key apply"),
+        "{why}"
+    );
+    assert!(why.contains("nothing was written"), "{why}");
+    assert!(!lineage_path(root).exists());
+    assert!(!key_dir(root, "NIFTY", SETTLED).exists());
+    assert_eq!(census_keys(root), census_before);
+    held.release().unwrap();
+    // Released, the same plan applies.
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!((done.moved.len(), done.lines_written), (1, 4));
+}
+
+/// BLOCKING r2, concurrent: two whole survey-plan-apply runs at once, each
+/// round with the day's ladder changed between their surveys. Whatever the
+/// interleaving, the ledger reads whole after both, and every round ends
+/// with nothing pending after one more run.
+#[test]
+fn two_applies_at_once_leave_a_ledger_that_reads() {
+    for round in 0..6 {
+        let fixture = Fixture::new(&format!("atonce{round}"));
+        fixture.counted();
+        let root = fixture.root();
+        let older = view(root);
+        between_surveys(root, true);
+        let newer = view(root);
+        let results: Vec<Result<Applied, String>> = std::thread::scope(|scope| {
+            let a = scope.spawn(|| apply(root, &older.0, &older.2, &older.1));
+            let b = scope.spawn(|| apply(root, &newer.0, &newer.2, &newer.1));
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        let wrote = results
+            .iter()
+            .filter(|done| done.as_ref().is_ok_and(|done| done.lines_written > 0))
+            .count();
+        assert_eq!(wrote, 1, "round {round}: {results:?}");
+        for refused in results.iter().filter_map(|done| done.as_ref().err()) {
+            assert!(
+                refused.contains("nothing was written")
+                    && (refused.contains("held by another re-key apply")
+                        || refused.contains("the ledger changed since this plan")),
+                "round {round}: {refused}"
+            );
+        }
+        assert!(withdrawn(root).is_ok(), "round {round}");
+        let (found, ledger, decided) = view(root);
+        let _ = apply(root, &found, &decided, &ledger).unwrap();
+        assert_eq!(view(root).2.pending(), 0, "round {round}");
+    }
+}
+
+/// Follow-up r2: A SOURCE THAT GREW AFTER THE SURVEY — a bar in a month the
+/// plan counted, or a month it did not — is refused by name and nothing of
+/// it is written; at cb237766d it was moved with the plan's stale `bars=`
+/// and the next plan read PENDING 1 for ever. A re-plan moves it whole.
+#[test]
+fn a_source_that_grew_after_the_survey_is_refused_not_moved_with_a_stale_count() {
+    for (tag, day, sod) in [
+        ("grewbar", d(2020, 7, 1), 35_100),
+        ("grewmonth", d(2020, 8, 3), 34_500),
+    ] {
+        let fixture = Fixture::new(tag);
+        fixture.counted();
+        let root = fixture.root();
+        let (found, ledger, decided) = view(root);
+        assert_eq!(decided.moves[0].bars, 3, "{tag}");
+        put(root, "NIFTY", STATED, &[bar(day, sod, 336)]);
+        let done = apply(root, &found, &decided, &ledger).unwrap();
+        assert!(done.moved.is_empty(), "{tag}: {:?}", done.moved);
+        let why = &done.refused[0].why;
+        assert!(
+            why.contains("the plan counted 3 bar(s)")
+                && why.contains("bars landed under it after the survey; re-plan"),
+            "{tag}: {why}"
+        );
+        assert!(!key_dir(root, "NIFTY", SETTLED).exists(), "{tag}");
+        let read = withdrawn(root).unwrap();
+        assert!(read.superseded(sym("NIFTY"), c(STATED)).is_none(), "{tag}");
+        // The re-plan counts 4 and moves them; then nothing is pending.
+        let (found, ledger, again) = view(root);
+        if again.moves.is_empty() {
+            // A new month the decoder files elsewhere is left by name,
+            // never moved with a stale count.
+            assert!(!again.unresolved.is_empty(), "{tag}");
+            continue;
+        }
+        assert_eq!(again.moves[0].bars, 4, "{tag}");
+        let done = apply(root, &found, &again, &ledger).unwrap();
+        assert_eq!(done.moved[0].bars, 4, "{tag}");
+        assert_eq!(view(root).2.pending(), 0, "{tag}");
+    }
+}
+
+/// Follow-up r2: THE READER refuses a `superseded` line into a key the
+/// ledger retires, and a cycle of `superseded` lines, naming the lines, in
+/// either order; a chain (A by B, B by C) reads.
+#[test]
+fn a_superseded_line_into_a_retired_key_or_a_cycle_is_refused_by_line() {
+    let into = pointer(STATED, IMPOSSIBLE[0]).line();
+    let retire = refusal_of(IMPOSSIBLE[0]).line();
+    for text in [format!("{into}\n{retire}\n"), format!("{retire}\n{into}\n")] {
+        let why = Withdrawn::parse(&text).unwrap_err();
+        assert!(
+            why.contains("retires NSE-FNO-NIFTY-2020-06-25-191250000-CE")
+                && why.contains("bars move only into a key that continues"),
+            "{why}"
+        );
+        assert!(why.contains("line 1") && why.contains("line 2"), "{why}");
+    }
+    let there = pointer(STATED, SETTLED).line();
+    let back = pointer(SETTLED, STATED).line();
+    let why = Withdrawn::parse(&format!("{there}\n{back}\n")).unwrap_err();
+    assert!(why.contains("in a cycle back to itself"), "{why}");
+    assert!(
+        why.contains("lines 1, 2") || why.contains("lines 2, 1"),
+        "{why}"
+    );
+    // A THREE-KEY CYCLE written out of order is named from its earliest
+    // line, and a chain of 2,000 keys reads (one walk, no quadratic path).
+    let third = "2023-06-27-1000000-PE";
+    let why = Withdrawn::parse(&format!(
+        "{}\n{}\n{}\n",
+        pointer(STATED, SETTLED).line(),
+        pointer(third, STATED).line(),
+        pointer(SETTLED, third).line()
+    ))
+    .unwrap_err();
+    assert!(
+        why.contains(&format!(
+            "lines 1, 3, 2 supersede NSE-FNO-NIFTY-{STATED} in a cycle"
+        )),
+        "{why}"
+    );
+    let mut long = String::new();
+    for at in 0..2_000_i64 {
+        let from = format!("2023-06-29-{}-PE", 1_000_000 + at * 500);
+        let to = format!("2023-06-29-{}-PE", 1_000_000 + (at + 1) * 500);
+        long.push_str(&pointer(&from, &to).line());
+        long.push('\n');
+    }
+    assert_eq!(Withdrawn::parse(&long).unwrap().counts(), (2_000, 0));
+    let onward = pointer(SETTLED, "2023-06-27-1000000-PE").line();
+    let chain = Withdrawn::parse(&format!("{there}\n{onward}\n")).unwrap();
+    assert_eq!(chain.counts(), (2, 0));
+    assert_eq!(
+        chain.moved_into(sym("NIFTY"), c(SETTLED)),
+        Some((c(STATED), 1))
+    );
+}
+
+/// Follow-up r2: THE WRITER never makes what the reader refuses. The plan
+/// leaves by name a key the ledger moved bars into instead of retiring it,
+/// and an apply refuses a hand-built plan that would retire one, move into
+/// a withdrawn key, or move into a key it also moves away.
+#[test]
+fn the_writer_never_retires_a_target_or_closes_a_cycle() {
+    let fixture = Fixture::new("targets");
+    fixture.counted();
+    let root = fixture.root();
+    append_ledger(
+        root,
+        &[pointer("2020-06-25-191200000-CE", IMPOSSIBLE[0]).line()],
+    );
+    let (found, ledger, decided) = view(root);
+    assert!(
+        !decided
+            .retired
+            .iter()
+            .any(|record| record.key == c(IMPOSSIBLE[0]))
+    );
+    let left = decided
+        .unresolved
+        .iter()
+        .find(|one| one.key.ends_with(IMPOSSIBLE[0]))
+        .unwrap();
+    assert!(left.why.contains("ledger line 1 moved"), "{}", left.why);
+    let bytes = std::fs::read(lineage_path(root)).unwrap();
+    let mut forced = decided.clone();
+    forced.retired.push(refusal_of(IMPOSSIBLE[0]));
+    let why = apply(root, &found, &forced, &ledger).unwrap_err();
+    assert!(why.contains("which ledger line 1 moved"), "{why}");
+    let mut into_gone = decided.clone();
+    into_gone.moves[0].to = c("2020-06-25-191200000-CE");
+    let why = apply(root, &found, &into_gone, &ledger).unwrap_err();
+    assert!(why.contains("which ledger line 1 withdraws"), "{why}");
+    let mut onward = decided.clone();
+    let mut second = onward.moves[0].clone();
+    second.from = c(SETTLED);
+    second.to = c("2023-06-27-1000000-PE");
+    onward.moves.push(second);
+    let why = apply(root, &found, &onward, &ledger).unwrap_err();
+    assert!(why.contains("which it also moves away"), "{why}");
+    let mut retire_target = decided;
+    retire_target.retired.push(refusal_of(SETTLED));
+    let why = apply(root, &found, &retire_target, &ledger).unwrap_err();
+    assert!(why.contains("which it also moves"), "{why}");
+    assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes);
+    assert!(!key_dir(root, "NIFTY", SETTLED).exists());
+}
+
+/// Follow-up r2: ONE RULE FOR BOTH RECORDED KINDS. A retired key that gained
+/// a bar after its retirement is unresolved by name, exactly as a moved key
+/// that did; one whose day merely gained other strikes (its median moved)
+/// stays recorded. At cb237766d the grown retired key read "recorded".
+#[test]
+fn a_retired_key_that_grew_is_unresolved_like_a_moved_one() {
+    let fixture = applied("retiredgrew");
+    let root = fixture.root();
+    between_surveys(root, true);
+    let (_, _, steady) = view(root);
+    assert_eq!(steady.recorded_retired.len(), 3, "{:?}", steady.unresolved);
+    put(
+        root,
+        "NIFTY",
+        IMPOSSIBLE[0],
+        &[bar(d(2019, 5, 30), 40_010, 9)],
+    );
+    let (_, _, grown) = view(root);
+    assert_eq!(grown.recorded_retired.len(), 2);
+    let left = grown
+        .unresolved
+        .iter()
+        .find(|one| one.key.ends_with(IMPOSSIBLE[0]))
+        .unwrap();
+    assert!(
+        left.why.contains("retires it with 1 bar(s) on 1 day(s)")
+            && left.why.contains("holds 2 bar(s) on 1 day(s) now"),
+        "{}",
+        left.why
+    );
+}
+
+/// p50, p99 and max of 200 sorted samples, as one line's fields.
+fn spread(mut samples: Vec<u128>) -> String {
+    samples.sort_unstable();
+    format!(
+        "p50={} p99={} max={} n={}",
+        samples[99],
+        samples[197],
+        samples[199],
+        samples.len()
+    )
+}
+
+/// THE GUARDS REPAIR r2 ADDS TO EVERY APPLY, MEASURED: the re-key lock's
+/// open, take and release; the ledger's re-key lines compared with a fresh
+/// read of 10,000 records (O(lines), once per apply); the reader's two
+/// whole-ledger rules on the same 10,000 lines; and `source_now` of one
+/// two-month key (one listing, two headers). Repair r4 adds the comparison
+/// narrowed to one `--underlying` that names every line (its worst case).
+/// 200 samples each, nanoseconds.
+/// Run with `--ignored --nocapture apply_guard_cost`.
+#[test]
+#[ignore = "a measurement, run by hand: --ignored --nocapture apply_guard_cost"]
+fn apply_guard_cost_per_operation() {
+    let fixture = Fixture::new("guardcost");
+    fixture.counted();
+    let root = fixture.root();
+    let at = ledger_lock_path(root);
+    let mut lock = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let started = std::time::Instant::now();
+        let file = open_ledger_lock(&at).unwrap();
+        let held = store::flock::Flock::try_lock(&file, at.as_path()).unwrap();
+        held.release().unwrap();
+        lock.push(started.elapsed().as_nanos());
+    }
+    let mut text = String::with_capacity(10_000 * 160);
+    for strike in 0..10_000_i64 {
+        let old = format!("2023-06-29-{}-PE", 1_000_000 + strike * 500);
+        let new = format!("2023-06-28-{}-PE", 1_000_000 + strike * 500);
+        text.push_str(&pointer(&old, &new).line());
+        text.push('\n');
+    }
+    let read = Withdrawn::parse(&text).unwrap();
+    let again = Withdrawn::parse(&text).unwrap();
+    let mut compare = Vec::with_capacity(200);
+    let mut rules = Vec::with_capacity(200);
+    let mut narrowed = Vec::with_capacity(200);
+    let only: BTreeSet<Symbol> = [sym("NIFTY")].into_iter().collect();
+    for _ in 0..200 {
+        let started = std::time::Instant::now();
+        read.same_records(&again, None).unwrap();
+        compare.push(started.elapsed().as_nanos());
+        let started = std::time::Instant::now();
+        read.same_records(&again, Some(&only)).unwrap();
+        narrowed.push(started.elapsed().as_nanos());
+        let started = std::time::Instant::now();
+        read.targets_continue().unwrap();
+        rules.push(started.elapsed().as_nanos());
+    }
+    let mut chain = String::with_capacity(10_000 * 160);
+    for at in 0..10_000_i64 {
+        let from = format!("2023-06-29-{}-PE", 1_000_000 + at * 500);
+        let to = format!("2023-06-29-{}-PE", 1_000_000 + (at + 1) * 500);
+        chain.push_str(&pointer(&from, &to).line());
+        chain.push('\n');
+    }
+    let linked = Withdrawn::parse(&chain).unwrap();
+    let mut walk = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let started = std::time::Instant::now();
+        linked.targets_continue().unwrap();
+        walk.push(started.elapsed().as_nanos());
+    }
+    let mut source = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let started = std::time::Instant::now();
+        let (months, bars) = source_now(root, sym("NIFTY"), c(STATED)).unwrap();
+        source.push(started.elapsed().as_nanos());
+        assert_eq!((months.len(), bars), (2, 3));
+    }
+    eprintln!("APPLY_GUARD lock_open_take_release {}", spread(lock));
+    eprintln!("APPLY_GUARD same_records_10000_lines {}", spread(compare));
+    eprintln!(
+        "APPLY_GUARD same_records_10000_lines_one_underlying {}",
+        spread(narrowed)
+    );
+    eprintln!(
+        "APPLY_GUARD targets_continue_10000_records {}",
+        spread(rules)
+    );
+    eprintln!("APPLY_GUARD targets_continue_10000_chain {}", spread(walk));
+    eprintln!("APPLY_GUARD source_now_2_months {}", spread(source));
+}
+
+/// Follow-up r3 (probe P4): A RETIREMENT WHOSE KEY GREW AFTER THE PLAN is
+/// refused by name under the lock, never appended with the plan's stale
+/// `bars=`: no `retired` line for it, its census rows kept, and a re-plan
+/// retires it with the bars it holds. Before repair r4 the apply appended
+/// `bars=1` for a key holding 2, and the reader held that one account.
+#[test]
+fn a_retirement_whose_key_grew_after_the_plan_is_refused_not_retired_stale() {
+    let scratch = retirements_only("retire-grew");
+    let root = scratch.root();
+    let (found, ledger, decided) = view(root);
+    let grew = IMPOSSIBLE[0];
+    let planned = decided
+        .retired
+        .iter()
+        .find(|record| record.key == c(grew))
+        .unwrap();
+    assert_eq!(planned.bars, 1);
+    put(root, "NIFTY", grew, &[bar(d(2019, 5, 30), 40_500, 9)]);
+    let census_before = census_keys(root).1;
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert!(
+        done.retired.iter().all(|record| record.key != c(grew)),
+        "{:?}",
+        done.retired
+    );
+    assert_eq!(done.retired.len(), IMPOSSIBLE.len() - 1);
+    let refused = done
+        .refused
+        .iter()
+        .find(|one| one.key == format!("NSE-FNO-NIFTY-{grew}"))
+        .unwrap();
+    assert!(
+        refused.why.contains("the plan counted 1 bar(s) to retire")
+            && refused.why.contains("it holds 2 bar(s) in 1 month(s) now")
+            && refused.why.ends_with("re-plan"),
+        "{}",
+        refused.why
+    );
+    let read = withdrawn(root).unwrap();
+    assert!(read.retired(sym("NIFTY"), c(grew)).is_none());
+    assert!(read.retired(sym("NIFTY"), c(IMPOSSIBLE[1])).is_some());
+    let text = std::fs::read_to_string(lineage_path(root)).unwrap();
+    assert!(!text.contains(grew), "{text}");
+    let listed = census_keys(root).1;
+    let row = format!("NIFTY {grew} 2019-05");
+    assert!(
+        census_before.contains(&row) && listed.contains(&row),
+        "{listed:?}"
+    );
+    // THE RE-PLAN retires it with what it holds, and then nothing is pending.
+    let (found, ledger, again) = view(root);
+    assert_eq!(again.retired.len(), 1);
+    assert_eq!(again.retired[0].bars, 2);
+    let done = apply(root, &found, &again, &ledger).unwrap();
+    assert_eq!((done.retired.len(), done.refused.len()), (1, 0));
+    assert_eq!(view(root).2.pending(), 0);
+    assert_eq!(
+        withdrawn(root)
+            .unwrap()
+            .retired(sym("NIFTY"), c(grew))
+            .map(|r| r.bars),
+        Some(2)
+    );
+}
+
+/// The retirements-only store's ladder and impossible strikes, a second time
+/// under BANKNIFTY, so two underlyings each have a retirement to apply.
+fn second_underlying(root: &Path) {
+    let on = d(2019, 5, 30);
+    for (at, key) in LADDER.iter().enumerate() {
+        let price = 201 + i64::try_from(at).unwrap();
+        put(
+            root,
+            "BANKNIFTY",
+            key,
+            &[bar(on, 33_300, price), bar(on, 33_301, price)],
+        );
+    }
+    put(root, "BANKNIFTY", IMPOSSIBLE[0], &[bar(on, 41_000, 7)]);
+}
+
+/// Follow-up r3 (probe P12): APPLIES OF DISJOINT `--underlying` PLANS do
+/// not refuse each other. Each compares the ledger it re-reads under the
+/// lock with the one it planned from over its own underlyings only, so the
+/// NIFTY apply's lines do not stale the BANKNIFTY plan; a plan of the same
+/// underlying, or of every underlying, made before them is still refused.
+/// Before repair r4 the BANKNIFTY apply was refused ("the ledger changed
+/// since this plan") and a re-plan cost a whole survey.
+#[test]
+fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
+    let scratch = retirements_only("disjoint");
+    let root = scratch.root();
+    second_underlying(root);
+    let only = |name: &str| BTreeSet::from([sym(name)]);
+    let narrowed = |name: &str| {
+        let wanted = only(name);
+        let found = survey(root, Some(&wanted)).unwrap();
+        let ledger = withdrawn(root).unwrap();
+        let decided = plan(&found, &ledger);
+        (found, ledger, decided)
+    };
+    let nifty = narrowed("NIFTY");
+    let bank = narrowed("BANKNIFTY");
+    let nifty_again = narrowed("NIFTY");
+    let every = view(root);
+    assert_eq!((nifty.2.retired.len(), bank.2.retired.len()), (3, 1));
+
+    let first = apply(root, &nifty.0, &nifty.2, &nifty.1).unwrap();
+    assert_eq!(first.retired.len(), 3);
+    let second = apply(root, &bank.0, &bank.2, &bank.1).unwrap();
+    assert_eq!((second.retired.len(), second.lines_written), (1, 1));
+    let read = withdrawn(root).unwrap();
+    assert_eq!(read.counts(), (0, 4));
+    assert!(read.retired(sym("BANKNIFTY"), c(IMPOSSIBLE[0])).is_some());
+
+    // THE SAME UNDERLYING, AND THE WHOLE LEDGER, ARE STILL COMPARED.
+    let bytes = std::fs::read(lineage_path(root)).unwrap();
+    for (name, stale) in [("NIFTY", &nifty_again), ("every", &every)] {
+        let why = apply(root, &stale.0, &stale.2, &stale.1).unwrap_err();
+        assert!(
+            why.contains("the ledger changed since this plan; re-plan")
+                && why.contains("nothing was written"),
+            "{name}: {why}"
+        );
+        assert_eq!(std::fs::read(lineage_path(root)).unwrap(), bytes, "{name}");
+    }
+    let why = apply(root, &nifty_again.0, &nifty_again.2, &nifty_again.1).unwrap_err();
+    assert!(
+        why.contains("re-key line(s) of NIFTY when the plan read it"),
+        "{why}"
+    );
+    let why = apply(root, &every.0, &every.2, &every.1).unwrap_err();
+    assert!(
+        why.contains("re-key line(s) of every underlying when the plan read it"),
+        "{why}"
+    );
+    assert_eq!(view(root).2.pending(), 0);
 }

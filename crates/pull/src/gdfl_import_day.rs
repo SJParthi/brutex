@@ -11,7 +11,7 @@ use crate::ingest::Failure;
 use crate::session::{Day, Window};
 use crate::vendor::Granularity;
 
-use super::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause};
+use super::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, import_cause};
 use super::census::{Census, StoreCensus, stop_at_census};
 use super::filing::{DayFiler, make_durable, stop_at_durability};
 use super::journal::{BAR_DEFINITION, Journal, ScopeHeld, closing_line, journal_path, run_line};
@@ -45,17 +45,12 @@ pub(super) fn name_staged(report: &mut Report, failures: Vec<Staged>) {
     }
 }
 
-/// A day's failure about `about`, refused by `refusal` (an import refusal
-/// that names its own code), at `stage`, logged: [`note_failure`] emits its
-/// `Error` event, which is why the name says `note_` (gate 19 reads it).
-pub(super) fn note_staged(
-    run: &Run<'_>,
-    day: Day,
-    about: &str,
-    stage: Stage,
-    refusal: &ImportRefusal,
-) -> Staged {
-    let cause = Cause::open(stage, refusal.code());
+/// A day's failure about `about`, refused by `refusal`, at the one stage
+/// [`import_cause`] gives its variant (IA-2, IA-GR-16: a call site cannot
+/// stage a variant two ways), logged: [`note_failure`] emits its `Error`
+/// event, which is why the name says `note_` (gate 19 reads it).
+pub(super) fn note_staged(run: &Run<'_>, day: Day, about: &str, refusal: &ImportRefusal) -> Staged {
+    let cause = import_cause(refusal);
     Staged {
         cause,
         failure: note_failure(run.kind, day, about, &refusal.to_string(), cause),
@@ -87,12 +82,15 @@ impl Close {
     }
 }
 
-/// The day's decisive failure: the census's, else the first that keeps the
-/// day from closing, else the first (D-3317: its `stage=` and `reason=`).
+/// The day's decisive failure: the census's, else the run's (a stop, IA-2,
+/// D-4853: a stopped day says `reason=stopped` even when an earlier file
+/// failed), else the first that keeps the day from closing, else the first
+/// (D-3317: its `stage=` and `reason=`).
 fn decisive(failures: &[Staged]) -> Option<&Staged> {
     failures
         .iter()
         .find(|one| one.cause.stage == Stage::Census)
+        .or_else(|| failures.iter().find(|one| one.cause.stage == Stage::Run))
         .or_else(|| failures.iter().find(|one| !one.cause.closes))
         .or_else(|| failures.first())
 }
@@ -110,7 +108,9 @@ pub(super) fn close_of(failures: &[Staged], read: bool) -> Close {
         return Close::Done;
     };
     let cause = first.cause;
-    if cause.stage == Stage::Census {
+    if matches!(cause.stage, Stage::Census | Stage::Run) {
+        // A stopped day whose `begin` was written is open, whatever its
+        // files did (D-4853): never a red `refused` day.
         Close::Incomplete(cause)
     } else if !read {
         Close::Refused(cause)
@@ -132,6 +132,12 @@ pub(super) struct Counts {
     pub(super) late: usize,
     pub(super) late_unresolved: usize,
     pub(super) max_back_s: u32,
+    /// Entries of the day that were not wanted files (DB-A49): counted on
+    /// the close for ever, so a skipped file outlives the event log.
+    pub(super) skipped: usize,
+    /// What the day's listing was (DB-A49): `None` when no listing was
+    /// read (a day refused before one, or one whose listing refused).
+    pub(super) listing: Option<crate::gdfl_cm::ListingSum>,
 }
 
 /// The report's counters at a day's start, so the day's own counts are a
@@ -141,6 +147,7 @@ pub(super) struct Counts {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Mark {
     pub(super) files: usize,
+    pub(super) files_skipped: usize,
     pub(super) rows: usize,
     pub(super) seconds: usize,
     pub(super) seconds_committed: usize,
@@ -154,6 +161,7 @@ impl Mark {
     const fn of(report: &Report) -> Self {
         Self {
             files: report.files,
+            files_skipped: report.files_skipped,
             rows: report.rows,
             seconds: report.seconds,
             seconds_committed: report.seconds_committed,
@@ -166,9 +174,16 @@ impl Mark {
 
 impl Counts {
     /// The day's counts: what `report` holds beyond `before`.
-    const fn of_day(before: Mark, report: &Report, failures: usize, max_back_s: u32) -> Self {
+    const fn of_day(
+        before: Mark,
+        report: &Report,
+        (failures, max_back_s): (usize, u32),
+        listing: Option<crate::gdfl_cm::ListingSum>,
+    ) -> Self {
         Self {
             files: report.files - before.files,
+            skipped: report.files_skipped - before.files_skipped,
+            listing,
             seconds: report.seconds - before.seconds,
             failures,
             late: report.late_rows - before.late_rows,
@@ -177,17 +192,24 @@ impl Counts {
         }
     }
 
-    /// The D-2822 stats, as `done` and `incomplete` write them.
+    /// The D-2822 stats, as `done` and `incomplete` write them, then what
+    /// the listing was (DB-A49): ` skipped=<n> entries=<n> listing=<hex>`,
+    /// or ` skipped=<n>` alone when no listing was read. A reader finds
+    /// each by name (`count_of`), so no earlier field moved.
     pub(super) fn text(&self) -> String {
+        let listing = self.listing.map_or_else(String::new, |sum| {
+            format!(" entries={} listing={}", sum.entries, sum.hex())
+        });
         format!(
             "definition={BAR_DEFINITION} files={} seconds={} failures={} late={} \
-             late_unresolved={} max_back_s={}",
+             late_unresolved={} max_back_s={} skipped={}{listing}",
             self.files,
             self.seconds,
             self.failures,
             self.late,
             self.late_unresolved,
             self.max_back_s,
+            self.skipped,
         )
     }
 }
@@ -456,13 +478,7 @@ impl Ctx<'_> {
         let scope = match self.scope_field(key, close) {
             Ok(scope) => scope,
             Err(why) => {
-                failures.push(note_staged(
-                    self.run,
-                    day,
-                    "scope ledger",
-                    Stage::Journal,
-                    &why,
-                ));
+                failures.push(note_staged(self.run, day, "scope ledger", &why));
                 return Outcome::Incomplete;
             }
         };
@@ -471,10 +487,17 @@ impl Ctx<'_> {
         {
             return close.outcome();
         }
-        match self.append(&format!("{unrun} run={}", self.id)) {
+        // THE CLOSE'S CLOCK TIME (DB-A50): a run the runs ledger knows says when
+        // each day closed, before its `run=`, which stays the line's last field.
+        let at = self
+            .options
+            .run
+            .map(|_| format!(" at={}", now_unix_s()))
+            .unwrap_or_default();
+        match self.append(&format!("{unrun}{at} run={}", self.id)) {
             Ok(_) => close.outcome(),
             Err(why) => {
-                failures.push(note_staged(self.run, day, "journal", Stage::Journal, &why));
+                failures.push(note_staged(self.run, day, "journal", &why));
                 Outcome::Incomplete
             }
         }
@@ -489,9 +512,10 @@ pub(super) fn close_day(
     ctx: &Ctx<'_>,
     (key, day): (&str, Day),
     (before, report, max_back_s): (Mark, &Report, u32),
+    listing: Option<crate::gdfl_cm::ListingSum>,
     failures: &mut Vec<Staged>,
 ) -> Outcome {
-    let counts = Counts::of_day(before, report, failures.len(), max_back_s);
+    let counts = Counts::of_day(before, report, (failures.len(), max_back_s), listing);
     ctx.close(
         (key, day),
         close_of(failures, counts.files > 0),
@@ -949,7 +973,6 @@ fn write_flags(
             run,
             day,
             "day ledger",
-            Stage::Journal,
             &ImportRefusal::DayLedger { why },
         )),
     }
@@ -1075,7 +1098,7 @@ where
         run,
         journal: &journal,
         options,
-        id: journal.fresh_run(started),
+        id: options.run.unwrap_or_else(|| journal.fresh_run(started)),
         started,
         announced: std::cell::Cell::new(false),
         scoped,
@@ -1087,17 +1110,102 @@ where
     note_started(&ctx, &filter);
     note_torn(&ctx);
     let mut report = Report::default();
-    let state = (&mut report, &mut flags);
-    reach_back(&ctx, &filter, state, &mut *census, &mut read_day)?;
+    let ended = run_days(
+        &ctx,
+        (&filter, &request),
+        (&mut report, &mut flags),
+        census,
+        &mut read_day,
+    );
+    let ended = ended.map(|()| report);
+    end_line(&ctx, &ended);
+    ended
+}
+
+/// THE RUN'S END IN THE JOURNAL (IA-2; DB-A50): a run the runs ledger knows
+/// that wrote any line writes one more `run` line when it ends, whatever
+/// ended it: `run <id> ended=<unix_s> outcome=<finished|stopped|code>
+/// definition=<n>`. No new verb (design §5.4): a `run` line with more
+/// `name=value` fields is read by every reader since 3f65ad43, and its
+/// `definition=` keeps the reader's run definition what the run's own line
+/// set. A run that wrote no line writes none (D-2803); a run with no ledger
+/// id (a test's bare reader) writes none, so its journal stays a pure
+/// function of its inputs. A journal that will not take the line is said at
+/// `error`; the run's end is not changed by it.
+fn end_line(ctx: &Ctx<'_>, ended: &Result<Report, ImportRefusal>) {
+    if ctx.options.run.is_none() || !ctx.announced.get() {
+        return;
+    }
+    let outcome = match ended {
+        Ok(_) => "finished",
+        Err(refusal) => refusal.code(),
+    };
+    let line = format!(
+        "run {} ended={} outcome={outcome} definition={BAR_DEFINITION}",
+        ctx.id,
+        now_unix_s()
+    );
+    if let Err(why) = ctx.journal.append(&line) {
+        let why = why.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error(TARGET, "run end line not written")
+                .with("run", ctx.id)
+                .with("outcome", outcome)
+                .with("why", why.as_str()),
+        );
+    }
+}
+
+/// The run's stop, when one was asked: the refusal that ends the run, with
+/// who asked and when, and its "run stopped" event (D-4893).
+fn stopped(ctx: &Ctx<'_>, day: Option<Day>, report: &mut Report) -> Option<ImportRefusal> {
+    let stop = ctx.options.stop.filter(|stop| stop.requested())?;
+    let shown = day.map(|day| day.to_string());
+    stop.note_stopped(ctx.run.kind.as_str(), shown.as_deref());
+    let request = stop.request();
+    Some(ImportRefusal::Stopped {
+        kind: ctx.run.kind,
+        day,
+        by: request
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |r| r.by.clone()),
+        requested: request.map_or(0, |r| r.requested),
+        done: Box::new(std::mem::take(report)),
+    })
+}
+
+/// [`drive_days`]' days once its context is built: the reach back, then each
+/// day of the range, the stop asked before each day and after it (D-4853:
+/// a stop that came after a day's last file lets the day close as it would
+/// have, and the run stops before the next).
+fn run_days<F>(
+    ctx: &Ctx<'_>,
+    (filter, request): (&str, &BarRequest),
+    (report, flags): (&mut Report, &mut quality::Ledger),
+    census: &mut dyn Census,
+    read_day: &mut F,
+) -> Result<(), ImportRefusal>
+where
+    F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
+{
+    let (run, options) = (ctx.run, ctx.options);
+    if let Some(refusal) = stopped(ctx, None, report) {
+        return Err(refusal);
+    }
+    let state = (&mut *report, &mut *flags);
+    reach_back(ctx, filter, state, &mut *census, &mut *read_day)?;
     let range = days(run.from, run.to);
     let total = range.len();
     for (index, day) in range.into_iter().enumerate() {
+        if let Some(refusal) = stopped(ctx, None, report) {
+            return Err(refusal);
+        }
         if let Some(observer) = options.observer {
             observer.day_begun(run.kind, day, (index, total));
         }
         'day: {
             let key = format!("{} {day} {filter}", run.kind.as_str());
-            let state = (&mut report, &mut flags);
+            let state = (&mut *report, &mut *flags);
             let asked = Asked {
                 key: &key,
                 day,
@@ -1105,10 +1213,10 @@ where
                 names: None,
                 early: false,
             };
-            if widen(&ctx, &request, &asked, state, &mut *census, &mut read_day)? {
+            if widen(ctx, request, &asked, state, &mut *census, &mut *read_day)? {
                 break 'day;
             }
-            if !admit(&ctx, &key, day, &mut report) {
+            if !admit(ctx, &key, day, report) {
                 break 'day;
             }
             let pass = Pass {
@@ -1116,15 +1224,18 @@ where
                 day,
                 member: None,
             };
-            let state = (&mut report, &mut flags);
-            day_pass(&ctx, &request, &pass, state, &mut *census, &mut read_day)?;
+            let state = (&mut *report, &mut *flags);
+            day_pass(ctx, request, &pass, state, &mut *census, &mut *read_day)?;
         }
         if let Some(observer) = options.observer {
-            observer.day_passed(run.kind, day, &report);
+            observer.day_passed(run.kind, day, report);
+        }
+        if let Some(refusal) = stopped(ctx, Some(day), report) {
+            return Err(refusal);
         }
     }
-    note_finished(&ctx, &report);
-    Ok(report)
+    note_finished(ctx, report);
+    Ok(())
 }
 
 /// The days of `from`'s month before it, in order: none when `from` is the
@@ -1607,8 +1718,18 @@ where
         ledger,
         batch,
         confirmed,
+        stopped,
+        begin,
         ..
     } = files_of_day;
+    // A STOP BEFORE THE DAY'S FIRST WRITE (D-4853): no file reached the
+    // store, so nothing of the day was started and the journal has nothing
+    // to close. The files read before the stop are counted and named.
+    if stopped && begin.is_none() {
+        take_read((run.kind, day), (read, extras), report, &mut failures);
+        name_staged(report, failures);
+        return Ok(None);
+    }
     // EVERY FILE OF THE DAY IS WRITTEN; NOW IT IS MADE DURABLE, ONCE, and
     // only then are its day-ledger lines, its census batch and its
     // closing line written (WP-16, D-3353). A day whose writes cannot be
@@ -1625,21 +1746,24 @@ where
             &why,
         ));
     }
-    let (held_day, member_bytes) = (read.held, extras.member_bytes);
+    let (held_day, member_bytes, listing) = (read.held, extras.member_bytes, extras.listing);
     take_read((run.kind, day), (read, extras), report, &mut failures);
     if !held_day {
         close_missing(ctx, (key, day), report, failures);
         return Ok(None);
     }
     // A member key's close never writes the whole-day line of the day
-    // ledger: that line is the base close's (D-4878, D-3335).
-    write_flags(
-        (run, run.only.is_empty() && pass.member.is_none()),
-        flags,
-        (day, ledger, member_bytes),
-        report,
-        &mut failures,
-    );
+    // ledger: that line is the base close's (D-4878, D-3335). Nor does a day
+    // a stop cut short: its line would describe files it never read.
+    if !stopped {
+        write_flags(
+            (run, run.only.is_empty() && pass.member.is_none()),
+            flags,
+            (day, ledger, member_bytes),
+            report,
+            &mut failures,
+        );
+    }
     if let Some(why) = census.publish(run.store_root, &held) {
         let room = census.room(run.store_root, &held);
         return Err(stop_at_census(
@@ -1652,16 +1776,54 @@ where
     }
     // A DAY IS COUNTED ONCE: here for a day read whole, and in [`widen`] for
     // a day read again for a wider scope, after its last member key.
+    // A DAY A STOP CUT SHORT after its `begin` closes `incomplete stage=run
+    // reason=stopped` (D-4853): [`decisive`] takes the run's cause before any
+    // file's, so it says `stopped` even when an earlier file failed.
+    if stopped {
+        failures.push(note_stopped_day(run.kind, day));
+    }
     let closed = match pass.member {
+        None if stopped => Closed::Day,
         None => {
             report.days_imported += 1;
             Closed::Day
         }
         Some(member) => Closed::Member { member, key },
     };
-    let outcome = close_day(ctx, (key, day), (before, report, day_back), &mut failures);
+    let outcome = close_day(
+        ctx,
+        (key, day),
+        (before, report, day_back),
+        listing,
+        &mut failures,
+    );
     record_close(run.kind, (day, outcome, closed), (before, report), failures);
     Ok(Some(outcome))
+}
+
+/// The failure a stop leaves on a day it cut short after its `begin`
+/// (D-4853), at the stage [`import_cause`] gives a stop, with its event: a
+/// stop is asked for, so the event is a warning, never an error.
+fn note_stopped_day(kind: ImportKind, day: Day) -> Staged {
+    let cause = Cause::open(Stage::Run, "stopped");
+    let day_text = day.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(TARGET, "day cut short by a stop")
+            .with("kind", kind.as_str())
+            .with("day", day_text.as_str())
+            .with("stage", cause.stage.as_str())
+            .with("code", cause.code),
+    );
+    Staged {
+        cause,
+        failure: super::failure_on(
+            day,
+            &format!("{day} run"),
+            "a stop was asked: the files of the day after this point were not taken, and a \
+             resume reads the day again"
+                .to_owned(),
+        ),
+    }
 }
 
 /// Counts what a source did with a day beside its files: the entries it

@@ -895,7 +895,7 @@ impl WindowAsk {
     }
 
     /// The query the window reads.
-    fn query(self) -> bars::WindowQuery {
+    pub(super) fn query(self) -> bars::WindowQuery {
         bars::WindowQuery {
             vendor: self.vendor,
             timeframe: self.timeframe,

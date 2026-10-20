@@ -481,6 +481,28 @@ fn every_run_refusal_has_its_own_code() {
         RunRefusal::SymbolInvalid {
             name: String::new(),
         },
+        // IA-2's: the locks, the runs ledger and the claim.
+        RunRefusal::RunBusy {
+            lock: String::new(),
+            holder: String::new(),
+        },
+        RunRefusal::RunLockRefused {
+            lock: String::new(),
+            why: String::new(),
+        },
+        RunRefusal::LockReplaced {
+            lock: String::new(),
+        },
+        RunRefusal::LockStalled {
+            lock: String::new(),
+            waited_ms: 0,
+        },
+        RunRefusal::CensusLayoutChanged { why: String::new() },
+        RunRefusal::CensusUnreadable { why: String::new() },
+        RunRefusal::RunsLedgerDamaged { offset: 0 },
+        RunRefusal::ClockImplausible { why: String::new() },
+        RunRefusal::RunsLedgerUnwritten { why: String::new() },
+        RunRefusal::ClaimUnwritten { why: String::new() },
     ];
     let codes: Vec<&str> = all.iter().map(RunRefusal::code).collect();
     assert_eq!(codes, RunRefusal::CODES);

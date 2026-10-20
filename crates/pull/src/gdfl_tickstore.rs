@@ -3,9 +3,14 @@
 //! strictly as its format specification v1 (`BRTXTS01`) states.
 //!
 //! The specification is `/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md`,
-//! version 1, sha256
-//! `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259`,
-//! recorded in `docs/00-charter.md` (GDFL capital-market section). Nothing
+//! version 1. The charter records two digests of it: sha256
+//! `6edc62a772b257a2aa1b45c0785a23936d9bff47b87648bbb1d9a84ab7063259`, the
+//! format as frozen (`docs/00-charter.md`, the verified tick store's format
+//! row of the GDFL capital-market section), and
+//! `d21139f55789315c5a8280432f8074ea613f17efe8d1a838b325d193adec5be9`, its §6
+//! as revised 2026-10-04 (the options names row of the same document). The
+//! file on disk today is the second; the magic, not the digest, decides
+//! whether a day file is read. Nothing
 //! here comes from the store's own tool: the file layout (§3), the block
 //! encoding (§4) and the paths (§2) are read off the specification, and every
 //! rebuilt file is still held by [`crate::gdfl_cm::read_listed`] to the zip
@@ -520,6 +525,158 @@ fn render(shape: u8, v: i64, out: &mut Vec<u8>) -> Result<(), CmRefusal> {
     Ok(())
 }
 
+/// The most directory entries one walk of a tick-store tree visits before it
+/// stops and says so (D-4866): the store holds one `.bts` per vendor day zip,
+/// about 18,400 entries in all (design §10.2 L-IA-8), so a tree holding a
+/// million is not one.
+pub const TICKSTORE_WALK_CAP: usize = 1_000_000;
+
+/// How many names of each kind a tree's census names before it only counts
+/// (D-4817: ≤ 16 named per reason).
+pub const TICKSTORE_NAMED: usize = 16;
+
+/// What a file name is to a tree of the tick store: `(tree, day, the path its
+/// name files it at under the root)` for a day file's name, else `None`.
+pub type DayFileName = dyn Fn(&str) -> Option<(u8, Day, String)>;
+
+/// A tree of the tick store as one walk found it (D-4866): every `.bts`
+/// filed where its own name says it belongs, every one found elsewhere, and
+/// the stray entries, which are counted by name and never opened. Built once
+/// per source, O(entries) up to [`TICKSTORE_WALK_CAP`]; a day is then one
+/// hash probe.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DayTable {
+    /// Day files at their own place.
+    pub held: usize,
+    /// The first misfiled day file of each (tree, day) the walk found: where
+    /// it was and where its name files it, both under the store's root.
+    misfiled: std::collections::HashMap<(u8, Day), (String, String)>,
+    /// Misfiled day files, every one counted.
+    pub misfiled_count: usize,
+    /// Entries that are not day files: a `*.bts.tmp` an ingest left (never
+    /// read, `FORMAT.md` §2), the writer's `.lock` and `ingest-log.tsv`,
+    /// its logs and tools, a link, anything else (D-4866).
+    pub stray: usize,
+    /// The first stray names, under the store's root.
+    pub stray_named: Vec<String>,
+    /// Why the walk could not finish, when it could not: every day the
+    /// tree lacks at its own place is then refused with it, never read as
+    /// absent.
+    pub fault: Option<CmRefusal>,
+}
+
+impl DayTable {
+    /// The misfiled day file of `tree` on `day`, as `(found, expected)`.
+    #[must_use]
+    pub fn misfiled(&self, tree: u8, day: Day) -> Option<&(String, String)> {
+        if self.misfiled.is_empty() {
+            return None;
+        }
+        self.misfiled.get(&(tree, day))
+    }
+
+    /// Walks `<root>/<top>` once, filing every regular file whose name
+    /// `own` reads as a day file `(tree, day, expected path under root)`.
+    /// Directories are descended; names starting with `.` are stray and not
+    /// descended; links are never followed. A tree that does not exist is
+    /// empty, as a store that never ingested it is.
+    #[must_use]
+    pub fn walk(root: &Path, top: &str, own: &DayFileName) -> Self {
+        let mut table = Self::default();
+        let mut stack = vec![(root.join(top), top.to_owned())];
+        let mut visited = 0_usize;
+        'walk: while let Some((dir, rel)) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound && rel == top => break,
+                Err(why) => {
+                    table.fault = Some(CmRefusal::TickStoreUnavailable { kind: why.kind() });
+                    break;
+                }
+            };
+            for entry in entries {
+                visited += 1;
+                if visited > TICKSTORE_WALK_CAP {
+                    table.fault = Some(CmRefusal::TickStoreMalformed {
+                        what: WALK_OVER_CAP,
+                    });
+                    break 'walk;
+                }
+                let found = entry.and_then(|entry| Ok((entry.file_type()?, entry)));
+                let (kind, entry) = match found {
+                    Ok(found) => found,
+                    Err(why) => {
+                        table.fault = Some(CmRefusal::TickStoreUnavailable { kind: why.kind() });
+                        break 'walk;
+                    }
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let path = format!("{rel}/{name}");
+                if kind.is_dir() && !name.starts_with('.') {
+                    stack.push((entry.path(), path));
+                    continue;
+                }
+                match own(&name).filter(|_| kind.is_file()) {
+                    Some((_, _, expected)) if expected == path => table.held += 1,
+                    Some((tree, day, expected)) => {
+                        table.misfiled_count += 1;
+                        let _first = table
+                            .misfiled
+                            .entry((tree, day))
+                            .or_insert((path, expected));
+                    }
+                    None => {
+                        table.stray += 1;
+                        if table.stray_named.len() < TICKSTORE_NAMED {
+                            table.stray_named.push(path);
+                        }
+                    }
+                }
+            }
+        }
+        table
+    }
+
+    /// What a day the tree does not hold at its own place is (D-4866): its
+    /// misfiled copy refused by name, the walk's fault when it could not
+    /// finish, else absent.
+    ///
+    /// # Errors
+    ///
+    /// [`CmRefusal::DayFileMisfiled`] and the walk's fault.
+    pub fn absent(&self, tree: u8, day: Day) -> Result<(), CmRefusal> {
+        if let Some((found, expected)) = self.misfiled(tree, day) {
+            return Err(CmRefusal::DayFileMisfiled {
+                found: found.clone(),
+                expected: expected.clone(),
+            });
+        }
+        self.fault.clone().map_or(Ok(()), Err)
+    }
+}
+
+/// The walk of a tree visited more than [`TICKSTORE_WALK_CAP`] entries.
+const WALK_OVER_CAP: &str = "the tick store's tree holds more than 1,000,000 entries; the walk \
+                             stopped there, and no day it did not reach is read as absent";
+
+/// The tree byte of `kind` in a [`DayTable`] (0 for indices, 1 for stocks).
+const fn tree_byte(kind: CmKind) -> u8 {
+    match kind {
+        CmKind::Indices => 0,
+        CmKind::Stocks => 1,
+    }
+}
+
+/// What a capital-market file name is to the tick store's `cm` tree: a day
+/// file's tree, day and the path its name files it at, under the root.
+fn cm_day_file(name: &str) -> Option<(u8, Day, String)> {
+    let stem = name.strip_suffix(".bts")?;
+    let (kind, day) = crate::gdfl_cm::folder_day(stem).ok()?;
+    let zip = day_zip_name(kind, day);
+    let expected = format!("cm/{}.bts", zip.strip_suffix(".zip").unwrap_or(&zip));
+    Some((tree_byte(kind), day, expected))
+}
+
 /// The tick store under its root (§2): `cm/<TREE>/<yyyy>/<MON_yyyy>/<day
 /// folder>.bts` for a capital-market day. Only that exact name is opened, so
 /// a `*.bts.tmp` the ingest left behind is never read; a day with no `.bts`
@@ -531,6 +688,9 @@ pub struct TickStore {
     /// What every day listing files (D-3333): the swept surface unless
     /// [`TickStore::with_scope`] names another.
     scope: Arc<CmScope>,
+    /// The `cm` tree as one walk found it (D-4866), walked the first time a
+    /// day is asked and shared by every clone.
+    table: Arc<std::sync::OnceLock<DayTable>>,
 }
 
 impl TickStore {
@@ -540,6 +700,7 @@ impl TickStore {
         Self {
             root: root.to_path_buf(),
             scope: CmScope::swept_shared(),
+            table: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -547,6 +708,14 @@ impl TickStore {
     #[must_use]
     pub fn with_scope(self, scope: Arc<CmScope>) -> Self {
         Self { scope, ..self }
+    }
+
+    /// The `cm` tree as one walk found it (D-4866): walked once, the first
+    /// time it is asked, O(entries) up to [`TICKSTORE_WALK_CAP`].
+    #[must_use]
+    pub fn table(&self) -> &DayTable {
+        self.table
+            .get_or_init(|| DayTable::walk(&self.root, "cm", &cm_day_file))
     }
 
     /// Where the day file of tree `kind` on `day` lies (§2).
@@ -618,8 +787,20 @@ impl CmSource for TickStore {
     /// [`CmRefusal::TickStoreUnavailable`] when the file exists but cannot be
     /// opened or read, and every refusal of [`read_index`].
     fn day(&self, kind: CmKind, day: Day) -> Result<Option<DayListing<TickLocator>>, CmRefusal> {
+        // A day file under another folder than its own refuses its day by
+        // name, whether or not one is also at its own place (D-4866, the
+        // archives' rule): one hash probe of the walked table.
+        let table = self.table();
+        if let Some((found, expected)) = table.misfiled(tree_byte(kind), day) {
+            return Err(CmRefusal::DayFileMisfiled {
+                found: found.clone(),
+                expected: expected.clone(),
+            });
+        }
+        // The day's own place is opened by its exact path, so a day the
+        // writer published after the walk is read whole (`FORMAT.md` §2).
         let Some((file, file_len)) = open_day(&self.day_path(kind, day))? else {
-            return Ok(None);
+            return table.absent(tree_byte(kind), day).map(|()| None);
         };
         let entries = read_index(&file, file_len)?;
         let file = Arc::new(file);

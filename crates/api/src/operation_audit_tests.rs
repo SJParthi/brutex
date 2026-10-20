@@ -56,6 +56,8 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/bars.json", DATA),
     ("/gaps.json", DATA),
     ("/bars/window.json", DATA),
+    // The same query written whole as one streamed CSV (R3-10): a store read.
+    ("/bars/export.csv", DATA),
     ("/spot.json", DATA),
     ("/greeks.json", DATA),
     // The routes the WP-01 seam registers ahead of their packages: store,

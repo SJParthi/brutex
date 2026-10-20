@@ -19,7 +19,6 @@
  * functions only, so `node --test` can import it with no compiler. Imports
  * are relative for the same reason — `$lib` is a Vite alias node cannot see.
  */
-import { pooled as readPool } from '../pooled.js';
 import { fmt } from './notes-labels.js';
 
 /* ---------------------------------------------------------------------
@@ -66,7 +65,15 @@ export const HEAD = 30; /* the sticky header covers the top of the scroll box */
    that is the third time in this file, so the rule is now simply that a
    constant shared by two deriveds lives above both. Its reasoning stays with
    `rowsThatFit`, which is where the 24 was measured. */
-export const FIT_SLACK = 24;
+/* EIGHT SINCE R3-03, AND THE SEVENTEEN IT HELD FOR `.bnotes` IS GONE: the notes
+   strip is now always in the box at one line's height, so its arrival after a
+   read no longer shrinks the box under a fitted page, and the heading's real
+   height (its band and its labels) is measured rather than taken as `HEAD`.
+   What remains is the damper — a fifth of a row for fonts and sub-pixels.
+   Twenty-four counted a row fewer than the window holds whenever the box was
+   within sixteen pixels of one more (the re-check's "Fit counts the rows that
+   fit the window"). */
+export const FIT_SLACK = 8;
 /* `--s4`, WHICH IS `.board`'s `gap`. Written here because this file cannot
    read a stylesheet token, and named rather than inlined so the next reader
    knows which declaration it is shadowing. If `.board`'s gap changes, this
@@ -172,7 +179,7 @@ export function monthSpan(a, b) {
   const yb = Number(b.slice(0, 4));
   const mb = Number(b.slice(5, 7));
   const n = (yb - ya) * 12 + (mb - ma) + 1;
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
 }
 
 /**
@@ -191,30 +198,33 @@ export function monthSpan(a, b) {
  * @param {string} [fromDay] the day window's first day, when it narrows
  * @param {string} [toDay] the day window's last day, when it narrows
  */
-export function seriesPlan(rows, fromDay = '', toDay = '') {
+export function seriesPlan(rows, fromDay, toDay) {
   /** @type {Map<string, {rows: number, census: any}>} */
   const series = new Map();
   const rungs = new Set();
-  let lo = '';
-  let hi = '';
+  const months = new Set();
   for (const r of rows) {
     rungs.add(r.timeframe);
+    months.add(r.month);
     const held = series.get(r.instrument);
     if (held) held.rows += Number(r.rows) || 0;
     else series.set(r.instrument, { rows: Number(r.rows) || 0, census: r });
-    if (lo === '' || r.month < lo) lo = r.month;
-    if (hi === '' || r.month > hi) hi = r.month;
   }
+  /* The first and last month held, by sorting rather than by comparing, so
+     a tie is not a second way to write the same answer (R3-03). */
+  const held = [...months].sort();
+  const lo = held[0] ?? '';
+  const hi = held.at(-1) ?? '';
   const keys = [...series.keys()].sort();
   const timeframe = rungs.size === 1 ? String([...rungs][0]) : '';
-  let from = lo;
-  let to = hi;
-  if (fromDay && fromDay.slice(0, 7) > from) from = fromDay.slice(0, 7);
-  if (toDay && toDay.slice(0, 7) < to) to = toDay.slice(0, 7);
+  /* A day window narrows the months asked for, never widens them. An empty
+     From sorts before every month, so it leaves the first held one. */
+  const from = fromDay ? [lo, fromDay.slice(0, 7)].sort()[1] : lo;
+  const to = toDay ? [hi, toDay.slice(0, 7)].sort()[0] : hi;
   /** @type {string | null} */
   let why = null;
-  if (keys.length === 0) why = null;
-  else if (rungs.size > 1) {
+  if (keys.length === 0) return { keys, series, timeframe, from, to, why };
+  if (rungs.size > 1) {
     why = `this selection reaches ${fmt(rungs.size)} rungs (${[...rungs].join(', ')}); a page is read at one rung, so choose one`;
   } else if (keys.length > MAX_SERIES) {
     why = `too_many_series: this selection reaches ${fmt(keys.length)} series and one window request reads at most ${fmt(MAX_SERIES)} — choose an expiry, a strike or a side`;
@@ -226,6 +236,9 @@ export function seriesPlan(rows, fromDay = '', toDay = '') {
   return { keys, series, timeframe, from, to, why };
 }
 
+/** The second a minute bound is sent at, by end. */
+const MINUTE_END = Object.freeze({ from: '00', to: '59' });
+
 /**
  * A time bound as the wire spells it, `HH:MM:SS`.
  *
@@ -236,11 +249,12 @@ export function seriesPlan(rows, fromDay = '', toDay = '') {
  * `HH:MM:59` at the To end; a bound that already carries its second is sent
  * as it is. Anything else is `''`, no bound.
  *
- * @param {string} t @param {'from' | 'to'} end
+ * @param {string | undefined} t @param {'from' | 'to'} end
  */
 export function todWire(t, end) {
-  const s = String(t ?? '').trim();
-  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${end === 'to' ? '59' : '00'}`;
+  if (typeof t !== 'string') return '';
+  const s = t.trim();
+  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${MINUTE_END[end]}`;
   if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
   return '';
 }
@@ -274,8 +288,8 @@ export function windowQuery(feed, plan, o) {
   q.set('limit', String(o.limit ?? 50));
   if (o.fromDay) q.set('from_day', o.fromDay);
   if (o.toDay) q.set('to_day', o.toDay);
-  const tf = todWire(o.fromTime ?? '', 'from');
-  const tt = todWire(o.toTime ?? '', 'to');
+  const tf = todWire(o.fromTime, 'from');
+  const tt = todWire(o.toTime, 'to');
   if (tf) q.set('tod_from', tf);
   if (tt) q.set('tod_to', tt);
   q.set('extremes', o.extremes ? '1' : '0');
@@ -297,39 +311,16 @@ export const rowKey = (key, t) => `${key}|${t}`;
  * @param {string} day `YYYY-MM-DD` @param {string} time `HH:MM` or `HH:MM:SS`
  */
 export function istInstant(day, time) {
-  const d = String(day ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const t = String(time ?? '').match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  const d = typeof day === 'string' ? day.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null;
+  const t = typeof time === 'string' ? time.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/) : null;
   if (!d || !t) return null;
   const [h, m, s] = [Number(t[1]), Number(t[2]), Number(t[3] ?? 0)];
   if (h > 23 || m > 59 || s > 59) return null;
   const midnight = Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]));
-  if (!Number.isFinite(midnight) || istDayKey(midnight - IST_OFFSET_MS) !== `${d[1]}-${d[2]}-${d[3]}`) return null;
+  /* A day that does not exist rolls over (30 Feb is 2 Mar), so the day read
+     back must be the day typed. */
+  if (new Date(midnight).toISOString().slice(0, 10) !== `${d[1]}-${d[2]}-${d[3]}`) return null;
   return (midnight - IST_OFFSET_MS) / 1000 + h * 3600 + m * 60 + s;
-}
-
-/**
- * WHAT THE GO-TO BOX TYPED, as an instant (DB-005).
- *
- * `YYYY-MM-DD HH:MM[:SS]` names the day; a bare `HH:MM[:SS]` takes `day`, the
- * day the reader is looking at. Seconds are accepted on every rung and are the
- * point on a one-second rung, where sixty bars share a minute.
- *
- * @param {string} text @param {string} day the default day, `YYYY-MM-DD`
- * @returns {{at: number, label: string} | {why: string}}
- */
-export function parseGoto(text, day) {
-  const s = String(text ?? '').trim().replace('T', ' ');
-  const both = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)$/);
-  const only = s.match(/^(\d{2}:\d{2}(?::\d{2})?)$/);
-  const d = both ? both[1] : day;
-  const t = both ? both[2] : only ? only[1] : '';
-  if (!t) {
-    return { why: `“${s}” is not an instant. Type a day and a time, 2019-03-20 12:33:38, or a time alone, 12:33:38, for the day on screen.` };
-  }
-  if (!d) return { why: `“${s}” names no day and no bar is on screen to take one from. Type the day too: 2019-03-20 ${t}.` };
-  const at = istInstant(d, t);
-  if (at === null) return { why: `“${s}” is not a real IST instant: the day must exist and the time be 00:00:00 to 23:59:59.` };
-  return { at, label: `${d} ${t.length === 5 ? `${t}:00` : t}` };
 }
 
 /** The 1-based page holding 0-based row `index` at `size` rows a page. @param {number} index @param {number} size */
@@ -351,7 +342,8 @@ export const pageOfIndex = (index, size) => Math.floor(Math.max(0, index) / Math
 export function censusBehind(totals, census) {
   /** @type {{key: string, file: number, census: number}[]} */
   const out = [];
-  for (const t of totals ?? []) {
+  if (!Array.isArray(totals)) return out;
+  for (const t of totals) {
     const c = census.get(t.key);
     if (c && Number.isSafeInteger(t.total) && c.rows !== t.total) out.push({ key: t.key, file: t.total, census: c.rows });
   }
@@ -365,78 +357,80 @@ export function censusBehind(totals, census) {
  * @param {string} k @param {boolean} desc
  */
 export function localComparator(k, desc) {
-  const dir = desc ? -1 : 1;
   return (/** @type {any} */ a, /** @type {any} */ b) => {
     const A = a[k];
     const B = b[k];
     const na = A === null || A === undefined;
     const nb = B === null || B === undefined;
     if (na !== nb) return na ? 1 : -1;
-    let d = 0;
-    if (!na) d = typeof A === 'string' || typeof B === 'string' ? (String(A) < String(B) ? -1 : String(A) > String(B) ? 1 : 0) : A < B ? -1 : A > B ? 1 : 0;
-    if (d !== 0) return dir * d;
+    /* Text and numbers both order by `<`: an expiry, a side and a strike are
+       each one type down a column; two unknowns are neither. */
+    const d = A < B ? -1 : A > B ? 1 : 0;
+    if (d !== 0) return desc ? -d : d;
     return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.rk < b.rk ? -1 : a.rk > b.rk ? 1 : 0;
   };
 }
 
-/* ---------------------------------------------------------------------
-   HOW MANY OF THOSE REQUESTS ARE IN FLIGHT AT ONCE - and it is a constant,
-   which is the whole point.
-
-   `Promise.all(want.map(read))` starts EVERY request in the same tick. The
-   budget above deliberately reads every matched instrument-month, so `want`
-   is as long as the query is wide, and the number of open sockets was
-   therefore a function of how much history the store holds.
-
-   MEASURED on this build, 2026-08-22, a store holding 2019-12..2026-08 for
-   NIFTY, BANKNIFTY and INDIAVIX at nine rungs - 81 months x 9 x 3 = 2,187
-   matched instrument-months:
-
-     requests fired                     498+ (the capture cut off)
-     succeeded                          0
-     every one of them                  net::ERR_INSUFFICIENT_RESOURCES
-
-   Chrome refuses to open more sockets long before 2,187 and fails the
-   REQUEST rather than queueing it, so the grid rendered nothing at all. Not
-   slow - empty, with a console full of failures and no sentence on the page
-   saying why. That is the shape `CLAUDE.md` §4 bans: a failure wearing an
-   empty table's clothes.
-
-   A POOL, NOT A SMALLER BUDGET. Capping `readBudget` would answer a narrower
-   question than the operator asked, which the block above rejects in the
-   operator's own words - "a page that answers a narrower question than the
-   one it was asked is worse than a slow one". Every matched month is still
-   read. What is bounded is how many are in flight, so the cost per reader is
-   constant no matter how wide the query gets, and a store ten years deep
-   costs the same sockets as one month does.
-
-   SIX because that is what a browser gives a single origin over HTTP/1.1;
-   asking for more does not make more, it makes a queue this code cannot see
-   and cannot report on.
-   --------------------------------------------------------------------- */
-export const IN_FLIGHT = 6;
-
 /**
- * Runs `job` over `items` with at most `limit` outstanding at any moment.
+ * WHICH CHANGES WERE MEASURED ACROSS THE OVERNIGHT GAP (R3-03).
  *
- * Results come back in the ORDER OF `items`, not the order they finished,
- * because the caller indexes them against its own plan and a pool that
- * reordered would silently shuffle the grid.
+ * A bar's Change % is its close against the previous STORED bar of its
+ * series, wherever that lies (D-3325). For the first bar of a session that is
+ * the last bar of an earlier day, so the figure is the overnight move, not a
+ * bar-to-bar one — and sorted by Change % those rows come out on top looking
+ * like the biggest bars of the month (the 11 Oct re-check, NIFTY spot ·
+ * Zerodha 1min, source row 57). Each such row now says so.
  *
- * A job that throws lands as a rejection in its own slot rather than taking
- * the pool down - `readBarFile` already returns failures as values, so this
- * is the belt to that braces.
+ * Said only where it is KNOWN, never guessed:
+ * - the previous bar of the same series is in `rows` and on an earlier IST
+ *   day; or
+ * - `edgeEarlier`: the read began at the first kept bar of a day window
+ *   with no time-of-day bound, so the bar before a series' first row lies
+ *   before the window's first day.
+ * A time-of-day bound proves nothing: the bar before the first kept bar of a
+ * day may be on that same day, outside the window, so no row is marked under
+ * one. A day rung is a close-to-close series by definition and is not marked.
  *
- * @template T, R
- * @param {T[]} items
- * @param {number} limit
- * @param {(item: T) => Promise<R>} job
- * @param {AbortSignal} [signal]
- * @returns {Promise<R[]>}
+ * ONLY ROWS READ IN TIME ORDER ARE NEIGHBOURS (`contiguous`, shadow 17 Oct).
+ * A page the server ordered by a value (Volume, Close, open interest) or by
+ * time of day holds bars from anywhere in the series: two of them on
+ * different days are not a bar and the bar before it. Sorted by Volume, the
+ * 9,400 PE of 28 Mar 2019 marked 22 Mar 09:41:14 "overnight" against a bar of
+ * 19 Mar on the same page, whatever traded between. Rows are neighbours only
+ * when the read was in time order or read every kept row (a sort this page
+ * does itself); otherwise nothing is known and nothing is marked.
+ *
+ * O(rows · log rows), once per read — never per paint.
+ *
+ * @param {any[]} rows grid rows (`rk`, `key`, `ts`, `day`, `chg`), any order
+ * @param {{timeNarrows: boolean, dayRung: boolean, edgeEarlier: boolean, contiguous: boolean}} o
+ * @returns {Map<string, number | null>} row key → the previous bar's ms, `null` when it is before the read
  */
-export async function pooled(items, limit, job, signal) {
-  return readPool(items, limit, job, signal);
+export function acrossDay(rows, o) {
+  /** @type {Map<string, number | null>} */
+  const out = new Map();
+  if (o.timeNarrows || o.dayRung || !o.contiguous) return out;
+  /** @type {Map<string, any[]>} */
+  const bySeries = new Map();
+  for (const r of rows) {
+    const list = bySeries.get(r.key);
+    if (list) list.push(r);
+    else bySeries.set(r.key, [r]);
+  }
+  for (const list of bySeries.values()) {
+    list.sort((a, b) => a.ts - b.ts);
+    list.forEach((r, i) => {
+      if (typeof r.chg !== 'number') return;
+      const prev = list[i - 1];
+      if (prev ? prev.day < r.day : o.edgeEarlier) out.set(r.rk, prev ? prev.ts : null);
+    });
+  }
+  return out;
 }
+
+/* `pooled` AND `IN_FLIGHT` STOOD HERE AND WENT IN R3-03: nothing imported
+   them from this file any more. The one pool and its six-socket ceiling are
+   `$lib/pooled.js`, which every reader that fans out already uses. */
 /** Files whose bar count disagrees with the census row that named them. */
 /* `barDisagree` HAS MOVED, to sit below `windowSaid` — it now has to ask
    whether the rows came from the window endpoint, and `windowSaid` is
@@ -540,65 +534,6 @@ export function paisaText(p) {
  */
 export const FLOOR_YEAR = 2015;
 export const spanFloor = `${FLOOR_YEAR}-01-01`;
-
-/**
- * `HH:MM` to minutes since IST midnight, or `null` if it is not a time.
- *
- * VALIDATES THE PARTS, not just the shape: `25:00` and `10:73` both match a
- * digits-colon-digits pattern and neither is a minute of any day. Returning
- * `null` for them is what lets the caller say "that is not a time" instead
- * of landing on a bar chosen by arithmetic on nonsense.
- *
- * @param {string | null | undefined} hhmm
- */
-export function minuteOf(hhmm) {
-  const m = String(hhmm ?? '')
-    .trim()
-    .match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const h = Number(m[1]);
-  const mi = Number(m[2]);
-  if (h > 23 || mi > 59) return null;
-  return h * 60 + mi;
-}
-
-/**
- * Which page buttons to draw. Always first, last, current and its
- * neighbours; the rest elided - a 1,840-page run must not render 1,840
- * buttons, which is the constant-per-paint rule applied to a control.
- *
- * @param {number} cur
- * @param {number} total
- */
-export function pageList(cur, total) {
-  /* ONE SHAPE FROM BOTH BRANCHES. The short branch returned bare numbers
-     and the long one returned records, so the `{#each}` key expression was
-     reading `.k` off a number for every run of seven pages or fewer. */
-  if (total <= 7) {
-    return Array.from({ length: total }, (_, i) => ({ k: `p${i + 1}`, p: i + 1, gap: false }));
-  }
-  const want = new Set([1, total, cur, cur - 1, cur + 1]);
-  if (cur <= 3) {
-    want.add(2);
-    want.add(3);
-    want.add(4);
-  }
-  if (cur >= total - 2) {
-    want.add(total - 1);
-    want.add(total - 2);
-    want.add(total - 3);
-  }
-  const list = [...want]
-    .filter((p) => p >= 1 && p <= total)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  /** @type {{ k: string, p: number, gap: boolean }[]} */
-  const out = [];
-  list.forEach((p, i) => {
-    if (i && p - list[i - 1] > 1) out.push({ k: `gap${p}`, p, gap: true });
-    out.push({ k: `p${p}`, p, gap: false });
-  });
-  return out;
-}
 
 /* ======================================================================
    WINDOWING — only the visible slice is in the DOM

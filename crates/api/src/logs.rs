@@ -1778,9 +1778,11 @@ static AUDITED_ERRORS: std::sync::Mutex<Ration> =
 
 /// The routes a `/db` page reads its data from: each read is counted and
 /// sampled into the durable stream (WP-33c, DB-A42).
-pub const DB_READS: [&str; 17] = [
+pub const DB_READS: [&str; 18] = [
     "/bars.json",
     "/bars/window.json",
+    // The same query written whole as one streamed CSV (R3-10).
+    "/bars/export.csv",
     "/spot.json",
     "/greeks.json",
     "/chain.json",

@@ -68,6 +68,9 @@ mod identity;
 #[path = "ratio/disk_projection.rs"]
 mod disk_projection;
 
+#[path = "ratio/day_table.rs"]
+mod day_table;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1431,6 +1434,7 @@ fn main() {
     let mut ok = true;
     ok &= gdfl_option_lookup_is_flat();
     ok &= gdfl_stock_lookup_is_flat();
+    ok &= day_table::day_lookup_is_flat();
     ok &= gdfl_second_by_index_is_flat();
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();

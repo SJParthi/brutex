@@ -508,6 +508,82 @@ pub fn current_id() -> Option<u64> {
     })
 }
 
+/// One invocation's attempt id held as the telemetry sink's run for as long
+/// as this guard lives (AG-02, finding stocks-7).
+///
+/// # Why
+///
+/// Every ledger line a pull writes — `audit/<vendor>.repairs`,
+/// `audit/zerodha.gaps` — stamps `run=` from the sink's run
+/// (`telemetry::global().map_or(0, Sink::run)`), the key `/logs?run=` groups
+/// an invocation's events by. Nothing in the cli ever claimed that key, so
+/// every such line a cli invocation wrote said `run=0` (measured 14 Oct
+/// 2026: 34,014 `gdfl.repairs` lines, 47,140 `zerodha.repairs`, 76,476
+/// `zerodha.gaps`) and no line could be joined to the invocation's events.
+/// Held, the lines say `run=<attempt id>`, the same id the invocation's
+/// lifecycle events carry. Zero stays the word for "no run" (D-0088): a
+/// process with no attempt, or no sink, claims nothing.
+///
+/// # A claim, never a store
+///
+/// [`telemetry::Sink::claim_run`] takes the key only if nothing holds it, and
+/// the guard releases it on drop only if it took it, so an invocation never
+/// borrows or replaces another's run (the property
+/// `parallel_command_lifecycles_never_borrow_or_replace_an_ambient_run`
+/// pins): an inner claim of a run already held is a no-op, and a second
+/// invocation in one process claims its own id after the first released.
+/// The key is process-wide, so the guard belongs at the boundary of a
+/// process that runs ONE command at a time — the `cli` binary — and never
+/// around work the API process runs beside other runs.
+///
+/// O(1): one `compare_exchange` to take, one to release.
+#[must_use = "the run is released when the guard drops"]
+pub struct RunClaim<'sink> {
+    sink: Option<&'sink telemetry::Sink>,
+    run: u64,
+    held: bool,
+}
+
+impl<'sink> RunClaim<'sink> {
+    /// Claims `run` on `sink`, when both exist, `run` is not zero and no
+    /// other run holds the key.
+    pub fn take(sink: Option<&'sink telemetry::Sink>, run: Option<u64>) -> Self {
+        let run = run.unwrap_or(0);
+        let held = sink.is_some_and(|sink| sink.claim_run(run));
+        Self { sink, run, held }
+    }
+
+    /// Whether this guard holds the sink's run.
+    #[must_use]
+    pub const fn held(&self) -> bool {
+        self.held
+    }
+
+    /// The run asked for (zero for none), held or not.
+    #[must_use]
+    pub const fn run(&self) -> u64 {
+        self.run
+    }
+}
+
+impl Drop for RunClaim<'_> {
+    fn drop(&mut self) {
+        if self.held
+            && let Some(sink) = self.sink
+        {
+            sink.release_run(self.run);
+        }
+    }
+}
+
+/// [`RunClaim::take`] of `attempt` on the process's installed sink: the one
+/// call a `cli` process makes around its command once the attempt id is
+/// known (`run_with_sink`'s `attempt`), so every line and event the command
+/// writes names it.
+pub fn claim_invocation_run(attempt: Option<u64>) -> RunClaim<'static> {
+    RunClaim::take(telemetry::global(), attempt)
+}
+
 /// Persist one finished rung/command boundary. A failure poisons final admission.
 pub fn completed_boundary() {
     CURRENT.with(|slot| {
@@ -698,3 +774,7 @@ pub fn page(root: &Path, before: Option<u64>, limit: usize) -> Result<Vec<Record
 #[cfg(test)]
 #[path = "operation_audit_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "operation_audit_run_tests.rs"]
+mod run_tests;

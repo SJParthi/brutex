@@ -150,6 +150,17 @@ const ROUTES: &[(&str, Runs)] = &[
             "cancellable(heavy, work)",
         ),
     ),
+    // THE SAME QUERY WRITTEN WHOLE (R3-10): every page is read by the
+    // window route's own `cancellable`, the scan pool for a heavy plan.
+    (
+        "/bars/export.csv",
+        pool(
+            Named::Scan,
+            "bars_export.rs",
+            "read_window",
+            "cancellable(heavy, move |cancel",
+        ),
+    ),
     (
         "/spot.json",
         pool(
