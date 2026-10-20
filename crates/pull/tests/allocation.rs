@@ -188,9 +188,14 @@ fn a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields() {
 //
 // A sealed month's frame states its own rows. A head or a stream that lies —
 // bit rot that keeps the checksum, or a writer bug that wrote a checksum over
-// wrong bytes — must be refused by name before the decoder reserves anything,
-// and an accepted frame reserves its checked rows times `size_of::<Bar>()` and
-// no more. Every frame here is built from invented bars.
+// wrong bytes — must be refused by name before the decoder reserves anything.
+// An accepted frame then makes one `Vec::reserve` of its checked rows, which
+// grows the buffer by `Vec`'s amortised rule, not by the rows (D-5902,
+// g-sc1-codec-3): nothing into a buffer with the room, and onto one short of
+// it one call to a capacity of the largest of twice the old, the length plus
+// the rows, and 4 — so exactly the rows times `size_of::<Bar>()` into a buffer
+// that never allocated when they are 4 or more, and 4 rows' worth for 1 to 3.
+// Every frame here is built from invented bars.
 // ---------------------------------------------------------------------------
 
 mod sealed_codec {
@@ -228,7 +233,12 @@ mod sealed_codec {
     /// A full block of invented bars whose every column moves, so every
     /// stream has a packed region to cut short.
     fn full_frame() -> Vec<u8> {
-        let rows: Vec<Bar> = (0..i64::from(BLOCK_ROWS))
+        frame_of(BLOCK_ROWS)
+    }
+
+    /// A frame of the first `rows` of [`full_frame`]'s invented bars.
+    fn frame_of(rows: u16) -> Vec<u8> {
+        let rows: Vec<Bar> = (0..i64::from(rows))
             .map(|i| {
                 let close = 1_111_100 + (i * 7_919) % 4_001;
                 Bar {
@@ -379,13 +389,19 @@ mod sealed_codec {
         assert_eq!((calls, bytes), (0, 0), "a bad checksum allocated");
     }
 
-    /// **AN ACCEPTED BLOCK RESERVES ITS STATED ROWS, ONCE, AND NO MORE.** A
-    /// full block into an empty buffer is one call of 256 × 56 bytes; into a
-    /// buffer with the room, nothing. The ceiling: a month head stating
-    /// `u16::MAX` rows a block (the month head's reader refuses that; the
-    /// codec is bounded without it). Seven width-0 streams hold any number of
-    /// rows in no bytes, so the 38-byte frame relabelled decodes to 65,535
-    /// rows and reserves exactly 3,669,960 bytes, the most one call can ask.
+    /// **AN ACCEPTED BLOCK RESERVES ITS STATED ROWS, ONCE, AND NO MORE** —
+    /// into an EMPTY buffer, which is what the name has always tested. A full
+    /// block into an empty buffer is one call of 256 × 56 bytes; into a
+    /// buffer with the room, nothing. The ceiling into an empty buffer: a
+    /// month head stating `u16::MAX` rows a block (the month head's reader
+    /// refuses that; the codec is bounded without it). Seven width-0 streams
+    /// hold any number of rows in no bytes, so the 38-byte frame relabelled
+    /// decodes to 65,535 rows and reserves exactly 3,669,960 bytes, the most
+    /// one call into an empty buffer can ask. "Empty" is capacity 0 here: onto
+    /// any buffer short of the room, a cleared one included, one call asks for
+    /// a capacity of the largest of twice that buffer's, its length plus the
+    /// rows, and 4, and a frame of 1 to 3 rows into an empty buffer asks for 4
+    /// rows: the tests below (D-5902, g-sc1-codec-3).
     #[test]
     fn an_accepted_block_reserves_its_stated_rows_and_no_more() {
         let stride = size_of::<Bar>();
@@ -418,6 +434,183 @@ mod sealed_codec {
             (Ok(most), 1, most * size_of::<i64>()),
             "decode_stamps"
         );
+    }
+
+    /// Both decoders over `frame` onto buffers already holding `len` rows in a
+    /// capacity of `capacity`, counted. The buffers are made before the count
+    /// starts, so only the decoders' own calls are seen.
+    fn decode_onto(frame: &[u8], len: usize, capacity: usize) -> (Counted, Counted) {
+        let crc = crc32c(frame);
+        let mut bars: Vec<Bar> = Vec::with_capacity(capacity);
+        bars.resize(len, Bar::default());
+        let mut stamps: Vec<i64> = Vec::with_capacity(capacity);
+        stamps.resize(len, 0);
+        assert_eq!(
+            (bars.capacity(), stamps.capacity()),
+            (capacity, capacity),
+            "the buffers start at exactly {capacity}"
+        );
+        let full = counted(|| decode_frame(frame, crc, 0, BLOCK_ROWS, &mut bars));
+        let only = counted(|| decode_stamps(frame, crc, 0, BLOCK_ROWS, &mut stamps));
+        (full, only)
+    }
+
+    /// **A ONE-ROW FRAME INTO AN EMPTY BUFFER TAKES THE MINIMUM CAPACITY.**
+    /// g-sc1-codec-3, D-5902, SC1-09.
+    ///
+    /// `Vec` gives a 56-byte or an 8-byte element a capacity of at least 4 once
+    /// it allocates, so a frame of 1 to 3 rows into an empty buffer is one
+    /// call of 4 × 56 = 224 bytes (stamps: 32), not its rows × 56; from 4
+    /// rows it is the rows exactly. The extremes of a frame's rows: 1, 2, 3,
+    /// 4, 5, 95, 96, 97, 171, 172, 255, 256, and the specification's 38-byte
+    /// one-row frame.
+    #[test]
+    fn a_one_row_frame_into_an_empty_buffer_takes_the_minimum_capacity() {
+        let stride = size_of::<Bar>();
+        let stamp = size_of::<i64>();
+        let (whole, stamps) = decode_both(&one_row_frame(), BLOCK_ROWS);
+        assert_eq!(whole, (Ok(1), 1, 224), "decode_frame, the 38-byte frame");
+        assert_eq!(stamps, (Ok(1), 1, 32), "decode_stamps, the 38-byte frame");
+        for rows in [1_u16, 2, 3, 4, 5, 95, 96, 97, 171, 172, 255, 256] {
+            let m = usize::from(rows);
+            let (whole, stamps) = decode_both(&frame_of(rows), BLOCK_ROWS);
+            let held = m.max(4);
+            assert_eq!(whole, (Ok(m), 1, held * stride), "decode_frame, {m} rows");
+            assert_eq!(stamps, (Ok(m), 1, held * stamp), "decode_stamps, {m}");
+        }
+    }
+
+    /// **A FULL BUFFER GROWS BY AMORTISED DOUBLING, NOT BY ITS ROWS.**
+    /// g-sc1-codec-3, D-5902, SC1-09.
+    ///
+    /// Until D-5902 SC1-09, L-SC-1, D-4939 #5 and the decoders' docs said an
+    /// accepted frame grows the caller's buffer by its checked rows and no
+    /// more. `Vec::reserve` promises at least the rows: onto a full
+    /// 10,000-row buffer a 256-row frame is one `realloc` of 20,000 × 56 =
+    /// 1,120,000 bytes, not 256 × 56 = 14,336, and written against the old
+    /// text this test fails there. The bound that holds: one call, to a
+    /// capacity of the largest of twice the old, the length plus the rows,
+    /// and 4. The cases: a full buffer, a small full one (where the length
+    /// plus the rows is the larger), exactly the room (no call), one row
+    /// short of it, an empty buffer at capacity 0, and a CLEARED buffer
+    /// (length 0, capacity kept) short of the room and with exactly the room;
+    /// then frames of 1 and 3 rows onto buffers of capacity 1 to 3, where the
+    /// minimum of 4 is the largest term; through both decoders, stamps at 8
+    /// bytes.
+    #[test]
+    fn a_full_buffer_grows_by_amortised_doubling_not_by_rows() {
+        let stride = size_of::<Bar>();
+        let stamp = size_of::<i64>();
+        let rows = usize::from(BLOCK_ROWS);
+        let frame = full_frame();
+        for (m, len, capacity, grown) in
+            [(1_u16, 1, 1, 4), (1, 3, 3, 6), (3, 0, 2, 4), (3, 1, 1, 4)]
+        {
+            let small = frame_of(m);
+            let m = usize::from(m);
+            assert_eq!(grown, (2 * capacity).max(len + m).max(4));
+            let (whole, stamps) = decode_onto(&small, len, capacity);
+            let at = format!("{m} rows onto {len} of {capacity}");
+            assert_eq!(whole, (Ok(m), 1, grown * stride), "decode_frame, {at}");
+            assert_eq!(stamps, (Ok(m), 1, grown * stamp), "decode_stamps, {at}");
+        }
+        for (len, capacity, grown, calls) in [
+            (10_000, 10_000, 20_000, 1),
+            (100, 100, 356, 1),
+            (10_000, 10_256, 0, 0),
+            (10_000, 10_255, 20_510, 1),
+            (0, 0, 256, 1),
+            (0, 200, 400, 1),
+            (0, 100, 256, 1),
+            (0, 256, 0, 0),
+        ] {
+            if calls == 1 {
+                assert_eq!(grown, (2 * capacity).max(len + rows).max(4));
+            }
+            let (whole, stamps) = decode_onto(&frame, len, capacity);
+            let at = format!("onto {len} rows of {capacity}");
+            assert_eq!(
+                whole,
+                (Ok(rows), calls, grown * stride),
+                "decode_frame {at}"
+            );
+            assert_eq!(
+                stamps,
+                (Ok(rows), calls, grown * stamp),
+                "decode_stamps {at}"
+            );
+        }
+        let (whole, stamps) = decode_onto(&frame, 10_000, 10_000);
+        assert_eq!((whole.2, stamps.2), (1_120_000, 160_000));
+        assert_ne!(whole.2, rows * stride, "the old claim: rows × 56 bytes");
+    }
+
+    /// **A MONTH DECODED FRAME AFTER FRAME INTO ONE BUFFER REALLOCATES 12
+    /// TIMES, AND A PRE-SIZED BUFFER NEVER.** g-sc1-codec-3, D-5902, L-SC-1.
+    ///
+    /// The measurement behind L-SC-1's memory clause: 2,022 full frames
+    /// (517,632 rows, a 1-second month's order) decoded one after another
+    /// into one `Vec::new()`, every call counted. The buffer doubles from 256
+    /// rows to 524,288, so 12 of the 2,022 calls allocate, the largest asking
+    /// 524,288 × 56 = 29,360,128 bytes; p50 and p99 of bytes a call are 0.
+    /// The same month into a buffer pre-sized for it makes no call at all.
+    /// `reserve_exact` would make every one of the 2,022 calls a `realloc`.
+    #[test]
+    fn a_month_decoded_into_one_buffer_reallocates_by_doubling() {
+        const FRAMES: usize = 2_022;
+        let stride = size_of::<Bar>();
+        let rows = usize::from(BLOCK_ROWS);
+        let frame = full_frame();
+        let crc = crc32c(&frame);
+        let mut bars: Vec<Bar> = Vec::new();
+        let mut stamps: Vec<i64> = Vec::new();
+        let mut bar_bytes = Vec::with_capacity(FRAMES);
+        let mut stamp_bytes = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            let (answer, calls, bytes) =
+                counted(|| decode_frame(&frame, crc, 0, BLOCK_ROWS, &mut bars));
+            assert_eq!((answer, calls.min(2)), (Ok(rows), usize::from(bytes > 0)));
+            bar_bytes.push(bytes);
+            let (answer, calls, bytes) =
+                counted(|| decode_stamps(&frame, crc, 0, BLOCK_ROWS, &mut stamps));
+            assert_eq!((answer, calls.min(2)), (Ok(rows), usize::from(bytes > 0)));
+            stamp_bytes.push(bytes);
+        }
+        assert_eq!((bars.len(), bars.capacity()), (517_632, 524_288));
+        assert_eq!((stamps.len(), stamps.capacity()), (517_632, 524_288));
+
+        for (name, size, each) in [
+            ("decode_frame", stride, &bar_bytes),
+            ("decode_stamps", size_of::<i64>(), &stamp_bytes),
+        ] {
+            let grew: Vec<usize> = each.iter().copied().filter(|&b| b > 0).collect();
+            let doubling: Vec<usize> = (0..12).map(|k| (rows << k) * size).collect();
+            assert_eq!(grew, doubling, "{name}: one call a doubling");
+            let mut sorted = each.clone();
+            sorted.sort_unstable();
+            // Nearest rank: the smallest value at or above q% of the calls.
+            let rank = |q: usize| sorted[(q * FRAMES).div_ceil(100) - 1];
+            let max = sorted[FRAMES - 1];
+            eprintln!(
+                "MONTH {name}: n={FRAMES} calls allocating={} bytes a call p50={} p99={} max={max}",
+                grew.len(),
+                rank(50),
+                rank(99)
+            );
+            assert_eq!((rank(50), rank(99), max), (0, 0, (rows << 11) * size));
+        }
+        assert_eq!((rows << 11) * stride, 29_360_128);
+
+        let mut sized: Vec<Bar> = Vec::with_capacity(FRAMES * rows);
+        let mut total = (0, 0);
+        for _ in 0..FRAMES {
+            let (answer, calls, bytes) =
+                counted(|| decode_frame(&frame, crc, 0, BLOCK_ROWS, &mut sized));
+            assert_eq!(answer, Ok(rows));
+            total = (total.0 + calls, total.1 + bytes);
+        }
+        assert_eq!(total, (0, 0), "a pre-sized month allocates nothing");
+        assert_eq!(sized.capacity(), FRAMES * rows);
     }
 }
 

@@ -1725,6 +1725,51 @@ mod tests {
         assert!(!quiet.contains("were not offered"), "{quiet}");
     }
 
+    /// **A month held raw and sealed is one instrument-month on the report**
+    /// (verify-SC-3-r2).
+    ///
+    /// `census_lines` prints the catalog's `spot` as "store holds N spot
+    /// instrument-month(s)", and the catalog counted a month's `.sbar` beside
+    /// its `.bin` into it, so a root whose every month was sealed printed
+    /// 2,328 for the 1,176 months a raw-only clone of it printed. The catalog
+    /// files by name, so empty files are enough to show it: two months, one of
+    /// them in both forms, are two instrument-months.
+    #[test]
+    fn a_month_in_both_forms_is_one_instrument_month_on_the_report() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-batch-both-forms-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let rung = root.join("bars/zerodha/NSE/INDEX/NIFTY/60min");
+        std::fs::create_dir_all(&rung).expect("dirs");
+        for name in ["2026-06.bin", "2026-07.bin", "2026-07.sbar"] {
+            std::fs::write(rung.join(name), b"").expect("a file the catalog counts");
+        }
+        let census = store::catalog::walk(&root).expect("walked").census;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            (census.spot, census.sealed_twin, census.sealed, census.seen),
+            (2, 1, 1, 3),
+            "{census:?}"
+        );
+        assert!(census.reconciles(), "{census:?}");
+        let text = render(
+            "zerodha",
+            "60min",
+            2,
+            "deadbeef",
+            "",
+            &census,
+            &Tally::default(),
+            &[],
+        );
+        assert!(
+            text.contains("\nstore holds 2 spot instrument-month(s); 0 match this feed and rung\n"),
+            "{text}"
+        );
+    }
+
     /// **The report names what the catalog saw and offered to nobody.** D-0769.
     ///
     /// `census_lines` printed `spot`, `unknown_vendor` and `unknown_rung` only,

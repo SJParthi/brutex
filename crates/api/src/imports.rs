@@ -1423,7 +1423,13 @@ fn run_line_json(run: &crate::server::import_journal::RunLine) -> Value {
         .iter()
         .map(|(name, value)| (name.clone(), Value::from(value.clone())))
         .collect();
-    json!({ "id": run.id, "line": run.line, "fields": fields })
+    let mut json = json!({ "id": run.id, "line": run.line, "fields": fields });
+    // THE RUN'S END LINE, when the journal holds one (IA-2; DB-A50): its
+    // `ended`, `outcome` are among `fields`; this names where it is.
+    if let (Some(end), Some(object)) = (run.end_line, json.as_object_mut()) {
+        let _absent = object.insert("end_line".to_owned(), Value::from(end));
+    }
+    json
 }
 
 /// One page of `run` lines, newest first.

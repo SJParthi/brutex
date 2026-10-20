@@ -937,10 +937,21 @@ fn a_day_with_only_vendor_refusals_closes_done_and_is_not_read_again() {
     assert_eq!(got.closed_with_refusals, vec![d1()]);
     assert!(got.closed_incomplete.is_empty());
     let line = line_of(&store, "options", "2024-04-01");
+    // What the day's listing was rides on the close (D-5903, DB-A49).
+    let listed = NfoSource::day(&NfoTickStore::new(&root.join("ts")), d1())
+        .unwrap()
+        .unwrap();
+    let sum = ListingSum::of(listed.entries());
     let want = format!(
         "done options 2024-04-01 * definition={BAR_DEFINITION} files=3 seconds={} failures=1 late={} \
-         late_unresolved={} max_back_s={} vendor_refused=1 reason=price_refused",
-        got.seconds, got.late_rows, got.late_unresolved, got.max_back_s
+         late_unresolved={} max_back_s={} skipped=0 entries={} listing={} vendor_refused=1 \
+         reason=price_refused",
+        got.seconds,
+        got.late_rows,
+        got.late_unresolved,
+        got.max_back_s,
+        sum.entries,
+        sum.hex()
     );
     assert_eq!(without_run(&line), want);
     let again = import(&root, Src::Store, ImportKind::Options, d1(), d1(), &store);
@@ -1142,7 +1153,7 @@ fn a_days_close_follows_its_failures() {
     );
     assert_eq!(
         Stage::ALL.map(Stage::as_str),
-        ["census", "journal", "file", "calendar", "vendor"]
+        ["census", "journal", "file", "calendar", "vendor", "run"]
     );
     let counts = Counts {
         files: 2,
@@ -1151,10 +1162,12 @@ fn a_days_close_follows_its_failures() {
         late: 3,
         late_unresolved: 0,
         max_back_s: 4,
+        skipped: 5,
+        listing: None,
     };
     let stats = format!(
         "definition={BAR_DEFINITION} files=2 seconds=9 failures=1 late=3 late_unresolved=0 \
-         max_back_s=4"
+         max_back_s=4 skipped=5"
     );
     assert_eq!(
         closing_line("k 1 *", Close::Done, &counts, ""),
@@ -2173,6 +2186,17 @@ fn a_torn_journal_line_is_ignored_and_a_foreign_one_refuses_the_run() {
 
 #[test]
 fn a_journal_that_cannot_be_written_fails_the_day_by_name() {
+    // Mode bits do not bind root, which is how this suite runs in a
+    // container: re-run the body where they do (D-0995;
+    // cloud-attack-law-20261016 found it failing as root).
+    crate::support::where_permission_binds(
+        "gdfl_import::tests::a_journal_that_cannot_be_written_fails_the_day_by_name",
+        a_journal_that_cannot_be_written_fails_the_day_by_name_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_journal_that_cannot_be_written_fails_the_day_by_name_body() {
     let root = scratch("import-journal-write");
     world(&root, &[d1()]);
     let store = root.join("S");
@@ -3749,6 +3773,17 @@ fn a_rescan_counts_the_closing_auction_and_never_writes_its_sidecar() {
 /// read refuses the run before any day.
 #[test]
 fn a_day_ledger_that_will_not_take_a_line_leaves_the_day_open() {
+    // Mode bits do not bind root, which is how this suite runs in a
+    // container: re-run the body where they do (D-0995;
+    // cloud-attack-law-20261016 found it failing as root).
+    crate::support::where_permission_binds(
+        "gdfl_import::tests::a_day_ledger_that_will_not_take_a_line_leaves_the_day_open",
+        a_day_ledger_that_will_not_take_a_line_leaves_the_day_open_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_day_ledger_that_will_not_take_a_line_leaves_the_day_open_body() {
     let on = day(2019, 5, 30);
     let root = scratch("wp11b-ledger-fault");
     world_of(&root, &[(on, Tree::Indices, index_shapes(on))]);
@@ -4512,6 +4547,8 @@ fn run_durable(
         workers: Workers::new(workers).unwrap(),
         durability,
         observer: None,
+        run: None,
+        stop: None,
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -4730,6 +4767,8 @@ fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
             workers: Workers::new(workers).unwrap(),
             durability: Durability::DEFAULT,
             observer: None,
+            run: None,
+            stop: None,
         };
         run_cm_from(&source, &run, options).unwrap()
     };
@@ -5786,3 +5825,113 @@ mod scope_reopen;
 
 #[path = "gdfl_wp11c_tests.rs"]
 mod wp11c;
+
+/// The 2025-02-01 Saturday the charter records as a full session (the Union
+/// Budget) is imported like any session, and an ordinary Saturday is closed
+/// (cloud-attack-law-20261016, lens 8). The day was pinned at the session layer
+/// (`pull::unit`) and never through the importer, where a weekend rule would
+/// silently drop a session the exchange held.
+#[test]
+fn the_budget_saturday_2025_02_01_is_imported_and_an_ordinary_saturday_is_closed() {
+    let root = scratch("import-budget-saturday");
+    let budget = day(2025, 2, 1);
+    world(&root, &[budget]);
+    let store = root.join("S");
+    let got = import(
+        &root,
+        Src::Store,
+        ImportKind::Indices,
+        budget,
+        budget,
+        &store,
+    );
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert_eq!(
+        (got.days_imported, got.days_closed, got.days_refused),
+        (1, 0, 0),
+        "{got:?}"
+    );
+    assert!(got.days_missing.is_empty(), "{got:?}");
+    assert!(got.seconds_committed > 0, "{got:?}");
+    let ordinary = day(2025, 2, 8);
+    let closed = import(
+        &root,
+        Src::Store,
+        ImportKind::Indices,
+        ordinary,
+        ordinary,
+        &store,
+    );
+    assert_eq!(
+        (closed.days_imported, closed.days_closed),
+        (0, 1),
+        "{closed:?}"
+    );
+    assert!(closed.failures.is_empty(), "{:?}", closed.failures);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Two import runs into ONE store at the same time leave exactly what one run
+/// leaves, and a rerun writes nothing (cloud-attack-law-20261016, lens 8).
+/// There is no run-level lock; correctness rests on the per-month bar locks,
+/// the census lock and the journal, which no test had exercised together. A
+/// run the other one blocks may refuse a month by name, never corrupt it.
+#[test]
+fn two_runs_into_one_store_at_once_leave_what_one_run_leaves() {
+    let root = scratch("import-two-at-once");
+    world(&root, &[d1()]);
+    let clean = root.join("clean");
+    let one = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &clean);
+    assert!(one.failures.is_empty(), "{:?}", one.failures);
+    let shared = root.join("S");
+    let race = || {
+        let run = Run {
+            kind: ImportKind::Indices,
+            from: d1(),
+            to: d1(),
+            only: &[],
+            store_root: &shared,
+        };
+        run_cm(&TickStore::new(&root.join("ts")), &run)
+    };
+    let (a, b) = std::thread::scope(|s| {
+        let (a, b) = (s.spawn(race), s.spawn(race));
+        (a.join().expect("run A"), b.join().expect("run B"))
+    });
+    for got in [&a, &b] {
+        match got {
+            Ok(report) => {
+                for failure in &report.failures {
+                    let why = format!("{failure:?}").to_lowercase();
+                    assert!(
+                        why.contains("holds") || why.contains("lock"),
+                        "a failure that is not a named lock refusal: {failure:?}"
+                    );
+                }
+            }
+            Err(why) => assert!(
+                format!("{why:?}").to_lowercase().contains("lock"),
+                "{why:?}"
+            ),
+        }
+    }
+    let settle = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &shared);
+    assert!(settle.failures.is_empty(), "{:?}", settle.failures);
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        assert_eq!(
+            bars(&shared, "INDEX", symbol, None),
+            bars(&clean, "INDEX", symbol, None),
+            "{symbol}: two runs at once left other bars than one run"
+        );
+    }
+    let settled = tree(&shared.join("bars"));
+    let again = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &shared);
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(again.days_imported, 0, "{again:?}");
+    assert_eq!(
+        tree(&shared.join("bars")),
+        settled,
+        "a rerun writes nothing"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

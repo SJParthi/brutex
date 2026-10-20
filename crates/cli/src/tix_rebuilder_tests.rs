@@ -276,7 +276,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
          \x20 2019-02  would build        3000 bars  a reader bisects: {absent}\n\
          \x20 2019-03  NOT HELD      no such month; nothing was created\n\
          \x20 2019-04  indexed            1500 bars\n\
-         Indexed 1, would build 2, small 0, not held 1, refused 0. Nothing was written.\n",
+         Indexed 1, would build 2, small 0, sealed 0, not held 1, refused 0. Nothing was written.\n",
         root.0.display()
     );
     assert_eq!(out, expected);
@@ -291,7 +291,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
          \x20 2019-02  built              3000 bars  because {absent}; a reader now goes through the index\n\
          \x20 2019-03  NOT HELD      no such month; nothing was created\n\
          \x20 2019-04  kept               1500 bars  already indexed; nothing written\n\
-         Built 2, kept 1, small 0, unindexable 0, not indexed 0, not held 1, refused 0: NOT every month in the \
+         Built 2, kept 1, small 0, sealed 0, unindexable 0, not indexed 0, not held 1, refused 0: NOT every month in the \
          span is indexed; rerun once the cause is gone (a rerun keeps what is built)\n",
         root.0.display()
     );
@@ -323,7 +323,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
     assert!(out.contains("  2019-02  kept "), "{out}");
     assert!(
         out.ends_with(
-            "Built 0, kept 2, small 0, unindexable 0, not indexed 0, not held 0, refused 0: every month in \
+            "Built 0, kept 2, small 0, sealed 0, unindexable 0, not indexed 0, not held 0, refused 0: every month in \
              the span is indexed\n"
         ),
         "{out}"
@@ -339,7 +339,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
     ]);
     assert_eq!(code, OK, "{out}");
     assert!(out.ends_with(
-        "Indexed 2, would build 0, small 0, not held 0, refused 0. Nothing was written.\n"
+        "Indexed 2, would build 0, small 0, sealed 0, not held 0, refused 0. Nothing was written.\n"
     ));
 }
 
@@ -431,7 +431,7 @@ fn a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean() {
     );
     assert!(
         out.ends_with(
-            "Built 0, kept 0, small 1, unindexable 0, not indexed 0, not held 0, refused 0: every \
+            "Built 0, kept 0, small 1, sealed 0, unindexable 0, not indexed 0, not held 0, refused 0: every \
              month in the span is indexed, or holds too few bars to need an index (D-4933)\n"
         ),
         "{out}"
@@ -451,7 +451,7 @@ fn a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean() {
     );
     assert!(
         out.ends_with(
-            "Indexed 0, would build 0, small 1, not held 0, refused 0. Nothing was written.\n"
+            "Indexed 0, would build 0, small 1, sealed 0, not held 0, refused 0. Nothing was written.\n"
         ),
         "{out}"
     );
@@ -542,4 +542,96 @@ fn the_cm_index_writer_seals_a_tix_on_every_new_month() {
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("  2019-01  kept "), "{out}");
     assert!(out.contains("  2019-02  kept "), "{out}");
+}
+
+/// Seals `month` beside its raw form, from the bars the read door returns,
+/// as the sealer's rename would (SC-3).
+fn seal(root: &Root, timeframe: Timeframe, month: YearMonth) {
+    let at = path(timeframe, month);
+    let raw = reader(root, timeframe, month);
+    let bars = raw.read_range(0, raw.records()).unwrap();
+    let built = store::sealed::build(at, &raw.header(), &bars, None, None).unwrap();
+    drop(raw);
+    let sbar = at.with_file(FileKind::SealedBars).to_path_buf(&root.0);
+    let staged = sbar.with_extension("sbar-staged");
+    fs::write(&staged, built.to_bytes()).unwrap();
+    fs::rename(&staged, &sbar).unwrap();
+}
+
+#[test]
+fn a_sealed_month_is_sealed_in_the_receipt_writes_nothing_and_is_clean() {
+    // verify-SC-3-r1 follow-up: the store answers `Reindexed::Sealed` for a
+    // month its served generation holds sealed (SC-3, D-5899), and a reader
+    // looks it up through the sealed time table (`TimeLookup::Sealed`). This
+    // verb called that "an outcome this build does not know" and REFUSED the
+    // month, and `--dry-run` said "would build ... a reader bisects: Sealed":
+    // both false, and the run failed over a month that needs nothing.
+    let root = Root::new();
+    let second = Timeframe::SECOND_1;
+    month_of(&root, second, ym(2019, 6), 2_000, 1, true);
+    month_of(&root, second, ym(2019, 7), 2_000, 1, false);
+    seal(&root, second, ym(2019, 6));
+    let before = tree(&root.0);
+
+    let (code, out) = root.run(&[
+        "gdfl",
+        "NSE/INDEX/NIFTY",
+        "1s",
+        "2019-06",
+        "2019-07",
+        "--dry-run",
+    ]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains(
+            "  2019-06  sealed             2000 bars  its own time table answers every lookup; \
+             no .tix is needed (D-5899); nothing written\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("  2019-07  would build        2000 bars  "),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(
+            "Indexed 0, would build 1, small 0, sealed 1, not held 0, refused 0. Nothing was \
+             written.\n"
+        ),
+        "{out}"
+    );
+    assert_eq!(tree(&root.0), before, "a dry run writes nothing");
+
+    let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-06", "2019-07"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains(
+            "  2019-06  sealed             2000 bars  its own time table answers every lookup; \
+             no .tix is needed (D-5899); nothing written\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(
+            "Built 1, kept 0, small 0, sealed 1, unindexable 0, not indexed 0, not held 0, \
+             refused 0: every month in the span is indexed, or sealed with its own time table \
+             (D-5899)\n"
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        reader(&root, second, ym(2019, 6)).time_lookup(),
+        TimeLookup::Sealed
+    );
+    assert_eq!(
+        reader(&root, second, ym(2019, 7)).time_lookup(),
+        TimeLookup::Indexed
+    );
+    let after = tree(&root.0);
+    let added: Vec<_> = after.iter().filter(|p| !before.contains(p)).collect();
+    assert_eq!(
+        added,
+        vec![&root.tix(second, ym(2019, 7))],
+        "only the raw month's .tix is written; nothing beside the sealed month"
+    );
 }
