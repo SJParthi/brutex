@@ -74606,8 +74606,9 @@ each now with a test that failed on that head:
   container; the open-ended span over history is measured (L-R324-23).
 - *What damage costs, measured, and what it does not cost.* On a shadow of
   the real store, a 3 MiB NUL run in the served audit file made every span
-  search ending after it about 3.4 ms slower at p50 (5.81 against 2.40 at
-  `limit=20`), a 200 KiB run nothing measurable; every line was answered
+  search ending after it 3.4 to 7 ms slower at p50 (5.81 against 2.40 at
+  `limit=20` at load average 12 to 14, 9.42 against 2.53 at 18 to 21), a
+  200 KiB run nothing measurable; every line was answered
   once across both, at `limit=20` and 200, and following `next` from 0
   reached the end of the kept history (L-R324-22, L-R324-23). Remembering,
   within one search, a stretch a probe found holds no newline would spare
@@ -74622,6 +74623,21 @@ each now with a test that failed on that head:
   cache; no manifest changes and no other crate moves. A new advisory is a
   finding to fix, never a baseline, as DENY-1 fixed the last ones under
   D-5090.
+- *The mutation run over this round's lines found 11 survivors, and each is
+  repaired* (L-R324-14). The probe's read now ends on what was read: a
+  read's own "I read a byte" answer is gone, so no wrong answer can spin
+  it, and a redundant guard went with it; a short read is the file's end,
+  never a bound met first (`a_file_shorter_than_the_search_end_answers_no_line`).
+  New tests pin the first read's size, a page already full, the span
+  stream's cursor and the damage sentence. Run again: 0 missed.
+- *`telemetry`'s reopen tests hold the fork gate* (D-1462). Wrapping the
+  mode-bit test in `where_permission_binds` (above) put one more forking
+  test beside the state-stream and picture tests that drop a sink and open
+  it again on the same directory; a child forked in that window holds the
+  one-writer lock, and two of them failed once under load ("another sink
+  ... holds this telemetry directory"). The twelve such tests R3-24 wrote
+  now take `no_fork_in_flight()`, as the crate's older ones do; the suite
+  then passed three times in a row.
 
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 

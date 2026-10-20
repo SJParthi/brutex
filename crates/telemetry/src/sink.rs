@@ -9189,6 +9189,9 @@ mod state_tests {
     /// both hold copied once, and never again on a later open.
     #[test]
     fn a_new_state_stream_is_seeded_from_the_audit_stream_and_the_ring() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9250,6 +9253,9 @@ mod state_tests {
     /// own first and last lines; a reopened stream records the span again.
     #[test]
     fn a_generation_keeps_its_first_and_last_event_time() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("span");
         let sink = Sink::open(&Config::new(&dir)).expect("opens");
         sink.inner
@@ -9407,6 +9413,9 @@ mod state_tests {
     /// is seeded beside it, not taken for it.
     #[test]
     fn a_ring_line_sharing_a_seq_with_another_is_seeded_too() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed-same-seq");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9442,6 +9451,9 @@ mod state_tests {
     /// changes it held were missing from a stream that said nothing.
     #[test]
     fn a_seed_names_a_file_it_could_not_read() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed-unread");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9476,6 +9488,9 @@ mod state_tests {
     /// deleted), names it, and seeds whole, once.
     #[test]
     fn a_seed_stopped_part_way_leaves_no_half_seeded_stream() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed-killed");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9541,6 +9556,9 @@ mod state_tests {
     /// them is still kept.
     #[test]
     fn a_sampled_line_reaches_the_audit_stream_and_never_the_state_stream() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("sampled");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9595,6 +9613,9 @@ mod state_tests {
     /// whole seed stays under its own name for the next start.
     #[test]
     fn a_seed_that_cannot_be_named_is_refused_by_name() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed-unnamed");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9634,6 +9655,9 @@ mod state_tests {
     /// start moves the kept seed aside once, seeds whole and names it.
     #[test]
     fn a_taken_name_leaves_one_seed_however_often_it_starts() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("seed-taken");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -9830,6 +9854,9 @@ mod state_tests {
     /// A stream reopened with nothing in it has no span to resume.
     #[test]
     fn an_empty_stream_resumes_no_span() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("span-empty");
         drop(Sink::open(&Config::new(&dir)).expect("opens"));
         let again = Sink::open(&Config::new(&dir)).expect("reopens");
@@ -9854,6 +9881,9 @@ mod state_tests {
     /// true span again.
     #[test]
     fn a_span_image_no_writer_makes_is_not_believed() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("span-damaged");
         let sink = Sink::open(&Config::new(&dir)).expect("opens");
         sink.inner
@@ -10045,6 +10075,9 @@ mod picture_tests {
     /// its oldest line from the ring it finds, read once.
     #[test]
     fn the_picture_survives_its_files_and_a_reopen_reads_the_ring_once() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("no-files");
         let sink = Sink::open(&Config::new(&dir)).expect("opens");
         let _ = sink.emit(&Event::error("a", "kept").with("code", "x"));
@@ -10153,6 +10186,9 @@ mod picture_tests {
     /// the sink, the copy still answers.
     #[test]
     fn the_live_copy_is_the_newest_lines_newest_first() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462); since
+        // repair round 2 a test in this module forks (`where_permission_binds`).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("recent");
         let sink = Sink::open(&Config::new(&dir).with_min_level(Level::Trace)).expect("opens");
         let total = u32::try_from(RECENT_LINES).unwrap() + 40;

@@ -3643,12 +3643,16 @@ impl<'p> Ahead<'p> {
         }
     }
 
-    /// Reads on, one read; answers whether it read a byte.
+    /// Reads on, one read: [`PROBE_FIRST_BYTES`] first, then two lines'
+    /// ceiling, never past `end` nor [`MAX_PROBE_BYTES`] held in all, and
+    /// records whether nothing is left before `end` to read. Nothing is read
+    /// once a bound is met; a read after a short one finds the file's end
+    /// again and reads nothing.
     ///
     /// # Errors
     ///
     /// The file cannot be opened, sought or read.
-    fn read_on(&mut self) -> Result<bool, String> {
+    fn read_on(&mut self) -> Result<(), String> {
         use std::io::{Read as _, Seek as _};
         let held = u64::try_from(self.bytes.len()).unwrap_or(u64::MAX);
         let ceiling = u64::try_from(telemetry::MAX_LINE_BYTES)
@@ -3663,8 +3667,8 @@ impl<'p> Ahead<'p> {
         let want = step
             .min(MAX_PROBE_BYTES.saturating_sub(held))
             .min(self.end.saturating_sub(at));
-        if self.reached || want == 0 {
-            return Ok(false);
+        if want == 0 {
+            return Ok(());
         }
         let got = std::fs::File::open(self.path)
             .and_then(|mut file| {
@@ -3675,11 +3679,18 @@ impl<'p> Ahead<'p> {
         let got = u64::try_from(got).unwrap_or(u64::MAX);
         // A SHORT READ is the file's end: nothing past it to read.
         self.reached = got < want || at.saturating_add(got) >= self.end;
-        Ok(got > 0)
+        Ok(())
     }
 
     /// The first newline at or after `at` (never before `base`), reading on
     /// as far as it takes, within `end` and [`MAX_PROBE_BYTES`].
+    ///
+    /// **IT STOPS WHEN A READ ADDS NOTHING** (R3-24 repair round 2, the
+    /// mutation run of 21 Oct): the bytes held only grow, by at most
+    /// [`MAX_PROBE_BYTES`] in all, so the loop's end rests on what was read,
+    /// never on what a read says of itself. It used to stop on the read's own
+    /// "I read a byte", and the mutation that made that answer always yes
+    /// spun the probe until the run's 300 s timeout.
     ///
     /// # Errors
     ///
@@ -3697,10 +3708,12 @@ impl<'p> Ahead<'p> {
                     from.saturating_add(u64::try_from(found).unwrap_or(u64::MAX)),
                 ));
             }
+            let held = self.bytes.len();
             from = self
                 .base
-                .saturating_add(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX));
-            if !self.read_on()? {
+                .saturating_add(u64::try_from(held).unwrap_or(u64::MAX));
+            self.read_on()?;
+            if self.bytes.len() == held {
                 return Ok(if self.reached {
                     Newline::Ended
                 } else {
@@ -3742,7 +3755,17 @@ impl<'p> Ahead<'p> {
 ///
 /// The file cannot be read: named, never answered as "no line here".
 fn line_after(path: &std::path::Path, at: u64, end: u64) -> Result<Probe, String> {
-    let mut ahead = Ahead::new(path, at.saturating_sub(1), end);
+    line_after_in(&mut Ahead::new(path, at.saturating_sub(1), end), at)
+}
+
+/// [`line_after`] through a reader the caller made from the byte before
+/// `at` (from 0 at 0), so a test can see how much one probe read.
+///
+/// # Errors
+///
+/// [`line_after`]'s.
+fn line_after_in(ahead: &mut Ahead<'_>, at: u64) -> Result<Probe, String> {
+    let path = ahead.path;
     let bounded = |from: u64| {
         format!(
             "{}: no line that decodes in the {MAX_PROBE_BYTES} bytes read on from byte {from}, \
@@ -9650,6 +9673,23 @@ mod r3_24_tests {
         let path = dir.join("audit.ndjson");
         std::fs::write(&path, &text).expect("a file");
         let end = text.len() as u64;
+        // ONE PROBE READS `PROBE_FIRST_BYTES` when a whole line follows the
+        // cut inside it, never two lines' ceiling (repair round 2: the
+        // mutation that read the ceiling first went uncaught).
+        assert!(
+            end > super::PROBE_FIRST_BYTES,
+            "premise: longer than one read"
+        );
+        let mut ahead = super::Ahead::new(&path, 0, end);
+        assert!(matches!(
+            super::line_after_in(&mut ahead, 0),
+            Ok(super::Probe::Line(_))
+        ));
+        assert_eq!(
+            ahead.bytes.len() as u64,
+            super::PROBE_FIRST_BYTES,
+            "one first read"
+        );
         let placed = |at: u64| match super::line_after(&path, at, end).expect("readable") {
             super::Probe::Line(got) => Some((got.start, got.len, got.record.seq)),
             super::Probe::Nothing => None,
@@ -9674,6 +9714,45 @@ mod r3_24_tests {
             "inside it"
         );
         assert_eq!(placed(third + 1), None, "past the last line's start");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FILE SHORTER THAN THE SEARCH'S END ANSWERS "NO LINE", NEVER
+    /// DAMAGE** (R3-24 repair round 2, the mutation run of 21 Oct): a file
+    /// cut short under a search (a foreign truncation; the sink only appends)
+    /// ends before the `end` the search was given, and its read comes back
+    /// short. That is the file's end, so a probe past its last whole line
+    /// says `Nothing`, as at the end proper; taken for a bound met first it
+    /// would name damage that is not there. Also at the end proper, with a
+    /// last line no newline closes.
+    #[test]
+    fn a_file_shorter_than_the_search_end_answers_no_line() {
+        let dir = crate::scratch::path("logs-r324-short-file");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let whole = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1000,\"level\":\"info\",\
+                     \"target\":\"x\",\"msg\":\"m\",\"fields\":{}}\n";
+        let text = format!("{whole}{{\"seq\":2,\"ts\":");
+        let path = dir.join("audit.ndjson");
+        std::fs::write(&path, &text).expect("a file");
+        let len = text.len() as u64;
+        let first = whole.len() as u64;
+        let kind = |at: u64, end: u64| match super::line_after(&path, at, end) {
+            Ok(super::Probe::Line(got)) => format!("line {}", got.record.seq),
+            Ok(super::Probe::Nothing) => "nothing".to_owned(),
+            Ok(super::Probe::Damaged(why)) => format!("damaged: {why}"),
+            Err(why) => format!("refused: {why}"),
+        };
+        for end in [len, len + 1000, len + 10 * super::PROBE_FIRST_BYTES] {
+            assert_eq!(kind(0, end), "line 1", "end {end}");
+            assert_eq!(
+                kind(1, end),
+                "nothing",
+                "a cut inside the first line, end {end}"
+            );
+            assert_eq!(kind(first, end), "nothing", "on the torn tail, end {end}");
+            assert_eq!(kind(len, end), "nothing", "at the file's end, end {end}");
+        }
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -11058,9 +11137,89 @@ mod r3_24_edge_tests {
         assert!(matches!(torn, Ok(Walked::Stopped(at)) if at == len - 1));
         assert_eq!(budget, 0, "the slice was spent");
         assert!(out.page.pointers.is_empty() && out.damage.is_empty());
+        // A PAGE ALREADY AS FULL AS ASKED reads nothing: the walk stands
+        // where it was and leaves its slice to the next page (repair round 2:
+        // the mutation that read a slice on went uncaught).
+        let mut left = 1000;
+        let full = span_backwards(&path, 0, (len, all), 0, &mut left, &mut Fetched::default());
+        assert!(matches!(full, Ok(Walked::Stopped(at)) if at == len));
+        assert_eq!(left, 1000, "nothing read");
         let gone = span_backwards(&dir.join("absent"), 0, (len, all), 100, &mut 99, &mut out);
         assert!(gone.is_err());
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN STREAM GOES ON FROM WHERE ITS WALK STOPPED ONCE EVERY POINTER
+    /// IS CONSUMED, AND FROM ITS LAST CONSUMED POINTER BEFORE THAT** (R324-27;
+    /// the mutation run of 21 Oct found `Stream::slot`'s guard untested by
+    /// the library's own tests): a walk that stopped on damage with no line
+    /// still moves the cursor, and a page that took fewer pointers than were
+    /// handed out offers the rest again, never skips them.
+    #[test]
+    fn a_span_stream_goes_on_from_where_its_walk_stopped() {
+        use super::Slot;
+        let dir = std::path::Path::new("/nonexistent-r324-slot");
+        let at = |index: u64| telemetry::PostingAt { serial: 3, index };
+        let stream = |pointers: &[u64], next: usize, more: bool, resume: Option<u64>| {
+            let page = telemetry::PostingsPage {
+                pointers: pointers
+                    .iter()
+                    .map(|&index| {
+                        let pointer = telemetry::AuditPointer {
+                            serial: 3,
+                            offset: index,
+                            seq: index,
+                            len: 10,
+                            level: telemetry::Level::Info,
+                        };
+                        (at(index), pointer)
+                    })
+                    .collect(),
+                ..telemetry::PostingsPage::default()
+            };
+            super::Stream {
+                half: "served",
+                source: "audit",
+                dir,
+                prune: None,
+                spans: std::collections::HashMap::new(),
+                placed: false,
+                serial: 3,
+                dimension: super::SPAN_PROBE,
+                value: String::new(),
+                page,
+                next,
+                last: next.checked_sub(1).map(|n| at(pointers[n])),
+                from: Slot::At(at(900)),
+                more,
+                head: None,
+                read: next,
+                passed: 0,
+                resume: resume.map(at),
+                damage: Vec::new(),
+                unreadable: 0,
+                unread_at: None,
+            }
+        };
+        // NO POINTER, THE WALK STOPPED ON DAMAGE: on from where it stopped.
+        assert_eq!(stream(&[], 0, true, Some(500)).slot(), Slot::At(at(500)));
+        // ONE OF THREE CONSUMED: on from it, the other two offered again.
+        assert_eq!(
+            stream(&[800, 700, 600], 1, true, Some(500)).slot(),
+            Slot::At(at(800))
+        );
+        // NONE CONSUMED, no place to go on from: where the page started.
+        assert_eq!(stream(&[800], 0, true, None).slot(), Slot::At(at(900)));
+        // EVERY ONE CONSUMED: on from where the walk stopped, older than all.
+        assert_eq!(
+            stream(&[800, 700, 600], 3, true, Some(500)).slot(),
+            Slot::At(at(500))
+        );
+        // EVERY ONE CONSUMED of a posting, which names no such place.
+        assert_eq!(stream(&[800, 700], 2, true, None).slot(), Slot::At(at(700)));
+        // NOTHING MORE: done, whatever the walk's place.
+        assert_eq!(stream(&[800], 1, false, Some(500)).slot(), Slot::Done);
+        assert_eq!(stream(&[], 0, false, None).slot(), Slot::Done);
     }
 
     /// **ONE FILE THAT WILL NOT READ IS SAID ONCE PER STREAM, WITH HOW MANY
@@ -11100,6 +11259,26 @@ mod r3_24_edge_tests {
         let said = got["keyed"]["index"]["said"].as_str().unwrap();
         assert!(said.contains("may not hold every match"), "{said}");
         let _ignored = std::fs::remove_dir_all(&dir);
+
+        // ONE LINE THAT WILL NOT READ is named as it is, with no count to add.
+        let lone = scratch("unread-lone");
+        hand_stream(&lone, &[&[1000, 1001, 1002], &[2000], &[3000, 3001, 3002]]);
+        let middle = telemetry::audit_path_for(&lone, 2, 1).unwrap();
+        std::fs::remove_file(&middle).expect("removed");
+        std::fs::create_dir_all(&middle).expect("a directory where the file was");
+        let (got, found) = ask_ts(&lone, "day=2020-01-02&limit=50");
+        assert_eq!(found, [3002, 3001, 3000, 1002, 1001, 1000], "{got:#}");
+        let named = middle.display().to_string();
+        let errors: Vec<&str> = got["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|why| why.as_str().unwrap())
+            .filter(|why| why.contains(&named))
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(!errors[0].contains("line(s) of the"), "{errors:#?}");
+        let _ignored = std::fs::remove_dir_all(&lone);
     }
 
     /// **A KEY BESIDE A SPAN PASSES A GENERATION THE SPAN MISSES UNREAD**
@@ -11948,6 +12127,35 @@ mod r3_24_torn_tests {
             "{said}"
         );
         assert!(said.contains("may not hold every match"), "{said}");
+    }
+
+    /// **DAMAGE READ PAST OR AROUND IS SAID, AND COSTS THE PAGE NO MATCH**
+    /// (R324-26; the mutation run of 21 Oct found the sentence untested by the
+    /// library's own tests): with none, the words name no damage; with two
+    /// stretches they count them and still say every match is there, which
+    /// damage alone does not take away.
+    #[test]
+    fn damage_read_past_is_said_and_costs_the_page_no_match() {
+        let mut indexed = Indexed {
+            reads: 2,
+            of: 2,
+            ..Indexed::default()
+        };
+        let none = read_words(&indexed);
+        assert!(!none.contains("damaged"), "{none}");
+        indexed.damage = 1;
+        let one = read_words(&indexed);
+        assert!(
+            one.contains("; 1 damaged stretch(es) of the audit files"),
+            "{one}"
+        );
+        indexed.damage = 2;
+        let said = read_words(&indexed);
+        assert!(
+            said.contains("; 2 damaged stretch(es) of the audit files read past or around"),
+            "{said}"
+        );
+        assert!(said.contains("every match the streams hold"), "{said}");
     }
 
     /// **THE STATE SLICE KEEPS A LINE THAT STARTS ON ITS FIRST BYTE, AND
