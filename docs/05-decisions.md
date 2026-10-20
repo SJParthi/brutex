@@ -75796,6 +75796,555 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
 
+### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
+
+**Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's
+entry ("The macOS rows run on macOS") took D-4990 on `feat/db-fix` first
+(67c4e58de, 18 Oct), and git joins two appended headings without a conflict,
+so the merged ledger headed D-4990 twice and gate 27b refused it. This entry
+is the newer one, so it takes max(existing) + 1 of the merged tree (D-0684):
+D-5835 at `feat/db-fix` f85ef6b22, where R4-07 heads D-5833 and D-5834 and
+D-5832 heads nothing (R4-07's own renumbering note names it as a former
+number, so it is not reused here). GF-1's D-4990 and its citations are
+unchanged. Every R4-17 citation
+of the listing rule (`pull::fetch`, `pull::identity_screen`, `pull::listing`,
+`pull::series_identity`, `crates/pull/tests/zerodha_identity.rs`, the charter
+row, and the R4-17 sections of `docs/04-invariants.md` and
+`docs/06-limits.md`) then named D-5835. D-4991 to D-4995 head one entry each
+and keep their numbers. The text below is unchanged.
+
+**Renumbered again at merge (repair 3).** D-5835 collided in turn: AH-03's
+entry ("/db names a re-keyed contract's successor and predecessor") took
+D-5835 on `feat/db-fix` (371b1a506) while this branch carried it, and AH-03
+heads D-5835 to D-5838, so the merged ledger headed D-5835 twice and gate
+27b refused it (`D-5835: 2 heading(s), allowed 1`). This entry is again the
+newer one and takes max(existing) + 1 of the merged tree: D-5839. No local or
+`origin/` branch heads D-5839 at the time of this merge; the higher numbers
+other branches head (D-5860 to D-5864, D-5865, D-5880 to D-5884, D-5899) are
+skipped by taking the lowest free number above the merged head. AH-03's D-5835
+and its citations are unchanged; every R4-17 citation listed above now names
+D-5839. Former numbers of this entry: D-4990 and D-5835; D-5832 was
+considered in the first merge and never committed.
+
+**Decision.** `pull::listing` reads the listing day of a CASH security from the
+newest receipted NSE security master under `<store>/session-masters`
+(`ListgDt`, seconds from 1980-01-01: NSE Masters Data v1.6 §2.3 and §3.1.1,
+`docs/00-charter.md` "NSE Masters Data v1.6"), keyed by exactly
+`(NSE, symbol, ISIN)`, the ISIN being `brutex_core::universe::nse_isin`'s. A
+bar, minute or day, stamped on an IST day before that listing day is refused at
+landing by name (`fetch::RowCause::BeforeListing`, code `before_listing`).
+
+1. **The listing day, never "before the first day bar".** A minute before the
+   first day bar the vendor served, on or after a stated listing day, is the
+   security's own (DALBHARAT's 1,967 such minutes, per the R4-17 work package):
+   it is not refused as `before_first_day_bar` when a master states the
+   listing. Where no master states it, the first-day-bar rule of WP-13d stands.
+2. **Unknown refuses nothing.** `ListgDt` `0` (TATACONSUM, TMPV), blank,
+   absent, undecodable, after the master's own day, conflicting between rows or
+   contradicted by the master's own removal date leaves the listing UNKNOWN
+   (`listing::Unknown`, each with its own code), and nothing is refused on it.
+3. **Inferred is a label.** A name no master on disk holds (DHFL, JETAIRWAYS)
+   is given the vendor's own day-rung span, labelled
+   `inferred_from_vendor_span`; it refuses nothing, because the vendor's span
+   cannot accuse the vendor's rows.
+4. **A master that does not check is passed over by name.** The newest master
+   whose receipt or bytes fail is named with why, and the next newest is used.
+   A store with no master that checks answers "not in any master" for every
+   probe. Nothing is downloaded or repaired.
+5. **Remembered once a master loads.** `listing::for_store` loads one table per
+   store root per process and remembers it only when a master loaded (AF-03:
+   a failed load is never remembered). A newer master installed while a
+   process runs is not seen until it restarts; `docs/06-limits.md` names it.
+6. **Said out loud (amended at R4-17 repair 3, by addition).** Point 4's
+   "named with why" was true only of `Listing::passed_over()`, which no
+   production code read: a damaged newest master was skipped silently, and
+   with no master that checks every CASH share wore
+   `inferred_from_vendor_span` — the label of a name a checked master omits —
+   so the listing rule was off for every share and nothing said why (the
+   verifier's finding, CLAUDE.md §4). Now: `listing::for_store` emits one
+   `warn` `pull.listing` event per master passed over (`master`, `why`,
+   `in_use`, `masters`) and one `warn` when none checks (`label`
+   `no_checked_master`, `passed_over`). A store with no master that checks —
+   none on disk, a directory that will not list, every master damaged — labels
+   every CASH share `no_checked_master` (`listing::Source::NoCheckedMaster`,
+   `Listing::absent`). The refusal of a bar before its listing names the
+   master file; every `pull.identity` event names the master and its SHA-256
+   (`master`, `master_sha256`; `no_checked_master` or `not_consulted` when
+   there is none). `cli series-identity` prints the master in use with its
+   SHA-256 and every master passed over with why, on one series and in the
+   `ALL` heading, and its run event names the master. The exit code does not
+   change: falling back to an older master is the spec's chosen behaviour
+   ("falls back to the previous receipted master, named"), and with no master
+   a landing refuses no bar before its listing either, so the scan's verdict
+   about what a landing refuses stays true — the degradation is loud, with
+   its reason, not a refusal. Because a table with no master is loaded again
+   on every call (AF-03), its warns are said once per distinct finding per
+   store per process, not once per answer: the same finding said on every
+   landing answer would bury `/logs`, and every `pull.identity` line of those
+   answers still carries the label. Rejected: failing every CASH landing when
+   no master checks (it would stop the pull of every share over a missing
+   reference file the landing does not need to store bars); remembering the
+   warned state across processes (a new process is a new reader and says it
+   again).
+7. **A master-shaped name that states no day is said too (amended at R4-17
+   repair 4, 19 Oct 2026, by addition; the R4-17 check's follow-up).**
+   `Listing::load` dropped a name with a master's prefix and suffix whose
+   middle is not a calendar day (`NSE_CM_security_31022026.csv.gz`, seven
+   digits, a letter among eight) before any read, so a master saved
+   under a mistyped date answered nothing and no line said so. Such a name is
+   now passed over BY NAME with the code `undated_master_name`
+   (`listing::UNDATED_MASTER`), never read, after every dated master passed
+   over, whether or not a dated master answers; it reaches `/logs` and the
+   `cli series-identity` heading through point 6's lines. One sort orders both
+   (an undated name sorts after every dated one), so gate 11's single declared
+   sort of `listing.rs` is unchanged. A name without the shape (a receipt, an
+   `NSE_FO_` file) is still not a master and not named. The operator's store
+   holds 42 masters, each named by a valid day, and 42 receipts (listed
+   read-only on 19 Oct 2026), so nothing it serves changes. Invariant ZI-23.
+
+8. **A share with no ISIN is its own label, and an unknown listing says why
+   (amended at R4-17 repair 5, 20 Oct 2026, by addition; the R4-17 check's
+   follow-ups).** The key is `(exchange, symbol, ISIN)` and the ISIN comes
+   from `core::universe::nse_isin`; for a CASH share that holds none
+   the key cannot be formed and no master is asked. Such a share was labelled
+   `inferred_from_vendor_span`, which says a master that checked was asked
+   and omits it, untrue when the master may hold the symbol. Its label is now
+   `no_isin` (`listing::Source::NoIsin`, `listing::NO_ISIN`), on the store
+   scan and on every `pull.identity` line, and like the inferred label it
+   refuses nothing; with no master that checks it stays `no_checked_master`,
+   the broader fact. None of the 208 shares on the operator's store hits it:
+   measured on the Mac, 20 Oct 2026, `cli series-identity ALL --segment CASH
+   --feed zerodha --workers 4 --dry-run` over a private shadow (read-only of
+   bars, kernel write lock) labels all 208 `nse_security_master`.
+   The store scan's `listed on unknown` names the master's own code beside it
+   when a master holds the share and states no usable day
+   (`listed on unknown (listing_epoch_zero)`, `SeriesScan::listing_unknown`),
+   so an epoch-zero master is told apart from a share no master knows.
+   Invariant ZI-24.
+
+Rejected: decoding the master a second time in `listing` (a second epoch
+authority beside `cash_auction`); keying by symbol alone (a reused symbol is
+another company); treating `0` as 1980-01-01.
+
+Proof: `pull::listing::tests` (`the_newest_master_that_checks_is_used_and_a_bad_newer_one_is_named`,
+`a_bar_before_the_listing_day_is_refused_and_the_listing_day_is_kept`,
+`epoch_zero_listing_refuses_nothing`, `every_unknown_listing_names_why_and_refuses_nothing`,
+`a_name_absent_from_every_master_is_labelled_inferred`,
+`no_master_on_disk_answers_nothing_and_names_why`, `a_master_name_is_read_exactly`,
+`a_store_table_is_remembered_only_once_a_master_loads`). Point 6:
+`a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use`
+(`pull::listing::tests`),
+`a_master_that_does_not_check_is_named_on_the_log_and_the_older_one_answers`,
+`with_no_master_that_checks_every_share_is_labelled_so_and_a_warn_says_the_rule_is_off`
+(`crates/pull/tests/zerodha_identity.rs`),
+`the_heading_names_the_master_in_use_and_every_master_passed_over`,
+`a_store_with_no_master_that_checks_says_the_listing_rule_is_off`
+(`cli::series_identity::tests`); invariants ZI-18 and ZI-19. Point 7:
+`a_master_shaped_name_that_states_no_day_is_passed_over_by_name`
+(`pull::listing::tests`); invariant ZI-23. Point 8:
+`a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use`
+(`pull::listing::tests`),
+`a_share_with_no_isin_is_labelled_no_isin_even_when_a_master_holds_it`,
+`epoch_zero_listing_refuses_nothing` (`crates/pull/tests/zerodha_identity.rs`),
+`listed_on_unknown_names_the_masters_own_reason` (`cli::series_identity::tests`);
+invariant ZI-24.
+
+### D-4991 — A window after a CASH security's removal day that answers nothing is the end of its history, never a failure (R4-17; COR-07) — 2026-10-17
+
+**Decision.** When the master states a removal day (`RmvlDt`) with no
+readmission after it, a vendor answer for that security on a window that
+starts strictly after the removal day — a 404 or an empty window — lands
+nothing and is recorded in `fetch::fetch_and_land_listed`'s result as
+`history_ends{delisted_on}` (code `history_ends_delisted`), with one `info`
+event per instrument and window. It is not a failure (`docs/07-plan.md` §10
+rows 16 and 18).
+
+1. **Strictly after.** Whether `RmvlDt` is the last day traded or the first not
+   traded is UNVERIFIED (charter), so the removal day itself is never past the
+   end, and a window that includes it is judged as today.
+2. **Only on a master's word.** An inferred span never ends a history; a 404 for
+   a still-listed security, or one no master names, is a failure as today.
+3. **Readmission reopens.** A readmission after the removal means the history
+   did not end.
+
+Proof: `pull::listing::tests::history_ends_after_removal_unless_readmitted`;
+`crates/pull/tests/zerodha_identity.rs::a_404_after_delisting_is_history_ending_not_a_failure`
+(a 404 and an empty answer after the removal day end the history; a 404 for a
+still-listed share, a window that includes the removal day, a 500, an index and
+rows that do arrive are each judged as before). **Not wired into the broker
+run here**: the Zerodha pull loop is R4-14's (`broker_run`), which calls
+`fetch_and_land_listed` with the share's span; until it does, the live pull
+reports such a window as it did.
+
+### D-4992 — The day rung is judged at landing ONLY for a price at or below zero and for a CASH day before its listing, never by range (R4-17; ING-01 c, d) — 2026-10-17
+
+**Amends WP-13d's rule** that a non-intraday window is returned untouched
+because "the day rung is the witness, not the accused"
+(`pull::ingest::identity_screen`). That left MAZDOCK's 1day bars with
+o=h=l=c=0 and IRFC's day bars before its listing landing (per the R4-17 work
+package). The witness half stands: a day bar is never judged by its range,
+its neighbours or any minute, so the day rung stays what minutes are judged
+against. Two things are refused by name, that row only:
+
+1. **`non_positive_price`**: any open, high, low or close at or below zero
+   paisa, on an index, a share or a future, on every rung. Options are not
+   judged by it (an option's zero is not this rule's). The store format is not
+   changed: `store::format`'s sanity check and `http`'s price decode both admit
+   zero, and this door refuses it instead.
+2. **`before_listing`**: a CASH bar on a day before its master's listing day
+   (D-5839).
+3. **On an index, exactly zero is held; only below zero is refused.** Amended
+   on the Mac, 17 Oct 2026, from the real-data run the work package requires
+   (`cli series-identity ALL --segment INDEX --feed zerodha` over a private
+   shadow of the operator's store, read-only of bars): the rule as first
+   written refused 153 Zerodha INDEX day bars as `non_positive_price`, and
+   every one of them is `NIFTY50DIVPOINT`'s, o=h=l=c=0, in runs that begin
+   the session after a March derivatives expiry (2015-03-27, 2020-03-27,
+   2021-03-26) or in early April (2016-04-04..2016-05-04, 2018-04-04..30,
+   2020-04-01..28, 2023-04-03..12) — the shape of a points index that
+   restarts from zero and rises as dividends accrue (2016-04-01 closed well
+   above zero, 2016-04-04 at zero). Refusing those rows would delete the index's
+   own values every year. No other of the 135 Zerodha INDEX series holds a
+   zero day bar, and none holds a negative one. That `NIFTY50DIVPOINT`
+   restarts from zero is read from the data, not from a methodology document
+   (UNVERIFIED: no charter source states it). The residual risk is named in
+   `docs/06-limits.md`: a level index served at zero by a vendor fault would
+   land as a day bar (none observed); its minutes are still judged by range.
+   The store scan labels every held index zero (`zero_price`, action `label`)
+   so it is never silent.
+4. **A day rung that will not open skips the range rules only (repair 1, 18
+   Oct 2026).** The minute arm returned every row of the answer untouched when
+   a touched day month would not open (a torn file, a generation-pointer
+   mismatch, a symbol-id mismatch: any `StoreError` but `Missing`), so a zero
+   minute, or another security's minutes before the master's listing day, was
+   STORED with no failure, contradicting point 1's "on every rung"; the store
+   scan flagged the same minutes, so landing and scan disagreed. Now every
+   minute is judged against a book with no day bar: each range verdict is
+   `no_day_rung` and nothing is refused by range, while `non_positive_price`,
+   `before_listing` and `in_session_jump` (D-4993), none of which reads the
+   day rung, refuse by name as on any other answer. One `pull.identity` warn
+   names why the rung would not open, and each refusal keeps its own warn.
+   Point 4's "every minute is judged against a book with no day bar" was
+   the whole ANSWER, and repair 2 narrows it to the month (point 5).
+5. **A day month that will not open costs its own days only (repair 2, 18
+   Oct 2026; the R4-17 check's PROBE-P1).** One torn day month emptied the
+   book for every month of the answer, so in a window 2024-01-29..02-02 with
+   January torn, February's foreign first minute was STORED although
+   February's day bar was read and refuses it; and the store scan, which
+   had dropped the torn month from its book, refused every minute of a torn
+   FIRST month as `before_first_day_bar` on the word of the next month.
+   Now each touched month is read on its own and the book is told which
+   would not open (`DayBook::with_unread`): a minute of such a month is
+   `no_day_rung`; a minute before the first day read is refused as
+   `before_first_day_bar` only while no torn month lies before that day;
+   every other minute is judged as on any answer. The landing and the scan
+   share the rule. The warn names each torn month and why.
+
+Proof: `crates/pull/tests/zerodha_identity.rs`
+(`a_torn_day_month_costs_the_range_rule_of_its_own_days_only`,
+`pull::series_identity::tests::a_day_month_that_would_not_open_costs_its_own_days_only`,
+`a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open`,
+`a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open`,
+`an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
+`a_day_rung_that_will_not_open_refuses_nothing_by_range`,
+`a_day_rung_that_will_not_open_is_named_on_the_log_beside_its_refusals`,
+`a_zero_price_day_bar_is_refused_by_name_at_landing`,
+`an_index_zero_day_bar_lands_and_a_negative_one_is_refused_by_name`,
+`pull::series_identity::tests::an_index_zero_is_held_and_a_price_below_zero_is_refused`,
+`cli::series_identity::tests::an_index_zero_is_labelled_and_passes_where_a_share_zero_fails`,
+`a_zero_price_minute_is_refused_by_name`,
+`an_options_zero_price_is_never_refused_as_non_positive`,
+`a_day_bar_before_listing_is_refused_by_name`,
+`the_day_rung_is_never_judged_by_range`).
+
+### D-4993 — A CASH minute whose open jumps beyond JUMP_BPS from the minute kept before it, inside one continuous run, is refused by name; JUMP_BPS = 3,000, measured on the store and kept (R4-17; RT-DATA-02 a) — 2026-10-17
+
+**Decision.** `pull::series_identity::JumpRun` follows one continuous recorded
+run of CASH minutes on the 1-minute grid. A minute whose open lies more than
+`JUMP_BPS` from the close of the minute last KEPT in the run is refused
+(`in_session_jump`). Several choices are locked here:
+
+1. **Continuous means one grid step apart.** A halt (2020-03-13, 2020-03-23), a
+   missing minute or the night breaks the run, so a session's first minute and
+   the first after any gap are never judged: 09:15 is never a jump, and a split
+   or bonus, which takes effect between sessions, cannot trip it.
+2. **Measured against the SMALLER price** (`jump_bps`), not the earlier close
+   alone, and that is a deliberate departure from the work package's
+   `|open(n) - close(n-1)| / close(n-1)`. Against the earlier close, a basis
+   halving reads 50% and a doubling 100%, so in an interleave the wrong side
+   is refused. Against the smaller, a factor trips alike either way.
+3. **The reference is the last KEPT minute**, so a block of foreign minutes is
+   refused whole, not at its edges. A minute refused for any cause keeps the
+   run continuous and never becomes the reference. When a run's FIRST minute is
+   the foreign one, the share's own minutes after it are refused instead,
+   loudly and by name. The day rung's `foreign_level` judges the same minutes
+   independently ONLY WHEN THE DAY RUNG HOLDS THAT DAY (repair 2, 18 Oct
+   2026, correcting "never stored silently"): with the day month absent or
+   unreadable nothing witnesses the first minute, so a foreign first minute
+   is STORED with no flag of its own while the honest minutes after it are
+   refused as `in_session_jump`. Measured by the R4-17 check (PROBE-P2: a
+   phantom 0.6x first minute stored, 374 honest minutes refused); on real
+   data this is the IPO-day phantom 09:15 minute WP-13d refuses only when
+   the day bar is there. Named in `docs/06-limits.md` (R4-17);
+   the refusals are loud, the stored first minute is not, and choosing
+   which side of an unwitnessed jump is foreign is NOT DONE.
+4. **CASH 1-minute only.** That is the population the threshold is to be
+   measured over. Indices are judged by the day rung (`foreign_level`), and
+   options can legitimately move more than any such band.
+5. **`JUMP_BPS` = 3,000 was PROVISIONAL (superseded by point 6).** The work package requires it measured
+   first, read-only, over every stored Zerodha CASH minute, per share (p99,
+   p999, max). It must show zero trips on split and bonus ex-dates, a trip on
+   PIIND's interleave (a close about nine times the next minute's open; an
+   invented close of 100.00 against an open of 11.00 is 80,909 bps by this
+   measure, `pull::series_identity::jump_bps`'s own unit test; the real
+   prices are not quoted, the repository being public), and none on a clean
+   share. The cloud session
+   that wrote this has no store. `cli series-identity ALL --segment CASH
+   --feed zerodha` prints exactly that distribution per share, and the
+   operator's run of it is the measurement. Until it is recorded beside the
+   constant and in `docs/06-limits.md`, the value is UNVERIFIED. If any action
+   day trips, or a clean share's maximum reaches 3,000, the constant is wrong:
+   stop and say so before this merges.
+6. **Measured on the Mac, 17 Oct 2026, and kept at 3,000.** `cli
+   series-identity ALL --segment CASH --feed zerodha --workers 4` over a
+   private shadow of the operator's store (bars read through the link, the
+   run under the kernel write lock, 25.8 s): 208 shares, 153,548,887 minutes.
+   Per share the 99th percentile of `jump_bps` is at most 188 (median share
+   11) and the 99.9th at most 270 outside PIIND; the largest jump of a share
+   nothing else accuses is RADICO's 2,203, so 3,000 sits 1.36 times above
+   it. PIIND (270,496) and VBL (10,003) are above it, and both on minutes the
+   day rung already refuses as `foreign_level`, which is judged first. **No
+   minute on the store trips the jump rule (0 in-session jumps)**, so no split
+   or bonus ex-date trips it either: of the 97 shares whose Zerodha/GDFL
+   close ratio changes in some month (`crosscheck_all.json`, 184 changes),
+   none holds a jump. The rule is therefore a second line behind the day
+   rung's range on today's store: it refuses an interleave the day bar's
+   range cannot see (a day bar wide enough to hold both bases), which the
+   store does not hold today. The margin of 1.36 over RADICO is the honest
+   limit, named in `docs/06-limits.md`.
+7. **A kept outlier close is the run's reference until the run breaks (named,
+   not re-anchored; repair 1, 18 Oct 2026).** The verifier showed it: one
+   minute whose CLOSE alone is far off, inside a day bar wide enough to hold
+   it, is kept, and every later minute of that continuous run whose open is
+   back on the share's own level jumps from it and is refused by name, to the
+   next halt, gap or session. Re-anchoring on a refused minute would instead
+   let a foreign block that starts the run land whole (point 3's other edge),
+   and choosing between the two needs a minute after the one being judged,
+   which this rule never reads. The refusals are loud, never silent stores,
+   and the store scan shows none (0 in-session jumps over 153,548,887
+   minutes, point 6). Named in `docs/06-limits.md`.
+
+Proof: `crates/pull/tests/zerodha_identity.rs`
+(`a_session_interleaving_two_price_bases_is_refused_at_landing`,
+`an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open`,
+`a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump`,
+`an_index_is_never_judged_by_the_jump_rule`);
+`pull::series_identity` unit tests of `jump_bps` and `JumpRun`.
+
+### D-4994 — `cli series-identity` gives every flagged stored bar a measured cause and writes a quarantine PLAN under `<store>/audit/series-identity/`, and writes no bar (R4-17; RT-DATA-02 b, Z6) — 2026-10-17
+
+**Decision.** The store scan judges every stored bar by the landing door's
+own rules (`identity_screen::scan_series`, one `MinuteJudge` shared with the
+landing). It counts in-session jumps per month and exits non-zero when any
+bar would be refused, an in-session jump among them. Each flagged bar is given
+a measured cause:
+
+| Code | Means | Plan action |
+|---|---|---|
+| `zero_price` | a price at or below zero (D-4992) | quarantine |
+| `before_listing` | before its master's listing day (D-5839) | quarantine |
+| `before_first_day_bar` | before the first day bar, where no master states the listing (WP-13d) | quarantine |
+| `basis_mismatch` | accused by its day rung or its run, but within `WITNESS_TOLERANCE_BPS` (100, chosen and stated) of GDFL's 1s bars of that minute folded by `pull::fold`: the vendor's minute is GDFL's and its day bar was adjusted apart | label |
+| `foreign_level` | matches neither its own day nor GDFL's minute | quarantine |
+| `no_gdfl_witness` | GDFL holds no such month (`StoreError::Missing`) or no such minute in it | quarantine if a landing refuses it; label if it is only suspect |
+| `gdfl_unread` | GDFL's month is there and would not open, read or fold (point 6) | remeasure |
+
+1. **The plan is the only file written.** One tab-separated row per (key, rung,
+   month, cause, action): `whole_month` when the row covers every bar of that
+   month's rung, else every stamp (UTC microseconds). Its name carries the
+   BLAKE3 of its content, so a rerun over the same store finds it and writes
+   nothing (`CLAUDE.md` §3 rule 5). It is published through
+   `store::staging::create` and a rename. No bar is written, moved or
+   changed; acting on the plan is a versioned generation's job (D-3350), not
+   this verb's.
+2. **Which named shares hold which cause is NOT stated here.** The work package
+   names PIIND 2018-12..2020-01, VBL 2023-06-14, PATANJALI, UNITDSPR, IRFC,
+   KFINTECH, DALBHARAT and MAZDOCK. Their causes are measured by the
+   operator's read-only run of this verb on the store and recorded from its
+   output. Writing them here without that run would be invention.
+3. **Measured on the Mac, 17 Oct 2026** (`cli series-identity <SYMBOL>
+   --segment CASH --feed zerodha` over a private shadow of the operator's
+   store, bars read-only under the kernel write lock; plans written into the
+   shadow's own `audit/`):
+
+   | Share | Exit | What the scan measured |
+   |---|---|---|
+   | PIIND | 1 | 7,576 minutes in 23 months 2018-01..2020-01 refused `foreign_level` by the day rung (2018-12 alone 4,799 of 7,500); measured `foreign_level` 5,162 (GDFL's folded minute disagrees), `no_gdfl_witness` 2,414. The interleave is refused before the jump rule sees it. |
+   | IRFC | 1 | 9,313 minutes 2018-03..2020-02 `before_listing` (the master's listing 2021-01-29; whole months), 2 minutes `zero_price`, 1 `no_gdfl_witness` in 2021-01 |
+   | KFINTECH | 1 | 254 minutes `before_listing` (2018-05, 2019-02; listing 2022-12-29); 1 suspect minute 2022-12, labelled |
+   | MAZDOCK | 1 | 7 day bars o=h=l=c=0, one each month 2018-01..2018-07, `zero_price` (all before its 2020-10-12 listing too) |
+   | VBL | 1 | 8 minutes on 2023-06-14 `foreign_level`, measured `foreign_level` against GDFL |
+   | PATANJALI | 0 | one whole session in 2023-07 suspect (375 minutes), `no_gdfl_witness`, labelled |
+   | UNITDSPR | 0 | 375 minutes unjudged (`no_day_bar`), nothing flagged |
+   | DALBHARAT | 0 | 1,967 minutes between its master's listing (2019-01-22) and its first day bar (2019-02-05) are its own: unjudged, never `before_first_day_bar` (D-5839) |
+
+   Over every share (`ALL`, exit 1): 9,567 `before_listing`, 7,600
+   `foreign_level`, 383 suspect, 9 `zero_price` (7 day bars, 2 minutes), 0
+   in-session jumps; measured `foreign_level` 5,170 and `no_gdfl_witness`
+   2,813, `basis_mismatch` 0. Over every index (`ALL --segment INDEX`):
+   220,767 `foreign_level` minutes (NIFTYNEXT50 87,375, NIFTYPVTBANK 61,088,
+   NIFTYGS10YR 60,750 among them), all `no_gdfl_witness` (GDFL holds no 1s
+   of those indices), 74,992 `before_first_day_bar` (NIFTYOILANDGAS: day
+   rung from 2023-06, minutes from 2022-08), and NIFTY50DIVPOINT's 153 zero
+   day bars (D-4992 point 3). NIFTY and BANKNIFTY are clean: 796,027 and
+   795,979 minutes held, nothing flagged.
+4. **`ALL` scans the series in parallel** (`--workers N`, default every core
+   the machine reports, never more than one per series): each series is
+   judged alone on a worker and the rows, counts and plan are joined in name
+   order, so the output and the plan are the same bytes for every worker
+   count. A month of either rung that will not open fails the run, a series
+   with no minute rung included (it was omitted from the failure before).
+5. **The verb is a store writer (repair 1, 18 Oct 2026; DB-B71).** It
+   publishes its plan under `audit/`, and a later generation acts on what the
+   plan says, so a plan must name the code that measured it. It was listed as
+   a reader in `crates/cli/src/store_write.rs` while it wrote there and
+   reached its root through `crate::store_root`, so a dirty-tree build wrote
+   an unstamped plan unrefused and the plan named no commit. Now it is in
+   `WRITERS` and reaches its root through `store_write::root_for`: an
+   unstamped build is refused before any bar is read unless
+   `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`, and a store whose `bars` is a link (a
+   test shadow) is refused by name. The plan is format `v2`: its second line
+   is `commit\t<sha>` (`unstamped` under the allowance), so two builds over
+   one store write two plans and neither is mistaken for the other. `v1` was
+   never on `feat/db-fix`; its plans exist only in test shadows. `--dry-run`
+   is the read-only form: the same scan, report and exit, the plan's path
+   named, nothing written, so a shadow can still be scanned. After the
+   rename the plan's directory is synced too.
+6. **A GDFL witness month that will not open is named, never measured as
+   absence (repair 1; Z6).** The witness read turned every failure — a torn,
+   locked or unreadable 1s month, a fold error — into "GDFL holds no
+   minute", so the minutes it would have vouched for silently flipped from
+   `basis_mismatch` (label) to `no_gdfl_witness` (quarantine) and nothing
+   named the file. Only `StoreError::Missing` is absence now. Any other open,
+   read or fold error makes each bar it would have measured `gdfl_unread`,
+   action `remeasure`, and the month a `NOT READ: gdfl 1s witness: <why>`
+   line that fails the run, on one series and in `ALL`.
+7. **One event per run (repair 1).** A run was visible on `/logs` only as
+   the binary's `cli.lifecycle` started and finished pair. It now leaves one
+   `cli.series_identity` record after every bar is judged — feed, segment,
+   scope, exit, commit, each measured cause's count, the months that would
+   not open and the plan's path — `warn` when the run fails. Never per bar
+   or per series (gate 17).
+8. **A plan is never written through a link, and a flag is never the
+   instrument (repair 2, 18 Oct 2026; the R4-17 check's PROBE-C1 and
+   PROBE-C4).** `create_dir_all` followed a symbolic link at
+   `audit/series-identity` (or `audit`) and the plan was written outside the
+   store. The plan directory is now made one step at a time and a step that
+   is a symbolic link is refused `linked_plan_dir`, by name, the run failing
+   and nothing written where the link points. The store-wide rule for links
+   below the store root (`store::safe_open`, R3-16) is not this verb's and
+   is NOT DONE here. And `cli series-identity --dry-run` alone took
+   `--dry-run` as the INSTRUMENT and ran in writing mode while the writer's
+   gate read the same arguments as a dry run; an instrument that begins with
+   `-` is now a misuse, refused before the store is named.
+9. **A plan at its name is checked, never trusted (repair 3, 18 Oct 2026;
+   the R4-17 check's follow-up on `Plan::write`).** A file already at the
+   plan's digest name was taken for this run's plan unread; the name carries
+   only 8 bytes of the digest. It is now read and compared with the plan's
+   bytes: equal is the plan, written once as before; anything else is
+   refused `plan_mismatch`, by name, the file left as it is and the run
+   failing. Repair 2's edit of point 7 above had dropped its last two lines
+   and point 8's number; both are restored here, word for word from
+   `37fce1a9e^`. A dead process's staging file of another pid is still not
+   reclaimed: `store::staging::create` clears only a leftover at the writer's
+   own name, so such a file stays as litter (never read as a plan: its name
+   begins with `.` and ends `.staging`); NOT DONE, `docs/06-limits.md`.
+   Invariant ZI-21.
+10. **The digest name is read through the store's reading door, and a failed
+    publish names what it leaves (repair 4, 19 Oct 2026; the R4-17 check's
+    follow-ups on `Plan::write`).** Point 9's check asked `is_file`, which
+    follows a link: a symbolic link at the plan's name pointing at a file
+    with this run's bytes passed for the plan, and a dangling one was not a
+    file, so the rename silently replaced the link. The name is now opened by
+    `store::safe_open::open_read_len` (`O_NOFOLLOW | O_NONBLOCK`, the kind
+    asked of the handle): nothing there is the one answer that writes; a
+    regular file is compared as in point 9; a link (dangling or not), a
+    directory, a pipe or any other kind is refused `plan_name_taken`, naming
+    what is there, left as it is, and the run fails. A write, sync or rename
+    that fails after the staging file exists now names that staging file in
+    the refusal, as left at that name; it is NOT deleted, because no code of
+    this verb deletes a file (`docs/06-limits.md`), and a later run of the
+    same process id clears it (`store::staging`). Rejected: removing the
+    run's own staging name on a failed rename (the verifier's suggestion
+    read one way) — it would be the verb's first deletion, against this
+    package's own stated rule, for a file that costs one plan's bytes and is
+    never read as a plan. Invariant ZI-22.
+
+11. **A series the store holds no month of is refused by name (repair 5, 20
+    Oct 2026, by addition; the R4-17 check's follow-up).** A named series
+    with no 1day month, no 1min month and no month that would not open, on
+    the feed and segment asked, printed "no stored bar would be refused at
+    landing" and exited 0, so an absent or mistyped symbol read as a clean
+    series. It is now refused `no_series` with exit 2 (`MISUSED`, arguments
+    that name no series), before any plan is staged: `SERIES IDENTITY
+    REFUSED: no_series: <feed> NSE-<segment>-<symbol> holds no 1day or 1min
+    month under <root>. Nothing was judged and no plan was written.` The
+    run's one event is a `warn`, its plan field `none: no series`. A series
+    with a day rung and no minutes (NIFTYINFRA's shape) is still judged.
+    `ALL` lists only directories on disk, so it is unchanged. **This amends
+    WP-13d's answer**, which its test
+    `a_clean_series_passes_and_a_series_the_store_lacks_holds_nothing`
+    asserted as exit 0 for a series with nothing on disk and for a feed that
+    holds no 1day or 1min month of it (`--feed gdfl`); the test now asserts
+    the refusal for both. Invariant ZI-25.
+
+Proof: `cli::series_identity::tests`
+(`a_plan_at_its_name_with_other_bytes_is_refused_never_trusted`,
+`a_plan_is_never_written_through_a_linked_directory`,
+`arguments_that_name_no_series_are_misused_before_anything_is_opened`,
+`every_run_leaves_one_event_with_its_counts_its_exit_and_its_plan`,
+`an_unstamped_build_writes_no_plan_unless_allowed_and_every_plan_names_its_commit`,
+`a_torn_gdfl_witness_month_is_named_and_fails_the_run_never_measured_as_absence`,
+`cli::store_write::tests::every_command_is_classified_as_a_store_writer_or_not`,
+`the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy`,
+`piind_minutes_are_named_by_cause_before_any_write`,
+`a_month_refused_whole_is_planned_whole`,
+`the_scan_names_every_edge_it_cannot_judge`, `a_plan_that_cannot_be_written_fails_out_loud`,
+`a_day_bar_alone_fails_and_a_suspect_minute_alone_passes_unless_its_plan_fails`,
+`a_witness_vouches_within_its_tolerance_and_no_further`, `a_percentile_is_the_nearest_rank`,
+`the_all_table_is_the_same_bytes_on_one_worker_and_on_many`,
+`a_worker_count_is_named_or_the_machines_and_never_above_one_per_series`,
+`a_day_month_that_will_not_open_fails_the_run_with_no_minute_rung`,
+and the WP-13d tests kept). Point 10:
+`a_link_at_the_plans_name_is_refused_never_followed_or_replaced`,
+`a_failed_publish_names_the_staging_file_it_leaves`; and the jump line at its
+threshold, `a_jump_of_exactly_the_threshold_is_judged_and_not_counted_beyond_it`
+(invariant ZI-20). Point 11:
+`a_series_the_store_holds_no_month_of_is_refused_by_name`,
+`a_clean_series_passes_and_a_series_the_store_lacks_holds_nothing` (invariant ZI-25).
+
+### D-4995 — No store path and no census key is built from a vendor's instrument token, checked from the source (R4-17; CON-13) — 2026-10-17
+
+**Decision.** `crates/pull/tests/token_identity.rs` reads six modules
+(`store/src/path.rs`, `pull/src/manifest.rs`, `core/src/instrument.rs`,
+`pull/src/census_store.rs`, `pull/src/gdfl_lineage.rs`, `api/src/facets.rs`)
+with `include_str!`. None of the following may hold an identifier naming
+`token`, `instrument_token`, `exchange_token`, `security_id` or `fininstrmid`
+(or holding `token` at all):
+
+- the bodies of `PathParts`, `StorePath`, `EntryKey`, `Contract` and `InstrumentKey`;
+- the parameters of `StorePath::new`, `StorePath::for_key`, `option_key` and `parse_option_key`;
+- any `EntryKey` or `PathParts` literal those modules build.
+
+Comments are not read. The list is closed: each item is found in exactly one
+listed module, every listed module holds something read, and no other non-test
+source file of `core`, `store`, `pull` or `api` defines a type or function of
+those names. A self-test over an in-memory module with an `instrument_token`
+field must be refused, so a checker that refuses nothing fails the build.
+
+Proof: `no_store_or_census_key_is_built_from_a_token`,
+`the_module_list_is_closed_over_every_definition_of_a_key`,
+`a_token_field_in_a_fixture_key_builder_is_refused`.
 
 ### D-5904 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
 
