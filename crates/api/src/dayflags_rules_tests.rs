@@ -613,6 +613,105 @@ fn a_months_sidecar_says_only_the_days_it_files() {
     assert!(held.refusals().is_empty(), "{:?}", held.refusals());
 }
 
+/// **A SHARE WHOSE DATED FLAG IS 0 IS NEVER SAID TO HAVE AN AUCTION PRINT**
+/// (the Mac's real-store re-check of R3-13; SC-CLOSE-8, SC-CLOSE-9). DALBHARAT,
+/// flag 0, read "this share's month holds no auction sidecar, so its print is
+/// not kept apart from trades" on 2026-09-25: a print a share outside the
+/// closing auction has no part in. A flag-0 day says so, with what its month's
+/// sidecar holds; a flag-1 day keeps its words; a day whose sidecar files a
+/// print says the file, whatever the flag.
+#[test]
+fn a_flag_zero_share_is_never_said_to_have_an_auction_print() {
+    let root = root_of("r3-13-flag-zero-print");
+    let quality = super::super::quality_path(&root);
+    let line = |on: &str, prints: &str| {
+        super::super::tests::flags_line(
+            "stocks",
+            on,
+            "*",
+            &super::super::STOCKS_FIELDS,
+            &[("auction_prints", prints)],
+        )
+    };
+    write(&quality, &line("2026-08-04", "3"));
+    for (on, prints) in [
+        ("2026-08-05", "4"),
+        ("2026-08-06", "5"),
+        ("2026-09-01", "6"),
+    ] {
+        super::super::tests::append(&quality, &line(on, prints));
+    }
+    install_flag(&root, "2026-08-04", "RELIANCE", 0);
+    install_flag(&root, "2026-08-05", "RELIANCE", 1);
+    install_flag(&root, "2026-08-06", "RELIANCE", 0);
+    install_flag(&root, "2026-09-01", "RELIANCE", 0);
+    let key = brutex_core::instrument::InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Cash,
+        underlying: brutex_core::symbol::Symbol::new("RELIANCE").expect("a symbol"),
+        kind: brutex_core::instrument::Kind::Equity,
+    };
+    // A PRINT FILED ON 2026-08-04 ONLY (an invented price no real share
+    // printed), so 2026-08 holds a sidecar and 2026-09 none.
+    let print = pull::gdfl_cm::auction::Print {
+        sod: 15 * 3_600 + 29 * 60 + 19,
+        price: 777_700,
+        quantity: 10,
+        rows: 1,
+        line: 1,
+    };
+    let _appended = pull::gdfl_cm::auction::append(&root, &key, day("2026-08-04"), &[print])
+        .expect("the sidecar appends");
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2026-08-04&to=2026-09-01"),
+    );
+    // Filed, flag 0: the sidecar's own record is said, as on any day.
+    let filed = record(&got, "2026-08-04");
+    assert_eq!(filed["calendar"]["cas"]["eligible"], false, "{filed:#}");
+    says_has(
+        filed,
+        "3 closing-auction print(s) in the day's share files; this share's month keeps its print \
+         apart from trades in its auction sidecar",
+    );
+    // None that day, flag 1: the words that were right stay.
+    let one = record(&got, "2026-08-05");
+    assert_eq!(one["calendar"]["cas"]["eligible"], true, "{one:#}");
+    says_has(
+        one,
+        "4 closing-auction print(s) in the day's share files; this share's month holds an auction \
+         sidecar that files no print for this day, so none is kept apart from trades here",
+    );
+    // None that day, flag 0.
+    let zero = record(&got, "2026-08-06");
+    assert_eq!(zero["auction_sidecar"], false, "{zero:#}");
+    says_has(
+        zero,
+        "5 closing-auction print(s) in the day's share files; this share's dated closing-auction \
+         flag is 0 this day, so it takes no part in the auction and has no print to keep apart \
+         (its month's auction sidecar files none for this day)",
+    );
+    // No sidecar in the month, flag 0.
+    let bare = record(&got, "2026-09-01");
+    assert_eq!(bare["auction_sidecar"], false, "{bare:#}");
+    says_has(
+        bare,
+        "6 closing-auction print(s) in the day's share files; this share's dated closing-auction \
+         flag is 0 this day, so it takes no part in the auction and has no print to keep apart \
+         (its month holds no auction sidecar)",
+    );
+    for rec in [zero, bare] {
+        assert!(
+            says(rec)
+                .iter()
+                .all(|say| !say.contains("its print is not kept apart")
+                    && !say.contains("none is kept apart from trades here")),
+            "{:#?}",
+            says(rec)
+        );
+    }
+}
+
 /// **A SIDECAR THAT CANNOT BE LOOKED AT IS NAMED, NEVER SAID ABSENT** (the Mac
 /// finish of R3-13; CLAUDE.md §4). `Path::is_file` answered `false` for any
 /// failed `stat`, so a month whose directory the host would not read was said

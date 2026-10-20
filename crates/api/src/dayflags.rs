@@ -5764,7 +5764,26 @@ impl Says<'_> {
                 // share's: a record that is not a GDFL share claims nothing
                 // about a sidecar it never looked for (the R3-13 review).
                 let prints = n("auction_prints");
+                // A SHARE WHOSE DATED FLAG IS 0 TAKES NO PART IN THE CLOSING
+                // AUCTION (SC-CLOSE-8's flag; the Mac's real-store re-check of
+                // R3-13): DALBHARAT, flag 0 from 2026-08-27, read "its print is
+                // not kept apart from trades" on 2026-09-25, naming a print it
+                // has no part in. Where its sidecar files one, the file is said.
+                let flag_zero = self.calendar.get("cas").and_then(|cas| cas.get("eligible"))
+                    == Some(&Value::Bool(false));
                 out.push(match self.sidecar {
+                    Some(rules::SidecarDay::NoneThatDay) if flag_zero => format!(
+                        "{prints} closing-auction print(s) in the day's share files; this share's \
+                         dated closing-auction flag is 0 this day, so it takes no part in the \
+                         auction and has no print to keep apart (its month's auction sidecar \
+                         files none for this day)"
+                    ),
+                    Some(rules::SidecarDay::NoFile) if flag_zero => format!(
+                        "{prints} closing-auction print(s) in the day's share files; this share's \
+                         dated closing-auction flag is 0 this day, so it takes no part in the \
+                         auction and has no print to keep apart (its month holds no auction \
+                         sidecar)"
+                    ),
                     Some(rules::SidecarDay::Filed) => format!(
                         "{prints} closing-auction print(s) in the day's share files; this share's \
                          month keeps its print apart from trades in its auction sidecar"

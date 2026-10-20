@@ -19893,6 +19893,28 @@ appended), n = 1,200, 31.5 / 120.5 / 142.2; cold (a fresh copy of the store,
 memos empty), n = 20, p50 11.6 / max 13.0; and the warm p50 at 10x and 100x
 the history no page reads is 0.89 and 0.89 of 1x (the gate is 3).
 
+**Re-measured 20 October 2026, 12:04-12:08 IST**, after `feat/db-fix`'s IA-3
+merge and D-5904 item 17 (item 18 came after it and adds one field lookup on
+a share day that counts auction prints): a release build of this branch on
+`127.0.0.1:9700` and the base (the head of `feat/db-fix` at its R4-09a
+merge, before IA-3, which changes nothing in `crates/api`) on
+`127.0.0.1:9701`, two fresh shadows, run in the order branch, base, base,
+branch (the first pass of each was taken at load average 15 to 20 on 14
+cores and is in the R3-13 report, not here). The second pass, warm,
+n = 200, p50 / p99 / max ms, base → branch: GDFL NIFTY 2024-07..09 3.59 / 4.55
+/ 6.93 → 2.62 / 3.17 / 5.65; Zerodha NIFTY 2.55 / 3.10 / 3.90 → 2.12 / 2.80 /
+**4.19**; Zerodha BANKNIFTY 2.41 / 3.00 / 7.41 → 2.21 / 2.76 / 4.66; Zerodha
+RELIANCE 3.62 / 4.33 / 5.96 → 3.31 / 3.81 / **6.82**; GDFL RELIANCE 4.12 / 4.66
+/ 4.79 → 3.98 / 4.62 / **6.69**; GDFL NIFTY 2019-11-28 12000 CE, 2019-09..11,
+3.41 / 4.08 / 4.87 → 2.51 / 3.11 / **7.19**. 60 clients, n = 1,200: 6.22 /
+15.42 / 19.81 → 4.75 / 13.09 / 17.16; 4.23 / 27.49 / 34.66 → 4.04 / 10.94 /
+21.99; 4.02 / 13.14 / 21.77 → 3.79 / 8.05 / 18.53; 6.23 / 17.36 / 37.17 →
+5.18 / **20.86** / 25.11; 6.47 / 15.48 / 20.49 → 6.11 / **17.94** / **35.52**;
+5.57 / 18.92 / 34.01 → 4.66 / 17.43 / 29.05. Bold: the branch above the
+base. p50 is lower on the branch in every case; single
+maxima and two 60-client p99s are higher, on a machine shared with other
+builds, and are stated rather than dropped.
+
 | ID | Limit | Why it is not O(1) / not closed | Bound | Package |
 |---|---|---|---|---|
 | L-R3-13-1 | `/dayflags.json` with R3-13's rules, measured on the real store | a page is at most 92 days, and each day reads a bounded set (L-R3-13-2, L-R3-13-3); the figures are what that costs | **Warm, n = 200, p50 / p99 / max ms, before → after:** GDFL NIFTY 2024-07..09 3.48 / 4.18 / 4.76 → 2.55 / 3.13 / 3.37; Zerodha NIFTY 2.56 / 3.18 / 3.46 → 2.12 / 2.62 / 2.66; GDFL NIFTY 2019-11-28 12000 CE, 2019-09..11, 3.37 / 3.80 / 4.12 → 2.73 / 3.33 / 3.55; Zerodha BANKNIFTY 2.52 / 3.03 / 3.10 → 2.10 / 2.62 / 4.14; Zerodha RELIANCE 3.73 / 4.44 / 4.71 → 3.20 / 3.77 / 4.08; GDFL RELIANCE 4.10 / 5.71 / 12.10 → 4.01 / 4.85 / 10.81. **60 clients, n = 1,200:** 5.25 / 14.09 / 24.84 → 3.90 / 11.32 / 20.55; 3.94 / 7.45 / 15.69 → 3.19 / 7.47 / 11.72; 4.80 / 8.65 / 9.87 → 4.16 / 7.14 / **16.92**; 3.81 / 14.62 / 20.69 → 3.14 / 7.47 / 8.34; 5.64 / 10.36 / 13.48 → 4.94 / 9.47 / **13.85**; 6.08 / **11.29** / 28.84 → 6.01 / **13.30** / 20.78 (bold: after above before; a second full run on the build before the auction-window fix had other tails above, e.g. Zerodha NIFTY max 44.14 against 33.09, so at 60 clients on a shared machine the tails move run to run and p50 is lower in every case). **Cold, ten restarts each, median / max ms:** a process's first request (the Zerodha NIFTY page) 73.4 / 132.3 → 77.9 / 114.8; its first GDFL page 4.24 / 6.34 → **22.16 / 26.89**: the late-row ledger's first read of the 14.0 MB, 23,270-line import journal, once per process (L-R3-13-3 d), after which a GDFL page is 2.9 to 3.1 ms; its third, GDFL RELIANCE, 4.55 / 24.45 → 5.15 / 16.94. A page whose 63 index sessions are scanned cold costs 3.1 to 3.2 ms once the process's ledgers are read. Where "after" is above "before" it is said here, not hidden: the target "no slower than today" is met at p50 everywhere and in warm p99 and max, and not in every 60-client tail or in the first GDFL request of a process | R3-13 |

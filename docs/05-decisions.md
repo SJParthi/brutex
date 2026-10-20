@@ -74987,5 +74987,18 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     and the phrase ends ", inside the recorded halt". No cause is claimed for
     the value: why the index printed there is UNVERIFIED.
 
-**Proof:** R313-01 to R313-28 (`docs/04-invariants.md`); the limits are
+18. **A share whose dated closing-auction flag is 0 is never said to have an
+    auction print** (the Mac's third re-check on the real store, 20 October:
+    GDFL DALBHARAT, flag 0 from 2026-08-27, read "192 closing-auction
+    print(s) in the day's share files; this share's month holds no auction
+    sidecar, so its print is not kept apart from trades" on 2026-09-25, naming
+    a print a share outside the auction has no part in). Where
+    `calendar.cas.eligible` is `false` and the month's `.auc` files no print
+    for the day, the phrase says the flag is 0, that the share takes no part
+    in the auction and has no print to keep apart, and what the month's
+    sidecar holds. A day whose sidecar files a print says the file whatever
+    the flag: the record is the evidence. A flag of 1, or one no master holds,
+    keeps the words of item 4.
+
+**Proof:** R313-01 to R313-29 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-3 (`docs/06-limits.md`).
