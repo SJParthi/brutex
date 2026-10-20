@@ -41,24 +41,43 @@
 //! `cli tix-rebuild`, `srt-build`, `msum-build`, `census-recount` and
 //! `gdfl-rekey` take, with the receipt line they print as its reason. The
 //! store's month lock refuses a month an import holds; the run names it, and a
-//! resume builds it once it is free.
+//! resume builds it once it is free. A scope that names no directory, or
+//! whose walk finds no month file, is refused by name before any line is
+//! written: a run of no item is never read as nothing pending (repair 1).
 //!
 //! `resume` is `run` naming an earlier run: every item a run of its chain
 //! closed clean is skipped. `stop` writes the request the running run reads
 //! between items (`pull::upkeep::request_stop`); without `RUN` it names the
-//! newest run, when one is running. `status` reads the journal's last line.
+//! newest run, when one is running, and a `RUN` that is not the running run
+//! is refused with nothing written, so no request waits for a later run the
+//! clock gives that id (repair 1). `status` reads the journal's last line.
 //!
-//! # Locks: the import's own
+//! # Locks: each item's own verb's, and never beside a live GDFL run
 //!
-//! A GDFL run first takes the import's run lock of every kind
-//! (`imports/gdfl.<kind>.lock` on the version-4 census, `imports/gdfl.lock` on
-//! version 3), without waiting, the holder record naming this verb: while an
-//! import of any kind runs, an upkeep run is refused `run_busy` by name, and
-//! while an upkeep run holds them, an import is. Every kind, because a
-//! recount writes every segment's census and the import journal, and a
-//! capital-market import files more than one segment. Under them each month
-//! is opened under its own exclusive store lock. Zerodha has no import run
-//! lock: its runs meet a pull on the month locks alone.
+//! D-5839 amendment 1 (20 October 2026, IA-2). An upkeep run takes NO lock
+//! of an import and no id in the runs ledger: IA-2's run lock claims an
+//! import run (`mode=import`) in the ledger, so one upkeep run would have
+//! read as three imports, and `census_store::recount` now takes the GDFL
+//! store lock exclusive itself, so a run holding the store lock would refuse
+//! its own recount items `run_busy`. Instead:
+//!
+//! - each item takes exactly the locks of the verb that owns it: an index
+//!   month its exclusive month lock (`cli srt-build`'s), a recount item the
+//!   census verb's hold with its own `census-recount` id in the ledger
+//!   (`cli census-recount`'s: each item IS one recount), a re-key item the
+//!   lineage and journal locks of `gdfl-rekey --apply`;
+//! - a GDFL run probes the GDFL lock files ([`live_run`]: shared,
+//!   non-blocking, never creating one, D-4849) before its walk and, through
+//!   the run's look (`pull::upkeep::Ask::busy`), before every item: while an
+//!   import or a census verb holds one, the run is refused `run_busy` naming
+//!   the holder's claim, or takes no further item and ends `stopped` with
+//!   those words, for a resume once it is free;
+//! - what is left is one item wide: an import that starts while an item is
+//!   being built may meet that month's lock, and is refused it by name by
+//!   the store (`docs/06-limits.md` L-R317-12).
+//!
+//! Zerodha has no import run lock: its runs meet a pull on the month locks
+//! alone.
 //!
 //! It never starts by itself: each kind is run on the operator's yes, from
 //! the store-step list (`config/store-steps.toml`).
@@ -78,14 +97,12 @@ use std::sync::atomic::AtomicBool;
 
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
-use pull::gdfl_import::ImportKind;
+use pull::gdfl_run::locks::{self, ClaimState, LockState};
 use pull::ingest::census_store::Span;
 use pull::session::Day;
 use pull::upkeep::{self, Ask, Kind, Month, Outcome, Ran, Scope, State, Status};
 use store::path::YearMonth;
-use telemetry::run_dirs::GdflLayout;
 
-use crate::gdfl_import_command::{Finding, Holder, RunLock, escape};
 use crate::{FAILED, MISUSED, OK};
 
 /// The verb's shape, printed with every misuse.
@@ -432,6 +449,15 @@ fn items(
         _ => {
             let walked = upkeep::months(root, vendor, &flags.scope)?;
             let total = walked.months.len();
+            // A RUN THAT WALKS NO MONTH FILE IS REFUSED, NEVER READ AS
+            // NOTHING PENDING (R3-17 repair 1; the re-key's rule, AG-02): a
+            // scope that exists but holds no month in its rung and months
+            // would end `done` with no item, which a step's check reads as
+            // finished. A scope whose months all have the file is not this:
+            // it walks them and gives none.
+            if total == 0 {
+                return Err(empty_scope(vendor, &flags.scope, &walked));
+            }
             let months: Vec<(String, Item)> = walked
                 .months
                 .into_iter()
@@ -453,6 +479,42 @@ fn items(
             Ok((months, said))
         }
     }
+}
+
+/// The words for a scope whose walk found no month file: where, which rung
+/// and months, and what the walk left alone there.
+fn empty_scope(vendor: Vendor, scope: &Scope, walked: &upkeep::Walked) -> String {
+    let mut words = format!(
+        "{} holds no month file under bars/{}",
+        if scope.prefix.is_empty() {
+            "the whole feed".to_owned()
+        } else {
+            scope.prefix.join("/")
+        },
+        vendor.as_str()
+    );
+    if let Some(rung) = scope.rung {
+        let _ = write!(words, " at rung {}", rung.as_str());
+    }
+    match (scope.from, scope.to) {
+        (Some(from), Some(to)) => {
+            let _ = write!(words, " from {from} to {to}");
+        }
+        (Some(from), None) => {
+            let _ = write!(words, " from {from}");
+        }
+        (None, Some(to)) => {
+            let _ = write!(words, " up to {to}");
+        }
+        (None, None) => {}
+    }
+    let _ = write!(
+        words,
+        " ({} link(s) never followed, {} stray name(s) left alone): a run of no item is refused, \
+         never read as nothing pending",
+        walked.links, walked.strays
+    );
+    words
 }
 
 /// Builds one item, by the step of the verb that owns it.
@@ -482,41 +544,52 @@ fn build_item(
     }
 }
 
-/// The import's run locks this run takes, every kind's, without waiting. On
-/// a version-3 census one lock serialises every kind, so it is taken once.
-pub(crate) fn run_locks(
-    root: &Path,
-    vendor: Vendor,
-    verb: &str,
-    started: u64,
-) -> Result<Vec<RunLock>, String> {
-    let mut held = Vec::new();
+/// The run a probe of the GDFL lock files finds live, in words, or `None`
+/// (D-5839 amendment 1). Each lock file that exists — the store lock and the
+/// kind locks, at most four — is probed SHARED and non-blocking, never
+/// created, at most `PROBE_READ` bytes read and released at once
+/// (`pull::gdfl_run::locks::lock_state`; D-4849: a probe never makes an
+/// import's press busy). A held lock names its holder's claim — an import
+/// of any kind, a census verb (`census-recount` included, which every
+/// recount item takes for itself) — and a lock that cannot be probed is
+/// named too: an upkeep run never starts beside a run it cannot see. A
+/// claim a dead holder left is not a live run. Zerodha has no such lock:
+/// `None`.
+pub(crate) fn live_run(root: &Path, vendor: Vendor) -> Option<String> {
     if vendor != Vendor::Gdfl {
-        return Ok(held);
+        return None;
     }
-    for kind in ImportKind::ALL {
-        let holder = Holder {
-            pid: std::process::id(),
-            run_started: started,
-            kind,
-            verb: escape(verb.as_bytes()),
-            claim: None,
-            sidecar: None,
-        };
-        let lock = RunLock::take(root, &holder).map_err(sentence)?;
-        let single = lock.layout == GdflLayout::V3;
-        held.push(lock);
-        if single {
-            break;
-        }
-    }
-    Ok(held)
-}
-
-/// The import door's finding as one sentence: its code, then its words.
-fn sentence(found: Finding) -> String {
-    let Finding { code, words } = found;
-    format!("{code}: {words}")
+    locks::lock_state(root, 0)
+        .into_iter()
+        .find_map(|state| match state {
+            LockState::Held {
+                lock,
+                claim: ClaimState::Claim(claim),
+            } => Some(format!(
+                "run_busy: a GDFL {} run holds {lock}: run {} of the runs ledger, kind {}, pid \
+                 {}, by {}, started {} (UNIX s); an upkeep run does not run beside it",
+                claim.mode, claim.run, claim.kind, claim.pid, claim.by, claim.started
+            )),
+            LockState::Held {
+                lock,
+                claim: ClaimState::Empty,
+            } => Some(format!(
+                "run_busy: a GDFL run holds {lock}, its claim not yet written; an upkeep run \
+                 does not run beside it"
+            )),
+            LockState::Held {
+                lock,
+                claim: ClaimState::Unreadable(text),
+            } => Some(format!(
+                "run_busy: {lock} is held, by a claim that does not read ({text}); an upkeep \
+                 run does not run beside it"
+            )),
+            LockState::Unprobed { lock, why } => Some(format!(
+                "run_lock_refused: {lock} could not be probed ({why}); an upkeep run does not \
+                 start beside a run it cannot see"
+            )),
+            LockState::Free { .. } | LockState::Interrupted { .. } => None,
+        })
 }
 
 /// UNIX seconds now: the binary's clock.
@@ -529,16 +602,6 @@ fn unix_now() -> u64 {
 /// What the binary tells once an item is built: nothing, beside the journal
 /// line the run writes for it.
 const fn no_progress(_: &str, _: &Outcome) {}
-
-/// What releasing the locks came to: every refusal named, or none.
-fn all_released(results: impl IntoIterator<Item = Result<(), String>>) -> Result<(), String> {
-    let refused: Vec<String> = results.into_iter().filter_map(Result::err).collect();
-    if refused.is_empty() {
-        Ok(())
-    } else {
-        Err(refused.join("; "))
-    }
-}
 
 /// The rate of a run, in items a second to one decimal, with no float.
 fn rate(items: usize, millis: u64) -> String {
@@ -636,17 +699,54 @@ fn render_run(
     }
 }
 
+/// Another kind's GDFL upkeep run that is running, in words, or `None`
+/// (D-5839 amendment 1, item (e)): two GDFL kinds run one after the other,
+/// as they did when each held the import's locks, because a recount's census
+/// hold and an index's month locks would refuse each other's items. One
+/// status read of each other kind's journal (a bounded tail and a `flock`
+/// probe), at the start only; a journal that cannot be read refuses too,
+/// since a run it hides cannot be seen. Zerodha's kinds share no lock and run
+/// side by side (item 2): `None`.
+fn other_kind_running(root: &Path, vendor: Vendor, kind: Kind) -> Option<String> {
+    if vendor != Vendor::Gdfl {
+        return None;
+    }
+    Kind::ALL
+        .into_iter()
+        .filter(|other| *other != kind)
+        .find_map(|other| match upkeep::status(root, vendor, other) {
+            Ok(Some(status)) if status.state == State::Running => Some(format!(
+                "upkeep_busy: the GDFL {} upkeep run {} is RUNNING ({} of {} built); two GDFL \
+                 upkeep kinds run one after the other (D-5839 item 2)",
+                other.word(),
+                status.id,
+                status.n,
+                status.of
+            )),
+            Ok(_) => None,
+            Err(why) => Some(format!(
+                "upkeep_unseen: whether a GDFL {} upkeep run is running cannot be read ({why})",
+                other.word()
+            )),
+        })
+}
+
+/// A run's state in words.
+fn state_word(state: State) -> String {
+    match state {
+        State::Running => "RUNNING".to_owned(),
+        State::Ended(how) => format!("ended {}", how.word()),
+        State::Died => "DIED (no end line, and its lock is free)".to_owned(),
+    }
+}
+
 /// One status line.
 fn render_status(out: &mut String, kind: Kind, status: Option<&Status>) {
     let Some(status) = status else {
         let _ = writeln!(out, "  {:<8} no run yet", kind.word());
         return;
     };
-    let state = match status.state {
-        State::Running => "RUNNING".to_owned(),
-        State::Ended(how) => format!("ended {}", how.word()),
-        State::Died => "DIED (no end line, and its lock is free)".to_owned(),
-    };
+    let state = state_word(status.state);
     let eta = status.eta().map_or_else(String::new, |eta| {
         format!(", about {eta} s left at its rate so far (an extrapolation)")
     });
@@ -666,6 +766,11 @@ fn render_status(out: &mut String, kind: Kind, status: Option<&Status>) {
 /// ended.
 fn plan(out: &mut String, root: &Path, vendor: Vendor, scope: &Scope) -> u8 {
     let walked = match upkeep::months(root, vendor, scope) {
+        Ok(walked) if walked.months.is_empty() => {
+            let why = empty_scope(vendor, scope, &walked);
+            let _ = writeln!(out, "UPKEEP PLAN REFUSED: {why}. Nothing was written.");
+            return FAILED;
+        }
         Ok(walked) => walked,
         Err(why) => {
             let _ = writeln!(out, "UPKEEP PLAN REFUSED: {why}. Nothing was written.");
@@ -815,7 +920,7 @@ pub(crate) fn command_with(arguments: &[&str], host: &Host<'_>, out: &mut String
             vendor,
             resume,
             flags,
-        } => run(out, &root, host, (kind, vendor, resume), &flags, arguments),
+        } => run(out, &root, host, (kind, vendor, resume), &flags),
     }
 }
 
@@ -841,8 +946,29 @@ fn stop(out: &mut String, root: &Path, kind: Kind, vendor: Vendor, id: Option<u6
         );
         return FAILED;
     };
+    // ONLY THE RUNNING RUN IS ASKED (R3-17 repair 1): a request naming an id
+    // no run holds yet would stop the later run the clock gives that id, at
+    // its first look. So an id that is not the running run's writes nothing.
+    if running != Some(target) {
+        let newest = status.as_ref().map_or_else(
+            || "no run has written a line".to_owned(),
+            |status| {
+                format!(
+                    "the newest is run {}, {}",
+                    status.id,
+                    state_word(status.state)
+                )
+            },
+        );
+        let _ = writeln!(
+            out,
+            "UPKEEP STOP REFUSED: run {target} is not running ({newest}); nothing was asked, and \
+             no request was written that a later run could meet"
+        );
+        return FAILED;
+    }
     match upkeep::request_stop(root, vendor, kind, target) {
-        Ok(path) if running == Some(target) => {
+        Ok(path) => {
             let _ = writeln!(
                 out,
                 "UPKEEP STOP — asked run {target} to stop in {}: it finishes the item it holds \
@@ -850,14 +976,6 @@ fn stop(out: &mut String, root: &Path, kind: Kind, vendor: Vendor, id: Option<u6
                 path.display()
             );
             OK
-        }
-        Ok(path) => {
-            let _ = writeln!(
-                out,
-                "UPKEEP STOP — wrote {} for run {target}, which is NOT running: it stops nothing",
-                path.display()
-            );
-            FAILED
         }
         Err(why) => {
             let _ = writeln!(out, "UPKEEP STOP REFUSED: {why}; nothing was asked");
@@ -873,7 +991,6 @@ fn run(
     host: &Host<'_>,
     (kind, vendor, resume): (Kind, Vendor, Option<u64>),
     flags: &Flags,
-    arguments: &[&str],
 ) -> u8 {
     let heading = format!(
         "UPKEEP {} — {} for {}",
@@ -881,6 +998,15 @@ fn run(
         kind.word(),
         vendor.as_str()
     );
+    // NOT BESIDE A LIVE GDFL RUN (D-5839 amendment 1): asked before the walk
+    // (which takes minutes on a whole segment) and again before every item,
+    // through the run's look. No lock of an import is taken: IA-2's run lock
+    // claims an import run id in the runs ledger, and the recount's own
+    // census hold would meet it.
+    if let Some(why) = live_run(root, vendor).or_else(|| other_kind_running(root, vendor, kind)) {
+        let _ = writeln!(out, "{heading} REFUSED: {why}. Nothing was written.");
+        return FAILED;
+    }
     let (plan, said) = match items(root, kind, vendor, flags) {
         Ok(found) => found,
         Err(why) => {
@@ -888,15 +1014,8 @@ fn run(
             return FAILED;
         }
     };
-    let verb_line = format!("upkeep {}", arguments.join(" "));
-    let held = match run_locks(root, vendor, &verb_line, (host.now)()) {
-        Ok(held) => held,
-        Err(why) => {
-            let _ = writeln!(out, "{heading} REFUSED: {why}. Nothing was written.");
-            return FAILED;
-        }
-    };
     let _ = writeln!(out, "{heading} under {}", root.display());
+    let busy = || live_run(root, vendor);
     let ask = Ask {
         vendor,
         kind,
@@ -905,6 +1024,7 @@ fn run(
         commit: host.commit,
         stop: host.stop,
         now: host.now,
+        busy: &busy,
     };
     let (commit, after_item) = (host.commit, host.after_item);
     let build = |key: &str, item: &Item| {
@@ -912,12 +1032,7 @@ fn run(
         after_item(key, &outcome);
         outcome
     };
-    let ran = upkeep::run(root, &ask, &plan, &build);
-    let released = all_released(
-        held.into_iter()
-            .map(|lock| lock.release().map_err(sentence)),
-    );
-    let ran = match ran {
+    let ran = match upkeep::run(root, &ask, &plan, &build) {
         Ok(ran) => ran,
         Err(why) => {
             let _ = writeln!(out, "{heading} REFUSED: {why}");
@@ -925,20 +1040,7 @@ fn run(
         }
     };
     render_run(out, (kind, vendor), &said, &ran, &plan);
-    exit_of(out, ran.whole(), released)
-}
-
-/// The exit of a run: [`OK`] only when it was whole and every lock it took
-/// was released; a lock left held is named.
-fn exit_of(out: &mut String, whole: bool, released: Result<(), String>) -> u8 {
-    match released {
-        Err(why) => {
-            let _ = writeln!(out, "  LOCKS NOT RELEASED: {why}");
-            FAILED
-        }
-        Ok(()) if whole => OK,
-        Ok(()) => FAILED,
-    }
+    if ran.whole() { OK } else { FAILED }
 }
 
 /// `cli upkeep`, against the CLI's store root (`BRUTEX_STORE`), stamped with

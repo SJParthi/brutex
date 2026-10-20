@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use brutex_core::instrument::{Contract, Exchange, Segment};
@@ -34,8 +35,8 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::sort_index::{Shape, SortIndex};
 
 use super::{
-    Host, Item, USAGE, all_released, build_item, command_with, exit_of, no_progress, outcome, rate,
-    run_locks, sentence, spans, unix_now,
+    Host, Item, USAGE, build_item, command_with, live_run, no_progress, outcome, rate, spans,
+    unix_now,
 };
 use crate::gdfl_import_command::{Holder, RunLock};
 use crate::{FAILED, MISUSED, OK};
@@ -362,7 +363,9 @@ fn upkeep_and_an_import_exclude_each_other_on_a_month() {
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("1 item(s) given"), "{out}");
     assert!(indexed(&root.0, held_month, "NIFTY"));
-    // THE RUN LOCK, v3: one for the store.
+    // A LIVE IMPORT, v3: its claimed run lock refuses the upkeep run before
+    // its walk, naming the claim, and nothing is written (D-5839 amendment
+    // 1: the upkeep takes no lock of an import, it looks).
     let import = Holder {
         pid: 4_242,
         run_started: 7,
@@ -376,61 +379,76 @@ fn upkeep_and_an_import_exclude_each_other_on_a_month() {
     let (code, out) = plain(&root.0, &["run", "tix", "gdfl", "--all"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(
-        out.contains("REFUSED: run_busy: another options run holds imports/gdfl.lock: pid 4242"),
+        out.contains("REFUSED: run_busy: a GDFL import run holds imports/gdfl.lock: run "),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            " of the runs ledger, kind options, pid 4242, by cli, started 7 (UNIX s); an upkeep \
+             run does not run beside it. Nothing was written."
+        ),
         "{out}"
     );
     assert_eq!(root.journal(Kind::DayIndex), before, "nothing written");
     lock.release().unwrap();
-    let held = run_locks(&root.0, Vendor::Gdfl, "upkeep run srt gdfl", 9).unwrap();
-    assert_eq!(held.len(), 1, "v3: the one store lock");
-    let refused = RunLock::take(&root.0, &import).unwrap_err();
-    assert_eq!(refused.code, "run_busy");
-    assert!(
-        refused.words.contains("verb=upkeep run srt gdfl"),
-        "{}",
-        refused.words
+    // An upkeep run holds no import lock: an import is claimed beside one
+    // that is building (here, after its first item), and the upkeep takes no
+    // further item, ends `stopped` with the import's claim, and a resume
+    // once the import is gone builds what is left.
+    let claimed: Mutex<Option<RunLock>> = Mutex::new(None);
+    let take_import = |_: &str, _: &Outcome| {
+        let mut slot = claimed.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(RunLock::take(&root.0, &import).unwrap());
+        }
+    };
+    let (code, out) = call(
+        &root.0,
+        &["run", "msum", "gdfl", "--all"],
+        &AtomicBool::new(false),
+        &take_import,
     );
-    drop(held);
-    // v4: one lock a kind, and the upkeep takes all three.
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("ENDED stopped: run_busy: a GDFL import run holds imports/gdfl.lock: run ")
+            && out.contains("kind options, pid 4242, by cli"),
+        "{out}"
+    );
+    assert!(
+        out.contains("2 item(s) left for a resume of run 1000"),
+        "{out}"
+    );
+    assert!(out.contains("(1 built, 1 clean, 2 left)"), "{out}");
+    claimed.lock().unwrap().take().unwrap().release().unwrap();
+    let (code, out) = plain(&root.0, &["resume", "msum", "gdfl", "1000", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2 item(s) given, 1 skipped"), "{out}");
+    // v4: an import of any one kind is a live run too; its claim is in its
+    // kind lock, and that is the lock named.
     fs::create_dir_all(root.0.join("manifest/v4/gdfl")).unwrap();
-    let held = run_locks(&root.0, Vendor::Gdfl, "upkeep run recount gdfl", 9).unwrap();
-    assert_eq!(held.len(), 3);
     for kind in ImportKind::ALL {
         let contender = Holder {
             kind,
             ..import.clone()
         };
-        let refused = RunLock::take(&root.0, &contender).unwrap_err();
-        assert_eq!(refused.code, "run_busy", "{kind:?}");
+        let held = RunLock::take(&root.0, &contender).unwrap();
+        let why = live_run(&root.0, Vendor::Gdfl).unwrap();
         assert!(
-            refused
-                .words
-                .contains(&format!("imports/gdfl.{}.lock", kind.as_str())),
-            "{}",
-            refused.words
+            why.starts_with(&format!(
+                "run_busy: a GDFL import run holds imports/gdfl.{}.lock: run ",
+                kind.as_str()
+            )),
+            "{why}"
         );
+        held.release().unwrap();
     }
-    drop(held);
-    let stocks = RunLock::take(
-        &root.0,
-        &Holder {
-            kind: ImportKind::Stocks,
-            ..import.clone()
-        },
-    )
-    .unwrap();
-    let why = run_locks(&root.0, Vendor::Gdfl, "upkeep run srt gdfl", 9).unwrap_err();
-    assert!(
-        why.starts_with("run_busy: another stocks run holds imports/gdfl.stocks.lock"),
-        "{why}"
+    assert_eq!(
+        live_run(&root.0, Vendor::Gdfl),
+        None,
+        "every claim released"
     );
-    stocks.release().unwrap();
     // Zerodha has no import run lock.
-    assert!(
-        run_locks(&root.0, Vendor::Zerodha, "upkeep", 9)
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(live_run(&root.0, Vendor::Zerodha), None);
 }
 
 /// **THE SORT INDEX IS THE SAME BYTES AT 1 AND 8 WORKERS**, and so are the
@@ -563,14 +581,17 @@ fn option(root: &Path, contract: &str, day: Day, second: u32) -> Held {
 fn option_of(root: &Path, underlying: &str, contract: &str, day: Day, second: u32) -> Held {
     let at = day.year_month().unwrap();
     let ts = (i64::from(day.days_from_epoch()) * 86_400 - 19_800 + i64::from(second)) * 1_000_000;
+    // INVENTED VALUES (R3-17 repair 1): the contracts are the census keys
+    // DB-027 names, but no price, volume or open interest of a vendor row is
+    // copied into this public repository; none of the assertions reads them.
     let bar = Bar {
         ts_micros: ts,
-        open: 2_100,
-        high: 2_100,
-        low: 2_100,
-        close: 2_100,
-        volume: 1,
-        open_interest: 525,
+        open: 4_242,
+        high: 4_242,
+        low: 4_242,
+        close: 4_242,
+        volume: 3,
+        open_interest: 30,
     };
     let path = store_path("FNO", underlying, Some(contract), at, FileKind::Bars);
     let mut file =
@@ -591,7 +612,7 @@ fn option_of(root: &Path, underlying: &str, contract: &str, day: Day, second: u3
             first_ts_micros: header.first_ts_micros,
             last_ts_micros: header.last_ts_micros,
         },
-        Closes::known(2_100, 2_100).unwrap(),
+        Closes::known(4_242, 4_242).unwrap(),
     )
 }
 
@@ -1043,10 +1064,30 @@ fn status_and_stop_read_and_ask_the_newest_run() {
     spot_months(&root.0, 1);
     let (code, _) = plain(&root.0, &["run", "srt", "gdfl"]);
     assert_eq!(code, OK);
-    let (code, out) = plain(&root.0, &["stop", "srt", "gdfl", "1000"]);
-    assert_eq!(code, FAILED, "{out}");
+    // A RUN THAT IS NOT RUNNING IS NEVER ASKED (R3-17 repair 1): not the
+    // ended run 1000, not an id no run holds yet, and no request is written
+    // that a later run given that id would meet at its first look.
+    let request = root
+        .0
+        .join(upkeep::stop_name(Vendor::Gdfl, Kind::SortIndex));
+    for id in ["1000", "1001", "99999999999"] {
+        let (code, out) = plain(&root.0, &["stop", "srt", "gdfl", id]);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(&format!(
+                "UPKEEP STOP REFUSED: run {id} is not running (the newest is run 1000, ended \
+                 done); nothing was asked, and no request was written that a later run could meet"
+            )),
+            "{out}"
+        );
+        assert!(!request.exists(), "no request for {id}");
+    }
+    // The run the clock then gives id 1001 is not stopped by anything.
+    fs::remove_file(srt(&root.0, ym(2019, 1))).unwrap();
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
     assert!(
-        out.contains("for run 1000, which is NOT running: it stops nothing"),
+        out.contains("run 1001: 1 worker(s), 1 item(s) given"),
         "{out}"
     );
     // A run that holds its journal: the stop names it.
@@ -1066,6 +1107,16 @@ fn status_and_stop_read_and_ask_the_newest_run() {
         out.contains("run 2000 RUNNING: 3 of 9 built, 3 clean, 6 s, about 12 s left"),
         "{out}"
     );
+    // While a run runs, another id is still not it.
+    let (code, out) = plain(&root.0, &["stop", "srt", "gdfl", "2001"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("run 2001 is not running (the newest is run 2000, RUNNING)"),
+        "{out}"
+    );
+    let (code, out) = plain(&root.0, &["stop", "srt", "gdfl", "2000"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("asked run 2000 to stop"), "{out}");
     let (code, out) = plain(&root.0, &["stop", "srt", "gdfl"]);
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("asked run 2000 to stop"), "{out}");
@@ -1101,9 +1152,24 @@ fn status_and_stop_read_and_ask_the_newest_run() {
         .join(upkeep::stop_name(Vendor::Gdfl, Kind::MonthSummary))
         .with_extension("stop.new");
     fs::create_dir_all(&staging).unwrap();
+    // The request is asked only of a RUNNING run (repair 1), so the run is
+    // made to run: its journal held, with a `run` line.
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(
+            root.0
+                .join(upkeep::journal_name(Vendor::Gdfl, Kind::MonthSummary)),
+        )
+        .unwrap();
+    (&held).write_all(b"run 5 v1 vendor=gdfl kind=msum commit=x workers=1 asked=1 items=2 skipped=0 plan=0 resume=- at=5\n").unwrap();
+    held.lock().unwrap();
     let (code, out) = plain(&root.0, &["stop", "msum", "gdfl", "5"]);
     assert_eq!(code, FAILED, "{out}");
-    assert!(out.contains("UPKEEP STOP REFUSED"), "{out}");
+    assert!(out.contains("UPKEEP STOP REFUSED: "), "{out}");
+    assert!(out.ends_with("; nothing was asked\n"), "{out}");
+    drop(held);
 }
 
 /// Every misuse is refused by name with the usage, before anything is
@@ -1270,11 +1336,30 @@ fn a_run_that_cannot_begin_is_refused_by_name() {
     let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("upkeep.gdfl.srt.log"), "{out}");
+    // Another GDFL kind cannot see past that journal (D-5839 amendment 1,
+    // item (e)): it is refused, unseen; with the name freed it runs.
+    let (code, out) = plain(&root.0, &["resume", "tix", "gdfl", "77"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED: upkeep_unseen: "), "{out}");
+    fs::remove_dir(
+        root.0
+            .join(upkeep::journal_name(Vendor::Gdfl, Kind::SortIndex)),
+    )
+    .unwrap();
+    // A resume of a run no journal holds: refused, and no journal made
+    // (R3-17 repair 1).
     let (code, out) = plain(&root.0, &["resume", "tix", "gdfl", "77"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(
-        out.contains("UPKEEP RESUME — tix for gdfl REFUSED: no run 77 in this journal"),
+        out.contains("UPKEEP RESUME — tix for gdfl REFUSED: no run 77 in ")
+            && out.contains("the journal does not exist, so there is nothing to resume"),
         "{out}"
+    );
+    assert!(
+        !root
+            .0
+            .join(upkeep::journal_name(Vendor::Gdfl, Kind::DayIndex))
+            .exists()
     );
     let owned = root.0.clone();
     let store = move || Ok(owned.clone());
@@ -1353,16 +1438,6 @@ fn the_binary_dispatches_upkeep_with_its_arguments() {
     assert!(
         out.contains("upkeep takes plan, run, resume, stop or status"),
         "{out}"
-    );
-}
-
-/// Locks that would not be released are each named; none refused is none.
-#[test]
-fn every_lock_that_would_not_be_released_is_named() {
-    assert_eq!(all_released([Ok(()), Ok(())]), Ok(()));
-    assert_eq!(
-        all_released([Ok(()), Err("a".to_owned()), Ok(()), Err("b".to_owned())]),
-        Err("a; b".to_owned())
     );
 }
 
@@ -1792,23 +1867,12 @@ fn a_zerodha_plan_names_no_rekey() {
     );
 }
 
-/// The exit of a run, the binary's clock and progress, a finding's sentence,
-/// and an item whose month the store cannot name: each said, none assumed.
+/// The binary's clock and progress, and an item whose month the store
+/// cannot name: each said, none assumed.
 #[test]
-fn the_exit_the_clock_and_a_nameless_month_are_each_said() {
-    let mut out = String::new();
-    assert_eq!(exit_of(&mut out, true, Ok(())), OK);
-    assert_eq!(exit_of(&mut out, false, Ok(())), FAILED);
-    assert!(out.is_empty(), "{out}");
-    assert_eq!(
-        exit_of(&mut out, true, Err("imports/gdfl.lock: refused".to_owned())),
-        FAILED
-    );
-    assert_eq!(out, "  LOCKS NOT RELEASED: imports/gdfl.lock: refused\n");
+fn the_clock_and_a_nameless_month_are_each_said() {
     assert!(unix_now() > 1_790_000_000, "a clock past 2026-09");
     no_progress("k", &Outcome::clean("built", "w"));
-    let found = crate::gdfl_import_command::Finding::new("run_busy", "held".to_owned());
-    assert_eq!(sentence(found), "run_busy: held");
     let nameless = upkeep::Month {
         exchange: String::new(),
         segment: "INDEX".to_owned(),
@@ -1834,4 +1898,359 @@ fn the_exit_the_clock_and_a_nameless_month_are_each_said() {
         "{}",
         outcome.why
     );
+}
+
+// ═══ R3-17 repair 1 ═════════════════════════════════════════════════════════
+
+/// **A SCOPE THAT NAMES NOTHING IS REFUSED, BEFORE ANY LINE.** A typo
+/// (`NSE/INDX`), a symbol the store does not hold and an exchange it does
+/// not hold (`BSE`) each walked zero month files and ended `done` with
+/// "every item of the run was built" — which S-50's own check reads as
+/// finished. Each is now refused by name, the plan too, and no journal is
+/// created. A scope that exists but holds no month in the months asked is
+/// refused the same way; a scope whose months all have the file is a clean
+/// nothing-to-do.
+#[test]
+fn a_scope_that_names_nothing_is_refused_before_any_line() {
+    let root = Root::new();
+    spot_months(&root.0, 2);
+    for scope in ["NSE/INDX", "NSE/INDEX/NOPE", "BSE"] {
+        for verb in ["srt", "tix", "msum"] {
+            let (code, out) = plain(&root.0, &["run", verb, "gdfl", scope]);
+            assert_eq!(code, FAILED, "{out}");
+            assert!(
+                out.contains(&format!("REFUSED: {scope} names nothing under bars/gdfl: "))
+                    && out.contains(" is absent. Nothing was written."),
+                "{out}"
+            );
+        }
+        let (code, out) = plain(&root.0, &["plan", "gdfl", scope]);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(&format!(
+                "UPKEEP PLAN REFUSED: {scope} names nothing under bars/gdfl"
+            )),
+            "{out}"
+        );
+    }
+    for kind in [Kind::SortIndex, Kind::DayIndex, Kind::MonthSummary] {
+        assert!(
+            !root
+                .0
+                .join(upkeep::journal_name(Vendor::Gdfl, kind))
+                .exists(),
+            "{kind:?}: no journal was created"
+        );
+    }
+    // A scope that is there, with no month in the months asked.
+    let (code, out) = plain(
+        &root.0,
+        &["run", "srt", "gdfl", "NSE/INDEX/NIFTY", "--from", "2030-01"],
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains(
+            "REFUSED: NSE/INDEX/NIFTY holds no month file under bars/gdfl from 2030-01 (0 \
+             link(s) never followed, 0 stray name(s) left alone): a run of no item is refused, \
+             never read as nothing pending. Nothing was written."
+        ),
+        "{out}"
+    );
+    let (code, out) = plain(&root.0, &["plan", "gdfl", "--rung", "1min"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("the whole feed holds no month file under bars/gdfl at rung 1min"),
+        "{out}"
+    );
+    // The scope's months all indexed: a clean run of no item, as before.
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl", "NSE/INDEX/NIFTY"]);
+    assert_eq!(code, OK, "{out}");
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl", "NSE/INDEX/NIFTY"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("0 of the 2 month file(s) in scope that have no file of this kind"),
+        "{out}"
+    );
+    assert!(out.contains("0 item(s) given"), "{out}");
+}
+
+/// **AN UPKEEP RUN HOLDS NO IMPORT LOCK AND TAKES NO RUN ID** (D-5839
+/// amendment 1). While its items are built nothing of the GDFL locks is
+/// held by it — a probe finds every lock file free — and an index run puts
+/// no record in the runs ledger. A RECOUNT run is no longer refused by its
+/// own locks (IA-2's recount takes the store lock exclusive for itself,
+/// and the upkeep used to hold it first): it ends clean, and the ledger
+/// holds one `census-recount` record per item and no `import` record.
+#[test]
+fn an_upkeep_run_holds_no_import_lock_and_takes_no_run_id() {
+    let root = Root::new();
+    spot_months(&root.0, 2);
+    for at in [ym(2019, 11), ym(2019, 12)] {
+        let path = store_path(
+            "FNO",
+            "NIFTY",
+            Some("2019-12-26-1200000-CE"),
+            at,
+            FileKind::Bars,
+        );
+        month(&root.0, path, "NIFTY", 30, false);
+    }
+    let held_seen = AtomicUsize::new(0);
+    let probe = |_: &str, _: &Outcome| {
+        let held = pull::gdfl_run::locks::lock_state(&root.0, 0)
+            .into_iter()
+            .filter(|state| matches!(state, pull::gdfl_run::locks::LockState::Held { .. }))
+            .count();
+        let _ = held_seen.fetch_add(held, Ordering::Relaxed);
+    };
+    let ledger = root.0.join(pull::gdfl_run::ledger::LEDGER);
+    let (code, out) = call(
+        &root.0,
+        &["run", "srt", "gdfl", "--workers", "2"],
+        &AtomicBool::new(false),
+        &probe,
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        !ledger.exists(),
+        "an index run takes no id in the runs ledger"
+    );
+    assert!(
+        !root.0.join("imports").exists(),
+        "and creates no lock file of an import"
+    );
+    let (code, out) = call(
+        &root.0,
+        &[
+            "run",
+            "recount",
+            "gdfl",
+            "--from",
+            "2019-11-14",
+            "--to",
+            "2019-12-31",
+        ],
+        &AtomicBool::new(false),
+        &probe,
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("outcomes            recounted 2"), "{out}");
+    assert_eq!(
+        held_seen.load(Ordering::Relaxed),
+        0,
+        "nothing held between items"
+    );
+    let records: Vec<pull::gdfl_run::ledger::Entry> = pull::gdfl_run::ledger::read_all(&root.0)
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|record| record.mode != "seed")
+        .collect();
+    assert_eq!(records.len(), 2, "one id an item: {records:?}");
+    assert!(
+        records
+            .iter()
+            .all(|record| record.mode == "census-recount" && record.kind == "census"),
+        "{records:?}"
+    );
+}
+
+/// **THE LOOK BEFORE EACH ITEM IS BOUNDED** (`docs/06-limits.md`
+/// L-R317-12): [`live_run`] over a version-4 store whose four GDFL lock
+/// files all exist, timed n = 2,000 with every lock free and n = 2,000 with
+/// one kind lock held. Printed for the limits row and the package report;
+/// every answer is asserted, the times are not (a timing on a shared
+/// machine is evidence, not a gate).
+#[test]
+#[ignore = "timings, printed"]
+fn live_run_timings() {
+    fn pct(mut took: Vec<std::time::Duration>) -> String {
+        took.sort_unstable();
+        let n = took.len();
+        format!(
+            "n={n} p50={:?} p99={:?} max={:?}",
+            took[n / 2],
+            took[n * 99 / 100],
+            took[n - 1]
+        )
+    }
+    let root = Root::new();
+    fs::create_dir_all(root.0.join("manifest/v4/gdfl")).unwrap();
+    let holder = |kind| Holder {
+        pid: 4_242,
+        run_started: 7,
+        kind,
+        verb: "gdfl-import (a timing)".to_owned(),
+        claim: None,
+        sidecar: None,
+    };
+    for kind in ImportKind::ALL {
+        RunLock::take(&root.0, &holder(kind))
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+    assert_eq!(pull::gdfl_run::locks::lock_names(&root.0).len(), 4);
+    let timed = |want_held: bool| {
+        let mut took = Vec::with_capacity(2_000);
+        for _ in 0..2_000 {
+            let began = std::time::Instant::now();
+            let seen = live_run(&root.0, Vendor::Gdfl);
+            took.push(began.elapsed());
+            assert_eq!(seen.is_some(), want_held, "{seen:?}");
+        }
+        pct(took)
+    };
+    println!(
+        "L-R317-12 live_run, 4 lock files, all free: {}",
+        timed(false)
+    );
+    let held = RunLock::take(&root.0, &holder(ImportKind::Options)).unwrap();
+    println!(
+        "L-R317-12 live_run, 4 lock files, options held: {}",
+        timed(true)
+    );
+    held.release().unwrap();
+}
+
+/// **A SECOND GDFL UPKEEP KIND WAITS FOR THE FIRST** (D-5839 amendment 1,
+/// item (e)): while a GDFL sort-index run holds its journal, a GDFL run of
+/// any other kind is refused by name and writes nothing; a Zerodha run of
+/// another kind is not (Zerodha's kinds share no lock); once the first is
+/// gone, the second runs. A journal that cannot be read refuses too.
+#[test]
+fn a_second_gdfl_upkeep_kind_waits_for_the_first() {
+    let root = Root::new();
+    spot_months(&root.0, 1);
+    let path = root
+        .0
+        .join(upkeep::journal_name(Vendor::Gdfl, Kind::SortIndex));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    (&file).write_all(b"run 2000 v1 vendor=gdfl kind=srt commit=x workers=1 asked=1 items=9 skipped=0 plan=0 resume=- at=2000\nitem 2000 n=3 ok=3 of=9 t=6 clean=1 word=built key=k why=w\n").unwrap();
+    file.lock().unwrap();
+    for kind in ["tix", "msum"] {
+        let (code, out) = plain(&root.0, &["run", kind, "gdfl"]);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(
+                "REFUSED: upkeep_busy: the GDFL srt upkeep run 2000 is RUNNING (3 of 9 built); \
+                 two GDFL upkeep kinds run one after the other (D-5839 item 2). Nothing was \
+                 written."
+            ),
+            "{out}"
+        );
+    }
+    assert!(
+        !root
+            .0
+            .join(upkeep::journal_name(Vendor::Gdfl, Kind::DayIndex))
+            .exists()
+    );
+    // Zerodha's other kinds are not held back by a GDFL run, nor by a
+    // Zerodha one: they reach their own walk (here, a feed the store does
+    // not hold).
+    let (code, out) = plain(&root.0, &["run", "tix", "zerodha"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("the store holds no zerodha bars"), "{out}");
+    drop(file);
+    let (code, out) = plain(&root.0, &["run", "tix", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    // A journal of another kind that cannot be read: refused, unseen.
+    fs::create_dir_all(
+        root.0
+            .join(upkeep::journal_name(Vendor::Gdfl, Kind::Recount)),
+    )
+    .unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("REFUSED: upkeep_unseen: whether a GDFL recount upkeep run is running"),
+        "{out}"
+    );
+}
+
+/// **EVERY LIVE RUN A PROBE CAN SEE IS NAMED, AND A RUN IT CANNOT SEE
+/// REFUSES** ([`live_run`], D-5839 amendment 1): a lock held with no claim
+/// yet, a lock held with bytes that are not a claim, and a lock file that
+/// cannot be probed each refuse the run by name; a claim its holder left
+/// when it died is not a live run.
+#[test]
+fn every_live_run_a_probe_can_see_is_named() {
+    let root = Root::new();
+    spot_months(&root.0, 1);
+    let lock = root.0.join("imports/gdfl.lock");
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    // Held, its claim not yet written.
+    let held = fs::File::create(&lock).unwrap();
+    held.lock().unwrap();
+    let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains(
+            "REFUSED: run_busy: a GDFL run holds imports/gdfl.lock, its claim not yet written; \
+             an upkeep run does not run beside it. Nothing was written."
+        ),
+        "{out}"
+    );
+    // Held, with bytes that are not a claim.
+    (&held).write_all(b"not a claim").unwrap();
+    let why = live_run(&root.0, Vendor::Gdfl).unwrap();
+    assert!(
+        why.starts_with("run_busy: imports/gdfl.lock is held, by a claim that does not read (")
+            && why.contains("not a claim"),
+        "{why}"
+    );
+    // Its holder gone, the bytes stay: a dead holder is not a live run.
+    drop(held);
+    assert_eq!(live_run(&root.0, Vendor::Gdfl), None);
+    // A lock file that cannot be probed: a directory at its name.
+    let kind_lock = root.0.join("imports/gdfl.options.lock");
+    fs::create_dir_all(&kind_lock).unwrap();
+    let why = live_run(&root.0, Vendor::Gdfl).unwrap();
+    assert!(
+        why.starts_with("run_lock_refused: imports/gdfl.options.lock could not be probed (")
+            && why.ends_with("an upkeep run does not start beside a run it cannot see"),
+        "{why}"
+    );
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(
+        code, OK,
+        "the plan writes nothing and looks at no lock: {out}"
+    );
+    assert!(
+        !root
+            .0
+            .join(upkeep::journal_name(Vendor::Gdfl, Kind::SortIndex))
+            .exists(),
+        "no run was begun"
+    );
+}
+
+/// The words of a scope with no month in its span, for every span shape.
+#[test]
+fn an_empty_span_is_said_as_it_was_asked() {
+    let root = Root::new();
+    spot_months(&root.0, 1);
+    for (flags, said) in [
+        (
+            &["--from", "2030-01", "--to", "2030-02"][..],
+            "the whole feed holds no month file under bars/gdfl from 2030-01 to 2030-02 (",
+        ),
+        (
+            &["--to", "2001-01"][..],
+            "the whole feed holds no month file under bars/gdfl up to 2001-01 (",
+        ),
+    ] {
+        let mut arguments = vec!["run", "tix", "gdfl"];
+        arguments.extend_from_slice(flags);
+        let (code, out) = plain(&root.0, &arguments);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains(said), "{out}");
+    }
 }

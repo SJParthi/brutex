@@ -28,8 +28,8 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use super::{
     Ask, Begun, Entry, How, Journal, KEY_CAP, Kind, Lacks, Lines, MAX_WORKERS, Month, Outcome,
     SYNC_EVERY, Scope, State, Status, TAIL_BYTES, VOID, WHY_CAP, drive, journal_name, key_refused,
-    months, one_line, one_word, parse, plan_digest, request_stop, run, status, stop_name,
-    whole_lines,
+    months, nothing_beside, one_line, one_word, parse, plan_digest, request_stop, run, status,
+    stop_name, whole_lines,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -96,6 +96,7 @@ fn ask<'a>(
         commit: Some("0123456789abcdef"),
         stop,
         now,
+        busy: &nothing_beside,
     }
 }
 
@@ -386,7 +387,16 @@ fn a_run_builds_every_item_once_and_says_so_line_by_line() {
         "{}",
         lines[6]
     );
-    assert!(lines[6].ends_with("why=every item of the run was built"));
+    // ONE ITEM REFUSED IS NOT "BUILT" (R3-17 repair 1): the run walked its
+    // whole plan, and its words say what did not end clean.
+    assert!(
+        lines[6].ends_with(
+            "why=every item of the run was taken, and 1 of the 5 did not end clean: they are \
+             left for a resume of run 1000"
+        ),
+        "{}",
+        lines[6]
+    );
     let found = status(&root.0, Vendor::Gdfl, Kind::SortIndex)
         .unwrap()
         .unwrap();
@@ -1382,11 +1392,13 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
             .to_vec(),
         ..Scope::default()
     };
+    // A SCOPE THAT NAMES NOTHING IS REFUSED BY NAME (R3-17 repair 1): it
+    // used to walk as an empty list, and a run of no item ends `done`.
+    let why = months(&root.0, Vendor::Gdfl, &other).unwrap_err();
     assert!(
-        months(&root.0, Vendor::Gdfl, &other)
-            .unwrap()
-            .months
-            .is_empty()
+        why.starts_with("NSE/FNO/NIFTY/2019-03-28-1160000-CE names nothing under bars/gdfl: ")
+            && why.ends_with("2019-03-28-1160000-CE is absent"),
+        "{why}"
     );
     let spot_and_contracts = Scope {
         prefix: ["NSE", "FNO", "NIFTY"].map(str::to_owned).to_vec(),
@@ -1444,17 +1456,16 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
             "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"
         ]
     );
-    // A symbol the scope does not name, and a contract under a symbol that
-    // holds only spot rungs: nothing.
+    // A symbol the store does not hold, and a contract under a symbol that
+    // holds only spot rungs: each names nothing, and is refused.
     let other_symbol = Scope {
         prefix: ["NSE", "INDEX", "BANKNIFTY"].map(str::to_owned).to_vec(),
         ..Scope::default()
     };
+    let why = months(&root.0, Vendor::Gdfl, &other_symbol).unwrap_err();
     assert!(
-        months(&root.0, Vendor::Gdfl, &other_symbol)
-            .unwrap()
-            .months
-            .is_empty()
+        why.starts_with("NSE/INDEX/BANKNIFTY names nothing under bars/gdfl: "),
+        "{why}"
     );
     let spot_contract = Scope {
         prefix: ["NSE", "INDEX", "NIFTY", "2019-03-28-1150000-CE"]
@@ -1462,21 +1473,59 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
             .to_vec(),
         ..Scope::default()
     };
+    let why = months(&root.0, Vendor::Gdfl, &spot_contract).unwrap_err();
     assert!(
-        months(&root.0, Vendor::Gdfl, &spot_contract)
-            .unwrap()
-            .months
-            .is_empty()
+        why.starts_with("NSE/INDEX/NIFTY/2019-03-28-1150000-CE names nothing under bars/gdfl: "),
+        "{why}"
     );
     let none = Scope {
         prefix: vec!["BSE".to_owned()],
         ..Scope::default()
     };
+    let why = months(&root.0, Vendor::Gdfl, &none).unwrap_err();
     assert!(
-        months(&root.0, Vendor::Gdfl, &none)
-            .unwrap()
-            .months
-            .is_empty()
+        why.starts_with("BSE names nothing under bars/gdfl: "),
+        "{why}"
+    );
+    assert!(why.ends_with("bars/gdfl/BSE is absent"), "{why}");
+    // A typo, a file and a link at the scope's name: each named for what
+    // it is, and never walked.
+    let typo = Scope {
+        prefix: ["NSE", "INDX"].map(str::to_owned).to_vec(),
+        ..Scope::default()
+    };
+    let why = months(&root.0, Vendor::Gdfl, &typo).unwrap_err();
+    assert!(
+        why.starts_with("NSE/INDX names nothing under bars/gdfl: "),
+        "{why}"
+    );
+    let base = root.0.join("bars/gdfl");
+    fs::write(base.join("MCX"), b"not a directory").unwrap();
+    let file = Scope {
+        prefix: vec!["MCX".to_owned()],
+        ..Scope::default()
+    };
+    let why = months(&root.0, Vendor::Gdfl, &file).unwrap_err();
+    assert!(why.ends_with("bars/gdfl/MCX is not a directory"), "{why}");
+    // A segment under a file: the host's own refusal (`ENOTDIR`), named.
+    let under_file = Scope {
+        prefix: ["MCX", "INDEX"].map(str::to_owned).to_vec(),
+        ..Scope::default()
+    };
+    let why = months(&root.0, Vendor::Gdfl, &under_file).unwrap_err();
+    assert!(
+        why.starts_with("cannot read ") && why.contains("bars/gdfl/MCX/INDEX: "),
+        "{why}"
+    );
+    std::os::unix::fs::symlink(base.join("NSE"), base.join("NSE2")).unwrap();
+    let link = Scope {
+        prefix: vec!["NSE2".to_owned()],
+        ..Scope::default()
+    };
+    let why = months(&root.0, Vendor::Gdfl, &link).unwrap_err();
+    assert!(
+        why.ends_with("bars/gdfl/NSE2 is a symbolic link, which the walk never follows"),
+        "{why}"
     );
     let why = months(&root.0, Vendor::Zerodha, &Scope::default()).unwrap_err();
     assert!(why.contains("holds no zerodha bars"), "{why}");
@@ -1852,4 +1901,174 @@ fn a_run_flushes_its_journal_at_the_run_line_every_64_items_and_the_end() {
         assert_eq!(ran.flushes, flushes, "{items} item(s)");
         assert_eq!(ran.built(), items);
     }
+}
+
+// ═══ R3-17 repair 1 ═════════════════════════════════════════════════════════
+
+/// **THE CALLER'S LOOK BEFORE EVERY ITEM** (D-5839 amendment 1): once it
+/// names a run this one must not run beside, no worker takes a further item,
+/// the run ends `stopped` with the look's own words and what is left, and a
+/// resume once the look is clear builds exactly what was left. A look that
+/// names a run before the first item leaves every item, at 1 worker and at 8.
+#[test]
+fn a_run_takes_no_item_beside_a_run_its_look_names() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 300;
+    let plan = keys(6);
+    let built = AtomicUsize::new(0);
+    let counting = |key: &str, at: &usize| {
+        let _ = built.fetch_add(1, Ordering::Relaxed);
+        clean(key, at)
+    };
+    let busy_after_two = || {
+        (built.load(Ordering::Relaxed) >= 2)
+            .then(|| "run_busy: an options import holds imports/gdfl.options.lock".to_owned())
+    };
+    let mut asked = ask(Kind::SortIndex, 1, &stop, &now);
+    asked.busy = &busy_after_two;
+    let first = run(&root.0, &asked, &plan, &counting).unwrap();
+    assert_eq!(first.how, How::Stopped);
+    assert_eq!((first.built(), first.left()), (2, 4));
+    assert_eq!(
+        first.why,
+        "run_busy: an options import holds imports/gdfl.options.lock; 4 item(s) left for a \
+         resume of run 300"
+    );
+    assert!(!first.whole());
+    let text = root.journal(Kind::SortIndex);
+    assert!(
+        text.contains(
+            " why=run_busy: an options import holds imports/gdfl.options.lock; 4 item(s) left \
+             for a resume of run 300\n"
+        ) && text.contains("end 300 how=stopped n=2 ok=2 of=6 t="),
+        "{text}"
+    );
+    assert_eq!(items_of(&text, 300), names(&plan[..2]));
+    // The look clear: the resume builds the four left, and only them.
+    let mut resume = ask(Kind::SortIndex, 1, &stop, &now);
+    resume.resume = Some(300);
+    let second = run(&root.0, &resume, &plan, &counting).unwrap();
+    assert_eq!((second.skipped, second.built()), (2, 4));
+    assert!(second.whole());
+    assert_eq!(
+        items_of(&root.journal(Kind::SortIndex), 301),
+        names(&plan[2..])
+    );
+    // Busy before the first item: nothing is built, at 1 worker and at 8.
+    let always = || Some("run_busy: a census-recount holds imports/gdfl.lock".to_owned());
+    for workers in [1, 8] {
+        let other = Root::new();
+        let mut asked = ask(Kind::DayIndex, workers, &stop, &now);
+        asked.busy = &always;
+        let ran = run(&other.0, &asked, &plan, &clean).unwrap();
+        assert_eq!(ran.how, How::Stopped, "{workers}");
+        assert_eq!((ran.built(), ran.left()), (0, 6), "{workers}");
+        assert!(
+            ran.why
+                .starts_with("run_busy: a census-recount holds imports/gdfl.lock; 6 item(s) left"),
+            "{}",
+            ran.why
+        );
+    }
+    // A look that names a run once the last item is taken leaves nothing:
+    // the run is done.
+    let late = Root::new();
+    built.store(0, Ordering::Relaxed);
+    let busy_after_all = || (built.load(Ordering::Relaxed) >= 6).then(|| "late".to_owned());
+    let mut asked = ask(Kind::SortIndex, 1, &stop, &now);
+    asked.busy = &busy_after_all;
+    let ran = run(&late.0, &asked, &plan, &counting).unwrap();
+    assert_eq!(ran.how, How::Done);
+    assert!(ran.whole());
+    assert_eq!(ran.why, "every item of the run was built");
+}
+
+/// **A RUN WHOSE ITEMS WERE REFUSED IS NOT SAID "BUILT"** (R3-17 repair 1):
+/// it walked its whole plan, so it ends `done`, but its words say how many
+/// did not end clean and that a resume takes them, and it is not whole.
+#[test]
+fn a_run_whose_items_were_refused_is_not_said_built() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 400;
+    let plan = keys(3);
+    let refused = |_: &str, _: &usize| Outcome::failed("REFUSED", "held by another process");
+    let ran = run(
+        &root.0,
+        &ask(Kind::SortIndex, 1, &stop, &now),
+        &plan,
+        &refused,
+    )
+    .unwrap();
+    assert_eq!(ran.how, How::Done);
+    assert_eq!((ran.built(), ran.clean(), ran.left()), (3, 0, 0));
+    assert!(!ran.whole());
+    assert_eq!(
+        ran.why,
+        "every item of the run was taken, and 3 of the 3 did not end clean: they are left for \
+         a resume of run 400"
+    );
+    let text = root.journal(Kind::SortIndex);
+    assert!(text.contains("end 400 how=done n=3 ok=0 of=3 "), "{text}");
+    assert!(!text.contains("every item of the run was built"), "{text}");
+}
+
+/// **NO ETA BEFORE A WHOLE SECOND** (R3-17 repair 1): a running run that has
+/// built items within its first second has no rate to extrapolate from, so
+/// it gives none, rather than "about 0 s left".
+#[test]
+fn a_run_under_a_second_old_has_no_eta() {
+    let young = Status {
+        id: 1,
+        state: State::Running,
+        n: 3,
+        ok: 3,
+        of: 9,
+        t: 0,
+    };
+    assert_eq!(young.eta(), None);
+    let one = Status { t: 1, ..young };
+    assert_eq!(one.eta(), Some(2), "1 s for three of nine: 2 s more");
+}
+
+/// **A RESUME OF A JOURNAL THAT DOES NOT EXIST CREATES NONE** (R3-17 repair
+/// 1): the refusal says nothing was written, and nothing was — not the
+/// journal, not the audit directory.
+#[test]
+fn a_resume_with_no_journal_writes_nothing() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 500;
+    let mut resume = ask(Kind::MonthSummary, 1, &stop, &now);
+    resume.resume = Some(77);
+    let why = run(&root.0, &resume, &keys(2), &clean).unwrap_err();
+    assert!(
+        why.starts_with("no run 77 in ") && why.ends_with("nothing was written"),
+        "{why}"
+    );
+    assert!(
+        !root
+            .0
+            .join(journal_name(Vendor::Gdfl, Kind::MonthSummary))
+            .exists(),
+        "no journal was created"
+    );
+    assert!(
+        !root.0.join(super::DIR).exists(),
+        "no audit directory either"
+    );
+    // With a journal, an unknown id is still refused, and the journal is
+    // left as it was.
+    let _ = run(
+        &root.0,
+        &ask(Kind::MonthSummary, 1, &stop, &now),
+        &keys(1),
+        &clean,
+    )
+    .unwrap();
+    let before = root.journal(Kind::MonthSummary);
+    let why = run(&root.0, &resume, &keys(2), &clean).unwrap_err();
+    assert!(why.contains("no run 77 in this journal"), "{why}");
+    assert_eq!(root.journal(Kind::MonthSummary), before);
 }

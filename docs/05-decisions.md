@@ -74868,7 +74868,7 @@ the counts on a page is R3-23's.
 `a_day_with_no_listing_claims_none` in `crates/pull/src/gdfl_ia3_tests.rs`;
 the pinned close line of `gdfl_import_tests`.
 
-### D-5839 — One upkeep runner: the store's catch-up builders run as tracked runs on workers, with a run id, a journal, Stop and resume, under the import's own run locks — 2026-10-17
+### D-5839 — One upkeep runner: the store's catch-up builders run as tracked runs on workers, with a run id, a journal, Stop and resume, under the import's own run locks — 2026-10-17 (item 4 replaced by amendment 1, 2026-10-20: beside no live GDFL run, each item under its own verb's locks)
 
 **Implemented by** R3-17: `pull::upkeep` (`crates/pull/src/upkeep.rs`: `run`,
 `status`, `request_stop`, `months`, `parse`) and `cli upkeep`
@@ -74907,12 +74907,15 @@ D-5835 to D-5838 first; the head of feat/db-fix was D-5838 at `371b1a506`).
    `cli scrub-blocks` ends its own. Per kind, not one file for all, because
    each kind is its own history with its own resume chain, a page reads one
    kind's tail, and kinds that share no lock (Zerodha's) run side by side; a
-   GDFL run holds the import's locks of every kind (item 4), so two GDFL
+   GDFL run holds the import's locks of every kind (item 4; since amendment
+   1 it holds none, and item (e) there keeps this), so two GDFL
    kinds run one after the other.
 3. **The run id** is the clock's UNIX seconds, or one more than the newest id
    the journal's tail holds when that is not earlier, so no two runs of one
    journal share an id whatever the clock says.
-4. **Locks: the import's own, and one run of a kind.** The run holds its
+4. **Locks: the import's own, and one run of a kind.** *Every lock of an
+   import below is replaced by amendment 1 (IA-2); the journal's own `flock`
+   stands.* The run holds its
    journal's `flock` for its whole life: a second run of the same vendor and
    kind is refused by name. A GDFL run first takes the import's run lock of
    EVERY kind (`imports/gdfl.<kind>.lock` on the version-4 census, the one
@@ -75008,3 +75011,84 @@ it, and the plan says it reads names, not bodies).
 UK-15 in `docs/04-invariants.md` (UK-15 at the merge of AG-02); limits L-R317-01 to L-R317-10 in
 `docs/06-limits.md` (L-R317-10, Zerodha's sort index, added on 19 October 2026
 with item 10's Zerodha run).
+
+**Amendment 1 — 2026-10-20 (R3-17 repair 1): the locks under IA-2.** IA-2,
+merged into feat/db-fix after this entry was written, changed what an
+import's run lock is and what a recount takes, and item 4 as first written
+no longer holds. Found by the round-2 check of `fix/db-R3-17`
+(`state/fix/round2/verify-R3-17-r1.json`, blocking item 1).
+
+- (a) **An upkeep run takes no lock of an import, no id in the runs ledger,
+  and writes no claim.** `RunLock::take` now CLAIMS an import run: it
+  allocates an id in the runs ledger (`audit/runs.ledger`, mode `import`) and
+  writes the claim into the kind lock (`pull::gdfl_run::claim_with`), so one
+  GDFL upkeep run would have registered as three import runs that imported
+  nothing (one a kind on version 4), and an import refused beside it would
+  have been told that an options run held the store. The ledger's mode words
+  (`pull::gdfl_run::ledger::MODES`, and a claim's, `locks::MODES`) hold no
+  upkeep word, and a record whose mode a reader does not know is not one
+  (`Entry::parse`): adding one would change the ledger for every reader
+  and every older build. The upkeep journal (§43) is the run's record, and
+  its run id is that journal's (item 3).
+- (b) **It never holds the GDFL store lock.** `census_store::recount` takes
+  it EXCLUSIVE itself (`claim_census`, mode `census-recount`, its own ledger
+  id; IA-GR-14), so an upkeep run that held it — shared on version 4 under
+  the kind locks, exclusive on version 3 — refused its own recount items
+  `run_busy`. Each recount item takes the census hold for itself, with one
+  `census-recount` id an item, which is what it is: `cli census-recount`
+  takes one a call.
+- (c) **What keeps an upkeep from a live GDFL run now is a look, not a
+  hold.** `cli upkeep` probes the GDFL lock files (`live_run`, through
+  `pull::gdfl_run::locks::lock_state`: each existing file shared and
+  non-blocking, never created, at most 1 KiB read and released at once; a
+  probe never makes an import's press busy, D-4849) before its walk, and
+  hands the same probe to `pull::upkeep::run` as the run's look
+  (`Ask::busy`), which every worker asks before every item. A held lock — an
+  import of any kind, a census verb — refuses the run `run_busy` naming the
+  holder's claim before anything is written, or makes it take no further
+  item and end `stopped` with those words, for a resume once it is free; a
+  lock file that cannot be probed refuses the same way (an upkeep run never
+  starts beside a run it cannot see). A claim its holder left when it died is
+  not a live run. Under it, the month's exclusive store lock still keeps an
+  upkeep and an import from one month at once.
+- (d) **What is no longer excluded, named.** An import that starts while an
+  item is being built is not refused at its door (nothing of its is held);
+  it may meet that one month's exclusive lock and is refused that month by
+  name by the store, and the upkeep stops at its next look. One item wide:
+  `docs/06-limits.md` L-R317-12, with the look's measured cost.
+- (e) **Two GDFL upkeep kinds still run one after the other** (item 2): a
+  GDFL run is refused while a run of another kind holds its GDFL upkeep
+  journal (`pull::upkeep::status` reads it `RUNNING`), named. Two starts in
+  the same instant can both pass that check; they then meet only on month
+  locks, each refused by name.
+- (f) Zerodha is unchanged: no import run lock, month locks alone.
+
+**Also in repair 1** — no new choice, the refusals `CLAUDE.md` §4 asks for,
+each found by the same check: a scope whose segments name no directory under
+`bars/<vendor>/` (`NSE/INDX`, `BSE`), or whose walk finds no month file in
+the rung and months asked, refuses the run and the plan by name before any
+line is written, so a mistyped S-50 command can no longer end `done` (a scope
+whose months all have the file is still a clean run of no item); `stop`
+writes a request only for the running run, so no request waits for a later
+run the clock gives its id; a resume of a journal that does not exist
+creates none; a run whose every item was taken but not every one ended
+clean ends `done` with words that say how many did not, never "every item
+of the run was built"; a status gives no ETA before one whole second; and
+the DB-027 test's bars carry invented values, not the vendor row's.
+
+**Proof (amendment 1).** `upkeep_and_an_import_exclude_each_other_on_a_month`
+(rewritten: a live import refuses the run before its walk; an import claimed
+between items stops it, and the resume builds the rest; every kind's lock on
+version 4 is seen), `an_upkeep_run_holds_no_import_lock_and_takes_no_run_id`,
+`every_live_run_a_probe_can_see_is_named`, `an_empty_span_is_said_as_it_was_asked`,
+`a_second_gdfl_upkeep_kind_waits_for_the_first`,
+`a_scope_that_names_nothing_is_refused_before_any_line`,
+`status_and_stop_read_and_ask_the_newest_run` (`crates/cli/src/upkeep_command_tests.rs`);
+`a_run_takes_no_item_beside_a_run_its_look_names`,
+`a_run_whose_items_were_refused_is_not_said_built`,
+`a_run_under_a_second_old_has_no_eta`, `a_resume_with_no_journal_writes_nothing`,
+`the_walk_lists_every_month_and_what_it_lacks` (`crates/pull/src/upkeep_tests.rs`).
+`a_recount_runs_one_month_of_days_an_item_and_resumes`, unchanged, failed on
+the merged tree before this amendment (its recount items refused `run_busy`
+by the upkeep's own lock) and passes after it. Invariants UK-02 (restated),
+UK-16 to UK-18; limits L-R317-11 and L-R317-12.

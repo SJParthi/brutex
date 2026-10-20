@@ -35,14 +35,20 @@
 //!
 //! The run holds an exclusive `flock` on its journal for its whole life. A
 //! second run of the same vendor and kind is refused by name at once; the
-//! caller's own locks can serialise more (`cli upkeep`'s). While a run
+//! caller's look can keep it from more (`cli upkeep`'s, below). While a run
 //! holds the lock, [`status`] says it is running; a journal whose last line
 //! is not an `end` and whose lock is free belongs to a run that DIED.
 //!
-//! What it shares with an import is not decided here: the caller takes the
-//! import's own run lock before it calls [`run`], and every builder takes the
-//! month's exclusive store lock, so an import and an upkeep never write one
-//! month at once (`cli upkeep`, `store::file::StoreError::Locked`).
+//! What it shares with an import is not decided here, and since D-5839
+//! amendment 1 (IA-2's claimed locks, 20 October 2026) the caller holds none
+//! of an import's locks: it hands [`run`] a look ([`Ask::busy`]) that is
+//! asked before every item, by every worker, and that says when a run this
+//! one must not run beside holds the store (`cli upkeep` probes the GDFL
+//! lock files); the run then takes no further item and ends `stopped` with
+//! the look's words. Every builder takes the month's exclusive store lock, so
+//! an import and an upkeep never write one month at once
+//! (`store::file::StoreError::Locked`), and a step that takes a lock of its
+//! own (the recount's census hold) takes it per item, as its verb does.
 //!
 //! # Stop
 //!
@@ -76,8 +82,9 @@
 //! # Cost
 //!
 //! Per item: one `item` line (one `write`), a `sync_data` every
-//! [`SYNC_EVERY`] items and at the end, and one open of the stop file per
-//! worker per item (`ENOENT` when no stop was asked). A kill can lose at most
+//! [`SYNC_EVERY`] items and at the end, one open of the stop file per
+//! worker per item (`ENOENT` when no stop was asked), and the caller's look
+//! ([`Ask::busy`]) once per worker per item. A kill can lose at most
 //! the unsynced lines; their items are built again on resume, which every
 //! builder here keeps (`kept`) when it finds them done. [`status`] is one
 //! bounded tail read and one `flock` probe. The months walk ([`months`]) is
@@ -91,7 +98,7 @@ use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Seek as _, SeekFrom
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use brutex_core::instrument::{Contract, Exchange, Segment};
@@ -270,6 +277,20 @@ pub struct Ask<'a> {
     pub stop: &'a AtomicBool,
     /// UNIX seconds now: the run id and the `run` line's `at=`.
     pub now: &'a (dyn Fn() -> u64 + Sync),
+    /// The caller's look before each item (D-5839 amendment 1): `Some(why)`
+    /// names a run this one must not run beside, and the run takes no
+    /// further item and ends [`How::Stopped`] with `why`; [`nothing_beside`]
+    /// for a caller with nothing to look at. Asked by every worker before
+    /// every item, so it must be bounded: `cli upkeep`'s is a probe of at
+    /// most four lock files (`docs/06-limits.md` L-R317-12).
+    pub busy: &'a (dyn Fn() -> Option<String> + Sync),
+}
+
+/// The look of a caller that runs beside nothing it must yield to: never
+/// busy.
+#[must_use]
+pub const fn nothing_beside() -> Option<String> {
+    None
 }
 
 /// How a run ended.
@@ -277,7 +298,8 @@ pub struct Ask<'a> {
 pub enum How {
     /// Every item it was given was built, clean or not.
     Done,
-    /// A Stop was asked and seen; items are left.
+    /// A Stop was asked and seen, or the caller's look ([`Ask::busy`]) named
+    /// a run this one must not run beside; items are left.
     Stopped,
     /// The journal could not be written; the run stopped taking items.
     Failed,
@@ -837,10 +859,12 @@ pub struct Status {
 
 impl Status {
     /// Seconds left at the rate so far, for a running run that has built at
-    /// least one item: an extrapolation, said as one.
+    /// least one item over at least one whole second: an extrapolation, said
+    /// as one. Under a second (`t=0`) there is no rate to extrapolate from,
+    /// and "about 0 s left" would be a claim, not a measure.
     #[must_use]
     pub fn eta(&self) -> Option<u64> {
-        (self.state == State::Running && self.n > 0)
+        (self.state == State::Running && self.n > 0 && self.t > 0)
             .then(|| self.t.saturating_mul(self.of.saturating_sub(self.n)) / self.n)
     }
 }
@@ -1036,20 +1060,85 @@ fn run_line(
     )
 }
 
+/// What the workers left, for [`ending`].
+struct Left<'a> {
+    /// The line the journal refused, if one was.
+    fault: Option<&'a str>,
+    /// What the caller's look said, if it named a run (the first worker's).
+    busy: Option<&'a str>,
+    /// Whether a Stop was seen.
+    stopped: bool,
+    /// Items given, built, and built clean.
+    of: u64,
+    n: u64,
+    ok: u64,
+}
+
 /// How a run ended and why, from what the workers left: a refused line, the
-/// items left, and whether a Stop was seen. A Stop seen once the last item
-/// was taken left nothing: the run is done.
-fn ending(fault: Option<&str>, left: u64, stopped: bool, id: u64) -> (How, String) {
-    match fault {
-        Some(why) => (
+/// run the caller's look named, a Stop, the items left. A Stop or a look
+/// seen once the last item was taken left nothing: the run is done, and its
+/// words say whether every item ended clean (a run whose every item was
+/// refused is not "built", R3-17 repair 1).
+fn ending(left: &Left<'_>, id: u64) -> (How, String) {
+    let rest = left.of.saturating_sub(left.n);
+    match (left.fault, left.busy) {
+        (Some(why), _) => (
             How::Failed,
             format!("the journal stopped taking lines: {why}"),
         ),
-        None if stopped && left > 0 => (
+        (None, Some(why)) if rest > 0 => (
             How::Stopped,
-            format!("a Stop was asked; {left} item(s) left for a resume of run {id}"),
+            format!("{why}; {rest} item(s) left for a resume of run {id}"),
         ),
-        None => (How::Done, "every item of the run was built".to_owned()),
+        (None, _) if left.stopped && rest > 0 => (
+            How::Stopped,
+            format!("a Stop was asked; {rest} item(s) left for a resume of run {id}"),
+        ),
+        (None, _) if left.ok == left.n => (How::Done, "every item of the run was built".to_owned()),
+        (None, _) => (
+            How::Done,
+            format!(
+                "every item of the run was taken, and {} of the {} did not end clean: they are \
+                 left for a resume of run {id}",
+                left.n.saturating_sub(left.ok),
+                left.n
+            ),
+        ),
+    }
+}
+
+/// Whether a worker takes no further item because the caller's look named a
+/// run this one must not run beside (D-5839 amendment 1): asked before every
+/// item by every worker; once one worker's look did, every worker stops at
+/// its next, and the first words given are the run's.
+fn yields(busy: &OnceLock<String>, look: &(dyn Fn() -> Option<String> + Sync)) -> bool {
+    if busy.get().is_some() {
+        return true;
+    }
+    look().is_some_and(|why| {
+        let _first_wins = busy.set(why);
+        true
+    })
+}
+
+/// The `end` line of run `id` from what the workers `left`, and how the run
+/// ended once the line was written — or `failed`, saying so, when it was not.
+fn end_line(lines: &mut dyn Lines, id: u64, left: &Left<'_>, seconds: u64) -> (How, String) {
+    let (how, why) = ending(left, id);
+    let end = format!(
+        "end {id} how={} n={} ok={} of={} t={seconds} why={}",
+        how.word(),
+        left.n,
+        left.ok,
+        left.of,
+        one_line(&why)
+    );
+    match lines.line(&end).and_then(|()| lines.sync()) {
+        Ok(()) => (how, why),
+        Err(fault) => (
+            How::Failed,
+            format!("{why} — and the end line was not written: {fault}"),
+        ),
     }
 }
 
@@ -1091,6 +1180,21 @@ pub fn run<T: Sync>(
         if !seen.insert(key.as_str()) {
             return Err(format!(
                 "the item key `{key}` is in the plan twice; nothing was written"
+            ));
+        }
+    }
+    // A RESUME OF A JOURNAL THAT DOES NOT EXIST CREATES NONE (R3-17 repair
+    // 1): opening it would leave an empty journal behind a refusal that says
+    // nothing was written.
+    if let Some(resumed) = ask.resume {
+        let path = root.join(journal_name(ask.vendor, ask.kind));
+        if let Err(why) = fs::symlink_metadata(&path)
+            && why.kind() == ErrorKind::NotFound
+        {
+            return Err(format!(
+                "no run {resumed} in {}: the journal does not exist, so there is nothing to \
+                 resume, and nothing was written",
+                path.display()
             ));
         }
     }
@@ -1142,6 +1246,7 @@ fn drive<T: Sync>(
     let started = Instant::now();
     let next = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
+    let busy: OnceLock<String> = OnceLock::new();
     let shared = Mutex::new(Shared {
         lines,
         n: 0,
@@ -1159,6 +1264,9 @@ fn drive<T: Sync>(
             }
             if ask.stop.load(Ordering::Acquire) || stop_asked_for(&stop_file, id) {
                 stopped.store(true, Ordering::Release);
+                return;
+            }
+            if yields(&busy, ask.busy) {
                 return;
             }
             let Some(&(at, (key, item))) = todo.get(next.fetch_add(1, Ordering::AcqRel)) else {
@@ -1190,26 +1298,15 @@ fn drive<T: Sync>(
     let elapsed = started.elapsed();
     let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let seconds = elapsed.as_secs();
-    let (how, why) = ending(
-        shared.fault.as_deref(),
-        of.saturating_sub(shared.n),
-        stopped.load(Ordering::Acquire),
-        id,
-    );
-    let end = format!(
-        "end {id} how={} n={} ok={} of={of} t={seconds} why={}",
-        how.word(),
-        shared.n,
-        shared.ok,
-        one_line(&why)
-    );
-    let (how, why) = match shared.lines.line(&end).and_then(|()| shared.lines.sync()) {
-        Ok(()) => (how, why),
-        Err(fault) => (
-            How::Failed,
-            format!("{why} — and the end line was not written: {fault}"),
-        ),
+    let left = Left {
+        fault: shared.fault.as_deref(),
+        busy: busy.get().map(String::as_str),
+        stopped: stopped.load(Ordering::Acquire),
+        of,
+        n: shared.n,
+        ok: shared.ok,
     };
+    let (how, why) = end_line(&mut *shared.lines, id, &left, seconds);
     Ok(Ran {
         id,
         resumed: ask.resume,
@@ -1433,8 +1530,9 @@ fn month_named(stem: &str) -> Option<YearMonth> {
 ///
 /// # Errors
 ///
-/// A directory in scope that cannot be listed, or a month whose served
-/// generation cannot be told.
+/// A scope whose segments name no directory ([`scope_named`]), a directory
+/// in scope that cannot be listed, or a month whose served generation cannot
+/// be told.
 pub fn months(root: &Path, vendor: Vendor, scope: &Scope) -> Result<Walked, String> {
     let mut walked = Walked::default();
     let base = root.join(store::path::STORE_ROOT).join(vendor.as_str());
@@ -1445,6 +1543,7 @@ pub fn months(root: &Path, vendor: Vendor, scope: &Scope) -> Result<Walked, Stri
             vendor.as_str()
         ));
     }
+    scope_named(&base, vendor, scope)?;
     for (exchange_path, exchange, what) in listed(&base)? {
         if !scope.admits(0, &exchange) {
             continue;
@@ -1489,6 +1588,39 @@ pub fn months(root: &Path, vendor: Vendor, scope: &Scope) -> Result<Walked, Stri
         }
     }
     Ok(walked)
+}
+
+/// Refuses a scope whose path segments name no directory under `base`
+/// (R3-17 repair 1; `CLAUDE.md` §4): a typo (`NSE/INDX`), an exchange the
+/// store does not hold (`BSE`), a symbol or a contract that is not there.
+/// Walked, each would find no month file, and a run of no item ends `done`
+/// — which a store step's own check reads as finished. One `lstat`; the
+/// whole feed (no segment) is not looked at here.
+///
+/// # Errors
+///
+/// The scope, the path it names and what is there instead: absent, a
+/// symbolic link (never followed), or not a directory.
+fn scope_named(base: &Path, vendor: Vendor, scope: &Scope) -> Result<(), String> {
+    if scope.prefix.is_empty() {
+        return Ok(());
+    }
+    let named = scope.prefix.join("/");
+    let path = base.join(&named);
+    let found = match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            "a symbolic link, which the walk never follows"
+        }
+        Ok(meta) if meta.is_dir() => return Ok(()),
+        Ok(_) => "not a directory",
+        Err(why) if why.kind() == ErrorKind::NotFound => "absent",
+        Err(why) => return Err(format!("cannot read {}: {why}", path.display())),
+    };
+    Err(format!(
+        "{named} names nothing under bars/{}: {} is {found}",
+        vendor.as_str(),
+        path.display()
+    ))
 }
 
 /// Whether the walk goes into a listed entry: a directory whose name is a
