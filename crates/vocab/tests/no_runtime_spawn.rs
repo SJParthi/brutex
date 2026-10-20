@@ -1714,6 +1714,30 @@ fn inner_attribute(
     }
 }
 
+/// Whether the attributes in `attrs`, which would exempt what follows them,
+/// stand on a `where`-clause predicate ([`on_where_predicate`]), recording
+/// the refusal by name when they do (D-5249): `rustc` 1.97.1 refuses one
+/// (E0658), and under a toolchain that did not, what follows the predicate
+/// is the body, so such an attribute exempts nothing.
+fn refused_on_where_predicate(
+    t: &[Token],
+    attrs: &Run,
+    at: &Nesting<'_>,
+    out: &mut FileScan,
+) -> bool {
+    let Some(start) = attrs.start.filter(|&start| on_where_predicate(t, start)) else {
+        return false;
+    };
+    out.record(
+        false,
+        t[start].line,
+        at.function(),
+        "puts a test-only attribute on a where-clause predicate, which rustc 1.97.1 refuses \
+         (E0658): this scan cannot place what it is on",
+    );
+    true
+}
+
 /// Reads `t`, a file or a test-only item (`test`), with the inline modules
 /// around it in `inline`.
 fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut FileScan) {
@@ -1767,23 +1791,7 @@ fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut Fil
         // shipped. One on the call or on the `macro_rules!` item itself is
         // outside, and exempts the whole of it.
         let gate_here = (attrs.test || by_test_fn) && !test && !at.in_macro(i);
-        // AN ATTRIBUTE THAT WOULD EXEMPT A `where`-CLAUSE PREDICATE IS REFUSED
-        // BY NAME (D-5249): `rustc` 1.97.1 refuses one (E0658), and under a
-        // toolchain that does not, what follows the predicate is the body.
-        let on_where = gate_here
-            && attrs
-                .start
-                .is_some_and(|start| on_where_predicate(t, start));
-        if on_where {
-            out.record(
-                false,
-                attrs.start.map_or(t[i].line, |start| t[start].line),
-                at.function(),
-                "puts a test-only attribute on a where-clause predicate, which rustc 1.97.1 \
-                 refuses (E0658): this scan cannot place what it is on",
-            );
-        }
-        let gate_here = gate_here && !on_where;
+        let gate_here = gate_here && !refused_on_where_predicate(t, &attrs, &at, out);
         for &(line, what) in &attrs.namings {
             out.record(test || gate_here, line, at.function(), what);
         }

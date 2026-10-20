@@ -77024,8 +77024,9 @@ and ten placed controls (a gated parameter before the clause, a gated field
 in the body, also after another field, a `where` closed inside brackets,
 test code, a fn after a clause's item, the function-pointer parameter, and
 generics after a `;`-ended item's clause or with nothing before them). It fails on the gate before this
-change and passes after; eleven hand mutants of the new code each fail it
-(`r2t-hand-mutants.log`). The probe is 42 of 42 on the new gate
+change and passes after; twelve hand mutants of the new code each fail it
+(`r2t-hand-mutants.log`; a thirteenth is equivalent, since an exempting
+attribute is never in test code). The probe is 42 of 42 on the new gate
 (`r2t-selfcheck-probe-on-new-gate.log`), the re-check's 26-case probe stays
 26 of 26, a copy of the real tree with two such files fails naming both, and
 the three earlier planted trees fail naming every file as before
