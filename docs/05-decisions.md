@@ -75508,6 +75508,294 @@ it fails with "an index ahead of its journal is walked at start, every
 record once", left `Ok(0)`, right `Ok(2)`. Logs `green-ahead.log`,
 `red-ahead-request.log` and `red-ahead-warm.log` beside the mutation log.
 `docs/04-invariants.md` PREC1-21.
+### D-6244 — Every append to the pull audit journal waits a bounded time for the append lock instead of being refused at once, through R3-08's one patience mechanism (AG-06; code-5, FM-162) — 2026-10-19
+
+**Number** the ledger's head on feat/db-fix was D-5883 when this entry was
+written, D-5902 (AH-05) at this change's merge of AH-05, and D-6243 (R4-09a)
+at its merges of R4-09a and of IA-3 (20 Oct; IA-3's eight entries, D-4815 to
+D-5903, all sit below the head), so this takes D-6244 (amendment A6: head + 1
+at landing; re-checked at landing). It replaces the numbers D-5865 and D-5903
+this change carried before; neither was landed as this decision, and D-5903
+is now IA-3's own, a different decision.
+
+**Finding** code-5 (14 Oct attack, both skeptics; a consequence of FM-162). The
+journal's append lock (`api::audit::Journal::appended_images`, and the whole
+note file's lock beside it) was taken with `Flock::try_lock`, so an append
+that met another writer's few-millisecond append was refused at once and its
+record lost. When the lost record was a run's opening record and the process
+then died before the run's close, the restart scan read the journal and
+answered "clean" for a run that ran. The code-4 skeptic's 300-run barrier
+experiment lost records on every run to the same refusal.
+
+**Decided.**
+
+1. **One patience mechanism, R3-08's, made exclusive.** `store::flock`
+   already had R3-08's patient SHARED lock (`with_patience`, `MAX_PATIENCE`,
+   `try_lock_shared_patiently`) and its holder registry (`HOLDERS`,
+   `holder_note`). The exclusive twin, `Flock::try_lock_patiently(file, path,
+   bound, doing)`, reuses every part of it, and keeps none of its own:
+   - **one wait loop**, `store::flock::patiently`, which both patient locks
+     call (R3-08's own loop was folded into it): ask once, and on contention
+     pause 1 ms doubling to `MAX_PAUSE` (16 ms) until the bound, measured as
+     the longer of the monotonic clock and the pauses slept, so a clock that
+     steps backwards cannot extend it; a host refusal that is not contention
+     is returned at once, never waited on;
+   - **one pause**, `MAX_PAUSE` (made public so the journal's documents can
+     name it);
+   - **one ceiling**, `MAX_PATIENCE` (1 s): a shared lock's whole budget in
+     one `with_patience` call, and the cut on any one exclusive bound. The
+     10 s ceiling the first build of this change kept beside it is gone;
+   - **one registry**, `HOLDERS`: a guard taken patiently registers its
+     holder (thread, since when, and what its caller said it is doing) IN
+     THE SAME STEP as `flock(2)` grants the lock, and forgets it in the same
+     step as it unlocks, both under the registry's lock (repair 2;
+     R3-08's month guards take the same step), and the refusal names the
+     holder in `holder_note`'s words. The in-process queue (point 2) lives in the same
+     entry, so a path's holder and its waiters are one record.
+2. **In this process, patient exclusive lockers of one path queue in the
+   order they asked** (a ticket each, a condition variable, a place given up
+   when its waiter's bound runs out), and only the head of the queue polls
+   `flock(2)`. A first build that only polled refused 102 of 800 appends from
+   eight threads appending in a loop with a one-second bound: the lock is free
+   only for the microseconds between one holder's release and the next take,
+   and a sleeping poller wakes to a held lock. With the queue none is
+   refused. The turn passes to the next locker only after the unlock (the
+   guard's `turn` field drops after its `Drop` has unlocked), and an empty
+   queue is forgotten with its registry entry.
+3. **The bound is `api::audit::APPEND_LOCK_WAIT`, one second**, equal to the
+   ceiling; a compile-time assertion refuses a value above it, which would be
+   cut silently. It is set from the measured holder time (one append's open,
+   `stat`, write, `fsync` and index catch-up on a clone of the operator's
+   1.08 GB journal, uncontended p99 3.7 to 12.5 ms, `docs/06-limits.md`
+   AG-06). Both append lock sites (the journal and its `.notes` file) use it.
+   `build_index` takes the same lock with a zero bound: the old `try_lock`
+   answer (busy at once when anyone holds or awaits it), now registered while
+   it builds, so an append that waits out its bound behind a long build names
+   "the journal index build".
+4. **A refusal past the bound names the bound, the record and the holder.**
+   The text keeps "cannot take the journal append lock" and "refused rather
+   than interleaved", and adds the record's kind and outcome, the bound as
+   cut by the ceiling, the wait, the attempts, how many were ahead in this
+   process, and the holder: "held by this process (pid, thread, doing a pull
+   audit journal append / the journal index build) since …", or, when no
+   holder in this process is registered, "held by another process" in
+   `holder_note`'s words (`flock(2)` does not say which). The `api.audit`
+   Error "record not appended" event is unchanged and carries the whole
+   refusal.
+5. **The locked file must still be the journal.** The wait widened the moment
+   between `open` and the lock, so after the lock the descriptor's device and
+   inode are compared with the path's (one `stat`); a journal moved aside or
+   replaced meanwhile is refused by name rather than appended to a file no
+   reader opens.
+6. **Readers never wait on this bound.** No journal reader takes the append
+   lock (`look`, `page`); the restart scan's own wait for an index build
+   (`pullrun::INDEX_WAITS`) is unchanged.
+
+**Repair 1 (19 Oct), and why.** The first build of this change (its first commit on fix/db-AG-06)
+was made before R3-08 merged, and its second check failed it on two counts.
+Merged, it left two wait loops, two pause constants, two ceilings and two
+holder registries side by side (rule 2 asks for one path); points 1 and 3
+are the one path. And its own registry, kept in `api::audit` beside the
+guard, named the wrong holder: the guard's explicit `drop` released the lock
+and handed the turn on before the registry entry dropped at function exit,
+so the predecessor's late removal erased the successor's entry and a refusal
+during the successor's hold blamed another process. Registration now
+belongs to the guard and follows the lock (point 1), so that ordering cannot
+recur; `the_holder_is_named_through_every_in_process_hand_off` samples the
+registry through real hand-offs and fails on the first build.
+
+**Repair 2 (20 Oct), and why.** Repair 1 registered after the grant and
+forgot before the unlock, which left two instants a reader here could meet:
+the lock held by this process and nobody named, read as "another process".
+A sampler that holds the registry's lock while it asks the kernel whether
+the lock is held found that in 5,964 of 25,038 held samples. Now the grant
+and the record are one step under the registry's lock
+(`store::flock::take_held`), and so are the forgetting and the unlock
+(`let_go`). Chosen over the alternatives because it makes the registry
+exact for every reader in this process at the price of one non-blocking
+`flock` call under a mutex the take and the release already lock; recording
+a holder before the grant would name one that does not hold the lock, and
+naming the instants only (repair 1's own note) left the defect.
+`no_reader_here_ever_finds_the_lock_held_and_its_holder_unnamed` is the
+exact sampler; `docs/06-limits.md` L-AG06-10 states the cost.
+
+**Not done here, and why.** A run whose opening append is refused AFTER the
+bound (a holder that keeps the lock longer than one second: a stuck writer, or
+the once-per-journal from-scratch index build of about 1.33 s per GiB) still
+runs unjournalled, because `RunLedger::open` keeps `opened_refused` and runs on
+and `RunLedger::flush` never retries the opening. That is `server.rs`, batch-1
+AF-04's file. Follow-on after AF-04: refuse to start a run whose opening could
+not be journalled, or retry the opening at the first flush; and let the restart
+scan (`pullrun.rs`) answer `not_known` rather than "clean" when such a refusal
+is known; and move the append off the async worker (`spawn_blocking`), since a
+contended append blocks the thread that calls it for up to the bound.
+`docs/06-limits.md` (AG-06) names each, and corrects the earlier reading that
+`close_unopened` covers a lost opening record: it does only when the run
+reaches its close.
+### D-6245 — AG-05: every census file is born through `store::staging::create`, an epoch's name is never a link, and `/disk.json` says a migrated census is unsealed — 2026-10-17
+
+Renumbered at landing (amendment A6): this decision carried D-5884 and then
+D-5903, and IA-3 landed D-5903 first, so it takes D-6245, the ledger head + 1.
+
+Assurance findings store-1 and store-2 (14 Oct attack run, each confirmed by
+two skeptics; their corrections applied).
+
+1. **The epoch install's staging file is created, never opened (store-1).**
+   `census_store::install_epoch` wrote `<epoch>.man.tmp` with
+   `File::create` — create, truncate, following a link — so a hard link
+   planted at that name cut the OLDER epoch's inode and wrote the new image
+   through it (compaction, `cli census-recount` and the re-key's withdraw all
+   answered `Ok`, leaving two epochs on one inode), and a symbolic link sent
+   the image into whatever it named. It now goes through D-4922's door,
+   `store::staging::create` (`O_CREAT | O_EXCL`): a hard link is refused
+   `staging_linked`, a symbolic link (dangling or not), a directory, a pipe
+   or a socket `staging_not_regular`, each by name with nothing removed,
+   truncated or written; a dead writer's leftover — a regular file with one
+   name — is cleared and the warning `stale epoch temporary cleared` carries
+   its bytes. Every caller inherits it because one install function writes
+   every epoch after the first (the migration's first epochs are written
+   `create_new` into a fresh staging directory, which never opens a name that
+   exists, and are not temporaries gate 28 counts). The seal's stub (`<vendor>.man.seal.tmp`) and
+   receipt (`SEALED.tmp`) used `remove_file` then `create_new`, which unlinked
+   whatever was at the name unseen; they use the same door.
+2. **An epoch's name holds a regular file or is refused.** `current_epoch`
+   refuses an epoch name whose listing entry is a symbolic link, a directory
+   or a special file (the type comes with the listing entry); `read_epoch`
+   names a symbolic link as one instead of the host's ELOOP. Before, the
+   listing answered the link as the current epoch and only the read stopped.
+3. **Gate 28 reads `.writing` as a temporary.** `census_store.rs` leaves its
+   LEGACY list (it names two temporaries and calls the door three times), and
+   `pull::ingest`'s single-file census publish (`<vendor>.man.writing` by
+   `File::create`), which the `.tmp`-only rule never saw (L-R316-03's blind
+   spot), joins it with a count of 1. That publish is NOT converted here:
+   `ingest.rs` is in flight (GF-1, R3-18) and owned next by IA-16, or R3-19
+   after them (docs/06-limits.md L-AG05-01).
+4. **`/disk.json` decides a single file's role from the seal RECEIPT
+   (store-2).** A migrated vendor's `<vendor>.man` was `sealed-stub` when a
+   `.v3-superseded` name existed and `superseded` otherwise — so the
+   operator's GDFL census, migrated (WP-81) and never sealed, was labelled
+   `superseded` and nothing said a pre-version-4 reader would serve the
+   census the migration froze. Now: `sealed-stub` only under a whole receipt;
+   `unsealed` with no receipt or a torn one; `seal-unknown` when the receipt
+   is a later format or cannot be read (a directory, a link). Each feed
+   carries `seal` {`migrated`, `receipt`, `receipt_path`, `requires`,
+   `requires_path`, `fault`}, and the answer's new `faults` names each vendor
+   whose seal is not whole: `census_unsealed` (with the step `cli
+   census-migrate <vendor> --seal` after a snapshot, docs/36 section 2, and
+   whether `manifest/REQUIRES` exists; an interrupted seal and a missing
+   single file are told apart), `census_seal_unknown`, and
+   `census_requires_absent` for a whole seal whose requirements line is
+   missing. No route was added; the /ingest Storage band and the /db badge
+   read the field later (SC-8).
+5. **What is not done here and why.** The seal itself is the operator's
+   store step (S-07, DB-B68, D-3381): `cli census-migrate gdfl --seal` after
+   a snapshot and a rehearsal on a copy, then an API restart by the main
+   session. A guard in `state/fix/deploy-8080.sh` (outside the repository)
+   that refuses to start a pre-version-4 binary over a version-4 store is the
+   main session's.
+6. **Repair 1 (19 Oct): a whole receipt is a claim, not the seal.** A second
+   agent put the census back at `gdfl.man` with `SEALED` and `REQUIRES` left
+   in place, and `/disk.json` read `sealed-stub`, no fault, and dropped the
+   census from `census_kept_bytes` — the store-2 hazard reported as sealed.
+   The route now measures both names a seal leaves: `sealed-stub` only when
+   the receipt is whole AND the single name holds the stub (its length and
+   its header, `census_store::holds_sealed_stub`, now public) AND
+   `<vendor>.man.v3-superseded` is a regular file; otherwise
+   `seal-inconsistent`, counted as kept bytes, with the fault
+   `census_seal_inconsistent` saying what each name holds and the step (`cli
+   census-migrate <vendor> --seal`, which either completes the seal or
+   refuses by name). Each feed's `seal` gains the measured `stub` and
+   `superseded`. A directory or a link at `manifest/REQUIRES` is said as
+   such, never "absent". The cost is one more `lstat` and one 16-byte read
+   per migrated vendor. **No default-suite test asserts a wall-clock bound**:
+   the epoch-install bench asserts the staging door's own call count on every
+   install (1 on a free name, 4 over a leftover) and the `/disk.json` bench
+   asserts a stable answer; both print p50, p99 and max for docs/06. An
+   absolute bound had failed on this shared host at p99 617 ms while the
+   unchanged `File::create` series beside it measured 309 ms: it measured the
+   load, not the code.
+   **`manifest/REQUIRES` is appended through no link** (the second agent's
+   follow-up, in this file): `require_feature` opened the name with `create`
+   and `append`, following a link, after a `read_to_string` that would wait
+   on a pipe. It now makes one no-follow, non-blocking open for read and
+   append and checks the handle's own `fstat`: a symbolic link (dangling or
+   not) is refused by name, a name that is not a regular file is refused, and
+   a regular file with more than one name is refused with its count, each
+   before a byte is written. One `open` where there were two, plus that
+   `fstat`: constant per requirement written.
+   **A census batch is appended into no second name** (the second check's
+   follow-up `probe_pre_damaged_shared_inode_epochs`, in this file): the
+   state the old staging open left — an epoch that is a hard link of an older
+   epoch's inode — still read as the current epoch, and `record` appended
+   into it, rewrote the older epoch's bytes in place and answered `Ok`.
+   `write_batch` now opens its file no-follow and non-blocking and checks the
+   handle's own `fstat`: a symbolic link, anything not a regular file and a
+   regular file with more than one name are each refused by name before a
+   byte is written. The same open serves the single-file census, so a
+   `<vendor>.man` a seal cut between its link and its rename (two names) is
+   refused too rather than grown under its superseded name. Cost: the open
+   it always made plus one `fstat`, per batch. The two pipe checks no longer
+   read a clock after the call (a call waiting on a pipe never returns to
+   it): each runs the call on its own thread and fails if no answer comes in
+   two minutes, a hang detector rather than a cost bound.
+
+Tests: `pull::ingest::census_store::link_tests::*` and
+`api::server::disk_route::seal_tests::*`; gate 28's
+`a_new_unlisted_staging_write_fails_the_gate_and_the_door_passes_it`.
+Invariants AG05-01 to AG05-11 in docs/04-invariants.md; limits L-AG05-01 to
+L-AG05-05 in docs/06-limits.md.
+
+**Repair 2 (verify-AG-05-r2, 2026-10-20).** Two figures the repair-1 roles
+introduced were wrong, and both are fixed at their one cause, the sum.
+`census_kept_bytes` is now computed by `api::server::disk_route::kept_bytes`
+from each census name's `retained` flag and its file identity
+`(st_dev, st_ino)`, taken from the `lstat` the view already made, so no call
+is added. Locked choices:
+
+1. A single file that reads `seal-unknown` is retention unless the name
+   holds the stub, measured. A receipt this build cannot read (a later
+   format, a pipe, a directory, a link) says nothing about the bytes at the
+   name, and bytes no seal accounts for are kept, never assumed disposable.
+   Before, the role was outside the kept set and a whole frozen census
+   dropped out of the figure (268430208 bytes on a real-store shadow).
+2. Each FILE is counted once across every feed, at its first retained name.
+   A retained name of a file that a name in use also holds (the current
+   epoch, the stub, an unmigrated single file) costs nothing. A seal killed
+   after its link and before its stub leaves one inode at two names, and the
+   per-name sum counted it twice. The roles and the fault words are
+   unchanged. The `census_unsealed` sentence now names that state as a seal
+   interrupted after its link, and it names a 0-byte single file as empty
+   rather than as the frozen census.
+3. `pull::census_store::require_feature` reads `manifest/REQUIRES` through a
+   read-only no-follow open before it opens anything for append. A line
+   already in force answers `Ok(false)` there, so a read-only `REQUIRES` no
+   longer fails an idempotent re-seal with `EACCES`. The append open keeps
+   every repair-1 refusal.
+4. A whole receipt's `superseded_bytes` is compared with what
+   `<vendor>.man.v3-superseded` holds. `census_store::seal_receipt_kept_bytes`
+   returns the figure from the receipt's one bounded read, and
+   `seal_receipt` delegates to it, so `SealReceipt` keeps its shape. A kept
+   census of any other length is not the census the seal kept: the seal's
+   `superseded` is `false`, the single name reads `seal-inconsistent`, and
+   the `census_seal_inconsistent` sentence names both lengths. Before this,
+   such a file read `sealed-stub` with no fault. The `lstat` was already
+   taken, so no call is added.
+5. A name at `manifest/v4/<vendor>` that is not a directory (a symbolic
+   link, a regular file, anything else) is named by the new fault
+   `census_v4_not_a_directory`. The vendor still reads as not migrated and
+   its single file keeps the role `single`, but the answer no longer passes
+   it over as a census nobody touched. A feed with no single file left is
+   still answered for its fault.
+
+Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
+`seal_tests::a_seal_killed_after_its_link_counts_its_one_file_once`,
+`seal_tests::an_empty_single_file_is_not_told_as_the_frozen_census`,
+`seal_tests::a_kept_census_cut_short_under_a_whole_receipt_is_seal_inconsistent`,
+`seal_tests::a_name_at_the_v4_directory_that_is_not_one_is_named` and
+`link_tests::an_idempotent_requirement_opens_nothing_for_writing`. Each one
+failed on the code before it. Invariants AG05-12 to AG05-17; limits
+L-AG05-06 and L-AG05-07.
+
 
 ### D-5904 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
 
