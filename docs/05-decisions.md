@@ -76414,3 +76414,9 @@ SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
    `Reference::horizons` answers each table's refusal rather than `None`, and
    `Reference::horizon_alerts` names every record within
    `HORIZON_ALERT_DAYS` of its end, past it, or absent. The tile is R3-25's.
+9. **A loaded row keeps its own provenance.** The seed writes each
+   citation as `<url> read <day>` with ` sha256 <hex>` when the charter
+   records one, and the loader reads a source column in exactly that shape
+   back as the row's own citations (URL, read day, checksum); a source in
+   any other words cites the file that holds it, with the row's words as
+   what it says.

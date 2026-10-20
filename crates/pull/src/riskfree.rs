@@ -1382,6 +1382,80 @@ mod tests {
         );
     }
 
+    /// A weekly table of `weeks` rows from 1990-01-03 where every third week
+    /// is a documented `CANCELLED` row instead of a result.
+    fn weekly_holed(weeks: i32) -> Series {
+        let start = day(1990, 1, 3);
+        let mut text = String::from(HEADER);
+        for week in 0..weeks {
+            let released = start.plus_days(week * 7).expect("before 2100").to_string();
+            text.push('\n');
+            if week % 3 == 2 {
+                text.push_str(&gap_line(&released, GapKind::Cancelled));
+            } else {
+                text.push_str(&line(&released, "98.5000", "6.1081"));
+            }
+        }
+        series(&text)
+    }
+
+    /// p50, p99 and max nanoseconds per lookup over 200 batches of `days`.
+    fn lookup_tail(table: &Series, days: &[TradeDay]) -> (u128, u128, u128) {
+        let mut per_call: Vec<u128> = (0..200)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for asked in days {
+                    std::hint::black_box(table.on(*asked).ok());
+                }
+                start.elapsed().as_nanos() / u128::try_from(days.len().max(1)).unwrap_or(1)
+            })
+            .collect();
+        per_call.sort_unstable();
+        let at = |rank: usize| per_call.get(rank).copied().unwrap_or(u128::MAX);
+        (at(100), at(198), at(199))
+    }
+
+    /// O(1) AT p99 WITH THE GAP RULE (R3-30 repair 1): a lookup that carries
+    /// a rate over a documented gap reads one more bounded slot, never a walk,
+    /// so its tail is flat from 52 to 5,200 rows. Printed with n and method.
+    #[test]
+    fn a_carried_lookup_is_flat_in_the_table() {
+        let mut tails = Vec::new();
+        for weeks in [52, 5_200] {
+            let table = weekly_holed(weeks);
+            let first = table.first_release().ordinal() + 1;
+            let span = table.last_release().ordinal() - first + 1;
+            let days: Vec<TradeDay> = (0..1_024)
+                .filter_map(|i| TradeDay::from_ordinal(first + span * i / 1_024).ok())
+                .collect();
+            let carried = days
+                .iter()
+                .filter(|asked| {
+                    table
+                        .on(**asked)
+                        .is_ok_and(|as_of| as_of.state() == "rate_carried")
+                })
+                .count();
+            assert!(carried > 0, "the sample carries over gaps at {weeks} rows");
+            assert_eq!(table.gap_count(), usize::try_from(weeks / 3).unwrap());
+            let tail = lookup_tail(&table, &days);
+            eprintln!(
+                "riskfree::Series::on, {weeks} rows ({} gaps), {} days x 200 batches, \
+                 {carried} carried: p50 {} ns p99 {} ns max {} ns per lookup",
+                table.gap_count(),
+                days.len(),
+                tail.0,
+                tail.1,
+                tail.2
+            );
+            tails.push(tail);
+        }
+        assert!(
+            matches!(tails.as_slice(), [small, big] if big.1 <= small.1.saturating_mul(10).max(2_000)),
+            "a table 100 times larger stays within ten times the p99: {tails:?}"
+        );
+    }
+
     #[test]
     fn chained_documented_gaps_carry_a_rate_no_older_than_two_windows() {
         // Four weekly gap rows after the 8 Jan result, then a result on

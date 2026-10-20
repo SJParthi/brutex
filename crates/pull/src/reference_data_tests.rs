@@ -762,6 +762,11 @@ fn the_loader_reads_every_table_inside_its_budget() {
         shipped.0, shipped.1, shipped.2, tenfold.0, tenfold.1, tenfold.2
     );
     assert!(shipped.0 < 50_000, "p50 under 50 ms: {shipped:?}");
+    // The tail too (R3-30 repair 1: the budget held p50 alone). A load is
+    // once per run, so its bound is generous; a load that walked something
+    // per lookup would still blow it.
+    assert!(shipped.1 < 250_000, "p99 under 250 ms: {shipped:?}");
+    assert!(tenfold.1 < 250_000, "p99 under 250 ms at 10x: {tenfold:?}");
     // Ten times the rows of one table moves the whole load by much less than
     // ten times: the calendar dominates and is unchanged.
     assert!(
@@ -1024,6 +1029,88 @@ fn a_seeded_row_keeps_every_citations_checksum() {
         }
     }
     assert!(with_sha > 0, "the compiled rows record checksums to keep");
+}
+
+/// R3-30 repair 1: a row LOADED from a seeded store cites its own URL, read
+/// day and checksum, exactly the compiled row's, never the file's source in
+/// their place. Before the repair every loaded citation was the file's
+/// (`docs/00-charter.md` section) with no checksum.
+#[test]
+fn a_loaded_row_cites_its_own_source_and_checksum() {
+    type Cite = (&'static str, &'static str, Option<&'static str>);
+    let cites = |status: RowStatus| -> Option<Vec<Cite>> {
+        match status {
+            RowStatus::Sourced(citations) => Some(
+                citations
+                    .iter()
+                    .map(|c| (c.url, c.read, c.sha256))
+                    .collect(),
+            ),
+            RowStatus::Unverified(_) => None,
+        }
+    };
+    let loaded = load(&seeded("ref-own-cite"));
+    assert_eq!(loaded.renames.origin(), "store");
+    assert_eq!(loaded.indices.origin(), "store");
+    let lineage = loaded.renames.table().unwrap();
+    let (mut compared, mut with_sha) = (0_usize, 0_usize);
+    for (got, want) in lineage
+        .rows()
+        .iter()
+        .zip(brutex_core::alias::LINEAGE.rows())
+    {
+        assert_eq!((got.old, got.new), (want.old, want.new));
+        assert_eq!(cites(got.status), cites(want.status), "{}", want.old);
+        compared += 1;
+        with_sha += cites(want.status)
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| c.2.is_some())
+            .count();
+    }
+    assert_eq!(compared, brutex_core::alias::LINEAGE.rows().len());
+    let indices = loaded.indices.table().unwrap();
+    for got in indices.applied() {
+        let want = brutex_core::alias::INDEX_ROWS
+            .iter()
+            .find(|row| row.nse_name == got.nse_name)
+            .expect("every loaded index row is a compiled one");
+        assert_eq!(cites(got.status), cites(want.status), "{}", want.nse_name);
+        compared += 1;
+        with_sha += cites(want.status)
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| c.2.is_some())
+            .count();
+    }
+    assert!(with_sha > 0, "checksums were compared, {compared} rows");
+    // A URL holding `; ` and ` read ` parses whole; other words cite the file.
+    let two = own_citations(
+        "a; b read x read 2026-10-07; https://e.invalid/p read 2026-10-08 sha256 \
+         0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("two parts");
+    assert_eq!(
+        two.iter()
+            .map(|c| (c.url, c.read, c.sha256))
+            .collect::<Vec<_>>(),
+        [
+            ("a; b read x", "2026-10-07", None),
+            (
+                "https://e.invalid/p",
+                "2026-10-08",
+                Some("0000000000000000000000000000000000000000000000000000000000000000")
+            ),
+        ]
+    );
+    for words in [
+        "",
+        "an operator's own words",
+        " read 2026-10-07",
+        "u read 2026-1-07",
+    ] {
+        assert!(own_citations(words).is_none(), "{words:?}");
+    }
 }
 
 #[test]

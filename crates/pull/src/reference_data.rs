@@ -1340,7 +1340,75 @@ fn leak(text: &str) -> &'static str {
     Box::leak(text.to_owned().into_boxed_str())
 }
 
+/// The citations a row's own `source` column names, when it is wholly in the
+/// shape [`cited`] writes: parts joined by `; `, each `<url> read
+/// <YYYY-MM-DD>` and optionally ` sha256 <64 hex>`; `None` for any other
+/// text. A URL may itself hold `; ` or ` read ` (the compiled ones do), so a
+/// part ends only where a dated `read` is followed by the end or by `; `.
+/// This is what keeps a seeded row's provenance through the store: its own
+/// URL, read day and checksum, not the file's (R3-30 repair 1).
+fn own_citations(source: &str) -> Option<Vec<Citation>> {
+    fn day_shaped(day: &str) -> bool {
+        day.len() == 10
+            && day.bytes().enumerate().all(|(at, byte)| {
+                if at == 4 || at == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            })
+    }
+    // After ` read `: the day, the optional checksum, and what follows the
+    // part (`Some("")` at the end), or `None` when this is not a part's end.
+    fn dated(tail: &str) -> Option<(&str, Option<&str>, &str)> {
+        let read = tail.get(..10).filter(|day| day_shaped(day))?;
+        let mut after = tail.get(10..)?;
+        let mut sha = None;
+        if let Some(hex) = after
+            .strip_prefix(" sha256 ")
+            .and_then(|rest| rest.get(..64))
+            .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            sha = Some(hex);
+            after = after.get(8 + 64..)?;
+        }
+        if after.is_empty() {
+            Some((read, sha, ""))
+        } else {
+            after.strip_prefix("; ").map(|next| (read, sha, next))
+        }
+    }
+    let mut rest = source;
+    let mut own = Vec::new();
+    while !rest.is_empty() {
+        let mut from = 0;
+        let (url, read, sha, next) = loop {
+            let at = from + rest.get(from..)?.find(" read ")?;
+            if let Some((read, sha, next)) = rest.get(at + 6..).and_then(dated) {
+                break (rest.get(..at)?, read, sha, next);
+            }
+            from = at + 1;
+        };
+        if url.is_empty() {
+            return None;
+        }
+        own.push(Citation {
+            url: leak(url),
+            read: leak(read),
+            sha256: sha.map(leak),
+            says: leak(source),
+        });
+        rest = next;
+    }
+    (!own.is_empty()).then_some(own)
+}
+
 fn citation_of(receipt: &Receipt, source: &str) -> &'static [Citation] {
+    if let Some(own) = own_citations(source) {
+        return Box::leak(own.into_boxed_slice());
+    }
+    // A source column in any other words (an operator's own row) cites the
+    // file that holds it, with the row's words as what it says.
     let citation = Citation {
         url: leak(&receipt.source),
         read: leak(&receipt.fetched.to_string()),
