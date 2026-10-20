@@ -1369,3 +1369,21 @@ window aside from the frozen-index flag as it sets a recorded halt aside
 recomputing the index, or computes it from constituents that no longer
 trade), and whether a session outside the measured span differs; no NSE page
 read here says either.
+
+## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-5904 item 20)
+
+What one dated master the store holds is, measured, not what NSE publishes
+about it. It sizes the cost of reading a share's dated closing-auction flag
+(§9) that `docs/06-limits.md` L-R3-13-4 states.
+
+| What | Measured | How |
+|---|---|---|
+| Masters held | 42 dated files: every weekday 2026-08-03..2026-09-30 but 2026-09-14 | `ls <store>/session-masters`, read-only, 2026-10-21 |
+| `NSE_CM_security_01092026.csv.gz` | 1,236,938 bytes compressed, 11,176,003 bytes expanded; 37,238 lines (one header, 37,237 records), of which 4,428 have `SctySrs` `EQ` | `gzip -dc` piped to `wc -lc`, and the EQ records counted on the third comma field (the field before the first free-text column), read-only |
+
+So a share's flag on one day is one of about 4,400 EQ rows in about 11 MB of
+CSV, and reading it cold means expanding and parsing the whole file.
+`pull::cash_auction::DailyEligibility::parse` reserves its map for every
+record (37,237), not the EQ rows it keeps; that it is the cause of the 18-25
+MB per held master the check measured is an inference from the reservation,
+UNVERIFIED as a split of the resident memory.

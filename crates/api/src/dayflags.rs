@@ -750,16 +750,18 @@ fn auction_of_days(
     let mut cas = rules::CasFlags::of(root, &inst.symbol, share);
     // A MASTER IS READ ONLY FOR A SESSION THAT HAS HAPPENED: a closed day has
     // no closing auction, and a day after today has no master dated it yet.
-    let flags = days
+    // The page's cold days are read together, a few at a time (R3-13 repair).
+    let asks: Vec<(Day, bool, bool)> = days
         .iter()
         .map(|day| {
             let open = matches!(
                 pull::calendar::record_of(i64::from(day.days_from_epoch())).kind,
                 DayKind::Open(_)
             );
-            cas.on_session(*day, open, today.is_some_and(|today| *day > today))
+            (*day, open, today.is_some_and(|today| *day > today))
         })
         .collect();
+    let flags = cas.on_sessions(&asks);
     notes.extend(cas_notes(&cas));
     let mut sidecars = rules::AuctionSidecars::of(root, asked.feed, &inst.symbol, share);
     let sidecar = days.iter().map(|day| sidecars.on(*day)).collect();
@@ -5174,7 +5176,7 @@ impl Context<'_> {
             let seconds = halt.seconds(inst.venue());
             (seconds.from, seconds.resume)
         });
-        rules::IndexDay {
+        let (json, mut says) = rules::IndexDay {
             feed: self.asked.feed,
             midnight: ist_midnight_micros(day),
             scan: held.scan,
@@ -5183,7 +5185,27 @@ impl Context<'_> {
             halt,
             auction: rules::auction_window(inst.venue(), day),
         }
-        .json()
+        .json();
+        // A GDFL INDEX DAY THE LEDGER DID NOT MEASURE IS SAID (the check's
+        // follow-up): bars held and no `flat_max_s` read leaves `frozen` null,
+        // and the phrase says why instead of leaving the null unexplained.
+        let holds = matches!(held.finest.unwrap_or(held.own), Held::Bars(bars) if bars > 0);
+        if self.asked.feed == Vendor::Gdfl && ledger.is_none() && holds {
+            let line = lines
+                .iter()
+                .find_map(|(kind, line)| (*kind == ImportKind::Indices).then_some(*line))
+                .flatten();
+            says.push(format!(
+                "index frozen not measured: {}, so no frozen run is judged (UNVERIFIED)",
+                if line.is_some() {
+                    "the day ledger's indices line carries no flat_max_s (written before the \
+                     measure)"
+                } else {
+                    "the day ledger holds no indices line for this day"
+                }
+            ));
+        }
+        (json, says)
     }
 }
 
@@ -6311,8 +6333,8 @@ fn rules_json() -> Value {
         "bar_definition": "the bar definition that built the day, from the import journal's deciding line or else the day ledger's: named on every option day, and on any day whose definition this build would not build (R3-13 goal 3)",
         "index": {
             "frozen": format!(
-                "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; null where neither measured the day",
-                rules::FROZEN_MIN_S
+                "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; the ledger keeps only the day's longest unchanged run, so on GDFL flagged is false only where that run is under {} s, true where its longest stretch outside the recorded halt and the cash closing auction's window reaches it, and null (never false) where it reaches it inside those windows or has no stamp to place it against them: a shorter run elsewhere is then not measured, and the phrase says so (UNVERIFIED); judged_s is that longest stretch; frozen is null where neither measured the day",
+                rules::FROZEN_MIN_S, rules::FROZEN_MIN_S
             ),
             "outside_day_range": "a minute's high above the day's Zerodha 1day bar's high, or its low below its low, flagged inside a recorded halt too (above_in_halt, below_in_halt say where); null on GDFL, whose seconds this route does not read whole (up to 22,500 reads a day)",
             "source": "DB-B20's detector: chosen, not sourced; flags only, the bars are served unchanged",

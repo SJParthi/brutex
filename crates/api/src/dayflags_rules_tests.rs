@@ -352,17 +352,14 @@ fn a_flag_is_read_only_on_an_open_session_up_to_today() {
     let open = flags.on_session(day("2026-08-04"), true, false);
     assert_eq!(open.eligibility, CasEligibility::Eligible);
     assert_eq!(open.basis, CasBasis::DatedMaster);
-    // A MASTER THAT LOADED IS KEPT FOR THE PROCESS, by its directory and day.
+    // THE SHARE'S FLAG IS KEPT FOR THE PROCESS, NEVER ITS MASTER
+    // (verify-R3-13-r1 blocking 2): no load of the directory is left in flight.
+    let dir = root.join("session-masters");
     assert!(
-        masters()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&(
-                root.join("session-masters"),
-                day("2026-08-04").days_from_epoch()
-            )),
-        "the loaded master is kept"
+        kept_flag(&dir, day("2026-08-04"), "RELIANCE").0,
+        "the flag is kept"
     );
+    assert_eq!(flights_of(&dir), 0, "no master is held");
     // An index, or a day before the auction began, needs no flag, open or not,
     // and asked directly reads none either.
     let mut index = CasFlags::of(&root, "NIFTY", false);
@@ -432,6 +429,207 @@ fn a_flag_refused_by_one_request_is_read_by_the_next() {
     assert_eq!(flag.eligibility, CasEligibility::Eligible);
     assert_eq!(flag.basis, CasBasis::DatedMaster);
     assert!(second.refusals().is_empty());
+}
+
+/// **A FLAG IS KEPT, ITS MASTER IS NOT, AND A DAY ASKED AT ONCE IS READ ONCE**
+/// (verify-R3-13-r1 blocking 2, D-5904 item 20). Before, every auction-era
+/// day's whole parsed master stayed for the life of the process (18-25 MB a
+/// day on the real store) beside `bars_change`'s own copy, and ten cold pages
+/// asking one day each parsed it. Now: twelve threads asking one share's day
+/// at once read its master once; a second share on that day reads it again
+/// (no master is held), and from then on both are one probe; no load of the
+/// directory is left in flight; and a refusal is shared only by the readers
+/// that asked while it ran, so the next request reads the day again (AF-03).
+#[test]
+fn a_flag_is_kept_without_its_master_and_a_day_asked_at_once_is_read_once() {
+    let root = root_of("r3-13-cas-flight");
+    let dir = root.join("session-masters");
+    let on = day("2026-08-11");
+    let csv = format!(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n7,RELIANCE,EQ,{},1\n8,INFY,EQ,{},0\n",
+        brutex_core::universe::nse_isin("RELIANCE")
+            .expect("an F&O share")
+            .as_str(),
+        brutex_core::universe::nse_isin("INFY")
+            .expect("an F&O share")
+            .as_str(),
+    );
+    pull::cash_session_cache::install(&dir, on, &stored_gzip(csv.as_bytes()))
+        .expect("the master lands");
+    let start = std::sync::Barrier::new(12);
+    let got: Vec<CasFlag> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..12)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    CasFlags::of(&root, "RELIANCE", true).on(on)
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("a reader"))
+            .collect()
+    });
+    assert!(
+        got.iter()
+            .all(|flag| flag.eligibility == CasEligibility::Eligible
+                && flag.basis == CasBasis::DatedMaster),
+        "{got:?}"
+    );
+    assert_eq!(reads_of(&dir, on), 1, "twelve readers at once read once");
+    assert_eq!(flights_of(&dir), 0, "no master is held after them");
+    let (kept, held) = kept_flag(&dir, on, "RELIANCE");
+    assert!(kept && held >= 1);
+    assert!(held <= FLAG_CAP);
+    // Another share that day: its master is read again, then kept as a flag.
+    let other = CasFlags::of(&root, "INFY", true).on(on);
+    assert_eq!(other.eligibility, CasEligibility::NotEligible);
+    assert_eq!(reads_of(&dir, on), 2);
+    for symbol in ["RELIANCE", "INFY", "RELIANCE"] {
+        let _flag = CasFlags::of(&root, symbol, true).on(on);
+    }
+    assert_eq!(reads_of(&dir, on), 2, "a kept flag is one probe");
+    // A MASTER'S OWN REFUSAL TO NAME A SHARE IS ITS ANSWER, KEPT: TCS has no
+    // row, read once, said on every request after.
+    let absent = CasFlags::of(&root, "TCS", true).on(on);
+    assert!(
+        matches!(&absent.basis, CasBasis::Unread(why) if why.starts_with("2026-08-11: ")),
+        "{absent:?}"
+    );
+    let mut again = CasFlags::of(&root, "TCS", true);
+    assert_eq!(again.on(on).basis, absent.basis);
+    assert_eq!(again.refusals().len(), 1, "said on this request too");
+    assert_eq!(reads_of(&dir, on), 3);
+    // A LOAD'S REFUSAL IS NEVER KEPT: a day with no master is read by every
+    // request, once each.
+    let missing = day("2026-08-12");
+    for _ in 0..3 {
+        let mut flags = CasFlags::of(&root, "RELIANCE", true);
+        assert_eq!(flags.on(missing).eligibility, CasEligibility::Unknown);
+        assert_eq!(flags.on(missing).eligibility, CasEligibility::Unknown);
+    }
+    assert_eq!(reads_of(&dir, missing), 3, "once per request");
+    assert_eq!(flights_of(&dir), 0);
+}
+
+/// **A PAGE'S COLD DAYS ARE READ TOGETHER, EACH ONCE** (verify-R3-13-r1
+/// blocking 2): six cold sessions are read on [`LOADS_AT_ONCE`] threads, each
+/// master once; a day with no master is this request's one refusal, read
+/// once and said once; a closed day and a day after today read nothing; and
+/// the same page asked again reads nothing but the refused day.
+#[test]
+fn a_pages_cold_days_are_read_together_each_once() {
+    let root = root_of("r3-13-cas-page");
+    let dir = root.join("session-masters");
+    let held = [
+        "2026-08-17",
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20",
+        "2026-08-21",
+        "2026-08-24",
+    ];
+    for (n, on) in held.iter().enumerate() {
+        install_flag(&root, on, "RELIANCE", u8::from(n % 2 == 0));
+    }
+    let mut asks: Vec<(Day, bool, bool)> = held.iter().map(|on| (day(on), true, false)).collect();
+    asks.push((day("2026-08-25"), true, false));
+    asks.push((day("2026-08-22"), false, false));
+    asks.push((day("2026-08-26"), true, true));
+    let mut flags = CasFlags::of(&root, "RELIANCE", true);
+    let got = flags.on_sessions(&asks);
+    assert_eq!(got.len(), asks.len());
+    for (n, flag) in got.iter().take(held.len()).enumerate() {
+        let want = if n % 2 == 0 {
+            CasEligibility::Eligible
+        } else {
+            CasEligibility::NotEligible
+        };
+        assert_eq!(flag.eligibility, want, "{n}: {flag:?}");
+        assert_eq!(flag.basis, CasBasis::DatedMaster);
+    }
+    assert!(
+        matches!(&got[6].basis, CasBasis::Unread(why) if why.starts_with("2026-08-25: ")),
+        "{:?}",
+        got[6]
+    );
+    assert_eq!(got[7].basis, CasBasis::NotRequired);
+    assert_eq!(got[8].basis, CasBasis::NotYet);
+    assert_eq!(flags.refusals().len(), 1, "{:?}", flags.refusals());
+    for on in held {
+        assert_eq!(reads_of(&dir, day(on)), 1, "{on}");
+    }
+    assert_eq!(reads_of(&dir, day("2026-08-25")), 1, "the refused day once");
+    assert_eq!(
+        reads_of(&dir, day("2026-08-22")),
+        0,
+        "a closed day reads nothing"
+    );
+    assert_eq!(
+        reads_of(&dir, day("2026-08-26")),
+        0,
+        "nor a day after today"
+    );
+    assert_eq!(flights_of(&dir), 0);
+    // Asked again: every held day is one probe, the refused one read again.
+    let again = CasFlags::of(&root, "RELIANCE", true).on_sessions(&asks);
+    assert_eq!(
+        again
+            .iter()
+            .map(|flag| flag.basis.clone())
+            .collect::<Vec<_>>(),
+        got.iter()
+            .map(|flag| flag.basis.clone())
+            .collect::<Vec<_>>()
+    );
+    for on in held {
+        assert_eq!(reads_of(&dir, day(on)), 1, "{on}");
+    }
+    assert_eq!(reads_of(&dir, day("2026-08-25")), 2);
+    // One cold day spawns no thread and reads it once.
+    install_flag(&root, "2026-08-27", "RELIANCE", 1);
+    let one =
+        CasFlags::of(&root, "RELIANCE", true).on_sessions(&[(day("2026-08-27"), true, false)]);
+    assert_eq!(one[0].eligibility, CasEligibility::Eligible);
+    assert_eq!(reads_of(&dir, day("2026-08-27")), 1);
+    // A share the universe does not name reads nothing at all.
+    let unnamed = CasFlags::of(&root, "NOTASHARE", true).on_sessions(&asks);
+    assert!(
+        unnamed
+            .iter()
+            .take(7)
+            .all(|flag| flag.basis == CasBasis::NoIdentity)
+    );
+}
+
+/// **THE FLAG MEMO IS BOUNDED** (verify-R3-13-r1 blocking 2): past
+/// [`FLAG_CAP`] / 2 new keys the older generation is dropped whole, never
+/// more than [`FLAG_CAP`] are held, and a flag hit since the last turn
+/// survives it.
+#[test]
+fn the_flag_memo_is_bounded_and_keeps_a_flag_in_use() {
+    let mut memo = FlagGenerations::default();
+    let key = |n: usize| (PathBuf::from("/m"), 0, format!("S{n}"));
+    for n in 0..FLAG_CAP {
+        memo.put(key(n), Ok(CasEligibility::Eligible));
+        // The first key is used throughout, so every turn keeps it.
+        assert!(memo.get(&key(0)).is_some(), "{n}");
+    }
+    assert!(memo.len() <= FLAG_CAP, "{}", memo.len());
+    memo.put(key(FLAG_CAP), Err("x".to_owned()));
+    assert!(memo.len() <= FLAG_CAP, "{}", memo.len());
+    assert!(memo.get(&key(0)).is_some(), "a flag in use survives");
+    assert!(memo.get(&key(1)).is_none(), "an unused old flag is dropped");
+    assert_eq!(memo.get(&key(FLAG_CAP)), Some(Err("x".to_owned())));
+    // Putting a held key again replaces it in place: nothing turns.
+    let held = memo.len();
+    memo.put(key(FLAG_CAP), Ok(CasEligibility::NotEligible));
+    assert_eq!(memo.len(), held);
+    assert_eq!(
+        memo.get(&key(FLAG_CAP)),
+        Some(Ok(CasEligibility::NotEligible))
+    );
 }
 
 // ══ The auction sidecar ══════════════════════════════════════════════════════
@@ -1361,6 +1559,37 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
     );
     assert_eq!(scan.high.map(|(high, _)| high), Some(1_030));
     assert_eq!(scan.low.map(|(low, _)| low), Some(995));
+    // MINUTE 7 IS ABSENT AND 1,020 GOES ON PAST IT (the check's follow-up):
+    // counted once, so the parts measured alone say why. A new value, a
+    // moving minute or a set-aside one after the gap is not counted.
+    assert_eq!(scan.broken, 1);
+    let not_broken = |next: store::format::Bar, still: bool| {
+        fold_minutes(vec![flat(1, 1_000), next].into_iter(), move |_| still).broken
+    };
+    assert_eq!(not_broken(flat(3, 1_001), false), 0);
+    assert_eq!(not_broken(moving(3, 1_000), false), 0);
+    assert_eq!(not_broken(flat(3, 1_000), true), 0);
+    assert_eq!(not_broken(flat(2, 1_000), false), 0, "no minute absent");
+    assert_eq!(not_broken(flat(3, 1_000), false), 1);
+    let (json, says) = IndexDay {
+        feed: Vendor::Zerodha,
+        midnight: 0,
+        scan: Some(scan),
+        day_bar: None,
+        ledger: None,
+        halt: None,
+        auction: None,
+    }
+    .json();
+    assert_eq!(json["frozen"]["broken_by_absent"], 1);
+    assert!(
+        says.contains(
+            &"index value unchanged across absent minutes 1 time(s): a minute the file does not \
+              hold ends a run, so each part is measured alone (1min)"
+                .to_owned()
+        ),
+        "{says:?}"
+    );
     // Inside a recorded halt, an unchanged value is the halt's.
     let halted = fold_minutes(
         vec![flat(1, 1_000), flat(2, 1_000), flat(3, 1_000)].into_iter(),
@@ -1527,13 +1756,17 @@ fn a_frozen_index_run_is_flagged_on_both_feeds() {
     assert_eq!(record(&share, "2022-03-07")["index"], Value::Null);
 }
 
-/// A GDFL ledger run that starts inside the recorded halt is the halt's.
+/// A GDFL ledger run that starts inside the recorded halt is the halt's, and
+/// SAYS NOTHING OF THE REST OF THE DAY (verify-R3-13-r1 blocking 1): the
+/// ledger keeps only the day's longest run, so where that run is the halt's a
+/// shorter frozen run elsewhere cannot be seen, and the day is `null`, never
+/// "not frozen". Only a longest run under 180 s answers `false`.
 #[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one halt day, its boundaries and every placement of a run against it, read together"
 )]
-fn a_ledger_run_inside_the_halt_is_not_frozen() {
+fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
     let halt = pull::calendar::halt_on(i64::from(day("2020-03-13").days_from_epoch()))
         .expect("a recorded halt")
         .seconds(pull::vendor::Venue::NseIndex);
@@ -1547,8 +1780,28 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
         auction: None,
     };
     let (json, says) = inside.json();
-    assert_eq!(json["frozen"]["flagged"], false);
-    assert!(says.is_empty());
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert_eq!(json["frozen"]["judged_s"], 0);
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 2700 s from 09:21:10, all of it inside the recorded halt; a shorter run of 180 \
+             s or more elsewhere in the session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
+    // A LONGEST RUN UNDER 180 S IS THE ONE "NOT FROZEN": no run of the day
+    // reaches it, wherever the run lies and whether or not it has a stamp.
+    for at in [Some(halt.from), Some(halt.resume), None] {
+        let short = IndexDay {
+            ledger: Some((179, at, 4)),
+            ..inside
+        };
+        let (json, says) = short.json();
+        assert_eq!(json["frozen"]["flagged"], false, "{at:?} {json:#}");
+        assert!(says.is_empty(), "{says:?}");
+    }
     // THE HALT IS `[from, resume)`: its first second is inside, the second it
     // resumes at is not, for a minute bar's stamp as for the ledger's run.
     let on = day("2020-03-13");
@@ -1571,16 +1824,24 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
     assert_eq!(outside.json().0["frozen"]["flagged"], true);
     // 2020-03-13'S RUN STARTS A SECOND BEFORE THE HALT (the R3-13 review): its
     // stamp is 09:21:09 and the halt's 09:21:10, so one second of it is
-    // outside the halt, and that is not a frozen index.
+    // outside the halt: the run is the halt's, and the day is not judged.
     let span = u64::from(halt.resume - halt.from);
     let before = IndexDay {
         ledger: Some((span + 1, Some(halt.from - 1), 4)),
         ..inside
     };
     let (json, says) = before.json();
-    assert_eq!(json["frozen"]["flagged"], false, "{json:#}");
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
     assert_eq!(json["frozen"]["judged_s"], 1);
-    assert!(says.is_empty(), "{says:?}");
+    assert_eq!(says.len(), 1, "{says:?}");
+    assert!(
+        says[0].contains(&format!(
+            "run, {} s from 09:21:09, only 1 s of it in one stretch outside the recorded halt; a \
+             shorter run",
+            span + 1
+        )),
+        "{says:?}"
+    );
     // A run that reaches 200 s before the halt is frozen for those 200 s.
     let partial = IndexDay {
         ledger: Some((span + 200, Some(halt.from - 200), 4)),
@@ -1594,22 +1855,53 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
         says[0].ends_with(", 200 s of it outside the recorded halt"),
         "{says:?}"
     );
+    // A RUN ON BOTH SIDES OF THE HALT IS JUDGED BY ITS LONGER SIDE, as
+    // Zerodha's minutes are: 100 s before and 100 s after are two runs of
+    // 100 s; 200 s before and 100 s after is frozen for the 200, in one
+    // stretch.
+    let both_sides = |before: u64, after: u64| IndexDay {
+        ledger: Some((
+            before + span + after,
+            Some(halt.from - u32::try_from(before).unwrap()),
+            4,
+        )),
+        ..inside
+    };
+    let (json, _) = both_sides(100, 100).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert_eq!(json["frozen"]["judged_s"], 100);
+    let (json, says) = both_sides(200, 100).json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(json["frozen"]["judged_s"], 200);
+    assert!(
+        says[0].ends_with(", 200 s of it in one stretch outside the recorded halt"),
+        "{says:?}"
+    );
     // A run past the halt's resumption counts only its seconds after it.
     let after = IndexDay {
         ledger: Some((span + 179, Some(halt.from), 4)),
         ..inside
     };
-    assert_eq!(after.json().0["frozen"]["flagged"], false);
+    assert_eq!(after.json().0["frozen"]["flagged"], Value::Null);
     assert_eq!(after.json().0["frozen"]["judged_s"], 179);
-    // On a halt day, a run with no stamp cannot be placed, so it is not flagged.
+    // On a halt day, a run with no stamp cannot be placed: not judged, and
+    // said so.
     let unplaced = IndexDay {
         ledger: Some((5_000, None, 4)),
         ..inside
     };
     let (json, says) = unplaced.json();
-    assert_eq!(json["frozen"]["flagged"], false);
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
     assert_eq!(json["frozen"]["judged_s"], Value::Null);
-    assert!(says.is_empty());
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 5000 s, with no stamp, so it cannot be placed against the recorded halt; a \
+             shorter run of 180 s or more elsewhere in the session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
     let unknown = IndexDay {
         feed: Vendor::Gdfl,
         midnight: 0,
@@ -1645,6 +1937,7 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
             low: Some((1, 60_000_000)),
             frozen_runs: 0,
             longest: None,
+            broken: 0,
         }),
         day_bar: Some((10, 5)),
         ledger: None,
@@ -1674,6 +1967,7 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
             low: Some((1, 60_000_000)),
             frozen_runs: 0,
             longest: None,
+            broken: 0,
         }),
         ..low
     };
@@ -1710,6 +2004,7 @@ fn a_ledger_run_inside_the_halt_is_not_frozen() {
             low: Some((1, 59_999_999)),
             frozen_runs: 0,
             longest: None,
+            broken: 0,
         }),
         ..in_halt
     };
@@ -2356,6 +2651,99 @@ fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
         SCANS.get().map_or(0, |memo| memo.lock().unwrap().len()),
         before
     );
+}
+
+/// **THE COLD AUCTION-ERA SHARE PAGE, TIMED ON THE REAL MASTERS**
+/// (verify-R3-13-r1 blocking 2; `docs/06-limits.md` L-R3-13-4): over a store
+/// root named by `BRUTEX_DAYFLAGS_STORE` (a shadow of the real store;
+/// read-only), each page is answered once to warm every other memo, then
+/// 200 times COLD (every kept flag dropped first, so each auction-era day's
+/// master is read again: the one cost this repair changed), 200 times warm,
+/// and 200 times as ten concurrent cold asks (20 rounds); and the flags alone
+/// ([`CasFlags::on_sessions`] over the page's days) cold, 200 times. Prints
+/// p50, p99, max and n in microseconds. Run with `-- --ignored --nocapture`.
+#[test]
+#[ignore = "requires BRUTEX_DAYFLAGS_STORE (a store root holding the masters); read-only"]
+#[allow(clippy::print_stdout, reason = "a measurement prints what it measured")]
+fn the_cold_auction_era_share_page_is_timed() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("BRUTEX_DAYFLAGS_STORE")
+            .expect("BRUTEX_DAYFLAGS_STORE names a store root"),
+    );
+    let pages = [
+        ("NSE-CASH-DALBHARAT", "2026-08-10", "2026-09-30"),
+        ("NSE-CASH-RELIANCE", "2026-08-03", "2026-09-30"),
+    ];
+    for (instrument, from, to) in pages {
+        let query = format!("feed=zerodha&instrument={instrument}&from={from}&to={to}");
+        let asked = ask(&query);
+        let warmed = answer(&root, &asked);
+        let days: Vec<(Day, bool, bool)> = (day(from).days_from_epoch()
+            ..=day(to).days_from_epoch())
+            .filter_map(|n| Day::from_days(n).ok())
+            .map(|d| {
+                let open = matches!(
+                    pull::calendar::record_of(i64::from(d.days_from_epoch())).kind,
+                    pull::calendar::DayKind::Open(_)
+                );
+                (d, open, false)
+            })
+            .collect();
+        let read = days.iter().filter(|(_, open, _)| *open).count();
+        let time = |cold: bool| {
+            if cold {
+                forget_flags(&root.join("session-masters"));
+            }
+            let start = std::time::Instant::now();
+            let _got = answer(&root, &asked);
+            start.elapsed().as_micros()
+        };
+        let cold: Vec<u128> = (0..200).map(|_| time(true)).collect();
+        let warm: Vec<u128> = (0..200).map(|_| time(false)).collect();
+        let symbol = instrument.trim_start_matches("NSE-CASH-");
+        let flags_only: Vec<u128> = (0..200)
+            .map(|_| {
+                forget_flags(&root.join("session-masters"));
+                let start = std::time::Instant::now();
+                let _flags = CasFlags::of(&root, symbol, true).on_sessions(&days);
+                start.elapsed().as_micros()
+            })
+            .collect();
+        let mut concurrent = Vec::new();
+        for _ in 0..20 {
+            forget_flags(&root.join("session-masters"));
+            let gate = std::sync::Barrier::new(10);
+            let round: Vec<u128> = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..10)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            gate.wait();
+                            let start = std::time::Instant::now();
+                            let _got = answer(&root, &asked);
+                            start.elapsed().as_micros()
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|t| t.join().expect("a reader"))
+                    .collect()
+            });
+            concurrent.extend(round);
+        }
+        assert_eq!(
+            answer(&root, &asked)["days"],
+            warmed["days"],
+            "cold, warm and concurrent answers agree"
+        );
+        println!(
+            "{query}: {read} open sessions; cold {:?}; warm {:?}; flags-only cold {:?}; 10 concurrent cold {:?} (p50, p99, max, n; us)",
+            spread(cold),
+            spread(warm),
+            spread(flags_only),
+            spread(concurrent)
+        );
+    }
 }
 
 /// The timing's pages, answered ten times each over the 1x store, and nothing
@@ -3392,14 +3780,17 @@ fn an_index_still_through_the_closing_auction_is_not_frozen() {
     );
 }
 
-/// **A GDFL LEDGER RUN IN THE AUCTION'S WINDOW IS NOT FROZEN** (the Mac
-/// finish of DB-B20; the real ledger measured NIFTY unchanged from 15:15:00
-/// for 799 to 864 s on 2026-09-25..30): a run from 15:15:00 is the auction's,
-/// one from 15:10:00 is judged for its 300 s before the window, a run with no
-/// stamp on an auction day cannot be placed, and a halt and the window that
-/// meet are counted once.
+/// **A GDFL LEDGER RUN IN THE AUCTION'S WINDOW IS THE AUCTION'S, AND THE DAY
+/// IS NEVER SAID "NOT FROZEN" FOR IT** (the Mac finish of DB-B20; the real
+/// ledger measured NIFTY unchanged from 15:15:00 for 799 to 864 s on
+/// 2026-09-25..30; verify-R3-13-r1 blocking 1): a run from 15:15:00 is the
+/// auction's, and since the ledger keeps only the day's longest run a shorter
+/// frozen run before 15:15 cannot be seen, so the day is `null` with the
+/// phrase that says why; one from 15:10:00 is judged for its 300 s before the
+/// window; a run with no stamp on an auction day cannot be placed and is
+/// `null`; and a halt and the window that meet are counted once.
 #[test]
-fn a_ledger_run_in_the_auction_window_is_not_frozen() {
+fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
     let window = auction_window(pull::vendor::Venue::NseIndex, day("2026-09-25"));
     let ledger = |seconds: u64, at: Option<u32>| IndexDay {
         feed: Vendor::Gdfl,
@@ -3411,9 +3802,34 @@ fn a_ledger_run_in_the_auction_window_is_not_frozen() {
         auction: window,
     };
     let (json, says) = ledger(838, Some(15 * 3_600 + 15 * 60)).json();
-    assert_eq!(json["frozen"]["flagged"], false, "{json:#}");
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
     assert_eq!(json["frozen"]["judged_s"], 0);
+    assert_eq!(json["frozen"]["longest_s"], 838);
+    assert_eq!(json["frozen"]["longest_from"], "15:15:00");
     assert_eq!(json["frozen"]["auction_window"], "15:15:00-15:30:00");
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 838 s from 15:15:00, all of it inside the cash closing auction's window; a \
+             shorter run of 180 s or more elsewhere in the session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
+    // One that starts before the window by less than 180 s: not judged either.
+    let (json, says) = ledger(900, Some(15 * 3_600 + 13 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert_eq!(json["frozen"]["judged_s"], 120);
+    assert!(
+        says[0].contains(
+            "900 s from 15:13:00, only 120 s of it in one stretch outside the cash closing \
+             auction's window"
+        ),
+        "{says:?}"
+    );
+    // The one "not frozen" an auction day can read: a longest run under 180 s.
+    let (json, says) = ledger(150, Some(15 * 3_600 + 15 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], false);
     assert!(says.is_empty(), "{says:?}");
     let (json, says) = ledger(600, Some(15 * 3_600 + 10 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], true);
@@ -3427,9 +3843,19 @@ fn a_ledger_run_in_the_auction_window_is_not_frozen() {
                 .to_owned()
         ]
     );
-    let (json, _) = ledger(600, None).json();
-    assert_eq!(json["frozen"]["flagged"], false);
+    let (json, says) = ledger(600, None).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
     assert_eq!(json["frozen"]["judged_s"], Value::Null);
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 600 s, with no stamp, so it cannot be placed against the cash closing \
+             auction's window; a shorter run of 180 s or more elsewhere in the session is not \
+             measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
     // A run that never touches the window says so.
     let (_, says) = ledger(240, Some(11 * 3_600)).json();
     assert_eq!(
@@ -3447,4 +3873,137 @@ fn a_ledger_run_in_the_auction_window_is_not_frozen() {
         ..ledger(1_200, Some(15 * 3_600))
     };
     assert_eq!(met.json().0["frozen"]["judged_s"], 600);
+    // THROUGH THE ROUTE, as the check reproduced it on the real store: a GDFL
+    // NIFTY day whose ledger run is 838 s from 15:15:00, and one whose run of
+    // 600 s carries no stamp, are both null and say why; a day whose longest
+    // run is 150 s is the one "not frozen".
+    let root = root_of("r3-13-ledger-auction");
+    let lines = [
+        ("2026-09-25", " flat_max_s=838 flat_max_at=15:15:00\n"),
+        ("2026-09-18", " flat_max_s=600 flat_max_at=-\n"),
+        ("2026-09-29", " flat_max_s=150 flat_max_at=15:16:00\n"),
+    ]
+    .iter()
+    .map(|(on, tail)| super::super::tests::index_flags(on, "NIFTY", &[]).replace('\n', tail))
+    .collect::<String>();
+    write(&super::super::quality_path(&root), &lines);
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2026-09-18&to=2026-09-29"),
+    );
+    let auction = record(&got, "2026-09-25");
+    assert_eq!(
+        auction["index"]["frozen"]["flagged"],
+        Value::Null,
+        "{auction:#}"
+    );
+    says_has(
+        auction,
+        "index frozen not judged: the day ledger measures only the day's longest unchanged run, \
+         838 s from 15:15:00, all of it inside the cash closing auction's window; a shorter run \
+         of 180 s or more elsewhere in the session is not measured (UNVERIFIED)",
+    );
+    let unstamped = record(&got, "2026-09-18");
+    assert_eq!(
+        unstamped["index"]["frozen"]["flagged"],
+        Value::Null,
+        "{unstamped:#}"
+    );
+    assert_eq!(unstamped["index"]["frozen"]["judged_s"], Value::Null);
+    assert!(
+        says(unstamped)
+            .iter()
+            .any(|said| said.contains("600 s, with no stamp, so it cannot be placed")),
+        "{:#?}",
+        says(unstamped)
+    );
+    let short = record(&got, "2026-09-29");
+    assert_eq!(short["index"]["frozen"]["flagged"], false, "{short:#}");
+    assert!(
+        says(short).iter().all(|said| !said.contains("frozen")),
+        "{:#?}",
+        says(short)
+    );
+}
+
+/// **A GDFL INDEX DAY THE LEDGER DID NOT MEASURE SAYS WHY ITS `frozen` IS
+/// NULL** (the check's follow-up): bars held under a ledger line written
+/// before `flat_max_s`, or under no line at all, each say so; a day holding
+/// nothing says nothing; a Zerodha day is never judged by the ledger.
+#[test]
+fn an_unmeasured_gdfl_index_day_says_why_its_frozen_is_null() {
+    let root = root_of("r3-13-ledger-unmeasured");
+    write(
+        &super::super::quality_path(&root),
+        &super::super::tests::index_flags("2022-03-09", "NIFTY", &[]),
+    );
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        ["2022-03-09", "2022-03-10"]
+            .iter()
+            .flat_map(|on| (0..3).map(move |s| bar(on, 9 * 3_600 + 15 * 60 + s, [1_600_000; 4], 0)))
+            .collect(),
+    );
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2022-03-09&to=2022-03-11"),
+    );
+    let old = record(&got, "2022-03-09");
+    assert_eq!(old["index"]["frozen"], Value::Null, "{old:#}");
+    says_has(
+        old,
+        "index frozen not measured: the day ledger's indices line carries no flat_max_s \
+         (written before the measure), so no frozen run is judged (UNVERIFIED)",
+    );
+    let none = record(&got, "2022-03-10");
+    says_has(
+        none,
+        "index frozen not measured: the day ledger holds no indices line for this day, so no \
+         frozen run is judged (UNVERIFIED)",
+    );
+    let empty = record(&got, "2022-03-11");
+    assert!(
+        says(empty).iter().all(|said| !said.contains("frozen")),
+        "{:#?}",
+        says(empty)
+    );
+    let zerodha = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2022-03-09&to=2022-03-09"),
+    );
+    assert!(
+        says(record(&zerodha, "2022-03-09"))
+            .iter()
+            .all(|said| !said.contains("frozen")),
+        "{zerodha:#}"
+    );
+}
+
+/// **`outside_of` JUDGES A RUN BY ITS LONGEST STRETCH OUTSIDE THE WINDOWS**:
+/// a run clear of both is whole; one inside a window has nothing outside;
+/// one across a window is two stretches; windows that meet, nest or come in
+/// either order are counted once; an empty or inverted window sets nothing
+/// aside.
+#[test]
+fn a_run_is_judged_by_its_longest_stretch_outside_the_windows() {
+    let halt = Some((100, 200));
+    let auction = Some((150, 300));
+    assert_eq!(outside_of((0, 50), [halt, auction]), (50, 50));
+    assert_eq!(outside_of((120, 180), [halt, auction]), (0, 0));
+    assert_eq!(outside_of((40, 260), [halt, None]), (60, 120));
+    assert_eq!(outside_of((40, 400), [halt, auction]), (100, 160));
+    assert_eq!(outside_of((40, 400), [auction, halt]), (100, 160));
+    assert_eq!(
+        outside_of((40, 400), [Some((100, 300)), Some((150, 200))]),
+        (100, 160)
+    );
+    assert_eq!(
+        outside_of((40, 400), [Some((200, 100)), Some((250, 250))]),
+        (360, 360)
+    );
+    assert_eq!(outside_of((300, 400), [halt, auction]), (100, 100));
+    assert_eq!(outside_of((0, 0), [halt, auction]), (0, 0));
 }

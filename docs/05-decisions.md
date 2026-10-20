@@ -76478,5 +76478,66 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     the flag: the record is the evidence. A flag of 1, or one no master holds,
     keeps the words of item 4.
 
-**Proof:** R313-01 to R313-29 (`docs/04-invariants.md`); the limits are
-L-R3-13-1 to L-R3-13-3 (`docs/06-limits.md`).
+19. **A GDFL index day the day ledger cannot judge is `null`, never "not
+    frozen"** (the check of 20-21 October, verify-R3-13-r1 blocking 1; amends
+    item 15's GDFL clause). The ledger keeps only the day's LONGEST unchanged
+    run (`flat_max_s`, `flat_max_at`), so where that run lies in the recorded
+    halt or the cash closing auction's window, or carries no stamp on a day
+    that has either, a shorter run of 180 s or more elsewhere in the session
+    cannot be seen. On every auction-era day the ledger has measured
+    (2026-09-25..30) the run is the auction's, from 15:15:00, and the record
+    answered `flagged: false`: every later GDFL index day would have read
+    "not frozen" whatever happened before 15:15. Now `index.frozen.flagged`
+    is `false` only where the longest run is under 180 s; `true` where its
+    longest single stretch outside the two windows reaches 180 s; and `null`
+    otherwise, with the phrase "index frozen not judged: the day ledger
+    measures only the day's longest unchanged run, ..., a shorter run of 180
+    s or more elsewhere in the session is not measured (UNVERIFIED)".
+    `judged_s` is that longest stretch, no longer the run less its set-aside
+    seconds: a run on both sides of a halt is two runs, as a Zerodha minute
+    inside a window ends a run (`dayflags_rules::outside_of`). A GDFL index
+    day holding bars and no `flat_max_s` says it is not measured, and why
+    (no indices line, or a line written before the measure). The band draws
+    `flagged: null` as its own kind, `frozen_unjudged`, "frozen run not
+    judged" (info), never as "frozen" and never as an ordinary session.
+    Chosen, not sourced: the ledger's measure is the import's (D-5904
+    item 15); what it does not measure is said, not guessed.
+
+20. **A share's flag is kept for the process, never its master; a day asked
+    at once is read once; a page's cold days are read together, a few at a
+    time** (verify-R3-13-r1 blocking 2). The memo of whole parsed masters
+    this package added (`MASTERS`) had no bound and held each auction-era
+    day's master beside `bars_change`'s own copy: 18-25 MB of resident memory
+    a day, never freed (+744 MB for 42 days, measured by the check), and the
+    first auction-era share page of a process took 2.6-3.15 s (4.5 s at ten
+    concurrent cold asks, +1.39 GB). Now `dayflags_rules::FLAGS` keeps only
+    `(masters directory, day, symbol) -> the master's answer` (the flag, or
+    its refusal to name the share), in two generations of at most
+    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A load in flight is
+    shared by every reader that asks while it runs (`FLIGHTS`) and ended when
+    its first reader is done, so a master lives only as long as the requests
+    reading it. At most `LOADS_AT_ONCE` = 4 masters are parsed at once in the
+    process, so concurrent cold pages cannot multiply the parse's memory; a
+    page's cold days are read on up to that many scoped threads
+    (`CasFlags::on_sessions`), each day once per request. A load's refusal
+    is still never kept beyond the readers that met it (AF-03). The parse
+    itself is `pull`'s and is unchanged: `DailyEligibility::parse` reserving
+    its map for every CSV line (37,237) rather than the EQ rows it keeps
+    (4,428) is named for `pull`'s owner, as is one bounded master memo shared
+    by `bars_change` and `sources` (L-R3-13-4). Measured cold and warm in
+    L-R3-13-4. Chosen, not tuned: 4 slots of the Mac's 14 cores, leaving the
+    rest to the route's other work and to imports; the bound is the choice,
+    its number is not sourced or measured to be best.
+
+21. **An unchanged index value that goes on past absent minutes is counted
+    and said** (the check's follow-up: Zerodha BANKNIFTY 2022-03-07 09:54-09:57
+    was reported as shorter runs, without saying why). A minute the file does
+    not hold still ends a run, so each part is measured alone, as before; the
+    times a flat minute after the gap prints the run's value are counted
+    (`DayScan::broken`, served as `index.frozen.broken_by_absent`) and the
+    phrase says "index value unchanged across absent minutes N time(s): a
+    minute the file does not hold ends a run, so each part is measured
+    alone". No value is assumed for the absent minutes.
+
+**Proof:** R313-01 to R313-35 (`docs/04-invariants.md`); the limits are
+L-R3-13-1 to L-R3-13-4 (`docs/06-limits.md`).

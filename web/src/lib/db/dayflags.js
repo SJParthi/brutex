@@ -147,6 +147,11 @@ export const DAY_KINDS = [
   { kind: 'halt', word: 'suspected halt', tone: 'info' },
   { kind: 'special', word: 'special session', tone: 'info' },
   { kind: 'unmeasured', word: 'session of unmeasured length', tone: 'info' },
+  // A GDFL INDEX DAY ITS LEDGER CANNOT JUDGE (verify-R3-13-r1): the ledger
+  // keeps only the day's longest unchanged run, and where that run is the
+  // halt's or the closing auction's, or has no stamp, `frozen.flagged` is
+  // `null` — not judged, never "not frozen". The phrase says why.
+  { kind: 'frozen_unjudged', word: 'frozen run not judged', tone: 'info' },
   { kind: 'cas', word: 'closing auction from 15:15', tone: 'info' },
   // A DAY AFTER A CONTRACT'S EXPIRY OWES NOTHING (SC-CLOSE-12): never a hole.
   { kind: 'expired', word: 'after expiry', tone: 'quiet' },
@@ -334,6 +339,10 @@ export function kindsOf(rec, ctx = {}) {
   if (Array.isArray(rec?.junk) && rec.junk.length > 0) out.push('junk');
   if (rec?.index?.frozen?.flagged === true) out.push('frozen');
   if (rec?.index?.outside_day_range?.flagged === true) out.push('outside_range');
+  // `flagged: null` on a frozen object is "not judged"; a `null` frozen (no
+  // measure at all) is not this kind, and `false` is "not frozen".
+  const frozen = rec?.index?.frozen;
+  if (frozen && typeof frozen === 'object' && frozen.flagged === null) out.push('frozen_unjudged');
   const peer = barsOf(rec?.peer);
   if (code === '.' && peer !== null && peer > 0) out.push('peer_on_closed');
   if (rec?.bar_definition?.current === false) out.push('old_definition');

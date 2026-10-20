@@ -20,8 +20,11 @@
 //! # Cost
 //!
 //! Every rule is O(1) a day or bounded by a named constant: [`CasFlags::of`] is
-//! one hash probe a day once a master is loaded (one read of the day's master
-//! per request otherwise, and only from 2026-08-03 on); [`expiry_of`] parses
+//! one hash probe a day once the share's flag is kept (otherwise one read of
+//! the day's master, shared by every request asking at once, on at most
+//! [`LOADS_AT_ONCE`] threads at a time, and only from 2026-08-03 on; a cold
+//! master read is NOT O(1) and is bounded and measured in `docs/06-limits.md`
+//! L-R3-13-4); [`expiry_of`] parses
 //! ten bytes; [`held_month_before`] makes at most [`MONTHS_BACK`] `metadata`
 //! calls, once per page, never per day.
 
@@ -153,17 +156,234 @@ pub(super) fn asked_rung(word: &str) -> Result<Option<Timeframe>, String> {
 
 // ══ A share's dated closing-auction flag ═════════════════════════════════════
 
-/// Each day's master THAT LOADED, kept once: a receipted master is immutable.
-/// A failed load is never kept here (AF-03): only the request that met it
+/// A loaded, receipt-checked NSE master.
+type Master = pull::cash_session_cache::VerifiedLifecycleMaster;
+
+/// One share's flag on one day as its day's master answered it: the flag, or
+/// the master's own refusal to name the share (no row, another ISIN). A
+/// receipted master is immutable, so a later read could only repeat either.
+type Answer = Result<CasEligibility, String>;
+
+/// A flag's key: the masters directory, the IST day, the share's symbol.
+type FlagKey = (PathBuf, u32, String);
+
+/// THE FLAGS ARE KEPT, NEVER THE MASTERS (verify-R3-13-r1, blocking 2;
+/// D-5904 item 20). A parsed master held for the process cost 18-25 MB of
+/// resident memory per auction-era day, never freed (+744 MB for 42 days),
+/// because `pull::cash_auction::DailyEligibility::parse` reserves its map for
+/// every CSV line (37,237 on 2026-09-01) to keep the 4,428 EQ rows. A page
+/// needs one share's flag a day, so that answer is all that is kept: its key
+/// (the directory's path, the day, the symbol) and the answer, about 200
+/// bytes by the sizes of their parts (an estimate; the process's memory is
+/// measured in L-R3-13-4), in two generations of at most [`FLAG_CAP`] / 2
+/// entries each.
+/// A FAILED LOAD IS NEVER KEPT HERE (AF-03): only the request that met it
 /// remembers it, with its reason, and the next request reads the day again.
-static MASTERS: OnceLock<Mutex<MasterMemo>> = OnceLock::new();
+static FLAGS: OnceLock<Mutex<FlagGenerations>> = OnceLock::new();
 
-/// Loaded masters by their directory and IST day.
-type MasterMemo = HashMap<(PathBuf, u32), Arc<pull::cash_session_cache::VerifiedLifecycleMaster>>;
+/// The most flags [`FLAGS`] holds across its two generations: 213 F&O shares
+/// for 153 auction-era sessions in one generation. A flag turned out is one
+/// master read again on the next cold page that needs it, never a wrong flag.
+pub(super) const FLAG_CAP: usize = 65_536;
 
-/// The process's loaded masters.
-fn masters() -> &'static Mutex<MasterMemo> {
-    MASTERS.get_or_init(|| Mutex::new(HashMap::new()))
+/// The two generations behind [`FLAGS`]: a put and a hit go to `young`; when
+/// `young` is full and the key is new, `old` is dropped whole and `young`
+/// becomes `old`, so at most the older half is dropped at once and a flag in
+/// use survives the turn.
+#[derive(Default)]
+struct FlagGenerations {
+    young: HashMap<FlagKey, Answer>,
+    old: HashMap<FlagKey, Answer>,
+}
+
+impl FlagGenerations {
+    /// The flag kept for `key`; a hit in `old` moves it to `young`.
+    fn get(&mut self, key: &FlagKey) -> Option<Answer> {
+        if let Some(answer) = self.young.get(key) {
+            return Some(answer.clone());
+        }
+        let (key, answer) = self.old.remove_entry(key)?;
+        self.put(key, answer.clone());
+        Some(answer)
+    }
+
+    /// Keeps `answer` for `key`, turning the generations when `young` is full.
+    fn put(&mut self, key: FlagKey, answer: Answer) {
+        let _was = self.old.remove(&key);
+        if !self.young.contains_key(&key) && self.young.len() >= FLAG_CAP / 2 {
+            self.old = std::mem::take(&mut self.young);
+        }
+        let _was = self.young.insert(key, answer);
+    }
+
+    /// Flags held across both generations.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.young.len() + self.old.len()
+    }
+}
+
+/// The process's kept flags.
+fn flags() -> std::sync::MutexGuard<'static, FlagGenerations> {
+    FLAGS
+        .get_or_init(|| Mutex::new(FlagGenerations::default()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One load of one day's master, shared by every reader that asks while it
+/// runs: the master, or the load's refusal.
+type Flight = Arc<OnceLock<Result<Arc<Master>, String>>>;
+
+/// THE LOADS IN FLIGHT, by masters directory and IST day (SINGLE FLIGHT,
+/// verify-R3-13-r1 blocking 2): ten cold pages asking one day at once parse
+/// its master once. A flight is dropped as soon as its first reader is done,
+/// and the master with its last reader, so no master outlives the requests
+/// that read it.
+static FLIGHTS: OnceLock<Mutex<HashMap<(PathBuf, u32), Flight>>> = OnceLock::new();
+
+/// The process's loads in flight.
+fn flights() -> std::sync::MutexGuard<'static, HashMap<(PathBuf, u32), Flight>> {
+    FLIGHTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The most masters the process parses at once, over every request: each
+/// parse holds its expanded CSV (11 MB on 2026-09-01) and the reserved map
+/// beside it until it is done, so this bounds the memory cold pages can take
+/// together, whatever their number. A page's own cold days are read on up to
+/// this many threads ([`CasFlags::on_sessions`]).
+pub(super) const LOADS_AT_ONCE: usize = 4;
+
+/// The parses running now, against [`LOADS_AT_ONCE`].
+static LOADING: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+
+/// Reads `day`'s master from `dir` under one of the [`LOADS_AT_ONCE`] slots,
+/// waiting for one where all are taken.
+fn load(dir: &Path, day: Day) -> Result<Arc<Master>, String> {
+    let _slot = Slot::take();
+    #[cfg(test)]
+    read_counted(dir, day);
+    pull::cash_session_cache::read_local_lifecycle(dir, day).map(Arc::new)
+}
+
+/// One of the [`LOADS_AT_ONCE`] slots, given back when dropped, a panicking
+/// read included, so a slot is never lost.
+struct Slot;
+
+impl Slot {
+    /// Waits for a free slot and takes it.
+    fn take() -> Self {
+        let (count, freed) = &LOADING;
+        let mut running = count.lock().unwrap_or_else(PoisonError::into_inner);
+        while *running >= LOADS_AT_ONCE {
+            running = freed.wait(running).unwrap_or_else(PoisonError::into_inner);
+        }
+        *running += 1;
+        Self
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (count, freed) = &LOADING;
+        let mut running = count.lock().unwrap_or_else(PoisonError::into_inner);
+        *running = running.saturating_sub(1);
+        drop(running);
+        freed.notify_one();
+    }
+}
+
+/// `symbol`'s flag on `day` from the masters in `dir`: the kept answer where
+/// one is, else the day's master read once however many ask at once. `Err`
+/// is the load's refusal, never kept; `Ok` is the master's answer, kept.
+fn flag_of(dir: &Path, day: Day, (symbol, isin): (&str, &str)) -> Result<Answer, String> {
+    let key: FlagKey = (dir.to_path_buf(), day.days_from_epoch(), symbol.to_owned());
+    if let Some(kept) = flags().get(&key) {
+        return Ok(kept);
+    }
+    let at = (key.0.clone(), key.1);
+    let flight = {
+        let mut flying = flights();
+        // LOOKED FOR AGAIN UNDER THE FLIGHTS' LOCK: a flight's reader keeps
+        // its flag before it ends the flight, so a reader that finds no flight
+        // here finds the flag, and one share's day is never read twice at once.
+        if let Some(kept) = flags().get(&key) {
+            return Ok(kept);
+        }
+        Arc::clone(flying.entry(at.clone()).or_default())
+    };
+    let loaded = flight.get_or_init(|| load(dir, day)).clone();
+    let answer = loaded.map(|master| master.cas_eligibility(symbol, isin));
+    if let Ok(kept) = &answer {
+        flags().put(key, kept.clone());
+    }
+    let mut flying = flights();
+    if flying
+        .get(&at)
+        .is_some_and(|held| Arc::ptr_eq(held, &flight))
+    {
+        let _ended = flying.remove(&at);
+    }
+    answer
+}
+
+/// Masters read so far, by directory and IST day: the proof that a day's
+/// master is read once however many ask at once.
+#[cfg(test)]
+static READS: OnceLock<Mutex<HashMap<(PathBuf, u32), usize>>> = OnceLock::new();
+
+/// Counts one read of `day`'s master in `dir`.
+#[cfg(test)]
+fn read_counted(dir: &Path, day: Day) {
+    let reads = READS.get_or_init(|| Mutex::new(HashMap::new()));
+    *reads
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry((dir.to_path_buf(), day.days_from_epoch()))
+        .or_default() += 1;
+}
+
+/// How many times `day`'s master in `dir` has been read.
+#[cfg(test)]
+pub(super) fn reads_of(dir: &Path, day: Day) -> usize {
+    READS
+        .get()
+        .and_then(|reads| {
+            reads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&(dir.to_path_buf(), day.days_from_epoch()))
+                .copied()
+        })
+        .unwrap_or(0)
+}
+
+/// Loads of `dir`'s masters still in flight: none once the requests that
+/// read them are done.
+#[cfg(test)]
+pub(super) fn flights_of(dir: &Path) -> usize {
+    flights().keys().filter(|(of, _)| of == dir).count()
+}
+
+/// Whether `symbol`'s flag on `day` from `dir` is kept, and how many flags
+/// are kept in all.
+#[cfg(test)]
+pub(super) fn kept_flag(dir: &Path, day: Day, symbol: &str) -> (bool, usize) {
+    let mut kept = flags();
+    let key = (dir.to_path_buf(), day.days_from_epoch(), symbol.to_owned());
+    (kept.get(&key).is_some(), kept.len())
+}
+
+/// Drops every flag kept from `dir`, so a timing run reads cold; flags from
+/// other directories, other tests' stores, are left as they are.
+#[cfg(test)]
+pub(super) fn forget_flags(dir: &Path) {
+    let mut kept = flags();
+    kept.young.retain(|(of, _, _), _| of != dir);
+    kept.old.retain(|(of, _, _), _| of != dir);
 }
 
 /// Where a day's closing-auction flag came from.
@@ -224,7 +444,8 @@ impl CasFlag {
 }
 
 /// One request's reads of the dated masters for one instrument: a day is read
-/// at most once per request, a loaded master is kept for the process.
+/// at most once per request, and its answer, never its master, is kept for the
+/// process ([`FLAGS`]).
 pub(super) struct CasFlags {
     /// `(symbol, ISIN)` for a share the universe names; `None` otherwise.
     identity: Option<(String, String)>,
@@ -278,20 +499,19 @@ impl CasFlags {
         if !self.share || !pull::vendor::cash_auction_eligibility_required(day) {
             return unknown(CasBasis::NotRequired);
         }
-        let Some((symbol, isin)) = self.identity.clone() else {
+        let Some((symbol, isin)) = self.identity.as_ref() else {
             return unknown(CasBasis::NoIdentity);
         };
         let days = day.days_from_epoch();
-        let master = match self.master(day) {
-            Ok(master) => master,
-            Err(why) => return unknown(CasBasis::Unread(why)),
-        };
-        match master.cas_eligibility(&symbol, &isin) {
-            Ok(eligibility) => CasFlag {
+        if let Some(why) = self.refused.get(&days) {
+            return unknown(CasBasis::Unread(why.clone()));
+        }
+        match flag_of(&self.dir, day, (symbol.as_str(), isin.as_str())) {
+            Ok(Ok(eligibility)) => CasFlag {
                 eligibility,
                 basis: CasBasis::DatedMaster,
             },
-            Err(why) => {
+            Ok(Err(why)) | Err(why) => {
                 let why = format!("{day}: {why}");
                 let _kept = self.refused.insert(days, why.clone());
                 unknown(CasBasis::Unread(why))
@@ -299,39 +519,59 @@ impl CasFlags {
         }
     }
 
-    /// `day`'s master: the process memo's when it loaded before, else read
-    /// now; a refusal is kept for this request only.
-    fn master(
-        &mut self,
-        day: Day,
-    ) -> Result<Arc<pull::cash_session_cache::VerifiedLifecycleMaster>, String> {
-        let days = day.days_from_epoch();
-        let key = (self.dir.clone(), days);
-        if let Some(kept) = masters()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
-            return Ok(Arc::clone(kept));
-        }
-        if let Some(why) = self.refused.get(&days) {
-            return Err(why.clone());
-        }
-        match pull::cash_session_cache::read_local_lifecycle(&self.dir, day) {
-            Ok(loaded) => {
-                let loaded = Arc::new(loaded);
-                let _was = masters()
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(key, Arc::clone(&loaded));
-                Ok(loaded)
+    /// [`Self::on_session`] for each of a page's `(day, open, future)`, in
+    /// order, ITS COLD DAYS READ FIRST ON UP TO [`LOADS_AT_ONCE`] THREADS
+    /// (verify-R3-13-r1 blocking 2): an auction-era page of 42 cold days read
+    /// one master after another took 2.6-3.15 s. A day whose flag is kept
+    /// spawns nothing, and a page with one cold day reads it on its own
+    /// thread. A load a thread could not make is this request's refusal, so
+    /// no day is read twice in one request.
+    pub(super) fn on_sessions(&mut self, asks: &[(Day, bool, bool)]) -> Vec<CasFlag> {
+        if let Some((symbol, isin)) = self.identity.as_ref() {
+            let cold: Vec<Day> = asks
+                .iter()
+                .filter(|(day, open, future)| {
+                    self.share
+                        && *open
+                        && !*future
+                        && pull::vendor::cash_auction_eligibility_required(*day)
+                        && !self.refused.contains_key(&day.days_from_epoch())
+                        && flags()
+                            .get(&(self.dir.clone(), day.days_from_epoch(), symbol.clone()))
+                            .is_none()
+                })
+                .map(|(day, _, _)| *day)
+                .collect();
+            if cold.len() > 1 {
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                let refused = Mutex::new(Vec::new());
+                let dir = self.dir.as_path();
+                // THE SCOPE JOINS EVERY THREAD and re-raises a panic in one.
+                std::thread::scope(|scope| {
+                    for _ in 0..cold.len().min(LOADS_AT_ONCE) {
+                        let _thread = scope.spawn(|| {
+                            while let Some(day) =
+                                cold.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                            {
+                                if let Err(why) =
+                                    flag_of(dir, *day, (symbol.as_str(), isin.as_str()))
+                                {
+                                    refused
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .push((day.days_from_epoch(), format!("{day}: {why}")));
+                                }
+                            }
+                        });
+                    }
+                });
+                self.refused
+                    .extend(refused.into_inner().unwrap_or_else(PoisonError::into_inner));
             }
-            Err(why) => {
-                let why = format!("{day}: {why}");
-                let _kept = self.refused.insert(days, why.clone());
-                Err(why)
-            }
         }
+        asks.iter()
+            .map(|(day, open, future)| self.on_session(*day, *open, *future))
+            .collect()
     }
 
     /// The days this request could not read a flag for, and why: at most one
@@ -627,12 +867,32 @@ pub(super) fn in_window(window: Option<(u32, u32)>, since: i64) -> bool {
     window.is_some_and(|(from, to)| since >= i64::from(from) && since < i64::from(to))
 }
 
-/// The seconds of the run `[start, end)` inside `window` `[from, to)`.
-fn overlap((start, end): (u64, u64), window: Option<(u32, u32)>) -> u64 {
-    window.map_or(0, |(from, to)| {
-        end.min(u64::from(to))
-            .saturating_sub(start.max(u64::from(from)))
-    })
+/// The run `[start, end)`'s seconds outside every one of `windows`
+/// (`[from, to)` each): its longest single stretch, and all its stretches
+/// together. A window that is empty or inverted sets nothing aside, and two
+/// that meet are counted once. Two windows, so at most three stretches.
+///
+/// THE LONGEST STRETCH IS WHAT A RUN IS JUDGED BY, as Zerodha's minutes are
+/// ([`fold_minutes`]): a bar inside a set-aside window ends the run there, so
+/// 100 s before a halt and 100 s after it are two runs of 100 s, never one of
+/// 200 s.
+fn outside_of((start, end): (u64, u64), windows: [Option<(u32, u32)>; 2]) -> (u64, u64) {
+    let mut cuts: Vec<(u64, u64)> = windows
+        .iter()
+        .flatten()
+        .map(|&(from, to)| (u64::from(from), u64::from(to)))
+        .filter(|(from, to)| from < to)
+        .collect();
+    cuts.sort_unstable();
+    let (mut cursor, mut longest, mut total) = (start, 0_u64, 0_u64);
+    for (from, to) in cuts {
+        let stretch = from.min(end).saturating_sub(cursor);
+        longest = longest.max(stretch);
+        total = total.saturating_add(stretch);
+        cursor = cursor.max(to);
+    }
+    let last = end.saturating_sub(cursor);
+    (longest.max(last), total.saturating_add(last))
 }
 
 /// The most one-minute bars one day's scan reads: a whole session is 375, so
@@ -653,6 +913,9 @@ pub(super) struct DayScan {
     pub(super) frozen_runs: u32,
     /// The longest such run: its first bar's stamp and its length in seconds.
     pub(super) longest: Option<(i64, u64)>,
+    /// Times an unchanged value went on past one or more absent minutes: the
+    /// run before them ended there, so each part was measured alone.
+    pub(super) broken: u32,
 }
 
 /// Each day's scan by month file, the file's inode and the day's first row,
@@ -718,6 +981,18 @@ pub(super) fn fold_minutes(
                 Some((first, bar.ts_micros, value))
             }
             other => {
+                // A RUN AN ABSENT MINUTE ENDED, where the next minute held
+                // prints the same value still, is counted (the check's
+                // follow-up: BANKNIFTY 2022-03-07 09:54-09:57), so a run
+                // measured as its parts says why.
+                if let Some((_, last, value)) = other
+                    && flat
+                    && !halted
+                    && value == bar.close
+                    && bar.ts_micros - last > MINUTE
+                {
+                    scan.broken = scan.broken.saturating_add(1);
+                }
                 close_run(other, &mut scan);
                 (flat && !halted).then_some((bar.ts_micros, bar.ts_micros, bar.close))
             }
@@ -867,11 +1142,19 @@ impl IndexDay {
                         self.aside(),
                     ));
                 }
+                if scan.broken > 0 {
+                    says.push(format!(
+                        "index value unchanged across absent minutes {} time(s): a minute the \
+                         file does not hold ends a run, so each part is measured alone ({rung})",
+                        scan.broken
+                    ));
+                }
                 serde_json::json!({
                     "basis": "minutes_scanned",
                     "rung": rung,
                     "flagged": scan.frozen_runs > 0,
                     "runs": scan.frozen_runs,
+                    "broken_by_absent": scan.broken,
                     "longest_s": longest.map(|(_, s)| s),
                     "longest_from": longest.map(|(from, _)| clock_of(self.midnight, from)),
                     "auction_window": self.auction_json(),
@@ -935,6 +1218,18 @@ impl IndexDay {
 
     /// The ledger's frozen run (GDFL): the record's `frozen` from the day
     /// ledger's `flat_max_s` and its stamp, and the phrase it says.
+    ///
+    /// THE LEDGER HOLDS ONE RUN A DAY, THE LONGEST (verify-R3-13-r1, blocking
+    /// 1; D-5904 item 19): `flatagg` keeps the day's longest unchanged run and
+    /// nothing shorter. So `flagged` is `false` only where that run is under
+    /// [`FROZEN_MIN_S`], when no run of the day can be frozen; `true` where its
+    /// longest stretch outside the recorded halt and the cash closing
+    /// auction's window reaches [`FROZEN_MIN_S`]; and `null` — never "not
+    /// frozen" — where the run reaches it but lies in those windows, or has no
+    /// stamp to place it against them on a day that has one. A shorter run
+    /// elsewhere in that session could be frozen and is not measured, and the
+    /// phrase says so (UNVERIFIED). On every auction-era day the ledger has
+    /// measured (2026-09-25..30), the run is the auction's, from 15:15:00.
     fn ledger_frozen(
         &self,
         (seconds, at, line): (u64, Option<u32>, u64),
@@ -946,43 +1241,50 @@ impl IndexDay {
         // 2020-03-13's run starts at 09:21:09, a second before the index
         // halt's 09:21:10, and is the halt itself; from 2026-08-03 every
         // session's run from 15:15:00 is the auction's ([`auction_window`]).
-        // A run with no stamp on such a day cannot be placed, so it is not
-        // flagged. The two windows are counted once where they meet.
-        let judged_s = match at {
+        // The two windows are counted once where they meet, and the run is
+        // judged by its longest stretch outside them ([`outside_of`]).
+        let windowed = self.halt.is_some() || self.auction.is_some();
+        let outside = match at {
             Some(at) => {
                 let start = u64::from(at);
                 let run = (start, start.saturating_add(seconds));
-                // Where the two do not meet, their meeting is empty or
-                // inverted and its overlap with the run is nothing.
-                let both = self.halt.zip(self.auction).map(
-                    |((halt_from, halt_to), (auction_from, auction_to))| {
-                        (halt_from.max(auction_from), halt_to.min(auction_to))
-                    },
-                );
-                let aside = overlap(run, self.halt)
-                    .saturating_add(overlap(run, self.auction))
-                    .saturating_sub(overlap(run, both));
-                Some(seconds.saturating_sub(aside))
+                Some(outside_of(run, [self.halt, self.auction]))
             }
-            None if self.halt.is_some() || self.auction.is_some() => None,
-            None => Some(seconds),
+            None if windowed => None,
+            None => Some((seconds, seconds)),
         };
-        let flagged = judged_s.is_some_and(|judged| judged >= FROZEN_MIN_S);
+        let judged_s = outside.map(|(longest, _)| longest);
+        let flagged = match judged_s {
+            Some(judged) if judged >= FROZEN_MIN_S => Some(true),
+            _ if seconds < FROZEN_MIN_S => Some(false),
+            _ => None,
+        };
         let clock = |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
-        if let Some(judged) = judged_s.filter(|_| flagged) {
-            let part = match (judged < seconds, self.auction.is_some()) {
-                (true, false) => format!(", {judged} s of it outside the recorded halt"),
-                (true, true) => format!(
-                    ", {judged} s of it outside any recorded halt and the cash closing \
-                     auction's window"
-                ),
-                (false, _) => format!(", outside any recorded halt{}", self.aside()),
-            };
-            says.push(format!(
-                "index value frozen in session: unchanged for {seconds} s from {} (the \
-                 import's measure of the vendor's rows){part}",
-                at.map_or_else(|| "-".to_owned(), clock)
-            ));
+        match (flagged, outside) {
+            (Some(true), Some((judged, total))) => {
+                let stretch = if judged < total {
+                    " in one stretch"
+                } else {
+                    ""
+                };
+                let part = match (judged < seconds, self.auction.is_some()) {
+                    (true, false) => {
+                        format!(", {judged} s of it{stretch} outside the recorded halt")
+                    }
+                    (true, true) => format!(
+                        ", {judged} s of it{stretch} outside any recorded halt and the cash \
+                         closing auction's window"
+                    ),
+                    (false, _) => format!(", outside any recorded halt{}", self.aside()),
+                };
+                says.push(format!(
+                    "index value frozen in session: unchanged for {seconds} s from {} (the \
+                     import's measure of the vendor's rows){part}",
+                    at.map_or_else(|| "-".to_owned(), clock)
+                ));
+            }
+            (None, _) => says.push(self.unjudged(seconds, at.map(clock), judged_s)),
+            _ => {}
         }
         serde_json::json!({
             "basis": "day_ledger",
@@ -995,6 +1297,30 @@ impl IndexDay {
             "auction_window": self.auction_json(),
             "line": line,
         })
+    }
+
+    /// The phrase of a ledger run that cannot judge the day (`flagged` null):
+    /// what the ledger measures, where its one run lies, and that a shorter
+    /// run elsewhere is not measured. `from` is the run's stamp, `judged` its
+    /// longest stretch outside the windows where it could be placed.
+    fn unjudged(&self, seconds: u64, from: Option<String>, judged: Option<u64>) -> String {
+        let windows = match (self.halt.is_some(), self.auction.is_some()) {
+            (true, false) => "the recorded halt",
+            (false, true) => "the cash closing auction's window",
+            _ => "the recorded halt and the cash closing auction's window",
+        };
+        let placed = match (from, judged) {
+            (Some(from), Some(0)) => format!("{seconds} s from {from}, all of it inside {windows}"),
+            (Some(from), Some(judged)) => format!(
+                "{seconds} s from {from}, only {judged} s of it in one stretch outside {windows}"
+            ),
+            _ => format!("{seconds} s, with no stamp, so it cannot be placed against {windows}"),
+        };
+        format!(
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, {placed}; a shorter run of {FROZEN_MIN_S} s or more elsewhere in the session \
+             is not measured (UNVERIFIED)"
+        )
     }
 
     /// Whether the stamp `ts` (epoch microseconds) lies inside the day's

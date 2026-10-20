@@ -412,6 +412,13 @@ test('SC-CLOSE-12: a day after expiry is expired, owing nothing — never a hole
 test('DB-B20, DB-A15, goal 3: a frozen index, a value outside the day range, a closed day the peer traded, an older definition', () => {
   assert.deepEqual(kindsOf(rec({ index: { frozen: { flagged: true }, outside_day_range: { flagged: true } } })), ['frozen', 'outside_range']);
   assert.deepEqual(kindsOf(rec({ index: { frozen: { flagged: false }, outside_day_range: null } })), ['session']);
+  // verify-R3-13-r1: a ledger run the day cannot be judged by is its own
+  // kind, never "not frozen" and never "frozen"; no measure at all is neither.
+  const unjudged = cellOf(rec({ index: { frozen: { basis: 'day_ledger', flagged: null, longest_s: 838, judged_s: 0 }, outside_day_range: null } }));
+  assert.deepEqual(unjudged.kinds, ['frozen_unjudged']);
+  assert.equal(unjudged.word, 'frozen run not judged');
+  assert.equal(unjudged.tone, 'info');
+  assert.deepEqual(kindsOf(rec({ index: { frozen: null, outside_day_range: null } })), ['session']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 21594 } })), ['peer_on_closed', 'closed']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 0 } })), ['closed']);
   const old = cellOf(rec({ bar_definition: { value: 2, current: false, means: 'fixture', from: 'import_journal', this_build: 4 } }));
@@ -422,7 +429,7 @@ test('DB-B20, DB-A15, goal 3: a frozen index, a value outside the day range, a c
   assert.equal(definitionOf({ value: 'two' }), null);
   assert.deepEqual(definitionOf({ value: 3 }), { value: 3, current: false, means: '', from: '', thisBuild: null });
   // Every new kind has a word and a tone.
-  for (const kind of ['frozen', 'outside_range', 'peer_on_closed', 'old_definition', 'expired']) {
+  for (const kind of ['frozen', 'frozen_unjudged', 'outside_range', 'peer_on_closed', 'old_definition', 'expired']) {
     assert.ok(DAY_KINDS.some((k) => k.kind === kind && k.word && k.tone), kind);
   }
 });
