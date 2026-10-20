@@ -5781,6 +5781,10 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
 #[path = "gdfl_backfill_tests.rs"]
 mod backfill;
 
+// SC-4, D-5904: a late day for a sealed month, and a day it holds.
+#[path = "gdfl_sealed_tests.rs"]
+mod sealed;
+
 /// The scope a close records and the days a wider scope reads again
 /// (WP-12f, D-4878), over this module's invented worlds.
 #[path = "gdfl_scope_tests.rs"]

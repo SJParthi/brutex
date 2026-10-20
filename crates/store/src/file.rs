@@ -883,6 +883,71 @@ pub enum StoreError {
         /// The refusal in full, naming the block, entry or field.
         detail: String,
     },
+    /// THE WRITE DOOR OF A SEALED MONTH (SC-4, D-5904; design §3, §4.5): the
+    /// month's served generation is held in its sealed form (`.sbar`,
+    /// D-4965), which is written once and never opened for writing again,
+    /// and the batch holds a bar the month does not hold as offered. Nothing
+    /// was written, to the `.sbar` or to the raw `.bin` beside it: bars
+    /// appended to the `.bin` would land where no reader looks, because the
+    /// read door opens the `.sbar` first (D-5899).
+    ///
+    /// A batch the month already holds bit for bit is not this refusal: it
+    /// is [`Appended::AlreadyPresent`], so a resumed import stays idempotent.
+    /// The caller takes the door that exists for a month that cannot be
+    /// appended to, [`crate::repair::repair_month`], which reads the sealed
+    /// month through the read door and publishes its successor generation as
+    /// a raw month. `offer` says what the same batch would have met had the
+    /// month been raw, so the caller can answer it exactly as it would have
+    /// answered the raw month: the form is never the content.
+    Sealed {
+        /// The `.sbar` the writer door opened.
+        path: PathBuf,
+        /// How many bars the month holds.
+        n_valid: u64,
+        /// The last stamp it holds, as its header states it (`0` when it
+        /// holds none).
+        last_ts_micros: i64,
+        /// Index within the batch of the first record the month does not
+        /// hold as offered.
+        at: u64,
+        /// That record's stamp, or for [`Conflict::Skipped`] the HELD stamp
+        /// the batch omits, exactly as [`StoreError::OverlapDisagrees`] says.
+        ts_micros: i64,
+        /// What a raw month would have done with the batch.
+        offer: SealedOffer,
+    },
+}
+
+/// What a batch refused by a SEALED month ([`StoreError::Sealed`]) would have
+/// met at the same month in its raw form (SC-4, D-5904).
+///
+/// The two forms hold the same bars bit for bit (D-5899), so the raw month's
+/// answer is a fact about the bars and the batch, not about the file: a
+/// caller that routes [`Self::Follows`] to the repair door and refuses
+/// [`Self::Disagrees`] answers every batch exactly as it answers the same
+/// batch at a raw month.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealedOffer {
+    /// The raw month would have appended it: from `at` on the batch follows
+    /// the last held bar, and every offered bar before `at` is held byte for
+    /// byte. A late day of a closed month is this.
+    Follows,
+    /// The raw month would have refused it as
+    /// [`StoreError::OverlapDisagrees`] with this conflict.
+    Disagrees(Conflict),
+}
+
+impl SealedOffer {
+    /// A stable word for a log line, a journal field or a JSON value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Follows => "follows",
+            Self::Disagrees(Conflict::Restated) => "restated",
+            Self::Disagrees(Conflict::NotHeld) => "not_held",
+            Self::Disagrees(Conflict::Skipped) => "skipped",
+        }
+    }
 }
 
 /// How an offered overlap disagrees with the records a month holds.
@@ -1250,8 +1315,40 @@ impl fmt::Display for StoreError {
                 field,
             } => write_misfiled(f, path, sidecar, field),
             refusal @ Self::SealedRefused { .. } => write_sealed_refused(f, refusal),
+            refusal @ Self::Sealed { .. } => write_sealed(f, refusal),
         }
     }
+}
+
+/// [`StoreError::Sealed`]'s sentence (SC-4, D-5904).
+fn write_sealed(f: &mut fmt::Formatter<'_>, refusal: &StoreError) -> fmt::Result {
+    let StoreError::Sealed {
+        path,
+        n_valid,
+        last_ts_micros,
+        at,
+        ts_micros,
+        offer,
+    } = refusal
+    else {
+        return Ok(());
+    };
+    write!(
+        f,
+        "{}: the month is sealed and is never appended to; it holds {n_valid} bars through \
+         {last_ts_micros}, and batch record {at} ",
+        path.display()
+    )?;
+    match offer {
+        SealedOffer::Follows => write!(f, "at {ts_micros} follows them")?,
+        SealedOffer::Disagrees(conflict) => write!(f, "{conflict} {ts_micros}")?,
+    }
+    write!(
+        f,
+        " (sealed_offer={}); nothing was written. A bar a sealed month lacks lands as its \
+         successor generation through the repair door (store::repair::repair_month)",
+        offer.as_str()
+    )
 }
 
 /// [`StoreError::SealedRefused`]'s sentence (SC-3, D-5899).
@@ -1767,6 +1864,8 @@ impl BarFile {
             lock_path.clone(),
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        #[cfg(test)]
+        write_door_tests::after_the_lock();
         // ASKED AGAIN UNDER THE LOCK (D-3350). A promotion holds this month's
         // lock shared while it writes the pointer
         // (`crate::generation::promote`), so a writer that passed the first
@@ -1774,6 +1873,29 @@ impl BarFile {
         // here, before a byte is appended to a generation no reader opens.
         // The guard's drop unlocks explicitly (`crate::flock`).
         crate::generation::refuse_superseded(root, path)?;
+
+        // A SEALED MONTH IS OPENED IN ITS SEALED FORM, AND THE PROBE IS MADE
+        // UNDER THE EXCLUSIVE LOCK, NEVER BEFORE IT (SC-4, D-5904; design
+        // §4.5). The sealer holds this lock shared from its first step to its
+        // last (§4.6), so a writer holding it exclusively either excluded the
+        // sealer or sees its finished `.sbar`. A probe made before the lock
+        // could append to a `.bin` that a `.sbar` published in between
+        // already supersedes: the bars would be committed where no reader
+        // looks, because the read door opens the `.sbar` first (D-5899).
+        //
+        // The same `open_sealed_at` the read door asks, so the writer and
+        // every reader agree on whether the month is sealed, and a damaged or
+        // misfiled `.sbar` is refused here by name exactly as a reader refuses
+        // it, never passed over for the `.bin`. Before the `.bin` is opened,
+        // let alone created: a month whose raw form a retirement removed
+        // (SC-9) is never re-created empty beside its sealed form. The handle
+        // keeps the lock and writes nothing; `append` answers every batch
+        // (`Self::sealed_offer`). One `open` more for a raw month, `ENOENT`.
+        if path.file() == FileKind::Bars
+            && let Some(sealed) = Self::open_sealed_at(root, path, symbol_id)?
+        {
+            return Ok(sealed.holding(lock));
+        }
 
         // Whether the month file was THERE before this open. Only a file that
         // existed can have been truncated or zeroed; one this open creates was
@@ -2836,6 +2958,110 @@ impl BarFile {
         })
     }
 
+    /// The writer door's sealed handle keeps the month's exclusive lock for
+    /// its life, as a raw writer's does (SC-4, D-5904): no other writer and
+    /// no sealer step meets it while it answers.
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the lifetime-only lock field is set once, on the writer door's sealed handle"
+    )]
+    fn holding(mut self, lock: Flock<File>) -> Self {
+        self._lock = Some(lock);
+        self
+    }
+
+    /// [`Self::append`] at a SEALED month (SC-4, D-5904; design §3, §4.5):
+    /// [`Appended::AlreadyPresent`] for a batch the month holds bit for bit,
+    /// and [`StoreError::Sealed`] for any other, naming what the raw form
+    /// would have done with it. Writes nothing in either case.
+    ///
+    /// Every question is the one the raw door asks, IN THE RAW DOOR'S ORDER,
+    /// through the same functions over the same records (the read funnel
+    /// serves a sealed month's frames as record images, D-5899):
+    /// `Header::advance` first; only on its out-of-order refusal
+    /// `already_stored` located by the sealed time table, then
+    /// `suffix_that_follows` and `diagnose_overlap`. So a batch is
+    /// `AlreadyPresent` here exactly when it is at the raw month, `Follows`
+    /// exactly when the raw month would have committed it, and a counter at
+    /// its end is the raw door's `Format` refusal whatever the batch holds.
+    ///
+    /// # Cost
+    ///
+    /// A batch that follows the last held bar is answered from the header
+    /// alone: no record is read. Otherwise the raw door's refusal path: one
+    /// time lookup (the sealed table: one table read, one directory read, one
+    /// frame's stamps) and one record read per offered bar the month holds,
+    /// bounded by the batch, never by the month. Nothing is written, so no
+    /// flush.
+    fn sealed_offer<R: Row>(
+        &self,
+        batch: &[R],
+        (first_ts, last_ts): (i64, i64),
+        count: u64,
+    ) -> Result<Appended, StoreError> {
+        let n_valid = self.header.n_valid;
+        let (at, ts_micros, offer) = match self.header.advance(count, first_ts, last_ts) {
+            Ok(_) => (0, first_ts, SealedOffer::Follows),
+            Err(source @ FormatError::TimestampsOutOfOrder { .. }) => {
+                let at = self.locate::<R>(first_ts)?;
+                if let Some(first_index) =
+                    already_stored(batch, at, n_valid, |index| self.read_row::<R>(index))?
+                {
+                    return Ok(Appended::AlreadyPresent {
+                        first_index,
+                        n_valid,
+                    });
+                }
+                if let Some(suffix) = self.suffix_that_follows(batch)? {
+                    let at = batch.len().saturating_sub(suffix.len());
+                    let ts = suffix.first().map_or(first_ts, Row::stamp);
+                    (len_u64(at), ts, SealedOffer::Follows)
+                } else {
+                    match self.diagnose_overlap(batch) {
+                        Some(StoreError::OverlapDisagrees {
+                            at,
+                            ts_micros,
+                            conflict,
+                            ..
+                        }) => (at, ts_micros, SealedOffer::Disagrees(conflict)),
+                        // A record the walk could not read is that failure,
+                        // named, exactly as the raw door reports it.
+                        Some(other) => return Err(other),
+                        // Unreachable after the two checks above (the raw
+                        // door's own comment says why); the raw door then
+                        // keeps `advance`'s refusal, and so does this one.
+                        None => {
+                            return Err(StoreError::Format {
+                                path: self.bars_path.clone(),
+                                source,
+                            });
+                        }
+                    }
+                }
+            }
+            // A counter at its end refuses the batch whatever the form: the
+            // raw door's terminal refusal, in its words.
+            Err(source) => {
+                return Err(StoreError::Format {
+                    path: self.bars_path.clone(),
+                    source,
+                });
+            }
+        };
+        // A REFUSAL HANDED BACK, NOT A LINE WRITTEN HERE: like every other
+        // refusal of this door (`OverlapDisagrees`, `Superseded`) it is the
+        // caller's to log and route, and the pull's ingest journals the
+        // successor generation the repair door publishes for it.
+        Err(StoreError::Sealed {
+            path: self.bars_path.clone(),
+            n_valid,
+            last_ts_micros: self.header.last_ts_micros,
+            at,
+            ts_micros,
+            offer,
+        })
+    }
+
     /// The checks every append makes before it reads a bar.
     fn may_append<R: Row>(&self) -> Result<(), StoreError> {
         // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
@@ -2895,6 +3121,13 @@ impl BarFile {
         let (first_ts, last_ts) = survey(batch)?;
         self.admission.admit(batch)?;
         let count = len_u64(batch.len());
+        // A SEALED MONTH TAKES NO APPEND (SC-4, D-5904). Asked after the
+        // batch's own refusals, so a garbage batch is named for what it is,
+        // and before anything below could touch a file: the handle holds the
+        // `.sbar` open for reading only, and nothing past this line runs.
+        if self.sealed.is_some() {
+            return self.sealed_offer(batch, (first_ts, last_ts), count);
+        }
 
         // `Header::advance` is the single authority on whether a batch follows
         // what is committed. Asking it first, rather than repeating its
@@ -10045,3 +10278,10 @@ pub use sealed_door::Form;
 #[cfg(test)]
 #[path = "file_sealed_tests.rs"]
 mod sealed_door_tests;
+
+/// The write door over a sealed month (SC-4, D-5904): `Sealed`,
+/// `AlreadyPresent`, the probe under the lock, the repair over a sealed
+/// source, and the write door's cost at 1, 10 and 100 times the bars.
+#[cfg(test)]
+#[path = "file_write_door_tests.rs"]
+mod write_door_tests;

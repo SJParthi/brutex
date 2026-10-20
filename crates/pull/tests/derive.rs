@@ -1593,9 +1593,18 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
         item(INGEST, "fn derive_month(").contains("Mode::Append => derive_all("),
         "an ordinary landing derives through `derive_all`"
     );
+    // An ordinary landing writes through `append_or_successor` since D-5904
+    // (SC-4): `write_and_count` first, exactly as before, and only a batch a
+    // SEALED month refuses that its raw form would append is filed as the
+    // month's successor generation. The one write door is still the first.
     assert!(
-        item(INGEST, "fn write_month(").contains("write_and_count("),
+        item(INGEST, "fn write_month(").contains("Mode::Append => append_or_successor("),
         "through the one write door"
+    );
+    assert!(
+        item(INGEST, "fn append_or_successor(")
+            .contains("match write_and_count(bars, store_root, symbol_id, parts, key)"),
+        "which is `write_and_count` first"
     );
 }
 

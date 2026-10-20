@@ -74543,3 +74543,78 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5904 — The write door of a sealed month: a batch it holds is `AlreadyPresent`, any other is `StoreError::Sealed` naming what its raw form would have done, the probe is made under the writer's lock, and the pull and the GDFL import file a batch the raw form would append as the month's successor generation — 2026-10-20
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.5, §6, §9 row SC-4; its proposed D-4929, whose read half is D-5899)
+gives a closed month a second form, the sealed `.sbar` of D-4965, written once
+and never opened for writing again. D-5899 opened it to every reader and said
+the write door was SC-4's. Until this entry the writer door did not know the
+form existed: `BarFile::open_or_create` opened (or created) the raw `.bin`
+beside a `.sbar` and appended there, so the bars were committed where no
+reader looks, because the read door opens the `.sbar` first; and a month held
+only sealed (after a retirement, SC-9) was re-created empty as a `.bin` and
+filled from its first bar.
+
+**The writer door opens the sealed form, under the lock.** `open_or_create`
+probes `.sbar` with the read door's own `open_sealed_at` after it holds the
+month's exclusive lock and after the generation pointer is asked again, and
+before the `.bin` is opened or created. The sealer holds the lock shared from
+its first step to its last (design §4.6), so a writer either excluded it or
+sees its finished file; a probe made before the lock could miss a seal that
+finished in between. A damaged or misfiled `.sbar` is refused here exactly as
+a reader refuses it (`SealedRefused`), never passed over for the `.bin`. The
+sealed handle keeps the lock and writes nothing.
+
+**What `append` answers.** The batch's own refusals first, in their own words
+(empty, out of order, impossible, outside the month, off the rung's grid).
+Then the questions the raw door asks, through the same functions over the same
+records: a batch the month holds bit for bit is `Appended::AlreadyPresent` at
+the index it sits at, so a resumed import stays idempotent; any other batch is
+`StoreError::Sealed { path, n_valid, last_ts_micros, at, ts_micros, offer }`,
+where `offer` is `SealedOffer::Follows` when the raw month would have
+committed it (from `at` on it follows the last held bar and every offered bar
+before `at` is held byte for byte) and `SealedOffer::Disagrees(conflict)`
+when the raw month would have refused it as `OverlapDisagrees` with that
+conflict, at the same index and stamp. A counter at its end is the raw door's
+`Format` refusal. Nothing is written in any case. The store emits no line for
+it, like every other refusal of that door; the caller logs and routes it.
+
+**The form is never the content: callers answer `Sealed` as they answer the
+raw month.** `pull::ingest`'s append door (`append_or_successor`), used by the
+Zerodha pull for the minute month and for every derived rung month, and the
+GDFL import's back-fill door, file a `Follows` batch as the month's successor
+generation through the one repair authority (`store::repair::repair_month`,
+D-3350), which reads the sealed month through the read door and publishes
+every held bar plus the new ones as a raw month under `bar-revisions-v1/<n>/`;
+it is sealed again later like any other. A `repairing` line naming
+`sealed-month successor` is journaled before the repair and its `repair` or
+`refused` line after it. `Disagrees` stands as the raw month's refusal would.
+The GDFL worker's own append door files nothing as a generation (D-3353): it
+commits nothing, and the coordinator files the day again through the back-fill
+door, which routes it. The basis witness (D-3323) is not asked of a `Follows`
+batch: it guards bars inserted among held ones, and the append door commits a
+`Follows` batch to a raw month with no witness, so asking one would refuse at a
+sealed month what the raw month takes.
+
+**A revision ordinal holding a `.sbar` is stepped over.** `write_revision`
+refused an ordinal that already held a `.bin`, `.crc`, `.lock` or `.tix`, but
+not a `.sbar`; a raw revision written beside one would publish bars no reader
+opens. Now `Incomplete`, stepped over and named like the others.
+
+**FM-283 at this door: committed bars are never rewritten.** The failure
+matrix feared an append into an open compressed block. The design never has
+one: a month is sealed whole once closed, and a bar it lacks lands only as a
+whole successor generation. A kill at any step before that generation is
+promoted leaves the sealed month served bit for bit: a torn ordinal is kept as
+found and stepped over, a whole unpromoted one is found again
+(`Published::Reused`) and promoted (invariant SC4-14). The kill points of the
+sealer itself are SC-6's.
+
+**Not decided here.** The failure kinds of IA-16's typed repair door are
+IA-16's: `Sealed` must be one of them (not merged when this landed). A repair
+or promotion over a month whose `.lock` a retirement removed would be refused
+for want of the lock (`repair::publish`, `generation::promote` take it shared);
+retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
+teach those two that a sealed source needs none. Sealing itself is SC-6's.

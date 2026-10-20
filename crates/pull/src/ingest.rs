@@ -1802,8 +1802,12 @@ fn rows_mode(
     // back-fill door tries the append door first, and repairs only a month
     // that lacks the whole batch where no append can ever land it.
     let held = match door {
+        // THE WORKER'S DOOR FILES NOTHING AS A GENERATION (D-3353): a sealed
+        // month's refusal commits nothing, and the GDFL coordinator files the
+        // batch again through the back-fill door, which routes it (SC-4).
         RowsDoor::Append => write_and_count(bars, store_root, symbol_id, parts, key)
-            .map(|(one, committed)| (one, committed, Filed::Appended)),
+            .map(|(one, committed)| (one, committed, Filed::Appended))
+            .map_err(|unwritten| unwritten.why),
         RowsDoor::BackFill { reason } => back_fill_or_append(
             bars,
             store_root,
@@ -2203,8 +2207,15 @@ fn write_month(
         month,
     };
     let written = match mode {
-        Mode::Append => write_and_count(slice, store_root, identity.symbol_id, parts, key)
-            .map(|(held, written)| (held, written, Vec::new())),
+        // FORM-BLIND (SC-4, D-5904): a sealed month's late day is filed as its
+        // successor generation, exactly where its raw form would append it.
+        Mode::Append => append_or_successor(
+            slice,
+            (store_root, identity.symbol_id),
+            (parts, key),
+            repair_policy(plan).open_interest_applies,
+            None,
+        ),
         Mode::Repair { reason } => repair_or_append(
             slice,
             store_root,
@@ -2432,6 +2443,153 @@ fn repair_policy(plan: Plan<'_>) -> store::repair::Policy {
     }
 }
 
+/// Why [`write_and_count`] committed nothing: the append door's words, and,
+/// for a month held in its SEALED form (SC-4, D-5904), what the same batch
+/// would have met at the month in its raw form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Unwritten {
+    /// The refusal, in the store's or the path's own words.
+    why: String,
+    /// `Some` only for `store::file::StoreError::Sealed`.
+    sealed: Option<store::file::SealedOffer>,
+}
+
+impl Unwritten {
+    /// The store's refusal, keeping the sealed month's offer.
+    fn of_store(why: &store::file::StoreError) -> Self {
+        let sealed = match why {
+            store::file::StoreError::Sealed { offer, .. } => Some(*offer),
+            _ => None,
+        };
+        Self {
+            why: why.to_string(),
+            sealed,
+        }
+    }
+
+    /// Whether the batch is one the month's raw form would have appended
+    /// (`SealedOffer::Follows`): the one refusal [`append_or_successor`]
+    /// files as the month's successor generation instead of refusing it.
+    fn follows_a_sealed_month(&self) -> bool {
+        self.sealed == Some(store::file::SealedOffer::Follows)
+    }
+}
+
+impl From<String> for Unwritten {
+    fn from(why: String) -> Self {
+        Self { why, sealed: None }
+    }
+}
+
+/// The reason journaled with a sealed month's successor generation (SC-4,
+/// D-5904): bars after its last held bar, which its raw form would append.
+/// First in the field and short, so `ledger_field`'s 160 characters keep it
+/// and most of a caller's own reason after it.
+const SEALED_SUCCESSOR: &str = "sealed-month successor, bars after its last (SC-4 D-5904)";
+
+/// THE APPEND DOOR, BLIND TO THE MONTH'S FORM (SC-4, D-5904; design §3,
+/// §4.5, §6 "a late day for a sealed month").
+///
+/// [`write_and_count`] first, exactly as before: a new month, a tail of a raw
+/// month and a batch already held (`AlreadyPresent`, in either form) land or
+/// answer as they always did. A month held in its SEALED form refuses every
+/// batch it does not hold (`StoreError::Sealed`), and a sealed month is
+/// never appended to. A batch its raw form WOULD have committed
+/// (`SealedOffer::Follows`: a late day after the month's last bar, or a
+/// resumed batch whose held part matches byte for byte) is filed as the
+/// month's successor generation through the one repair authority
+/// ([`repair_after`], `store::repair::repair_month`), which reads the sealed
+/// month through the read door and publishes every held bar plus the new
+/// ones as a raw month; it is sealed again later like any other. Every other
+/// refusal stands in the store's own words, exactly as the raw month's would
+/// (`SealedOffer::Disagrees` is the raw form's `OverlapDisagrees`). So the
+/// outcome of every batch is the one the month's raw form gives it, and the
+/// form is never the content.
+///
+/// # Journaled before and after
+///
+/// The `repairing` line is appended to `<store>/audit/<vendor>.repairs`
+/// BEFORE the successor is published (the back-fill door's rule: no
+/// generation is ever served that the journal does not name), naming the
+/// generation served and [`SEALED_SUCCESSOR`]; the repair's own `repair` or
+/// `refused` line follows it. A `repairing` line that cannot be written
+/// refuses the batch before anything is published.
+///
+/// # The basis witness is not asked
+///
+/// `store::repair::Policy::basis_witness` guards bars a repair inserts among
+/// held ones from a feed whose prices are adjusted as of the pull date. A
+/// `Follows` batch is one the append door commits after the last held bar
+/// with no witness at a raw month; asking one here would refuse at a sealed
+/// month what the raw month takes. Held bars the batch overlaps were already
+/// compared byte for byte by the store (`SealedOffer::Follows` says so), and
+/// the repair compares them again under `policy`.
+///
+/// # Cost
+///
+/// [`write_and_count`]'s for every batch but a sealed month's `Follows`;
+/// that one reads and merges every bar the served generation holds and
+/// writes it again: O(held + offered), bounded by `store::repair::MAX_ROWS`,
+/// one generation a batch, at most `store::repair::MAX_REVISIONS` a month.
+/// Not O(1), and not on a read path (`docs/06-limits.md` L-SC4-01).
+fn append_or_successor(
+    bars: &[store::format::Bar],
+    (store_root, symbol_id): (&Path, u32),
+    (parts, key): (PathParts<'_>, EntryKey),
+    open_interest_applies: bool,
+    reason: Option<&str>,
+) -> Result<(Held, usize, Vec<i64>), String> {
+    let unwritten = match write_and_count(bars, store_root, symbol_id, parts, key) {
+        Ok((held, written)) => return Ok((held, written, Vec::new())),
+        Err(unwritten) if unwritten.follows_a_sealed_month() => unwritten,
+        Err(unwritten) => return Err(unwritten.why),
+    };
+    successor_of_sealed(
+        &unwritten.why,
+        bars,
+        (store_root, symbol_id),
+        (parts, key),
+        (open_interest_applies, reason),
+    )
+}
+
+/// [`append_or_successor`]'s second half: the `repairing` line, then the
+/// repair, outside any durable batch (the repair's flushes are its own,
+/// D-3350).
+fn successor_of_sealed(
+    appended: &str,
+    bars: &[store::format::Bar],
+    (store_root, symbol_id): (&Path, u32),
+    (parts, key): (PathParts<'_>, EntryKey),
+    (open_interest_applies, reason): (bool, Option<&str>),
+) -> Result<(Held, usize, Vec<i64>), String> {
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let served = store::generation::served(store_root, path)
+        .map_err(|why| format!("{appended}; the generation served could not be read: {why}"))?
+        .ordinal();
+    let reason = reason.map_or_else(
+        || SEALED_SUCCESSOR.to_owned(),
+        |caller| format!("{SEALED_SUCCESSOR}: {caller}"),
+    );
+    journal_intent(store_root, &parts, served, bars, &reason).map_err(|why| {
+        format!(
+            "{appended}; not filed as the sealed month's successor generation: the repair journal would not take the `repairing` line ({why}), so nothing was published"
+        )
+    })?;
+    let _outside_the_batch = store::file::DurableBatch::suspend();
+    let policy = store::repair::Policy {
+        open_interest_applies,
+        basis_witness: false,
+    };
+    repair_after(
+        appended,
+        bars,
+        (store_root, symbol_id),
+        (parts, key),
+        (policy, &reason),
+    )
+}
+
 /// THE REPAIR DOOR (D-3350): the append door first, and a versioned repair of
 /// the month when the append door refuses it.
 ///
@@ -2452,7 +2610,7 @@ fn repair_or_append(
     match write_and_count(bars, store_root, symbol_id, parts, key) {
         Ok((held, written)) => Ok((held, written, Vec::new())),
         Err(appended) => repair_after(
-            &appended,
+            &appended.why,
             bars,
             (store_root, symbol_id),
             (parts, key),
@@ -2647,7 +2805,27 @@ fn back_fill_or_append(
 ) -> Result<(Held, usize, Filed), String> {
     let appended = match write_and_count(bars, store_root, symbol_id, parts, key) {
         Ok((held, written)) => return Ok((held, written, Filed::Appended)),
-        Err(why) => why,
+        // A SEALED MONTH'S LATE DAY (SC-4, D-5904): what its raw form would
+        // append is its successor generation, before the back-fill's own
+        // judgement, which asks only of bars no append could ever land.
+        Err(unwritten) if unwritten.follows_a_sealed_month() => {
+            return successor_of_sealed(
+                &unwritten.why,
+                bars,
+                (store_root, symbol_id),
+                (parts, key),
+                (policy.open_interest_applies, Some(reason)),
+            )
+            .map(|(held, added, added_at)| {
+                let filed = if added_at.is_empty() {
+                    Filed::Appended
+                } else {
+                    Filed::NewGeneration
+                };
+                (held, added, filed)
+            });
+        }
+        Err(unwritten) => unwritten.why,
     };
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
     let served = match lack_of(store_root, path, symbol_id, bars) {
@@ -4118,7 +4296,16 @@ fn derive(
     // separately — the receipt's `derived` line already says how many rungs
     // landed, and a second number for the same fact would be a second thing to
     // keep in step.
-    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, written)| {
+    // FORM-BLIND (SC-4, D-5904): a derived rung month held sealed takes the
+    // bars its raw form would append as its successor generation.
+    append_or_successor(
+        &bars,
+        (store_root, symbol_id),
+        (parts, key),
+        crate::vendor::open_interest_applies(segment),
+        None,
+    )
+    .map(|(held, written, _added_at)| {
         // THE MONTH'S `derive` LINE (D-3321 item 3, D-3335), when the month
         // changed or still owes something: a re-derive that wrote nothing and
         // withheld nothing has nothing new to say.
@@ -4235,13 +4422,16 @@ fn reconcile_derived(
 /// # Errors
 ///
 /// The path's refusal or the store's, in its own words.
+/// A SEALED month (SC-4, D-5904) is [`Unwritten::sealed`]: what the raw form
+/// would have done with the batch, so the caller answers it as it answers a
+/// raw month ([`append_or_successor`]).
 fn write_and_count(
     bars: &[store::format::Bar],
     store_root: &Path,
     symbol_id: u32,
     parts: PathParts<'_>,
     key: EntryKey,
-) -> Result<(Held, usize), String> {
+) -> Result<(Held, usize), Unwritten> {
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
     // A MONTH SERVED FROM A REPAIR REVISION (D-3350). The writer door refuses
     // it — an append to its original would never be served — so a batch it
@@ -4251,7 +4441,8 @@ fn write_and_count(
     if let store::generation::Served::Revision(pointer) =
         store::generation::served(store_root, path).map_err(|why| why.to_string())?
     {
-        return already_served(bars, store_root, path, symbol_id, key, pointer);
+        return already_served(bars, store_root, path, symbol_id, key, pointer)
+            .map_err(Unwritten::from);
     }
     let mut file =
         BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
@@ -4277,7 +4468,7 @@ fn write_and_count(
     // batch's first record landed, so the difference is what this call wrote.
     // On a partial overlap `append` recurses on the suffix, so both values
     // describe the suffix and the subtraction is right without knowing that.
-    let written = match file.append(bars).map_err(|why| why.to_string())? {
+    let written = match file.append(bars).map_err(|why| Unwritten::of_store(&why))? {
         store::file::Appended::Committed {
             first_index,
             n_valid,
