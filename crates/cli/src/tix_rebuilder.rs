@@ -31,7 +31,10 @@
 //! * a month already indexed is kept, after three reads, so a rerun is safe;
 //! * each month built is then reopened through the READ door and asked how it
 //!   looks a timestamp up, so "indexed" in the receipt is what a reader sees,
-//!   not what the writer believes.
+//!   not what the writer believes;
+//! * a month its served generation holds SEALED (`.sbar`) is `sealed`: its own
+//!   time table answers every lookup, so no `.tix` is needed, nothing is
+//!   written, and the read-back must find the sealed table (SC-3, D-5899).
 //!
 //! `--dry-run` opens every month read-only, says which are indexed and which
 //! would be built, and writes nothing.
@@ -234,6 +237,9 @@ enum Line {
     /// Under the small-month threshold with no `.tix`: none is made, nothing
     /// was written, and a reader bisects by rule (D-4933).
     Small { n_valid: u64 },
+    /// Held SEALED by its served generation: its own time table answers every
+    /// lookup, no `.tix` is needed and nothing was written (SC-3, D-5899).
+    Sealed { n_valid: u64 },
 }
 
 impl Line {
@@ -246,6 +252,7 @@ impl Line {
                 | Self::Indexed { .. }
                 | Self::WouldBuild { .. }
                 | Self::Small { .. }
+                | Self::Sealed { .. }
         )
     }
 }
@@ -297,6 +304,7 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
             };
         }
         Reindexed::BelowThreshold => Line::Small { n_valid },
+        Reindexed::Sealed => Line::Sealed { n_valid },
         // `Reindexed` is non-exhaustive: an outcome this build does not know
         // is not a month it can call indexed.
         other => {
@@ -313,7 +321,12 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         {
             line
         }
-        Ok((_, TimeLookup::Indexed)) if !matches!(line, Line::Small { .. }) => line,
+        // A SEALED MONTH IS READ BACK TOO: a reader must go through its time
+        // table, so the receipt's `sealed` is what a reader sees.
+        Ok((_, TimeLookup::Sealed)) if matches!(line, Line::Sealed { .. }) => line,
+        Ok((_, TimeLookup::Indexed)) if matches!(line, Line::Kept { .. } | Line::Built { .. }) => {
+            line
+        }
         Ok((_, reader)) => Line::NotIndexed {
             n_valid,
             reader: format!("{reader:?}"),
@@ -329,6 +342,7 @@ fn inspect(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
     match reader_view(root, path, symbol_id) {
         Ok((n_valid, TimeLookup::Indexed)) => Line::Indexed { n_valid },
         Ok((n_valid, TimeLookup::Bisection(Why::BelowThreshold))) => Line::Small { n_valid },
+        Ok((n_valid, TimeLookup::Sealed)) => Line::Sealed { n_valid },
         Ok((n_valid, TimeLookup::Bisection(why))) => Line::WouldBuild {
             n_valid,
             why: why.to_string(),
@@ -379,6 +393,10 @@ fn render_line(out: &mut String, month: YearMonth, line: &Line) {
         Line::Small { n_valid } => writeln!(
             out,
             "  {month}  small         {n_valid:>9} bars  under {INDEX_MIN_ROWS} bars: no .tix by the small-month rule (D-4933); a reader bisects in at most ten reads; nothing written"
+        ),
+        Line::Sealed { n_valid } => writeln!(
+            out,
+            "  {month}  sealed        {n_valid:>9} bars  its own time table answers every lookup; no .tix is needed (D-5899); nothing written"
         ),
     };
 }
@@ -445,39 +463,60 @@ pub(crate) fn command_with(
         render_line(out, month, &line);
         lines.push(line);
     }
-    let count = |want: fn(&Line) -> bool| lines.iter().filter(|line| want(line)).count();
     let clean = lines.iter().all(Line::clean);
-    if ask.dry_run {
+    render_receipt(out, ask.dry_run, &lines, clean);
+    if clean { OK } else { FAILED }
+}
+
+/// The run's closing tally: every outcome counted once, in both runs.
+fn render_receipt(out: &mut String, dry_run: bool, lines: &[Line], clean: bool) {
+    let count = |want: fn(&Line) -> bool| lines.iter().filter(|line| want(line)).count();
+    if dry_run {
         let _ = writeln!(
             out,
-            "Indexed {}, would build {}, small {}, not held {}, refused {}. Nothing was written.",
+            "Indexed {}, would build {}, small {}, sealed {}, not held {}, refused {}. Nothing was written.",
             count(|line| matches!(line, Line::Indexed { .. })),
             count(|line| matches!(line, Line::WouldBuild { .. })),
             count(|line| matches!(line, Line::Small { .. })),
+            count(|line| matches!(line, Line::Sealed { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
         );
     } else {
+        let (small, sealed) = (
+            count(|line| matches!(line, Line::Small { .. })),
+            count(|line| matches!(line, Line::Sealed { .. })),
+        );
+        let verdict = if clean {
+            format!(
+                "every month in the span is indexed{}{}",
+                if small > 0 {
+                    ", or holds too few bars to need an index (D-4933)"
+                } else {
+                    ""
+                },
+                if sealed > 0 {
+                    ", or sealed with its own time table (D-5899)"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            "NOT every month in the span is indexed; rerun once the cause is gone (a rerun keeps \
+             what is built)"
+                .to_owned()
+        };
         let _ = writeln!(
             out,
-            "Built {}, kept {}, small {}, unindexable {}, not indexed {}, not held {}, refused {}: {}",
+            "Built {}, kept {}, small {small}, sealed {sealed}, unindexable {}, not indexed {}, not held {}, refused {}: {verdict}",
             count(|line| matches!(line, Line::Built { .. })),
             count(|line| matches!(line, Line::Kept { .. })),
-            count(|line| matches!(line, Line::Small { .. })),
             count(|line| matches!(line, Line::Unindexable { .. })),
             count(|line| matches!(line, Line::NotIndexed { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
-            if clean && count(|line| matches!(line, Line::Small { .. })) > 0 {
-                "every month in the span is indexed, or holds too few bars to need an index (D-4933)"
-            } else if clean {
-                "every month in the span is indexed"
-            } else {
-                "NOT every month in the span is indexed; rerun once the cause is gone (a rerun keeps what is built)"
-            }
         );
     }
-    if clean { OK } else { FAILED }
 }
 
 /// One month built as an item of an upkeep run (R3-17, D-5839): the step

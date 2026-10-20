@@ -161,6 +161,9 @@ impl<'a, B: ReadAt> Span<'a, B> {
 struct Entry {
     name: Vec<u8>,
     method: u64,
+    /// The general-purpose flag (APPNOTE 4.4.4): bit 0 is encryption, bit
+    /// 3 a data descriptor after the data.
+    flags: u16,
     crc32: u32,
     /// Compressed length: the stored bytes, for a stored member.
     packed: u64,
@@ -187,7 +190,64 @@ fn zip64_block(extra: &[u8]) -> &[u8] {
     &[]
 }
 
-/// Every central-directory record of the zip in `span`, in order.
+/// The length of a ZIP64 end record with no extensible data: its 12-byte
+/// head plus the 44 bytes its size field then states (APPNOTE 4.3.14), as
+/// every real container measured writes it (design §8 B7: 56 + 20 = 76
+/// bytes before the end record).
+const ZIP64_RECORD_LEN: u64 = 56;
+
+/// What a ZIP64 end record of [`ZIP64_RECORD_LEN`] states its own size as.
+const ZIP64_RECORD_SIZE_FIELD: u64 = 44;
+
+/// Where the ZIP64 end record starts when it sits, as APPNOTE lays it out,
+/// right before the 20-byte locator that precedes the end record at
+/// `end_at`, and states the size of a record with no extensible data;
+/// `None` otherwise, when the locator's stated offset is the only word on
+/// it. Two reads, O(1).
+fn zip64_record_at<B: ReadAt>(span: &Span<'_, B>, end_at: u64) -> Result<Option<u64>, CmRefusal> {
+    let Some(at) = end_at.checked_sub(20 + ZIP64_RECORD_LEN) else {
+        return Ok(None);
+    };
+    let head = span.read(at, 12)?;
+    let found = signed(&head, 0, ZIP64_END_SIGNATURE)
+        && le(&head, 4, 8, CUT_SHORT).is_ok_and(|size| size == ZIP64_RECORD_SIZE_FIELD);
+    Ok(found.then_some(at))
+}
+
+/// Refuses a zip whose central directory, as its end record states it
+/// (`offset`, `size`, `count` records), ends before `actual`, where the next
+/// record actually starts, AND whose first central record is found that
+/// many bytes later (design §8 B7): the bytes between are a prefix its
+/// offsets were not adjusted for, [`CmRefusal::ArchivePrefixed`], named
+/// before the directory is read. A directory stated short with no record
+/// where the prefix would put it is not a prefix: the walk that follows
+/// refuses it by what it finds (a record cut short, a size that does not
+/// match), as does one stated to run past `actual`. One 4-byte read, O(1).
+fn unprefixed<B: ReadAt>(
+    span: &Span<'_, B>,
+    actual: u64,
+    (offset, size, count): (u64, u64, u64),
+) -> Result<(), CmRefusal> {
+    let Some(bytes) = offset
+        .checked_add(size)
+        .and_then(|stated| actual.checked_sub(stated))
+        .filter(|bytes| *bytes > 0)
+    else {
+        return Ok(());
+    };
+    let shifted = offset
+        .checked_add(bytes)
+        .and_then(|at| span.read(at, 4).ok())
+        .is_some_and(|head| signed(&head, 0, CENTRAL_SIGNATURE));
+    if count == 0 || shifted {
+        return Err(CmRefusal::ArchivePrefixed { bytes });
+    }
+    Ok(())
+}
+
+/// The central directory's `(count, size, offset)` as the end record states
+/// them, from the ZIP64 end record when a locator precedes it, with a prefix
+/// named before any of them is used (design §8 B7).
 ///
 /// The end record is the last 22 bytes plus a comment; when a ZIP64 locator
 /// sits right before it, the ZIP64 end record gives the count, size and
@@ -197,8 +257,7 @@ fn zip64_block(extra: &[u8]) -> &[u8] {
 /// other 3,953 saturate the offset alone and carry it in a ZIP64 block before
 /// the `UT` block, which is the layout this reader was written against (its
 /// whole central directory walked with `od`, charter GDFL section, D-0812).
-/// The walked records must end exactly at the declared directory size.
-fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefusal> {
+fn directory_bounds<B: ReadAt>(span: &Span<'_, B>) -> Result<(u64, u64, u64), CmRefusal> {
     let tail_len = span.len.min(TAIL_MAX);
     let tail_at = span.len - tail_len;
     let tail = span.read(tail_at, tail_len)?;
@@ -221,6 +280,15 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
         None => None,
     };
     if let Some(locator) = locator {
+        // The prefix is measured first, from the ZIP64 end record found where
+        // APPNOTE puts it (design §8 B7), so it is named before the
+        // locator's stated offset, short by the prefix in a prefixed zip, is
+        // used to read the record as before.
+        if let Some(found) = zip64_record_at(span, end_at)? {
+            let record = span.read(found, ZIP64_RECORD_LEN)?;
+            let field = |at| le(&record, at, 8, CUT_SHORT);
+            unprefixed(span, found, (field(48)?, field(40)?, field(32)?))?;
+        }
         let record = span.read(le(&locator, 8, 8, CUT_SHORT)?, 56)?;
         if !signed(&record, 0, ZIP64_END_SIGNATURE) {
             return Err(CmRefusal::ArchiveMalformed {
@@ -234,7 +302,17 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
         return Err(CmRefusal::ArchiveMalformed {
             what: SATURATED_WITHOUT_LOCATOR,
         });
+    } else {
+        unprefixed(span, end_at, (offset, size, count))?;
     }
+    Ok((count, size, offset))
+}
+
+/// Every central-directory record of the zip in `span`, in order, from the
+/// bounds [`directory_bounds`] reads. The walked records must end exactly
+/// at the declared directory size.
+fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefusal> {
+    let (count, size, offset) = directory_bounds(span)?;
     if size > CENTRAL_CAP {
         return Err(CmRefusal::ArchiveMalformed {
             what: CENTRAL_OVER_CAP,
@@ -255,6 +333,7 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
         let extra_len = index(field(30, 2)?);
         let comment_len = index(field(32, 2)?);
         let method = field(10, 2)?;
+        let flags = u16::try_from(field(8, 2)?).unwrap_or(u16::MAX);
         let crc32 = u32::try_from(field(16, 4)?).unwrap_or_default();
         let (packed, len, local) = (field(20, 4)?, field(24, 4)?, field(42, 4)?);
         let cut = CmRefusal::ArchiveMalformed { what: CUT_SHORT };
@@ -281,6 +360,7 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
         entries.push(Entry {
             name: name.to_vec(),
             method,
+            flags,
             crc32,
             packed,
             len,
@@ -326,11 +406,48 @@ pub fn day_zip_name(kind: CmKind, day: Day) -> String {
     )
 }
 
-/// The tree and day a member name files, when it is exactly a day zip's name.
-fn day_zip(name: &str) -> Option<(CmKind, Day)> {
-    let file = name.rsplit_once('/')?.1;
-    let (kind, day) = crate::gdfl_cm::folder_day(file.strip_suffix(".zip")?).ok()?;
-    (day_zip_name(kind, day) == name).then_some((kind, day))
+/// What one central-directory name is to the day table (design §8 C2, C3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Named {
+    /// Exactly a day zip's name: filed where its name says it belongs.
+    DayZip(CmKind, Day),
+    /// A day zip's file name under another folder than the one its name
+    /// files it in, the root included (C3, F9): `day_zip_misfiled`.
+    Misfiled(CmKind, Day),
+    /// A tree's day-zip prefix and `.zip` around something that is not a
+    /// real `ddmmyyyy` (C2): `day_zip_name_invalid`, named in the census.
+    Invalid,
+    /// Anything else: a folder entry, a stray file.
+    Other,
+}
+
+/// What `name` is to the day table. A tree's prefix and a real `ddmmyyyy`
+/// name a copy of that day wherever it lies and whatever follows the date
+/// (`... (1).zip`), as the loose zips' rule does (D-4834); only the exact
+/// name at its own place is the day zip. O(the name's length).
+fn named(name: &str) -> Named {
+    let file = name.rsplit_once('/').map_or(name, |(_, file)| file);
+    let Some(stem) = file.strip_suffix(".zip") else {
+        return Named::Other;
+    };
+    for kind in [CmKind::Indices, CmKind::Stocks] {
+        let Some(rest) = stem.strip_prefix(kind.descriptor().folder_prefix) else {
+            continue;
+        };
+        let Some(day) = rest.get(..8).and_then(crate::gdfl_cm::ddmmyyyy) else {
+            return Named::Invalid;
+        };
+        return if day_zip_name(kind, day) == name {
+            Named::DayZip(kind, day)
+        } else {
+            Named::Misfiled(kind, day)
+        };
+    }
+    if stem.starts_with("GFDLCM_") {
+        Named::Invalid
+    } else {
+        Named::Other
+    }
 }
 
 /// Where one stored day zip lies in the outer archive.
@@ -342,6 +459,65 @@ struct Inner {
     len: u64,
 }
 
+/// How many names of one kind the archive census names before it only
+/// counts (D-4817: ≤ 16 named per reason).
+pub const CENSUS_NAMED: usize = 16;
+
+/// What the outer archive's names were, beside the day zips it files
+/// (design §8 A10, C2, C3; D-4817): counted, the first [`CENSUS_NAMED`] of
+/// each named. Report only: the days it concerns are refused by name on
+/// their own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveCensus {
+    /// Names that are not day zips at all: folder entries, stray files.
+    pub ignored: usize,
+    /// Day-zip file names under another folder than their own.
+    pub misfiled: usize,
+    /// The first misfiled names, as found.
+    pub misfiled_named: Vec<String>,
+    /// Names with a tree's prefix whose date is not a real `ddmmyyyy`.
+    pub invalid: usize,
+    /// The first invalid names, as found.
+    pub invalid_named: Vec<String>,
+}
+
+impl ArchiveCensus {
+    /// Counts `name` under `count`, naming it while fewer than
+    /// [`CENSUS_NAMED`] are named.
+    fn note(count: &mut usize, named: &mut Vec<String>, name: &str) {
+        *count += 1;
+        if named.len() < CENSUS_NAMED {
+            named.push(name.to_owned());
+        }
+    }
+}
+
+/// What the day table holds for one tree and day (D-4818): the stored day
+/// zip, or the fault of its container that refuses that day only. 24 bytes
+/// as `Option<Slot>`, the same as the plain table it replaced, so the
+/// table's worst case (`docs/06-limits.md`) is unchanged.
+#[derive(Debug, Clone)]
+enum Slot {
+    /// One stored, readable day zip at its own place.
+    Held(Inner),
+    /// Two copies of the day, a lone copy under another folder, or a lone
+    /// copy the reader cannot take as it is stored.
+    Refused(Box<CmRefusal>),
+}
+
+/// The one rule every zip source files a copy of a day by (D-4818, design
+/// §8 A16, A17, B19, C3): the first copy fills the day's slot, at its own
+/// place as the day zip (or the fault that keeps it from being read) and
+/// anywhere else as `day_zip_misfiled`, naming where it was found; a second
+/// copy, wherever it lies, makes the day `archive_duplicate_day`. Each for
+/// that day only.
+fn file_copy(cell: &mut Option<Slot>, day: Day, copy: Result<Inner, CmRefusal>) {
+    *cell = Some(match cell {
+        Some(_) => Slot::Refused(Box::new(CmRefusal::ArchiveDuplicateDay { day })),
+        None => copy.map_or_else(|why| Slot::Refused(Box::new(why)), Slot::Held),
+    });
+}
+
 /// The outer archive, its central directory read once into a dense table of
 /// day zips per tree, indexed by days since the archive's first day.
 #[derive(Debug)]
@@ -350,10 +526,12 @@ pub struct Archive<B> {
     len: u64,
     /// The first day any day zip names, in days since the epoch.
     first: u32,
-    /// Day zips of the index tree, then of the stock tree.
-    days: [Vec<Option<Inner>>; 2],
-    /// Names that are not day zips: folder entries and anything else.
-    ignored: usize,
+    /// Day zips of the index tree, then of the stock tree, each the stored
+    /// day zip or the fault of its container that refuses that day only
+    /// (D-4818).
+    days: [Vec<Option<Slot>>; 2],
+    /// What the names beside the day zips were.
+    census: ArchiveCensus,
     /// What every day listing files (D-3333): the swept surface unless
     /// [`Archive::with_scope`] names another.
     scope: Arc<CmScope>,
@@ -382,57 +560,101 @@ const fn tree(kind: CmKind) -> usize {
     }
 }
 
+/// The general-purpose flag's encryption bit (APPNOTE 4.4.4, bit 0).
+const ENCRYPTED: u16 = 1;
+
+/// The fault, if any, that keeps a member from being read as it is stored:
+/// encryption first, as [`member_bytes`] checks it, then a method other
+/// than stored for a day zip read in place.
+fn stored_fault(name: &str, method: u64, flags: u16) -> Option<CmRefusal> {
+    if flags & ENCRYPTED != 0 {
+        return Some(CmRefusal::ArchiveMemberEncrypted {
+            member: name.to_owned(),
+        });
+    }
+    (method != 0).then(|| CmRefusal::ArchiveMemberCompressed {
+        member: name.to_owned(),
+    })
+}
+
 impl<B: ReadAt> Archive<B> {
     /// Reads the central directory of `len` bytes of `source` once, O(entries),
-    /// and files every day zip by tree and day.
+    /// and files every day zip by tree and day. A fault of one day zip
+    /// refuses that day only, never the archive (D-4818): a compressed or
+    /// encrypted day zip, two for one day, or one under another folder than
+    /// its name's. Each is answered by [`CmSource::day`] for its day.
     ///
     /// # Errors
     ///
     /// [`CmRefusal::ArchiveUnavailable`] on a failed read,
-    /// [`CmRefusal::ArchiveMalformed`] when the bytes are not a zip,
-    /// [`CmRefusal::ArchiveMemberCompressed`] for a day zip that is not
-    /// stored, and [`CmRefusal::ArchiveDuplicateDay`] for two day zips of one
-    /// tree on one day.
+    /// [`CmRefusal::ArchiveMalformed`] when the bytes are not a zip, and
+    /// [`CmRefusal::ArchivePrefixed`] when bytes precede its first record.
     pub fn from_source(source: B, len: u64) -> Result<Self, CmRefusal> {
         let entries = central_directory(&Span::of(&source, len))?;
-        let mut found = Vec::with_capacity(entries.len());
-        let mut ignored = 0_usize;
+        // Two passes over the directory already in memory, so the table is
+        // sized once and filled in place: no map, no sort (CM-13).
+        let days_named =
+            entries
+                .iter()
+                .filter_map(|entry| match named(&String::from_utf8_lossy(&entry.name)) {
+                    Named::DayZip(_, day) | Named::Misfiled(_, day) => Some(day.days_from_epoch()),
+                    Named::Invalid | Named::Other => None,
+                });
+        let span = days_named.fold(None, |span: Option<(u32, u32)>, day| {
+            Some(span.map_or((day, day), |(lo, hi)| (lo.min(day), hi.max(day))))
+        });
+        // One cell per day from the first day zip named to the last, none
+        // when the archive names none.
+        let first = span.map_or(0, |(lo, _)| lo);
+        let width = span.map_or(0, |(lo, hi)| index(u64::from(hi - lo)) + 1);
+        let mut days = [vec![None; width], vec![None; width]];
+        let mut census = ArchiveCensus::default();
         for entry in entries {
             let name = String::from_utf8_lossy(&entry.name);
-            let Some((kind, day)) = day_zip(&name) else {
-                ignored += 1;
-                continue;
+            let (kind, day, copy) = match named(&name) {
+                Named::DayZip(kind, day) => {
+                    let copy = stored_fault(&name, entry.method, entry.flags).map_or(
+                        Ok(Inner {
+                            header: entry.offset,
+                            len: entry.packed,
+                        }),
+                        Err,
+                    );
+                    (kind, day, copy)
+                }
+                Named::Misfiled(kind, day) => {
+                    let ArchiveCensus {
+                        misfiled,
+                        misfiled_named,
+                        ..
+                    } = &mut census;
+                    ArchiveCensus::note(misfiled, misfiled_named, &name);
+                    let why = CmRefusal::DayZipMisfiled {
+                        found: name.clone().into_owned(),
+                        expected: day_zip_name(kind, day),
+                    };
+                    (kind, day, Err(why))
+                }
+                Named::Invalid => {
+                    let ArchiveCensus {
+                        invalid,
+                        invalid_named,
+                        ..
+                    } = &mut census;
+                    ArchiveCensus::note(invalid, invalid_named, &name);
+                    continue;
+                }
+                Named::Other => {
+                    census.ignored += 1;
+                    continue;
+                }
             };
-            if entry.method != 0 {
-                return Err(CmRefusal::ArchiveMemberCompressed {
-                    member: name.into_owned(),
-                });
-            }
-            let inner = Inner {
-                header: entry.offset,
-                len: entry.packed,
-            };
-            found.push((kind, day, inner));
-        }
-        let first = found
-            .iter()
-            .map(|(_, day, _)| day.days_from_epoch())
-            .min()
-            .unwrap_or(0);
-        let width = found
-            .iter()
-            .map(|(_, day, _)| index(u64::from(day.days_from_epoch() - first)) + 1)
-            .max()
-            .unwrap_or(0);
-        let mut days = [vec![None; width], vec![None; width]];
-        for (kind, day, inner) in found {
             let slot = index(u64::from(day.days_from_epoch() - first));
-            let held = days
+            if let Some(cell) = days
                 .get_mut(tree(kind))
                 .and_then(|table| table.get_mut(slot))
-                .map(|cell| cell.replace(inner));
-            if matches!(held, Some(Some(_))) {
-                return Err(CmRefusal::ArchiveDuplicateDay { day });
+            {
+                file_copy(cell, day, copy);
             }
         }
         Ok(Self {
@@ -440,7 +662,7 @@ impl<B: ReadAt> Archive<B> {
             len,
             first,
             days,
-            ignored,
+            census,
             scope: CmScope::swept_shared(),
         })
     }
@@ -451,24 +673,36 @@ impl<B: ReadAt> Archive<B> {
         Self { scope, ..self }
     }
 
-    /// How many names in the archive are not day zips. Report only: the
-    /// census lists them, and nothing here refuses one.
+    /// How many names in the archive are not day zips filed where their own
+    /// name says: folder entries, stray files, invalid and misfiled day-zip
+    /// names. Report only: [`Archive::census`] names them, and a misfiled
+    /// one refuses its own day.
     #[must_use]
     pub const fn ignored(&self) -> usize {
-        self.ignored
+        self.census.ignored + self.census.invalid + self.census.misfiled
+    }
+
+    /// What the names beside the day zips were (D-4817).
+    #[must_use]
+    pub const fn census(&self) -> &ArchiveCensus {
+        &self.census
     }
 
     /// Where the day zip of `kind` on `day` lies: one index into the day
-    /// table, then its local header read and checked.
+    /// table, which holds the day zip or its refusal, then its local header
+    /// read and checked.
     fn day_zip_span(&self, kind: CmKind, day: Day) -> Result<Option<Inner>, CmRefusal> {
-        let Some(inner) = day
+        let Some(slot) = day
             .days_from_epoch()
             .checked_sub(self.first)
-            .and_then(|slot| self.days.get(tree(kind))?.get(index(u64::from(slot))))
-            .copied()
-            .flatten()
+            .map(|slot| index(u64::from(slot)))
         else {
             return Ok(None);
+        };
+        let inner = match self.days.get(tree(kind)).and_then(|table| table.get(slot)) {
+            Some(Some(Slot::Held(inner))) => *inner,
+            Some(Some(Slot::Refused(why))) => return Err(CmRefusal::clone(why)),
+            Some(None) | None => return Ok(None),
         };
         let outer = Span::of(&self.source, self.len);
         let local = outer.read(inner.header, 30)?;
@@ -500,6 +734,9 @@ pub struct ZipLocator {
     method: u16,
     /// The member's compressed length, as its central record states.
     packed: u64,
+    /// The member's general-purpose flag, as its central record states:
+    /// bit 0 refuses it as encrypted before any byte is inflated.
+    flags: u16,
 }
 
 /// "a member's data runs past its day zip": the local header's name and
@@ -546,6 +783,7 @@ impl<B: ReadAt> CmSource for Archive<B> {
                 header: entry.offset,
                 method: u16::try_from(entry.method).unwrap_or(u16::MAX),
                 packed: entry.packed,
+                flags: entry.flags,
             };
             listing.push(
                 &String::from_utf8_lossy(&entry.name),
@@ -588,6 +826,8 @@ impl<B: ReadAt> CmSource for Archive<B> {
 ///
 /// # Errors
 ///
+/// [`CmRefusal::ArchiveMemberEncrypted`] for a member whose flag sets bit 0,
+/// before any byte of it is read (D-4818),
 /// [`CmRefusal::ArchiveMalformed`] when the member's local header is not
 /// where its record says or its data runs past its zip,
 /// [`CmRefusal::ArchiveMethodUnknown`] for a method other than stored or
@@ -599,6 +839,11 @@ pub fn member_bytes<B: ReadAt>(
     entry: &str,
     len: u64,
 ) -> Result<Vec<u8>, CmRefusal> {
+    if at.flags & ENCRYPTED != 0 {
+        return Err(CmRefusal::ArchiveMemberEncrypted {
+            member: entry.to_owned(),
+        });
+    }
     let span = Span {
         src: source,
         base: at.base,
@@ -684,6 +929,7 @@ pub fn zip_entries<B: ReadAt>(source: &B, base: u64, len: u64) -> Result<Vec<Zip
                 header: entry.offset,
                 method: u16::try_from(entry.method).unwrap_or(u16::MAX),
                 packed: entry.packed,
+                flags: entry.flags,
             },
             raw_name: entry.name,
         })
@@ -697,16 +943,15 @@ pub fn zip_entries<B: ReadAt>(source: &B, base: u64, len: u64) -> Result<Vec<Zip
 ///
 /// # Errors
 ///
+/// [`CmRefusal::ArchiveMemberEncrypted`] for an encrypted member (D-4818),
 /// [`CmRefusal::ArchiveMemberCompressed`] for a member that is not stored,
 /// [`CmRefusal::ArchiveMalformed`] when its local header is not where its
 /// record says or its data runs past its zip, and
 /// [`CmRefusal::ArchiveUnavailable`] on a failed read.
 pub fn stored_span<B: ReadAt>(source: &B, entry: &ZipEntry) -> Result<(u64, u64), CmRefusal> {
     let at = entry.locator;
-    if at.method != 0 {
-        return Err(CmRefusal::ArchiveMemberCompressed {
-            member: entry.name.clone(),
-        });
+    if let Some(fault) = stored_fault(&entry.name, u64::from(at.method), at.flags) {
+        return Err(fault);
     }
     let span = Span {
         src: source,
@@ -774,6 +1019,13 @@ mod tests {
         len: u64,
         /// The central record's comment, which the reader must step over.
         comment: &'a str,
+        /// The general-purpose flag both headers state (bit 11, UTF-8, is
+        /// added to the central one as the vendor's writer sets it).
+        flags: u16,
+        /// A data descriptor after the data (bit 3), the local header's CRC
+        /// and sizes then deliberately wrong, as every outer day zip of the
+        /// operator's archives writes them zero (design §8 B13).
+        descriptor: bool,
     }
 
     fn put<'a>(name: &'a str, data: &'a [u8]) -> Put<'a> {
@@ -784,6 +1036,8 @@ mod tests {
             crc: crc32(data),
             len: data.len() as u64,
             comment: "",
+            flags: 0,
+            descriptor: false,
         }
     }
 
@@ -804,13 +1058,23 @@ mod tests {
         let mut central = Vec::new();
         for entry in entries {
             let offset = out.len() as u64;
+            let local_flags = entry.flags | if entry.descriptor { 8 } else { 0 };
             out.extend(0x0403_4b50_u32.to_le_bytes());
-            out.extend([20, 0, 0, 0]);
+            out.extend([20, 0]);
+            out.extend(local_flags.to_le_bytes());
             out.extend(entry.method.to_le_bytes());
             out.extend([0; 4]);
-            out.extend(entry.crc.to_le_bytes());
-            out.extend(u32le(entry.data.len() as u64));
-            out.extend(u32le(entry.len));
+            if entry.descriptor {
+                // Deliberately wrong: a reader that used these would read
+                // one byte, or none, of the member.
+                out.extend(0xDEAD_BEEF_u32.to_le_bytes());
+                out.extend(1_u32.to_le_bytes());
+                out.extend(0_u32.to_le_bytes());
+            } else {
+                out.extend(entry.crc.to_le_bytes());
+                out.extend(u32le(entry.data.len() as u64));
+                out.extend(u32le(entry.len));
+            }
             out.extend(u16le(entry.name.len()));
             // A wide entry's local header carries an extended-timestamp block
             // as Info-ZIP writes one, so the data starts after the name AND
@@ -824,6 +1088,12 @@ mod tests {
             out.extend(entry.name.as_bytes());
             out.extend(local_extra);
             out.extend(entry.data);
+            if entry.descriptor {
+                out.extend(0x0807_4b50_u32.to_le_bytes());
+                out.extend(entry.crc.to_le_bytes());
+                out.extend(u32le(entry.data.len() as u64));
+                out.extend(u32le(entry.len));
+            }
             let saturated = 0xFFFF_FFFF_u64;
             let (size, comp, at, extra): (u64, u64, u64, Vec<u8>) = match wide {
                 Wide::No => (entry.len, entry.data.len() as u64, offset, Vec::new()),
@@ -842,7 +1112,8 @@ mod tests {
                 }
             };
             central.extend(0x0201_4b50_u32.to_le_bytes());
-            central.extend([45, 3, 45, 0, 0, 8]);
+            central.extend([45, 3, 45, 0]);
+            central.extend((local_flags | 0x0800).to_le_bytes());
             central.extend(entry.method.to_le_bytes());
             central.extend([0; 4]);
             central.extend(entry.crc.to_le_bytes());
@@ -954,6 +1225,8 @@ mod tests {
             crc: crc32(raw),
             len: raw.len() as u64,
             comment: "",
+            flags: 0,
+            descriptor: false,
         }
     }
 
@@ -1166,17 +1439,32 @@ mod tests {
         );
     }
 
+    /// The next day's day zip: its own name, holding the same bytes, so a
+    /// test can show a fault of one day leaves the next one readable.
+    const NEXT_ZIP: &str = "INDICES/2024/APR_2024/GFDLCM_INDICES_TICK_02042024.zip";
+
+    fn next_day() -> Day {
+        Day::new(2024, 4, 2).unwrap()
+    }
+
+    /// B8 (D-4818, F13): a day zip the outer archive DEFLATES is refused for
+    /// its own day, by name, never for the whole archive; the next day
+    /// reads, and the refusal never closes the day it names.
     #[test]
     fn outer_member_not_stored_refuses() {
         let day_zip = inner(&csv());
         let mut entry = put(DAY_ZIP, &day_zip);
         entry.method = 8;
+        let archive = archive(zip(&[entry, put(NEXT_ZIP, &day_zip)], Wide::Offset, true)).unwrap();
+        let why = archive.day(CmKind::Indices, at()).unwrap_err();
         assert_eq!(
-            archive(zip(&[entry], Wide::Offset, true)).err(),
-            Some(CmRefusal::ArchiveMemberCompressed {
+            why,
+            CmRefusal::ArchiveMemberCompressed {
                 member: DAY_ZIP.to_owned()
-            })
+            }
         );
+        assert!(!crate::gdfl_import::cm_cause(&why).closes);
+        assert!(archive.day(CmKind::Indices, next_day()).unwrap().is_some());
     }
 
     /// A day the archive holds no day zip for is `None`, a day the vendor
@@ -1202,18 +1490,28 @@ mod tests {
         assert_eq!(read_day(&archive, &nifty_key(), next), Ok(None));
     }
 
+    /// B19 (D-4818, F38, FM-044): two day zips for one day refuse that day
+    /// only, as a duplicate that never closes it; the archive opens and the
+    /// next day reads.
     #[test]
     fn two_members_for_one_day_refuse() {
         let day_zip = inner(&csv());
-        assert_eq!(
-            archive(zip(
-                &[put(DAY_ZIP, &day_zip), put(DAY_ZIP, &day_zip)],
-                Wide::Offset,
-                true
-            ))
-            .err(),
-            Some(CmRefusal::ArchiveDuplicateDay { day: at() })
-        );
+        let archive = archive(zip(
+            &[
+                put(DAY_ZIP, &day_zip),
+                put(DAY_ZIP, &day_zip),
+                put(NEXT_ZIP, &day_zip),
+            ],
+            Wide::Offset,
+            true,
+        ))
+        .unwrap();
+        let why = archive.day(CmKind::Indices, at()).unwrap_err();
+        assert_eq!(why, CmRefusal::ArchiveDuplicateDay { day: at() });
+        let cause = crate::gdfl_import::cm_cause(&why);
+        assert_eq!((cause.code, cause.closes), ("archive_duplicate_day", false));
+        assert!(archive.day(CmKind::Indices, next_day()).unwrap().is_some());
+        assert_eq!(read_day(&archive, &nifty_key(), at()).err(), Some(why));
     }
 
     /// The dense day table's worst case, the figure `docs/06-limits.md`
@@ -1226,7 +1524,7 @@ mod tests {
         let first = Day::new(1_970, 1, 1).unwrap().days_from_epoch();
         let last = Day::new(9_999, 12, 31).unwrap().days_from_epoch();
         assert_eq!((first, last - first + 1), (0, 2_932_897));
-        assert_eq!(std::mem::size_of::<Option<Inner>>(), 24);
+        assert_eq!(std::mem::size_of::<Option<Slot>>(), 24);
     }
 
     /// Only `<TREE>/<yyyy>/<MON>_<yyyy>/GFDLCM_<TREE>_TICK_<ddmmyyyy>.zip`
@@ -1277,6 +1575,18 @@ mod tests {
         ];
         let archive = archive(zip(&entries, Wide::Offset, true)).unwrap();
         assert_eq!(archive.ignored(), 9);
+        // Five copies of the day under another folder (C3, F9): counted and
+        // named; one invalid date (C2); three that are no day zip at all.
+        let census = archive.census();
+        assert_eq!((census.misfiled, census.invalid, census.ignored), (5, 1, 3));
+        assert_eq!(
+            census.misfiled_named.first().map(String::as_str),
+            Some("STOCKS/2024/APR_2024/GFDLCM_INDICES_TICK_01042024.zip")
+        );
+        assert_eq!(
+            census.invalid_named,
+            ["INDICES/2024/APR_2024/GFDLCM_INDICES_TICK_31042024.zip"]
+        );
         let may = Day::new(2026, 5, 15).unwrap();
         let span = may.days_from_epoch() - at().days_from_epoch() + 1;
         assert_eq!(archive.first, at().days_from_epoch());
@@ -1285,7 +1595,12 @@ mod tests {
             [usize::try_from(span).unwrap(); 2],
             "one cell per day from the first day zip to the last, no wider"
         );
-        assert!(archive.day(CmKind::Indices, at()).is_ok());
+        // Six copies of one day refuse that day as a duplicate (D-4818),
+        // and only that day: the stock tree's day still lists.
+        assert_eq!(
+            archive.day(CmKind::Indices, at()).err(),
+            Some(CmRefusal::ArchiveDuplicateDay { day: at() })
+        );
         assert_eq!(
             stated(&listed(&archive, CmKind::Stocks, may), "SBIN.NSE.csv"),
             Ok(Some((1, crc32(b"x"))))
@@ -1363,7 +1678,7 @@ mod tests {
                     name,
                     format!("{tree}/2019/{mon}_2019/{prefix}01{month:02}2019.zip")
                 );
-                assert_eq!(day_zip(&name), Some((kind, day)), "{name}");
+                assert_eq!(named(&name), Named::DayZip(kind, day), "{name}");
             }
         }
     }
@@ -1714,6 +2029,8 @@ mod tests {
             crc: 0,
             len: 7,
             comment: "",
+            flags: 0,
+            descriptor: false,
         };
         let wide = zip(&[declared], Wide::All, false);
         let entries = central_directory(&Span::of(&wide, wide.len() as u64)).unwrap();
@@ -1832,6 +2149,343 @@ mod tests {
         ] {
             let text = refusal.to_string();
             assert!(text.contains(words), "{text}");
+        }
+    }
+
+    // ── IA-3: the container faults per day, and the shapes the real
+    //    containers have (design §8 B7, B12, B13, C2, C3; D-4818) ──────────
+
+    /// `bytes` with `n` bytes put before its first record and no offset
+    /// adjusted, as a self-extracting stub or a careless concatenation
+    /// leaves a zip.
+    fn prefixed(bytes: &[u8], n: usize) -> Vec<u8> {
+        let mut out = vec![0x5A; n];
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// B7: a zip with bytes before its first record is refused in its own
+    /// name, the prefix measured from the end record, plain and ZIP64, and
+    /// never read through offsets short by the prefix. With no prefix the
+    /// same bytes open.
+    #[test]
+    fn a_zip_with_bytes_before_its_first_record_is_refused_by_name() {
+        let day_zip = inner(&csv());
+        for zip64 in [false, true] {
+            let whole = zip(&[put(DAY_ZIP, &day_zip)], Wide::No, zip64);
+            assert!(archive(whole.clone()).is_ok(), "zip64={zip64}");
+            for n in [1, 37, 4_096] {
+                assert_eq!(
+                    malformed(prefixed(&whole, n)),
+                    CmRefusal::ArchivePrefixed { bytes: n as u64 },
+                    "zip64={zip64} n={n}"
+                );
+            }
+        }
+        // The inner day zip is held to the same rule inside its span.
+        let outer = zip(&[put(DAY_ZIP, &prefixed(&day_zip, 9))], Wide::Offset, true);
+        assert_eq!(
+            archive(outer).unwrap().day(CmKind::Indices, at()).err(),
+            Some(CmRefusal::ArchivePrefixed { bytes: 9 })
+        );
+        let cause = crate::gdfl_import::cm_cause(&CmRefusal::ArchivePrefixed { bytes: 9 });
+        assert_eq!((cause.code, cause.closes), ("archive_prefixed", false));
+    }
+
+    /// B13 (F27): every outer day zip of the operator's archives carries a
+    /// data descriptor, its local CRC and sizes zero. Built that way here,
+    /// with the local sizes deliberately wrong and a descriptor after the
+    /// data, the day is read by its central sizes, end to end, and so is a
+    /// member of the day zip written the same way.
+    #[test]
+    fn a_member_with_a_data_descriptor_is_read_by_its_central_sizes() {
+        let raw = csv();
+        let packed = deflate(&raw);
+        let mut member = deflated(MEMBER, &packed, &raw);
+        member.descriptor = true;
+        let day_zip = zip(
+            &[put("GFDLCM_INDICES_TICK_01042024/", b""), member],
+            Wide::No,
+            false,
+        );
+        let mut entry = put(DAY_ZIP, &day_zip);
+        entry.descriptor = true;
+        let archive = archive(zip(&[put("INDICES/", b""), entry], Wide::Offset, true)).unwrap();
+        assert_eq!(fetched(&archive), Ok(raw.clone()));
+        let read = read_day(&archive, &nifty_key(), at()).unwrap().unwrap();
+        assert_eq!(&*read.bytes, raw.as_slice());
+        assert_eq!(read.file, decode(&raw, &nifty_expect()).unwrap());
+    }
+
+    /// B12 (FM-026): an encrypted member is refused by its own name before
+    /// any byte is inflated, never as a corrupt member or a CRC mismatch:
+    /// an encrypted day zip for its day only, an encrypted file of a day
+    /// when it is fetched. Neither closes its day.
+    #[test]
+    fn an_encrypted_member_is_refused_by_its_own_name() {
+        let day_zip = inner(&csv());
+        let mut entry = put(DAY_ZIP, &day_zip);
+        entry.flags = 1;
+        let outer = zip(&[entry, put(NEXT_ZIP, &day_zip)], Wide::Offset, true);
+        let archive_a = archive(outer).unwrap();
+        let why = archive_a.day(CmKind::Indices, at()).unwrap_err();
+        assert_eq!(
+            why,
+            CmRefusal::ArchiveMemberEncrypted {
+                member: DAY_ZIP.to_owned()
+            }
+        );
+        assert!(
+            archive_a
+                .day(CmKind::Indices, next_day())
+                .unwrap()
+                .is_some()
+        );
+        let raw = csv();
+        let packed = deflate(&raw);
+        let mut member = deflated(MEMBER, &packed, &raw);
+        member.flags = 1;
+        let day_zip = zip(
+            &[put("GFDLCM_INDICES_TICK_01042024/", b""), member],
+            Wide::No,
+            false,
+        );
+        let archive_b = archive(outer_of(&day_zip)).unwrap();
+        let why = fetched(&archive_b).unwrap_err();
+        assert_eq!(
+            why,
+            CmRefusal::ArchiveMemberEncrypted {
+                member: MEMBER.to_owned()
+            }
+        );
+        let cause = crate::gdfl_import::cm_cause(&why);
+        assert_eq!(
+            (cause.code, cause.closes),
+            ("archive_member_encrypted", false)
+        );
+    }
+
+    /// The outer archive holding `day_zip` as the one day zip of `at()`.
+    fn outer_of(day_zip: &[u8]) -> Vec<u8> {
+        outer(day_zip)
+    }
+
+    /// C3 (F9, FM-023): a lone day zip under another folder than its own is
+    /// named where it was found and where it belongs, for its day only, and
+    /// never read as a day the vendor did not ship.
+    #[test]
+    fn a_misfiled_day_zip_is_named_where_it_was_found() {
+        let day_zip = inner(&csv());
+        for found in [
+            "INDICES/2024/MAY_2024/GFDLCM_INDICES_TICK_01042024.zip",
+            "STOCKS/2024/APR_2024/GFDLCM_INDICES_TICK_01042024.zip",
+            "GFDLCM_INDICES_TICK_01042024.zip",
+        ] {
+            let archive = archive(zip(
+                &[put(found, &day_zip), put(NEXT_ZIP, &day_zip)],
+                Wide::Offset,
+                true,
+            ))
+            .unwrap();
+            let why = archive.day(CmKind::Indices, at()).unwrap_err();
+            assert_eq!(
+                why,
+                CmRefusal::DayZipMisfiled {
+                    found: found.to_owned(),
+                    expected: DAY_ZIP.to_owned()
+                },
+                "{found}"
+            );
+            assert!(!crate::gdfl_import::cm_cause(&why).closes);
+            assert!(archive.day(CmKind::Indices, next_day()).unwrap().is_some());
+            assert_eq!(archive.census().misfiled_named, [found]);
+        }
+    }
+
+    /// C2: a day zip name whose date is not real is named in the census,
+    /// at most [`CENSUS_NAMED`] by name, every one counted, and files
+    /// nothing.
+    #[test]
+    fn an_impossible_day_zip_name_is_named() {
+        let names: Vec<String> = (0..20)
+            .map(|n| format!("INDICES/2024/APR_2024/GFDLCM_INDICES_TICK_32{n:02}2024.zip"))
+            .collect();
+        let entries: Vec<Put<'_>> = names.iter().map(|name| put(name, b"")).collect();
+        let archive = archive(zip(&entries, Wide::No, false)).unwrap();
+        let census = archive.census();
+        assert_eq!(
+            (census.invalid, census.invalid_named.len()),
+            (20, CENSUS_NAMED)
+        );
+        assert_eq!(census.invalid_named.first(), names.first());
+        assert_eq!(archive.days.each_ref().map(Vec::len), [0, 0]);
+    }
+
+    /// IA-GR-27 (D-4818): no container fault closes a day, so removing a
+    /// copy, re-zipping it or a build that reads it fills the day on a
+    /// re-run; a name the vendor gave a file the same way every time does.
+    #[test]
+    fn no_container_fault_closes_a_day() {
+        for fault in [
+            CmRefusal::ArchiveDuplicateDay { day: at() },
+            CmRefusal::ArchiveMemberCompressed {
+                member: "M".to_owned(),
+            },
+            CmRefusal::ArchiveMethodUnknown {
+                member: "M".to_owned(),
+                method: 12,
+            },
+            CmRefusal::ArchiveMemberEncrypted {
+                member: "M".to_owned(),
+            },
+            CmRefusal::ArchivePrefixed { bytes: 1 },
+            CmRefusal::DayZipMisfiled {
+                found: "a".to_owned(),
+                expected: "b".to_owned(),
+            },
+            CmRefusal::DayFileMisfiled {
+                found: "a".to_owned(),
+                expected: "b".to_owned(),
+            },
+            CmRefusal::ArchiveMalformed { what: CUT_SHORT },
+        ] {
+            let cause = crate::gdfl_import::cm_cause(&fault);
+            assert!(!cause.closes, "{fault}");
+            assert_eq!(cause.stage.as_str(), "vendor", "{fault}");
+        }
+        let missing = CmRefusal::ExtensionMissing {
+            stem: "NIFTY 50.NSE_IDX".to_owned(),
+        };
+        let cause = crate::gdfl_import::cm_cause(&missing);
+        assert_eq!((cause.code, cause.closes), ("extension_missing", true));
+    }
+
+    /// Every refusal IA-3 adds names what it refused.
+    #[test]
+    fn every_ia3_refusal_says_what_it_refused() {
+        for (refusal, words) in [
+            (
+                CmRefusal::ArchivePrefixed { bytes: 37 },
+                "archive prefixed: 37 bytes",
+            ),
+            (
+                CmRefusal::ArchiveMemberEncrypted {
+                    member: "M".to_owned(),
+                },
+                "M is encrypted",
+            ),
+            (
+                CmRefusal::DayZipMisfiled {
+                    found: "F".to_owned(),
+                    expected: "E".to_owned(),
+                },
+                "found at F, its name files it at E",
+            ),
+            (
+                CmRefusal::DayFileMisfiled {
+                    found: "F".to_owned(),
+                    expected: "E".to_owned(),
+                },
+                "tick-store day file misfiled: found at F",
+            ),
+            (
+                CmRefusal::ExtensionMissing {
+                    stem: "S".to_owned(),
+                },
+                "S is a wanted stem with no extension",
+            ),
+        ] {
+            let text = refusal.to_string();
+            assert!(text.contains(words), "{text}");
+        }
+    }
+
+    // ── the real containers (ignored: they read the operator's archives) ──
+
+    /// The real capital-market outer zip and every yearly options zip, read
+    /// where `BRUTEX_GDFL_CM_ARCHIVE` and `BRUTEX_GDFL_NFO_ARCHIVES` name
+    /// them, read only: each opens with no prefix (B7), and the day spans,
+    /// the census, and how many day zips carry a data descriptor, an
+    /// encryption bit or a method other than stored are printed for the
+    /// charter (IA-0b, SF-17). Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "reads the operator's real archives, named by two variables"]
+    fn the_real_containers_open_with_no_prefix_and_print_their_facts() {
+        if let Some(path) = std::env::var_os("BRUTEX_GDFL_CM_ARCHIVE") {
+            let archive = Archive::open(Path::new(&path)).unwrap();
+            for (tree, name) in [(0, "indices"), (1, "stocks")] {
+                let held: Vec<usize> = archive.days[tree]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, cell)| matches!(cell, Some(Slot::Held(_))).then_some(slot))
+                    .collect();
+                let day = |slot: usize| {
+                    u32::try_from(slot)
+                        .ok()
+                        .and_then(|slot| Day::from_days(archive.first + slot).ok())
+                };
+                println!(
+                    "cm_zip {name}: days={} first={:?} last={:?}",
+                    held.len(),
+                    held.first().map(|slot| day(*slot)),
+                    held.last().map(|slot| day(*slot)),
+                );
+            }
+            println!(
+                "cm_zip prefix=0 refused_days={} census={:?}",
+                archive
+                    .days
+                    .iter()
+                    .flatten()
+                    .filter(|cell| matches!(cell, Some(Slot::Refused(_))))
+                    .count(),
+                archive.census()
+            );
+            let span = Span::of(&archive.source, archive.len);
+            let entries = central_directory(&span).unwrap();
+            let count = |test: &dyn Fn(&Entry) -> bool| entries.iter().filter(|e| test(e)).count();
+            println!(
+                "cm_zip entries={} descriptor={} encrypted={} not_stored={}",
+                entries.len(),
+                count(&|e| e.flags & 8 != 0),
+                count(&|e| e.flags & ENCRYPTED != 0),
+                count(&|e| e.method != 0),
+            );
+        }
+        if let Some(dir) = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES") {
+            let mut years: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "zip"))
+                .collect();
+            years.sort();
+            for year in years {
+                let file = std::fs::File::open(&year).unwrap();
+                let len = file.metadata().unwrap().len();
+                let entries = zip_entries(&file, 0, len).unwrap();
+                let zips: Vec<&ZipEntry> = entries
+                    .iter()
+                    .filter(|e| {
+                        Path::new(&e.name)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+                    })
+                    .collect();
+                println!(
+                    "nfo_zips {}: prefix=0 entries={} day_zips={} first={:?} last={:?} \
+                     descriptor={} encrypted={} not_stored={}",
+                    year.display(),
+                    entries.len(),
+                    zips.len(),
+                    zips.first().map(|e| &e.name),
+                    zips.last().map(|e| &e.name),
+                    zips.iter().filter(|e| e.locator.flags & 8 != 0).count(),
+                    zips.iter()
+                        .filter(|e| e.locator.flags & ENCRYPTED != 0)
+                        .count(),
+                    zips.iter().filter(|e| e.locator.method != 0).count(),
+                );
+            }
         }
     }
 }

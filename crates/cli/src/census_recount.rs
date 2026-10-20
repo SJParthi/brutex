@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use brutex_core::vendor::Vendor;
 use pull::ingest::census_store::{self, Cycle, JournalClose, Location, Migration, Recount, Span};
 use pull::session::Day;
+use store::header::MonthVerdict;
 
 use crate::{FAILED, MISUSED, OK};
 
@@ -273,6 +274,7 @@ fn render_recount(
     for (path, why) in &found.unreadable_named {
         let _ = writeln!(out, "    {}: {why}", path.display());
     }
+    render_slot_damage(out, found);
     let _ = writeln!(out, "  not store names     {}", found.not_store_names);
     for path in &found.not_store_named {
         let _ = writeln!(out, "    {}", path.display());
@@ -294,6 +296,32 @@ fn render_recount(
     }
     if let Some(drift) = census_store::legacy_drift(root, vendor) {
         let _ = writeln!(out, "  WARNING             {drift}");
+    }
+}
+
+/// The receipt's header-slot lines: a count, then EVERY month whose slot audit
+/// is not clean, by path and reason (D-6242, R4-09a).
+///
+/// Every one is printed, not the first [`SHOWN`]: a month that silently fell
+/// back to an older generation is the failure this verb exists to make
+/// visible, and "and 12 more" would hide exactly the month an operator is
+/// looking for. A reverted month offered no row and closed no day; the verb
+/// exits FAILED. Nothing here repairs or rewrites a header — that is the
+/// operator's store step.
+fn render_slot_damage(out: &mut String, found: &Recount) {
+    let reverted = found
+        .slot_damaged
+        .iter()
+        .filter(|(_, audit)| matches!(audit.verdict, MonthVerdict::Reverted { .. }))
+        .count();
+    let _ = writeln!(
+        out,
+        "  header slot damage  {} month(s), {reverted} reverted to an older generation \
+         (not recorded, no day closed)",
+        found.slot_damaged.len()
+    );
+    for (path, audit) in &found.slot_damaged {
+        let _ = writeln!(out, "    {}: {}", path.display(), audit.describe());
     }
 }
 

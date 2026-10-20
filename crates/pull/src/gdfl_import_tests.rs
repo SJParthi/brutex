@@ -937,10 +937,21 @@ fn a_day_with_only_vendor_refusals_closes_done_and_is_not_read_again() {
     assert_eq!(got.closed_with_refusals, vec![d1()]);
     assert!(got.closed_incomplete.is_empty());
     let line = line_of(&store, "options", "2024-04-01");
+    // What the day's listing was rides on the close (D-5903, DB-A49).
+    let listed = NfoSource::day(&NfoTickStore::new(&root.join("ts")), d1())
+        .unwrap()
+        .unwrap();
+    let sum = ListingSum::of(listed.entries());
     let want = format!(
         "done options 2024-04-01 * definition={BAR_DEFINITION} files=3 seconds={} failures=1 late={} \
-         late_unresolved={} max_back_s={} vendor_refused=1 reason=price_refused",
-        got.seconds, got.late_rows, got.late_unresolved, got.max_back_s
+         late_unresolved={} max_back_s={} skipped=0 entries={} listing={} vendor_refused=1 \
+         reason=price_refused",
+        got.seconds,
+        got.late_rows,
+        got.late_unresolved,
+        got.max_back_s,
+        sum.entries,
+        sum.hex()
     );
     assert_eq!(without_run(&line), want);
     let again = import(&root, Src::Store, ImportKind::Options, d1(), d1(), &store);
@@ -1142,7 +1153,7 @@ fn a_days_close_follows_its_failures() {
     );
     assert_eq!(
         Stage::ALL.map(Stage::as_str),
-        ["census", "journal", "file", "calendar", "vendor"]
+        ["census", "journal", "file", "calendar", "vendor", "run"]
     );
     let counts = Counts {
         files: 2,
@@ -1151,10 +1162,12 @@ fn a_days_close_follows_its_failures() {
         late: 3,
         late_unresolved: 0,
         max_back_s: 4,
+        skipped: 5,
+        listing: None,
     };
     let stats = format!(
         "definition={BAR_DEFINITION} files=2 seconds=9 failures=1 late=3 late_unresolved=0 \
-         max_back_s=4"
+         max_back_s=4 skipped=5"
     );
     assert_eq!(
         closing_line("k 1 *", Close::Done, &counts, ""),
@@ -4512,6 +4525,8 @@ fn run_durable(
         workers: Workers::new(workers).unwrap(),
         durability,
         observer: None,
+        run: None,
+        stop: None,
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -4730,6 +4745,8 @@ fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
             workers: Workers::new(workers).unwrap(),
             durability: Durability::DEFAULT,
             observer: None,
+            run: None,
+            stop: None,
         };
         run_cm_from(&source, &run, options).unwrap()
     };

@@ -368,6 +368,8 @@ fn upkeep_and_an_import_exclude_each_other_on_a_month() {
         run_started: 7,
         kind: ImportKind::Options,
         verb: "gdfl-import options zip 2019-01-01 2019-01-31".to_owned(),
+        claim: None,
+        sidecar: None,
     };
     let lock = RunLock::take(&root.0, &import).unwrap();
     let before = root.journal(Kind::DayIndex);

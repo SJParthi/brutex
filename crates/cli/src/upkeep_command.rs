@@ -500,6 +500,8 @@ pub(crate) fn run_locks(
             run_started: started,
             kind,
             verb: escape(verb.as_bytes()),
+            claim: None,
+            sidecar: None,
         };
         let lock = RunLock::take(root, &holder).map_err(sentence)?;
         let single = lock.layout == GdflLayout::V3;

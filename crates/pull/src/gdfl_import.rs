@@ -365,7 +365,7 @@ use store::format::{Bar, OI_NULL};
 
 use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
-use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, read_listed, split_name};
+use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, ListingSum, read_listed};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
 use crate::ingest::{Failure, Plan};
 #[cfg(test)]
@@ -377,7 +377,7 @@ use crate::session::{Day, IST_OFFSET_SECS};
 use crate::vendor::Granularity;
 use crate::vendor::{Listing, PriceScale, TimestampEncoding};
 
-pub use self::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, nfo_cause};
+pub use self::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, import_cause, nfo_cause};
 pub use self::census::CensusRoom;
 use self::census::StoreCensus;
 #[cfg(test)]
@@ -394,12 +394,13 @@ use self::filing::symbol_id_of;
 use self::filing::{BeginGate, JobRead, ReadJob, on_workers, take_quality};
 pub(crate) use self::journal::Journal;
 pub use self::journal::Refreshed;
-pub(crate) use self::journal::append_lines;
 #[cfg(test)]
 pub(crate) use self::journal::load_warning;
 pub use self::journal::{
-    BAR_DEFINITION, JOURNAL_LOAD_WARN_BYTES, definition_is_current, done_whole_days, journal_path,
+    BAR_DEFINITION, ClosedBy, JOURNAL_LOAD_WARN_BYTES, KeyHistory, VERB_WORDS,
+    definition_is_current, done_whole_days, journal_lock_path, journal_path,
 };
+pub(crate) use self::journal::{append_lines, append_lines_within};
 #[cfg(test)]
 use self::journal::{closing_line, count_of, torn_fragment};
 
@@ -902,6 +903,14 @@ pub struct RunOptions<'a> {
     /// day. `None` tells no one. Called on the coordinating thread only,
     /// never from a worker, and never changes a byte the run leaves.
     pub observer: Option<&'a dyn Observer>,
+    /// The run's id from the store-wide runs ledger (IA-2, D-4847, D-4880),
+    /// allocated under the run's locks by `crate::gdfl_run`. `None` only for
+    /// a caller that holds no ledger (a test's bare reader): the id is then
+    /// the run's start raised past every id the journal holds, as before.
+    pub run: Option<u64>,
+    /// The run's stop (IA-2, D-4827, D-4853): asked before each file is
+    /// taken and before each day, never inside a file. `None` runs to the end.
+    pub stop: Option<&'a crate::gdfl_run::stop::StopControl>,
 }
 
 /// What a run tells whoever started it, as it goes (IA-1, design §5.1:
@@ -1787,6 +1796,9 @@ struct Handed {
 #[derive(Debug, Default)]
 struct DayExtras {
     member_bytes: Option<u64>,
+    /// What the day's listing was (DB-A49): its entry count and digest,
+    /// written on the close.
+    listing: Option<ListingSum>,
     lineage: lineage::Written,
     failures: Vec<Staged>,
     /// The members a probe asked for that the day's listing holds a file
@@ -1984,23 +1996,25 @@ where
     let swept = scope::Record::of(crate::gdfl_cm::CmScope::swept().members(tree));
     // A day read again for several members lists once: the listing of the
     // day in hand is kept until another day is asked for.
-    let mut cached: Option<(Day, crate::gdfl_cm::DayListing<S::Locator>)> = None;
+    // Its sum (DB-A49) is kept with it, taken once per day.
+    let mut cached: Option<CachedDay<S::Locator>> = None;
     let scoped = Some((&record, &swept));
     drive_core(run, options, (&mut StoreCensus, scoped), |day, filer| {
-        if cached.as_ref().is_none_or(|(held, _)| *held != day) {
+        if cached.as_ref().is_none_or(|(held, _, _)| *held != day) {
             cached = None;
             let (listed, listing) = cm_list(source, (tree, day));
             match listing {
-                Some(listing) => cached = Some((day, listing)),
+                Some(listing) => cached = Some((day, listing, listed.listing)),
                 None => return listed.close(Vec::new()).0,
             }
         }
-        let Some((_, listing)) = cached.as_ref() else {
+        let Some((_, listing, sum)) = cached.as_ref() else {
             return Listed::default().close(Vec::new()).0;
         };
         let mut listed = Listed {
             held: true,
             member_bytes: listing.member_bytes(),
+            listing: *sum,
             ..Listed::default()
         };
         let member = match &filer.ask {
@@ -2022,6 +2036,10 @@ where
     })
 }
 
+/// A capital-market day's listing kept while its member keys are read, with
+/// the day and the listing's sum (DB-A49), taken once per day.
+type CachedDay<L> = (Day, crate::gdfl_cm::DayListing<L>, Option<ListingSum>);
+
 /// What a day's listing decided before any file of it is read (WP-16): the
 /// entries it skipped, the ones it refused by name, each at its place in the
 /// listing, and the day zip's size. The wanted files are its jobs.
@@ -2035,6 +2053,8 @@ struct Listed {
     refused: Vec<(usize, Refused)>,
     /// The day zip's size, where the source read one.
     member_bytes: Option<u64>,
+    /// What the listing was, kept with the day's close (DB-A49).
+    listing: Option<ListingSum>,
 }
 
 impl Listed {
@@ -2068,6 +2088,7 @@ impl Listed {
         };
         let extras = DayExtras {
             member_bytes: self.member_bytes,
+            listing: self.listing,
             ..DayExtras::default()
         };
         ((read, extras), contracts)
@@ -2094,6 +2115,7 @@ fn cm_list<S: CmSource>(
         Ok(Some(listing)) => {
             listed.held = true;
             listed.member_bytes = listing.member_bytes();
+            listed.listing = Some(ListingSum::of(listing.entries()));
             (listed, Some(listing))
         }
         Ok(None) => (listed, None),
@@ -2117,13 +2139,12 @@ fn cm_jobs<'a, L>(
 ) -> Vec<CmJob<'a, L>> {
     let mut seen = HashSet::with_capacity(listing.entries().len());
     let mut jobs = Vec::with_capacity(listing.entries().len());
-    let folder = format!("{}/", listing.folder());
     for (index, file) in listing.entries().iter().enumerate() {
-        let stem = file
-            .entry
-            .strip_prefix(&folder)
-            .and_then(|name| split_name(name).ok())
-            .map(|(stem, _)| stem);
+        // A file of the day folder, after `/` or `\` (D-4828); a name that
+        // is a wanted stem whole, with no extension (D-4835), is `bare`.
+        let (stem, bare) = listing
+            .entry_stem(file)
+            .map_or((None, false), |(stem, bare)| (Some(stem), bare));
         // A member key reads its one member's files (WP-12f, D-4878). Every
         // other entry is the base close's, counted there and not again.
         if let Some(asked) = member
@@ -2158,6 +2179,16 @@ fn cm_jobs<'a, L>(
             listed.skipped += 1;
             continue;
         }
+        // A wanted stem with no extension is refused by name, never skipped
+        // (D-4835): it is the day's only name for the ticker, or the first,
+        // and a later name of the same ticker is a skip, as for twins.
+        if bare {
+            let why = CmRefusal::ExtensionMissing {
+                stem: file.name().to_owned(),
+            };
+            listed.refused.push((index, Refused::cm(file.name(), &why)));
+            continue;
+        }
         jobs.push(CmJob {
             index,
             file,
@@ -2187,15 +2218,12 @@ fn cm_present<L>(
 ) -> Vec<String> {
     let asks =
         |symbol: &str| run.wants(symbol) && lender.is_none_or(|names| names.contains(symbol));
-    let folder = format!("{}/", listing.folder());
     let mut seen = HashSet::with_capacity(wanted.len());
     let mut present = Vec::new();
     for file in listing.entries() {
-        let stem = file
-            .entry
-            .strip_prefix(&folder)
-            .and_then(|name| split_name(name).ok())
-            .map(|(stem, _)| stem);
+        // The same reading of a day folder's names as `cm_jobs` (D-4828,
+        // D-4835), so a probe and a read never disagree on what a day holds.
+        let stem = listing.entry_stem(file).map(|(stem, _)| stem);
         let Some((stem, member)) =
             stem.and_then(|stem| listing.member(stem).map(|member| (stem, member)))
         else {
@@ -2619,7 +2647,6 @@ fn fold_lineage<S: NfoSource>(
             run,
             day,
             "lineage",
-            Stage::Journal,
             &ImportRefusal::Lineage { why },
         )),
     }
@@ -2743,6 +2770,9 @@ where
                 .ok()
                 .map(|day_file| contract_day_of(&day_file, index))
         },
+        // A warm-up reads and files nothing: the day's own filing asks the
+        // stop before each file it takes.
+        None,
     );
     match read {
         Ok(all) => all.into_iter().flatten().collect(),
@@ -2790,6 +2820,7 @@ fn nfo_list<S: NfoSource>(
         Ok(Some(listing)) => {
             listed.held = true;
             listed.member_bytes = listing.member_bytes();
+            listed.listing = Some(ListingSum::of(listing.entries()));
             (listed, Some(listing))
         }
         Ok(None) => (listed, None),
@@ -3258,6 +3289,16 @@ mod r3_attack_tests;
 #[path = "gdfl_r4_attack_tests.rs"]
 mod r4_attack_tests;
 
+// IA-3: the close's listing (DB-A49), the CM `\` separator, a stem with
+// no extension and the tick store's day table.
+#[cfg(test)]
+#[path = "gdfl_ia3_tests.rs"]
+mod ia3_tests;
+
 #[cfg(test)]
 #[path = "gdfl_import_split_tests.rs"]
 mod split_tests;
+
+#[cfg(test)]
+#[path = "gdfl_import_ia2_tests.rs"]
+mod ia2_tests;
