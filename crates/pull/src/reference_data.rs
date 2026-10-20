@@ -1425,25 +1425,22 @@ impl Lineage {
         Ok(lineage)
     }
 
-    /// The compiled lineage of `brutex_core::alias`, built once.
-    #[must_use]
-    pub fn compiled() -> &'static Self {
-        static COMPILED: OnceLock<&'static Lineage> = OnceLock::new();
-        COMPILED.get_or_init(|| {
-            let rows: &'static [SymbolChange] = alias::LINEAGE.rows();
-            match Self::of(rows) {
-                Ok(lineage) => Box::leak(Box::new(lineage)),
-                // `the_shipped_lineage_has_no_cycle_and_no_duplicate` holds
-                // the compiled rows; an empty lineage files every stem under
-                // its own name and refuses none, which is exactly what a
-                // lineage with no rows says, and the test names the fault.
-                Err(_) => Box::leak(Box::new(Self {
-                    rows: &[],
-                    by_old: HashMap::new(),
-                    by_new: HashMap::new(),
-                })),
-            }
-        })
+    /// The compiled lineage of `brutex_core::alias`, built once, or the
+    /// reason the compiled rows do not form one. Never an empty lineage in
+    /// its place: an empty lineage would file every stem under its own name
+    /// and refuse none, which is a fallback that hides the fault (R3-30
+    /// repair 1). `the_shipped_lineage_has_no_cycle_and_no_duplicate` holds
+    /// the compiled rows.
+    ///
+    /// # Errors
+    ///
+    /// The compiled rows' cycle or duplicate, in words, on every call.
+    pub fn compiled() -> Result<&'static Self, &'static str> {
+        static COMPILED: OnceLock<Result<Lineage, String>> = OnceLock::new();
+        COMPILED
+            .get_or_init(|| Self::of(alias::LINEAGE.rows()))
+            .as_ref()
+            .map_err(String::as_str)
     }
 
     /// Every row, applied or not, in table order.
@@ -2149,6 +2146,10 @@ pub struct Reference {
     pub lots: Slot<costs::lot::LotTable>,
     /// The risk-free rate series.
     pub rates: Slot<crate::riskfree::Series>,
+    /// Every table whose directory held names that are not generations, in
+    /// load order, each told as a `warn` event: never served, never ignored
+    /// in silence.
+    pub strays: Vec<(Table, Strays)>,
 }
 
 /// One slot as a reader sees it: the table, where it came from (`store`,
@@ -2189,17 +2190,39 @@ impl Reference {
     /// Where the two dated records end, seen from `today` (days since the
     /// epoch): the calendar of record's last day, and the last day the rate
     /// series answers (its last release plus
-    /// [`crate::riskfree::MAX_AGE_DAYS`]). `None` for a table that is not
-    /// served, which is itself a refusal [`Self::refusals`] names. O(1).
-    #[must_use]
-    pub fn horizons(&self, today: i64) -> [(Table, Option<Horizon>); 2] {
-        let calendar = self.calendar.table().ok().map(|table| table.horizon(today));
-        let rates = self.rates.table().ok().map(|series| {
+    /// [`crate::riskfree::MAX_AGE_DAYS`]). A table that is not served
+    /// answers its own [`Refusal`], never a quiet `None` (R3-30 repair 1).
+    /// O(1).
+    pub fn horizons(&self, today: i64) -> [(Table, Result<Horizon, &Refusal>); 2] {
+        let calendar = self.calendar.table().map(|table| table.horizon(today));
+        let rates = self.rates.table().map(|series| {
             let last = i64::from(series.last_release().ordinal())
                 + i64::from(crate::riskfree::MAX_AGE_DAYS);
             Horizon::of(last, today)
         });
         [(Table::Calendar, calendar), (Table::RiskFreeRate, rates)]
+    }
+
+    /// Every dated record that needs the operator, seen from `today`: one
+    /// whose horizon alert fires ([`HORIZON_ALERT_DAYS`]) or has ended, and
+    /// one that is not served at all, each with its sentence. An absent or
+    /// refused record is an alert, not a silence. O(1).
+    #[must_use]
+    pub fn horizon_alerts(&self, today: i64) -> Vec<(Table, String)> {
+        self.horizons(today)
+            .into_iter()
+            .filter_map(|(table, horizon)| match horizon {
+                Ok(horizon) if horizon.ended => Some((
+                    table,
+                    format!("ended {} days ago", horizon.days_left.unsigned_abs()),
+                )),
+                Ok(horizon) if horizon.alert() => {
+                    Some((table, format!("ends in {} days", horizon.days_left)))
+                }
+                Ok(_) => None,
+                Err(why) => Some((table, format!("not served: {why}"))),
+            })
+            .collect()
     }
 
     /// Every refusal, in load order.
@@ -2220,10 +2243,50 @@ impl Reference {
     }
 }
 
+/// The names in a table's directory that are not generations. None is ever
+/// served, and none is ignored in silence (R3-30 repair 1): [`load`] keeps
+/// them in [`Reference::strays`] and tells each table's as one `warn` event,
+/// so a misnamed generation is seen beside the table that was served
+/// without it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Strays {
+    /// Staging files (`.<generation>.<pid>.<serial>.staging`): a write in
+    /// flight, or one killed before its hard link.
+    pub staging: usize,
+    /// Every other name: misnamed, foreign or hand-placed.
+    pub other: usize,
+    /// The smallest other name, so the event can name one.
+    pub first_other: Option<String>,
+}
+
+impl Strays {
+    /// No stray at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.staging == 0 && self.other == 0
+    }
+
+    fn count(&mut self, name: &std::ffi::OsStr) {
+        let text = name.to_string_lossy();
+        if text.starts_with('.') && text.ends_with(".staging") {
+            self.staging += 1;
+        } else {
+            self.other += 1;
+            if self
+                .first_other
+                .as_deref()
+                .is_none_or(|first| *text < *first)
+            {
+                self.first_other = Some(text.into_owned());
+            }
+        }
+    }
+}
+
 /// The newest generation's number and path in `table`'s directory under
-/// `store`, the count of names that are not generations, or `Ok(None)` when
-/// the directory holds no generation.
-fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, usize), Refusal> {
+/// `store`, the names that are not generations, or `Ok(None)` when the
+/// directory holds no generation.
+fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, Strays), Refusal> {
     let dir = table.dir(store);
     let refuse = |kind, detail: String| Refusal {
         table,
@@ -2234,11 +2297,13 @@ fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, usize),
     };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok((None, 0)),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, Strays::default()));
+        }
         Err(why) => return Err(refuse(RefusalKind::Read, why.to_string())),
     };
     let mut best: Option<u64> = None;
-    let mut strays = 0_usize;
+    let mut strays = Strays::default();
     for (seen, entry) in entries.enumerate() {
         if seen >= MAX_GENERATIONS {
             return Err(refuse(
@@ -2255,7 +2320,7 @@ fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, usize),
             .and_then(|digits| digits.parse::<u64>().ok());
         match generation {
             Some(generation) => best = best.max(Some(generation)),
-            None => strays += 1,
+            None => strays.count(&name),
         }
     }
     Ok((best.map(|g| (g, table.path(store, g))), strays))
@@ -2282,7 +2347,7 @@ fn slot<T>(
     store: &Path,
     table: Table,
     build: impl Fn(&Parsed, &Path) -> Result<T, Refusal>,
-) -> Slot<T> {
+) -> (Slot<T>, Strays) {
     let compiled = || -> Result<(Receipt, T), Refusal> {
         let dir = table.dir(store);
         if !table.compiled() {
@@ -2313,13 +2378,16 @@ fn slot<T>(
         Ok((parsed.receipt, made))
     };
     let found = if store.as_os_str().is_empty() {
-        Ok((None, 0))
+        Ok((None, Strays::default()))
     } else {
         newest(store, table)
     };
-    match found {
-        Err(why) => Slot::Refused(why),
-        Ok((None, _)) => match compiled() {
+    let (found, strays) = match found {
+        Err(why) => return (Slot::Refused(why), Strays::default()),
+        Ok(found) => found,
+    };
+    let slot = match found {
+        None => match compiled() {
             Ok((receipt, made)) => Slot::Compiled {
                 receipt,
                 looked_in: table.dir(store),
@@ -2327,7 +2395,7 @@ fn slot<T>(
             },
             Err(why) => Slot::Refused(why),
         },
-        Ok((Some((generation, path)), _)) => {
+        Some((generation, path)) => {
             let loaded = read_capped(&path)
                 .map_err(|(kind, detail)| Refusal {
                     table,
@@ -2347,6 +2415,39 @@ fn slot<T>(
                 Err(why) => Slot::Refused(why),
             }
         }
+    };
+    (slot, strays)
+}
+
+/// One `warn` event for a table directory that holds names which are not
+/// generations, naming the count of each kind and the smallest other name.
+fn told_strays(store: &Path, table: Table, strays: &Strays) {
+    if strays.is_empty() {
+        return;
+    }
+    let dir = table.dir(store).display().to_string();
+    let event = telemetry::Event::warn("pull::reference_data", "names that are not generations")
+        .with("table", table.word())
+        .with("path", dir.as_str())
+        .with("staging", u64::try_from(strays.staging).unwrap_or(u64::MAX))
+        .with("other", u64::try_from(strays.other).unwrap_or(u64::MAX))
+        .with("first_other", strays.first_other.as_deref().unwrap_or("-"));
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// The level and message a slot is told at. A table this build has no
+/// compiled copy of, and the store no generation of yet, is an ABSENCE,
+/// said at `warn` with its reason, not a refused file at `error`: every run
+/// that loads the tables (an import never reads the rate) would otherwise
+/// log an error for a table nobody wrote (R3-30 repair 1). A consumer that
+/// needs the table still refuses by this name.
+fn told_as<T>(slot: &Slot<T>) -> (telemetry::Level, &'static str) {
+    match slot {
+        Slot::Refused(why) if why.kind == RefusalKind::Absent && why.generation.is_none() => {
+            (telemetry::Level::Warn, "table absent")
+        }
+        Slot::Refused(_) => (telemetry::Level::Error, "table refused"),
+        Slot::Store { .. } | Slot::Compiled { .. } => (telemetry::Level::Info, "table loaded"),
     }
 }
 
@@ -2356,23 +2457,22 @@ fn told<T>(table: Table, slot: &Slot<T>) {
         .receipt()
         .map(|receipt| receipt.fetched.to_string())
         .unwrap_or_default();
+    let (level, message) = told_as(slot);
+    let event =
+        telemetry::Event::new(level, "pull::reference_data", message).with("table", table.word());
     let event = match slot {
-        Slot::Refused(why) => telemetry::Event::error("pull::reference_data", "table refused")
-            .with("table", table.word())
+        Slot::Refused(why) => event
             .with("path", path.as_str())
             .with("why", why.kind.word())
             .with("detail", why.detail.as_str()),
-        Slot::Store { receipt, .. } | Slot::Compiled { receipt, .. } => {
-            telemetry::Event::info("pull::reference_data", "table loaded")
-                .with("table", table.word())
-                .with("origin", slot.origin())
-                .with("path", path.as_str())
-                .with("generation", receipt.generation)
-                .with("rows", u64::try_from(receipt.rows).unwrap_or(u64::MAX))
-                .with("source", receipt.source.as_str())
-                .with("fetched", fetched.as_str())
-                .with("sha256", receipt.sha256.as_str())
-        }
+        Slot::Store { receipt, .. } | Slot::Compiled { receipt, .. } => event
+            .with("origin", slot.origin())
+            .with("path", path.as_str())
+            .with("generation", receipt.generation)
+            .with("rows", u64::try_from(receipt.rows).unwrap_or(u64::MAX))
+            .with("source", receipt.source.as_str())
+            .with("fetched", fetched.as_str())
+            .with("sha256", receipt.sha256.as_str()),
     };
     let _dropped_when_filtered = telemetry::emit(&event);
 }
@@ -2382,23 +2482,40 @@ fn told<T>(table: Table, slot: &Slot<T>) {
 /// and checksum, or its refusal.
 #[must_use]
 pub fn load(store: &Path) -> Reference {
-    let reference = Reference {
-        calendar: slot(store, Table::Calendar, CalendarTable::build),
-        indices: slot(store, Table::IndexIdentity, IndexTable::build),
-        renames: slot(store, Table::SymbolChanges, build_lineage),
-        fno: slot(store, Table::FnoList, FnoTable::build),
-        expiry: slot(store, Table::ExpiryMoves, ExpiryTable::build),
-        lots: slot(store, Table::LotSizes, build_lots),
-        rates: slot(store, Table::RiskFreeRate, build_rates),
-    };
-    told(Table::Calendar, &reference.calendar);
-    told(Table::IndexIdentity, &reference.indices);
-    told(Table::SymbolChanges, &reference.renames);
-    told(Table::FnoList, &reference.fno);
-    told(Table::ExpiryMoves, &reference.expiry);
-    told(Table::LotSizes, &reference.lots);
-    told(Table::RiskFreeRate, &reference.rates);
-    reference
+    let mut strays = Vec::new();
+    let calendar = kept(&mut strays, store, Table::Calendar, CalendarTable::build);
+    let indices = kept(&mut strays, store, Table::IndexIdentity, IndexTable::build);
+    let renames = kept(&mut strays, store, Table::SymbolChanges, build_lineage);
+    let fno = kept(&mut strays, store, Table::FnoList, FnoTable::build);
+    let expiry = kept(&mut strays, store, Table::ExpiryMoves, ExpiryTable::build);
+    let lots = kept(&mut strays, store, Table::LotSizes, build_lots);
+    let rates = kept(&mut strays, store, Table::RiskFreeRate, build_rates);
+    Reference {
+        calendar,
+        indices,
+        renames,
+        fno,
+        expiry,
+        lots,
+        rates,
+        strays,
+    }
+}
+
+/// One table through [`slot`], told as its event, its strays told and kept.
+fn kept<T>(
+    strays: &mut Vec<(Table, Strays)>,
+    store: &Path,
+    table: Table,
+    build: impl Fn(&Parsed, &Path) -> Result<T, Refusal>,
+) -> Slot<T> {
+    let (loaded, found) = slot(store, table, build);
+    told(table, &loaded);
+    told_strays(store, table, &found);
+    if !found.is_empty() {
+        strays.push((table, found));
+    }
+    loaded
 }
 
 // ─────────────────────────────── the writer ───────────────────────────────
@@ -2414,6 +2531,9 @@ pub struct Written {
     pub path: PathBuf,
     /// Its checksum.
     pub sha256: String,
+    /// `true` when this write landed the generation; `false` when the newest
+    /// generation already held exactly these bytes and nothing was written.
+    pub landed: bool,
 }
 
 /// Why a write did not land.
@@ -2426,6 +2546,8 @@ pub enum WriteError {
     /// Another writer landed this generation first: nothing of this write
     /// is at a final name.
     Raced(u64),
+    /// The newest generation is `u64::MAX`: no generation follows it.
+    Exhausted(u64),
     /// The draft does not parse back as its own table.
     Refused(Refusal),
 }
@@ -2441,6 +2563,10 @@ impl fmt::Display for WriteError {
                     "generation {generation} was written by another writer first"
                 )
             }
+            Self::Exhausted(generation) => write!(
+                f,
+                "generation {generation} is the last a name can carry; no generation follows it"
+            ),
             Self::Refused(why) => write!(f, "{why}"),
         }
     }
@@ -2463,9 +2589,32 @@ pub fn write(store: &Path, draft: &Draft) -> Result<Written, WriteError> {
     let dir = table.dir(store);
     std::fs::create_dir_all(&dir)
         .map_err(|why| WriteError::Io(format!("{}: {why}", dir.display())))?;
-    let generation = match newest(store, table) {
-        Ok((found, _)) => found.map_or(1, |(g, _)| g.saturating_add(1)),
+    let newest_found = match newest(store, table) {
+        Ok((found, _)) => found,
         Err(why) => return Err(WriteError::Refused(why)),
+    };
+    // IDEMPOTENT (R3-30 repair 1): a draft whose bytes, numbered as the
+    // newest generation, ARE that generation lands nothing; re-running a
+    // seed or a rate import over the same rows is not a new generation.
+    if let Some((held, held_path)) = &newest_found
+        && let Ok(rendered) = render(draft, *held)
+        && read_capped(held_path).is_ok_and(|bytes| bytes == rendered.as_bytes())
+    {
+        let parsed = parse(table, Some(*held), held_path, rendered.as_bytes())
+            .map_err(WriteError::Refused)?;
+        return Ok(Written {
+            table,
+            generation: *held,
+            path: held_path.clone(),
+            sha256: parsed.receipt.sha256,
+            landed: false,
+        });
+    }
+    let generation = match newest_found {
+        None => 1,
+        // The last generation a name can carry: refused by name, never
+        // reported as a race the writer did not lose.
+        Some((held, _)) => held.checked_add(1).ok_or(WriteError::Exhausted(held))?,
     };
     let text = render(draft, generation).map_err(WriteError::Draft)?;
     let path = table.path(store, generation);
@@ -2503,12 +2652,23 @@ pub fn write(store: &Path, draft: &Draft) -> Result<Written, WriteError> {
     // the generation, which now has its final name (or was refused).
     let _left_for_the_next_create = std::fs::remove_file(&staging);
     match linked {
-        Ok(()) => Ok(Written {
-            table,
-            generation,
-            path,
-            sha256: parsed.receipt.sha256,
-        }),
+        // DURABLE: the new name is synced in its directory before the write
+        // reports it landed, so a power cut after `Ok` cannot lose it.
+        Ok(()) => std::fs::File::open(&dir)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|why| {
+                WriteError::Io(format!(
+                    "{}: generation {generation} is linked but its directory did not sync: {why}",
+                    dir.display()
+                ))
+            })
+            .map(|()| Written {
+                table,
+                generation,
+                path,
+                sha256: parsed.receipt.sha256,
+                landed: true,
+            }),
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(WriteError::Raced(generation))
         }
@@ -2559,9 +2719,16 @@ fn cited(status: RowStatus) -> (Standing, String) {
     match status {
         RowStatus::Sourced(citations) => (
             Standing::Sourced,
+            // Each citation's sha256 travels with it when the charter
+            // records one (R3-30 repair 1: the seed dropped it).
             citations
                 .iter()
-                .map(|c| format!("{} read {}", c.url, c.read))
+                .map(|c| {
+                    c.sha256.map_or_else(
+                        || format!("{} read {}", c.url, c.read),
+                        |sha| format!("{} read {} sha256 {sha}", c.url, c.read),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; "),
         ),
@@ -2688,7 +2855,8 @@ pub fn seed_draft(table: Table) -> Result<Draft, String> {
                         ymd_day(row.first_day)?.to_string(),
                         row.kind.as_str().to_owned(),
                         row.contracts.to_string(),
-                        "pull::expiry_alias::ALIASES".to_owned(),
+                        // Each row says what it rests on (R3-30 repair 1).
+                        field(&row.basis.source()),
                     ])
                 })
                 .collect::<Result<_, _>>()?,

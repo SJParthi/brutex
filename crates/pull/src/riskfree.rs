@@ -120,6 +120,20 @@ pub const SOURCE_PREFIX: &str = "https://www.rbi.org.in/";
 /// week to spare and refuses a whole missing week. D-2810.
 pub const MAX_AGE_DAYS: i32 = 14;
 
+/// The oldest a CARRIED result may be, in calendar days: two staleness
+/// windows.
+///
+/// A documented gap row restarts the staleness clock, so without this a run
+/// of documented gaps would carry one result's rate with no age bound at all
+/// (R3-30 repair 1): ten weekly `CANCELLED` rows would price on a rate ten
+/// weeks old. Twenty-eight days admits the longest documented runs the
+/// operator's table holds -- two consecutive weeks without a 91-day cut-off
+/// (2024-09-18 and 2024-09-25; 2026-03-25 and the week of 2026-03-30, DB-B44)
+/// -- with the holiday shift [`MAX_AGE_DAYS`] already allows, and refuses a
+/// third missing week by name ([`LookupError::CarriedTooLong`]) instead of
+/// pricing on it. A bound of the series, not of a vendor fact.
+pub const MAX_CARRIED_AGE_DAYS: i32 = 2 * MAX_AGE_DAYS;
+
 /// The largest file this will read. A weekly series for a century is under
 /// a megabyte; anything bigger is not this table.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -328,6 +342,17 @@ pub enum LookupError {
         /// The day asked.
         day: TradeDay,
     },
+    /// Documented gaps cover the day, but the result they would carry is more
+    /// than [`MAX_CARRIED_AGE_DAYS`] old: a run of gaps carries a rate only so
+    /// far, and past it no rate is priced.
+    CarriedTooLong {
+        /// The day asked.
+        day: TradeDay,
+        /// The release of the result that would have been carried.
+        result: TradeDay,
+        /// The documented gap that covers the day.
+        gap: Gap,
+    },
 }
 
 impl std::fmt::Display for SeriesError {
@@ -368,6 +393,15 @@ impl std::fmt::Display for LookupError {
                  days old or absent, and no documented gap row explains why, so \
                  an auction is missing from the series; no rate is carried \
                  forward over an unexplained gap"
+            ),
+            Self::CarriedTooLong { day, result, gap } => write!(
+                f,
+                "documented gaps cover {day} (the latest, released {}, is {}), but the \
+                 result they would carry was released {result}, more than \
+                 {MAX_CARRIED_AGE_DAYS} days before; a rate is carried over documented \
+                 gaps only that far, and no older rate is priced",
+                gap.released,
+                gap.kind.word(),
             ),
         }
     }
@@ -671,6 +705,15 @@ impl Series {
             .and_then(|slot| slot.checked_sub(1))
             .and_then(|index| self.gaps.get(usize::try_from(index).ok()?))
             .copied();
+        if let Some(gap) = carried
+            && day.ordinal() - auction.released.ordinal() > MAX_CARRIED_AGE_DAYS
+        {
+            return Err(LookupError::CarriedTooLong {
+                day,
+                result: auction.released,
+                gap,
+            });
+        }
         Ok(AsOf {
             rate,
             auction,
@@ -892,6 +935,8 @@ mod tests {
                 .map_err(|e| match e {
                     LookupError::BeforeSeries { .. } => "before the series",
                     LookupError::Stale { .. } => "too old",
+                    // No gap row in this table, so nothing is carried.
+                    LookupError::CarriedTooLong { .. } => "carried too long",
                 });
             assert_eq!(got, expected, "on {asked}");
             if let Ok(released) = got {
@@ -1334,6 +1379,63 @@ mod tests {
             Err(LookupError::Stale {
                 day: day(2020, 2, 27)
             })
+        );
+    }
+
+    #[test]
+    fn chained_documented_gaps_carry_a_rate_no_older_than_two_windows() {
+        // Four weekly gap rows after the 8 Jan result, then a result on
+        // 12 Feb. Each gap restarts the staleness clock, so without a bound on
+        // the CARRIED result the 8 Jan rate would price every day to 12 Feb.
+        let mut text = String::from(HEADER);
+        for (released, price, yield_pct) in [
+            ("2020-01-01", "98.5000", "6.1081"),
+            ("2020-01-08", "98.4000", "6.5219"),
+        ] {
+            text.push('\n');
+            text.push_str(&line(released, price, yield_pct));
+        }
+        for released in ["2020-01-15", "2020-01-22", "2020-01-29", "2020-02-05"] {
+            text.push('\n');
+            text.push_str(&gap_line(released, GapKind::Cancelled));
+        }
+        text.push('\n');
+        text.push_str(&line("2020-02-12", "98.6000", "5.6951"));
+        text.push('\n');
+        let chained = series(&text);
+        assert_eq!(chained.gap_count(), 4);
+        // Day 28 after the carried release: still carried, still labelled.
+        let edge = chained.on(day(2020, 2, 5)).expect("day 28 is carried");
+        assert_eq!(edge.state(), "rate_carried");
+        assert_eq!(edge.auction.released, day(2020, 1, 8));
+        // Day 29, inside the fourth gap's own fourteen days: refused by name,
+        // naming the gap and the result it would have carried.
+        let gap = Gap {
+            released: day(2020, 2, 5),
+            kind: GapKind::Cancelled,
+        };
+        for asked in [day(2020, 2, 6), day(2020, 2, 12)] {
+            assert_eq!(
+                chained.on(asked),
+                Err(LookupError::CarriedTooLong {
+                    day: asked,
+                    result: day(2020, 1, 8),
+                    gap,
+                }),
+                "{asked}"
+            );
+        }
+        let said = chained
+            .on(day(2020, 2, 6))
+            .expect_err("refused")
+            .to_string();
+        assert!(said.contains("2020-01-08"), "{said}");
+        assert!(said.contains("cancelled"), "{said}");
+        assert!(said.contains(&MAX_CARRIED_AGE_DAYS.to_string()), "{said}");
+        // The next result is fresh again from the day after its release.
+        assert_eq!(
+            chained.on(day(2020, 2, 13)).map(|as_of| as_of.state()),
+            Ok("rate_fresh")
         );
     }
 

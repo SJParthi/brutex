@@ -75795,3 +75795,72 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 `link_tests::an_idempotent_requirement_opens_nothing_for_writing`. Each one
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
+
+### D-6246 — R3-30: the reference tables are store data read through one loader; a rate carried over a documented RBI gap is labelled on the wire and bounded — 2026-10-20
+
+Number taken from the ledger head at commit (amendment A6); the landing
+renumbers it if another package lands D-6246 first.
+
+Findings DB-B44, DB-G76 (store side), SC-CLOSE-15 (partial), SC-CLOSE-23,
+SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
+`verify-R3-30-r1`.
+
+1. **Seven tables, one loader.** `calendar`, `index_identity`,
+   `symbol_changes`, `fno_list`, `expiry_moves`, `lot_sizes` and
+   `risk_free_rate` are files under `<store>/reference/v1/<table>/`
+   (`docs/02-store-format.md`, "Reference tables, format version 1").
+   `pull::reference_data::load` reads the newest generation of each, checks
+   its sha256, and serves it labelled `store`; a file that fails any check is
+   refused by name (table, file, generation, kind) and nothing of that table
+   is served, never the compiled copy in its place. A table with no
+   generation is served from the copy this build compiled, labelled
+   `compiled`; `risk_free_rate` has no compiled copy and answers a named
+   absence. Each load is one event per table; an absence of a table with no
+   compiled copy is told at `warn` (`table absent`), a refused file at
+   `error`.
+2. **Writes append.** A generation is staged under the writer's own name,
+   synced, hard-linked to `<generation:020>.ref` and the directory synced; no
+   generation is rewritten. Bytes identical to the newest generation land
+   nothing (`Written::landed` is `false`); generation `u64::MAX` refuses the
+   next write by name (`WriteError::Exhausted`), never as a race. Names in a
+   table directory that are not generations are never served and never
+   ignored in silence: `Reference::strays` keeps them and one `warn` event
+   per table names them.
+3. **A documented RBI gap carries the rate, labelled (DB-B44).** The T-bill
+   table may hold a gap row (`cut_off_price` `CANCELLED`, `NA` or
+   `NOT_HELD`, no yield, an RBI URL). It restarts the 14-day staleness clock
+   (`MAX_AGE_DAYS`, D-2810), and a day it covers is priced on the previous
+   result's rate with `rate_state` `rate_carried` and `rate_gap` (kind and
+   release day) on every `/greeks.json` cell; the `rate` header counts
+   `gaps` beside `auctions`, and `/db` tags the IV cell `C` and names the gap
+   in its title. A run of gaps carries a result at most
+   `MAX_CARRIED_AGE_DAYS` = 28 days (two staleness windows: the operator's
+   table holds at most two consecutive weeks without a 91-day cut-off);
+   past it every cell is refused `rate_carried_too_long`. A gap nobody
+   documented is refused `rate_stale` exactly as before.
+4. **Lot rows carry their standing (DB-G76, store side).** Every lot row has
+   its source, source sha256 and read day; only a row whose source is
+   recorded in `docs/00-charter.md` applies, others are listed `unverified`
+   and not applied, and an underlying or day with no applied row is a named
+   absence. `costs::lot::LotTable` is built from rows `pull` hands it, so
+   `costs` still names `core` alone. The compiled `costs::lot::lot_size`
+   path is unchanged, so until R3-10-OPT moves readers onto the table the two
+   answers differ on the spans whose revisions are unsourced; the table is
+   the authority for every new reader.
+5. **A reused symbol closes its day (FM-112).** `nfo_cause`'s
+   `UnderlyingStale` is a vendor cause that closes, like `cm_cause`'s
+   `SymbolNotInUse`: one action item per symbol change, never a nightly
+   incomplete; the day is read again only by a named re-read once an alias
+   row lands.
+6. **A calendar extension lists, never re-files (FM-109).**
+   `expiry_alias::rekey_plan(contracts, held, newer)` lists every contract
+   that settles `as_stated_unmeasured` under the calendar the store holds
+   now and that the newer calendar settles elsewhere or refuses; applying it
+   is the rekey writer's (R4-21).
+7. **Every expiry row says what it rests on.** Five NIFTY rows cite
+   NSE/FAOP/68747 (D-3358), five DB-B01 rows are inferred with their cause
+   UNVERIFIED, and the rest are census measurements.
+8. **A dated record that ends, or is not served, is an alert.**
+   `Reference::horizons` answers each table's refusal rather than `None`, and
+   `Reference::horizon_alerts` names every record within
+   `HORIZON_ALERT_DAYS` of its end, past it, or absent. The tile is R3-25's.

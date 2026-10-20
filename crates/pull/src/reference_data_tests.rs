@@ -210,8 +210,21 @@ fn stray_names_are_not_generations_and_an_empty_store_serves_the_compiled_tables
     ] {
         std::fs::write(dir.join(stray), b"x").unwrap();
     }
-    assert_eq!(newest(&store, Table::LotSizes).unwrap(), (None, 4));
-    assert_eq!(load(&store).lots.origin(), "compiled");
+    let strays = Strays {
+        staging: 1,
+        other: 3,
+        first_other: Some("0000000000000000000x.ref".to_owned()),
+    };
+    assert_eq!(
+        newest(&store, Table::LotSizes).unwrap(),
+        (None, strays.clone())
+    );
+    // Served from the compiled copy, and the strays are KEPT and told, never
+    // ignored in silence (R3-30 repair 1).
+    let loaded = load(&store);
+    assert_eq!(loaded.lots.origin(), "compiled");
+    assert_eq!(loaded.strays, [(Table::LotSizes, strays)]);
+    assert!(load(&scratch("ref-no-strays")).strays.is_empty());
 }
 
 #[test]
@@ -480,10 +493,19 @@ fn a_store_with_no_rate_table_refuses_greeks_by_name() {
     assert_eq!(why.kind.word(), "absent");
     assert!(why.to_string().contains("risk_free_rate"), "{why}");
     assert!(why.detail.contains("no rate is invented"));
+    // An absent rate table is an ALERT with its reason, never a quiet None.
+    let [(cal_table, cal), (rate_table, rates)] = loaded.horizons(epoch(2026, 10, 20));
     assert_eq!(
-        loaded.horizons(epoch(2026, 10, 20))[1],
-        (Table::RiskFreeRate, None)
+        (cal_table, rate_table),
+        (Table::Calendar, Table::RiskFreeRate)
     );
+    assert!(cal.is_ok(), "the calendar is served");
+    assert_eq!(rates.map_err(|why| why.kind), Err(RefusalKind::Absent));
+    let alerts = loaded.horizon_alerts(epoch(2026, 10, 20));
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].0, Table::RiskFreeRate);
+    assert!(alerts[0].1.starts_with("not served: "), "{alerts:?}");
+    assert!(alerts[0].1.contains("absent"), "{alerts:?}");
 }
 
 #[test]
@@ -509,11 +531,16 @@ fn the_horizon_alert_fires_seven_days_before_the_calendar_ends() {
     let loaded = load(&store);
     let rates_last = epoch(2020, 1, 29) + i64::from(crate::riskfree::MAX_AGE_DAYS);
     let [(_, cal), (_, rates)] = loaded.horizons(rates_last - 7);
-    assert!(cal.is_some());
+    assert!(cal.is_ok());
     let rates = rates.unwrap();
     assert_eq!(rates.last_day, rates_last);
     assert!(rates.alert());
     assert!(!loaded.horizons(rates_last - 8)[1].1.unwrap().alert());
+    assert_eq!(loaded.horizon_alerts(rates_last - 8), []);
+    assert_eq!(
+        loaded.horizon_alerts(rates_last + 1),
+        [(Table::RiskFreeRate, "ended 1 days ago".to_owned())]
+    );
 }
 
 #[test]
@@ -645,32 +672,42 @@ fn a_calendar_change_that_closes_a_held_day_is_named_before_it_is_applied() {
 #[test]
 fn two_writers_of_one_generation_never_both_land() {
     let store = seeded("ref-race");
-    let draft = seed_draft(Table::LotSizes).unwrap();
+    // A draft that differs from the seeded generation 1 (one invented row),
+    // so eight writers contend for generation 2.
+    let mut draft = seed_draft(Table::LotSizes).unwrap();
+    let mut row = draft.rows[0].clone();
+    row[0] = "INVENTEDRACE".to_owned();
+    draft.rows.push(row);
     let outcomes: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| write(&store, &draft)))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let mut landed: Vec<u64> = outcomes
+    // Exactly one writer LANDS generation 2. Every other one either lost the
+    // race for it (`Raced(2)`) or listed after it landed and found exactly
+    // its bytes there (`landed: false`, generation 2): no generation lands
+    // twice, and the same rows never land as a second generation.
+    let landed: Vec<u64> = outcomes
         .iter()
-        .filter_map(|outcome| outcome.as_ref().ok().map(|w| w.generation))
+        .filter_map(|outcome| outcome.as_ref().ok().filter(|w| w.landed))
+        .map(|w| w.generation)
         .collect();
-    let raced = outcomes
-        .iter()
-        .filter(|outcome| matches!(outcome, Err(WriteError::Raced(_))))
-        .count();
-    assert_eq!(landed.len() + raced, 8, "{outcomes:?}");
-    let before = landed.len();
-    landed.sort_unstable();
-    landed.dedup();
-    assert_eq!(landed.len(), before, "no generation landed twice");
-    // Every landed generation reads back; the newest is served.
-    assert_eq!(load(&store).lots.origin(), "store");
-    for generation in landed {
-        let bytes = std::fs::read(Table::LotSizes.path(&store, generation)).unwrap();
-        parse(Table::LotSizes, Some(generation), Path::new("x"), &bytes).unwrap();
+    assert_eq!(landed, [2], "{outcomes:?}");
+    for outcome in &outcomes {
+        match outcome {
+            Ok(written) => assert_eq!(written.generation, 2, "{outcomes:?}"),
+            Err(WriteError::Raced(generation)) => assert_eq!(*generation, 2),
+            Err(other) => panic!("{other}"),
+        }
     }
+    // The landed generation reads back and is served.
+    let loaded = load(&store);
+    assert_eq!(loaded.lots.origin(), "store");
+    assert_eq!(loaded.lots.receipt().unwrap().generation, 2);
+    let bytes = std::fs::read(Table::LotSizes.path(&store, 2)).unwrap();
+    parse(Table::LotSizes, Some(2), Path::new("x"), &bytes).unwrap();
+    assert!(!Table::LotSizes.path(&store, 3).exists(), "nothing past 2");
 }
 
 /// p50, p99 and max of `n` timed calls, in microseconds.
@@ -761,6 +798,12 @@ fn a_reused_symbol_is_one_action_item_and_not_a_nightly_incomplete() {
         let stale = lineage
             .filed_under(change.old, later)
             .expect_err("the old symbol after its change is refused");
+        // THE ITEM IS THE CHANGE ROW, NOT THE DAY: the loader's lineage
+        // refuses every later day with the same row, so every day of the
+        // symbol keys one item (the set below is built from what
+        // `filed_under`, `nfo_cause` and `cm_cause` answer, never from the
+        // test's own `change`).
+        assert_eq!(stale, alias::Stale::AfterChange(*change), "{later:?}");
         // The option day.
         let option = NfoRefusal::UnderlyingStale {
             ticker: format!("{}INVENTED", change.old),
@@ -849,4 +892,161 @@ fn replay_a_real_rate_table_under_the_gap_rule() {
         stale.len(),
         carried.len()
     );
+}
+
+/// The lot seed with one invented row added, so it differs from generation 1.
+fn changed_lots(tag: &str) -> Draft {
+    let mut draft = seed_draft(Table::LotSizes).unwrap();
+    let mut row = draft.rows[0].clone();
+    row[0] = tag.to_owned();
+    draft.rows.push(row);
+    draft
+}
+
+#[test]
+fn writing_the_same_rows_again_lands_no_new_generation() {
+    let store = seeded("ref-idem");
+    let draft = seed_draft(Table::LotSizes).unwrap();
+    // The seeded generation 1 holds exactly these rows: nothing lands.
+    let again = write(&store, &draft).unwrap();
+    assert!(!again.landed, "{again:?}");
+    assert_eq!(again.generation, 1);
+    assert_eq!(again.path, Table::LotSizes.path(&store, 1));
+    assert_eq!(again.sha256, load(&store).lots.receipt().unwrap().sha256);
+    assert!(!Table::LotSizes.path(&store, 2).exists(), "no second copy");
+    // Changed rows are a new generation.
+    let landed = write(&store, &changed_lots("INVENTEDIDEM")).unwrap();
+    assert!(landed.landed);
+    assert_eq!(landed.generation, 2);
+    // Going back to the first rows is a THIRD generation, never a rewind
+    // to generation 1 (append-only).
+    let back = write(&store, &draft).unwrap();
+    assert!(back.landed);
+    assert_eq!(back.generation, 3);
+    assert_eq!(load(&store).lots.receipt().unwrap().generation, 3);
+}
+
+#[test]
+fn the_last_generation_is_refused_by_name_not_reported_as_a_race() {
+    let store = seeded("ref-exhausted");
+    let draft = seed_draft(Table::LotSizes).unwrap();
+    // Generation u64::MAX, planted: the last a name can carry.
+    std::fs::write(
+        Table::LotSizes.path(&store, u64::MAX),
+        render(&draft, u64::MAX).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(load(&store).lots.receipt().unwrap().generation, u64::MAX);
+    // The same rows: idempotent, nothing to write.
+    let same = write(&store, &draft).unwrap();
+    assert!(!same.landed);
+    assert_eq!(same.generation, u64::MAX);
+    // Other rows: refused by name. Before repair 1 this was `Raced(u64::MAX)`,
+    // a race nobody ran.
+    let refused = write(&store, &changed_lots("INVENTEDLAST")).unwrap_err();
+    assert!(
+        matches!(refused, WriteError::Exhausted(u64::MAX)),
+        "{refused:?}"
+    );
+    assert!(refused.to_string().contains("no generation follows"));
+}
+
+#[test]
+fn an_absent_table_is_told_as_a_warning_and_a_refused_file_as_an_error() {
+    let store = seeded("ref-told");
+    let loaded = load(&store);
+    // No rate generation yet and no compiled copy: an absence, at warn. The
+    // import loads every table and never reads this one.
+    assert_eq!(
+        told_as(&loaded.rates),
+        (telemetry::Level::Warn, "table absent")
+    );
+    assert_eq!(
+        told_as(&loaded.lots),
+        (telemetry::Level::Info, "table loaded")
+    );
+    // A file that IS there and will not read is still an error.
+    std::fs::create_dir_all(Table::RiskFreeRate.dir(&store)).unwrap();
+    std::fs::write(Table::RiskFreeRate.path(&store, 1), b"torn").unwrap();
+    let loaded = load(&store);
+    assert_eq!(
+        loaded.rates.table().map(drop).map_err(|why| why.generation),
+        Err(Some(1))
+    );
+    assert_eq!(
+        told_as(&loaded.rates),
+        (telemetry::Level::Error, "table refused")
+    );
+}
+
+#[test]
+fn the_compiled_lineage_is_served_or_refused_never_emptied() {
+    let lineage = Lineage::compiled().expect("the shipped rows form a lineage");
+    assert_eq!(
+        lineage.rows().len(),
+        brutex_core::alias::LINEAGE.rows().len()
+    );
+    assert!(
+        !lineage.rows().is_empty(),
+        "the compiled lineage has rows to serve"
+    );
+}
+
+#[test]
+fn a_seeded_row_keeps_every_citations_checksum() {
+    // Every compiled citation that records a sha256 is in its seeded row's
+    // source text, beside its URL and read day: the round trip through the
+    // store loses no provenance the charter recorded.
+    let mut with_sha = 0_usize;
+    let rows = brutex_core::alias::INDEX_ROWS
+        .iter()
+        .map(|row| row.status)
+        .chain(
+            brutex_core::alias::LINEAGE
+                .rows()
+                .iter()
+                .map(|row| row.status),
+        );
+    let seeded: Vec<String> = [Table::IndexIdentity, Table::SymbolChanges]
+        .into_iter()
+        .flat_map(|table| seed_draft(table).unwrap().rows)
+        .map(|row| row.last().cloned().unwrap())
+        .collect();
+    for (status, source) in rows.zip(&seeded) {
+        if let RowStatus::Sourced(citations) = status {
+            for citation in citations {
+                assert!(source.contains(citation.url), "{source}");
+                if let Some(sha) = citation.sha256 {
+                    with_sha += 1;
+                    assert!(source.contains(&format!("sha256 {sha}")), "{source}");
+                }
+            }
+        }
+    }
+    assert!(with_sha > 0, "the compiled rows record checksums to keep");
+}
+
+#[test]
+fn the_expiry_seed_says_what_each_row_rests_on() {
+    // Before repair 1 every row's source was the bare word of the table and
+    // the file said `measured`, though five rows rest on NSE/FAOP/68747 and
+    // five are inferred with their cause UNVERIFIED.
+    let store = seeded("ref-expiry-basis");
+    let loaded = load(&store);
+    let table = loaded.expiry.table().unwrap();
+    let sources: Vec<&str> = table.rows().iter().map(|row| row.source.as_str()).collect();
+    let count = |prefix: &str| sources.iter().filter(|s| s.starts_with(prefix)).count();
+    assert_eq!(count("sourced: NSE/FAOP/68747"), 5, "{sources:?}");
+    assert_eq!(count("inferred from the underlying"), 5, "{sources:?}");
+    assert_eq!(count("measured: "), sources.len() - 10, "{sources:?}");
+    for row in table.rows() {
+        if row.source.starts_with("sourced") {
+            assert_eq!(row.underlying.as_deref(), Some("NIFTY"));
+            assert_eq!(row.first_day, day(2025, 8, 1));
+            assert!(row.source.contains("FAOP68747.pdf"), "{}", row.source);
+        }
+        if row.source.starts_with("inferred") {
+            assert!(row.source.contains("UNVERIFIED"), "{}", row.source);
+        }
+    }
 }
