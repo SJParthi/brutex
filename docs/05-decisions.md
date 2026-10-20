@@ -72402,6 +72402,22 @@ rule and a test:
 4. A day one feed holds is a row: `gdfl_only` or `zerodha_only`; both feeds
    with no matched minute is `no_overlap`; both feeds and no lag yet is
    `not_aligned` (same test).
+5. **A month held sealed is read through the one door** (added when
+   `feat/db-fix` 5cec3e7cd, which carries SC-3's read door, was merged in,
+   20 Oct 2026): every month file is opened by `BarFile::open_existing`,
+   which since D-5899 opens `<yyyy-mm>.sbar` first and the raw `.bin`
+   second. A share-month held only sealed (after a retirement) gives the raw
+   form's file byte for byte but the store root its `# month` line names; a
+   damaged sealed form beside an intact `.bin` makes every day of that
+   share-month `read_failed:gdfl_1s:<the door's refusal>` and the run exits 1,
+   never answered from the `.bin` and never `absent`
+   (`a_sealed_month_is_read_through_the_door_like_its_raw_form`). The verb
+   adds no sealed reader of its own. The real store held no `.sbar` on
+   20 Oct 2026 (a READ-ONLY `find bars -name '*.sbar'` printed nothing), so
+   no figure of D-5179 item 3 changes; a sealed record's read cost is the
+   door's: a cache miss decodes one frame of at most 256 rows and a
+   neighbouring row is a copy (`docs/06-limits.md` L-SC-1, L-SC-22, measured
+   by SC-3), O(1) a record, not measured again by this verb.
 
 ### D-5174 — One authority for the per-stock-day factor: `cli::feed_reconcile::FactorIndex`, read by FIB-10 and OF-2, never recomputed — 2026-10-16
 
@@ -72542,7 +72558,13 @@ rule and a test:
    feed holds any share directory; a month where no listed share holds a
    bar of either feed; a store root that is not a
    directory; an `--out` inside the store anywhere but under its audit area
-   `audit/` (compared on canonical paths). Each prints `FEED RECONCILE
+   `audit/` (compared on canonical paths); an `--out` anywhere inside the
+   tick store `BRUTEX_GDFL_TICKSTORE` names, and a named tick store that
+   cannot be resolved for a reason other than not existing (added by DATA-1
+   verification round 1, fifth pass, whose verifier could not try it: the
+   tick store is read-only to this repository; with the variable unset or
+   empty no root is known and none is compared, `docs/06-limits.md`). Each
+   prints `FEED RECONCILE
    REFUSED` or `FAILED` with the reason and exits 1. **The listing is of
    share directories, not of one month's files** (corrected before merge,
    DATA-1 verification round 1, fourth pass): a share directory
@@ -72577,6 +72599,7 @@ rule and a test:
    verb does not sweep it, because another run may own it (docs/06-limits.md).
 6. **Proof**: `a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month`,
    `the_out_directory_may_sit_in_the_store_only_under_its_audit_area`,
+   `an_out_inside_the_tick_store_is_refused_by_name`,
    `an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud`,
    `a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary`,
    `the_scheduler_doubles_while_throughput_rises_and_returns_to_the_fastest_count`,

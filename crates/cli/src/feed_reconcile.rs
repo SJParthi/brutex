@@ -89,7 +89,7 @@
 //! reader and the digest read only the newest FULL version (D-5178). A
 //! `--symbols` key neither feed holds a directory of is refused before
 //! anything is written, and `--out` may lie inside the store only under its
-//! audit area.
+//! audit area, and never inside the tick store `BRUTEX_GDFL_TICKSTORE` names.
 //!
 //! # Cost
 //!
@@ -434,14 +434,24 @@ pub(crate) fn lookup_ask(arguments: &[&str]) -> Result<Lookup, String> {
 /// `cli feed-reconcile`: see the module header.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     let store = crate::store_write::root_for("feed-reconcile", arguments);
-    command_with(arguments, &store, crate::commit_stamp(), out)
+    let tick = tick_root(std::env::var_os(pull::gdfl_run::TICKSTORE_VAR));
+    command_with(arguments, &store, tick.as_deref(), crate::commit_stamp(), out)
 }
 
-/// The verb against the store root `store` names and a stated build stamp, so
-/// every arm is driven by a test without the process environment.
+/// The tick store's root as `BRUTEX_GDFL_TICKSTORE` names it (the variable
+/// `cli gdfl-import tickstore` reads), or `None` when it is unset or empty:
+/// then no root is known to compare an `--out` with (`docs/06-limits.md`).
+fn tick_root(named: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    named.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+/// The verb against the store root `store` names, the tick store root `tick`
+/// (if one is known) and a stated build stamp, so every arm is driven by a
+/// test without the process environment.
 pub(crate) fn command_with(
     arguments: &[&str],
     store: &dyn Fn() -> Result<PathBuf, String>,
+    tick: Option<&Path>,
     commit: Option<&str>,
     out: &mut String,
 ) -> u8 {
@@ -474,7 +484,7 @@ pub(crate) fn command_with(
             return FAILED;
         }
     };
-    if let Some(why) = place_refusal(&root, &ask.out) {
+    if let Some(why) = place_refusal(&root, tick, &ask.out) {
         let _ = writeln!(
             out,
             "FEED RECONCILE REFUSED: {why}. Nothing was read or written."
@@ -764,9 +774,13 @@ fn chosen(root: &Path, month: YearMonth, symbols: &[String]) -> Result<Vec<Liste
 /// Why the run may not go ahead against `root` into `out`, or `None`. The
 /// store root must be a directory (an absent one would list no share and
 /// publish a file of no row), and `out` may lie inside the store only under
-/// its audit area: never in `bars/`, a generation or a manifest. Compared on
-/// canonical paths, so a link or a `..` does not slip a file past it.
-fn place_refusal(root: &Path, out: &Path) -> Option<String> {
+/// its audit area: never in `bars/`, a generation or a manifest. Nor may it
+/// lie anywhere inside the tick store `tick` names, which this repository only
+/// reads; a tick root that does not exist holds nothing `out` (which does) can
+/// be inside, and one that cannot be resolved for any other reason refuses.
+/// Compared on canonical paths, so a link or a `..` does not slip a file past
+/// it.
+fn place_refusal(root: &Path, tick: Option<&Path>, out: &Path) -> Option<String> {
     let store = match root.canonicalize() {
         Ok(store) if store.is_dir() => store,
         Ok(_) => return Some(format!("the store `{}` is not a directory", root.display())),
@@ -776,6 +790,30 @@ fn place_refusal(root: &Path, out: &Path) -> Option<String> {
         Ok(target) => target,
         Err(why) => return Some(format!("--out `{}`: {why}", out.display())),
     };
+    if let Some(tick) = tick {
+        match tick.canonicalize() {
+            Ok(ticks) if target.starts_with(&ticks) => {
+                return Some(format!(
+                    "--out `{}` lies inside the tick store `{}` ({}), which this repository \
+                     only reads; this verb never writes there",
+                    out.display(),
+                    tick.display(),
+                    pull::gdfl_run::TICKSTORE_VAR
+                ));
+            }
+            Ok(_) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => {
+                return Some(format!(
+                    "the tick store `{}` ({}) cannot be resolved, so --out `{}` cannot be \
+                     shown to lie outside it: {why}",
+                    tick.display(),
+                    pull::gdfl_run::TICKSTORE_VAR,
+                    out.display()
+                ));
+            }
+        }
+    }
     (target.starts_with(&store) && !target.starts_with(store.join("audit"))).then(|| {
         format!(
             "--out `{}` lies inside the store `{}` outside its audit area `audit/`; this \

@@ -23,7 +23,7 @@ use brutex_core::vendor::Vendor;
 use pull::session::{Day, IST_OFFSET_SECS};
 use store::file::BarFile;
 use store::format::{Bar, OI_NULL};
-use store::path::{StorePath, Timeframe, YearMonth};
+use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
 use super::{
     Basis, COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorPair,
@@ -31,7 +31,7 @@ use super::{
     Window, ZMinute, ask, bin, bounds, carried, carry_line, command_with, day_kind, file_digest,
     flag_text, lag_order, lookup_ask, mode, newest, newest_of, parse_carry, parse_day, parse_frac,
     parse_month, parts, percent, previous, publish, range_bounds, rank, round_half_up, schedule,
-    symbol_id,
+    symbol_id, tick_root,
 };
 use crate::{FAILED, MISUSED, OK};
 
@@ -262,6 +262,7 @@ fn run_with(store: &Path, arguments: &[&str]) -> (u8, String) {
     let code = command_with(
         arguments,
         &move || Ok(root.clone()),
+        None,
         Some(COMMIT),
         &mut text,
     );
@@ -493,6 +494,7 @@ fn a_missing_out_directory_or_store_refuses_before_anything_is_read() {
     let code = command_with(
         &["2025-03", "--out", &out],
         &|| Err("no store here".to_owned()),
+        None,
         Some(COMMIT),
         &mut said,
     );
@@ -543,6 +545,81 @@ fn the_out_directory_may_sit_in_the_store_only_under_its_audit_area() {
     assert!(
         contents(&out.0).0.is_empty(),
         "no file of no row is published"
+    );
+}
+
+/// AN `--out` INSIDE THE TICK STORE IS REFUSED BY NAME (DATA-1 verification
+/// round 1, fifth pass: "not tried"). The root `BRUTEX_GDFL_TICKSTORE` names,
+/// read once by `command`, is compared on canonical paths like the store's; a
+/// root that does not exist holds nothing an existing `--out` can be inside,
+/// one that cannot be resolved for another reason refuses, and an unset or
+/// empty variable names no root.
+#[test]
+fn an_out_inside_the_tick_store_is_refused_by_name() {
+    let (store, ticks, out) = (Dir::new("store"), Dir::new("ticks"), Dir::new("out"));
+    let span = on(2025, 3, 3, hm(9, 15), 2);
+    Fixture::default()
+        .gdfl("SYNA", span, 10)
+        .minutes("SYNA", span, (1, 1), 20)
+        .write(&store.0);
+    let day = ticks.0.join("cm").join("2025-03-03");
+    fs::create_dir_all(&day).unwrap();
+    let run = |tick: Option<&Path>, into: &Path| {
+        let (root, into) = (store.0.clone(), into.display().to_string());
+        let mut text = String::new();
+        let code = command_with(
+            &["2025-03", "--out", &into],
+            &move || Ok(root.clone()),
+            tick,
+            Some(COMMIT),
+            &mut text,
+        );
+        (code, text)
+    };
+    for inside in [ticks.0.clone(), day.clone(), day.join("..").join("..")] {
+        let before = contents(&inside);
+        let (code, text) = run(Some(&ticks.0), &inside);
+        assert_eq!(code, FAILED, "{}: {text}", inside.display());
+        assert!(
+            text.starts_with("FEED RECONCILE REFUSED: --out `")
+                && text.contains("lies inside the tick store `")
+                && text.contains("(BRUTEX_GDFL_TICKSTORE), which this repository only reads")
+                && text.contains("Nothing was read or written."),
+            "{}: {text}",
+            inside.display()
+        );
+        assert_eq!(contents(&inside), before, "nothing written");
+    }
+    let plain = ticks.0.join("plain");
+    fs::write(&plain, "not a directory").unwrap();
+    let (code, text) = run(Some(&plain.join("under")), &out.0);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("cannot be resolved, so --out `") && text.contains("cannot be shown"),
+        "{text}"
+    );
+    assert!(contents(&out.0).0.is_empty(), "nothing written");
+
+    // A tick store elsewhere, one that does not exist, and none named.
+    for (tick, version) in [
+        (Some(ticks.0.clone()), 1),
+        (Some(ticks.0.join("not-here")), 2),
+        (None, 3),
+    ] {
+        let (code, text) = run(tick.as_deref(), &out.0);
+        assert_eq!(code, OK, "{tick:?}: {text}");
+        assert!(
+            out.0
+                .join(format!("feed-reconcile-2025-03.v{version}.csv"))
+                .exists(),
+            "{tick:?}"
+        );
+    }
+    assert_eq!(tick_root(None), None);
+    assert_eq!(tick_root(Some(std::ffi::OsString::new())), None, "empty");
+    assert_eq!(
+        tick_root(Some(std::ffi::OsString::from("/ticks"))),
+        Some(PathBuf::from("/ticks"))
     );
 }
 
@@ -1533,6 +1610,116 @@ fn a_share_with_no_readable_day_still_has_its_failure_row() {
         ),
         "a share-level failure answers every day"
     );
+}
+
+/// Writes `fixture` into `raw`, then places the sealed form of each of its
+/// month files, built from that file's own committed header and records,
+/// under `sealed` (which may be `raw` itself); the `.sbar` paths written.
+fn seal_into(fixture: &Fixture, raw: &Path, sealed: &Path) -> Vec<PathBuf> {
+    fixture.write(raw);
+    fixture
+        .files
+        .iter()
+        .map(|((symbol, vendor, secs, (year, month)), bars)| {
+            let rung = Timeframe::from_secs(*secs).unwrap();
+            let path =
+                StorePath::new(parts(vendor_of(vendor), symbol, rung, ym(*year, *month))).unwrap();
+            let header = BarFile::open_existing(raw, path, symbol_id(symbol))
+                .unwrap()
+                .header();
+            let bytes = store::sealed::build(path, &header, bars, None, None)
+                .unwrap()
+                .to_bytes();
+            let sbar = path.with_file(FileKind::SealedBars).to_path_buf(sealed);
+            fs::create_dir_all(sbar.parent().unwrap()).unwrap();
+            fs::write(&sbar, bytes).unwrap();
+            sbar
+        })
+        .collect()
+}
+
+/// SC-3's read door (D-5899) reaches this verb through
+/// `BarFile::open_existing`: a month held only sealed (after a retirement)
+/// gives the raw form's file byte for byte, and a damaged sealed form beside
+/// an intact `.bin` is `read_failed` by name, never answered from the `.bin`
+/// and never `absent`.
+#[test]
+fn a_sealed_month_is_read_through_the_door_like_its_raw_form() {
+    let (raw, sealed, both) = (Dir::new("raw"), Dir::new("sealed"), Dir::new("both"));
+    let mut fixture = Fixture::default();
+    for day in [3, 4] {
+        // 200 minutes, so 400 GDFL seconds a day: four sealed frames.
+        let span = on(2025, 3, day, hm(9, 15), 200);
+        fixture
+            .gdfl("SYNS", span, 10)
+            .minutes("SYNS", span, (2, 1), 20)
+            .day_bar("SYNS", (2025, 3, day), 4_000);
+    }
+    let sbars = seal_into(&fixture, &raw.0, &sealed.0);
+    assert_eq!(sbars.len(), 3, "the 1s, 1min and 1day months are sealed");
+    let gdfl = StorePath::new(parts(
+        Vendor::Gdfl,
+        "SYNS",
+        Timeframe::SECOND_1,
+        ym(2025, 3),
+    ))
+    .unwrap();
+    assert!(
+        !gdfl.to_path_buf(&sealed.0).exists(),
+        "the sealed root holds no raw form"
+    );
+    assert_eq!(
+        BarFile::open_existing(&sealed.0, gdfl, symbol_id("SYNS"))
+            .unwrap()
+            .form(),
+        store::file::Form::Sealed,
+        "the door serves the sealed form"
+    );
+
+    let (out_raw, out_sealed) = (Dir::new("out"), Dir::new("out"));
+    let (code, text) = reconcile(&raw.0, &out_raw.0, &[]);
+    assert_eq!(code, OK, "{text}");
+    let (code, text) = reconcile(&sealed.0, &out_sealed.0, &[]);
+    assert_eq!(code, OK, "a month held only sealed is read: {text}");
+    let from_raw = file(&out_raw.0, "2025-03", 1);
+    let (raw_root, sealed_root) = (raw.0.display().to_string(), sealed.0.display().to_string());
+    assert!(from_raw.contains(&raw_root), "the header names its store");
+    assert_eq!(
+        file(&out_sealed.0, "2025-03", 1),
+        from_raw.replace(&raw_root, &sealed_root),
+        "the sealed form gives the raw form's file byte for byte but the store it names"
+    );
+    let all = rows(&from_raw);
+    assert_eq!(all.len(), 2, "two stock-days");
+    assert!(all.iter().all(|row| row["status"] == "matched"), "{all:?}");
+
+    // A DAMAGED SEALED FORM BESIDE AN INTACT RAW ONE: a byte of the GDFL
+    // month's last frame. The door refuses it and never reads the `.bin`.
+    let placed = seal_into(&fixture, &both.0, &both.0);
+    let target = gdfl.with_file(FileKind::SealedBars).to_path_buf(&both.0);
+    assert!(placed.contains(&target), "{placed:?}");
+    let mut bytes = fs::read(&target).unwrap();
+    let last = bytes.len() - 3;
+    bytes[last] ^= 0x10;
+    fs::write(&target, bytes).unwrap();
+    assert!(
+        gdfl.to_path_buf(&both.0).exists(),
+        "the raw form is beside it"
+    );
+    let out_both = Dir::new("out");
+    let (code, text) = reconcile(&both.0, &out_both.0, &[]);
+    assert_eq!(code, FAILED, "a damaged sealed month fails the run: {text}");
+    assert!(text.contains("FEED RECONCILE INCOMPLETE"), "{text}");
+    let damaged = rows(&file(&out_both.0, "2025-03", 1));
+    assert_eq!(damaged.len(), 2, "both days keep their row: {damaged:?}");
+    for row in &damaged {
+        assert!(
+            row["status"].starts_with("read_failed:gdfl_1s:") && row["status"].contains("sealed"),
+            "named, never absent and never the .bin's answer: {}",
+            row["status"]
+        );
+        assert_eq!(row["gdfl_day_volume"], "", "no half-read number");
+    }
 }
 
 #[test]
@@ -2564,6 +2751,7 @@ fn the_span_is_every_month_the_census_holds_for_a_share() {
     let code = command_with(
         &["months"],
         &move || Err(format!("`{}` is not a store", missing.display())),
+        None,
         Some(COMMIT),
         &mut text,
     );

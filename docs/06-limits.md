@@ -19569,6 +19569,15 @@ was shared with other agents' builds and the API, so a tail can be the host's.
   entry per publish. The verb does not sweep it, because a concurrent run
   may own a temporary of the same month; removing one whose process is gone
   is the operator's, by hand. NOT measured: how often this happens.
+- **An `--out` inside the tick store is refused only when the tick store is
+  named (D-5178 item 3).** `command` reads `BRUTEX_GDFL_TICKSTORE` (the
+  variable `cli gdfl-import tickstore` reads, `pull::gdfl_run::TICKSTORE_VAR`)
+  once and compares canonical paths, as it does for the store. With the
+  variable unset or empty no crate states where the tick store is, so an
+  `--out` inside it is not caught by this verb: the operator's setting is the
+  only guard there, and the full run's command in this section names an
+  `--out` under the store's `audit/` instead. One extra `canonicalize` per
+  run, not per bar.
 - **NOT measured:** a cold page cache (the runs read months the host had
   cached or not as it happened), more than 4 workers on the real store (the
   read-only rule of this run), and the generated worker count on the real
