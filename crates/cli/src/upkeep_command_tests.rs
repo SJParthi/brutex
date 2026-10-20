@@ -1061,6 +1061,23 @@ fn status_and_stop_read_and_ask_the_newest_run() {
         out.contains("no srt run of gdfl is running; nothing was asked"),
         "{out}"
     );
+    // An id named where no run of the kind has written a line: refused,
+    // said so, and neither a request nor a journal is created.
+    let (code, out) = plain(&root.0, &["stop", "srt", "gdfl", "1000"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains(
+            "UPKEEP STOP REFUSED: run 1000 is not running (no run has written a line); nothing \
+             was asked, and no request was written that a later run could meet"
+        ),
+        "{out}"
+    );
+    for name in [
+        upkeep::stop_name(Vendor::Gdfl, Kind::SortIndex),
+        upkeep::journal_name(Vendor::Gdfl, Kind::SortIndex),
+    ] {
+        assert!(!root.0.join(&name).exists(), "{name} was not created");
+    }
     spot_months(&root.0, 1);
     let (code, _) = plain(&root.0, &["run", "srt", "gdfl"]);
     assert_eq!(code, OK);
