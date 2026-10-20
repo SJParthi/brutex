@@ -18,18 +18,19 @@ import http from 'node:http';
 import {
   PAGE_TARGETS, MEASURED_PAGES, SPEED_ROUTE, WINDOWS, SORTS, GARBLED, BUNDLE_BUDGETS,
   readSpeedReport, microsText, speedRows, sortRows, speedTile, summary, ignoredFields,
-  garbledUrl, budgetOf, builtPages, budgetVerdict, pageSelf
+  garbledUrl, budgetOf, builtPages, budgetVerdict, pageSelf, bytesText, earlierReading
 } from '../src/lib/speed.js';
 import {
   REPORT_ROUTE, MAX_REPORT_BYTES, MAX_PAGE_BYTES, REPORTS_PER_MINUTE, MINUTE_MS, FALLBACK_EVENT,
-  reportBody, outcomeOf, createPageReporter, installPageReport, reportFallback
+  reportBody, outcomeOf, createPageReporter, installPageReport, reportFallback, REPLACEMENT
 } from '../src/lib/page-report.js';
 import { upCheck, apiTitle, UP_ROUTE, UP_METHOD, UP_CHECKING } from '../src/lib/api-status.js';
 import * as sheet from '../ci/speed-sheet.mjs';
 import * as harness from '../ci/browser-harness.mjs';
 import { windowQuery, LOCAL_SORT_BUDGET } from '../src/lib/db/bars-plan.js';
 import { dayflagsUrl } from '../src/lib/db/dayflags.js';
-import { rungsUrl } from '../src/lib/sources.js';
+import { rungsUrl, SOURCES_DEFAULTS } from '../src/lib/sources.js';
+import { linkOfKey, DEFAULT_INSTRUMENT } from '../src/lib/db/selection-model.js';
 
 const web = new URL('../', import.meta.url);
 /** @param {string} path */
@@ -186,9 +187,13 @@ test('the_bundle_is_inside_its_budget', async () => {
   try {
     assert.throws(() => plugin.writeBundle.call(ctx, { dir: big }), /1 page\(s\) past their budget.*\/gaps: 400\.0 KB on first load.*budget 400\.0 KB — OVER ITS BUDGET/);
     assert.doesNotThrow(() => plugin.writeBundle.call(ctx, { dir: synthBuild({ pageBytes: 1_000 }) }));
-    // The server build carries no client entry and is not weighed; neither is a build with no directory.
-    assert.doesNotThrow(() => plugin.writeBundle.call(ctx, { dir: mkdtempSync(join(tmpdir(), 'r315-server-')) }));
-    assert.doesNotThrow(() => plugin.writeBundle.call(ctx, {}));
+    // A client output without its entry, or with no directory, is REFUSED by
+    // name (repair round 1: it passed unweighed). The server build, which
+    // ships nothing to a browser, is told apart by its own configuration:
+    // 'the page budget refuses a client build it cannot weigh, and a build
+    // that weighed nothing'.
+    assert.throws(() => plugin.writeBundle.call(ctx, { dir: mkdtempSync(join(tmpdir(), 'r315-server-')) }), /the page budget found no client build to weigh: .*r315-server-.* holds no _app\/immutable\/entry/);
+    assert.throws(() => plugin.writeBundle.call(ctx, {}), /the build named no output directory/);
   } finally {
     console.log = quiet;
   }
@@ -234,10 +239,10 @@ test('a time is printed in its unit, and a window that holds nothing is a dash, 
   assert.equal(microsText(999), '999 µs');
   assert.equal(microsText(1_000), '1.00 ms', 'a millisecond is said in ms');
   assert.equal(microsText(1_234), '1.23 ms');
-  assert.equal(microsText(9_999), '10.00 ms');
+  assert.equal(microsText(9_999), '10.0 ms', 'the unit and its decimals follow the rounding (repair round 1: it printed 10.00 ms)');
   assert.equal(microsText(10_000), '10.0 ms', 'from ten ms, one decimal');
   assert.equal(microsText(45_678), '45.7 ms');
-  assert.equal(microsText(999_999), '1000.0 ms');
+  assert.equal(microsText(999_999), '1.00 s', 'never 1000.0 ms (repair round 1)');
   assert.equal(microsText(1_000_000), '1.00 s', 'a second is said in s');
   assert.equal(microsText(2_500_000), '2.50 s');
 });
@@ -317,7 +322,7 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
 
 test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(budgetOf('/gaps'), 400_000);
-  assert.equal(budgetOf('/db'), 800_000);
+  assert.equal(budgetOf('/db'), 825_000, 'raised for R3-04 on the 20 Oct merged tree (D-5915 item 10)');
   const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }, { route: '/audit', node: 3, js: 1, css: 1, bytes: 400_000, files: [] }]);
   assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true], [false, false]], 'exactly the budget, and exactly the target, are inside');
   assert.match(v[1].line, /— OVER ITS BUDGET — over the 400\.0 KB wire target/);
@@ -407,7 +412,7 @@ test('one report per distinct failure a minute, at most ten a minute, and what w
   for (let i = 0; i < REPORTS_PER_MINUTE + 3; i += 1) r.report('request', `GET /x${i}`);
   await flush();
   assert.equal(sent.length, REPORTS_PER_MINUTE);
-  assert.deepEqual(r.counts(), { sent: REPORTS_PER_MINUTE, heldBack: 4, sendFailures: 0 });
+  assert.deepEqual(r.counts(), { sent: REPORTS_PER_MINUTE, heldBack: 4, sendFailures: 0, faults: 0 });
   now = MINUTE_MS;
   assert.equal(r.report('error', 'boom'), true, 'a new minute, the same failure is said again');
   await flush();
@@ -1052,7 +1057,7 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     try {
       await assert.rejects(b.cdp.send('Bogus.method'), /Bogus\.method/);
     } finally {
-      b.close();
+      await b.close();
     }
   } finally {
     site.server.close();
@@ -1614,3 +1619,275 @@ function synthBuild(o) {
   writeFileSync(join(dir, '_app/immutable/assets/unused.css'), 'a{}');
   return dir;
 }
+
+// ---------------------------------------------------------------------------
+// Repair round 1 (20 Oct): the re-check's findings, each failing before.
+// ---------------------------------------------------------------------------
+
+test('a lone surrogate is written as U+FFFD, and a reporter that throws never changes the page\'s own answer', async () => {
+  // Before: encodeURIComponent threw URIError on the lone half.
+  const body = /** @type {string} */ (reportBody('/db\uD800', 'cut \uDC00 here 😀 whole'));
+  assert.equal(new URLSearchParams(body).get('page'), `/db${REPLACEMENT}`);
+  assert.equal(new URLSearchParams(body).get('what'), `cut ${REPLACEMENT} here 😀 whole`, 'a paired surrogate is kept, a lone one replaced');
+  const long = /** @type {string} */ (reportBody('/db', `${'\uD800'.repeat(2_000)}`));
+  assert.ok(Buffer.byteLength(long) <= MAX_REPORT_BYTES, 'a text of lone halves is still cut inside the ceiling');
+  // Installed: a 500 whose URL holds a lone half is ANSWERED, and reported.
+  /** @type {{url: string, init: any}[]} */
+  const calls = [];
+  const win = fakeWindow(async (/** @type {any} */ input, /** @type {any} */ init) => {
+    calls.push({ url: String(input), init });
+    if (String(input) === REPORT_ROUTE) return response(202);
+    if (String(input).includes('net')) throw new TypeError('Failed to fetch');
+    return response(500);
+  });
+  /** @type {string[]} */
+  const warned = [];
+  let clock = 0;
+  const off = installPageReport(win, { now: () => clock, warn: (line) => warned.push(line) });
+  const answered = await win.fetch('/x.json?q=\uD800');
+  assert.equal(answered.status, 500, 'the page gets the answer the server gave, not a rejection');
+  await assert.rejects(win.fetch('/net.json?q=\uDBFF'), /Failed to fetch/, 'and a request with no answer throws its own error, not the reporter\'s');
+  await flush();
+  const sent = calls.filter((c) => c.url === REPORT_ROUTE).map((c) => new URLSearchParams(c.init.body).get('what'));
+  assert.deepEqual(sent, [`request: GET /x.json?q=${REPLACEMENT} answered HTTP 500`, `request: GET /net.json?q=${REPLACEMENT} got no answer: Failed to fetch`]);
+  // A page path that throws when read: the report is a fault, counted and said once a minute.
+  Object.defineProperty(win.location, 'pathname', { get() { throw new Error('no location'); } });
+  clock = 1;
+  assert.equal((await win.fetch('/y.json')).status, 500);
+  assert.equal((await win.fetch('/z.json')).status, 500);
+  win.emit('unhandledrejection', { reason: { get message() { throw new Error('unreadable'); } } });
+  win.emit('error', { get message() { throw new Error('unreadable'); } });
+  await flush();
+  assert.equal(warned.length, 1, warned.join('\n'));
+  assert.match(warned[0], /^the page reporter could not write a report \(no location\); 1 reporting faults since this tab opened$/);
+  clock = 1 + MINUTE_MS;
+  assert.equal((await win.fetch('/w.json')).status, 500);
+  assert.equal(warned.length, 2);
+  assert.match(warned[1], /; 5 reporting faults since this tab opened$/, 'every fault is counted, the console told once a minute');
+  off();
+  // The reporter alone: a page() that throws, a clock that throws, a console that throws.
+  /** @type {string[]} */
+  const said = [];
+  const r = createPageReporter({ send: async () => {}, page: () => { throw new Error('gone'); }, now: () => 0, warn: (l) => said.push(l) });
+  assert.equal(r.report('error', 'x'), false);
+  assert.equal(r.counts().faults, 1);
+  assert.equal(said.length, 1);
+  const broken = createPageReporter({ send: async () => {}, page: () => '/db', now: () => { throw new Error('no clock'); }, warn: () => { throw new Error('no console'); } });
+  assert.equal(broken.report('error', 'x'), false, 'never throws, whatever throws under it');
+  assert.equal(broken.counts().faults, 1);
+  const loud = createPageReporter({ send: async () => { throw new Error('down'); }, page: () => '/db', now: () => 0, warn: () => { throw new Error('no console'); } });
+  assert.equal(loud.report('error', 'x'), true);
+  await flush();
+  await flush();
+  assert.deepEqual(loud.counts(), { sent: 1, heldBack: 0, sendFailures: 1, faults: 1 }, 'a console that throws on the unsent report is a fault, never an unhandled rejection');
+});
+
+test('a time and a size are printed in the unit their rounding reaches', () => {
+  // Before: 999,950-999,999 µs printed "1000.0 ms" and 9,996-9,999 µs "10.00 ms".
+  assert.equal(microsText(999_949), '999.9 ms');
+  assert.equal(microsText(999_950), '1.00 s');
+  assert.equal(microsText(999_999), '1.00 s');
+  assert.equal(microsText(1_000_000), '1.00 s');
+  assert.equal(microsText(9_995), '9.99 ms');
+  assert.equal(microsText(9_996), '10.0 ms');
+  assert.equal(microsText(9_999), '10.0 ms');
+  assert.equal(microsText(999), '999 µs');
+  assert.equal(microsText(1_000), '1.00 ms');
+  // Heap and wire: KB under a megabyte, MB from there, decimal as every target.
+  assert.equal(bytesText(3_800_000), '3.8 MB', 'a 3.8 MB heap printed 3800.0 KB');
+  assert.equal(bytesText(520_300_000), '520.3 MB');
+  assert.equal(bytesText(409_900), '409.9 KB');
+  assert.equal(bytesText(999_949), '999.9 KB');
+  assert.equal(bytesText(999_950), '1.0 MB', 'never 1000.0 KB');
+  assert.equal(bytesText(0), '0.0 KB');
+  assert.equal(bytesText(null), 'not reported by this browser');
+  assert.equal(bytesText(Number.NaN), 'not reported by this browser');
+  const page = source('src/routes/speed/+page.svelte');
+  assert.match(page, /\{bytesText\(self\.wireBytes\)\} on the wire/);
+  assert.match(page, /script heap \{bytesText\(self\.heapBytes\)\}/);
+  assert.doesNotMatch(page, /const kb = /, 'one size rule, the library\'s');
+});
+
+test('a failed reading leaves the earlier report drawn under a line that says it is the earlier one', () => {
+  assert.equal(earlierReading('failed', true, '20 Oct 10:02:03'), 'The figures below are the earlier reading, from 20 Oct 10:02:03: the latest reading failed, and nothing below is from it.');
+  assert.equal(earlierReading('failed', false, 'x'), null, 'a first reading that failed has no earlier one');
+  assert.equal(earlierReading('ready', true, 'x'), null);
+  assert.equal(earlierReading('reading', true, 'x'), null, 'a reading under way is said by the button');
+  const page = source('src/routes/speed/+page.svelte');
+  assert.match(page, /const earlier = \$derived\(earlierReading\(read\.phase, read\.report !== null, stampLabel\(read\.at\)\)\);/);
+  assert.match(page, /\{#if read\.phase === 'failed'\}\n\s+<p class="refused" role="alert" data-speed-failed>\{read\.why\}<\/p>\n\s+\{#if earlier\}<p class="refused earlier" data-speed-earlier>\{earlier\}<\/p>\{\/if\}/);
+  // The failed branch keeps the earlier reading's time: `at` is set only when a reading is ready.
+  assert.match(page, /read = \{ \.\.\.read, phase: 'failed', why: /);
+  assert.match(page, /read = \{ phase: 'ready', report, build: buildOf\(r\.headers\), why: '', at: Date\.now\(\) \};/);
+});
+
+test('the page budget refuses a client build it cannot weigh, and a build that weighed nothing', async () => {
+  const { pageBudget } = await import('../vite.config.js');
+  /** @param {boolean} ssr */
+  const plugin = (ssr) => {
+    const p = /** @type {any} */ (pageBudget());
+    p.configResolved({ build: { ssr } });
+    return p;
+  };
+  // The server build alone, its client build never weighed: before, a pass in silence.
+  const lonely = plugin(true);
+  assert.equal(lonely.writeBundle({ dir: tmpdir() }), undefined, 'the server build ships nothing to a browser and is not weighed');
+  assert.throws(() => lonely.closeBundle(), /the page budget weighed no page: the server build closed and no client build it started was weighed/);
+  // A client build whose output has no entry: before, a return in silence.
+  const server = plugin(true);
+  const client = plugin(false);
+  assert.throws(() => client.writeBundle({ dir: mkdtempSync(join(tmpdir(), 'r315-noentry-')) }), /the page budget found no client build to weigh: .*r315-noentry-.* holds no _app\/immutable\/entry/);
+  assert.throws(() => client.writeBundle({}), /the build named no output directory holds no _app\/immutable\/entry/);
+  assert.throws(() => server.closeBundle(), /^Error: the page budget found no client build to weigh: the build named no output directory/, 'the server\'s close repeats the client\'s own refusal, never a vaguer one');
+  // A client build inside its budget is weighed, and the server build then closes.
+  const server2 = plugin(true);
+  const inside = plugin(false);
+  inside.writeBundle({ dir: synthBuild({ pageBytes: 1_000 }) });
+  assert.equal(server2.closeBundle(), undefined);
+  assert.equal(inside.closeBundle(), undefined, 'the client build\'s own close asks nothing');
+  // One past it fails the build, by name.
+  const server3 = plugin(true);
+  assert.throws(() => plugin(false).writeBundle({ dir: synthBuild({ pageBytes: budgetOf('/gaps') + 1 }) }), /1 page\(s\) past their budget in \$lib\/speed\.js BUNDLE_BUDGETS: \/gaps: .* — OVER ITS BUDGET/);
+  // Found building the 20 Oct merged tree: /db past its budget surfaced only
+  // as "weighed no page", the server's close over the client's refusal.
+  assert.throws(() => server3.closeBundle(), /^Error: 1 page\(s\) past their budget in \$lib\/speed\.js BUNDLE_BUDGETS: \/gaps: .* — OVER ITS BUDGET/);
+  // A server build that starts afresh forgets the last build's refusal.
+  const server4 = plugin(true);
+  plugin(false).writeBundle({ dir: synthBuild({ pageBytes: 1_000 }) });
+  assert.equal(server4.closeBundle(), undefined);
+});
+
+test('the harness opens on the app\'s own default instrument, or the one --instrument names, and refuses one that is not a key', () => {
+  assert.equal(harness.EDGE_INSTRUMENT, SOURCES_DEFAULTS.key, 'read from the app, never typed in the harness');
+  assert.equal(linkOfKey(harness.EDGE_INSTRUMENT)?.sym, DEFAULT_INSTRUMENT, '/sources and /db open on one instrument, so the harness measures /db\'s');
+  assert.equal(harness.parseArgs(['--base', 'http://h:1']).instrument, harness.EDGE_INSTRUMENT);
+  const own = harness.INTERACTIONS;
+  assert.deepEqual(own.map((i) => i.open), ['/db', '/db', '/db?seg=options', null], '/db\'s own opening is its bare address, as measured');
+  assert.deepEqual(/** @type {any} */ (own[0].steps[0]).type[1], DEFAULT_INSTRUMENT);
+  const other = harness.interactionsFor('NSE-EQ-RELIANCE');
+  assert.deepEqual(other.map((i) => i.open), ['/db?sym=RELIANCE', '/db?sym=RELIANCE', '/db?seg=options&sym=RELIANCE', null]);
+  assert.equal(/** @type {any} */ (other[0].steps[0]).type[1], 'RELIANCE');
+  assert.ok(Object.isFrozen(other) && other.every((i) => Object.isFrozen(i)));
+  assert.equal(harness.parseArgs(['--base', 'http://h:1', '--instrument', 'NSE-INDEX-BANKNIFTY']).instrument, 'NSE-INDEX-BANKNIFTY');
+  for (const bad of ['garbage', 'nse-index-nifty', '']) {
+    assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--instrument', bad]), /--instrument .* is not an instrument key/, bad);
+  }
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--instrument']), /--instrument needs a value/);
+  assert.throws(() => harness.interactionsFor('garbage'), /is not an instrument key/);
+});
+
+test('a sheet and a capture are written whole: a new file renamed over the old, nothing left beside it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'r315-whole-'));
+  const out = join(dir, 'sheet.md');
+  sheet.writeWhole(out, 'first\n');
+  assert.equal(readFileSync(out, 'utf8'), 'first\n');
+  sheet.writeWhole(out, 'second, longer\n');
+  assert.equal(readFileSync(out, 'utf8'), 'second, longer\n');
+  assert.deepEqual(readdirSync(dir), ['sheet.md'], 'no temporary file is left beside it');
+  // A path the rename cannot take (a directory there): refused by name, its own file taken back, the directory untouched.
+  mkdirSync(join(dir, 'taken'));
+  writeFileSync(join(dir, 'taken', 'inside'), 'kept');
+  assert.throws(() => sheet.writeWhole(join(dir, 'taken'), 'x'), /could not write .*taken whole: /);
+  assert.deepEqual(readdirSync(dir).sort(), ['sheet.md', 'taken']);
+  assert.equal(readFileSync(join(dir, 'taken', 'inside'), 'utf8'), 'kept');
+  // A directory that does not exist: refused before anything is made.
+  assert.throws(() => sheet.writeWhole(join(dir, 'missing', 'sheet.md'), 'x'), /ENOENT/);
+  // Both commands write through it.
+  assert.match(source('ci/speed-sheet.mjs'), /if \(args\.out\) writeWhole\(args\.out, text\);/);
+  assert.match(source('ci/browser-harness.mjs'), /if \(args\.capture\) writeWhole\(args\.capture, /);
+  assert.match(source('ci/browser-harness.mjs'), /if \(args\.out\) writeWhole\(args\.out, text\);/);
+  assert.doesNotMatch(source('ci/browser-harness.mjs') + source('ci/speed-sheet.mjs'), /writeFileSync\((args|path)/);
+});
+
+test('a browser the harness started leaves nothing behind: not its profile, not its process, after a close, a failed launch, an exit or a signal', { timeout: 180_000 }, async () => {
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const noSandbox = process.getuid?.() === 0;
+  /** @param {number | undefined} pid */
+  const running = (pid) => {
+    try {
+      process.kill(/** @type {number} */ (pid), 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** @param {() => boolean} done @param {number} ms */
+  const until = async (done, ms) => {
+    const end = Date.now() + ms;
+    while (!done() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    return done();
+  };
+  // A close: before, the profile stayed and close() did not wait for the browser to leave.
+  const root = mkdtempSync(join(tmpdir(), 'r315-profiles-'));
+  const b = await harness.launch(chrome, noSandbox, 30_000, root);
+  assert.match(b.profile, new RegExp(`^${root}/${harness.PROFILE_PREFIX}[A-Za-z0-9]{6}$`));
+  assert.ok(existsSync(b.profile) && running(b.pid) && b.alive());
+  await b.close();
+  assert.equal(b.alive(), false);
+  assert.equal(running(b.pid), false, 'the browser has left when close() returns');
+  assert.deepEqual(readdirSync(root), [], 'and its profile is gone');
+  // A launch that fails takes back what it made.
+  const failed = mkdtempSync(join(tmpdir(), 'r315-failed-'));
+  const fake = mkdtempSync(join(tmpdir(), 'r315-fake-chrome-'));
+  const mute = join(fake, 'mute');
+  writeFileSync(mute, '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+  const liar = join(fake, 'liar');
+  writeFileSync(liar, '#!/bin/sh\necho "DevTools listening on ws://127.0.0.1:1/devtools/browser/x" >&2\nexec sleep 30\n', { mode: 0o755 });
+  const unrunnable = join(fake, 'unrunnable');
+  writeFileSync(unrunnable, 'not a program', { mode: 0o644 });
+  await assert.rejects(harness.launch(mute, false, 200, failed), /printed no DevTools address in 200 ms/);
+  await assert.rejects(harness.launch(liar, false, 30_000, failed), /could not connect to ws:\/\/127\.0\.0\.1:1/);
+  await assert.rejects(harness.launch(unrunnable, false, 30_000, failed), /the browser could not be started: .*EACCES/);
+  assert.deepEqual(readdirSync(failed), [], 'no profile is left by a launch that failed');
+  // Only a profile this harness made is ever removed.
+  assert.throws(() => harness.removeProfile(fake), /refusing to remove .*: not a profile this harness made/);
+  assert.throws(() => harness.removeProfile(join(fake, `${harness.PROFILE_PREFIX}abcdefg`)), /refusing to remove/);
+  assert.ok(existsSync(mute), 'a refused path is untouched');
+  // An exit and a signal: a harness process that leaves without close().
+  const script = join(fake, 'leaves.mjs');
+  writeFileSync(script, [
+    `import * as h from ${JSON.stringify(new URL('ci/browser-harness.mjs', web).href)};`,
+    `const b = await h.launch(${JSON.stringify(chrome)}, ${noSandbox}, 30000, process.argv[3]);`,
+    'process.stdout.write(JSON.stringify({ pid: b.pid, profile: b.profile }) + "\\n");',
+    'if (process.argv[2] === "exit") process.exit(0);',
+    'if (process.argv[2] === "throw") setTimeout(() => { throw new Error("the harness died"); }, 10);',
+    'setInterval(() => {}, 1000);'
+  ].join('\n'));
+  const { spawn: run } = await import('node:child_process');
+  for (const how of ['exit', 'throw', 'SIGTERM', 'SIGINT', 'SIGHUP']) {
+    const where = mkdtempSync(join(tmpdir(), `r315-leaves-${how}-`));
+    const child = run(process.execPath, [script, how, where], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const line = await new Promise((resolve, reject) => {
+      let text = '';
+      child.stdout.on('data', (c) => {
+        text += c;
+        if (text.includes('\n')) resolve(text.split('\n')[0]);
+      });
+      child.on('exit', (code) => reject(new Error(`${how}: the harness left (${code}) before it started a browser`)));
+    });
+    const started = JSON.parse(String(line));
+    assert.ok(running(started.pid), `${how}: the browser is running`);
+    const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    if (how.startsWith('SIG')) child.kill(/** @type {NodeJS.Signals} */ (how));
+    const { code, signal } = /** @type {{code: number | null, signal: string | null}} */ (await ended);
+    if (how === 'exit') assert.equal(code, 0);
+    else if (how === 'throw') assert.equal(code, 1, 'an uncaught error still ends the process as it would have');
+    else assert.equal(signal, how, `${how} keeps its meaning: the process ends by it`);
+    assert.ok(await until(() => !running(started.pid), 10_000), `${how}: the browser ${started.pid} was left running`);
+    assert.deepEqual(readdirSync(where), [], `${how}: the profile was left`);
+  }
+});
+
+test('the browser is started before any page is timed, on a page that asks the server nothing, in a context thrown away', () => {
+  // Before: the first cold sample of the first page carried the browser's
+  // own start (1,108 ms on a five-line page at n = 1, against 20-28 ms for
+  // every later cold load), and the command test above failed by it.
+  assert.match(harness.WARM_UP_PAGE, /^data:text\/html,.*<p>warm-up<\/p>$/, 'text, so the paint path runs, and a data: address, so the server is asked nothing');
+  const src = source('ci/browser-harness.mjs');
+  const run = src.slice(src.indexOf('export async function runHarness'));
+  assert.ok(run.indexOf('await warmUp(cdp, open, args.settleMs);') > 0, 'runHarness warms the browser');
+  assert.ok(run.indexOf('await warmUp(cdp, open, args.settleMs);') < run.indexOf('for (const page of args.pages)'), 'before the first page is timed');
+  const warm = src.slice(src.indexOf('async function warmUp'), src.indexOf('export async function runHarness'));
+  assert.match(warm, /Target\.createBrowserContext[\s\S]*loadOnce\(tab, cdp, WARM_UP_PAGE, settleMs\)[\s\S]*Target\.disposeBrowserContext/, 'in a context of its own, thrown away after');
+});

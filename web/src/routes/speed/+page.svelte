@@ -31,7 +31,7 @@
   import { stampLabel } from '$lib/dates.js';
   import {
     SPEED_ROUTE, WINDOWS, SORTS, PAGE_TARGETS, MEASURED_PAGES,
-    readSpeedReport, speedRows, sortRows, microsText, speedTile, pageSelf
+    readSpeedReport, speedRows, sortRows, microsText, bytesText, earlierReading, speedTile, pageSelf
   } from '$lib/speed.js';
 
   /** @type {{phase: 'reading' | 'ready' | 'failed', report: import('$lib/speed.js').SpeedReport | null,
@@ -89,8 +89,7 @@
     if (s < 7200) return `${Math.round(s / 60)} min`;
     return `${(s / 3600).toFixed(1)} h`;
   };
-  /** @param {number | null} b */
-  const kb = (b) => (b === null ? 'not reported by this browser' : `${(b / 1000).toFixed(1)} KB`);
+  const earlier = $derived(earlierReading(read.phase, read.report !== null, stampLabel(read.at)));
 </script>
 
 <svelte:head><title>Speed · brutex</title></svelte:head>
@@ -134,6 +133,7 @@
 
   {#if read.phase === 'failed'}
     <p class="refused" role="alert" data-speed-failed>{read.why}</p>
+    {#if earlier}<p class="refused earlier" data-speed-earlier>{earlier}</p>{/if}
   {/if}
 
   {#if read.report}
@@ -216,8 +216,8 @@
       <p class="whence" data-speed-self>
         This page's own load, from this browser:
         first content {self.firstContentMs === null ? 'not reported by this browser' : `${self.firstContentMs} ms`}
-        · {kb(self.wireBytes)} on the wire over {self.resources} fetches
-        · script heap {kb(self.heapBytes)}.
+        · {bytesText(self.wireBytes)} on the wire over {self.resources} fetches
+        · script heap {bytesText(self.heapBytes)}.
       </p>
     {/if}
   </section>

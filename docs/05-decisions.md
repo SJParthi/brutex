@@ -74628,5 +74628,32 @@ amendment A6): the part's spec assigned no block.
    delivered**, so a page that painted is never read as unpainted under load,
    and one that never paints is still said not painted.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-11);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-13.
+Repair round 1 (20 Oct, after the re-check of the committed work):
+
+10. **`/db`'s budget is 825,000 B.** On the merged tree after AG-05, `/db`
+    weighed 804,033 B on its first load, past 800,000: R3-04's Coverage tab
+    and the counts that agree (D-5870) added 13,702 B. Held just above its
+    size, rounded up to 25 KB, by item 2's rule. `/backtest` (1,118,393 B)
+    and `/ingest` (512,891 B) are inside theirs.
+11. **The harness starts the browser before it times a page** (R315-14). The
+    first page a new browser draws pays for the browser's own start, and
+    that cost landed on the first cold sample of each run (L-R315-15); a
+    reader's browser is already running, so it is not the page's. The
+    warm-up is a `data:` page, so the server is asked nothing, in a browser
+    context thrown away, so every timed cold load stays cold.
+12. **A browser the harness starts is the harness's to stop, and its profile
+    the harness's to remove** (R315-13): on `close()`, on a failed launch,
+    and on exit, an uncaught error, SIGINT, SIGTERM and SIGHUP. Only a path
+    `mkdtempSync` made for the harness's prefix is ever removed; what earlier
+    runs left is not touched (L-R315-14).
+13. **The reporter never changes a page's answer** (R315-12): a lone
+    surrogate is written as U+FFFD, every reporting step is guarded, and a
+    fault is counted and said on the console at most once a minute rather
+    than thrown into the page's request.
+14. **The page budget fails a build it did not weigh** (R315-15), and the
+    harness's instrument is the app's own default unless `--instrument`
+    names another (R315-17): neither is typed in the harness or skipped in
+    silence.
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-18);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-15.

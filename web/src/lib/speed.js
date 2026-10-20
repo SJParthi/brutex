@@ -117,14 +117,52 @@ export function readSpeedReport(body) {
  * under a second, s above; an em dash for a window that holds no request,
  * because 0 µs would claim a measurement nobody took.
  *
+ * THE UNIT IS CHOSEN AFTER THE ROUNDING (the R3-15 re-check, 20 Oct): 999,950
+ * to 999,999 µs rounded to one decimal of a millisecond is 1000.0, which
+ * printed "1000.0 ms"; it is "1.00 s". 9,996 to 9,999 µs likewise print
+ * "10.0 ms", never "10.00 ms".
+ *
  * @param {number} micros
  * @param {number} [n] the window's request count; 0 prints the dash
  */
 export function microsText(micros, n = 1) {
   if (n === 0 || !Number.isFinite(micros)) return '—';
   if (micros < 1_000) return `${micros} µs`;
-  if (micros < 1_000_000) return `${(micros / 1_000).toFixed(micros < 10_000 ? 2 : 1)} ms`;
+  const ms = micros / 1_000;
+  if (Number(ms.toFixed(2)) < 10) return `${ms.toFixed(2)} ms`;
+  if (Number(ms.toFixed(1)) < 1_000) return `${ms.toFixed(1)} ms`;
   return `${(micros / 1_000_000).toFixed(2)} s`;
+}
+
+/**
+ * A size in bytes as the Speed page prints it, decimal like every target
+ * here: KB under a megabyte, MB from there (a script heap of 3.8 MB printed
+ * "3800.0 KB"), the unit chosen after the rounding as {@link microsText}
+ * chooses its own; `null` is what the browser did not report.
+ *
+ * @param {number | null} bytes
+ */
+export function bytesText(bytes) {
+  if (bytes === null || !Number.isFinite(bytes)) return 'not reported by this browser';
+  const kb = bytes / 1_000;
+  if (Number(kb.toFixed(1)) < 1_000) return `${kb.toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/**
+ * The sentence a Speed page draws above a report it is still showing after
+ * a later reading failed: the figures are the EARLIER reading's, stamped
+ * with when it was read, and never pass for the one that failed (the R3-15
+ * re-check, 20 Oct: the old table stayed drawn under the alert as if
+ * current). `null` when what is drawn is the latest reading.
+ *
+ * @param {'reading' | 'ready' | 'failed'} phase
+ * @param {boolean} shown whether a report is drawn
+ * @param {string} readAt when the drawn report was read, as the page prints a stamp
+ */
+export function earlierReading(phase, shown, readAt) {
+  if (phase !== 'failed' || !shown) return null;
+  return `The figures below are the earlier reading, from ${readAt}: the latest reading failed, and nothing below is from it.`;
 }
 
 /**
@@ -391,7 +429,13 @@ export function garbledUrl(url, field) {
  *   committed `web/build` of `aab82424` alone weighs 1,111,563 / 786,109 /
  *   506,027 B. `/db` grew with R3-02's controls and R3-03's pager and Go to;
  *   `/backtest` and `/ingest` changed no file of their own route, so their
- *   growth is shared `$lib` code those merges brought.
+ *   growth is shared `$lib` code those merges brought;
+ * * the build of `feat/db-fix` after AG-05 with R3-15 and its repair round 1
+ *   merged in (20 Oct 2026, the Mac, `npm run build`) — `/backtest`
+ *   1,118,393 B, `/db` 804,033 B, `/ingest` 512,891 B. `/db` was past
+ *   800,000 B by R3-04's Coverage tab and the counts that agree (D-5870,
+ *   13,702 B more on its first load than the 20 Oct figure above), so `/db`
+ *   is now 825,000 B; the other two are inside theirs.
  *
  * Each time that is the budget doing its job — a page grew and the build
  * said so; the figure it now holds is the merged tree's, by the same
@@ -402,7 +446,7 @@ export function garbledUrl(url, field) {
 export const BUNDLE_BUDGETS = Object.freeze({
   default: PAGE_TARGETS.wireBytes,
   '/backtest': 1_125_000,
-  '/db': 800_000,
+  '/db': 825_000,
   '/ingest': 525_000
 });
 

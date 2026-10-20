@@ -35,6 +35,18 @@
  * (a failing report would report itself), and a report that cannot be sent
  * is written to the console, loudly, once per minute.
  *
+ * # It never changes the page's own answer
+ *
+ * The reporter sits in the path of every request, so it must not be able to
+ * break one (found by the R3-15 re-check, 20 Oct): a failure text holding a
+ * lone UTF-16 surrogate (a string cut between the two halves of an emoji, or
+ * a server message decoded badly) made `encodeURIComponent` throw `URIError`,
+ * and the wrapped `fetch` REJECTED where the bare one had answered `500`. A
+ * lone surrogate is now written as U+FFFD, the replacement character, and
+ * every reporting step runs guarded: a step that throws is counted
+ * (`counts().faults`) and said on the console at most once a minute, and the
+ * page's request answers exactly as it would have without the reporter.
+ *
  * # Installed once, for every page
  *
  * Importing this module in a browser installs it on `window` (one line in
@@ -69,9 +81,17 @@ const encoder = new TextEncoder();
 /** Bytes of `s` once form-encoded. @param {string} s */
 const encodedBytes = (s) => encoder.encode(encodeURIComponent(s)).length;
 
+/** What a lone UTF-16 surrogate is written as: U+FFFD, the replacement character. */
+export const REPLACEMENT = '�';
+
 /**
  * A control character, which the server refuses in `page` and allows in
- * `what` only as a newline or a tab, becomes a space.
+ * `what` only as a newline or a tab, becomes a space; a lone surrogate, which
+ * no encoding can write (`encodeURIComponent` throws `URIError` on it),
+ * becomes {@link REPLACEMENT}. Iterating a string by code point yields a
+ * PAIRED surrogate as one code point past U+FFFF, so a code point that is
+ * itself in U+D800..U+DFFF is exactly a lone half. One pass, the same pass
+ * as before.
  *
  * @param {string} s
  * @param {boolean} keepLines
@@ -81,9 +101,19 @@ function clean(s, keepLines) {
   for (const c of s) {
     const code = /** @type {number} */ (c.codePointAt(0));
     const control = code < 0x20 || (code >= 0x7f && code < 0xa0);
-    out += control && !(keepLines && (c === '\n' || c === '\t')) ? ' ' : c;
+    const lone = code >= 0xd800 && code <= 0xdfff;
+    out += lone ? REPLACEMENT : control && !(keepLines && (c === '\n' || c === '\t')) ? ' ' : c;
   }
   return out;
+}
+
+/** A thrown value's words, never throwing itself. @param {unknown} why */
+function wordsOf(why) {
+  try {
+    return String(/** @type {{message?: unknown}} */ (why)?.message ?? why);
+  } catch {
+    return 'a value that cannot be written as text';
+  }
 }
 
 /**
@@ -158,14 +188,64 @@ export function createPageReporter(options) {
   let sendFailures = 0;
   let lastWarn = -Infinity;
   let total = 0;
+  let faults = 0;
+  let lastFault = -Infinity;
 
   /**
-   * One report. Returns whether it was sent.
+   * A reporting step that threw: counted, and said on the console at most
+   * once a minute. Never thrown on, so the page's own request or listener is
+   * never changed by its reporter.
+   *
+   * @param {unknown} why
+   */
+  function fault(why) {
+    faults += 1;
+    try {
+      const at = now();
+      if (at - lastFault < MINUTE_MS) return;
+      lastFault = at;
+      warn(`the page reporter could not write a report (${wordsOf(why)}); ${faults} reporting faults since this tab opened`);
+    } catch {
+      // The clock or the console threw as well: the count is what is kept.
+    }
+  }
+
+  /**
+   * One report. Returns whether it was sent; NEVER THROWS (a step that
+   * throws is a {@link fault}, and the answer is `false`).
    *
    * @param {'request' | 'error' | 'fallback'} kind
    * @param {string} what
    */
   function report(kind, what) {
+    try {
+      return reportOnce(kind, what);
+    } catch (why) {
+      fault(why);
+      return false;
+    }
+  }
+
+  /**
+   * Runs one reporting step, guarded as {@link report} is.
+   *
+   * @param {() => void} step
+   */
+  function quietly(step) {
+    try {
+      step();
+    } catch (why) {
+      fault(why);
+    }
+  }
+
+  /**
+   * {@link report}'s body, which may throw.
+   *
+   * @param {'request' | 'error' | 'fallback'} kind
+   * @param {string} what
+   */
+  function reportOnce(kind, what) {
     const at = now();
     const page = options.page();
     const key = `${page}\n${kind}\n${what}`;
@@ -192,8 +272,7 @@ export function createPageReporter(options) {
         sendFailures += 1;
         if (at - lastWarn >= MINUTE_MS) {
           lastWarn = at;
-          const said = String(/** @type {{message?: unknown}} */ (why)?.message ?? why);
-          warn(`${REPORT_ROUTE} could not take the report "${kind}: ${what}" (${said}); ${sendFailures} reports unsent since this tab opened`);
+          quietly(() => warn(`${REPORT_ROUTE} could not take the report "${kind}: ${what}" (${wordsOf(why)}); ${sendFailures} reports unsent since this tab opened`));
         }
       });
     return true;
@@ -201,8 +280,9 @@ export function createPageReporter(options) {
 
   return {
     report,
+    quietly,
     /** What this tab has done, for a test or a page that shows it. */
-    counts: () => ({ sent: total, heldBack, sendFailures })
+    counts: () => ({ sent: total, heldBack, sendFailures, faults })
   };
 }
 
@@ -261,39 +341,52 @@ export function installPageReport(win, options = {}) {
     }
   });
 
-  /** @param {unknown} input @param {any} [init] */
+  /**
+   * The page's `fetch`, answered exactly as the bare one answers: the same
+   * response, or the same error thrown. Reading the request and reporting
+   * run guarded ({@link createPageReporter}'s `quietly`), so nothing the
+   * reporter does can turn an answer into a rejection.
+   *
+   * @param {unknown} input @param {any} [init]
+   */
   async function reportingFetch(input, init) {
-    const { url, method } = requestOf(input, init);
-    const own = isReportRoute(url, origin);
+    /** @type {Response} */
+    let response;
     try {
-      const response = await original(input, init);
-      if (!own && outcomeOf({ status: response.status, retryAfter: response.headers?.has?.('retry-after') }) === 'failed') {
-        reporter.report('request', `${method} ${url} answered HTTP ${response.status}`);
-      }
-      return response;
+      response = await original(input, init);
     } catch (error) {
-      if (!own && outcomeOf({ error }) === 'failed') {
-        const said = String(/** @type {{message?: unknown}} */ (error)?.message ?? error);
-        reporter.report('request', `${method} ${url} got no answer: ${said}`);
-      }
+      reporter.quietly(() => {
+        const { url, method } = requestOf(input, init);
+        if (!isReportRoute(url, origin) && outcomeOf({ error }) === 'failed') {
+          reporter.report('request', `${method} ${url} got no answer: ${wordsOf(error)}`);
+        }
+      });
       throw error;
     }
+    reporter.quietly(() => {
+      const { url, method } = requestOf(input, init);
+      if (!isReportRoute(url, origin) && outcomeOf({ status: response.status, retryAfter: response.headers?.has?.('retry-after') }) === 'failed') {
+        reporter.report('request', `${method} ${url} answered HTTP ${response.status}`);
+      }
+    });
+    return response;
   }
 
+  // Each listener's words are read guarded too: a listener that threw would
+  // raise an error event of its own.
   /** @param {any} event */
-  const onError = (event) => {
+  const onError = (event) => reporter.quietly(() => {
     const where = event?.filename ? ` at ${event.filename}:${event.lineno ?? '?'}:${event.colno ?? '?'}` : '';
     reporter.report('error', `${String(event?.message ?? event?.error ?? 'an uncaught error')}${where}`);
-  };
+  });
   /** @param {any} event */
-  const onRejection = (event) => {
-    const reason = event?.reason;
-    reporter.report('error', `unhandled rejection: ${String(reason?.message ?? reason)}`);
-  };
+  const onRejection = (event) => reporter.quietly(() => {
+    reporter.report('error', `unhandled rejection: ${wordsOf(event?.reason)}`);
+  });
   /** @param {any} event */
-  const onFallback = (event) => {
+  const onFallback = (event) => reporter.quietly(() => {
     reporter.report('fallback', String(event?.detail ?? 'a fallback with no description'));
-  };
+  });
 
   win.fetch = reportingFetch;
   win.addEventListener('error', onError);

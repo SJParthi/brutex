@@ -72,23 +72,25 @@
  *     [--chrome <path to Chrome or Chromium>] [--n 200] [--pages /db,/ingest] \
  *     [--idle-tabs 1,10,20] [--idle-ms 3600000] [--no-interactions] [--no-idle] [--no-sandbox] \
  *     [--no-report-check] [--read-only] [--hook <module.mjs>]... [--capture <file>] [--out <sheet.md>] \
- *     [--settle-ms 500] [--step-wait-ms 30000]
+ *     [--settle-ms 500] [--step-wait-ms 30000] [--instrument <key>]
  *
  * No npm dependency: it drives the browser over the DevTools protocol on
  * Node's own WebSocket. Exit 0 when every target holds; 1 with every reason
  * otherwise; 2 for a misused command or no browser.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { PAGE_TARGETS, MEASURED_PAGES, summary } from '../src/lib/speed.js';
 import { UP_ROUTE, UP_METHOD } from '../src/lib/api-status.js';
 import { REPORT_ROUTE } from '../src/lib/page-report.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
-import { rungsUrl, rungSeconds } from '../src/lib/sources.js';
+import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
+import { linkOfKey } from '../src/lib/db/selection-model.js';
+import { writeWhole } from './speed-sheet.mjs';
 
 /** Where a browser is looked for when `--chrome` and `BRUTEX_CHROME` say nothing. */
 export const CHROME_PATHS = Object.freeze([
@@ -117,7 +119,9 @@ export const NEXT_PAGE = 'button[aria-label="Next page"]:not([disabled])';
 export const BROWSER_SORT = 'th[aria-sort] button.sortbtn[title*="the browser orders this column itself"]:not([disabled])';
 
 /**
- * The timed interactions. `open: null` with `edge` is opened at the
+ * The timed interactions for an instrument: the picker click types its
+ * underlying (`linkOfKey(key).sym`) into `/db`'s instrument search.
+ * `open: null` with `edge` is opened at the
  * address {@link sortEdge} finds. Each step is `{click}`, `{type: [selector, text]}`
  * or `{waitFor}`; the time is from the LAST step's click to the last network event it caused, or two frames after it if later.
  * `open` is the address the page is opened at first.
@@ -127,23 +131,42 @@ export const BROWSER_SORT = 'th[aria-sort] button.sortbtn[title*="the browser or
  * the page offers, whose option cells run to many pages.
  *
  * @typedef {{click: string, last?: boolean} | {type: [string, string]} | {waitFor: string}} Step
- * @type {{name: string, open: string | null, edge?: boolean, steps: Step[]}[]}
+ * @typedef {{name: string, open: string | null, edge?: boolean, steps: Step[]}} Interaction
+ * @param {string} instrument an instrument key, `NSE-INDEX-NIFTY`
+ * @returns {readonly Readonly<Interaction>[]}
  */
-const TIMED = [
-  { name: 'picker click', open: '/db', steps: [{ type: ['[aria-controls="db-search-list"]', 'NIFTY'] }, { waitFor: '#db-search-list [role="option"]' }, { click: '#db-search-list [role="option"]' }] },
-  { name: 'feed switch', open: '/db', steps: [{ click: FEED_PICKER }, { waitFor: FREE_CHOICE }, { click: FREE_CHOICE }] },
-  { name: 'page turn of option cells', open: '/db?seg=options', steps: [{ click: EXPIRY_PICKER }, { waitFor: FREE_CHOICE }, { click: FREE_CHOICE, last: true }, { waitFor: NEXT_PAGE }, { click: NEXT_PAGE }] },
-  { name: `sort at the ${LOCAL_SORT_BUDGET.toLocaleString('en-IN')}-row browser sort edge`, open: null, edge: true, steps: [{ waitFor: BROWSER_SORT }, { click: BROWSER_SORT }] }
-];
-
-/** {@link TIMED}, frozen. */
-export const INTERACTIONS = Object.freeze(TIMED.map((t) => Object.freeze(t)));
+export function interactionsFor(instrument) {
+  const sym = linkOfKey(instrument)?.sym;
+  if (!sym) throw new Error(`--instrument ${JSON.stringify(instrument)} is not an instrument key (NSE-INDEX-NIFTY, NSE-EQ-RELIANCE, ...)`);
+  // /db's own opening is its bare address; another instrument is named by
+  // `sym=`, the field /db reads for the underlying.
+  const own = sym === linkOfKey(SOURCES_DEFAULTS.key)?.sym;
+  const db = (/** @type {string} */ q) => (own ? `/db${q === '' ? '' : `?${q}`}` : `/db?${q === '' ? '' : `${q}&`}sym=${encodeURIComponent(sym)}`);
+  /** @type {Interaction[]} */
+  const timed = [
+    { name: 'picker click', open: db(''), steps: [{ type: ['[aria-controls="db-search-list"]', sym] }, { waitFor: '#db-search-list [role="option"]' }, { click: '#db-search-list [role="option"]' }] },
+    { name: 'feed switch', open: db(''), steps: [{ click: FEED_PICKER }, { waitFor: FREE_CHOICE }, { click: FREE_CHOICE }] },
+    { name: 'page turn of option cells', open: db('seg=options'), steps: [{ click: EXPIRY_PICKER }, { waitFor: FREE_CHOICE }, { click: FREE_CHOICE, last: true }, { waitFor: NEXT_PAGE }, { click: NEXT_PAGE }] },
+    { name: `sort at the ${LOCAL_SORT_BUDGET.toLocaleString('en-IN')}-row browser sort edge`, open: null, edge: true, steps: [{ waitFor: BROWSER_SORT }, { click: BROWSER_SORT }] }
+  ];
+  return Object.freeze(timed.map((t) => Object.freeze(t)));
+}
 
 /** How long a step waits for its selector, ms: real data can take seconds to draw a grid. */
 export const STEP_WAIT_MS = 30_000;
 
-/** The instrument `/db` opens on (NIFTY spot), whose rungs the sort edge is found on. */
-export const EDGE_INSTRUMENT = 'NSE-INDEX-NIFTY';
+/**
+ * The instrument `/db` opens on, whose rungs the sort edge is found on and
+ * whose underlying the picker click types: READ from the app's own default
+ * (`$lib/sources.js` `SOURCES_DEFAULTS.key`, "the instrument /db opens on",
+ * whose underlying is `$lib/db/selection-model.js` `DEFAULT_INSTRUMENT`; a
+ * test holds the two together), never typed here. `--instrument` names
+ * another.
+ */
+export const EDGE_INSTRUMENT = SOURCES_DEFAULTS.key;
+
+/** The timed interactions on {@link EDGE_INSTRUMENT}. */
+export const INTERACTIONS = interactionsFor(EDGE_INSTRUMENT);
 
 /** `day` less `n` days, both `YYYY-MM-DD`. @param {string} day @param {number} n */
 const daysBefore = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10);
@@ -306,7 +329,7 @@ export function parseArgs(argv) {
   /** @type {Record<string, string | boolean | string[]>} */
   const o = { hook: [] };
   const flags = new Set(['no-interactions', 'no-idle', 'no-report-check', 'no-sandbox', 'read-only']);
-  const valued = new Set(['base', 'chrome', 'n', 'pages', 'idle-tabs', 'idle-ms', 'capture', 'out', 'settle-ms', 'step-wait-ms']);
+  const valued = new Set(['base', 'chrome', 'n', 'pages', 'idle-tabs', 'idle-ms', 'capture', 'out', 'settle-ms', 'step-wait-ms', 'instrument']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
@@ -332,9 +355,12 @@ export function parseArgs(argv) {
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
+  const instrument = String(o.instrument ?? EDGE_INSTRUMENT);
+  if (rungsUrl(instrument) === null || linkOfKey(instrument) === null) throw new Error(`--instrument ${JSON.stringify(instrument)} is not an instrument key (NSE-INDEX-NIFTY, NSE-EQ-RELIANCE, ...)`);
   return {
     base,
     chrome,
+    instrument,
     n: whole('n', 200, 1),
     pages,
     idleTabs,
@@ -391,49 +417,175 @@ export class Cdp {
   }
 }
 
+/** The name every browser profile this harness makes starts with, in the temporary directory. */
+export const PROFILE_PREFIX = 'brutex-harness-';
+
+/** How long a browser has to leave after SIGTERM before it is killed, ms. */
+export const STOP_WAIT_MS = 5_000;
+
+/**
+ * Removes a profile directory this harness made, and nothing else: the path
+ * must be one `mkdtempSync` returned for {@link PROFILE_PREFIX} (the prefix and
+ * its six random characters, nothing past them), so a path from anywhere else
+ * is refused by name, never removed.
+ *
+ * @param {string} profile
+ */
+export function removeProfile(profile) {
+  if (!new RegExp(`^${PROFILE_PREFIX}[A-Za-z0-9]{6}$`).test(basename(profile))) {
+    throw new Error(`refusing to remove ${JSON.stringify(profile)}: not a profile this harness made (${PROFILE_PREFIX}XXXXXX)`);
+  }
+  rmSync(profile, { recursive: true, force: true, maxRetries: 3 });
+}
+
+/**
+ * Every browser this process started and has not stopped yet. If the
+ * process ends first — it exits, throws, or is sent SIGINT, SIGTERM or
+ * SIGHUP — each is killed and its profile removed (found by the R3-15
+ * re-check, 20 Oct: 127 profiles were left in the temporary directory, and a
+ * harness that died left headless browsers running). A SIGKILL of the
+ * harness itself runs nothing, so a browser it started can outlive it then
+ * (docs/06-limits.md).
+ *
+ * @type {Set<{killNow: () => void}>}
+ */
+const LIVE = new Set();
+let guarded = false;
+
+/** Installs the exit and signal guards, once a process. */
+function guardProcess() {
+  if (guarded) return;
+  guarded = true;
+  process.on('exit', () => {
+    for (const b of LIVE) b.killNow();
+  });
+  for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
+    const on = () => {
+      for (const b of LIVE) b.killNow();
+      process.removeListener(signal, on);
+      // The signal keeps its meaning: with no other listener, the process
+      // ends as it would have without this guard.
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    process.on(signal, on);
+  }
+}
+
+/**
+ * A started browser's stop: SIGTERM, then SIGKILL after {@link STOP_WAIT_MS};
+ * its profile removed once it has left. Registered in {@link LIVE} until it
+ * has stopped.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {string} profile
+ */
+function tracked(child, profile) {
+  let gone = false;
+  const exited = new Promise((resolve) => {
+    const done = () => {
+      gone = true;
+      resolve(undefined);
+    };
+    child.once('exit', done);
+    child.once('error', done);
+  });
+  const alive = () => !gone && child.exitCode === null && child.signalCode === null && child.pid !== undefined;
+  const entry = {
+    // Runs inside an exit or signal handler, so it never throws: what it
+    // could not do is said on stderr, by name.
+    killNow() {
+      LIVE.delete(entry);
+      try {
+        if (alive()) child.kill('SIGKILL');
+        removeProfile(profile);
+      } catch (why) {
+        process.stderr.write(`browser-harness: could not stop the browser ${child.pid} or remove ${profile}: ${/** @type {Error} */ (why).message}\n`);
+      }
+    }
+  };
+  LIVE.add(entry);
+  guardProcess();
+  return {
+    alive,
+    async stop() {
+      if (alive()) {
+        child.kill('SIGTERM');
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let timer;
+        await Promise.race([exited, new Promise((resolve) => (timer = setTimeout(resolve, STOP_WAIT_MS)))]);
+        clearTimeout(timer);
+        if (alive()) {
+          child.kill('SIGKILL');
+          await exited;
+        }
+      }
+      removeProfile(profile);
+      LIVE.delete(entry);
+    }
+  };
+}
+
 /**
  * Starts the browser headless on a debugging port it picks, in a new
- * profile directory, and connects.
+ * profile directory under `root`, and connects. `close()` stops the browser
+ * and waits for it to leave, then removes the profile; a launch that fails
+ * stops what it started first. Either way nothing it made is left.
  *
  * @param {string} chrome
  * @param {boolean} [noSandbox]
  * @param {number} [waitMs] how long the browser has to print its DevTools address
+ * @param {string} [root] where the profile is made (the temporary directory)
  */
-export async function launch(chrome, noSandbox = false, waitMs = 30_000) {
+export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = tmpdir()) {
   if (!chrome || !existsSync(chrome)) throw new Error(`no browser at ${JSON.stringify(chrome)}: pass --chrome or set BRUTEX_CHROME`);
-  const profile = mkdtempSync(join(tmpdir(), 'brutex-harness-'));
+  const profile = mkdtempSync(join(root, PROFILE_PREFIX));
   // `--no-sandbox` only when the operator asks (a browser run as root, in a
   // container, refuses to start without it): never chosen here on its own.
   const flags = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'];
   const child = spawn(chrome, flags, { stdio: ['ignore', 'ignore', 'pipe'] });
-  const url = await new Promise((resolve, reject) => {
-    let text = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`the browser printed no DevTools address in ${waitMs} ms: ${text.slice(-400)}`));
-    }, waitMs);
-    child.stderr.on('data', (c) => {
-      text += c;
-      const m = /DevTools listening on (ws:\/\/\S+)/.exec(text);
-      if (m) {
+  const browser = tracked(child, profile);
+  /** @type {WebSocket} */
+  let ws;
+  try {
+    const url = await new Promise((resolve, reject) => {
+      let text = '';
+      const timer = setTimeout(() => reject(new Error(`the browser printed no DevTools address in ${waitMs} ms: ${text.slice(-400)}`)), waitMs);
+      child.stderr?.on('data', (c) => {
+        text += c;
+        const m = /DevTools listening on (ws:\/\/\S+)/.exec(text);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[1]);
+        }
+      });
+      child.on('error', (why) => {
         clearTimeout(timer);
-        resolve(m[1]);
-      }
+        reject(new Error(`the browser could not be started: ${why.message}`));
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`the browser exited ${code} before it listened: ${text.slice(-400)}`));
+      });
     });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`the browser exited ${code} before it listened: ${text.slice(-400)}`));
+    ws = new WebSocket(String(url));
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', resolve, { once: true });
+      ws.addEventListener('error', () => reject(new Error(`could not connect to ${url}`)), { once: true });
     });
-  });
-  const ws = new WebSocket(String(url));
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', () => {
-      child.kill('SIGKILL');
-      reject(new Error(`could not connect to ${url}`));
-    }, { once: true });
-  });
-  return { cdp: new Cdp(ws), close: () => { ws.close(); child.kill('SIGTERM'); }, profile };
+  } catch (why) {
+    await browser.stop();
+    throw why;
+  }
+  return {
+    cdp: new Cdp(ws),
+    close: async () => {
+      ws.close();
+      await browser.stop();
+    },
+    alive: browser.alive,
+    profile,
+    pid: child.pid
+  };
 }
 
 /**
@@ -760,6 +912,37 @@ async function reportCheck(cdp, base, settleMs) {
  * @typedef {{cdp: Cdp, base: string, settleMs: number, openTab: typeof openTab, loadOnce: typeof loadOnce}} Harness
  */
 
+/**
+ * The page the browser draws once before anything is timed: text, so the
+ * paint path runs, and a `data:` address, so the server is asked nothing
+ * and no cache of the site is made.
+ */
+export const WARM_UP_PAGE = 'data:text/html,<!doctype html><title>warm-up</title><p>warm-up</p>';
+
+/**
+ * THE BROWSER IS STARTED BEFORE ANY PAGE IS TIMED (repair round 1, 20 Oct).
+ * The first page a new browser draws pays for the browser's own start — its
+ * paint and network processes come up then — and that cost landed on the
+ * first cold sample of the first page: measured on a five-line page, cold
+ * first content 1,108 ms at n = 1, and 20 ms p50 against a 2,272 ms max at
+ * n = 5. It is the browser starting, not the page loading (a reader's
+ * browser is already running), and it was the 2,332 ms max in the 20 Oct
+ * `/db` cold row. So one load of {@link WARM_UP_PAGE} runs first, in a
+ * browser context of its own that is then thrown away: every timed cold
+ * load is still a fresh context with no cache and no cookies.
+ *
+ * @param {Cdp} cdp
+ * @param {(context: string | undefined) => ReturnType<typeof openTab>} open
+ * @param {number} settleMs
+ */
+async function warmUp(cdp, open, settleMs) {
+  const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+  const tab = await open(browserContextId);
+  await loadOnce(tab, cdp, WARM_UP_PAGE, settleMs);
+  await tab.close();
+  await cdp.send('Target.disposeBrowserContext', { browserContextId });
+}
+
 /** @param {ReturnType<typeof parseArgs>} args */
 export async function runHarness(args) {
   const browser = await launch(args.chrome, args.noSandbox);
@@ -777,6 +960,7 @@ export async function runHarness(args) {
   /** @param {string | undefined} context */
   const open = (context) => openTab(cdp, context, { readOnly: args.readOnly, base: args.base, writes });
   try {
+    await warmUp(cdp, open, args.settleMs);
     for (const page of args.pages) {
       /** @type {Awaited<ReturnType<typeof loadOnce>>[]} */
       const cold = [];
@@ -806,18 +990,19 @@ export async function runHarness(args) {
       /** @type {Awaited<ReturnType<typeof sortEdge>> | null} */
       let edge = null;
       let edgeWhy = '';
-      if (INTERACTIONS.some((it) => it.edge)) {
+      const interactions = interactionsFor(args.instrument);
+      if (interactions.some((it) => it.edge)) {
         try {
           edge = await sortEdge(async (path) => {
             const r = await fetch(`${args.base}${path}`, { cache: 'no-store' });
             return { status: r.status, body: await r.text() };
-          });
+          }, args.instrument);
           notes.push(`sort edge: ${edge.address} holds ${edge.rows} bars of ${edge.feed} ${edge.rung}, the longest range of days ending ${edge.to} at or under ${LOCAL_SORT_BUDGET} (${edge.asked} GETs${edge.passed.length > 0 ? `; passed over ${edge.passed.join('; ')}` : ''})`);
         } catch (why) {
           edgeWhy = String(/** @type {{message?: unknown}} */ (why)?.message ?? why);
         }
       }
-      for (const it of INTERACTIONS) {
+      for (const it of interactions) {
         const at = it.edge ? edge?.address ?? null : it.open;
         if (at === null) {
           lines.push(`| ${it.name} | 0 | NOT MEASURED: ${edgeWhy} | — |`);
@@ -925,14 +1110,14 @@ export async function runHarness(args) {
       failures.push(...(out.failures ?? []));
     }
   } finally {
-    browser.close();
+    await browser.close();
   }
   if (args.readOnly) {
     const v = readOnlyVerdict(writes, args.base);
     notes.push(...v.notes);
     failures.push(...v.failures);
   }
-  if (args.capture) writeFileSync(args.capture, `${JSON.stringify({ base: args.base, requests: capture }, null, 1)}\n`);
+  if (args.capture) writeWhole(args.capture, `${JSON.stringify({ base: args.base, requests: capture }, null, 1)}\n`);
   return { ok: failures.length === 0, lines, failures, notes };
 }
 
@@ -991,7 +1176,7 @@ async function main() {
   }
   const text = renderHarness(result, args);
   process.stdout.write(text);
-  if (args.out) writeFileSync(args.out, text);
+  if (args.out) writeWhole(args.out, text);
   process.exit(result.ok ? 0 : 1);
 }
 

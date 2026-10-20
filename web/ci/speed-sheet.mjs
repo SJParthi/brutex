@@ -66,7 +66,8 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { windowQuery } from '../src/lib/db/bars-plan.js';
@@ -615,6 +616,45 @@ export function renderSheet(result, args) {
   return `${lines.join('\n')}\n`;
 }
 
+/**
+ * Writes `text` to `path` WHOLE: into a new file beside it (opened `wx`, so
+ * never one that exists), flushed to the disk, then renamed over `path`, so
+ * a reader of `path` finds the old file or the whole new one, never half a
+ * sheet (the R3-15 re-check, 20 Oct: `--out` and the harness's `--capture`
+ * were written in place). The directory is flushed after the rename where
+ * the platform allows it. A write that fails takes back the file it made,
+ * that one file only, and throws by name; `path` is untouched.
+ *
+ * @param {string} path
+ * @param {string} text
+ */
+export function writeWhole(path, text) {
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  let fd = openSync(tmp, 'wx', 0o644);
+  try {
+    writeFileSync(fd, text);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = -1;
+    renameSync(tmp, path);
+  } catch (why) {
+    if (fd !== -1) closeSync(fd);
+    unlinkSync(tmp);
+    throw new Error(`could not write ${path} whole: ${/** @type {Error} */ (why).message}`);
+  }
+  try {
+    const dir = openSync(dirname(path), 'r');
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    // A directory cannot be flushed on every platform: the rename above is
+    // what makes the file whole, and it has happened.
+  }
+}
+
 async function main() {
   let args;
   try {
@@ -626,7 +666,7 @@ async function main() {
   const result = await runSheet(args);
   const text = renderSheet(result, args);
   process.stdout.write(text);
-  if (args.out) writeFileSync(args.out, text);
+  if (args.out) writeWhole(args.out, text);
   process.exit(result.ok ? 0 : 1);
 }
 
