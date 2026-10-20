@@ -27,11 +27,11 @@ use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
 use super::{
     Basis, COLUMN_COUNT, COLUMNS, Carry, FLAG_NAMES, FORMAT, FactorIndex, FactorPair,
-    FactorRefusal, Frac, Grid, LAG_BINS, MAX_REPEAT, PairAt, Running, Scope, Scratch, USAGE,
-    Window, ZMinute, ask, bin, bounds, carried, carry_line, command_with, day_kind, file_digest,
-    flag_text, lag_order, lookup_ask, mode, newest, newest_of, parse_carry, parse_day, parse_frac,
-    parse_month, parts, percent, previous, publish, range_bounds, rank, round_half_up, schedule,
-    symbol_id, tick_root,
+    FactorRefusal, Frac, Grid, LAG_BINS, MAX_REPEAT, PairAt, Report, Running, Scope, Scratch,
+    USAGE, Window, ZMinute, ask, bin, bounds, carried, carry_line, command_with, day_kind,
+    file_digest, flag_text, lag_order, lookup_ask, mode, newest, newest_of, parse_carry, parse_day,
+    parse_frac, parse_month, parts, percent, previous, publish, publish_through, range_bounds,
+    rank, round_half_up, schedule, symbol_id, tick_root,
 };
 use crate::{FAILED, MISUSED, OK};
 
@@ -1690,8 +1690,13 @@ fn a_sealed_month_is_read_through_the_door_like_its_raw_form() {
         "the sealed form gives the raw form's file byte for byte but the store it names"
     );
     let all = rows(&from_raw);
-    assert_eq!(all.len(), 2, "two stock-days");
-    assert!(all.iter().all(|row| row["status"] == "matched"), "{all:?}");
+    let statuses: Vec<&str> = all.iter().map(|row| row["status"].as_str()).collect();
+    assert_eq!(
+        statuses,
+        ["not_aligned", "matched"],
+        "two stock-days; the first has no earlier lag to apply (D-5173 item 4): {all:?}"
+    );
+    assert_eq!(all[1]["gdfl_day_volume"], "4000", "{all:?}");
 
     // A DAMAGED SEALED FORM BESIDE AN INTACT RAW ONE: a byte of the GDFL
     // month's last frame. The door refuses it and never reads the `.bin`.
@@ -1935,7 +1940,8 @@ fn publishing_takes_the_next_free_version_and_replaces_nothing() {
         b"not a version",
     )
     .unwrap();
-    let (path, version) = publish(&dir.0, month, Scope::Full, b"new").unwrap();
+    let (path, version, cleared) = publish(&dir.0, month, Scope::Full, b"new").unwrap();
+    assert_eq!(cleared, None, "a staging name of its own clears nothing");
     assert_eq!(version, 8);
     assert_eq!(fs::read(&path).unwrap(), b"new");
     assert_eq!(
@@ -1946,7 +1952,7 @@ fn publishing_takes_the_next_free_version_and_replaces_nothing() {
     assert_eq!(newest(&dir.0.join("absent"), month).unwrap(), None);
     // A `--symbols` file has its own name and numbers, and is never the
     // month's newest version (D-5178).
-    let (partial, number) = publish(&dir.0, month, Scope::Symbols, b"partial").unwrap();
+    let (partial, number, _) = publish(&dir.0, month, Scope::Symbols, b"partial").unwrap();
     assert_eq!(number, 1);
     assert_eq!(
         partial.file_name().unwrap().to_string_lossy(),
@@ -1963,7 +1969,7 @@ fn publishing_takes_the_next_free_version_and_replaces_nothing() {
             .map(|(_, v)| v),
         Some(1)
     );
-    let (_, again) = publish(&dir.0, month, Scope::Full, b"next").unwrap();
+    let (_, again, _) = publish(&dir.0, month, Scope::Full, b"next").unwrap();
     assert_eq!(again, 9, "a --symbols file takes no full version number");
 }
 
@@ -1982,7 +1988,7 @@ fn a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary() {
         fs::write(dir.0.join(odd), b"odd").unwrap();
     }
     assert_eq!(newest(&dir.0, month).unwrap(), None);
-    let (path, version) = publish(&dir.0, month, Scope::Full, b"first").unwrap();
+    let (path, version, _) = publish(&dir.0, month, Scope::Full, b"first").unwrap();
     assert_eq!(version, 1);
     assert_eq!(newest(&dir.0, month).unwrap(), Some((path, 1)));
     fs::write(
@@ -2002,6 +2008,78 @@ fn a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary() {
         before,
         "no temporary and no version left behind"
     );
+}
+
+/// THE TEMPORARY IS CREATED THROUGH THE STAGING DOOR (gate 28, R3-16; found
+/// refused on this file by the repair round of 20 Oct 2026): a second name of
+/// another file at the staging name is refused by name and that file keeps
+/// every byte; a symbolic link there is refused and left as it is; a one-name
+/// leftover is a dead writer's, cleared, its size handed back and said on the
+/// screen, and the publish goes ahead.
+#[test]
+fn the_temporary_is_created_through_the_staging_door() {
+    let dir = Dir::new("staging");
+    let month = ym(2025, 3);
+    let tmp = dir.0.join(".feed-reconcile-2025-03.tmp-1-2");
+    let other = dir.0.join("other.csv");
+    fs::write(&other, b"kept bytes").unwrap();
+
+    fs::hard_link(&other, &tmp).unwrap();
+    let refused = publish_through(&dir.0, month, Scope::Full, b"new", &tmp).unwrap_err();
+    assert!(
+        refused.starts_with("creating the temporary: staging_linked: ")
+            && refused.ends_with("; nothing was published"),
+        "{refused}"
+    );
+    assert_eq!(
+        fs::read(&other).unwrap(),
+        b"kept bytes",
+        "nothing written through"
+    );
+    assert_eq!(newest(&dir.0, month).unwrap(), None, "no version");
+    fs::remove_file(&tmp).unwrap();
+
+    std::os::unix::fs::symlink(&other, &tmp).unwrap();
+    let refused = publish_through(&dir.0, month, Scope::Full, b"new", &tmp).unwrap_err();
+    assert!(
+        refused.starts_with("creating the temporary: staging_not_regular"),
+        "{refused}"
+    );
+    assert!(
+        fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink(),
+        "left as it is"
+    );
+    assert_eq!(fs::read(&other).unwrap(), b"kept bytes");
+    assert_eq!(newest(&dir.0, month).unwrap(), None, "no version");
+    fs::remove_file(&tmp).unwrap();
+
+    fs::write(&tmp, b"half a file").unwrap();
+    let (path, version, cleared) =
+        publish_through(&dir.0, month, Scope::Full, b"new", &tmp).unwrap();
+    assert_eq!((version, cleared), (1, Some(11)), "the leftover's 11 bytes");
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    assert!(!tmp.exists(), "the temporary is removed after the link");
+    assert_eq!(fs::read(&other).unwrap(), b"kept bytes");
+
+    let report = |cleared| Report {
+        file: path.clone(),
+        version,
+        scope: Scope::Full,
+        carry: "feed-reconcile-2025-02.v1.csv".to_owned(),
+        summary: "summary".to_owned(),
+        timing: "timing".to_owned(),
+        failed: false,
+        cleared,
+    };
+    let mut said = String::new();
+    assert_eq!(report(Some(11)).print(&mut said), OK);
+    assert!(
+        said.contains("FEED RECONCILE NOTE: a dead run's temporary of 11 byte(s) sat at"),
+        "{said}"
+    );
+    let mut quiet = String::new();
+    assert_eq!(report(None).print(&mut quiet), OK);
+    assert!(!quiet.contains("NOTE"), "{quiet}");
 }
 
 /// A MONTH NEITHER FEED HOLDS A SHARE OF IS REFUSED rather than published as

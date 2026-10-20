@@ -19542,6 +19542,16 @@ was shared with other agents' builds and the API, so a tail can be the host's.
   checked against the share listing by one probe of a hash set sized from
   that listing (D-5178), never by a search of the sorted listing: the first
   repair's `binary_search_by` was refused by gate 11 rule 1 and is gone.
+- **Gates 12 and 28.** The five cost claims of
+  `crates/cli/src/feed_reconcile.rs` (the module header, `Running::admit`,
+  `Seconds::last_in`, `FactorIndex::load` and `factor_of`) are the timings
+  this section measured over the operator's store, and `factor --repeat`'s;
+  where a claim says "no loop" it is by construction. No test or bench
+  gates any of those timings, so each claim says UNVERIFIED as a gated
+  bound, which is what gate 12 asks of a claim with no test, bench or
+  invariant row timing it. Gate 12 refused all five (naming no proof) and
+  gate 28 refused the publish temporary until the DATA-1 repair round of
+  20 Oct 2026; no earlier round of this package ran either gate.
 - **`factor --repeat` is bounded (D-5178 item 5).** At most `MAX_REPEAT` =
   1,000,000 timed lookups, whose timings take 8 MB; a larger count is
   refused by name before anything is allocated.
@@ -19569,7 +19579,12 @@ was shared with other agents' builds and the API, so a tail can be the host's.
   and `.symbols.v<N>.csv` names), never replaces one, and costs one listing
   entry per publish. The verb does not sweep it, because a concurrent run
   may own a temporary of the same month; removing one whose process is gone
-  is the operator's, by hand. NOT measured: how often this happens.
+  is the operator's, by hand. NOT measured: how often this happens. The
+  temporary is created by `store::staging::create` (D-5172 item 2, gate 28):
+  one host call on a free name, at most four over a one-name leftover at the
+  same name (L-IA-44), once per run, not per bar; the leftover a `kill -9`
+  leaves holds another process id and instant in its name, so a later run's
+  door never meets it and it stays until removed by hand.
 - **An `--out` inside the tick store is refused only when the tick store is
   named (D-5178 item 3).** `command` reads `BRUTEX_GDFL_TICKSTORE` (the
   variable `cli gdfl-import tickstore` reads, `pull::gdfl_run::TICKSTORE_VAR`)

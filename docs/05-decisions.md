@@ -72340,6 +72340,17 @@ median ratio and a spread test on it; a typed exchange tick.
    refuses rather than replaces), the temporary removed and the directory
    synced: a reader never sees half a file and a re-run never overwrites one.
    The bytes do not depend on the worker count, the time or the version.
+   **The temporary is created by `store::staging::create`** (gate 28, R3-16,
+   D-4951), never by an open of the module's own: a second name of another
+   file, a symbolic link or a directory at the staging name is refused by
+   name and left as it is, so nothing is written through it, and a one-name
+   leftover (a dead writer's, at a name holding the process id and the
+   clock's nanoseconds) is cleared first and said on the screen and in the run
+   event (`staging_cleared`). Corrected before the merge by the DATA-1 repair
+   round of 20 Oct 2026: the first version opened the temporary itself with
+   `create_new` and gate 28 refused `crates/cli/src/feed_reconcile.rs` from
+   DATA-1's first commit on; no earlier round of this package ran that gate
+   (`the_temporary_is_created_through_the_staging_door`).
 3. **Carry, so a new month computes only itself.** `# carry,<symbol>,lags=…,
    interval=…,exceed_open=…,cut_onset=…` and `# pooled,lags=…` hand the next
    month each share's lag history, last interval, open span and session-cut

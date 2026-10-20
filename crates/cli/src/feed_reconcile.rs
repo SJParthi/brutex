@@ -97,7 +97,10 @@
 //! offset; per stock-day a fixed walk of its 1,440 minutes, of at most 60
 //! seconds per minute window, and of 119 lags per minute. Parallel over
 //! shares; one telemetry event per share-month and one per run, emitted from
-//! the coordinating thread.
+//! the coordinating thread. Measured over the operator's store (p50, p99 and
+//! max per bar, per stock-day and per share-month, `docs/06-limits.md`
+//! §"Feed reconcile"); no test or bench gates those timings: UNVERIFIED as
+//! gated bounds.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -435,7 +438,13 @@ pub(crate) fn lookup_ask(arguments: &[&str]) -> Result<Lookup, String> {
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     let store = crate::store_write::root_for("feed-reconcile", arguments);
     let tick = tick_root(std::env::var_os(pull::gdfl_run::TICKSTORE_VAR));
-    command_with(arguments, &store, tick.as_deref(), crate::commit_stamp(), out)
+    command_with(
+        arguments,
+        &store,
+        tick.as_deref(),
+        crate::commit_stamp(),
+        out,
+    )
 }
 
 /// The tick store's root as `BRUTEX_GDFL_TICKSTORE` names it (the variable
@@ -1090,7 +1099,11 @@ pub(crate) struct Running {
 }
 
 impl Running {
-    /// Admits one matched minute. O(1).
+    /// Admits one matched minute. O(1): three fraction comparisons by i128
+    /// cross-multiplication and no loop, by construction; its exactness is
+    /// FR-05 and FR-06. No test or bench times it alone: UNVERIFIED as a timed
+    /// bound (the per-stock-day walk that calls it is measured in
+    /// `docs/06-limits.md` §"Feed reconcile").
     pub(crate) fn admit(&mut self, pair: PairAt, low: Frac, high: Frac) {
         if self.emptied.is_some() {
             return;
@@ -1266,7 +1279,10 @@ impl Seconds {
     }
 
     /// The last held second in `[from, to)` seconds of the day. O(1) after
-    /// [`Self::fill`].
+    /// [`Self::fill`]: one slot read and no loop, by construction (FR-08 pins
+    /// the lags it serves). No test or bench times it alone: UNVERIFIED as a
+    /// timed bound (measured inside the per-stock-day walk, `docs/06-limits.md`
+    /// §"Feed reconcile").
     fn last_in(&self, from: i64, to: i64) -> Option<usize> {
         let end = to.min(i64::try_from(SECONDS_PER_DAY).unwrap_or(i64::MAX));
         if end <= 0 || end <= from {
@@ -2894,6 +2910,9 @@ pub(crate) struct Report {
     pub(crate) summary: String,
     timing: String,
     pub(crate) failed: bool,
+    /// The bytes of a dead writer's leftover the staging door cleared at the
+    /// temporary's name, or `None`.
+    pub(crate) cleared: Option<u64>,
 }
 
 impl Report {
@@ -2920,6 +2939,13 @@ impl Report {
                 "FEED RECONCILE NOTE: no carry from the previous month ({why}); each share's \
                  applied lag starts from this month's own earlier days and its first matched \
                  day's ex-date is unchecked. Run the months in order to carry one."
+            );
+        }
+        if let Some(bytes) = self.cleared {
+            let _ = writeln!(
+                out,
+                "FEED RECONCILE NOTE: a dead run's temporary of {bytes} byte(s) sat at this run's \
+                 staging name; its name was removed before the publish (store::staging)."
             );
         }
         if self.failed {
@@ -3047,7 +3073,7 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
     let summary = summarise(ask.month, &results);
     let body = render(root, ask, commit, &carried, &results, &running, &summary);
     let scope = ask.scope();
-    let (file, version) = publish(&ask.out, ask.month, scope, body.as_bytes())?;
+    let (file, version, cleared) = publish(&ask.out, ask.month, scope, body.as_bytes())?;
     let timing = timing(&results, &rounds, started);
     let line = format!(
         "{} {} v{version} {} | carry {} | {summary} | {timing}\n",
@@ -3074,7 +3100,13 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
         .with("scope", scope.text())
         .with("carry", carried.note.as_str())
         .with("stocks", results.len())
-        .with("read_failed", failed),
+        .with("read_failed", failed)
+        .with(
+            "staging_cleared",
+            cleared
+                .map_or_else(|| "none".to_owned(), |bytes| bytes.to_string())
+                .as_str(),
+        ),
     );
     Ok(Report {
         file,
@@ -3084,6 +3116,7 @@ pub(crate) fn run(root: &Path, ask: &Ask, commit: Option<&str>) -> Result<Report
         summary,
         timing,
         failed,
+        cleared,
     })
 }
 
@@ -3398,12 +3431,15 @@ pub(crate) fn newest_of(
 /// Writes `bytes` as the next version of the month's file of `scope`: a
 /// temporary, made durable, then linked to its final name (a link never
 /// replaces a file), the temporary removed and the directory made durable.
+/// The version's path and number, and the bytes of a dead writer's leftover
+/// the staging door cleared first (`None` on a free name; the caller reports
+/// it).
 pub(crate) fn publish(
     dir: &Path,
     month: YearMonth,
     scope: Scope,
     bytes: &[u8],
-) -> Result<(PathBuf, u32), String> {
+) -> Result<(PathBuf, u32, Option<u64>), String> {
     let tmp = dir.join(format!(
         ".feed-reconcile-{month}.tmp-{}-{}",
         std::process::id(),
@@ -3411,37 +3447,52 @@ pub(crate) fn publish(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos())
     ));
+    publish_through(dir, month, scope, bytes, &tmp)
+}
+
+/// [`publish`] through the staging name `tmp`, which must be this run's own
+/// (`publish` puts the process id and the clock's nanoseconds in it). The
+/// temporary is created by `store::staging::create` (gate 28, R3-16), which
+/// opens nothing already at the name: a second name of another file, a
+/// symbolic link or a directory there is refused by name and left as it is,
+/// so no byte is ever written through it; a one-name leftover is a dead
+/// writer's, cleared first and its size handed back.
+pub(crate) fn publish_through(
+    dir: &Path,
+    month: YearMonth,
+    scope: Scope,
+    bytes: &[u8],
+    tmp: &Path,
+) -> Result<(PathBuf, u32, Option<u64>), String> {
     let failed = |what: &str, path: &Path, why: std::io::Error| {
         format!("{what} `{}`: {why}", path.display())
     };
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|why| failed("creating", &tmp, why))?;
+    let staged = store::staging::create(tmp)
+        .map_err(|why| format!("creating the temporary: {why}; nothing was published"))?;
+    let (mut file, cleared) = (staged.file, staged.cleared);
     // EVERY FAILURE AFTER THE TEMPORARY EXISTS REMOVES IT: it is this run's
     // own unpublished file, never a version, and a leak would sit beside the
     // versions until someone deleted it by hand.
     let linked = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|why| failed("writing", &tmp, why))
+        .map_err(|why| failed("writing", tmp, why))
         .and_then(|()| {
             drop(file);
-            link_next(dir, month, scope, &tmp)
+            link_next(dir, month, scope, tmp)
         });
-    let published = match linked {
+    let (path, version) = match linked {
         Ok(published) => published,
         Err(why) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(tmp);
             return Err(why);
         }
     };
-    std::fs::remove_file(&tmp).map_err(|why| failed("removing the temporary", &tmp, why))?;
+    std::fs::remove_file(tmp).map_err(|why| failed("removing the temporary", tmp, why))?;
     std::fs::File::open(dir)
         .and_then(|handle| handle.sync_all())
         .map_err(|why| failed("syncing", dir, why))?;
-    Ok(published)
+    Ok((path, version, cleared))
 }
 
 /// Links the durable temporary `tmp` to the month's next free version name
@@ -3815,7 +3866,9 @@ fn cell_of(
 
 impl FactorIndex {
     /// Loads the newest version file of `month` from `dir`. One pass over
-    /// its rows; every later lookup is O(1).
+    /// its rows; every later lookup is O(1) (FR-16). The lookup is timed by
+    /// `factor --repeat`, measured in `docs/06-limits.md` §"Feed reconcile";
+    /// no test or bench gates that timing: UNVERIFIED as a gated bound.
     ///
     /// # Errors
     ///
@@ -3870,7 +3923,9 @@ impl FactorIndex {
     }
 
     /// The factor of `symbol` on `day`, or why there is none. O(1): one hash
-    /// and one fixed-stride index.
+    /// and one fixed-stride index (FR-16). Timed by `factor --repeat`
+    /// (`docs/06-limits.md` §"Feed reconcile"); no test or bench gates that
+    /// timing: UNVERIFIED as a gated bound.
     ///
     /// # Errors
     ///
