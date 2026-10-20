@@ -75508,3 +75508,127 @@ it fails with "an index ahead of its journal is walked at start, every
 record once", left `Ok(0)`, right `Ok(2)`. Logs `green-ahead.log`,
 `red-ahead-request.log` and `red-ahead-warm.log` beside the mutation log.
 `docs/04-invariants.md` PREC1-21.
+### D-6244 — Every append to the pull audit journal waits a bounded time for the append lock instead of being refused at once, through R3-08's one patience mechanism (AG-06; code-5, FM-162) — 2026-10-19
+
+**Number** the ledger's head on feat/db-fix was D-5883 when this entry was
+written, D-5902 (AH-05) at this change's merge of AH-05, and D-6243 (R4-09a)
+at its merges of R4-09a and of IA-3 (20 Oct; IA-3's eight entries, D-4815 to
+D-5903, all sit below the head), so this takes D-6244 (amendment A6: head + 1
+at landing; re-checked at landing). It replaces the numbers D-5865 and D-5903
+this change carried before; neither was landed as this decision, and D-5903
+is now IA-3's own, a different decision.
+
+**Finding** code-5 (14 Oct attack, both skeptics; a consequence of FM-162). The
+journal's append lock (`api::audit::Journal::appended_images`, and the whole
+note file's lock beside it) was taken with `Flock::try_lock`, so an append
+that met another writer's few-millisecond append was refused at once and its
+record lost. When the lost record was a run's opening record and the process
+then died before the run's close, the restart scan read the journal and
+answered "clean" for a run that ran. The code-4 skeptic's 300-run barrier
+experiment lost records on every run to the same refusal.
+
+**Decided.**
+
+1. **One patience mechanism, R3-08's, made exclusive.** `store::flock`
+   already had R3-08's patient SHARED lock (`with_patience`, `MAX_PATIENCE`,
+   `try_lock_shared_patiently`) and its holder registry (`HOLDERS`,
+   `holder_note`). The exclusive twin, `Flock::try_lock_patiently(file, path,
+   bound, doing)`, reuses every part of it, and keeps none of its own:
+   - **one wait loop**, `store::flock::patiently`, which both patient locks
+     call (R3-08's own loop was folded into it): ask once, and on contention
+     pause 1 ms doubling to `MAX_PAUSE` (16 ms) until the bound, measured as
+     the longer of the monotonic clock and the pauses slept, so a clock that
+     steps backwards cannot extend it; a host refusal that is not contention
+     is returned at once, never waited on;
+   - **one pause**, `MAX_PAUSE` (made public so the journal's documents can
+     name it);
+   - **one ceiling**, `MAX_PATIENCE` (1 s): a shared lock's whole budget in
+     one `with_patience` call, and the cut on any one exclusive bound. The
+     10 s ceiling the first build of this change kept beside it is gone;
+   - **one registry**, `HOLDERS`: a guard taken patiently registers its
+     holder (thread, since when, and what its caller said it is doing) IN
+     THE SAME STEP as `flock(2)` grants the lock, and forgets it in the same
+     step as it unlocks, both under the registry's lock (repair 2;
+     R3-08's month guards take the same step), and the refusal names the
+     holder in `holder_note`'s words. The in-process queue (point 2) lives in the same
+     entry, so a path's holder and its waiters are one record.
+2. **In this process, patient exclusive lockers of one path queue in the
+   order they asked** (a ticket each, a condition variable, a place given up
+   when its waiter's bound runs out), and only the head of the queue polls
+   `flock(2)`. A first build that only polled refused 102 of 800 appends from
+   eight threads appending in a loop with a one-second bound: the lock is free
+   only for the microseconds between one holder's release and the next take,
+   and a sleeping poller wakes to a held lock. With the queue none is
+   refused. The turn passes to the next locker only after the unlock (the
+   guard's `turn` field drops after its `Drop` has unlocked), and an empty
+   queue is forgotten with its registry entry.
+3. **The bound is `api::audit::APPEND_LOCK_WAIT`, one second**, equal to the
+   ceiling; a compile-time assertion refuses a value above it, which would be
+   cut silently. It is set from the measured holder time (one append's open,
+   `stat`, write, `fsync` and index catch-up on a clone of the operator's
+   1.08 GB journal, uncontended p99 3.7 to 12.5 ms, `docs/06-limits.md`
+   AG-06). Both append lock sites (the journal and its `.notes` file) use it.
+   `build_index` takes the same lock with a zero bound: the old `try_lock`
+   answer (busy at once when anyone holds or awaits it), now registered while
+   it builds, so an append that waits out its bound behind a long build names
+   "the journal index build".
+4. **A refusal past the bound names the bound, the record and the holder.**
+   The text keeps "cannot take the journal append lock" and "refused rather
+   than interleaved", and adds the record's kind and outcome, the bound as
+   cut by the ceiling, the wait, the attempts, how many were ahead in this
+   process, and the holder: "held by this process (pid, thread, doing a pull
+   audit journal append / the journal index build) since …", or, when no
+   holder in this process is registered, "held by another process" in
+   `holder_note`'s words (`flock(2)` does not say which). The `api.audit`
+   Error "record not appended" event is unchanged and carries the whole
+   refusal.
+5. **The locked file must still be the journal.** The wait widened the moment
+   between `open` and the lock, so after the lock the descriptor's device and
+   inode are compared with the path's (one `stat`); a journal moved aside or
+   replaced meanwhile is refused by name rather than appended to a file no
+   reader opens.
+6. **Readers never wait on this bound.** No journal reader takes the append
+   lock (`look`, `page`); the restart scan's own wait for an index build
+   (`pullrun::INDEX_WAITS`) is unchanged.
+
+**Repair 1 (19 Oct), and why.** The first build of this change (its first commit on fix/db-AG-06)
+was made before R3-08 merged, and its second check failed it on two counts.
+Merged, it left two wait loops, two pause constants, two ceilings and two
+holder registries side by side (rule 2 asks for one path); points 1 and 3
+are the one path. And its own registry, kept in `api::audit` beside the
+guard, named the wrong holder: the guard's explicit `drop` released the lock
+and handed the turn on before the registry entry dropped at function exit,
+so the predecessor's late removal erased the successor's entry and a refusal
+during the successor's hold blamed another process. Registration now
+belongs to the guard and follows the lock (point 1), so that ordering cannot
+recur; `the_holder_is_named_through_every_in_process_hand_off` samples the
+registry through real hand-offs and fails on the first build.
+
+**Repair 2 (20 Oct), and why.** Repair 1 registered after the grant and
+forgot before the unlock, which left two instants a reader here could meet:
+the lock held by this process and nobody named, read as "another process".
+A sampler that holds the registry's lock while it asks the kernel whether
+the lock is held found that in 5,964 of 25,038 held samples. Now the grant
+and the record are one step under the registry's lock
+(`store::flock::take_held`), and so are the forgetting and the unlock
+(`let_go`). Chosen over the alternatives because it makes the registry
+exact for every reader in this process at the price of one non-blocking
+`flock` call under a mutex the take and the release already lock; recording
+a holder before the grant would name one that does not hold the lock, and
+naming the instants only (repair 1's own note) left the defect.
+`no_reader_here_ever_finds_the_lock_held_and_its_holder_unnamed` is the
+exact sampler; `docs/06-limits.md` L-AG06-10 states the cost.
+
+**Not done here, and why.** A run whose opening append is refused AFTER the
+bound (a holder that keeps the lock longer than one second: a stuck writer, or
+the once-per-journal from-scratch index build of about 1.33 s per GiB) still
+runs unjournalled, because `RunLedger::open` keeps `opened_refused` and runs on
+and `RunLedger::flush` never retries the opening. That is `server.rs`, batch-1
+AF-04's file. Follow-on after AF-04: refuse to start a run whose opening could
+not be journalled, or retry the opening at the first flush; and let the restart
+scan (`pullrun.rs`) answer `not_known` rather than "clean" when such a refusal
+is known; and move the append off the async worker (`spawn_blocking`), since a
+contended append blocks the thread that calls it for up to the bound.
+`docs/06-limits.md` (AG-06) names each, and corrects the earlier reading that
+`close_unopened` covers a lost opening record: it does only when the run
+reaches its close.

@@ -19906,3 +19906,105 @@ that is not measured says so.
 | L-PREC1-05 | The autopilot asks `legacy_drift` once per vendor on every round | CR-28's rule (D-5402) needs the drift answer before the survey resumes from a census; it is one receipt read and at most three `lstat`s per vendor, never a walk of the store. Measured 19 Oct 2026 by `pull::ingest::census_store::tests::legacy_drift_cost_per_call_is_measured` (`#[ignore]`d), n = 400 calls each: a migrated scratch store p50 29 µs, p99 52 µs, max 97 µs; this package's shadow of the operator's store (its `manifest/` an APFS clone of the real one, `gdfl.man` 268,430,208 bytes, migrated), read only, p50 11 µs, p99 43 µs, max 94 µs, answer "no drift" | the vendor set is fixed, so a round's added cost is bounded by that count times one call; the test holds p99 under 20 ms | PREC-1 |
 | L-PREC1-06 | A write probe cut off between its create and its remove halts that vendor's probe until an operator frees the name | `probe_io` opens its dot-file with `create_new` and removes only the file it made (D-5408); a leftover at the name, like a planted link, is something this call did not make, and removing it is the automatic deletion R4-06 refuses on a scheduler path | the probe fails by name ("already holds the probe's name") and the feed stays store-halted under `STORE_PROBES`' own bound; nothing is written through or removed. Operator step: remove `<store root>/.brutex-write-probe-<vendor>` by hand | PREC-1 / R4-12 |
 | L-PREC1-07 | `/dayflags.json`'s and `/ingest/refusals.json`'s pull refusals walk the whole pull journal once when its index lost an entry, or when the asked symbol's refusal entry will not read | the index cannot answer whole there (D-5410), and the journal is the source the index was built from, so the answer is read from it: O(journal) the first time in a process, then only what was appended (the walk is cached under the journal's `(dev, ino)`, DB-A34). An index that lost an entry is walked at start, off the request path, as one with no index is; a damaged refusal entry is found only by a request for that symbol, which pays the walk. Measured 19 Oct 2026 on shadows of the operator's store (journal 4,217,222 records, 1,079,608,832 bytes; index rebuilt by the server, then one byte of a clone flipped by hand), load average 65 to 106 on 14 cores: a damaged `refusals/NIFTY.idx` entry, first request 0.839 s (`read_ms` 661, every record read), then n = 200 sequential requests p50 1.74 ms, p99 3.27 ms, max 6.66 ms, NIFTY's 20 refusals equal to the healthy index's answer apart from its `source` block (sorted JSON compared) (the build before D-5410 withheld them as an unread journal); a damaged `runs` entry, walk at start `journal_ms` 661, first request 0.097 s reading no record. On a healthy index the added step is one integer comparison: interleaved A/B, n = 200 each, before / after D-5410's change (two release builds of this package's branch, the merged tip without and with that change; both commits were squashed into the package's one commit, so neither is a commit a reader can check out and neither is cited by hash), `/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY` one month p50 1.76 / 1.79 ms, p99 4.02 / 3.75 ms; RELIANCE p50 2.26 / 2.27 ms, p99 7.07 / 4.85 ms; `/ingest/refusals.json` NIFTY and RELIANCE p50 0.96 / 0.95 ms, p99 2.01 / 1.90 ms | bounded by the journal's length once per process, never per request; named in `via.why` on every walked answer | PREC-1 |
+## The pull audit journal's append lock waits a bounded time (AG-06, D-6244)
+
+**First build, measured 18 October 2026**, with the test harness
+`api::audit::lock_wait_measure::measure_append_latency_under_contention`
+(`crates/api/src/audit_lock_wait_measure.rs`, `--ignored`), which calls
+`Journal::open_run`, `append_member` and `close_run` through the public API
+with 1, 2 and 8 writer threads started on one barrier, 200 samples of each
+operation in each case (1 writer × 200, 2 × 100, 8 × 25), timing each call
+with `Instant`. Each side ran over its own APFS clone (`cp -c`) of the
+operator's 1.08 GB journal (4,217,222 records) and its index, on the
+WD_BLACK volume where the journal lives, so the real journal was never
+written. Before: a test build (the workspace test profile, optimised with
+debug info) of `feat/db-fix` at the head this branch started from, with only
+the harness file added. After: this branch, the same profile. The shared
+machine's load average was 11 to 41. Figures are p50 / p99 / max in
+milliseconds; "refused" counts appends refused.
+
+| Writers | Operation | Before p50 / p99 / max | Before refused | After p50 / p99 / max | After refused |
+|---|---|---|---|---|---|
+| 1 | `open_run` | 6.6 / 16.7 / 2,216.0 | 0 | 5.4 / 12.5 / 2,451.8 | 0 |
+| 1 | `append_member` | 3.2 / 7.9 / 11.3 | 0 | 2.6 / 9.1 / 15.1 | 0 |
+| 1 | `close_run` | 6.5 / 11.2 / 13.5 | 0 | 5.6 / 11.6 / 13.5 | 0 |
+| 2 | `open_run` | 0.6 / 16.6 / 20.0 | 100 | 11.7 / 20.1 / 22.0 | 0 |
+| 2 | `append_member` | 0.4 / 8.9 / 11.2 | 100 | 7.4 / 13.7 / 20.3 | 0 |
+| 2 | `close_run` | 4.6 / 18.5 / 19.8 | 100 | 10.3 / 17.1 / 31.4 | 0 |
+| 8 | `open_run` | 0.05 / 7.8 / 8.9 | 175 | 39.4 / 49.5 / 163.9 | 0 |
+| 8 | `append_member` | 0.05 / 5.2 / 6.2 | 175 | 29.3 / 156.1 / 161.7 | 0 |
+| 8 | `close_run` | 0.06 / 7.1 / 10.0 | 175 | 30.0 / 48.9 / 50.6 | 0 |
+
+The two sides ran ten minutes apart at a load average of 11 to 13, each on
+its own fresh clone. Before, a contended call is fast because it is refused
+(17 to 60 µs), and the record is lost: 100 of 200 of each operation with two
+writers, 175 of 200 with eight. After, nothing is refused and a contended
+call costs the holds queued ahead of it. An earlier pair at a load average of
+15 to 41 agreed: before, 199, 199 and 198 of 200 refused with two writers and
+194 to 195 with eight; after, none, with eight writers' p99 at 20.7, 17.9
+and 22.0 ms and the uncontended p99 at 3.7, 2.2 and 4.3 ms. A first build of
+this change that only polled (no queue in the process) refused 1 of 200
+`open_run`s with eight writers on the clone, and 102 of 800 appends in
+`eight_concurrent_appenders_lose_no_record`: a poller loses to a writer that
+takes the lock again the moment it lets go, which is why the queue exists.
+
+
+The first `open_run` on each clone (the 2.2 s and 2.5 s max of the uncontended rows)
+is the index rebuilt from scratch: a clone is a new inode, and the index is
+keyed by device and inode, so the first append rebuilt it under the append
+lock (L-AG06-02).
+
+**Repairs 1 and 2, measured 20 October 2026.** Repair 1 folded the first
+build's own wait loop, pause, 10 s ceiling, queue map and holder registry into
+R3-08's (`store::flock::patiently`, `MAX_PAUSE`, `MAX_PATIENCE`, `HOLDERS`),
+and moved the holder's registration into the lock guard. Repair 2 made the
+`flock(2)` grant and the registration one step under the registry's lock, and
+the forgetting and the unlock another (L-AG06-10). The same harness ran over
+fresh APFS clones (`cp -cR`) of the `audit/` of this package's shadow
+(`shadow.sh AG-06`), never the real journal. Before: a test build of
+`feat/db-fix` as of its SC-3 merge (20 October, 00:31 IST) with only the
+harness added (saved as `tgt/AG-06-r2-bin/api-before`; no later commit on
+feat/db-fix touches `crates/api/src/audit.rs` or `crates/store/src/flock.rs`,
+so the `try_lock` code it measures is still the base's), run at 01:43
+IST at a load average of 15 to 17. After: this branch with both repairs, run
+at 07:44 IST at a load average of 11 to 13, over the clone
+`shadow/AG-06-measure-r3`. Figures are p50 / p99 / max in milliseconds, n =
+200 per row; "refused" counts appends refused.
+
+| Writers | Operation | Before p50 / p99 / max | Before refused | After p50 / p99 / max | After refused |
+|---|---|---|---|---|---|
+| 1 | `open_run` | 3.7 / 8.2 / 2,412.4 | 0 | 4.8 / 10.2 / 2,246.6 | 0 |
+| 1 | `append_member` | 1.8 / 5.6 / 6.1 | 0 | 2.3 / 8.2 / 19.6 | 0 |
+| 1 | `close_run` | 3.4 / 8.5 / 9.5 | 0 | 4.9 / 10.7 / 11.4 | 0 |
+| 2 | `open_run` | 0.015 / 6.7 / 8.5 | 170 | 10.9 / 18.2 / 34.3 | 0 |
+| 2 | `append_member` | 0.015 / 3.2 / 3.3 | 171 | 6.7 / 12.8 / 32.6 | 0 |
+| 2 | `close_run` | 0.015 / 6.4 / 6.8 | 171 | 9.7 / 16.7 / 17.5 | 0 |
+| 8 | `open_run` | 0.054 / 4.6 / 6.6 | 186 | 32.2 / 48.9 / 52.0 | 0 |
+| 8 | `append_member` | 0.059 / 3.9 / 4.9 | 185 | 22.2 / 35.5 / 47.4 | 0 |
+| 8 | `close_run` | 0.057 / 4.0 / 6.6 | 186 | 24.4 / 36.7 / 38.4 | 0 |
+
+As on 18 October, a contended call before is fast because it is refused and
+its record lost; after, nothing is refused and a contended call costs the
+holds queued ahead of it, bounded by `APPEND_LOCK_WAIT`. The uncontended max
+of `open_run` (2.2 s and 2.4 s) is the index rebuilt from scratch by the
+first append to a clone (L-AG06-02). The repaired build's uncontended p99 is
+within the noise of the 18 October pair (12.5, 9.1 and 11.6 ms then).
+Re-run: `BRUTEX_AG06_MEASURE_ROOT=<a fresh cp -cR clone root>
+tgt/AG-06-r3-logs/api-test-repair2 --ignored --exact
+audit::lock_wait_measure::measure_append_latency_under_contention
+--nocapture`; logs `tgt/AG-06-r2-logs/measure-before1.log` and
+`tgt/AG-06-r3-logs/measure-after-r3.log`.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG06-01 | An append that meets another writer's append waits for it | the lock is one file's exclusive `flock(2)`; waiting is what replaced losing the record (code-5, FM-162) | `APPEND_LOCK_WAIT` = 1 s, which is also `store::flock::MAX_PATIENCE`, the one ceiling of every patient lock (a compile-time assertion keeps it at or under it), then refused by name (bound, record kind and outcome, wait, attempts, holder). Uncontended p99 3.7 to 12.5 ms (`open_run`) and 4.3 to 11.6 ms (`close_run`) across the 18 October runs, so 64 queued appenders at that p99 need 0.24 to 0.8 s: the headroom is thin at the top of the measured load, and past it the 64th is refused by name (`sixty_four_appenders_at_once_each_land_or_are_refused_by_name` proves only that none is lost silently, not that all 64 land). In this process waiters queue in the order they asked; against another process the head of the queue polls, 1 ms doubling to `MAX_PAUSE` (16 ms) | AG-06 |
+| L-AG06-02 | A from-scratch index build holds the append lock for the whole build | the index is built under the append lock so no append can overtake it (WP-33c) | about 1.33 s per GiB (2.2 to 2.5 s measured for the 1.08 GB clone on this loaded machine), once per journal file: at the first start or append after the index is absent or is not this file's (a restored or cloned journal). An append that meets it waits 1 s and is refused, naming the holder: "doing the journal index build" when `Journal::build_index` runs it, but "doing a pull audit journal append" when the build runs inside an append (the in-append build is not told apart). **NOT DONE**: a bound that covers it would grow with the journal | AG-06 |
+| L-AG06-03 | **NOT DONE: a run whose opening append is refused AFTER the bound still runs unjournalled** | `RunLedger::open` (server.rs, batch-1 AF-04's file) keeps `opened_refused` and runs on, and `RunLedger::flush` never retries the opening; the restart scan (`pullrun.rs`) reads only the journal | the window is now a holder past 1 s (a stuck writer, or L-AG06-02), not any few-millisecond append. Follow-on after AF-04: refuse to start a run whose opening could not be journalled, or retry the opening at the first flush; and answer `not_known`, not "clean", when such a refusal is known. The `api.audit` Error "record not appended" and `pull.run started` events are still written | AG-06, AF-04 |
+| L-AG06-04 | Correction to the D-4950 note above that a refused opening record "closes behind it written late": `close_unopened` covers a refused opening only when the run reaches its close | a run that dies before its close leaves no opening record, and the restart scan read that journal as clean (code-5) | narrowed by L-AG06-01 to L-AG06-03's window | AG-06 |
+| L-AG06-05 | A holder in another process is not named by itself | `flock(2)` does not say who holds a lock; the registry of holders is this process's own, and the journal's writers leave no note in it (a note is for a lock file that holds nothing else) | the refusal says, in `store::flock::holder_note`'s words, "held by another process that left no note in the lock" and that this process holds nothing on it (a `cli` pull, or a second server over this store) | AG-06 |
+| L-AG06-06 | A stuck holder costs every append the bound | each append waits its own 1 s before it is refused; nothing remembers that the last one was refused | 1 s per append, each refusal an `Error` event naming the holder; a run with many failed members appends one record per member | AG-06 |
+| L-AG06-07 | **A contended append blocks the thread that calls it for up to the bound** | the wait is a blocking poll and a condition-variable wait, and the pull runs call the journal from async code: `broker_run_by` (`server.rs` near line 6070) and `fno_walk` (near line 11405) reach `RunLedger::open` and its flushes on a tokio worker | up to 1 s of one worker per contended append (the 8-writer p99 above is the measured cost); moving those calls to `spawn_blocking` is `server.rs`, batch-1 AF-04's file. **NOT DONE** here | AG-06, AF-04 |
+| L-AG06-08 | A member failure whose note was cut can wait twice | its whole note is appended to `pull.notes` under the journal's own lock (so the note's ordinal is the record's), and that file's lock waits its own `APPEND_LOCK_WAIT` | at most 2 s in all. Every writer in this code takes the notes lock only under the journal lock, so the second wait is met only behind a holder outside this protocol (an older build, or a stuck process) | AG-06 |
+| L-AG06-09 | The holder registry is paid on every append | one registry lock and hash probe for the ticket, one for the holder, and one each as they end (R3-08's L-R308-02 cost, which no bench times apart) | inside the append latency measured above, uncontended and contended; not timed apart | AG-06 |
+| L-AG06-10 | The process-wide holder registry's lock is held across one non-blocking `flock(2)` call at every registered take and every registered release (repair 2) | the registry is this process's memory and `flock(2)` is the kernel's: repair 1 registered after the grant and forgot before the unlock, so at those two instants a refusal read "another process" while this one held the lock. Repair 2 makes each pair one step under the registry's lock (`store::flock::take_held`, `let_go`), so every reader here sees the two move together. The price: every registered take and release in the process (the journal's appends, R3-08's month writers and patient readers) passes through that one mutex for the length of one `flock` call, which never blocks | one `flock` call per hold of the registry's lock, never a blocking one. Its cost is inside the journal append latency measured above (repairs 1 and 2: uncontended `append_member` p50 2.3 ms, p99 8.2 ms, n = 200) and is not timed apart (UNVERIFIED alone, as L-R308-02). What it buys, measured by `no_reader_here_ever_finds_the_lock_held_and_its_holder_unnamed` (8 lockers × 200 takes, a sampler holding the registry's lock): with repair 1's two-step code, 5,964 of 25,038, 6,684 of 11,811 and 5,560 of 10,455 samples that met the lock held found nobody named (three runs of the saved binary `tgt/AG-06-r3-logs/store-test-before-repair2`); with repair 2 the test asserts none, with at least 100 such samples | AG-06 |
+| L-AG06-11 | A hand-off wakes every patient locker of the path waiting in this process, not only the next one | the queue (`store::flock`'s `Turns`) is one counter pair and one condition variable per lock path; a hand-off moves `serving` and calls `notify_all`, and each woken waiter re-checks its own ticket under the queue's mutex and sleeps again unless it is next. A waiter that gives up before its turn is kept in an ordered set and skipped when reached (O(log g) for g given up) | per hand-off, O(w) wake-ups for w lockers of that path waiting in this process; w is at most the threads appending to one journal at once, each waiting at most `APPEND_LOCK_WAIT`. The pull runs append from a handful of threads; the tests drive w up to 63 (`sixty_four_patient_lockers_all_take_the_lock_in_turn`, `sixty_four_appenders_at_once_each_land_or_are_refused_by_name`). Its cost is inside the 8-writer rows above (p99 36.7 to 48.9 ms, dominated by the holds' `fsync`) and is not timed apart (UNVERIFIED alone). One condition variable per ticket would make a hand-off wake one waiter; not done, because w is small and bounded | AG-06 |
