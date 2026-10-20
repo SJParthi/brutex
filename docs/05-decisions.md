@@ -76141,3 +76141,166 @@ contended append blocks the thread that calls it for up to the bound.
 `docs/06-limits.md` (AG-06) names each, and corrects the earlier reading that
 `close_unopened` covers a lost opening record: it does only when the run
 reaches its close.
+### D-6245 — AG-05: every census file is born through `store::staging::create`, an epoch's name is never a link, and `/disk.json` says a migrated census is unsealed — 2026-10-17
+
+Renumbered at landing (amendment A6): this decision carried D-5884 and then
+D-5903, and IA-3 landed D-5903 first, so it takes D-6245, the ledger head + 1.
+
+Assurance findings store-1 and store-2 (14 Oct attack run, each confirmed by
+two skeptics; their corrections applied).
+
+1. **The epoch install's staging file is created, never opened (store-1).**
+   `census_store::install_epoch` wrote `<epoch>.man.tmp` with
+   `File::create` — create, truncate, following a link — so a hard link
+   planted at that name cut the OLDER epoch's inode and wrote the new image
+   through it (compaction, `cli census-recount` and the re-key's withdraw all
+   answered `Ok`, leaving two epochs on one inode), and a symbolic link sent
+   the image into whatever it named. It now goes through D-4922's door,
+   `store::staging::create` (`O_CREAT | O_EXCL`): a hard link is refused
+   `staging_linked`, a symbolic link (dangling or not), a directory, a pipe
+   or a socket `staging_not_regular`, each by name with nothing removed,
+   truncated or written; a dead writer's leftover — a regular file with one
+   name — is cleared and the warning `stale epoch temporary cleared` carries
+   its bytes. Every caller inherits it because one install function writes
+   every epoch after the first (the migration's first epochs are written
+   `create_new` into a fresh staging directory, which never opens a name that
+   exists, and are not temporaries gate 28 counts). The seal's stub (`<vendor>.man.seal.tmp`) and
+   receipt (`SEALED.tmp`) used `remove_file` then `create_new`, which unlinked
+   whatever was at the name unseen; they use the same door.
+2. **An epoch's name holds a regular file or is refused.** `current_epoch`
+   refuses an epoch name whose listing entry is a symbolic link, a directory
+   or a special file (the type comes with the listing entry); `read_epoch`
+   names a symbolic link as one instead of the host's ELOOP. Before, the
+   listing answered the link as the current epoch and only the read stopped.
+3. **Gate 28 reads `.writing` as a temporary.** `census_store.rs` leaves its
+   LEGACY list (it names two temporaries and calls the door three times), and
+   `pull::ingest`'s single-file census publish (`<vendor>.man.writing` by
+   `File::create`), which the `.tmp`-only rule never saw (L-R316-03's blind
+   spot), joins it with a count of 1. That publish is NOT converted here:
+   `ingest.rs` is in flight (GF-1, R3-18) and owned next by IA-16, or R3-19
+   after them (docs/06-limits.md L-AG05-01).
+4. **`/disk.json` decides a single file's role from the seal RECEIPT
+   (store-2).** A migrated vendor's `<vendor>.man` was `sealed-stub` when a
+   `.v3-superseded` name existed and `superseded` otherwise — so the
+   operator's GDFL census, migrated (WP-81) and never sealed, was labelled
+   `superseded` and nothing said a pre-version-4 reader would serve the
+   census the migration froze. Now: `sealed-stub` only under a whole receipt;
+   `unsealed` with no receipt or a torn one; `seal-unknown` when the receipt
+   is a later format or cannot be read (a directory, a link). Each feed
+   carries `seal` {`migrated`, `receipt`, `receipt_path`, `requires`,
+   `requires_path`, `fault`}, and the answer's new `faults` names each vendor
+   whose seal is not whole: `census_unsealed` (with the step `cli
+   census-migrate <vendor> --seal` after a snapshot, docs/36 section 2, and
+   whether `manifest/REQUIRES` exists; an interrupted seal and a missing
+   single file are told apart), `census_seal_unknown`, and
+   `census_requires_absent` for a whole seal whose requirements line is
+   missing. No route was added; the /ingest Storage band and the /db badge
+   read the field later (SC-8).
+5. **What is not done here and why.** The seal itself is the operator's
+   store step (S-07, DB-B68, D-3381): `cli census-migrate gdfl --seal` after
+   a snapshot and a rehearsal on a copy, then an API restart by the main
+   session. A guard in `state/fix/deploy-8080.sh` (outside the repository)
+   that refuses to start a pre-version-4 binary over a version-4 store is the
+   main session's.
+6. **Repair 1 (19 Oct): a whole receipt is a claim, not the seal.** A second
+   agent put the census back at `gdfl.man` with `SEALED` and `REQUIRES` left
+   in place, and `/disk.json` read `sealed-stub`, no fault, and dropped the
+   census from `census_kept_bytes` — the store-2 hazard reported as sealed.
+   The route now measures both names a seal leaves: `sealed-stub` only when
+   the receipt is whole AND the single name holds the stub (its length and
+   its header, `census_store::holds_sealed_stub`, now public) AND
+   `<vendor>.man.v3-superseded` is a regular file; otherwise
+   `seal-inconsistent`, counted as kept bytes, with the fault
+   `census_seal_inconsistent` saying what each name holds and the step (`cli
+   census-migrate <vendor> --seal`, which either completes the seal or
+   refuses by name). Each feed's `seal` gains the measured `stub` and
+   `superseded`. A directory or a link at `manifest/REQUIRES` is said as
+   such, never "absent". The cost is one more `lstat` and one 16-byte read
+   per migrated vendor. **No default-suite test asserts a wall-clock bound**:
+   the epoch-install bench asserts the staging door's own call count on every
+   install (1 on a free name, 4 over a leftover) and the `/disk.json` bench
+   asserts a stable answer; both print p50, p99 and max for docs/06. An
+   absolute bound had failed on this shared host at p99 617 ms while the
+   unchanged `File::create` series beside it measured 309 ms: it measured the
+   load, not the code.
+   **`manifest/REQUIRES` is appended through no link** (the second agent's
+   follow-up, in this file): `require_feature` opened the name with `create`
+   and `append`, following a link, after a `read_to_string` that would wait
+   on a pipe. It now makes one no-follow, non-blocking open for read and
+   append and checks the handle's own `fstat`: a symbolic link (dangling or
+   not) is refused by name, a name that is not a regular file is refused, and
+   a regular file with more than one name is refused with its count, each
+   before a byte is written. One `open` where there were two, plus that
+   `fstat`: constant per requirement written.
+   **A census batch is appended into no second name** (the second check's
+   follow-up `probe_pre_damaged_shared_inode_epochs`, in this file): the
+   state the old staging open left — an epoch that is a hard link of an older
+   epoch's inode — still read as the current epoch, and `record` appended
+   into it, rewrote the older epoch's bytes in place and answered `Ok`.
+   `write_batch` now opens its file no-follow and non-blocking and checks the
+   handle's own `fstat`: a symbolic link, anything not a regular file and a
+   regular file with more than one name are each refused by name before a
+   byte is written. The same open serves the single-file census, so a
+   `<vendor>.man` a seal cut between its link and its rename (two names) is
+   refused too rather than grown under its superseded name. Cost: the open
+   it always made plus one `fstat`, per batch. The two pipe checks no longer
+   read a clock after the call (a call waiting on a pipe never returns to
+   it): each runs the call on its own thread and fails if no answer comes in
+   two minutes, a hang detector rather than a cost bound.
+
+Tests: `pull::ingest::census_store::link_tests::*` and
+`api::server::disk_route::seal_tests::*`; gate 28's
+`a_new_unlisted_staging_write_fails_the_gate_and_the_door_passes_it`.
+Invariants AG05-01 to AG05-11 in docs/04-invariants.md; limits L-AG05-01 to
+L-AG05-05 in docs/06-limits.md.
+
+**Repair 2 (verify-AG-05-r2, 2026-10-20).** Two figures the repair-1 roles
+introduced were wrong, and both are fixed at their one cause, the sum.
+`census_kept_bytes` is now computed by `api::server::disk_route::kept_bytes`
+from each census name's `retained` flag and its file identity
+`(st_dev, st_ino)`, taken from the `lstat` the view already made, so no call
+is added. Locked choices:
+
+1. A single file that reads `seal-unknown` is retention unless the name
+   holds the stub, measured. A receipt this build cannot read (a later
+   format, a pipe, a directory, a link) says nothing about the bytes at the
+   name, and bytes no seal accounts for are kept, never assumed disposable.
+   Before, the role was outside the kept set and a whole frozen census
+   dropped out of the figure (268430208 bytes on a real-store shadow).
+2. Each FILE is counted once across every feed, at its first retained name.
+   A retained name of a file that a name in use also holds (the current
+   epoch, the stub, an unmigrated single file) costs nothing. A seal killed
+   after its link and before its stub leaves one inode at two names, and the
+   per-name sum counted it twice. The roles and the fault words are
+   unchanged. The `census_unsealed` sentence now names that state as a seal
+   interrupted after its link, and it names a 0-byte single file as empty
+   rather than as the frozen census.
+3. `pull::census_store::require_feature` reads `manifest/REQUIRES` through a
+   read-only no-follow open before it opens anything for append. A line
+   already in force answers `Ok(false)` there, so a read-only `REQUIRES` no
+   longer fails an idempotent re-seal with `EACCES`. The append open keeps
+   every repair-1 refusal.
+4. A whole receipt's `superseded_bytes` is compared with what
+   `<vendor>.man.v3-superseded` holds. `census_store::seal_receipt_kept_bytes`
+   returns the figure from the receipt's one bounded read, and
+   `seal_receipt` delegates to it, so `SealReceipt` keeps its shape. A kept
+   census of any other length is not the census the seal kept: the seal's
+   `superseded` is `false`, the single name reads `seal-inconsistent`, and
+   the `census_seal_inconsistent` sentence names both lengths. Before this,
+   such a file read `sealed-stub` with no fault. The `lstat` was already
+   taken, so no call is added.
+5. A name at `manifest/v4/<vendor>` that is not a directory (a symbolic
+   link, a regular file, anything else) is named by the new fault
+   `census_v4_not_a_directory`. The vendor still reads as not migrated and
+   its single file keeps the role `single`, but the answer no longer passes
+   it over as a census nobody touched. A feed with no single file left is
+   still answered for its fault.
+
+Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
+`seal_tests::a_seal_killed_after_its_link_counts_its_one_file_once`,
+`seal_tests::an_empty_single_file_is_not_told_as_the_frozen_census`,
+`seal_tests::a_kept_census_cut_short_under_a_whole_receipt_is_seal_inconsistent`,
+`seal_tests::a_name_at_the_v4_directory_that_is_not_one_is_named` and
+`link_tests::an_idempotent_requirement_opens_nothing_for_writing`. Each one
+failed on the code before it. Invariants AG05-12 to AG05-17; limits
+L-AG05-06 and L-AG05-07.
