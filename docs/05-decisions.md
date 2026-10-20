@@ -74543,3 +74543,90 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5915 — R3-15: the page targets, the page budgets, the header-only up check, the shared reporter's ration, the speed sheet's ignored-field rule and the harness's read-only mode — 2026-10-20
+
+**Why.** R3-14 made the server keep p50, p99 and the max per route
+(`/speed.json`) and a route for a page's own failure (`POST /page-report`);
+nothing drew the first or called the second. The only speed sheet was a
+hand-run script outside the app, a build behind, naming its own URLs; no
+browser measured a page; nothing stopped a page's code from growing; and every
+open tab asked a whole `GET /feeds.json` every 8 s to learn that the server was
+up. Built in the cloud (16 to 17 Oct) and finished on the Mac (18 to 20 Oct).
+The decision number is taken at landing from the ledger's head (round 3
+amendment A6): the part's spec assigned no block.
+
+1. **The four page-side targets** are first content p99 under 300 ms, no pause
+   over 50 ms, heap under 100 MB and under 400 KB on the wire, bytes decimal
+   (1 KB = 1,000 B, the stricter reading), for `/db`, `/ingest`, `/gaps`,
+   `/audit`, `/markets`, `/sources` and `/speed` (`web/src/lib/speed.js`
+   `PAGE_TARGETS`, `MEASURED_PAGES`). Whether they hold is a measurement,
+   recorded in `docs/06-limits.md` L-R315-01 to L-R315-04; a target that is
+   not met is said there, never relaxed here.
+2. **Each page's first-load script and style is budgeted at build time**
+   (`BUNDLE_BUDGETS`), and a page past its budget fails `vite build`. The
+   default is the 400 KB wire target. `/backtest`, `/db` and `/ingest` already
+   ship more, and the server sends them uncompressed
+   (`crates/api/src/assets.rs`), so their budgets are held just above their
+   size on the merged tree, rounded up to 25 KB, and every budget line says
+   they are over the target. Raising a budget is a decision with its reason,
+   never an edit to make a build pass. The figures: on the 16 Oct cloud cut
+   1,091,954 / 726,909 / 482,536 B (budgets 1,100,000 / 750,000 / 500,000);
+   on the 18 Oct merged tree `/db` 754,201 B, past 750,000, so `/db` was raised
+   to 775,000; on the 20 Oct merged tree (`feat/db-fix` after AH-05, with
+   R3-15) 1,115,769 / 790,331 / 510,266 B, all three past the 18 Oct budgets
+   before R3-15's 4.2 KB was added (the committed build alone: 1,111,563 /
+   786,109 / 506,027 B), so the budgets are now **1,125,000 / 800,000 /
+   525,000 B**. `/db` grew with R3-02's controls and R3-03's pager and Go to;
+   `/backtest` and `/ingest` changed no file of their own route, so their
+   growth is shared `$lib` code. Each raise is the budget doing its job: the
+   build said a page grew, and this entry says why it is allowed.
+3. **The header's probe is `HEAD /inspection.json`**, a constant answer the
+   server builds from its commit stamp alone, in place of a whole
+   `GET /feeds.json` (a census read, a settings stat and a held-span walk per
+   probe per tab). The content-type check that catches a dev server's HTML
+   fallback is kept: a HEAD answer carries the header.
+4. **One shared reporter on every page** (`$lib/page-report.js`, one import in
+   `+layout.svelte`) wraps `window.fetch` and listens for `error`,
+   `unhandledrejection` and `brutex:fallback`. The server's own outcome classes
+   decide what is a failure (a 5xx that is not busy, or no answer); a refusal,
+   a busy and the page's own cancel are not. Rationed per tab: one report per
+   distinct failure a minute and ten a minute, what was held back carried on
+   the next; the report route never reports itself.
+5. **The speed sheet fails its run on a field the server ignored**, by three
+   signals of the server's own: an `ignored` list in the answer, a 400 saying
+   the route does not read the field, or the field garbled and answered 2xx
+   with the same bytes. Signal 3 is a lower bound for answers that carry their
+   own clock. Every row is stamped with the one build (`x-brutex-build`) that
+   answered it.
+6. **The browser harness has no npm dependency**: it drives Chrome over the
+   DevTools protocol on Node's own WebSocket. `--no-sandbox` only when the
+   operator asks. **`--read-only`** (found needed on the Mac, 19 Oct: the
+   standing rule is that no agent POSTs to a server, and a page that meets a
+   failed request reports it on its own) blocks the report address in the
+   browser with the DevTools Fetch domain, names each blocked report as a
+   note, fails the run on any other write that leaves the browser, and skips
+   the reporter check; `--no-report-check` alone does not make a run read
+   only.
+7. **The four interactions are measured on `/db` as it is drawn** (found on
+   the Mac, 20 Oct: two of the cloud's four selectors named controls the
+   real page does not have, and the sort clicked a server-side column of a
+   5.4 million-bar selection): the feed and expiry pickers are the shared
+   `Picker`; the page turn chooses the newest expiry the picker offers; each
+   sample opens in a browser context of its own, because the feed switch
+   persists the feed it chose; each click is timed to the last network event
+   it caused, or two frames after it when later, never including the settle
+   window's 500 ms of quiet; and the 20,000-row sort edge is FOUND
+   (`sortEdge`), never typed: the longest newest-ending range of days whose
+   bars are at or under `LOCAL_SORT_BUDGET`, on the opening instrument's
+   first stored rung where one day fits.
+8. **The sheet bounds a large answer**: past `--max-answer-bytes`
+   (16,000,000 B) it is timed at one client, each skipped client count said;
+   past 64,000,000 B it is kept as its length and sha256. The page capture
+   replays `/gaps`' 184 MB census, which sixty clients would hold at once.
+9. **A load waits at most 2,000 ms for a paint the browser has not yet
+   delivered**, so a page that painted is never read as unpainted under load,
+   and one that never paints is still said not painted.
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-11);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-13.
