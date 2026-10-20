@@ -2014,6 +2014,44 @@ fn a_run_whose_items_were_refused_is_not_said_built() {
     assert!(!text.contains("every item of the run was built"), "{text}");
 }
 
+/// **A RUN GIVEN NO ITEM IS NOT SAID "BUILT"** (R3-17 repair 1b): a scope
+/// whose months all have the file gives an empty plan; the run ends `done`
+/// and whole, and its words say nothing was pending, never "every item of
+/// the run was built" of none. Its `end` line still says `n=0 ok=0 of=0`.
+#[test]
+fn a_run_given_no_item_says_nothing_was_pending() {
+    let stop = AtomicBool::new(false);
+    let now = || 500;
+    let never = |_: &str, _: &usize| -> Outcome { unreachable!("an empty plan builds nothing") };
+    for workers in [1, 8] {
+        let root = Root::new();
+        let ran = run(
+            &root.0,
+            &ask(Kind::SortIndex, workers, &stop, &now),
+            &keys(0),
+            &never,
+        )
+        .unwrap();
+        assert_eq!(ran.how, How::Done, "{workers}");
+        assert_eq!(
+            (ran.built(), ran.clean(), ran.left()),
+            (0, 0, 0),
+            "{workers}"
+        );
+        assert!(ran.whole(), "{workers}");
+        assert_eq!(
+            ran.why, "no item was pending, so none was built",
+            "{workers}"
+        );
+        let text = root.journal(Kind::SortIndex);
+        assert!(
+            text.contains("end 500 how=done n=0 ok=0 of=0 "),
+            "{workers}: {text}"
+        );
+        assert!(!text.contains("every item of the run was built"), "{text}");
+    }
+}
+
 /// **NO ETA BEFORE A WHOLE SECOND** (R3-17 repair 1): a running run that has
 /// built items within its first second has no rate to extrapolate from, so
 /// it gives none, rather than "about 0 s left".

@@ -1094,6 +1094,14 @@ fn ending(left: &Left<'_>, id: u64) -> (How, String) {
             How::Stopped,
             format!("a Stop was asked; {rest} item(s) left for a resume of run {id}"),
         ),
+        // A run given no item built nothing, and says so rather than
+        // "every item was built" of none (R3-17 repair 1b): the caller
+        // refuses a scope that walks no month file, so this is a scope whose
+        // months all have the file, or a resume whose chain closed them all.
+        (None, _) if left.of == 0 => (
+            How::Done,
+            "no item was pending, so none was built".to_owned(),
+        ),
         (None, _) if left.ok == left.n => (How::Done, "every item of the run was built".to_owned()),
         (None, _) => (
             How::Done,
