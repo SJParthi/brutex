@@ -429,6 +429,46 @@ pub enum CmRefusal {
         /// What the sidecar said.
         why: String,
     },
+    /// A day-folder entry whose WHOLE name is a wanted stem, with no
+    /// extension at all (`NIFTY 50.NSE_IDX`, D-4835): the split at its last
+    /// dot made it a foreign stem, so it was skipped and the day read as if
+    /// the file were absent. Refused by name, never skipped.
+    ExtensionMissing {
+        /// The stem, which is the whole entry name.
+        stem: String,
+    },
+    /// Bytes before a zip's first record that its offsets were not adjusted
+    /// for (D-4818, design §8 B7): where the central directory actually ends
+    /// less where its end record says it ends. Offsets are never adjusted.
+    ArchivePrefixed {
+        /// How many bytes precede the zip's own first record.
+        bytes: u64,
+    },
+    /// A member whose general-purpose flag sets bit 0, encryption (D-4818,
+    /// APPNOTE 4.4.4): refused by its own name before any inflate, never
+    /// read as a corrupt member or a CRC mismatch.
+    ArchiveMemberEncrypted {
+        /// The member's name, folder included.
+        member: String,
+    },
+    /// A day zip found under another folder than the one its own name
+    /// files it in (D-4834, design §8 A16, C3): the day is refused for it by
+    /// name, never read as absent.
+    DayZipMisfiled {
+        /// Where it was found.
+        found: String,
+        /// Where its name says it belongs.
+        expected: String,
+    },
+    /// A tick-store `.bts` day file outside its `<tree>/<yyyy>/<MON_yyyy>/`
+    /// folder (D-4866, design §8 T10): the day is refused for it by name,
+    /// never read as absent.
+    DayFileMisfiled {
+        /// Where it was found, under the store's root.
+        found: String,
+        /// Where its name says it belongs, under the store's root.
+        expected: String,
+    },
 }
 
 impl core::fmt::Display for CmRefusal {
@@ -524,10 +564,53 @@ impl core::fmt::Display for CmRefusal {
                  unknown: {why}"
             ),
             Self::AuctionSidecar { why } => write!(f, "auction sidecar refused: {why}"),
+            Self::ExtensionMissing { stem } => extension_missing(f, stem),
+            Self::ArchivePrefixed { bytes } => prefixed(f, *bytes),
+            Self::ArchiveMemberEncrypted { member } => write!(f, "{member} is encrypted"),
+            Self::DayZipMisfiled { found, expected } => misfiled(f, ZIP_WORD, (found, expected)),
+            Self::DayFileMisfiled { found, expected } => misfiled(f, BTS_WORD, (found, expected)),
         }
     }
 }
 
+/// What a misfiled day zip is called in its refusal.
+const ZIP_WORD: &str = "day zip";
+
+/// What a misfiled tick-store day file is called in its refusal.
+const BTS_WORD: &str = "tick-store day file";
+
+// Free functions rather than arms: the arms took `<CmRefusal as
+// core::fmt::Display>::fmt` past `clippy::too_many_lines` (as `fetch.rs`
+// says of its own).
+
+/// [`CmRefusal::ExtensionMissing`]'s words.
+fn extension_missing(f: &mut core::fmt::Formatter<'_>, stem: &str) -> core::fmt::Result {
+    write!(
+        f,
+        "{stem} is a wanted stem with no extension at all; neither csv nor CSV, never skipped"
+    )
+}
+
+/// [`CmRefusal::ArchivePrefixed`]'s words.
+fn prefixed(f: &mut core::fmt::Formatter<'_>, bytes: u64) -> core::fmt::Result {
+    write!(
+        f,
+        "archive prefixed: {bytes} bytes precede the zip's first record and its offsets were \
+         not adjusted for them"
+    )
+}
+
+/// [`CmRefusal::DayZipMisfiled`]'s and [`CmRefusal::DayFileMisfiled`]'s words.
+fn misfiled(
+    f: &mut core::fmt::Formatter<'_>,
+    what: &str,
+    (found, expected): (&str, &str),
+) -> core::fmt::Result {
+    write!(
+        f,
+        "{what} misfiled: found at {found}, its name files it at {expected}"
+    )
+}
 impl core::error::Error for CmRefusal {}
 
 impl CmRefusal {
@@ -565,7 +648,7 @@ pub fn folder_day(name: &str) -> Result<(CmKind, Day), CmRefusal> {
 }
 
 /// `ddmmyyyy` as a real date, or `None`. Day first: `01042024` is 1 April.
-fn ddmmyyyy(text: &str) -> Option<Day> {
+pub(crate) fn ddmmyyyy(text: &str) -> Option<Day> {
     let &[d1, d2, m1, m2, y1, y2, y3, y4] = text.as_bytes() else {
         return None;
     };
@@ -1247,6 +1330,11 @@ enum Held<T> {
     /// case-insensitive volume only the two spellings of one extension, in a
     /// zip one name twice. [`CmRefusal::AmbiguousCaseTwins`] names it.
     Twins,
+    /// A name that is the stem itself with no extension at all, alone or
+    /// beside other names for the ticker (D-4835):
+    /// [`CmRefusal::ExtensionMissing`] names it, whatever order the names
+    /// came in.
+    NoExtension(Box<str>),
 }
 
 /// Names filed by their ticker-map slot: an array of [`TICKER_SLOTS`] cells,
@@ -1337,11 +1425,16 @@ impl<T> SlotTable<T> {
     /// `pull::gdfl_cm::tests::day_folder_lookup_is_one_index_into_a_ticker_slot_array`;
     /// UNVERIFIED as a measured time (`docs/06-limits.md`).
     pub fn file(&mut self, name: &str, value: T) {
-        let Some((stem, ext)) = name.rsplit_once('.') else {
-            self.skip();
-            return;
+        // A name that is a wanted stem whole, with no extension at all
+        // (D-4835): the split below would make `NIFTY 50.NSE_IDX` the foreign
+        // stem `NIFTY 50` and skip it, so the day read as if the file were
+        // absent. One more slot probe, still O(1) per name.
+        let bare = self.slot_of(name).map(|slot| (slot, None));
+        let split = || {
+            let (stem, ext) = name.rsplit_once('.')?;
+            Some((self.slot_of(stem)?, Some(ext)))
         };
-        let Some(slot) = self.slot_of(stem) else {
+        let Some((slot, ext)) = bare.or_else(split) else {
             self.skip();
             return;
         };
@@ -1354,12 +1447,15 @@ impl<T> SlotTable<T> {
             return;
         };
         self.names += 1;
-        // A third spelling of the extension anywhere among a ticker's names is
-        // named as that; only names all spelled `.csv` or `.CSV` are twins.
+        // A name with no extension anywhere among a ticker's names is named
+        // as that, whatever came first; then a third spelling of the
+        // extension; only names all spelled `.csv` or `.CSV` are twins.
         *cell = match (ext, &*cell) {
-            ("csv", Held::Empty) => Held::One(name.into(), ExtVariant::Lower, value),
-            ("CSV", Held::Empty) => Held::One(name.into(), ExtVariant::Upper, value),
-            ("csv" | "CSV", Held::One(..) | Held::Twins) => Held::Twins,
+            (None, _) => Held::NoExtension(name.into()),
+            (_, Held::NoExtension(held)) => Held::NoExtension(held.clone()),
+            (Some("csv"), Held::Empty) => Held::One(name.into(), ExtVariant::Lower, value),
+            (Some("CSV"), Held::Empty) => Held::One(name.into(), ExtVariant::Upper, value),
+            (Some("csv" | "CSV"), Held::One(..) | Held::Twins) => Held::Twins,
             _ => Held::OddExtension,
         };
     }
@@ -1398,12 +1494,17 @@ impl<T> SlotTable<T> {
     /// [`CmRefusal::AmbiguousCaseTwins`] when two names spelled `.csv` or
     /// `.CSV` were filed for the stem, and [`CmRefusal::ExtensionUnknown`] when
     /// any name filed for it has a third spelling of the extension.
+    /// [`CmRefusal::ExtensionMissing`] when a name filed for it is the stem
+    /// itself with no extension (D-4835).
     pub fn get(&self, stem: &str) -> Result<Option<(&str, ExtVariant, &T)>, CmRefusal> {
         let held = self.slot_of(stem).and_then(|slot| self.cell(slot));
         match held {
             Some(Held::One(name, ext, value)) => Ok(Some((name, *ext, value))),
             Some(Held::OddExtension) => Err(CmRefusal::ExtensionUnknown),
             Some(Held::Twins) => Err(CmRefusal::AmbiguousCaseTwins),
+            Some(Held::NoExtension(name)) => Err(CmRefusal::ExtensionMissing {
+                stem: name.to_string(),
+            }),
             _ => Ok(None),
         }
     }
@@ -1428,12 +1529,69 @@ pub struct ListedFile<L> {
 
 impl<L> ListedFile<L> {
     /// The file's name inside its day folder: the entry name after the last
-    /// `/`.
+    /// `/` or `\` (D-4828: a CM day zip may use either, as an options one
+    /// already may).
     #[must_use]
     pub fn name(&self) -> &str {
         self.entry
-            .rsplit_once('/')
+            .rsplit_once(['/', '\\'])
             .map_or(&*self.entry, |(_, file)| file)
+    }
+}
+
+/// The file name `entry` names directly inside `folder`: the rest after
+/// `<folder>/` or `<folder>\` (D-4828), and whether the separator was `\`.
+/// `None` for an entry anywhere else, the folder entry itself included.
+/// O(the folder name's length).
+#[must_use]
+pub fn in_folder<'a>(entry: &'a str, folder: &str) -> Option<(&'a str, bool)> {
+    let rest = entry.strip_prefix(folder)?;
+    rest.strip_prefix('/')
+        .map(|file| (file, false))
+        .or_else(|| rest.strip_prefix('\\').map(|file| (file, true)))
+}
+
+/// What a day's listing was, kept with its close for ever (DB-A49): how many
+/// entries it had and the BLAKE3 of every entry's name, a zero byte, its
+/// stated length and its stated CRC-32 (each eight and four bytes,
+/// little-endian), in the source's order. Two listings that agree on this
+/// digest named the same files with the same sizes and checksums, so a file
+/// a day skipped is counted and identified after the event log has rotated.
+/// O(entries), the same pass the listing itself already is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListingSum {
+    /// How many entries the listing held.
+    pub entries: usize,
+    /// The digest.
+    pub digest: [u8; 32],
+}
+
+impl ListingSum {
+    /// The sum of `entries`, in their order.
+    #[must_use]
+    pub fn of<L>(entries: &[ListedFile<L>]) -> Self {
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        for file in entries {
+            hasher.update(file.entry.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&file.len.to_le_bytes());
+            hasher.update(&file.crc32.to_le_bytes());
+        }
+        Self {
+            entries: entries.len(),
+            digest: hasher.finalize(),
+        }
+    }
+
+    /// The digest as 64 lower-case hex digits.
+    #[must_use]
+    pub fn hex(&self) -> String {
+        self.digest
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _infallible = core::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+                hex
+            })
     }
 }
 
@@ -1454,6 +1612,8 @@ pub struct DayListing<L> {
     /// The day zip's own size, where the source read one (D-3335's
     /// `member_bytes`); `None` for a source that holds no zip.
     member_bytes: Option<u64>,
+    /// Files of the day folder named with `\` rather than `/` (D-4828).
+    backslash: usize,
 }
 
 /// Where a day's closing-auction eligibility comes from (D-3320).
@@ -1557,7 +1717,22 @@ impl<L> DayListing<L> {
             cas: Cas::of(kind, day, &scope),
             scope,
             member_bytes: None,
+            backslash: 0,
         }
+    }
+
+    /// How many files of the day folder were named with `\` rather than
+    /// `/` (D-4828): the count D-4841's `separator_backslash` records.
+    #[must_use]
+    pub const fn backslash(&self) -> usize {
+        self.backslash
+    }
+
+    /// The file `file` names directly inside this day's folder, after `/` or
+    /// `\` (D-4828), or `None` for an entry anywhere else.
+    #[must_use]
+    pub fn file_name<'a>(&self, file: &'a ListedFile<L>) -> Option<&'a str> {
+        in_folder(&file.entry, &self.folder).map(|(name, _)| name)
     }
 
     /// This listing, read from a day zip of `bytes` bytes as its archive's
@@ -1586,11 +1761,13 @@ impl<L> DayListing<L> {
     /// UNVERIFIED as a measured time (`docs/06-limits.md`).
     pub fn push(&mut self, entry: &str, len: u64, crc32: u32, locator: L) {
         let at = self.entries.len();
-        match entry
-            .strip_prefix(self.folder.as_str())
-            .and_then(|rest| rest.strip_prefix('/'))
-        {
-            Some(file) => self.table.file(file, at),
+        // `\` is a separator as `/` is (D-4828): the options reader already
+        // took both, and a CM day zip written by another tool reads the same.
+        match in_folder(entry, &self.folder) {
+            Some((file, backslash)) => {
+                self.backslash += usize::from(backslash);
+                self.table.file(file, at);
+            }
             None => self.table.skip(),
         }
         self.entries.push(ListedFile {
@@ -1666,6 +1843,21 @@ impl<L> DayListing<L> {
     #[must_use]
     pub fn member(&self, stem: &str) -> Option<String> {
         self.scope.member_of(self.kind(), stem)
+    }
+
+    /// The stem `file` is filed under, when it is a file of this day's
+    /// folder (`/` or `\`, D-4828): its name less a `csv` or `CSV`
+    /// extension, with `false`; or, for a name that is a stem of the
+    /// listing's scope whole with no extension at all (D-4835), that name,
+    /// with `true`, which [`CmRefusal::ExtensionMissing`] refuses. `None` for
+    /// every other entry. O(1) beyond the name's own length.
+    #[must_use]
+    pub fn entry_stem<'a>(&self, file: &'a ListedFile<L>) -> Option<(&'a str, bool)> {
+        let name = self.file_name(file)?;
+        match split_name(name) {
+            Ok((stem, _)) => Some((stem, false)),
+            Err(_) => self.table.slot_of(name).map(|_| (name, true)),
+        }
     }
 
     /// The file holding `stem`, if the day has one: one slot index.
@@ -2859,6 +3051,11 @@ pub struct DayFile {
     pub ext: ExtVariant,
     /// What it held.
     pub file: CmFile,
+    /// The verified member: the bytes the rows were decoded from, after
+    /// their length and CRC-32 were checked against the listing (design
+    /// §5.1 seam 4, VERIFY-04), so a second reader of the same file (the
+    /// inline oracle, IA-16's loss probes) reads these with no second fetch.
+    pub bytes: Arc<[u8]>,
 }
 
 /// Reads `key`'s file for `day` from `source`: the calendar gate, the day's
@@ -2959,6 +3156,7 @@ pub fn read_listed<S: CmSource>(
         name: file.name().to_owned(),
         ext,
         file: decoded,
+        bytes: Arc::from(bytes),
     }))
 }
 

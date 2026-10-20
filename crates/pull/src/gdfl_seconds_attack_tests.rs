@@ -1209,9 +1209,11 @@ fn nifty_file() -> Vec<u8> {
     ])
 }
 
-/// Names that climb out of the day folder, start at the root, use a
-/// backslash or sit in a subfolder are listed and counted, never filed, so
-/// no such member is ever read as the ticker's file; the exact name is. A
+/// Names that climb out of the day folder, start at the root or sit in a
+/// subfolder, with `/` or `\` (a separator since D-4828, so `<folder>\<file>`
+/// is the file itself: `a_cm_day_zip_with_backslash_paths_reads_like_forward_slashes`),
+/// are listed and counted, never filed, so no such member is ever read as
+/// the ticker's file; the exact name is. A
 /// NUL after the extension is a third spelling of it and refuses the ticker
 /// `ExtensionUnknown`, loudly, never read either.
 #[test]
@@ -1221,7 +1223,8 @@ fn member_names_that_climb_or_hide_are_never_the_tickers_file() {
     let names = [
         format!("{folder}/../NIFTY 50.NSE_IDX.csv"),
         format!("/{folder}/NIFTY 50.NSE_IDX.csv"),
-        format!("{folder}\\NIFTY 50.NSE_IDX.csv"),
+        format!("{folder}\\..\\NIFTY 50.NSE_IDX.csv"),
+        format!("{folder}\\sub\\NIFTY 50.NSE_IDX.csv"),
         format!("{folder}/sub/NIFTY 50.NSE_IDX.csv"),
         format!("{folder}/./NIFTY 50.NSE_IDX.csv"),
         "../NIFTY 50.NSE_IDX.csv".to_owned(),
@@ -1265,14 +1268,22 @@ fn member_names_that_climb_or_hide_are_never_the_tickers_file() {
         .unwrap()
         .unwrap();
     assert_eq!(got.file.rows.len(), 3);
-    // An outer name that reaches the day zip's name through `..` is no day zip.
+    // An outer name that reaches the day zip's name through `..` is never
+    // read as the day zip: it is a copy under another path, refused by name
+    // for its day (D-4818, `day_zip_misfiled`), never read as absent.
     let day_zip = zip(&with);
     let sneaky = "INDICES/2024/APR_2024/../APR_2024/GFDLCM_INDICES_TICK_01042024.zip";
     let bytes = zip(&[(sneaky, day_zip.as_slice(), Method::Stored)]);
     let len = u64::try_from(bytes.len()).unwrap();
     let archive = Archive::from_source(bytes, len).unwrap();
     assert_eq!(archive.ignored(), 1);
-    assert!(archive.day(CmKind::Indices, d1()).unwrap().is_none());
+    assert_eq!(
+        archive.day(CmKind::Indices, d1()).err(),
+        Some(CmRefusal::DayZipMisfiled {
+            found: sneaky.to_owned(),
+            expected: crate::gdfl_archive::day_zip_name(CmKind::Indices, d1()),
+        })
+    );
 }
 
 /// A deflated member that inflates to 16 MiB under a stated 100 bytes is

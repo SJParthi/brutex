@@ -149,6 +149,10 @@ impl BarFile {
             bars_path: at,
             layout,
             header,
+            // NO SLOTS TO AUDIT (D-6243): the sealed form has one head under its
+            // own checksum, refused by name when damaged, and no older slot a
+            // read could fall back to.
+            slot_audit: None,
             checksums: None,
             crc_path: None,
             verified: Mutex::new(VerifiedBlock::EMPTY),
