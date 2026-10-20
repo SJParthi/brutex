@@ -29,7 +29,7 @@ use std::time::Instant;
 use brutex_core::instrument::Contract;
 
 use super::sealed_door_tests::{Root, month_path, path_at, seal, sealed_bytes, seconds, write_raw};
-use super::{Appended, BarFile, Conflict, Form, SealedOffer, StoreError};
+use super::{Appended, BarFile, Conflict, Form, Offered, SealedOffer, StoreError};
 use crate::format::{Bar, OI_NULL};
 use crate::path::{FileKind, StorePath, Timeframe, YearMonth};
 use crate::repair::{MonthRepair, Policy, repair_month, revision_root};
@@ -225,13 +225,9 @@ fn a_reoffer_to_a_sealed_month_is_already_present() {
     assert_eq!(snapshot(&root.0), before);
 }
 
-#[test]
-fn every_offer_is_answered_as_the_raw_month_answers_it() {
-    let _sink_is_mine = crate::emits::hold_the_sink();
-    // THE FORM IS NEVER THE CONTENT: a batch is `AlreadyPresent` at the
-    // sealed month exactly when it is at the raw one, `Follows` exactly when
-    // the raw one commits it, and `Disagrees(c)` at the index and stamp of
-    // the raw one's `OverlapDisagrees` with conflict `c`.
+/// A 700-second month with a ten-second hole, and one batch of every shape
+/// the raw door answers differently (SC-4, D-5904, D-6247).
+fn blind_cases() -> (Vec<Bar>, Vec<(&'static str, Vec<Bar>)>) {
     let full = seconds(700);
     // A hole of ten seconds at rows 350..360, so a stamp inside the held
     // range that the month never held exists.
@@ -249,7 +245,7 @@ fn every_offer_is_answered_as_the_raw_month_answers_it() {
     let mut overlap_differs_then_new = overlap_then_new.clone();
     overlap_differs_then_new[2].volume += 1;
     let earlier_day = shift(&seconds(3), -3);
-    let cases: Vec<(&str, Vec<Bar>)> = vec![
+    let cases: Vec<(&'static str, Vec<Bar>)> = vec![
         ("the whole month again", held.clone()),
         ("a tail after the last bar", late.clone()),
         ("held bars then new ones", overlap_then_new),
@@ -263,6 +259,17 @@ fn every_offer_is_answered_as_the_raw_month_answers_it() {
         ("skipping a held bar", vec![held[10], held[12]]),
         ("a day before the first held", earlier_day),
     ];
+    (held, cases)
+}
+
+#[test]
+fn every_offer_is_answered_as_the_raw_month_answers_it() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    // THE FORM IS NEVER THE CONTENT: a batch is `AlreadyPresent` at the
+    // sealed month exactly when it is at the raw one, `Follows` exactly when
+    // the raw one commits it, and `Disagrees(c)` at the index and stamp of
+    // the raw one's `OverlapDisagrees` with conflict `c`.
+    let (held, cases) = blind_cases();
     for path in [month_path(None), option_path()] {
         for (case, offer) in &cases {
             let raw = answer(path, &held, offer, false);
@@ -334,6 +341,132 @@ fn every_offer_is_answered_as_the_raw_month_answers_it() {
     ] {
         assert!(named.contains(&want), "{want:?} among {named:?}");
     }
+}
+
+/// What [`BarFile::offer`] answers `offer` with through a READ-ONLY handle
+/// at a fresh copy of `held`, raw or sealed; every file of the month is
+/// asserted byte-identical after it.
+fn offered(
+    path: StorePath<'_>,
+    held: &[Bar],
+    offer: &[Bar],
+    sealed: bool,
+) -> Result<Offered, StoreError> {
+    let root = Root::new(if sealed {
+        "w-offer-sealed"
+    } else {
+        "w-offer-raw"
+    });
+    write_raw(&root.0, path, held);
+    if sealed {
+        seal(&root.0, path);
+    }
+    let before = snapshot(&root.0);
+    let reader = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(reader.form() == Form::Sealed, sealed);
+    let answered = reader.offer(offer);
+    drop(reader);
+    assert_eq!(snapshot(&root.0), before, "an offer never writes");
+    answered
+}
+
+/// THE RAW DOOR'S ANSWER, ASKED WITHOUT WRITING (SC-4 repair round 1,
+/// D-6247): through a read-only handle, raw or sealed, spot or option, every
+/// batch is `Held` exactly when the raw writer answers `AlreadyPresent` (at
+/// the same index and count), `Unheld`/`Follows` exactly when it commits
+/// (from the tail, `at` the first offered bar not held, every bar before it
+/// held), and `Unheld`/`Disagrees(c)` at the index and stamp of its
+/// `OverlapDisagrees` with `c`. A garbage batch is the raw door's own
+/// refusal. Nothing is written in any case.
+#[test]
+fn an_offer_through_a_read_only_handle_is_the_raw_doors_answer() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let (held, cases) = blind_cases();
+    for path in [month_path(None), option_path()] {
+        for (case, offer) in &cases {
+            let raw = answer(path, &held, offer, false);
+            for sealed in [false, true] {
+                let got = offered(path, &held, offer, sealed);
+                match (&raw, &got) {
+                    (
+                        Ok(Appended::AlreadyPresent {
+                            first_index,
+                            n_valid,
+                        }),
+                        Ok(Offered::Held {
+                            first_index: at,
+                            n_valid: count,
+                        }),
+                    ) => assert_eq!((first_index, n_valid), (at, count), "{case}"),
+                    (
+                        Ok(Appended::Committed { first_index, .. }),
+                        Ok(Offered::Unheld {
+                            at,
+                            ts_micros,
+                            offer: SealedOffer::Follows,
+                        }),
+                    ) => {
+                        assert_eq!(*first_index, held.len() as u64, "{case}");
+                        assert_eq!(*ts_micros, offer[*at as usize].ts_micros, "{case}");
+                        assert!(
+                            offer[..*at as usize].iter().all(|bar| held.contains(bar)),
+                            "{case}: every bar before `at` is held"
+                        );
+                        assert!(
+                            offer[*at as usize..]
+                                .iter()
+                                .all(|bar| bar.ts_micros > held[held.len() - 1].ts_micros),
+                            "{case}: every bar from `at` follows the last held"
+                        );
+                    }
+                    (
+                        Err(StoreError::OverlapDisagrees {
+                            at,
+                            ts_micros,
+                            conflict,
+                            ..
+                        }),
+                        Ok(Offered::Unheld {
+                            at: offered_at,
+                            ts_micros: offered_ts,
+                            offer: SealedOffer::Disagrees(offered_conflict),
+                        }),
+                    ) => assert_eq!(
+                        (at, ts_micros, conflict),
+                        (offered_at, offered_ts, offered_conflict),
+                        "{case}"
+                    ),
+                    _ => panic!("{case} sealed={sealed}: raw {raw:?}, offered {got:?}"),
+                }
+            }
+        }
+    }
+    // A GARBAGE BATCH is the raw door's refusal, in either form.
+    let mut unordered = held[..4].to_vec();
+    unordered.swap(1, 2);
+    for sealed in [false, true] {
+        assert!(matches!(
+            offered(month_path(None), &held, &[], sealed),
+            Err(StoreError::EmptyBatch)
+        ));
+        let raw = answer(month_path(None), &held, &unordered, false);
+        let got = offered(month_path(None), &held, &unordered, sealed);
+        assert_eq!(
+            format!("{:?}", got.unwrap_err()),
+            format!("{:?}", raw.unwrap_err()),
+            "sealed={sealed}"
+        );
+    }
+    // AN EMPTY MONTH: every batch follows it.
+    let tail = shift(&seconds(3), 1);
+    assert_eq!(
+        offered(month_path(None), &[], &tail, false).unwrap(),
+        Offered::Unheld {
+            at: 0,
+            ts_micros: tail[0].ts_micros,
+            offer: SealedOffer::Follows
+        }
+    );
 }
 
 /// A garbage batch, and how its refusal is recognised.

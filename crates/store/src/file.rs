@@ -950,6 +950,32 @@ impl SealedOffer {
     }
 }
 
+/// What [`BarFile::offer`] finds: what the month IN ITS RAW FORM would do
+/// with a batch, asked without writing (SC-4 repair round 1, D-6247).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offered {
+    /// Every offered bar is held byte for byte from `first_index`: the raw
+    /// door's [`Appended::AlreadyPresent`].
+    Held {
+        /// Where the batch's first bar is held.
+        first_index: u64,
+        /// How many bars the month holds.
+        n_valid: u64,
+    },
+    /// The month does not hold the batch as offered.
+    Unheld {
+        /// Index within the batch of the first record the month does not
+        /// hold as offered.
+        at: u64,
+        /// That record's stamp, or for [`Conflict::Skipped`] the HELD stamp
+        /// the batch omits, as [`StoreError::OverlapDisagrees`] says.
+        ts_micros: i64,
+        /// [`SealedOffer::Follows`]: the raw door would commit the batch
+        /// from `at` on; [`SealedOffer::Disagrees`]: it would refuse it.
+        offer: SealedOffer,
+    },
+}
+
 /// How an offered overlap disagrees with the records a month holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conflict {
@@ -3022,6 +3048,82 @@ impl BarFile {
         (first_ts, last_ts): (i64, i64),
         count: u64,
     ) -> Result<Appended, StoreError> {
+        match self.raw_answer(batch, (first_ts, last_ts), count)? {
+            Offered::Held {
+                first_index,
+                n_valid,
+            } => Ok(Appended::AlreadyPresent {
+                first_index,
+                n_valid,
+            }),
+            // A REFUSAL HANDED BACK, NOT A LINE WRITTEN HERE: like every other
+            // refusal of this door (`OverlapDisagrees`, `Superseded`) it is the
+            // caller's to log and route, and the pull's ingest journals the
+            // successor generation the repair door publishes for it.
+            Offered::Unheld {
+                at,
+                ts_micros,
+                offer,
+            } => Err(StoreError::Sealed {
+                path: self.bars_path.clone(),
+                n_valid: self.header.n_valid,
+                last_ts_micros: self.header.last_ts_micros,
+                at,
+                ts_micros,
+                offer,
+            }),
+        }
+    }
+
+    /// What [`Self::append`] at this month IN ITS RAW FORM would do with
+    /// `batch`, asked through any handle, a read-only one included, and
+    /// writing nothing (SC-4 repair round 1, D-6247).
+    ///
+    /// The batch's own refusals first, exactly as `append` asks them
+    /// (`may_append`, `survey`, the month's admission): a garbage batch is
+    /// named for what it is. Then the one set of questions the sealed writer
+    /// door asks ([`Self::sealed_offer`]), in the raw door's order: a batch
+    /// is [`Offered::Held`] exactly when the raw door answers
+    /// [`Appended::AlreadyPresent`], [`Offered::Unheld`] with
+    /// [`SealedOffer::Follows`] exactly when the raw door would commit it
+    /// (from `at` on), and [`SealedOffer::Disagrees`] exactly when it would
+    /// refuse it as [`StoreError::OverlapDisagrees`]. A counter at its end is
+    /// the raw door's `Format` refusal.
+    ///
+    /// The caller is the pull's append door at a month served from a repair
+    /// revision (D-3350), which the writer door never appends to: it asks the
+    /// SERVED generation this question and files a `Follows` batch as the
+    /// month's next successor, so a revision-served month answers every batch
+    /// as its raw form would (D-6247).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::EmptyBatch`], [`StoreError::BatchNotOrdered`],
+    /// [`StoreError::ImpossibleBar`] and the admission's refusals for the
+    /// batch; [`StoreError::Format`] at a counter's end; a record the walk
+    /// cannot read, named.
+    ///
+    /// # Cost
+    ///
+    /// [`Self::sealed_offer`]'s: the header alone for a batch that follows
+    /// the last held bar; otherwise one time lookup and one record read per
+    /// offered bar the month holds, bounded by the batch, never by the month.
+    /// Nothing is written.
+    pub fn offer<R: Row>(&self, batch: &[R]) -> Result<Offered, StoreError> {
+        self.may_append::<R>()?;
+        let (first_ts, last_ts) = survey(batch)?;
+        self.admission.admit(batch)?;
+        self.raw_answer(batch, (first_ts, last_ts), len_u64(batch.len()))
+    }
+
+    /// The questions [`Self::sealed_offer`] and [`Self::offer`] share: the raw
+    /// door's, in its order, over the records as the read funnel serves them.
+    fn raw_answer<R: Row>(
+        &self,
+        batch: &[R],
+        (first_ts, last_ts): (i64, i64),
+        count: u64,
+    ) -> Result<Offered, StoreError> {
         let n_valid = self.header.n_valid;
         let (at, ts_micros, offer) = match self.header.advance(count, first_ts, last_ts) {
             Ok(_) => (0, first_ts, SealedOffer::Follows),
@@ -3030,7 +3132,7 @@ impl BarFile {
                 if let Some(first_index) =
                     already_stored(batch, at, n_valid, |index| self.read_row::<R>(index))?
                 {
-                    return Ok(Appended::AlreadyPresent {
+                    return Ok(Offered::Held {
                         first_index,
                         n_valid,
                     });
@@ -3071,14 +3173,7 @@ impl BarFile {
                 });
             }
         };
-        // A REFUSAL HANDED BACK, NOT A LINE WRITTEN HERE: like every other
-        // refusal of this door (`OverlapDisagrees`, `Superseded`) it is the
-        // caller's to log and route, and the pull's ingest journals the
-        // successor generation the repair door publishes for it.
-        Err(StoreError::Sealed {
-            path: self.bars_path.clone(),
-            n_valid,
-            last_ts_micros: self.header.last_ts_micros,
+        Ok(Offered::Unheld {
             at,
             ts_micros,
             offer,

@@ -283,6 +283,175 @@ fn a_late_day_for_a_sealed_month_lands_as_its_successor_and_every_rung_follows()
     );
 }
 
+/// TWO LATE DAYS IN TWO PULLS (SC-4 repair round 1, D-6247): after the first
+/// late day every sealed month is served from its successor generation, a
+/// repair revision, which the writer door never appends to (D-3350). The
+/// second late day, in its own pull, follows that revision's last bar, so
+/// the raw month would append it: it is filed as the NEXT successor through
+/// the same repair door, with no human step. A re-pull window that re-reads
+/// the second day and adds a third (held part byte-equal, new bars after
+/// its last) is filed the same way. Every month then serves exactly what a
+/// never-sealed store serves; the originals and every earlier revision are
+/// byte-identical; each successor is journaled before and after, naming the
+/// revision it follows; the same window again writes nothing and spends no
+/// generation; and a restated minute of a held late day is refused as the
+/// raw month refuses it, nothing written.
+#[test]
+fn two_late_days_in_two_pulls_after_sealing_serve_what_a_never_sealed_store_serves() {
+    let (sealed, whole) = (Scratch::new("late2-sealed"), Scratch::new("late2-whole"));
+    let (first, last) = (day(2024, 4, 1), day(2024, 4, 3));
+    for root in [&sealed.0, &whole.0] {
+        let got = land(root, first, last, answer(first, last));
+        assert!(got.failures.is_empty(), "{:?}", got.failures);
+    }
+    let sealed_months = seal_every_month(&sealed.0);
+    let originals = tree(&sealed.0.join("bars"));
+    let pulls = [
+        (day(2024, 4, 4), day(2024, 4, 4), 1_u32),
+        (day(2024, 4, 5), day(2024, 4, 5), 2),
+        // A window re-reading the held 04-05 and adding 04-08: the held part
+        // byte-equal, the new bars after the last held one.
+        (day(2024, 4, 5), day(2024, 4, 8), 3),
+    ];
+    let mut revisions = BTreeMap::new();
+    for (from, to, generation) in pulls {
+        let got = land(&sealed.0, from, to, answer(from, to));
+        let raw = land(&whole.0, from, to, answer(from, to));
+        assert!(got.failures.is_empty(), "{from}..{to}: {:?}", got.failures);
+        assert!(raw.failures.is_empty(), "{from}..{to}: {:?}", raw.failures);
+        assert!(raw.bars_committed > 0, "{from}..{to}");
+        assert_eq!(got.bars_committed, raw.bars_committed, "{from}..{to}");
+        for &path in &sealed_months {
+            assert_eq!(
+                served(&sealed.0, path),
+                served(&whole.0, path),
+                "{from}..{to} {path:?}"
+            );
+            assert_eq!(
+                store::generation::served(&sealed.0, path)
+                    .unwrap()
+                    .ordinal(),
+                generation,
+                "{from}..{to} {path:?}"
+            );
+        }
+        // NEVER IN PLACE: the sealed originals and every revision published
+        // by an earlier pull are byte for byte what they were.
+        let now = tree(&sealed.0.join("bar-revisions-v1"));
+        for (path, bytes) in &revisions {
+            assert_eq!(now.get(path), Some(bytes), "{from}..{to} {path:?}");
+        }
+        revisions = now;
+        assert_eq!(tree(&sealed.0.join("bars")), originals, "{from}..{to}");
+    }
+    assert_eq!(months(&whole.0), sealed_months, "no month made beside one");
+
+    assert_two_successors_after_the_sealed_one(&sealed.0, sealed_months.len());
+    assert_held_again_and_restated_refused(&sealed.0, &whole.0, &sealed_months);
+}
+
+/// The journal after three late-day pulls over sealed months (D-6247): per
+/// month one `repairing`/`repair` pair naming the sealed successor, then two
+/// naming the revision successor, generation 1 to 2 and 2 to 3.
+fn assert_two_successors_after_the_sealed_one(sealed: &Path, months: usize) {
+    let journal = repairs(sealed);
+    let lines = |verb: &str| -> Vec<&str> {
+        journal
+            .lines()
+            .filter(|line| line.split(' ').next() == Some(verb))
+            .collect()
+    };
+    let (intents, repairs_done) = (lines("repairing"), lines("repair"));
+    assert_eq!(intents.len(), 3 * months, "{journal}");
+    assert_eq!(repairs_done.len(), 3 * months, "{journal}");
+    let (sealed_lines, revision_lines): (Vec<&str>, Vec<&str>) = intents
+        .iter()
+        .partition(|line| line.contains("reason=sealed-month_successor_"));
+    assert_eq!(sealed_lines.len(), months, "{journal}");
+    assert_eq!(revision_lines.len(), 2 * months, "{journal}");
+    assert!(
+        revision_lines
+            .iter()
+            .all(|line| line.contains("reason=revision_successor_")),
+        "{journal}"
+    );
+    for link in 1..=2_u32 {
+        assert_eq!(
+            repairs_done
+                .iter()
+                .filter(|line| line.contains(&format!(
+                    " from_generation={link} to_generation={} ",
+                    link + 1
+                )))
+                .count(),
+            months,
+            "{journal}"
+        );
+    }
+}
+
+/// After the three pulls (D-6247): the same window again writes nothing,
+/// journals nothing and spends no generation, and a restated minute of a held
+/// late day is refused as the raw month refuses it, nothing written.
+fn assert_held_again_and_restated_refused(
+    sealed: &Path,
+    whole: &Path,
+    sealed_months: &[StorePath<'static>],
+) {
+    // THE SAME WINDOW AGAIN: held by every successor, nothing written, no
+    // generation spent, nothing journaled.
+    let (from, to) = (day(2024, 4, 5), day(2024, 4, 8));
+    let before = (
+        tree(&sealed.join("bars")),
+        tree(&sealed.join("bar-revisions-v1")),
+        repairs(sealed),
+    );
+    let again = land(sealed, from, to, answer(from, to));
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(again.bars_committed, 0);
+    assert_eq!(
+        (
+            tree(&sealed.join("bars")),
+            tree(&sealed.join("bar-revisions-v1")),
+            repairs(sealed),
+        ),
+        before
+    );
+
+    // A RESTATED MINUTE OF A HELD LATE DAY is refused as the raw month
+    // refuses it: by name, nothing written, no generation spent.
+    let held = day(2024, 4, 5);
+    let mut restated = answer(held, held);
+    restated[10].close += 5;
+    let at_revision = land(sealed, held, held, restated.clone());
+    let at_raw = land(whole, held, held, restated);
+    assert!(!at_raw.failures.is_empty(), "the raw month refuses it");
+    assert_eq!(
+        at_revision.failures.len(),
+        at_raw.failures.len(),
+        "{:?} against {:?}",
+        at_revision.failures,
+        at_raw.failures
+    );
+    assert_eq!(at_revision.bars_committed, at_raw.bars_committed);
+    let words = format!("{:?}", at_revision.failures);
+    assert!(
+        words.contains("repair revision 3") && words.contains("restates"),
+        "{words}"
+    );
+    assert_eq!(
+        (
+            tree(&sealed.join("bars")),
+            tree(&sealed.join("bar-revisions-v1")),
+            repairs(sealed),
+        ),
+        before
+    );
+    for &path in sealed_months {
+        assert_eq!(served(sealed, path), served(whole, path), "{path:?}");
+    }
+}
+
 /// A DAY A SEALED MONTH HOLDS writes nothing and spends no generation, and A
 /// RESTATED MINUTE is refused exactly as the raw month refuses it: by name,
 /// nothing written, nothing repaired.
