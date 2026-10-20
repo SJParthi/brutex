@@ -19,6 +19,10 @@
  * functions only, so `node --test` can import it with no compiler. Imports
  * are relative for the same reason — `$lib` is a Vite alias node cannot see.
  */
+import { contractOf, strikeText } from './decoration.js';
+import { dayLabel, monthLabel } from '../dates.js';
+import { coverPct } from '../completeness.js';
+import { fmt } from './notes-labels.js';
 
 /* ---- THE PERCENTAGE COLUMNS ----------------------------------------
    `/store.json` sends INTEGER BASIS POINTS. 125 is +1.25%. It is never a
@@ -106,8 +110,10 @@ export const WHY = {
  * @param {string | null} code
  */
 export const whyText = (code) =>
-  (code === null ? null : /** @type {Record<string, string | undefined>} */ (WHY)[code]) ??
-  `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
+  // AN OWN KEY ONLY: `WHY.constructor` is Object's, never a reason (R3-04).
+  Object.hasOwn(WHY, String(code))
+    ? /** @type {Record<string, string>} */ (WHY)[String(code)]
+    : `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
 
 /* ======================================================================
    THE COVERAGE VERDICT'S WORDS (D-3336, WP-54)
@@ -141,8 +147,14 @@ export const NOTE_TEXT = {
     'Holds a session whose length is not recorded (or, for an index, an outage day with no common index computation, D-0420). Those days are owed nothing here and are named rather than given a guessed length.',
   cas: "From 2026-08-03 a closing-auction-eligible share trades continuously only until 15:15 (charter §9, D-3320): 360 one-minute bars a session, and Zerodha's landing ends at 15:14. Eligibility is per share, from the dated NSE master, and is not on the census wire, so this month is judged against the eligible count and the other count is named.",
   cas_unresolved:
-    'Holds more bars than an auction-eligible share owes and fewer than an ineligible one: which this share was on each day cannot be told from the count, so neither verdict is claimed.',
+    "Holds auction days, and this share's dated closing-auction flag is not on the census wire: a flag-0 share owes 375 one-minute bars a session and an eligible one 360, so a count between the two is neither full nor short, and a count under both is short by at least the eligible count's shortfall (SC-CLOSE-17).",
   extra: 'Holds bars beyond what the calendar owes: bars on days the calendar of record says were closed, or more than a session holds.',
+  surplus_unplaced:
+    'A surplus no month total can place: the bars beyond what is owed may stand on one day while another lacks as many, so the count proves no day whole. It is never called full or 100.00% on its count; only a per-day count can clear it (R3-04).',
+  halt_unplaced:
+    "Holds a halt day, and a bar in a halted minute is owed nothing and is not missing (D-3336 §1): a month total that meets what is owed may count a halted minute's bar in place of a regular minute another day lacks, so the count proves no day whole. Neither full nor short is claimed; only a per-day count can clear it (R3-04).",
+  unheld_sessions:
+    "Short by at least what the sessions it holds no bar on owe, counted day by day from the series' own held days: a surplus on another day never pays for them (R3-04, DB-014).",
   store_wide:
     "A store-wide hole: at least nine in ten series stored at this month and rung hold no more bars than this one (or even the fullest is short by as much), so the pull or import did not land those days for nearly anything. It is a hole, never 'full'. Nine in ten is chosen, not sourced.",
   store_wide_part:
@@ -161,8 +173,9 @@ export const NOTE_TEXT = {
  * @param {string} code
  */
 export const noteText = (code) =>
-  /** @type {Record<string, string | undefined>} */ (NOTE_TEXT)[code] ??
-  `A coverage note this page has no sentence for: ${code}.`;
+  Object.hasOwn(NOTE_TEXT, code)
+    ? /** @type {Record<string, string>} */ (NOTE_TEXT)[code]
+    : `A coverage note this page has no sentence for: ${code}.`;
 
 /** The state words, as the grid prints them. */
 export const STATE_WORD = {
@@ -174,6 +187,428 @@ export const STATE_WORD = {
   unmeasured: 'unmeasured',
   over: 'over'
 };
+
+/* ======================================================================
+   THE COUNTS THE PAGE SHOWS, ONE RULE EACH (R3-04; DB-048, DB-014, DB-046)
+   ----------------------------------------------------------------------
+   The Bars badge, the Coverage badge, the pager, the Coverage grid and the
+   header line beside the tabs each counted their own thing: 434 against
+   443 for one selection, 4 against 7 for one tab read twice, a strike
+   printed in paisa. Every rule below is a pure function the components
+   call and `web/tests/db-counts.test.js` drives.
+   ====================================================================== */
+
+/**
+ * THE FROM AND TO DAYS AS ONE ORDERED WINDOW, or `null` when they narrow
+ * nothing. Coverage follows the same window the Bars grid does (DB-046):
+ * the fields narrow only once they differ from the span they were seeded
+ * with (`dayNarrowing`). A window typed backwards is put in order, so its
+ * range is never printed To before From.
+ *
+ * @param {string} fromDay `YYYY-MM-DD` or `''`
+ * @param {string} toDay `YYYY-MM-DD` or `''`
+ * @param {boolean} narrowing
+ * @returns {{ from: string, to: string } | null}
+ */
+export function coverWindow(fromDay, toDay, narrowing) {
+  if (!narrowing) return null;
+  let from = fromDay || '';
+  let to = toDay || '';
+  if (from === '' && to === '') return null;
+  // An empty From sorts first already; an empty To must not.
+  if (to !== '') [from, to] = [from, to].sort();
+  return { from, to };
+}
+
+/**
+ * Whether a `YYYY-MM` month holds a day of the window. The month is the
+ * Coverage grid's row, so a month the window touches on one day is listed,
+ * and judged whole (the note under the grid says so).
+ *
+ * @param {string} month
+ * @param {{ from: string, to: string } | null} window
+ */
+export function monthInWindow(month, window) {
+  if (window === null) return true;
+  // Its first day is not after To, and its last is not before From: `-31`
+  // bounds every day of a month as text, and an empty From bounds nothing.
+  return (window.to === '' || `${month}-01` <= window.to) && `${month}-31` >= window.from;
+}
+
+/**
+ * The window as words, in order: `01 Oct 2024 → 31 Oct 2024`, an open end
+ * named as one.
+ *
+ * @param {{ from: string, to: string }} window
+ */
+export function windowText(window) {
+  return `${window.from ? dayLabel(window.from) : 'the first day held'} → ${window.to ? dayLabel(window.to) : 'the last day held'}`;
+}
+
+/**
+ * WHY THE COVERAGE GRID IS EMPTY WHEN THE WINDOW EMPTIED IT, said once: the
+ * window in order and the days the selection does hold, in order. `''`
+ * when the window is not what emptied it (nothing matched before it, or
+ * something is left), and the grid's own narrowing sentence stands.
+ *
+ * @param {{ matched: number, listed: number, window: { from: string, to: string } | null, held: { lo: string, hi: string } | null }} o
+ */
+export function windowEmptyWhy(o) {
+  if (o.window === null || o.matched === 0 || o.listed > 0) return '';
+  const [lo, hi] = [o.held?.lo, o.held?.hi].sort();
+  const held = lo && hi ? `; this selection holds ${dayLabel(lo)} → ${dayLabel(hi)}` : '';
+  return `The From and To window, ${windowText(o.window)}, holds no month of the ${fmt(o.matched)} instrument-month(s) this selection matches${held}. Coverage follows the window, as the Bars grid does: widen the dates to see them.`;
+}
+
+/**
+ * THE COUNTED LINE ABOVE THE GRID AND THE DRAWER'S FOUR FIGURES, from ONE
+ * function over the rows each shows, so neither can disagree with the rows
+ * under it (R3-04). Missing counts an absent month's owed bars, which its
+ * row prints beside the word; held is owed less missing, so a per-day floor
+ * lowers the coverage too; a row whose missing count is unknown (an
+ * unplaced surplus, an unread auction flag, a halt or unsized day a month
+ * total cannot place) joins neither sum and is counted on its own:
+ * `uncounted` holds every such calendar row, `over` and `unresolved` the
+ * two kinds the line names apart.
+ *
+ * @param {Array<{ rows: number, absent?: boolean, cover: import('../completeness.js').Cover }>} rows
+ */
+export function coverTotals(rows) {
+  const t = {
+    n: 0, stored: 0, absent: 0, noTrade: 0, full: 0, over: 0, unresolved: 0,
+    unverified: 0, trade: 0, missing: 0, owed: 0, held: 0, bars: 0, uncounted: 0, counted: 0,
+    sessions: 0, heldSessions: 0, heldExact: true, storeWide: 0, derivedLagging: 0,
+    /** @type {number | null} */
+    coverage: null
+  };
+  for (const r of rows ?? []) {
+    const c = r.cover;
+    t.n += 1;
+    // An absent month's row holds 0 bars (`absentRow`), so every row adds its own.
+    t.bars += r.rows;
+    if (r.absent) {
+      if (c.basis === 'trade') t.noTrade += 1;
+      else t.absent += 1;
+    } else t.stored += 1;
+    if (c.basis === 'none') t.unverified += 1;
+    else if (c.basis === 'trade') t.trade += 1;
+    if (c.state === 'full') t.full += 1;
+    if (c.state === 'over') t.over += 1;
+    if (c.notes.includes('cas_unresolved') && c.missing === null) t.unresolved += 1;
+    if (c.notes.includes('store_wide')) t.storeWide += 1;
+    if (c.notes.includes('derived_behind') || c.notes.includes('derived_partial')) t.derivedLagging += 1;
+    t.sessions += c.sessions ?? 0;
+    t.heldSessions += c.heldSessions ?? 0;
+    if (!c.heldExact) t.heldExact = false;
+    if (c.basis === 'calendar' && c.owed !== null && c.missing !== null) {
+      t.missing += c.missing;
+      t.owed += c.owed;
+      t.held += c.owed - c.missing;
+      t.counted += 1;
+    } else if (c.basis === 'calendar') t.uncounted += 1;
+  }
+  t.coverage = t.owed > 0 ? t.held / t.owed : null;
+  return t;
+}
+
+/**
+ * THE COUNTED LINE'S MISSING AND OWED FIGURES, SAID FOR WHAT THEY COUNT
+ * (R3-04 Mac pass). A row whose missing count is unknown joins neither sum,
+ * so a selection holding only such rows summed to "0 bar(s) missing" and
+ * "coverage — of 0 owed": GDFL NIFTY 1s, March 2020, an unplaced surplus
+ * whose 19 regular days lack 558 seconds (`/dayflags.json`), read as
+ * nothing missing; a trade-driven selection (an option, a share at 1s),
+ * which is owed no fixed count, read "0 bar(s) missing" the same way. With
+ * rows and none counted the figures are a dash and the words say why, kind
+ * by kind; with some counted and some a month total cannot judge, the sums
+ * say they cover the counted rows only. No rows at all is nothing owed: 0.
+ *
+ * @param {{ n: number, counted: number, missing: number, owed: number, uncounted: number, trade: number, unverified: number }} t `coverTotals`
+ * @returns {{ missing: string, owed: string, why: string, partial: boolean, none: boolean }} `owed` follows the coverage figure: "of N owed", or why there is none; `why` the kinds no sum counts, `''` when every row is counted
+ */
+export function countedLine(t) {
+  const none = t.n > 0 && t.counted === 0;
+  const partial = t.counted > 0 && t.uncounted > 0;
+  const why = [
+    t.uncounted > 0 ? `${fmt(t.uncounted)} a month total cannot judge` : '',
+    t.trade > 0 ? `${fmt(t.trade)} trade-driven, owed no fixed count` : '',
+    t.unverified > 0 ? `${fmt(t.unverified)} no calendar could judge` : ''
+  ].filter(Boolean);
+  return {
+    missing: none ? '—' : fmt(t.missing),
+    owed: none
+      ? `(no row's missing count is known: ${why.join('; ')})`
+      : `of ${fmt(t.owed)} owed${partial ? `, over the rows whose missing count is known; ${fmt(t.uncounted)} more a month total cannot judge` : ''}`,
+    why: why.join('; '),
+    partial,
+    none
+  };
+}
+
+/**
+ * What one drawer row prints under Missing, the figure the drawer's total
+ * sums: `absent −N` for a month with no file, `full`, `+N` for an unplaced
+ * surplus, `−N` short, and `—` where nothing is owed or measured.
+ *
+ * @param {{ absent?: boolean, cover: import('../completeness.js').Cover }} m
+ */
+export function missingText(m) {
+  const c = m.cover;
+  if (m.absent && c.basis === 'trade') return 'no trade';
+  if (c.basis !== 'calendar' || c.missing === null) return c.state === 'over' ? `+${fmt(c.surplus)}` : '—';
+  if (m.absent) return `absent −${fmt(c.missing)}`;
+  if (c.missing === 0) return 'full';
+  return `−${fmt(c.missing)}`;
+}
+
+/**
+ * THE SET A BAR COUNT BELONGS TO: feed, rung, months, series and bounds —
+ * never the page or the order, so a count read on one page stands for
+ * every page and every order of the same query. Built from the same plan
+ * and bounds the bar read sends.
+ *
+ * @param {string} feed
+ * @param {{ timeframe?: string, from?: string, to?: string, keys?: string[] } | null | undefined} plan
+ * @param {{ fromDay?: string, toDay?: string, fromTime?: string, toTime?: string } | null | undefined} bounds
+ * @param {unknown} nonce the page's re-read stamp
+ */
+export function barsQueryKey(feed, plan, bounds, nonce) {
+  // `join` writes an absent field (`undefined`, `null`) as nothing.
+  return [
+    feed, plan?.timeframe, plan?.from, plan?.to, (plan?.keys ?? []).join(','),
+    bounds?.fromDay, bounds?.toDay, bounds?.fromTime, bounds?.toTime, nonce
+  ].join('|');
+}
+
+/**
+ * THE MOST ROWS `selectionKey` READS: `bars-plan.js`'s `MAX_SERIES` (1,024)
+ * series times its `MAX_WINDOW_MONTHS` (240) months. A selection holding more
+ * rows than that at one rung reaches more series or months than one window
+ * read takes, so the Bars grid never counts it. Not imported, so this module
+ * stays free of the reader's pool; a test pins the product.
+ */
+export const SELECTION_KEY_ROWS_MAX = 1024 * 240;
+
+/**
+ * THE MATCHED ROWS' CONTENT, AS A KEY PART (R3-04 Mac pass). The Bars grid
+ * plans nothing off its own tab — its plan is empty on Coverage — so a count
+ * kept under the plan's keys never matched there, and the Coverage tab read
+ * "—" after Bars had counted (shadow of the real store, 19 Oct 2026: GDFL
+ * NIFTY 1s, March 2020, 4,71,828 on Bars and "—" on Coverage). Keying by the
+ * rows' identity instead failed the same way: opening Coverage reads the
+ * whole census, which rebuilds the matched rows as a new array of the same
+ * rows. The plan is a pure function of the matched rows and the bounds, so
+ * their CONTENT names the set on either tab: the row count, the census bar
+ * count, and two order-free sums of a 32-bit FNV-1a and a djb2 hash of each
+ * row's instrument, month and rung (a collision needs both 32-bit sums, the
+ * count and the bar count to agree for two different selections at one
+ * feed, bound and store generation). Each distinct instrument, month and
+ * rung is hashed once and a row mixes its three parts in order.
+ *
+ * COST: one pass over the matched rows, O(rows x key length), computed once
+ * per change of the matched rows (a `$derived`), never per render and never
+ * per bar; BOUNDED at `SELECTION_KEY_ROWS_MAX` rows, past which it reads
+ * nothing and answers `null`: no count is kept or matched for such a
+ * selection, which the Bars grid refuses to read anyway (more than
+ * `MAX_SERIES` series, or more than `MAX_WINDOW_MONTHS` months, at one rung).
+ * Named in docs/06-limits.md (L-R304-02).
+ *
+ * @param {ArrayLike<{ instrument: string, month: string, timeframe: string, rows?: number }> | null | undefined} rows the page's matched rows (`db.matched`); none yet is `none`
+ * @returns {string | null} `null` past the bound
+ */
+export function selectionKey(rows) {
+  if (rows === null || typeof rows !== 'object' || typeof rows.length !== 'number') return 'none';
+  if (rows.length > SELECTION_KEY_ROWS_MAX) return null;
+  // EACH DISTINCT PART IS HASHED ONCE: an instrument repeats once a month and
+  // a month once an instrument, so a row costs three probes and two mixes.
+  /** @type {Map<string, [number, number]>} */
+  const parts = new Map();
+  const partOf = (/** @type {unknown} */ value) => {
+    const text = String(value);
+    let h = parts.get(text);
+    if (h === undefined) {
+      let h1 = 0x811c9dc5;
+      let h2 = 5381;
+      for (let j = 0; j < text.length; j += 1) {
+        const c = text.charCodeAt(j);
+        h1 = Math.imul(h1 ^ c, 0x01000193);
+        h2 = (Math.imul(h2, 33) + c) | 0;
+      }
+      h = [h1 >>> 0, h2 >>> 0];
+      parts.set(text, h);
+    }
+    return h;
+  };
+  let fnv = 0;
+  let djb = 0;
+  let bars = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const [i1, i2] = partOf(r.instrument);
+    const [m1, m2] = partOf(r.month);
+    const [t1, t2] = partOf(r.timeframe);
+    // A ROW IS ITS THREE PARTS IN ORDER, mixed (murmur3's finaliser), so two
+    // rows never trade parts: (A, March) and (B, April) are not (A, April).
+    const h1 = mix(mix(i1 ^ Math.imul(m1, 0x9e3779b1)) ^ t1);
+    const h2 = mix(mix((i2 + Math.imul(m2, 0x7feb352d)) | 0) ^ Math.imul(t2, 0x846ca68b));
+    // ORDER-FREE: the same rows in another order are the same set.
+    fnv = (fnv + h1) >>> 0;
+    djb = (djb + h2) >>> 0;
+    bars += Number(r.rows) || 0;
+  }
+  return `${rows.length}:${bars}:${fnv.toString(36)}:${djb.toString(36)}`;
+}
+
+/**
+ * murmur3's 32-bit finaliser: every input bit moves every output bit.
+ *
+ * @param {number} value
+ * @returns {number} unsigned 32-bit
+ */
+function mix(value) {
+  let h = value >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+/**
+ * THE BARS TAB'S COUNT, one number for one selection and one window, on
+ * either tab and by link (R3-04, DB-048). It costs no request: it reads the
+ * window answer the Bars grid already fetched.
+ *
+ * - the server's total for this query, live on the Bars tab or remembered
+ *   from it on Coverage (leaving Bars drops the rows, by design, and the
+ *   badge fell back to the census: 443 against the pager's 434);
+ * - else nothing, with the reason and the census's stored count in the
+ *   title only. THE CENSUS'S COUNT IS NEVER THE BADGE'S NUMBER, bound or no
+ *   bound (R3-04 Mac pass, 20 Oct): it counts what the files store, not
+ *   what this query keeps, and the two differ on the real store with no
+ *   bound at all — GDFL NIFTY 1s read 4,41,02,990 on a link straight to
+ *   Coverage and 4,40,32,544 on Bars, Zerodha RELIANCE 1min 8,08,865 and
+ *   7,95,320 (shadow) — so showing it made the badge read two numbers for
+ *   one selection on one tab, the disagreement this removes;
+ * - EXCEPT A SETTLED SELECTION THAT MATCHES NOTHING: no series, no month, so
+ *   the query keeps 0 bars, counted without a read, on either tab. The Bars
+ *   grid reads nothing for it (Expired options with no expiry chosen), so a
+ *   dash there said "open Bars" on the Bars tab itself, forever (shadow, 20
+ *   Oct). Only once the page has settled (`settled`): an empty match while
+ *   the census is still read is not a count.
+ *
+ * @param {{ said: number | null, remembered: { key: string, total: number } | null, key: string | null, census: number, narrows: boolean, empty?: boolean }} o `empty`: the page has settled and nothing matched
+ * @returns {{ n: number | null, from: 'server' | 'empty' | 'none', title: string }}
+ */
+export function barsBadge(o) {
+  const server = o.said ?? (o.remembered !== null && o.remembered.key === o.key ? o.remembered.total : null);
+  if (server !== null) {
+    return {
+      n: server,
+      from: 'server',
+      title: `${fmt(server)} bar(s) this query keeps — the server's count over every matched month and series, after the date and time bounds; the same number the Bars pager counts, on either tab.`
+    };
+  }
+  if (o.empty === true) {
+    return { n: 0, from: 'empty', title: 'Nothing matches this selection, so its query keeps 0 bars: counted without a read, the same on either tab.' };
+  }
+  const why = o.narrows
+    ? 'a date or time bound narrows this query and only the server counts a window'
+    : `only the server counts the bars this query keeps. The census stores ${fmt(o.census)} bar(s) in the matched months; that counts the files, not this query, and is never shown here as its count`;
+  return {
+    n: null,
+    from: 'none',
+    title: `Not counted yet: ${why}. Open Bars and its one read counts it; the number then stays here on either tab.`
+  };
+}
+
+/**
+ * THE HEADER LINE'S RANGE: the From and To window in view when it narrows,
+ * else the matched months on disk — in order either way.
+ *
+ * @param {string[]} months the matched months, any order
+ * @param {{ from: string, to: string } | null} window
+ * @returns {{ from: string, to: string, word: string } | null}
+ */
+export function headerRange(months, window) {
+  const sorted = [...months].sort();
+  const first = sorted.length > 0 ? month(sorted[0]) : '—';
+  const last = sorted.length > 0 ? month(sorted[sorted.length - 1]) : '—';
+  if (window === null) return sorted.length > 0 ? { from: first, to: last, word: 'on disk' } : null;
+  return { from: window.from ? dayLabel(window.from) : first, to: window.to ? dayLabel(window.to) : last, word: 'in view' };
+}
+
+/**
+ * A month key as words. `monthLabel` hands a string back for any string
+ * (verbatim when it does not parse), so the cast states what it returns.
+ *
+ * @param {string} ym
+ */
+function month(ym) {
+  return /** @type {string} */ (monthLabel(ym));
+}
+
+/**
+ * Whether the newest stored bar falls inside the window: `in`, or `after`
+ * / `before` it. The close beside the range describes the window in view,
+ * so one outside it is named as outside, never printed as the window's.
+ *
+ * @param {number} ms the bar's epoch milliseconds
+ * @param {{ from: string, to: string } | null} window
+ * @param {(ms: number) => string} isoDay the bar's IST day, `YYYY-MM-DD`
+ * @returns {'in' | 'after' | 'before'}
+ */
+export function closeInWindow(ms, window, isoDay) {
+  if (window === null) return 'in';
+  const day = isoDay(ms);
+  if (window.to !== '' && day > window.to) return 'after';
+  // An empty From is before every day.
+  return day < window.from ? 'before' : 'in';
+}
+
+/**
+ * A contract's tail as the header prints it: `11,650 CE` (the strike in
+ * rupees, never `1165000 CE` in paisa), `FUT` for a future, `''` for a key
+ * that is no contract.
+ *
+ * @param {string} key a census instrument key
+ */
+export function contractTail(key) {
+  const ct = contractOf(key);
+  if (ct !== null) return `${strikeText(ct.strike)} ${ct.side}`;
+  return /-\d{4}-\d{2}-\d{2}-FUT$/.test(key) ? 'FUT' : '';
+}
+
+/**
+ * REFUSED FRONTS THE DAY BAND READ (D-3315), as one sentence: days before a
+ * series' first `1day` bar that a pull refused before append, so the rung
+ * holds no daily bar there. Coverage measures a series from its first bar,
+ * so these days are never counted missing; the box beside the coverage
+ * figure and the empty grid both print this sentence, so the two say the
+ * same thing. `null` when the band read none. Cells are the band's own,
+ * oldest first (`bandOf`).
+ *
+ * @param {Array<{ day: string, kinds?: string[] }> | null | undefined} cells
+ * @param {string} instrument the band's instrument, `''` when it names none
+ * @returns {{ n: number, from: string, to: string, text: string } | null}
+ */
+export function refusedFrontOf(cells, instrument) {
+  if (!cells) return null;
+  const days = cells.filter((c) => Array.isArray(c.kinds) && c.kinds.includes('front'));
+  if (days.length === 0) return null;
+  const from = days[0].day;
+  const to = days[days.length - 1].day;
+  return {
+    n: days.length,
+    from,
+    to,
+    text: `${fmt(days.length)} day(s) of a refused front, ${dayLabel(from)} → ${dayLabel(to)}${instrument ? ` (${instrument})` : ''}: the vendor served them and a pull refused them before append, so no daily bar is stored there (D-3315). Coverage measures from the first stored bar, so these days are named here and never counted as held.`
+  };
+}
+
+/** A coverage ratio, never 100.00% for a month missing a bar (`coverPct`). */
+export { coverPct };
 
 /** What the page says instead of a verdict it cannot support. */
 export const SOLE_WHY =
