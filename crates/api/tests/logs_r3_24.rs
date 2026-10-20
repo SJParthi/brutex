@@ -12,7 +12,10 @@
 //! properties in more depth through R3-24's own names, which do not exist on
 //! the base.
 //!
-//! The last two tests are R3-24 repair round 1's (20 Oct): each failed on
+//! The last test is repair round 2's (20 Oct): it failed on round 1's head,
+//! `bce65685a`, and names only what the base exported too.
+//!
+//! The two before it are R3-24 repair round 1's (20 Oct): each failed on
 //! the package's first head, `dbfa9074a`, where the two defects the second
 //! check found were made. They name only what the base exported too; on the
 //! base the torn-line test passes (the span search did not exist) and the
@@ -324,4 +327,93 @@ fn a_line_written_per_request_never_reaches_the_never_rolling_stream() {
         "the rolling audit stream keeps every line"
     );
     let _ignored = std::fs::remove_dir_all(&served);
+}
+
+/// Every record a span alone answers, page after page, following `next`
+/// (`before=<next>`) until there is none; `None` when 200 pages did not
+/// reach the end, which only a cursor that stands still can do here.
+fn every_page(served: &Path, store: &Path, query: &str) -> Option<(Vec<u64>, String)> {
+    let (mut seqs, mut before) = (Vec::new(), None::<String>);
+    for _ in 0..200 {
+        let asked = before
+            .as_deref()
+            .map_or_else(|| query.to_owned(), |next| format!("{query}&before={next}"));
+        let got = logs(served, store, &asked);
+        seqs.extend(
+            got["records"]
+                .as_array()
+                .expect("records")
+                .iter()
+                .map(|record| record["seq"].as_u64().expect("a seq")),
+        );
+        let Some(next) = got["keyed"]["next"].as_str() else {
+            let said = got["keyed"]["index"]["said"].as_str().unwrap_or_default();
+            return Some((seqs, said.to_owned()));
+        };
+        before = Some(next.to_owned());
+    }
+    None
+}
+
+/// **R3-24 REPAIR ROUND 2: A RUN OF DAMAGE LONGER THAN A PROBE'S WINDOW
+/// NEVER CUTS A SPAN SHORT, AND A CLIENT FOLLOWING `next` REACHES THE END.**
+/// A real sink writes 40 refusals; while it is stopped a run of NUL bytes
+/// with no newline in it is appended to its audit file (a damaged or foreign
+/// file, which `telemetry`'s tail reader must survive); the next open closes
+/// the run with its newline and writes 150 more. A span alone over all 190,
+/// paged at `limit=20` and at `limit=500`, must answer each of the 190 once
+/// and end. On repair round 1's head (`bce65685a`) a run longer than the
+/// probe's two-line window, 128 KiB, was taken for "no line here": the third
+/// check's shadow answered 80 of 150 at `limit=20`, its last page calling
+/// itself complete. A run longer than the probe's whole bound
+/// (`MAX_PROBE_BYTES`, 1 MiB) is searched around and read past, never
+/// refused and never looped on.
+#[test]
+fn a_long_run_of_damage_never_cuts_a_span_short() {
+    const BEFORE: usize = 40;
+    const AFTER: usize = 150;
+    let to = telemetry::now_millis() + 86_400_000;
+    let mut short = Vec::new();
+    for run in [200 * 1024, 512 * 1024, 3 * 1024 * 1024] {
+        let served = scratch(&format!("long-run-{run}"));
+        let store = scratch(&format!("long-run-store-{run}"));
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("opens");
+            refusals(&sink, BEFORE);
+        }
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::audit_current_path(&served))
+                .expect("the audit file");
+            file.write_all(&vec![0u8; run]).expect("a run of damage");
+        }
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("reopens");
+            refusals(&sink, AFTER);
+        }
+        for limit in [20, 500] {
+            let query = format!("from=0&to={to}&limit={limit}");
+            match every_page(&served, &store, &query) {
+                None => short.push(format!("run {run} limit {limit}: no end in 200 pages")),
+                Some((seqs, said)) => {
+                    let distinct: std::collections::BTreeSet<u64> = seqs.iter().copied().collect();
+                    if seqs.len() != BEFORE + AFTER || distinct.len() != BEFORE + AFTER {
+                        short.push(format!(
+                            "run {run} limit {limit}: {} line(s), {} distinct, last said {said:?}",
+                            seqs.len(),
+                            distinct.len()
+                        ));
+                    }
+                }
+            }
+        }
+        let _ignored = std::fs::remove_dir_all(&served);
+        let _ignored = std::fs::remove_dir_all(&store);
+    }
+    assert!(
+        short.is_empty(),
+        "a span lost lines across a run of damage: {short:#?}"
+    );
 }

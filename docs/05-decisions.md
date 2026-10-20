@@ -74570,6 +74570,41 @@ each now with a test that failed on that head:
   `state_changes_json`) finished at 50 mutants, 48 caught, 2 unviable, none
   missed.
 
+**Repair round 2 (20 Oct, after the third check).**
+- *A run of damage longer than a probe's window cut a span short and the
+  page called itself complete.* Each step of the span probe read at most
+  two lines' ceiling, 128 KiB, and answered "no line" for a window holding
+  no newline though bytes were left before the search's end, so a NUL run
+  a later open closed with its newline cut every span over it: the third
+  check's shadow answered 80 of 150 lines at `limit=20`, the last page
+  saying every match was there. The probe now reads on, to the newline it
+  looks for, within `MAX_PROBE_BYTES` (1 MiB, the span page's own slice)
+  in all, and says "no line" only when its read reached the end (R324-25).
+- *Past a probe's bounds the search now goes around the damage instead of
+  refusing the span in that file.* Chosen over the refusal the check also
+  offered because a refusal cannot be honest across pages: either the
+  cursor stands still (the check's follow-up: `next` did not move and
+  `more` stayed true, so a client looped) or it moves past the file and a
+  later page calls itself complete with that file's lines unread. Going
+  around is sound by the stream's time order: a line stamped after the
+  span's end found below the damage proves every line from it on, and the
+  cut is exact again; else the cut is the lowest place proved, and the
+  backward walk passes the lines stamped after the span over by their
+  time. The damage costs reads (at most `MAX_PROBE_BYTES` a probe), never
+  lines, and is named in the posting's `damage` and in `said` (R324-26,
+  L-R324-22). A slice of more than two lines' ceiling no line starts in is
+  read past and named, and a page that stopped short says where it goes
+  on from, so the cursor moves on every page (R324-27). A span open at its
+  end is not searched at all.
+- *Taken from the check's follow-ups, in this package's files:* one file
+  that will not read is named once per stream with a count, not once per
+  pointer; `/audit.json`'s state changes name an absent state stream
+  (`no_stream`) and the serving sink's refusal of its own
+  (`served_state_error`) (R324-28); the new mode-bit test in `telemetry`
+  (`a_name_is_taken_by_anything_a_rename_cannot_replace`) runs through
+  `where_permission_binds` (D-0995), so it holds as root in a cloud
+  container; the open-ended span over history is measured (L-R324-23).
+
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
 The store-compression design (`state/design/store-compression-20261012.md`

@@ -319,9 +319,14 @@ pub fn body(
     out.push_str(r#","log_reach":"#);
     out.push_str(&crate::logs::reach_object(&halves, now_ms));
     out.push_str(r#","state_changes":"#);
+    // THE SERVING SINK'S OWN STATE STREAM: a refusal of it is said beside
+    // the rows (R3-24 repair round 2), never an empty answer that reads as
+    // "nothing happened". `None` in a process with no sink.
+    let served = telemetry::global().and_then(telemetry::Sink::state_health);
     out.push_str(&crate::logs::state_changes_json(
         &halves,
         crate::logs::STATE_CHANGES_SHOWN,
+        served.as_ref(),
     ));
     out.push('}');
     out

@@ -9699,6 +9699,16 @@ mod state_tests {
     /// that cannot be listed; nothing there and an empty directory do not.
     #[test]
     fn a_name_is_taken_by_anything_a_rename_cannot_replace() {
+        crate::tests::where_permission_binds(
+            "sink::state_tests::a_name_is_taken_by_anything_a_rename_cannot_replace",
+            a_name_is_taken_by_anything_a_rename_cannot_replace_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995): as root a
+    /// directory shut with `chmod 000` is still listed, and the premise that
+    /// it cannot be fails on its own (the third check of 20 Oct).
+    fn a_name_is_taken_by_anything_a_rename_cannot_replace_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = scratch("name-taken");
         let at = |name: &str| dir.join(name);

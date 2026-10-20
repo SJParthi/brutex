@@ -851,7 +851,7 @@ const STATE_TAIL_BYTES: u64 = 64 * 1024;
 /// shows of who did what. Per directory one read of at most
 /// [`STATE_TAIL_BYTES`] at the end of its state stream, which never rolls,
 /// so the newest lines are always there; a stream that is not there is
-/// passed over, one that cannot be read is named in `unread`.
+/// named in `no_stream`, one that cannot be read in `unread`.
 ///
 /// **A LINE THE STREAM HOLDS THAT IS NO STATE CHANGE BY TODAY'S RULE IS NOT
 /// SHOWN AS ONE, AND IS COUNTED** (R3-24 repair round 1): a stream written
@@ -861,16 +861,37 @@ const STATE_TAIL_BYTES: u64 = 64 * 1024;
 /// [`telemetry::run_dirs::state_events::is_state_change`] again; one it
 /// refuses is left out of `rows` and counted in `passed_over`, so twenty real
 /// state changes are never pushed out by traffic, and nothing is hidden.
-pub(crate) fn state_changes_json(halves: &[Half], limit: usize) -> String {
+///
+/// **A STREAM THAT IS NOT THERE IS NAMED, AND SO IS THE SERVING SINK'S OWN
+/// REFUSAL** (R3-24 repair round 2, the third check's follow-up): a stream
+/// absent from a directory used to be passed over unsaid, so when the sink
+/// refused the served state stream (`name_taken`, R324-24) this answered 0
+/// state changes with `unread: []`, which reads as "nothing happened". Each
+/// absent stream is now listed in `no_stream`, and `served` (the serving
+/// sink's state-stream health, `None` for a process with no sink) puts its
+/// last failure in `served_state_error`.
+pub(crate) fn state_changes_json(
+    halves: &[Half],
+    limit: usize,
+    served: Option<&telemetry::AuditHealth>,
+) -> String {
     use std::io::{Read as _, Seek as _};
     let mut found: Vec<(&'static str, telemetry::Record)> = Vec::new();
     let mut passed_over = 0u64;
     let mut unread: Vec<String> = Vec::new();
+    let mut no_stream: Vec<String> = Vec::new();
     for half in halves {
         let path = telemetry::audit_current_path(&telemetry::run_dirs::state_stream_of(&half.path));
         let len = match std::fs::metadata(&path) {
             Ok(meta) => meta.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                no_stream.push(format!(
+                    r#"{{"half":{},"path":{}}}"#,
+                    render::json_string(half.name),
+                    render::json_string(&path.display().to_string())
+                ));
+                continue;
+            }
             Err(e) => {
                 unread.push(format!("{}: {e}", path.display()));
                 continue;
@@ -932,9 +953,13 @@ pub(crate) fn state_changes_json(halves: &[Half], limit: usize) -> String {
         .collect();
     let unread: Vec<String> = unread.iter().map(|why| render::json_string(why)).collect();
     format!(
-        r#"{{"rows":[{}],"limit":{limit},"unread":[{}],"passed_over":{passed_over},"passed_over_means":"lines the streams hold, in the slice read, that are no state change by this build's rule (written under an earlier one); left out of rows","from":"the never-rolling state stream of each log directory"}}"#,
+        r#"{{"rows":[{}],"limit":{limit},"unread":[{}],"no_stream":[{}],"served_state_error":{},"passed_over":{passed_over},"passed_over_means":"lines the streams hold, in the slice read, that are no state change by this build's rule (written under an earlier one); left out of rows","from":"the never-rolling state stream of each log directory"}}"#,
         rows.join(","),
         unread.join(","),
+        no_stream.join(","),
+        served
+            .and_then(|health| health.last_error.as_deref())
+            .map_or_else(|| "null".to_owned(), render::json_string),
     )
 }
 
@@ -3555,39 +3580,149 @@ struct Placed {
     record: telemetry::Record,
 }
 
-/// What one step of [`line_after`] finds from a cut.
-enum Found {
-    /// The first whole line starting at or after the cut, decoded.
-    Line(Placed),
-    /// The first whole line starting at or after the cut does not decode: a
-    /// torn fragment a later open closed with its newline, or a damaged line.
-    /// Where it starts and its length with its newline.
-    Undecodable { start: u64, len: u64 },
-    /// No whole line starts at or after the cut inside the bytes read.
-    NoLine,
-}
-
 /// What one probe of [`end_of_span`] finds: the first line that DECODES
 /// starting at or after the cut (every line between the cut and it being
-/// undecodable), or `Nothing` when no such line starts before the end.
+/// undecodable), `Nothing` when the read reached `end` with no such line,
+/// or `Damaged` when it could reach neither within its bounds.
 enum Probe {
     Line(Placed),
+    /// The read reached `end` (or the file's end) and no line that decodes
+    /// starts between the cut and it: never said of bytes left unread.
     Nothing,
+    /// The probe stopped at one of its bounds with bytes left before `end`:
+    /// more than [`MAX_UNDECODABLE_STEPS`] undecodable lines in a row, or
+    /// [`MAX_PROBE_BYTES`] read with no line that decodes in them. Named,
+    /// and never taken for "no line here" (R3-24 repair round 2).
+    Damaged(String),
 }
 
 /// The most undecodable lines one probe of [`end_of_span`] steps past before
-/// it refuses to place the span (R3-24 repair round 1). A torn line is at
+/// it stops and names the damage (R3-24 repair round 1). A torn line is at
 /// most one per kill mid-append, so a file holds a few; a run longer than
-/// this is a damaged file a binary search cannot trust, and the answer says
-/// so by name rather than answer short.
+/// this is a damaged file, and the search says so by name rather than
+/// answer short.
 pub const MAX_UNDECODABLE_STEPS: u32 = 16;
 
+/// The most bytes one probe of [`end_of_span`] reads, its steps together
+/// (R3-24 repair round 2): a probe reads on through an undecodable line of
+/// any length up to this, so a run of damage with no newline in it, longer
+/// than two lines' ceiling, is read past rather than taken for the end of
+/// the file. The same slice a span page reads backwards ([`SPAN_SLICE_BYTES`]).
+pub const MAX_PROBE_BYTES: u64 = SPAN_SLICE_BYTES;
+
+/// The bytes one probe has read forward from `base`, never past `end` nor
+/// [`MAX_PROBE_BYTES`] in all: [`PROBE_FIRST_BYTES`] first, then two lines'
+/// ceiling a read, and only as far as the newline it looks for.
+struct Ahead<'p> {
+    path: &'p std::path::Path,
+    base: u64,
+    end: u64,
+    bytes: Vec<u8>,
+    /// Whether the bytes reach `end`, or the file ended before it: nothing
+    /// is left to read.
+    reached: bool,
+}
+
+/// Where [`Ahead::newline_from`] found the next newline.
+enum Newline {
+    At(u64),
+    /// None before `end`.
+    Ended,
+    /// None in the [`MAX_PROBE_BYTES`] read, with bytes left before `end`.
+    Bounded,
+}
+
+impl<'p> Ahead<'p> {
+    fn new(path: &'p std::path::Path, base: u64, end: u64) -> Self {
+        Self {
+            path,
+            base,
+            end,
+            bytes: Vec::new(),
+            reached: base >= end,
+        }
+    }
+
+    /// Reads on, one read; answers whether it read a byte.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be opened, sought or read.
+    fn read_on(&mut self) -> Result<bool, String> {
+        use std::io::{Read as _, Seek as _};
+        let held = u64::try_from(self.bytes.len()).unwrap_or(u64::MAX);
+        let ceiling = u64::try_from(telemetry::MAX_LINE_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2);
+        let step = if held == 0 {
+            PROBE_FIRST_BYTES
+        } else {
+            ceiling
+        };
+        let at = self.base.saturating_add(held);
+        let want = step
+            .min(MAX_PROBE_BYTES.saturating_sub(held))
+            .min(self.end.saturating_sub(at));
+        if self.reached || want == 0 {
+            return Ok(false);
+        }
+        let got = std::fs::File::open(self.path)
+            .and_then(|mut file| {
+                file.seek(std::io::SeekFrom::Start(at))?;
+                file.take(want).read_to_end(&mut self.bytes)
+            })
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let got = u64::try_from(got).unwrap_or(u64::MAX);
+        // A SHORT READ is the file's end: nothing past it to read.
+        self.reached = got < want || at.saturating_add(got) >= self.end;
+        Ok(got > 0)
+    }
+
+    /// The first newline at or after `at` (never before `base`), reading on
+    /// as far as it takes, within `end` and [`MAX_PROBE_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// [`Self::read_on`]'s.
+    fn newline_from(&mut self, at: u64) -> Result<Newline, String> {
+        let mut from = at.max(self.base);
+        loop {
+            let skip = usize::try_from(from.saturating_sub(self.base)).unwrap_or(usize::MAX);
+            if let Some(found) = self
+                .bytes
+                .get(skip..)
+                .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+            {
+                return Ok(Newline::At(
+                    from.saturating_add(u64::try_from(found).unwrap_or(u64::MAX)),
+                ));
+            }
+            from = self
+                .base
+                .saturating_add(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX));
+            if !self.read_on()? {
+                return Ok(if self.reached {
+                    Newline::Ended
+                } else {
+                    Newline::Bounded
+                });
+            }
+        }
+    }
+
+    /// The bytes `from..to`, both read.
+    fn between(&self, from: u64, to: u64) -> Option<&[u8]> {
+        let at = |place: u64| usize::try_from(place.checked_sub(self.base)?).ok();
+        self.bytes.get(at(from)?..at(to)?)
+    }
+}
+
 /// The first whole line of `path` that decodes, starting at or after `at`
-/// and before `end`. Each step is one read: [`PROBE_FIRST_BYTES`] first, two
-/// lines' ceiling ([`telemetry::MAX_LINE_BYTES`]) only when no whole line
-/// follows the cut inside it. An undecodable line is stepped past, at most
-/// [`MAX_UNDECODABLE_STEPS`] of them, so a probe is at most
-/// `2 x (MAX_UNDECODABLE_STEPS + 1)` reads.
+/// and before `end`. It reads [`PROBE_FIRST_BYTES`] first and on, two lines'
+/// ceiling ([`telemetry::MAX_LINE_BYTES`]) a read, only as far as the next
+/// newline: an undecodable line is stepped past, at most
+/// [`MAX_UNDECODABLE_STEPS`] of them and at most [`MAX_PROBE_BYTES`] read in
+/// all, so a probe costs at most that whatever the file holds.
 ///
 /// **AN UNDECODABLE LINE IS STEPPED PAST, NEVER TAKEN FOR "NO LINE HERE"**
 /// (the second check of 20 Oct): this used to answer `None` for a first
@@ -3595,85 +3730,80 @@ pub const MAX_UNDECODABLE_STEPS: u32 = 16;
 /// below `high`" and so cut the span above the torn line: a span alone
 /// answered 2 of 120 lines and called the page complete.
 ///
+/// **NOR IS A WINDOW WITH NO NEWLINE IN IT** (the third check of 20 Oct):
+/// each step used to read at most two lines' ceiling, 128 KiB, and answer
+/// "no line" when that window held no newline, though bytes were left
+/// before `end`. A run of damage longer than the window (a NUL run a later
+/// open closed with its newline) so cut every span over it short: 80 of 150
+/// lines answered, the page calling itself complete. Now `Nothing` is said
+/// only when the read reached `end`; a bound met first is [`Probe::Damaged`].
+///
 /// # Errors
 ///
-/// The file cannot be read, or more undecodable lines than the bound run on
-/// from `at`: each named, never answered as "no line here".
+/// The file cannot be read: named, never answered as "no line here".
 fn line_after(path: &std::path::Path, at: u64, end: u64) -> Result<Probe, String> {
-    let ceiling = u64::try_from(telemetry::MAX_LINE_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(2);
+    let mut ahead = Ahead::new(path, at.saturating_sub(1), end);
+    let bounded = |from: u64| {
+        format!(
+            "{}: no line that decodes in the {MAX_PROBE_BYTES} bytes read on from byte {from}, \
+             a run longer than any line the sink writes ({} bytes)",
+            path.display(),
+            telemetry::MAX_LINE_BYTES
+        )
+    };
     let mut at = at;
     for _ in 0..=MAX_UNDECODABLE_STEPS {
-        let found = match line_within(path, at, end, PROBE_FIRST_BYTES.min(ceiling))? {
-            Found::NoLine => line_within(path, at, end, ceiling)?,
-            found => found,
+        // AT 0 THE FIRST LINE STARTS THERE; else after the first newline from
+        // the byte before `at`, so a line starting exactly at `at` is found.
+        let start = if at == 0 {
+            0
+        } else {
+            match ahead.newline_from(at.saturating_sub(1))? {
+                Newline::At(newline) => newline.saturating_add(1),
+                Newline::Ended => return Ok(Probe::Nothing),
+                Newline::Bounded => return Ok(Probe::Damaged(bounded(at))),
+            }
         };
-        match found {
-            Found::Line(line) => return Ok(Probe::Line(line)),
-            Found::NoLine => return Ok(Probe::Nothing),
+        let newline = match ahead.newline_from(start)? {
+            Newline::At(newline) => newline,
+            // A LINE WITH NO NEWLINE BEFORE `end` is no whole line.
+            Newline::Ended => return Ok(Probe::Nothing),
+            Newline::Bounded => return Ok(Probe::Damaged(bounded(start))),
+        };
+        let len = newline.saturating_sub(start).saturating_add(1);
+        match ahead.between(start, newline).map(telemetry::Record::decode) {
+            Some(Ok(record)) => return Ok(Probe::Line(Placed { start, len, record })),
             // THE NEXT LINE STARTS RIGHT AFTER IT, and is read from there.
-            Found::Undecodable { start, len } => at = start.saturating_add(len),
+            _ => at = newline.saturating_add(1),
         }
     }
-    Err(format!(
-        "{}: more than {MAX_UNDECODABLE_STEPS} undecodable lines run on to byte {at}, so the \
-         span's end cannot be placed in this file and no line of the span is answered from it",
+    Ok(Probe::Damaged(format!(
+        "{}: more than {MAX_UNDECODABLE_STEPS} undecodable lines run on to byte {at}",
         path.display()
-    ))
+    )))
 }
 
 /// How much one probe of [`end_of_span`] reads first (the Mac's bench of 19
 /// Oct): every probe used to read two lines' ceiling, 128 KiB, so a binary
 /// search over a 64 MiB audit file read about 3 MiB to place one cut, and
 /// `span alone` at C-LG-03's 10x store cost p50 5.6 ms. A line is a few
-/// hundred bytes, so a probe reads this much and the whole ceiling only when
-/// no whole line follows the cut inside it; the line it places is the same
-/// either way.
+/// hundred bytes, so a probe reads this much and on only when no whole line
+/// follows the cut inside it; the line it places is the same either way.
 const PROBE_FIRST_BYTES: u64 = 4 * 1024;
 
-/// One step of [`line_after`]: the first whole line starting at or after
-/// `at` and before `end`, reading at most `window` bytes from the byte
-/// before `at`.
-///
-/// # Errors
-///
-/// The file cannot be opened, sought or read.
-fn line_within(path: &std::path::Path, at: u64, end: u64, window: u64) -> Result<Found, String> {
-    use std::io::{Read as _, Seek as _};
-    let from = at.saturating_sub(1);
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|mut file| {
-            file.seek(std::io::SeekFrom::Start(from))?;
-            file.take(window.min(end.saturating_sub(from)))
-                .read_to_end(&mut bytes)
-        })
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    // AT 0 THE FIRST LINE STARTS THERE; else after the first newline from
-    // the byte before `at`, so a line starting exactly at `at` is found.
-    let skip = if at == 0 {
-        0
-    } else {
-        match bytes.iter().position(|&byte| byte == b'\n') {
-            Some(newline) => newline.saturating_add(1),
-            None => return Ok(Found::NoLine),
-        }
-    };
-    let rest = bytes.get(skip..).unwrap_or_default();
-    let Some(len) = rest.iter().position(|&byte| byte == b'\n') else {
-        return Ok(Found::NoLine);
-    };
-    let start = from.saturating_add(u64::try_from(skip).unwrap_or(u64::MAX));
-    let whole = u64::try_from(len).unwrap_or(u64::MAX).saturating_add(1);
-    Ok(match rest.get(..len).map(telemetry::Record::decode) {
-        Some(Ok(record)) => Found::Line(Placed {
-            start,
-            len: whole,
-            record,
-        }),
-        _ => Found::Undecodable { start, len: whole },
-    })
+/// Where [`end_of_span`] cut a file.
+#[derive(Debug, PartialEq, Eq)]
+struct Cut {
+    /// Every line that decodes starting at or after it is stamped after the
+    /// span's end.
+    at: u64,
+    /// `None`: every line that decodes before `at` is stamped at or before
+    /// the span's end, so `at` is exact. Named when a probe met damage it
+    /// could not read past and the search could not place the end below it:
+    /// `at` is then the lowest place PROVED, a line's start or the end, and
+    /// the lines between it and the span are passed over by their time
+    /// ([`span_backwards`]), never answered and never lost.
+    damage: Option<String>,
 }
 
 /// The offset in `path` where the first line stamped after `to` starts, below
@@ -3684,16 +3814,28 @@ fn line_within(path: &std::path::Path, at: u64, end: u64, window: u64) -> Result
 /// lock and clamps its clock, so `ms` order is file order (`telemetry`
 /// `Inner::stamp`).
 ///
+/// **DAMAGE IS SEARCHED AROUND, NEVER GUESSED ACROSS** (R3-24 repair round
+/// 2): a probe that meets damage ([`Probe::Damaged`]) tells nothing about
+/// the lines after its cut, so the search goes on below it unproved. A line
+/// stamped after `to` found below the damage proves every line from it on
+/// (time order), and the cut is exact again; else the answer is the lowest
+/// place proved, with the damage named. Damage past the span's end so costs
+/// nothing once a line between the span's end and it is found, and any other
+/// damage costs reads (the walk passes the lines after the span over by
+/// their time), never lines.
+///
 /// # Errors
 ///
-/// [`line_after`]'s: a probe that cannot read, or cannot step past the
-/// undecodable lines after its cut. The search never guesses a cut.
-fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> Result<u64, String> {
+/// [`line_after`]'s: a probe that cannot read. The search never guesses a
+/// cut.
+fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> Result<Cut, String> {
     // `low` is always a line's start: every line starting before it that
-    // decodes is stamped at or before `to`. `high` is a place every line
-    // starting at or after which that decodes is stamped after `to`.
+    // decodes is stamped at or before `to`. `high` bounds the search, and
+    // when `sure` it is proved: every line starting at or after it that
+    // decodes is stamped after `to`. `known` is the lowest LINE START (or
+    // `end`) proved so, the answer when `high` is not.
     //
-    // A probe that finds no line that DECODES starting in `middle..high`
+    // A probe that finds no line that DECODES starting in `middle..end`
     // narrows to `middle` and loses nothing: the line straddling `middle`
     // starts below it and is read whole, to `end`, when a later probe reaches
     // it, and if it is at or before `to` then `low` moves past it to where
@@ -3702,18 +3844,69 @@ fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> Result<u64, String>
     //
     // An undecodable line BEFORE a decoded one is that line's elder in the
     // file, so it is at or before the decoded line's time and moves with it.
-    let (mut low, mut high) = (0u64, end);
+    //
+    // A SPAN OPEN AT ITS END cuts at `end`: every line is at or before it,
+    // so nothing is searched, and damage costs it no probe.
+    if to == i64::MAX {
+        return Ok(Cut {
+            at: end,
+            damage: None,
+        });
+    }
+    let (mut low, mut high, mut known, mut sure) = (0u64, end, end, true);
+    let mut damage = None;
     while low < high {
         let middle = low + (high - low) / 2;
         match line_after(path, middle, end)? {
             Probe::Line(line) if line.start < high && line.record.at_unix_millis > to => {
                 high = line.start;
+                known = line.start;
+                sure = true;
             }
             Probe::Line(line) if line.start < high => low = line.start.saturating_add(line.len),
             Probe::Line(_) | Probe::Nothing => high = middle,
+            Probe::Damaged(why) => {
+                high = middle;
+                sure = false;
+                damage.get_or_insert(why);
+            }
         }
     }
-    Ok(low)
+    Ok(if sure {
+        Cut {
+            at: low,
+            damage: None,
+        }
+    } else {
+        Cut {
+            at: low.max(known),
+            damage,
+        }
+    })
+}
+
+/// One page of pointers a [`Stream`] reads: a posting's, or a span's as
+/// [`span_page`] answers it.
+#[derive(Debug, Default)]
+struct Fetched {
+    page: telemetry::PostingsPage,
+    /// Whether older pointers may remain: for a posting, a page as full as
+    /// asked; for a span, a walk that stopped at `take` lines or at its byte
+    /// slice. Never a guess.
+    more: bool,
+    /// Where the next page goes on from once every pointer of this one is
+    /// consumed: the place the walk stopped, every line starting at or after
+    /// it in that file read (R3-24 repair round 2). `None` when it did not
+    /// stop short. A walk that stopped before it found a line still moves
+    /// the cursor, so a client following `next` never asks the same page
+    /// twice.
+    resume: Option<telemetry::PostingAt>,
+    /// Lines the walk read and passed over because they are stamped after
+    /// the span's end: only behind a cut that damage made conservative.
+    passed: u64,
+    /// The damage met, each stretch named: what the search could not read
+    /// past, and what the walk read past.
+    damage: Vec<String>,
 }
 
 /// One page of a span read alone (R3-24): the lines of the kept audit files
@@ -3729,23 +3922,25 @@ fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> Result<u64, String>
 /// [`SPAN_SLICE_BYTES`] in all. The walk stops at the first line older than
 /// `from`: every older line is older still.
 ///
-/// Answers the page and whether older lines in the span may remain: `true`
-/// when it stopped at `take` lines or at its byte slice, never a guess.
+/// **DAMAGE COSTS READS, NEVER LINES, AND IS NAMED** (R3-24 repair round 2):
+/// a span whose end the search cannot place exactly is read from the lowest
+/// place proved, its later lines passed over by time, and a stretch no line
+/// starts in is read past a slice at a time; each is named in `damage`, and
+/// the cursor moves on every page.
 ///
 /// # Errors
 ///
-/// The serial, a file that is there and cannot be read, or one whose span's
-/// end cannot be placed ([`end_of_span`]): the answer names it in `errors`
-/// and never calls itself complete ([`read_words`]).
+/// The serial, or a file that is there and cannot be read: the answer names
+/// it in `errors` and never calls itself complete ([`read_words`]).
 fn span_page(
     dir: &std::path::Path,
     (from, to): (i64, i64),
     take: usize,
     before: Option<telemetry::PostingAt>,
-) -> Result<(telemetry::PostingsPage, bool), String> {
+) -> Result<Fetched, String> {
     let current = telemetry::audit_serial(dir)?;
     let oldest = current.saturating_sub(u64::from(telemetry::AUDIT_KEEP_FILES.saturating_sub(1)));
-    let mut out = telemetry::PostingsPage::default();
+    let mut out = Fetched::default();
     let mut budget = SPAN_SLICE_BYTES;
     for serial in (oldest..=current).rev() {
         if before.is_some_and(|at| serial > at.serial) {
@@ -3759,7 +3954,7 @@ fn span_page(
         };
         if span.last_ms.is_some_and(|last| last < from) {
             // EVERY OLDER FILE IS OLDER STILL.
-            return Ok((out, false));
+            return Ok(out);
         }
         if !span.overlaps(from, to) {
             continue;
@@ -3773,40 +3968,63 @@ fn span_page(
             .filter(|at| at.serial == serial)
             .map_or(len, |at| at.index.min(len));
         let cut = end_of_span(&path, end, to)?;
-        match span_backwards(&path, serial, (cut, from), take, &mut budget, &mut out)? {
-            Walked::Older => return Ok((out, false)),
-            Walked::Stopped => return Ok((out, true)),
+        if let Some(why) = cut.damage {
+            out.damage.push(format!(
+                "{why}: the span's end is not placed exactly in this file, so it is read from \
+                 byte {} and the lines stamped after the span are passed over by their time",
+                cut.at
+            ));
+        }
+        match span_backwards(
+            &path,
+            serial,
+            (cut.at, (from, to)),
+            take,
+            &mut budget,
+            &mut out,
+        )? {
+            Walked::Older => return Ok(out),
+            Walked::Stopped(at) => {
+                out.more = true;
+                out.resume = Some(telemetry::PostingAt { serial, index: at });
+                return Ok(out);
+            }
             Walked::FileStart => {}
         }
     }
-    Ok((out, false))
+    Ok(out)
 }
 
 /// How a backward walk of one audit file ended.
 enum Walked {
     /// It reached a line older than the span: every older line is older.
     Older,
-    /// It took `take` lines or spent its slice: older lines may remain.
-    Stopped,
+    /// It took `take` lines or spent its slice: older lines may remain, and
+    /// every line starting at or after this place has been read.
+    Stopped(u64),
     /// It reached the file's first line.
     FileStart,
 }
 
 /// Reads `path` backwards from `cut`, one slice at a time and whole lines
-/// only, pushing every line stamped at or after `from` until `take`, the
-/// slice `budget` or a line older than `from`.
+/// only, pushing every line stamped `from..=to` until `take`, the slice
+/// `budget` or a line older than `from`. A line stamped after `to` is
+/// passed over and counted (there is one only behind a conservative cut,
+/// [`Cut`]). A slice of more than [`NO_LINE_BYTES`] that no line starts in
+/// is part of a line no writer makes: it is read past and named, so a walk
+/// never stands still on damage (R3-24 repair round 2).
 fn span_backwards(
     path: &std::path::Path,
     serial: u64,
-    (mut cut, from): (u64, i64),
+    (mut cut, (from, to)): (u64, (i64, i64)),
     take: usize,
     budget: &mut u64,
-    out: &mut telemetry::PostingsPage,
+    out: &mut Fetched,
 ) -> Result<Walked, String> {
     use std::io::{Read as _, Seek as _};
     while cut > 0 {
-        if *budget == 0 || out.pointers.len() >= take {
-            return Ok(Walked::Stopped);
+        if *budget == 0 || out.page.pointers.len() >= take {
+            return Ok(Walked::Stopped(cut));
         }
         let slice = (*budget).min(cut);
         let start = cut.saturating_sub(slice);
@@ -3819,38 +4037,63 @@ fn span_backwards(
             .map_err(|e| format!("{}: {e}", path.display()))?;
         *budget = budget.saturating_sub(slice);
         // A SLICE THAT DOES NOT START THE FILE starts mid-line: what is
-        // before its first newline belongs to the next slice. A slice with
-        // no newline at all is a slice spent on part of one line.
+        // before its first newline belongs to the next slice.
         let first = if start == 0 {
-            0
+            Some(0)
         } else {
-            match bytes.iter().position(|&byte| byte == b'\n') {
-                Some(at) => at.saturating_add(1),
-                None => return Ok(Walked::Stopped),
-            }
+            bytes
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|at| at.saturating_add(1))
         };
-        let whole = bytes.get(first..).unwrap_or_default();
-        let base = start.saturating_add(u64::try_from(first).unwrap_or(u64::MAX));
+        let base = first.map_or(cut, |first| {
+            start.saturating_add(u64::try_from(first).unwrap_or(u64::MAX))
+        });
+        if base >= cut {
+            // NO LINE STARTS IN THE SLICE: it is all one line's. Longer than
+            // any line the sink writes, it is damage, read past and named;
+            // else the slice was the end of the budget, and the next page's
+            // whole slice reads the line.
+            if slice <= u64::try_from(NO_LINE_BYTES).unwrap_or(u64::MAX) {
+                return Ok(Walked::Stopped(cut));
+            }
+            out.damage.push(format!(
+                "{}: no line starts in the {slice} bytes before byte {cut}, part of a line \
+                 longer than any the sink writes ({} bytes); read past",
+                path.display(),
+                telemetry::MAX_LINE_BYTES
+            ));
+            cut = start;
+            continue;
+        }
+        let whole = bytes.get(first.unwrap_or(0)..).unwrap_or_default();
         let mut lines: Vec<(u64, &[u8])> = Vec::new();
         let mut offset = base;
         for line in whole.split_inclusive(|&byte| byte == b'\n') {
             lines.push((offset, line));
             offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
         }
+        // `done`: every line starting at or after it has been read.
+        let mut done = cut;
         for (at, line) in lines.into_iter().rev() {
-            if out.pointers.len() >= take {
-                return Ok(Walked::Stopped);
+            if out.page.pointers.len() >= take {
+                return Ok(Walked::Stopped(done));
             }
+            done = at;
             let Ok(record) = telemetry::Record::decode(line.strip_suffix(b"\n").unwrap_or(line))
             else {
-                out.malformed = out.malformed.saturating_add(1);
+                out.page.malformed = out.page.malformed.saturating_add(1);
                 continue;
             };
             if record.at_unix_millis < from {
                 return Ok(Walked::Older);
             }
-            out.total = out.total.saturating_add(1);
-            out.pointers.push((
+            if record.at_unix_millis > to {
+                out.passed = out.passed.saturating_add(1);
+                continue;
+            }
+            out.page.total = out.page.total.saturating_add(1);
+            out.page.pointers.push((
                 telemetry::PostingAt { serial, index: at },
                 telemetry::AuditPointer {
                     serial,
@@ -3900,8 +4143,20 @@ struct Stream<'d> {
     /// Pointers this page consumed.
     read: usize,
     /// Of those, the pointers passed over because their file or their place
-    /// puts their line outside the span asked (R3-24).
+    /// puts their line outside the span asked (R3-24); for a span stream,
+    /// also the lines its walk passed over by their time ([`Fetched::passed`]).
     passed: u64,
+    /// Where a span stream goes on from once every pointer is consumed
+    /// ([`Fetched::resume`]); `None` for a posting.
+    resume: Option<telemetry::PostingAt>,
+    /// The damage a span stream met, each stretch named ([`Fetched::damage`]).
+    damage: Vec<String>,
+    /// Pointers whose line would not read, and where in `errors` the first
+    /// one's reason stands: each stream names its first and counts the rest,
+    /// so one unreadable file is said once, never once per pointer (R3-24
+    /// repair round 2: 29 copies of one reason at `limit=5`).
+    unreadable: u64,
+    unread_at: Option<usize>,
 }
 
 /// Where one stream of a keyed answer stands, as a cursor names it.
@@ -4007,7 +4262,11 @@ impl Stream<'_> {
                     self.consume(at);
                 }
                 telemetry::AuditLine::Unreadable(why) => {
-                    errors.push(why);
+                    if self.unread_at.is_none() {
+                        self.unread_at = Some(errors.len());
+                        errors.push(why);
+                    }
+                    self.unreadable = self.unreadable.saturating_add(1);
                     self.consume(at);
                 }
             }
@@ -4130,12 +4389,19 @@ impl Stream<'_> {
             .and_then(|_| self.page.pointers.get(self.next).map(|(at, _)| *at))
     }
 
-    /// Where the stream stands for the next page.
+    /// Where the stream stands for the next page. A span stream whose every
+    /// pointer was consumed goes on from where its walk stopped, which is
+    /// older than every pointer it fetched: a walk that found no line still
+    /// moves the cursor (R3-24 repair round 2).
     fn slot(&self) -> Slot {
-        if self.head.is_none() && self.next >= self.page.pointers.len() && !self.more {
+        let spent = self.head.is_none() && self.next >= self.page.pointers.len();
+        if spent && !self.more {
             return Slot::Done;
         }
-        self.last.map_or(self.from, Slot::At)
+        match self.resume {
+            Some(at) if spent => Slot::At(at),
+            _ => self.last.map_or(self.from, Slot::At),
+        }
     }
 }
 
@@ -4161,6 +4427,11 @@ struct Indexed {
     /// so a cursor never offers them again. A line the search read to place
     /// the span is counted here and in `reads` both.
     passed: u64,
+    /// Stretches of damage the span streams met and read past or around,
+    /// every stream together, each named in its posting's `damage` (R3-24
+    /// repair round 2). They cost reads, never lines, so they never make a
+    /// page incomplete; they are said, never silent.
+    damage: usize,
     /// A cursor that does not fit this request, named.
     cursor_refused: Option<String>,
     /// Failures, in their own words.
@@ -4238,6 +4509,22 @@ fn index_rows(halves: &[IndexDir<'_>], asked: &Asked) -> Indexed {
         .streams
         .iter()
         .fold(0u64, |sum, stream| sum.saturating_add(stream.passed));
+    out.damage = opened.streams.iter().fold(0usize, |sum, stream| {
+        sum.saturating_add(stream.damage.len())
+    });
+    // ONE UNREADABLE FILE IS SAID ONCE PER STREAM, with how many of the
+    // stream's lines it kept from being read.
+    for stream in &opened.streams {
+        if stream.unreadable > 1
+            && let Some(why) = stream.unread_at.and_then(|at| out.errors.get_mut(at))
+        {
+            let _ = write!(
+                why,
+                " ({} line(s) of the {} posting {}={} would not read; the first is named)",
+                stream.unreadable, stream.source, stream.dimension, stream.value
+            );
+        }
+    }
     let cursor: Vec<Slot> = opened
         .slot_of
         .iter()
@@ -4338,20 +4625,14 @@ fn open_streams<'d>(
             };
             // A SPAN ALONE is read from the files its time meets; every other
             // probe is a posting (R3-24).
-            let fetched = match keys.span {
-                Some(span) if *dimension == SPAN_PROBE => {
-                    span_page(dir, span, MAX_KEYED_READS, before)
-                }
-                _ => {
-                    telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before)
-                        .map(|page| {
-                            let more = page.pointers.len() >= MAX_KEYED_READS;
-                            (page, more)
-                        })
-                }
-            };
-            match fetched {
-                Ok((page, more)) => {
+            match fetch(dir, (dimension, value), keys.span, before) {
+                Ok(Fetched {
+                    page,
+                    more,
+                    resume,
+                    passed,
+                    damage,
+                }) => {
                     opened.slot_of.push(Some(opened.streams.len()));
                     opened.fixed.push(from);
                     opened.streams.push(Stream {
@@ -4373,7 +4654,11 @@ fn open_streams<'d>(
                         more,
                         head: None,
                         read: 0,
-                        passed: 0,
+                        passed,
+                        resume,
+                        damage,
+                        unreadable: 0,
+                        unread_at: None,
                     });
                 }
                 Err(why) => {
@@ -4385,6 +4670,30 @@ fn open_streams<'d>(
         }
     }
     opened
+}
+
+/// One stream's first page: a span alone is read from the files its time
+/// meets ([`span_page`]); every other probe is a posting, whose page is as
+/// full as asked when older pointers may remain.
+fn fetch(
+    dir: &std::path::Path,
+    (dimension, value): (&str, &str),
+    span: Option<(i64, i64)>,
+    before: Option<telemetry::PostingAt>,
+) -> Result<Fetched, String> {
+    match span {
+        Some(span) if dimension == SPAN_PROBE => span_page(dir, span, MAX_KEYED_READS, before),
+        _ => telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before).map(
+            |page| {
+                let more = page.pointers.len() >= MAX_KEYED_READS;
+                Fetched {
+                    page,
+                    more,
+                    ..Fetched::default()
+                }
+            },
+        ),
+    }
 }
 
 /// Merges the streams newest first into `out.rows` until `asked.limit` rows
@@ -4474,7 +4783,7 @@ fn posting_json(stream: &Stream<'_>) -> String {
         })
         .collect();
     format!(
-        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
+        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}],"damage":[{}]}}"#,
         render::json_string(stream.half),
         render::json_string(stream.source),
         render::json_string(stream.dimension),
@@ -4483,6 +4792,12 @@ fn posting_json(stream: &Stream<'_>) -> String {
         stream.read,
         stream.page.malformed,
         uncovered.join(","),
+        stream
+            .damage
+            .iter()
+            .map(|why| render::json_string(why))
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -4830,7 +5145,7 @@ fn read_words(indexed: &Indexed) -> String {
     };
     // POINTERS PASSED OVER are said beside the lines read (R3-24): the span
     // put their lines outside it, by their file's span or by the search.
-    let passed = if indexed.passed == 0 {
+    let mut passed = if indexed.passed == 0 {
         String::new()
     } else {
         format!(
@@ -4838,6 +5153,16 @@ fn read_words(indexed: &Indexed) -> String {
             indexed.passed
         )
     };
+    // DAMAGE IS SAID beside them (R3-24 repair round 2): read past or around,
+    // it holds no line that decodes, so it costs the page no match.
+    if indexed.damage > 0 {
+        let _ = write!(
+            passed,
+            "; {} damaged stretch(es) of the audit files read past or around, each named in \
+             its posting's damage",
+            indexed.damage
+        );
+    }
     if indexed.capped {
         format!(
             "capped: the first {} of {of} indexed line(s) were read{passed}, newest first; ask \
@@ -9298,6 +9623,7 @@ mod r3_24_tests {
         let placed = |at: u64| match super::line_after(&path, at, end).expect("readable") {
             super::Probe::Line(got) => Some((got.start, got.len, got.record.seq)),
             super::Probe::Nothing => None,
+            super::Probe::Damaged(why) => panic!("no damage in this file: {why}"),
         };
         let first = short.len() as u64;
         let third = first + long.len() as u64;
@@ -10466,7 +10792,7 @@ mod r3_24_edge_tests {
     //! R3-24: a span read across generations and every way it stops, and the
     //! streams that are there and will not answer, each named.
 
-    use super::{Half, RefusalTail, Seen, Walked, span_backwards, span_page};
+    use super::{Fetched, Half, RefusalTail, Seen, Walked, span_backwards, span_page};
     use std::fmt::Write as _;
 
     /// How long one search a test asks for may take before the test fails:
@@ -10621,7 +10947,7 @@ mod r3_24_edge_tests {
         // EVERY PAGE INSIDE A DEADLINE: a search that spins fails this test.
         let page = |span: (i64, i64), take: usize, before: Option<telemetry::PostingAt>| {
             let dir = dir.clone();
-            in_time(move || span_page(&dir, span, take, before))
+            in_time(move || span_page(&dir, span, take, before).map(|got| (got.page, got.more)))
         };
         let (middle, more) = page((1500, 2500), 100, None).expect("a page");
         assert_eq!(seqs(&middle), [(1, 6), (1, 5), (1, 4)]);
@@ -10674,25 +11000,75 @@ mod r3_24_edge_tests {
         hand_stream(&dir, &GENS);
         let path = telemetry::audit_path_for(&dir, 2, 0).unwrap();
         let len = std::fs::metadata(&path).expect("the file").len();
-        let mut out = telemetry::PostingsPage::default();
-        let spent = span_backwards(&path, 0, (len, 0), 100, &mut 0, &mut out);
-        assert!(matches!(spent, Ok(Walked::Stopped)));
+        let all = (0, i64::MAX);
+        let mut out = Fetched::default();
+        let spent = span_backwards(&path, 0, (len, all), 100, &mut 0, &mut out);
+        assert!(
+            matches!(spent, Ok(Walked::Stopped(at)) if at == len),
+            "where it stood"
+        );
         // A SLICE SHORTER THAN THE FILE starts mid-line: the piece before its
-        // first newline is left for a later slice, never read as a line.
+        // first newline is left for a later slice, never read as a line, and
+        // the walk stops on the first line it read.
         let mut half = len / 2;
-        let mut part = telemetry::PostingsPage::default();
-        let walked = span_backwards(&path, 0, (len, 0), 100, &mut half, &mut part);
-        assert!(matches!(walked, Ok(Walked::Stopped)));
-        assert_eq!(seqs(&part), [(0, 3)]);
-        assert_eq!(part.malformed, 0);
-        // A TORN END: the slice holds part of one line and no newline.
+        let mut part = Fetched::default();
+        let walked = span_backwards(&path, 0, (len, all), 100, &mut half, &mut part);
+        assert_eq!(seqs(&part.page), [(0, 3)]);
+        let first = part.page.pointers[0].1.offset;
+        assert!(
+            matches!(walked, Ok(Walked::Stopped(at)) if at == first),
+            "{first}"
+        );
+        assert_eq!(part.page.malformed, 0);
+        // A TORN END: the slice holds part of one line and no newline. A
+        // slice this short may be a whole line's end, so the walk stands
+        // where it was for the next page's whole slice, naming no damage.
         let mut budget = 10;
-        let torn = span_backwards(&path, 0, (len - 1, 0), 100, &mut budget, &mut out);
-        assert!(matches!(torn, Ok(Walked::Stopped)));
+        let torn = span_backwards(&path, 0, (len - 1, all), 100, &mut budget, &mut out);
+        assert!(matches!(torn, Ok(Walked::Stopped(at)) if at == len - 1));
         assert_eq!(budget, 0, "the slice was spent");
-        assert!(out.pointers.is_empty());
-        let gone = span_backwards(&dir.join("absent"), 0, (len, 0), 100, &mut 99, &mut out);
+        assert!(out.page.pointers.is_empty() && out.damage.is_empty());
+        let gone = span_backwards(&dir.join("absent"), 0, (len, all), 100, &mut 99, &mut out);
         assert!(gone.is_err());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **ONE FILE THAT WILL NOT READ IS SAID ONCE PER STREAM, WITH HOW MANY
+    /// LINES IT KEPT FROM BEING READ** (R3-24 repair round 2, the third
+    /// check's follow-up: one unreadable stream was repeated once per pointer
+    /// read, 29 copies at `limit=5`). The middle generation's audit file is
+    /// replaced by a directory, so each of its three pointers fails to read:
+    /// the answer names the failure once, counts the three, and still
+    /// answers the lines around it and never calls itself complete.
+    #[test]
+    fn one_unreadable_file_is_said_once_per_stream() {
+        let dir = scratch("unread-once");
+        hand_stream(&dir, &GENS);
+        let middle = telemetry::audit_path_for(&dir, 2, 1).unwrap();
+        std::fs::remove_file(&middle).expect("removed");
+        std::fs::create_dir_all(&middle).expect("a directory where the file was");
+        let (got, found) = ask_ts(&dir, "day=2020-01-02&limit=50");
+        assert_eq!(found, [3002, 3001, 3000, 1002, 1001, 1000], "{got:#}");
+        let errors: Vec<&str> = got["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|why| why.as_str().unwrap())
+            .collect();
+        let named = middle.display().to_string();
+        assert_eq!(
+            errors.iter().filter(|why| why.contains(&named)).count(),
+            1,
+            "named once: {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|why| why.contains("(3 line(s) of the audit posting day=")),
+            "{errors:#?}"
+        );
+        let said = got["keyed"]["index"]["said"].as_str().unwrap();
+        assert!(said.contains("may not hold every match"), "{said}");
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -11041,7 +11417,7 @@ mod r3_24_edge_tests {
             path: dir.clone(),
         }];
         let read = |halves: &[Half]| -> serde_json::Value {
-            serde_json::from_str(&super::state_changes_json(halves, 5)).expect("JSON")
+            serde_json::from_str(&super::state_changes_json(halves, 5, None)).expect("JSON")
         };
         let got = read(&halves);
         assert_eq!(got["rows"][0]["message"], "command started");
@@ -11193,7 +11569,7 @@ mod r3_24_torn_tests {
     //! earlier rule let into the never-rolling stream is not shown as a
     //! state change.
 
-    use super::{Half, Indexed, end_of_span, read_words, span_page, state_changes_json};
+    use super::{Cut, Half, Indexed, end_of_span, read_words, span_page, state_changes_json};
 
     /// A torn fragment as a kill mid-append leaves it, closed by the next
     /// open's newline.
@@ -11201,7 +11577,7 @@ mod r3_24_torn_tests {
 
     /// [`end_of_span`] inside the edge tests' deadline: a search that spins
     /// fails the test by name.
-    fn placed(path: &std::path::Path, end: u64, to: i64) -> Result<u64, String> {
+    fn placed(path: &std::path::Path, end: u64, to: i64) -> Result<Cut, String> {
         let path = path.to_path_buf();
         super::r3_24_edge_tests::in_time(move || end_of_span(&path, end, to))
     }
@@ -11252,7 +11628,8 @@ mod r3_24_torn_tests {
                 std::fs::write(&path, &text).expect("a file");
                 let end = text.len() as u64;
                 for to in 990..1090 {
-                    let cut = placed(&path, end, to).expect("placed");
+                    let Cut { at: cut, damage } = placed(&path, end, to).expect("placed");
+                    assert_eq!(damage, None, "a torn line is stepped past, never damage");
                     searched += 1;
                     for &(start, ms) in &starts {
                         assert_eq!(
@@ -11269,11 +11646,68 @@ mod r3_24_torn_tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A DAMAGE THE SEARCH CANNOT STEP PAST IS NAMED, NEVER A SHORT
-    /// ANSWER**: more undecodable lines in a row than
-    /// `MAX_UNDECODABLE_STEPS` between two good lines; the search refuses by
-    /// the file's name, and so does the span's page, which an answer lists in
-    /// `errors`. Exactly the bound in a row is stepped past and placed.
+    /// One audit stream of one generation holding `text`, its span starting
+    /// at `first` and open at its end.
+    fn one_generation(name: &str, text: &[u8], first: i64) -> std::path::PathBuf {
+        let stream = scratch(name);
+        std::fs::create_dir_all(stream.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(&stream), 0u64.to_le_bytes()).expect("serial");
+        let file = telemetry::audit_path_for(&stream, 0, 0).expect("a kept file");
+        std::fs::write(&file, text).expect("the audit file");
+        let generation = telemetry::audit_generation_path(&stream, 0);
+        std::fs::create_dir_all(&generation).expect("a generation");
+        std::fs::write(
+            generation.join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+            [first.to_le_bytes(), i64::MAX.to_le_bytes()].concat(),
+        )
+        .expect("a span file");
+        stream
+    }
+
+    /// Every pointer of a span read alone, page after page through each
+    /// page's `resume`, `take` at a time, and the damage named on the way;
+    /// `None` when 500 pages did not reach the end (a cursor standing still).
+    fn every_span_page(
+        stream: &std::path::Path,
+        span: (i64, i64),
+        take: usize,
+    ) -> Option<(Vec<u64>, Vec<String>)> {
+        let (mut seqs, mut damage, mut before) = (Vec::new(), Vec::new(), None);
+        for _ in 0..500 {
+            let held = stream.to_path_buf();
+            let got =
+                super::r3_24_edge_tests::in_time(move || span_page(&held, span, take, before))
+                    .expect("a page");
+            seqs.extend(got.page.pointers.iter().map(|(_, pointer)| pointer.seq));
+            damage.extend(got.damage);
+            if !got.more {
+                return Some((seqs, damage));
+            }
+            // A SPAN PAGE THAT SAYS MORE names where it goes on from, and it
+            // is older than every pointer it handed out.
+            let resume = got.resume.expect("a page with more names where it goes on");
+            assert!(
+                got.page
+                    .pointers
+                    .iter()
+                    .all(|(at, _)| (at.serial, at.index) >= (resume.serial, resume.index)),
+                "{resume:?}"
+            );
+            before = Some(resume);
+        }
+        None
+    }
+
+    /// **DAMAGE THE SEARCH CANNOT STEP PAST IS SEARCHED AROUND AND NAMED,
+    /// NEVER A SHORT ANSWER AND NEVER A REFUSAL THAT STANDS STILL**: more
+    /// undecodable lines in a row than `MAX_UNDECODABLE_STEPS` between two
+    /// good lines. Exactly the bound in a row is stepped past and placed
+    /// exactly. Past it the search names the damage and answers the lowest
+    /// place it proved: no line at or before the span's end lies after it.
+    /// Through the span's page every line of the span is answered and the
+    /// damage named. On repair round 1's head this refused the span in the
+    /// file, and its cursor never moved, so a client following `next` asked
+    /// the same page for ever (the third check's follow-up).
     #[test]
     fn a_damage_the_search_cannot_step_past_is_named() {
         let dir = scratch("damage");
@@ -11284,7 +11718,10 @@ mod r3_24_torn_tests {
         let cut = placed(&path, at_bound.len() as u64, 2000).expect("placed");
         assert_eq!(
             cut,
-            line(1, 1000).len() as u64,
+            Cut {
+                at: line(1, 1000).len() as u64,
+                damage: None
+            },
             "after the first line alone"
         );
 
@@ -11296,32 +11733,164 @@ mod r3_24_torn_tests {
         );
         let path = dir.join("damaged.ndjson");
         std::fs::write(&path, &damaged).expect("a file");
-        let why = placed(&path, damaged.len() as u64, 2000).expect_err("refused");
+        let cut = placed(&path, damaged.len() as u64, 2000).expect("placed");
+        let why = cut.damage.expect("the damage named");
         assert!(
             why.contains("damaged.ndjson") && why.contains("undecodable lines"),
             "{why}"
         );
+        assert_eq!(
+            cut.at,
+            damaged.len() as u64,
+            "no probe reached a line past the damage, so the end is the lowest place proved"
+        );
 
         // THROUGH THE SPAN'S PAGE: one generation holding the damaged file.
-        let stream = scratch("damage-stream");
-        std::fs::create_dir_all(stream.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
-        std::fs::write(telemetry::audit_serial_path(&stream), 0u64.to_le_bytes()).expect("serial");
-        let file = telemetry::audit_path_for(&stream, 0, 0).expect("a kept file");
-        std::fs::write(&file, &damaged).expect("the audit file");
-        let generation = telemetry::audit_generation_path(&stream, 0);
-        std::fs::create_dir_all(&generation).expect("a generation");
-        std::fs::write(
-            generation.join(telemetry::run_dirs::AUDIT_SPAN_FILE),
-            [1000i64.to_le_bytes(), i64::MAX.to_le_bytes()].concat(),
-        )
-        .expect("a span file");
-        let held = stream.clone();
-        let refused =
-            super::r3_24_edge_tests::in_time(move || span_page(&held, (0, 2000), 100, None))
-                .expect_err("named");
-        assert!(refused.contains("undecodable lines"), "{refused}");
+        let stream = one_generation("damage-stream", damaged.as_bytes(), 1000);
+        let (seqs, damage) = every_span_page(&stream, (0, 2000), 100).expect("an end");
+        assert_eq!(seqs, [1], "the span's one line, answered");
+        assert_eq!(damage.len(), 1, "{damage:?}");
+        assert!(damage[0].contains("undecodable lines"), "{damage:?}");
+        let (seqs, damage) = every_span_page(&stream, (0, i64::MAX), 100).expect("an end");
+        assert_eq!(seqs, [2, 1], "an open span searches nothing");
+        assert!(damage.is_empty(), "{damage:?}");
         let _ignored = std::fs::remove_dir_all(&dir);
         let _ignored = std::fs::remove_dir_all(&stream);
+    }
+
+    /// 40 lines, a run of `run` NUL bytes closed by a newline (a damaged
+    /// file's run, or a foreign one's), then 40 more: the text and each
+    /// line's `(start, ms)`.
+    fn around_a_run(run: usize) -> (Vec<u8>, Vec<(u64, i64)>) {
+        let (mut text, mut starts) = (Vec::new(), Vec::new());
+        for n in 0..80u64 {
+            if n == 40 {
+                text.resize(text.len() + run, 0);
+                text.push(b'\n');
+            }
+            let ms = 1000 + 2 * i64::try_from(n).unwrap();
+            starts.push((text.len() as u64, ms));
+            text.extend_from_slice(line(n + 1, ms).as_bytes());
+        }
+        (text, starts)
+    }
+
+    /// **A RUN LONGER THAN A PROBE'S WINDOW NEVER CUTS A SPAN SHORT** (the
+    /// third check of 20 Oct): 40 lines, a NUL run with no newline in it, its
+    /// newline, 40 lines; the cut asked for at every line's start and the
+    /// file's end as the search's end, and eight ends of span. The third
+    /// check's own layouts are here (runs of 100, 140, 200 and 512 KiB, the
+    /// same ends and its seven ends of span), and two past the probe's bound.
+    /// A probe read at most two lines' ceiling, 128 KiB, and answered "no
+    /// line" for a window holding no newline, so a run longer than that cut
+    /// every span over it short: the third check's probe found 160 wrong cuts
+    /// for a 512 KiB run on repair round 1's head, `bce65685a` (`nul 524288
+    /// end 529856 to 1080: line at 529720 stamped 1080 vs cut 5431`,
+    /// `state/fix/round2/verify-R3-24-r2c/probe/nul.log`). A run inside
+    /// `MAX_PROBE_BYTES` is read past and the cut is exact; a longer one is
+    /// searched around: named, and no line at or before the span's end lies
+    /// after the cut.
+    #[test]
+    fn a_run_longer_than_a_probe_window_never_cuts_a_span_short() {
+        let dir = scratch("long-run");
+        let bound = usize::try_from(super::MAX_PROBE_BYTES).unwrap();
+        let window = 2 * telemetry::MAX_LINE_BYTES;
+        let (mut exact, mut around) = (0u32, 0u32);
+        for run in [
+            100 * 1024,
+            window + 1,
+            140 * 1024,
+            200 * 1024,
+            512 * 1024,
+            bound + 4096,
+            3 * bound,
+        ] {
+            let (text, starts) = around_a_run(run);
+            let path = dir.join(format!("audit-{run}.ndjson"));
+            std::fs::write(&path, &text).expect("a file");
+            // FEWER ENDS PAST THE BOUND: each probe in the run reads it all.
+            let ends: Vec<u64> = starts
+                .iter()
+                .step_by(if run > bound { 20 } else { 1 })
+                .map(|&(start, _)| start)
+                .chain([starts[41].0, text.len() as u64])
+                .collect();
+            for &end in &ends {
+                for to in [990, 1050, 1079, 1080, 1081, 1100, 1158, 1200] {
+                    let cut = placed(&path, end, to).expect("placed");
+                    for &(start, ms) in starts.iter().filter(|&&(start, _)| start < end) {
+                        assert!(
+                            ms > to || start < cut.at,
+                            "run {run} end {end} to {to}: the line at {start} stamped {ms} is \
+                             after the cut {cut:?}"
+                        );
+                        if cut.damage.is_none() {
+                            assert_eq!(
+                                start < cut.at,
+                                ms <= to,
+                                "run {run} end {end} to {to}: the line at {start} stamped {ms} \
+                                 against the exact cut {}",
+                                cut.at
+                            );
+                        }
+                    }
+                    match cut.damage {
+                        None => exact += 1,
+                        Some(why) => {
+                            assert!(run > bound / 2, "run {run}: {why}");
+                            assert!(why.contains(&format!("audit-{run}.ndjson")), "{why}");
+                            around += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            exact > 0 && around > 0,
+            "premise: {exact} exact, {around} around"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN PAGE READS EVERY LINE AROUND A RUN OF DAMAGE, ONCE, AND ENDS**:
+    /// the layout above with a run inside the probe's bound and one three
+    /// times past it, read a page at a time at `take` = 7 and 1,000 through
+    /// each page's `resume`, for a span over the lines before the run, one
+    /// across it, one after it and an open one. Every line of the span is
+    /// answered once, and the run past the bound is named.
+    #[test]
+    fn a_span_page_reads_every_line_around_damage_once_and_ends() {
+        let bound = usize::try_from(super::MAX_PROBE_BYTES).unwrap();
+        for run in [200 * 1024, 3 * bound] {
+            let (text, starts) = around_a_run(run);
+            let stream = one_generation(&format!("run-pages-{run}"), &text, 1000);
+            for span in [(1000, 1050), (1060, 1100), (1090, 1158), (0, i64::MAX)] {
+                let mut wanted: Vec<u64> = (1u64..)
+                    .zip(&starts)
+                    .filter(|&(_, &(_, ms))| ms >= span.0 && ms <= span.1)
+                    .map(|(seq, _)| seq)
+                    .collect();
+                // NEWEST FIRST, as a span page answers.
+                wanted.reverse();
+                for take in [7, 1000] {
+                    let (seqs, damage) =
+                        every_span_page(&stream, span, take).expect("the pages end");
+                    assert_eq!(seqs, wanted, "run {run} span {span:?} take {take}");
+                    if run <= bound / 2 {
+                        assert!(damage.is_empty(), "{damage:?}");
+                    }
+                    assert!(
+                        damage.iter().all(|why| why.contains("audit")),
+                        "each named by its file: {damage:?}"
+                    );
+                }
+            }
+            let (_, damage) = every_span_page(&stream, (1060, 1100), 1000).expect("an end");
+            if run > bound {
+                assert!(!damage.is_empty(), "a run past the bound is named");
+            }
+            let _ignored = std::fs::remove_dir_all(&stream);
+        }
     }
 
     /// **AN ANSWER WITH A STREAM OR LINE IT COULD NOT READ IS NEVER CALLED
@@ -11381,7 +11950,7 @@ mod r3_24_torn_tests {
         }];
         let count = || -> usize {
             let got: serde_json::Value =
-                serde_json::from_str(&state_changes_json(&halves, 1_000)).expect("JSON");
+                serde_json::from_str(&state_changes_json(&halves, 1_000, None)).expect("JSON");
             got["rows"].as_array().expect("rows").len()
         };
         std::fs::write(&state, &text).expect("a state stream");
@@ -11394,6 +11963,60 @@ mod r3_24_torn_tests {
         std::fs::write(&state, format!("{text}\n")).expect("a state stream");
         assert_eq!(count(), 255, "the line the slice cuts is no record");
         let _ignored = std::fs::remove_dir_all(&served);
+    }
+
+    /// **A STATE STREAM THE SINK REFUSED IS NAMED ON THE AUDIT ANSWER, NEVER
+    /// AN EMPTY ONE** (R3-24 repair round 2, the third check's follow-up):
+    /// a directory that is not empty holds the state stream's name, so the
+    /// sink refuses the stream by name (R324-17). `/audit.json`'s state
+    /// changes used to answer 0 rows with `unread: []`; now the absent stream
+    /// is in `no_stream` and the serving sink's refusal in
+    /// `served_state_error`. A directory whose stream is there lists neither.
+    #[test]
+    fn a_state_stream_the_sink_refused_is_named_on_the_audit_answer() {
+        let served = scratch("refused-state");
+        let taken = telemetry::run_dirs::state_stream_of(&served);
+        std::fs::create_dir_all(&taken).expect("a directory where the stream goes");
+        std::fs::write(taken.join("someone-elses"), b"x").expect("not empty");
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("opens");
+        let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+        let health = sink.state_health().expect("named, not absent");
+        let why = health.last_error.clone().expect("the refusal named");
+        drop(sink);
+        let halves = [Half {
+            name: "served",
+            path: served.clone(),
+        }];
+        let got: serde_json::Value =
+            serde_json::from_str(&state_changes_json(&halves, 20, Some(&health))).expect("JSON");
+        assert_eq!(got["rows"].as_array().unwrap().len(), 0, "{got:#}");
+        assert_eq!(got["unread"].as_array().unwrap().len(), 0, "{got:#}");
+        assert_eq!(got["no_stream"][0]["half"], "served", "{got:#}");
+        assert!(
+            got["no_stream"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with(&taken.display().to_string()),
+            "{got:#}"
+        );
+        assert_eq!(got["served_state_error"], why.as_str(), "{got:#}");
+
+        let held = scratch("held-state");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&held)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+        }
+        let halves = [Half {
+            name: "served",
+            path: held.clone(),
+        }];
+        let got: serde_json::Value =
+            serde_json::from_str(&state_changes_json(&halves, 20, None)).expect("JSON");
+        assert_eq!(got["rows"].as_array().unwrap().len(), 1, "{got:#}");
+        assert_eq!(got["no_stream"].as_array().unwrap().len(), 0, "{got:#}");
+        assert!(got["served_state_error"].is_null(), "{got:#}");
+        let _ignored = std::fs::remove_dir_all(&served);
+        let _ignored = std::fs::remove_dir_all(&held);
     }
 
     /// **A LINE AN EARLIER RULE LET INTO THE NEVER-ROLLING STREAM IS NOT SHOWN
@@ -11428,8 +12051,12 @@ mod r3_24_torn_tests {
             path: served.clone(),
         }];
         let answer = |halves: &[Half]| -> serde_json::Value {
-            serde_json::from_str(&state_changes_json(halves, super::STATE_CHANGES_SHOWN))
-                .expect("JSON")
+            serde_json::from_str(&state_changes_json(
+                halves,
+                super::STATE_CHANGES_SHOWN,
+                None,
+            ))
+            .expect("JSON")
         };
         let got = answer(&halves);
         let rows = got["rows"].as_array().expect("rows");

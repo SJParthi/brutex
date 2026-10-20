@@ -1757,7 +1757,7 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/gaps_route.rs", 1),
     ("crates/api/src/import_journal.rs", 3),
     ("crates/api/src/imports.rs", 3), // 2 -> 3, AF-02 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
-    ("crates/api/src/logs.rs", 8), // 2 -> 8, R3-24 (docs/06-limits.md)
+    ("crates/api/src/logs.rs", 7), // 2 -> 8, R3-24; 8 -> 7, its repair round 2 (docs/06-limits.md)
     ("crates/api/src/scrub_route.rs", 3),
     ("crates/cli/src/scrub_blocks.rs", 1),
     ("crates/pull/src/expiry_alias.rs", 4),
