@@ -19835,3 +19835,37 @@ Scripts and raw figures are in the AH-04 report
 | L-HA-01 | `store::header::slot_audit` and the audit every `BarFile` open now takes | it is O(1): exactly `MAX_SLOTS` (two) 64-byte decodes and CRC-32C checks at the fixed `SLOT_STRIDE` positions, whatever the region or the file holds beyond them; the open's selection is not repeated (`read_region_at` audits against the generation it already chose) | C-HA-01 (`cargo bench -p store --bench ratio`, a damaged newest slot so the timed call takes the naming path): ratio 0.992x at a 10x region and 1.000x at 100x against a 56,250 ps base (200 calls each, gate 8 ceiling 3.0x); one call at a time at the 100x region, n = 1,000: p50 83 ns, p99 125 ns, max 375 ns (19 Oct 2026 after merging `feat/db-fix`; an earlier run the same day gave 0.990x and 0.993x on a 66,875 ps base and the same p50, p99 and max). Over the real store, read-only, 19 Oct 2026 (header region read with `pread`, `slot_audit` timed alone, 4 workers): 2,349,724 month files under `bars/` p50 292 ns, p99 2,708 ns, max 17.84 ms; 64,147 under `bar-revisions-v1/` p50 291 ns, p99 2,250 ns, max 26.79 ms (`bar-generations-v1/` held none); every one `clean`, none damaged or reverted, by every vendor, segment and rung. The two maxima are single calls on a machine shared by about twelve agents, timed around a call whose work does not depend on the file; they are scheduling, not size, and are stated rather than dropped. The route that opens the month on every request, `/bars/window.json` (`limit=1000`, 2026-09), n = 200 sequential GETs on a release build over a shadow of the real store, 19 Oct 2026: NIFTY GDFL 1s p50 1.249 / p99 1.578 / max 2.404 ms; NIFTY Zerodha 1min 1.234 / 1.553 / 4.301 ms; BANKNIFTY GDFL 1s 1.281 / 1.660 / 4.534 ms; RELIANCE Zerodha 1min 1.199 / 1.919 / 7.581 ms; and over a private copy of NIFTY 1s 2026-09 with its newest slot damaged, 1.295 / 1.917 / 4.237 ms, and its event log and audit stream each held 203 `store.header.slot_damaged` lines afterwards: one per open (these 200 requests, two probes and one open at start). No feat/db-fix baseline was served beside it; the audit is the C-HA-01 cost inside each open. The `store.header.slot_damaged` line is at most one per open and only beside a damaged slot; a month opened on every request of a route writes one line per open, which is what "once per open" costs | R4-09a |
 | L-HA-02 | A damaged slot's generation is not read when its checksum fails | the format guarantees no byte of a slot whose CRC fails, so the generation stays unknown (D-6241) and the month is named `reverted` ("possibly"), never `clean`. Whether a newer commit was really lost cannot be decided from the header alone | the census row recorded for that month (its `rows`) can be compared with the header read; that comparison is R4-09's read-only scrub and is NOT DONE in this part | R4-09 |
 | L-HA-03 | `cli census-recount` names every non-clean month, uncapped | a store whose every month is damaged prints one line per month; capping it would hide the month an operator looks for (D-6242) | one line per damaged month file in range, no more; a clean store prints one count line | R4-09a |
+
+## The sources' walks, the per-day container faults and the close's listing (IA-3; D-4815, D-4818, D-4834, D-4866, D-5903)
+
+Each walk below is once per source object, never per day or per request. A
+run holds one source object per kind, so a walk is paid once per run; the
+api's source cache that would keep one across runs (D-4802, the rest of
+L-IA-8) is NOT BUILT.
+
+**Measured** (20 Oct 2026, M4 Pro on the loaded shared machine, release,
+sequential, one call per sample, the ignored test `ia3_lookup_costs` over the
+operator's real sources, read only; a second agent repeats it with
+`BRUTEX_GDFL_TICKSTORE`, `BRUTEX_GDFL_CM_ARCHIVE` and `BRUTEX_GDFL_DAYZIPS`
+set and `cargo test --release -p pull --lib -- --ignored --nocapture
+ia3_lookup_costs`): the tick store's `cm` walk 81 ms cold (4,002 day files
+held, 0 misfiled, 2 stray: `cm/.lock`, `cm/ingest-log.tsv`), its `options`
+walk 38 ms (2,001 held, 18 stray); the misfiled probe after the walk n=20,000
+p50 under the 41 ns clock, p99 42 ns, max 1,166 ns; a tick-store index-day
+listing digest n=267 p50 6.8 us, p99 66.7 us, max 241 us; an options-day
+listing digest n=41 p50 1.65 ms, p99 2.93 ms, max 2.93 ms (O(entries), about
+11,000 entries a day); the CM archive's directory read once in 2 ms (4,209
+entries, 215 folder entries, nothing misfiled or invalid) and a day's listing
+out of it n=400 p50 212 us, p99 1.0 ms, max 2.4 ms (the day zip's own
+directory, read from disk); the loose root's walk 1.8 ms (12 zips) and a day
+lookup n=400 p50 84 ns, p99 166 ns, max 10.8 us. C-GI-04 in gate 8's ratio
+bench (`crates/pull/benches/ratio/day_table.rs`, invented, in memory): the
+CM archive's day lookup at 10x and 100x the days is 1.009x and 1.008x the 1x
+cost, p50 750 ns, p99 833 ns, max 74 us over n=20,000 at 10,000 days.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-8 | The `dayzips` walk and the tick store's tree walks (part of L-IA-8; the year zips and the archive directory are read as before) | a loose root is walked when `DayZips::open` runs; a tick-store tree (`cm`, `options`) the first time a day of it is asked, and every lookup after is one hash probe | O(entries): `dayzips` ≤ `DAYZIPS_WALK_CAP` = 100,000 (refused whole past it); a tick-store tree ≤ `TICKSTORE_WALK_CAP` = 1,000,000 (past it every day the tree lacks at its own place is refused with the walk's fault). The real tick store holds about 18,400 entries (design §10.2) and the loose root 12 zips in 9 folders | IA-3 |
+| L-IA-59 | The listing digest on a day's close (D-5903) | the BLAKE3 of every entry's name, size and CRC-32, in listing order | O(entries of the day), the same pass the listing already is: ≤ 26,820 entries on the largest options day measured (design §10.2) | IA-3 |
+| L-IA-60 | The verified member kept with the decode (design §5.1 seam 4) | `DayFile.bytes` and `NfoDayFile.bytes` hold the member's bytes as long as the decoded file is held; one copy of the fetched bytes is made into the shared buffer | O(bytes of the file) per file in hand, a second copy of each file the day's workers hold at once; the decoded rows were already held beside it. The memory bound of a whole day is L-IA-12's | IA-3 |
+| L-IA-61 | The archive's per-day faults (D-4818) | the outer directory, already in memory, is walked twice: once for the day span that sizes the dense table, once to fill it with each day's zip or its refusal | O(entries) once per archive, as before; a day is one index into a cell of 24 bytes, as before | IA-3 |

@@ -74689,3 +74689,181 @@ back to.
 `a_damaged_sealed_head_is_refused_never_read_short`);
 `cli::census_recount::tests::a_month_read_in_its_sealed_form_names_no_slot_and_is_recorded`.
 Invariant HA-06.
+
+### D-4818 — A container fault refuses its own day, never the archive, and never closes the day — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_archive.rs`,
+`crates/pull/src/gdfl_import_causes.rs`). **Findings** F13, F38 of the
+ingest-automation design; FM-040, FM-044 and FM-026 of the failure matrix.
+
+**What was observed.** `Archive::from_source` refused the WHOLE capital-market
+outer zip for one compressed day zip (`archive_member_compressed`) or for two
+day zips of one day (`archive_duplicate_day`), so one packaging slip stopped
+every day of every run, while the options year zips refused only that day.
+And `cm_cause` gave those two codes and `archive_method_unknown`
+`Cause::vendor`, which CLOSES a day, though removing a copy, re-zipping it or
+a build that reads the method fills the day.
+
+**Decided.** (1) Every fault of a day zip is decided per (tree, day) when the
+outer directory is read once, and answered by `CmSource::day` for that day
+only: two copies of the day wherever each lies are `archive_duplicate_day`; a
+lone copy under another folder than its own name's is `day_zip_misfiled
+{found, expected}` (D-4834's rule, the same for the archive, the loose zips
+and the tick store, D-4866); a lone copy the reader cannot take as it is
+stored is `archive_member_compressed` or `archive_member_encrypted`. Every
+other day reads. (2) The general-purpose flag's bit 0 refuses a member
+`archive_member_encrypted{member}` before any byte is inflated, in every
+zip reader (`member_bytes`, `stored_span`), never as a corrupt member or a
+CRC mismatch. (3) A zip whose central directory, as its end record states it,
+ends before the next record actually starts is `archive_prefixed{bytes}`:
+the ZIP64 end record is found from the end record (76 bytes before it when it
+states the size of a record with no extensible data), not from the locator's
+stated offset, and the check runs before the directory is read. Offsets are
+never adjusted. (4) None of these closes a day: `cm_cause` gives
+`archive_duplicate_day`, `archive_member_compressed`,
+`archive_method_unknown`, `archive_member_encrypted`, `archive_prefixed`,
+`day_zip_misfiled` and `day_file_misfiled` `Cause::open(Stage::Vendor, ..)`
+in the same change that made them per day, so no build closes a day for one.
+No second code is minted. (5) The names beside the day zips are an archive
+census: folder entries and stray files counted, misfiled and invalid
+day-zip names counted and the first 16 of each named (D-4817).
+
+**Cost.** Unchanged: the directory is read once, O(entries), and walked
+twice in memory to size and fill the dense day table, whose cell now holds
+the day zip or the refusal of its day (24 bytes as `Option<Slot>`, as the
+plain cell was, so the table's stated worst case stands); a day is one index.
+No map and no sort is added to the reader (CM-13's pin).
+
+**Proof.** `outer_member_not_stored_refuses`, `two_members_for_one_day_refuse`
+(both changed to day level), `an_encrypted_member_is_refused_by_its_own_name`,
+`a_zip_with_bytes_before_its_first_record_is_refused_by_name`,
+`a_misfiled_day_zip_is_named_where_it_was_found`,
+`an_impossible_day_zip_name_is_named`, `no_container_fault_closes_a_day`
+(IA-GR-27), `names_that_are_not_day_zips_are_ignored_and_counted`, in
+`crates/pull/src/gdfl_archive.rs`.
+
+### D-4817 — Near-miss names are named, not just counted: at most 16 per reason per source — 2026-10-20
+
+**Implemented by** IA-3. A day-zip name under another folder than its own, a
+day-zip name whose date is not real or lies outside the calendar's measured
+span, and a stray entry of a loose-zip root or a tick-store tree are each
+counted, and the first 16 of each reason are kept by name (4 for a loose
+root's strays, the run line's bound, design §8 A19) in the source's census
+(`ArchiveCensus`, `DayZipsCensus`, `DayTable`). A count with no names was
+the gap: 43 of 50 index files of 2018-11-07 appear nowhere today. Showing
+these names on `/ingest` is IA-10a's and IA-12a's; the run line's
+`ignored_entries` field is IA-1's door. **Proof.**
+`an_impossible_day_zip_name_is_named`, `a_loose_zip_in_the_wrong_kind_or_month_folder_is_named`,
+`the_tick_stores_writer_files_are_never_opened`.
+
+### D-4828 — A CM day zip may name its files with `\` as well as `/` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_cm.rs`, with the two readers of
+a day folder's names in `crates/pull/src/gdfl_import.rs`, `cm_jobs` and
+`cm_present`). The options reader already accepted both separators
+(`entry_ticker`); the CM listing took only `/` and skipped every other entry,
+so a day zip written by another tool would have closed `done files=0`. Now
+`gdfl_cm::in_folder` reads `<folder>/` and `<folder>\` alike, the listing,
+the import's job list and the member probe all use it (one reading of a day
+folder's names, so a probe and a read never disagree), `ListedFile::name`
+splits at either, and the listing counts the files named with `\`
+(`DayListing::backslash`), the count D-4841's `separator_backslash` field
+records when its owner lands the ledger's `v=2` lines. **Proof.**
+`a_cm_day_zip_with_backslash_paths_reads_like_forward_slashes` (a filtered and
+an unfiltered run) in `crates/pull/src/gdfl_ia3_tests.rs`.
+
+### D-4835 — A wanted stem with no extension is refused `extension_missing`, never skipped — 2026-10-20
+
+**Implemented by** IA-3. `NIFTY 50.NSE_IDX` or `RELIANCE.NSE` with no
+extension was split at its last dot into the foreign stem `NIFTY 50` and
+skipped, so the day read as if the file were absent. Now an entry whose WHOLE
+name is a stem of the listing's scope is `extension_missing{stem}`: the
+ticker slot holds it whatever order its names came in, `locate` and
+`read_listed` refuse it, and the import refuses it where the run wants the
+series it would be filed under, once per ticker (a second name of the ticker
+is a skip, as for twins). It is the vendor's own name for the file, read the
+same way every time, so it closes the day `done` with that refusal
+(`Cause::vendor`). **Proof.** `a_wanted_stem_with_no_extension_is_refused_by_name`.
+
+### D-4815 — Loose day zips are a third GDFL source kind, `dayzips` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_dayzips.rs`): `DayZips` is a
+`CmSource` and an `NfoSource`, so the 12 loose zips of 2026-09-25..30 (which
+neither archive holds) read with the same import and, for V-2b, the same
+cold verify as the archives. Not yet a source WORD: `gdfl_run`'s
+`SourceWord`, `SourceId` and `BRUTEX_GDFL_DAYZIPS`, and `Origin`'s
+measurement of the root, are the run's door (IA-1's file) and are named NOT
+DONE in IA-3's report.
+
+### D-4834 — `dayzips` reads one layout and nothing else, walked once and capped — 2026-10-20
+
+**Implemented by** IA-3. `<ROOT>/{INDICES,STOCKS,OPTIONS}/<MON_yyyy>/<name>.zip`,
+`<name>` the day's own folder name. The root is walked once when the source
+opens, links never followed, at most 100,000 entries
+(`dayzips_too_many_entries`: the root is refused whole and no day is filed
+from a walk that did not finish). Every name is filed in a map by kind and
+day, so a day is one hash probe and a far-dated name sizes nothing. A name
+with a day prefix whose date is not real or outside the calendar's measured
+span (`calendar::exchange_kind_of` answers `Unmeasured`) is
+`day_zip_name_invalid`, named in the census and never filed. Two copies of a
+day wherever each lies (another month folder, a `... (1).zip` beside it)
+are `archive_duplicate_day`; a lone copy under another folder is
+`day_zip_misfiled{found, expected}`; a link, pipe or device at a day zip's
+name is a copy the store's reading door refuses by name when the day is
+asked; a zip gone since the walk is `archive_unavailable` (not found), never
+a day the source does not hold. Each refuses its day only and never closes it
+(D-4818). **Proof.** the ten tests of `crates/pull/src/gdfl_dayzips_tests.rs`.
+
+### D-4866 — The tick store as a source: its day table, misfiled day files and the writer's files — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_tickstore.rs` for the `cm`
+tree, `crates/pull/src/gdfl_nfo.rs` for the `options` tree). Each tree is
+walked once, the first time a day is asked (`DayTable::walk`, at most
+1,000,000 entries), links never followed and dot-names never descended.
+A `.bts` outside its `<tree>/<yyyy>/<MON_yyyy>/` folder is
+`day_file_misfiled{found, expected}` for its day, whether or not a copy also
+sits at its own place (the archives' rule, D-4818), and never closes it; until
+now that day read `day_not_held`, silently. A `*.bts.tmp`, the writer's own
+`.lock` and `ingest-log.tsv`, its logs and tools are stray entries: counted,
+the first 16 named, never opened, locked or written. A day's own place is
+still opened by its exact path, so a day the writer publishes by rename after
+the walk is read whole (`FORMAT.md` §2; the writer's own code is outside this
+repository, UNVERIFIED). A walk that could not finish refuses every day the
+tree lacks at its own place with its fault, never reads it as absent.
+**Proof.** `a_misfiled_tick_store_day_is_named_where_it_was_found`,
+`the_tick_stores_writer_files_are_never_opened` (every stray entry a pipe, so
+an open would hang the test).
+
+### D-5903 — A day's close records what its listing was: `skipped=`, `entries=` and `listing=` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_import_day.rs`,
+`crates/pull/src/gdfl_import.rs`, `crates/pull/src/gdfl_cm.rs`). **Finding**
+DB-A49 (FM-119): the 2018-09-03 indices zip holds 54 files and its journal
+line said `files=2`; the other 52 were named nowhere, `files_skipped` was a
+run total printed to the cli's stdout, and the event log that carried a
+day's info lines rotates (the 6 October import's are gone).
+
+**Decided.** Every `done` and `incomplete` line appends, after the D-2822
+stats and before any later field, ` skipped=<n>`: the day's entries that
+were not wanted files (off the scope, outside the filter, a second name of a
+ticker, not a file of the day folder); and, when the day's listing was read,
+` entries=<n> listing=<64 hex>`: the listing's entry count and the BLAKE3 of
+every entry's name, a zero byte, its stated length and its stated CRC-32
+(eight and four bytes, little-endian), in the source's order
+(`gdfl_cm::ListingSum`). Two closes that agree on the digest were made from
+listings naming the same files with the same sizes and checksums, so what a
+day skipped is counted for ever and can be identified against any copy of
+the source. A day a census stop cut short writes `skipped=` alone and no
+listing: it claims no listing nobody read. A day whose listing was refused,
+or that the source does not hold, closes `refused` as before, a line that
+carries no counts at all. Readers find every field by name
+(`count_of`), so no earlier field moved and every older line still reads.
+The cost is the listing's own O(entries) pass, once per day.
+
+**Not decided here.** The per-file names of the skipped entries (the digest
+identifies them against the source, the names live in the source); serving
+the counts on a page is R3-23's.
+
+**Proof.** `the_close_line_carries_skipped_and_the_listing` and
+`a_day_with_no_listing_claims_none` in `crates/pull/src/gdfl_ia3_tests.rs`;
+the pinned close line of `gdfl_import_tests`.

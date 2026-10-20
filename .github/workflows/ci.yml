@@ -1898,6 +1898,17 @@ jobs:
           # and naming a failure at 1x, 10x and 100x (C-GR-06). Inside a
           # `#[cfg(test)]`-mounted module; no production path reaches them.
           declared="$declared pull/src/gdfl_run_tests.rs:println!:4"
+          # TWO MORE FILES, the same kind, from IA-3 (20 Oct 2026): both prints
+          # are in `#[ignore]`d tests run by hand over the operator's real
+          # sources, read only, and no production path reaches either.
+          #   pull/src/gdfl_archive.rs println! 4: the real containers' day
+          #     spans, census, prefix and descriptor counts (IA-0b's facts).
+          #   pull/src/gdfl_ia3_tests.rs println! 17: the walks' cold times
+          #     and the n, p50, p99 and max of the day lookups and the
+          #     listing digest (L-IA-8, L-IA-59, L-IA-61), and each real
+          #     day's two close lines read from two sources (NIFTY first).
+          declared="$declared pull/src/gdfl_archive.rs:println!:4
+          pull/src/gdfl_ia3_tests.rs:println!:17"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
