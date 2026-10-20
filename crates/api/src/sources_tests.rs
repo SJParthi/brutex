@@ -2083,3 +2083,14 @@ fn stamps_print_in_ist_to_the_second() {
     assert_eq!(day_param("2019-02", "from", true), Ok(day(2019, 2, 28)));
     assert!(day_param("2019-02-30", "from", false).is_err());
 }
+
+/// A month file name with a SIGNED field is not a held month
+/// (cloud-attack-law-20261016, lens 8): `2024-+3.bin` passed the length
+/// check and `str::parse` read it as March 2024.
+#[test]
+fn a_signed_month_file_name_is_not_listed_as_a_held_month() {
+    assert_eq!(month_of_text("2024-03"), YearMonth::new(2024, 3).ok());
+    for bad in ["2024-+3", "+024-03", "2024-3", "02024-03", "2024-003"] {
+        assert_eq!(month_of_text(bad), None, "{bad}");
+    }
+}

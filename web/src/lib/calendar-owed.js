@@ -24,7 +24,8 @@ export function foldMinuteOwed(from, to, exchangeOwed, indexOwed, addDay) {
   const index = new Map();
   /** @type {Set<string>} */
   const indexUnknown = new Set();
-  if (!from || !to || from > to) return { exchange, index, indexUnknown };
+  // A span that runs backwards walks no day below.
+  if (!from || !to) return { exchange, index, indexUnknown };
   let day = from;
   while (day <= to) {
     const owed = exchangeOwed.get(day);
@@ -151,10 +152,18 @@ export function denseOwed(body) {
   const days = typeof body?.days === 'string' ? body.days : '';
   const from = body?.from;
   if (!days || !Number.isSafeInteger(from)) return { owed, indexOwed };
-  const regular = Number.isSafeInteger(body?.minuteOwed?.regular) ? body.minuteOwed.regular : null;
-  /** @type {Map<number, any>} */
+  // A BODY IS IN HAND HERE: the guard above read its day string.
+  const regular = Number.isSafeInteger(body.minuteOwed?.regular) ? body.minuteOwed.regular : null;
+  // THE SPECIAL DAYS, KEYED BY THEIR DAY, so each day of the walk is one probe
+  // (O(1) per day, CLAUDE.md §3 rule 4; a linear `find` per day made the walk
+  // days × specials). The FIRST entry for a day is the one read, as a scan
+  // from the front would read it; an answer with no list sizes none.
+  /** @type {Map<unknown, any>} */
   const special = new Map();
-  for (const entry of Array.isArray(body?.special) ? body.special : []) special.set(entry?.day, entry);
+  for (const entry of Array.isArray(body.special) ? body.special : []) {
+    const at = entry?.day;
+    if (!special.has(at)) special.set(at, entry);
+  }
   for (let at = 0; at < days.length; at += 1) {
     const code = days[at];
     if (code === '.' || code === '-') continue;
@@ -221,14 +230,20 @@ function pause(ms, signal) {
  * @returns {Promise<{ response: Response, body: any }>}
  */
 async function settledCalendar(url, request, signal, wait) {
-  for (let asked = 1; ; asked += 1) {
-    const response = await request(url, { cache: 'no-store', signal });
-    if (response.status !== 202) return { response, body: undefined };
-    const body = await response.json();
-    if (body?.status !== 'building' || asked >= CALENDAR_BUILDING_TRIES) return { response, body };
+  // ONE LOOP WITH ONE EXIT, so every path through it is a path a test can
+  // walk: an endless `for (;;)` left an unreachable tail behind its returns.
+  let response = await request(url, { cache: 'no-store', signal });
+  /** @type {any} */
+  let body;
+  for (let asked = 1; response.status === 202; asked += 1) {
+    body = await response.json();
+    if (body?.status !== 'building' || asked >= CALENDAR_BUILDING_TRIES) break;
     const hint = Number(body.retry_after_ms);
     await wait(Number.isFinite(hint) && hint >= 50 ? hint : 250, signal);
+    body = undefined;
+    response = await request(url, { cache: 'no-store', signal });
   }
+  return { response, body };
 }
 
 /**
@@ -275,7 +290,7 @@ export async function askCalendar(url, request, signal, wait = pause) {
  *   is a session. `held`, the default, is the answer every caller got before.
  * @returns {Promise<Calendar>}
  */
-export async function readCalendar(feed, request, signal, wait = pause, span = 'held') {
+export async function readCalendar(feed, request, signal, wait = pause, span) {
   try {
     const { response, body: building } = await settledCalendar(
       `/calendar.json?feed=${encodeURIComponent(feed)}${span === 'record' ? '&span=record' : ''}`,
@@ -363,7 +378,7 @@ export async function readCalendar(feed, request, signal, wait = pause, span = '
  *   span?: 'held' | 'record'
  * }} options `span: 'record'` reads the calendar of record's whole span (DB-B42).
  */
-export function createCalendarLoader({ request, apply, requests, span = 'held' }) {
+export function createCalendarLoader({ request, apply, requests, span }) {
   return {
     /** @param {string | null | undefined} feed */
     load(feed) {
@@ -449,7 +464,8 @@ export function monthsBetween(from, to) {
   const endY = Number(to.slice(0, 4));
   const endM = Number(to.slice(5, 7));
   while (y < endY || (y === endY && m <= endM)) {
-    out.push(`${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`);
+    // A year of the record has four digits; a month is padded to two.
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
     m += 1;
     if (m > 12) {
       m = 1;
@@ -463,19 +479,33 @@ export function monthsBetween(from, to) {
  * ONE FEED'S CALENDAR OF RECORD AT ONE RUNG, as prefix sums.
  *
  * `index`, `share` and `cas` are the three ways a day can be owed:
- * - `index` — an index (and a future): a regular or auction day owes
- *   `owed.regular`; a special or halt day its `indexOwed` (the systems-outage
- *   day of 2021-02-24 has none: SEBI recorded no common index computation,
- *   D-0420, so it is UNKNOWN, never the exchange's 220).
+ * - `index` — an index: a regular or auction day owes `owed.regular`; a
+ *   special or halt day its `indexOwed` (the systems-outage day of
+ *   2021-02-24 has none: SEBI recorded no common index computation, D-0420,
+ *   so it is UNKNOWN, never the exchange's 220).
  * - `share` — a share that is NOT closing-auction eligible: an auction day
  *   owes `owed.regular`.
  * - `cas` — a CAS-eligible share from 2026-08-03 (D-3320): an auction day
  *   owes `owed.casEligible` (360 at 1min: Zerodha's landing ends at 15:14).
+ * - `deriv` — a future (SC-CLOSE-17): a regular or auction day owes the
+ *   derivatives venue's own count for its era, `owed.derivatives[].regular`
+ *   (375 at 1min to 2026-08-02 and 385 from the 15:40 close, NSE/FAOP/74467,
+ *   both the server's). It used to be judged as an index, at 375 on every
+ *   day. A special or halt day, and every day of an answer that serves no
+ *   derivatives row, is UNKNOWN: the server sizes no derivatives special
+ *   session, and an index count is not one.
  *
  * A `U` day (a session of unmeasured length) and a special day with no count
  * are UNKNOWN in the kind they lack: counted in `unknown*`, contributing
  * nothing to the owed sum, so a reader can say "owed excludes N days" rather
  * than invent a length (D-3336 §1, CLAUDE.md §3 rule 1).
+ *
+ * `unheld*` is what the sessions the series HOLDS NO BAR ON owe, in each
+ * kind, read off a series answer's held digits (`0` on a session): a floor
+ * under what the series misses that no bar on another day can lower (R3-04,
+ * DB-014). A month total cannot place a surplus, so it used to let the
+ * extra seconds of twenty held days cover the whole of a twenty-first that
+ * was never held (GDFL 2022-03-07). A `-` digit (not read) owes no floor.
  *
  * Refuses a body with no day string or a held string of the wrong length:
  * a malformed calendar is a named failure, never an empty one.
@@ -497,26 +527,37 @@ export function owedLedger(body) {
     throw new Error(`/calendar.json held string is ${heldText.length} days against ${n} day codes`);
   }
   const int = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) ? /** @type {number} */ (v) : null);
-  const regular = int(body?.owed?.regular);
-  const casEligible = int(body?.owed?.casEligible);
-  /** @type {Map<number, any>} */
-  const special = new Map();
-  for (const entry of Array.isArray(body.special) ? body.special : []) {
-    if (Number.isSafeInteger(entry?.day)) special.set(entry.day, entry);
-  }
-  /** @type {Map<number, any>} */
-  const halts = new Map();
-  for (const halt of Array.isArray(body.halts) ? body.halts : []) {
-    if (Number.isSafeInteger(halt?.day)) halts.set(halt.day, halt);
-  }
+  const regular = int(body.owed?.regular);
+  const casEligible = int(body.owed?.casEligible);
+  // A SPECIAL OR HALT ENTRY WITH NO DAY IS REFUSED, never skipped, as a
+  // withheld run is: dropped, its day would read as a day nobody sized.
+  /** @param {unknown} list @param {string} name */
+  const byDay = (list, name) => {
+    /** @type {Map<number, any>} */
+    const by = new Map();
+    for (const entry of Array.isArray(list) ? list : []) {
+      if (!Number.isSafeInteger(entry?.day)) throw new Error(`/calendar.json \`${name}\` carries an entry with no day: ${JSON.stringify(entry)}`);
+      by.set(entry.day, entry);
+    }
+    return by;
+  };
+  const special = byDay(body.special, 'special');
+  const halts = byDay(body.halts, 'halts');
+  const derivatives = derivativeEras(body.owed?.derivatives);
   const prefix = () => new Float64Array(n + 1);
   const sessions = prefix();
   const index = prefix();
   const share = prefix();
   const cas = prefix();
+  const deriv = prefix();
   const unknownIndex = prefix();
   const unknownShare = prefix();
   const unknownCas = prefix();
+  const unknownDeriv = prefix();
+  const unheldIndex = prefix();
+  const unheldShare = prefix();
+  const unheldCas = prefix();
+  const unheldDeriv = prefix();
   const auction = prefix();
   const specials = prefix();
   const halted = prefix();
@@ -528,54 +569,58 @@ export function owedLedger(body) {
   const heldDays = prefix();
   const heldSessions = prefix();
   const closedHeld = prefix();
-  for (let at = 0; at < n; at += 1) {
-    const code = codes[at];
+  // THE ERA A DAY FALLS IN, by a cursor that only moves forward: the days
+  // ascend and the eras are disjoint and sorted, so the walk stays one pass.
+  let era = 0;
+  [...codes].forEach((code, at) => {
     const day = from + at;
     const session = SESSION_CODES.has(code);
+    while (derivatives !== null && era < derivatives.length && derivatives[era].to < day) era += 1;
+    const derivDay =
+      derivatives !== null && era < derivatives.length && derivatives[era].from <= day ? derivatives[era].regular : null;
+    // THREE KINDS OF DAY: a regular one, an auction one, and every other —
+    // a special or halt day by its record, and a closed, unsized or outside
+    // day by its having none (owed nothing, and unknown only if a session).
+    const sized = special.get(day);
+    const regularDay = code === 'R' || code === 'X';
     /** @type {number | null} */
-    let i = 0;
+    const i = regularDay ? regular : int(sized?.indexOwed);
     /** @type {number | null} */
-    let s = 0;
+    const s = regularDay ? regular : int(sized?.owed);
     /** @type {number | null} */
-    let c = 0;
-    if (code === 'R') {
-      i = regular;
-      s = regular;
-      c = regular;
-    } else if (code === 'X') {
-      i = regular;
-      s = regular;
-      c = casEligible;
-    } else if (code === 'P' || code === 'H') {
-      const sized = special.get(day);
-      i = int(sized?.indexOwed);
-      s = int(sized?.owed);
-      c = s;
-    } else if (code === 'U') {
-      i = null;
-      s = null;
-      c = null;
-    }
+    const c = code === 'X' ? casEligible : s;
+    /** @type {number | null} */
+    const d = regularDay ? derivDay : null;
     const held = heldText === null ? 0 : heldText[at] !== '-' && heldText[at] !== '0' ? 1 : 0;
+    // A SESSION READ AND NOT HELD: its digit is `0`. Never `-`, which is a
+    // day nobody read, and never a closed day, which owes nothing.
+    const unheld = session && heldText !== null && heldText[at] === '0' ? 1 : 0;
     sessions[at + 1] = sessions[at] + (session ? 1 : 0);
     index[at + 1] = index[at] + (i ?? 0);
     share[at + 1] = share[at] + (s ?? 0);
     cas[at + 1] = cas[at] + (c ?? 0);
+    deriv[at + 1] = deriv[at] + (d ?? 0);
     unknownIndex[at + 1] = unknownIndex[at] + (session && i === null ? 1 : 0);
     unknownShare[at + 1] = unknownShare[at] + (session && s === null ? 1 : 0);
     unknownCas[at + 1] = unknownCas[at] + (session && c === null ? 1 : 0);
+    unknownDeriv[at + 1] = unknownDeriv[at] + (session && d === null ? 1 : 0);
+    unheldIndex[at + 1] = unheldIndex[at] + unheld * (i ?? 0);
+    unheldShare[at + 1] = unheldShare[at] + unheld * (s ?? 0);
+    unheldCas[at + 1] = unheldCas[at] + unheld * (c ?? 0);
+    unheldDeriv[at + 1] = unheldDeriv[at] + unheld * (d ?? 0);
     auction[at + 1] = auction[at] + (code === 'X' ? 1 : 0);
     specials[at + 1] = specials[at] + (code === 'P' ? 1 : 0);
     halted[at + 1] = halted[at] + (code === 'H' ? 1 : 0);
     unmeasured[at + 1] = unmeasured[at] + (code === 'U' ? 1 : 0);
     haltBars[at + 1] =
-      haltBars[at] + (code === 'H' && regular !== null && s !== null ? Math.max(0, regular - s) : 0);
+      // No regular count reads 0, and a halt then leaves nothing unowed.
+      haltBars[at] + (code === 'H' && s !== null ? Math.max(0, Number(regular) - s) : 0);
     heldDays[at + 1] = heldDays[at] + held;
     heldSessions[at + 1] = heldSessions[at] + (session ? held : 0);
     closedHeld[at + 1] = closedHeld[at] + (code === '.' ? held : 0);
-  }
+  });
   const heldBy = Array.isArray(body.heldBy) ? body.heldBy.map(String) : [];
-  const target = body?.target ?? null;
+  const target = body.target ?? null;
   return {
     feed: typeof body.feed === 'string' ? body.feed : '',
     rung: typeof body.rung === 'string' ? body.rung : '',
@@ -593,10 +638,49 @@ export function owedLedger(body) {
         : null,
     regular,
     casEligible,
+    derivatives,
     special,
     halts,
-    sum: { sessions, index, share, cas, unknownIndex, unknownShare, unknownCas, auction, specials, halted, unmeasured, haltBars, heldDays, heldSessions, closedHeld }
+    sum: {
+      sessions, index, share, cas, deriv,
+      unknownIndex, unknownShare, unknownCas, unknownDeriv,
+      unheldIndex, unheldShare, unheldCas, unheldDeriv,
+      auction, specials, halted, unmeasured, haltBars, heldDays, heldSessions, closedHeld
+    }
   };
+}
+
+/**
+ * `owed.derivatives` of a `/calendar.json` answer as sorted eras, epoch
+ * days inclusive, or `null` when the answer serves none (an older server):
+ * then no future can be owed a count, and the page says so (SC-CLOSE-17).
+ *
+ * An era whose count is not a whole number (`null`, with the server's
+ * `why`: no verified hours) owes nothing and leaves its sessions unknown.
+ * An era that does not parse is REFUSED, never skipped: dropping it would
+ * turn its days into days the derivatives venue did not trade.
+ *
+ * @param {unknown} rows
+ * @returns {{ from: number, to: number, regular: number | null, tradeDriven: boolean }[] | null}
+ */
+export function derivativeEras(rows) {
+  if (rows === undefined || rows === null) return null;
+  if (!Array.isArray(rows)) throw new Error('/calendar.json `owed.derivatives` is not a list');
+  const eras = rows.map((row) => {
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    // A row that is no object fails the first test and is never read further.
+    if (!iso.test(String(row?.from)) || !iso.test(String(row.to)) || row.to < row.from) {
+      throw new Error(`/calendar.json \`owed.derivatives\` carries a malformed era: ${JSON.stringify(row)}`);
+    }
+    return {
+      from: epochDayOfIso(row.from),
+      to: epochDayOfIso(row.to),
+      regular: Number.isSafeInteger(row.regular) ? row.regular : null,
+      tradeDriven: row.tradeDriven === true
+    };
+  });
+  eras.sort((a, b) => a.from - b.from);
+  return eras;
 }
 
 /**
@@ -611,6 +695,7 @@ export function owedLedger(body) {
  * @property {{ symbol: string, segment: string } | null} series
  * @property {number | null} regular bars a regular session owes at this rung
  * @property {number | null} casEligible bars an auction day owes a CAS-eligible share
+ * @property {{ from: number, to: number, regular: number | null, tradeDriven: boolean }[] | null} derivatives the derivatives venue's eras, `null` when the answer serves none
  * @property {Map<number, any>} special
  * @property {Map<number, any>} halts
  * @property {Record<string, Float64Array>} sum prefix sums, one more than days
@@ -644,9 +729,15 @@ export function ledgerSpan(ledger, fromDay, toDay) {
     index: out.index,
     share: out.share,
     cas: out.cas,
+    deriv: out.deriv,
     unknownIndex: out.unknownIndex,
     unknownShare: out.unknownShare,
     unknownCas: out.unknownCas,
+    unknownDeriv: out.unknownDeriv,
+    unheldIndex: out.unheldIndex,
+    unheldShare: out.unheldShare,
+    unheldCas: out.unheldCas,
+    unheldDeriv: out.unheldDeriv,
     auction: out.auction,
     specials: out.specials,
     halted: out.halted,

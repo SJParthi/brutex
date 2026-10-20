@@ -28,10 +28,12 @@
 //! CURRENT epoch is the highest-numbered `<epoch>.man` present; a
 //! `<epoch>.man.tmp` is incomplete and never read. Appends go to the current
 //! epoch at its own offsets, exactly as to a single file. A compaction writes
-//! the next epoch to its `.tmp`, flushes it, renames it into place and flushes
-//! the directory. The epoch it replaced is never opened for writing again and
-//! never deleted (`CLAUDE.md` §3 rule 8), so no byte of the census's history is
-//! rewritten in place, and a crash at any step leaves a whole epoch current.
+//! the next epoch to its `.tmp` (born new through `store::staging::create`, so
+//! a link planted at that name is refused and never written through: AG-05),
+//! flushes it, renames it into place and flushes the directory. The epoch it
+//! replaced is never opened for writing again and never deleted (`CLAUDE.md`
+//! §3 rule 8), so no byte of the census's history is rewritten in place, and a
+//! crash at any step leaves a whole epoch current.
 //!
 //! # The up-front refusal (DB-G10)
 //!
@@ -60,6 +62,7 @@ use brutex_core::instrument::{Contract, Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use store::file::BarFile;
+use store::header::{MonthVerdict, SlotAudit};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 use crate::manifest::{
@@ -174,7 +177,8 @@ pub fn locate(root: &Path, vendor: Vendor) -> Result<Location, String> {
 /// # Errors
 ///
 /// The directory and the host's words, for a directory that exists and cannot
-/// be listed.
+/// be listed; and an epoch's name that holds anything but a regular file — a
+/// symbolic link above all, which is never followed — by name (AG-05).
 pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Option<u32>, String> {
     let dir = segment_dir(root, vendor, segment);
     let entries = match fs::read_dir(&dir) {
@@ -193,10 +197,37 @@ pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Op
     for entry in entries {
         let entry = entry.map_err(|why| format!("{} could not be listed: {why}", dir.display()))?;
         if let Some(epoch) = entry.file_name().to_str().and_then(parse_epoch_name) {
+            // AN EPOCH IS A REGULAR FILE THE CENSUS WROTE ITSELF (AG-05,
+            // store-1). A symbolic link at an epoch's name was the listing's
+            // answer while `read_epoch` refused it with the host's ELOOP, so
+            // the partition stopped with only this listing naming it; a link
+            // is followed nowhere and is refused here, by name. The type
+            // comes with the listing's own entry (no extra call where the
+            // host reports it).
+            let kind = entry.file_type().map_err(|why| {
+                format!("{} could not be measured: {why}", entry.path().display())
+            })?;
+            if let Some(found) = store::safe_open::Found::of(kind) {
+                return Err(not_an_epoch(&entry.path(), found));
+            }
             newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
         }
     }
     Ok(newest)
+}
+
+/// The refusal of an epoch's name that holds something other than a regular
+/// file: a symbolic link (followed nowhere), a directory, a pipe, a socket or
+/// a device. AG-05 (store-1).
+fn not_an_epoch(path: &Path, found: store::safe_open::Found) -> String {
+    format!(
+        "{} is {} ({}), not a regular file: an epoch is a file the census wrote \
+         itself, so this one is refused rather than followed or read; nothing was \
+         read or written. Look at what put it there before moving it aside (AG-05)",
+        path.display(),
+        found.sentence(),
+        found.word()
+    )
 }
 
 /// One census a batch is written into: a vendor's single file, or one
@@ -435,6 +466,15 @@ pub fn target_for_plan(root: &Path, vendor: Vendor, segment: &str) -> Result<Tar
 pub fn read_epoch(path: &Path, vendor: Vendor, segment: Segment) -> Result<Manifest, String> {
     let named = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
     let file = store::open_flags::open_read_no_follow(path).map_err(|why| {
+        // A SYMBOLIC LINK IS NAMED AS ONE (AG-05, store-1), not left as the
+        // host's "too many levels of symbolic links": one `lstat`, on the
+        // refusal's path only.
+        if let Some(found) = fs::symlink_metadata(path)
+            .ok()
+            .and_then(|meta| store::safe_open::Found::of(meta.file_type()))
+        {
+            return not_an_epoch(path, found);
+        }
         format!(
             "{} could not be opened: {why}. An epoch is never deleted, so one that \
              cannot be opened is refused rather than read as absent",
@@ -1003,21 +1043,53 @@ fn install_next_epoch(
 /// **An epoch is written once.** One that already exists is refused, never
 /// replaced: the lock serialises every writer of the partition, so an epoch
 /// already at that name means the listing and the disk disagree, and renaming
-/// over it would rewrite a generation in place (`CLAUDE.md` §3 rule 8). A
-/// `.tmp` left by a crash is never read and is overwritten here.
+/// over it would rewrite a generation in place (`CLAUDE.md` §3 rule 8).
+///
+/// **Its staging file is born new, never opened (AG-05, store-1; D-4922).**
+/// The `.tmp` is created through `store::staging::create` — `O_CREAT |
+/// O_EXCL`, under which the host opens nothing already at the name — so a
+/// hard link planted there (a second name of an OLDER epoch) is refused
+/// `staging_linked` and a symbolic link, a directory or a pipe
+/// `staging_not_regular`, each by name and with nothing removed, truncated or
+/// written. It used to be `File::create`, "create, truncate", which cut the
+/// older epoch's inode and wrote the new image through it, and wrote through
+/// a symbolic link into whatever it named. A `.tmp` left by a crash — a
+/// regular file with one name — is a dead writer's: its NAME is removed and
+/// the install lands, and the warning `stale epoch temporary cleared` says
+/// how many bytes it held. The partition's lock is what makes that leftover
+/// a dead writer's: a second installer is refused at the lock.
 ///
 /// # Errors
 ///
 /// The path and the host's words; an epoch number past [`LAST_EPOCH`]; an
-/// epoch already present.
+/// epoch already present; the staging refusal, by its word and the name.
 fn install_epoch(
-    _lock: &CensusLock,
+    lock: &CensusLock,
     root: &Path,
     vendor: Vendor,
     segment: Segment,
     epoch: u32,
     image: &[u8],
 ) -> Result<PathBuf, String> {
+    install_epoch_with(lock, root, vendor, segment, epoch, image, &mut |_| Ok(()))
+        .map(|(path, _calls)| path)
+}
+
+/// [`install_epoch`], with `fail` asked before each step of
+/// [`write_whole_with`] a full disk or a kill can stop: the failpoint the
+/// tests use, `Ok` everywhere else. Returns the epoch's path and the host
+/// calls the staging door made (`store::staging::Staged::calls`: 1 on a
+/// free name, 4 over a leftover), which the bench asserts instead of a
+/// wall-clock bound (AG-05 repair 1).
+fn install_epoch_with(
+    _lock: &CensusLock,
+    root: &Path,
+    vendor: Vendor,
+    segment: Segment,
+    epoch: u32,
+    image: &[u8],
+    fail: &mut dyn FnMut(WholeStep) -> std::io::Result<()>,
+) -> Result<(PathBuf, u8), String> {
     let dir = segment_dir(root, vendor, segment);
     // A range pattern: the epochs six digits can name, a compile-time bound.
     let (FIRST_EPOCH..=LAST_EPOCH) = epoch else {
@@ -1039,25 +1111,79 @@ fn install_epoch(
         "{}{EPOCH_TMP_SUFFIX}",
         epoch_name(epoch).trim_end_matches(crate::manifest::MANIFEST_EXTENSION)
     ));
-    write_whole(&dir, &tmp, &path, image).map_err(|why| {
+    let (cleared, calls) = write_whole_with(&dir, &tmp, &path, image, fail).map_err(|why| {
         format!(
             "{} could not be installed through {}: {why}",
             path.display(),
             tmp.display()
         )
     })?;
-    Ok(path)
+    if let Some(bytes) = cleared {
+        let staged = tmp.display().to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(TARGET, "stale epoch temporary cleared")
+                .with("path", telemetry::Value::Str(&staged))
+                .with("bytes", telemetry::Value::Uint(bytes)),
+        );
+    }
+    Ok((path, calls))
 }
 
-/// The five calls an epoch install is, apart from the sentence it fails with.
-fn write_whole(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let mut file = fs::File::create(tmp)?;
-    file.write_all(image)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(tmp, path)?;
-    fs::File::open(dir)?.sync_all()
+/// A step of [`write_whole_with`] that a full disk or a kill can stop, named
+/// so a test can stop it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WholeStep {
+    /// The image's bytes into the new staging file.
+    Write,
+    /// The rename of the flushed staging file to the epoch's name.
+    Rename,
+}
+
+/// The calls an epoch install is, apart from the sentence it fails with:
+/// the directory, the staging file born through `store::staging::create`,
+/// the image written and flushed, the rename and the directory's flush.
+/// Returns the bytes of a dead writer's leftover whose name was cleared,
+/// and the calls the staging door made.
+///
+/// A failure before the rename renames nothing: the epoch's name stays free,
+/// every older epoch is as it was, and the staging file is a regular file
+/// with one name that the next install clears.
+fn write_whole_with(
+    dir: &Path,
+    tmp: &Path,
+    path: &Path,
+    image: &[u8],
+    fail: &mut dyn FnMut(WholeStep) -> std::io::Result<()>,
+) -> Result<(Option<u64>, u8), String> {
+    fs::create_dir_all(dir).map_err(|why| format!("{} could not be made: {why}", dir.display()))?;
+    let store::staging::Staged {
+        file: mut staged,
+        cleared,
+        calls,
+    } = store::staging::create(tmp).map_err(|refused| refused.to_string())?;
+    fail(WholeStep::Write)
+        .and_then(|()| staged.write_all(image))
+        .and_then(|()| staged.sync_all())
+        .map_err(|why| {
+            format!(
+                "{} could not be written: {why}; nothing was renamed",
+                tmp.display()
+            )
+        })?;
+    drop(staged);
+    fail(WholeStep::Rename)
+        .and_then(|()| fs::rename(tmp, path))
+        .map_err(|why| {
+            format!(
+                "{} could not be renamed to {}: {why}; nothing was renamed",
+                tmp.display(),
+                path.display()
+            )
+        })?;
+    fs::File::open(dir)
+        .and_then(|flushed| flushed.sync_all())
+        .map_err(|why| format!("{} could not be flushed: {why}", dir.display()))?;
+    Ok((cleared, calls))
 }
 
 // ═══ One batch, three flushes (WP-16, DB-N25) ═════════════════════════════
@@ -1151,6 +1277,54 @@ pub(super) fn write_batch(
     write_batch_with(path, appends, landed, &mut |file, _| file.sync_all())
 }
 
+/// Opens the census file a batch appends into, and refuses, by name and
+/// before a byte is written, any name an append would write THROUGH (AG-05
+/// repair 1; the second check's `probe_pre_damaged_shared_inode_epochs`): a
+/// symbolic link (opened with `O_NOFOLLOW`, so the host refuses it with
+/// `ELOOP`), anything not a regular file (a pipe is opened without waiting,
+/// `O_NONBLOCK`), and a regular file with more than one name — an epoch the
+/// old staging open left as a second name of an OLDER epoch's inode, or a
+/// single file a seal cut between its link and its rename. Writing into such
+/// a file rewrites the other name's bytes in place and returns `Ok`, the
+/// exact silence D-4922 forbids. Cost: the open it always made and one
+/// `fstat` of the open file, per batch.
+fn open_for_batch(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+        .open(path)
+        .map_err(|why| {
+            if why.raw_os_error() == Some(store::open_flags::ELOOP) {
+                std::io::Error::other(format!(
+                    "{} is a symbolic link, and no census batch is appended through one; \
+                     nothing was written",
+                    path.display()
+                ))
+            } else {
+                why
+            }
+        })?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file, so no census batch is appended to it; nothing was \
+             written",
+            path.display()
+        )));
+    }
+    if meta.nlink() != 1 {
+        return Err(std::io::Error::other(format!(
+            "{} has {} names (a hard link), so an append would rewrite another name's \
+             bytes in place; nothing was written",
+            path.display(),
+            meta.nlink()
+        )));
+    }
+    Ok(file)
+}
+
 /// [`write_batch`], with each of its flushes issued through `barrier`: the
 /// seam a test counts them by, fails one at, or looks at the file through.
 pub(super) fn write_batch_with(
@@ -1179,7 +1353,7 @@ pub(super) fn write_batch_with(
             )));
         }
     }
-    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let file = open_for_batch(path)?;
     for append in appends {
         file.write_all_at(&append.bytes, append.offset)?;
     }
@@ -1781,11 +1955,36 @@ fn write_receipt(
 #[must_use]
 pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
     let receipt = vendor_dir(root, vendor).join(MIGRATION_RECEIPT);
-    let text = fs::read_to_string(&receipt).ok()?;
-    let recorded: u64 = text
+    // ONLY AN ABSENT RECEIPT IS "NOT MIGRATED". This was `.ok()?` and `?` on
+    // the parse, so a receipt that could not be read, or that names no
+    // `legacy_bytes`, answered "no drift" — and this is the only warning that
+    // a pre-version-4 writer filed months the census does not read
+    // (`api::store_route`, `cli census-recount`). Every receipt `migrate`
+    // writes carries the line (cloud-attack-law-20261016).
+    let text = match fs::read_to_string(&receipt) {
+        Ok(text) => text,
+        Err(why) if why.kind() == ErrorKind::NotFound => return None,
+        Err(why) => {
+            return Some(format!(
+                "{} cannot be read ({why}), so whether a writer built before version 4 has \
+                 written to {} since the migration is not known",
+                receipt.display(),
+                manifest_path(root, vendor).display()
+            ));
+        }
+    };
+    let Some(recorded) = text
         .lines()
         .find_map(|line| line.strip_prefix("legacy_bytes="))
-        .and_then(|value| value.parse().ok())?;
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Some(format!(
+            "{} names no readable legacy_bytes, so drift of {} since the migration cannot \
+             be measured",
+            receipt.display(),
+            manifest_path(root, vendor).display()
+        ));
+    };
     let legacy = manifest_path(root, vendor);
     let superseded = superseded_path(root, vendor);
     if let Ok(kept) = fs::symlink_metadata(&superseded) {
@@ -2020,33 +2219,67 @@ fn requirement_refusal(text: &str, vendor: Vendor) -> Option<String> {
 /// this `vendor`; flushes the file and its directory. Returns whether a line
 /// was written. The caller holds the census lock the change was made under.
 ///
+/// **Never through a link and never waiting** (AG-05 repair 1): every open is
+/// no-follow and non-blocking, then the handle's own `fstat`. A symbolic link
+/// at the name, dangling or not, is refused by name (the host's `ELOOP`), and
+/// so are a name that is not a regular file (a pipe opens at once and is
+/// refused, never read) and a regular file with more than one name, whose
+/// append would grow another name's bytes — each before a byte is written.
+/// It used to `read_to_string` the name, which waits on a pipe, and then open
+/// it again with `create` and `append`, following a link.
+///
+/// **An idempotent call opens nothing for writing** (AG-05 repair 2): the
+/// name is read first through a read-only open, and a line already in force
+/// answers `Ok(false)` there. It used to open for append before it looked, so
+/// a `REQUIRES` the operator made read-only failed a re-seal that had nothing
+/// to write with the host's `EACCES`. Only a line still to write opens the
+/// name for append, and that open checks the name again.
+///
 /// # Errors
 ///
-/// The path and the host's words. Nothing is truncated or rewritten: the file
-/// is opened for append only.
+/// The path and the host's words, or what stands at the name. Nothing is
+/// truncated or rewritten: the file is opened for append only.
 pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<bool, String> {
     let at = requires_path(root);
-    let held = match fs::read_to_string(&at) {
-        Ok(text) => text,
-        Err(why) if why.kind() == ErrorKind::NotFound => String::new(),
-        Err(why) => return Err(format!("{}: {why}", at.display())),
-    };
     let wanted = format!("requires={feature} vendor={} ", vendor.as_str());
-    let in_force = held
-        .rfind('\n')
-        .map_or("", |end| held.get(..=end).unwrap_or(""));
-    if in_force.split('\n').any(|line| line.starts_with(&wanted)) {
+    let in_force = |held: &str| -> usize { held.rfind('\n').map_or(0, |end| end + 1) };
+    let names = |held: &str| {
+        held.get(..in_force(held))
+            .unwrap_or("")
+            .split('\n')
+            .any(|line| line.starts_with(&wanted))
+    };
+    // READ FIRST, FOR READ ALONE: nothing to write opens nothing for writing.
+    if let Some(mut file) = open_requires(&at, false)? {
+        let mut held = String::new();
+        file.read_to_string(&mut held)
+            .map_err(|why| format!("{}: {why}", at.display()))?;
+        if names(&held) {
+            return Ok(false);
+        }
+    }
+    let Some(mut file) = open_requires(&at, true)? else {
+        return Err(format!(
+            "{} could not be created for the requirement; nothing was written",
+            at.display()
+        ));
+    };
+    let mut held = String::new();
+    file.read_to_string(&mut held)
+        .map_err(|why| format!("{}: {why}", at.display()))?;
+    if names(&held) {
         return Ok(false);
     }
+    let whole = held.get(..in_force(&held)).unwrap_or("");
     let mut lines = String::new();
     // A TORN TAIL IS ENDED FIRST, AS A VOID LINE, so the new line starts at
     // a line's start and the unfinished bytes neither join it nor become a
     // requirement nobody wrote.
-    if held.len() > in_force.len() {
+    if held.len() > whole.len() {
         lines.push_str(REQUIRES_VOID);
         lines.push('\n');
     }
-    if !in_force.split('\n').any(|line| line == REQUIRES_FORMAT) {
+    if !whole.split('\n').any(|line| line == REQUIRES_FORMAT) {
         lines.push_str(REQUIRES_FORMAT);
         lines.push('\n');
     }
@@ -2054,17 +2287,57 @@ pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<boo
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let _ = writeln!(lines, "{wanted}since={V4_READER_SINCE} at={at_unix}");
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&at)
-        .and_then(|mut file| {
-            file.write_all(lines.as_bytes())?;
-            file.sync_all()
-        })
+    file.write_all(lines.as_bytes())
+        .and_then(|()| file.sync_all())
         .map_err(|why| format!("{}: {why}", at.display()))?;
     at.parent().map_or(Ok(()), sync_dir)?;
     Ok(true)
+}
+
+/// Opens `manifest/REQUIRES` no-follow and non-blocking: for read alone
+/// (`append` false, `Ok(None)` when nothing is at the name), or for read and
+/// append, created when absent. Before a byte is read or written it refuses,
+/// by name, a symbolic link (the host's `ELOOP`), a name that is not a
+/// regular file and a regular file with more than one name.
+fn open_requires(at: &Path, append: bool) -> Result<Option<fs::File>, String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .append(append)
+        .create(append)
+        .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+        .open(at);
+    let file = match opened {
+        Ok(file) => file,
+        Err(why) if !append && why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) if why.raw_os_error() == Some(store::open_flags::ELOOP) => {
+            return Err(format!(
+                "{} is a symbolic link, and no requirement is appended through one; \
+                 nothing was written",
+                at.display()
+            ));
+        }
+        Err(why) => return Err(format!("{}: {why}", at.display())),
+    };
+    let meta = file
+        .metadata()
+        .map_err(|why| format!("{}: {why}", at.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{} is not a regular file, so no requirement is appended to it; nothing was \
+             written",
+            at.display()
+        ));
+    }
+    if meta.nlink() != 1 {
+        return Err(format!(
+            "{} has {} names (a hard link), so an append would grow another name's bytes; \
+             nothing was written",
+            at.display(),
+            meta.nlink()
+        ));
+    }
+    Ok(Some(file))
 }
 
 // ═══ The seal: a migrated vendor's single file refuses an old reader ════════
@@ -2138,8 +2411,13 @@ pub fn sealed_stub(vendor: Vendor) -> Vec<u8> {
 
 /// Whether `path` holds a seal's stub: [`STUB_LEN`] bytes whose first slot
 /// carries the magic family and [`SEALED_VERSION`]. One `lstat` and one
-/// 16-byte read.
-fn holds_sealed_stub(path: &Path) -> bool {
+/// 16-byte read. A symbolic link at `path` is not a stub.
+///
+/// Public so `/disk.json` never takes a seal receipt's word for the stub
+/// (AG-05 repair 1): a whole receipt beside a single file that still holds
+/// the version-3 census is a seal the store does not have.
+#[must_use]
+pub fn holds_sealed_stub(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -2321,15 +2599,14 @@ fn install_stub(legacy: &Path, vendor: Vendor) -> Result<(), String> {
     let mut staged = legacy.to_path_buf().into_os_string();
     staged.push(".seal.tmp");
     let staged = PathBuf::from(staged);
-    let _ = fs::remove_file(&staged);
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)
-        .and_then(|mut file| {
-            file.write_all(&sealed_stub(vendor))?;
-            file.sync_all()
-        })
+    // BORN NEW THROUGH THE ONE DOOR (AG-05, D-4922): a dead seal's leftover
+    // with one name is cleared, and a link or anything else at the name is
+    // refused by name instead of being unlinked unseen.
+    let mut file = store::staging::create(&staged)
+        .map_err(|refused| format!("{refused}; {} still holds the census", legacy.display()))?
+        .file;
+    file.write_all(&sealed_stub(vendor))
+        .and_then(|()| file.sync_all())
         .map_err(|why| {
             format!(
                 "{}: {why}; {} still holds the census",
@@ -2337,6 +2614,7 @@ fn install_stub(legacy: &Path, vendor: Vendor) -> Result<(), String> {
                 legacy.display()
             )
         })?;
+    drop(file);
     fs::rename(&staged, legacy).map_err(|why| {
         format!(
             "{} could not be renamed over {}: {why}; {} still holds the census",
@@ -2384,10 +2662,24 @@ pub enum SealReceipt {
 ///
 /// A name that is not a regular file, or cannot be read: by name.
 pub fn seal_receipt(path: &Path) -> Result<SealReceipt, String> {
+    seal_receipt_kept_bytes(path).map(|(receipt, _)| receipt)
+}
+
+/// [`seal_receipt`] and, for a whole receipt, the `superseded_bytes=` it
+/// records: the length of the census the seal kept (AG-05 repair 2). A reader
+/// that takes the receipt as a seal compares it with what the superseded name
+/// holds, so a superseded file cut short or replaced under a whole receipt is
+/// named rather than read as sealed. The same one bounded read; `None` for
+/// every receipt that is not whole.
+///
+/// # Errors
+///
+/// As [`seal_receipt`].
+pub fn seal_receipt_kept_bytes(path: &Path) -> Result<(SealReceipt, Option<u64>), String> {
     let named = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
     let file = match store::open_flags::open_read_no_follow(path) {
         Ok(file) => file,
-        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(SealReceipt::Absent),
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok((SealReceipt::Absent, None)),
         Err(why) => return Err(named(&why)),
     };
     if !file.metadata().map_err(|why| named(&why))?.is_file() {
@@ -2408,30 +2700,38 @@ pub fn seal_receipt(path: &Path) -> Result<SealReceipt, String> {
     };
     match value("format") {
         Some(format) if SEAL_RECEIPT_FORMAT.strip_prefix("format=") != Some(format) => {
-            return Ok(SealReceipt::Foreign(format.to_owned()));
+            return Ok((SealReceipt::Foreign(format.to_owned()), None));
         }
         Some(_) => {}
         None => {
-            return Ok(SealReceipt::Torn(format!(
-                "it holds {} byte(s) and no whole {SEAL_RECEIPT_FORMAT} line",
-                bytes.len()
-            )));
+            return Ok((
+                SealReceipt::Torn(format!(
+                    "it holds {} byte(s) and no whole {SEAL_RECEIPT_FORMAT} line",
+                    bytes.len()
+                )),
+                None,
+            ));
         }
     }
     let commit = |value: &str| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit());
     if !value("reader_since").is_some_and(commit) {
-        return Ok(SealReceipt::Torn(
-            "it names no whole reader_since=<commit> line".to_owned(),
+        return Ok((
+            SealReceipt::Torn("it names no whole reader_since=<commit> line".to_owned()),
+            None,
         ));
     }
-    if value("superseded").is_none_or(str::is_empty)
-        || value("superseded_bytes").is_none_or(|bytes| bytes.parse::<u64>().is_err())
-    {
-        return Ok(SealReceipt::Torn(
-            "it names no whole superseded= and superseded_bytes= line".to_owned(),
-        ));
+    let kept_bytes = value("superseded_bytes").and_then(|bytes| bytes.parse::<u64>().ok());
+    match kept_bytes {
+        Some(kept_bytes) if value("superseded").is_some_and(|kept| !kept.is_empty()) => {
+            Ok((SealReceipt::Whole, Some(kept_bytes)))
+        }
+        _ => Ok((
+            SealReceipt::Torn(
+                "it names no whole superseded= and superseded_bytes= line".to_owned(),
+            ),
+            None,
+        )),
     }
-    Ok(SealReceipt::Whole)
 }
 
 /// Leaves a whole seal receipt under `path`: returns whether one was written,
@@ -2513,16 +2813,14 @@ fn write_seal_receipt(path: &Path, superseded: &Path, bytes: u64) -> Result<(), 
     let mut staged = path.to_path_buf().into_os_string();
     staged.push(".tmp");
     let staged = PathBuf::from(staged);
-    let _ = fs::remove_file(&staged);
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            file.sync_all()
-        })
+    // BORN NEW THROUGH THE ONE DOOR (AG-05, D-4922), as the stub is.
+    let mut file = store::staging::create(&staged)
+        .map_err(|refused| refused.to_string())?
+        .file;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
         .map_err(|why| format!("{}: {why}", staged.display()))?;
+    drop(file);
     fs::rename(&staged, path).map_err(|why| {
         format!(
             "{} could not be renamed to {}: {why}",
@@ -2603,8 +2901,16 @@ pub struct Recount {
     pub unreadable: u64,
     /// The first [`NAMED`] of them, with why.
     pub unreadable_named: Vec<(PathBuf, String)>,
-    /// Months holding an unreadable file: no day of these is closed.
+    /// Months holding an unreadable file, or one whose header reverted to an
+    /// older generation ([`Recount::slot_damaged`]): no day of these is closed.
     pub months_unreadable: Vec<YearMonth>,
+    /// EVERY month file in range whose header slot audit is not clean
+    /// (`store::header::slot_audit`), with the audit, in walk order. A
+    /// `reverted` month offers no row — its header is the OLDER generation, and
+    /// recording it would write the loss into the census — and closes no day; a
+    /// `damaged` month (an older slot damaged, nothing lost) offers its row.
+    /// Both make the recount not clean. Nothing here repairs a header. D-6242.
+    pub slot_damaged: Vec<(PathBuf, SlotAudit)>,
     /// Directory entries that are not part of a store path, counted, so a
     /// stray file is visible and never silently read as a month.
     pub not_store_names: u64,
@@ -2635,6 +2941,7 @@ impl Recount {
     #[must_use]
     pub fn clean(&self) -> bool {
         self.unreadable == 0
+            && self.slot_damaged.is_empty()
             && self.refused() == 0
             && self
                 .journal
@@ -2885,8 +3192,25 @@ fn walk_rung(
         }
         walk.found.files_in_range += 1;
         match header_row(at, contract, timeframe, month) {
-            Ok(Some(row)) => walk.held.push(row),
-            Ok(None) => walk.found.files_empty += 1,
+            // A HEADER THAT REVERTED IS NAMED AND OFFERS NOTHING (D-6242): the
+            // row it would offer is the older generation's, and the days of
+            // its month stay open until the operator recovers or re-imports it.
+            // A month served in its sealed form has no slots (`None`, D-6243).
+            Ok((row, audit)) => {
+                let named = audit.filter(|audit| !audit.is_clean());
+                let reverted = named
+                    .is_some_and(|audit| matches!(audit.verdict, MonthVerdict::Reverted { .. }));
+                if let Some(audit) = named {
+                    walk.found.slot_damaged.push((path, audit));
+                }
+                if reverted {
+                    let _ = walk.unreadable_months.insert(month);
+                } else if let Some(row) = row {
+                    walk.held.push(row);
+                } else {
+                    walk.found.files_empty += 1;
+                }
+            }
             Err(why) => {
                 walk.found.unreadable += 1;
                 let _ = walk.unreadable_months.insert(month);
@@ -2911,7 +3235,7 @@ fn header_row(
     contract: Option<Contract>,
     timeframe: Timeframe,
     month: YearMonth,
-) -> Result<Option<Held>, String> {
+) -> Result<(Option<Held>, Option<SlotAudit>), String> {
     let path = StorePath::new(PathParts {
         vendor: at.vendor,
         exchange: at.exchange.as_str(),
@@ -2932,14 +3256,14 @@ fn header_row(
     let file = BarFile::open_existing(at.root, path, symbol_id).map_err(|why| why.to_string())?;
     let header = file.header();
     if header.n_valid == 0 {
-        return Ok(None);
+        return Ok((None, file.slot_audit()));
     }
     let first = file.read_record(0).map_err(|why| why.to_string())?;
     let last = file
         .read_record(header.n_valid - 1)
         .map_err(|why| why.to_string())?;
     let closes = Closes::known(first.close, last.close).map_err(|why| why.to_string())?;
-    Ok(Some(Held::new(
+    let row = Held::new(
         Entry {
             key: EntryKey {
                 contract,
@@ -2954,7 +3278,8 @@ fn header_row(
             last_ts_micros: header.last_ts_micros,
         },
         closes,
-    )))
+    );
+    Ok((Some(row), file.slot_audit()))
 }
 
 /// The rung a directory name is, if it is one.
@@ -3540,3 +3865,9 @@ fn append_journal(path: &Path, lines: &str) -> Result<(), String> {
 #[cfg(test)]
 #[path = "census_store_tests.rs"]
 mod tests;
+
+/// No epoch, stub or receipt is written through a link planted at its
+/// staging name, and no epoch's name is followed (AG-05, store-1).
+#[cfg(test)]
+#[path = "census_store_link_tests.rs"]
+mod link_tests;

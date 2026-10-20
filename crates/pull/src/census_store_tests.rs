@@ -1745,3 +1745,87 @@ fn a_sealed_month_is_counted_once_and_a_lone_one_is_a_month() {
     );
     assert_eq!(done.offered, 3, "raw, both forms and sealed alone");
 }
+
+/// A migration receipt that cannot be read, or that names no `legacy_bytes`,
+/// is named — never answered as "no drift" (cloud-attack-law-20261016, lens 2).
+/// `legacy_drift` is the only warning that a pre-version-4 writer filed months
+/// the census does not read, and its `.ok()?` turned a damaged receipt into
+/// silence. Only an ABSENT receipt is "not migrated".
+#[test]
+fn a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift() {
+    let scratch = Scratch::new("RECEIPT");
+    let root = scratch.root();
+    assert_eq!(
+        record(root, Vendor::Gdfl, &[row(0, 1)]).map(|c| c.len()),
+        Ok(1)
+    );
+    assert_eq!(
+        record(root, Vendor::Gdfl, &[row(1, 1)]).map(|c| c.len()),
+        Ok(1)
+    );
+    migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None, "unchanged since");
+    let receipt = vendor_dir(root, Vendor::Gdfl).join("MIGRATED");
+    let whole = std::fs::read(&receipt).expect("receipt");
+
+    std::fs::write(&receipt, [0xFF_u8, 0xFE, b'\n']).expect("not UTF-8");
+    let unread = legacy_drift(root, Vendor::Gdfl).expect("an unreadable receipt is named");
+    assert!(
+        unread.contains("MIGRATED") && unread.contains("cannot be read"),
+        "{unread}"
+    );
+
+    std::fs::write(&receipt, b"format=1\n").expect("no legacy_bytes");
+    let unmeasured = legacy_drift(root, Vendor::Gdfl).expect("a receipt with no length is named");
+    assert!(
+        unmeasured.contains("names no readable legacy_bytes"),
+        "{unmeasured}"
+    );
+
+    std::fs::write(&receipt, &whole).expect("whole again");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    assert_eq!(legacy_drift(root, Vendor::Zerodha), None, "not migrated");
+}
+
+/// **`legacy_drift`'s cost per call, measured** (PREC-1, D-5402). The autopilot
+/// now asks it once per vendor per round, so its cost is a step of the round.
+/// n = 400 calls on a migrated scratch store, and, when `BRUTEX_STORE_ROOT`
+/// names a store, n = 400 more on that store for GDFL, read only: one receipt
+/// read and at most three `lstat`s, nothing written. The answer may not move
+/// between calls; p50, p99 and max are printed and the p99 is held under
+/// 20 ms (`docs/06-limits.md` L-PREC1-05).
+#[test]
+#[ignore = "a timing measurement: run on demand; BRUTEX_STORE_ROOT optional and read only (docs/06-limits.md L-PREC1-05)"]
+fn legacy_drift_cost_per_call_is_measured() {
+    let scratch = Scratch::new("DRIFT-TIMING");
+    assert_eq!(
+        record(scratch.root(), Vendor::Gdfl, &[row(0, 1)]).map(|c| c.len()),
+        Ok(1)
+    );
+    migrate(scratch.root(), Vendor::Gdfl).expect("it migrates");
+    let real = std::env::var_os("BRUTEX_STORE_ROOT").map(PathBuf::from);
+    let mut roots: Vec<(&str, &Path)> = vec![("scratch", scratch.root())];
+    if let Some(real) = real.as_deref() {
+        roots.push(("store", real));
+    }
+    for (label, root) in roots {
+        let want = legacy_drift(root, Vendor::Gdfl);
+        let mut micros: Vec<u128> = Vec::with_capacity(400);
+        for _ in 0..400 {
+            let started = std::time::Instant::now();
+            let got = legacy_drift(root, Vendor::Gdfl);
+            micros.push(started.elapsed().as_micros());
+            assert_eq!(got, want, "{label}: the answer does not move between calls");
+        }
+        micros.sort_unstable();
+        let at = |q: usize| micros.get(399 * q / 100).copied().unwrap_or(u128::MAX);
+        let max = micros.last().copied().unwrap_or(u128::MAX);
+        eprintln!(
+            "legacy_drift {label} ({}): n=400 p50={}us p99={}us max={max}us, answer {want:?}",
+            root.display(),
+            at(50),
+            at(99)
+        );
+        assert!(at(99) < 20_000, "{label}: p99 {}us", at(99));
+    }
+}
