@@ -81,6 +81,7 @@
     sourceNotRead,
     drawerFacts,
     shareBasisUrl,
+    basisWindowOf,
     basisRunsOf,
     basisRunLabel,
     segmentOfKey,
@@ -183,9 +184,10 @@
 
   /**
    * A ZERODHA SHARE'S ADJUSTED OR QUANTISED RUNS (R3-13 goal 4; DB-G38,
-   * DB-G40): one `/sources/day.json` over the page's days of one share, at most
-   * its newest 31 days (the route's page), so each row is labelled with the run
-   * its day belongs to, first and last day, from the served factor. `null`
+   * DB-G40): one `/sources/day.json` of the route's whole 31-day page laid
+   * around the page's days of one share (`basisWindowOf`; their newest 31 where
+   * they span more), so each row is labelled with the run its day belongs to,
+   * first and last day as far as the page reaches, from the served factor. `null`
    * for another feed, a page of no share or of more than one.
    */
   const basisUrl = $derived.by(() => {
@@ -193,11 +195,8 @@
     const share = runs.filter((r) => segmentOfKey(r.instrument) === 'CASH');
     const keys = new Set(share.map((r) => r.instrument));
     if (keys.size !== 1) return null;
-    const days = share.flatMap((r) => [istDay(r.first.ts), istDay(r.last.ts)]).filter(Boolean).sort();
-    const to = days[days.length - 1] ?? '';
-    const floor = to ? new Date(Date.parse(`${to}T00:00:00Z`) - 30 * 86_400_000).toISOString().slice(0, 10) : '';
-    const from = days[0] && days[0] > floor ? days[0] : floor;
-    return shareBasisUrl([...keys][0], from, to);
+    const asked = basisWindowOf(share.flatMap((r) => [istDay(r.first.ts), istDay(r.last.ts)]).filter(Boolean));
+    return asked ? shareBasisUrl([...keys][0], asked.from, asked.to) : null;
   });
   /** The runs `basisUrl` answered, oldest first; `[]` until it answers. */
   const basisRuns = $derived(basisRunsOf(bodyOf(basisUrl)));

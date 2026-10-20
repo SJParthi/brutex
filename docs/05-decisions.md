@@ -76539,5 +76539,21 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     minute the file does not hold ends a run, so each part is measured
     alone". No value is assumed for the absent minutes.
 
-**Proof:** R313-01 to R313-35 (`docs/04-invariants.md`); the limits are
+22. **A series with no file for the month names no bar definition** (the
+    check's follow-up: a contract the store holds no file of read "bar
+    definition 2 built this day" from the options kind-day). The kind-day's
+    import built nothing of it, so `bar_definition` is `null` and no phrase
+    is said, as after expiry (item 16). A file that holds no bar that day
+    keeps its definition: the import read the day.
+
+23. **Two words of the band say what they count** (the check's follow-ups).
+    On a coarser grid the zero-volume phrase names the finest rung it counts
+    ("300 of 375 Zerodha 1min bar(s) carry zero volume"); and a Zerodha
+    share's run label asks `/sources/day.json` for the route's whole 31-day
+    page laid around the rows' days (`basisWindowOf`; their newest 31 where
+    they span more), so a page showing one day names the run as far as that
+    page reaches rather than "2019-06-07 → 2019-06-07", and an open edge reads
+    "the run may go on both ways past the days read".
+
+**Proof:** R313-01 to R313-37 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 (`docs/06-limits.md`).

@@ -50,6 +50,7 @@ import {
   recordText,
   drawerFacts,
   shareBasisUrl,
+  basisWindowOf,
   basisRunsOf,
   basisRunLabel,
   definitionFact,
@@ -768,7 +769,7 @@ test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named 
   assert.deepEqual(basisRunsOf({ days: [basisDay('2019-07-01', { quantised: true, basis_differs: true, factor: null })] }), []);
   // One measured day alone is a run open both ways.
   const lone = basisRunsOf({ days: [unmeasured('2019-07-01'), basisDay('2019-07-02', { quantised: true, factor: 1.0254, grid_paisa: { zerodha_minutes: 50, gdfl_seconds: null } }), unmeasured('2019-07-03')] });
-  assert.match(basisRunLabel(lone, '2019-07-02')?.text ?? '', /quantised against GDFL's raw prints: 2019-07-02 to 2019-07-02, 1 day\(s\) measured, factor ×1\.0254; Zerodha's prices sit on a 50-paisa grid, coarser than an exact adjustment leaves \(the run may go on both ways the days read\)/);
+  assert.match(basisRunLabel(lone, '2019-07-02')?.text ?? '', /quantised against GDFL's raw prints: 2019-07-02 to 2019-07-02, 1 day\(s\) measured, factor ×1\.0254; Zerodha's prices sit on a 50-paisa grid, coarser than an exact adjustment leaves \(the run may go on both ways past the days read\)/);
   assert.equal(basisRunLabel(lone, '2019-07-03'), null, 'an unmeasured day past the run is not in it');
   // A run with a measured raw day on each side is closed both ways: no edge is said.
   const closed = basisRunsOf({ days: [basisDay('2019-08-01', { factor: 1, basis_differs: false }), basisDay('2019-08-02', { factor: 4, basis_differs: true }), basisDay('2019-08-05', { factor: 1, basis_differs: false })] });
@@ -783,6 +784,22 @@ test('R3-13 goal 4: a share run whose prices are adjusted or quantised is named 
   assert.match(prov, /\{#if l\.basis\}<span class="bb \{l\.basis\.tone\}" title=\{l\.basis\.text\}>\{l\.basis\.short\}<\/span>\{\/if\}/);
   const badge = readFileSync(new URL('../src/routes/db/DbBasisBadge.svelte', import.meta.url), 'utf8');
   assert.match(badge, /adjusted or quantised run is named, with its first and last day/);
+});
+
+test('R3-13 repair: a share run label asks the route\'s whole 31-day page around the rows\' days', () => {
+  // One visible day: the page is laid around it, 15 days each side.
+  assert.deepEqual(basisWindowOf(['2019-06-07']), { from: '2019-05-23', to: '2019-06-22' });
+  // A short span keeps its days inside a 31-day page, any order, repeats kept once.
+  assert.deepEqual(basisWindowOf(['2019-06-10', '2019-06-03', '2019-06-10']), { from: '2019-05-23', to: '2019-06-22' });
+  // Rows spanning more than 31 days ask their newest 31, as before.
+  assert.deepEqual(basisWindowOf(['2019-01-02', '2019-06-30']), { from: '2019-05-31', to: '2019-06-30' });
+  assert.deepEqual(basisWindowOf(['2019-05-31', '2019-06-30']), { from: '2019-05-31', to: '2019-06-30' });
+  // Nothing to lay a page around, or no day at all.
+  assert.equal(basisWindowOf([]), null);
+  assert.equal(basisWindowOf(['', 'yesterday']), null);
+  // The component asks through it.
+  const prov = readFileSync(new URL('../src/routes/db/DbProvenance.svelte', import.meta.url), 'utf8');
+  assert.match(prov, /const asked = basisWindowOf\(/);
 });
 
 /* ── R3-13 goal 3: the bar definition that built a row's day ─────────────── */

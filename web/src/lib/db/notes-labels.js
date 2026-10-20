@@ -1504,6 +1504,32 @@ export function shareBasisUrl(instrument, from, to) {
 }
 
 /**
+ * THE DAYS ONE `/sources/day.json` PAGE ASKS FOR A SHARE'S RUN LABELS
+ * (verify-R3-13-r1 follow-up: a page showing one day labelled its run
+ * "2019-06-07 → 2019-06-07"): the route's whole page of 31 days, `from` to
+ * `to` inclusive, laid around the rows' days so a run is named past them
+ * where the page reaches; where the rows span more than 31 days, their
+ * newest 31. `null` with no day. A run longer than the page still says it
+ * may go on (`basisRunLabel`).
+ *
+ * @param {string[]} days the rows' `YYYY-MM-DD` days, any order
+ * @returns {{ from: string, to: string } | null}
+ */
+export function basisWindowOf(days) {
+  const sorted = days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+  if (sorted.length === 0) return null;
+  const DAY = 86_400_000;
+  const at = (/** @type {string} */ d) => Date.parse(`${d}T00:00:00Z`);
+  const iso = (/** @type {number} */ ms) => new Date(ms).toISOString().slice(0, 10);
+  const first = at(sorted[0]);
+  const last = at(sorted[sorted.length - 1]);
+  const span = Math.round((last - first) / DAY);
+  if (span >= 30) return { from: iso(last - 30 * DAY), to: iso(last) };
+  const before = Math.floor((30 - span) / 2);
+  return { from: iso(first - before * DAY), to: iso(last + (30 - span - before) * DAY) };
+}
+
+/**
  * THE RUNS OF DAYS WHOSE ZERODHA PRICES ARE ADJUSTED OR QUANTISED, from a
  * `/sources/day.json` answer (R3-13 goal 4; DB-G38, DB-G40): consecutive days
  * of the answer (oldest first) whose served `basis` says the basis
@@ -1574,7 +1600,7 @@ export function basisRunLabel(runs, day) {
     ? `; Zerodha's prices sit on a ${exact(run.grid.zerodha)}-paisa grid${run.grid.gdfl !== null ? ` against GDFL's raw ${exact(run.grid.gdfl)}-paisa grid` : ''}, coarser than an exact adjustment leaves`
     : '';
   const edge = run.open.before || run.open.after
-    ? ` (the run may go on ${run.open.before && run.open.after ? 'both ways' : run.open.before ? 'before' : 'after'} the days read)`
+    ? ` (the run may go on ${run.open.before && run.open.after ? 'both ways past' : run.open.before ? 'before' : 'after'} the days read)`
     : '';
   return {
     tone: 'adjusted',

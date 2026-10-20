@@ -1391,6 +1391,17 @@ fn an_option_day_names_its_bar_definition() {
     )
     .replace("definition=2", "definition=3");
     write(&super::super::quality_path(&root), &ledger);
+    // The contract's month file holds one invented trade a session.
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-FNO-NIFTY-2024-10-31-2500000-CE",
+        Timeframe::SECOND_1,
+        ["2024-10-01", "2024-10-03", "2024-10-04", "2024-10-07"]
+            .iter()
+            .map(|on| bar(on, 9 * 3_600 + 15 * 60, [5_000; 4], 1))
+            .collect(),
+    );
     let got = answer(
         &root,
         &ask(
@@ -1435,6 +1446,23 @@ fn an_option_day_names_its_bar_definition() {
     assert_eq!(
         record(&zerodha, "2024-10-01")["bar_definition"],
         Value::Null
+    );
+    // A CONTRACT THE STORE HOLDS NO FILE OF names none (the check's
+    // follow-up): the kind-day's import built nothing of it.
+    let unheld = answer(
+        &root,
+        &ask(
+            "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-10-31-2600000-CE&from=2024-10-01&to=2024-10-01",
+        ),
+    );
+    let unheld = record(&unheld, "2024-10-01");
+    assert_eq!(unheld["bar_definition"], Value::Null, "{unheld:#}");
+    assert!(
+        says(unheld)
+            .iter()
+            .all(|said| !said.starts_with("bar definition")),
+        "{:#?}",
+        says(unheld)
     );
 }
 
@@ -3649,6 +3677,14 @@ fn a_day_after_expiry_names_no_bar_definition() {
         "done options 2018-10-25 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
          done options 2018-10-26 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
     );
+    // The contract's month file holds one invented trade on its expiry day.
+    file_bars(
+        &root,
+        Vendor::Gdfl,
+        "NSE-FNO-NIFTY-2018-10-25-1000000-CE",
+        Timeframe::SECOND_1,
+        vec![bar("2018-10-25", 9 * 3_600 + 15 * 60, [5_000; 4], 1)],
+    );
     let contract = answer(
         &root,
         &ask(
@@ -3979,6 +4015,44 @@ fn an_unmeasured_gdfl_index_day_says_why_its_frozen_is_null() {
             .iter()
             .all(|said| !said.contains("frozen")),
         "{zerodha:#}"
+    );
+}
+
+/// **ON A COARSER GRID THE ZERO-VOLUME PHRASE NAMES THE RUNG IT COUNTS** (the
+/// check's follow-up): a share's `1day` grid counts its `1min` candles' zero
+/// volume and says "of 375 Zerodha 1min bar(s)"; at the finest rung the
+/// phrase is as before.
+#[test]
+fn a_coarser_grids_zero_volume_phrase_names_the_rung_it_counts() {
+    let root = root_of("r3-13-fills-rung");
+    let mut bars = minutes_at("2020-02-03", 375, 100_000);
+    for bar in bars.iter_mut().skip(75) {
+        bar.volume = 0;
+    }
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-CASH-RELIANCE",
+        Timeframe::MINUTE_1,
+        bars,
+    );
+    let asked = ask("feed=zerodha&instrument=NSE-CASH-RELIANCE&from=2020-02-03&to=2020-02-03");
+    let coarse = answer_at(
+        &root,
+        &asked,
+        Band {
+            rung: Some(Timeframe::DAY_1),
+            expiry: None,
+        },
+    );
+    says_has(
+        record(&coarse, "2020-02-03"),
+        "300 of 375 Zerodha 1min bar(s) carry zero volume: held, but no trade in that minute",
+    );
+    let fine = answer(&root, &asked);
+    says_has(
+        record(&fine, "2020-02-03"),
+        "300 of 375 Zerodha bar(s) carry zero volume: held, but no trade in that minute",
     );
 }
 

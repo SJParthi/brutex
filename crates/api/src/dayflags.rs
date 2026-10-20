@@ -5009,7 +5009,11 @@ impl Context<'_> {
         // SC-CLOSE-12 and goal 3): the kind-day's bar definition is not the
         // contract's, so it is neither served nor said there, and the band
         // never marks a day that owes nothing as built under an older one.
-        let (bar_definition, definition_says) = if expired {
+        // NOR WHERE THE SERIES HAS NO FILE FOR THE MONTH (the check's
+        // follow-up): the kind-day's import built nothing of it, so no
+        // definition is named over a contract the store does not hold. A
+        // file that holds no bar that day keeps it: the import read the day.
+        let (bar_definition, definition_says) = if expired || finest_held == Held::NoFile {
             (None, None)
         } else {
             self.definition(day, import.as_ref(), &quality_lines)
@@ -6051,8 +6055,16 @@ impl Says<'_> {
         if let (Held::Bars(held), Some(zero)) = (self.finest.unwrap_or(self.own), self.fills)
             && zero > 0
         {
+            // ON A COARSER GRID THE COUNT IS THE FINEST RUNG'S, and says so
+            // (the check's follow-up): "of 375 Zerodha 1min bar(s)".
+            let counted = if self.finest.is_some() {
+                format!(" {}", finest(self.feed).as_str())
+            } else {
+                String::new()
+            };
             out.push(format!(
-                "{zero} of {held} {} bar(s) carry zero volume: held, but no trade in that minute",
+                "{zero} of {held} {}{counted} bar(s) carry zero volume: held, but no trade in \
+                 that minute",
                 name(self.feed)
             ));
         }
@@ -6330,7 +6342,7 @@ fn rules_json() -> Value {
         "cas": "calendar.cas is a share's dated closing-auction flag from that day's NSE master, read as /bars/window.json reads it: true (flag 1, continuous to 15:15, 360 owed), false (flag 0, continuous to 15:29, 375 owed), null with why where no master holds it; null where none applies (an index, an option, a day before 2026-08-03) (SC-CLOSE-8); auction_sidecar is true only where the GDFL share month's .auc sidecar files a print stamped on that day, false where the month holds no sidecar or files none that day, null where none applies or the sidecar would not read (named in notes); no print is called kept apart without one (SC-CLOSE-9; per day, never per month, L-AH03-2), one read of the sidecar per month a request",
         "expired": "a day after a contract's expiry is expired and owes nothing: owed_minutes and unverified_minutes 0, as /gaps.json says (SC-CLOSE-12)",
         "late": "import.late and max_back_s count every file of the kind-day; on a recounted day they are the close before the census recount, named by late_line (DB-029)",
-        "bar_definition": "the bar definition that built the day, from the import journal's deciding line or else the day ledger's: named on every option day, and on any day whose definition this build would not build (R3-13 goal 3)",
+        "bar_definition": "the bar definition that built the day, from the import journal's deciding line or else the day ledger's: named on every option day, and on any day whose definition this build would not build (R3-13 goal 3); null after a contract's expiry and where the series has no file for the month, whose import built nothing of it",
         "index": {
             "frozen": format!(
                 "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; the ledger keeps only the day's longest unchanged run, so on GDFL flagged is false only where that run is under {} s, true where its longest stretch outside the recorded halt and the cash closing auction's window reaches it, and null (never false) where it reaches it inside those windows or has no stamp to place it against them: a shorter run elsewhere is then not measured, and the phrase says so (UNVERIFIED); judged_s is that longest stretch; frozen is null where neither measured the day",
