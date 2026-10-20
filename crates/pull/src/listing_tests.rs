@@ -353,7 +353,7 @@ fn a_master_shaped_name_that_states_no_day_is_passed_over_by_name() {
     // No dated master: none checks, and both undated names are said.
     let alone = Listing::load(&root.masters());
     assert_eq!(alone.in_use(), None);
-    assert_eq!(alone.absent(), Source::NoCheckedMaster);
+    assert_eq!(alone.absent(Some(ALPHA)), Source::NoCheckedMaster);
     let named: Vec<&str> = alone
         .passed_over()
         .iter()
@@ -504,11 +504,13 @@ fn a_name_that_is_not_text_is_not_a_master() {
 fn a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use() {
     let root = Root::new("none-checks");
     let empty = Listing::load(&root.masters());
-    assert_eq!(empty.absent(), Source::NoCheckedMaster);
-    assert_eq!(empty.absent().code(), "no_checked_master");
+    assert_eq!(empty.absent(Some(ALPHA)), Source::NoCheckedMaster);
+    // No master and no ISIN: still the broader fact, no master checks.
+    assert_eq!(empty.absent(None), Source::NoCheckedMaster);
+    assert_eq!(empty.absent(Some(ALPHA)).code(), "no_checked_master");
     assert_eq!(empty.in_use(), None);
     let unlisted = Listing::load(&root.0.join("no-such-directory"));
-    assert_eq!(unlisted.absent().code(), "no_checked_master");
+    assert_eq!(unlisted.absent(Some(ALPHA)).code(), "no_checked_master");
 
     install(
         &root.0,
@@ -516,7 +518,14 @@ fn a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use() {
         &[row("ALPHA", ALPHA, Some(day(2021, 3, 4)))],
     );
     let checked = Listing::load(&root.masters());
-    assert_eq!(checked.absent(), Source::InferredFromVendorSpan);
+    assert_eq!(checked.absent(Some(ALPHA)), Source::InferredFromVendorSpan);
+    // R4-17 repair 5: with no ISIN the master is never asked, so the share
+    // is not one the master omits: its own label, never "inferred".
+    assert!(checked.span("NSE", "ALPHA", Some(ALPHA)).is_some());
+    assert_eq!(checked.span("NSE", "ALPHA", None), None);
+    assert_eq!(checked.absent(None), Source::NoIsin);
+    assert_eq!(checked.absent(None).code(), "no_isin");
+    assert_eq!(super::NO_ISIN, "no_isin");
     let (file, sha256) = checked.in_use().expect("the master in use");
     assert_eq!(file, "NSE_CM_security_03082026.csv.gz");
     let receipt = std::fs::read_to_string(
@@ -536,7 +545,7 @@ fn a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use() {
     bytes.push(b'X');
     std::fs::write(&gz, bytes).expect("damage the fixture master");
     let damaged = Listing::load(&root.masters());
-    assert_eq!(damaged.absent().code(), "no_checked_master");
+    assert_eq!(damaged.absent(Some(ALPHA)).code(), "no_checked_master");
     assert_eq!(damaged.in_use(), None);
     assert_eq!(damaged.passed_over().len(), 1);
     assert_eq!(

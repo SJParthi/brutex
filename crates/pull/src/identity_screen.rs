@@ -78,6 +78,11 @@ pub struct SeriesScan {
     /// Where its listing came from: [`crate::listing::Source::code`], or
     /// `no_listing` for a series no listing applies to.
     pub listing: &'static str,
+    /// When a master holds the share but states no listing day a refusal may
+    /// rest on, why: [`crate::listing::Unknown::code`] (`listing_epoch_zero`,
+    /// ...). `None` otherwise (R4-17 repair 5: "listed on unknown" said no
+    /// reason).
+    pub listing_unknown: Option<&'static str>,
     /// For a CASH share, the master its listing was read from: its file and
     /// the lower-case hex SHA-256 its receipt binds. `None` when no master
     /// checks, and for a series no listing applies to.
@@ -128,13 +133,10 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
     let cash = parts.segment == "CASH" && parts.contract.is_none();
     let table = cash.then(|| crate::listing::for_store(store_root));
     let isin = brutex_core::universe::nse_isin(parts.symbol);
-    let held = table.as_deref().and_then(|listing| {
-        listing.span(
-            parts.exchange,
-            parts.symbol,
-            isin.as_ref().map(brutex_core::isin::Isin::as_str),
-        )
-    });
+    let isin = isin.as_ref().map(brutex_core::isin::Isin::as_str);
+    let held = table
+        .as_deref()
+        .and_then(|listing| listing.span(parts.exchange, parts.symbol, isin));
     let listed_on = held
         .and_then(|found| found.listed_on())
         .map(|day| i64::from(day.days_from_epoch()));
@@ -144,9 +146,12 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
         first_day: None,
         listing: match (held, table.as_deref()) {
             (Some(found), _) => found.source.code(),
-            (None, Some(listing)) => listing.absent().code(),
+            (None, Some(listing)) => listing.absent(isin).code(),
             (None, None) => NO_LISTING,
         },
+        listing_unknown: held
+            .and_then(|found| found.first.err())
+            .map(crate::listing::Unknown::code),
         master: table.as_deref().and_then(|listing| {
             listing
                 .in_use()
@@ -324,9 +329,11 @@ pub(super) fn screen(
         return (kept, Refused::default());
     };
     let table = cash_listing(store_root, &identity, plan);
+    let isin = brutex_core::universe::nse_isin(identity.symbol.as_str());
+    let isin = isin.as_ref().map(brutex_core::isin::Isin::as_str);
     let span = table
         .as_deref()
-        .and_then(|listing| span_of(listing, &identity));
+        .and_then(|listing| span_of(listing, &identity, isin));
     let listed_on = span
         .and_then(|span| span.listed_on())
         .map(|day| i64::from(day.days_from_epoch()));
@@ -337,8 +344,9 @@ pub(super) fn screen(
             (Some(span), _) => span.source.code(),
             // A SHARE IN NO MASTER ON DISK (DHFL, JETAIRWAYS): its span is the
             // vendor's own, labelled, and refuses nothing (D-5839) — unless
-            // no master checks at all, which is its own label (repair 3).
-            (None, Some(listing)) => listing.absent().code(),
+            // no master checks at all, which is its own label (repair 3), or the
+            // share has no ISIN to ask a master with (repair 5).
+            (None, Some(listing)) => listing.absent(isin).code(),
             (None, None) => NO_LISTING,
         },
         master: MasterSeen::of(table.as_deref()),
@@ -429,18 +437,13 @@ fn cash_listing(
         .then(|| crate::listing::for_store(store_root))
 }
 
-/// The share's span, by its exact NSE ISIN.
+/// The share's span, by its exact NSE ISIN (`None`: the universe holds none).
 fn span_of<'a>(
     listing: &'a crate::listing::Listing,
     identity: &Identity,
+    isin: Option<&str>,
 ) -> Option<crate::listing::Span<'a>> {
-    let symbol = identity.symbol.as_str();
-    let isin = brutex_core::universe::nse_isin(symbol);
-    listing.span(
-        identity.exchange.as_str(),
-        symbol,
-        isin.as_ref().map(brutex_core::isin::Isin::as_str),
-    )
+    listing.span(identity.exchange.as_str(), identity.symbol.as_str(), isin)
 }
 
 /// One kept row's IST day and its four prices in paisa, or `None` when the

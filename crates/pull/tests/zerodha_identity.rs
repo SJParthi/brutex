@@ -590,13 +590,29 @@ fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
 
 /// [`install_master`], dated `on`.
 fn install_master_on(root: &Path, on: Day, rows: &[(&str, Option<Day>, Option<Day>)]) {
+    let keyed: Vec<(&str, brutex_core::isin::Isin, Option<Day>, Option<Day>)> = rows
+        .iter()
+        .map(|(symbol, listed, removed)| {
+            let isin = brutex_core::universe::nse_isin(symbol).expect("an NSE ISIN");
+            (*symbol, isin, *listed, *removed)
+        })
+        .collect();
+    install_master_keyed(root, on, &keyed);
+}
+
+/// [`install_master_on`] with each row's ISIN named, for a share the
+/// universe holds no ISIN of.
+fn install_master_keyed(
+    root: &Path,
+    on: Day,
+    rows: &[(&str, brutex_core::isin::Isin, Option<Day>, Option<Day>)],
+) {
     use std::fmt::Write as _;
     use std::io::Write as _;
     let mut csv = String::from(
         "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n",
     );
-    for (id, (symbol, listed, removed)) in rows.iter().enumerate() {
-        let isin = brutex_core::universe::nse_isin(symbol).expect("an NSE ISIN");
+    for (id, (symbol, isin, listed, removed)) in rows.iter().enumerate() {
         let cell =
             |on: &Option<Day>| on.map_or_else(|| "0".to_owned(), |d| nse_seconds(d).to_string());
         writeln!(
@@ -627,7 +643,8 @@ fn local_minute(row: &RawRow) -> (Day, i64) {
 }
 
 /// PIIND's shape (RT-DATA-02 a): inside one session, a block of minutes at
-/// another price basis — the 09:15 close 821.65 beside the 09:16 open 89.90 —
+/// another price basis — here an invented 1,100/10,000 of the series' level,
+/// near the ninefold step the spec measured; no real price is quoted —
 /// under a day bar that spans both, so the day rung cannot tell them apart.
 /// The block is refused whole by name; the minutes after it, back on the
 /// series' own basis, land; nothing refused is folded.
@@ -639,7 +656,7 @@ fn a_session_interleaving_two_price_bases_is_refused_at_landing() {
     // A day bar mixed like the vendor's: low at the foreign basis, high at the
     // series' own.
     let mixed = RawRow {
-        low: LEVEL * 8_990 / 82_165 - 1_000,
+        low: LEVEL * 1_100 / 10_000 - 1_000,
         ..day_candle(days[2])
     };
     let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
@@ -657,9 +674,9 @@ fn a_session_interleaving_two_price_bases_is_refused_at_landing() {
     let mut swapped = 0usize;
     for row in &mut rows {
         let (on, minute) = local_minute(row);
-        // 10:00..10:09: ten minutes at 8,990/82,165 of the level.
+        // 10:00..10:09: ten minutes at an invented 1,100/10,000 of the level.
         if on == days[2] && (600..=609).contains(&minute) {
-            *row = impostor(on, minute, 8_990, 82_165);
+            *row = impostor(on, minute, 1_100, 10_000);
             swapped += 1;
         }
     }
@@ -1001,6 +1018,90 @@ fn epoch_zero_listing_refuses_nothing() {
         vec![early],
     );
     assert!(done.failures.is_empty(), "{:?}", done.failures);
+    // R4-17 repair 5: the scan says WHY the listing is unknown, by the
+    // master's own code, beside the master it was read from.
+    let scan = cash_scan(&scratch.0, symbol);
+    assert_eq!(scan.listing, "nse_security_master");
+    assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, Some("listing_epoch_zero"));
+}
+
+/// The store scan of one CASH share's Zerodha series.
+fn cash_scan(root: &Path, symbol: &str) -> pull::ingest::identity_screen::SeriesScan {
+    pull::ingest::identity_screen::scan_series(
+        root,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    )
+}
+
+/// R4-17 repair 5: a CASH share whose ISIN the universe does not hold cannot
+/// be keyed `(exchange, symbol, ISIN)`, so no master is asked. It was labelled
+/// `inferred_from_vendor_span` (a master was asked and omits it) even when
+/// the master in use holds the symbol, as this one does. Its label is
+/// `no_isin`, on the scan and on the screen's `/logs` line alike, and nothing
+/// is refused on a listing: a day bar before the master's listing day lands.
+#[test]
+fn a_share_with_no_isin_is_labelled_no_isin_even_when_a_master_holds_it() {
+    let sink = log_sink();
+    let scratch = Scratch::new("no-isin");
+    let symbol = "ZZNOISIN";
+    assert!(
+        brutex_core::universe::nse_isin(symbol).is_none(),
+        "the universe holds no ISIN of the invented share"
+    );
+    let (from, to, days) = week();
+    // The master holds the symbol under an ISIN the universe gives another
+    // share: an invented row, keyed by an ISIN this share is never asked by.
+    let isin = brutex_core::universe::nse_isin("IRFC").expect("an NSE ISIN");
+    install_master_keyed(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, isin, Some(days[4]), None)],
+    );
+    let mut rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    rows[1] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[1]
+    };
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(
+        whys(&done, "before_listing").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        whys(&done, "non_positive_price").len(),
+        1,
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(done.bars_committed, 4);
+    let lines = identity_lines(sink, symbol);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"listing\":\"no_isin\""), "{}", lines[0]);
+    let scan = cash_scan(&scratch.0, symbol);
+    assert_eq!(scan.listing, "no_isin");
+    assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, None);
+    assert!(scan.master.is_some(), "a master checks");
 }
 
 /// A share in no master on disk (DHFL, JETAIRWAYS): its span is the vendor's
@@ -1021,21 +1122,10 @@ fn a_name_absent_from_every_master_is_labelled_inferred() {
     );
     assert!(done.failures.is_empty(), "{:?}", done.failures);
     assert_eq!(done.bars_committed, 5);
-    let scan = pull::ingest::identity_screen::scan_series(
-        &scratch.0,
-        PathParts {
-            vendor: brutex_core::vendor::Vendor::Zerodha,
-            exchange: "NSE",
-            segment: "CASH",
-            symbol: "PIIND",
-            contract: None,
-            timeframe: Timeframe::MINUTE_1,
-            month: YearMonth::new(2024, 1).unwrap(),
-            file: FileKind::Bars,
-        },
-    );
+    let scan = cash_scan(&scratch.0, "PIIND");
     assert_eq!(scan.listing, "inferred_from_vendor_span");
     assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, None);
 }
 
 /// COR-07: a 404 or an empty answer for days after a master's removal day is
@@ -1455,7 +1545,7 @@ fn an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open() {
     for row in &mut rows {
         let (on, minute) = local_minute(row);
         if on == days[2] && (600..=609).contains(&minute) {
-            *row = impostor(on, minute, 8_990, 82_165);
+            *row = impostor(on, minute, 1_100, 10_000);
         }
     }
     let done = land_cash(
@@ -1576,7 +1666,7 @@ fn an_index_is_never_judged_by_the_jump_rule() {
     let symbol = "NIFTY";
     let (from, to, days) = week();
     let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
-    day_rows[2].low = LEVEL * 8_990 / 82_165 - 1_000;
+    day_rows[2].low = LEVEL * 1_100 / 10_000 - 1_000;
     let req = request(from, to, pull::vendor::Granularity::Day1);
     let done = pull::ingest::from_window(
         &RawWindow { rows: day_rows },
@@ -1591,7 +1681,7 @@ fn an_index_is_never_judged_by_the_jump_rule() {
     for row in &mut rows {
         let (on, minute) = local_minute(row);
         if on == days[2] && (600..=609).contains(&minute) {
-            *row = impostor(on, minute, 8_990, 82_165);
+            *row = impostor(on, minute, 1_100, 10_000);
         }
     }
     let done = land(&scratch.0, symbol, from, to, rows);

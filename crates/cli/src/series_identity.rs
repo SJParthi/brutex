@@ -60,7 +60,9 @@
 //!
 //! [`OK`] when no stored bar would be refused and every month of both rungs
 //! and of the GDFL witness opened; [`FAILED`] otherwise — any in-session jump
-//! among them; [`MISUSED`] for arguments that name no series.
+//! among them; [`MISUSED`] for arguments that name no series, and for a
+//! series the store holds no month of on either rung (`no_series`, R4-17
+//! repair 5).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -777,13 +779,16 @@ fn run_event(
     unread: usize,
 ) {
     let causes = counts_text(counts);
-    let event = if code == OK {
-        telemetry::Event::info(EVENT_TARGET, "series identity scanned: nothing refused")
-    } else {
-        telemetry::Event::warn(
+    let event = match code {
+        OK => telemetry::Event::info(EVENT_TARGET, "series identity scanned: nothing refused"),
+        MISUSED => telemetry::Event::warn(
+            EVENT_TARGET,
+            "series identity refused: the store holds no month of the series",
+        ),
+        _ => telemetry::Event::warn(
             EVENT_TARGET,
             "series identity scanned: bars a landing refuses, or a month that would not open",
-        )
+        ),
     };
     crate::note(
         &event
@@ -962,11 +967,61 @@ const fn writes_what(ask: &Ask) -> &'static str {
     }
 }
 
+/// "listed on" of one series: the master's day, or `unknown` with the
+/// master's own reason when it holds the share and states no usable day
+/// (R4-17 repair 5: `listed on unknown` gave no reason).
+fn listed_on_text(scan: &SeriesScan) -> String {
+    match (scan.listed_on, scan.listing_unknown) {
+        (Some(on), _) => day_text(on),
+        (None, Some(why)) => format!("unknown ({why})"),
+        (None, None) => "unknown".to_owned(),
+    }
+}
+
+/// Whether the store holds no month of either rung of the series, and none
+/// that would not open: nothing to judge.
+fn held_nothing(scan: &SeriesScan) -> bool {
+    scan.day_months.is_empty() && scan.minute_months.is_empty() && scan.unread.is_empty()
+}
+
+/// The code a run over a series the store does not hold is refused with.
+const NO_SERIES: &str = "no_series";
+
+/// A series the store holds no month of, on either rung, is refused by name
+/// as arguments that name no series ([`MISUSED`]). It answered "no stored bar
+/// would be refused at landing" with exit 0, so an absent or mistyped symbol
+/// read as a clean series (R4-17 repair 5). Nothing is written; the run's one
+/// event says so.
+fn no_series(run: &Run<'_>, symbol: &str, scan: &SeriesScan, out: &mut String) -> u8 {
+    let ask = run.ask;
+    let _ = writeln!(
+        out,
+        "SERIES IDENTITY REFUSED: {NO_SERIES}: {} NSE-{}-{symbol} holds no 1day or 1min month \
+         under {}. Nothing was judged and no plan was written.",
+        ask.feed.as_str(),
+        ask.segment,
+        run.root.display()
+    );
+    let master = master_word(ask, scan.master.as_ref());
+    run_event(
+        run,
+        (symbol, &master),
+        MISUSED,
+        "none: no series",
+        &BTreeMap::new(),
+        0,
+    );
+    MISUSED
+}
+
 fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
     let (root, ask) = (run.root, run.ask);
     let Some(mut scan) = scan(root, ask, symbol) else {
         return MISUSED;
     };
+    if held_nothing(&scan) {
+        return no_series(run, symbol, &scan, out);
+    }
     // MEASURED FIRST, so a GDFL month that would not open is among the
     // NOT READ lines below and fails the run (Z6 repair 1).
     let mut plan = Plan::default();
@@ -991,8 +1046,7 @@ fn one(run: &Run<'_>, symbol: &str, out: &mut String) -> u8 {
         out,
         "  listing: {}; listed on {}",
         scan.listing,
-        scan.listed_on
-            .map_or_else(|| "unknown".to_owned(), day_text)
+        listed_on_text(&scan)
     );
     if ask.segment == "CASH" {
         master_lines(out, scan.master.as_ref(), &scan.passed_over);

@@ -36,6 +36,10 @@
 //!   ([`Source::InferredFromVendorSpan`]). It is a label: an inferred span never
 //!   refuses anything, because the vendor's own span cannot accuse the vendor's
 //!   own rows.
+//! - A share whose ISIN [`brutex_core::universe::nse_isin`] does not hold
+//!   cannot be keyed, so no master is asked: it is labelled
+//!   [`Source::NoIsin`], never "inferred" (which says a master was asked and
+//!   omits it), and nothing is refused on it (R4-17 repair 5).
 //!
 //! # Which master
 //!
@@ -106,6 +110,13 @@ pub enum Source<'a> {
     /// listing, so the listing rule is off for every share, said by a `warn`
     /// ([`for_store`]). Never a span's source; the label of every share then.
     NoCheckedMaster,
+    /// A master checks, but [`brutex_core::universe::nse_isin`] holds no ISIN
+    /// for the share: the key `(exchange, symbol, ISIN)` cannot be formed, so
+    /// no master is asked and nothing is known of its listing (R4-17 repair
+    /// 5). It was labelled [`Source::InferredFromVendorSpan`], which says a
+    /// master was asked and omits the share — untrue when the master may hold
+    /// it. Never a span's source; a label, it refuses nothing.
+    NoIsin,
 }
 
 impl Source<'_> {
@@ -116,12 +127,17 @@ impl Source<'_> {
             Self::NseSecurityMaster { .. } => "nse_security_master",
             Self::InferredFromVendorSpan => "inferred_from_vendor_span",
             Self::NoCheckedMaster => NO_CHECKED_MASTER,
+            Self::NoIsin => NO_ISIN,
         }
     }
 }
 
 /// The label of every CASH share of a store with no master that checks.
 pub const NO_CHECKED_MASTER: &str = "no_checked_master";
+
+/// The label of a CASH share whose ISIN the universe does not hold, beside a
+/// master that checks ([`Source::NoIsin`]).
+pub const NO_ISIN: &str = "no_isin";
 
 /// The target of the events [`for_store`] says a master's fate on.
 pub const EVENT_TARGET: &str = "pull.listing";
@@ -316,15 +332,17 @@ impl Listing {
         &self.passed_over
     }
 
-    /// The label of a share this table holds no span for:
+    /// The label of a share this table holds no span for, asked with the
+    /// `isin` [`Listing::span`] was asked with:
     /// [`Source::InferredFromVendorSpan`] when a master checked and omits it,
-    /// [`Source::NoCheckedMaster`] when no master checked at all.
+    /// [`Source::NoIsin`] when a master checked but the share has no ISIN to
+    /// ask it with, [`Source::NoCheckedMaster`] when no master checked at all.
     #[must_use]
-    pub const fn absent(&self) -> Source<'static> {
-        if self.master.is_some() {
-            Source::InferredFromVendorSpan
-        } else {
-            Source::NoCheckedMaster
+    pub const fn absent(&self, isin: Option<&str>) -> Source<'static> {
+        match (self.master.is_some(), isin.is_some()) {
+            (false, _) => Source::NoCheckedMaster,
+            (true, false) => Source::NoIsin,
+            (true, true) => Source::InferredFromVendorSpan,
         }
     }
 

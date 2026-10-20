@@ -1128,7 +1128,11 @@ mod tests {
             Some(10_000),
             "a halving reads as a doubling"
         );
-        assert_eq!(jump_bps(82_165, 8_990), Some(81_395), "PIIND's interleave");
+        assert_eq!(
+            jump_bps(10_000, 1_100),
+            Some(80_909),
+            "an invented interleave of PIIND's shape"
+        );
         assert_eq!(jump_bps(10_000, 13_000), Some(JUMP_BPS));
         assert_eq!(
             jump_bps(10_000, 13_001),

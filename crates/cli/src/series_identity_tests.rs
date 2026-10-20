@@ -348,15 +348,23 @@ fn a_clean_series_passes_and_a_series_the_store_lacks_holds_nothing() {
         out.contains("no stored bar would be refused at landing"),
         "{out}"
     );
-    // A series with nothing on disk: nothing to refuse, and it says none.
+    // A series with nothing on disk holds nothing to judge. WP-13d answered
+    // it "1day: none", "1min: none" and exit 0, which reads as a clean
+    // series; R4-17 repair 5 (D-4994 point 11) refuses it by name instead.
     let (code, out) = root.run(&["NIFTYIT"]);
-    assert_eq!(code, OK, "{out}");
-    assert!(out.contains("1day: none; first served day none"), "{out}");
-    assert!(out.contains("1min: none"), "{out}");
-    // A feed that holds nothing for it.
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(
+        out.contains("SERIES IDENTITY REFUSED: no_series: zerodha NSE-INDEX-NIFTYIT holds no"),
+        "{out}"
+    );
+    assert!(!out.contains("no stored bar would be refused"), "{out}");
+    // A feed that holds no 1day or 1min month for it: the same refusal.
     let (code, out) = root.run(&["NIFTY", "--feed", "gdfl"]);
-    assert_eq!(code, OK, "{out}");
-    assert!(out.contains("gdfl NSE-INDEX-NIFTY"), "{out}");
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(
+        out.contains("SERIES IDENTITY REFUSED: no_series: gdfl NSE-INDEX-NIFTY holds no"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -535,12 +543,17 @@ fn install_master(root: &Path, symbol: &str, listed: Day) {
 
 /// [`install_master`], dated `on`.
 fn install_master_on(root: &Path, on: Day, symbol: &str, listed: Day) {
+    install_master_listing(root, on, symbol, nse_seconds(listed));
+}
+
+/// [`install_master_on`] with the `ListgDt` cell as written: `0` is a master
+/// that states no listing day (TATACONSUM's shape).
+fn install_master_listing(root: &Path, on: Day, symbol: &str, listed: u64) {
     use std::io::Write as _;
     let isin = brutex_core::universe::nse_isin(symbol).unwrap();
     let csv = format!(
-        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n7000,{symbol},EQ,{},1,{},0,0\n",
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n7000,{symbol},EQ,{},1,{listed},0,0\n",
         isin.as_str(),
-        nse_seconds(listed)
     );
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(csv.as_bytes()).unwrap();
@@ -579,7 +592,7 @@ fn week_minutes(times: impl Fn(Day, i64) -> (i64, i64)) -> (Vec<Day>, Vec<store:
 /// so only the run can see them — fails, counting each jump in its month.
 #[test]
 fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
-    let wide = |on: Day| day_bar(on, LEVEL * 8_990 / 82_165 - 1_000, LEVEL + 2_000);
+    let wide = |on: Day| day_bar(on, LEVEL * 1_100 / 10_000 - 1_000, LEVEL + 2_000);
     let clean = Root::new();
     let (days, minutes) = week_minutes(|_, _| (1, 1));
     seed(
@@ -614,7 +627,7 @@ fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
     let seeded = Root::new();
     let (days, minutes) = week_minutes(|on, m| {
         if on == day(2024, 1, 3) && (600..=609).contains(&m) {
-            (8_990, 82_165)
+            (1_100, 10_000)
         } else {
             (1, 1)
         }
@@ -682,7 +695,7 @@ fn piind_store(symbol: &str) -> Root {
     let root = Root::new();
     let (days, minutes) = week_minutes(|on, m| {
         if on == day(2024, 1, 3) && (600..=609).contains(&m) {
-            (8_990, 82_165)
+            (1_100, 10_000)
         } else {
             (1, 1)
         }
@@ -1690,7 +1703,7 @@ fn the_jump_line_counts_jumps_beyond_the_threshold_apart_from_jump_refusals() {
     let narrow = |on: Day| day_bar(on, LEVEL - 1_000, LEVEL + 2_000);
     let (days, minutes) = week_minutes(|on, m| {
         if on == day(2024, 1, 3) && (600..=609).contains(&m) {
-            (8_990, 82_165)
+            (1_100, 10_000)
         } else {
             (1, 1)
         }
@@ -1889,4 +1902,88 @@ fn a_failed_publish_names_the_staging_file_it_leaves() {
     super::publish(&mut staged.file, &staging, &free, b"plan\n").unwrap();
     assert_eq!(fs::read(&free).unwrap(), b"plan\n");
     assert!(fs::symlink_metadata(&staging).is_err());
+}
+
+/// R4-17 repair 5: a master that holds the share and states no usable
+/// listing day (`ListgDt` 0, TATACONSUM's shape) is named with its own code:
+/// "listed on unknown" gave no reason, so a reader could not tell an
+/// epoch-zero master from a share no master knows.
+#[test]
+fn listed_on_unknown_names_the_masters_own_reason() {
+    let symbol = "TATACONSUM";
+    let root = listed_store(symbol, &[]);
+    install_master_listing(&root.0, day(2026, 8, 3), symbol, 0);
+    let (code, out) = root.run(&[symbol, "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("listing: nse_security_master; listed on unknown (listing_epoch_zero)\n"),
+        "{out}"
+    );
+    // No master at all: the bare word, since there is no master's reason.
+    let bare = listed_store(symbol, &[]);
+    let (code, out) = bare.run(&[symbol, "--segment", "CASH", "--dry-run"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("listing: no_checked_master; listed on unknown\n"),
+        "{out}"
+    );
+}
+
+/// R4-17 repair 5: a series the store holds no month of, on either rung, is
+/// refused by name with [`MISUSED`]. It printed "no stored bar would be
+/// refused at landing" and exited 0, so an absent or mistyped symbol read as
+/// a clean series. Nothing is written, with or without `--dry-run`, and the
+/// run's one event is a `warn` naming the refusal.
+#[test]
+fn a_series_the_store_holds_no_month_of_is_refused_by_name() {
+    use crate::ledger_all::tests::{counts, mark, says, sink};
+    let from = mark();
+    let (root, _) = store();
+    let before = listing(&root.0);
+    for arguments in [
+        &["NOSUCHINDEX"][..],
+        &["NOSUCHINDEX", "--dry-run"],
+        &["NOSUCHSHARE", "--segment", "CASH"],
+    ] {
+        let (code, out) = root.run(arguments);
+        assert_eq!(code, MISUSED, "{arguments:?}: {out}");
+        assert!(
+            out.contains("SERIES IDENTITY REFUSED: no_series: zerodha NSE-"),
+            "{out}"
+        );
+        assert!(out.contains("holds no 1day or 1min month under"), "{out}");
+        assert!(
+            out.contains("Nothing was judged and no plan was written."),
+            "{out}"
+        );
+        assert!(!out.contains("no stored bar would be refused"), "{out}");
+    }
+    assert_eq!(listing(&root.0), before, "a refusal writes nothing");
+    // A series the store does hold is still judged: NIFTYINFRA has a day rung
+    // and no minutes, which is not "no month".
+    let (_, out) = root.run(&["NIFTYINFRA", "--dry-run"]);
+    assert!(!out.contains("no_series"), "{out}");
+
+    let sink = sink();
+    let dir = sink.path().parent().unwrap().to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.series_identity");
+    let runs: Vec<telemetry::Record> = telemetry::tail(&dir, sink.keep_files(), &query)
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.seq >= from
+                && (says(record, "scope", "NOSUCHINDEX") || says(record, "scope", "NOSUCHSHARE"))
+        })
+        .collect();
+    assert_eq!(runs.len(), 3, "one event per run: {runs:?}");
+    for run in &runs {
+        assert_eq!(run.level, telemetry::Level::Warn, "{run:?}");
+        assert!(counts(run, "exit", u64::from(MISUSED)), "{run:?}");
+        assert!(says(run, "plan", "none: no series"), "{run:?}");
+        assert!(
+            run.message
+                .contains("the store holds no month of the series"),
+            "{run:?}"
+        );
+    }
 }

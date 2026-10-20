@@ -19887,6 +19887,17 @@ the process under the kernel write lock, nothing written outside the shadow):
 | larger maxima | PIIND 270,496 and VBL 10,003, both on minutes the day rung refuses as `foreign_level` first |
 | minutes refused as `in_session_jump` | **0**, so 0 on any split or bonus ex-date |
 
+**VBL's 10,003 is one day's, and what that day was is UNVERIFIED (R4-17
+repair 5).** All 8 of VBL's jumps beyond `JUMP_BPS` fall on 2023-06-14, the
+date the R4-17 specification names for VBL, and the scan measures each of
+those minutes `foreign_level` against GDFL (docs/05-decisions.md, the store
+scan's table). That 2023-06-14 is VBL's bonus ex-date is UNVERIFIED: no
+corporate-action source is recorded in `docs/00-charter.md`, and the only
+evidence of action days behind the row above is the Zerodha/GDFL close-ratio
+change of `crosscheck_all.json` (docs/05-decisions.md D-4993 point 6), which
+is a measurement of two vendors, not an exchange record. It stays
+UNVERIFIED until a charter row names the exchange's corporate-action record.
+
 **The limit this names:** 3,000 is 1.36 times the largest clean jump, not a
 wide margin, and on today's store the rule refuses nothing the day rung's
 range does not already refuse. A share with a genuine one-minute move

@@ -2662,6 +2662,12 @@ const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 
 // Declared at R4-17 repair 3: gate 1d had never been run on the package.
 // Repair 4 adds the passed-over code `undated_master_name` (a master-shaped
 // name that states no calendar day) and its test tag `undated`.
+// Repair 5 adds `session-masters`, `pull::listing::MASTER_DIR`: the store's
+// directory of NSE security masters, a directory under the store root and
+// never a Parameter Store segment. `pull::gdfl_run_scope` joins the same
+// name and was refused for it on feat/db-fix before this declaration.
+// Repair 5 also adds the label `no_isin`, `pull::listing::NO_ISIN`: a CASH
+// share the universe holds no ISIN of, beside a master that checks.
 const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range delisted_on enum \
      epoch-zero epoch-zero-landing exchange_token fininstrmid for for_key halt history-ends \
      history_ends_delisted identity-log identity-log-unread impl in_session_jump in_use \
@@ -2669,9 +2675,10 @@ const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range
      kite_token label late-removal level listing-unread-day listing_after_master listing_blank \
      listing_column_absent listing_conflicting listing_contradictory listing_epoch_zero \
      listing_invalid macos master master_sha256 minute-before-listing newest no-master-checks \
-     no-such-directory no_checked_master no_listing non_positive_price none-checks not-text \
+     no-such-directory no_checked_master no_isin no_listing non_positive_price none-checks not-text \
      not_consulted nse_security_master option-zero option_key overflow parse_option_key \
-     passed-over-master passed_over removal rs security_id server struct target torn-one-month \
+     passed-over-master passed_over removal rs security_id server session-masters struct target \
+     torn-one-month \
      type undated undated_master_name unknowns unread-day zero-minute zero-unread-day";
 
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN

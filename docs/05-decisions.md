@@ -74974,6 +74974,23 @@ landing by name (`fetch::RowCause::BeforeListing`, code `before_listing`).
    holds 42 masters, each named by a valid day, and 42 receipts (listed
    read-only on 19 Oct 2026), so nothing it serves changes. Invariant ZI-23.
 
+8. **A share with no ISIN is its own label, and an unknown listing says why
+   (amended at R4-17 repair 5, 20 Oct 2026, by addition; the R4-17 check's
+   follow-ups).** The key is `(exchange, symbol, ISIN)` and the ISIN comes
+   from `core::universe::nse_isin`; for a CASH share that holds none
+   the key cannot be formed and no master is asked. Such a share was labelled
+   `inferred_from_vendor_span`, which says a master that checked was asked
+   and omits it, untrue when the master may hold the symbol. Its label is now
+   `no_isin` (`listing::Source::NoIsin`, `listing::NO_ISIN`), on the store
+   scan and on every `pull.identity` line, and like the inferred label it
+   refuses nothing; with no master that checks it stays `no_checked_master`,
+   the broader fact. None of the 208 shares on the operator's store hits it.
+   The store scan's `listed on unknown` names the master's own code beside it
+   when a master holds the share and states no usable day
+   (`listed on unknown (listing_epoch_zero)`, `SeriesScan::listing_unknown`),
+   so an epoch-zero master is told apart from a share no master knows.
+   Invariant ZI-24.
+
 Rejected: decoding the master a second time in `listing` (a second epoch
 authority beside `cash_auction`); keying by symbol alone (a reused symbol is
 another company); treating `0` as 1980-01-01.
@@ -74993,7 +75010,13 @@ Proof: `pull::listing::tests` (`the_newest_master_that_checks_is_used_and_a_bad_
 `a_store_with_no_master_that_checks_says_the_listing_rule_is_off`
 (`cli::series_identity::tests`); invariants ZI-18 and ZI-19. Point 7:
 `a_master_shaped_name_that_states_no_day_is_passed_over_by_name`
-(`pull::listing::tests`); invariant ZI-23.
+(`pull::listing::tests`); invariant ZI-23. Point 8:
+`a_table_with_no_master_that_checks_is_its_own_label_and_names_none_in_use`
+(`pull::listing::tests`),
+`a_share_with_no_isin_is_labelled_no_isin_even_when_a_master_holds_it`,
+`epoch_zero_listing_refuses_nothing` (`crates/pull/tests/zerodha_identity.rs`),
+`listed_on_unknown_names_the_masters_own_reason` (`cli::series_identity::tests`);
+invariant ZI-24.
 
 ### D-4991 — A window after a CASH security's removal day that answers nothing is the end of its history, never a failure (R4-17; COR-07) — 2026-10-17
 
@@ -75323,6 +75346,24 @@ a measured cause:
     package's own stated rule, for a file that costs one plan's bytes and is
     never read as a plan. Invariant ZI-22.
 
+11. **A series the store holds no month of is refused by name (repair 5, 20
+    Oct 2026, by addition; the R4-17 check's follow-up).** A named series
+    with no 1day month, no 1min month and no month that would not open, on
+    the feed and segment asked, printed "no stored bar would be refused at
+    landing" and exited 0, so an absent or mistyped symbol read as a clean
+    series. It is now refused `no_series` with exit 2 (`MISUSED`, arguments
+    that name no series), before any plan is staged: `SERIES IDENTITY
+    REFUSED: no_series: <feed> NSE-<segment>-<symbol> holds no 1day or 1min
+    month under <root>. Nothing was judged and no plan was written.` The
+    run's one event is a `warn`, its plan field `none: no series`. A series
+    with a day rung and no minutes (NIFTYINFRA's shape) is still judged.
+    `ALL` lists only directories on disk, so it is unchanged. **This amends
+    WP-13d's answer**, which its test
+    `a_clean_series_passes_and_a_series_the_store_lacks_holds_nothing`
+    asserted as exit 0 for a series with nothing on disk and for a feed that
+    holds no 1day or 1min month of it (`--feed gdfl`); the test now asserts
+    the refusal for both. Invariant ZI-25.
+
 Proof: `cli::series_identity::tests`
 (`a_plan_at_its_name_with_other_bytes_is_refused_never_trusted`,
 `a_plan_is_never_written_through_a_linked_directory`,
@@ -75344,7 +75385,9 @@ and the WP-13d tests kept). Point 10:
 `a_link_at_the_plans_name_is_refused_never_followed_or_replaced`,
 `a_failed_publish_names_the_staging_file_it_leaves`; and the jump line at its
 threshold, `a_jump_of_exactly_the_threshold_is_judged_and_not_counted_beyond_it`
-(invariant ZI-20).
+(invariant ZI-20). Point 11:
+`a_series_the_store_holds_no_month_of_is_refused_by_name`,
+`a_clean_series_passes_and_a_series_the_store_lacks_holds_nothing` (invariant ZI-25).
 
 ### D-4995 — No store path and no census key is built from a vendor's instrument token, checked from the source (R4-17; CON-13) — 2026-10-17
 
