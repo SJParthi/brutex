@@ -75625,7 +75625,10 @@ landing by name (`fetch::RowCause::BeforeListing`, code `before_listing`).
    `no_isin` (`listing::Source::NoIsin`, `listing::NO_ISIN`), on the store
    scan and on every `pull.identity` line, and like the inferred label it
    refuses nothing; with no master that checks it stays `no_checked_master`,
-   the broader fact. None of the 208 shares on the operator's store hits it.
+   the broader fact. None of the 208 shares on the operator's store hits it:
+   measured on the Mac, 20 Oct 2026, `cli series-identity ALL --segment CASH
+   --feed zerodha --workers 4 --dry-run` over a private shadow (read-only of
+   bars, kernel write lock) labels all 208 `nse_security_master`.
    The store scan's `listed on unknown` names the master's own code beside it
    when a master holds the share and states no usable day
    (`listed on unknown (listing_epoch_zero)`, `SeriesScan::listing_unknown`),

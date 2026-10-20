@@ -19978,6 +19978,19 @@ restarts from zero. The residual risk: a level index served at zero by a
 vendor fault would land as a day bar. None is observed (0 of 135 series); its
 minutes are still judged by range, and the scan labels every held zero.
 
+**A `no_series` refusal, measured (repair 5, 20 Oct 2026, D-4994 point
+11).** `cli series-identity NOSUCHSHARE --segment CASH --dry-run`, the
+release build of repair 5 over a private shadow under the kernel write lock,
+200 sequential runs timed by the shell's clock: p50 119.2 ms, p99 233.4 ms,
+max 335.5 ms, every run exit 2. That is the whole process: its start, one
+load of the newest master that checks (O(rows of that master), once per run,
+as "The listing table is loaded once per store root per process" below
+says) and one listing of each rung's directory (`repair_plan::held_months`);
+nothing walks the store.
+On the same shadow `piind` (lower case) and `NIFTY --feed gdfl` are refused
+the same way, and `ALL --segment CASH` still labels 208 shares
+`nse_security_master` with the 17 Oct totals unchanged.
+
 **Store scan, measured on the Mac (17 Oct 2026, read-only of bars, kernel
 write lock, private shadow):**
 
