@@ -1504,7 +1504,7 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/bars.rs", 3),
     ("crates/api/src/calendar_of.rs", 3),
     ("crates/api/src/constituents.rs", 3),
-    ("crates/api/src/logs.rs", 4), // 1 -> 4, GF-1 (docs/06-limits.md)
+    ("crates/api/src/logs.rs", 5), // 1 -> 4, GF-1; 4 -> 5, R3-24 (docs/06-limits.md)
     ("crates/cli/src/frontier.rs", 1),
     ("crates/cli/src/global_replay_v3.rs", 1),
     ("crates/cli/src/knobs.rs", 1),
@@ -1633,6 +1633,10 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": one answer's cells, at most `CELLS_MOST` = 4,096.
     ("crates/api/src/census_rollup.rs", 1),
+    // R3-24, 18 Oct 2026: the /logs picture's top codes, ordered once per
+    // answer over its fixed table of `PICTURE_CODES` = 16 entries; reason in
+    // docs/06-limits.md, "Gate 11 — R3-24".
+    ("crates/telemetry/src/sink.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1739,7 +1743,7 @@ const ALLOW_SCAN: Allow = &[
     // of one df line. Reasons in docs/06-limits.md, gate 11 rules 6 and 7.
     ("crates/pull/src/gdfl_dropbox.rs", 3),
     ("crates/pull/src/disk_projection.rs", 1),
-    ("crates/telemetry/src/sink.rs", 3), // 1 -> 3, GF-1 (docs/06-limits.md)
+    ("crates/telemetry/src/sink.rs", 4), // 1 -> 3, GF-1; 3 -> 4, R3-24 (docs/06-limits.md)
     // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
     // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
     // — the /db fix round and the ingest automation, declared together".
@@ -1753,7 +1757,7 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/gaps_route.rs", 1),
     ("crates/api/src/import_journal.rs", 3),
     ("crates/api/src/imports.rs", 3), // 2 -> 3, AF-02 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
-    ("crates/api/src/logs.rs", 2),
+    ("crates/api/src/logs.rs", 8), // 2 -> 8, R3-24 (docs/06-limits.md)
     ("crates/api/src/scrub_route.rs", 3),
     ("crates/cli/src/scrub_blocks.rs", 1),
     ("crates/pull/src/expiry_alias.rs", 4),
@@ -1775,6 +1779,10 @@ const ALLOW_SCAN: Allow = &[
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
     // most `MAX_KIND_BYTES` = 64 bytes.
     ("crates/pull/src/rehearsal.rs", 1),
+    // R3-24, 18 Oct 2026: the state-change table's `row_of`, a search of
+    // the 23-row compile-time `TABLE`; reason in docs/06-limits.md, "Gate 11
+    // — R3-24".
+    ("crates/telemetry/src/state_events.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1885,7 +1893,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/disk_route.rs", 2),
     ("crates/api/src/gaps_route.rs", 3),
     ("crates/api/src/imports.rs", 2),
-    ("crates/api/src/logs.rs", 5),
+    ("crates/api/src/logs.rs", 6), // 5 -> 6, R3-24 (docs/06-limits.md)
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
     ("crates/cli/src/store_write.rs", 4),
