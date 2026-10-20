@@ -1064,3 +1064,39 @@ fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side()
         );
     }
 }
+
+/// A candidate detail file whose barrier failed is WITHDRAWN, not left at its
+/// final, immutable name, and the retry writes it (cloud-attack-law-20261016,
+/// lens 4). `write_exact` returned the error and left the file: whole, it was
+/// accepted by the next run over bytes no barrier of this run reached; torn, it
+/// wedged the identity as "already contains different bytes". D-1915 fixed the
+/// same defect in `boolean_candidate_persistence::write_or_equal`.
+#[test]
+fn a_failed_detail_barrier_withdraws_the_file_and_the_retry_writes_it() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("withdrawn-detail.bin");
+    let magic = *b"BXTEST01";
+    {
+        let _armed = crate::fixed_tail::fault::Armed::arm(
+            "withdrawn-detail.bin",
+            crate::fixed_tail::fault::Kind::Sync,
+        );
+        let why = write_exact(&path, magic, b"payload").expect_err("the barrier failed");
+        assert!(why.contains("withdrawn"), "{why}");
+        assert!(
+            !crate::fixed_tail::fault::Armed::pending(),
+            "the barrier the fault was armed on is the one write_exact called"
+        );
+    }
+    assert!(
+        !path.exists(),
+        "an unacknowledged file is not left at its name"
+    );
+    let digest = write_exact(&path, magic, b"payload").expect("the retry writes it");
+    assert_eq!(
+        write_exact(&path, magic, b"payload").expect("an exact rerun is accepted"),
+        digest
+    );
+    let _cleanup = std::fs::remove_dir_all(&dir);
+}
