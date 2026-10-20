@@ -75908,7 +75908,7 @@ Repair round 1 (20 Oct, after the re-check of the committed work):
     silence.
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-18);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-15.
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-16.
 
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
@@ -76459,3 +76459,49 @@ field must be refused, so a checker that refuses nothing fails the build.
 Proof: `no_store_or_census_key_is_built_from_a_token`,
 `the_module_list_is_closed_over_every_definition_of_a_key`,
 `a_token_field_in_a_fixture_key_builder_is_refused`.
+
+### D-5916 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 to clear two RustSec advisories published on 19 and 20 Oct; `Cargo.lock` only — 2026-10-21
+
+**Context** (R3-15 repair, the gate re-run after its merge of `feat/db-fix`).
+`cargo deny check` was green on this tree at 00:07 IST on 21 Oct and red at
+02:24 IST the same night, with no file changed between the two runs: the
+advisory database it fetched had gained two entries. Both reach the native TLS
+path `hyper-rustls -> reqwest -> pull -> api, cli`:
+
+- **RUSTSEC-2026-0382** (dated 2026-10-20), "Certificate verification may
+  accept distrusted intermediates", <https://rustsec.org/advisories/RUSTSEC-2026-0382>,
+  against `rustls-webpki` 0.103.15 (through `rustls` 0.23.46), patched
+  `>= 0.103.16, < 0.104.0-alpha.1`: affected versions may accept certificate
+  paths through emSign intermediates whose private keys are now well known.
+- **RUSTSEC-2026-0381** (dated 2026-10-19), "Bundled root certificates allow
+  trust in distrusted emSign intermediates", <https://rustsec.org/advisories/RUSTSEC-2026-0381>,
+  against `webpki-roots` 1.0.9, patched `>= 1.0.10`, which removes the root
+  `emSign ECC Root CA - G3`.
+
+**Decision.**
+
+1. **Both are patch releases inside every manifest's existing range**, so only
+   `Cargo.lock` moves (`cargo update -p rustls-webpki --precise 0.103.16`,
+   `cargo update -p webpki-roots --precise 1.0.10`): two version and two
+   checksum lines. No manifest line, no dependency list and no feature moved;
+   the lock still holds 195 packages.
+2. **The scan `the_dependency_set_has_not_moved_without_review` demands was
+   run before its pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
+   re-pinned to `0x79FE_A712_E0CC_24EC`): neither crate ships a `build.rs` or
+   any `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.s` or `.asm`. `webpki-roots`
+   1.0.10's files outside `.rs`, `.md`, `.toml` and `.json` are the same set as
+   1.0.9's; `rustls-webpki` 0.103.16 adds exactly eight `.spki.der` files
+   under `src/data/distrusted/`, the public keys it now refuses: data, not
+   code. Licences unchanged: ISC, and CDLA-Permissive-2.0 under the existing
+   `deny.toml` exception for `webpki-roots` by name.
+3. **What the bump refuses that 1.0.9 and 0.103.15 accepted, stated rather
+   than hidden**: a vendor or service certificate chain that passes through
+   one of the distrusted emSign intermediates, or that chains only to
+   `emSign ECC Root CA - G3`, now fails the TLS handshake. That is a loud
+   failure of the pull, never a silent one. Whether any host `crates/pull`
+   reaches chains to emSign is **UNVERIFIED**: no vendor host was contacted
+   for this entry.
+
+**Proof.** `cargo deny check`: advisories, bans, licences and sources ok on
+the bumped lock; `the_dependency_set_has_not_moved_without_review` fails on the
+bumped lock under the old pin and passes under the new one.
