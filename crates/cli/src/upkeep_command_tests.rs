@@ -1,4 +1,4 @@
-//! `cli upkeep` on invented stores (R3-17, D-5839): a run that stops and
+//! `cli upkeep` on invented stores (R3-17, D-6270): a run that stops and
 //! resumes where it stopped, an upkeep and an import shutting each other out
 //! of a month and of the store, the sort index at one and eight workers, a
 //! failed index open retried, the three impossible strikes retired (DB-027),
@@ -364,7 +364,7 @@ fn upkeep_and_an_import_exclude_each_other_on_a_month() {
     assert!(out.contains("1 item(s) given"), "{out}");
     assert!(indexed(&root.0, held_month, "NIFTY"));
     // A LIVE IMPORT, v3: its claimed run lock refuses the upkeep run before
-    // its walk, naming the claim, and nothing is written (D-5839 amendment
+    // its walk, naming the claim, and nothing is written (D-6270 amendment
     // 1: the upkeep takes no lock of an import, it looks).
     let import = Holder {
         pid: 4_242,
@@ -1353,7 +1353,7 @@ fn a_run_that_cannot_begin_is_refused_by_name() {
     let (code, out) = plain(&root.0, &["run", "srt", "gdfl"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("upkeep.gdfl.srt.log"), "{out}");
-    // Another GDFL kind cannot see past that journal (D-5839 amendment 1,
+    // Another GDFL kind cannot see past that journal (D-6270 amendment 1,
     // item (e)): it is refused, unseen; with the name freed it runs.
     let (code, out) = plain(&root.0, &["resume", "tix", "gdfl", "77"]);
     assert_eq!(code, FAILED, "{out}");
@@ -1677,7 +1677,7 @@ fn a_rekey_that_only_withdraws_again_says_applied() {
     );
 }
 
-/// Each answer an apply can give is one item outcome (D-5839 item 8): a
+/// Each answer an apply can give is one item outcome (D-6270 item 8): a
 /// clean `applied` that says what it wrote and whether it installed an
 /// epoch; a `REFUSED` naming each refused key and why (a race since AG-02,
 /// whose plan leaves a held target unresolved, so no fixture reaches it
@@ -1738,7 +1738,7 @@ fn an_apply_answer_becomes_one_item_outcome() {
     assert_eq!(stopped.why, "the re-key lock is held");
 }
 
-/// AG-02's rule at the upkeep's door (D-5839 amended): an underlying whose
+/// AG-02's rule at the upkeep's door (D-6270 amended): an underlying whose
 /// directory holds no option key with a bar is refused by name, never read
 /// as nothing pending, and nothing is written. Before the rule the item was
 /// clean `kept` and the run exited OK.
@@ -1991,7 +1991,7 @@ fn a_scope_that_names_nothing_is_refused_before_any_line() {
     assert!(out.contains("0 item(s) given"), "{out}");
 }
 
-/// **AN UPKEEP RUN HOLDS NO IMPORT LOCK AND TAKES NO RUN ID** (D-5839
+/// **AN UPKEEP RUN HOLDS NO IMPORT LOCK AND TAKES NO RUN ID** (D-6270
 /// amendment 1). While its items are built nothing of the GDFL locks is
 /// held by it — a probe finds every lock file free — and an index run puts
 /// no record in the runs ledger. A RECOUNT run is no longer refused by its
@@ -2130,7 +2130,7 @@ fn live_run_timings() {
     held.release().unwrap();
 }
 
-/// **A SECOND GDFL UPKEEP KIND WAITS FOR THE FIRST** (D-5839 amendment 1,
+/// **A SECOND GDFL UPKEEP KIND WAITS FOR THE FIRST** (D-6270 amendment 1,
 /// item (e)): while a GDFL sort-index run holds its journal, a GDFL run of
 /// any other kind is refused by name and writes nothing; a Zerodha run of
 /// another kind is not (Zerodha's kinds share no lock); once the first is
@@ -2157,7 +2157,7 @@ fn a_second_gdfl_upkeep_kind_waits_for_the_first() {
         assert!(
             out.contains(
                 "REFUSED: upkeep_busy: the GDFL srt upkeep run 2000 is RUNNING (3 of 9 built); \
-                 two GDFL upkeep kinds run one after the other (D-5839 item 2). Nothing was \
+                 two GDFL upkeep kinds run one after the other (D-6270 item 2). Nothing was \
                  written."
             ),
             "{out}"
@@ -2193,7 +2193,7 @@ fn a_second_gdfl_upkeep_kind_waits_for_the_first() {
 }
 
 /// **EVERY LIVE RUN A PROBE CAN SEE IS NAMED, AND A RUN IT CANNOT SEE
-/// REFUSES** ([`live_run`], D-5839 amendment 1): a lock held with no claim
+/// REFUSES** ([`live_run`], D-6270 amendment 1): a lock held with no claim
 /// yet, a lock held with bytes that are not a claim, and a lock file that
 /// cannot be probed each refuse the run by name; a claim its holder left
 /// when it died is not a live run.

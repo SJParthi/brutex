@@ -519,7 +519,7 @@ fn render_receipt(out: &mut String, dry_run: bool, lines: &[Line], clean: bool) 
     }
 }
 
-/// One month built as an item of an upkeep run (R3-17, D-5839): the step
+/// One month built as an item of an upkeep run (R3-17, D-6270): the step
 /// this verb takes for it, and the receipt line this verb prints for it as the
 /// run's outcome, so the two never say different things.
 pub(crate) fn upkeep_month(

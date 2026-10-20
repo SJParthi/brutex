@@ -1,4 +1,4 @@
-//! Tests of the upkeep run (R3-17, D-5839): the journal's lines read back
+//! Tests of the upkeep run (R3-17, D-6270): the journal's lines read back
 //! strictly, one run of a kind at a time, Stop by flag and by request, resume
 //! from a chain, the torn tail, a journal that stops taking lines, workers
 //! that build every item once, the status a page reads, and the months a
@@ -1905,7 +1905,7 @@ fn a_run_flushes_its_journal_at_the_run_line_every_64_items_and_the_end() {
 
 // ═══ R3-17 repair 1 ═════════════════════════════════════════════════════════
 
-/// **THE CALLER'S LOOK BEFORE EVERY ITEM** (D-5839 amendment 1): once it
+/// **THE CALLER'S LOOK BEFORE EVERY ITEM** (D-6270 amendment 1): once it
 /// names a run this one must not run beside, no worker takes a further item,
 /// the run ends `stopped` with the look's own words and what is left, and a
 /// resume once the look is clear builds exactly what was left. A look that

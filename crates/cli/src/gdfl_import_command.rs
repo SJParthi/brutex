@@ -94,7 +94,7 @@ use crate::{FAILED, MISUSED, OK};
 #[path = "gdfl_import_guard.rs"]
 mod guard;
 /// The import's run lock, which `cli upkeep`'s tests take to stand for a
-/// live import (R3-17, D-5839 amendment 1: the upkeep itself takes none).
+/// live import (R3-17, D-6270 amendment 1: the upkeep itself takes none).
 #[cfg(test)]
 pub(crate) use guard::{Holder, RunLock};
 

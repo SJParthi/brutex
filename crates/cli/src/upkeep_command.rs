@@ -1,6 +1,6 @@
 //! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
 //! month lacks, and each builder run over it on N workers with a run id,
-//! progress, Stop and resume, under the import's own locks. R3-17, D-5839;
+//! progress, Stop and resume, under the import's own locks. R3-17, D-6270;
 //! DB-027, DB-N14.
 //!
 //! # Usage
@@ -54,7 +54,7 @@
 //!
 //! # Locks: each item's own verb's, and never beside a live GDFL run
 //!
-//! D-5839 amendment 1 (20 October 2026, IA-2). An upkeep run takes NO lock
+//! D-6270 amendment 1 (20 October 2026, IA-2). An upkeep run takes NO lock
 //! of an import and no id in the runs ledger: IA-2's run lock claims an
 //! import run (`mode=import`) in the ledger, so one upkeep run would have
 //! read as three imports, and `census_store::recount` now takes the GDFL
@@ -545,7 +545,7 @@ fn build_item(
 }
 
 /// The run a probe of the GDFL lock files finds live, in words, or `None`
-/// (D-5839 amendment 1). Each lock file that exists — the store lock and the
+/// (D-6270 amendment 1). Each lock file that exists — the store lock and the
 /// kind locks, at most four — is probed SHARED and non-blocking, never
 /// created, at most `PROBE_READ` bytes read and released at once
 /// (`pull::gdfl_run::locks::lock_state`; D-4849: a probe never makes an
@@ -700,7 +700,7 @@ fn render_run(
 }
 
 /// Another kind's GDFL upkeep run that is running, in words, or `None`
-/// (D-5839 amendment 1, item (e)): two GDFL kinds run one after the other,
+/// (D-6270 amendment 1, item (e)): two GDFL kinds run one after the other,
 /// as they did when each held the import's locks, because a recount's census
 /// hold and an index's month locks would refuse each other's items. One
 /// status read of each other kind's journal (a bounded tail and a `flock`
@@ -717,7 +717,7 @@ fn other_kind_running(root: &Path, vendor: Vendor, kind: Kind) -> Option<String>
         .find_map(|other| match upkeep::status(root, vendor, other) {
             Ok(Some(status)) if status.state == State::Running => Some(format!(
                 "upkeep_busy: the GDFL {} upkeep run {} is RUNNING ({} of {} built); two GDFL \
-                 upkeep kinds run one after the other (D-5839 item 2)",
+                 upkeep kinds run one after the other (D-6270 item 2)",
                 other.word(),
                 status.id,
                 status.n,
@@ -998,7 +998,7 @@ fn run(
         kind.word(),
         vendor.as_str()
     );
-    // NOT BESIDE A LIVE GDFL RUN (D-5839 amendment 1): asked before the walk
+    // NOT BESIDE A LIVE GDFL RUN (D-6270 amendment 1): asked before the walk
     // (which takes minutes on a whole segment) and again before every item,
     // through the run's look. No lock of an import is taken: IA-2's run lock
     // claims an import run id in the runs ledger, and the recount's own

@@ -1,6 +1,6 @@
 //! One upkeep run: a store builder carried over a list of items as a TRACKED
 //! run — a run id, an append-only journal, N workers, Stop and resume. R3-17,
-//! D-5839.
+//! D-6270.
 //!
 //! # Why it exists
 //!
@@ -39,7 +39,7 @@
 //! holds the lock, [`status`] says it is running; a journal whose last line
 //! is not an `end` and whose lock is free belongs to a run that DIED.
 //!
-//! What it shares with an import is not decided here, and since D-5839
+//! What it shares with an import is not decided here, and since D-6270
 //! amendment 1 (IA-2's claimed locks, 20 October 2026) the caller holds none
 //! of an import's locks: it hands [`run`] a look ([`Ask::busy`]) that is
 //! asked before every item, by every worker, and that says when a run this
@@ -277,7 +277,7 @@ pub struct Ask<'a> {
     pub stop: &'a AtomicBool,
     /// UNIX seconds now: the run id and the `run` line's `at=`.
     pub now: &'a (dyn Fn() -> u64 + Sync),
-    /// The caller's look before each item (D-5839 amendment 1): `Some(why)`
+    /// The caller's look before each item (D-6270 amendment 1): `Some(why)`
     /// names a run this one must not run beside, and the run takes no
     /// further item and ends [`How::Stopped`] with `why`; [`nothing_beside`]
     /// for a caller with nothing to look at. Asked by every worker before
@@ -1108,7 +1108,7 @@ fn ending(left: &Left<'_>, id: u64) -> (How, String) {
 }
 
 /// Whether a worker takes no further item because the caller's look named a
-/// run this one must not run beside (D-5839 amendment 1): asked before every
+/// run this one must not run beside (D-6270 amendment 1): asked before every
 /// item by every worker; once one worker's look did, every worker stops at
 /// its next, and the first words given are the run's.
 fn yields(busy: &OnceLock<String>, look: &(dyn Fn() -> Option<String> + Sync)) -> bool {

@@ -103,7 +103,7 @@ const ALLOWED: [(&str, &str, usize, &str); 4] = [
         1,
         "request_stop renames its synced request (`<name>.stop.new`) to its sibling \
          final name in the same audit folder; a request it replaces names an earlier \
-         run and stops nothing (R3-17, D-5839)",
+         run and stops nothing (R3-17, D-6270)",
     ),
     (
         "crates/pull/src/gdfl_dropbox.rs",

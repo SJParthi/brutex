@@ -20020,7 +20020,260 @@ audit::lock_wait_measure::measure_append_latency_under_contention
 | L-AG05-06 | `census_kept_bytes` is a sum over every census name of every feed, each file once (repair 2) | counting a file once needs its identity: one `HashSet` probe and at most one insert per name, from the `(st_dev, st_ino)` of the `lstat` the view already took, so no call is added; the names are the ones the answer already lists (the single file, the superseded file, every epoch of every segment, the receipt), and epochs grow by one per compaction (DB-B59, L-AG05-03) | expected O(1) per name (hashing, not a worst-case bound), O(names) per uncached answer, the answer kept for `DISK_TTL`; GET `/disk.json` p50/p99/max on a real-store shadow in fix-AG-05.json | AG-05 |
 | L-AG05-07 | One follow-up of verify-AG-05-r2 is NOT DONE here (two others were taken in this change: a kept census cut short under a whole receipt, AG05-16, and a non-directory at `manifest/v4/<vendor>`, AG05-17) | a symbolic link at a single-file census is refused at load in the host's `ELOOP` words, not named as a link: the load is not in `census_store.rs`'s seal path — R3-19 | it needs a link planted inside the operator's own store (none exists: every name in the real store has one link) | AG-05 → R3-19 |
 
-## The upkeep runner (R3-17, D-5839)
+## R4-17: Zerodha series identity (D-5839 and D-4991 to D-4995)
+
+**`JUMP_BPS` = 3,000 was chosen first and MEASURED on the Mac, 17 Oct
+2026.** `cli series-identity ALL --segment CASH --feed zerodha --workers 4`
+over a private shadow of the operator's store (bars read through the link,
+the process under the kernel write lock, nothing written outside the shadow):
+208 shares, 153,548,887 minutes, 25.8 s wall (16.3 s user, 15.7 s system),
+505 MB peak resident.
+
+| Measure of `jump_bps` across continuous minutes | Value |
+|---|---|
+| per-share p99 | at most 188 bps; median share 11 |
+| per-share p999 | at most 270 bps outside PIIND (PIIND 90,079) |
+| largest max of a share nothing else accuses | 2,203 bps (RADICO) |
+| larger maxima | PIIND 270,496 and VBL 10,003, both on minutes the day rung refuses as `foreign_level` first |
+| minutes refused as `in_session_jump` | **0**, so 0 on any split or bonus ex-date |
+
+**VBL's 10,003 is one day's, and what that day was is UNVERIFIED (R4-17
+repair 5).** All 8 of VBL's jumps beyond `JUMP_BPS` fall on 2023-06-14, the
+date the R4-17 specification names for VBL, and the scan measures each of
+those minutes `foreign_level` against GDFL (docs/05-decisions.md, the store
+scan's table). That 2023-06-14 is VBL's bonus ex-date is UNVERIFIED: no
+corporate-action source is recorded in `docs/00-charter.md`, and the only
+evidence of action days behind the row above is the Zerodha/GDFL close-ratio
+change of `crosscheck_all.json` (docs/05-decisions.md D-4993 point 6), which
+is a measurement of two vendors, not an exchange record. It stays
+UNVERIFIED until a charter row names the exchange's corporate-action record.
+
+**The limit this names:** 3,000 is 1.36 times the largest clean jump, not a
+wide margin, and on today's store the rule refuses nothing the day rung's
+range does not already refuse. A share with a genuine one-minute move
+beyond 30% of the smaller price inside a continuous run would be refused by
+name; whether exchange price bands make that impossible is UNVERIFIED (no
+band rule is in the charter). Re-run the scan after every Zerodha re-pull
+and compare the `jump-max` column with this row.
+
+**A kept outlier close cascades to the end of its run (D-4993 point 7).** One
+minute whose close alone is far off, inside a day bar wide enough to hold it,
+becomes the run's reference, and each later minute of that continuous run
+back on the share's own level is refused `in_session_jump`, by name, to the
+next halt, gap or session. It is loud, never a silent store, and not
+re-anchored, because re-anchoring would let a foreign block that starts a run
+land whole; telling the two apart needs a later minute than the one judged.
+None is on today's store (0 in-session jumps).
+
+**An unwitnessed first minute is stored (D-4993 point 3, repair 2).** When a
+run's FIRST minute is foreign and the day rung does not hold its day (the
+month absent, or a month that would not open), nothing witnesses that minute:
+it is stored with no flag of its own, and the share's own minutes after it
+are refused `in_session_jump` by name. The R4-17 check measured it on a
+fixture (a 0.6x first minute stored, 374 honest minutes refused); on real
+data it is the IPO-day phantom 09:15 minute, which WP-13d refuses as
+`foreign_level` only when the day bar is there. The refusals are loud; the
+stored minute is not. Deciding which side of an unwitnessed jump is foreign
+needs more than the minute judged, and is NOT DONE: the store scan run after
+the day rung lands judges that minute against its day and flags it.
+
+**A day month that will not open costs its own days only (repair 2,
+ZI-16).** A minute of that month, or a minute before it while it lies before
+the first day read, is `no_day_rung` and is not refused by range; the
+months of the same answer that opened judge their minutes as ever. Before
+repair 2 one torn month emptied the book for the whole answer, so a foreign
+minute of a readable month beside it was stored.
+
+**An index's zero lands (D-4992 point 3).** The day arm refuses a price
+BELOW zero on an index and holds exactly zero, because every zero-valued
+Zerodha INDEX day bar on the store (153) is `NIFTY50DIVPOINT`'s, an index that
+restarts from zero. The residual risk: a level index served at zero by a
+vendor fault would land as a day bar. None is observed (0 of 135 series); its
+minutes are still judged by range, and the scan labels every held zero.
+
+**A `no_series` refusal, measured (repair 5, 20 Oct 2026, D-4994 point
+11).** `cli series-identity NOSUCHSHARE --segment CASH --dry-run`, the
+release build of repair 5 over a private shadow under the kernel write lock,
+200 sequential runs timed by the shell's clock: p50 119.2 ms, p99 233.4 ms,
+max 335.5 ms, every run exit 2. That is the whole process: its start, one
+load of the newest master that checks (O(rows of that master), once per run,
+as "The listing table is loaded once per store root per process" below
+says) and one listing of each rung's directory (`repair_plan::held_months`);
+nothing walks the store.
+On the same shadow `piind` (lower case) and `NIFTY --feed gdfl` are refused
+the same way, and `ALL --segment CASH` still labels 208 shares
+`nse_security_master` with the 17 Oct totals unchanged.
+
+**Store scan, measured on the Mac (17 Oct 2026, read-only of bars, kernel
+write lock, private shadow):**
+
+| Run | Series | Bars judged | Wall | Workers |
+|---|---|---|---|---|
+| `NIFTY --segment INDEX` | 1 | 796,027 minutes + 141 day months | 0.81 s | 1 |
+| `ALL --segment INDEX` | 135 | 47,967,058 minutes | 6.86 s | 4 |
+| `ALL --segment CASH` | 208 | 153,548,887 minutes | 25.8 s | 4 |
+| `<SYMBOL> --segment CASH`, each share once, sequential, warm | 208 runs | about 740,000 minutes each | p50 0.297 s, p99 0.375 s, max 0.390 s (PIIND); 55.3 s in all | 1 |
+
+Re-measured after repair 2 (18 Oct 2026, the release build of the repair's
+final commit, the same shadow and kernel write lock, `--dry-run`): `ALL
+--segment CASH` 14.31 s wall, 507.7 MB peak RSS, the same counts
+(153,548,887 minutes; measured `foreign_level` 5,170, `no_gdfl_witness`
+2,813, `before_listing` 9,567, `zero_price` 9, 0 in-session jumps; no month
+NOT READ); `ALL --segment INDEX` 5.41 s, the same counts; each CASH share
+once, sequential, warm: n=208, p50 0.301 s, p99 0.333 s, max 0.403 s
+(PIIND), 60.4 s in all, 20 shares exit 1. No day month on the store fails
+to open, so repair 2 changes no count there.
+
+That is about 0.17 µs of wall clock per minute judged on 4 workers, the GDFL witness reads included. It
+is O(bars held), a scan, never a read path; `ALL` spreads the series over
+the workers (`--workers`, default every core the machine reports).
+
+**Measured in the R4-17 cloud container, 17 Oct 2026** (4 vCPU, shared, not
+the operator's machine; `cargo bench -p pull --bench ratio`, release build):
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-01 listing probe (`Listing::span`), master of 300 → 3,000 rows | 80,501 ps | 80,418 ps (0.998x) | — | 125 / 210 / 31,583 ns at 300 rows; 96 / 113 / 3,520 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute (`MinuteJudge::judge`), answer of 1 → 10 → 100 sessions | 24,974 ps | 29,785 ps (1.192x) | 37,798 ps (1.513x) | 74 / 77 / 3,475 ns at 100 sessions (n=20,000) |
+
+**The same rows on the operator's Mac, 17 Oct 2026** (M4 Pro, shared with the
+other build agents, load about 17; `cargo bench --locked -p pull --bench ratio`,
+release; every gate-8 ratio within its ceiling):
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-01 listing probe, master of 300 → 3,000 rows | 57,985 ps | 58,127 ps (1.002x) | — | 42 / 84 / 209 ns at 300 rows; 42 / 84 / 250 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute, 1 → 10 → 100 sessions | 13,705 ps | 17,064 ps (1.245x) | 21,638 ps (1.578x) | 41 / 42 / 209 ns at 100 sessions (n=20,000) |
+
+**Repair 2, 18 Oct 2026, the same Mac and command, every gate-8 ratio within
+its ceiling.** C-ZI-03 is new: `DayBook::judge` on a minute of a day month
+that would not open, against a book told of 1, 10 and 100 such months (every
+other month from 2000-01, so none adjoin). The first form of repair 2 kept the
+torn months as sorted day spans and searched them: 1,380 ps → 2,893 ps
+(2.096x) → 4,483 ps (3.248x), a BREACH of the 3.0x ceiling, measured and
+replaced. The month is now found by calendar arithmetic and one hash probe:
+
+| Row | 1x | 10x | 100x | Single call p50 / p99 / max |
+|---|---|---|---|---|
+| C-ZI-02 identity judge per minute, 1 → 10 → 100 sessions | 12,833 ps | 15,140 ps (1.179x) | 20,568 ps (1.602x) | 0 / 42 / 208 ns at 100 sessions (n=20,000; the p50 is below the 41 ns clock tick) |
+| C-ZI-03 a torn month's minute, 1 → 10 → 100 torn months | 14,536 ps | 14,489 ps (0.996x) | 14,967 ps (1.029x) | 0 / 42 / 208 ns at 100 torn months (n=20,000; the p50 is below the 41 ns clock tick) |
+
+Telling the book which months are torn (`DayBook::with_unread`) is once per
+answer, O(torn months), and a landing's answer touches at most three.
+
+**C-ZI-02 is not O(1): the per-minute judgement is one binary search over the
+day bars of the months the answer touches, O(log days).** That is
+1.513x at 100 sessions, inside the 3.0x ceiling and above the 1.4x line past
+which a shared-host ratio is re-run on dedicated hardware before it is believed. A
+landing's book holds only the months its answer touches (a 60-day Zerodha
+window touches at most three: about 63 day bars), so the 100x row, about five
+months in one answer, is past what a landing meets. The scan
+(`identity_screen::scan_series`) builds one book of the series' whole day
+rung, so its per-minute cost grows as O(log days held), about 2,000 for
+2018..2026.
+
+**The listing table is loaded once per store root per process**
+(`listing::for_store`), and only after a master loads. A newer master
+installed while a process runs is not seen until that process restarts. The
+direction is safe: a missing new listing refuses nothing, and a missing new
+removal leaves a 404 the failure it was. A newer master whose receipt fails
+is passed over by name: one `warn` `pull.listing` line per master passed over and
+one when none checks (R4-17 repair 3, D-5839 point 6; before that repair the
+name lived only in a method nothing read). A master-shaped name that states
+no calendar day is passed over by name too and never read (repair 4, D-5839
+point 7): no parse, one line per such name. Loading is one directory listing and one master parse
+(O(rows), about 4 MB of gzip), paid once per process **only when a master
+loads.** A store whose `session-masters/` holds no master that checks is
+loaded again on every call, so every CASH landing and every CASH series of a
+scan pays one listing of that directory and one check of each master in it,
+newest first: O(masters on disk), measured by the package's verifier on the
+Mac (18 Oct 2026) at 100 to 176 ms for 42 masters, growing by one master a
+session. Remembering the failure was considered and not done: the only cheap
+witness of a newly installed master is the directory's modification time,
+whose resolution depends on the volume's file system, and a stale "no master"
+turns the listing refusal off. Bounded, not O(1). On the 17 Oct shadow scans
+of the operator's store a master loaded (DALBHARAT's and IRFC's listings were
+read from it), so that store did not pay this then.
+
+**A store with no master that checks says so once per finding, not once per
+answer** (R4-17 repair 3). Its table is loaded again on every call (above),
+and `listing::for_store` remembers, per store root, what the last load found
+(whether a master loaded, and each master passed over with why) so the same
+finding is not said again: one `Mutex<HashMap>` probe and, when a master is
+passed over, one comparison of that list per load, O(masters on disk), inside
+the load that already reads each of them. The memory is one entry per store
+root the process names. A new process says it again. Every `pull.identity`
+line of those answers carries `listing` and `master` = `no_checked_master`,
+so no answer judged without a listing is unlabelled.
+
+**A dead run's staging file under `audit/series-identity` is not reclaimed**
+(R4-17 repair 3, D-4994 point 9; NOT DONE). `Plan::write` stages under a
+name holding its own process id, and `store::staging::create` clears only a
+leftover at the writer's own name, so a run killed between the create and
+the rename leaves `.series-identity.<pid>.staging` until a later run has the
+same pid. It is never read as a plan (its name begins with `.` and ends
+`.staging`); it costs its bytes on disk, at most one plan's size per killed
+run. Reclaiming another pid's file needs a liveness check this verb does not
+hold. A file AT the plan's digest name is now read and compared with the
+plan's bytes before it is taken for the plan: O(plan bytes), once per run,
+on the writing path only. Since repair 4 (D-4994 point 10) that name is opened
+through `store::safe_open` (a link there is refused `plan_name_taken`, never
+followed or replaced; the `stat` of the name became the handle's `fstat`,
+so the calls per run are as before), and a write, sync or rename that fails after staging NAMES the staging
+file it leaves in the refusal; it is still not deleted.
+
+**The store scan is O(bars held), and a scan, not a read path.** Each
+flagged minute's measured cause reads GDFL's 1s month of that share once and
+folds it (`pull::fold`): about 470,000 records per month that holds a flagged
+minute. Months with nothing flagged read nothing of GDFL. Its quarantine plan
+lists every flagged stamp, so a series flagged whole (NIFTYNEXT50, 87,375
+minutes per WP-13d's measurement) writes a plan of that many stamps. A month
+whose every bar shares one cause is written as `whole_month` instead.
+
+**The scan is a store writer (repair 1, D-4994 point 5)**, so it cannot write
+its plan on a test shadow whose `bars` is a link (`linked_store_root`) or from
+an unstamped build; `--dry-run` scans either and writes nothing. A plan's
+staging name is the writing process's own (`.series-identity.<pid>.staging`):
+one left by a process that was killed between create and rename stays in
+`audit/series-identity/` until removed by hand. Nothing reads it (readers look
+for `*.plan`), and no code here deletes it (no automatic deletion, R4-06).
+
+**`WITNESS_TOLERANCE_BPS` = 100 is chosen, not measured.** It decides a label
+only (`basis_mismatch` against `foreign_level`). No landing rule reads it.
+
+**History ends is not yet on the live pull.** `fetch::fetch_and_land_listed`
+returns it; the Zerodha broker run (`broker_run`, R4-14's) must call it with
+the share's span. Until then a window after delisting is reported as it was.
+
+### Gate 11 — R4-17, declared at its merge (R4-17 repair 2, 18 October 2026)
+
+~~~~text
+Gate 11 run on the merged tree (feat/db-fix at R4-07's merge, with R4-17) met five
+R4-17 occurrences; each was read before it was counted or removed.
+
+RULE 3 (`ALLOW_UNSIZED`) -- pull/src/listing.rs: the process table of loaded
+  listings (`listing::for_store`) was an unsized `HashMap`; it is now
+  `with_capacity(1)`, one store per process, so no allowance is added.
+  pull/src/series_identity.rs: repair 2's torn-month set was made empty in
+  every book; it is now `None` until a month is torn, and then collected
+  once from an exact-size iterator, so no allowance is added.
+RULE 4 (`ALLOW_SORT`) -- pull/src/listing.rs 0 -> 1: `Listing::load` orders
+  the receipted master files of one directory newest first, once per load
+  (once per store root per process); the directory holds one file a day of
+  receipts. cli/src/series_identity.rs 0 -> 1: a scan orders one series'
+  judged in-session jumps for its percentiles, O(j log j) over at most the
+  series' minutes, once per series per scan; a scan, never a read path.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/series_identity.rs 0 -> 1:
+  `DayBook::unread_holds` asks a `HashSet` of the torn day months whether
+  it holds a day's month: one hash probe (C-ZI-03, flat at 1.006x from 1
+  to 100 torn months).
+
+Two refusals on the same run are feat/db-fix's own, present there
+without R4-17 and not R4-17's files: rule 3 at
+pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
+~~~~
+
+## The upkeep runner (R3-17, D-6270)
 
 `pull::upkeep` and `cli upkeep`. None of it is on a request path: a page reads
 a run's state through `pull::upkeep::status`, which is one read of at most
@@ -20038,7 +20291,7 @@ a run's state through `pull::upkeep::status`, which is one read of at most
 | L-R317-08 | The recount and the re-key take one worker | they write one census, one import journal and one lineage ledger | `Kind::workers` gives them one whatever is asked; their time is serial | R3-17 |
 | L-R317-09 | **DB-N14: the request half is AF-05's; R3-17 carries the store step (S-50), and on the operator's store it is owed for the shares, the options and five widened indices, not for NIFTY or BANKNIFTY** | a value sort or `extremes=1` reads row by row only the months with no `.srt` (AF-05) | MEASURED on the Mac, 18 Oct 2026, release `api` stamped `101473942` (`crates/api` equal to this branch's head), curl `time_total`, n = 200 sequential GETs a query, one client, 127.0.0.1:9701. **The operator's store** (the shadow R3-17: bars read through its link, `bar-generations-v1` and `bar-revisions-v1` cloned): GDFL NIFTY 1 s 2018-09..2026-09 by close, by volume and by close with `extremes=1` — `scan_rows` 0 of 44,102,990, p50 4.5, 4.7 and 4.5 ms, p99 6.7, 6.3 and 5.9 ms, max 6.9, 8.7 and 6.1 ms; its last page (offset 44,102,940) p50 2.3 ms, p99 3.2 ms; BANKNIFTY by close p50 4.5 ms, p99 6.0 ms: S-05 and the repairs' revisions already index every NIFTY and BANKNIFTY month a reader opens. RELIANCE 1 s by close: **400 `scan_budget_exceeded`**, 32,417,004 rows in months with no `.srt`; NIFTY 28 Mar 2019 11,500 CE, its March month by volume: `scan_rows` 172,339, p50 9.9 ms, p99 12.5 ms. `cli upkeep plan gdfl` on the same shadow: months with no `.srt`, INDEX 67 of 268 (INDIAVIX, NIFTYCPSE, NIFTYFINSERVICE, NIFTYIT and NIFTYNEXT50 12 each, NIFTYMIDSELECT 7), CASH 15,247 of 29,214, NIFTY options 22,445 of 147,357. **After one upkeep run** (`cli upkeep run srt gdfl --workers 8`, 16,688 ms) on the private copy feed8 (the same NIFTY, BANKNIFTY and RELIANCE months and NIFTY's 2019-03 options, every sidecar left out first): RELIANCE 200, `scan_rows` 0 of 36,701,384, p50 6.0 ms, p99 8.1 ms, max 8.6 ms; the 11,500 CE `scan_rows` 0, p50 2.4 ms, p99 3.9 ms; NIFTY p50 8.3 ms, p99 22.2 ms, its last page p50 4.4 ms. A shadow WITHOUT `bar-generations-v1` (as `state/fix/shadow.sh` makes one) serves each repaired month at generation 0 and read 5,092,020 NIFTY rows a request from 12 months (p50 306 ms, p99 441 ms, the last page refused `sort_too_deep`): the first probe here, set aside, and the reason the shadow above clones the pointers | R3-17 |
 | L-R317-10 | **Zerodha's sort index is owed too: until S-50's Zerodha run, a value sort or `extremes=1` on a Zerodha series reads every row of each month that has no `.srt`** | most Zerodha months have no `.srt` (every NIFTY and BANKNIFTY month of every rung; 80 of RELIANCE's 105 a rung, the other 25 written on 13 and 14 Oct; why those 25 have one and the rest none is NOT MEASURED here), so AF-05's reader orders their rows itself; a month under 1,024 bars (D-4933's small-month rule: the 10min to 1day rungs of an index) never gets one, and its rows are read whatever the run does | MEASURED on the Mac, 19 Oct 2026, release `api` and `cli` of this branch. `cli upkeep plan zerodha` (read-only) on the shadow R3-17: 198,188 of 251,270 month files lack a `.srt`, the walk 52 s. On the operator's store through that shadow, n = 200 sequential GETs (curl `time_total`, 127.0.0.1:9701, load average 19 to 33 on 14 cores): a whole-history Zerodha NIFTY 1min sort by close, 796,027 rows, all of them read, p50 53.20 ms, p99 97.37 ms, max 162.09 ms; the 1day rung, 2,168 rows in 141 small months, p50 7.19 ms, p99 16.42 ms. **After one upkeep run** on a private copy of the operator's Zerodha NIFTY, BANKNIFTY and RELIANCE months (`cli upkeep run srt zerodha --workers N`, S-50's note), the same NIFTY sort on the copy before and after: `scan_rows` 796,027 then 0, p50 72.65 then 3.21 ms, p99 98.86 then 4.11 ms, max 123.06 then 4.38 ms; BANKNIFTY 1min p99 69.83 then 8.65 ms; RELIANCE 1min p99 63.90 then 10.64 ms; the NIFTY 5min rung reads 1,200 rows (its small months) and the 1day rung all 2,168, p50 8.38 ms. The builder at 1, 4 and 8 workers there: 129.2, 475.2 and 418.6 months a second over NIFTY's 981 (3.2× at 8), 168.9, 628.3 and 491.2 over the other 2,291 (2.9×); at 1 worker the CPU (user + sys over wall) was 15 % of NIFTY's run and 16 % of the other, so the rest is the drive, as L-R317-01 found for GDFL | R3-17 |
-| L-R317-11 | **A run holds its whole plan in memory, and the sort-index builder holds one month's rows a worker** | the plan is the walk's month list (the scope's every month file, then those that lack the kind), and the outcomes come back in plan order (`Ran::outcomes`), so both are O(items); a `.srt` is built from one month's rows held whole and sorted per column | the walk and the outcomes are a few hundred bytes an item, bounded by the scope's month files (147,357 under `NSE/FNO/NIFTY` on the shadow of 20 Oct: the plan held a maximum resident set of 70,942,720 bytes, measured by the round-2 check with `/usr/bin/time -l`, `state/fix/round2/logs-R3-17-v/plan-nifty-fno.log`); the builder: 85 NIFTY 1s spot months at 8 workers held a maximum resident set of 1,343,946,752 bytes (the same check, `big0-run.log`), about 168 MB a worker (the per-worker figure is that total divided by 8, an inference, not a per-worker measurement). The whole FNO segment (2,068,972 month files on 18 Oct, D-5839's note) would hold about 1 GB of plan before its first item: an EXTRAPOLATION from the NIFTY figure, not measured; run S-50 a segment or a symbol at a time where that matters | R3-17 |
-| L-R317-12 | **An upkeep run looks for a live GDFL run before every item, and what it cannot see is one item wide** | an upkeep takes no lock of an import (D-5839 amendment 1), so it probes their lock files instead; an import that starts while an item is being built is not refused at its door and may meet that one month's exclusive lock (refused by name by the store), and the upkeep stops at its next look; two GDFL upkeep kinds started in the same instant can both pass the start check and then meet only on month locks, each refused by name | the look is `live_run`: at most four lock files, each one open, one `flock` try and at most 1 KiB read, O(1) an item whatever the store holds. Measured 20 Oct 2026 by `live_run_timings` (`crates/cli/src/upkeep_command_tests.rs`, the test profile, a version-4 store with all four lock files in the temp directory of the Mac's internal disk, other agents' builds running): all free, n = 2,000, p50 61.2 µs, p99 142.8 µs, max 649.9 µs; the options kind lock held, n = 2,000, p50 61.8 µs, p99 188.5 µs, max 524.3 µs. On the WD_BLACK store NOT MEASURED; run upkeep steps with no import running (S-50's note), as before | R3-17 |
+| L-R317-11 | **A run holds its whole plan in memory, and the sort-index builder holds one month's rows a worker** | the plan is the walk's month list (the scope's every month file, then those that lack the kind), and the outcomes come back in plan order (`Ran::outcomes`), so both are O(items); a `.srt` is built from one month's rows held whole and sorted per column | the walk and the outcomes are a few hundred bytes an item, bounded by the scope's month files (147,357 under `NSE/FNO/NIFTY` on the shadow of 20 Oct: the plan held a maximum resident set of 70,942,720 bytes, measured by the round-2 check with `/usr/bin/time -l`, `state/fix/round2/logs-R3-17-v/plan-nifty-fno.log`); the builder: 85 NIFTY 1s spot months at 8 workers held a maximum resident set of 1,343,946,752 bytes (the same check, `big0-run.log`), about 168 MB a worker (the per-worker figure is that total divided by 8, an inference, not a per-worker measurement). The whole FNO segment (2,068,972 month files on 18 Oct, D-6270's note) would hold about 1 GB of plan before its first item: an EXTRAPOLATION from the NIFTY figure, not measured; run S-50 a segment or a symbol at a time where that matters | R3-17 |
+| L-R317-12 | **An upkeep run looks for a live GDFL run before every item, and what it cannot see is one item wide** | an upkeep takes no lock of an import (D-6270 amendment 1), so it probes their lock files instead; an import that starts while an item is being built is not refused at its door and may meet that one month's exclusive lock (refused by name by the store), and the upkeep stops at its next look; two GDFL upkeep kinds started in the same instant can both pass the start check and then meet only on month locks, each refused by name | the look is `live_run`: at most four lock files, each one open, one `flock` try and at most 1 KiB read, O(1) an item whatever the store holds. Measured 20 Oct 2026 by `live_run_timings` (`crates/cli/src/upkeep_command_tests.rs`, the test profile, a version-4 store with all four lock files in the temp directory of the Mac's internal disk, other agents' builds running): all free, n = 2,000, p50 61.2 µs, p99 142.8 µs, max 649.9 µs; the options kind lock held, n = 2,000, p50 61.8 µs, p99 188.5 µs, max 524.3 µs. On the WD_BLACK store NOT MEASURED; run upkeep steps with no import running (S-50's note), as before | R3-17 |
 | L-R317-13 | **A small month is listed as lacking `.srt` by every plan and taken again by every sort-index run** | the walk reads names, never a month's header (L-R317-02), and the small-month rule gives a month under `store::time_index::INDEX_MIN_ROWS` bars no `.srt` (D-4933), so the name never appears | each such month is one item of every `srt` run: the store's door opens it under its month lock, writes nothing and the item ends `small`, clean, so a step's "every item clean" check still holds; `upkeep plan` never reads zero lacking while a small month is held, which S-50's check already says ("lacks .srt only on months the run named small"). Their count is a fact of the store, not measured here | R3-17 |
 | L-R317-14 | **The walk lists a month by its `.bin`; a sealed month whose `.bin` a retirement removed is not walked** | `pull::upkeep::months` takes a month file to be its `<yyyy-mm>.bin`; a sealed month is a `.sbar` that carries its own sort index, and its `.bin` stays until a retirement step that is a deletion with its own yes (S-27, pending on 20 Oct 2026) | no such month exists on the operator's store while S-27 and its retirement are not run (S-27 `state = "pending"`); once one is, `tix` and `msum` would not see it: NOT DONE, named for the sealing work (SC-7), not measured | R3-17 |
