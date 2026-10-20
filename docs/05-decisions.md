@@ -74544,6 +74544,152 @@ counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
 
+### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
+
+**What was observed.** `Header::read_region` decodes each of the `MAX_SLOTS`
+slot positions and keeps the valid slot with the highest generation; a slot
+that is "empty, stale, half-written, corrupt or in the wrong position is simply
+not a candidate". A newest slot whose checksum fails therefore made the month
+open at the older generation, every record the lost commit counted unreadable,
+with `Ok` and no line at all: `note_header_fell_back` fires only when the
+newest slot DECODED and then failed `Header::validate`. `BarFile::validated`'s
+`claimed > n_valid` refusal does not see it either, because `highest_claim`
+counts only slots that decode. `cli::stored::load` reads through `BarFile`, so
+a backtest would have read the shorter month silently.
+
+**Decided.**
+1. `store::header::slot_audit(region, file_len) -> SlotAudit`: one
+   `SlotState` per position read — `Empty`, `Valid { generation }`,
+   `Damaged { reason, generation }` — and a `MonthVerdict`: `Clean`,
+   `Damaged` (a slot whose verified generation is older than the one read:
+   nothing lost), `Reverted` (newer, or of unknown generation: possibly lost)
+   or `Unreadable(FormatError)` (the read refuses). `SlotDamage` is
+   `Truncated`, `Erased` or `Refused(FormatError)`, and `SlotDamage::name`
+   gives one stable word: `crc`, `magic`, `version`, `stride`,
+   `wrong_position`, `beyond_file_len`, `timestamps_out_of_order`, `reserved`,
+   `flags`, `checksums_required`, `truncated`, `erased`, else `refused`. It is
+   public and its signature is stable, so that PROVEN-GATE can call it over
+   every month file an admitted day reads; that call is PROVEN-GATE's own and
+   does not exist at this commit (R4-09a builds no gate).
+2. It reads exactly the `MAX_SLOTS` positions `read_region` reads and audits
+   against the generation `read_region` selects, found by the same search; it
+   selects, writes, repairs and emits nothing.
+3. **The selection is unchanged.** `read_region` returns the same header for
+   every input, the crash-table cases included; `Header::read_region_at(region,
+   file_len, path)` is the same read returning the audit beside the header,
+   and `BarFile` keeps it from the region it already read
+   (`BarFile::slot_audit`), so no reader reads the region twice.
+4. Every read whose verdict is `Damaged` or `Reverted` writes ONE
+   `store.header.slot_damaged` line at `Error` (so the audit stream keeps it)
+   with `verdict`, `slot`, `reason`, `chosen_generation`, `file_len`, `why`,
+   `damaged_generation` when verified, and `path` when the caller has one
+   (`BarFile` does). A clean read, a first-commit read and an unreadable
+   region (which keeps its own `no committed header` line) write none. A
+   newest slot that decoded but counts records past the file's end
+   (`beyond_file_len`) writes this line beside the existing `Warn` fall-back
+   line: the fall-back line says the read walked back, this one names the slot
+   and keeps it in the audit stream. No new crate arrow (`core telemetry <-
+   store`).
+
+**Cost.** O(1) per read: `MAX_SLOTS` (two) 64-byte decodes and checksums
+beyond the selection, independent of the region and the file. C-HA-01 holds it
+flat at 1x, 10x and 100x the region; `docs/06-limits.md` L-HA-01 has the
+per-call numbers. **Proof.** `crates/store/tests/slot_audit.rs`,
+`crates/store/tests/slot_damaged_log.rs`, `store::header::audit_tests`,
+`store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`.
+Invariants HA-01 to HA-04, C-HA-01.
+
+### D-6241 — A damaged slot's generation is read only from a slot whose own checksum verified it; an unknown one beside the generation read is a revert, never clean (R4-09a) — 2026-10-18
+
+**What was observed.** The checksum covers every byte of a slot except its own
+four. When it fails, nothing in the format says which bytes are the commit's:
+a torn write leaves a mix of the old and the new image, a bit flip leaves the
+old one damaged, and both read as a plausible generation field.
+
+**Decided.**
+1. A `Damaged` slot carries `generation: Some(g)` only when `Header::decode`
+   accepted it — magic, a version this build knows, its own checksum, stride,
+   reserved tail and flags — and it then failed only the position rule or
+   `Header::validate`. In every other case the generation is `None`. It is
+   never read from bytes the checksum did not vouch for.
+2. Position does not order it either: slot position is `generation %
+   slot_count`, and with two slots `g - 1` and `g + 1` share a parity. So a
+   `None` beside the generation read makes the month `Reverted` with
+   `damaged_generation: None` ("possibly reverted"), never `Clean`. A
+   verified generation equal to or above the one read is `Reverted` too; only
+   a verified generation below it is `Damaged`.
+3. All 64 bytes zero is `Empty` at a position no committed generation has
+   reached, and `Erased` (generation unknown, so `Reverted`) at a position the
+   generation read proves was written: generations are consecutive from zero
+   (`Header::genesis`, `Header::advance`), so generation `p` was the first to
+   land on position `p`, and any read generation at or above `p` proves it.
+   A slot with any non-zero byte that fails to decode is damage, never empty.
+
+**Cost.** None beyond D-6240. **Proof.**
+`slot_audit::every_single_bit_flip_in_the_newest_slot_is_named_and_never_moves_the_read`,
+`slot_audit::a_newest_slot_torn_at_every_prefix_is_named_and_the_older_header_is_returned`,
+`slot_audit::a_zeroed_slot_the_generation_proves_was_written_is_erased`,
+`store::header::audit_tests`. Invariant HA-02.
+
+### D-6242 — `cli census-recount` names every month whose header slot audit is not clean, by path and reason; a reverted month offers no row and closes no day (R4-09a) — 2026-10-18
+
+**What was observed.** The recount rebuilds census rows from each month
+file's committed header. A month that silently reverted would have been
+recorded at the OLDER generation's count — writing the loss into the census,
+where the importer's later header-against-census check could no longer see it —
+and its import days closed as counted.
+
+**Decided.**
+1. `pull::census_store::recount` keeps `BarFile::slot_audit` for every month
+   file in range and lists EVERY non-clean one in `Recount::slot_damaged`,
+   with its audit, in walk order. The receipt prints a count line
+   (`header slot damage  N month(s), R reverted to an older generation (not
+   recorded, no day closed)`) and one line per month, `<path>:
+   <SlotAudit::describe>`, all of them: no "and N more", because the month an
+   operator is looking for is exactly the one a cap would hide.
+2. A `Reverted` month offers no row and its month joins
+   `Recount::months_unreadable`, so none of its days is closed. A `Damaged`
+   month (an older slot damaged, nothing lost) offers its row. Either makes
+   `Recount::clean` false, so the verb exits FAILED.
+3. Nothing here repairs or rewrites a header. Recovery is the operator's store
+   step with a yes (R3-20, or R4-09's importer re-import of a reverted month).
+
+**Cost.** None beyond D-6240: the audit is the one `BarFile` took at open; the
+walk stays one header read and two record reads per month. **Proof.**
+`cli::census_recount::tests::a_month_whose_newest_header_slot_is_damaged_is_named_and_never_recorded`,
+`cli::census_recount::tests::an_older_damaged_slot_is_named_and_its_month_is_still_recorded`,
+`cli::census_recount::tests::a_clean_recount_says_no_header_slot_is_damaged`,
+`cli::census_recount::tests::a_month_that_reverted_to_an_empty_generation_is_named_and_never_counted_empty`.
+Invariant HA-05.
+
+### D-6243 — A month served in its sealed form has no slot audit: `BarFile::slot_audit` is `None` there, and nothing is named for it (R4-09a, after SC-3) — 2026-10-20
+
+**What was observed.** SC-3 (D-5899, D-5900) merged one read door for both
+forms of a month while R4-09a was open: `BarFile::open_existing` opens the
+`.sbar` first and builds the handle from its one head
+(`sealed::Head::bar_header`), never through `Header::read_region`. That head
+has no slot pair. It is under its own checksum and is refused by name
+(`head_checksum`) when damaged, and there is no older copy a read could fall
+back to.
+
+**Decided.**
+1. `BarFile::slot_audit` returns `Option<SlotAudit>`: `Some` for a month opened
+   in its raw form (the audit of the region the open read, D-6240), `None` for
+   one opened in its sealed form. A sealed handle never carries a made-up
+   clean pair of slots: "no slots" and "two clean slots" are different facts.
+2. `pull::census_store::recount` names only `Some` audits that are not clean.
+   A month read in its sealed form names nothing and offers its row from the
+   sealed head; the census audits the form the door actually serves.
+3. `store::header::slot_audit(region, file_len)` is unchanged and stays the
+   function PROVEN-GATE calls on a raw month's header region; for a sealed
+   month the sealed head's own refusal is the signal.
+
+**Proof.** `crates/store/tests/slot_audit_sealed.rs`
+(`a_month_opened_in_its_sealed_form_has_no_slot_audit`,
+`a_damaged_sealed_head_is_refused_never_read_short`);
+`cli::census_recount::tests::a_month_read_in_its_sealed_form_names_no_slot_and_is_recorded`.
+Invariant HA-06.
+
 ### D-5903 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
 
 **Number** free on `feat/db-fix` on 2026-10-20 (the highest heading was

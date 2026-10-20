@@ -3,7 +3,7 @@
 //!
 //! # What was unproven
 //!
-//! This crate holds twelve emit sites and, until this module, not one of them
+//! This crate holds thirteen emit sites and, until this module, not one of them
 //! was asserted to reach a file. Each could have been deleted outright — the
 //! whole body replaced with `()` — and `cargo test`, `cargo clippy` and the
 //! mutation gate would all have stayed green, because nothing anywhere read
@@ -11,7 +11,7 @@
 //! untested branch is worth, which is what `CLAUDE.md` §4's ban on a test that
 //! asserts nothing says in the other direction.
 //!
-//! It is worse than an ordinary coverage hole. Eleven of these twelve fire only
+//! It is worse than an ordinary coverage hole. Twelve of these thirteen fire only
 //! once something has already gone wrong — a header region of zeros, a commit
 //! walked back a generation, a block whose bytes are not the bytes that were
 //! sealed, an append that died before its header slot reached the disk, a lock
@@ -19,16 +19,18 @@
 //! run that needs them is the run nobody can repeat afterwards. A line that was
 //! never proved to be written is not evidence.
 //!
-//! Six of those eleven are not refusals. `store.open` **accepts** the month and
+//! Seven of those twelve are not refusals. `store.open` **accepts** the month and
 //! names the damage. Since D-0688 the `store.block` interrupted-append line
 //! accepts a tail block whose entry was sealed past the commit and names the
 //! append that died. The `store.header` fall-back returns an older committed
-//! generation's header and names the newer one it rejected. Since D-2329 the
+//! generation's header and names the newer one it rejected. Since D-6240 the
+//! `store.header.slot_damaged` line names a read that went past a header slot
+//! that does not decode or does not hold, and returns the generation it read. Since D-2329 the
 //! two `store.tix` lines name a month whose time lookup bisects and a month
-//! whose time index a writer rebuilt from its bars. Those five hand
-//! back working data, so the line is the only trace there is. The sixth is
+//! whose time index a writer rebuilt from its bars. Those six hand
+//! back working data, so the line is the only trace there is. The seventh is
 //! `store.flock` (D-0693): it fires from a `Drop`, which cannot hand anybody
-//! anything. Those are the six sites in this crate whose deletion is
+//! anything. Those are the seven sites in this crate whose deletion is
 //! invisible from outside the log. The other five hand the caller a refusal
 //! — a `FormatError`, or a `SealedError` for a sealed month — as well as
 //! writing a line, so a lost emit still leaves a trace somewhere: the
@@ -220,15 +222,15 @@ enum Handed {
     Success,
 }
 
-/// `n` as the header spells it, for the twelve sites and the tallies of them.
+/// `n` as the header spells it, for the thirteen sites and the tallies of them.
 fn spelt(n: usize) -> &'static str {
     [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "eleven", "twelve",
+        "eleven", "twelve", "thirteen",
     ]
     .get(n)
     .copied()
-    .unwrap_or_else(|| panic!("the header spells no count above twelve, got {n}"))
+    .unwrap_or_else(|| panic!("the header spells no count above thirteen, got {n}"))
 }
 
 /// [`spelt`] opening a sentence.
@@ -289,6 +291,31 @@ fn drive_header_fell_back(_root: &Path) -> Handed {
         .expect("the previous generation is intact and is returned");
     assert_eq!(read.generation, 0, "the newest commit is not the one used");
     assert_eq!(read.n_valid, 0, "and its counter is the one that came back");
+    Handed::Data
+}
+
+/// A newest slot whose checksum fails: `note_slot_damaged` (D-6240).
+///
+/// Generation 1 is written whole and then one checksum byte is flipped, so it
+/// no longer DECODES — the case `note_header_fell_back` never saw, because it
+/// speaks only for a slot that decoded. The read returns generation 0 with
+/// `Ok`, exactly as before; the line is the only trace of the lost commit.
+fn drive_header_slot_damaged(_root: &Path) -> Handed {
+    let genesis = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS);
+    let next = genesis
+        .advance(0, T0, T0)
+        .expect("a re-publish under a new generation");
+    let mut region = vec![0u8; HEADER_BYTES];
+    place(&mut region, &genesis.commit().expect("genesis commits"));
+    place(&mut region, &next.commit().expect("generation 1 commits"));
+    if let Some(byte) = region.get_mut(16_384 + 56) {
+        *byte ^= 0x01;
+    }
+    let read = Header::read_region(&region, HEADER_LEN).expect("generation 0 is intact");
+    assert_eq!(
+        read.generation, 0,
+        "the damaged newest commit is not the one used"
+    );
     Handed::Data
 }
 
@@ -618,7 +645,7 @@ fn scratch(tag: &str) -> PathBuf {
 ///
 /// At module scope rather than inside the test that walks it, so the table can
 /// grow without the test body growing with it.
-const SITES: [Site; 12] = [
+const SITES: [Site; 13] = [
     Site {
         target: "store.header",
         message: "no committed header",
@@ -630,6 +657,12 @@ const SITES: [Site; 12] = [
         message: "fell back to an older generation",
         level: telemetry::Level::Warn,
         drive: drive_header_fell_back,
+    },
+    Site {
+        target: "store.header.slot_damaged",
+        message: "header slot damaged",
+        level: telemetry::Level::Error,
+        drive: drive_header_slot_damaged,
     },
     Site {
         target: "store.header",
@@ -779,9 +812,23 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
         .collect();
 
     let found = telemetry::tail(&dir, sink.keep_files(), &telemetry::Query::last(64));
+    // ONE SITE SPEAKS TWICE, AND ONLY ONE (D-6240). `drive_header_fell_back`'s
+    // read walks back past a slot that decoded but whose records the file
+    // cannot hold — `beyond_file_len` — so the slot audit names that slot as
+    // well: its fall-back line and a `store.header.slot_damaged` line. Every
+    // other drive writes exactly its own line.
+    let slot_damaged_lines = found
+        .records
+        .iter()
+        .filter(|line| line.target == "store.header.slot_damaged")
+        .count();
+    assert_eq!(
+        slot_damaged_lines, 2,
+        "the slot-damaged drive's line and the fall-back drive's, no more"
+    );
     assert_eq!(
         found.records.len(),
-        SITES.len(),
+        SITES.len() + 1,
         "one line per site and not one line more — no site went silent, no \
          silent path spoke, and nothing outside this test wrote while it ran. \
          The file held: {:?}",

@@ -228,7 +228,7 @@ const MAX_ROW_LEN: usize = {
 const _: () = assert!(MAX_ROW_LEN == 80);
 
 use crate::flock::Flock;
-use crate::header::Header;
+use crate::header::{Header, SlotAudit};
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath, YearMonth};
 use crate::time_index::{Entry, Fault, Geometry, Held, Why, below_threshold};
@@ -1326,6 +1326,15 @@ pub struct BarFile {
     layout: Layout,
     /// The committed state, re-read from the file on open.
     header: Header,
+    /// Every header slot of the region read at open, and the month verdict
+    /// (`crate::header::slot_audit`), from the same bytes `header` was chosen
+    /// from. It describes the open, not later commits by this handle. D-6240.
+    ///
+    /// `None` for a month served in its sealed form (`.sbar`): that form has one
+    /// head under its own checksum and no slot pair, so there is no older
+    /// generation to fall back to; a damaged head is refused by name
+    /// (`head_checksum`), never reverted. D-6243.
+    slot_audit: Option<SlotAudit>,
     /// The per-block checksum sidecar, when this file carries one.
     ///
     /// # `None` is a real state and it is not a failure
@@ -2332,7 +2341,7 @@ impl BarFile {
         // the batch's too. `None` for every other door.
         batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
-        let (header, claimed) = read_header(&bars, &bars_path, len)?;
+        let (header, claimed, slot_audit) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
 
         // A TORN TAIL PAST THE COUNTER BRICKED THE WHOLE MONTH, PERMANENTLY.
@@ -2591,6 +2600,7 @@ impl BarFile {
             bars_path,
             layout,
             header,
+            slot_audit: Some(slot_audit),
             checksums,
             // THE PATH IS KEPT ONLY WHEN THE FLAG IS SET, which is the whole
             // mechanism behind `crc_path`'s three-row table. `crc_path` is in
@@ -2777,6 +2787,19 @@ impl BarFile {
     #[must_use]
     pub const fn header(&self) -> Header {
         self.header
+    }
+
+    /// The header region's slot audit as this file was opened: one state per
+    /// slot and the month verdict. A month that silently reverted to an older
+    /// generation because its newest slot is damaged says so here. D-6240.
+    ///
+    /// `None` when the month was opened in its sealed form, which has no header
+    /// slots to audit: its one head is checked whole and refused when damaged,
+    /// so it cannot revert silently. A caller names `Some` audits that are not
+    /// clean and has nothing to name for `None`. D-6243.
+    #[must_use]
+    pub const fn slot_audit(&self) -> Option<SlotAudit> {
+        self.slot_audit
     }
 
     /// The geometry this file's version defines.
@@ -4752,12 +4775,14 @@ fn initialise(
 /// It costs a second decode of at most two 64-byte slots, once per open. It is
 /// not a second *search*: no generation ordering, no slot-position rule and no
 /// fallback are reproduced here — see [`highest_claim`].
-fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64), StoreError> {
+fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64, SlotAudit), StoreError> {
     let want = len.min(REGION_LEN_U64);
     let mut region = vec![0u8; usize::try_from(want).unwrap_or(REGION_LEN)];
     read_fully(src, path, 0, &mut region)?;
-    let header = refused(Header::read_region(&region, len), path)?;
-    Ok((header, highest_claim(&region)))
+    // The path rides on `store.header.slot_damaged`, and the audit is kept by
+    // the handle (D-6240): the same region, decoded once more per slot.
+    let (header, audit) = refused(Header::read_region_at(&region, len, path), path)?;
+    Ok((header, highest_claim(&region), audit))
 }
 
 /// The largest `n_valid` any slot of the region still decodes as.
