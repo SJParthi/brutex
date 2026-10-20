@@ -73158,6 +73158,291 @@ builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs 
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
 
+
+### D-5150 — A backtest trades a day, and learns from it, only when the calendar of record calls it a regular weekday 09:15–15:29 session with no special session, no notice of one and no market-wide halt; the full-length Budget weekends and 2024-01-20 are excluded too — 2026-10-16
+
+**Context.** The operator (15 Oct 2026, NEXT-PROMPT.md "NO SPECIAL
+SESSIONS"): never trade a Muhurat, a half day or any other special or short
+session in any backtest; every day that is not a normal full session is
+excluded from trades AND from the own-past statistics that generate the
+values; the data stays stored and labelled; count and show the excluded days
+per year. The attack of the same evening (`state/charges-deep-check-20261015.json`,
+handover issue H5) showed that `pull::calendar::kind_of` cannot carry that
+rule: it answers `Open(Session::full())` for the three Budget weekends,
+2024-01-20 and both March 2020 halt days, and `OpenLengthUnmeasured` for five
+Muhurats. The design judge (16 Oct 2026) added that `kind_of` answers
+`Unmeasured` outside 2019-12-02..2026-09-04, so a rule written on it would
+silently drop every 2018 and 2019 day and the last weeks of 2026.
+
+**Decision.** `pull::calendar::tradable_day(day) -> Result<(), NotTradable>`
+is the one question. It is `Ok` only when `sourced_kind_of(day) ==
+DayKind::Open(Session::full())` (equal to `kind_of` inside the measured window
+and answered from the recorded NSE circulars from 2018-01-01 to 2026-12-31),
+the day is a weekday, and `special_session`, `session_circular` (D-5152) and
+`halt_on` are all `None`
+(`the_rule_is_the_specs_conditions_on_every_day_of_the_record` holds it on
+every day of the record and three past each edge). It never reads the store.
+
+The reason is named, one per day, the first that applies in this order:
+unmeasured, closed, special session or notice, unsized session, halt,
+anything else. `NotTradable`'s codes are explicit discriminants, append-only
+and never renumbered (`the_reason_codes_are_pinned_and_every_reason_has_its_own_name_and_label`):
+0 `Unmeasured`, 1 `Weekend`, 2 `Holiday`, 3 `Muhurat`, 4
+`DisasterRecoveryDrill`, 5 `SystemsOutage`, 6 `BudgetWeekend`, 7
+`WeekendFullSession`, 8 `OpenLengthUnmeasured`, 9 `MarketHalt`, 10 `Unknown`.
+A day outside the record is `Unmeasured`, its own reason and never `Unknown`:
+a year whose circular is owed is a known gap, not an unexplained day.
+
+**Excluding the full-length `BudgetWeekend` and `WeekendFullSession` days**
+(2020-02-01, 2025-02-01, 2026-02-01, 2024-01-20) is the operator's "any other
+special session": their hours were regular, and they are excluded because the
+rule excludes every special session, not because of anything measured about
+their trading. Whether a full-length special session behaves like a normal
+day is a question the data can answer later: each is excluded under its own
+code, so a run that re-admits exactly those two codes and compares is one
+argument away. The bars stay stored and labelled.
+
+**The measured short days stay tradable** (judge, 16 Oct 2026; operator, 16
+Oct 2026 17:15 IST item 5). `SHORT_DAYS` (2019-08-02, 2022-03-07) is evidence
+that minutes were absent in the vendors' answers, not a statement about the
+exchange's session: the exchange held its full session. A reader that needs
+those minutes asks the `verify/` day image, which says "not verified" at
+generation 0. `a_normal_day_stays_tradable_drills_do_not_and_short_days_do`.
+
+**What it does not change.** `kind_of`, `sourced_kind_of` and
+`exchange_kind_of` answer exactly what they did, so
+`cli::stored::calendar_policy_digest_v2` and every recorded run identity are
+unmoved. No consumer is rewired here: the backtest and own-past-statistic
+readers adopt `tradable_day` in their own packages (the Fib Flag priority run),
+each with its test (`docs/06-limits.md` L-CAL-4).
+
+### D-5151 — A session no row explains is refused as `Unknown`, one of unrecorded length as `OpenLengthUnmeasured`, and a year holding either is not counted — 2026-10-16
+
+**Decision.** An open day whose windows are not 09:15–15:29, or a full session
+on a weekend, with no special session, notice or halt to name it, is
+`NotTradable::Unknown`; a session of unrecorded length with no row is
+`OpenLengthUnmeasured`. Both are "unexplained" (`NotTradable::is_unexplained`).
+Neither occurs in today's tables
+(`the_yearly_counts_name_every_excluded_session_and_add_up` asserts zero
+unexplained days in every year 2018–2026); both are reachable through
+`classify` and tested there
+(`classify_names_every_shape_and_refuses_the_unknown_ones`), and `cli
+calendar-days` exits `FAILED` for a year that holds one, naming the count
+(`an_unexplained_day_is_marked_and_refuses_the_year`), so an unknown case
+becomes a sourced row and a test before it is counted. A closed day stays
+closed whatever a row claims about it, and a special kind wins over a halt.
+
+This replaces the first draft of this package, which excluded the short days
+as `ShortDay` and named the unknown case `IrregularSession`; neither name was
+ever merged.
+
+### D-5152 — The special sessions get their notices of record: `SESSION_CIRCULARS`, sixteen rows, each held equal to the measured window — 2026-10-16
+
+**Decision.** `pull::calendar::SESSION_CIRCULARS` records, for every special
+session 2018–2026, the NSE circular (or, for 2021-02-24, SEBI's order) that
+states it: number, date, address, and the normal-market windows it notifies
+(`None` for the untimed 2026-11-08 Muhurat). Read on 2026-10-16 from
+`nsearchives.nseindia.com`; recorded in `docs/00-charter.md` §3 ("The notices
+of record"). Append-only: a later notice (the 2026 Muhurat's timings) is a new
+row and an edit of no other. `SPECIAL_SESSIONS` and its evidence strings are
+untouched; the notice is a second lane beside the measurement, and
+`every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+fails the build if the two lanes disagree. They agree on all fifteen timed
+rows. 2024-01-20's notice (NSE/MSD/60340) sources the session's regular hours;
+WHY the exchange made it a full session stays UNVERIFIED. No NSE circular was
+found for either March 2020 halt, which stay `Suspected` (D-3320). No half-day
+session was found in any notice read.
+
+### D-5153 — `cli calendar-days YEAR`: the excluded days one line each and the year's totals, a pure function of the tables — 2026-10-16
+
+**Decision.** `pull::calendar::year_exclusions(year)` counts a year by the
+tradable-day rule through the running sums (D-5157): two indexed reads and a
+subtraction. It refuses a year not wholly inside the calendar of record
+(2018-01-01..2026-12-31) by name rather than counting it short
+(`a_year_outside_the_record_is_refused_by_name`). `cli calendar-days YEAR`
+prints the year's holiday record (circular, measured or owed), every
+non-tradable day except ordinary closed weekends (counted, not listed) with
+its weekday, its reason, its label and its source, then the totals by reason;
+it reads no store and writes nothing; one `cli.calendar_days` event records
+the year's counts. It is not a sweep verb. Per year, 2018–2026, the excluded
+sessions are 1, 1, 4, 2, 1, 1, 4, 2 and 2: eighteen in all (nine Muhurats,
+three Budget weekends, 2024-01-20, two drills, the outage and two suspected
+halts).
+
+**YEAR is four ASCII digits and nothing else** (CAL-1 self-check, 19 Oct
+2026). `u16::from_str` alone took `+2024` and printed 2024's page, and took
+`02024` and `7` as years; every word that is not four digits is now a misuse
+that names itself and prints the usage, and `0000` and `9999` are refused as
+years outside the record (`calendar_days_refuses_garbage_years_by_name`).
+
+### D-5154 — The measured window is versioned: each version is its own extent of the bitset, computed, with its own digest, and new runs take the newest — 2026-10-16 (the circular tables joined the version in D-5159)
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 4):
+the measured window `FIRST_DAY` 18,232 .. `LAST_DAY` 20,700 was typed beside
+the bits; it must be computed from the measured bitset's own extent, each
+newly stored day appended to a NEW calendar version with its own digest, each
+recorded run naming its version and re-verifying against it, so an extension
+re-keys nothing.
+
+**Decision.** `pull::calendar::MEASURED_VERSIONS` is an append-only table of
+`MeasuredVersion { version, days, source }`, numbered from 1, each answering
+more days of `TRADED` than the one before (a const assertion,
+`versions_ascend`). Version 1 is the original 2,455 days (2019-12-02 ..
+2026-08-21); version 2 adds 2026-08-22 .. 2026-09-04 (D-3346), 2,469 days.
+`FIRST_DAY`, `LAST_DAY` and `DAYS` are const fns of the newest row, pinned by
+const assertions to 18,232, 20,700 and 2,469, so a version appended without a
+decision fails the build; `padding_is_clear` holds that no bit is set past the
+newest extent. `CalendarVersion` answers `kind_of`, `sourced_kind_of` and
+`tradable_day` at any version, and `CalendarVersion::digest` is BLAKE3 of
+canonical bytes (a domain, the version, both spans, every holiday circular and
+session notice, and every day of the record with its kind and tradable code).
+`pull::calendar::calendar_digest()` is the newest version's, built once per
+process. `the_measured_versions_keep_their_extents_and_their_digests`.
+
+**Not wired.** No run identity hashes `calendar_digest` yet: adding it to a
+recorded run's identity is the run owner's change (`docs/06-limits.md`
+L-CAL-7). The measurement of a newly stored day is still the D-3346 method,
+run by hand and landed as a new row.
+
+### D-5155 — The sourced span is computed from an append-only table of NSE holiday circulars, and a missing year stops it — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 3):
+`SOURCED_FIRST_DAY` 17,532 .. `SOURCED_LAST_DAY` 20,818 was typed beside the
+rows.
+
+**Decision.** `pull::calendar::HOLIDAY_CIRCULARS` records each NSE
+capital-market holiday circular (year, number, issue date, address, and
+whether it is the year's whole list): NSE/CMTR/36475 (2018), NSE/CMTR/39612
+(2019) with the two additions NSE/CMTR/40536 and NSE/MSD/42319, and
+NSE/CMTR/71775 (2026), each already in `docs/00-charter.md` §9 (D-2805).
+`sourced_span` is a const fn: the first day is 1 January of the earliest year
+with a whole list; the last is 31 December of the latest year Y such that
+every year up to Y is recorded or wholly inside the measured window. A missing
+year stops the span, and a partial row does not make a year recorded. Today
+that gives 2018-01-01..2026-12-31, pinned by const assertions.
+`the_sourced_span_is_computed_from_the_circulars_and_a_gap_stops_it`: an
+appended synthetic 2027 moves the bound, a gap year stops it, and the day
+after the last day is `Unmeasured`. `year_record(year)` says, per year,
+whether its holidays are a recorded circular, measured, or owed.
+
+### D-5156 — The record's end is warned from 1 January of its last sourced year, not 30 typed days before — 2026-10-16
+
+**Decision.** `record_horizon(newest_day).ends_soon` is true from 1 January of
+`SOURCED_LAST_YEAR` (today 2026), because from then the next year's holiday
+circular is owed and nothing later will make the record longer on its own; the
+horizon names that year (`owed_year`, today 2027). It replaces
+`RECORD_ENDS_SOON_DAYS` = 30 (D-4964 point 6), which is removed from the code
+and from the figures `core/tests/decision_citations.rs` holds. The pull run's
+status document keeps its shape (`endsSoon` is true for any day of 2026).
+`the_record_horizon_warns_before_the_end_and_names_the_days_past_it`.
+
+### D-5157 — Per-reason excluded-day counts are running sums indexed by day, so any bucket costs O(1) — 2026-10-16
+
+**Decision.** `RunningSums::build(version)` makes one pass over the version's
+record (3,287 days today) and keeps, per day, the running count of every
+reason and of tradable days; `RunningSums::between(first, last)` is two
+indexed reads and a subtraction whatever the bucket's length, and refuses an
+inverted bucket or one not wholly inside the record by name (`SpanRefusal`).
+`excluded_between` uses the newest version's sums, built once per process.
+`the_running_sums_answer_every_bucket_exactly` compares every month of the
+record and odd buckets with a day-by-day count.
+
+### D-5158 — `cli calendar-days check`: the calendar held against every stored day of every feed, read-only — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" items 1 and
+2): the years to complete are every year holding a stored NSE day of a swept
+or reference instrument in any feed, read from `pull::manifest`; the
+cross-check covers every stored day in every feed and prints (a) held days
+the rule refuses, (b) held weekend or holiday days no row names, as new
+candidates UNVERIFIED until their circular is found, and (c) weekdays called
+open that no feed holds.
+
+**Decision.** `cli calendar-days check` reads `BRUTEX_STORE` and writes
+nothing. Years: every census entry of an NSE month of NIFTY, BANKNIFTY,
+INDIAVIX or an F&O cash equity, any feed (BSE, MCX, contracts and stocks
+outside the F&O list never count), each printed with its holiday record and
+its notices. Days: every NIFTY and BANKNIFTY bar month of each feed (its
+`1day` months where it holds them, else its finest), read through the month's
+own time index, two `first_at_or_after` lookups a day, and each day one
+indexed write into a dense day map whose span the censuses fix before any
+month is read (it was an ordered tree map, O(log d) a day, until the
+self-check of 19 Oct 2026), so a day costs O(1) per feed and no month is
+scanned. A census or month that cannot be read is named `NOT READ`; an
+unexplained refusal, a candidate inside the record, a missing session or an
+unreadable source makes the run exit `FAILED` with the count, and so does a
+store holding no NIFTY or BANKNIFTY day at all: a check of nothing is not a
+pass.
+Candidates in an owed year are listed apart. One `cli.calendar_check` event
+per run and one per instrument-month read.
+
+**Departures, said plainly.** The per-day source is the index bar months
+themselves rather than the GDFL `.prv` landing records and the `verify/` year
+index the operator named: the bars are what those two describe, and the
+`verify/` index answers "not verified" at generation 0. Every run re-reads
+every index month; re-checking only the months whose census entry changed
+needs a memo the read-only check does not write (`docs/06-limits.md`
+L-CAL-9).
+
+**The store, 18 Oct 2026 (read-only, the shadow `shadow/CAL-1`, whose bars
+are the real store's through a link, under the kernel write lock).** Two
+feeds: Zerodha `1day` (282 NIFTY and BANKNIFTY months, 2,911 days, 2015-01
+to 2026-09) and GDFL `1s` (194 months, 1,989 days, 2018-09 to 2026-09), read
+in 981 ms. (a) 17 held sessions refused, every one a row of the tables (the
+eighteen excluded sessions less 2026-11-08, not yet traded); 743 held days
+of 2015-2017 are `Unmeasured`. (b) No candidate inside the record; two in
+the owed years, 2015-02-28 (Sat) and 2016-10-30 (Sun). (c) No weekday called
+open that no feed holds. The years 2015, 2016 and 2017 hold Zerodha months
+and no circular: they are owed (`docs/06-limits.md` L-CAL-8). The check found
+no GDFL `1s` NIFTY or BANKNIFTY bar on any of the eight Muhurats traded so
+far, the two drills or the outage; Zerodha holds a `1day` bar on every one.
+
+### D-5159 — Each calendar version reads its own prefix of the circular tables; a later notice for a day supersedes the earlier one; a recorded year brings its holidays — 2026-10-18
+
+**Context.** D-5154 versioned the measured window and said an extension
+re-keys nothing, but every version read the WHOLE of `HOLIDAY_CIRCULARS` and
+`SESSION_CIRCULARS`. Appending NSE's 2027 holiday circular (owed now:
+`record_horizon` warns from 2026-01-01) would have moved version 2's sourced
+span to 2027-12-31, changed its canonical bytes and so its digest, and every
+run recorded under version 2 would have failed re-verification: the
+re-keying item 4 forbids. Two smaller holes sat beside it: the table is
+append-only and "a later notice is a new row", yet the lookup returned the
+FIRST row naming a day, so the 2026 Muhurat's timing notice, appended, would
+never have been read; and `sourced_kind` calls every weekday open unless
+`SOURCED_HOLIDAYS` lists it, so a circular row appended without its days
+would have called each of that year's holidays a session.
+
+**Decision.** `MeasuredVersion` carries `holiday_circulars` and
+`session_circulars`: how many rows of each table it reads, from the first.
+`CalendarVersion` holds those prefixes and answers, spans and hashes only
+them. Both versions read 5 and 16. `versions_ascend` now requires each
+version to read no fewer days or rows than the one before and to add
+something; a version may add only a circular or only a notice.
+`versions_read_the_tables` (a const assertion) holds that no version reads
+past a table and that the newest reads every row, so a row appended without
+its version fails the build. A day's notice is the LAST row naming it
+(`notice_in`), and `year_record` counts a day once, by its newest notice.
+`recorded_years_list_their_holidays` (a const assertion) refuses a
+whole-year circular, for a year not wholly measured, with no day of that
+year in `SOURCED_HOLIDAYS` outside the window. Version 2's digest is pinned
+to the value first printed on 2026-10-18,
+`de177094a06002658c4ce9d9f79e423c635f63d2762756bfdbd215f27b333bf0`; the move
+changed no byte. Proofs: `an_appended_row_is_a_new_version_and_re_keys_none_before_it`,
+`version_two_keeps_its_recorded_digest`,
+`a_recorded_year_without_its_holidays_is_refused`,
+`a_bad_version_table_or_padding_is_refused`.
+
+**What it does not version.** `TRADED`'s bits up to each version's extent
+are versioned (D-5154); the older tables (`SPECIAL_SESSIONS`, `HALTS`,
+`IRREGULAR`, `SOURCED_HOLIDAYS`, `SOURCED_SPECIAL`) are not, because they are
+not this package's. A change to one of them that changes how a day of a
+version's record is answered changes that version's digest, and the pinned
+digest fails the build: that is a re-keying, and it is meant to be loud. A
+row that answers only days past every version's record changes nothing.
+
+**`cli calendar-days check` columns.** The year table's holiday text of an
+owed year (87 characters) ran into its notices column; each column is now
+held apart by two spaces (`the_check_reads_every_feed_and_prints_the_three_lists`).
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
