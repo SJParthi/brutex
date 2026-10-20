@@ -502,6 +502,10 @@ pub const fn cause_code(cause: RowCause) -> u8 {
         RowCause::Conflicting => 5,
         RowCause::BeforeFirstDayBar => 6,
         RowCause::ForeignLevel => 7,
+        // R4-17's three causes, appended when the two branches met.
+        RowCause::NonPositivePrice => 8,
+        RowCause::BeforeListing => 9,
+        RowCause::InSessionJump => 10,
     }
 }
 
@@ -516,6 +520,9 @@ pub const fn cause_of(code: u8) -> Option<RowCause> {
         5 => Some(RowCause::Conflicting),
         6 => Some(RowCause::BeforeFirstDayBar),
         7 => Some(RowCause::ForeignLevel),
+        8 => Some(RowCause::NonPositivePrice),
+        9 => Some(RowCause::BeforeListing),
+        10 => Some(RowCause::InSessionJump),
         _ => None,
     }
 }

@@ -1374,3 +1374,64 @@ files of `github.com/dropbox/dropbox-api-spec`:
 The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
+
+## NSE Masters Data v1.6 — read 17 Oct 2026 (R4-17: the listing rule)
+
+`CLAUDE.md` §3 rule 1 requires the listing rule `pull::listing` applies to
+trace to a source recorded here. The specification below was fetched over
+HTTPS on 17 Oct 2026 (HTTP 200, `application/pdf`, 817,499 bytes, 39 pages)
+by the R4-17 cloud session and read from the bytes fetched. The digest is of
+those bytes; the exchange may serve other bytes later.
+
+| Document | Date | URL | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|---|---|
+| NSE – Masters Data, CM, F&O, CD and COM Segments, Version 1.6 (NSE Data & Analytics) | 05 May 2025 | `https://nsearchives.nseindia.com/web/sites/default/files/inline-files/NSE-Masters%20Data-v1.6.pdf` | `a1e45b6de312ebf05298fac8a1c4fbe337b8339b7eb110ac75705925bd05487e` | §2.3 Units (p7): "All time fields are number of seconds from midnight January 1, 1980, unless specified otherwise." §3.1.1 `security.txt` (p9): "Listing Date LONG Numeric Date of listing.", "Expulsion Date LONG Numeric Date of expulsion.", "Re-Admission Date LONG Numeric Date of readmission." | `pull::cash_auction`'s lifecycle decode (unchanged), and `pull::listing`: a CASH bar dated before its exact symbol+ISIN's listing date is not that security's bar; a window after its expulsion date is the end of its history (D-5839, D-4991) |
+
+**What the document does NOT say, and so is labelled in the code.** v1.6
+describes `security.txt`; it does not name the MII CSV's abbreviated columns.
+That `ListgDt`, `RmvlDt` and `RadmssnDt` of the dated
+`NSE_CM_security_ddmmyyyy.csv.gz` (charter §9) are its Listing, Expulsion and
+Re-Admission dates is read from their names and order (`docs/13-pull-reconciliation-20260906.md`,
+columns 35–37), not from this document. One observation corroborates the
+epoch: IRFC's `ListgDt` 1,296,345,600 seconds decodes to 2021-01-29 from
+1980-01-01 — the day of its first Zerodha day bar measured on the operator's
+store (`pull::series_identity`'s header) — and to 2011-01-30 from 1970. A
+`ListgDt` of `0` names no date: a security whose master row carries `0`
+(TATACONSUM and TMPV on the operator's masters, per the R4-17 work package)
+has an UNKNOWN listing day, and nothing is refused on it. Whether the
+expulsion date is the last day traded or the first day not traded is
+UNVERIFIED: `pull::listing` treats only days strictly AFTER it as past the
+end of history, so the expulsion day itself is never refused.
+
+## Filesystem counts for `/disk.json` — read 16 Oct 2026 (D-5240, D-5241)
+
+`/disk.json` reports the store's filesystem from one system call made in the
+server process (it started `/bin/df -Pk` until D-5240). Which call, and in
+which units, rests on the operating system's own declarations, read from the
+macOS SDK on the operator's machine (Command Line Tools
+`MacOSX27.0.sdk`, macOS 27.0.1, build 26A434) and from the `rustix` 1.1.4
+registry source the build compiles. The digest is of the bytes read; another
+SDK may declare otherwise.
+
+| Source | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|
+| `usr/include/sys/_types.h` | `863c4f07045775002b63b7e616742d9f746e4a02da4441442d8fe1138bbd0ff9` | line 70: `typedef unsigned int __darwin_fsblkcnt_t; /* Used by statvfs and fstatvfs */` — 32 bits | macOS reads `statfs(2)`, not `statvfs(2)` (D-5241) |
+| `usr/include/sys/statvfs.h` | `658ae523adc689c84eef80fd16a9dbd7d4f00fbc7eba0499f96c1afba6033ace` | `struct statvfs`: `f_blocks`, `f_bfree`, `f_bavail` are `fsblkcnt_t`, "in units of `f_frsize`" | the counts off macOS (`statvfs`, D-5240); why not on macOS (D-5241) |
+| `usr/include/sys/mount.h` | `45872741bb916b92bddd2e562d2047b552af1f68269081a0aeb58a3e5a2b8a51` | `__DARWIN_STRUCT_STATFS64`: `uint32_t f_bsize` "fundamental file system block size"; `uint64_t f_blocks`, `f_bfree`, `f_bavail` ("free blocks avail to non-superuser"); `char f_mntonname[MAXPATHLEN]` "directory on which mounted" | the counts and the mount point on macOS (D-5241) |
+| `rustix-1.1.4/src/backend/libc/fs/types.rs` (crates.io) | not recorded: the lock's own checksum pins the package | line 1069: `pub type StatFs = c::statfs;` on the libc backend, so `rustix::fs::statfs` hands back the SDK's struct unchanged; `StatVfs` widens every count to `u64` | the fields `disk_route::counts_and_mount` reads |
+
+**What is NOT sourced here.** How Darwin's `statvfs` folds a volume of 2^32
+fragments or more into its 32-bit counts — truncation, or a larger `f_frsize`
+— was not read: Apple's libc source was not consulted, and no such volume was
+measured. It is UNVERIFIED, and it is why macOS does not use that call. The
+`df` behaviour the route matches (total = every fragment, free = what an
+unprivileged writer may take, the mount point `df` prints) is checked by
+measurement, not by source: `on_macos_total_free_and_mount_are_what_bin_df_printed`
+compares the route with `/bin/df -Pk` on this machine, and the Linux branch was
+compared with GNU `df -Pk` by hand in the cloud container (D-5240). **What it
+does not match, measured 17 Oct 2026**: on APFS macOS `df`'s Used column is
+not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
+425,294,667,776), and no field of the `statfs` structure above carries the
+figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
+route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
+`docs/06-limits.md` L-RUST1-1).
