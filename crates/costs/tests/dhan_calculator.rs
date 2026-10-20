@@ -883,13 +883,14 @@ fn the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_wher
 }
 
 /// The live option readings of 15-16 Oct 2026, priced precisely under the
-/// DATED selector, must equal today's table once the regime carries FA73061's
-/// 0.03553% row from 2026-03-01. Until package CHG-0 lands that row, the
-/// regime still answers FA64232's 0.03503% for October 2026 — without the
-/// IPFT, which FA73061 folds into its own row — and this fails. The local
-/// merge un-ignores it (D-5115).
+/// DATED selector, equal today's table line for line: the dated card is the
+/// regime row in force plus the IPFT, exactly as `costs::trip` reads them, so
+/// on and after 2026-03-01 it is FA64232's 0.03503% plus the 0.0005% IPFT —
+/// the 0.03553% FA73061 states as one total (sources row E-03). It was
+/// `#[ignore]`d while the dated card dropped the IPFT by date and waited for
+/// package CHG-0's FA73061 row; that drop under-charged every NSE options day
+/// from 2026-03-01 and is gone (D-5131), so this runs in the gate.
 #[test]
-#[ignore = "needs CHG-0's FA73061 regime row"]
 fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases() {
     let options: Vec<&Case> = GOLDEN.iter().filter(|case| case.kind == OPT).collect();
     assert_eq!(options.len(), 11);
@@ -907,8 +908,32 @@ fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases
             };
             let dated = price(RateSelector::Dated);
             let today = price(RateSelector::CurrentOnEveryDate);
-            assert_eq!(dated.lines(), today.lines(), "{} on {on}", case.name);
-            assert_eq!(dated.total(), today.total(), "{} on {on}", case.name);
+            if month == 10 {
+                assert_eq!(dated.lines(), today.lines(), "{} on {on}", case.name);
+                assert_eq!(dated.total(), today.total(), "{} on {on}", case.name);
+                continue;
+            }
+            // FA73061's own first day: the exchange charge, and every line
+            // but STT, agree. The dated STT is the 0.1% in force until the
+            // Finance Act 2026 rate of 2026-04-01 (crate::regime), today's
+            // table the 0.15% — so STT is the one line that differs, and
+            // only by that rate: 0.05% of the sell premium, to the rupee.
+            let (dated_lines, today_lines) = (dated.lines(), today.lines());
+            for at in (0..dated_lines.len()).filter(|&at| at != 3) {
+                assert_eq!(
+                    dated_lines[at], today_lines[at],
+                    "{} on {on}: {}",
+                    case.name, dated_lines[at].0
+                );
+            }
+            assert_eq!(
+                dated.stt_paisa().raw(),
+                (dated.sell_value().raw() + 500) / 1_000
+            );
+            assert_eq!(
+                today.stt_paisa().raw(),
+                (today.sell_value().raw() * 3 + 1_000) / 2_000
+            );
         }
     }
 }
@@ -1047,32 +1072,35 @@ fn the_endpoint_and_the_ui_readings_of_the_v1_inputs_agree_line_for_line() {
 
 /// The precise net result of one golden reading: its gross less the ENTIRE
 /// precise charge stack of its days — one client-security-day for intraday
-/// and F&O, a buy day and a sell day for delivery and MTF.
+/// and F&O, a buy day and a sell day (the next one: a pair on one day is one
+/// client-security-day, and `NetTrade::of_days` refuses it) for delivery and
+/// MTF.
 fn precise_net(case: &Case) -> Result<NetTrade, ChargeError> {
     let on = TradeDay::new(2026, 10, 16).expect("a real date");
-    let settle = |orders: &[(OrderSide, Option<i64>)]| -> Result<DayCharges, ChargeError> {
-        let mut day = ClientSecurityDay::open(
-            case.kind,
-            case.exchange,
-            on,
-            RateSelector::CurrentOnEveryDate,
-        )?;
-        for &(side, price) in orders {
-            if let Some(price) = price {
-                day.add(Order::new(side, case.quantity, paisa(price))?)?;
+    let settle =
+        |orders: &[(OrderSide, Option<i64>)], on: TradeDay| -> Result<DayCharges, ChargeError> {
+            let mut day = ClientSecurityDay::open(
+                case.kind,
+                case.exchange,
+                on,
+                RateSelector::CurrentOnEveryDate,
+            )?;
+            for &(side, price) in orders {
+                if let Some(price) = price {
+                    day.add(Order::new(side, case.quantity, paisa(price))?)?;
+                }
             }
-        }
-        day.settle()
-    };
+            day.settle()
+        };
     match case.kind {
         TradeKind::Equity(Product::Delivery | Product::Mtf) => NetTrade::of_days(
-            &settle(&[(OrderSide::Buy, case.buy)])?,
-            &settle(&[(OrderSide::Sell, case.sell)])?,
+            &settle(&[(OrderSide::Buy, case.buy)], on)?,
+            &settle(&[(OrderSide::Sell, case.sell)], on.plus_days(1)?)?,
         ),
-        _ => NetTrade::of_day(&settle(&[
-            (OrderSide::Buy, case.buy),
-            (OrderSide::Sell, case.sell),
-        ])?),
+        _ => NetTrade::of_day(&settle(
+            &[(OrderSide::Buy, case.buy), (OrderSide::Sell, case.sell)],
+            on,
+        )?),
     }
 }
 

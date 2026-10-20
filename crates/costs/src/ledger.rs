@@ -43,9 +43,19 @@
 //!
 //! [`DayLedger::add`] is a fixed handful of checked additions and one
 //! [`crate::schedule::dhan_brokerage`]; [`DayLedger::close`] is one
-//! [`RateCard::resolve`] and a fixed sequence of exact-rate products. Neither
-//! walks the orders. `crates/costs/benches/stack.rs` measures both: C-CHG-07
-//! for the add, C-CHG-08 for the close in each mode.
+//! [`RateCard::resolve`] and a fixed sequence of exact-rate products, and so
+//! is [`DayLedger::order_lines_unrounded`]. None walks the orders.
+//! `crates/costs/benches/stack.rs` measures all three: C-CHG-07 for the add,
+//! C-CHG-08 for the close and C-CHG-09 for one order's lines, in each mode.
+//!
+//! # One order's lines need its day
+//!
+//! Whether a delivery or MTF order pays delivery STT and stamp duty and a DP
+//! share, or the non-delivery rates and no DP, depends on whether its day
+//! squared off. [`DayLedger::order_lines_unrounded`] prices an order against
+//! its own day's netting — the rule [`DayLedger::close`] nets by — and the
+//! day-less [`order_lines_unrounded`] refuses a delivery or MTF order by name
+//! (D-5131).
 
 use brutex_core::instrument::Exchange;
 use brutex_core::price::Paisa;
@@ -53,13 +63,15 @@ use brutex_core::price::Paisa;
 use crate::charge_error::ChargeError;
 use crate::day::TradeDay;
 use crate::error::CostError;
-use crate::exact::{Exact, units_of};
+use crate::exact::{Exact, round_half_up, units_of};
 use crate::rate::OrderSide;
 use crate::schedule::{
     DHAN_DP_CHARGE, DHAN_SQUARE_OFF_FEE, GST, Mode, Product, RateCard, RateSelector, Settlement,
     Taxes, TradeKind, dhan_brokerage_units,
 };
-use crate::stack::{DayCharges, LINE_NAMES, Totals, settle_dhan, settle_precise};
+use crate::stack::{
+    DayCharges, LINE_NAMES, Netting, Totals, equity_netting, settle_dhan, settle_precise,
+};
 
 /// One executed order: a side, the units it filled and their value in paisa
 /// (price × units, or premium × units for an option), and whether the
@@ -311,25 +323,33 @@ const DHAN_HAS_NO_DATED_RATES: ChargeError = ChargeError::NotOnPage {
            RateSelector::CurrentOnEveryDate, labelled)",
 };
 
-/// One executed order's own lines, **unrounded**, in [`LINE_NAMES`] order:
-/// the order's exact share of each line of its client-security-day, in units
-/// of 10⁻⁹ rupee.
+/// One executed order's own lines, **unrounded**, in [`LINE_NAMES`] order,
+/// for an order whose lines do not depend on how its day netted: an
+/// **intraday** equity order (an intraday day is priced only squared off), a
+/// futures order or an options order (their taxes go by side).
 ///
-/// Linear lines are exact shares, so the day's orders sum to the day's
-/// unrounded line: brokerage (the order's own), the exchange charge and the
-/// SEBI fee on its value, stamp duty on a buy, and STT on the value the
-/// day's tax is levied on — for precise equity intraday that is **half** the
-/// order's value at the rate, because `NSE/CMTR/5588` taxes the squared-off
-/// quantity at the day's VWAP of the buys and the sells together, and the
-/// VWAP's own rounding to the paisa is a day step no order can take. GST is
-/// 18% of the order's own unrounded base (precise: brokerage + exchange +
-/// SEBI; calculator: brokerage + exchange), half-up to the unit. The DP
-/// charge is a day line carried by a delivery or MTF **sell** order as if it
-/// were the day's only sell; the broker square-off fee and its GST by the
-/// order that was the broker's.
+/// **A delivery or MTF order is refused by name**
+/// ([`ChargeError::NeedsItsDay`]): whether it pays delivery STT on its whole
+/// value, delivery stamp duty and a DP share, or the non-delivery rates and
+/// no DP, depends on whether its client-security-day squared off, and one
+/// order cannot tell. [`DayLedger::order_lines_unrounded`] prices it against
+/// its own day's netting (D-5131).
+///
+/// Each line is the order's exact share of its client-security-day's line,
+/// in units of 10⁻⁹ rupee: brokerage (the order's own), the exchange charge
+/// and the SEBI fee on its value, stamp duty on a buy, and STT on the value
+/// the day's tax is levied on — for precise equity intraday that is **half**
+/// the order's value at the rate, because `NSE/CMTR/5588` taxes the
+/// squared-off quantity at the day's VWAP of the buys and the sells
+/// together. GST is 18% of the order's own unrounded base (precise:
+/// brokerage + exchange + SEBI; calculator: brokerage + exchange), half-up to
+/// the unit; the broker square-off fee and its GST are carried by the order
+/// that was the broker's. What the day's orders sum to is stated, and
+/// proved, on [`DayLedger::order_lines_unrounded`].
 ///
 /// # Errors
 ///
+/// * [`ChargeError::NeedsItsDay`] for a delivery or MTF order.
 /// * Whatever [`RateCard::resolve`] refuses, in precise mode; and for the
 ///   calculator mode, [`ChargeError::NotOnPage`] under the dated rate set and
 ///   for BSE futures and options.
@@ -365,6 +385,18 @@ const DHAN_HAS_NO_DATED_RATES: ChargeError = ChargeError::NotOnPage {
 /// // Its STT share: half of ₹76,500 at 0.025% is ₹9.5625, exactly.
 /// assert_eq!(lines[3], ("STT", lines[3].1));
 /// assert_eq!(lines[3].1.units(), 9_562_500_000);
+/// // A delivery order needs its day.
+/// assert!(
+///     order_lines_unrounded(
+///         TradeKind::Equity(Product::Delivery),
+///         Exchange::Nse,
+///         TradeDay::new(2026, 10, 15)?,
+///         sell,
+///         Mode::Precise,
+///         RateSelector::CurrentOnEveryDate,
+///     )
+///     .is_err()
+/// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn order_lines_unrounded(
@@ -375,12 +407,193 @@ pub fn order_lines_unrounded(
     mode: Mode,
     rate_set: RateSelector,
 ) -> Result<[(&'static str, Exact); 11], ChargeError> {
+    let order = applicable(kind, order)?;
+    if let TradeKind::Equity(Product::Delivery | Product::Mtf) = kind {
+        return Err(ChargeError::NeedsItsDay {
+            kind: kind.as_str(),
+        });
+    }
+    // An intraday day is priced only squared off; futures and options are
+    // taxed by side, and their netting is never read.
+    lines_of(kind, exchange, day, order, mode, rate_set, Netting::Squared).map(named)
+}
+
+impl DayLedger {
+    /// One of this day's executed orders' own lines, **unrounded**, in
+    /// [`LINE_NAMES`] order, priced against **the day's own netting** — the
+    /// per-trade attribution of a day a backtest closes. Call it after the
+    /// day's last [`Self::add`], as [`Self::close`] is called: the netting
+    /// and the DP share are the day's as it then stands. O(1): a fixed
+    /// handful of exact products, never a walk of the orders (C-CHG-09 in
+    /// `crates/costs/benches/stack.rs`).
+    ///
+    /// The day nets exactly as [`Self::close`] nets it (one rule,
+    /// `crate::stack::equity_netting`): on a **squared** equity day — intraday,
+    /// delivery or MTF — an order pays non-delivery STT on half its value,
+    /// non-delivery stamp duty on a buy, and no DP; on a **one-sided**
+    /// delivery or MTF day it pays delivery STT on its whole value, delivery
+    /// stamp duty on a buy, and a sell carries its share of the day's one DP
+    /// charge and its GST, in proportion to its value among the day's sells
+    /// (the whole of it for the day's only sell). The calculator mode prices
+    /// as the page does, which nets nothing, and shares the page's DP the
+    /// same way. Futures and options are taxed by side, as in
+    /// [`order_lines_unrounded`].
+    ///
+    /// **What the day's orders sum to.** Every share is exact to the unit of
+    /// 10⁻⁹ rupee, half-up where it falls between two units, and the day
+    /// rounds its own line once; so over the day's orders brokerage, the
+    /// exchange charge, the SEBI fee, stamp duty and the square-off lines sum
+    /// to the day's unrounded lines, STT does too except for the day's VWAP
+    /// rounding to the paisa (a day step no order can take), and the DP lines
+    /// sum to the day's within half a unit per sell order — exactly when the
+    /// day has one sell. GST is each order's own, on its own unrounded base,
+    /// and is not a share of the day's GST (the day's is on the rounded
+    /// base). Proved on a squared and a one-sided intraday, delivery and MTF
+    /// day by
+    /// `costs::ledger::tests::a_days_orders_sum_to_its_unrounded_lines_on_every_netting`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ChargeError::Cost`] carrying [`CostError::NotPositive`] for an
+    ///   order that is not positive.
+    /// * [`ChargeError::SquareOffNotApplicable`] for a broker square-off on a
+    ///   delivery or MTF order.
+    /// * [`ChargeError::OrderNotInDay`] for an order larger, on its side,
+    ///   than the day's whole side, in units or in value: it cannot be one of
+    ///   the day's orders. (A smaller order of another day cannot be told
+    ///   from the totals; keeping days apart is the caller's.)
+    /// * In precise mode, what the day's netting refuses, exactly as
+    ///   [`Self::close`] does: [`ChargeError::OpenIntradayPosition`] and
+    ///   [`ChargeError::PartlySquaredDay`].
+    /// * Otherwise as [`order_lines_unrounded`]: a rate the rate set cannot
+    ///   supply, what the calculator page was never read for, an overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use brutex_core::instrument::Exchange;
+    /// use brutex_core::price::Paisa;
+    /// use costs::day::TradeDay;
+    /// use costs::ledger::{DayLedger, ExecutedOrder};
+    /// use costs::rate::OrderSide;
+    /// use costs::schedule::{Mode, Product, RateSelector, TradeKind};
+    ///
+    /// // A delivery day bought and sold the same 100 shares: it squared off,
+    /// // so each order pays the non-delivery rates and nobody pays DP.
+    /// let mut day = DayLedger::new(
+    ///     TradeKind::Equity(Product::Delivery),
+    ///     Exchange::Nse,
+    ///     TradeDay::new(2026, 10, 15)?,
+    /// )?;
+    /// let buy = ExecutedOrder {
+    ///     side: OrderSide::Buy,
+    ///     qty: 100,
+    ///     value_paisa: Paisa::from_raw(15_000_00),
+    ///     broker_square_off: false,
+    /// };
+    /// let sell = ExecutedOrder {
+    ///     side: OrderSide::Sell,
+    ///     value_paisa: Paisa::from_raw(14_800_00),
+    ///     ..buy
+    /// };
+    /// day.add(buy)?;
+    /// day.add(sell)?;
+    /// let lines = day.order_lines_unrounded(sell, Mode::Precise, RateSelector::CurrentOnEveryDate)?;
+    /// // STT: half of ₹14,800 at 0.025% is ₹1.85; DP: none.
+    /// assert_eq!((lines[3].1.units(), lines[7].1.units()), (1_850_000_000, 0));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn order_lines_unrounded(
+        &self,
+        order: ExecutedOrder,
+        mode: Mode,
+        rate_set: RateSelector,
+    ) -> Result<[(&'static str, Exact); 11], ChargeError> {
+        let order = applicable(self.kind, order)?;
+        let (day_units, day_value) = self.totals.side(order.side);
+        let (units, value) = match order.side {
+            OrderSide::Buy => ("bought quantity", "bought value"),
+            OrderSide::Sell => ("sold quantity", "sold value"),
+        };
+        if order.qty > day_units {
+            return Err(ChargeError::OrderNotInDay {
+                figure: units,
+                order: order.qty,
+                day: day_units,
+            });
+        }
+        if order.value_paisa.raw() > day_value.raw() {
+            return Err(ChargeError::OrderNotInDay {
+                figure: value,
+                order: order.value_paisa.raw(),
+                day: day_value.raw(),
+            });
+        }
+        let netting = match (mode, self.kind) {
+            (Mode::Precise, TradeKind::Equity(product)) => equity_netting(
+                product,
+                self.totals.side(OrderSide::Buy).0,
+                self.totals.side(OrderSide::Sell).0,
+            )?,
+            // Futures and options are taxed by side, and the calculator page
+            // nets nothing: their netting is never read.
+            _ => Netting::Squared,
+        };
+        let [b, x, s, stt, ex, stamp, gst, dp, dp_gst, so, so_gst] = lines_of(
+            self.kind,
+            self.exchange,
+            self.day,
+            order,
+            mode,
+            rate_set,
+            netting,
+        )?;
+        // The day's DP is one charge per security per day: a sell carries
+        // its share of it by value, a buy carries none (its line is zero).
+        let (dp, dp_gst) = (
+            share(dp, order.value_paisa, day_value)?,
+            share(dp_gst, order.value_paisa, day_value)?,
+        );
+        Ok(named([
+            b, x, s, stt, ex, stamp, gst, dp, dp_gst, so, so_gst,
+        ]))
+    }
+}
+
+/// The order, checked: positive, and squared off by the broker only where a
+/// ceiling square-off exists.
+fn applicable(kind: TradeKind, order: ExecutedOrder) -> Result<ExecutedOrder, ChargeError> {
     let order = order.checked()?;
     if order.broker_square_off && !kind.can_be_squared_off_by_broker() {
         return Err(ChargeError::SquareOffNotApplicable {
             kind: kind.as_str(),
         });
     }
+    Ok(order)
+}
+
+/// `line × part ÷ whole`, half-up to the unit: an order's share of a line
+/// its day pays once. `whole` is the day's value on the order's side, which
+/// [`DayLedger::order_lines_unrounded`] has checked is at least `part`.
+fn share(line: Exact, part: Paisa, whole: Paisa) -> Result<Exact, ChargeError> {
+    let numerator = line
+        .units()
+        .checked_mul(i128::from(part.raw()))
+        .ok_or(overflow("an order's share of a day line"))?;
+    Ok(Exact(round_half_up(numerator, i128::from(whole.raw()))?))
+}
+
+/// Every line of one order, unnamed, in [`LINE_NAMES`] order; the DP lines
+/// are the whole day's DP if this order were its only sell.
+fn lines_of(
+    kind: TradeKind,
+    exchange: Exchange,
+    day: TradeDay,
+    order: ExecutedOrder,
+    mode: Mode,
+    rate_set: RateSelector,
+    netting: Netting,
+) -> Result<[Exact; 11], ChargeError> {
     let value = order.value_paisa;
     let (bought, sold) = match order.side {
         OrderSide::Buy => (value, Paisa::ZERO),
@@ -398,7 +611,7 @@ pub fn order_lines_unrounded(
     let lines = match mode {
         Mode::Precise => {
             let card = RateCard::resolve(kind, exchange, day, rate_set)?;
-            precise_order_lines(&card, order.side, value, bought, sold, brokerage)?
+            precise_order_lines(&card, order.side, value, bought, brokerage, netting)?
         }
         Mode::DhanCalculator => match rate_set {
             RateSelector::CurrentOnEveryDate => {
@@ -408,7 +621,7 @@ pub fn order_lines_unrounded(
         },
     };
     let [b, x, s, stt, stt_exercise, stamp, gst, dp, dp_gst] = lines;
-    let named = [
+    Ok([
         b,
         x,
         s,
@@ -420,10 +633,14 @@ pub fn order_lines_unrounded(
         dp_gst,
         square_off,
         square_off_gst,
-    ];
+    ])
+}
+
+/// The eleven lines with their [`LINE_NAMES`].
+fn named(lines: [Exact; 11]) -> [(&'static str, Exact); 11] {
     let [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10] = LINE_NAMES;
-    let [l0, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10] = named;
-    Ok([
+    let [l0, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10] = lines;
+    [
         (n0, l0),
         (n1, l1),
         (n2, l2),
@@ -435,38 +652,42 @@ pub fn order_lines_unrounded(
         (n8, l8),
         (n9, l9),
         (n10, l10),
-    ])
+    ]
 }
 
 /// The first nine precise lines of one order: brokerage, exchange, SEBI,
 /// STT, STT on exercise (none: an order is not an exercise), stamp, GST, DP
-/// and GST on DP.
+/// and GST on DP. An equity order is taxed by its day's `netting`; a futures
+/// or options order by its side alone.
 fn precise_order_lines(
     card: &RateCard,
     side: OrderSide,
     value: Paisa,
     bought: Paisa,
-    sold: Paisa,
     brokerage: Exact,
+    netting: Netting,
 ) -> Result<[Exact; 9], ChargeError> {
     let exchange_charge = units_of(value, card.exchange_charge().rate(), 1)?;
     let sebi = units_of(value, card.sebi().rate(), 1)?;
     let (stt, stamp, dp) = match card.taxes() {
         Taxes::Equity {
-            product,
             stt_non_delivery,
             stt_delivery,
             stamp_non_delivery,
             stamp_delivery,
-        } => match product {
+            ..
+        } => match netting {
             // Half the order's value: the day's non-delivery value is the
-            // squared quantity at the VWAP of buys and sells together.
-            Product::Intraday => (
+            // squared quantity at the VWAP of buys and sells together —
+            // whatever the product, a squared day pays no DP.
+            Netting::Squared => (
                 units_of(value, stt_non_delivery.rate(), 2)?,
                 units_of(bought, stamp_non_delivery.rate(), 1)?,
                 Paisa::ZERO,
             ),
-            Product::Delivery | Product::Mtf => (
+            // One side only: delivery, on the whole value; a sell debits the
+            // demat, so it carries the DP.
+            Netting::OneSided => (
                 units_of(value, stt_delivery.rate(), 1)?,
                 units_of(bought, stamp_delivery.rate(), 1)?,
                 if side == OrderSide::Sell {
@@ -484,11 +705,18 @@ fn precise_order_lines(
             stt_sell,
             stamp_buy,
             ..
-        } => (
-            units_of(sold, stt_sell.rate(), 1)?,
-            units_of(bought, stamp_buy.rate(), 1)?,
-            Paisa::ZERO,
-        ),
+        } => {
+            let sold = if side == OrderSide::Sell {
+                value
+            } else {
+                Paisa::ZERO
+            };
+            (
+                units_of(sold, stt_sell.rate(), 1)?,
+                units_of(bought, stamp_buy.rate(), 1)?,
+                Paisa::ZERO,
+            )
+        }
     };
     let gst_rate = card.gst().rate();
     let base = Exact::sum(&[brokerage, exchange_charge, sebi], "an order's GST base")?;
@@ -972,29 +1200,275 @@ mod tests {
     }
 
     #[test]
+    fn a_days_orders_sum_to_its_unrounded_lines_on_every_netting() {
+        // (kind, orders): a squared intraday, delivery and MTF day (the
+        // verifier's day: ₹15,000 bought and ₹14,800 sold, VWAP ₹149.00
+        // exactly), one-sided delivery and MTF days with two orders on their
+        // side, and futures and options. Each day closed in both modes; the
+        // day's orders' lines from the ledger summed (D-5131).
+        let mtf = TradeKind::Equity(Product::Mtf);
+        let squared = vec![buy(100, 150_00), sell(100, 148_00)];
+        let cases: [(TradeKind, Vec<ExecutedOrder>); 9] = [
+            (INTRADAY, squared.clone()),
+            (DELIVERY, squared.clone()),
+            (mtf, squared),
+            // Two sells, shares of the DP exact: ₹3.75 and ₹8.75.
+            (DELIVERY, vec![sell(30, 100_00), sell(70, 100_00)]),
+            // Two sells, shares of the DP that fall between units.
+            (mtf, vec![sell(30, 150_00), sell(70, 149_00)]),
+            (DELIVERY, vec![buy(30, 150_00), buy(70, 149_00)]),
+            (mtf, vec![buy(1, 1_00)]),
+            (
+                TradeKind::Futures,
+                vec![buy(65, 25_200_00), sell(65, 25_250_00)],
+            ),
+            (TradeKind::Options, vec![buy(65, 100_00), sell(130, 120_00)]),
+        ];
+        for (kind, orders) in cases {
+            let day = ledger(kind, Exchange::Nse, &orders);
+            let sells = i128::try_from(orders.iter().filter(|o| o.side == OrderSide::Sell).count())
+                .expect("small");
+            for mode in [Mode::Precise, Mode::DhanCalculator] {
+                let closed = units(&day.close(mode, TODAY).expect("priced").unrounded_lines());
+                let mut summed = [0_i128; 11];
+                for &o in &orders {
+                    let lines = day.order_lines_unrounded(o, mode, TODAY).expect("priced");
+                    assert_eq!(lines.map(|(name, _)| name), LINE_NAMES);
+                    for (at, line) in units(&lines).into_iter().enumerate() {
+                        summed[at] += line;
+                    }
+                }
+                let case = format!("{kind:?} {mode:?} {orders:?}");
+                // Brokerage, exchange, SEBI, STT, STT on exercise, stamp and
+                // the square-off lines: exactly (every VWAP here is a whole
+                // paisa).
+                for at in [0, 1, 2, 3, 4, 5, 9, 10] {
+                    assert_eq!(summed[at], closed[at], "{case}: {}", LINE_NAMES[at]);
+                }
+                // DP and its GST: within half a unit per sell order.
+                for at in [7, 8] {
+                    assert!(
+                        (summed[at] - closed[at]).abs() * 2 <= sells,
+                        "{case}: {} summed {} vs the day's {}",
+                        LINE_NAMES[at],
+                        summed[at],
+                        closed[at]
+                    );
+                }
+            }
+        }
+        // The verifier's squared delivery and MTF day, line by line: the
+        // non-delivery rates on each order, and no DP (the day pays none).
+        for kind in [DELIVERY, mtf] {
+            let day = ledger(kind, Exchange::Nse, &[buy(100, 150_00), sell(100, 148_00)]);
+            let closed = day.close(Mode::Precise, TODAY).expect("priced");
+            assert_eq!(
+                (closed.stt_paisa(), closed.stamp_paisa(), closed.dp()),
+                (rs(3_73), rs(45), Paisa::ZERO),
+                "{kind:?}"
+            );
+            let b = units(
+                &day.order_lines_unrounded(buy(100, 150_00), Mode::Precise, TODAY)
+                    .expect("priced"),
+            );
+            let s = units(
+                &day.order_lines_unrounded(sell(100, 148_00), Mode::Precise, TODAY)
+                    .expect("priced"),
+            );
+            // STT: half of ₹15,000 and of ₹14,800 at 0.025%; stamp: 0.003%
+            // of ₹15,000 on the buy; DP: none.
+            assert_eq!(
+                [b[3], s[3], b[5], s[5], b[7], s[7], b[8], s[8]],
+                [1_875_000_000, 1_850_000_000, 450_000_000, 0, 0, 0, 0, 0],
+                "{kind:?}"
+            );
+        }
+        // The exact DP shares of two equal-price sells: ₹3.75 and ₹8.75.
+        let two = ledger(
+            DELIVERY,
+            Exchange::Nse,
+            &[sell(30, 100_00), sell(70, 100_00)],
+        );
+        let dp = |o| {
+            units(
+                &two.order_lines_unrounded(o, Mode::Precise, TODAY)
+                    .expect("priced"),
+            )[7]
+        };
+        assert_eq!(
+            (dp(sell(30, 100_00)), dp(sell(70, 100_00))),
+            (3_750_000_000, 8_750_000_000)
+        );
+        // Where the netting is never read, the ledger's lines are the free
+        // function's: an intraday squared day, futures and options.
+        for (kind, orders) in [
+            (INTRADAY, [buy(50, 1_520_00), sell(50, 1_530_00)]),
+            (
+                TradeKind::Futures,
+                [buy(65, 25_200_00), sell(65, 25_250_00)],
+            ),
+            (TradeKind::Options, [buy(65, 100_00), sell(65, 120_00)]),
+        ] {
+            let day = ledger(kind, Exchange::Nse, &orders);
+            for o in orders {
+                for mode in [Mode::Precise, Mode::DhanCalculator] {
+                    assert_eq!(
+                        day.order_lines_unrounded(o, mode, TODAY),
+                        order_lines_unrounded(kind, Exchange::Nse, on(), o, mode, TODAY),
+                        "{kind:?} {mode:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name() {
+        let sold = ledger(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
+        let refused = |day: &DayLedger, o, mode| day.order_lines_unrounded(o, mode, TODAY).err();
+        let not_in = |figure, order, day| Some(ChargeError::OrderNotInDay { figure, order, day });
+        for mode in [Mode::Precise, Mode::DhanCalculator] {
+            // More units, more value, or a side the day never traded.
+            assert_eq!(
+                refused(&sold, sell(51, 1_530_00), mode),
+                not_in("sold quantity", 51, 50)
+            );
+            assert_eq!(
+                refused(&sold, sell(50, 1_530_01), mode),
+                not_in("sold value", 76_500_50, 76_500_00)
+            );
+            assert_eq!(
+                refused(&sold, buy(1, 1_00), mode),
+                not_in("bought quantity", 1, 0)
+            );
+            let bought = ledger(INTRADAY, Exchange::Nse, &[buy(10, 1_00), sell(10, 1_00)]);
+            assert_eq!(
+                refused(&bought, buy(10, 1_01), mode),
+                not_in("bought value", 10_10, 10_00)
+            );
+            // An equal order is the day's: priced.
+            assert!(refused(&sold, sell(50, 1_530_00), mode).is_none());
+            // Not positive, and a broker square-off on a delivery day, are
+            // refused before the day is read.
+            assert_eq!(
+                refused(&sold, sell(0, 1_530_00), mode),
+                Some(ChargeError::Cost(CostError::NotPositive {
+                    quantity: "order quantity",
+                    value: 0
+                }))
+            );
+            let ceiling = ExecutedOrder {
+                broker_square_off: true,
+                ..sell(50, 1_530_00)
+            };
+            assert_eq!(
+                refused(&sold, ceiling, mode),
+                Some(ChargeError::SquareOffNotApplicable {
+                    kind: "equity delivery"
+                })
+            );
+        }
+        // Precise mode nets the day as its close does, and refuses what the
+        // close refuses; the page nets nothing and prices both.
+        let open = ledger(INTRADAY, Exchange::Nse, &[buy(50, 1_520_00)]);
+        let partly = ledger(
+            DELIVERY,
+            Exchange::Nse,
+            &[buy(100, 1_520_00), sell(60, 1_530_00)],
+        );
+        for (day, o, why) in [
+            (
+                open,
+                buy(50, 1_520_00),
+                ChargeError::OpenIntradayPosition {
+                    bought: 50,
+                    sold: 0,
+                },
+            ),
+            (
+                partly,
+                sell(60, 1_530_00),
+                ChargeError::PartlySquaredDay {
+                    bought: 100,
+                    sold: 60,
+                },
+            ),
+        ] {
+            assert_eq!(day.close(Mode::Precise, TODAY).err(), Some(why));
+            assert_eq!(refused(&day, o, Mode::Precise), Some(why));
+            assert!(day.close(Mode::DhanCalculator, TODAY).is_ok());
+            assert!(refused(&day, o, Mode::DhanCalculator).is_none());
+        }
+        // The rate set: the page has no dated rates; the dated set has no
+        // equity history.
+        assert_eq!(
+            sold.order_lines_unrounded(
+                sell(50, 1_530_00),
+                Mode::DhanCalculator,
+                RateSelector::Dated
+            )
+            .err(),
+            Some(DHAN_HAS_NO_DATED_RATES)
+        );
+        assert!(matches!(
+            sold.order_lines_unrounded(sell(50, 1_530_00), Mode::Precise, RateSelector::Dated),
+            Err(ChargeError::Cost(CostError::Unverified(_)))
+        ));
+        // A share that would leave i128 is refused by name, not wrapped.
+        assert_eq!(
+            share(Exact(i128::MAX), rs(2), rs(2)),
+            Err(overflow("an order's share of a day line"))
+        );
+        assert_eq!(share(Exact(10), rs(1), rs(4)), Ok(Exact(3)), "2.5 half-up");
+        assert_eq!(share(Exact(10), rs(1), rs(3)), Ok(Exact(3)), "3.33 down");
+    }
+
+    #[test]
     fn an_orders_lines_carry_dp_the_square_off_fee_and_every_kinds_taxes() {
         let lines = |kind, exchange, o, mode| {
             units(&order_lines_unrounded(kind, exchange, on(), o, mode, TODAY).expect("priced"))
         };
+        // A delivery or MTF order is priced against its day: the day's only
+        // order, so a one-sided day.
+        let alone = |kind, o: ExecutedOrder, mode| {
+            units(
+                &ledger(kind, Exchange::Nse, &[o])
+                    .order_lines_unrounded(o, mode, TODAY)
+                    .expect("priced"),
+            )
+        };
         // A delivery sell carries the day's DP; a delivery buy its stamp.
-        let sale = lines(DELIVERY, Exchange::Nse, sell(50, 1_530_00), Mode::Precise);
+        let sale = alone(DELIVERY, sell(50, 1_530_00), Mode::Precise);
         assert_eq!((sale[7], sale[8]), (12_500_000_000, 2_250_000_000));
         assert_eq!(sale[3], 76_500_00 * 10_000, "0.1% of the sell value");
-        let page_sale = lines(
-            DELIVERY,
-            Exchange::Nse,
-            sell(50, 1_530_00),
-            Mode::DhanCalculator,
-        );
+        let page_sale = alone(DELIVERY, sell(50, 1_530_00), Mode::DhanCalculator);
         assert_eq!((page_sale[7], page_sale[8]), (14_750_000_000, 0));
-        let purchase = lines(DELIVERY, Exchange::Nse, buy(50, 1_520_00), Mode::Precise);
+        let purchase = alone(DELIVERY, buy(50, 1_520_00), Mode::Precise);
         assert_eq!((purchase[5], purchase[7]), (76_000_00 * 1_500, 0));
         // The page charges DP on a sell only: a delivery or MTF buy carries
         // none in calculator mode either (a `>=` on the sold value would put
         // ₹14.75 on every buy).
         for kind in [DELIVERY, TradeKind::Equity(Product::Mtf)] {
-            let page_purchase = lines(kind, Exchange::Nse, buy(50, 1_520_00), Mode::DhanCalculator);
+            let page_purchase = alone(kind, buy(50, 1_520_00), Mode::DhanCalculator);
             assert_eq!((page_purchase[7], page_purchase[8]), (0, 0), "{kind:?}");
+            // Without its day, a delivery or MTF order is refused by name.
+            for mode in [Mode::Precise, Mode::DhanCalculator] {
+                assert_eq!(
+                    order_lines_unrounded(
+                        kind,
+                        Exchange::Nse,
+                        on(),
+                        sell(50, 1_530_00),
+                        mode,
+                        TODAY
+                    )
+                    .err(),
+                    Some(ChargeError::NeedsItsDay {
+                        kind: kind.as_str()
+                    }),
+                    "{kind:?} {mode:?}"
+                );
+            }
         }
         // Futures and options: STT on a sell only, stamp on a buy only.
         for (kind, stt, stamp) in [

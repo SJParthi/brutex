@@ -111,6 +111,31 @@ pub enum ChargeError {
         /// The figure asked for.
         figure: &'static str,
     },
+    /// One order's lines asked of a delivery or MTF order without its day.
+    /// Whether it pays delivery STT and stamp duty and a DP share, or the
+    /// non-delivery rates and no DP, depends on whether its client-security-
+    /// day squared off, and one order cannot tell (D-5131).
+    NeedsItsDay {
+        /// The trade kind, as `crate::schedule::TradeKind::as_str` spells it.
+        kind: &'static str,
+    },
+    /// An order asked of a day it cannot belong to: larger, on its side,
+    /// than everything the day holds on that side (D-5131).
+    OrderNotInDay {
+        /// Which of the side's totals the order exceeds.
+        figure: &'static str,
+        /// The order's figure.
+        order: i64,
+        /// The day's figure.
+        day: i64,
+    },
+    /// A net P&L asked of two days that are not one trade's two legs in
+    /// time and in rates: priced under different rate sets, or closed on or
+    /// before the day it opened (D-5131).
+    MismatchedLegs {
+        /// Why the two days are not one trade's legs.
+        why: &'static str,
+    },
 }
 
 impl fmt::Display for ChargeError {
@@ -177,6 +202,23 @@ impl fmt::Display for ChargeError {
                  calculator replica, an estimate for comparison — refused rather than decided \
                  on an estimate"
             ),
+            Self::NeedsItsDay { kind } => write!(
+                f,
+                "one {kind} order cannot say whether its day squared off (non-delivery STT and \
+                 stamp duty, no DP) or held one side (delivery STT and stamp duty, DP on a \
+                 sell) — price it through DayLedger::order_lines_unrounded after the day's \
+                 last order; refused rather than guessed"
+            ),
+            Self::OrderNotInDay { figure, order, day } => write!(
+                f,
+                "the order's {figure} is {order} and the whole day's is {day}: it cannot be one \
+                 of this day's orders — refused rather than priced against another day"
+            ),
+            Self::MismatchedLegs { why } => write!(
+                f,
+                "{why}: they are not one trade's opening and closing legs — refused rather \
+                 than netted"
+            ),
         }
     }
 }
@@ -201,7 +243,8 @@ impl From<crate::error::Refusal> for ChargeError {
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,
-    clippy::inconsistent_digit_grouping
+    clippy::inconsistent_digit_grouping,
+    clippy::too_many_lines
 )]
 mod tests {
     use super::*;
@@ -210,7 +253,32 @@ mod tests {
 
     #[test]
     fn every_charge_refusal_renders_its_own_reason() {
-        let cases: [(ChargeError, &str); 14] = [
+        let cases: [(ChargeError, &str); 17] = [
+            (
+                ChargeError::NeedsItsDay {
+                    kind: "equity delivery",
+                },
+                "one equity delivery order cannot say whether its day squared off \
+                 (non-delivery STT and stamp duty, no DP) or held one side (delivery STT and \
+                 stamp duty, DP on a sell) — price it through DayLedger::order_lines_unrounded \
+                 after the day's last order; refused rather than guessed",
+            ),
+            (
+                ChargeError::OrderNotInDay {
+                    figure: "sold quantity",
+                    order: 60,
+                    day: 50,
+                },
+                "the order's sold quantity is 60 and the whole day's is 50: it cannot be one of \
+                 this day's orders — refused rather than priced against another day",
+            ),
+            (
+                ChargeError::MismatchedLegs {
+                    why: "the two days were priced under different rate sets",
+                },
+                "the two days were priced under different rate sets: they are not one \
+                 trade's opening and closing legs — refused rather than netted",
+            ),
             (
                 ChargeError::NotPrecise {
                     figure: "a trade's net",

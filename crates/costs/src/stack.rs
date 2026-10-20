@@ -268,6 +268,14 @@ impl Totals {
         self.orders
     }
 
+    /// One side's units and value so far.
+    pub(crate) const fn side(&self, side: OrderSide) -> (i64, Paisa) {
+        match side {
+            OrderSide::Buy => (self.buy_quantity, self.buy_value),
+            OrderSide::Sell => (self.sell_quantity, self.sell_value),
+        }
+    }
+
     /// Records one executed order of `kind`: `quantity` units worth `value`,
     /// placed by the broker if `by_broker`. Returns the order's brokerage,
     /// half-up to the paisa. All or nothing: a refused order leaves the
@@ -778,31 +786,26 @@ fn taxes(card: &RateCard, t: &Totals, turnover: Paisa) -> Result<Levied, ChargeE
             stamp_non_delivery,
             stamp_delivery,
         } => {
-            let (bought, sold) = (t.buy_quantity, t.sell_quantity);
-            if bought == sold {
+            match equity_netting(product, t.buy_quantity, t.sell_quantity)? {
                 // Squared off: all non-delivery. NSE/CMTR/5588: the value
                 // is the non-delivery quantity at the day's VWAP of every
                 // trade, the VWAP itself rounded to two decimals.
-                let value = non_delivery_value(turnover, bought)?;
-                return Levied::of(
-                    (value, stt_non_delivery),
+                Netting::Squared => Levied::of(
+                    (
+                        non_delivery_value(turnover, t.buy_quantity)?,
+                        stt_non_delivery,
+                    ),
                     (t.buy_value, stamp_non_delivery),
                     false,
-                );
+                ),
+                // One side only: delivery. The tax is on that side's value,
+                // the stamp on the buy value, and a sell debits the demat.
+                Netting::OneSided => Levied::of(
+                    (turnover, stt_delivery),
+                    (t.buy_value, stamp_delivery),
+                    t.sell_quantity > 0,
+                ),
             }
-            if product == Product::Intraday {
-                return Err(ChargeError::OpenIntradayPosition { bought, sold });
-            }
-            if bought > 0 && sold > 0 {
-                return Err(ChargeError::PartlySquaredDay { bought, sold });
-            }
-            // One side only: delivery. The tax is on that side's value,
-            // the stamp on the buy value, and a sell debits the demat.
-            Levied::of(
-                (turnover, stt_delivery),
-                (t.buy_value, stamp_delivery),
-                sold > 0,
-            )
         }
         Taxes::Futures {
             stt_sell,
@@ -819,6 +822,46 @@ fn taxes(card: &RateCard, t: &Totals, turnover: Paisa) -> Result<Levied, ChargeE
             Ok(levied)
         }
     }
+}
+
+/// How an equity client-security-day nets, as the exchange nets it: by the
+/// day's quantities, never by the product label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Netting {
+    /// Equal units bought and sold: all non-delivery, whatever the product
+    /// (`NSE/CMTR/5588`) — non-delivery STT and stamp duty, and no DP.
+    Squared,
+    /// Units on one side only, on a delivery or MTF day: delivery — delivery
+    /// STT and stamp duty, and DP on a sell.
+    OneSided,
+}
+
+/// The one rule that nets an equity day: [`taxes`] prices the day by it and
+/// `crate::ledger::DayLedger::order_lines_unrounded` prices each of the day's
+/// orders by it, so an order's lines and its day's can never be netted two
+/// ways.
+///
+/// # Errors
+///
+/// * [`ChargeError::OpenIntradayPosition`] for an intraday day whose sides
+///   differ: its exit order is missing.
+/// * [`ChargeError::PartlySquaredDay`] for a delivery or MTF day with both
+///   sides of unequal size: its split needs the FIFO order sequence.
+pub(crate) fn equity_netting(
+    product: Product,
+    bought: i64,
+    sold: i64,
+) -> Result<Netting, ChargeError> {
+    if bought == sold {
+        return Ok(Netting::Squared);
+    }
+    if product == Product::Intraday {
+        return Err(ChargeError::OpenIntradayPosition { bought, sold });
+    }
+    if bought > 0 && sold > 0 {
+        return Err(ChargeError::PartlySquaredDay { bought, sold });
+    }
+    Ok(Netting::OneSided)
 }
 
 /// `NSE/CMTR/5588`'s non-delivery value of a squared-off day: the quantity
@@ -1415,6 +1458,15 @@ fn not_an_estimate(day: &DayCharges, figure: &'static str) -> Result<(), ChargeE
 pub const NET_LABEL: &str =
     "net after charges, precise NSE/SEBI method (every charge of the trade, both legs)";
 
+/// Why [`NetTrade::of_days`] refuses two days priced under different rate
+/// sets.
+pub const DIFFERENT_RATE_SETS: &str = "the two days were priced under different rate sets";
+
+/// Why [`NetTrade::of_days`] refuses a closing day that is not after the
+/// opening day.
+pub const NOT_IN_ORDER: &str = "the closing day is not after the opening day (a trade opened \
+     and closed on one day is one client-security-day: NetTrade::of_day)";
+
 /// One trade's result after **the entire precise charge stack** of its days:
 /// the gross (sold value less bought value), every charge, and the net.
 ///
@@ -1425,6 +1477,7 @@ pub struct NetTrade {
     gross: Paisa,
     charges: Paisa,
     net: Paisa,
+    rate_set: RateSelector,
 }
 
 impl NetTrade {
@@ -1472,7 +1525,12 @@ impl NetTrade {
                          exercise)",
             });
         }
-        Self::from_parts(day.sell_value, day.buy_value, day.total)
+        Self::from_parts(
+            day.sell_value,
+            day.buy_value,
+            day.total,
+            day.basis.rate_set(),
+        )
     }
 
     /// A round trip opened on one day and closed on another — a delivery,
@@ -1482,6 +1540,11 @@ impl NetTrade {
     ///
     /// * [`ChargeError::UnmatchedRoundTrip`] when the two days are not one
     ///   buy side and one sell side of the same units, kind and exchange.
+    /// * [`ChargeError::MismatchedLegs`] when they are, but were priced under
+    ///   different rate sets — one net would mix two rate tables and carry
+    ///   neither's version — or the closing day is not after the opening
+    ///   day: a reversed pair, or one day split in two, which is one
+    ///   client-security-day and nets through [`Self::of_day`] (D-5131).
     /// * [`ChargeError::Cost`] carrying an overflow.
     pub fn of_days(opening: &DayCharges, closing: &DayCharges) -> Result<Self, ChargeError> {
         not_an_estimate(opening, NET_LABEL)?;
@@ -1502,6 +1565,14 @@ impl NetTrade {
         if !matched {
             return Err(ChargeError::UnmatchedRoundTrip { opened, closed });
         }
+        if opening.basis.rate_set() != closing.basis.rate_set() {
+            return Err(ChargeError::MismatchedLegs {
+                why: DIFFERENT_RATE_SETS,
+            });
+        }
+        if !opening.basis.day().before(closing.basis.day()) {
+            return Err(ChargeError::MismatchedLegs { why: NOT_IN_ORDER });
+        }
         let sold = add(
             opening.sell_value,
             closing.sell_value,
@@ -1513,11 +1584,16 @@ impl NetTrade {
             "the trade's bought value",
         )?;
         let charges = add(opening.total, closing.total, "the trade's charges")?;
-        Self::from_parts(sold, bought, charges)
+        Self::from_parts(sold, bought, charges, opening.basis.rate_set())
     }
 
     /// `sold − bought`, then less the charges, refused rather than wrapped.
-    fn from_parts(sold: Paisa, bought: Paisa, charges: Paisa) -> Result<Self, ChargeError> {
+    fn from_parts(
+        sold: Paisa,
+        bought: Paisa,
+        charges: Paisa,
+        rate_set: RateSelector,
+    ) -> Result<Self, ChargeError> {
         let gross = sold
             .raw()
             .checked_sub(bought.raw())
@@ -1529,7 +1605,46 @@ impl NetTrade {
             gross: Paisa::from_raw(gross),
             charges,
             net: Paisa::from_raw(net),
+            rate_set,
         })
+    }
+
+    /// The rate set every day of the trade was priced under.
+    #[must_use]
+    pub const fn rate_set(&self) -> RateSelector {
+        self.rate_set
+    }
+
+    /// The two version strings a run identity records beside this net: the
+    /// rate set's ([`RateSelector::version`]) and the precise method's
+    /// ([`Mode::version`]) — a net is only ever precise (D-5124, D-5131).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use brutex_core::instrument::Exchange;
+    /// use brutex_core::price::Paisa;
+    /// use costs::day::TradeDay;
+    /// use costs::rate::OrderSide;
+    /// use costs::schedule::{Product, RateSelector, TradeKind};
+    /// use costs::stack::{ClientSecurityDay, NetTrade, Order};
+    ///
+    /// let mut day = ClientSecurityDay::open(
+    ///     TradeKind::Equity(Product::Intraday),
+    ///     Exchange::Nse,
+    ///     TradeDay::new(2026, 10, 15)?,
+    ///     RateSelector::CurrentOnEveryDate,
+    /// )?;
+    /// day.add(Order::new(OrderSide::Buy, 50, Paisa::from_raw(1_520_00))?)?;
+    /// day.add(Order::new(OrderSide::Sell, 50, Paisa::from_raw(1_530_00))?)?;
+    /// let trade = NetTrade::of_day(&day.settle()?)?;
+    /// assert_eq!(trade.rate_set(), RateSelector::CurrentOnEveryDate);
+    /// assert_eq!(trade.versions(), ("todays-rates/2026-10-16/r1", "precise/r1"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn versions(&self) -> (&'static str, &'static str) {
+        (self.rate_set.version(), Mode::Precise.version())
     }
 
     /// Sold value less bought value, before any charge. A labelled extra,
@@ -1616,6 +1731,28 @@ mod tests {
         csd.settle().expect("a settled day")
     }
 
+    /// A day priced on `on` under `selector`: the closing leg of a carried
+    /// trade, a day after [`priced`]'s.
+    fn priced_on(
+        kind: TradeKind,
+        exchange: Exchange,
+        orders: &[Order],
+        on: TradeDay,
+        selector: RateSelector,
+    ) -> DayCharges {
+        let mut csd = ClientSecurityDay::open(kind, exchange, on, selector).expect("priced");
+        for &order in orders {
+            csd.add(order).expect("in range");
+        }
+        csd.settle().expect("a settled day")
+    }
+
+    /// The day after [`priced`]'s, at today's rates.
+    fn next(kind: TradeKind, exchange: Exchange, orders: &[Order]) -> DayCharges {
+        priced_on(kind, exchange, orders, day(2026, 10, 16), TODAY)
+    }
+
+    const TODAY: RateSelector = RateSelector::CurrentOnEveryDate;
     const INTRADAY: TradeKind = TradeKind::Equity(Product::Intraday);
     const DELIVERY: TradeKind = TradeKind::Equity(Product::Delivery);
     const MTF: TradeKind = TradeKind::Equity(Product::Mtf);
@@ -2465,11 +2602,11 @@ mod tests {
         );
         assert!(thin.gross().raw() > 0 && !thin.is_win());
         // Exactly break-even is not a win: the net must be ABOVE zero.
-        let even = NetTrade::from_parts(rs(10_00), rs(5_00), rs(5_00)).expect("in range");
+        let even = NetTrade::from_parts(rs(10_00), rs(5_00), rs(5_00), TODAY).expect("in range");
         assert_eq!(even.net(), Paisa::ZERO);
         assert!(!even.is_win());
         assert!(
-            NetTrade::from_parts(rs(10_00), rs(5_00), rs(4_99))
+            NetTrade::from_parts(rs(10_00), rs(5_00), rs(4_99), TODAY)
                 .expect("in range")
                 .is_win()
         );
@@ -2482,7 +2619,7 @@ mod tests {
         assert_eq!(NetTrade::of_day(&v5).expect("short").net(), rs(9_599_37));
         // D1, delivery: bought one day, sold another; both days' charges.
         let bought = priced(DELIVERY, Exchange::Nse, &[buy(50, 1_520_00)]);
-        let sold = priced(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
+        let sold = next(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
         let d1 = NetTrade::of_days(&bought, &sold).expect("a delivery round trip");
         assert_eq!(
             (d1.gross(), d1.charges(), d1.net()),
@@ -2490,7 +2627,7 @@ mod tests {
         );
         // A carried futures short: sold one day, covered another.
         let opened = priced(TradeKind::Futures, Exchange::Nse, &[sell(65, 25_250_00)]);
-        let covered = priced(TradeKind::Futures, Exchange::Nse, &[buy(65, 25_200_00)]);
+        let covered = next(TradeKind::Futures, Exchange::Nse, &[buy(65, 25_200_00)]);
         let short = NetTrade::of_days(&opened, &covered).expect("a futures round trip");
         assert_eq!(short.gross(), rs(3_250_00));
         assert_eq!(
@@ -2507,7 +2644,7 @@ mod tests {
                      exercise)",
         };
         let bought = priced(DELIVERY, Exchange::Nse, &[buy(50, 1_520_00)]);
-        let sold = priced(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
+        let sold = next(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
         let partly = priced(DELIVERY, Exchange::Nse, &[sell(49, 1_530_00)]);
         assert_eq!(NetTrade::of_day(&bought), Err(one_day));
         assert_eq!(NetTrade::of_day(&sold), Err(one_day));
@@ -2560,11 +2697,11 @@ mod tests {
         // A gross or a net past i64 is refused by name, never wrapped.
         let named = |operation| Err(ChargeError::Cost(CostError::Overflow { operation }));
         assert_eq!(
-            NetTrade::from_parts(rs(i64::MIN), rs(1), rs(0)),
+            NetTrade::from_parts(rs(i64::MIN), rs(1), rs(0), TODAY),
             named("the trade's gross")
         );
         assert_eq!(
-            NetTrade::from_parts(rs(i64::MIN + 1), rs(1), rs(1)),
+            NetTrade::from_parts(rs(i64::MIN + 1), rs(1), rs(1), TODAY),
             named("the trade's net")
         );
         let mut huge = bought;
@@ -2590,6 +2727,72 @@ mod tests {
         assert_eq!(
             NetTrade::of_days(&huge_bought, &extra),
             named("the trade's bought value")
+        );
+    }
+
+    #[test]
+    fn a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions() {
+        let mismatched = |why| Err(ChargeError::MismatchedLegs { why });
+        let at = |kind, orders: &[Order], on, selector| {
+            priced_on(kind, Exchange::Nse, orders, on, selector)
+        };
+        // A delivery trade bought on 15 Oct: sold on 16 Oct it nets; sold on
+        // 14 Oct (reversed) or on 15 Oct itself (one day split in two) it is
+        // refused by name.
+        let bought = priced(DELIVERY, Exchange::Nse, &[buy(50, 1_520_00)]);
+        let sold = next(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
+        let earlier = at(DELIVERY, &[sell(50, 1_530_00)], day(2026, 10, 14), TODAY);
+        let same = priced(DELIVERY, Exchange::Nse, &[sell(50, 1_530_00)]);
+        assert_eq!(
+            NetTrade::of_days(&bought, &earlier),
+            mismatched(NOT_IN_ORDER)
+        );
+        assert_eq!(NetTrade::of_days(&bought, &same), mismatched(NOT_IN_ORDER));
+        let d1 = NetTrade::of_days(&bought, &sold).expect("in order");
+        assert_eq!(d1.rate_set(), TODAY);
+        assert_eq!(d1.versions(), ("todays-rates/2026-10-16/r1", "precise/r1"));
+        // Options, the kind the dated set prices: one leg at the rates in
+        // force, the other at today's, either way round, is refused.
+        let (d14, d15) = (day(2026, 10, 14), day(2026, 10, 15));
+        let dated = RateSelector::Dated;
+        let open_dated = at(TradeKind::Options, &[buy(65, 100_00)], d14, dated);
+        let open_today = at(TradeKind::Options, &[buy(65, 100_00)], d14, TODAY);
+        let close_dated = at(TradeKind::Options, &[sell(65, 120_00)], d15, dated);
+        let close_today = at(TradeKind::Options, &[sell(65, 120_00)], d15, TODAY);
+        assert_eq!(
+            NetTrade::of_days(&open_dated, &close_today),
+            mismatched(DIFFERENT_RATE_SETS)
+        );
+        assert_eq!(
+            NetTrade::of_days(&open_today, &close_dated),
+            mismatched(DIFFERENT_RATE_SETS)
+        );
+        // One rate set, in order: netted, and the net names that set.
+        let carried = NetTrade::of_days(&open_dated, &close_dated).expect("one rate set");
+        assert_eq!(carried.rate_set(), dated);
+        assert_eq!(carried.versions(), ("dated-regime/r2", "precise/r1"));
+        assert_eq!(
+            carried.charges(),
+            rs(open_dated.total().raw() + close_dated.total().raw())
+        );
+        assert_eq!(
+            NetTrade::of_days(&open_today, &close_today)
+                .expect("one rate set")
+                .rate_set(),
+            TODAY
+        );
+        // A one-day net names its day's rate set.
+        let intraday = at(
+            TradeKind::Options,
+            &[buy(65, 100_00), sell(65, 120_00)],
+            d15,
+            dated,
+        );
+        assert_eq!(
+            NetTrade::of_day(&intraday)
+                .expect("a round trip")
+                .versions(),
+            ("dated-regime/r2", "precise/r1")
         );
     }
 

@@ -19730,7 +19730,7 @@ a figure.
 | L-IA-57 | Naming who holds a busy lock (IA-2 repair 1) | a census verb refused beside v4 runs reads the kind locks; a press refused its sink probes its claim lock | O(1): at most three kind-lock probes (shared, non-blocking, ≤ 1 KiB each) or one claim-lock probe. Measured (`ia2_repair_timings`): census verb refused beside 3 v4 runs n=2,000 p50 71.7 µs, p99 129.0 µs, max 267.9 µs; plan refused before its sink n=2,000 p50 19.7 µs, p99 41.5 µs, max 112.3 µs | IA-2 |
 | L-IA-58 | A run's end line in `/imports.json` (IA-2 repair 1) | each `run <id> ended=` line is folded into its run | O(1) per line: one id-index probe and the run's own fields. Measured (`end_line_fold_timing`, ignored test): 100,000 end lines folded beside 100,000 runs, each timed, p50 458 ns, p99 1.46 µs, max 72.3 µs. The route over the real store's journal (24 runs), n=200 sequential GETs on :8401: p50 9.24 ms, p99 10.10 ms, max 12.83 ms | IA-2 |
 
-## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5130
+## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5131
 
 `crates/costs` package CHG-1: `schedule`, `stack` (precise, the default) and
 `dhan_calc` (Dhan's calculator, comparison only). §27 above still describes
@@ -19807,18 +19807,37 @@ options STT tripled between 2018 and 2026 — and the label says so on every
 output. It is the operator's choice for backtests, not an accuracy claim
 (D-5115).
 
-### The dated options exchange charge depends on package CHG-0
+### The dated options exchange charge is the trip stack's, and how CHG-0 must merge (D-5131)
 
-Under `RateSelector::Dated`, an NSE options day before 2026-03-01 is priced at
-the regime's 0.03503% plus the 0.0005% IPFT (= 0.03553%, FA64232's total); from
-2026-03-01 at the regime row alone, which `FA73061` states with the IPFT folded
-in. **Until CHG-0's 0.03553% row lands in `regime.rs`, a dated NSE options day
-on or after 2026-03-01 is priced at 0.03503% — under by the IPFT.**
-`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
-is `#[ignore = "needs CHG-0's FA73061 regime row"]` and fails today by exactly
-that (₹5.01 against ₹5.08 on the NIFTY 25300 CE reading); the local merge
-un-ignores it. If CHG-0 instead splits the row (₹3,552 + ₹1 per crore with the
-IPFT kept separate), that test fails after the merge and says so.
+Under `RateSelector::Dated`, an NSE options day is priced at the regime row in
+force **plus the IPFT**, read exactly where `costs::trip::Rates::resolve` reads
+them, on every day: FA64232's 0.03503% plus the 0.0005% IPFT = 0.03553%, which
+on and after 2026-03-01 is the total `FA73061` states (₹3,552.99 + ₹0.01 per
+crore, sources row `E-03`). Until D-5131 the card dropped the IPFT by date from
+2026-03-01, expecting CHG-0's FA73061 row; that row is not in `regime.rs`, so
+every dated NSE options day from 2026-03-01 was priced at 0.03503% — ₹5.01
+against ₹5.08 on the NIFTY 25300 CE reading — labelled as cited, and the test
+that showed it was `#[ignore]`d. It now runs in the gate
+(`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`),
+and `costs::schedule::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+holds the card to `trip` on every day from 2018 to 2027 at both venues.
+
+**What CHG-0's merge must do.** CHG-0 (branch `fix/db-CHG-0`, not merged when
+this was written) adds a 0.03553% NSE row from 2026-03-01 and a dated NSE IPFT
+that is zero from the same day, and reads the IPFT through
+`regime::ipft_rate(exchange, day)` in `trip`. The dated card must then read
+the IPFT from the same function: if it kept `rate::ipft` beside CHG-0's row it
+would charge 0.03603% from 2026-03-01, and the trip-agreement test, the
+October golden test and the r2 fingerprint each fail on that merge. Read where
+`trip` reads it, the card's figures — and the `dated-regime/r2` fingerprint —
+do not change at that merge, because CHG-0 re-splits the same total.
+
+**The IPFT figure before 2026-03-01 is the one `trip` has always carried.**
+`rate::NSE_IPFT` (₹50 per crore) comes from `COSTS_VERIFIED` §5 and its circular
+citation is UNVERIFIED (D-1779); the dated card labels the NSE exchange line
+cited, as it did before this repair, on the strength of FA64232's row and that
+figure. CHG-0's branch reads `FA56129` for it; until that merges, the
+pre-2026-03-01 IPFT part is the predecessor's figure, not a circular read here.
 
 ### Dhan's calculator total: the page's last paisa is not reproduced
 
@@ -19953,6 +19972,48 @@ machine, not the stack — `settle` holds no loop over orders — and it is
 recorded rather than dropped. Logs:
 `state/fix/round2/chg1-logs-r6/bench.log`, `bench-run2.log`, `bench-run3.log`.
 
+### One order's lines, measured, and what a 16-call batch mean hides (D-5131)
+
+C-CHG-09 times `DayLedger::order_lines_unrounded` on a day of 2 orders and of
+2,000,000, in each mode, and a delivery sell's DP share alone and among
+2,000,000 sells. **Method, stated because it is not the gate's:** the bench
+binary was built with plain `rustc --edition 2024 -C opt-level=3 -C
+overflow-checks=on` (no `lto = "fat"`, no `codegen-units = 1`), because the
+shared cargo queue had no free slot, and run twice on the operator's Mac
+(20 Oct 2026, load average 10–24 on 14 cores from other agents' builds),
+20,000 batches of 16 calls: precise order lines p50 65.1 ns, p99 75.5–80.7 ns
+at both day sizes and for the DP share; calculator order lines p50 28.6 ns,
+p99 33.8 ns; every C-CHG-07..09 ratio 0.93–1.04×. Logs:
+`state/fix/round2/chg1-logs-r8/bench-rustc-run1.log`, `bench-rustc-run2.log`.
+
+**One call per sample.** The same run times the ledger's add, its precise
+close and its precise order lines ONE call per sample (20,000 samples), beside
+a sample of two clock reads and nothing else, so the p99 and max are per call
+and not a 16-call mean. The Mac's clock moves in 41.67 ns ticks, so a figure
+is a whole number of ticks: two clock reads alone p50 0, p99 42 ns; the add
+p50 0, p99 42 ns, max 125 ns — indistinguishable from the clock; the close p50
+125 ns, p99 167 ns; order lines p50 83 ns, p99 125 ns. The max column of
+both (up to 8.5 µs, and 12.9 µs for two clock reads alone) is the shared
+machine's scheduler, not the call: the clock-reads-only sample shows it too.
+These figures carry the clock's own read and are reported, not gated.
+
+**The same bench by the gate's own method.** Once a cargo slot was free, `cargo
+bench -p costs --bench stack` (the workspace bench profile) ran twice on the
+repaired tree, 20 Oct 2026 15:00 IST, load average 8–15 on 14 cores
+(`state/fix/round2/chg1-logs-r8/bench1.log`, `bench2.log`). C-CHG-09, 20,000
+batches of 16 calls: precise order lines p50 41.6 ns, p99 46.8–49.5 ns at both
+day sizes; calculator order lines p50 20.8 ns, p99 23.4–26.0 ns; the DP share
+p50 41.6 ns, p99 49.4–52.1 ns, **except one run's p99 of 119.7 ns for 1 of
+2,000,000 sells** (52.1 ns for the day's only sell in the same run, 49.4 ns
+for both in the other) — recorded, not dropped, and read as the shared machine
+because the call holds no loop over the day's sells; every C-CHG-01..09 ratio
+0.93–1.09×. One call per sample, n = 20,000: the add p50 0, p99 42 ns, max
+125 ns; the precise close p50 125 ns, p99 166 ns, max 1.6 µs and 14.5 µs;
+order lines p50 42 ns, p99 84 ns, **max 39.0 µs and 6.5 µs** — the largest
+max either method recorded, beside 125–167 ns for two clock reads alone in
+the same runs. A single call's max on this shared machine is therefore not a
+bound this document can state; the p99 is.
+
 ### Line coverage of the CHG-1 modules is not 100%, and why
 
 `cargo llvm-cov -p costs --locked` at the third local merge (19 Oct 2026,
@@ -19979,6 +20040,22 @@ commodity, reached by `ledger::order_lines_unrounded` before any rate card is
 read, and the overflow guard on the calculator day's fees, reached with
 square-off fees near `i64::MAX` set directly on the running totals.
 
+**Re-measured on the repaired tree (D-5131).** `cargo llvm-cov -p costs
+--locked` on 20 Oct 2026 in its own target directory
+(`state/fix/round2/chg1-logs-r9/cov.log`, `cov-missing.log`): `charge_error`
+and `exact` 100% of lines; `stack` 99.81% (the same three `?` arms, kind 1),
+`dhan_calc` 99.79% (one line, kind 4), `schedule` 99.32%, `ledger` 99.04%.
+`ledger`'s eight lines are the five `NoDefault` lines (kind 2) and the three
+message arguments of the DP-share `assert!` in
+`a_days_orders_sum_to_its_unrounded_lines_on_every_netting`; `schedule`'s
+five are the three `assert!` messages above and the two `panic!` arms of
+`the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`,
+reached only when the card and `trip` disagree — kind 3, all test code.
+**No line of the repair's production code is unexecuted**, and §9's 100% is
+still not met, for the four kinds named here. `cargo mutants` on each of the
+six files of that tree: 446 mutants, 310 caught, 136 unviable, 0 missed, 0
+timeouts (`chg1-logs-r9/mut-*.out`).
+
 ### The backtest ledger: what it assumes (D-5127)
 
 `costs::ledger::DayLedger` is the stack's own arithmetic behind the API a
@@ -20002,9 +20079,18 @@ backtest drives, so every limit above applies to it unchanged. What it adds:
   on the billed, rounded base and, on the calculator page, on the exchange line
   rounded to 10⁻⁴ rupee first. Precise intraday STT is half the order's value
   at the rate, where the day's is on the squared quantity at the VWAP rounded
-  to the paisa — equal when the VWAP is exact. DP is carried by every delivery
-  or MTF sell order as if it were the day's only sell, where the day charges
-  it once.
+  to the paisa — equal when the VWAP is exact. A delivery or MTF order is
+  priced only against its day (`DayLedger::order_lines_unrounded`, D-5131):
+  a squared day pays the non-delivery rates and no DP, a one-sided day the
+  delivery rates, and each sell carries its value-share of the day's one DP,
+  half-up to 10⁻⁹ rupee — so the sells' DP lines sum to the day's within half
+  a unit per sell, exactly when the day has one sell. The day-less
+  `order_lines_unrounded` refuses a delivery or MTF order by name
+  (`NeedsItsDay`); until D-5131 it priced every such order as delivery, which
+  over-charged a squared day's orders about 8× on STT and 5× on stamp duty and
+  added a DP the day never pays. The ledger can refuse an order larger than
+  its day's side (`OrderNotInDay`) but cannot tell a smaller order of another
+  day from one of its own: keeping days apart is the caller's.
 - **A ledger rounds STT and stamp duty for its own security.** A client's day
   across several securities still goes through `stack::ClientDay`, which
   rounds them once across all of them; a ledger closed alone is the
@@ -20016,9 +20102,16 @@ backtest drives, so every limit above applies to it unchanged. What it adds:
 - **Rate-set versions are bumped by hand and caught by a fingerprint.**
   `RateSelector::version` is a string; the test that pins it beside a
   fingerprint of the table makes a changed rate fail until the string moves.
-  Package CHG-0's FA73061 row changes the dated regime, so its merge must bump
-  `DATED_RATES_VERSION` to `dated-regime/r2` and re-pin
-  `DATED_FINGERPRINT`.
+  D-5131 moved the dated set to `dated-regime/r2` (r1 dropped the NSE options
+  IPFT from 2026-03-01). Package CHG-0's FA73061 row re-splits that same total,
+  so, merged as the section above says, it leaves the r2 figures and
+  fingerprint unchanged; a merge that changes any dated figure fails the
+  fingerprint test until the version moves.
+- **A net names its rate set, and refuses two.** `NetTrade::of_days` refuses
+  two legs priced under different rate sets and a closing day on or before
+  the opening day (`MismatchedLegs`, D-5131), and a net carries
+  `rate_set()` and `versions()` for a run identity. It cannot tell two legs of
+  two different trades that happen to match in kind, venue and units.
 
 ### The winner-gate page's charges (D-5128)
 

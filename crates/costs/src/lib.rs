@@ -147,9 +147,12 @@
 //! and every one of its outputs says so. Rates are chosen by an explicit
 //! [`schedule::RateSelector`] with no `Default`: today's rates on every date (the
 //! set a backtest names, labelled on every output) or the dated regime above,
-//! unchanged. A backtest drives [`ledger::DayLedger`]: one per client,
-//! security and day, an O(1) add per executed order, one close in either
-//! mode. D-5110 to D-5130.
+//! read exactly as [`trip::Rates::resolve`] reads it — the regime row in force
+//! plus the IPFT, on every day (D-5131). A backtest drives
+//! [`ledger::DayLedger`]: one per client, security and day, an O(1) add per
+//! executed order, one close in either mode, and each order's own lines priced
+//! against the day's netting — measured as C-CHG-07, C-CHG-08 and C-CHG-09 in
+//! `crates/costs/benches/stack.rs`. D-5110 to D-5131.
 //!
 //! | Module | Owns |
 //! |---|---|

@@ -24,6 +24,14 @@
 //! * **The backtest ledger (`costs::ledger::DayLedger`) adds its 2,000,001st
 //!   order, and a crore of shares, at the cost of its first** (C-CHG-07), **and
 //!   closes 2,000,000 orders at the cost of two, in each mode** (C-CHG-08).
+//! * **One order's lines from a ledger of 2,000,000 orders cost what they
+//!   cost from a ledger of two, in each mode, and a delivery sell's share of
+//!   the day's DP costs the same among 2,000,000 sells as alone** (C-CHG-09).
+//!
+//! The ledger's steps are also timed ONE call per sample and printed beside
+//! a sample of two clock reads alone, so the per-call p99 and max are shown
+//! undiluted by the batch mean; those figures carry the clock's own cost and
+//! are reported, not gated (D-5131).
 //!
 //! Each is a ratio of medians held under [`CEILING_PERMILLE`]; a breach exits
 //! non-zero. The absolute figures are printed and are NOT gated: they belong
@@ -68,19 +76,31 @@ struct Spread {
 }
 
 /// Times `op`, [`BATCH`] calls per sample.
-fn spread<T>(mut op: impl FnMut() -> T) -> Spread {
+fn spread<T>(op: impl FnMut() -> T) -> Spread {
+    spread_of(BATCH, op)
+}
+
+/// Times `op` ONE call per sample: the per-call p99 and max that a batch
+/// mean dilutes (one slow call is averaged with fifteen fast ones), bounded
+/// below by the clock's own resolution and cost — so reported, never gated.
+fn spread_unbatched<T>(op: impl FnMut() -> T) -> Spread {
+    spread_of(1, op)
+}
+
+/// Times `op`, `batch` calls per sample, per call.
+fn spread_of<T>(batch: u32, mut op: impl FnMut() -> T) -> Spread {
     for _ in 0..WARMUP {
-        for _ in 0..BATCH {
+        for _ in 0..batch {
             black_box(op());
         }
     }
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let start = Instant::now();
-        for _ in 0..BATCH {
+        for _ in 0..batch {
             black_box(op());
         }
-        samples.push(start.elapsed().as_nanos() * 1_000 / u128::from(BATCH));
+        samples.push(start.elapsed().as_nanos() * 1_000 / u128::from(batch));
     }
     samples.sort_unstable();
     let at = |permille: usize| samples.get(SAMPLES * permille / 1_000).copied();
@@ -451,6 +471,122 @@ fn a_ledger_close_does_not_track_how_many_orders_it_holds(f: &Fixture) -> bool {
     ok
 }
 
+/// C-CHG-09 — one order's own lines, priced against its day's netting, cost
+/// the same on a day of 2,000,000 orders as on a day of two, in each mode,
+/// and a one-sided delivery day's DP share costs the same for 2,000,000 sells
+/// as for one: the lines read the day's totals and never its orders.
+fn a_ledgers_order_lines_do_not_track_how_many_orders_it_holds(f: &Fixture) -> bool {
+    let Some((fresh, crowded)) = ledgers(f) else {
+        println!("  BENCH SETUP FAILED: the ledgers");
+        return false;
+    };
+    let mut two = fresh;
+    let sell = executed(OrderSide::Sell, 1, 1_01);
+    if two
+        .add(executed(OrderSide::Buy, 1, 1_00))
+        .and(two.add(sell))
+        .is_err()
+    {
+        println!("  BENCH SETUP FAILED: one round trip");
+        return false;
+    }
+    let lines = |day: DayLedger, order: ExecutedOrder, mode: Mode| {
+        spread(move || {
+            black_box(day).order_lines_unrounded(
+                black_box(order),
+                black_box(mode),
+                RateSelector::CurrentOnEveryDate,
+            )
+        })
+    };
+    let mut ok = true;
+    for (mode, name) in [
+        (Mode::Precise, "precise"),
+        (Mode::DhanCalculator, "Dhan calculator"),
+    ] {
+        let small = lines(two, sell, mode);
+        let many = lines(crowded, sell, mode);
+        report(&format!("order lines ({name}): a day of 2 orders"), small);
+        report(&format!("order lines ({name}): a day of 2,000,000"), many);
+        ok &= ratio(
+            &format!("C-CHG-09 order lines ({name}): 2,000,000 orders vs 2"),
+            small,
+            many,
+        );
+    }
+    // A one-sided delivery day: the sell's share of the day's one DP.
+    let Ok(held) = DayLedger::new(TradeKind::Equity(Product::Delivery), Exchange::Nse, f.day)
+    else {
+        println!("  BENCH SETUP FAILED: the delivery ledger");
+        return false;
+    };
+    let (mut one, mut sells) = (held, held);
+    let mut set_up = one.add(sell).is_ok();
+    for _ in 0..2_000_000 {
+        set_up &= sells.add(sell).is_ok();
+    }
+    if !set_up {
+        println!("  BENCH SETUP FAILED: the delivery sells");
+        return false;
+    }
+    let alone = lines(one, sell, Mode::Precise);
+    let shared = lines(sells, sell, Mode::Precise);
+    report(
+        "order lines (precise): DP share, the day's only sell",
+        alone,
+    );
+    report(
+        "order lines (precise): DP share, 1 of 2,000,000 sells",
+        shared,
+    );
+    ok &= ratio(
+        "C-CHG-09 order lines (precise DP share): 2,000,000 sells vs 1",
+        alone,
+        shared,
+    );
+    ok
+}
+
+/// Reported, not gated: the ledger's three steps timed ONE call per sample,
+/// so the p99 and max are per call rather than per 16-call mean. Each figure
+/// carries the clock's own read (two `Instant::now()` per sample), so it is
+/// an upper bound on the call, and the method is named in the output.
+fn the_ledgers_steps_one_call_per_sample(f: &Fixture) -> bool {
+    let Some((fresh, crowded)) = ledgers(f) else {
+        println!("  BENCH SETUP FAILED: the ledgers");
+        return false;
+    };
+    let order = executed(OrderSide::Sell, 1, 1_01);
+    report(
+        "unbatched: ledger add, the 2,000,001st order",
+        spread_unbatched(move || {
+            let mut d = black_box(crowded);
+            d.add(black_box(order))
+        }),
+    );
+    report(
+        "unbatched: ledger close (precise), 2,000,000 orders",
+        spread_unbatched(move || {
+            black_box(crowded).close(black_box(Mode::Precise), RateSelector::CurrentOnEveryDate)
+        }),
+    );
+    report(
+        "unbatched: order lines (precise), 2,000,000 orders",
+        spread_unbatched(move || {
+            black_box(crowded).order_lines_unrounded(
+                black_box(order),
+                black_box(Mode::Precise),
+                RateSelector::CurrentOnEveryDate,
+            )
+        }),
+    );
+    report(
+        "unbatched: two clock reads and nothing else",
+        spread_unbatched(|| black_box(fresh.orders())),
+    );
+    true
+}
+
 /// Reported, not gated: opening a day under the dated selector, which adds
 /// the regime's compile-time-bounded walks to the card.
 fn the_dated_selector_cost(f: &Fixture) {
@@ -481,6 +617,8 @@ fn main() {
     ok &= a_client_days_cost_does_not_track_how_many_securities_it_holds(&f);
     ok &= a_ledger_add_does_not_track_the_orders_before_it_or_its_size(&f);
     ok &= a_ledger_close_does_not_track_how_many_orders_it_holds(&f);
+    ok &= a_ledgers_order_lines_do_not_track_how_many_orders_it_holds(&f);
+    ok &= the_ledgers_steps_one_call_per_sample(&f);
     the_dated_selector_cost(&f);
     if !ok {
         println!("CHG-1 STACK BENCH FAILED: a ratio breached its ceiling");

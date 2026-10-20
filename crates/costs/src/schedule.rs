@@ -38,9 +38,7 @@ use crate::dated::boundary;
 use crate::day::TradeDay;
 use crate::error::Refusal;
 use crate::exact::{Exact, Quantum, Ratio, units_of};
-use crate::rate::{
-    BSE_IPFT, GST_ON_FEE_BASE, NSE_IPFT, RATE_SCALE, SEBI_TURNOVER_FEE, STAMP_DUTY_BUY_SIDE,
-};
+use crate::rate::{GST_ON_FEE_BASE, RATE_SCALE, SEBI_TURNOVER_FEE, STAMP_DUTY_BUY_SIDE};
 use crate::regime::{exchange_charge_rate, stt_exercise_rate, stt_options_rate};
 
 // ---------------------------------------------------------------------------
@@ -598,9 +596,12 @@ pub const TODAYS_RATES_VERSION: &str = "todays-rates/2026-10-16/r1";
 
 /// The version of the dated rate set: the dated regime tables of
 /// `crate::regime` as resolved by [`RateCard::resolve`]. A change to any
-/// dated row (package CHG-0's FA73061 row is one) moves it — the same test
-/// fails until it does.
-pub const DATED_RATES_VERSION: &str = "dated-regime/r1";
+/// dated rate the card carries moves it — the same test fails until it does.
+/// r2 (D-5131): r1 dropped the NSE options IPFT from 2026-03-01 and charged
+/// 0.03503%; r2 charges the 0.03553% the trip stack does. Package CHG-0's
+/// FA73061 row re-splits that same total, so it leaves every figure here —
+/// and the fingerprint — as they are.
+pub const DATED_RATES_VERSION: &str = "dated-regime/r2";
 
 impl RateSelector {
     /// The version string a run identity records for this rate set.
@@ -614,7 +615,7 @@ impl RateSelector {
     ///     RateSelector::CurrentOnEveryDate.version(),
     ///     "todays-rates/2026-10-16/r1"
     /// );
-    /// assert_eq!(RateSelector::Dated.version(), "dated-regime/r1");
+    /// assert_eq!(RateSelector::Dated.version(), "dated-regime/r2");
     /// ```
     #[must_use]
     pub const fn version(self) -> &'static str {
@@ -682,6 +683,31 @@ impl RateBasis {
     pub const fn day(self) -> TradeDay {
         match self {
             Self::TodaysRatesAppliedTo(day) | Self::InForceOn(day) => day,
+        }
+    }
+
+    /// The rate set the label names: today's rates on every date, or the
+    /// rates in force on the day.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use costs::day::TradeDay;
+    /// use costs::schedule::{RateBasis, RateSelector};
+    ///
+    /// let on = TradeDay::new(2026, 10, 15)?;
+    /// assert_eq!(
+    ///     RateBasis::TodaysRatesAppliedTo(on).rate_set(),
+    ///     RateSelector::CurrentOnEveryDate
+    /// );
+    /// assert_eq!(RateBasis::InForceOn(on).rate_set(), RateSelector::Dated);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn rate_set(self) -> RateSelector {
+        match self {
+            Self::TodaysRatesAppliedTo(_) => RateSelector::CurrentOnEveryDate,
+            Self::InForceOn(_) => RateSelector::Dated,
         }
     }
 }
@@ -949,9 +975,10 @@ const REGIME_ROW: &str = "crate::regime — the dated regime row in force on the
      citation is on the row (crates/costs/src/regime.rs).";
 
 /// The source line a dated NSE options exchange charge carries.
-const REGIME_EXCHANGE_NSE: &str = "crate::regime::exchange_charge_rate on the trade day, plus \
-     crate::rate::NSE_IPFT before FA73061's effective date (2026-03-01); from that date the \
-     regime row alone, which FA73061 states as transaction charge and IPFT together.";
+const REGIME_EXCHANGE_NSE: &str = "crate::regime::exchange_charge_rate on the trade day plus \
+     crate::rate::NSE_IPFT, exactly as crate::trip::Rates::resolve adds them; on and after \
+     2026-03-01 FA73061 states the same total, Rs 3,552.99 + Rs 0.01 = Rs 3,553 per crore \
+     (sources row E-03), as FA64232's Rs 3,503 plus the Rs 50 IPFT (D-5131).";
 
 /// The source line a dated BSE options exchange charge carries.
 const REGIME_EXCHANGE_BSE: &str = "crate::regime::exchange_charge_rate on the trade day, plus \
@@ -990,17 +1017,30 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
 }
 
 /// The dated options card: the regime's rows on `day`, the fixed rates from
-/// `crate::rate`, exactly as `crate::trip::Rates::resolve` reads them.
+/// `crate::rate`, exactly as `crate::trip::Rates::resolve` reads them — the
+/// exchange charge is the regime row in force **plus the IPFT `trip` adds**,
+/// on every day.
+///
+/// The IPFT is never dropped by date. Until D-5131 it was dropped from
+/// FA73061's effective date (2026-03-01) on, on the expectation that package
+/// CHG-0's FA73061 row (₹3,552.99 + ₹0.01 per crore, carried together as
+/// 0.03553%) would be the row in force; that row is not in `crate::regime`,
+/// so the row in force is still FA64232's 0.03503% and the card charged
+/// 0.03503% — the IPFT's 0.0005% short — on every NSE options day from
+/// 2026-03-01, labelled as cited. One figure, read where `trip` reads it,
+/// cannot fold twice or not at all: whichever split the regime carries, the
+/// card is the regime's row plus the regime's IPFT, and
+/// `the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+/// holds it to `trip` on every day from 2018 to 2027 at both venues.
 fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
     let base = exchange_charge_rate(exchange, day)?;
     let stt_sell = stt_options_rate(day)?;
     let stt_exercise = stt_exercise_rate(day)?;
-    // FA73061 folds the IPFT into the NSE row from its effective date; before
-    // it, and on BSE always, the IPFT is its own figure added on top.
-    let (ipft_bps, exchange_charge) = match exchange {
-        Exchange::Nse if !day.before(FA73061_EFFECTIVE) => (0, Status::Cited),
-        Exchange::Nse => (NSE_IPFT.get(), Status::Cited),
-        Exchange::Bse => (BSE_IPFT.get(), Status::Unverified),
+    let ipft_bps = crate::rate::ipft(exchange).get();
+    // The BSE IPFT is a zero no source states (crate::rate::BSE_IPFT).
+    let exchange_charge = match exchange {
+        Exchange::Nse => Status::Cited,
+        Exchange::Bse => Status::Unverified,
     };
     let source = match exchange {
         Exchange::Nse => REGIME_EXCHANGE_NSE,
@@ -1464,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dated_option_card_is_the_regime_on_the_trade_day_with_the_ipft_folded_at_fa73061() {
+    fn the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day() {
         let dated = |exchange, when| {
             RateCard::resolve(TradeKind::Options, exchange, when, RateSelector::Dated)
                 .expect("a verified window")
@@ -1490,15 +1530,35 @@ mod tests {
         assert_eq!(before.sebi().rate(), Ratio::new(10, RATE_SCALE));
         assert_eq!(before.gst().rate(), Ratio::new(1_800_000, RATE_SCALE));
         assert_eq!(before.kind(), TradeKind::Options);
-        // From FA73061: the regime row alone. Until package CHG-0 adds the
-        // 0.03553% row, that row is still FA64232's 0.03503% — so this is
-        // the figure the IGNORED tests in crate::stack wait on.
-        let from = dated(Exchange::Nse, FA73061_EFFECTIVE);
-        let regime_now = exchange_charge_rate(Exchange::Nse, FA73061_EFFECTIVE).expect("verified");
-        assert_eq!(
-            from.exchange_charge().rate(),
-            Ratio::new(regime_now.get(), RATE_SCALE)
-        );
+        // From FA73061 on: still the regime row plus the IPFT. The row in
+        // force is FA64232's 0.03503% (package CHG-0's FA73061 row is not in
+        // crate::regime), so the IPFT is not dropped: 0.03553%, the total
+        // FA73061 states (sources row E-03). Dropping it by date charged
+        // 0.03503% here, labelled as cited (D-5131).
+        for on in [FA73061_EFFECTIVE, day(2026, 10, 15), CURRENT_AS_OF] {
+            let from = dated(Exchange::Nse, on);
+            let regime_now = exchange_charge_rate(Exchange::Nse, on).expect("verified");
+            assert_eq!(
+                regime_now.get(),
+                3_503,
+                "the row in force on {on}: package CHG-0's FA73061 row moves it to 3,553 and \
+                 the NSE IPFT to zero from 2026-03-01; read the IPFT where crate::trip reads it \
+                 then, and this card follows"
+            );
+            assert_eq!(
+                from.exchange_charge().rate(),
+                Ratio::new(3_553, RATE_SCALE),
+                "{on}"
+            );
+            // Today's table carries it per hundred crore: the same value.
+            let (got, today) = (from.exchange_charge().rate(), NSE_OPTIONS_EXCHANGE.rate());
+            assert_eq!(
+                i128::from(got.numerator()) * i128::from(today.denominator()),
+                i128::from(today.numerator()) * i128::from(got.denominator()),
+                "the dated card and today's table agree on {on}"
+            );
+            assert_eq!(from.exchange_charge().status(), Status::Cited);
+        }
         // On BSE the IPFT is a zero, always added, and flagged.
         let bse = dated(Exchange::Bse, CURRENT_AS_OF);
         assert_eq!(bse.exchange_charge().rate(), Ratio::new(3_250, RATE_SCALE));
@@ -1514,6 +1574,51 @@ mod tests {
                 stamp_buy: Cited::named(300, RATE_SCALE, STAMP_OPTIONS.source()),
             }
         );
+    }
+
+    #[test]
+    fn the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day() {
+        // One dated figure, two readers: the CHG-1 dated card and the round
+        // trip of crate::trip. On every day from 2018-01-01 to 2027-12-31 at
+        // both venues they price together or refuse together, and where they
+        // price, the card's exchange charge is trip's exchange rate plus its
+        // IPFT, to the unit (D-5131). The card that dropped the IPFT from
+        // 2026-03-01 fails here on 2026-03-01 at NSE.
+        let (mut priced, mut refused) = (0_u32, 0_u32);
+        let mut on = day(2018, 1, 1);
+        while on.before(day(2028, 1, 1)) {
+            for exchange in [Exchange::Nse, Exchange::Bse] {
+                let card = RateCard::resolve(TradeKind::Options, exchange, on, RateSelector::Dated);
+                let trip = crate::trip::Rates::resolve(crate::rate::Broker::Zerodha, exchange, on);
+                match (card, trip) {
+                    (Ok(card), Ok(trip)) => {
+                        priced += 1;
+                        assert_eq!(
+                            card.exchange_charge().rate(),
+                            Ratio::new(trip.exchange().get() + trip.ipft().get(), RATE_SCALE),
+                            "{exchange:?} on {on}"
+                        );
+                        let Taxes::Options { stt_sell, .. } = card.taxes() else {
+                            panic!("an options card carries option taxes");
+                        };
+                        assert_eq!(
+                            stt_sell.rate(),
+                            Ratio::new(trip.stt().get(), RATE_SCALE),
+                            "{exchange:?} on {on}"
+                        );
+                    }
+                    (Err(_), Err(_)) => refused += 1,
+                    (card, trip) => panic!(
+                        "{exchange:?} on {on}: the dated card {card:?} and trip {trip:?} \
+                         disagree on whether the day has a rate"
+                    ),
+                }
+            }
+            on = on.plus_days(1).expect("inside the calendar");
+        }
+        // 2024-10-01 to 2027-12-31 prices at both venues (1,187 days);
+        // 2018-01-01 to 2024-09-30 refuses at both (2,465 days).
+        assert_eq!((priced, refused), (1_187 * 2, 2_465 * 2));
     }
 
     #[test]
@@ -1671,7 +1776,7 @@ mod tests {
             ],
             [
                 ("todays-rates/2026-10-16/r1", TODAYS_FINGERPRINT),
-                ("dated-regime/r1", DATED_FINGERPRINT),
+                ("dated-regime/r2", DATED_FINGERPRINT),
             ],
             "a rate table changed: bump its version (TODAYS_RATES_VERSION or \
              DATED_RATES_VERSION) and re-pin its fingerprint"
@@ -1686,6 +1791,7 @@ mod tests {
     /// `todays_fingerprint()` on the r1 table.
     const TODAYS_FINGERPRINT: u64 = 4_405_649_805_164_050_705;
 
-    /// `dated_fingerprint()` on the r1 regime.
-    const DATED_FINGERPRINT: u64 = 15_071_536_258_216_706_835;
+    /// `dated_fingerprint()` on the r2 regime (r1 dropped the NSE options
+    /// IPFT from 2026-03-01; D-5131).
+    const DATED_FINGERPRINT: u64 = 11_353_183_212_436_303_133;
 }

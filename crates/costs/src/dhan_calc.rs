@@ -315,10 +315,13 @@ pub(crate) fn page_lines(
 /// One order's own lines at the page's rates, unrounded: brokerage,
 /// exchange, SEBI, STT, STT on exercise (none), stamp, GST, DP and GST on DP
 /// (none: the page's DP line carries its GST). Linear in the order, so a
-/// day's orders sum to the day's lines; GST here is 18% of the order's
+/// day's orders sum to the day's lines — except the DP, which is here the
+/// whole day's DP for a delivery or MTF sell, as if it were the day's only
+/// sell; `crate::ledger::DayLedger::order_lines_unrounded` shares it among
+/// the day's sells by value (D-5131). GST here is 18% of the order's
 /// brokerage and its UNROUNDED exchange line, because the page's 10⁻⁴ rupee
 /// step on the exchange line is a step on the day's total, not an order's.
-/// `crate::ledger::order_lines_unrounded` documents the rule.
+/// `crate::ledger::DayLedger::order_lines_unrounded` documents the rule.
 ///
 /// # Errors
 ///

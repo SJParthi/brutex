@@ -73618,6 +73618,94 @@ backtest reaches an exercise; the refusal is for any caller that holds to
 expiry. `docs/06-limits.md` §CHG-1 records the gap; a read of B-06's effective
 date and S-06's rate closes it as a new rate row.
 
+### D-5131 — CLOUD-CHG1 repair 1: the dated options card adds the IPFT on every day as the trip stack does (`dated-regime/r2`); one order's lines are priced against its own day's netting; a net refuses two rate sets and out-of-order legs and names its versions — 2026-10-20
+
+**Number** inside the cloud block D-5110..D-5139 (D-5131 was free on this
+branch and on `feat/db-fix` at `453de6989`).
+
+**What was observed** (second check of CLOUD-CHG1,
+`state/fix/round2/verify-CLOUD-CHG1-r1.json`, all three reproduced here first,
+`state/fix/round2/chg1-logs-r8/probe-before.log`):
+
+1. `RateSelector::Dated` dropped the NSE options IPFT from FA73061's effective
+   date (2026-03-01), on the expectation that package CHG-0's FA73061 row
+   would be the regime row in force. That row is not in `crate::regime`, so
+   the row in force was FA64232's 0.03503% and every dated NSE options day
+   from 2026-03-01 was charged 0.03503% — the IPFT's 0.0005% short, ₹5.01
+   against ₹5.08 exchange charge (GST ₹8.10 against ₹8.12) on the NIFTY 25300
+   CE 65 × 100 → 120 reading — labelled "rates in force on" and cited. Today's
+   table, `trip::Rates::resolve` and source row `E-03` all give 0.03553%. The
+   test that showed it was `#[ignore]`d, so no gate could fail.
+2. `ledger::order_lines_unrounded` priced every delivery or MTF order as
+   delivery: 0.1% STT on its whole value, 0.015% stamp duty, DP on every sell.
+   The day nets by quantities, so a squared delivery or MTF day pays 0.025% STT
+   on the squared quantity at the VWAP, 0.003% stamp and no DP. On the
+   verifier's ₹15,000 / ₹14,800 day the orders summed to STT ₹29.80, stamp
+   ₹2.25 and DP ₹12.50 against the day's ₹3.725, ₹0.45 and nil.
+3. The CHG-1 block of `crates/costs/src/lib.rs` claimed O(1) and named no
+   proof gate 12 accepts — the one gate-12 refusal this package added.
+
+**Decision.**
+
+1. The dated options card's exchange charge is the regime row in force plus
+   the IPFT `crate::rate::ipft` gives — the same two figures, read the same
+   way, as `trip::Rates::resolve` — on every day, never dropped by date: on
+   and after 2026-03-01 that is 0.03553%, the total FA73061 states. The dated
+   rate set moves to `dated-regime/r2` with its fingerprint re-pinned. Proved
+   by `costs::schedule::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+   (every day 2018-2027, both venues),
+   `costs::schedule::the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day`,
+   and the un-ignored
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`,
+   which now checks 2026-03-01 on every line but STT (the dated 0.1% against
+   today's 0.15%, a real difference of rates, which the ignored version would
+   have failed on had it ever run). All three fail on the old card (checked
+   by building the old rule into a copy).
+2. **One netting rule, read by both.** `stack::equity_netting` is the rule
+   the day's taxes are levied by, and a new
+   `DayLedger::order_lines_unrounded(&self, order, mode, rate_set)` prices
+   one of the day's orders by the same rule: squared (any product) — the
+   non-delivery rates and no DP; one-sided delivery or MTF — the delivery
+   rates and, for a sell, its value-share of the day's one DP and its GST,
+   half-up to 10⁻⁹ rupee. The day-less `ledger::order_lines_unrounded`
+   refuses a delivery or MTF order by name (`ChargeError::NeedsItsDay`); the
+   ledger method refuses an order larger than its day's side
+   (`ChargeError::OrderNotInDay`) and, in precise mode, whatever the day's
+   close refuses. Proved by
+   `costs::ledger::a_days_orders_sum_to_its_unrounded_lines_on_every_netting`
+   (squared intraday, delivery and MTF days, one-sided days of two orders,
+   futures and options, both modes) and
+   `costs::ledger::a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name`.
+   Measured as C-CHG-09.
+3. The lib.rs block names `crates/costs/benches/stack.rs` and C-CHG-07..09.
+4. Follow-ups taken, in the same files: `NetTrade::of_days` refuses two legs
+   priced under different rate sets and a closing day on or before the
+   opening day (`ChargeError::MismatchedLegs`), and a `NetTrade` carries
+   `rate_set()` and `versions()` for a run identity
+   (`costs::stack::a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions`);
+   the stack bench prints the ledger's steps one call per sample beside two
+   clock reads alone, so the per-call p99 is shown undiluted (reported, not
+   gated).
+
+**Not chosen.** (a) Dropping the IPFT only when the row in force starts on
+or after 2026-03-01: it needs the regime row's start, which `crate::regime`
+does not expose, and CHG-0 replaces the flat IPFT with a dated one anyway —
+reading the IPFT where `trip` reads it is one rule that survives that merge.
+(b) Refusing a dated NSE options day from 2026-03-01: the total is sourced
+(`E-03`), so a refusal would withhold a cited figure. (c) An explicit
+`squared` / `one-sided` argument on the day-less function: a caller could
+pass the wrong one; the ledger knows. (d) Carrying a delivery sell's DP on
+each sell "as if the day's only sell": it charges a two-sell day twice.
+
+**What CHG-0's merge must do** is in `docs/06-limits.md` §CHG-1: read the
+IPFT in the dated card from the function `trip` then reads it from; the r2
+figures do not change at that merge.
+
+**A citation, explained rather than edited.** D-5110 names `c9e3472`, the
+cloud base. That commit is the snapshot of `feat/db-fix` at `4756cce0`
+(D-5400), reachable from `origin/cloud/base-20261016` and not from
+`feat/db-fix`'s own history; D-5110 stands as written.
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
