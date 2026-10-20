@@ -158,6 +158,9 @@ pub mod gdfl_archive;
 /// a `CmSource` and checked before the one-second fold sees them. D-0808,
 /// D-2800.
 pub mod gdfl_cm;
+/// The vendor's loose day zips, the third GDFL source kind: walked once,
+/// each day one probe, read in place as the archives are. D-4815, D-4834.
+pub mod gdfl_dayzips;
 /// The GDFL Dropbox fetch inside the app: list, pick, download, verify and
 /// hand on, never overwriting, never deleting (E2E-01, R4-07).
 pub mod gdfl_dropbox;

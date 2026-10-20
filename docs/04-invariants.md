@@ -7860,3 +7860,36 @@ fixture is invented.
 | AH04-08 | **An options-only listing (`bars` 0, `options: true`) is held, not never pulled**: the tally counts it in `held`, the Held filter keeps it, its detail view offers no pull; `bars` null with `options: true` is unread; the partition sums. | `an_options_only_listing_is_held_not_never_pulled` | ✓ |
 | AH04-09 | **Where an options-only row's spot is filed is the alias table's answer, never a guess**: an INDEX key, a rename, the table's reason, or "names no other key". | `an_options_only_rows_spot_is_named_by_the_alias_table_never_guessed` | ✓ |
 | AH04-10 | **Below 768 px wide or 700 px tall only the header stays fixed and the /db board gets at least half of the viewport, every board control reachable; nothing changes at desktop sizes.** | a measurement in the Browser pane, `docs/06-limits.md` L-AH04-02 | ◐ |
+
+## Sources: per-day container faults, the loose day zips, the tick store's day table, and what a close records of its listing (IA-3; D-4815, D-4817, D-4818, D-4828, D-4834, D-4835, D-4866, D-5903)
+
+`crates/pull/src/gdfl_archive.rs`, `gdfl_cm.rs`, `gdfl_nfo.rs` (its
+sources), `gdfl_tickstore.rs`, the new `gdfl_dayzips.rs`, the cause arms in
+`gdfl_import_causes.rs` and the close line in `gdfl_import_day.rs`. Proofs in
+`pull::gdfl_archive::tests`, `pull::gdfl_dayzips::tests` and
+`pull::gdfl_import::ia3_tests`.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| IA-MX-A4 | **The loose day zips read like the archive day they copy**: the same listing digest, the same member size and the same decoded file for a capital-market day, and the same entries for an options day as the year zip that files it. | `loose_day_zips_import_like_the_archive_day_they_copy`, `a_loose_options_day_lists_like_the_year_zip_that_files_it` | ✓ |
+| IA-MX-A13 | **The placeholder shapes are refused by name**: a streamed `outer.zip` cut before its central directory is a stray name and `archive_malformed` (no end record); an options placeholder whose entry sits outside its day folder lists no option file. | `the_placeholder_shapes_are_refused_by_name` | ✓ |
+| IA-MX-A16 | **A loose zip in another kind's or month's folder is `day_zip_misfiled{found, expected}` for its day only**, never closing it; strays are counted, at most 4 named. | `a_loose_zip_in_the_wrong_kind_or_month_folder_is_named` | ✓ |
+| IA-MX-A17 | **Two copies of a loose day, wherever each lies, are `archive_duplicate_day` for that day only**, never closing it. | `a_loose_day_given_twice_is_refused_for_that_day` | ✓ |
+| IA-MX-A20 | **A loose zip name whose day is impossible or outside the calendar's span is named and never filed**, so it sizes nothing. | `a_far_dated_loose_zip_name_never_sizes_the_day_table` | ✓ |
+| IA-MX-B7 | **A zip with bytes before its first record is `archive_prefixed{bytes}`**, the prefix measured from the end record, plain and ZIP64, outer and inner, before the directory is read. | `a_zip_with_bytes_before_its_first_record_is_refused_by_name` | ✓ |
+| IA-MX-B8 | **A compressed day zip refuses its own day, never the archive**, and never closes it. | `outer_member_not_stored_refuses`; at import level, the day stays open twice over and the next day closes done: `a_deflated_day_zip_member_is_read_or_refused_only_for_its_day` (FM-040), its data never inflated: `a_deflated_day_zip_is_refused_and_never_recursed` (HUMAN-010) | ✓ |
+| IA-MX-B12 | **An encrypted member is `archive_member_encrypted` before any byte is inflated**: a day zip for its day, a file when fetched. | `an_encrypted_member_is_refused_by_its_own_name`; at import level: `an_encrypted_member_is_refused_as_encrypted_not_corrupt` (FM-026) | ✓ |
+| IA-MX-B13 | **A member with a data descriptor is read by its central sizes**, its local sizes deliberately wrong, outer and inner. | `a_member_with_a_data_descriptor_is_read_by_its_central_sizes` | ✓ |
+| IA-MX-B19 | **Two day zips for one day refuse that day only**; the archive opens and the next day reads. | `two_members_for_one_day_refuse`; at import level, a `... (1).zip` copy: `two_members_for_one_day_refuse_that_day_only` (FM-044) | ✓ |
+| IA-MX-B22 | **A CM day zip naming its files with `\` reads exactly as with `/`**, filtered and not. | `a_cm_day_zip_with_backslash_paths_reads_like_forward_slashes` | ✓ |
+| IA-MX-B27 | **A loose file that is not a zip refuses its day by what is wrong with it**, never closing it. | `a_loose_zip_that_is_not_a_zip_is_refused_for_its_day` | ✓ |
+| IA-MX-C2 | **An impossible day-zip name is counted, the first 16 named, and files nothing.** | `an_impossible_day_zip_name_is_named` | ✓ |
+| IA-MX-C3 | **A lone day zip under another folder is `day_zip_misfiled{found, expected}`**, never `day_not_held`. | `a_misfiled_day_zip_is_named_where_it_was_found`; at import level, the wrong month folder, never `day_not_held`: `a_day_zip_in_the_wrong_month_folder_is_named_not_ignored` (FM-023, CONC-067) | ✓ |
+| IA-MX-D23 | **A wanted stem with no extension is `extension_missing{stem}`**, refused once per ticker in either order, closing its day done with the refusal; a run filtered to another symbol skips it. | `a_wanted_stem_with_no_extension_is_refused_by_name` | ✓ |
+| IA-MX-T9 | **A tick-store day published after the walk is read whole at its own place.** | `the_tick_stores_writer_files_are_never_opened` | ✓ |
+| IA-MX-T10 | **A misfiled `.bts` is `day_file_misfiled{found, expected}` for its day**, never `day_not_held`, also beside a copy at its own place. | `a_misfiled_tick_store_day_is_named_where_it_was_found` | ✓ |
+| IA-MX-T11 | **The writer's files and a `*.bts.tmp` are counted and never opened** (each a pipe in the test). | `the_tick_stores_writer_files_are_never_opened` | ✓ |
+| IA-GR-27 | **No container fault closes a day**: duplicate, compressed, unknown method, encrypted, prefixed, misfiled zip, misfiled day file and malformed are each `Cause::open` at the vendor stage; `extension_missing` closes. | `no_container_fault_closes_a_day` | ✓ |
+| IA3-01 | **A day's close records its listing (DB-A49)**: `skipped=` always, and `entries=` and `listing=` (the BLAKE3 of every entry's name, size and CRC-32) when the listing was read; a filtered run of the same day states the same listing and skips more; a day whose listing was refused, or that the source does not hold, closes `refused` with no counts and no listing. | `the_close_line_carries_skipped_and_the_listing`, `a_day_with_no_listing_claims_none`, `the_close_line_carries_skipped_and_unresolved` (FM-119: a day of only unswept files) | ✓ |
+| IA3-02 | **The verified member travels with the decode**: a capital-market `DayFile` and an options `NfoDayFile` carry the bytes their rows were decoded from, after the length and CRC check, so a second reader needs no second fetch (design §5.1 seam 4). | `loose_day_zips_import_like_the_archive_day_they_copy`, `a_member_with_a_data_descriptor_is_read_by_its_central_sizes`, and the options store-against-zips test of `gdfl_nfo_tests` | ✓ |
+| IA3-03 | **A loose root past 100,000 entries is refused whole; an empty root holds no day; a missing root, a zip gone since the walk and a link at a day zip's name are refused by name, never read as absent.** | `a_root_past_the_walk_cap_is_refused_whole`, `an_empty_or_missing_root_is_named`, `a_loose_zip_gone_or_linked_is_refused_never_absent` | ✓ |

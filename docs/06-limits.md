@@ -19827,3 +19827,37 @@ Scripts and raw figures are in the AH-04 report
 |---|---|---|---|---|
 | L-AH04-01 | `committed_at` of a migrated vendor is three `metadata` calls, not one | a version-4 census is one current epoch per segment, and the newest of them is the last commit; the census's own parts name the files, so no directory is listed | at most three stats a request, none per row. `/audit.json?feed=gdfl` before p50 0.804 / p99 1.365 / max 1.485 ms, after 0.751 / 1.396 / 1.401 ms; `?feed=zerodha` (one file, unchanged) before 1.723 / 2.490 / 2.826 ms, after 1.660 / 2.567 / 2.635 ms. The stamp is the mtime the file system keeps: a file written in place without its mtime moving (no writer here does) would not move it | AH-04 |
 | L-AH04-02 | Layout has no unit test; the board's share of the window is a measurement | CSS media queries are not run by `node --test` | `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`, board [top, height] px and share of the viewport after scrolling `main` to its end, before → after: 375x812 [595, 218] 27% → [181, 631] 78%; 375x667 [595, 73] 11% → [181, 486] 73%; 375x568 [595, 24] 0%, 0 of 140 board controls reachable → [181, 387] 68%, 140 of 140; 320x568 [673, 24] 0%, 0 of 140 → 68%, 140 of 140; 812x375 [318, 57] 15% → [106, 269] 72%; 1024x600 [298, 302] 50% → [134, 466] 78%; 1280x800 [260, 541] 68% → unchanged, `main` still `overflow: hidden`. Repeated at 375x667 on BANKNIFTY options (35% → 73%), NIFTY options (35% → 73%) and RELIANCE spot (8% → 73%). The connection banner of an unstamped build is taller (235 px at 375 wide), and it scrolls away with the rest; a page other than `/db` keeps its own scroll regions at main's height, measured on `/db` only | AH-04 |
+
+## The sources' walks, the per-day container faults and the close's listing (IA-3; D-4815, D-4818, D-4834, D-4866, D-5903)
+
+Each walk below is once per source object, never per day or per request. A
+run holds one source object per kind, so a walk is paid once per run; the
+api's source cache that would keep one across runs (D-4802, the rest of
+L-IA-8) is NOT BUILT.
+
+**Measured** (20 Oct 2026, M4 Pro on the loaded shared machine, release,
+sequential, one call per sample, the ignored test `ia3_lookup_costs` over the
+operator's real sources, read only; a second agent repeats it with
+`BRUTEX_GDFL_TICKSTORE`, `BRUTEX_GDFL_CM_ARCHIVE` and `BRUTEX_GDFL_DAYZIPS`
+set and `cargo test --release -p pull --lib -- --ignored --nocapture
+ia3_lookup_costs`): the tick store's `cm` walk 81 ms cold (4,002 day files
+held, 0 misfiled, 2 stray: `cm/.lock`, `cm/ingest-log.tsv`), its `options`
+walk 38 ms (2,001 held, 18 stray); the misfiled probe after the walk n=20,000
+p50 under the 41 ns clock, p99 42 ns, max 1,166 ns; a tick-store index-day
+listing digest n=267 p50 6.8 us, p99 66.7 us, max 241 us; an options-day
+listing digest n=41 p50 1.65 ms, p99 2.93 ms, max 2.93 ms (O(entries), about
+11,000 entries a day); the CM archive's directory read once in 2 ms (4,209
+entries, 215 folder entries, nothing misfiled or invalid) and a day's listing
+out of it n=400 p50 212 us, p99 1.0 ms, max 2.4 ms (the day zip's own
+directory, read from disk); the loose root's walk 1.8 ms (12 zips) and a day
+lookup n=400 p50 84 ns, p99 166 ns, max 10.8 us. C-GI-04 in gate 8's ratio
+bench (`crates/pull/benches/ratio/day_table.rs`, invented, in memory): the
+CM archive's day lookup at 10x and 100x the days is 1.009x and 1.008x the 1x
+cost, p50 750 ns, p99 833 ns, max 74 us over n=20,000 at 10,000 days.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-8 | The `dayzips` walk and the tick store's tree walks (part of L-IA-8; the year zips and the archive directory are read as before) | a loose root is walked when `DayZips::open` runs; a tick-store tree (`cm`, `options`) the first time a day of it is asked, and every lookup after is one hash probe | O(entries): `dayzips` ≤ `DAYZIPS_WALK_CAP` = 100,000 (refused whole past it); a tick-store tree ≤ `TICKSTORE_WALK_CAP` = 1,000,000 (past it every day the tree lacks at its own place is refused with the walk's fault). The real tick store holds about 18,400 entries (design §10.2) and the loose root 12 zips in 9 folders | IA-3 |
+| L-IA-59 | The listing digest on a day's close (D-5903) | the BLAKE3 of every entry's name, size and CRC-32, in listing order | O(entries of the day), the same pass the listing already is: ≤ 26,820 entries on the largest options day measured (design §10.2) | IA-3 |
+| L-IA-60 | The verified member kept with the decode (design §5.1 seam 4) | `DayFile.bytes` and `NfoDayFile.bytes` hold the member's bytes as long as the decoded file is held; one copy of the fetched bytes is made into the shared buffer | O(bytes of the file) per file in hand, a second copy of each file the day's workers hold at once; the decoded rows were already held beside it. The memory bound of a whole day is L-IA-12's | IA-3 |
+| L-IA-61 | The archive's per-day faults (D-4818) | the outer directory, already in memory, is walked twice: once for the day span that sizes the dense table, once to fill it with each day's zip or its refusal | O(entries) once per archive, as before; a day is one index into a cell of 24 bytes, as before | IA-3 |

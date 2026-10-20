@@ -132,6 +132,12 @@ pub(super) struct Counts {
     pub(super) late: usize,
     pub(super) late_unresolved: usize,
     pub(super) max_back_s: u32,
+    /// Entries of the day that were not wanted files (DB-A49): counted on
+    /// the close for ever, so a skipped file outlives the event log.
+    pub(super) skipped: usize,
+    /// What the day's listing was (DB-A49): `None` when no listing was
+    /// read (a day refused before one, or one whose listing refused).
+    pub(super) listing: Option<crate::gdfl_cm::ListingSum>,
 }
 
 /// The report's counters at a day's start, so the day's own counts are a
@@ -141,6 +147,7 @@ pub(super) struct Counts {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Mark {
     pub(super) files: usize,
+    pub(super) files_skipped: usize,
     pub(super) rows: usize,
     pub(super) seconds: usize,
     pub(super) seconds_committed: usize,
@@ -154,6 +161,7 @@ impl Mark {
     const fn of(report: &Report) -> Self {
         Self {
             files: report.files,
+            files_skipped: report.files_skipped,
             rows: report.rows,
             seconds: report.seconds,
             seconds_committed: report.seconds_committed,
@@ -166,9 +174,16 @@ impl Mark {
 
 impl Counts {
     /// The day's counts: what `report` holds beyond `before`.
-    const fn of_day(before: Mark, report: &Report, failures: usize, max_back_s: u32) -> Self {
+    const fn of_day(
+        before: Mark,
+        report: &Report,
+        (failures, max_back_s): (usize, u32),
+        listing: Option<crate::gdfl_cm::ListingSum>,
+    ) -> Self {
         Self {
             files: report.files - before.files,
+            skipped: report.files_skipped - before.files_skipped,
+            listing,
             seconds: report.seconds - before.seconds,
             failures,
             late: report.late_rows - before.late_rows,
@@ -177,17 +192,24 @@ impl Counts {
         }
     }
 
-    /// The D-2822 stats, as `done` and `incomplete` write them.
+    /// The D-2822 stats, as `done` and `incomplete` write them, then what
+    /// the listing was (DB-A49): ` skipped=<n> entries=<n> listing=<hex>`,
+    /// or ` skipped=<n>` alone when no listing was read. A reader finds
+    /// each by name (`count_of`), so no earlier field moved.
     pub(super) fn text(&self) -> String {
+        let listing = self.listing.map_or_else(String::new, |sum| {
+            format!(" entries={} listing={}", sum.entries, sum.hex())
+        });
         format!(
             "definition={BAR_DEFINITION} files={} seconds={} failures={} late={} \
-             late_unresolved={} max_back_s={}",
+             late_unresolved={} max_back_s={} skipped={}{listing}",
             self.files,
             self.seconds,
             self.failures,
             self.late,
             self.late_unresolved,
             self.max_back_s,
+            self.skipped,
         )
     }
 }
@@ -490,9 +512,10 @@ pub(super) fn close_day(
     ctx: &Ctx<'_>,
     (key, day): (&str, Day),
     (before, report, max_back_s): (Mark, &Report, u32),
+    listing: Option<crate::gdfl_cm::ListingSum>,
     failures: &mut Vec<Staged>,
 ) -> Outcome {
-    let counts = Counts::of_day(before, report, failures.len(), max_back_s);
+    let counts = Counts::of_day(before, report, (failures.len(), max_back_s), listing);
     ctx.close(
         (key, day),
         close_of(failures, counts.files > 0),
@@ -1723,7 +1746,7 @@ where
             &why,
         ));
     }
-    let (held_day, member_bytes) = (read.held, extras.member_bytes);
+    let (held_day, member_bytes, listing) = (read.held, extras.member_bytes, extras.listing);
     take_read((run.kind, day), (read, extras), report, &mut failures);
     if !held_day {
         close_missing(ctx, (key, day), report, failures);
@@ -1767,7 +1790,13 @@ where
         }
         Some(member) => Closed::Member { member, key },
     };
-    let outcome = close_day(ctx, (key, day), (before, report, day_back), &mut failures);
+    let outcome = close_day(
+        ctx,
+        (key, day),
+        (before, report, day_back),
+        listing,
+        &mut failures,
+    );
     record_close(run.kind, (day, outcome, closed), (before, report), failures);
     Ok(Some(outcome))
 }
