@@ -1637,6 +1637,11 @@ const ALLOW_SORT: Allow = &[
     // answer over its fixed table of `PICTURE_CODES` = 16 entries; reason in
     // docs/06-limits.md, "Gate 11 — R3-24".
     ("crates/telemetry/src/sink.rs", 1),
+    // R4-17 repair 2, 18 Oct 2026: reason in docs/06-limits.md, "Gate 11 —
+    // R4-17, declared at its merge": the master files of one directory, once
+    // per load; one series' in-session jumps, once per scan.
+    ("crates/pull/src/listing.rs", 1),
+    ("crates/cli/src/series_identity.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1930,6 +1935,10 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/census_rollup.rs", 1),
     ("crates/api/src/settings_route.rs", 1),
     ("crates/pull/src/rehearsal.rs", 2),
+    // R4-17 repair 2, 18 Oct 2026: a hash probe of the torn day months
+    // (`DayBook::unread_holds`, C-ZI-03); docs/06-limits.md, "Gate 11 —
+    // R4-17, declared at its merge".
+    ("crates/pull/src/series_identity.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

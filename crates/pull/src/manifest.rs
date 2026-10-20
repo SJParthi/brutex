@@ -1342,6 +1342,18 @@ pub enum EntryFault {
         /// The value that is neither a price nor the sentinel.
         paisa: i64,
     },
+    /// A version-3 contract field that is set — a non-zero length — and does
+    /// not read back as a contract: a length past the field, text that is not
+    /// UTF-8, or text `Contract::parse` refuses.
+    ///
+    /// Refused rather than read as no contract: `None` is the SPOT key, so a
+    /// contract row that answered `None` was counted under its underlying's
+    /// spot series, and two such rows merged into one key — the merge the
+    /// field's own doc forbids (cloud-attack-law-20261016).
+    ContractUnreadable {
+        /// The length the field stores.
+        len: u8,
+    },
 }
 
 impl fmt::Display for EntryFault {
@@ -1371,6 +1383,10 @@ impl fmt::Display for EntryFault {
                 f,
                 "close {paisa} paisa is neither a price nor the not-recorded \
                  sentinel {CLOSE_NULL}"
+            ),
+            Self::ContractUnreadable { len } => write!(
+                f,
+                "the contract field ({len} bytes) does not read back as a contract"
             ),
         }
     }
@@ -2200,7 +2216,7 @@ impl Held {
         // answering `None` is the right answer for it, and this is the only
         // place that has both halves in hand.
         let mut entry = entry;
-        entry.key.contract = read_contract(&half);
+        entry.key.contract = read_contract(&half)?;
         Ok(Self { entry, closes })
     }
 }
@@ -4501,16 +4517,29 @@ fn covered(image: &[u8; IMAGE_LEN]) -> [u8; OFF_CRC] {
 ///
 /// A zero length is the spot case and is not an error: every version-2 row and
 /// every spot row leaves these bytes zero, and a census full of them reads back
-/// exactly as it always did. Text that is not valid ASCII, or a length past the
-/// field, answers `None` rather than a partial name — a truncated contract is a
-/// DIFFERENT contract, and reading one would merge two series under one key.
-fn read_contract(half: &[u8; IMAGE_LEN]) -> Option<Contract> {
-    let n = usize::from(*half.get(C_CONTRACT_N)?);
-    if n == 0 || n > C_CONTRACT_LEN {
-        return None;
+/// exactly as it always did.
+///
+/// # Errors
+///
+/// [`EntryFault::ContractUnreadable`] for a set field that does not read back:
+/// a length past the field, text that is not UTF-8, or text `Contract::parse`
+/// refuses. This answered `None` for those, and `None` is the spot key — so a
+/// truncated or damaged contract was not "a DIFFERENT contract" kept apart but
+/// the underlying's spot series, merged with it under one key.
+fn read_contract(half: &[u8; IMAGE_LEN]) -> Result<Option<Contract>, EntryFault> {
+    // `C_CONTRACT_N < OFF_CRC` is asserted at compile time, so the byte is
+    // always there; reading a missing one as zero would be absence.
+    let len = half.get(C_CONTRACT_N).copied().unwrap_or(0);
+    let n = usize::from(len);
+    if n == 0 {
+        return Ok(None);
     }
-    let text = core::str::from_utf8(half.get(C_CONTRACT..C_CONTRACT + n)?).ok()?;
-    Contract::parse(text)
+    half.get(C_CONTRACT..C_CONTRACT + n)
+        .filter(|_| n <= C_CONTRACT_LEN)
+        .and_then(|text| core::str::from_utf8(text).ok())
+        .and_then(Contract::parse)
+        .map(Some)
+        .ok_or(EntryFault::ContractUnreadable { len })
 }
 
 fn write_at<const N: usize>(out: &mut [u8; IMAGE_LEN], offset: usize, src: [u8; N]) {

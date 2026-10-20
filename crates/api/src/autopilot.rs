@@ -780,7 +780,37 @@ fn probe_io(root: &std::path::Path, path: &std::path::Path) -> std::io::Result<(
             ),
         ));
     }
-    let mut file = std::fs::File::create(path)?;
+    // NEVER WRITE THROUGH, AND NEVER REMOVE, WHAT SITS AT THE PROBE NAME.
+    // `File::create` follows a symlink and truncates its target, so a link
+    // planted (or left) at the probe name pointed this write at any file it
+    // named, a store file among them (cloud-attack-law-20261016). The
+    // branch's repair unlinked whatever held the name first; on a scheduler
+    // path that is an automatic deletion of something this call did not
+    // make, which R4-06 refuses (AUT-05, `pull/tests/no_scheduler_delete.rs`).
+    // `create_new` refuses ANY entry at the name and never follows a link, so
+    // the probe writes only a file it made and removes only that file. A name
+    // already held (a link, or the file of a probe cut off before its
+    // removal) fails the probe by name and is left as it is for the operator
+    // (PREC-1, D-5408).
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|why| {
+            if why.kind() == std::io::ErrorKind::AlreadyExists {
+                std::io::Error::new(
+                    why.kind(),
+                    format!(
+                        "{why}: something already holds the probe's name (a link, or the \
+                         file of a probe cut off before its removal); the probe neither \
+                         writes through nor removes what it did not make, so it is left for \
+                         the operator"
+                    ),
+                )
+            } else {
+                why
+            }
+        })?;
     file.write_all(b"brutex write probe\n")?;
     // THE BYTES HAVE TO REACH THE DEVICE. A write that only reached the page
     // cache answers "the disk is fine" on a disk that is full, which is the one
@@ -1219,7 +1249,8 @@ pub enum Halt {
     /// bytes written under the store root, `sync_all`-ed and removed. See
     /// [`store_writable`] and [`STORE_PROBES`].
     Store,
-    /// The vendor's manifest exists and will not load.
+    /// The vendor's manifest exists and will not load, or loads with a legacy
+    /// drift that is not known to be none ([`refuse_drifted`], D-5402).
     ///
     /// Re-checkable for **free**: [`round`] already re-reads every census once
     /// per pass, so noticing that the file now loads is a comparison on data
@@ -2755,6 +2786,59 @@ pub(crate) fn manifest_of(
     })
 }
 
+/// Every loaded census whose legacy drift is not known to be none, refused for
+/// this round by name (CR-28, D-5402).
+///
+/// `drift` is `pull::ingest::census_store::legacy_drift` in production: the
+/// only warning that a writer built before version 4 filed months this census
+/// does not read, and since D-5402 also the answer for a migration receipt
+/// that cannot be read or names no length. A `Held` census with a drift answer
+/// becomes `Census::Unreadable` carrying the drift's own words, so [`survey`]
+/// halts that feed by name and nothing is fetched: resuming from a census
+/// that may miss held months re-pulls them at today's adjustment basis, the
+/// mechanism CR-05 named. An absent or unreadable census passes through
+/// unchanged, and a repaired drift revives the feed on the next pass through
+/// [`manifest_loads`], as a repaired manifest does.
+///
+/// # Cost
+///
+/// One `drift` call per loaded census, over the fixed vendor set; each reads
+/// one small receipt and asks the file system about at most three names, so
+/// O(1) in the store's size.
+#[must_use]
+pub(crate) fn refuse_drifted(
+    censuses: Vec<VendorCensus>,
+    drift: impl Fn(brutex_core::vendor::Vendor) -> Option<String>,
+) -> Vec<VendorCensus> {
+    censuses
+        .into_iter()
+        .map(|mut one| {
+            if matches!(one.state, Census::Held { .. })
+                && let Some(why) = drift(one.vendor)
+            {
+                one.state = Census::Unreadable {
+                    reason: format!(
+                        "the census loads, but whether it names every month the store holds \
+                         is not known: {why}"
+                    ),
+                    fault: crate::census::Fault::Refused,
+                };
+            }
+            one
+        })
+        .collect()
+}
+
+/// Every vendor's census under `root`, read once, with each one whose legacy
+/// drift is not known to be none refused by [`refuse_drifted`] (CR-28,
+/// D-5402). The one census read [`round`] makes per pass; a function of its
+/// own so `round` stays inside clippy's line bound (PREC-1, D-5407).
+fn trusted_censuses(root: &std::path::Path) -> Vec<VendorCensus> {
+    refuse_drifted(census::read_all(root), |vendor| {
+        pull::ingest::census_store::legacy_drift(root, vendor)
+    })
+}
+
 /// The first month at or after `hint` that this feed still owes work for.
 ///
 /// Scans upward and stops at the first incomplete month. The hint is monotone,
@@ -3196,8 +3280,9 @@ fn survey(
                     });
             if let Some(reason) = unreadable {
                 let why = format!(
-                    "{}'s manifest exists and will not load, so what the store holds \
-                     cannot be established and nothing is fetched against a guess: {reason}. \
+                    "{}'s manifest exists and will not load as a census this round can \
+                     trust, so what the store holds cannot be established and nothing is \
+                     fetched against a guess: {reason}. \
                      This build has no manifest reconstructor and will not invent one — \
                      rebuilding a census that has already failed a checksum is the wrong \
                      instinct. The file IS re-read on every pass, so a repair clears this by \
@@ -3555,7 +3640,9 @@ async fn round(
     };
     // ONE CENSUS READ PER PASS, not per cell. O(entries) once, against a pass
     // that takes minutes — the same bargain D-0039 struck for the site.
-    let censuses = census::read_all(&site.store_root);
+    // A CENSUS WHOSE DRIFT IS NOT KNOWN TO BE NONE STARTS NO PULL (CR-28,
+    // D-5402): it is refused here, before the survey resumes from it.
+    let censuses = trusted_censuses(&site.store_root);
 
     // THE DISK IS RE-CHECKED BEFORE THE FEEDS ARE SURVEYED, so a feed the probe
     // revives is surveyed on this pass rather than the next one.
@@ -5188,6 +5275,130 @@ mod tests {
                 report.halted
             );
         }
+    }
+
+    /// **A census whose legacy drift is not known to be none starts no pull**
+    /// (CR-28, D-5402). A migration receipt that cannot be read used to answer
+    /// "no drift", and the round resumed from a census that may not name every
+    /// held month, re-pulling those months at today's basis. Through
+    /// [`refuse_drifted`] the loaded census is refused by the drift's own
+    /// words, the survey halts the feed and chooses nothing, and the same
+    /// census with drift answered `None` is untouched and drives the round.
+    #[test]
+    fn a_census_whose_drift_is_not_known_starts_no_pull() {
+        let yesterday = day(2026, 8, 6);
+        let axis = [series("NIFTY")];
+        let mut feeds = drivable(yesterday);
+        let drift = "MIGRATED cannot be read (Permission denied)";
+        let held: Vec<VendorCensus> = feeds.iter().map(|f| held_census(f.vendor)).collect();
+
+        let clean = refuse_drifted(held.clone(), |_| None);
+        assert!(
+            clean.iter().all(|c| matches!(c.state, Census::Held { .. })),
+            "no drift leaves every census held"
+        );
+        let mut control = drivable(yesterday);
+        let (_, chosen) = survey(&mut control, &axis, &clean, yesterday);
+        assert!(chosen.is_some(), "the premise: a held census drives a pull");
+
+        let refused = refuse_drifted(held, |_| Some(drift.to_owned()));
+        let (reports, chosen) = survey(&mut feeds, &axis, &refused, yesterday);
+        assert!(chosen.is_none(), "no pull starts on a drift-unknown census");
+        assert!(
+            feeds
+                .iter()
+                .all(|f| f.halt_kind == Some(Halt::Census) && f.halted.is_some()),
+            "every such feed is halted on its census"
+        );
+        for report in &reports {
+            assert!(
+                report.halted.contains(drift) && report.halted.contains("is not known"),
+                "the drift's own words reach the page: {}",
+                report.halted
+            );
+        }
+
+        let others = [
+            census_of(feeds[0].vendor, Census::Absent),
+            census_of(
+                feeds[0].vendor,
+                Census::Unreadable {
+                    reason: String::from("entry 41 fails its own checksum"),
+                    fault: crate::census::Fault::Refused,
+                },
+            ),
+        ];
+        let passed = refuse_drifted(others.to_vec(), |_| Some(drift.to_owned()));
+        assert!(matches!(passed[0].state, Census::Absent));
+        assert!(matches!(
+            &passed[1].state,
+            Census::Unreadable { reason, .. } if reason == "entry 41 fails its own checksum"
+        ));
+    }
+
+    /// **The round's one census read asks the real drift check** (CR-28,
+    /// D-5402; PREC-1, D-5407). The test above hands [`refuse_drifted`] a
+    /// stand-in answer; this one drives [`trusted_censuses`], the call `round`
+    /// makes, over a store root a real GDFL census was recorded and migrated
+    /// into. With its migration receipt whole the census is held; with the
+    /// receipt unreadable it is refused, carrying the drift's own words, so
+    /// `survey` halts the feed on it as the test above shows.
+    #[test]
+    fn the_rounds_census_read_refuses_a_census_whose_migration_receipt_will_not_read() {
+        use brutex_core::vendor::Vendor;
+        use pull::ingest::census_store;
+        use pull::manifest::{Closes, Entry, EntryKey, Held};
+        let root = crate::scratch::path("autopilot-trusted-censuses");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a store root");
+        let held = |n: u32| {
+            Held::new(
+                Entry {
+                    key: EntryKey {
+                        contract: brutex_core::instrument::Contract::parse(&format!(
+                            "2019-12-26-{}-CE",
+                            1_000_000 + n * 100
+                        )),
+                        exchange: Exchange::Nse,
+                        segment: Segment::Fno,
+                        symbol: Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: store::path::Timeframe::SECOND_1,
+                        month: store::path::YearMonth::new(2019, 11).expect("a month"),
+                    },
+                    rows: 1,
+                    first_ts_micros: 10,
+                    last_ts_micros: 11,
+                },
+                Closes::UNKNOWN,
+            )
+        };
+        census_store::record(&root, Vendor::Gdfl, &[held(0)]).expect("recorded");
+        census_store::record(&root, Vendor::Gdfl, &[held(1)]).expect("recorded");
+        census_store::migrate(&root, Vendor::Gdfl).expect("it migrates");
+        let gdfl = |all: Vec<VendorCensus>| {
+            all.into_iter()
+                .find(|one| one.vendor == Vendor::Gdfl)
+                .expect("GDFL's census is read")
+        };
+        assert!(
+            matches!(gdfl(trusted_censuses(&root)).state, Census::Held { .. }),
+            "the premise: a migrated census whose receipt reads is held"
+        );
+
+        let receipt =
+            pull::manifest::vendor_dir(&root, Vendor::Gdfl).join(census_store::MIGRATION_RECEIPT);
+        std::fs::write(&receipt, [0xFF_u8, 0xFE, b'\n']).expect("the receipt is not UTF-8");
+        let refused = gdfl(trusted_censuses(&root));
+        let Census::Unreadable { reason, .. } = &refused.state else {
+            panic!("a census whose migration receipt will not read is refused, never held");
+        };
+        assert!(
+            reason.contains("is not known")
+                && reason.contains("MIGRATED")
+                && reason.contains("cannot be read"),
+            "the drift's own words are carried: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ------------------------------------------------------------- handlers
@@ -7266,6 +7477,64 @@ mod tests {
         // the file name carries the vendor precisely so two feeds probing in one
         // pass cannot remove each other's file and read that as a failure.
         store_writable(&occupied, "dhan").expect("a different vendor, a different path");
+    }
+
+    /// **THE WRITE PROBE NEVER WRITES THROUGH A LINK AT ITS NAME, AND REMOVES
+    /// NOTHING IT DID NOT MAKE** (cloud-attack-law-20261016, lens 4; PREC-1,
+    /// D-5408). It opened the name with `File::create`, which follows a symlink
+    /// and truncates its target: a file the link named, a store file among
+    /// them, was overwritten with the probe line and only the link was removed
+    /// afterwards. The branch's repair unlinked whatever held the name, an
+    /// automatic deletion R4-06 refuses on a scheduler path. Now a link, or a
+    /// file a cut-off probe left, fails the probe by name and is left exactly
+    /// as it was; once the name is free the probe writes, syncs and removes
+    /// only its own file.
+    #[test]
+    fn the_write_probe_never_writes_through_a_link_at_its_name() {
+        let root = crate::scratch::path("autopilot-probe-link");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a store root");
+        let outside = crate::scratch::path("autopilot-probe-link-victim");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("a directory outside the root");
+        let victim = outside.join("2025-05.bin");
+        std::fs::write(&victim, b"keep").expect("a file the link names");
+        let probe = root.join(format!("{STORE_PROBE_PREFIX}groww"));
+        std::os::unix::fs::symlink(&victim, &probe).expect("a link at the probe name");
+
+        let why = store_writable(&root, "groww").expect_err("a held probe name is refused");
+        assert!(
+            why.contains("already holds the probe's name") && why.contains(STORE_PROBE_PREFIX),
+            "the refusal names the probe and why: {why}"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("the victim is still there"),
+            b"keep",
+            "the probe wrote through the link"
+        );
+        assert!(
+            std::fs::symlink_metadata(&probe).is_ok_and(|meta| meta.file_type().is_symlink()),
+            "the link the probe did not make is left where it was"
+        );
+
+        // A FILE A CUT-OFF PROBE LEFT is refused the same way and kept byte
+        // for byte: the probe removes only what this call made.
+        std::fs::remove_file(&probe).expect("the operator removes the link");
+        std::fs::write(&probe, b"left by a probe cut off before its removal")
+            .expect("a leftover file");
+        let why = store_writable(&root, "groww").expect_err("a leftover is refused too");
+        assert!(why.contains("already holds the probe's name"), "{why}");
+        assert_eq!(
+            std::fs::read(&probe).expect("the leftover is kept"),
+            b"left by a probe cut off before its removal"
+        );
+
+        std::fs::remove_file(&probe).expect("the operator removes the leftover");
+        store_writable(&root, "groww").expect("a free name: the root takes a write");
+        assert!(
+            std::fs::symlink_metadata(&probe).is_err(),
+            "the probe removes the one file it made"
+        );
     }
 
     /// **A store-halted feed probes its own disk inside a real round, and a

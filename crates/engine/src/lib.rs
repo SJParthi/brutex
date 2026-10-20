@@ -886,12 +886,16 @@ pub const DEFAULT_CEILING: usize = 1 << 27;
 /// still cannot fire at the defaults — but the factor was wrong by two, and an
 /// arithmetic argument whose inputs do not match the constants it names is the
 /// same class of defect D-0302 built a gate for. Corrected by D-0304, which
-/// also records what nothing here says: **no production caller sets the
-/// ceiling at all.** `Ladder::with_ceiling` is called from tests and benches
-/// only, so every real run halts at a `DEFAULT_CEILING` sized in this file's
-/// own table against *"a 48 GB machine"* — a static assumption about hardware
-/// that the operator's machine may not share, deciding how far the ladder is
-/// allowed to walk before it stops enumerating combinations.
+/// also said no production caller sets the ceiling — **and D-0305 corrected
+/// that**: `cli` sets it on every ladder it builds (`BRUTEX_CEILING`, folded
+/// into the run identity), `cli::batch` passes `BATCH_CEILING`, and
+/// `runner::Sweeper` carries the configured ceiling into `runner::validate`.
+/// This paragraph kept D-0304's sentence after D-0305 withdrew it
+/// (cloud-attack-law-20261016). What survives: a run that sets no ceiling
+/// halts at a `DEFAULT_CEILING` sized in this file's own table against *"a 48
+/// GB machine"* — a static assumption about hardware that the operator's
+/// machine may not share, deciding how far the ladder is allowed to walk
+/// before it stops enumerating combinations.
 ///
 /// `engine::the_pair_budget_refuses_where_the_ceiling_cannot` proves the budget
 /// works; note that it must call `with_pair_budget(1)` to reach it. Nothing
