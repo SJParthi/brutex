@@ -796,5 +796,288 @@ fn note_filed(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    //! Mutant kills for [`merge`] (cloud mutation round, 2026-10-16). Every
+    //! price and quantity is invented.
+
+    use super::{CmRow, Print, merge};
+
+    const fn row(line: u32, sod: u32, ltp: i64, ltq: u64) -> CmRow {
+        CmRow {
+            line,
+            sod,
+            ltp,
+            ltq,
+        }
+    }
+
+    /// Only a row identical to the last print in ALL THREE of second, price
+    /// and quantity raises its count; a row differing in any one of them is
+    /// a new print, and the merged print keeps its FIRST row's line. Kills
+    /// each `&&` of the merge test read as `||` and each `==` read as `!=`.
+    #[test]
+    fn a_row_merges_only_when_second_price_and_quantity_all_match() {
+        let first = row(10, 55_687, 123_405, 7);
+        for (other, what) in [
+            (row(11, 55_688, 123_405, 7), "another second"),
+            (row(11, 55_687, 123_410, 7), "another price"),
+            (row(11, 55_687, 123_405, 8), "another quantity"),
+        ] {
+            let mut prints = Vec::new();
+            merge(&mut prints, first);
+            merge(&mut prints, other);
+            assert_eq!(prints.len(), 2, "{what} is a new print");
+            assert_eq!(
+                prints[1],
+                Print {
+                    sod: other.sod,
+                    price: other.ltp,
+                    quantity: other.ltq,
+                    rows: 1,
+                    line: 11,
+                },
+                "{what}"
+            );
+            assert_eq!(prints[0].rows, 1, "{what} leaves the first alone");
+        }
+        let mut prints = Vec::new();
+        merge(&mut prints, first);
+        merge(&mut prints, row(11, 55_687, 123_405, 7));
+        merge(&mut prints, row(12, 55_687, 123_405, 7));
+        assert_eq!(
+            prints,
+            [Print {
+                sod: 55_687,
+                price: 123_405,
+                quantity: 7,
+                rows: 3,
+                line: 10,
+            }],
+            "three identical rows are one print stated three times, its quantity never summed"
+        );
+    }
+
+    /// The count saturates rather than wrapping to zero.
+    #[test]
+    fn a_merged_count_saturates() {
+        let mut prints = vec![Print {
+            sod: 1,
+            price: 2,
+            quantity: 3,
+            rows: u32::MAX,
+            line: 4,
+        }];
+        merge(&mut prints, row(5, 1, 2, 3));
+        assert_eq!(prints[0].rows, u32::MAX);
+        assert_eq!(prints.len(), 1);
+    }
+
+    /// A directory where the month's sidecar belongs is refused by the
+    /// sidecar's own name, and nothing is written inside it. Invented share.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_directory_at_the_sidecar_name_is_refused_by_name() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarDir");
+        let key = super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+            .unwrap();
+        let day = super::Day::new(2026, 8, 4).unwrap();
+        let sidecar = super::path(&root, &key, day).unwrap();
+        std::fs::create_dir_all(&sidecar).unwrap();
+        let print = Print {
+            sod: 55_687,
+            price: 140_150,
+            quantity: 400,
+            rows: 1,
+            line: 3,
+        };
+        let why = match super::append(&root, &key, day, &[print]) {
+            Err(super::CmRefusal::AuctionSidecar { why }) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            why.starts_with(&format!("{}: ", sidecar.display())),
+            "{why}"
+        );
+        assert!(std::fs::read_dir(&sidecar).unwrap().next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A header that is not its version's own is refused in that version's
+    /// words: a version-1 header with a reserved byte set is named against
+    /// version 1's shape, a version-2 header with its checksum broken against
+    /// version 2's. Kills the message choice's `==` read as `!=`, which
+    /// swapped the two.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn a_bad_header_is_refused_in_its_own_versions_words() {
+        let mut first = super::header_of(super::VERSION_1);
+        first[12] = 1;
+        assert_eq!(
+            super::parse(&first).unwrap_err().why,
+            "the version-1 header is not BRTXAUC1 with 32-byte records and a zero reserved field"
+        );
+        let mut second = super::header_of(super::VERSION);
+        second[12] ^= 0xFF;
+        assert_eq!(
+            super::parse(&second).unwrap_err().why,
+            "the version-2 header's checksum does not match, or its record length is not 32"
+        );
+        // The premise: each header unbroken is read, with no record.
+        for version in [super::VERSION_1, super::VERSION] {
+            let read = super::parse(&super::header_of(version)).unwrap();
+            assert_eq!((read.version, read.records.len()), (version, 0));
+        }
+    }
+
+    /// Only a sidecar that is not there reads as no sidecar: one that cannot
+    /// be opened for another reason (a regular file where its directory
+    /// belongs) is refused naming the path. Kills the absence guard read as
+    /// `true`, which answered every open failure as an absent file.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn only_a_missing_sidecar_reads_as_none() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarRead");
+        assert!(matches!(super::read(&root.join("Absent.auc")), Ok(None)));
+        let file = root.join("File");
+        std::fs::write(&file, b"x").unwrap();
+        let under = file.join("Under.auc");
+        let refused = super::read(&under).unwrap_err();
+        assert_eq!(refused.ordinal, None);
+        assert!(
+            refused.why.starts_with(&format!("{}: ", under.display())),
+            "{}",
+            refused.why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A fresh sidecar's new directories are synced in their parents up to
+    /// the directory that already existed, and no higher: the store root is
+    /// synced (it holds the first directory the append made) and nothing
+    /// above it is. Kills the walk's `&&` read as `||`, which took every
+    /// existing ancestor up to `/` for a directory the append made.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn a_fresh_sidecar_syncs_no_directory_above_the_one_it_was_made_in() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarSync");
+        let key = super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+            .unwrap();
+        let day = super::Day::new(2026, 8, 4).unwrap();
+        let print = Print {
+            sod: 55_687,
+            price: 140_150,
+            quantity: 400,
+            rows: 1,
+            line: 3,
+        };
+        super::seam::SYNCED.with(|synced| synced.borrow_mut().clear());
+        super::append(&root, &key, day, &[print]).unwrap();
+        let synced = super::seam::SYNCED.with(|synced| synced.borrow().clone());
+        assert!(synced.contains(&root), "{synced:?}");
+        assert!(
+            synced.iter().all(|dir| dir.starts_with(&root)),
+            "{synced:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A sidecar lock another handle holds past the bound is refused once
+    /// the bound passes, naming it. Run on its own thread under a ten-second
+    /// watchdog, so a wait that never ends fails here instead of hanging the
+    /// run (the wait guard read as `true`).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_sidecar_lock_held_past_the_bound_is_refused_in_time() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarHeld");
+        let path = root.join("Held.auc");
+        std::fs::write(&path, b"").unwrap();
+        let holder = std::fs::File::open(&path).unwrap();
+        holder.lock().unwrap();
+        let (send, answer) = std::sync::mpsc::channel();
+        let at = path.clone();
+        std::thread::spawn(move || {
+            let file = std::fs::File::open(&at).unwrap();
+            let bound = std::time::Duration::from_millis(50);
+            let got = super::hold(&file, &at, super::Hold::Shared, bound).map(drop);
+            let _gone_when_the_test_ended = send.send(got);
+        });
+        let got = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("refused within ten seconds");
+        assert_eq!(
+            got,
+            Err("the lock is held by another reader or writer past 50 ms".to_owned())
+        );
+        holder.unlock().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A fresh sidecar whose directory can be written but not opened (mode
+    /// 0o300) is written and synced, and then the append refuses naming the
+    /// directory that was not synced: the record is on disk, its entry's
+    /// durability is not vouched for. Run where permission bits bind
+    /// (D-0995).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_sidecar_directory_that_cannot_be_synced_is_named() {
+        crate::support::where_permission_binds(
+            "gdfl_cm::auction::cloud_mutant_tests::a_sidecar_directory_that_cannot_be_synced_is_named",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = crate::gdfl_fixtures::scratch("CloudSidecarNoSync");
+                let key =
+                    super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+                        .unwrap();
+                let day = super::Day::new(2026, 8, 4).unwrap();
+                let path = super::path(&root, &key, day).unwrap();
+                let dir = path.parent().unwrap().to_path_buf();
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+                let print = Print {
+                    sod: 55_687,
+                    price: 140_150,
+                    quantity: 400,
+                    rows: 1,
+                    line: 3,
+                };
+                let refused = super::append(&root, &key, day, &[print]);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let why = match refused {
+                    Err(super::CmRefusal::AuctionSidecar { why }) => why,
+                    other => panic!("{other:?}"),
+                };
+                assert!(
+                    why.starts_with(&format!(
+                        "{}: written and synced, but its directory {} was not synced: ",
+                        path.display(),
+                        dir.display()
+                    )),
+                    "{why}"
+                );
+                let held = super::parse(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(held.records.len(), 1, "the record is on disk");
+                std::fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 #[path = "gdfl_cm_auction_v2_tests.rs"]
 mod v2_tests;

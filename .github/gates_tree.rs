@@ -2771,8 +2771,22 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
      writer_changed yes";
 
+// The cloud mutation pass over `crates/pull` (reports/cloud-mut-pull-20261017.md):
+// `proc` and `self` are the two directories of the Linux path
+// `/proc/self/status`, which `cash_session_cache`'s `read_limited` test reads
+// because procfs states a length of 0 for a file that yields more, the one
+// regular file that reaches the read's own length recheck. `08` is the month
+// field of the invented GDFL row date `04/08/2026` the closing-auction tests
+// of `pull/tests/cloud_mutants_import.rs` write, a `DD/MM/YYYY` the slash
+// splits; `msg` is the key of the telemetry JSON line one of them reads back.
+// `linux` is the `target_os` value of the `cfg` that compiles that procfs test
+// on Linux alone: macOS, the store's host, has no `/proc` (CLOUD-MUTPULL).
+// None names an account, an environment, a vendor credential or a field of a
+// parameter path.
+const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 70] = [
+const DECLARED: [&str; 71] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2843,6 +2857,7 @@ const DECLARED: [&str; 70] = [
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
     R4_07_LITERAL,
+    CLOUD_MUT_PULL_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
