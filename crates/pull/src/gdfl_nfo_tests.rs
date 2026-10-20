@@ -992,6 +992,11 @@ fn the_tick_store_and_the_zips_give_the_same_file() {
     assert_eq!(got.name, "NIFTY04APR2422000CE");
     assert_eq!(got.ticker.contract.as_str(), "2024-04-04-2200000-CE");
     assert_eq!(got.file.rows[0].oi, 300);
+    // The verified member travels with the decode (IA-3, design §5.1 seam
+    // 4): the bytes the rows came from, byte for byte, from either source.
+    assert_eq!(&*got.bytes, one.as_slice());
+    let from_zip = read_file(&zips, &from_zips, &from_zips.entries()[0]).unwrap();
+    assert_eq!(from_zip.bytes, got.bytes);
     // A day neither holds.
     assert!(store.day(day(2024, 4, 2)).unwrap().is_none());
     assert!(zips.day(day(2024, 4, 2)).unwrap().is_none());

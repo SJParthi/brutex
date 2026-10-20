@@ -1320,7 +1320,7 @@ The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
 
-## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-5903)
+## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-5904)
 
 §9 and D-0151 record that from 2026-08-03 every share an NSE index is
 computed from leaves continuous trading at 15:15 for the cash closing auction,
@@ -1337,7 +1337,7 @@ there, measured, not what NSE publishes about it.
 So the index **holds still from 15:15 until the auction's close is printed**
 on both feeds, every session of the auction era measured. R3-13 sets that
 window aside from the frozen-index flag as it sets a recorded halt aside
-(D-5903 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
+(D-5904 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
 recomputing the index, or computes it from constituents that no longer
 trade), and whether a session outside the measured span differs; no NSE page
 read here says either.

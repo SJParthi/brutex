@@ -626,9 +626,12 @@ const LEFT: [(&str, &str); 68] = [
         "imports/gdfl.dayflags",
         "4466ea7b57d0aaef4fab0a26ee4ee4921d97b205b730240a034a688e07377b0e",
     ),
+    // IA-3 (D-5903, DB-A49): every close now says what its listing was
+    // (`skipped=`, `entries=`, `listing=`); no other byte the runs leave
+    // moved, the months, the census and the day ledger included.
     (
         "imports/gdfl.journal",
-        "092de752457d5a24633f4ffb4c772e1ca82cf37a8bf251d34309a5a374b5f84d",
+        "faca81e53fe129e726c33aaf0a03e3222566878ab5a53280778d38aebc913e0c",
     ),
     // IA-2 (D-4803): the journal append lock every append takes, empty.
     (
