@@ -1382,6 +1382,55 @@ pub fn journal_path(root: &Path) -> PathBuf {
     root.join("audit").join("pull.journal")
 }
 
+/// How long one append to the pull journal (and its whole-note file) waits
+/// for the append lock another writer holds before it is refused: **1 s**
+/// (AG-06, code-5, FM-162; D-6244).
+///
+/// # Why a wait, and why this one
+///
+/// The lock was taken with `try_lock` and refused at once, so a run whose
+/// opening record met another writer's append ran with no opening record, and
+/// a process that died before the run's close left the restart scan
+/// answering "clean" (code-5). One append holds the lock for an open, a
+/// `stat`, one write, one `fsync` (`F_FULLFSYNC` on macOS) and the index
+/// catch-up: measured on a clone of the operator's 1.08 GB journal in
+/// `docs/06-limits.md` (AG-06 rows), uncontended p99 3.7 to 12.5 ms. One
+/// second is about eighty of those holds queued ahead of an append; it is also
+/// `store::flock`'s one ceiling ([`store::flock::MAX_PATIENCE`]), which cuts
+/// any longer bound, so it cannot be raised here alone. The wait is
+/// `store::flock`'s one loop: 1 ms doubling to [`store::flock::MAX_PAUSE`],
+/// so a lock freed a moment later is taken within a millisecond or two.
+///
+/// # What it does not cover
+///
+/// A from-scratch index build holds the same lock for the whole build (about
+/// 1.33 s per GiB, once per journal file, at the first start after the index
+/// is absent): an append that meets it waits this bound and is then refused,
+/// naming the holder ("doing the journal index build" when `build_index`
+/// runs it, "doing a pull audit journal append" when the build runs inside an
+/// append). Readers never take this lock, so no reader waits on this bound.
+/// `docs/06-limits.md` names both, and that a contended append blocks the
+/// thread that calls it for up to this bound.
+pub const APPEND_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+// A bound above the ceiling would be cut without a word, so it is refused at
+// compile time instead.
+const _: () = assert!(
+    APPEND_LOCK_WAIT.as_nanos() <= store::flock::MAX_PATIENCE.as_nanos(),
+    "APPEND_LOCK_WAIT above store::flock::MAX_PATIENCE would be cut silently"
+);
+
+/// What a journal append says it is doing while it holds the append lock, so
+/// an append it refuses names it through `store::flock::holder_note`.
+pub const APPEND_DOING: &str = "a pull audit journal append";
+
+/// What a whole-note append says it is doing while it holds the notes lock.
+pub const NOTE_DOING: &str = "a pull audit whole-note append";
+
+/// What `Journal::build_index` says it is doing while it holds the append
+/// lock for a whole from-scratch build.
+pub const INDEX_BUILD_DOING: &str = "the journal index build";
+
 impl Journal {
     /// The journal beneath a store root.
     #[must_use]
@@ -1509,7 +1558,7 @@ impl Journal {
     ///
     /// As [`Self::append`]: the opening record did not reach the journal.
     pub fn open_run(&self, head: &Record) -> Result<Thread, String> {
-        self.appended_images(|_ordinal| head.image().to_vec())
+        self.appended_images(head, |_ordinal| head.image().to_vec())
             .map(|first| Thread {
                 head: head.clone(),
                 first,
@@ -1596,7 +1645,7 @@ impl Journal {
         let note = format!("{}; late", head.note);
         late.note = keep(&note, NOTE_CAPACITY);
         late.note_bytes = saturating_len(&note);
-        self.appended_images(|_ordinal| {
+        self.appended_images(record, |_ordinal| {
             let mut out = Vec::with_capacity(2 * RECORD_LEN);
             out.extend_from_slice(&late.image());
             out.extend_from_slice(&record.image());
@@ -1619,7 +1668,7 @@ impl Journal {
     ) -> Result<(), String> {
         let mut written = 1u64;
         let first = self
-            .appended_images(|ordinal| {
+            .appended_images(record, |ordinal| {
                 let mut out = Vec::with_capacity(2 * RECORD_LEN);
                 let mut at = ordinal;
                 if ordinal != thread.last.saturating_add(1) {
@@ -1664,7 +1713,7 @@ impl Journal {
     fn appended(&self, record: &Record, whole: Option<&str>) -> Result<(), String> {
         // THE WHOLE NOTE FIRST, while this journal's lock fixes the ordinal the
         // record will have. Only for a member failure whose note was cut.
-        self.appended_images(|ordinal| {
+        self.appended_images(record, |ordinal| {
             self.with_whole_note(record, whole, ordinal)
                 .image()
                 .to_vec()
@@ -1681,10 +1730,32 @@ impl Journal {
     /// Its bytes are one `write_all`: a failed or short write is rolled back to
     /// the length measured under the lock, all of it.
     ///
+    /// `what` is the record the refusal names when the lock cannot be taken
+    /// within [`APPEND_LOCK_WAIT`].
+    ///
     /// # Errors
     ///
     /// As [`Self::append`].
-    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {
+    fn appended_images(
+        &self,
+        what: &Record,
+        build: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<u64, String> {
+        self.appended_within(APPEND_LOCK_WAIT, what, build)
+    }
+
+    /// [`Self::appended_images`] with the lock wait `bound` given, so a test
+    /// can drive a zero bound and a short one without waiting the real one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`].
+    fn appended_within(
+        &self,
+        bound: std::time::Duration,
+        what: &Record,
+        build: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<u64, String> {
         let named =
             |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", self.path.display());
         // ONE LEVEL, NEVER THE ROOT. `create_dir_all` made every missing
@@ -1712,7 +1783,16 @@ impl Journal {
         // success path once the record is synced: closing the descriptor would
         // leave the lock alive on any duplicate a child spawned by another
         // thread still holds (D-0693).
-        let mut file = Flock::try_lock(
+        //
+        // A BOUNDED WAIT, NOT A REFUSAL AT ONCE (AG-06, code-5, FM-162;
+        // D-6244). Another writer's append holds this lock for milliseconds;
+        // refusing at once lost the record it met, a run's opening record
+        // among them. The wait loop, the queue in this process and the
+        // registry that names the holder are `store::flock`'s, one each; past
+        // the bound the refusal names the bound (as cut by the ceiling), the
+        // record, and the holder in `store::flock::holder_note`'s words.
+        let bound = bound.min(store::flock::MAX_PATIENCE);
+        let mut file = Flock::try_lock_patiently(
             std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
@@ -1720,16 +1800,32 @@ impl Journal {
                 .open(&self.path)
                 .map_err(|e| named("cannot open the journal", &e))?,
             self.path.as_path(),
+            bound,
+            APPEND_DOING,
         )
         .map_err(|e| {
             format!(
-                "{}: cannot take the journal append lock; another writer may be appending, so this record was refused rather than interleaved — {e}",
-                self.path.display()
+                "{}: cannot take the journal append lock for a {} record ({}) within its {} ms bound (APPEND_LOCK_WAIT): {e}; so this record was refused rather than interleaved",
+                self.path.display(),
+                what.kind.label(),
+                what.outcome.label(),
+                bound.as_millis(),
             )
         })?;
         let meta = file
             .metadata()
             .map_err(|e| named("cannot measure the locked journal", &e))?;
+        // THE FILE LOCKED MUST STILL BE THE JOURNAL. The wait widened the
+        // moment between `open` and the lock from nothing to up to the bound:
+        // a journal moved aside or replaced in it leaves this descriptor on a
+        // file nobody reads, and an append there would be a record lost
+        // behind a success. One `stat`, refused by name (AG-06).
+        if !same_file(&meta, &self.path) {
+            return Err(named(
+                "the journal at this path was replaced or moved while this append waited for its lock, so the locked file is no longer the journal; refused rather than appended where no reader looks",
+                &std::io::Error::other("its device and inode differ from the path's"),
+            ));
+        }
         let bytes = meta.len();
         let torn = bytes % RECORD_LEN_U64;
         if torn != 0 {
@@ -1741,13 +1837,7 @@ impl Journal {
         }
         let first = bytes / RECORD_LEN_U64;
         let images = build(first);
-        write_rolled_back(
-            &mut file,
-            &self.path,
-            bytes,
-            &images,
-            std::io::Write::write_all,
-        )?;
+        write_rolled_back(&mut file, &self.path, bytes, &images, journal_write)?;
         file.sync_all()
             .map_err(|e| named("the record was written and not synced", &e))?;
         // THE RECORD IS DURABLE FROM HERE, SO NOTHING BELOW MAY REFUSE THE
@@ -1795,7 +1885,7 @@ impl Journal {
     fn append_note(&self, ordinal: u64, whole: &str) -> Result<u64, String> {
         let path = self.notes_path();
         let named = |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", path.display());
-        let mut file = Flock::try_lock(
+        let mut file = Flock::try_lock_patiently(
             std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
@@ -1803,11 +1893,14 @@ impl Journal {
                 .open(&path)
                 .map_err(|e| named("cannot open the notes file", &e))?,
             path.as_path(),
+            APPEND_LOCK_WAIT,
+            NOTE_DOING,
         )
         .map_err(|e| {
             format!(
-                "{}: cannot take the notes append lock — {e}",
-                path.display()
+                "{}: cannot take the notes append lock within its {} ms bound (APPEND_LOCK_WAIT) — {e}",
+                path.display(),
+                APPEND_LOCK_WAIT.as_millis()
             )
         })?;
         let at = file
@@ -1950,6 +2043,29 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// The journal record write: `write_all`, and under `cfg(test)` a one-shot
+/// per-thread refusal first when a test armed one, because no developer's
+/// disk fills on request and the disk-full arm after a patiently taken lock
+/// must still be driven (AG-06).
+fn journal_write(file: &mut std::fs::File, image: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(kind) = lock_wait_tests::take_write_refusal() {
+        return Err(std::io::Error::new(
+            kind,
+            "write refused by the audit test seam",
+        ));
+    }
+    std::io::Write::write_all(file, image)
+}
+
+/// Whether `path` still names the file `locked` was measured from: one
+/// `stat`, compared by device and inode. A path that cannot be measured is
+/// not the same file.
+fn same_file(locked: &std::fs::Metadata, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).is_ok_and(|now| (now.dev(), now.ino()) == (locked.dev(), locked.ino()))
 }
 
 /// Writes `image` at the end of a journal that held exactly `at` bytes under
@@ -2507,7 +2623,11 @@ pub(crate) struct Indexed {
     /// lies (DB-B34: a run record damaged before the index was built is
     /// filed here and not under `runs`).
     pub(crate) fault_ordinals: Vec<u64>,
-    /// Index entries that would not decode, skipped.
+    /// Index entries that would not decode — in `runs` or in `faults` — each
+    /// one a run or a fault the index can no longer show. A reader that finds
+    /// any walks the journal instead and says why (`pullrun::older_runs`,
+    /// `audit_json::attribution`, and since D-5410 `dayflags::trusted_index`
+    /// for the pull refusals of `/dayflags.json` and `/ingest`).
     pub(crate) malformed: u64,
 }
 
@@ -2721,6 +2841,34 @@ impl Batch {
 /// Appends `bytes` to `path` and syncs it; nothing for nothing.
 fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
+    append_synced_with(path, bytes, |file, raw| {
+        file.write_all(raw).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`append_synced`] through `write`, the seam a test injects a short write
+/// at.
+///
+/// # A failed append is rolled back (PG-71, D-5401)
+///
+/// An index file is a run of fixed-size entries read with `chunks_exact`, so a
+/// short write — a full disk mid-entry — left a fragment that shifted every
+/// entry appended after it off its frame: each later entry then read as
+/// malformed and every reader walked the journal for good. The length is
+/// measured before the write, under the journal's append lock every caller
+/// holds, and a failed or short write is truncated back to it, as
+/// [`write_rolled_back`] does for a record. Only bytes this call wrote are
+/// removed. When the truncation fails too, both errors are named, and a
+/// reader counts what no longer decodes into `malformed` and walks.
+///
+/// # Errors
+///
+/// The directory, open, measure, write or sync, in the failure's own words.
+fn append_synced_with(
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -2733,9 +2881,26 @@ fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .create(true)
         .open(path)
         .map_err(|e| format!("{}: cannot open — {e}", path.display()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| format!("{}: cannot append an index entry — {e}", path.display()))
+    let at = file
+        .metadata()
+        .map_err(|e| format!("{}: cannot measure — {e}", path.display()))?
+        .len();
+    let Err(e) = write(&mut file, bytes) else {
+        return Ok(());
+    };
+    Err(match file.set_len(at) {
+        Ok(()) => format!(
+            "{}: cannot append an index entry — {e}; its partial bytes were truncated back to \
+             {at} bytes, so every whole entry before them stays on its frame",
+            path.display()
+        ),
+        Err(and) => format!(
+            "{}: cannot append an index entry — {e}; truncating its partial bytes back to {at} \
+             bytes also failed: {and}; a reader counts what no longer decodes as malformed and \
+             walks the journal",
+            path.display()
+        ),
+    })
 }
 
 /// Writes the cover: `covered` records indexed. In place, one 16-byte write.
@@ -2860,11 +3025,18 @@ impl Journal {
         out.runs.sort_by_key(|run| run.0);
         out.runs.dedup_by_key(|run| run.0);
         let faults = read_or_empty(&dir.join("faults"))?;
-        let mut fault_ordinals: Vec<u64> = faults
-            .chunks_exact(ORDINAL_ENTRY)
-            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_FAULT))
-            .filter(|ordinal| *ordinal < covered)
-            .collect();
+        // A FAULT ENTRY THAT WILL NOT READ IS COUNTED, NEVER DROPPED: it was a
+        // `filter_map`, so a damaged `faults` file under-reported the very
+        // records that would not decode — corruption hidden by corruption
+        // (CLAUDE.md section 4; cloud-attack-law-20261016).
+        let mut fault_ordinals: Vec<u64> = Vec::new();
+        for chunk in faults.chunks_exact(ORDINAL_ENTRY) {
+            match read_ordinal_entry(chunk, MARK_FAULT) {
+                Some(ordinal) if ordinal < covered => fault_ordinals.push(ordinal),
+                Some(_) => {}
+                None => out.malformed = out.malformed.saturating_add(1),
+            }
+        }
         fault_ordinals.sort_unstable();
         fault_ordinals.dedup();
         out.faults = as_u64(fault_ordinals.len());
@@ -2878,17 +3050,30 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// The file is there and cannot be read.
+    /// The file is there and cannot be read, or one of its entries is not a
+    /// refusal entry (a mark or checksum that does not match): a refusal the
+    /// index lost is named, never answered as a shorter history. It was a
+    /// `filter_map` that dropped the entry (cloud-attack-law-20261016).
     pub(crate) fn refusal_ordinals(&self, source: &str, covered: u64) -> Result<Vec<u64>, String> {
         let Some(name) = source_file(source) else {
             return Ok(Vec::new());
         };
-        let bytes = read_or_empty(&self.index_dir().join("refusals").join(name))?;
-        let mut out: Vec<u64> = bytes
-            .chunks_exact(ORDINAL_ENTRY)
-            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_REFUSAL))
-            .filter(|ordinal| *ordinal < covered)
-            .collect();
+        let path = self.index_dir().join("refusals").join(name);
+        let bytes = read_or_empty(&path)?;
+        let mut out: Vec<u64> = Vec::new();
+        for (entry, chunk) in bytes.chunks_exact(ORDINAL_ENTRY).enumerate() {
+            match read_ordinal_entry(chunk, MARK_REFUSAL) {
+                Some(ordinal) if ordinal < covered => out.push(ordinal),
+                Some(_) => {}
+                None => {
+                    return Err(format!(
+                        "{}: entry {entry} is not a refusal entry (its mark or checksum does \
+                         not match), so no refusal is read from this index",
+                        path.display()
+                    ));
+                }
+            }
+        }
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -2938,7 +3123,17 @@ impl Journal {
             }
             Err(e) => return Err(format!("{}: {e}", self.path.display())),
         };
-        let Ok(locked) = Flock::try_lock(file, self.path.as_path()) else {
+        // NAMED WHILE IT BUILDS, so an append that waits out its bound behind
+        // a long build says what it waited for: a zero bound keeps the old
+        // `try_lock` answer (busy at once when anyone holds or awaits the
+        // lock), and the guard registers the build in `store::flock`'s one
+        // registry while it holds it (AG-06).
+        let Ok(locked) = Flock::try_lock_patiently(
+            file,
+            self.path.as_path(),
+            std::time::Duration::ZERO,
+            INDEX_BUILD_DOING,
+        ) else {
             return Ok(IndexBuilt {
                 busy: true,
                 ..IndexBuilt::default()
@@ -3133,6 +3328,26 @@ fn note_index(path: &Path, outcome: &Result<IndexBuilt, String>) {
     let _dropped_when_filtered =
         telemetry::emit(&event.with("path", telemetry::Value::Str(&shown)));
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+#[path = "audit_lock_wait_tests.rs"]
+mod lock_wait_tests;
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::print_stdout
+)]
+#[path = "audit_lock_wait_measure.rs"]
+mod lock_wait_measure;
 
 #[cfg(test)]
 #[allow(
@@ -4399,9 +4614,9 @@ mod tests {
     fn nothing_after_the_sync_can_refuse_an_append() {
         let body = include_str!("audit.rs")
             .split_once(
-                "    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {\n",
+                "        build: impl FnOnce(u64) -> Vec<u8>,\n    ) -> Result<u64, String> {\n        let named =",
             )
-            .expect("`appended_images` is in this file")
+            .expect("`appended_within`, the body of `appended_images`, is in this file")
             .1
             .split_once("\n    }\n")
             .expect("`appended` ends")
@@ -4942,6 +5157,238 @@ mod tests {
         let caught = journal.build_index().unwrap();
         assert_eq!((caught.records, caught.faults), (1, 1));
         assert_eq!(journal.read_index(3).unwrap().faults, 1);
+    }
+
+    /// **A DAMAGED FAULT OR REFUSAL ENTRY IS COUNTED OR REFUSED, NEVER
+    /// DROPPED** (cloud-attack-law-20261016, lens 2). Both were a
+    /// `filter_map`: a flipped `faults` entry made `faults` read 0 over a
+    /// journal holding a record that will not decode, and a flipped refusal
+    /// entry answered a member's refusal history one record short.
+    #[test]
+    fn a_damaged_fault_or_refusal_entry_is_counted_or_refused_not_dropped() {
+        let root = scratch("audit-index-damaged-entries");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member("ZZOIL", "refused: fixture"))
+            .unwrap();
+        let mut broken = member("ZZOIL", "refused: broken").image();
+        broken[60] ^= 0xff;
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&broken);
+        std::fs::write(&journal.path, &bytes).unwrap();
+        journal.build_index().unwrap();
+        let whole = journal.read_index(3).unwrap();
+        assert_eq!((whole.faults, whole.malformed), (1, 0));
+        assert_eq!(journal.refusal_ordinals("ZZOIL", 3).unwrap(), vec![1]);
+
+        let faults = journal.index_dir().join("faults");
+        let mut image = std::fs::read(&faults).unwrap();
+        assert_eq!(image.len(), ORDINAL_ENTRY, "one fault, one entry");
+        image[0] ^= 0xff;
+        std::fs::write(&faults, &image).unwrap();
+        let damaged = journal.read_index(3).unwrap();
+        assert_eq!(
+            (damaged.faults, damaged.malformed),
+            (0, 1),
+            "the lost fault entry is counted, so a reader walks instead"
+        );
+
+        let refusals = journal
+            .index_dir()
+            .join("refusals")
+            .join(source_file("ZZOIL").unwrap());
+        let mut image = std::fs::read(&refusals).unwrap();
+        assert_eq!(image.len(), ORDINAL_ENTRY, "one refusal, one entry");
+        image[3] ^= 0xff;
+        std::fs::write(&refusals, &image).unwrap();
+        let refused = journal.refusal_ordinals("ZZOIL", 3).unwrap_err();
+        assert!(refused.contains("is not a refusal entry"), "{refused}");
+        assert!(refused.contains("ZZOIL.idx"), "{refused}");
+    }
+
+    /// **A FAULT ENTRY AT OR PAST THE COVER IS NOT COUNTED** (PREC-1, D-5409).
+    /// An append lands its index entries first and moves the cover after, so
+    /// a crash between the two leaves a `faults` entry the cover does not
+    /// reach yet. `read_index` counts a `faults` entry only below the cover,
+    /// as it reads a `runs` entry: the record at the cover's own ordinal is
+    /// the next one, not yet covered. Two mutants of that guard (`<` read as
+    /// `<=`, and the guard dropped) survived every test before this one.
+    #[test]
+    fn a_fault_entry_at_or_past_the_cover_is_not_counted() {
+        let root = scratch("audit-index-fault-past-cover");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member("ZZOIL", "refused: fixture"))
+            .unwrap();
+        let mut broken = member("ZZOIL", "refused: broken").image();
+        broken[60] ^= 0xff;
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&broken);
+        std::fs::write(&journal.path, &bytes).unwrap();
+        journal.build_index().unwrap();
+        let whole = journal.read_index(3).unwrap();
+        assert_eq!(
+            (whole.faults, whole.fault_ordinals.clone(), whole.malformed),
+            (1, vec![2], 0),
+            "the premise: the broken record is the fault at ordinal 2"
+        );
+        // The crash shape: the entry for ordinal 2 landed, the cover still
+        // says 2 records.
+        write_cover(&journal.index_dir(), 2).unwrap();
+        let short = journal.read_index(3).unwrap();
+        assert_eq!(
+            (
+                short.covered,
+                short.faults,
+                short.fault_ordinals.clone(),
+                short.malformed
+            ),
+            (2, 0, Vec::<u64>::new(), 0),
+            "a fault at the cover's own ordinal is not below it"
+        );
+    }
+
+    /// **A SHORT INDEX APPEND IS TRUNCATED BACK, SO NO LATER ENTRY IS OFF ITS
+    /// FRAME** (PG-71's root cause, D-5401). `append_synced` wrote and synced
+    /// with nothing undone on failure: half a run entry left by a full disk
+    /// stayed in `runs`, the next batch was appended after it, and from then on
+    /// `chunks_exact` read every later entry across two — each counted
+    /// malformed, so every reader walked the journal for good. The short write
+    /// is injected through the same seam production writes through.
+    #[test]
+    fn a_short_index_append_is_truncated_back_and_the_next_entry_stays_on_its_frame() {
+        use std::io::Write as _;
+        let root = scratch("audit-index-short-append");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        let runs = journal.index_dir().join("runs");
+        let before = std::fs::read(&runs).unwrap();
+        assert_eq!(before.len(), RUN_ENTRY, "the premise: one run, one entry");
+
+        let entry = run_entry(1, 2_000, Some(brutex_core::vendor::Vendor::Zerodha));
+        let refused = append_synced_with(&runs, &entry, |file, raw| {
+            file.write_all(raw.get(..RUN_ENTRY / 2).unwrap_or(raw))?;
+            Err(std::io::Error::other("injected: no space left mid-entry"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            std::fs::read(&runs).unwrap(),
+            before,
+            "the fragment is gone and the whole entry before it is untouched"
+        );
+        assert!(refused.contains("injected"), "{refused}");
+        assert!(
+            refused.contains("truncated back to 32 bytes"),
+            "the rollback is named: {refused}"
+        );
+
+        append_synced(&runs, &entry).unwrap();
+        let bytes = std::fs::read(&runs).unwrap();
+        assert_eq!(bytes.len(), 2 * RUN_ENTRY, "the next entry is whole");
+        assert!(
+            bytes
+                .chunks_exact(RUN_ENTRY)
+                .all(|chunk| read_run_entry(chunk).is_some()),
+            "every entry decodes on its own frame"
+        );
+    }
+
+    /// **A ROLLBACK THAT FAILS TOO IS NAMED, AND THE FRAGMENT IT LEAVES IS
+    /// COUNTED, NEVER READ PAST** (PG-71, D-5401; PREC-1). When the truncation
+    /// back fails as well — here the handle is swapped for a read-only one,
+    /// which `set_len` refuses — the refusal names both errors and does not
+    /// claim the fragment is gone. The next entry then lands after the
+    /// fragment, off its frame, and `read_index` counts what no longer decodes
+    /// into `malformed`, so every reader walks the journal and says why
+    /// instead of answering a shorter history; the whole entry before the
+    /// fragment still reads.
+    #[test]
+    fn a_short_index_append_whose_rollback_fails_is_named_and_counted_malformed() {
+        use std::io::Write as _;
+        let root = scratch("audit-index-rollback-fails");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        let runs = journal.index_dir().join("runs");
+        assert_eq!(
+            std::fs::read(&runs).unwrap().len(),
+            RUN_ENTRY,
+            "the premise: one run, one entry"
+        );
+        assert_eq!(
+            journal.read_index(1).unwrap().malformed,
+            0,
+            "the premise: a whole index"
+        );
+
+        let entry = run_entry(1, 2_000, Some(brutex_core::vendor::Vendor::Zerodha));
+        let refused = append_synced_with(&runs, &entry, |file, raw| {
+            file.write_all(raw.get(..RUN_ENTRY / 2).unwrap_or(raw))?;
+            *file = std::fs::File::open(&runs)?;
+            Err(std::io::Error::other("injected: no space left mid-entry"))
+        })
+        .unwrap_err();
+        assert!(refused.contains("injected"), "{refused}");
+        assert!(
+            refused.contains("truncating its partial bytes back to 32 bytes also failed"),
+            "both failures are named: {refused}"
+        );
+        assert!(
+            refused.contains("counts what no longer decodes as malformed"),
+            "the refusal says what a reader does next: {refused}"
+        );
+        assert_eq!(
+            std::fs::read(&runs).unwrap().len(),
+            RUN_ENTRY + RUN_ENTRY / 2,
+            "the fragment stays, and nothing said it was removed"
+        );
+
+        append_synced(&runs, &entry).unwrap();
+        let indexed = journal.read_index(1).unwrap();
+        assert_eq!(
+            indexed.malformed, 1,
+            "the entry read across the fragment is counted, so a reader walks"
+        );
+        assert_eq!(
+            indexed.runs.len(),
+            1,
+            "the whole entry before the fragment still reads"
+        );
+    }
+
+    /// **`append_synced`'s cost per entry, measured** (PREC-1, D-5401). The
+    /// rollback adds one `fstat` to each index-file append; the write and its
+    /// `sync_all` were already there. n = 400 one-entry appends, each opened,
+    /// measured, written and synced: p50, p99 and max are printed, the file
+    /// is exactly 400 whole entries, and the p99 is held under 250 ms, the
+    /// bound a device's sync stays inside (`docs/06-limits.md` L-PREC1-03).
+    #[test]
+    #[ignore = "a timing measurement of a synced append: run on demand (docs/06-limits.md L-PREC1-03)"]
+    fn append_synced_cost_per_entry_is_measured() {
+        let root = scratch("audit-append-timing");
+        let path = root.join("timing").join("runs");
+        let entry = run_entry(1, 2_000, None);
+        let mut micros: Vec<u128> = Vec::with_capacity(400);
+        for _ in 0..400 {
+            let started = std::time::Instant::now();
+            append_synced(&path, &entry).unwrap();
+            micros.push(started.elapsed().as_micros());
+        }
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            400 * 32,
+            "every append landed whole"
+        );
+        micros.sort_unstable();
+        let at = |q: usize| micros.get(399 * q / 100).copied().unwrap_or(u128::MAX);
+        let max = micros.last().copied().unwrap_or(u128::MAX);
+        eprintln!(
+            "append_synced n=400 p50={}us p99={}us max={max}us",
+            at(50),
+            at(99)
+        );
+        assert!(at(99) < 250_000, "p99 {}us", at(99));
     }
 
     /// **AN INDEX ENTRY IS ITS OWN, BY MARK AND CHECKSUM**: a run entry and an

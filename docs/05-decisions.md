@@ -74618,3 +74618,1255 @@ or promotion over a month whose `.lock` a retirement removed would be refused
 for want of the lock (`repair::publish`, `generation::promote` take it shared);
 retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
 teach those two that a sealed source needs none. Sealing itself is SC-6's.
+
+### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
+
+**What was observed.** `Header::read_region` decodes each of the `MAX_SLOTS`
+slot positions and keeps the valid slot with the highest generation; a slot
+that is "empty, stale, half-written, corrupt or in the wrong position is simply
+not a candidate". A newest slot whose checksum fails therefore made the month
+open at the older generation, every record the lost commit counted unreadable,
+with `Ok` and no line at all: `note_header_fell_back` fires only when the
+newest slot DECODED and then failed `Header::validate`. `BarFile::validated`'s
+`claimed > n_valid` refusal does not see it either, because `highest_claim`
+counts only slots that decode. `cli::stored::load` reads through `BarFile`, so
+a backtest would have read the shorter month silently.
+
+**Decided.**
+1. `store::header::slot_audit(region, file_len) -> SlotAudit`: one
+   `SlotState` per position read — `Empty`, `Valid { generation }`,
+   `Damaged { reason, generation }` — and a `MonthVerdict`: `Clean`,
+   `Damaged` (a slot whose verified generation is older than the one read:
+   nothing lost), `Reverted` (newer, or of unknown generation: possibly lost)
+   or `Unreadable(FormatError)` (the read refuses). `SlotDamage` is
+   `Truncated`, `Erased` or `Refused(FormatError)`, and `SlotDamage::name`
+   gives one stable word: `crc`, `magic`, `version`, `stride`,
+   `wrong_position`, `beyond_file_len`, `timestamps_out_of_order`, `reserved`,
+   `flags`, `checksums_required`, `truncated`, `erased`, else `refused`. It is
+   public and its signature is stable, so that PROVEN-GATE can call it over
+   every month file an admitted day reads; that call is PROVEN-GATE's own and
+   does not exist at this commit (R4-09a builds no gate).
+2. It reads exactly the `MAX_SLOTS` positions `read_region` reads and audits
+   against the generation `read_region` selects, found by the same search; it
+   selects, writes, repairs and emits nothing.
+3. **The selection is unchanged.** `read_region` returns the same header for
+   every input, the crash-table cases included; `Header::read_region_at(region,
+   file_len, path)` is the same read returning the audit beside the header,
+   and `BarFile` keeps it from the region it already read
+   (`BarFile::slot_audit`), so no reader reads the region twice.
+4. Every read whose verdict is `Damaged` or `Reverted` writes ONE
+   `store.header.slot_damaged` line at `Error` (so the audit stream keeps it)
+   with `verdict`, `slot`, `reason`, `chosen_generation`, `file_len`, `why`,
+   `damaged_generation` when verified, and `path` when the caller has one
+   (`BarFile` does). A clean read, a first-commit read and an unreadable
+   region (which keeps its own `no committed header` line) write none. A
+   newest slot that decoded but counts records past the file's end
+   (`beyond_file_len`) writes this line beside the existing `Warn` fall-back
+   line: the fall-back line says the read walked back, this one names the slot
+   and keeps it in the audit stream. No new crate arrow (`core telemetry <-
+   store`).
+
+**Cost.** O(1) per read: `MAX_SLOTS` (two) 64-byte decodes and checksums
+beyond the selection, independent of the region and the file. C-HA-01 holds it
+flat at 1x, 10x and 100x the region; `docs/06-limits.md` L-HA-01 has the
+per-call numbers. **Proof.** `crates/store/tests/slot_audit.rs`,
+`crates/store/tests/slot_damaged_log.rs`, `store::header::audit_tests`,
+`store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`.
+Invariants HA-01 to HA-04, C-HA-01.
+
+### D-6241 — A damaged slot's generation is read only from a slot whose own checksum verified it; an unknown one beside the generation read is a revert, never clean (R4-09a) — 2026-10-18
+
+**What was observed.** The checksum covers every byte of a slot except its own
+four. When it fails, nothing in the format says which bytes are the commit's:
+a torn write leaves a mix of the old and the new image, a bit flip leaves the
+old one damaged, and both read as a plausible generation field.
+
+**Decided.**
+1. A `Damaged` slot carries `generation: Some(g)` only when `Header::decode`
+   accepted it — magic, a version this build knows, its own checksum, stride,
+   reserved tail and flags — and it then failed only the position rule or
+   `Header::validate`. In every other case the generation is `None`. It is
+   never read from bytes the checksum did not vouch for.
+2. Position does not order it either: slot position is `generation %
+   slot_count`, and with two slots `g - 1` and `g + 1` share a parity. So a
+   `None` beside the generation read makes the month `Reverted` with
+   `damaged_generation: None` ("possibly reverted"), never `Clean`. A
+   verified generation equal to or above the one read is `Reverted` too; only
+   a verified generation below it is `Damaged`.
+3. All 64 bytes zero is `Empty` at a position no committed generation has
+   reached, and `Erased` (generation unknown, so `Reverted`) at a position the
+   generation read proves was written: generations are consecutive from zero
+   (`Header::genesis`, `Header::advance`), so generation `p` was the first to
+   land on position `p`, and any read generation at or above `p` proves it.
+   A slot with any non-zero byte that fails to decode is damage, never empty.
+
+**Cost.** None beyond D-6240. **Proof.**
+`slot_audit::every_single_bit_flip_in_the_newest_slot_is_named_and_never_moves_the_read`,
+`slot_audit::a_newest_slot_torn_at_every_prefix_is_named_and_the_older_header_is_returned`,
+`slot_audit::a_zeroed_slot_the_generation_proves_was_written_is_erased`,
+`store::header::audit_tests`. Invariant HA-02.
+
+### D-6242 — `cli census-recount` names every month whose header slot audit is not clean, by path and reason; a reverted month offers no row and closes no day (R4-09a) — 2026-10-18
+
+**What was observed.** The recount rebuilds census rows from each month
+file's committed header. A month that silently reverted would have been
+recorded at the OLDER generation's count — writing the loss into the census,
+where the importer's later header-against-census check could no longer see it —
+and its import days closed as counted.
+
+**Decided.**
+1. `pull::census_store::recount` keeps `BarFile::slot_audit` for every month
+   file in range and lists EVERY non-clean one in `Recount::slot_damaged`,
+   with its audit, in walk order. The receipt prints a count line
+   (`header slot damage  N month(s), R reverted to an older generation (not
+   recorded, no day closed)`) and one line per month, `<path>:
+   <SlotAudit::describe>`, all of them: no "and N more", because the month an
+   operator is looking for is exactly the one a cap would hide.
+2. A `Reverted` month offers no row and its month joins
+   `Recount::months_unreadable`, so none of its days is closed. A `Damaged`
+   month (an older slot damaged, nothing lost) offers its row. Either makes
+   `Recount::clean` false, so the verb exits FAILED.
+3. Nothing here repairs or rewrites a header. Recovery is the operator's store
+   step with a yes (R3-20, or R4-09's importer re-import of a reverted month).
+
+**Cost.** None beyond D-6240: the audit is the one `BarFile` took at open; the
+walk stays one header read and two record reads per month. **Proof.**
+`cli::census_recount::tests::a_month_whose_newest_header_slot_is_damaged_is_named_and_never_recorded`,
+`cli::census_recount::tests::an_older_damaged_slot_is_named_and_its_month_is_still_recorded`,
+`cli::census_recount::tests::a_clean_recount_says_no_header_slot_is_damaged`,
+`cli::census_recount::tests::a_month_that_reverted_to_an_empty_generation_is_named_and_never_counted_empty`.
+Invariant HA-05.
+
+### D-6243 — A month served in its sealed form has no slot audit: `BarFile::slot_audit` is `None` there, and nothing is named for it (R4-09a, after SC-3) — 2026-10-20
+
+**What was observed.** SC-3 (D-5899, D-5900) merged one read door for both
+forms of a month while R4-09a was open: `BarFile::open_existing` opens the
+`.sbar` first and builds the handle from its one head
+(`sealed::Head::bar_header`), never through `Header::read_region`. That head
+has no slot pair. It is under its own checksum and is refused by name
+(`head_checksum`) when damaged, and there is no older copy a read could fall
+back to.
+
+**Decided.**
+1. `BarFile::slot_audit` returns `Option<SlotAudit>`: `Some` for a month opened
+   in its raw form (the audit of the region the open read, D-6240), `None` for
+   one opened in its sealed form. A sealed handle never carries a made-up
+   clean pair of slots: "no slots" and "two clean slots" are different facts.
+2. `pull::census_store::recount` names only `Some` audits that are not clean.
+   A month read in its sealed form names nothing and offers its row from the
+   sealed head; the census audits the form the door actually serves.
+3. `store::header::slot_audit(region, file_len)` is unchanged and stays the
+   function PROVEN-GATE calls on a raw month's header region; for a sealed
+   month the sealed head's own refusal is the signal.
+
+**Proof.** `crates/store/tests/slot_audit_sealed.rs`
+(`a_month_opened_in_its_sealed_form_has_no_slot_audit`,
+`a_damaged_sealed_head_is_refused_never_read_short`);
+`cli::census_recount::tests::a_month_read_in_its_sealed_form_names_no_slot_and_is_recorded`.
+Invariant HA-06.
+
+### D-4818 — A container fault refuses its own day, never the archive, and never closes the day — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_archive.rs`,
+`crates/pull/src/gdfl_import_causes.rs`). **Findings** F13, F38 of the
+ingest-automation design; FM-040, FM-044 and FM-026 of the failure matrix.
+
+**What was observed.** `Archive::from_source` refused the WHOLE capital-market
+outer zip for one compressed day zip (`archive_member_compressed`) or for two
+day zips of one day (`archive_duplicate_day`), so one packaging slip stopped
+every day of every run, while the options year zips refused only that day.
+And `cm_cause` gave those two codes and `archive_method_unknown`
+`Cause::vendor`, which CLOSES a day, though removing a copy, re-zipping it or
+a build that reads the method fills the day.
+
+**Decided.** (1) Every fault of a day zip is decided per (tree, day) when the
+outer directory is read once, and answered by `CmSource::day` for that day
+only: two copies of the day wherever each lies are `archive_duplicate_day`; a
+lone copy under another folder than its own name's is `day_zip_misfiled
+{found, expected}` (D-4834's rule, the same for the archive, the loose zips
+and the tick store, D-4866); a lone copy the reader cannot take as it is
+stored is `archive_member_compressed` or `archive_member_encrypted`. Every
+other day reads. (2) The general-purpose flag's bit 0 refuses a member
+`archive_member_encrypted{member}` before any byte is inflated, in every
+zip reader (`member_bytes`, `stored_span`), never as a corrupt member or a
+CRC mismatch. (3) A zip whose central directory, as its end record states it,
+ends before the next record actually starts is `archive_prefixed{bytes}`:
+the ZIP64 end record is found from the end record (76 bytes before it when it
+states the size of a record with no extensible data), not from the locator's
+stated offset, and the check runs before the directory is read. Offsets are
+never adjusted. (4) None of these closes a day: `cm_cause` gives
+`archive_duplicate_day`, `archive_member_compressed`,
+`archive_method_unknown`, `archive_member_encrypted`, `archive_prefixed`,
+`day_zip_misfiled` and `day_file_misfiled` `Cause::open(Stage::Vendor, ..)`
+in the same change that made them per day, so no build closes a day for one.
+No second code is minted. (5) The names beside the day zips are an archive
+census: folder entries and stray files counted, misfiled and invalid
+day-zip names counted and the first 16 of each named (D-4817).
+
+**Cost.** Unchanged: the directory is read once, O(entries), and walked
+twice in memory to size and fill the dense day table, whose cell now holds
+the day zip or the refusal of its day (24 bytes as `Option<Slot>`, as the
+plain cell was, so the table's stated worst case stands); a day is one index.
+No map and no sort is added to the reader (CM-13's pin).
+
+**Proof.** `outer_member_not_stored_refuses`, `two_members_for_one_day_refuse`
+(both changed to day level), `an_encrypted_member_is_refused_by_its_own_name`,
+`a_zip_with_bytes_before_its_first_record_is_refused_by_name`,
+`a_misfiled_day_zip_is_named_where_it_was_found`,
+`an_impossible_day_zip_name_is_named`, `no_container_fault_closes_a_day`
+(IA-GR-27), `names_that_are_not_day_zips_are_ignored_and_counted`, in
+`crates/pull/src/gdfl_archive.rs`.
+
+### D-4817 — Near-miss names are named, not just counted: at most 16 per reason per source — 2026-10-20
+
+**Implemented by** IA-3. A day-zip name under another folder than its own, a
+day-zip name whose date is not real or lies outside the calendar's measured
+span, and a stray entry of a loose-zip root or a tick-store tree are each
+counted, and the first 16 of each reason are kept by name (4 for a loose
+root's strays, the run line's bound, design §8 A19) in the source's census
+(`ArchiveCensus`, `DayZipsCensus`, `DayTable`). A count with no names was
+the gap: 43 of 50 index files of 2018-11-07 appear nowhere today. Showing
+these names on `/ingest` is IA-10a's and IA-12a's; the run line's
+`ignored_entries` field is IA-1's door. **Proof.**
+`an_impossible_day_zip_name_is_named`, `a_loose_zip_in_the_wrong_kind_or_month_folder_is_named`,
+`the_tick_stores_writer_files_are_never_opened`.
+
+### D-4828 — A CM day zip may name its files with `\` as well as `/` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_cm.rs`, with the two readers of
+a day folder's names in `crates/pull/src/gdfl_import.rs`, `cm_jobs` and
+`cm_present`). The options reader already accepted both separators
+(`entry_ticker`); the CM listing took only `/` and skipped every other entry,
+so a day zip written by another tool would have closed `done files=0`. Now
+`gdfl_cm::in_folder` reads `<folder>/` and `<folder>\` alike, the listing,
+the import's job list and the member probe all use it (one reading of a day
+folder's names, so a probe and a read never disagree), `ListedFile::name`
+splits at either, and the listing counts the files named with `\`
+(`DayListing::backslash`), the count D-4841's `separator_backslash` field
+records when its owner lands the ledger's `v=2` lines. **Proof.**
+`a_cm_day_zip_with_backslash_paths_reads_like_forward_slashes` (a filtered and
+an unfiltered run) in `crates/pull/src/gdfl_ia3_tests.rs`.
+
+### D-4835 — A wanted stem with no extension is refused `extension_missing`, never skipped — 2026-10-20
+
+**Implemented by** IA-3. `NIFTY 50.NSE_IDX` or `RELIANCE.NSE` with no
+extension was split at its last dot into the foreign stem `NIFTY 50` and
+skipped, so the day read as if the file were absent. Now an entry whose WHOLE
+name is a stem of the listing's scope is `extension_missing{stem}`: the
+ticker slot holds it whatever order its names came in, `locate` and
+`read_listed` refuse it, and the import refuses it where the run wants the
+series it would be filed under, once per ticker (a second name of the ticker
+is a skip, as for twins). It is the vendor's own name for the file, read the
+same way every time, so it closes the day `done` with that refusal
+(`Cause::vendor`). **Proof.** `a_wanted_stem_with_no_extension_is_refused_by_name`.
+
+### D-4815 — Loose day zips are a third GDFL source kind, `dayzips` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_dayzips.rs`): `DayZips` is a
+`CmSource` and an `NfoSource`, so the 12 loose zips of 2026-09-25..30 (which
+neither archive holds) read with the same import and, for V-2b, the same
+cold verify as the archives. Not yet a source WORD: `gdfl_run`'s
+`SourceWord`, `SourceId` and `BRUTEX_GDFL_DAYZIPS`, and `Origin`'s
+measurement of the root, are the run's door (IA-1's file) and are named NOT
+DONE in IA-3's report.
+
+### D-4834 — `dayzips` reads one layout and nothing else, walked once and capped — 2026-10-20
+
+**Implemented by** IA-3. `<ROOT>/{INDICES,STOCKS,OPTIONS}/<MON_yyyy>/<name>.zip`,
+`<name>` the day's own folder name. The root is walked once when the source
+opens, links never followed, at most 100,000 entries
+(`dayzips_too_many_entries`: the root is refused whole and no day is filed
+from a walk that did not finish). Every name is filed in a map by kind and
+day, so a day is one hash probe and a far-dated name sizes nothing. A name
+with a day prefix whose date is not real or outside the calendar's measured
+span (`calendar::exchange_kind_of` answers `Unmeasured`) is
+`day_zip_name_invalid`, named in the census and never filed. Two copies of a
+day wherever each lies (another month folder, a `... (1).zip` beside it)
+are `archive_duplicate_day`; a lone copy under another folder is
+`day_zip_misfiled{found, expected}`; a link, pipe or device at a day zip's
+name is a copy the store's reading door refuses by name when the day is
+asked; a zip gone since the walk is `archive_unavailable` (not found), never
+a day the source does not hold. Each refuses its day only and never closes it
+(D-4818). **Proof.** the ten tests of `crates/pull/src/gdfl_dayzips_tests.rs`.
+
+### D-4866 — The tick store as a source: its day table, misfiled day files and the writer's files — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_tickstore.rs` for the `cm`
+tree, `crates/pull/src/gdfl_nfo.rs` for the `options` tree). Each tree is
+walked once, the first time a day is asked (`DayTable::walk`, at most
+1,000,000 entries), links never followed and dot-names never descended.
+A `.bts` outside its `<tree>/<yyyy>/<MON_yyyy>/` folder is
+`day_file_misfiled{found, expected}` for its day, whether or not a copy also
+sits at its own place (the archives' rule, D-4818), and never closes it; until
+now that day read `day_not_held`, silently. A `*.bts.tmp`, the writer's own
+`.lock` and `ingest-log.tsv`, its logs and tools are stray entries: counted,
+the first 16 named, never opened, locked or written. A day's own place is
+still opened by its exact path, so a day the writer publishes by rename after
+the walk is read whole (`FORMAT.md` §2; the writer's own code is outside this
+repository, UNVERIFIED). A walk that could not finish refuses every day the
+tree lacks at its own place with its fault, never reads it as absent.
+**Proof.** `a_misfiled_tick_store_day_is_named_where_it_was_found`,
+`the_tick_stores_writer_files_are_never_opened` (every stray entry a pipe, so
+an open would hang the test).
+
+### D-5903 — A day's close records what its listing was: `skipped=`, `entries=` and `listing=` — 2026-10-20
+
+**Implemented by** IA-3 (`crates/pull/src/gdfl_import_day.rs`,
+`crates/pull/src/gdfl_import.rs`, `crates/pull/src/gdfl_cm.rs`). **Finding**
+DB-A49 (FM-119): the 2018-09-03 indices zip holds 54 files and its journal
+line said `files=2`; the other 52 were named nowhere, `files_skipped` was a
+run total printed to the cli's stdout, and the event log that carried a
+day's info lines rotates (the 6 October import's are gone).
+
+**Decided.** Every `done` and `incomplete` line appends, after the D-2822
+stats and before any later field, ` skipped=<n>`: the day's entries that
+were not wanted files (off the scope, outside the filter, a second name of a
+ticker, not a file of the day folder); and, when the day's listing was read,
+` entries=<n> listing=<64 hex>`: the listing's entry count and the BLAKE3 of
+every entry's name, a zero byte, its stated length and its stated CRC-32
+(eight and four bytes, little-endian), in the source's order
+(`gdfl_cm::ListingSum`). Two closes that agree on the digest were made from
+listings naming the same files with the same sizes and checksums, so what a
+day skipped is counted for ever and can be identified against any copy of
+the source. A day a census stop cut short writes `skipped=` alone and no
+listing: it claims no listing nobody read. A day whose listing was refused,
+or that the source does not hold, closes `refused` as before, a line that
+carries no counts at all. Readers find every field by name
+(`count_of`), so no earlier field moved and every older line still reads.
+The cost is the listing's own O(entries) pass, once per day.
+
+**Not decided here.** The per-file names of the skipped entries (the digest
+identifies them against the source, the names live in the source); serving
+the counts on a page is R3-23's.
+
+**Proof.** `the_close_line_carries_skipped_and_the_listing` and
+`a_day_with_no_listing_claims_none` in `crates/pull/src/gdfl_ia3_tests.rs`;
+the pinned close line of `gdfl_import_tests`.
+
+### D-5870 — /db counts that agree: one Bars count on either tab, Coverage follows the From and To window, a month total never proves a month whole where a day may hold bars it does not owe, a future is owed the derivatives count, and a share with no dated auction flag is not judged between the two counts (R3-04; DB-048, DB-014, DB-046, SC-CLOSE-17) — 2026-10-19
+
+**Findings.** DB-048: on one selection and one day window the Bars pager
+read 434 and the Coverage tab's Bars badge 443 (the census's stored count of
+the matched months); the Coverage badge read 4 on Bars and 7 on Coverage
+(matched rows on one tab, matched plus absent months on the other). DB-046:
+the From and To days narrowed Bars and not Coverage, and the text said the
+dates were ignored. DB-014: each month was judged against the fullest peer,
+not the calendar, and a month total let a surplus on one day pay for a hole
+on another. SC-CLOSE-17: a future was owed an index's 375 a session after
+the 15:40 derivatives close (charter §7), and every share on an auction day
+was judged against the eligible count. The header printed a strike in paisa
+(`1165000 CE`) and the whole series' range, not the window in view.
+
+The package was built in the cloud (`origin/cloud/db-R3-04-20261017`) and
+checked on the Mac on a shadow of the real store (`state/fix/shadow.sh`,
+bars linked read-only, GET only). **The Mac pass found three of the cloud's
+fixes did not hold on the real page or the real census**, and amended them
+(items 1, 2 and 4):
+
+- The kept Bars count was keyed by the Bars grid's plan, which is EMPTY off
+  the Bars tab (`DbBarsGrid.svelte` plans nothing for a view nobody reads),
+  so the key never matched on Coverage: GDFL NIFTY 1s, 01-31 Mar 2020, read
+  4,71,828 on Bars and "—" on Coverage after Bars had counted. Keying by the
+  matched rows' identity failed the same way, because opening Coverage reads
+  the whole census and rebuilds the matched array with the same rows.
+- The Coverage count on the Bars tab walked the WHOLE census on every change
+  of selection: timed in node over the real GDFL census (2,098,428 rows), p50
+  23 ms / p99 59 ms for NIFTY spot and p50 91 ms / p99 177 ms for every NIFTY
+  option at 1s, against the 50 ms pause the package's own target allows.
+- A month whose bars in halted minutes exceeded its regular holes read
+  "full 100.00%": GDFL NIFTY 1s 2020-03 holds 4,71,828 bars against
+  4,65,377 owed, its 19 regular days hold 426,942 of their 427,500 seconds
+  (558 missing; 18 of the 19 hold fewer than 22,500, 27 Mar 22,401;
+  `/dayflags.json`), and the halt days' halted-minute bars (owed nothing,
+  D-3336 §1) paid for them. GDFL
+  BANKNIFTY 1s 2020-03 read the same (4,71,855 held).
+
+**Decision.**
+
+1. **The Bars badge is the server's count for the query, on either tab.** It
+   reads the live window answer, or the last SETTLED one kept under the
+   query's key: feed, the matched rows' CONTENT (`selectionKey`: the row
+   count, the census bar count and two order-free 32-bit hash sums of each
+   row's instrument, month and rung), the day and time bounds and the
+   store's re-read stamp — never the page, the order, the grid's plan or the
+   array's identity. With no server count it is "—" with the reason, bound
+   or no bound, never another set's number: the census's stored count is
+   named in the badge's title only, because it counts the files and not the
+   query and differs from the server's on the real store with no bound at
+   all (amended by the second Mac pass, item 11). It sends no request of its
+   own.
+2. **Coverage lists, counts and pages the months the From and To window
+   touches**, judging each listed month whole, and its count is the same on
+   both tabs and in its pager. A window that empties it says so once, both
+   ranges in order. On the Bars tab the count reads the matched
+   instruments' rows from an index of the census built once per census read
+   in slices of about 8 ms with a task between them (DB-G84's rule); until
+   that index is whole the Coverage badge reads "…" with the reason, never a
+   count of part of the census. On Coverage it reads the grid's own index.
+3. **Missing is per day where the series' own held days are read**: missing
+   = max(owed − held, what the sessions holding no bar owe). Held is owed
+   less missing.
+4. **A month total proves a month whole only where no day of it can hold bars
+   it does not owe.** A month holding more than it owes (`surplus`, counted
+   against what is OWED, not against the halt ceiling) with nothing known
+   missing is `over`: no missing count, no ratio, never full, never 100.00%.
+   A month whose span holds a halt day or a session of unknown length, and
+   whose total meets what it owes, is `unmeasured` with the reason named
+   (`halt_unplaced`, `unknown_days`). Only a per-day count can clear either.
+   A month short of what it owes is short by at least that many.
+5. **Percentages are rounded DOWN to two decimals**; a ratio above zero that
+   floors to nothing reads `<0.01%`.
+6. **A future is owed the derivatives venue's count**, `/calendar.json`
+   `owed.derivatives[]` era by era (375 a regular session at 1min to
+   2026-08-02, 385 from 2026-08-03; charter §7), on regular and auction days;
+   special, halt and unsized days are unknown to it; an answer with no
+   derivatives row judges no future, by name; a future at 1s is
+   trade-driven.
+7. **A share on auction days owes 360 when its dated flag is 1 and 375 when
+   0**; with no flag (the census carries none) a count between the two is
+   unmeasured (`cas_unresolved`) and a count under both is short by at least
+   the eligible count's shortfall.
+8. **A `/calendar.json` `special` or `halts` entry with no day is refused by
+   name**, as a malformed `withheld` run is.
+9. **The header beside the tabs prints a strike as a price** (`11,650 CE`)
+   and the From and To window "in view" when it narrows, else the months on
+   disk; the newest stored close shows only when it falls in that window,
+   and one outside it is named as after or before it.
+10. **The special-day lookup of `denseOwed` is one Map probe per day**, as it
+    was before the cloud build (which made it a linear `find` per day).
+11. **Second Mac pass (20 Oct 2026), two amendments.** (a) The census's
+    stored count was the badge's number with no bound and no server count,
+    and on the real store that made one tab read two numbers for one
+    selection: GDFL NIFTY 1s with no bound read 4,41,02,990 on a link
+    straight to Coverage and 4,40,32,544 after one visit to Bars (shadow,
+    `state/fix/round2/fix-R3-04.json`). The badge now shows only the
+    server's count, live or kept, and "—" until Bars has counted (item 1).
+    (b) The counted line above the Coverage grid and the drawer's Missing
+    summed only rows whose missing count is known, so a selection holding
+    only an unplaced surplus read "0 bar(s) missing" and "coverage — of 0
+    owed" (GDFL NIFTY 1s, 01-31 Mar 2020, whose 19 regular days lack 558
+    seconds), and a trade-driven selection, owed no fixed count, read the
+    same (GDFL NIFTY 28 Mar 2019 11,600 CE on 15 Mar 2019): with rows and
+    none counted both figures are a dash and the words name each kind no
+    sum counts (a month total cannot judge it, trade-driven, no calendar);
+    with some counted and some a month total cannot judge, the owed figure
+    says it covers the counted rows and names how many more there are
+    (`countedLine`, `coverTotals.counted` and `uncounted`). No rows at
+    all is nothing owed and reads 0. (c) With the census's count gone from
+    the badge, a settled selection that matches nothing (Expired options
+    with no expiry chosen, which the Bars grid never reads) read "—" and
+    "open Bars" on the Bars tab itself; it reads 0, counted without a read,
+    on either tab — only once the page has settled, never while the census
+    is still read.
+
+**Not done, and owed elsewhere.** A per-day bar count for every month (on
+the census or as a route) would let items 3 and 4 judge every day exactly
+and clear the `over` and `halt_unplaced` months; the census carries month
+totals only. The dated closing-auction flag is not on the series' calendar
+answer, so item 7 cannot judge a share individually. On GDFL NIFTY 1s with no
+bound the census's stored count (4,41,02,990) and the server's count of the
+same months (4,40,32,544) differ by 70,446; the badge shows only the
+server's (item 11), and the difference itself is the census owner's to
+explain (`docs/06-limits.md` L-R304-04).
+
+**Proof.** `web/tests/db-counts.test.js` and `web/tests/completeness.test.js`
+(rows R304-01 to R304-10 of `docs/04-invariants.md`), and the shadow checks
+recorded in `state/fix/round2/fix-R3-04.json`.
+
+### D-5400 — cloud/attack-law-20261016 merged back onto feat/db-fix one commit at a time, each claim re-measured here rather than trusted; two hunks left because feat/db-fix already held the fix (PREC-1) — 2026-10-17
+
+**Implemented by** PREC-1. **Findings** GC-61 (its Budget Saturday part),
+GC-75, GO-51, ZM-72, ZM-75, FOLD-65 (merging GO-41), ST-43, ST-46, PG-63,
+PG-64, PG-65, PG-66, PG-71, CR-25 and CR-28 of the read-only precision sweep
+of 16 Oct (`state/precision-20261016/catalogue.json`; matrix rows FM-320,
+FM-325, FM-350, FM-384, FM-386, FM-434, FM-457, FM-458, FM-493 to FM-496,
+FM-500, FM-592 and FM-595 in `new-matrix-rows.json`).
+
+**What was observed.** `origin/cloud/attack-law-20261016` is a one-commit
+snapshot of `feat/db-fix` at 4756cce0 (c9e3472e) and fifteen commits over it:
+eight that change code and seven that only write
+`reports/cloud-attack-law-20261016.md` and its lens 2 appendix. It was merged
+nowhere, and the sweep's critic found six cases marked handled whose tests
+existed only there.
+
+1. **Taken with `git cherry-pick -x`, in the branch's order:** 5a15d52d4
+   (cli srt-build dry run), 43f46ac37 (store: reader against writer, the
+   zero-byte reader door, the kernel's ENOSPC), 9119e8d72 (api: four hidden
+   fallbacks, three lax parsers, the write probe), fbb0c4805 (runner: the
+   zero-paisa entry, the exact mean), 883e1d4a1 (pull: census contract,
+   migration receipt, torn gap line, a key withdrawn twice), 72f16e993 (cli:
+   listing entry, detail barrier, run ledger name), 46afc61bb (api: fifteen
+   permission tests where the mode bits bind), 184d1db8d (core, engine,
+   store: two stale doc claims, checked against the code here, and a test
+   that raced inode reuse), and the seven report commits 9748776fb,
+   e52425a29, 8f54e7c4c, 77fad536b, 57f248ca1, fe2bf9bef and 8a7d5eb62.
+   Left: the snapshot c9e3472e, which is `feat/db-fix`'s own history
+   squashed into one commit and would add nothing but a second copy of it.
+2. **Two hunks left, because `feat/db-fix` already held the fix.**
+   `crates/api/src/bars_route.rs` (PG-63): AF-05 had already put the window
+   route on the one strict `bars::month_of_text`; the conflict kept
+   `feat/db-fix`'s side, and the branch's
+   `the_window_refuses_a_month_not_spelled_yyyy_mm` is kept as that route's
+   first test of it. `crates/pull/src/request_minutes.rs` (ZM-72): R3-18's
+   repair had already made every ledger append take the file's `flock`,
+   close a torn last line and refuse a link (`append_named_picking`); the
+   branch's `append_lines` call was left, and its
+   `a_torn_gap_line_is_closed_before_the_next_append` is kept beside R3-18's
+   test. Both conflicts and their resolution are in
+   `state/fix/round2/fix-PREC-1.json`.
+3. **The branch's claims are data, so each was re-measured.** On the
+   operator's Mac as the operator's user, 17 Oct: every fix reverted with
+   every test present (where a test calls a new item, the item kept and its
+   behaviour put back: `series_names` skipping an unreadable entry,
+   `refuse_drifted` answering nothing, `edge` reading Welford's mean, the
+   window route splitting on `-`, `append_synced_with` with no rollback),
+   the named tests built and run red, then the merged tip built and run
+   green. Eighteen failed before: the branch's fifteen, each at the
+   assertion its report names, and this package's own three (the lines
+   are in `fix-PREC-1.json`). Pins, which passed before
+   and are called pins: `the_month_route_names_a_held_or_truncated_month_and_never_answers_it_empty`,
+   the two store door tests, the Budget Saturday import, the two-runs
+   import, the torn gap line (fixed on `feat/db-fix` by R3-18) and the
+   branch's helper test `an_exactly_zero_sum_sample_has_a_zero_mean_and_is_read_long`,
+   which passes whether or not `edge` calls the helper; D-5403 adds the test
+   that goes through `edge`.
+4. **Not re-measurable here, said so.** GC-75's red is uid 0 only: on the
+   Mac the mode bits bind for the operator's user, so the permission tests
+   pass before and after, and D-0995's `where_permission_binds` wrapper is
+   kept for the container that runs as root. ST-43's `/dev/full` test is
+   compiled for Linux only; the Mac's own measurement is D-5404.
+5. **FOLD-65 and GO-41's fifteen invariant rows** (SS-06, MR-34, AF-23,
+   AF-28j, PIF-02, APIC-05, C4-CLI-03-03, AFA-13, ZR-04, ZX-20, AFG-71,
+   GI-01, GI-07 twice, GI-10) had already been corrected on `feat/db-fix`
+   by R3-14's repair of gate 10 (RA-184) before this package ran: each names
+   a test that exists, and a row whose behaviour a later decision reversed
+   says which decision. Gate 10 was run here over the merged tip, numbers
+   in `docs/06-limits.md` L-PREC1-04. Two of them, PIF-02 and AFA-13, kept a
+   claim no named test pinned (the once-per-day sentence for a day with no
+   recorded window); D-5406 names the test that does. No other row was
+   edited.
+
+### D-5401 — An audit-index append that fails is truncated back to the length it started at (PG-71's root cause; PREC-1) — 2026-10-17
+
+**Finding** PG-71 (FM-500), whose test column asks for "the root-cause
+rollback test for append_synced".
+
+**What was observed.** `api::audit`'s index files (`runs`, `faults`,
+`refusals/<source>.idx`) are runs of fixed-size entries read with
+`chunks_exact`. `append_synced` wrote and synced with nothing undone on
+failure, so a short write (a full disk mid-entry) left a fragment, the next
+batch was appended after it, and every later entry was read across two
+frames: counted malformed, and since D-5400's 9119e8d72 every reader walks
+the journal when any entry is malformed. The walk is correct and
+O(journal); the fragment made it permanent.
+
+**Decision.** `append_synced` measures the file's length after opening it,
+under the journal's append lock every caller already holds, writes through
+a seam (`append_synced_with`), and on a failed or short write truncates back
+to that length, as `write_rolled_back` does for a journal record (D-1854).
+Only bytes this call wrote are removed. When the truncation fails too, both
+errors are named, and a reader counts what does not decode as malformed and
+walks. A torn tail left by a power cut, where no error path ran, is not
+repaired by this; it stays malformed and walked (`docs/06-limits.md`
+L-PREC1-02).
+
+**Proof.** `api::audit::tests::a_short_index_append_is_truncated_back_and_the_next_entry_stays_on_its_frame`
+injects half an entry and an error through the seam. Red with the rollback
+removed: its scratch `runs` file was left at 48 bytes, the 32-byte entry and
+the 16-byte fragment. Cost: one `fstat` per index-file append, measured by
+`append_synced_cost_per_entry_is_measured` (L-PREC1-03).
+
+### D-5402 — An unreadable migration receipt is a drift answer by name, and the autopilot starts no pull on a census whose drift is not known to be none (CR-28; PREC-1) — 2026-10-17
+
+**Finding** CR-28 (FM-595).
+
+**What was observed.** `pull::ingest::census_store::legacy_drift` is the
+only warning that a writer built before version 4 filed months the census
+does not read. It read the receipt with `.ok()?`, so a receipt that could
+not be read, or that named no `legacy_bytes`, answered "no drift". The
+autopilot resumes from the census (`api::autopilot::survey`, then
+`frontier`), so months the census misses are owed again and re-pulled at
+today's adjustment basis, the mechanism CR-05 named. The autopilot never
+asked `legacy_drift` at all.
+
+**Decision.**
+1. Only an ABSENT receipt is "not migrated" (`None`). A receipt that cannot
+   be read, or names no readable `legacy_bytes`, answers `Some` with the
+   receipt's path and the reason (883e1d4a1, D-5400).
+2. `api::autopilot::refuse_drifted` runs on every round's census read. A
+   `Held` census for which `legacy_drift` answers anything becomes
+   `Census::Unreadable` carrying the drift's own words, so `survey` halts
+   the feed on its census by name and chooses no unit. Absent and
+   unreadable censuses pass unchanged. A repaired drift revives the feed on
+   the next pass through `manifest_loads`, as a repaired manifest does.
+   Cost: one receipt read and at most three `lstat`s per vendor per round,
+   O(1) in the store (L-PREC1-05).
+3. **Not changed:** the hand F&O pull in `server.rs` keeps its own stated
+   rule that a census which will not read is resumed from the window's
+   first day (a full refetch whose overlap `BarFile::append` verifies). It
+   is a separate decision with its own comment, and CR-28 names the
+   autopilot.
+4. On the real store, read only on 17 Oct: only GDFL is migrated, its
+   receipt reads, and `manifest/gdfl.man` is the recorded 268,430,208
+   bytes, so this halts nothing today.
+
+**Proof.** `a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift`
+(`crates/pull/src/census_store_tests.rs`; red before: "an unreadable
+receipt is named") and `api::autopilot::tests::a_census_whose_drift_is_not_known_starts_no_pull`
+(red with `refuse_drifted` answering nothing: "no pull starts on a
+drift-unknown census").
+
+### D-5403 — Money on the ranking path: a zero-paisa pessimistic entry is a measurement not taken, and `edge` reports the exact mean (CR-25; PREC-1) — 2026-10-17
+
+**Finding** CR-25 (FM-592, critical) and the branch report's lens 5.
+
+1. **A zero entry refuses the path.** `runner::grid::entry_fills` answers
+   its `0` sentinel when the cost model refuses the bar: for a long, a
+   positive low under one tick, which `costs::fill::fills_at`'s
+   printed-extreme sell leg refuses and `Candle::check_evaluable` admits.
+   Options print at 1 to 4 paisa (GO-14). `Candidate::unmeasured` and
+   `refused_at` now treat `entry_pess == 0` as a refused path, so no trade
+   is booked at a 0-paisa entry (fbb0c4805). Fills are at least a tick, so
+   `== 0` and nothing wider.
+2. **The exact mean.** `edge`'s `mean_paisa` is the exact `i128` sum over
+   the count, divided once; Welford's running mean stays for `m2` and the
+   overlap centring. The mean's sign is the whole rule for trading Short,
+   and Welford does not land on zero for a zero sum (fbb0c4805). The
+   branch's test pinned the helper `exact_mean` alone and passed whether or
+   not `edge` used it, so this package adds one through `edge`.
+
+**Proof.** `runner::grid::tests::a_sub_tick_entry_low_refuses_the_path_rather_than_charging_a_zero_entry`
+(red before: "a zero entry is a measurement not taken");
+`runner::outcome::overlap_tests::edge_reports_the_exact_mean_and_a_zero_sum_is_a_positive_zero`
+(red with `edge` reading Welford's mean: `1.6229971724787928` against the
+exact mean three units in the last place away, bits 4609988148633845772
+against 4609988148633845775; on the tip its zero-sum half reports `+0.0`
+where Welford, on the same moves, does not).
+
+### D-5404 — The kernel's own ENOSPC is measured on the operator's Mac through a small volume made to fill (ST-43; PREC-1) — 2026-10-17
+
+**Finding** ST-43 (FM-457).
+
+The branch's `file::tests::the_kernels_own_enospc_from_dev_full_is_disk_full_by_name`
+is `#[cfg(target_os = "linux")]`: macOS has no `/dev/full`, so on the Mac a
+real ENOSPC was never measured. `file::tests::the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name`
+fills a file in the directory `BRUTEX_FULL_VOLUME` names, at most 1 GiB, in
+64 KiB `write_fully` calls until the kernel refuses, and the refusal must
+leave as `StoreError::DiskFull { action: Write }` by name. It is ignored
+with that reason, because a test cannot make a volume without the
+operator's machine mounting one. Run on 17 Oct on a 2 MiB HFS+ image
+mounted under the session's scratch directory with `hdiutil`: 1,900,544
+bytes accepted, then `DiskFull` (L-PREC1-01).
+
+### D-5405 — `/dayflags.json` and the derive ledger read a month by the one strict parser (PG-63, PG-65; PREC-1) — 2026-10-18
+
+**Finding** PG-63's rule, "one strict YYYY-MM parser on every route", and
+PG-65's, "one strict month-file parser", checked on the shadow of the real
+store after the merge rather than taken from the branch.
+
+**What was observed.** On 18 Oct 2026, with this package's build serving a
+shadow of the real store on `127.0.0.1:9302`,
+`/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-%2B1&to=2025-02`
+answered HTTP 200 with `asked.from` = `2025-01-01`, while `/bars/window.json`,
+`/chain.json` and `/bars.json` refused the same spelling by name.
+`api::dayflags::bound` checked only the LENGTHS of a month's two halves and
+handed them to `str::parse`, which takes a leading `+`; `parse_derive`, which
+reads a `derive` line of the coverage ledger, had the same check. These were
+the two sites left after AF-05 and the branch: no other `split_once('-')` in
+`crates/api/src` reads a month (searched 18 Oct).
+
+**Decision.** Both call `crate::bars::month_of_text`, the one strict parser
+(exactly four digits, a dash, two digits, then `YearMonth::new`'s range).
+A day still goes through `import_journal::parse_day`, which already refused
+any spelling that does not print back as itself. O(1): a fixed seven-byte
+pattern, as before.
+
+**Proof.** `api::server::dayflags::tests::a_month_with_a_signed_field_is_refused_on_the_route_and_in_the_derive_ledger`
+(red on the code before this entry, green after; the failing line is in
+`state/fix/round2/fix-PREC-1.json`), and on the shadow the same request now
+answers HTTP 400 naming `from`.
+
+### D-5406 — PREC-1 after `feat/db-fix` moved: two invariant rows name the test that pins their last claim, and the merged tip re-measured (PREC-1) — 2026-10-18
+
+**Findings** FOLD-65 (merging GO-41; matrix row FM-434), and every case of
+D-5400 again, because `feat/db-fix` moved 41 commits (R3-08, R4-07, IA-1,
+IA-8, WEBFLAG-1 among them) after this package's first commit.
+
+1. **Two rows kept a claim no named test pinned.** R3-14's repair of gate 10
+   re-pointed PIF-02 and AFA-13 when WP-13b gave the Muhurat and the
+   disaster-recovery Saturday their recorded windows, and both rows kept the
+   sentence that a day with NO recorded window is still named once, withheld,
+   for its own reason. PIF-02 said only that "the fold module's own tests"
+   held it; AFA-13 named two tests about the DR Saturday folding. The test
+   that pins it is `pull::fold::tests::an_unsized_day_is_one_note_for_its_own_reason_and_counted`
+   (`crates/pull/src/fold.rs`): one note per unsized day, reason
+   `Withheld::Unsized`, never a coverage fault, every bucket counted under
+   it. Both rows now name it, path-qualified, so gate 10 checks it in that
+   file. Each row keeps its own mark (PIF-02 stays a history row).
+2. **The merge.** `feat/db-fix` at 294b24d4f was merged into the package
+   branch. Three conflicts, each two independent additions, both kept:
+   `crates/api/src/chain_route_tests.rs` (the branch's signed-expiry test
+   and R3-08's chain-beside-a-writer test), and the tails of
+   `docs/04-invariants.md` and this file (R3-08's and R4-07's rows and
+   entries first, this package's after them). No hunk of R3-08 was reverted;
+   the two pins that meet its writer rule were run again on the merged tip
+   (results in `state/fix/round2/fix-PREC-1.json`).
+3. **D-5405 re-measured.** The release build of this package from before
+   D-5405 (12:53 IST, 18 Oct, still serving `127.0.0.1:9302` over the
+   shadow) answered
+   `/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-%2B1&to=2025-02`
+   HTTP 200 with `asked.from` `2025-01-01`, and `to=2025-%2B2` HTTP 200 with
+   `asked.to` `2025-02-28`, at 17:43 IST. The after-build's answers are in
+   the same report.
+
+### D-5407 — PREC-1 on the merged tip: `round` kept inside clippy's line bound by `trusted_censuses`, whose wiring to the real drift check is tested, and two reds re-measured (PREC-1) — 2026-10-18
+
+**Findings** CR-28 (FM-595), GC-61 (FM-320), PG-63 and PG-65 (FM-493,
+FM-495), on `feat/db-fix` at 371b1a506 (AH-03 merged after D-5406).
+
+1. **The merge.** `feat/db-fix` at 371b1a506 was merged into the package
+   branch. Three conflicts, each the tail of a ledger
+   (`docs/04-invariants.md`, this file, `docs/06-limits.md`), each two
+   independent additions: AH-03's rows and entries first, this package's
+   after them. No hunk of AH-03 was edited.
+2. **`round` was 101 lines on the merged tip**, one over clippy's
+   `too_many_lines` bound, so `cargo clippy --workspace --all-targets -- -D
+   warnings` was red at `crates/api/src/autopilot.rs` `async fn round`
+   (measured 18 Oct). D-5402's census read (`refuse_drifted` over
+   `census::read_all` with `legacy_drift` as its answer) moved into
+   `trusted_censuses`, one call in `round`, so `round` has the line count
+   it had before D-5402. Nothing else in `round` changed.
+3. **The wiring is now tested, not only the rule.** D-5402's test hands
+   `refuse_drifted` a stand-in answer, so no test showed that `round` asks
+   the real `legacy_drift`.
+   `api::autopilot::tests::the_rounds_census_read_refuses_a_census_whose_migration_receipt_will_not_read`
+   records and migrates a GDFL census on a scratch root through
+   `pull::ingest::census_store`, reads it held through `trusted_censuses`,
+   makes the receipt unreadable, and reads it refused with the drift's own
+   words. Red with `trusted_censuses`' drift answer replaced by `None`
+   (panicked at `crates/api/src/autopilot.rs:5379`, "a census whose
+   migration receipt will not read is refused, never held"), green after.
+4. **Two reds taken again on this tip**, each in a target directory no
+   other worktree builds into (a shared one handed this tree another
+   worktree's `pull`, built later, as fresh; the evidence is in
+   `state/fix/round2/fix-PREC-1.json`). D-5405's
+   `a_month_with_a_signed_field_is_refused_on_the_route_and_in_the_derive_ledger`
+   with the two parser hunks reverted: panicked at
+   `crates/api/src/dayflags.rs:6799`, `from=2025-%2B1` asked as
+   `Day { year: 2025, month: 1, day: 1 }`. GC-61's Budget Saturday test, a
+   pin that passes on `feat/db-fix`, against a mutant whose `kind_of`
+   answers `Closed` for 2025-02-01: `(days_imported, days_closed,
+   days_refused)` was `(0, 1, 0)` against the `(1, 0, 0)` it asserts. Both
+   mutations were undone and the tree checked clean before the gates ran.
+
+### D-5408 — The write probe removes only the file it made: a held probe name fails the probe by name and is left for the operator, so the branch's link rule and R4-06's no-automatic-deletion rule both hold (PREC-1) — 2026-10-19
+
+**Finding** the branch's write-probe repair (9119e8d72, taken by D-5400)
+against R4-06's no-automatic-deletion gate (AUT-05, D-5320 to D-5322), met
+on the merged tip.
+
+**What was observed.** `cargo test --workspace --locked` on the merged tip,
+18 Oct: `pull/tests/no_scheduler_delete.rs`'s `no_scheduler_path_deletes_a_file`
+was red, "a scheduler path deletes or renames:
+crates/api/src/autopilot.rs:791: match std::fs::remove_file(path) {". The
+branch's repair of `probe_io` unlinked whatever held the probe's name before
+opening it with `create_new`: an automatic deletion, on a scheduler path, of
+something the call did not make. R4-06's gate allows exactly one
+`remove_file(path)` there, the probe's own file, and its `File::create`
+allowance was no longer spent either.
+
+**Decision.** Both rules hold; neither is traded for the other.
+1. `probe_io` opens the probe's dot-file with `create_new` and unlinks
+   nothing first. `create_new` refuses any entry at the name, a link
+   included, and never follows one, so nothing is written through a link
+   (the branch's rule) and nothing is removed but the file this call made
+   (R4-06's rule).
+2. A name already held, by a link or by the file of a probe cut off before
+   its removal, fails the probe with the host's `AlreadyExists` and the
+   sentence "something already holds the probe's name ...; the probe neither
+   writes through nor removes what it did not make, so it is left for the
+   operator". The feed stays store-halted with that reason under the
+   probation's own bound (`STORE_PROBES`) until the name is freed by hand.
+3. R4-06's `ALLOWED` loses its `File::create` row, which is no longer a
+   site, and its `remove_file(path)` row's reason is restated; nothing else
+   in `crates/pull/tests/no_scheduler_delete.rs` changed.
+
+**Cost, stated.** A probe cut off between its create and its remove leaves
+its dot-file, and that vendor's probe then fails by name until an operator
+removes it (`docs/06-limits.md` L-PREC1-06). Removing a leftover recognised
+by its name is the automatic deletion R4-06 refuses.
+
+**Proof.** `api::autopilot::tests::the_write_probe_never_writes_through_a_link_at_its_name`
+asserts the refusal, a planted link and a leftover file each kept exactly as
+they were, and a free name written and removed: red with the branch's probe
+put back, green after (the lines are in `state/fix/round2/fix-PREC-1.json`).
+`no_scheduler_path_deletes_a_file` is green on the tip.
+
+### D-5409 — Three mutants that survived PREC-1's diff-scoped mutation run are killed by a test each: the `faults` cover guard and the walked attribution's identity (PREC-1) — 2026-10-19
+
+**Finding** CLAUDE.md section 9 ("no surviving mutant on touched modules")
+against the code D-5400 took from 9119e8d72 for PG-71.
+
+**What was observed.** `cargo mutants` over this package's diff of
+`crates/api` (`--in-diff`, 50 mutants, 19 Oct, the operator's Mac as the
+operator's user): 32 caught, 15 unviable, 3 missed:
+1. `crates/api/src/audit.rs` `Journal::read_index`, the guard
+   `Some(ordinal) if ordinal < covered` on a `faults` entry, replaced by
+   `true`;
+2. the same guard with `<` read as `<=`;
+3. `crates/api/src/audit_json.rs` `attribution`, the field `identity`
+   deleted from the `Attribution` built when the index is malformed.
+
+The first two are one rule no test read: an append lands its index entries
+first and moves the cover after (`write_cover`), so a crash between the two
+leaves a `faults` entry for the ordinal the cover does not yet reach. That
+record is the next one; counting it would report a fault in a record the
+page's total does not include. The third is a cost rule: without the
+journal's `(dev, ino)` the cached walk never matches the next request's
+identity, so every page of a journal with a damaged index walked the whole
+journal again instead of decoding only what was appended since. Both
+behaviours were right; neither was pinned.
+
+**Decision.** No code changes. Two tests:
+1. `api::audit::tests::a_fault_entry_at_or_past_the_cover_is_not_counted`
+   builds an index with a fault at ordinal 2, then writes the cover back to
+   2 records (the crash shape) and asserts `(covered, faults,
+   fault_ordinals, malformed)` is `(2, 0, [], 0)`.
+2. `api::audit_json::tests::an_index_that_lost_a_run_entry_is_walked_and_says_why`
+   also asserts that the walked attribution carries the journal's own
+   `(dev, ino)`.
+
+**Proof.** Each mutant applied by hand and the test run, 19 Oct: the `<=`
+mutant panicked at `crates/api/src/audit.rs:5094`, "a fault at the cover's
+own ordinal is not below it", left `(2, 1, [2], 0)`, right `(2, 0, [], 0)`;
+the guard-to-`true` mutant red at the same assertion; the identity deletion
+panicked at `crates/api/src/audit_json.rs:1893`, "the walk is cached under
+the file it read", left `None`, right `Some((16777232, 559978477))`. Both
+files restored byte-identical (sha-256 checked) and both tests green.
+
+### D-5410 — The pull refusals of `/dayflags.json` and `/ingest` are walked from the journal when its index lost an entry or the symbol's refusal entry will not read, and the answer says why (PG-71; PREC-1) — 2026-10-19
+
+**Finding** PG-71 (FM-500), whose rule is "count into malformed and walk the
+journal with the reason" on `/audit.json` AND `/dayflags.json`. D-5400 (from
+9119e8d72) and D-5401 closed it for `/audit.json` and for the index's own
+appends; the `/dayflags.json` half was re-read here rather than taken as
+handled.
+
+**What was observed** (19 Oct 2026, on this package's branch merged with
+`feat/db-fix` after AH-04; that merge was squashed into the package's one
+commit, so it is not cited by hash):
+1. `dayflags::read_pull_journal` read the journal's index whenever
+   `Journal::read_index` answered, and `pull_indexed` files each refusal
+   under the run the index holds before it. A `runs` entry that will not
+   decode is counted in `Indexed::malformed` and read nowhere, so the lost
+   run's members were filed under the vendor of the run before it. Measured
+   by `an_index_that_lost_a_run_entry_is_walked_for_the_refusals_and_says_why`
+   on the code before this entry: a reference run's refusal (record 4) was
+   read as Zerodha's beside Zerodha's own (record 2), two where the journal
+   holds one, at the test's first assertion on the damaged index.
+2. A refusal entry of the symbol's that will not read makes
+   `Journal::refusal_ordinals` refuse by name (D-5400), and this reader
+   answered that refusal as an unread pull journal (`PullUnread::Failed`):
+   the day's refusals withheld although the journal itself reads. Measured by
+   `a_refusal_entry_that_will_not_read_walks_the_journal_and_says_why`,
+   panicking with "walked, not refused:
+   Failed(... ZZOIL.idx: entry 0 is not a refusal entry ...)".
+3. `warm_pull_journal` skipped the walk at start for any index `read_index`
+   answered, so a damaged index would have left the whole walk to the first
+   request; the same test measured `Ok(0)` records walked at start against
+   the `Ok(4)` it asserts.
+
+**Decision.**
+1. `dayflags::trusted_index` is `read_index` refusing an index whose
+   `malformed` count is not zero, by name ("N of the index's entries cannot
+   be read, so a run may be missing from it and a refusal filed under another
+   run's vendor"): the rule `audit_json::attribution` and
+   `pullrun::older_runs` already keep. `read_pull_journal` and
+   `warm_pull_journal` both read through it, so such a journal is walked at
+   start, off the request path, as one with no index is.
+2. When reading through the index fails for any reason, including a refusal
+   entry that will not read, the journal is walked and `via` is
+   `{"kind": "walk", "why": <the index's own words>}`. The walk is the
+   existing one (DB-A34, DB-N19): outside the tails' lock, cached under the
+   journal's `(dev, ino)`, so later requests read only what was appended. A
+   walk that cannot read the journal is still `PullUnread::Failed`, in its own
+   words.
+3. **Not changed:** a healthy index is read exactly as before; the added cost
+   there is one integer comparison per request (`docs/06-limits.md`
+   L-PREC1-07, measured before and after on the shadow of the real store).
+
+**Proof.** The two tests above, red before and green after
+(`crates/api/src/dayflags.rs`). On a shadow of the operator's store, 19 Oct
+2026, with one byte of a clone of `refusals/NIFTY.idx` flipped: the build before
+this entry answered `/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY`
+with the pull journal unread and no refusal; this build walked the journal
+(`via.kind` `walk`, `why` naming `NIFTY.idx` entry 0) and `/ingest/refusals.json`
+for NIFTY answered the healthy index's answer exactly apart from its `source`
+block (20 refusals; compared as sorted JSON). With a
+`runs` entry flipped too, the walk ran at start and the first request read no
+record. Costs in `docs/06-limits.md` L-PREC1-07.
+
+### D-5411 — PREC-1 after AG-02 merged: the re-key ledger's "read whole or refused" rule is AG-02's code, and GO-51's test is kept on it (GO-51; PREC-1) — 2026-10-19
+
+**Finding** GO-51 (FM-350): a second `superseded` or `retired` line for one
+key with different fields was silently kept as the later one.
+
+**What was observed.** `feat/db-fix` moved to 9c6254ad9 at 15:19 IST on
+19 Oct with AG-02 ("refuse a re-targeted or superseded-and-retired key by
+name"), which rewrote `Withdrawn::parse` in `crates/pull/src/gdfl_rekey.rs`
+around two new methods, `admit_superseded` and `admit_retired`. Merging it
+into this package's branch conflicted in exactly the lines the cloud
+branch's 883e1d4a1 changed (D-5400): the doc comment of `parse` and its two
+record arms, and the test file where both sides appended at one place.
+
+**Decision.**
+1. **`crates/pull/src/gdfl_rekey.rs` is AG-02's side, whole.** It holds the
+   cloud branch's rule and more: a key superseded by two different keys is
+   refused naming both lines, one move or one retirement recorded twice with
+   another account (counts or digest) is refused, a key both superseded and
+   retired is refused, an identical repeat reads once. The cloud branch's
+   two arms would have been a second implementation of the same refusal,
+   which is the shape this repository refuses.
+2. **GO-51's test is kept**, beside AG-02's, because the precision sweep's
+   critic and `docs/04-invariants.md` PREC1-06 name it:
+   `a_key_withdrawn_twice_with_different_records_refuses_the_ledger` now
+   reads AG-02's words ("a key continues under one key", "one retirement
+   has one account", both line numbers) instead of the cloud branch's
+   ("superseded twice", "retired twice"). Its facts are unchanged: two
+   targets refused, two retirement accounts refused, an identical repeat of
+   either is one record (`counts()` (1, 0) and (0, 1)).
+3. Nothing else of either side changed. No other file conflicted; the three
+   ledgers auto-merged and gate 10's id and number checks were re-run on the
+   merged tree.
+
+**Proof.** `pull::gdfl_rekey::tests::a_key_withdrawn_twice_with_different_records_refuses_the_ledger`
+green on the merged tree beside AG-02's
+`a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines`
+and `one_move_or_retirement_recorded_twice_with_another_account_is_refused`;
+red on 17 Oct on the code before D-5400 with the fix reverted (the line is in
+`state/fix/round2/fix-PREC-1.json`).
+
+### D-5412 — The two mutants D-5410's diff left alive are killed by a test of an index ahead of its pull journal (PG-71; PREC-1) — 2026-10-19
+
+**Finding** PG-71 (FM-500), D-5410's lines, measured by mutation rather than
+read.
+
+**What was observed.** `cargo mutants --in-diff` over D-5410's diff
+(`crates/api`, tests `server::dayflags::` and `ingest_refusals`; 19 Oct, the
+operator's Mac as the operator's user, log
+`state/fix/round2/prec1-logs/r6/mut-d5410.log`): 16 mutants in 37 minutes,
+12 caught, 2 unviable, **2 missed**: `replace / with *` in
+`read_pull_journal` (`trusted_index(&journal, whole / stride)`) and in
+`warm_pull_journal` (`whole / crate::audit::RECORD_LEN_U64`). Both hand
+`trusted_index` a count larger than the journal's, and no test asked what
+`read_index` does with the count: it refuses an index that covers more
+records than the journal holds. So a journal cut back, or put back from an
+older copy, beside an index that covers more of it, would be read through
+that index under either mutant, and the start would skip its walk.
+
+**Decision.** One test pins the count both callers pass:
+`an_index_ahead_of_its_journal_is_walked_and_says_why` builds two runs
+(four records, all indexed), cuts the journal back to its first run, and
+asserts that a request walks it with `via.why` naming "covers 4 records and
+the journal holds 2", reads the journal's own two records and answers only
+the first run's refusal; and that `warm_pull_journal` walks the same journal
+at start, two records. No production line changed: the guard is
+`read_index`'s, and D-5410's lines already pass it the journal's count.
+
+**Proof.** Measured 19 Oct in a scratch copy of the tree (never the
+worktree), the file restored byte for byte after each run: the test passes
+on the tree (1 passed); with `whole * stride` in `read_pull_journal` it
+fails at its first assertion on the cut journal, the walk's reason being
+"cannot read record 3 — failed to fill whole buffer" instead of the index's
+refusal; with `whole * crate::audit::RECORD_LEN_U64` in `warm_pull_journal`
+it fails with "an index ahead of its journal is walked at start, every
+record once", left `Ok(0)`, right `Ok(2)`. Logs `green-ahead.log`,
+`red-ahead-request.log` and `red-ahead-warm.log` beside the mutation log.
+`docs/04-invariants.md` PREC1-21.
+### D-6244 — Every append to the pull audit journal waits a bounded time for the append lock instead of being refused at once, through R3-08's one patience mechanism (AG-06; code-5, FM-162) — 2026-10-19
+
+**Number** the ledger's head on feat/db-fix was D-5883 when this entry was
+written, D-5902 (AH-05) at this change's merge of AH-05, and D-6243 (R4-09a)
+at its merges of R4-09a and of IA-3 (20 Oct; IA-3's eight entries, D-4815 to
+D-5903, all sit below the head), so this takes D-6244 (amendment A6: head + 1
+at landing; re-checked at landing). It replaces the numbers D-5865 and D-5903
+this change carried before; neither was landed as this decision, and D-5903
+is now IA-3's own, a different decision.
+
+**Finding** code-5 (14 Oct attack, both skeptics; a consequence of FM-162). The
+journal's append lock (`api::audit::Journal::appended_images`, and the whole
+note file's lock beside it) was taken with `Flock::try_lock`, so an append
+that met another writer's few-millisecond append was refused at once and its
+record lost. When the lost record was a run's opening record and the process
+then died before the run's close, the restart scan read the journal and
+answered "clean" for a run that ran. The code-4 skeptic's 300-run barrier
+experiment lost records on every run to the same refusal.
+
+**Decided.**
+
+1. **One patience mechanism, R3-08's, made exclusive.** `store::flock`
+   already had R3-08's patient SHARED lock (`with_patience`, `MAX_PATIENCE`,
+   `try_lock_shared_patiently`) and its holder registry (`HOLDERS`,
+   `holder_note`). The exclusive twin, `Flock::try_lock_patiently(file, path,
+   bound, doing)`, reuses every part of it, and keeps none of its own:
+   - **one wait loop**, `store::flock::patiently`, which both patient locks
+     call (R3-08's own loop was folded into it): ask once, and on contention
+     pause 1 ms doubling to `MAX_PAUSE` (16 ms) until the bound, measured as
+     the longer of the monotonic clock and the pauses slept, so a clock that
+     steps backwards cannot extend it; a host refusal that is not contention
+     is returned at once, never waited on;
+   - **one pause**, `MAX_PAUSE` (made public so the journal's documents can
+     name it);
+   - **one ceiling**, `MAX_PATIENCE` (1 s): a shared lock's whole budget in
+     one `with_patience` call, and the cut on any one exclusive bound. The
+     10 s ceiling the first build of this change kept beside it is gone;
+   - **one registry**, `HOLDERS`: a guard taken patiently registers its
+     holder (thread, since when, and what its caller said it is doing) IN
+     THE SAME STEP as `flock(2)` grants the lock, and forgets it in the same
+     step as it unlocks, both under the registry's lock (repair 2;
+     R3-08's month guards take the same step), and the refusal names the
+     holder in `holder_note`'s words. The in-process queue (point 2) lives in the same
+     entry, so a path's holder and its waiters are one record.
+2. **In this process, patient exclusive lockers of one path queue in the
+   order they asked** (a ticket each, a condition variable, a place given up
+   when its waiter's bound runs out), and only the head of the queue polls
+   `flock(2)`. A first build that only polled refused 102 of 800 appends from
+   eight threads appending in a loop with a one-second bound: the lock is free
+   only for the microseconds between one holder's release and the next take,
+   and a sleeping poller wakes to a held lock. With the queue none is
+   refused. The turn passes to the next locker only after the unlock (the
+   guard's `turn` field drops after its `Drop` has unlocked), and an empty
+   queue is forgotten with its registry entry.
+3. **The bound is `api::audit::APPEND_LOCK_WAIT`, one second**, equal to the
+   ceiling; a compile-time assertion refuses a value above it, which would be
+   cut silently. It is set from the measured holder time (one append's open,
+   `stat`, write, `fsync` and index catch-up on a clone of the operator's
+   1.08 GB journal, uncontended p99 3.7 to 12.5 ms, `docs/06-limits.md`
+   AG-06). Both append lock sites (the journal and its `.notes` file) use it.
+   `build_index` takes the same lock with a zero bound: the old `try_lock`
+   answer (busy at once when anyone holds or awaits it), now registered while
+   it builds, so an append that waits out its bound behind a long build names
+   "the journal index build".
+4. **A refusal past the bound names the bound, the record and the holder.**
+   The text keeps "cannot take the journal append lock" and "refused rather
+   than interleaved", and adds the record's kind and outcome, the bound as
+   cut by the ceiling, the wait, the attempts, how many were ahead in this
+   process, and the holder: "held by this process (pid, thread, doing a pull
+   audit journal append / the journal index build) since …", or, when no
+   holder in this process is registered, "held by another process" in
+   `holder_note`'s words (`flock(2)` does not say which). The `api.audit`
+   Error "record not appended" event is unchanged and carries the whole
+   refusal.
+5. **The locked file must still be the journal.** The wait widened the moment
+   between `open` and the lock, so after the lock the descriptor's device and
+   inode are compared with the path's (one `stat`); a journal moved aside or
+   replaced meanwhile is refused by name rather than appended to a file no
+   reader opens.
+6. **Readers never wait on this bound.** No journal reader takes the append
+   lock (`look`, `page`); the restart scan's own wait for an index build
+   (`pullrun::INDEX_WAITS`) is unchanged.
+
+**Repair 1 (19 Oct), and why.** The first build of this change (its first commit on fix/db-AG-06)
+was made before R3-08 merged, and its second check failed it on two counts.
+Merged, it left two wait loops, two pause constants, two ceilings and two
+holder registries side by side (rule 2 asks for one path); points 1 and 3
+are the one path. And its own registry, kept in `api::audit` beside the
+guard, named the wrong holder: the guard's explicit `drop` released the lock
+and handed the turn on before the registry entry dropped at function exit,
+so the predecessor's late removal erased the successor's entry and a refusal
+during the successor's hold blamed another process. Registration now
+belongs to the guard and follows the lock (point 1), so that ordering cannot
+recur; `the_holder_is_named_through_every_in_process_hand_off` samples the
+registry through real hand-offs and fails on the first build.
+
+**Repair 2 (20 Oct), and why.** Repair 1 registered after the grant and
+forgot before the unlock, which left two instants a reader here could meet:
+the lock held by this process and nobody named, read as "another process".
+A sampler that holds the registry's lock while it asks the kernel whether
+the lock is held found that in 5,964 of 25,038 held samples. Now the grant
+and the record are one step under the registry's lock
+(`store::flock::take_held`), and so are the forgetting and the unlock
+(`let_go`). Chosen over the alternatives because it makes the registry
+exact for every reader in this process at the price of one non-blocking
+`flock` call under a mutex the take and the release already lock; recording
+a holder before the grant would name one that does not hold the lock, and
+naming the instants only (repair 1's own note) left the defect.
+`no_reader_here_ever_finds_the_lock_held_and_its_holder_unnamed` is the
+exact sampler; `docs/06-limits.md` L-AG06-10 states the cost.
+
+**Not done here, and why.** A run whose opening append is refused AFTER the
+bound (a holder that keeps the lock longer than one second: a stuck writer, or
+the once-per-journal from-scratch index build of about 1.33 s per GiB) still
+runs unjournalled, because `RunLedger::open` keeps `opened_refused` and runs on
+and `RunLedger::flush` never retries the opening. That is `server.rs`, batch-1
+AF-04's file. Follow-on after AF-04: refuse to start a run whose opening could
+not be journalled, or retry the opening at the first flush; and let the restart
+scan (`pullrun.rs`) answer `not_known` rather than "clean" when such a refusal
+is known; and move the append off the async worker (`spawn_blocking`), since a
+contended append blocks the thread that calls it for up to the bound.
+`docs/06-limits.md` (AG-06) names each, and corrects the earlier reading that
+`close_unopened` covers a lost opening record: it does only when the run
+reaches its close.
+### D-6245 — AG-05: every census file is born through `store::staging::create`, an epoch's name is never a link, and `/disk.json` says a migrated census is unsealed — 2026-10-17
+
+Renumbered at landing (amendment A6): this decision carried D-5884 and then
+D-5903, and IA-3 landed D-5903 first, so it takes D-6245, the ledger head + 1.
+
+Assurance findings store-1 and store-2 (14 Oct attack run, each confirmed by
+two skeptics; their corrections applied).
+
+1. **The epoch install's staging file is created, never opened (store-1).**
+   `census_store::install_epoch` wrote `<epoch>.man.tmp` with
+   `File::create` — create, truncate, following a link — so a hard link
+   planted at that name cut the OLDER epoch's inode and wrote the new image
+   through it (compaction, `cli census-recount` and the re-key's withdraw all
+   answered `Ok`, leaving two epochs on one inode), and a symbolic link sent
+   the image into whatever it named. It now goes through D-4922's door,
+   `store::staging::create` (`O_CREAT | O_EXCL`): a hard link is refused
+   `staging_linked`, a symbolic link (dangling or not), a directory, a pipe
+   or a socket `staging_not_regular`, each by name with nothing removed,
+   truncated or written; a dead writer's leftover — a regular file with one
+   name — is cleared and the warning `stale epoch temporary cleared` carries
+   its bytes. Every caller inherits it because one install function writes
+   every epoch after the first (the migration's first epochs are written
+   `create_new` into a fresh staging directory, which never opens a name that
+   exists, and are not temporaries gate 28 counts). The seal's stub (`<vendor>.man.seal.tmp`) and
+   receipt (`SEALED.tmp`) used `remove_file` then `create_new`, which unlinked
+   whatever was at the name unseen; they use the same door.
+2. **An epoch's name holds a regular file or is refused.** `current_epoch`
+   refuses an epoch name whose listing entry is a symbolic link, a directory
+   or a special file (the type comes with the listing entry); `read_epoch`
+   names a symbolic link as one instead of the host's ELOOP. Before, the
+   listing answered the link as the current epoch and only the read stopped.
+3. **Gate 28 reads `.writing` as a temporary.** `census_store.rs` leaves its
+   LEGACY list (it names two temporaries and calls the door three times), and
+   `pull::ingest`'s single-file census publish (`<vendor>.man.writing` by
+   `File::create`), which the `.tmp`-only rule never saw (L-R316-03's blind
+   spot), joins it with a count of 1. That publish is NOT converted here:
+   `ingest.rs` is in flight (GF-1, R3-18) and owned next by IA-16, or R3-19
+   after them (docs/06-limits.md L-AG05-01).
+4. **`/disk.json` decides a single file's role from the seal RECEIPT
+   (store-2).** A migrated vendor's `<vendor>.man` was `sealed-stub` when a
+   `.v3-superseded` name existed and `superseded` otherwise — so the
+   operator's GDFL census, migrated (WP-81) and never sealed, was labelled
+   `superseded` and nothing said a pre-version-4 reader would serve the
+   census the migration froze. Now: `sealed-stub` only under a whole receipt;
+   `unsealed` with no receipt or a torn one; `seal-unknown` when the receipt
+   is a later format or cannot be read (a directory, a link). Each feed
+   carries `seal` {`migrated`, `receipt`, `receipt_path`, `requires`,
+   `requires_path`, `fault`}, and the answer's new `faults` names each vendor
+   whose seal is not whole: `census_unsealed` (with the step `cli
+   census-migrate <vendor> --seal` after a snapshot, docs/36 section 2, and
+   whether `manifest/REQUIRES` exists; an interrupted seal and a missing
+   single file are told apart), `census_seal_unknown`, and
+   `census_requires_absent` for a whole seal whose requirements line is
+   missing. No route was added; the /ingest Storage band and the /db badge
+   read the field later (SC-8).
+5. **What is not done here and why.** The seal itself is the operator's
+   store step (S-07, DB-B68, D-3381): `cli census-migrate gdfl --seal` after
+   a snapshot and a rehearsal on a copy, then an API restart by the main
+   session. A guard in `state/fix/deploy-8080.sh` (outside the repository)
+   that refuses to start a pre-version-4 binary over a version-4 store is the
+   main session's.
+6. **Repair 1 (19 Oct): a whole receipt is a claim, not the seal.** A second
+   agent put the census back at `gdfl.man` with `SEALED` and `REQUIRES` left
+   in place, and `/disk.json` read `sealed-stub`, no fault, and dropped the
+   census from `census_kept_bytes` — the store-2 hazard reported as sealed.
+   The route now measures both names a seal leaves: `sealed-stub` only when
+   the receipt is whole AND the single name holds the stub (its length and
+   its header, `census_store::holds_sealed_stub`, now public) AND
+   `<vendor>.man.v3-superseded` is a regular file; otherwise
+   `seal-inconsistent`, counted as kept bytes, with the fault
+   `census_seal_inconsistent` saying what each name holds and the step (`cli
+   census-migrate <vendor> --seal`, which either completes the seal or
+   refuses by name). Each feed's `seal` gains the measured `stub` and
+   `superseded`. A directory or a link at `manifest/REQUIRES` is said as
+   such, never "absent". The cost is one more `lstat` and one 16-byte read
+   per migrated vendor. **No default-suite test asserts a wall-clock bound**:
+   the epoch-install bench asserts the staging door's own call count on every
+   install (1 on a free name, 4 over a leftover) and the `/disk.json` bench
+   asserts a stable answer; both print p50, p99 and max for docs/06. An
+   absolute bound had failed on this shared host at p99 617 ms while the
+   unchanged `File::create` series beside it measured 309 ms: it measured the
+   load, not the code.
+   **`manifest/REQUIRES` is appended through no link** (the second agent's
+   follow-up, in this file): `require_feature` opened the name with `create`
+   and `append`, following a link, after a `read_to_string` that would wait
+   on a pipe. It now makes one no-follow, non-blocking open for read and
+   append and checks the handle's own `fstat`: a symbolic link (dangling or
+   not) is refused by name, a name that is not a regular file is refused, and
+   a regular file with more than one name is refused with its count, each
+   before a byte is written. One `open` where there were two, plus that
+   `fstat`: constant per requirement written.
+   **A census batch is appended into no second name** (the second check's
+   follow-up `probe_pre_damaged_shared_inode_epochs`, in this file): the
+   state the old staging open left — an epoch that is a hard link of an older
+   epoch's inode — still read as the current epoch, and `record` appended
+   into it, rewrote the older epoch's bytes in place and answered `Ok`.
+   `write_batch` now opens its file no-follow and non-blocking and checks the
+   handle's own `fstat`: a symbolic link, anything not a regular file and a
+   regular file with more than one name are each refused by name before a
+   byte is written. The same open serves the single-file census, so a
+   `<vendor>.man` a seal cut between its link and its rename (two names) is
+   refused too rather than grown under its superseded name. Cost: the open
+   it always made plus one `fstat`, per batch. The two pipe checks no longer
+   read a clock after the call (a call waiting on a pipe never returns to
+   it): each runs the call on its own thread and fails if no answer comes in
+   two minutes, a hang detector rather than a cost bound.
+
+Tests: `pull::ingest::census_store::link_tests::*` and
+`api::server::disk_route::seal_tests::*`; gate 28's
+`a_new_unlisted_staging_write_fails_the_gate_and_the_door_passes_it`.
+Invariants AG05-01 to AG05-11 in docs/04-invariants.md; limits L-AG05-01 to
+L-AG05-05 in docs/06-limits.md.
+
+**Repair 2 (verify-AG-05-r2, 2026-10-20).** Two figures the repair-1 roles
+introduced were wrong, and both are fixed at their one cause, the sum.
+`census_kept_bytes` is now computed by `api::server::disk_route::kept_bytes`
+from each census name's `retained` flag and its file identity
+`(st_dev, st_ino)`, taken from the `lstat` the view already made, so no call
+is added. Locked choices:
+
+1. A single file that reads `seal-unknown` is retention unless the name
+   holds the stub, measured. A receipt this build cannot read (a later
+   format, a pipe, a directory, a link) says nothing about the bytes at the
+   name, and bytes no seal accounts for are kept, never assumed disposable.
+   Before, the role was outside the kept set and a whole frozen census
+   dropped out of the figure (268430208 bytes on a real-store shadow).
+2. Each FILE is counted once across every feed, at its first retained name.
+   A retained name of a file that a name in use also holds (the current
+   epoch, the stub, an unmigrated single file) costs nothing. A seal killed
+   after its link and before its stub leaves one inode at two names, and the
+   per-name sum counted it twice. The roles and the fault words are
+   unchanged. The `census_unsealed` sentence now names that state as a seal
+   interrupted after its link, and it names a 0-byte single file as empty
+   rather than as the frozen census.
+3. `pull::census_store::require_feature` reads `manifest/REQUIRES` through a
+   read-only no-follow open before it opens anything for append. A line
+   already in force answers `Ok(false)` there, so a read-only `REQUIRES` no
+   longer fails an idempotent re-seal with `EACCES`. The append open keeps
+   every repair-1 refusal.
+4. A whole receipt's `superseded_bytes` is compared with what
+   `<vendor>.man.v3-superseded` holds. `census_store::seal_receipt_kept_bytes`
+   returns the figure from the receipt's one bounded read, and
+   `seal_receipt` delegates to it, so `SealReceipt` keeps its shape. A kept
+   census of any other length is not the census the seal kept: the seal's
+   `superseded` is `false`, the single name reads `seal-inconsistent`, and
+   the `census_seal_inconsistent` sentence names both lengths. Before this,
+   such a file read `sealed-stub` with no fault. The `lstat` was already
+   taken, so no call is added.
+5. A name at `manifest/v4/<vendor>` that is not a directory (a symbolic
+   link, a regular file, anything else) is named by the new fault
+   `census_v4_not_a_directory`. The vendor still reads as not migrated and
+   its single file keeps the role `single`, but the answer no longer passes
+   it over as a census nobody touched. A feed with no single file left is
+   still answered for its fault.
+
+Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
+`seal_tests::a_seal_killed_after_its_link_counts_its_one_file_once`,
+`seal_tests::an_empty_single_file_is_not_told_as_the_frozen_census`,
+`seal_tests::a_kept_census_cut_short_under_a_whole_receipt_is_seal_inconsistent`,
+`seal_tests::a_name_at_the_v4_directory_that_is_not_one_is_named` and
+`link_tests::an_idempotent_requirement_opens_nothing_for_writing`. Each one
+failed on the code before it. Invariants AG05-12 to AG05-17; limits
+L-AG05-06 and L-AG05-07.

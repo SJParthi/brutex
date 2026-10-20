@@ -73,22 +73,18 @@ const LISTED: [(&str, &str); 3] = [
 
 /// The named exceptions: (module, the site's code line trimmed, how many
 /// times it may appear, why).
-const ALLOWED: [(&str, &str, usize, &str); 4] = [
-    (
-        "crates/api/src/autopilot.rs",
-        "let mut file = std::fs::File::create(path)?;",
-        1,
-        "store_writable's probe creates its own dot-file (STORE_PROBE_PREFIX + \
-         vendor) to learn whether the disk takes a write; File::create would \
-         empty a file of that name, and no store file carries it",
-    ),
+///
+/// The probe's `File::create` row is gone (PREC-1, D-5408): the probe opens
+/// its dot-file with `create_new`, which empties nothing and refuses a name
+/// already held, so that line is no longer a site.
+const ALLOWED: [(&str, &str, usize, &str); 3] = [
     (
         "crates/api/src/autopilot.rs",
         "std::fs::remove_file(path)",
         1,
         "store_writable's probe removes the one dot-file it created a moment \
-         before (STORE_PROBE_PREFIX + vendor), never a store file; making the \
-         probe overwrite in place instead is R4-12's (autopilot.rs owner)",
+         before with create_new (STORE_PROBE_PREFIX + vendor), never a store \
+         file and never a name it found held (PREC-1, D-5408)",
     ),
     (
         "crates/pull/src/tickstore_write.rs",

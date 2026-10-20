@@ -228,7 +228,7 @@ const MAX_ROW_LEN: usize = {
 const _: () = assert!(MAX_ROW_LEN == 80);
 
 use crate::flock::Flock;
-use crate::header::Header;
+use crate::header::{Header, SlotAudit};
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath, YearMonth};
 use crate::time_index::{Entry, Fault, Geometry, Held, Why, below_threshold};
@@ -1423,6 +1423,15 @@ pub struct BarFile {
     layout: Layout,
     /// The committed state, re-read from the file on open.
     header: Header,
+    /// Every header slot of the region read at open, and the month verdict
+    /// (`crate::header::slot_audit`), from the same bytes `header` was chosen
+    /// from. It describes the open, not later commits by this handle. D-6240.
+    ///
+    /// `None` for a month served in its sealed form (`.sbar`): that form has one
+    /// head under its own checksum and no slot pair, so there is no older
+    /// generation to fall back to; a damaged head is refused by name
+    /// (`head_checksum`), never reverted. D-6243.
+    slot_audit: Option<SlotAudit>,
     /// The per-block checksum sidecar, when this file carries one.
     ///
     /// # `None` is a real state and it is not a failure
@@ -2454,7 +2463,7 @@ impl BarFile {
         // the batch's too. `None` for every other door.
         batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
-        let (header, claimed) = read_header(&bars, &bars_path, len)?;
+        let (header, claimed, slot_audit) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
 
         // A TORN TAIL PAST THE COUNTER BRICKED THE WHOLE MONTH, PERMANENTLY.
@@ -2713,6 +2722,7 @@ impl BarFile {
             bars_path,
             layout,
             header,
+            slot_audit: Some(slot_audit),
             checksums,
             // THE PATH IS KEPT ONLY WHEN THE FLAG IS SET, which is the whole
             // mechanism behind `crc_path`'s three-row table. `crc_path` is in
@@ -2899,6 +2909,19 @@ impl BarFile {
     #[must_use]
     pub const fn header(&self) -> Header {
         self.header
+    }
+
+    /// The header region's slot audit as this file was opened: one state per
+    /// slot and the month verdict. A month that silently reverted to an older
+    /// generation because its newest slot is damaged says so here. D-6240.
+    ///
+    /// `None` when the month was opened in its sealed form, which has no header
+    /// slots to audit: its one head is checked whole and refused when damaged,
+    /// so it cannot revert silently. A caller names `Some` audits that are not
+    /// clean and has nothing to name for `None`. D-6243.
+    #[must_use]
+    pub const fn slot_audit(&self) -> Option<SlotAudit> {
+        self.slot_audit
     }
 
     /// The geometry this file's version defines.
@@ -4985,12 +5008,14 @@ fn initialise(
 /// It costs a second decode of at most two 64-byte slots, once per open. It is
 /// not a second *search*: no generation ordering, no slot-position rule and no
 /// fallback are reproduced here — see [`highest_claim`].
-fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64), StoreError> {
+fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64, SlotAudit), StoreError> {
     let want = len.min(REGION_LEN_U64);
     let mut region = vec![0u8; usize::try_from(want).unwrap_or(REGION_LEN)];
     read_fully(src, path, 0, &mut region)?;
-    let header = refused(Header::read_region(&region, len), path)?;
-    Ok((header, highest_claim(&region)))
+    // The path rides on `store.header.slot_damaged`, and the audit is kept by
+    // the handle (D-6240): the same region, decoded once more per slot.
+    let (header, audit) = refused(Header::read_region_at(&region, len, path), path)?;
+    Ok((header, highest_claim(&region), audit))
 }
 
 /// The largest `n_valid` any slot of the region still decodes as.
@@ -7526,6 +7551,69 @@ mod tests {
                 action: Action::Write,
             })
         );
+    }
+
+    /// THE KERNEL'S OWN `ENOSPC`, not a scripted host's. `/dev/full` answers
+    /// every write with `ENOSPC`, so this is the one full disk a test can
+    /// produce without privileged mounting, and it measures what the test
+    /// above can only assume: that the real error kind reaches `classify` as
+    /// `StorageFull` and leaves as `DiskFull` by name, returned and never
+    /// signalled (cloud-attack-law-20261016, lens 8).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernels_own_enospc_from_dev_full_is_disk_full_by_name() {
+        let at = Path::new("/dev/full");
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at)
+            .expect("Linux has /dev/full");
+        assert_eq!(
+            write_fully(&full, at, 0, &[0xAB; 4_096]),
+            Err(StoreError::DiskFull {
+                path: at.to_path_buf(),
+                action: Action::Write,
+            })
+        );
+    }
+
+    /// THE KERNEL'S OWN `ENOSPC` WHERE THERE IS NO `/dev/full` (macOS, the
+    /// operator's machine; PREC-1, ST-43). The test above is compiled for
+    /// Linux only, so on the Mac a real `ENOSPC` was never measured. This one
+    /// fills a file on a volume made small on purpose, named by
+    /// `BRUTEX_FULL_VOLUME`, until the kernel refuses, and the refusal must
+    /// leave `write_fully` as `DiskFull` by name. Bounded: a volume that takes
+    /// 1 GiB without refusing fails the test rather than filling a real disk.
+    #[test]
+    #[ignore = "needs BRUTEX_FULL_VOLUME: a directory on a small volume made to fill (docs/06-limits.md L-PREC1-01)"]
+    fn the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name() {
+        let dir = std::env::var_os("BRUTEX_FULL_VOLUME")
+            .map(PathBuf::from)
+            .expect("BRUTEX_FULL_VOLUME names a directory on a small volume");
+        let at = dir.join("brutex-enospc-probe.bin");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&at)
+            .expect("a new file on the small volume");
+        let chunk = vec![0xAB_u8; 1 << 16];
+        let mut offset = 0_u64;
+        let refused = loop {
+            assert!(offset < 1 << 30, "the volume took 1 GiB without refusing");
+            match write_fully(&file, &at, offset, &chunk) {
+                Ok(()) => offset = offset.saturating_add(1 << 16),
+                Err(refused) => break refused,
+            }
+        };
+        assert_eq!(
+            refused,
+            StoreError::DiskFull {
+                path: at.clone(),
+                action: Action::Write,
+            },
+            "after {offset} bytes"
+        );
+        // THE MEASUREMENT IS PRINTED, so L-PREC1-01 can be taken again.
+        eprintln!("ENOSPC: DiskFull by name after {offset} bytes accepted");
     }
 
     #[test]

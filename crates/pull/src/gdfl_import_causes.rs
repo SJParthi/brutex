@@ -541,9 +541,30 @@ pub const fn cm_cause(why: &CmRefusal) -> Cause {
         CmRefusal::RowsOverCap { .. } => Cause::vendor("rows_over_cap"),
         CmRefusal::NoSessionRows => Cause::vendor("no_session_rows"),
         CmRefusal::IndexEndsInSession { .. } => Cause::vendor("index_ends_in_session"),
-        CmRefusal::ArchiveDuplicateDay { .. } => Cause::vendor("archive_duplicate_day"),
-        CmRefusal::ArchiveMemberCompressed { .. } => Cause::vendor("archive_member_compressed"),
-        CmRefusal::ArchiveMethodUnknown { .. } => Cause::vendor("archive_method_unknown"),
+        // D-4835: the vendor named a wanted file with no extension; the same
+        // listing names it the same way every time.
+        CmRefusal::ExtensionMissing { .. } => Cause::vendor("extension_missing"),
+        // D-4818: a fault of the container as read never closes a day. Two
+        // copies of one day, a day zip the outer archive compresses, a method
+        // this reader does not inflate, an encrypted member, a prefix the
+        // offsets were not adjusted for, a day zip or day file under another
+        // folder: removing the copy, re-zipping it or a build that reads it
+        // fills the day, so each leaves it open (IA-GR-27).
+        CmRefusal::ArchiveDuplicateDay { .. } => {
+            Cause::open(Stage::Vendor, "archive_duplicate_day")
+        }
+        CmRefusal::ArchiveMemberCompressed { .. } => {
+            Cause::open(Stage::Vendor, "archive_member_compressed")
+        }
+        CmRefusal::ArchiveMethodUnknown { .. } => {
+            Cause::open(Stage::Vendor, "archive_method_unknown")
+        }
+        CmRefusal::ArchiveMemberEncrypted { .. } => {
+            Cause::open(Stage::Vendor, "archive_member_encrypted")
+        }
+        CmRefusal::ArchivePrefixed { .. } => Cause::open(Stage::Vendor, "archive_prefixed"),
+        CmRefusal::DayZipMisfiled { .. } => Cause::open(Stage::Vendor, "day_zip_misfiled"),
+        CmRefusal::DayFileMisfiled { .. } => Cause::open(Stage::Vendor, "day_file_misfiled"),
         CmRefusal::CalendarNotRegular { .. } => {
             Cause::open(Stage::Calendar, "calendar_not_regular")
         }
