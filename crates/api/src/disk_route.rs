@@ -55,7 +55,9 @@
 //! 8 KiB tail read of its scrub cursor (the findings index behind it is
 //! rebuilt only when its ledger moves, `scrub_route::with_index`). The answer is
 //! kept for [`DISK_TTL`] per store root, so a page polling it costs one
-//! `Mutex` read between measurements.
+//! `Mutex` read between measurements, and misses that arrive together take one
+//! measurement: the first measures, the rest wait for it and serve its answer
+//! (D-5245).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -691,19 +693,47 @@ pub(crate) fn measured(root: &Path, site: Option<&Site>) -> String {
     out
 }
 
-/// [`measured`], kept for [`DISK_TTL`] per store root.
+/// [`measured`], kept for [`DISK_TTL`] per store root, one measurement at a
+/// time.
 fn answer(site: &Site) -> String {
-    let root = site.store_root.clone();
-    if let Some((held_root, at, body)) =
-        LAST.lock().unwrap_or_else(PoisonError::into_inner).as_ref()
-        && *held_root == root
-        && at.elapsed() < DISK_TTL
-    {
-        return body.clone();
+    answer_from(&LAST, &MEASURING, &site.store_root, || {
+        measured(&site.store_root, Some(site))
+    })
+}
+
+/// Held by the one caller measuring, so misses that arrive together take ONE
+/// measurement (D-5245): the others wait for it and serve its answer.
+static MEASURING: Mutex<()> = Mutex::new(());
+
+/// The answer `last` holds for `root` while it is younger than [`DISK_TTL`];
+/// otherwise one `take`n under `measuring` — after looking again, since a
+/// caller that waited for the lock finds the answer the one ahead of it took.
+/// `last` is never held while `measuring` is asked for, so the two cannot
+/// deadlock.
+fn answer_from(
+    last: &Mutex<Option<(PathBuf, Instant, String)>>,
+    measuring: &Mutex<()>,
+    root: &Path,
+    take: impl FnOnce() -> String,
+) -> String {
+    let held = || {
+        last.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|(held_root, at, body)| {
+                (held_root == root && at.elapsed() < DISK_TTL).then(|| body.clone())
+            })
+    };
+    if let Some(body) = held() {
+        return body;
     }
-    let body = measured(&root, Some(site));
-    *LAST.lock().unwrap_or_else(PoisonError::into_inner) =
-        Some((root, Instant::now(), body.clone()));
+    let _one = measuring.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(body) = held() {
+        return body;
+    }
+    let body = take();
+    *last.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some((root.to_path_buf(), Instant::now(), body.clone()));
     body
 }
 
@@ -1402,6 +1432,65 @@ mod tests {
         assert!(number("used_bytes") <= number("total_bytes"));
         assert!(number("free_bytes") <= number("total_bytes"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **MISSES THAT ARRIVE TOGETHER TAKE ONE MEASUREMENT** (D-5245,
+    /// RUST1-14): eight callers released at once on an empty cache, the
+    /// measurement taking 50 ms, measure once and all serve that one answer;
+    /// another root is its own measurement, an answer as old as [`DISK_TTL`]
+    /// is taken again, and a fresh one is served without measuring. Before
+    /// D-5245 each of the eight measured (the operations pool bounds them at
+    /// four at a time).
+    #[test]
+    fn misses_that_arrive_together_take_one_measurement() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let last = Mutex::new(None);
+        let measuring = Mutex::new(());
+        let root = Path::new("/a-root");
+        let taken = AtomicUsize::new(0);
+        let together = Barrier::new(8);
+        let bodies: Vec<String> = std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        together.wait();
+                        answer_from(&last, &measuring, root, || {
+                            let n = taken.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(50));
+                            format!("measurement {n}")
+                        })
+                    })
+                })
+                .collect();
+            callers.into_iter().map(|c| c.join().unwrap()).collect()
+        });
+        assert_eq!(taken.load(Ordering::SeqCst), 1, "{bodies:?}");
+        assert_eq!(bodies, vec!["measurement 0".to_owned(); 8]);
+
+        let other = Path::new("/b-root");
+        assert_eq!(
+            answer_from(&last, &measuring, other, || "b".to_owned()),
+            "b"
+        );
+        {
+            let mut held = last.lock().unwrap();
+            let (_, at, _) = held.as_mut().expect("the answer for /b-root is held");
+            *at = Instant::now()
+                .checked_sub(DISK_TTL)
+                .expect("this machine has been up longer than the TTL");
+        }
+        assert_eq!(
+            answer_from(&last, &measuring, other, || "b2".to_owned()),
+            "b2"
+        );
+        assert_eq!(
+            answer_from(&last, &measuring, other, || panic!(
+                "a fresh answer is served, not measured again"
+            )),
+            "b2"
+        );
     }
 
     /// `(p50, p99, max)` of `ns` by nearest rank, in nanoseconds.

@@ -74937,3 +74937,31 @@ pass, fail (`r1b-new-tests-on-old-gate.log`); all nine pass after.
 A copy of the tree merged with `feat/db-fix` at `dad1a760` with four of the
 new spellings planted fails naming each (`r1b-plant-merged.log`); the tree
 itself is green with its two entries.
+
+### D-5245 — `/disk.json` misses that arrive together take one measurement (RUST-1, repair round 1c) — 2026-10-20
+
+**Finding.** The re-check of 19 Oct 2026 (`state/fix/round2/verify-CLOUD-RUST1-r1.json`,
+its follow-ups) noted that the answer cache WP-81 gave `/disk.json` had no
+single flight: `answer` looked in the cache and, on a miss, measured, so
+misses arriving together each measured, up to the operations pool's four at
+a time, while `docs/06-limits.md` L-WP81-4 said the route "is measured at most
+once in 30 s".
+
+**Decision.** One measurement at a time per process, behind a second lock:
+a caller that misses takes the measuring lock, looks in the cache again (the
+caller ahead of it may have just filled it), and measures only if it is still
+empty, stale or for another root. The cache lock is never held while the
+measuring lock is asked for, so the two cannot deadlock; a poisoned lock is
+taken as it stands, as the cache's own lock already was. The hit path is
+unchanged. `measured` and the answer's bytes are unchanged, so RUST1-07 holds.
+
+**Proof.** `misses_that_arrive_together_take_one_measurement` in
+`crates/api/src/disk_route.rs` (RUST1-14): eight callers released together
+on an empty cache with a 50 ms measurement measure once and serve one answer.
+The same test against the old shape fails with 8 measurements on 30 of 30
+runs and passes against the new one on 30 of 30
+(`scratch/fix-CLOUD-RUST1-r1c/singleflight/before-after-30.txt`).
+
+**Cost.** L-RUST1-5: a waiting caller waits the rest of one uncached
+measurement; a hung filesystem holds the waiters as it held each caller
+before.
