@@ -20019,3 +20019,37 @@ audit::lock_wait_measure::measure_append_latency_under_contention
 | L-AG05-05 | `api` lists and opens census epochs by its own code, which this change did not reach | `api::census::current_epoch` (census.rs, used by `census_cache.rs`) lists `<epoch>.man` names without their type, and the epoch open (`sized`, census.rs) sets `O_NONBLOCK` but not `O_NOFOLLOW`, so by reading the code a symbolic link at an epoch's name would be followed by `/db`'s census reads where `pull::census_store` now refuses it. NOT PROVED by a test here; `api/src/census.rs` is outside AG-05's files | a link planted inside the operator's own store (none exists); the fix is one shared listing and one no-follow open — `api` calling `pull::census_store::current_epoch` and `read_epoch`, or `store::safe_open::open_read` — by the next package that owns `api/src/census.rs` (R4-29 or the one after it) | AG-05 → owner of `api/src/census.rs` |
 | L-AG05-06 | `census_kept_bytes` is a sum over every census name of every feed, each file once (repair 2) | counting a file once needs its identity: one `HashSet` probe and at most one insert per name, from the `(st_dev, st_ino)` of the `lstat` the view already took, so no call is added; the names are the ones the answer already lists (the single file, the superseded file, every epoch of every segment, the receipt), and epochs grow by one per compaction (DB-B59, L-AG05-03) | expected O(1) per name (hashing, not a worst-case bound), O(names) per uncached answer, the answer kept for `DISK_TTL`; GET `/disk.json` p50/p99/max on a real-store shadow in fix-AG-05.json | AG-05 |
 | L-AG05-07 | One follow-up of verify-AG-05-r2 is NOT DONE here (two others were taken in this change: a kept census cut short under a whole receipt, AG05-16, and a non-directory at `manifest/v4/<vendor>`, AG05-17) | a symbolic link at a single-file census is refused at load in the host's `ELOOP` words, not named as a link: the load is not in `census_store.rs`'s seal path — R3-19 | it needs a link planted inside the operator's own store (none exists: every name in the real store has one link) | AG-05 → R3-19 |
+
+## The `_v3` ledger check per options day, and the year-zip directory walk (IA-3-OPT; D-4814, D-4867, D-6890)
+
+**Measured** on 20 Oct 2026 on the M4 Pro, a loaded shared machine. The
+build is the dev profile (opt-level 3, overflow checks on). Calls are
+sequential, one call per sample, all read only, through the ignored test
+`the_real_v3_ledger_agrees_with_the_real_year_zips`. The ledger is the
+operator's `/Volumes/WD_BLACK/NSE_Options_Tick` and the sources are the year
+zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
+`BRUTEX_GDFL_V3_LEDGER` and `BRUTEX_GDFL_NFO_ARCHIVES` set and
+`cargo test -p pull --lib -- --ignored --nocapture --exact gdfl_v3::tests::the_real_v3_ledger_agrees_with_the_real_year_zips`.
+
+- The ledger holds 79, 245, 252, 248, 248, 246, 249, 249 and 181 manifests
+  a year for 2018 to 2026, with exactly as many ok markers (1,997 each).
+- Every one of the 1,997 days the year zips hold agrees: 20,825,675 lines.
+  Each marker's `crc` and `size` are its day zip's own.
+- The check per day, first run (files cold): n=1,997, p50 7.8 ms, p99
+  52.7 ms, max 134.9 ms. Second run, minutes later: n=1,997, p50 5.7 ms, p99
+  10.7 ms, max 12.8 ms. Each check is one read of a manifest of up to about
+  3 MB and of its marker, from the external drive, plus one sha256 and one
+  pass.
+- The largest day's shape in memory (26,820 invented lines, 3,234,350 bytes,
+  `the_v3_extremes_are_each_named`): one check in 14.9 ms, including the
+  reads from the scratch directory.
+- The first day asked (the directory listed, the 9 year zips' central
+  directories walked): 16.1 ms in the first run and 12.4 ms in the second. A
+  later day's listing: 5.9 ms and 1.8 ms, which is the day zip's own
+  directory read from disk, not the lookup.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA3OPT-01 | The `_v3` check of one options day (`V3Ledger::check`) | it reads the day's manifest and ok marker, takes one sha256 of the manifest, and makes one pass over its lines against the listing: O(entries of the day). A line that agrees allocates nothing; only the first difference is built | a manifest over `MANIFEST_MAX_BYTES` (64 MiB) or a marker over `MARKER_MAX_BYTES` (4 KiB) is `Unverified` and is never read whole. The largest day measured is 26,820 lines. Measured above: p99 52.7 ms per day with the files cold and 10.7 ms warm, mostly the drive's read | IA-3-OPT |
+| L-IA3OPT-02 | The options year-zip directory walk (`NfoZips::list`) | to name a day zip filed in another zip (FM-043), the first day asked lists the directory and walks every `*.zip`'s central directory once: O(names in the directory) plus O(entries) per zip, once per source object (one run). After that, each day is one hash probe of its year's index and one of the notes | the real directory holds 9 year zips of 84 to 265 entries each (2,103 in all, counted by `zipinfo -1`), walked in 12.4 to 16.1 ms. The source cache that would keep the walk across runs (D-4802) is NOT BUILT | IA-3-OPT |
+| L-IA3OPT-03 | A year zip that refuses is walked again on each day of its year | a zip that refuses is not kept, as before this change, so each of its days names the refusal anew and a zip mended mid-run is read: O(entries of that zip) per day of its year while it refuses | only while it refuses. A zip of any other name that refuses is not asked again for the life of the source, so every day held nowhere answers its refusal until the next run | IA-3-OPT |
