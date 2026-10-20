@@ -3895,7 +3895,10 @@ disk = "unknown until rehearsed"
             "        \"a\" => {\n            arguments.len() > 2\n        }\n        other => WRITERS.contains(&other),\n",
         ] {
             let refused = rule(arms).expect_err("refused");
-            assert!(refused.contains("an arm this gate does not read"), "{refused}");
+            assert!(
+                refused.contains("an arm this gate does not read"),
+                "{refused}"
+            );
         }
         // And the cli's real `series-identity` arm is the block form.
         assert!(!table.writes("series-identity", &["ALL", "--dry-run"]));
