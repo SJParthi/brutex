@@ -507,3 +507,1571 @@ fn an_all_foreign_answer_a_single_row_an_empty_one_a_rerun_and_the_repair_door()
     assert_eq!(held.len(), held_before, "a refused session was repaired in");
     assert!(held.iter().all(|b| b.high <= LEVEL + 2_000));
 }
+
+// ---------------------------------------------------------------------------
+// R4-17: a CASH share's own witnesses — its listing day in the receipted NSE
+// master, its own previous minute — and the day-rung arm. RT-DATA-02, ING-01,
+// Z5, COR-07. Every master, listing date and price below is invented; the
+// symbols are real only so `brutex_core::universe::nse_isin` gives each the
+// exact ISIN a landing keys its listing by.
+// ---------------------------------------------------------------------------
+
+fn cash_request(
+    from: Day,
+    to: Day,
+    granularity: pull::vendor::Granularity,
+) -> pull::fetch::BarRequest {
+    pull::fetch::BarRequest {
+        listing: pull::vendor::Listing::Equity,
+        ..request(from, to, granularity)
+    }
+}
+
+fn cash_plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
+    pull::ingest::Plan {
+        segment: "CASH",
+        ..plan(request)
+    }
+}
+
+fn cash_month(
+    root: &Path,
+    symbol: &str,
+    tf: Timeframe,
+    month: (u16, u8),
+) -> Vec<store::format::Bar> {
+    let path = StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol,
+        contract: None,
+        timeframe: tf,
+        month: YearMonth::new(month.0, month.1).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    match store::file::BarFile::open_existing(root, path, symbol_id(symbol)) {
+        Ok(file) => (0..file.header().n_valid)
+            .map(|i| file.read_record(i).unwrap())
+            .collect(),
+        Err(store::file::StoreError::Missing { .. }) => Vec::new(),
+        Err(why) => panic!("{symbol} {}: {why}", tf.as_str()),
+    }
+}
+
+fn land_cash(
+    root: &Path,
+    symbol: &str,
+    (from, to): (Day, Day),
+    granularity: pull::vendor::Granularity,
+    rows: Vec<RawRow>,
+) -> pull::ingest::Ingested {
+    let req = cash_request(from, to, granularity);
+    pull::ingest::from_window(
+        &RawWindow { rows },
+        symbol,
+        "IDENTITY TEST",
+        root,
+        cash_plan(&req),
+    )
+}
+
+/// Seconds from 1980-01-01, as the NSE master states a lifecycle date.
+fn nse_seconds(on: Day) -> u64 {
+    u64::from(on.days_from_epoch() - day(1980, 1, 1).days_from_epoch()) * 86_400
+}
+
+/// Install an invented, receipted NSE master dated 2026-08-03 under `root`
+/// stating, for each symbol, its listing and removal days (`None` is `0`).
+fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
+    install_master_on(root, day(2026, 8, 3), rows);
+}
+
+/// [`install_master`], dated `on`.
+fn install_master_on(root: &Path, on: Day, rows: &[(&str, Option<Day>, Option<Day>)]) {
+    let keyed: Vec<(&str, brutex_core::isin::Isin, Option<Day>, Option<Day>)> = rows
+        .iter()
+        .map(|(symbol, listed, removed)| {
+            let isin = brutex_core::universe::nse_isin(symbol).expect("an NSE ISIN");
+            (*symbol, isin, *listed, *removed)
+        })
+        .collect();
+    install_master_keyed(root, on, &keyed);
+}
+
+/// [`install_master_on`] with each row's ISIN named, for a share the
+/// universe holds no ISIN of.
+fn install_master_keyed(
+    root: &Path,
+    on: Day,
+    rows: &[(&str, brutex_core::isin::Isin, Option<Day>, Option<Day>)],
+) {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+    let mut csv = String::from(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n",
+    );
+    for (id, (symbol, isin, listed, removed)) in rows.iter().enumerate() {
+        let cell =
+            |on: &Option<Day>| on.map_or_else(|| "0".to_owned(), |d| nse_seconds(d).to_string());
+        writeln!(
+            csv,
+            "{},{symbol},EQ,{},1,{},{},0",
+            7_000 + id,
+            isin.as_str(),
+            cell(listed),
+            cell(removed)
+        )
+        .unwrap();
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(csv.as_bytes()).unwrap();
+    let bytes = encoder.finish().unwrap();
+    let masters = root.join(pull::listing::MASTER_DIR);
+    fs::create_dir_all(&masters).unwrap();
+    pull::cash_session_cache::install(&masters, on, &bytes).expect("fixture master");
+}
+
+/// The local minute of the day of a fixture row, and its day.
+fn local_minute(row: &RawRow) -> (Day, i64) {
+    let local = row.timestamp + IST_OFFSET_SECS;
+    (
+        Day::from_days(u32::try_from(local.div_euclid(86_400)).unwrap()).unwrap(),
+        local.rem_euclid(86_400) / 60,
+    )
+}
+
+/// PIIND's shape (RT-DATA-02 a): inside one session, a block of minutes at
+/// another price basis — here an invented 1,100/10,000 of the series' level,
+/// near the ninefold step the spec measured; no real price is quoted —
+/// under a day bar that spans both, so the day rung cannot tell them apart.
+/// The block is refused whole by name; the minutes after it, back on the
+/// series' own basis, land; nothing refused is folded.
+#[test]
+fn a_session_interleaving_two_price_bases_is_refused_at_landing() {
+    let scratch = Scratch::new("interleave");
+    let symbol = "PIIND";
+    let (from, to, days) = week();
+    // A day bar mixed like the vendor's: low at the foreign basis, high at the
+    // series' own.
+    let mixed = RawRow {
+        low: LEVEL * 1_100 / 10_000 - 1_000,
+        ..day_candle(days[2])
+    };
+    let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    day_rows[2] = mixed;
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        day_rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    let honest = rows.len();
+    let mut swapped = 0usize;
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        // 10:00..10:09: ten minutes at an invented 1,100/10,000 of the level.
+        if on == days[2] && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 1_100, 10_000);
+            swapped += 1;
+        }
+    }
+    assert_eq!(swapped, 10);
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "in_session_jump");
+    assert_eq!(
+        named.len(),
+        1,
+        "one failure per (cause, day): {:?}",
+        done.failures
+    );
+    assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
+    assert!(named[0].contains("continuous run"), "{}", named[0]);
+    assert!(
+        whys(&done, "foreign_level").is_empty(),
+        "the mixed day bar holds them"
+    );
+    let held = cash_month(&scratch.0, symbol, Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(held.len(), honest - 10, "the rest of the answer landed");
+    assert!(
+        held.iter().all(|b| b.low >= LEVEL - 1_000),
+        "no foreign minute stored"
+    );
+    for rung in [Timeframe::MINUTE_5, Timeframe::MINUTE_15] {
+        let folded = cash_month(&scratch.0, symbol, rung, (2024, 1));
+        assert!(!folded.is_empty());
+        assert!(
+            folded.iter().all(|b| b.low >= LEVEL - 1_000),
+            "{}",
+            rung.as_str()
+        );
+    }
+}
+
+/// A halt or a missing minute splits the run, and a session's first minute is
+/// never judged: a level change across either is not a jump.
+#[test]
+fn a_halt_splits_the_run_and_a_sessions_first_minute_is_never_a_jump() {
+    let scratch = Scratch::new("halt");
+    let symbol = "PIIND";
+    let (from, to, days) = week();
+    let wide = |d: Day| RawRow {
+        low: LEVEL / 2 - 1_000,
+        high: LEVEL * 2,
+        ..day_candle(d)
+    };
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        days.iter().copied().map(wide).collect(),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    // Day 2: a halt from 11:00 to 11:44, after which the level is 1.6 times.
+    // Day 4: the whole session at 1.6 times the level from its first minute.
+    rows.retain(|row| {
+        let (on, minute) = local_minute(row);
+        !(on == days[1] && (660..705).contains(&minute))
+    });
+    let kept = rows.len();
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if (on == days[1] && minute >= 705) || on == days[3] {
+            *row = impostor(on, minute, 8, 5);
+        }
+    }
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert!(
+        whys(&done, "in_session_jump").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        cash_month(&scratch.0, symbol, Timeframe::MINUTE_1, (2024, 1)).len(),
+        kept
+    );
+}
+
+/// MAZDOCK's shape (ING-01 c): 1day bars with o=h=l=c=0 land today. The
+/// day-rung arm refuses each by name and lands the rest. An index's zero day
+/// bar is NOT refused (D-4992 point 3, the test below): only a price below
+/// zero is, on an index.
+#[test]
+fn a_zero_price_day_bar_is_refused_by_name_at_landing() {
+    zero_day_landing("MAZDOCK", "CASH", 2);
+}
+
+/// D-4992, measured: an index's zero is its own (`NIFTY50DIVPOINT` restarts
+/// from zero after each March expiry), so on an INDEX the zero day bar lands
+/// and only the row below zero is refused by name.
+#[test]
+fn an_index_zero_day_bar_lands_and_a_negative_one_is_refused_by_name() {
+    zero_day_landing("NIFTY50DIVPOINT", "INDEX", 1);
+}
+
+/// A week of day bars, row 1 at zero and row 3 with a low of -5 paisa, landed
+/// under `segment`: `refused` of them are refused by name, the rest land.
+fn zero_day_landing(symbol: &str, segment: &str, refused: usize) {
+    {
+        let scratch = Scratch::new(&format!("zero-day-{symbol}"));
+        let (from, to, days) = week();
+        let mut rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+        rows[1] = RawRow {
+            open: 0,
+            high: 0,
+            low: 0,
+            close: 0,
+            ..rows[1]
+        };
+        rows[3] = RawRow { low: -5, ..rows[3] };
+        let req = cash_request(from, to, pull::vendor::Granularity::Day1);
+        let req = pull::fetch::BarRequest {
+            listing: if segment == "CASH" {
+                pull::vendor::Listing::Equity
+            } else {
+                pull::vendor::Listing::Index
+            },
+            ..req
+        };
+        let done = pull::ingest::from_window(
+            &RawWindow { rows },
+            symbol,
+            "IDENTITY TEST",
+            &scratch.0,
+            pull::ingest::Plan {
+                segment,
+                ..plan(&req)
+            },
+        );
+        let named = whys(&done, "non_positive_price");
+        assert_eq!(named.len(), refused, "{symbol}: {:?}", done.failures);
+        // Each refusal names its own row of the answer.
+        let negative = named.last().unwrap();
+        assert!(negative.starts_with("row 3:"), "{negative}");
+        assert!(negative.contains("low -5"), "{negative}");
+        if refused == 2 {
+            assert!(named[0].starts_with("row 1:"), "{}", named[0]);
+            assert!(
+                named[0].contains("open 0, high 0, low 0, close 0"),
+                "{}",
+                named[0]
+            );
+        }
+        assert_eq!(
+            done.bars_committed,
+            5 - refused,
+            "{symbol}: every other day lands"
+        );
+    }
+}
+
+/// The day rung is the witness, never the accused: a day bar at any positive
+/// level lands, however far from its neighbours (D-4992).
+#[test]
+fn the_day_rung_is_never_judged_by_range() {
+    let scratch = Scratch::new("day-range");
+    let symbol = "MAZDOCK";
+    let (from, to, days) = week();
+    let mut rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    rows[2] = RawRow {
+        open: LEVEL * 37,
+        high: LEVEL * 37 + 10,
+        low: LEVEL * 37 - 10,
+        close: LEVEL * 37,
+        ..rows[2]
+    };
+    rows[4] = RawRow {
+        open: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        ..rows[4]
+    };
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(done.bars_committed, 5);
+}
+
+/// IRFC's shape (Z5, ING-01 d): day bars before the master's listing day are
+/// another security's; the listing day itself lands.
+#[test]
+fn a_day_bar_before_listing_is_refused_by_name() {
+    let scratch = Scratch::new("day-before-listing");
+    let symbol = "IRFC";
+    let (from, to, days) = week();
+    install_master(&scratch.0, &[(symbol, Some(days[2]), None)]);
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(named.len(), 2, "one per (cause, day): {:?}", done.failures);
+    assert!(named[0].contains("nse_security_master"), "{}", named[0]);
+    assert_eq!(done.bars_committed, 3, "the listing day and after land");
+    let held = cash_month(&scratch.0, symbol, Timeframe::DAY_1, (2024, 1));
+    let first = pull::series_identity::ist_day(held[0].ts_micros);
+    assert_eq!(first, i64::from(days[2].days_from_epoch()));
+}
+
+/// IRFC's and KFINTECH's minutes years before their listing (Z5): refused as
+/// `before_listing`, not `before_first_day_bar`. DALBHARAT's (D-5839): minutes
+/// on or after the listing and before the vendor's first day bar are the
+/// share's own and land.
+#[test]
+fn a_minute_before_listing_is_refused_by_name() {
+    let scratch = Scratch::new("minute-before-listing");
+    let (from, to, days) = week();
+    install_master(
+        &scratch.0,
+        &[
+            ("IRFC", Some(days[2]), None),
+            ("DALBHARAT", Some(days[0]), None),
+        ],
+    );
+    for symbol in ["IRFC", "DALBHARAT"] {
+        // The vendor's day rung starts on the third session for both.
+        let rows = days[2..].iter().copied().map(day_candle).collect();
+        let done = land_cash(
+            &scratch.0,
+            symbol,
+            (days[2], to),
+            pull::vendor::Granularity::Day1,
+            rows,
+        );
+        assert!(done.failures.is_empty(), "{symbol}: {:?}", done.failures);
+    }
+    let honest = answer(from, to).len();
+    let before: usize = sessions(from, to)
+        .iter()
+        .filter(|(d, _)| *d < days[2])
+        .map(|(_, minutes)| minutes.len())
+        .sum();
+
+    let done = land_cash(
+        &scratch.0,
+        "IRFC",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(named.len(), 2, "{:?}", done.failures);
+    assert!(
+        whys(&done, "before_first_day_bar").is_empty(),
+        "the listing, never the first day bar"
+    );
+    assert_eq!(
+        cash_month(&scratch.0, "IRFC", Timeframe::MINUTE_1, (2024, 1)).len(),
+        honest - before
+    );
+
+    let done = land_cash(
+        &scratch.0,
+        "DALBHARAT",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(
+        done.failures.iter().all(|f| !f.why.contains("refused for")),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        cash_month(&scratch.0, "DALBHARAT", Timeframe::MINUTE_1, (2024, 1)).len(),
+        honest
+    );
+}
+
+/// TATACONSUM's and TMPV's shape: a master whose `ListgDt` is `0` states no
+/// listing, so nothing is refused on it; minutes before the first day bar fall
+/// back to WP-13d's rule, and day bars on any day land.
+#[test]
+fn epoch_zero_listing_refuses_nothing() {
+    let scratch = Scratch::new("epoch-zero-landing");
+    let symbol = "TATACONSUM";
+    let (from, to, days) = week();
+    install_master(&scratch.0, &[(symbol, None, None)]);
+    let rows = days[2..].iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (days[2], to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(
+        whys(&done, "before_listing").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        whys(&done, "before_first_day_bar").len(),
+        2,
+        "{:?}",
+        done.failures
+    );
+    // A day bar years earlier lands: the listing is unknown.
+    let early = day(2019, 1, 1);
+    let early = day_candle(Day::from_days(early.days_from_epoch() + 1).unwrap());
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (day(2019, 1, 1), day(2019, 1, 3)),
+        pull::vendor::Granularity::Day1,
+        vec![early],
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    // R4-17 repair 5: the scan says WHY the listing is unknown, by the
+    // master's own code, beside the master it was read from.
+    let scan = cash_scan(&scratch.0, symbol);
+    assert_eq!(scan.listing, "nse_security_master");
+    assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, Some("listing_epoch_zero"));
+}
+
+/// The store scan of one CASH share's Zerodha series.
+fn cash_scan(root: &Path, symbol: &str) -> pull::ingest::identity_screen::SeriesScan {
+    pull::ingest::identity_screen::scan_series(
+        root,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    )
+}
+
+/// R4-17 repair 5: a CASH share whose ISIN the universe does not hold cannot
+/// be keyed `(exchange, symbol, ISIN)`, so no master is asked. It was labelled
+/// `inferred_from_vendor_span` (a master was asked and omits it) even when
+/// the master in use holds the symbol, as this one does. Its label is
+/// `no_isin`, on the scan and on the screen's `/logs` line alike, and nothing
+/// is refused on a listing: a day bar before the master's listing day lands.
+#[test]
+fn a_share_with_no_isin_is_labelled_no_isin_even_when_a_master_holds_it() {
+    let sink = log_sink();
+    let scratch = Scratch::new("no-isin");
+    let symbol = "ZZNOISIN";
+    assert!(
+        brutex_core::universe::nse_isin(symbol).is_none(),
+        "the universe holds no ISIN of the invented share"
+    );
+    let (from, to, days) = week();
+    // The master holds the symbol under an ISIN the universe gives another
+    // share: an invented row, keyed by an ISIN this share is never asked by.
+    let isin = brutex_core::universe::nse_isin("IRFC").expect("an NSE ISIN");
+    install_master_keyed(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, isin, Some(days[4]), None)],
+    );
+    let mut rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    rows[1] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[1]
+    };
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(
+        whys(&done, "before_listing").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        whys(&done, "non_positive_price").len(),
+        1,
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(done.bars_committed, 4);
+    let lines = identity_lines(sink, symbol);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"listing\":\"no_isin\""), "{}", lines[0]);
+    let scan = cash_scan(&scratch.0, symbol);
+    assert_eq!(scan.listing, "no_isin");
+    assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, None);
+    assert!(scan.master.is_some(), "a master checks");
+}
+
+/// A share in no master on disk (DHFL, JETAIRWAYS): its span is the vendor's
+/// own, labelled `inferred_from_vendor_span`, and it refuses nothing a day bar
+/// carries.
+#[test]
+fn a_name_absent_from_every_master_is_labelled_inferred() {
+    let scratch = Scratch::new("inferred-landing");
+    let (from, to, days) = week();
+    install_master(&scratch.0, &[("IRFC", Some(days[4]), None)]);
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        "PIIND",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(done.bars_committed, 5);
+    let scan = cash_scan(&scratch.0, "PIIND");
+    assert_eq!(scan.listing, "inferred_from_vendor_span");
+    assert_eq!(scan.listed_on, None);
+    assert_eq!(scan.listing_unknown, None);
+}
+
+/// COR-07: a 404 or an empty answer for days after a master's removal day is
+/// the end of the security's history, recorded and never a failure; a 404 for
+/// a security still listed is the failure it was.
+#[test]
+fn a_404_after_delisting_is_history_ending_not_a_failure() {
+    use pull::fetch::{FakeSource, FetchError, fetch_and_land_listed};
+    let scratch = Scratch::new("history-ends");
+    let removed = day(2023, 3, 31);
+    install_master(
+        &scratch.0,
+        &[
+            ("IRFC", Some(day(2021, 1, 4)), Some(removed)),
+            ("PIIND", Some(day(2010, 1, 4)), None),
+        ],
+    );
+    let table = pull::listing::Listing::load(&scratch.0.join(pull::listing::MASTER_DIR));
+    let isin = |s: &str| brutex_core::universe::nse_isin(s).unwrap();
+    let gone = table
+        .span("NSE", "IRFC", Some(isin("IRFC").as_str()))
+        .unwrap();
+    let listed = table
+        .span("NSE", "PIIND", Some(isin("PIIND").as_str()))
+        .unwrap();
+    let not_found = || FetchError::VendorRefused {
+        status: 404,
+        detail: "not found".to_owned(),
+        named: None,
+    };
+    let after = cash_request(
+        day(2024, 1, 1),
+        day(2024, 1, 5),
+        pull::vendor::Granularity::Day1,
+    );
+    let encoding = pull::vendor::TimestampEncoding::EpochSecondsUtc;
+    let scale = pull::vendor::PriceScale::Paisa;
+    for source in [FakeSource::refusing(not_found()), FakeSource::default()] {
+        let landed = fetch_and_land_listed(&source, &after, encoding, scale, Some(&gone))
+            .expect("the end of history is not a failure");
+        assert_eq!(
+            landed.history_ends,
+            Some(pull::fetch::HistoryEnds {
+                delisted_on: removed
+            })
+        );
+        assert!(landed.bars.is_empty());
+    }
+    assert_eq!(pull::fetch::HistoryEnds::CODE, "history_ends_delisted");
+    // Still listed: the 404 is the failure it was.
+    let refused = fetch_and_land_listed(
+        &FakeSource::refusing(not_found()),
+        &after,
+        encoding,
+        scale,
+        Some(&listed),
+    );
+    assert_eq!(refused, Err(not_found()));
+    // A window that includes the removal day is judged as today.
+    let straddle = cash_request(removed, day(2023, 4, 5), pull::vendor::Granularity::Day1);
+    let refused = fetch_and_land_listed(
+        &FakeSource::refusing(not_found()),
+        &straddle,
+        encoding,
+        scale,
+        Some(&gone),
+    );
+    assert_eq!(refused, Err(not_found()));
+    // Another refusal after delisting is still that refusal.
+    let other = FetchError::VendorRefused {
+        status: 500,
+        detail: "server".to_owned(),
+        named: None,
+    };
+    let refused = fetch_and_land_listed(
+        &FakeSource::refusing(other.clone()),
+        &after,
+        encoding,
+        scale,
+        Some(&gone),
+    );
+    assert_eq!(refused, Err(other));
+    // An index is never judged by a share's span.
+    let index = request(
+        day(2024, 1, 1),
+        day(2024, 1, 5),
+        pull::vendor::Granularity::Day1,
+    );
+    let refused = fetch_and_land_listed(
+        &FakeSource::refusing(not_found()),
+        &index,
+        encoding,
+        scale,
+        Some(&gone),
+    );
+    assert_eq!(refused, Err(not_found()));
+    // Rows that do arrive after delisting are landed as rows, not ended.
+    let rows = vec![day_candle(day(2024, 1, 2))];
+    let landed = fetch_and_land_listed(
+        &FakeSource::returning(rows),
+        &after,
+        encoding,
+        scale,
+        Some(&gone),
+    )
+    .unwrap();
+    assert_eq!(landed.history_ends, None);
+    assert_eq!(landed.bars.len(), 1);
+}
+
+/// An option's price of zero is not this rule's (D-4992): a zero day bar and a
+/// zero minute of an option contract land, on either arm.
+#[test]
+fn an_options_zero_price_is_never_refused_as_non_positive() {
+    let scratch = Scratch::new("option-zero");
+    let (from, to, days) = week();
+    let contract = brutex_core::instrument::Contract::parse("2024-01-25-2150000-CE").unwrap();
+    let option = |granularity| pull::fetch::BarRequest {
+        listing: pull::vendor::Listing::Derivative,
+        ..request(from, to, granularity)
+    };
+    let zero = |row: RawRow| RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..row
+    };
+    for (granularity, rows) in [
+        (
+            pull::vendor::Granularity::Day1,
+            days.iter()
+                .copied()
+                .map(day_candle)
+                .map(zero)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            pull::vendor::Granularity::Minute1,
+            answer(days[0], days[0]).into_iter().map(zero).collect(),
+        ),
+    ] {
+        let req = option(granularity);
+        let done = pull::ingest::from_window(
+            &RawWindow { rows },
+            "NIFTY",
+            "IDENTITY TEST",
+            &scratch.0,
+            pull::ingest::Plan {
+                segment: "FNO",
+                contract: Some(contract),
+                ..plan(&req)
+            },
+        );
+        assert!(
+            whys(&done, "non_positive_price").is_empty(),
+            "{:?}",
+            done.failures
+        );
+    }
+}
+
+/// Write `bytes` where `symbol`'s CASH day month 2024-01 is, so it will not
+/// open as a bar file.
+fn unreadable_day_month(root: &Path, symbol: &str, bytes: &[u8]) {
+    let path = StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol,
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month: YearMonth::new(2024, 1).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(root);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+}
+
+/// A day rung that will not open refuses nothing BY RANGE: a clean answer
+/// lands whole, and the screen says so rather than refusing on a witness it
+/// could not read.
+#[test]
+fn a_day_rung_that_will_not_open_refuses_nothing_by_range() {
+    let scratch = Scratch::new("unread-day");
+    let (from, to, _) = week();
+    let path = StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "CASH",
+        symbol: "PIIND",
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month: YearMonth::new(2024, 1).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+    .to_path_buf(&scratch.0);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"not a bar file").unwrap();
+    let rows = answer(from, to);
+    let sent = rows.len();
+    let done = land_cash(
+        &scratch.0,
+        "PIIND",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(
+        cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent
+    );
+    // The store scan names the month it could not open and judges nothing by it.
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "PIIND",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.unread.len(), 1, "{:?}", scan.unread);
+    assert!(scan.unread[0].1.starts_with("1day: "), "{:?}", scan.unread);
+    assert!(scan.day_verdicts.is_empty());
+    // An instrument that is no symbol is not judged here: the landing refuses
+    // it by name itself.
+    let done = land_cash(
+        &scratch.0,
+        "not a symbol",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(!done.failures.is_empty());
+    assert!(whys(&done, "refused for").is_empty(), "{:?}", done.failures);
+}
+
+/// R4-17 repair 2 (the R4-17 check's PROBE-P1): a day month that will not
+/// open costs the range rule of its OWN days only. The answer spans
+/// 2024-01-29..2024-02-02 and January's day month is torn: February's foreign
+/// minutes are still refused by range against February's day bars, January's
+/// land unjudged (`no_day_rung`), and neither the landing nor the store scan
+/// refuses a January minute as before the first day bar on the word of
+/// February's. Before repair 2 the torn month emptied the book for the whole
+/// answer, so February's foreign minutes were stored with no failure; and the
+/// scan flagged every January minute `before_first_day_bar`.
+#[test]
+fn a_torn_day_month_costs_the_range_rule_of_its_own_days_only() {
+    let scratch = Scratch::new("torn-one-month");
+    let (from, to) = (day(2024, 1, 29), day(2024, 2, 2));
+    let feb: Vec<Day> = sessions(day(2024, 2, 1), to)
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
+    assert_eq!(feb.len(), 2, "the fixture February holds two sessions");
+    let done = land_cash(
+        &scratch.0,
+        "VBL",
+        (feb[0], feb[1]),
+        pull::vendor::Granularity::Day1,
+        feb.iter().copied().map(day_candle).collect(),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    unreadable_day_month(&scratch.0, "VBL", b"not a bar file");
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    let torn_day = day(2024, 1, 30);
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if (on == feb[0] || on == torn_day) && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 85, 100);
+        }
+    }
+    let done = land_cash(
+        &scratch.0,
+        "VBL",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "foreign_level");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
+    assert_eq!(done.failures.len(), 1, "nothing else: {:?}", done.failures);
+    let january = cash_month(&scratch.0, "VBL", Timeframe::MINUTE_1, (2024, 1));
+    let february = cash_month(&scratch.0, "VBL", Timeframe::MINUTE_1, (2024, 2));
+    assert_eq!(january.len() + february.len(), sent - 10);
+    assert!(
+        february.iter().all(|b| b.low >= LEVEL - 1_000),
+        "no foreign February minute stored"
+    );
+    assert_eq!(
+        january.iter().filter(|b| b.low < LEVEL - 1_000).count(),
+        10,
+        "January's foreign minutes have no witness that opens: they land, unjudged"
+    );
+    // The store scan judges the same way: it names the torn month and
+    // flags nothing, never January's minutes as before the first day bar.
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "VBL",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.unread.len(), 1, "{:?}", scan.unread);
+    assert!(scan.unread[0].1.starts_with("1day: "), "{:?}", scan.unread);
+    assert_eq!(scan.first_day, Some(i64::from(feb[0].days_from_epoch())));
+    assert!(scan.flagged.is_empty(), "{:?}", scan.flagged);
+    let january_tally = &scan.months[0].1;
+    assert_eq!(
+        january_tally.no_day_rung,
+        u64::try_from(january.len()).unwrap()
+    );
+}
+
+/// R4-17 repair 1, ING-01 c: a zero-price minute is refused by name even
+/// when the day rung will not open. That rule reads no day bar, so a torn
+/// day month is no reason to store a price of zero (it was stored, with no
+/// failure, before this repair).
+#[test]
+fn a_zero_minute_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("zero-unread-day");
+    let (from, to, _) = week();
+    unreadable_day_month(&scratch.0, "MAZDOCK", b"not a bar file");
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    rows[41] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[41]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "non_positive_price");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("1 row(s) refused"), "{}", named[0]);
+    assert_eq!(done.failures.len(), 1, "nothing else: {:?}", done.failures);
+    let stored = cash_month(&scratch.0, "MAZDOCK", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(stored.len(), sent - 1);
+    assert!(
+        stored
+            .iter()
+            .all(|b| b.open > 0 && b.high > 0 && b.low > 0 && b.close > 0),
+        "no price at or below zero stored"
+    );
+}
+
+/// R4-17 repair 1, ING-01 d: a CASH minute before its master's listing day
+/// is refused by name even when the day rung will not open: its witness is
+/// the master, which was read. IRFC's shape, listed on the third session.
+#[test]
+fn a_minute_before_listing_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("listing-unread-day");
+    let (from, to, days) = week();
+    install_master(&scratch.0, &[("IRFC", Some(days[2]), None)]);
+    unreadable_day_month(&scratch.0, "IRFC", b"not a bar file");
+    let rows = answer(from, to);
+    let sent = rows.len();
+    let done = land_cash(
+        &scratch.0,
+        "IRFC",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(named.len(), 2, "one per day: {:?}", done.failures);
+    assert!(
+        named.iter().all(|why| why.contains("375 row(s) refused")),
+        "{named:?}"
+    );
+    assert_eq!(done.failures.len(), 2, "nothing else: {:?}", done.failures);
+    let stored = cash_month(&scratch.0, "IRFC", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(stored.len(), sent - 750);
+    let listed = i64::from(days[2].days_from_epoch());
+    assert!(
+        stored
+            .iter()
+            .all(|b| pull::series_identity::ist_day(b.ts_micros) >= listed),
+        "no minute before the listing stored"
+    );
+}
+
+/// R4-17 repair 1, RT-DATA-02 a: the jump rule reads no day bar either, so a
+/// block of minutes at another basis is refused whole by name when the day
+/// rung will not open, and the rest of the answer lands.
+#[test]
+fn an_in_session_jump_is_refused_by_name_when_the_day_rung_will_not_open() {
+    let scratch = Scratch::new("jump-unread-day");
+    let (from, to, days) = week();
+    unreadable_day_month(&scratch.0, "PIIND", b"not a bar file");
+    let mut rows = answer(from, to);
+    let honest = rows.len();
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if on == days[2] && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 1_100, 10_000);
+        }
+    }
+    let done = land_cash(
+        &scratch.0,
+        "PIIND",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "in_session_jump");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("10 row(s) refused"), "{}", named[0]);
+    assert_eq!(
+        done.failures.len(),
+        1,
+        "nothing by range: {:?}",
+        done.failures
+    );
+    let held = cash_month(&scratch.0, "PIIND", Timeframe::MINUTE_1, (2024, 1));
+    assert_eq!(held.len(), honest - 10);
+    assert!(
+        held.iter().all(|b| b.low >= LEVEL - 1_000),
+        "no foreign minute stored"
+    );
+}
+
+/// A zero-price minute of a share or an index is refused by name on the
+/// minute arm, before any other rule (ING-01 c), and the rest lands.
+#[test]
+fn a_zero_price_minute_is_refused_by_name() {
+    let scratch = Scratch::new("zero-minute");
+    let (from, to, days) = week();
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    rows[40].low = 0;
+    rows[41] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..rows[41]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "MAZDOCK",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    let named = whys(&done, "non_positive_price");
+    assert_eq!(named.len(), 1, "{:?}", done.failures);
+    assert!(named[0].contains("2 row(s) refused"), "{}", named[0]);
+    assert_eq!(
+        cash_month(&scratch.0, "MAZDOCK", Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent - 2
+    );
+}
+
+/// A price the landing cannot hold (a rupee price that overflows paisa) is
+/// not judged here, on either arm: the landing refuses it in its own words.
+#[test]
+fn a_price_the_landing_cannot_hold_is_left_to_the_landing() {
+    let scratch = Scratch::new("overflow");
+    let (from, to, days) = week();
+    for (granularity, mut rows) in [
+        (
+            pull::vendor::Granularity::Day1,
+            days.iter().copied().map(day_candle).collect::<Vec<_>>(),
+        ),
+        (pull::vendor::Granularity::Minute1, answer(days[0], days[0])),
+    ] {
+        for row in &mut rows {
+            *row = RawRow {
+                open: row.open / 100,
+                high: row.high / 100,
+                low: row.low / 100,
+                close: row.close / 100,
+                ..*row
+            };
+        }
+        rows[1].high = i64::MAX / 10;
+        let req = cash_request(from, to, granularity);
+        let done = pull::ingest::from_window(
+            &RawWindow { rows },
+            "PIIND",
+            "IDENTITY TEST",
+            &scratch.0,
+            pull::ingest::Plan {
+                scale: pull::vendor::PriceScale::Rupees,
+                ..cash_plan(&req)
+            },
+        );
+        assert_eq!(
+            whys(&done, "price_off_grid").len(),
+            1,
+            "{:?}",
+            done.failures
+        );
+        assert!(whys(&done, "non_positive_price").is_empty());
+    }
+}
+
+/// The jump rule is a CASH rule (D-4993 item 4): the same interleave under an
+/// index key and a day bar that spans both levels is not judged by it. An
+/// index is judged by its day rung alone (`foreign_level`).
+#[test]
+fn an_index_is_never_judged_by_the_jump_rule() {
+    let scratch = Scratch::new("index-no-jump");
+    let symbol = "NIFTY";
+    let (from, to, days) = week();
+    let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    day_rows[2].low = LEVEL * 1_100 / 10_000 - 1_000;
+    let req = request(from, to, pull::vendor::Granularity::Day1);
+    let done = pull::ingest::from_window(
+        &RawWindow { rows: day_rows },
+        symbol,
+        "IDENTITY TEST",
+        &scratch.0,
+        plan(&req),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if on == days[2] && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 1_100, 10_000);
+        }
+    }
+    let done = land(&scratch.0, symbol, from, to, rows);
+    assert!(
+        whys(&done, "in_session_jump").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        month_bars(&scratch.0, symbol, Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent
+    );
+}
+
+/// The one telemetry sink this test binary installs, or the one already there:
+/// `telemetry::install` refuses a second, so every log test shares it.
+fn log_sink() -> &'static telemetry::Sink {
+    let dir = std::env::temp_dir().join(format!("brutex-identity-log-{}", std::process::id()));
+    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    match telemetry::install(&config) {
+        Ok(installed) => installed,
+        Err(_already) => telemetry::global().expect("install named the sink that exists"),
+    }
+}
+
+/// Every `pull.identity` line the sink holds for `instrument`.
+fn identity_lines(sink: &telemetry::Sink, instrument: &str) -> Vec<String> {
+    let needle = format!("\"instrument\":\"{instrument}\"");
+    sink.paths()
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|line| line.contains("\"target\":\"pull.identity\"") && line.contains(&needle))
+        .collect()
+}
+
+/// `/logs` says what the screen did (one `warn` per refused cause and day, an
+/// `info` line for minutes left unjudged) and says nothing about an answer
+/// that was wholly held. Each symbol here is used by no other test in this
+/// binary, so the global sink's lines can be told apart.
+#[test]
+fn the_screen_names_each_refused_cause_and_day_on_the_log() {
+    let sink = log_sink();
+    let scratch = Scratch::new("identity-log");
+    let (from, to, days) = week();
+
+    // KFINTECH: a zero day bar (day arm), then a zero minute (minute arm).
+    let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    day_rows[1] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..day_rows[1]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "KFINTECH",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        day_rows,
+    );
+    assert_eq!(whys(&done, "non_positive_price").len(), 1);
+    let lines = identity_lines(sink, "KFINTECH");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"level\":\"warn\""), "{}", lines[0]);
+    assert!(
+        lines[0].contains("\"cause\":\"non_positive_price\""),
+        "{}",
+        lines[0]
+    );
+    // NO MASTER ON DISK IS ITS OWN LABEL (R4-17 repair 3): this store holds
+    // no master, so nothing is known of KFINTECH's listing — never the
+    // `inferred_from_vendor_span` of a name every master omits — and the line
+    // names no master in use.
+    assert!(
+        lines[0].contains("\"listing\":\"no_checked_master\""),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"master\":\"no_checked_master\""),
+        "{}",
+        lines[0]
+    );
+    let mut rows = answer(days[2], days[2]);
+    rows[7].close = 0;
+    rows[7].low = 0;
+    let done = land_cash(
+        &scratch.0,
+        "KFINTECH",
+        (days[2], days[2]),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert_eq!(whys(&done, "non_positive_price").len(), 1);
+    assert!(
+        whys(&done, "non_positive_price")[0].contains("row 7:"),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(identity_lines(sink, "KFINTECH").len(), 2);
+
+    // PATANJALI: a clean day rung and clean minutes. Nothing to say.
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        "PATANJALI",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty());
+    let done = land_cash(
+        &scratch.0,
+        "PATANJALI",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert!(
+        identity_lines(sink, "PATANJALI").is_empty(),
+        "{:?}",
+        identity_lines(sink, "PATANJALI")
+    );
+
+    // UNITDSPR: minutes and no day rung. They land, unjudged, and it is said.
+    let done = land_cash(
+        &scratch.0,
+        "UNITDSPR",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let lines = identity_lines(sink, "UNITDSPR");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"level\":\"info\""), "{}", lines[0]);
+    assert!(lines[0].contains("\"no_day_rung\":1875"), "{}", lines[0]);
+}
+
+/// RADICO: a day month that will not open and one zero minute (R4-17 repair
+/// 1). One warn names why the rung would not open, and the zero is still
+/// refused, with its own warn; no `info` line claims the rung was read. The
+/// symbol is used by no other test in this binary.
+#[test]
+fn a_day_rung_that_will_not_open_is_named_on_the_log_beside_its_refusals() {
+    let sink = log_sink();
+    let scratch = Scratch::new("identity-log-unread");
+    let (from, to, _) = week();
+    unreadable_day_month(&scratch.0, "RADICO", b"not a bar file");
+    let mut rows = answer(from, to);
+    rows[9].open = 0;
+    let done = land_cash(
+        &scratch.0,
+        "RADICO",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert_eq!(
+        whys(&done, "non_positive_price").len(),
+        1,
+        "{:?}",
+        done.failures
+    );
+    let lines = identity_lines(sink, "RADICO");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines.iter().all(|l| l.contains("\"level\":\"warn\"")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("the day rung would not open")
+                && l.contains("\"why\":")
+                && l.contains("\"no_day_rung\":1874")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("\"cause\":\"non_positive_price\"") && l.contains("\"rows\":1")),
+        "{lines:?}"
+    );
+}
+
+/// R4-17's three refusal causes have their own append-only bytes in the
+/// refused-row record (`pull::response_keep`, `docs/02-store-format.md`):
+/// 8, 9 and 10, each read back as itself, and 11 names none. The record's
+/// writer (IA-8) and these causes met at the merge into `feat/db-fix`.
+#[test]
+fn every_r4_17_cause_has_its_own_refused_row_byte() {
+    use pull::fetch::RowCause;
+    use pull::response_keep::{cause_code, cause_of};
+    for (cause, code) in [
+        (RowCause::NonPositivePrice, 8),
+        (RowCause::BeforeListing, 9),
+        (RowCause::InSessionJump, 10),
+    ] {
+        assert_eq!(cause_code(cause), code, "{}", cause.code());
+        assert_eq!(cause_of(code), Some(cause), "{}", cause.code());
+    }
+    assert_eq!(cause_of(11), None);
+}
+
+/// Every `pull.listing` line the sink holds for the scratch store tagged `tag`.
+fn listing_lines(sink: &telemetry::Sink, tag: &str) -> Vec<String> {
+    let needle = format!("brutex-IDENTITY-{tag}-{}", std::process::id());
+    sink.paths()
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|line| line.contains("\"target\":\"pull.listing\"") && line.contains(&needle))
+        .collect()
+}
+
+/// A master's file bytes with one byte appended: its receipt no longer binds them.
+fn damage_master(root: &Path, file: &str) {
+    let path = root.join(pull::listing::MASTER_DIR).join(file);
+    let mut bytes = fs::read(&path).expect("the fixture master");
+    bytes.push(b'X');
+    fs::write(&path, bytes).expect("damage the fixture master");
+}
+
+/// R4-17 repair 3 (the spec's "a master with a bad receipt: refused, falls
+/// back to the previous receipted master, named"): a newer master whose bytes
+/// do not check is passed over BY NAME on `/logs` — one `warn` naming the
+/// file, why, and the master that answers instead — the older master answers
+/// and its refusal names that file, and every `pull.identity` line names the
+/// master in use and the SHA-256 of its bytes. Before this the fallback was
+/// silent: the name lived only in a method nothing read.
+#[test]
+fn a_master_that_does_not_check_is_named_on_the_log_and_the_older_one_answers() {
+    use sha2::Digest as _;
+    let sink = log_sink();
+    let tag = "passed-over-master";
+    let scratch = Scratch::new(tag);
+    let symbol = "WIPRO";
+    let (from, to, days) = week();
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, Some(days[2]), None)],
+    );
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 4),
+        &[(symbol, Some(days[2]), None)],
+    );
+    damage_master(&scratch.0, "NSE_CM_security_04082026.csv.gz");
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        symbol,
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    let named = whys(&done, "before_listing");
+    assert_eq!(
+        named.len(),
+        2,
+        "the older master answers: {:?}",
+        done.failures
+    );
+    assert!(
+        named[0].contains("NSE_CM_security_03082026.csv.gz"),
+        "the refusal names the master it rests on: {}",
+        named[0]
+    );
+
+    let said = listing_lines(sink, tag);
+    assert_eq!(said.len(), 1, "one warn per master passed over: {said:?}");
+    assert!(said[0].contains("\"level\":\"warn\""), "{}", said[0]);
+    assert!(
+        said[0].contains("\"master\":\"NSE_CM_security_04082026.csv.gz\""),
+        "{}",
+        said[0]
+    );
+    assert!(
+        said[0].contains("\"in_use\":\"NSE_CM_security_03082026.csv.gz\""),
+        "{}",
+        said[0]
+    );
+    assert!(
+        !said[0].contains("\"why\":\"\""),
+        "why is said: {}",
+        said[0]
+    );
+    assert!(said[0].contains("\"why\":\""), "{}", said[0]);
+
+    let bytes = fs::read(
+        scratch
+            .0
+            .join(pull::listing::MASTER_DIR)
+            .join("NSE_CM_security_03082026.csv.gz"),
+    )
+    .unwrap();
+    // Hex written here by hand, not by `pull::listing::sha256_hex`: the
+    // expectation must not come from the code it checks.
+    let sha256 =
+        sha2::Sha256::digest(&bytes)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                // `write!` to a `String` cannot fail.
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    let identity = identity_lines(sink, symbol);
+    assert!(!identity.is_empty(), "the refusals are on the log");
+    for line in &identity {
+        assert!(
+            line.contains("\"master\":\"NSE_CM_security_03082026.csv.gz\""),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("\"master_sha256\":\"{sha256}\"")),
+            "{line}"
+        );
+    }
+}
+
+/// R4-17 repair 3: when no master under the store checks, every CASH share is
+/// labelled `no_checked_master` — never `inferred_from_vendor_span`, the label
+/// of a name a master that checked omits — and one `warn` says the listing
+/// rule is off, besides the one naming the master passed over. A table with
+/// no master is loaded again on every call (AF-03), and what it found is said
+/// once, not once per answer.
+#[test]
+fn with_no_master_that_checks_every_share_is_labelled_so_and_a_warn_says_the_rule_is_off() {
+    let sink = log_sink();
+    let tag = "no-master-checks";
+    let scratch = Scratch::new(tag);
+    let symbol = "ITC";
+    let (from, to, days) = week();
+    install_master_on(
+        &scratch.0,
+        day(2026, 8, 3),
+        &[(symbol, Some(days[2]), None)],
+    );
+    damage_master(&scratch.0, "NSE_CM_security_03082026.csv.gz");
+    for _ in 0..2 {
+        let rows = days.iter().copied().map(day_candle).collect();
+        let done = land_cash(
+            &scratch.0,
+            symbol,
+            (from, to),
+            pull::vendor::Granularity::Day1,
+            rows,
+        );
+        // THE RULE IS OFF, AND SAID TO BE: nothing is refused on a damaged
+        // master's word.
+        assert!(
+            whys(&done, "before_listing").is_empty(),
+            "{:?}",
+            done.failures
+        );
+    }
+    let scan = pull::ingest::identity_screen::scan_series(
+        &scratch.0,
+        PathParts {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2024, 1).unwrap(),
+            file: FileKind::Bars,
+        },
+    );
+    assert_eq!(scan.listing, "no_checked_master");
+    assert_eq!(scan.listed_on, None);
+
+    let said = listing_lines(sink, tag);
+    let off: Vec<&String> = said
+        .iter()
+        .filter(|line| line.contains("\"label\":\"no_checked_master\""))
+        .collect();
+    assert_eq!(off.len(), 1, "said once for three loads: {said:?}");
+    assert!(off[0].contains("\"level\":\"warn\""), "{}", off[0]);
+    assert!(off[0].contains("\"passed_over\":1"), "{}", off[0]);
+    let passed: Vec<&String> = said
+        .iter()
+        .filter(|line| line.contains("\"master\":\"NSE_CM_security_03082026.csv.gz\""))
+        .collect();
+    assert_eq!(passed.len(), 1, "{said:?}");
+    assert!(passed[0].contains("\"in_use\":\"none\""), "{}", passed[0]);
+}
