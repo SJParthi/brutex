@@ -74604,6 +74604,24 @@ each now with a test that failed on that head:
   (`a_name_is_taken_by_anything_a_rename_cannot_replace`) runs through
   `where_permission_binds` (D-0995), so it holds as root in a cloud
   container; the open-ended span over history is measured (L-R324-23).
+- *What damage costs, measured, and what it does not cost.* On a shadow of
+  the real store, a 3 MiB NUL run in the served audit file made every span
+  search ending after it about 3.4 ms slower at p50 (5.81 against 2.40 at
+  `limit=20`), a 200 KiB run nothing measurable; every line was answered
+  once across both, at `limit=20` and 200, and following `next` from 0
+  reached the end of the kept history (L-R324-22, L-R324-23). Remembering,
+  within one search, a stretch a probe found holds no newline would spare
+  the probes below it reading the run again; not done, and named there.
+- *`cargo deny` went red on 21 Oct with two new advisories, fixed by their
+  own named solutions:* RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 may
+  accept distrusted emSign intermediates; fixed in 0.103.16) and
+  RUSTSEC-2026-0381 (`webpki-roots` 1.0.9 bundles roots that trust them;
+  fixed in 1.0.10), both reached through `reqwest` and `hyper-rustls` from
+  `pull`. `Cargo.lock` takes `rustls-webpki` 0.103.16 and `webpki-roots`
+  1.0.10, resolved offline from crates already in the local registry
+  cache; no manifest changes and no other crate moves. A new advisory is a
+  finding to fix, never a baseline, as DENY-1 fixed the last ones under
+  D-5090.
 
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
