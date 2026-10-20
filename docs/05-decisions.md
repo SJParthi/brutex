@@ -76316,3 +76316,172 @@ cannot read.
 workspace manifest panics, then with one is read) — RUST1-16.
 
 **Cost.** One emptiness check before the measurement's `statfs(2)`.
+
+### D-5248 — An attribute inside a macro call's input or a `macro_rules!` body exempts nothing from the spawn gate (RUST-1, repair round 2, self-check) — 2026-10-20
+
+**Finding.** Repair round 2's self-check, looking for the class the re-check
+of 20 Oct 2026 found (an attribute placed on more than it is on), found the
+gate of D-5246 honouring a `#[cfg(test)]` that stands inside a macro's
+tokens. Those tokens are not code yet. rustc 1.97.1, without `--test`,
+compiled each of these into a binary that ran the program
+(`state/fix/round2/logs-CLOUD-RUST1/r2r-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2r/rc/`): a1, a call
+`m! { #[cfg(test)] pub fn run() { .. } }` to a `macro_rules!` whose arm
+`(#[$a:meta] $($t:tt)*)` drops the attribute; a2, a `macro_rules!` body
+writing `#[cfg(test)] $(fn $n() {})* pub fn run() { .. }`, where the
+attribute lands on the first repeated fn and `run` ships; a6, the same with
+an item variable, `#[cfg(test)] $i pub fn run()`; a7, a comma list
+`#[cfg(test)] const A: bool = 1 < 2, const B: fn() = || { .. }` a matcher
+takes, whose `<` kept D-5246's item rule from ending `A` at its comma. The
+gate before this change missed all twelve shapes planted for it
+(`r2r-probe-on-old-gate.log`). Checked and refused by rustc, so no door:
+attributes in a `where` clause (a3, E0658), a `macro_rules!` used as an
+attribute named `test` (a4, E0658), and an `include!` of a file that opens
+with `#![cfg(test)]` (a5, "an inner attribute is not permitted in this
+context"). `cfg(r#test)` is `test` (b1), as the gate reads it.
+
+**Decision.** Inside a macro call's input (`name!(..)`, `name![..]`,
+`name! {..}`, through a path or a raw name) or a `macro_rules!` body, a
+`#[cfg(test)]` exempts nothing: what stands after it is read as shipped. The
+gate's pass keeps the depth each such bracket opened at, and an attribute
+read there does not gate. A `!` after a keyword (`if !{..}`,
+`return !(..)`) is a negation and opens no macro input. A `#[cfg(test)]` on
+the call itself or on the `macro_rules!` item is outside its tokens and
+still takes the whole of it; a bare `#[test]` was already held to a fn
+directly in a module (D-5246), which a macro's input is not. Erring towards
+failing costs a false refusal of a spawn some macro really does keep under
+test, never a pass; L-RUST1-7 says so and names the two places such test
+code can put the attribute instead.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants the
+twelve shapes, each refused, with six exempt controls (the gated call in
+two forms, three negations, and a gated fn and module after a call closes) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-17); `r2r-probe-on-new-gate.log`
+has none missed, and six hand mutants of the new code (never leaving a
+macro, a keyword before `!` opening one, the check dropped, any
+`ident ! ident {` taken for a `macro_rules!` body, `k > 3`, leaving at any
+closing bracket) each fail that test (`r2r-hand-mutants.log`). `no_shipped_code_starts_a_program_outside_the_allowlist`
+passes on this branch after its merge of `feat/db-fix` on 20 Oct 2026, with both
+allowlist entries at their counts.
+
+**Cost.** One look back of at most three tokens at each opening bracket the
+pass steps over, and a stack of open macro depths: test-time only, no
+shipped code.
+
+### D-5249 — What an attribute macro is handed exempts nothing from the spawn gate, and a bare `#[test]` beside one exempts nothing (RUST-1, repair round 2, resumed self-check) — 2026-10-20
+
+**Finding.** The resumed self-check of repair round 2, looking again for the
+class the re-check of 20 Oct 2026 found (an attribute honoured where `rustc`
+does not honour it), found the gate of D-5248 trusting attributes that an
+attribute macro is handed. An attribute macro receives the item it is on,
+the attributes after it on that item and every token inside the item, and
+returns whatever it likes. rustc 1.97.1 does not evaluate the `cfg`s inside
+that input first. With a proc-macro crate `pm2` written for the proof
+(`strip`, which drops the attributes after it, and `strip_all`, which drops
+every attribute in the item), rustc compiled each of these without `--test`
+into a binary that ran the program or kept the field
+(`state/fix/round2/logs-CLOUD-RUST1/r2s-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2s/rc/`): q1 `#[pm2::strip] #[test] pub fn
+launch()`; q2 the same through `#[cfg_attr(all(), pm2::strip)]`; and, under
+`#[pm2::strip_all]`, r1 a module holding a `#[test]` fn, r2 a fn holding a
+`#[cfg(test)]` statement, r3 a struct holding a `#[cfg(test)]` field, r4 a
+fn with a `#[cfg(test)]` parameter, r5 an `impl` holding a `#[cfg(test)]`
+fn, r6 a struct whose generics hold a brace (`<const N: usize = { 3 }>`), r7
+a `static` whose value holds a `#[cfg(test)]` fn in its second block, and r8
+an `impl Tr<{ 1 }>`. The gate before this change missed all fifteen shapes
+planted for it, and a copy of the real tree with two such files passed it
+(`r2s-d5249-probe-old-vs-new.log`, `r2s-plant-real-tree.log`).
+
+Which names an import can re-point was measured, not assumed:
+`use pm2::strip as <name>; #[<name>] #[test] pub fn launch()` kept the
+built-in and dropped `launch` for each of `allow`, `automatically_derived`,
+`cold`, `deny`, `deprecated`, `doc`, `expect`, `forbid`, `ignore`, `inline`,
+`macro_export`, `macro_use`, `must_use`, `non_exhaustive`, `path`, `repr`,
+`should_panic`, `track_caller`, `used` and `warn`, and ran the macro and
+shipped `launch` for `derive`, `default`, `global_allocator`, `test_case`,
+`cfg_eval` and `bench`. Checked and refused by rustc, so no door: an
+attribute macro on a statement (st1, E0658 "custom attributes cannot be
+applied to statements") and an inner attribute macro (i1, E0658 "inner macro
+attributes are unstable"). And `cfg` comes first: `#[pm2::strip]
+#[cfg(test)]` and `#[cfg(test)] #[pm2::strip]` both dropped the fn (q4, q7),
+as did `#[test] #[pm2::strip]` (q3) and `#[inline] #[test]` (q5).
+
+**Decision.** An attribute MAY BE A MACRO unless it is `cfg`, one of the
+twenty built-ins above, a `cfg_attr` all of whose attributes are not, or
+`test` or `derive` in a file where no `use`, `extern crate` or `include!`
+can re-point the name; a path (`tokio::main`, `rustfmt::skip`) and a raw
+name may be one. Where one stands on an item, from the item's start to its
+end no attribute exempts anything: the end is the item's `;`, or the brace
+closing its body, which is the first `{` outside its generics, and for a
+`const`, `static`, `type`, `use` or `extern crate` only its `;`, so the end
+errs late, never early. A bare `#[test]` with one beside it exempts nothing.
+A `#[cfg(test)]` beside one still takes the whole item. Erring wide costs a
+false refusal (`#[test] #[pm2::strip]`, which rustc drops, and a
+`#[cfg(test)]` inside a `#[serde(..)]` struct, are refused); L-RUST1-8 says
+so. The merged tree has no such case.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants
+the fifteen shapes, each refused, with seven exempt controls (`cfg` beside a
+macro, `#[inline] #[test]`, a `derive`, `#[must_use]`, the tree's own
+`cfg_attr(not(test), expect(..))` before `#[test]`, and a gated fn after a
+macro's item and after a bodiless `const`) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-18). Thirteen hand mutants of the
+new code (no attribute a macro, `derive` always built-in, no region kept,
+the body at the first brace, `#[test]` beside a macro exempting, `cfg_attr`
+never a macro, nothing bodiless, generics ignored, the region unread, `test`
+never a macro, a path built-in, an item's region ended as a non-item's, the
+region never taken) each fail that test (`r2s-hand-mutants.log`). The re-check's 26-case probe is 26 as
+claimed and its planted tree still fails naming all four files
+(`r2s-verifier-probe-on-new-gate.log`, `r2s-plant-trees-on-new-gate.log`);
+`no_shipped_code_starts_a_program_outside_the_allowlist` passes on this
+branch's tree with both allowlist entries at their counts.
+
+**Cost.** One look at each outer attribute's first tokens, a second
+file-wide look for `derive` beside the one for `test`, and one forward walk
+per item an attribute macro may be on: test-time only, no shipped code.
+
+**Addendum, 21 Oct 2026 (repair round 2, resumed again): a test-only
+attribute on a `where`-clause predicate is refused by name.** This block's
+numbers end here, so the last self-check of the round is recorded in the
+entry it extends rather than in a new one. Looking once more for the same
+class, a 42-case probe found four shapes the gate still exempted:
+`where #[cfg(test)] T: Copy { body }` on a fn, an `impl` and a struct, and
+`where T: Copy, #[cfg(test)] U: Copy { body }`. A predicate is not an item,
+so its exemption ran under `item_end`'s non-item rule, and with no `,`, `>`
+or `|` before the body it ran on through the body
+(`state/fix/round2/logs-CLOUD-RUST1/r2t-selfcheck-probe-on-old-gate.log`).
+rustc 1.97.1, the pinned toolchain, refuses all four (E0658, *attributes in
+`where` clause are unstable*; `r2t-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2t/rc/`), so none can ship today, but the gate's
+header promises that what it cannot place is refused by name, and a
+toolchain that stabilised the syntax would turn the miss into a real one.
+
+*Decision.* An attribute that would exempt (a test-only `cfg`), standing
+straight after `where` or after a `,` with a `where` before it in the same
+brackets and no `;` or `{` between, is refused by name as *puts a test-only
+attribute on a where-clause predicate, which rustc 1.97.1 refuses (E0658):
+this scan cannot place what it is on*, and exempts nothing, so the body
+after it is read as shipped. A gated parameter of a function-pointer type
+inside a predicate (`T: Into<fn(u8, #[cfg(test)] u8)>`) is inside brackets
+the `where` is not, so it is placed as before; rustc compiled that one
+without `--test` into a binary that ran the program (`fp1.rs`). Refusing
+rather than modelling the clause errs towards failing.
+
+*Proof.* `an_attribute_on_a_where_predicate_is_refused_by_name` plants five
+refused shapes (also after `F: Fn(u8) -> u8,` and beside another attribute),
+each failing by file, line and scope together with the naming in the body,
+and ten placed controls (a gated parameter before the clause, a gated field
+in the body, also after another field, a `where` closed inside brackets,
+test code, a fn after a clause's item, the function-pointer parameter, and
+generics after a `;`-ended item's clause or with nothing before them). It fails on the gate before this
+change and passes after; eleven hand mutants of the new code each fail it
+(`r2t-hand-mutants.log`). The probe is 42 of 42 on the new gate
+(`r2t-selfcheck-probe-on-new-gate.log`), the re-check's 26-case probe stays
+26 of 26, a copy of the real tree with two such files fails naming both, and
+the three earlier planted trees fail naming every file as before
+(`r2t-plant-trees-on-new-gate.log`). RUST1-19; L-RUST1-6 says the model is
+of the pinned toolchain.
+
+*Cost.* One look at the token before each exempting attribute and, after a
+`,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
+test-time only, no shipped code.

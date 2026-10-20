@@ -1921,9 +1921,10 @@ mod tests {
     }
 
     /// **THE ROUTE'S JSON SHAPE IS UNCHANGED (D-5240)**: the same top-level
-    /// keys, and the filesystem object's five in the same order with the same
-    /// types. Only `source` changes, to name the call now made: `statfs` on
-    /// macOS, `statvfs` elsewhere.
+    /// keys (and `faults`, which AG-05 added after `feeds`, D-6245), and the
+    /// filesystem object's five in the same order with the same types. Only
+    /// `source` changes, to name the call now made: `statfs` on macOS,
+    /// `statvfs` elsewhere.
     #[test]
     fn the_disk_json_shape_is_unchanged() {
         let root = crate::scratch::path("disk-route-shape");
@@ -1942,6 +1943,7 @@ mod tests {
             [
                 "backup",
                 "census_kept_bytes",
+                "faults",
                 "feeds",
                 "filesystem",
                 "measured_ttl_secs",

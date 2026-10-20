@@ -1,5 +1,5 @@
 //! **No backend code starts another program at run time, except the two the
-//! allowlist below names.** D-5240, D-5243, D-5244, D-5246.
+//! allowlist below names.** D-5240, D-5243, D-5244, D-5246, D-5248, D-5249.
 //!
 //! # Why this exists
 //!
@@ -28,8 +28,12 @@
 //! spellings an earlier version passed, and a third (20 Oct 2026, D-5246)
 //! found attributes it placed on more than they are on: a gated generic or
 //! closure parameter, a field or an argument named `union`, and a `#[test]`
-//! re-pointed by an import. Where its model of the compiler cannot place a
-//! file or an attribute, it now refuses rather than guesses.
+//! re-pointed by an import; that repair's own self-check found a macro free
+//! to drop, move or repeat an attribute it is handed (D-5248), and its
+//! resumed self-check an attribute macro free to do the same with the item
+//! it is on (D-5249). Where its
+//! model of the compiler cannot place a file or an attribute, it now refuses
+//! rather than guesses.
 //!
 //! # What it reads
 //!
@@ -115,7 +119,26 @@
 //!   `>` closing its list and a closure's at the `|` closing its own. Nothing
 //!   gated extends past a bracket that closes something it is inside, so a
 //!   gated field cannot swallow the field after it, nor a gated parameter the
-//!   body after it;
+//!   body after it. AN ATTRIBUTE INSIDE A MACRO CALL'S INPUT OR A
+//!   `macro_rules!` BODY EXEMPTS NOTHING (D-5248): those tokens are not code
+//!   yet, and the macro may drop the attribute (`(#[$a:meta] $($t:tt)*)`),
+//!   move it, or put it on what a variable or a repetition pastes
+//!   (`#[cfg(test)] $i pub fn run()`), so what stands after it is read as
+//!   shipped. A `!` after a keyword (`if !{..}`, `return !(..)`) is a
+//!   negation, not a call. One on the call or on the `macro_rules!` item
+//!   itself is outside them and takes the whole of it. AN ATTRIBUTE MACRO'S
+//!   INPUT EXEMPTS NOTHING EITHER (D-5249): an attribute that may be a macro
+//!   (any but `cfg`, the built-ins `rustc` keeps for itself, which an import
+//!   named like one does not re-point, a `cfg_attr` of those, and `test` and
+//!   `derive` where nothing in the file re-points them; a path such as
+//!   `tokio::main` or `rustfmt::skip` may be one) is handed the item it is on,
+//!   the attributes after it and everything inside the item, and may drop any
+//!   attribute there, so a bare `#[test]` beside it, and every attribute
+//!   inside that item, exempts nothing. The item runs to its `;` or to the
+//!   brace closing its body, past a brace in its generics (`S<{ N }>`) and, for
+//!   a `const`, `static`, `type` or `use`, past every block in its value. A
+//!   `#[cfg(test)]` beside one still takes the item: `rustc` evaluates `cfg`
+//!   before it expands any attribute macro;
 //! * **a free function under the built-in `#[test]`**, and nothing else under
 //!   a bare `#[test]` (D-5246). What `test` names is name resolution's, not
 //!   the spelling's: `rustc` 1.97.1 compiled a `use .. as test;`, the same in
@@ -123,8 +146,10 @@
 //!   named `test`, and a derive helper named `test` each into a build without
 //!   `--test`, the item kept. So a bare `#[test]` exempts only a `fn` written
 //!   directly in a module (the file's or an inline one's: not in a function,
-//!   an `impl`, a trait, a block or a macro body), in a file that holds no
-//!   `use` or `extern crate` spelling `test` and no `include!`. A glob import
+//!   an `impl`, a trait, a block, a macro body, a macro call's input or an
+//!   item an attribute macro is on), with no attribute beside it that may be
+//!   a macro (D-5249), in a file that holds no `use` or `extern crate`
+//!   spelling `test` and no `include!`. A glob import
 //!   or a macro's expansion cannot re-point it (`rustc` refuses either as
 //!   ambiguous with the prelude, E0659); `#[macro_use] extern crate`, which
 //!   re-points it in every file of a crate, is refused by name, and so is a
@@ -164,9 +189,11 @@
 //! the macro is called; a manifest target of another kind, or naming no
 //! source; a manifest value given as a multi-line string; a shipped
 //! `#[macro_use] extern crate`, and a `fn` only a bare `#[test]` exempts in a
-//! file an `include!` pastes into shipped code (D-5246); and a shipped
-//! declaration, a manifest target, a path dependency, a `[patch]` or a
-//! workspace member outside `crates/`.
+//! file an `include!` pastes into shipped code (D-5246); a test-only
+//! attribute on a `where`-clause predicate, which `rustc` 1.97.1 refuses
+//! (E0658) and a toolchain that accepted it would see run on into the body
+//! (D-5249); and a shipped declaration, a manifest target, a path dependency,
+//! a `[patch]` or a workspace member outside `crates/`.
 //!
 //! `*_tests.rs` is exempt by name only BECAUSE it is reached by that rule: a
 //! file named like a test outside `tests/` that no test-only declaration names
@@ -189,9 +216,9 @@
 //! * **Code that does not exist as text under `crates/`**: what a procedural
 //!   macro or a build script generates. Its usual door, `include!` of a path
 //!   built by `concat!(env!("OUT_DIR"), ..)`, is refused; a procedural macro's
-//!   output is not. Nor is what an attribute macro does with the item it is
-//!   on: one on an inline module or a function may drop or rewrite a
-//!   `#[cfg(test)]` or a `#[test]` inside it that this scan honoured.
+//!   output is not, nor what an attribute macro emits; what one is handed is
+//!   read as shipped (D-5249). An inner attribute macro (`#![m]`) is
+//!   unstable, so none is on a module from inside it.
 //! * **A foreign call** (`posix_spawn` through FFI). Gate 16 makes every crate
 //!   root `#![forbid(unsafe_code)]`, which is what closes that door; this scan
 //!   does not repeat it.
@@ -688,15 +715,96 @@ fn attr_is_bare_test(attr: &[Token]) -> bool {
     attr.len() == 1 && keyword(attr, 0, "test")
 }
 
-/// Whether this file holds something that can bind the name `test` where its
-/// own `#[test]` resolves: a `use` or an `extern crate` that spells the name
-/// anywhere (a group member, a rename, a raw `r#test`, inside a function body
-/// or a macro body), or an `include!`, which pastes another file's text, and
-/// so its imports, here. A glob import and a macro's expansion cannot: rustc
-/// 1.97.1 refuses both as ambiguous with the prelude's `test` (E0659), so a
-/// build that compiles has neither re-pointing it. Erring wide only exempts
-/// less.
-fn may_rebind_test(t: &[Token]) -> bool {
+/// Built-in attributes `rustc` keeps for itself, none of which rewrites what
+/// it is on (D-5249). rustc 1.97.1 (20 Oct 2026), given `use pm2::strip as
+/// <name>; #[<name>] #[test] pub fn launch() {..}`, `strip` being an
+/// attribute macro that drops every attribute it is handed, kept the built-in
+/// for each of these and dropped `launch` with its `#[test]`; for `derive`,
+/// `default`, `global_allocator`, `test_case`, `cfg_eval` and `bench` it ran
+/// the macro and shipped `launch` (`r2s-rustc-proofs.log`).
+const INERT: &[&str] = &[
+    "allow",
+    "automatically_derived",
+    "cold",
+    "deny",
+    "deprecated",
+    "doc",
+    "expect",
+    "forbid",
+    "ignore",
+    "inline",
+    "macro_export",
+    "macro_use",
+    "must_use",
+    "non_exhaustive",
+    "path",
+    "repr",
+    "should_panic",
+    "track_caller",
+    "used",
+    "warn",
+];
+
+/// Whether the attribute body `attr` may be an ATTRIBUTE MACRO, which is
+/// handed the item it is on, the attributes after it and everything inside
+/// the item, and may drop or rewrite any attribute there (D-5249): rustc
+/// 1.97.1 shipped a `#[test]` fn after one, and a `#[cfg(test)]` statement,
+/// field, parameter, `impl` fn or module `#[test]` fn inside one. Not one: a
+/// name in [`INERT`], `cfg`, a `cfg_attr` all of whose attributes are not
+/// one, and `test` and `derive` where nothing in the file can re-point the
+/// name ([`may_rebind`]). Anything else may be, a path (`tokio::main`,
+/// `rustfmt::skip`) and a raw name included: erring wide only exempts less.
+fn may_be_macro(attr: &[Token], rebinds_test: bool, rebinds_derive: bool) -> bool {
+    if path_sep(attr, 1) {
+        return true;
+    }
+    if keyword(attr, 0, "cfg") || INERT.iter().any(|word| keyword(attr, 0, word)) {
+        return false;
+    }
+    if keyword(attr, 0, "test") {
+        return rebinds_test;
+    }
+    if keyword(attr, 0, "derive") {
+        return rebinds_derive;
+    }
+    if !(keyword(attr, 0, "cfg_attr") && punct(attr, 1, '(')) {
+        return true;
+    }
+    // `cfg_attr(P, a, b)` is replaced by `#[a] #[b]` where it stands when `P`
+    // holds, so it is a macro exactly when one of those is.
+    let close = matching(attr, 1).unwrap_or(attr.len());
+    let mut k = predicate(attr, 2).1;
+    while k < close {
+        if !punct(attr, k, ',') {
+            return true;
+        }
+        let from = k + 1;
+        let mut depth = 0_usize;
+        k = from;
+        while k < close && !(depth == 0 && punct(attr, k, ',')) {
+            match attr[k].tok {
+                Tok::Punct('(' | '[' | '{') => depth += 1,
+                Tok::Punct(')' | ']' | '}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            k += 1;
+        }
+        if k > from && may_be_macro(&attr[from..k], rebinds_test, rebinds_derive) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether this file holds something that can bind `name` (`test`,
+/// `derive`) where its own attribute of that name resolves: a `use` or an
+/// `extern crate` that spells the name anywhere (a group member, a rename, a
+/// raw `r#test`, inside a function body or a macro body), or an `include!`,
+/// which pastes another file's text, and so its imports, here. A glob import
+/// and a macro's expansion cannot: rustc 1.97.1 refuses both as ambiguous
+/// with the prelude's `test` (E0659), so a build that compiles has neither
+/// re-pointing it. Erring wide only exempts less.
+fn may_rebind(t: &[Token], name: &str) -> bool {
     (0..t.len()).any(|k| {
         let declares = (keyword(t, k, "use") && !punct(t, k + 1, '<'))
             || (keyword(t, k, "extern") && keyword(t, k + 1, "crate"));
@@ -705,7 +813,7 @@ fn may_rebind_test(t: &[Token]) -> bool {
                 && t[k..]
                     .iter()
                     .take_while(|x| x.tok != Tok::Punct(';'))
-                    .any(|x| matches!(&x.tok, Tok::Ident { name, .. } if name == "test")))
+                    .any(|x| matches!(&x.tok, Tok::Ident { name: spelled, .. } if spelled == name)))
     })
 }
 
@@ -770,6 +878,42 @@ fn statement_position(t: &[Token], at: usize) -> bool {
         || punct(t, before, '{')
         || punct(t, before, '}')
         || (punct(t, before, ']') && closes_attribute(t, before))
+}
+
+/// Whether the attribute starting at `at` stands on a `where`-clause
+/// predicate: a `where` precedes it in the same brackets with no `;` or `{`
+/// between them (a `}` is met before its own `{`), and only `where` or a `,`
+/// stands straight before it. `rustc` 1.97.1 refuses an attribute there
+/// (E0658, measured 21 Oct 2026), and a toolchain that accepts one would see
+/// `where #[cfg(test)] T: Copy { body }` read as a gated predicate running on
+/// through the body under [`item_end`]'s rule for what is not an item, so one
+/// that would exempt is refused by name instead (D-5249). A brace in the
+/// clause before the attribute (`where T: Tr<{ 1 }>, #[cfg(test)] U: Copy`)
+/// stops the walk: that one is not seen, and `rustc` refuses it all the same.
+/// A gated parameter of a function-pointer type in a predicate (`T: Into<fn(u8,
+/// #[cfg(test)] u8)>`, which `rustc` compiles) is inside brackets the
+/// `where` is not, so it is not one.
+fn on_where_predicate(t: &[Token], at: usize) -> bool {
+    let Some(before) = at.checked_sub(1) else {
+        return false;
+    };
+    if !(punct(t, before, ',') || keyword(t, before, "where")) {
+        return false;
+    }
+    let mut depth = 0_usize;
+    for k in (0..at).rev() {
+        match t[k].tok {
+            Tok::Punct(')' | ']') => depth += 1,
+            Tok::Punct('(' | '[') => match depth.checked_sub(1) {
+                Some(outer) => depth = outer,
+                None => return false,
+            },
+            Tok::Punct('{' | ';') if depth == 0 => return false,
+            _ if depth == 0 && keyword(t, k, "where") => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The files the attribute body `attr` names for the `mod` it is on: the value
@@ -876,6 +1020,57 @@ fn item_end(t: &[Token], from: usize, item: bool) -> usize {
             }
             Tok::Punct('|') if depth == 0 && !item => return i,
             _ if depth == 0 && keyword(t, i, "where") => clause = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Where the item an attribute macro may be on, starting at `from`, ends,
+/// ERRING LATE, since the macro is handed all of it (D-5249): just past its
+/// `;`, or just past the brace that closes its body, the first `{` outside
+/// its generics. A brace inside its generics (`S<{ N }>`, `<const N: usize =
+/// { 3 }>`) is a const argument, not its body; a `const`, `static`, `type`,
+/// `use` or `extern crate` item has no body and ends at its `;`, so a block
+/// in its type or its value (`= { 1 } + { .. }`) does not end it. It never
+/// runs past a bracket that closes something it is inside.
+fn macro_input_end(t: &[Token], from: usize) -> usize {
+    let mut k = from;
+    if keyword(t, k, "pub") {
+        k += 1;
+        if punct(t, k, '(') {
+            k = matching(t, k).map_or(t.len(), |close| close + 1);
+        }
+    }
+    let bodiless = ((keyword(t, k, "const") || keyword(t, k, "static"))
+        && !fn_item(t, k)
+        && !punct(t, k + 1, '{'))
+        || keyword(t, k, "type")
+        || keyword(t, k, "use")
+        || (keyword(t, k, "extern") && keyword(t, k + 1, "crate"));
+    let mut depth = 0_usize;
+    let mut angle = 0_usize;
+    let mut body = false;
+    let mut i = from;
+    while let Some(tok) = t.get(i) {
+        match tok.tok {
+            Tok::Punct(open @ ('(' | '[' | '{')) => {
+                body |= open == '{' && depth == 0 && angle == 0 && !bodiless;
+                depth += 1;
+            }
+            Tok::Punct(')' | ']' | '}') => {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+                if depth == 0 && body {
+                    return i + 1;
+                }
+            }
+            Tok::Punct(';') if depth == 0 => return i + 1,
+            Tok::Punct('<') if depth == 0 => angle += 1,
+            Tok::Punct('>') if depth == 0 && !arrow(t, i) => angle = angle.saturating_sub(1),
             _ => {}
         }
         i += 1;
@@ -1187,21 +1382,80 @@ struct Run {
     bare_test: bool,
     /// `#[macro_use]`, refused on an `extern crate`.
     macro_use: bool,
+    /// Where the first attribute that may be an attribute macro opens
+    /// ([`may_be_macro`]), which is handed what it is on (D-5249).
+    macro_attr: Option<usize>,
     path: Option<String>,
     also: Vec<String>,
     namings: Vec<(usize, &'static str)>,
 }
 
 /// Where a pass stands: its bracket depth, the functions, traits, impls and
-/// inline modules open around it, and the one whose body the next `{` opens.
+/// inline modules open around it, the one whose body the next `{` opens, and
+/// the depth inside each macro call's input or `macro_rules!` body it is in,
+/// and where the last item an attribute macro may be on ends.
 struct Nesting<'a> {
     inline: &'a [String],
     depth: usize,
     scopes: Vec<(Scope, usize)>,
     pending: Option<Scope>,
+    macros: Vec<usize>,
+    /// The token index before which the pass is inside an attribute macro's
+    /// input ([`macro_input_end`], D-5249).
+    input_until: usize,
 }
 
-impl Nesting<'_> {
+/// Whether the bracket at `k` opens a macro call's input (`name!(..)`,
+/// `path::name! {..}`, `r#name![..]`) or a `macro_rules!` body. A keyword
+/// before the `!` (`if !(..)`, `return !(..)`) makes it a negation, not a
+/// call.
+fn opens_macro(t: &[Token], k: usize) -> bool {
+    let Some(before) = k.checked_sub(1) else {
+        return false;
+    };
+    if punct(t, before, '!') {
+        return before.checked_sub(1).is_some_and(|name| item_name(t, name));
+    }
+    k >= 3
+        && ident(t.get(before)).is_some()
+        && punct(t, k - 2, '!')
+        && keyword(t, k - 3, "macro_rules")
+}
+
+impl<'a> Nesting<'a> {
+    /// The start of a pass, with the inline modules around it in `inline`.
+    fn new(inline: &'a [String]) -> Self {
+        Nesting {
+            inline,
+            depth: 0,
+            scopes: Vec::new(),
+            pending: None,
+            macros: Vec::new(),
+            input_until: 0,
+        }
+    }
+
+    /// Takes the item at `i`, under an attribute that may be an attribute
+    /// macro, as that macro's input (D-5249): an item (`statement` saying its
+    /// attributes stand where one can begin) up to [`macro_input_end`],
+    /// anything else, which rustc refuses such a macro on, to its own end.
+    fn hand_to_attribute_macro(&mut self, t: &[Token], i: usize, statement: bool) {
+        let until = if statement && is_item(t, i) {
+            macro_input_end(t, i)
+        } else {
+            item_end(t, i, false)
+        };
+        self.input_until = self.input_until.max(until);
+    }
+
+    /// Whether the token at `i` is inside a macro call's input or a
+    /// `macro_rules!` body (D-5248), or an item an attribute macro may be on
+    /// (D-5249): tokens a macro is handed or emits, not yet code, which it may
+    /// drop an attribute from, move one in, or repeat.
+    fn in_macro(&self, i: usize) -> bool {
+        !self.macros.is_empty() || i < self.input_until
+    }
+
     /// Whether this point is directly in a module's body (the file's, or an
     /// inline module's), not inside a function, a trait, an `impl`, a type,
     /// a block or a macro body: where the built-in `#[test]` takes a free
@@ -1256,9 +1510,9 @@ impl Nesting<'_> {
         Some(parts.join("::"))
     }
 
-    /// One token that is none of the things a pass reads for itself.
-    fn step(&mut self, tok: &Tok) {
-        match tok {
+    /// The token at `i`, which is none of the things a pass reads for itself.
+    fn step(&mut self, t: &[Token], i: usize) {
+        match t[i].tok {
             Tok::Punct('{') => {
                 self.depth += 1;
                 if let Some(scope) = self.pending.take() {
@@ -1270,10 +1524,18 @@ impl Nesting<'_> {
                 if self.scopes.last().is_some_and(|(_, at)| *at == self.depth) {
                     self.scopes.pop();
                 }
+            }
+            Tok::Punct(';') => self.pending = None,
+            _ => {}
+        }
+        match t[i].tok {
+            Tok::Punct('(' | '[' | '{') if opens_macro(t, i) => self.macros.push(self.depth),
+            Tok::Punct(')' | ']' | '}') => {
+                if self.macros.last() == Some(&self.depth) {
+                    self.macros.pop();
+                }
                 self.depth = self.depth.saturating_sub(1);
             }
-            Tok::Punct(')' | ']') => self.depth = self.depth.saturating_sub(1),
-            Tok::Punct(';') => self.pending = None,
             _ => {}
         }
     }
@@ -1399,7 +1661,10 @@ fn opens(t: &[Token], i: usize, pending: bool) -> Option<(Scope, usize)> {
 impl Run {
     /// Takes in the outer attribute whose body is `attr` and which opens at
     /// `at`.
-    fn read(&mut self, attr: &[Token], at: usize) {
+    fn read(&mut self, attr: &[Token], at: usize, macro_attr: bool) {
+        if macro_attr {
+            self.macro_attr.get_or_insert(at);
+        }
         self.start.get_or_insert(at);
         self.test |= attr_is_cfg_test(attr);
         self.bare_test |= attr_is_bare_test(attr);
@@ -1453,20 +1718,16 @@ fn inner_attribute(
 /// around it in `inline`.
 fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut FileScan) {
     let mut i = 0;
-    let mut at = Nesting {
-        inline,
-        depth: 0,
-        scopes: Vec::new(),
-        pending: None,
-    };
+    let mut at = Nesting::new(inline);
     let mut run = Run::default();
-    let rebinds_test = may_rebind_test(t);
+    let rebinds_test = may_rebind(t, "test");
+    let rebinds_derive = may_rebind(t, "derive");
     while i < t.len() {
         if let Some((inner, attr, next)) = attribute(t, i) {
             if inner {
                 inner_attribute(t, i, attr, test, &at, out);
             } else {
-                run.read(attr, i);
+                run.read(attr, i, may_be_macro(attr, rebinds_test, rebinds_derive));
             }
             i = next;
             continue;
@@ -1488,14 +1749,41 @@ fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut Fil
             .is_some_and(|start| statement_position(t, start));
         // A bare `#[test]` exempts only what the built-in one would take: a
         // free `fn` directly in a module, in a file where nothing can re-point
-        // the name ([`may_rebind_test`]).
+        // the name ([`may_rebind`]), with no attribute beside it that may be
+        // an attribute macro, which is handed the `#[test]` and may drop it
+        // (D-5249). A `#[cfg(test)]` beside one still takes the item: rustc
+        // evaluates `cfg` before it expands any attribute macro.
         let by_test_fn = !attrs.test
             && attrs.bare_test
             && !rebinds_test
+            && attrs.macro_attr.is_none()
             && statement
             && at.in_module_body()
             && fn_item(t, i);
-        let gate_here = (attrs.test || by_test_fn) && !test;
+        // AN ATTRIBUTE IN A MACRO CALL'S INPUT OR A `macro_rules!` BODY EXEMPTS
+        // NOTHING (D-5248): the macro may drop it (`(#[$a:meta] $($t:tt)*)`),
+        // move it, or put it on what a variable or a repetition pastes
+        // (`#[cfg(test)] $i pub fn run()`), so what stands after it is read as
+        // shipped. One on the call or on the `macro_rules!` item itself is
+        // outside, and exempts the whole of it.
+        let gate_here = (attrs.test || by_test_fn) && !test && !at.in_macro(i);
+        // AN ATTRIBUTE THAT WOULD EXEMPT A `where`-CLAUSE PREDICATE IS REFUSED
+        // BY NAME (D-5249): `rustc` 1.97.1 refuses one (E0658), and under a
+        // toolchain that does not, what follows the predicate is the body.
+        let on_where = gate_here
+            && attrs
+                .start
+                .is_some_and(|start| on_where_predicate(t, start));
+        if on_where {
+            out.record(
+                false,
+                attrs.start.map_or(t[i].line, |start| t[start].line),
+                at.function(),
+                "puts a test-only attribute on a where-clause predicate, which rustc 1.97.1 \
+                 refuses (E0658): this scan cannot place what it is on",
+            );
+        }
+        let gate_here = gate_here && !on_where;
         for &(line, what) in &attrs.namings {
             out.record(test || gate_here, line, at.function(), what);
         }
@@ -1521,6 +1809,14 @@ fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut Fil
             gated(&t[i..end], &at.modules(), attrs.path.as_deref(), place, out);
             i = end;
             continue;
+        }
+        // AN ATTRIBUTE MACRO IS HANDED WHAT IT IS ON (D-5249), and may drop
+        // or rewrite any attribute inside it, so up to the end of that item no
+        // attribute exempts anything. rustc refuses an attribute macro on a
+        // statement, a field or a parameter, so only an item is its input;
+        // anything else is held to its own end all the same.
+        if attrs.macro_attr.is_some() {
+            at.hand_to_attribute_macro(t, i, statement);
         }
         for k in macro_body_reaches(t, i) {
             out.record(
@@ -1557,7 +1853,7 @@ fn pass(t: &[Token], test: bool, inline: &[String], place: &Place, out: &mut Fil
             i += span;
             continue;
         }
-        at.step(&t[i].tok);
+        at.step(t, i);
         i += 1;
     }
 }
@@ -2507,6 +2803,34 @@ fn a_planted_spawn_is_refused_by_file_line_and_function() {
         // An item a macro is handed in a list ends at its comma (macro input,
         // so no binary: the shape is planted, not compiled).
         format!("m! {{ #[cfg(test)] struct A, struct B(std::{MODULE}::{TYPE}) }}\nfn run() {{}}"),
+        // An attribute inside a macro call's input or a `macro_rules!` body
+        // exempts nothing (D-5248): the macro may drop it, move it, or put it
+        // on what a variable or a repetition pastes. rustc 1.97.1 compiled
+        // the first three, and the comma list given a matcher that takes it,
+        // each without `--test` into a binary that ran the program
+        // (`r2r-rustc-proofs.log`: a1, a2, a6, a7).
+        format!(
+            "macro_rules! m {{ (#[$a:meta] $($t:tt)*) => {{ $($t)* }} }}\n\
+             m! {{ #[cfg(test)] pub fn run() {{ {spawn}; }} }}"
+        ),
+        format!(
+            "macro_rules! m {{ ($($n:ident)*) => {{\n\
+                 #[cfg(test)] $(fn $n() {{}})* pub fn run() {{ {spawn}; }}\n\
+             }} }}\nm!(a);"
+        ),
+        format!(
+            "macro_rules! m {{ ($i:item) => {{ #[cfg(test)] $i pub fn run() {{ {spawn}; }} }} }}\n\
+             m!(fn a() {{}});"
+        ),
+        format!("m! {{ #[cfg(test)] const A: bool = 1 < 2, const B: fn() = || {{ {spawn}; }} }}"),
+        format!("m![#[cfg(test)] pub fn run() {{ {spawn}; }}];"),
+        format!("pub fn run() {{ m!(#[cfg(test)] {{ {spawn}; }}); }}"),
+        format!("pub fn run() {{ m! {{ #[cfg(test)] let a = {spawn}; }} }}"),
+        format!("pub mod x {{ m! {{ #[cfg(test)] pub fn run() {{ {spawn}; }} }} }}"),
+        format!("pub fn run() {{ a::b::m!(#[cfg(test)] {{ {spawn}; }}); }}"),
+        format!("pub fn run() {{ r#m!(#[cfg(test)] {{ {spawn}; }}); }}"),
+        format!("m! {{ mod t {{ #[test] pub fn run() {{ {spawn}; }} }} }}"),
+        format!("macro_rules! m {{ () => {{ #[cfg(test)] pub fn run() {{ {spawn}; }} }} }}"),
         // A bare `#[test]` is the built-in one only on a free fn directly in
         // a module, in a file nothing in which can re-point the name. rustc
         // compiled each of the next eight with the program kept, the name
@@ -2529,6 +2853,46 @@ fn a_planted_spawn_is_refused_by_file_line_and_function() {
         format!("include!(\"h.rs\");\n#[test]\npub fn launch() {{ {spawn}; }}"),
         format!("pub fn run() {{ #[test] let _a = 1; {spawn}; }}"),
         format!("#![test]\npub fn run() {{ {spawn}; }}"),
+        // AN ATTRIBUTE MACRO IS HANDED WHAT IT IS ON (D-5249). rustc 1.97.1
+        // compiled each of the next eleven without `--test` into a binary
+        // that ran the program or kept the field, `pm2::strip` dropping the
+        // attributes after it and `pm2::strip_all` every attribute inside the
+        // item (`r2s-rustc-proofs.log`: q1, q2, s_derive, r1 to r8).
+        format!("#[pm2::strip]\n#[test]\npub fn launch() {{ {spawn}; }}"),
+        format!("#[cfg_attr(all(), pm2::strip)]\n#[test]\npub fn launch() {{ {spawn}; }}"),
+        format!("use pm2::strip as derive;\n#[derive]\n#[test]\npub fn launch() {{ {spawn}; }}"),
+        format!("#[pm2::strip_all]\nmod m {{\n    #[test]\n    pub fn launch() {{ {spawn}; }}\n}}"),
+        format!("#[pm2::strip_all]\npub fn run() {{\n    #[cfg(test)]\n    {spawn};\n}}"),
+        format!(
+            "#[pm2::strip_all]\npub struct S {{\n    #[cfg(test)]\n    pub c: std::{MODULE}::{TYPE},\n}}"
+        ),
+        format!("#[pm2::strip_all]\npub fn run(#[cfg(test)] c: &mut std::{MODULE}::{TYPE}) {{}}"),
+        format!(
+            "#[pm2::strip_all]\nimpl S {{\n    #[cfg(test)]\n    pub fn launch() {{ {spawn}; }}\n}}"
+        ),
+        // Its input runs past a brace in its generics, and to the `;` of an
+        // item with no body, whatever blocks its value holds.
+        format!(
+            "#[pm2::strip_all]\npub struct S<const N: usize = {{ 3 }}> {{\n    #[cfg(test)]\n    \
+             pub c: std::{MODULE}::{TYPE},\n}}"
+        ),
+        format!(
+            "#[pm2::strip_all]\npub static GO: fn() = if {{ true }} {{ #[cfg(test)] fn go() {{ \
+             {spawn}; }} go }} else {{ idle }};"
+        ),
+        format!(
+            "#[pm2::strip_all]\nimpl Tr<{{ 1 }}> for S {{\n    #[cfg(test)]\n    fn launch() {{ \
+             {spawn}; }}\n}}"
+        ),
+        // Erring wide: `test` re-pointed is a macro too, a `#[test]` before an
+        // attribute macro (which rustc does drop with its fn, q3) exempts
+        // nothing, and so does one under `#[unsafe(..)]` or a tool's path.
+        format!(
+            "use pm::passthru as test;\n#[test]\nmod m {{ #[cfg(test)] fn t() {{ {spawn}; }} }}"
+        ),
+        format!("#[test]\n#[pm2::strip]\npub fn launch() {{ {spawn}; }}"),
+        format!("#[rustfmt::skip]\n#[test]\npub fn launch() {{ {spawn}; }}"),
+        format!("#[r#inline]\n#[test]\npub fn launch() {{ {spawn}; }}"),
     ];
     for src in &refused {
         let failures = planted(src);
@@ -2638,6 +3002,42 @@ fn a_planted_spawn_is_refused_by_file_line_and_function() {
         // module, where nothing re-points the name; an unrelated `use`.
         format!("use std::fmt;\nmod tests {{\n    #[test]\n    fn t() {{ {spawn}; }}\n}}"),
         format!("#![allow(dead_code)]\n#[test]\npub const unsafe fn t() {{ {spawn}; }}"),
+        // `#[cfg(test)]` on the macro call itself is outside its input, and
+        // takes the whole call; a keyword before `!` is a negation, so the
+        // block after it is code, not a macro's input (rustc 1.97.1 compiled
+        // this `if !{..}` and `return !{..}`: b4 in `r2r-rustc-proofs.log`).
+        format!("#[cfg(test)]\nm! {{ pub fn t() {{ {spawn}; }} }}"),
+        format!("pub fn run() {{ #[cfg(test)] m!({spawn}); }}"),
+        format!("pub fn run(x: bool) {{ if !x {{ #[cfg(test)] let _c = {spawn}; }} }}"),
+        // A macro's input ends at its closing bracket: what follows is code.
+        format!("m!(a);\nm! {{ b }}\n#[cfg(test)]\nfn t() {{ {spawn}; }}"),
+        format!("fn run() {{ m![a]; }}\n#[cfg(test)]\nmod tests {{ fn t() {{ {spawn}; }} }}"),
+        format!(
+            "pub fn run(x: bool) -> bool {{\n\
+                 if !{{ #[cfg(test)] let _c = {spawn}; x }} {{\n\
+                     return !{{ #[cfg(test)] let _d = {spawn}; x }};\n\
+                 }}\n\
+                 x\n\
+             }}"
+        ),
+        // D-5249: `cfg` is evaluated before any attribute macro is expanded,
+        // so a `#[cfg(test)]` beside one still takes the item (rustc dropped
+        // it, q4); a built-in attribute, a `derive` nothing re-points and a
+        // `cfg_attr` of built-ins are no macro (q5); and a macro's input ends
+        // where its item does, at its body's brace or at its `;`.
+        format!("#[pm2::strip]\n#[cfg(test)]\npub fn launch() {{ {spawn}; }}"),
+        format!("#[inline]\n#[test]\npub fn launch() {{ {spawn}; }}"),
+        format!(
+            "#[derive(Debug)]\npub struct S {{\n    #[cfg(test)]\n    pub c: std::{MODULE}::{TYPE},\n}}"
+        ),
+        format!("#[must_use]\npub fn run() -> u8 {{\n    #[cfg(test)]\n    {spawn};\n    0\n}}"),
+        format!(
+            "#[cfg_attr(not(test), expect(dead_code, reason = \"x\"))]\n#[test]\nfn t() {{ {spawn}; }}"
+        ),
+        format!("#[pm2::strip]\npub fn a() {{}}\n#[cfg(test)]\nfn t() {{ {spawn}; }}"),
+        format!(
+            "#[pm2::strip_all]\npub const A: u8 = {{ 1 }};\n#[cfg(test)]\nfn t() {{ {spawn}; }}"
+        ),
     ];
     for src in &exempt {
         assert_eq!(planted(src), Vec::<String>::new(), "refused:\n{src}");
@@ -2686,6 +3086,22 @@ fn a_planted_spawn_is_refused_by_file_line_and_function() {
             "use tokio::main as test;\n#[test]\npub async fn launch() {{\n    {spawn};\n}}"
         )),
         ["crates/x/src/lib.rs:4 in fn launch"]
+    );
+    // D-5248: what a macro is handed after a `#[cfg(test)]` is placed as the
+    // shipped code it may become.
+    assert_eq!(
+        at(&format!(
+            "m! {{\n    #[cfg(test)]\n    pub fn run() {{\n        {spawn};\n    }}\n}}"
+        )),
+        ["crates/x/src/lib.rs:4 in fn run"]
+    );
+    // D-5249: and what an attribute macro is handed, as the shipped code it
+    // may become.
+    assert_eq!(
+        at(&format!(
+            "#[pm2::strip_all]\npub fn run() {{\n    #[cfg(test)]\n    {spawn};\n}}"
+        )),
+        ["crates/x/src/lib.rs:4 in fn run"]
     );
     assert_eq!(
         planted("#[macro_use]\nextern crate pm;"),
@@ -3230,6 +3646,121 @@ fn what_this_scan_cannot_place_is_refused_by_name() {
              outside test code is not allowed"
                 .to_owned()
         ]
+    );
+}
+
+/// **A TEST-ONLY ATTRIBUTE ON A `where`-CLAUSE PREDICATE IS REFUSED BY NAME,
+/// AND THE BODY AFTER IT IS SHIPPED** (repair round 2, D-5249). Before this,
+/// `where #[cfg(test)] T: Copy { .. }` ran the predicate's exemption on
+/// through the body, as a gated generic parameter once ran past its `>`.
+/// `rustc` 1.97.1 refuses all four shapes (E0658, measured on 21 Oct 2026 in
+/// `scratch/fix-CLOUD-RUST1-r2t/rc/w0*.err`), so none ships on the pinned
+/// toolchain; the refusal holds the line for one that accepts it. The same
+/// attribute before the clause, inside a body after it, or in test code is
+/// placed as before.
+#[test]
+fn an_attribute_on_a_where_predicate_is_refused_by_name() {
+    let sp = format!("std::{MODULE}::{TYPE}::new(\"sh\");");
+    let ty = format!("std::{MODULE}::{TYPE}");
+    let refused = |line: usize, function: &str| {
+        format!(
+            "crates/x/src/lib.rs:{line} in fn {function} puts a test-only attribute on a \
+             where-clause predicate, which rustc 1.97.1 refuses (E0658): this scan cannot place \
+             what it is on: a process spawn outside test code is not allowed"
+        )
+    };
+    let named = |line: usize, function: &str| {
+        format!(
+            "crates/x/src/lib.rs:{line} in fn {function} names the process-spawning type: a \
+             process spawn outside test code is not allowed"
+        )
+    };
+    for (src, function, line) in [
+        (
+            format!("pub fn run<T>() where #[cfg(test)] T: Copy {{ {sp} }}"),
+            "run",
+            1,
+        ),
+        (
+            format!(
+                "pub struct S<T>(T);\nimpl<T> S<T> where #[cfg(test)] T: Copy {{ pub fn run() {{ {sp} }} }}"
+            ),
+            "-",
+            2,
+        ),
+        (
+            format!("pub struct S<T> where #[cfg(test)] T: Copy {{ pub c: {ty}, t: T }}"),
+            "-",
+            1,
+        ),
+        (
+            format!("pub fn run<T, U>() where T: Copy, #[cfg(all(test, unix))] U: Copy {{ {sp} }}"),
+            "run",
+            1,
+        ),
+        (
+            format!(
+                "pub fn run<F>() where F: Fn(u8) -> u8, #[inline] #[cfg(test)] F: Copy {{ {sp} }}"
+            ),
+            "run",
+            1,
+        ),
+    ] {
+        let failures = planted(&src);
+        assert!(
+            failures.contains(&refused(line, function)),
+            "{src}: {failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("names the process-spawning type")),
+            "the body after a gated where predicate is shipped: {src}: {failures:?}"
+        );
+    }
+    assert_eq!(
+        planted(&format!(
+            "pub fn run<T>() where #[cfg(test)] T: Copy {{ {sp} }}"
+        )),
+        vec![refused(1, "run"), named(1, "run")]
+    );
+    // Before the clause, inside a body after it (after a field too), after a
+    // `where` closed inside brackets, or in test code: placed as before, and
+    // nothing is refused.
+    for src in [
+        format!("pub fn run<T>(#[cfg(test)] c: {ty}) where T: Copy {{}}"),
+        format!("pub struct S<T> where T: Copy {{ #[cfg(test)] c: {ty}, t: T }}"),
+        format!("pub struct S<T> where T: Copy {{ pub a: u8, #[cfg(test)] c: {ty}, t: T }}"),
+        format!("pub struct S([u8; {{ fn a<T>() where T: Copy {{}} 1 }}], #[cfg(test)] {ty});"),
+        format!(
+            "pub struct S<T>(T);\nimpl<T> S<T> where T: Copy {{\n    #[cfg(test)]\n    fn t() {{ {sp} }}\n}}"
+        ),
+        format!("pub fn a<T>() where T: Copy {{}}\n#[cfg(test)]\nfn t() {{ {sp} }}"),
+        format!("#[cfg(test)]\nmod t {{ fn run<T>() where #[cfg(test)] T: Copy {{ {sp} }} }}"),
+    ] {
+        assert_eq!(planted(&src), Vec::<String>::new(), "{src}");
+    }
+    // A gated parameter of a function-pointer type inside a predicate is no
+    // predicate's attribute: `rustc` 1.97.1 compiles it without `--test`
+    // (`scratch/fix-CLOUD-RUST1-r2t/rc/fp1.rs` ran the program), so it is not
+    // refused, ends at its `)`, and the body after it is shipped. A later
+    // predicate after a `;` (`struct X(T) where T: Copy;`) is no clause of
+    // the generics that follow it.
+    assert_eq!(
+        planted(&format!(
+            "pub fn run<T>() where T: Into<fn(u8, #[cfg(test)] u8)> {{ {sp} }}"
+        )),
+        vec![named(1, "run")]
+    );
+    assert_eq!(
+        planted(&format!(
+            "pub struct X<T>(T) where T: Copy;\npub struct Y<A, #[cfg(test)] B>(A, {ty});"
+        )),
+        vec![named(2, "-")]
+    );
+    assert_eq!(
+        planted(&format!("pub struct Y<A, #[cfg(test)] B>(A, {ty});")),
+        vec![named(1, "-")]
     );
 }
 
