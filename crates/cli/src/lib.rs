@@ -70,6 +70,10 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli feed-reconcile`: Zerodha minutes vs Zerodha day bar vs GDFL seconds,
+/// per stock-day, read from the store directly, and the factor reader
+/// (DATA-1, D-5170..D-5175).
+pub mod feed_reconcile;
 /// `cli gdfl-dayflags`: the GDFL day ledger of days already imported (D-3335).
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
@@ -96,9 +100,9 @@ mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
-/// `cli series-identity`: every stored minute of a series judged against its
-/// own stored day bars, read-only: the minutes a landing refuses today and the
-/// months that hold them (WP-13d).
+/// `cli series-identity`: every stored bar of a series judged as a landing
+/// judges it, read-only of bars: the bars a landing refuses today, the months
+/// that hold them, and one quarantine plan under `audit/` (WP-13d, R4-17).
 mod series_identity;
 /// `cli srt-build`: the `.srt` sort index for named months of a series (D-3349).
 mod srt_builder;
@@ -548,6 +552,17 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the span's census-refused gdfl import days
                                    with a `recounted` journal line each. DAY is
                                    YYYY-MM-DD (D-3316, D-3317).
+       cli feed-reconcile YYYY-MM --out DIR [--symbols A,B] [--workers N]
+                                   read-only over the bars: per stock-day held by
+                                   either feed, GDFL 1s volume vs Zerodha day bar
+                                   vs Zerodha minute sum, the exact paisa-pair
+                                   price factor (empty when no minute matched),
+                                   the clock lag, ex-date, volume and session
+                                   flags. Writes a NEW version file under DIR,
+                                   never replacing one (D-5170..D-5175).
+       cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]
+                                   one stock-day's factor from the newest
+                                   version file, O(1) per lookup, timed.
        cli gdfl-dayflags KIND FROM TO [--lineage]
                                    the GDFL day ledger (D-3335) of every day
                                    of the range the import journal records as
@@ -618,14 +633,22 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
-       cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED]
-                                   read-only: every stored 1min bar of a series
-                                   judged against its own stored 1day bars; the
-                                   minutes a landing refuses today (before the
-                                   first served day bar, or wholly outside
-                                   their own day's range) and the months that
-                                   hold them. ALL prints one line per series
-                                   and names each with no minute rung (WP-13d).
+       cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED] [--workers N]
+                          [--dry-run]
+                                   writes no bar: every stored bar of a series
+                                   judged as a landing judges it today (a price
+                                   at or below zero, a CASH bar before its
+                                   master's listing day, a minute before the
+                                   first served day bar or outside its own
+                                   day's range, a CASH in-session jump), each
+                                   flagged bar given a cause measured against
+                                   GDFL, and the months that hold them. Writes
+                                   one quarantine plan under audit/ naming the
+                                   commit, so an unstamped build is refused;
+                                   --dry-run writes nothing. ALL scans the
+                                   series in parallel, prints one line per
+                                   series and names each with no minute rung
+                                   (WP-13d, D-4994).
        cli zerodha-gaps INSTRUMENT|ALL FROM TO [--segment INDEX|CASH] [--apply]
                                    the gap ledger for stored Zerodha 1min months
                                    (FROM, TO are YYYY-MM-DD), from the store and
@@ -2898,6 +2921,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["series-identity", arguments @ ..] if !arguments.is_empty() => {
             series_identity::command(arguments, out)
         }
+        ["feed-reconcile", arguments @ ..] if !arguments.is_empty() => {
+            feed_reconcile::command(arguments, out)
+        }
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
@@ -2972,7 +2998,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 53] = [
+const COMMANDS: [&str; 54] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2994,6 +3020,7 @@ const COMMANDS: [&str; 53] = [
     "expression-backtest-stored",
     "expression-search-stored",
     "expression-stored",
+    "feed-reconcile",
     "fold-audit",
     "gdfl-dayflags",
     "gdfl-import",

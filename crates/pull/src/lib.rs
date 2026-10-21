@@ -186,6 +186,10 @@ pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
+/// The `_v3` extraction ledger, read only, as evidence never a source: the
+/// manifest of an options day, trusted by its ok marker, against the day's
+/// listing. D-4814, D-4867.
+pub mod gdfl_v3;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an
@@ -196,6 +200,9 @@ pub mod http;
 pub mod ingest;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
+/// A CASH security's listing day and end of history, from the receipted NSE
+/// security master (R4-17).
+pub mod listing;
 pub mod manifest;
 /// Where an instrument master comes from, and what it takes to replace one.
 ///
