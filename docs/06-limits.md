@@ -6314,8 +6314,13 @@ the packages `cargo tree -e normal,build -i` finds in the native host graph:
 | `crc32fast` `getrandom` `zerocopy` | `Command::new` |
 | `ahash` `generic-array` | `version_check` (which runs `rustc`) |
 | `num-traits` | `autocfg` (`emit_expression_cfg` compiles probes with `rustc`) |
+| `rustix` | `std::process::Command::new` on `$RUSTC` or `RUSTC_WRAPPER` (feature probes; D-5240) |
 
-Thirteen packages. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
+Fourteen packages: the thirteen D-2328 measured, and `rustix` 1.1.4, which
+`api` took on 2026-10-16 so `/disk.json` calls `statvfs(2)` instead of starting
+`/bin/df` (D-5240) — a run-time child process traded for a build-time `rustc`
+probe of the kind already listed, its registry source read before the lock
+moved. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
 in `Cargo.lock` but not in the native graph, and missed `num-traits`. `ring`,
 `rustversion` and `wasm-bindgen-shared` also spawn, and are in `Cargo.lock` for
 other targets only; `cargo tree -i` on the host finds none of them.
@@ -6326,8 +6331,8 @@ from this workspace, so **the ban as written cannot be held at the dependency
 level**, and the sentence in §2 is stronger than the tree.
 
 **Why this is recorded rather than fixed.** A gate banning dependency build
-scripts would fail on `serde`. A gate with an allowlist of the thirteen would
-pass everything on the list forever and say nothing about the fourteenth. Neither
+scripts would fail on `serde`. A gate with an allowlist of the fourteen would
+pass everything on the list forever and say nothing about the fifteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
@@ -6345,7 +6350,7 @@ named binding libraries.
 
 **What is not held**: the literal sentence, against dependencies. A reader
 finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
-something true and something this workspace already contains thirteen of. See
+something true and something this workspace already contains fourteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
 
@@ -17842,11 +17847,53 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   1,055 of 80,000 with waits of up to 869 ms. A request that finds the
   ledger longer reads and indexes the bytes appended since the last request
   under the vendor's lock: O(appended), at most 16 MiB.
-- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One `df -Pk`,
-  a stat of each census file, each feed's scrub state. Its uncached
-  measurement at 385,440 standing findings: 3.1–4.5 ms (it was 84–92 ms: a
-  walk and a sort of every finding for 16 names); cached, n=200, 0.06 / 0.17
-  / 1.79 ms.
+- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One
+  `statvfs(2)` and a `stat` per directory from the store root up to its mount
+  point — on macOS one `statfs(2)` and no directory walk, the mount point
+  being the call's own `f_mntonname` (D-5241) — (a `/bin/df -Pk` child
+  process until D-5240), a stat of each census
+  file, each feed's scrub state. Misses that arrive together take ONE
+  measurement: the first measures and the rest wait for it, then serve its
+  answer (D-5245, RUST1-14); until then each of them measured, up to the
+  operations pool's four at a time, so "at most once in 30 s" did not hold
+  under concurrent misses. A waiting caller waits as long as the measurement
+  takes, which a hung filesystem makes unbounded (L-RUST1-5). Its uncached measurement at 385,440 standing
+  findings: 3.1–4.5 ms (it was 84–92 ms: a walk and a sort of every finding
+  for 16 names); cached, n=200, 0.06 / 0.17 / 1.79 ms. That figure included
+  the `df` child, which was not timed apart on the operator's machine and the
+  figure was not re-taken there after D-5240. On the 4-core cloud container on
+  16 Oct 2026, the build before and the build after run in three interleaved
+  rounds (n=1,000 each after 50 warm-up calls, one test thread, an empty store
+  in a temporary directory, nearest rank; ranges across the rounds): the
+  filesystem step alone was p50 1.49–1.53 ms, p99 2.18–3.00 ms, max
+  4.60–5.85 ms with the child and is p50 3.0–4.5 µs, p99 7.1–11.2 µs, max
+  36–85 µs with `statvfs(2)`; the `GET /disk.json` handler with its cache
+  cleared before each call, through the operations pool, was p50 1.62–1.65 ms,
+  p99 2.35–3.27 ms, max 4.66–9.66 ms and is p50 67–72 µs, p99 136–152 µs, max
+  0.21–0.85 ms; with the cache warm it is unchanged, p50 39–41 µs. **On the
+  operator's machine, 17 Oct 2026** (M4 Pro, load average 28 on 14 cores from
+  other builds, the test profile, one test thread; RUST1-10,
+  `the_call_at_its_p99_costs_less_than_the_df_child_at_its_p50`, two rounds,
+  n = 1,000 each after 50 warm-ups, interleaved, nearest rank; logs
+  `state/fix/round2/logs-CLOUD-RUST1/timing.log` and `timing-r2.log`): the
+  `/bin/df -Pk` child the route started was p50 1.51–1.77 ms, p99
+  2.61–4.50 ms, max 3.33–6.68 ms; one `statfs(2)` is p50 6.6–9.0 µs, p99
+  36–68 µs, max 81–383 µs (boot volume and the external drive alike); the
+  whole uncached answer on an empty store p50 30–43 µs, p99 117–167 µs, max
+  0.30–0.33 ms; the `GET /disk.json` handler through the operations pool with
+  its cache cleared before each call p50 43–45 µs, p99 282–353 µs, max
+  0.47–0.94 ms, and warm p50 3.3–3.4 µs, p99 32–58 µs, max 0.18–0.44 ms.
+  Over HTTP, the release build serving a shadow of the real store (bars
+  linked, the rest cloned; GDFL census 2,098,428 months; `state/fix/shadow.sh`,
+  `serve.sh`, port 9301, GET only, one keep-alive connection, `curl
+  %{time_total}`): n = 300 sequential GETs, all 200 and all but the first
+  inside the 30 s cache, p50 0.22 ms, p99 2.03 ms, max 2.59 ms; n = 12 GETs
+  spaced 31 s apart so each misses the cache and measures the whole answer,
+  p50 2.13 ms, max 14.10 ms (min 1.18 ms) — a sample of twelve, so no p99 is
+  claimed for it. The real store records no full-block scrub of either feed
+  today (`scrub.recorded` false for `gdfl` and `zerodha`), so no findings
+  index was read and this is not the 385,440-finding figure above re-taken.
+  Logs `state/fix/round2/logs-CLOUD-RUST1/http-hit-300.txt`, `http-miss.txt`.
 - **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
   O(blocks of that month) in TIME; its answer is constant-size.** Every block
   is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar
@@ -17903,8 +17950,11 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   census file: O(epochs), a handful today). It grows by one census epoch per
   compaction — about the size of the live census each time. NOT DONE: a
   bound, an alarm at a threshold, or an archive step that moves older epochs
-  off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
-  of its own (L-WP81-4), cached for 30 s in the operations pool.
+  off the store's drive; `/disk.json`'s one `statfs(2)` (macOS, D-5241) or
+  `statvfs(2)` (elsewhere) has no timeout of
+  its own either: a filesystem that hangs the call hangs the measurement, as
+  it hung the `df -Pk` child the call replaced (L-WP81-4, D-5240), cached for
+  30 s in the operations pool.
 
 ## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
 
@@ -18861,7 +18911,7 @@ log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
 | L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | **Re-measured under `ruzstd` 0.9.1** (D-5090 point 8; 17 October 2026, the same three read-only day zips and the same test, log `state/fix/deny-1-logs/tsw-measure-ruzstd-0.9.1-20261017.log`, each file verified entry for entry against its zip): 1.57 to 2.04 times the tool's bytes for the same day (indices 16,385,730 B against 8,042,422, stocks 59,143,634 against 37,566,114, options 253,387,791 against 151,027,298). Under 0.8.2 (14 October) the same days were 16,400,878, 60,066,755 and 255,904,074 B (1.60 to 2.04 times): 0.9.1's Raw fallback stores 1.0% fewer bytes over the three days, never more. About 329 MB a trading day against 197 MB, about 33 GB more a year (EXTRAPOLATION from three days; 332 MB and 34 GB under 0.8.2). Why, read from `ruzstd`'s source and unchanged in 0.9.1: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more (`MIN_MATCH_LEN`, `encoding/match_generator.rs`) over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08, DENY-1 |
 | L-TSW-5 | One entry rebuilt | a file is decoded whole | O(the file's bytes), the reader's (`gdfl_tickstore::rebuild`), unchanged: from this writer's options day p50 0.30 ms, p99 81 ms, max 275 ms (n = 20,054), from the tool's p50 0.30 ms, p99 93 ms; indices files (3.7 MB each) p50 125 ms, p99 260 ms (n = 141) | R4-08 |
 | L-TSW-6 | Point lookup on a written day | none: it is O(1) | the readers' listing, one probe: p50 41 ns, p99 125 ns, max 0.34 ms (scheduler), n = 200,540 on the options day and 36,820 on the stocks day; the tool's own figure was 208 ns p99. Bench C-TSW-02 on a written 4,000-member day: p50 41 ns, p99 42 ns, max 167 ns, n = 20,000; flat at 10x and 100x members (1.03x, 1.04x) | R4-08 |
-| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
+| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it; `rustix`, whose safe `statvfs` `api` takes for `/disk.json` (D-5240), is not a `pull` dependency | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
 | L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
 | L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
 
@@ -20272,6 +20322,21 @@ Two refusals on the same run are feat/db-fix's own, present there
 without R4-17 and not R4-17's files: rule 3 at
 pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ~~~~
+
+## `/disk.json` without a child process, and the run-time spawn gate (RUST-1; D-5240, D-5241, D-5242)
+
+Measured on the operator's machine, 17 Oct 2026. The timings are L-WP81-4's.
+
+| Id | What is not held | Why | Measured, and what is done instead |
+|---|---|---|---|
+| L-RUST1-1 | On APFS `used_bytes` is not the volume's own used space | `statfs(2)`'s `f_blocks` and `f_bfree` are the APFS container's, shared by every volume in it, and no field of that structure carries the volume's own allocation, which macOS `df` prints in its Used column; how `df` reads it was not read (UNVERIFIED), and any other call would be a foreign one gate 16 refuses | `used_bytes` stays `f_blocks − f_bfree` and the module header, D-5241 and RUST1-09 say so. Boot volume: 426,123,862,016 bytes against `df`'s 335,261,478,912 (the container's other volumes, about 90.9 GB); the external drive holding the store: 6,263,293,562,880 against 6,262,437,662,720 (0.86 GB). The re-check of 19 Oct 2026 reported the widest gap, on the sealed read-only system volume: 331.7 GB against `df`'s 13.7 GB (`state/fix/round2/verify-CLOUD-RUST1-r1.json`, its follow-ups; not re-measured here). An API reader tells the container's figure from `filesystem.source`, `statfs`; no field names the scope, since RUST1-07 pins the shape. `total_bytes`, `free_bytes` and `mount` equal `df`'s byte for byte on both. No page reads `used_bytes`: `web/src/lib/disk.js` shows free of total |
+| L-RUST1-2 | The spawn gate sees only the spellings it lists, and does not read dependencies, generated code, foreign calls, the `cfg` it does not evaluate, or a build that sets `test` outside the harness | It is a model of `rustc` and Cargo written as a lexer and path rules, not the compiler: it lexes the `.rs` files under `crates/`, reads every `Cargo.toml` there and the workspace's, and lists every other file there, and it claims exactly the spellings its header lists, each planted in its own tests; a spelling the header does not list is not claimed. Out of its sight: a dependency that starts a program at run time, a dependency's re-export of the type under another name, a dependency's macro whose own body spells the type (only what the call site hands it is read), code a procedural macro or a build script generates, a `posix_spawn` through FFI, a `cfg` other than one holding only under `test` (its code is read as shipped), `--cfg test` from `RUSTFLAGS`, a `.cargo/config.toml` or a build script's `cargo:rustc-cfg=test` (the scan takes `test` to hold only under the harness), and a file Cargo reads unasked outside `crates/` | Gate 16 (`#![forbid(unsafe_code)]` on every crate root) closes the FFI door; `crates/vocab/tests/workspace_is_rust.rs` pins the dependency set so a new package is reviewed, and on 20 Oct 2026 `Cargo.lock` held none of `open`, `duct`, `subprocess`, `xshell`, `which`, `async-process`, `cmd_lib`, `execute`, `run_script`, `command-group`, `opener`, `webbrowser` or `nix` (`cc` is there, a build dependency of `ring`, L-RUST1-3); an `include!` of no plain string (the build-script door) is refused; WHAT THE MODEL CANNOT PLACE IS REFUSED BY NAME (RUST1-13, D-5244): a shipped declaration with no `.rs` file where it looks, an inline or inner `#[path]`, a module file or `include!` in a macro body, a manifest target of another kind or with no source, a multi-line manifest value, and anything a declaration or a manifest names outside `crates/`; an unevaluated `cfg` errs towards failing, never passing; the gate's own module header lists the same blind spots. Proof it fails: a spawn planted in `disk_route::measure` on 17 Oct 2026 failed `no_shipped_code_starts_a_program_outside_the_allowlist` with `crates/api/src/disk_route.rs:207 in fn measure names the process-spawning type` (log `state/fix/round2/logs-CLOUD-RUST1/planted-spawn.log`); on 19 Oct 2026 the re-check's 27 probe cases and allowlist spoof, run against the repaired gate, were all as claimed and its planted tree failed naming all five plants; on 20 Oct 2026 a second pass's 30-case probe went from 26 missed to none, and four of its spellings planted in a copy of the merged tree each failed (`r1b-c7-probe-on-new-gate.log`, `r1b-plant-c7.log`, `r1b-probe-on-old-gate.log`, `r1b-probe-on-new-gate.log`, `r1b-plant-merged.log` in the same folder; D-5244) |
+| L-RUST1-3 | `rustix`'s build script starts `rustc` | its feature probes; §96 lists it as the fourteenth such package, and whether §2's build-script sentence binds dependencies is the owner's open question (D-2328, D-5242) | one cold build: 3 `rustc --emit=metadata` probes, the build-script run 0.6 s (`libc`'s, already present, 1 `rustc --version`, 0.4 s); a measurement of one build on a loaded machine. No crate already in `Cargo.lock` gives a safe `statvfs` (D-5242) |
+| L-RUST1-4 | `the_filesystem_numbers_are_what_the_call_returns` and the macOS `df` comparison retry a race | on a busy volume a quiet round (the counts equal before and after) can still disagree with the measurement taken between them: once on 17 Oct 2026, `used` one fragment off | the round is retried, up to 200, and three must agree exactly; a wrong formula disagrees on every round, and the formula on counts whose free and available fragments differ is pinned by `counts_no_filesystem_can_have_are_refused_by_name` |
+| L-RUST1-5 | A `/disk.json` miss can wait for another caller's measurement | single flight (D-5245): a caller that misses while another measures waits on the measuring lock and serves that answer, so concurrent misses take one measurement | the wait is at most the rest of one uncached measurement, the handler's miss figures in L-WP81-4 (operator's machine, 17 Oct 2026: p50 43–45 µs, p99 282–353 µs, max 0.47–0.94 ms on an empty store); the hit path is unchanged, one `Mutex` read. A `statfs(2)` or `statvfs(2)` that hangs holds every waiting caller, as before D-5245 it held each caller in its own call; the operations pool still bounds them at four, and neither shape has a timeout (L-WP81-4, the NOT DONE beside it) |
+| L-RUST1-6 | The spawn gate's `#[test]` and attribute placement are a model of `rustc`, not its resolver, and an attribute macro's output is unseen | Repair round 2 (D-5246) found the gate placing attributes on more than they are on: a gated generic or closure parameter ran on through the body after it, a field or argument named `union` swallowed the ones after it, and a bare `#[test]` exempted whatever an import had re-pointed `test` to. What `#[test]` names is decided by name resolution, which a lexer cannot run; and an attribute macro on an inline module or a function receives its tokens and may drop or rewrite a `#[cfg(test)]` or `#[test]` inside it that the scan honoured, which D-5249 now answers by reading everything such a macro is handed as shipped (L-RUST1-8) | The gate now places an attribute by where it stands and ends a non-item at `,`, `>` or `\|` (RUST1-15); a bare `#[test]` exempts only a free fn directly in a module in a file with no `use` or `extern crate` spelling `test` and no `include!`, which closes every re-pointing rustc 1.97.1 compiled on 20 Oct 2026 (`use .. as test`, a group member, a raw `r#test`, a block `use`, `#[macro_use] extern crate`, a derive helper, an `impl`, a macro body), since a glob or a macro-expanded binding is refused by rustc as ambiguous (E0659), `#[macro_use] extern crate` and a pasted file's bare `#[test]` are refused by name, and an import the model misreads only exempts less. `cfg` cannot be re-pointed (a reserved name). An attribute macro's OUTPUT stays out of sight, as every procedural macro's output already was (L-RUST1-2); its input no longer exempts anything (D-5249, RUST1-18). The model is of the pinned toolchain: a test-only attribute on a `where`-clause predicate, which rustc 1.97.1 refuses (E0658, `r2t-rustc-proofs.log`, 21 Oct 2026) and the gate once exempted the body after, is refused by name (RUST1-19), but other syntax a later toolchain stabilises is not modelled until a toolchain bump, itself a decision, re-checks the gate. Proof: `r2-probe-on-old-gate.log` (30 of 33 missed), `r2-probe-on-new-gate.log` (none), `r2-verifier-probe-on-new-gate.log` (26 of 26 as claimed), `r2-plant-verifier-tree.log` (the three plants each named) and `r2-rustc-proofs.log`, in `state/fix/round2/logs-CLOUD-RUST1/` |
+| L-RUST1-7 | A spawn a macro is handed after a `#[cfg(test)]` fails the gate even when the macro keeps the attribute on it | D-5248: a macro's input and a `macro_rules!` body are tokens, not code yet, and the scan cannot expand a macro to learn whether it drops the attribute, moves it, or puts it on what a variable or a repetition pastes; rustc 1.97.1 compiled each of those into a binary that ran the program (`r2r-rustc-proofs.log` a1, a2, a6, a7). Erring towards failing costs a false refusal, never a pass | The gate reads everything after such an attribute as shipped (RUST1-17). Test code that needs a spawn inside a macro puts the `#[cfg(test)]` on the call (`#[cfg(test)] m! {..}`) or on the module around it, which the scan honours. The merged tree has no such case: `no_shipped_code_starts_a_program_outside_the_allowlist` passes on it. Proof: `r2r-probe-on-old-gate.log` (12 of 12 missed), `r2r-probe-on-new-gate.log` (none; its 3 controls exempt), `r2r-hand-mutants.log` (6 of 6 killed), in `state/fix/round2/logs-CLOUD-RUST1/` |
+| L-RUST1-8 | An attribute that is not a built-in costs its item every exemption, even when no macro is behind it | D-5249: an attribute macro is handed the item it is on, the attributes after it and everything inside, and rustc 1.97.1 does not evaluate the `cfg`s there first; it shipped a `#[test]` fn after one and a `#[cfg(test)]` statement, field, parameter, `impl` fn or module `#[test]` fn inside one (`r2s-rustc-proofs.log` q1, q2, r1 to r8). A lexer cannot tell a macro from a derive helper or a tool attribute, so anything but `cfg`, twenty measured built-ins, a `cfg_attr` of those, and an un-re-pointed `test` or `derive` is taken for one: `#[serde(..)]`, `#[default]`, `#[rustfmt::skip]`, `#[tokio::main]`, `#[unsafe(..)]` and a raw name included. Erring towards failing costs a false refusal (a gated spawn inside such an item, a `#[test]` before or after one), never a pass | The gate reads the whole item as shipped (RUST1-18); `#[cfg(test)]` beside such an attribute still takes the item, since rustc evaluates `cfg` first (q4, q7). Test code that needs a spawn under such an attribute puts it in a `#[cfg(test)]` module or item, which the scan honours. The merged tree has no such case: `no_shipped_code_starts_a_program_outside_the_allowlist` passes on it, and the twenty built-ins were each measured on 20 Oct 2026 rather than taken from a list. Proof: `r2s-d5249-probe-old-vs-new.log` (15 of 15 missed before, none after; 7 controls exempt), `r2s-hand-mutants.log` (13 of 13 killed), `r2s-plant-real-tree.log` (a copy of the real tree with two planted files passed before and fails naming both), in `state/fix/round2/logs-CLOUD-RUST1/` |
 
 ## Reference tables as store data (R3-30, D-6246)
 
