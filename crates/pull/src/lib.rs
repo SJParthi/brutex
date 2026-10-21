@@ -190,6 +190,10 @@ pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
+/// The `_v3` extraction ledger, read only, as evidence never a source: the
+/// manifest of an options day, trusted by its ok marker, against the day's
+/// listing. D-4814, D-4867.
+pub mod gdfl_v3;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an

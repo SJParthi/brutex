@@ -77902,3 +77902,130 @@ of the pinned toolchain.
 *Cost.* One look at the token before each exempting attribute and, after a
 `,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
 test-time only, no shipped code.
+
+### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
+
+The design's own id (`state/design/ingest-automation.md` §16, D-4814),
+landed with that number by IA-3-OPT, the options remainder of IA-3, whose
+report left it parked as options work. The 20 Oct options replan withdrew
+the parking.
+
+1. **Read only, and never a source.** `pull::gdfl_v3` opens two files per
+   options day, `<root>/<yyyy>/_v3/manifest/<hex>.ok.tsv` and
+   `<root>/<yyyy>/_v3/ok/<hex>.ok`, where `<hex>` is the lowercase hex of the
+   day zip's name inside its year zip (`NfoZips::day_zip_name`,
+   `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`). Each is opened with one
+   read-only `File::open` and read up to a cap of 64 MiB for a manifest and
+   4 KiB for a marker. A larger file is `Unverified` and is never read whole.
+   Nothing in the ledger is written, created, renamed, removed, locked or
+   flocked, and `lock.guard` and `place.lock` are never named. A
+   source-shape test pins this. No bar is ever read from the ledger.
+2. **Trust.** A manifest is compared only when its ok marker agrees with it.
+   The marker's measured shape is `x3-marker 1` followed by one `key=value`
+   line each for `name_hex`, `crc`, `size`, `manifest_sha256`, `day_hex`,
+   `files`, `bytes` and `run`. It must name this day zip (`name_hex`, and
+   `day_hex` without `.zip`). Its `crc` must be 8 hex digits and its `size`,
+   `files` and `bytes` decimal. Its `manifest_sha256` must equal the sha256
+   of the manifest's bytes, and its `files` and `bytes` must equal the
+   manifest's count of file lines and the sum of its sizes. Any other marker
+   makes the day `V3::Unverified { why }`, which is never compared and so
+   never `Agrees`. **This corrects the design, by measurement over all
+   1,997 markers:** `crc` and `size` are the *day zip's* CRC-32 and size as
+   its year zip records them, not the manifest's. The reader holds `size` to
+   the day zip's member bytes wherever the source read them.
+3. **A line is exactly 6 tab fields.** Field 2 (the size) must be decimal,
+   field 3 (the CRC) 8 hex digits, and fields 4 and 5 decimal. Fields 4 and
+   5 are read and never interpreted: what they mean is **UNVERIFIED**
+   (design §3.11). A line of 5 or 7 fields, a non-hex CRC, a non-decimal
+   size, a byte that is not UTF-8 or a last line with no newline (torn) is
+   `V3::Malformed { line, why }`, named by its one-based line number. It is
+   never skipped, and its day is told as unverified.
+4. **The mapping and the comparison.** A listing entry maps to `<MON_yyyy>/`
+   plus the entry with every `\` turned to `/`. Directory lines are kept on
+   both sides (design §6.1, :2221). Manifest line `i` is held to listing
+   entry `i` on path, size, CRC-32 and source day zip, in that order, with at
+   most one difference per line, and the day zip's size is held to the
+   marker. The answer is `Agrees { lines }`, or `Disagrees { count, first }`
+   naming the first differing path and what differs there. The cost is
+   O(entries of the day) plus one sha256 of the manifest: one pass, no map,
+   no sort, and no allocation for a line that agrees.
+5. **Absence is named and is not an error of the day.** A day for which the
+   ledger holds neither a manifest nor a marker is
+   `Absent { why: "no manifest for <day zip>" }`. A marker without its
+   manifest is `Unverified`. `V3::code` gives the day block's byte: 0
+   absent, 1 agrees, 2 disagrees, 3 unverified or malformed.
+6. **Not built here (IA-6's, after this part).** The completeness sweep's
+   per-day check, the day flag `v3_manifest_disagrees` with
+   `manifest{count, first}`, and test IA-GV-07.
+
+Tests (`pull::gdfl_v3::tests`): `a_v3_manifest_line_maps_to_its_listing_path`,
+`a_disagreeing_v3_manifest_names_its_first_difference`,
+`an_unverified_v3_manifest_is_not_trusted`,
+`a_malformed_v3_line_is_named_with_its_line_number`,
+`the_v3_extremes_are_each_named`, `the_v3_ledger_is_never_opened_for_writing`,
+and the ignored, read-only
+`the_real_v3_ledger_agrees_with_the_real_year_zips`. Invariants IA3OPT-01 to
+IA3OPT-07 and IA3OPT-11. Limit L-IA3OPT-01.
+
+### D-4867 — The `_v3` ledger's root is `BRUTEX_GDFL_V3_LEDGER`, read through the one source-root rule, with no default (IA-3-OPT) — 2026-10-20
+
+The design's own id (`state/design/ingest-automation.md` §16, D-4867),
+landed with that number by IA-3-OPT.
+
+`V3Ledger::from_env` reads the variable through `gdfl_run::source_root`,
+the rule every `BRUTEX_GDFL_*` source root is read by (D-4801). Unset or
+empty, it is `V3Ledger::Unset`, and every day answers
+`v3: absent (BRUTEX_GDFL_V3_LEDGER unset)`. There is no default path, and no
+path literal appears in tracked code. The design's further sentence, "and
+`/gdfl/sources.json` names the variable", is **NOT BUILT here**: there is no
+such route on `feat/db-fix`. It belongs to whichever package builds the page
+that lists the import's sources.
+
+Test: `an_unset_v3_ledger_is_named_never_defaulted`. Invariant IA3OPT-04.
+
+### D-6890 — An options day zip filed anywhere but its own place in its own year's zip is named where it lies, never "not held" (IA-3-OPT; FM-043) — 2026-10-20
+
+From the block D-6890..D-6899 recorded for IA-3-OPT in
+`state/decision-blocks.json` by the 20 Oct options replan.
+
+Before this, `NfoZips::day` looked only in `<the day's year>.zip`, under the
+exact name `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`. A day zip packed
+anywhere else was therefore never listed and never flagged, and its day read
+as not held. That covered 2025-12-31 packed into `2026.zip`, a day under
+another month's folder or at the zip's root, and a day inside a fiscal-year
+`2025-26.zip`.
+
+1. **One walk, then one probe per day.** On the first day asked, the source
+   lists its directory once and walks every `*.zip` in it. Each `<yyyy>.zip`
+   becomes that year's index, keyed by day, holding only the day zips at
+   their own place. Every `GFDLNFO_TICK_<ddmmyyyy>.zip` entry found anywhere
+   else, and every day zip in a zip of any other name, is noted under its
+   day as `<zip>:<entry>`. The cost is O(names in the directory) plus
+   O(entries) per zip, once per source object. After that, a day costs one
+   probe of its year's index and one probe of the notes. Names that do not
+   end `.zip` (`.DS_Store`, `2024.zip.part`) are never opened.
+2. **D-4818's one rule files each copy**, as `gdfl_archive::file_copy` does
+   for the capital-market archive. One copy at its own place reads. One copy
+   only elsewhere refuses `day_zip_misfiled { found, expected }`, where
+   `found` is `<zip>:<entry>` and `expected` is
+   `<yyyy>.zip:<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`. Two copies anywhere,
+   within one zip or across two, refuse `archive_duplicate_day`. Both reach
+   `cm_cause` through `NfoRefusal::Source` unchanged and stay open: neither
+   closes the day.
+3. **An unread zip never lets a day read as not held.** A zip that refuses
+   while the directory is listed is kept as unread. A day of its own year
+   refuses with its refusal when asked, as before. A day held nowhere
+   readable answers the first unread zip's refusal, never `Ok(None)`,
+   because that zip may hold it. Once the zip reads, it is walked and leaves
+   the unread set.
+4. **Known gaps, named.** `archive_duplicate_day` names the day, not both
+   zips: `CmRefusal::ArchiveDuplicateDay { day }` is the capital-market
+   archive's variant (`gdfl_cm.rs`), and widening it is outside this part's
+   files. The refusal an unread zip passes to a day held nowhere is that
+   zip's own refusal, which does not name the zip.
+
+Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
+`a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held` and
+`pull::gdfl_import::ia3_tests::every_options_source_refusal_reaches_its_cm_arm`
+(IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
+L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
