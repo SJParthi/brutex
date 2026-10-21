@@ -126,13 +126,17 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 53] = [
+const NOT_ON_MAIN: [(&str, Off); 54] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
     ("28c362c1", Off::Neither),
     ("da28ae95", Off::Neither),
     ("b1d9ac70", Off::Neither),
+    // DATA-1's feed-reconcile measurement in docs/06-limits.md: a
+    // work-in-progress commit squashed before the merge, kept only on a
+    // backup branch, so no ancestor of this branch either.
+    ("dedcb99a", Off::Neither),
     // The GDFL line's docs/07-plan.md rows (D-0808, round-3 and round-5
     // repairs): a branch history squashed before it landed; none of the nine
     // is an ancestor of this branch either.
