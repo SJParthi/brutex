@@ -20490,7 +20490,7 @@ runs), under a kernel write lock on the store, the tick store and the
 archive, wall time from the run's own clock, on a machine shared with other
 builds; the per-row, per-share-day and per-lookup percentiles are exact (a
 counting histogram, no sampling) over every share-day of the year. The
-version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` of the operator's work folder (build of commit `4465735a0`, 19 and 20 October 2026).
+version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` of the operator's work folder (19 and 20 October 2026; the build is the commit each row of those files names in its `checked_by` column, one of this package's branch that a squash merge does not keep, so it is named there rather than cited here).
 
 | ID | Limit | Why it is not closed | Bound | Package |
 |---|---|---|---|---|
