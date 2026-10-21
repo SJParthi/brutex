@@ -417,7 +417,7 @@ mod tests {
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
         // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 15] = [
+        let writing: [(&str, &[&str]); 16] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
