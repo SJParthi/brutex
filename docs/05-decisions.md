@@ -77683,3 +77683,93 @@ Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
 `pull::gdfl_import::ia3_tests::every_options_source_refusal_reaches_its_cm_arm`
 (IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
 L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
+
+### D-6891 — R3-19: a day's census publish reads one header region, not the whole list; a segment directory is never followed; the AG-05 follow-ups closed — 2026-10-21
+
+The number is the ledger head + 1 (amendment A6): this entry was written as
+D-6246 and renumbered when IA-3-OPT's D-6890 landed first; it is taken again
+from the head at landing if another package lands first.
+
+1. **A run keeps the census it has read, decoded, between its days.**
+   `census_store::Kept` is the memory of one run; `census_store::record_kept`
+   is `record` with it, and the GDFL import's `StoreCensus` holds one per
+   run (every `drive*` door makes a new one). After a cycle publishes, the
+   census in memory is exactly what the file holds — the cycle computed
+   every entry and commit it wrote — so it is kept with the file's device,
+   inode and length. The next cycle, under the lock every writer takes,
+   lists the partition as always, opens the file without following it,
+   compares the identity and reads the header region (32 KiB): when the
+   identity and the newest committed header are the ones kept, the kept
+   census is the census, and the day costs its own rows. Anything else
+   (another writer's append, an epoch installed by a compaction or a re-key,
+   a repair, a file replaced, a header that does not decode) reads the
+   census whole once and says why. A census that loaded degraded, was
+   upgraded, was compacted or had no file before the cycle is never kept,
+   and a cycle that fails keeps nothing. `record` and every other caller
+   keep nothing and read whole, as before. The bytes left are the bytes
+   `record` leaves (`census_store::kept_tests::the_census_after_n_days_is_the_same_bytes_as_before`).
+   Proof of the cost: `census_store::kept_tests::a_days_publish_reads_only_its_own_keys`
+   (a counting reader: one header region a day at 1,000 and at 20,000
+   entries) and the measured `kept_tests::the_kept_publish_is_flat_measured`
+   (docs/06-limits.md L-IA-11). Measured on 21 Oct 2026: within the ratio
+   gate through 4 million invented keys and on clones of two real GDFL FNO
+   epochs (2.07 and 8.39 million entries, p50 14.0 ms each), and NOT within
+   it at 8.4 million invented keys (p50 4.1x the 0.4-million figure, under
+   heavy memory pressure; the cause is not proved). A whole read there took
+   4.46 s; the kept day 17.5 ms.
+2. **Every kept-path cycle says what it cost.** `pull.census` "census
+   published" (info): vendor, census, `read` (`kept` or `whole`), `why`,
+   offered, recorded, entries, `load_us`, `total_us` and `kept`. The GDFL
+   import's "day imported" carries `census_ms`, the day's publish in
+   milliseconds. Neither event changes any byte the run leaves.
+3. **A segment directory is never followed** (verify-AG-05-r3). One `lstat`
+   of `manifest/v4/<vendor>/<SEGMENT>` before a listing and before an epoch
+   install stages anything: a symbolic link, a regular file or anything else
+   that is not a directory is refused `segment_dir_not_directory (<word>)`
+   by name, in `store::safe_open::Found`'s word and sentence (`file`, "a
+   regular file", where `Found` has no kind), and nothing is followed,
+   created or removed. An absent segment directory is made by `mkdir` of
+   that one name (its parents as before), which refuses anything planted
+   since the look. The install's counted host calls before the image are
+   now 2 on a free name and 5 over a leftover. The race between the look
+   and the calls after it is docs/06-limits.md L-R319-02.
+4. **The seal-stub check never waits and never follows.**
+   `holds_sealed_stub` (on `/disk.json`'s request path) opens through
+   `store::safe_open::open_read_len` and tests the length of that handle:
+   one open, one `fstat`, one 16-byte read. A pipe or a link swapped in
+   answers `false` at once; it used to `lstat` and then `File::open`, which
+   blocked on a FIFO and followed a link.
+5. **A link at a single-file census is named as one at load** (L-AG05-07):
+   `census_not_regular (symlink): <path> is a symbolic link ...`, not the
+   host's ELOOP words, wherever census_store reads the single file (a
+   cycle's load, `read_vendor`, the migration).
+6. **The single-file census publish's `.writing` temporary is born through
+   `store::staging::create`** (L-AG05-01): a link of either kind, a
+   directory or a pipe there is refused `staging_not_regular` or
+   `staging_linked` by name with its target unchanged. `ingest.rs` is struck
+   from gate 28's LEGACY list (5 rows to 4); every census temporary is now
+   born through the door.
+7. **`api`'s census reads take the writer's listing rule and a no-follow
+   open** (L-AG05-05): `api::census::current_epoch` is
+   `pull::ingest::census_store::current_epoch_in`, and both `sized_epoch` (an
+   epoch) and `sized_with_id` (the single file `manifest/<vendor>.man`) open
+   through one helper, `open_unfollowed`, which is
+   `store::safe_open::open_read`. A refused name reaches the census answer as
+   `Census::Unreadable` with `Fault::Refused` and the door's or the writer's
+   sentence, never as an empty census and never as the link's target served
+   as the census; `census_cache`'s stamp records it as a fault. A link at the
+   single file's name used to be followed and a regular file behind it read
+   (L-R319-04). A socket at either name stays what it was before, an I/O
+   fault (`Unsupported`, carrying the door's sentence) that the census cache
+   declines to keep (D-0695), since the host will not open one at all.
+8. **An epoch's refusal says its kind once**:
+   `epoch_not_regular (<word>): <path> is <sentence>, not a regular file ...`,
+   as `store::safe_open::ReadRefusal` says one; it printed `is a pipe (FIFO)
+   (pipe)`.
+
+Proof: `census_store::kept_tests::*` (twenty tests, named in
+docs/04-invariants.md R319-01..R319-12), the updated
+`census_store::link_tests::current_epoch_refuses_a_symlinked_epoch_by_name`
+and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
+`api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
+and gate 28's own test with the ingest row struck.

@@ -691,7 +691,9 @@ pub fn drive<F>(run: &Run<'_>, read_day: F) -> Result<Report, ImportRefusal>
 where
     F: FnMut(Day, &mut dyn FnMut(TickFile)) -> DayRead,
 {
-    drive_with(run, RunOptions::default(), &mut StoreCensus, read_day)
+    // The run's census memory, kept across its days (R3-19).
+    let mut census = StoreCensus::default();
+    drive_with(run, RunOptions::default(), &mut census, read_day)
 }
 
 /// [`drive`] with the run's [`RunOptions`]: the origin the caller measured,
@@ -709,7 +711,7 @@ pub fn drive_from<F>(
 where
     F: FnMut(Day, &mut dyn FnMut(TickFile)) -> DayRead,
 {
-    drive_with(run, options, &mut StoreCensus, read_day)
+    drive_with(run, options, &mut StoreCensus::default(), read_day)
 }
 
 /// "run started", with everything the caller said about where the data came
@@ -823,6 +825,7 @@ fn note_day(
     day: Day,
     (outcome, closed): (Outcome, Closed<'_>),
     (before, report): (Mark, &Report),
+    census_ms: Option<u64>,
 ) {
     let day_text = day.to_string();
     let words = summary_words(closed, outcome);
@@ -842,6 +845,12 @@ fn note_day(
             report.seconds_committed - before.seconds_committed,
         )
         .with("failures", report.failures_total - before.failures);
+    // The day's census publish, in milliseconds (R3-19): absent on a close
+    // that published nothing of its own (a day read again for a wider scope).
+    let event = match census_ms {
+        Some(ms) => event.with("census_ms", ms),
+        None => event,
+    };
     let event = match closed {
         Closed::Day => event,
         Closed::Member { member, key } => event.with("member", member).with("key", key),
@@ -1498,7 +1507,7 @@ impl Widened {
                     members: self.closed,
                 },
             );
-            note_day(ctx.run.kind, day, told, (before, report));
+            note_day(ctx.run.kind, day, told, (before, report), None);
         }
     }
 }
@@ -1764,6 +1773,10 @@ where
             &mut failures,
         );
     }
+    // THE DAY'S CENSUS TIME, told on its closing line (R3-19): the publish
+    // reads the run's kept census, so it costs the day's own rows, and a day
+    // that did not is visible by this number and by "census published".
+    let census_started = std::time::Instant::now();
     if let Some(why) = census.publish(run.store_root, &held) {
         let room = census.room(run.store_root, &held);
         return Err(stop_at_census(
@@ -1782,6 +1795,7 @@ where
     if stopped {
         failures.push(note_stopped_day(run.kind, day));
     }
+    let census_ms = u64::try_from(census_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let closed = match pass.member {
         None if stopped => Closed::Day,
         None => {
@@ -1797,7 +1811,13 @@ where
         listing,
         &mut failures,
     );
-    record_close(run.kind, (day, outcome, closed), (before, report), failures);
+    record_close(
+        run.kind,
+        (day, outcome, closed),
+        (before, report),
+        failures,
+        Some(census_ms),
+    );
     Ok(Some(outcome))
 }
 
@@ -1855,6 +1875,7 @@ fn record_close(
     (day, outcome, closed): (Day, Outcome, Closed<'_>),
     (before, report): (Mark, &mut Report),
     failures: Vec<Staged>,
+    census_ms: Option<u64>,
 ) {
     // A DAY IS NAMED ONCE however many of its member keys closed that way
     // (D-4878): the days of a run ascend, so the day is the list's last.
@@ -1870,7 +1891,7 @@ fn record_close(
         Outcome::Refused => named(&mut report.closed_refused),
     }
     name_staged(report, failures);
-    note_day(kind, day, (outcome, closed), (before, report));
+    note_day(kind, day, (outcome, closed), (before, report), census_ms);
 }
 
 /// "run finished", with how its days closed (D-3317).
