@@ -18,7 +18,7 @@ import http from 'node:http';
 import {
   PAGE_TARGETS, MEASURED_PAGES, SPEED_ROUTE, WINDOWS, SORTS, GARBLED, BUNDLE_BUDGETS,
   readSpeedReport, microsText, speedRows, sortRows, speedTile, summary, ignoredFields,
-  garbledUrl, budgetOf, builtPages, budgetVerdict, pageSelf, bytesText, earlierReading
+  garbledUrl, budgetOf, builtPages, budgetVerdict, bytesText, earlierReading, SELF_TYPES, selfStart, selfAdd, selfText, watchSelf
 } from '../src/lib/speed.js';
 import {
   REPORT_ROUTE, MAX_REPORT_BYTES, MAX_PAGE_BYTES, REPORTS_PER_MINUTE, MINUTE_MS, FALLBACK_EVENT,
@@ -352,16 +352,135 @@ test('the budget refuses a build it cannot read, naming what was missing', () =>
   assert.equal(ok[1].bytes, ok[0].bytes - 20, 'a page with an empty preload list ships the shared base alone');
 });
 
-test('a page reads its own load from the performance timeline, and says null for what the browser did not give', () => {
-  assert.deepEqual(pageSelf(null), { firstContentMs: null, wireBytes: null, resources: 0, heapBytes: null });
-  /** @param {Record<string, any[]>} by @param {any} [memory] */
-  const perf = (by, memory) => ({ getEntriesByType: (/** @type {string} */ t) => by[t] ?? [], memory });
+test('a page reads its own load as the browser delivers it: a late paint and a late fetch are counted, and only what the browser cannot report is said not reported by it', () => {
+  const all = ['element', 'paint', 'navigation', 'resource', 'longtask'];
+  // A browser with no observer: every figure said unsupported, never a zero.
+  const none = selfStart(null);
   assert.deepEqual(
-    pageSelf(perf({ paint: [{ name: 'first-paint', startTime: 1 }, { name: 'first-contentful-paint', startTime: 120.4 }], navigation: [{ transferSize: 1_000 }], resource: [{ transferSize: 500 }, { transferSize: undefined }, { transferSize: Number.NaN }] }, { usedJSHeapSize: 4_000_000 })),
-    { firstContentMs: 120, wireBytes: 1_500, resources: 4, heapBytes: 4_000_000 }
+    { paint: none.paint, wire: none.wire, firstContentMs: none.firstContentMs, heapBytes: none.heapBytes, atMs: none.atMs },
+    { paint: 'unsupported', wire: 'unsupported', firstContentMs: null, heapBytes: null, atMs: null }
   );
-  assert.deepEqual(pageSelf(perf({ paint: [{ name: 'first-contentful-paint', startTime: Number.NaN }] })), { firstContentMs: null, wireBytes: null, resources: 0, heapBytes: null });
-  assert.equal(pageSelf(perf({}, { usedJSHeapSize: Number.NaN })).heapBytes, null, 'a heap that is not a number is not reported');
+  assert.ok(Object.isFrozen(none));
+  assert.equal(selfText(none, '/speed'), 'This page\'s own load, from this browser: first content not reported by this browser · bytes on the wire not reported by this browser · script heap not reported by this browser.');
+  assert.equal(selfStart(['paint', 'resource']).wire, 'unsupported', 'a wire without the document is not passed off as the whole load');
+  assert.equal(selfStart(['navigation', 'resource']).paint, 'unsupported');
+  assert.equal(selfStart(/** @type {any} */ ('paint navigation resource')).paint, 'unsupported', 'only an array is a list of types');
+  assert.deepEqual(SELF_TYPES, ['paint', 'navigation', 'resource']);
+  // THE DEFECT (the R3-15 re-check, 21 Oct): the page read its timeline once,
+  // at mount, before it had painted and before its last fetches ended, and
+  // said "not reported by this browser" for a first content Chrome reported.
+  let r = selfAdd(selfStart(all), [
+    { entryType: 'navigation', name: 'http://h:1/speed?x=1', transferSize: 9_000 },
+    { entryType: 'resource', name: 'http://h:1/a.js', transferSize: 248_500 }
+  ], { atMs: 40, heapBytes: 2_300_000 });
+  assert.equal(selfText(r, '/speed'), 'This page\'s own load, from this browser: first content not reported yet · 257.5 KB on the wire over 2 fetches · script heap 2.3 MB. Read 40.0 ms after the tab opened, with the load still going; redrawn as each entry arrives.');
+  // The paint and the later fetches arrive: each counted once, the first first content stands.
+  r = selfAdd(r, [{ entryType: 'paint', name: 'first-paint', startTime: 50 }, { entryType: 'paint', name: 'first-contentful-paint', startTime: 84.4 }], { atMs: 90 });
+  r = selfAdd(r, [{ entryType: 'resource', transferSize: 151_800 }, { entryType: 'paint', name: 'first-contentful-paint', startTime: 900 }, null, { entryType: 'longtask', duration: 80 }], { atMs: 1_234.5, loaded: true, heapBytes: Number.NaN });
+  assert.equal(r.firstContentMs, 84);
+  assert.equal(r.wireBytes, 409_300);
+  assert.equal(r.fetches, 3);
+  assert.equal(r.heapBytes, 2_300_000, 'a heap that is not a number does not replace the last one read');
+  assert.equal(selfText(r, '/speed'), 'This page\'s own load, from this browser: first content 84 ms · 409.3 KB on the wire over 3 fetches (not under the 400 KB target) · script heap 2.3 MB. Read 1.23 s after the tab opened, after the load; a later fetch is added when it ends.');
+  assert.equal(selfAdd(r, [], { loaded: false }).loaded, true, 'a load that ended stays ended');
+  // A first content that is not a number is not one; a slow one and a large heap are said against their targets.
+  const odd = selfAdd(selfStart(all), [{ entryType: 'paint', name: 'first-contentful-paint', startTime: Number.NaN }]);
+  assert.equal(odd.paint, 'waiting');
+  assert.equal(odd.firstContentMs, null);
+  const slow = selfAdd(selfStart(all), [{ entryType: 'paint', name: 'first-contentful-paint', startTime: 300 }], { heapBytes: 100_000_000 });
+  assert.match(selfText(slow, '/speed'), /first content 300 ms \(not under the 300 ms p99 target\) · 0\.0 KB on the wire over 0 fetches · script heap 100\.0 MB \(not under the 100 MB target\)\.$/);
+  assert.match(selfText(selfAdd(selfStart(all), [{ entryType: 'paint', name: 'first-contentful-paint', startTime: 299.4 }]), '/speed'), /first content 299 ms · /);
+  // An entry with no size, entries the browser dropped, and a wire the browser cannot give.
+  const gaps = selfAdd(selfStart(all), [{ entryType: 'resource' }, { entryType: 'resource', transferSize: Number.POSITIVE_INFINITY }, { entryType: 'resource', transferSize: 399_999 }], { dropped: 7 });
+  assert.match(selfText(selfAdd(gaps, [], { dropped: Number.NaN }), '/speed'), /400\.0 KB on the wire over 3 fetches, 2 of them with no size from this browser, and 7 more the browser dropped before this page could read them · /);
+  assert.equal(selfAdd(gaps, [], { dropped: -3 }).dropped, 7, 'a count below zero adds nothing');
+  const blind = selfAdd(selfStart(['paint']), [{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 1 }]);
+  assert.equal(blind.fetches, 0, 'a wire the browser cannot give is never half counted');
+  // A tab that opened on another page and came here by a link: the figures are the tab's.
+  const linked = selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'http://h:1/db?feed=zerodha', transferSize: 1_000 }]);
+  assert.equal(linked.documentPath, '/db');
+  assert.match(selfText(linked, '/speed'), / This tab opened on \/db and came here by a link inside the app, so these are the tab's figures since it opened, not this page's alone\.$/);
+  assert.equal(selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'not a url', transferSize: 1 }]).documentPath, null);
+  assert.doesNotMatch(selfText(selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 1 }]), '/speed'), /came here by a link/);
+  // Chrome hands a buffered observer the document's entry twice (measured 21 Oct): it is one fetch, the later size standing.
+  const doc = (/** @type {number | undefined} */ transferSize) => ({ entryType: 'navigation', name: 'http://h:1/speed', transferSize });
+  const twice = selfAdd(selfAdd(selfStart(all), [doc(877), doc(877), { entryType: 'resource', transferSize: 50_300 }]), [doc(900)]);
+  assert.deepEqual([twice.fetches, twice.wireBytes, twice.unsized], [2, 51_200, 0]);
+  const sizedLater = selfAdd(selfStart(all), [doc(undefined), doc(700)]);
+  assert.deepEqual([sizedLater.fetches, sizedLater.wireBytes, sizedLater.unsized], [1, 700, 0]);
+  const sizeLost = selfAdd(selfStart(all), [doc(700), doc(undefined)]);
+  assert.deepEqual([sizeLost.fetches, sizeLost.wireBytes, sizeLost.unsized], [1, 0, 1]);
+});
+
+test('watching a page\'s own load: one buffered observer per supported type, a reading at once and after each delivery and the load, and a stop that leaves nothing', () => {
+  /** @type {any[]} */
+  const made = [];
+  class Observer {
+    static supportedEntryTypes = ['paint', 'navigation', 'resource', 'longtask'];
+    /** @param {(list: any, self: any, options?: any) => void} cb */
+    constructor(cb) {
+      this.cb = cb;
+      /** @type {any[]} */
+      this.asked = [];
+      this.disconnected = false;
+      made.push(this);
+    }
+    /** @param {any} o */
+    observe(o) {
+      this.asked.push(o);
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+    /** @param {any[]} entries @param {number} [dropped] */
+    deliver(entries, dropped) {
+      this.cb({ getEntries: () => entries }, this, dropped === undefined ? undefined : { droppedEntriesCount: dropped });
+    }
+  }
+  /** @type {Map<string, () => void>} */
+  const listeners = new Map();
+  let now = 12.5;
+  const win = {
+    PerformanceObserver: Observer,
+    performance: { now: () => now, memory: { usedJSHeapSize: 1_500_000 } },
+    document: { readyState: 'interactive' },
+    addEventListener: (/** @type {string} */ t, /** @type {() => void} */ f) => listeners.set(t, f),
+    removeEventListener: (/** @type {string} */ t) => listeners.delete(t)
+  };
+  /** @type {any[]} */
+  const seen = [];
+  const stop = watchSelf(win, (reading) => seen.push(reading));
+  assert.equal(made.length, 1, 'one observer');
+  assert.deepEqual(made[0].asked, [{ type: 'paint', buffered: true }, { type: 'navigation', buffered: true }, { type: 'resource', buffered: true }]);
+  assert.equal(seen.length, 1, 'a reading at once');
+  assert.equal(seen[0].atMs, 12.5);
+  assert.equal(seen[0].heapBytes, 1_500_000);
+  assert.match(selfText(seen[0], '/speed'), /^This page's own load, from this browser: first content not reported yet · 0\.0 KB on the wire over 0 fetches · /);
+  now = 60;
+  made[0].deliver([{ entryType: 'resource', transferSize: 100 }, { entryType: 'paint', name: 'first-contentful-paint', startTime: 58 }], 2);
+  assert.equal(seen.length, 2);
+  assert.deepEqual([seen[1].wireBytes, seen[1].fetches, seen[1].dropped, seen[1].firstContentMs, seen[1].loaded], [100, 1, 2, 58, false]);
+  now = 500;
+  win.document.readyState = 'complete';
+  /** @type {() => void} */ (listeners.get('load'))();
+  assert.equal(seen.at(-1).loaded, true, 'the load event is a reading of its own');
+  made[0].deliver([{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 900 }]);
+  assert.deepEqual([seen.at(-1).wireBytes, seen.at(-1).fetches, seen.at(-1).dropped, seen.at(-1).atMs], [1_000, 2, 2, 500]);
+  stop();
+  assert.equal(made[0].disconnected, true);
+  assert.equal(listeners.size, 0, 'the load listener is removed');
+  // A browser that supports only paint is asked only for paint; one with no observer gets one reading, and its stop does nothing.
+  const paintOnly = { ...win, PerformanceObserver: class extends Observer { static supportedEntryTypes = ['paint']; } };
+  watchSelf(paintOnly, () => {})();
+  assert.deepEqual(made.at(-1).asked, [{ type: 'paint', buffered: true }]);
+  /** @type {any[]} */
+  const bare = [];
+  const stopBare = watchSelf({}, (reading) => bare.push(reading));
+  stopBare();
+  assert.equal(bare.length, 1);
+  assert.equal(bare[0].paint, 'unsupported');
+  assert.equal(bare[0].atMs, null, 'no clock, no stamp');
+  assert.doesNotThrow(() => watchSelf(null, () => {})());
 });
 
 // ---------------------------------------------------------------------------
@@ -1436,6 +1555,183 @@ test('the sort edge is found from the data: the longest range at or under the bu
   assert.deepEqual([late.feed, late.passed], ['b', []]);
 });
 
+test('the Speed page watches its own load and never reads it once in a timer', () => {
+  // Before: `setTimeout(() => (self = pageSelf(performance)), 0)` inside
+  // onMount read the timeline before the page had painted and before its last
+  // fetches ended (the R3-15 re-check, 21 Oct).
+  const page = source('src/routes/speed/+page.svelte');
+  assert.match(page, /const stopSelf = watchSelf\(typeof window === 'undefined' \? null : window, \(reading\) => \(self = reading\)\);/);
+  assert.match(page, /stopSelf\(\);/, 'the watch stops with the page');
+  assert.match(page, />\{selfText\(self, here\)\}<\/p>/);
+  assert.match(page, /data-wire-bytes=\{self\.wire === 'observed' \? self\.wireBytes : undefined\}/);
+  assert.match(page, /data-first-content-ms=\{self\.firstContentMs \?\? undefined\}/);
+  assert.doesNotMatch(page, /setTimeout|getEntriesByType|pageSelf/);
+});
+
+test('the Speed page\'s own line in a real browser: the tab\'s own first content and its whole wire, after the load', { timeout: 120_000 }, async () => {
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const site = await browserStandIn({});
+  const b = await harness.launch(chrome, process.getuid?.() === 0);
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      const { browserContextId } = await b.cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+      const tab = await harness.openTab(b.cdp, browserContextId, { readOnly: true, base: site.base });
+      await harness.loadOnce(tab, b.cdp, `${site.base}/self`, 300);
+      const v = await tab.evaluate(`(() => {
+        const fcp = performance.getEntriesByType('paint').find((e) => e.name === 'first-contentful-paint');
+        const loads = [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')];
+        const line = document.querySelector('[data-speed-self]');
+        return {
+          text: line.textContent,
+          drawnFirstContent: line.dataset.firstContentMs,
+          drawnBytes: Number(line.dataset.wireBytes),
+          drawnFetches: Number(line.dataset.fetches),
+          browserFirstContent: fcp ? Math.round(fcp.startTime) : null,
+          browserBytes: loads.reduce((a, e) => a + e.transferSize, 0),
+          browserFetches: loads.length
+        };
+      })()`);
+      assert.equal(typeof v.browserFirstContent, 'number', 'Chrome reports first content');
+      assert.equal(v.drawnFirstContent, String(v.browserFirstContent), `the drawn first content is the browser's: ${v.text}`);
+      assert.match(v.text, new RegExp(`first content ${v.browserFirstContent} ms`));
+      assert.doesNotMatch(v.text, /not reported/, 'a browser that reports a figure is never said not to');
+      assert.equal(v.drawnBytes, v.browserBytes, 'the drawn wire is the tab\'s own navigation and resource transferSize');
+      assert.equal(v.drawnFetches, v.browserFetches);
+      assert.ok(v.browserBytes > 450_000, 'the fetch after the load is on the wire');
+      assert.match(v.text, /on the wire over \d+ fetches \(not under the 400 KB target\)/, 'and a load over the target is marked over it');
+      assert.match(v.text, /after the load; a later fetch is added when it ends\.$/);
+      await tab.close();
+      await b.cdp.send('Target.disposeBrowserContext', { browserContextId });
+    }
+  } finally {
+    await b.close();
+    site.server.close();
+  }
+});
+
+test('a report costs the same however long the failure\'s text, and a cut text always ends with an ellipsis', () => {
+  // Before: clean() walked the whole text, 250 ms for 4,000,000 characters (the R3-15 re-check, 21 Oct).
+  const huge = `${'é'.repeat(2_000)}${'x'.repeat(4_000_000)}`;
+  assert.equal(reportBody('/db', huge), reportBody('/db', 'é'.repeat(2_000)), 'what is past the cut never fits, so the body is the same');
+  /** @type {number[]} */
+  const ms = [];
+  for (let i = 0; i < 5; i += 1) {
+    const t = performance.now();
+    reportBody('/db', huge);
+    ms.push(performance.now() - t);
+  }
+  assert.ok(Math.min(...ms) < 25, `a 4,000,002-character text cleaned in ${ms.map((m) => m.toFixed(2)).join(', ')} ms`);
+  // A text whose readable words start past the cut: the cut is said, never passed off as the whole report.
+  assert.equal(decodeURIComponent(String(reportBody('/db', `x${' '.repeat(4_000_000)}y`)).split('what=')[1]), 'x…');
+  assert.equal(decodeURIComponent(String(reportBody('/db', '\u0001'.repeat(5_000))).split('what=')[1]), '…', 'a cut text that cleans to nothing is still said as cut');
+  assert.equal(reportBody(`/${'a'.repeat(4_000_000)}`, 'x'), null, 'a page path of any length is refused as past 256 bytes');
+  assert.equal(reportBody('/db', 'é'.repeat(MAX_REPORT_BYTES + 1)), reportBody('/db', 'é'.repeat(2_000)), 'one code point past the cut is cut');
+  // The reporter keys and sends the cut text: one long failure is one report.
+  /** @type {string[]} */
+  const sent = [];
+  const r = createPageReporter({ send: async (body) => void sent.push(body), page: () => '/db', now: () => 0 });
+  assert.equal(r.report('error', huge), true);
+  assert.equal(r.report('error', `${'é'.repeat(2_000)}${'y'.repeat(10)}`), false, 'the same first 1,025 code points are the same failure');
+});
+
+test('the ration never holds reports back for a clock that went back, and its own clock only moves forward', async () => {
+  let now = 3_600_000;
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {string[]} */
+  const warned = [];
+  const r = createPageReporter({ send: async (body) => void sent.push(body), page: () => '/db', now: () => now, warn: (l) => warned.push(l) });
+  assert.equal(r.report('error', 'a'), true);
+  now = 0;
+  assert.equal(r.report('error', 'a'), true, 'a failure last sent "an hour from now" is not held back for that hour');
+  for (let i = 0; i < REPORTS_PER_MINUTE - 1; i += 1) r.report('request', `GET /x${i}`);
+  assert.equal(r.report('error', 'b'), false, 'the ration holds inside the new window');
+  now = MINUTE_MS;
+  assert.equal(r.report('error', 'b'), true, 'and a minute later the window is new');
+  // A step back inside the fault and send-failure warnings: said again, not silent for an hour.
+  let page = '/db';
+  const faulty = createPageReporter({ send: async () => { throw new Error('HTTP 503'); }, page: () => { if (page === '') throw new Error('no page'); return page; }, now: () => now, warn: (l) => warned.push(l) });
+  now = 3_600_000;
+  faulty.report('error', 'c');
+  await flush();
+  page = '';
+  faulty.report('error', 'd');
+  now = 0;
+  faulty.report('error', 'e');
+  page = '/db';
+  faulty.report('error', 'f');
+  await flush();
+  assert.equal(warned.filter((l) => l.includes('could not write a report (no page)')).length, 2, warned.join('\n'));
+  assert.equal(warned.filter((l) => l.includes('could not take the report')).length, 2, warned.join('\n'));
+  assert.match(source('src/lib/page-report.js'), /const now = options\.now \?\? monotonic;/);
+  assert.match(source('src/lib/page-report.js'), /typeof performance !== 'undefined' && typeof performance\.now === 'function' \? \(\) => performance\.now\(\)/);
+});
+
+test('the harness removes only a profile it made in this process, refuses a run past its ceiling, and a page named twice', () => {
+  // Before: the name alone was checked, so a directory that merely looked like a profile was removed.
+  const lookalike = mkdtempSync(join(tmpdir(), harness.PROFILE_PREFIX));
+  writeFileSync(join(lookalike, 'kept'), 'kept');
+  assert.throws(() => harness.removeProfile(lookalike), /refusing to remove .*: not a profile this harness made in this process/);
+  assert.equal(readFileSync(join(lookalike, 'kept'), 'utf8'), 'kept', 'a look-alike is untouched');
+  assert.equal(harness.parseArgs(['--base', 'http://h:1', '--n', String(harness.MAX_N)]).n, harness.MAX_N);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--n', String(harness.MAX_N + 1)]), /--n must be at most 10000/);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--n', '1e9']), /--n must be at most 10000/);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--pages', '/db,/speed,/db']), /--pages names \/db twice: each page is measured once a run/);
+  assert.deepEqual(harness.parseArgs(['--base', 'http://h:1', '--pages', '/db,/speed']).pages, ['/db', '/speed']);
+  assert.equal(sheet.parseArgs(['--base', 'http://h:1', '--n', '10000']).n, 10_000);
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--n', '10001']), /--n must be at most 10000/);
+  // A file that cannot be opened is said as the sheet's own refusal, naming the path.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-open-'));
+  assert.throws(() => sheet.writeWhole(join(dir, 'missing', 'sheet.md'), 'x'), /^Error: could not write .*\/missing\/sheet\.md whole: ENOENT/);
+});
+
+test('a browser that ignores SIGTERM is killed after the wait, and a profile that cannot be removed at exit is said, never thrown', { timeout: 120_000 }, async () => {
+  const fake = mkdtempSync(join(tmpdir(), 'r315-stubborn-'));
+  const stubborn = join(fake, 'stubborn');
+  // SIGTERM ignored, and the ignore survives the exec: only SIGKILL ends it.
+  writeFileSync(stubborn, "#!/bin/sh\ntrap '' TERM\necho \"DevTools listening on ws://127.0.0.1:1/devtools/browser/x\" >&2\nexec sleep 60\n", { mode: 0o755 });
+  const root = mkdtempSync(join(tmpdir(), 'r315-stubborn-root-'));
+  const t = Date.now();
+  await assert.rejects(harness.launch(stubborn, false, 30_000, root), /could not connect to ws:\/\/127\.0\.0\.1:1/);
+  const took = Date.now() - t;
+  assert.ok(took >= harness.STOP_WAIT_MS - 50, `the browser was given ${harness.STOP_WAIT_MS} ms after SIGTERM before SIGKILL (took ${took} ms)`);
+  assert.deepEqual(readdirSync(root), [], 'and its profile is gone once it has left');
+  if (process.getuid?.() === 0) return; // root removes from a read-only directory: the next case cannot be built as root.
+  // At exit, a profile whose directory is read-only: the guard says so on stderr and the process still ends as it would.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const locked = mkdtempSync(join(tmpdir(), 'r315-locked-'));
+  const script = join(fake, 'locks.mjs');
+  writeFileSync(script, [
+    `import * as h from ${JSON.stringify(new URL('ci/browser-harness.mjs', web).href)};`,
+    'import { chmodSync } from "node:fs";',
+    `const b = await h.launch(${JSON.stringify(chrome)}, false, 30000, process.argv[2]);`,
+    'process.stdout.write(JSON.stringify({ pid: b.pid, profile: b.profile }) + "\\n");',
+    'chmodSync(process.argv[2], 0o555);',
+    'process.exit(0);'
+  ].join('\n'));
+  const { spawnSync } = await import('node:child_process');
+  const ran = spawnSync(process.execPath, [script, locked], { encoding: 'utf8', timeout: 60_000 });
+  const { chmodSync } = await import('node:fs');
+  chmodSync(locked, 0o755);
+  assert.equal(ran.status, 0, ran.stderr);
+  const started = JSON.parse(ran.stdout.split('\n')[0]);
+  assert.match(ran.stderr, new RegExp(`browser-harness: could not stop the browser ${started.pid} or remove ${started.profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: `));
+  /** @param {number} pid */
+  const running = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const end = Date.now() + 10_000;
+  while (running(started.pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(running(started.pid), false, 'the browser was killed even though its profile could not be removed');
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1449,6 +1745,7 @@ test('the sort edge is found from the data: the longest range at or under the bu
  */
 async function browserStandIn(o) {
   const reporter = source('src/lib/page-report.js');
+  const speedLib = source('src/lib/speed.js');
   /** @type {object[]} */
   const log = [];
   /** @type {string[]} every request the stand-in was sent, `METHOD /path` */
@@ -1468,6 +1765,14 @@ async function browserStandIn(o) {
     '/gaps': page('gaps', `<script>fetch('/feeds.json'); fetch('/broken').catch(() => null); setInterval(() => fetch('/feeds.json'), 300); setTimeout(() => { throw new Error('boom'); }, 0); setTimeout(() => { throw 'plain'; }, 0);</script>`),
     '/speed': page('speed', `<script>new Worker('/lib/worker.js');</script>`),
     '/blank': `<!doctype html><title>blank</title><body>${script}`,
+    // THE SPEED PAGE'S OWN LINE, drawn by the REAL `$lib/speed.js` as the
+    // page draws it: client-rendered (nothing to paint until the module has
+    // run), and a fetch of 450,000 bytes after the load, so a reading taken
+    // at mount has neither the paint nor the whole wire.
+    '/self': '<!doctype html><meta charset="utf-8"><title>self</title><body><p data-speed-self></p><script type="module">' +
+      "import { watchSelf, selfText } from '/lib/speed.js'; const line = document.querySelector('[data-speed-self]');" +
+      'watchSelf(window, (r) => { line.textContent = selfText(r, location.pathname); line.dataset.firstContentMs = r.firstContentMs ?? ""; line.dataset.wireBytes = String(r.wireBytes); line.dataset.fetches = String(r.fetches); });' +
+      "addEventListener('load', () => setTimeout(() => fetch('/big').then((a) => a.text()), 100));</script>",
     // A request failed AFTER the reporter is installed, as on every page of the app.
     '/reporting': page('reporting', `<script type="module">import '/lib/page-report.js'; fetch('/broken').catch(() => null);</script>`)
   };
@@ -1480,6 +1785,8 @@ async function browserStandIn(o) {
       res.end(body);
     };
     if (u.pathname === '/lib/page-report.js') return send(200, 'text/javascript', reporter);
+    if (u.pathname === '/lib/speed.js') return send(200, 'text/javascript', speedLib);
+    if (u.pathname === '/big') return send(200, 'text/plain', 'x'.repeat(450_000), { 'cache-control': 'no-store' });
     if (u.pathname === '/lib/worker.js') return send(200, 'text/javascript', 'self.onmessage = () => {};', { 'cache-control': 'max-age=3600' });
     if (u.pathname === UP_ROUTE) return send(200, 'application/json', req.method === 'HEAD' ? '' : '{}', { 'x-brutex-build': 'f'.repeat(40) });
     if (u.pathname === REPORT_ROUTE && req.method === 'POST') {
@@ -1702,10 +2009,15 @@ test('a time and a size are printed in the unit their rounding reaches', () => {
   assert.equal(bytesText(0), '0.0 KB');
   assert.equal(bytesText(null), 'not reported by this browser');
   assert.equal(bytesText(Number.NaN), 'not reported by this browser');
+  // The page draws the library's own-load sentence (R315-19), and the
+  // sentence prints the wire and the heap through bytesText.
   const page = source('src/routes/speed/+page.svelte');
-  assert.match(page, /\{bytesText\(self\.wireBytes\)\} on the wire/);
-  assert.match(page, /script heap \{bytesText\(self\.heapBytes\)\}/);
-  assert.doesNotMatch(page, /const kb = /, 'one size rule, the library\'s');
+  assert.match(page, />\{selfText\(self, here\)\}<\/p>/);
+  const lib = source('src/lib/speed.js');
+  const sentence = lib.slice(lib.indexOf('export function selfText'), lib.indexOf('export function watchSelf'));
+  assert.match(sentence, /\$\{bytesText\(r\.wireBytes\)\} on the wire/);
+  assert.match(sentence, /script heap \$\{bytesText\(r\.heapBytes\)\}/);
+  assert.doesNotMatch(page + sentence, /const kb = /, 'one size rule, the library\'s');
 });
 
 test('a failed reading leaves the earlier report drawn under a line that says it is the earlier one', () => {

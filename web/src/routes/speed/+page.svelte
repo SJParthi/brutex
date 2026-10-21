@@ -31,7 +31,7 @@
   import { stampLabel } from '$lib/dates.js';
   import {
     SPEED_ROUTE, WINDOWS, SORTS, PAGE_TARGETS, MEASURED_PAGES,
-    readSpeedReport, speedRows, sortRows, microsText, bytesText, earlierReading, speedTile, pageSelf
+    readSpeedReport, speedRows, sortRows, microsText, earlierReading, speedTile, watchSelf, selfText
   } from '$lib/speed.js';
 
   /** @type {{phase: 'reading' | 'ready' | 'failed', report: import('$lib/speed.js').SpeedReport | null,
@@ -41,8 +41,10 @@
   /** @type {'all' | 'route' | 'stage'} */
   let kind = $state('all');
   let sortKey = $state('order');
-  /** @type {ReturnType<typeof pageSelf> | null} */
+  /** @type {import('$lib/speed.js').SelfReading | null} */
   let self = $state(null);
+  /** This page's own path, which the self reading compares with the document the tab opened on. */
+  const here = typeof location === 'undefined' ? '/speed' : location.pathname;
   /** @type {AbortController | null} */
   let inFlight = null;
 
@@ -70,11 +72,16 @@
 
   onMount(() => {
     void load();
-    // THIS PAGE'S OWN LOAD, read once the browser has painted it: the same
-    // targets the harness holds every page to, as far as a page can see them.
-    const settle = setTimeout(() => (self = pageSelf(typeof performance === 'undefined' ? null : /** @type {any} */ (performance))), 0);
+    // THIS PAGE'S OWN LOAD, as the browser reports it: the same targets the
+    // harness holds every page to, as far as a page can see them. Watched,
+    // not read once: a PerformanceObserver over paint, navigation and
+    // resource entries (buffered, so nothing the browser reported before this
+    // mount is missed) and the load event, redrawn as each entry arrives and
+    // stamped with when it was read. One read on a timer at mount ran before
+    // the page had painted and before its last fetches ended (R315-19).
+    const stopSelf = watchSelf(typeof window === 'undefined' ? null : window, (reading) => (self = reading));
     return () => {
-      clearTimeout(settle);
+      stopSelf();
       inFlight?.abort();
     };
   });
@@ -213,12 +220,14 @@
       <code>web/ci/speed-sheet.mjs</code>.
     </p>
     {#if self}
-      <p class="whence" data-speed-self>
-        This page's own load, from this browser:
-        first content {self.firstContentMs === null ? 'not reported by this browser' : `${self.firstContentMs} ms`}
-        · {bytesText(self.wireBytes)} on the wire over {self.resources} fetches
-        · script heap {bytesText(self.heapBytes)}.
-      </p>
+      <p
+        class="whence"
+        data-speed-self
+        data-first-content-ms={self.firstContentMs ?? undefined}
+        data-wire-bytes={self.wire === 'observed' ? self.wireBytes : undefined}
+        data-fetches={self.fetches}
+        data-loaded={self.loaded}
+      >{selfText(self, here)}</p>
     {/if}
   </section>
 </div>

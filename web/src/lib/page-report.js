@@ -107,6 +107,41 @@ function clean(s, keepLines) {
   return out;
 }
 
+/**
+ * The first `n` code points of `s`, read lazily, and whether anything was
+ * left out: a text of any length costs at most `n` steps, never its whole
+ * length (the R3-15 re-check, 21 Oct: a 4,000,000-character failure text
+ * took 250 ms to clean before it was cut). A string of at most `n` UTF-16
+ * units is at most `n` code points and is returned as it is.
+ *
+ * @param {string} s
+ * @param {number} n
+ * @returns {{part: string, cut: boolean}}
+ */
+function head(s, n) {
+  if (s.length <= n) return { part: s, cut: false };
+  let part = '';
+  let taken = 0;
+  for (const c of s) {
+    if (taken === n) return { part, cut: true };
+    part += c;
+    taken += 1;
+  }
+  return { part, cut: false };
+}
+
+/**
+ * The reporter's clock: `performance.now()`, which only moves forward, where
+ * there is one. A wall clock stepped back held every report back until it
+ * caught up (the R3-15 re-check, 21 Oct); the ration also starts a new
+ * window on a clock that went back, for a clock a caller injects.
+ */
+const monotonic =
+  typeof performance !== 'undefined' && typeof performance.now === 'function' ? () => performance.now() : () => Date.now();
+
+/** Whether `at` is inside the minute that began at `then`; never for a clock that went back. @param {number} at @param {number} then */
+const withinMinute = (at, then) => at >= then && at - then < MINUTE_MS;
+
 /** A thrown value's words, never throwing itself. @param {unknown} why */
 function wordsOf(why) {
   try {
@@ -124,17 +159,22 @@ function wordsOf(why) {
  * {@link MAX_PAGE_BYTES}) or an empty `what`, so a report that cannot be
  * written is never sent to be refused.
  *
+ * O(1) in the length of either text: each is cut to one code point past
+ * what could ever fit before it is cleaned ({@link head}), and a `what` that
+ * was cut always ends with `…`, so a cut is never passed off as the whole.
+ *
  * @param {string} page the page's path, `/db`
  * @param {string} what what failed, in the page's words
  * @returns {string | null}
  */
 export function reportBody(page, what) {
-  const path = clean(String(page ?? ''), false);
-  const said = clean(String(what ?? ''), true).trim();
-  if (!path.startsWith('/') || encoder.encode(path).length > MAX_PAGE_BYTES || said === '') return null;
-  const head = `page=${encodeURIComponent(path)}&what=`;
-  const room = MAX_REPORT_BYTES - encoder.encode(head).length;
-  if (encodedBytes(said) <= room) return head + encodeURIComponent(said);
+  const path = clean(head(String(page ?? ''), MAX_PAGE_BYTES + 1).part, false);
+  const { part, cut } = head(String(what ?? ''), MAX_REPORT_BYTES + 1);
+  const said = clean(part, true).trim();
+  if (!path.startsWith('/') || encoder.encode(path).length > MAX_PAGE_BYTES || (said === '' && !cut)) return null;
+  const lead = `page=${encodeURIComponent(path)}&what=`;
+  const room = MAX_REPORT_BYTES - encoder.encode(lead).length;
+  if (!cut && encodedBytes(said) <= room) return lead + encodeURIComponent(said);
   const chars = [...said];
   let lo = 0;
   let hi = chars.length;
@@ -145,7 +185,7 @@ export function reportBody(page, what) {
     if (encodedBytes(chars.slice(0, mid).join('') + '…') <= room) lo = mid;
     else hi = mid - 1;
   }
-  return head + encodeURIComponent(chars.slice(0, lo).join('') + '…');
+  return lead + encodeURIComponent(chars.slice(0, lo).join('') + '…');
 }
 
 /**
@@ -177,7 +217,7 @@ export function outcomeOf(ended) {
  *   perMinute?: number, warn?: (line: string) => void}} options
  */
 export function createPageReporter(options) {
-  const now = options.now ?? Date.now;
+  const now = options.now ?? monotonic;
   const perMinute = options.perMinute ?? REPORTS_PER_MINUTE;
   const warn = options.warn ?? ((line) => console.error(line));
   /** @type {Map<string, number>} when each distinct report was last sent */
@@ -202,7 +242,7 @@ export function createPageReporter(options) {
     faults += 1;
     try {
       const at = now();
-      if (at - lastFault < MINUTE_MS) return;
+      if (withinMinute(at, lastFault)) return;
       lastFault = at;
       warn(`the page reporter could not write a report (${wordsOf(why)}); ${faults} reporting faults since this tab opened`);
     } catch {
@@ -248,19 +288,22 @@ export function createPageReporter(options) {
   function reportOnce(kind, what) {
     const at = now();
     const page = options.page();
-    const key = `${page}\n${kind}\n${what}`;
-    if (at - windowStart >= MINUTE_MS) {
+    // Cut before it is used as a key or a body: the cost of a report never
+    // grows with the failure's text (what is past the cut never fits).
+    const { part: said } = head(String(what), MAX_REPORT_BYTES + 1);
+    const key = `${page}\n${kind}\n${said}`;
+    if (!withinMinute(at, windowStart)) {
       windowStart = at;
       inWindow = 0;
-      for (const [k, when] of sent) if (at - when >= MINUTE_MS) sent.delete(k);
+      for (const [k, when] of sent) if (!withinMinute(at, when)) sent.delete(k);
     }
     const last = sent.get(key);
-    if ((last !== undefined && at - last < MINUTE_MS) || inWindow >= perMinute) {
+    if ((last !== undefined && withinMinute(at, last)) || inWindow >= perMinute) {
       heldBack += 1;
       return false;
     }
     const carried = heldBack > 0 ? ` [${heldBack} more held back by this tab's ration before this one]` : '';
-    const body = reportBody(page, `${kind}: ${what}${carried}`);
+    const body = reportBody(page, `${kind}: ${said}${carried}`);
     if (body === null) return false;
     sent.set(key, at);
     inWindow += 1;
@@ -270,9 +313,9 @@ export function createPageReporter(options) {
       .then(() => options.send(body))
       .catch((/** @type {unknown} */ why) => {
         sendFailures += 1;
-        if (at - lastWarn >= MINUTE_MS) {
+        if (!withinMinute(at, lastWarn)) {
           lastWarn = at;
-          quietly(() => warn(`${REPORT_ROUTE} could not take the report "${kind}: ${what}" (${wordsOf(why)}); ${sendFailures} reports unsent since this tab opened`));
+          quietly(() => warn(`${REPORT_ROUTE} could not take the report "${kind}: ${said}" (${wordsOf(why)}); ${sendFailures} reports unsent since this tab opened`));
         }
       });
     return true;

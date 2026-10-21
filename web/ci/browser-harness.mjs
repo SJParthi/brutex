@@ -345,13 +345,16 @@ export function parseArgs(argv) {
   }
   const base = String(o.base ?? '');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('--base must be an origin such as http://127.0.0.1:8080 (no path)');
-  const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min) => {
+  const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min, max = Number.MAX_SAFE_INTEGER) => {
     const v = o[name] === undefined ? dflt : Number(o[name]);
     if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}`);
+    if (v > max) throw new Error(`--${name} must be at most ${max}`);
     return v;
   };
   const pages = String(o.pages ?? MEASURED_PAGES.join(',')).split(',');
   if (pages.some((p) => !p.startsWith('/'))) throw new Error('--pages is a comma list of paths, each starting /');
+  const twice = pages.find((p, i) => pages.indexOf(p) !== i);
+  if (twice !== undefined) throw new Error(`--pages names ${twice} twice: each page is measured once a run`);
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
@@ -361,7 +364,7 @@ export function parseArgs(argv) {
     base,
     chrome,
     instrument,
-    n: whole('n', 200, 1),
+    n: whole('n', 200, 1, MAX_N),
     pages,
     idleTabs,
     idleMs: whole('idle-ms', 3_600_000, 1_000),
@@ -420,22 +423,43 @@ export class Cdp {
 /** The name every browser profile this harness makes starts with, in the temporary directory. */
 export const PROFILE_PREFIX = 'brutex-harness-';
 
+/**
+ * The most loads of a page one run takes, cold and warm each (`--n`): fifty
+ * times the n = 200 the targets are measured at. A run past it would take
+ * days, and is refused by name rather than started (the R3-15 re-check,
+ * 21 Oct: `--n` had no ceiling).
+ */
+export const MAX_N = 10_000;
+
+/**
+ * Every profile directory this process made and has not removed yet.
+ * {@link removeProfile} removes only these: a path that merely LOOKS like
+ * one (the prefix and six characters) is refused (the R3-15 re-check,
+ * 21 Oct: the name alone was checked, so R315-13 claimed more than the code
+ * did).
+ *
+ * @type {Set<string>}
+ */
+const MADE = new Set();
+
 /** How long a browser has to leave after SIGTERM before it is killed, ms. */
 export const STOP_WAIT_MS = 5_000;
 
 /**
  * Removes a profile directory this harness made, and nothing else: the path
- * must be one `mkdtempSync` returned for {@link PROFILE_PREFIX} (the prefix and
- * its six random characters, nothing past them), so a path from anywhere else
- * is refused by name, never removed.
+ * must be one {@link launch} made in this process (kept in {@link MADE}) and
+ * named as `mkdtempSync` names one for {@link PROFILE_PREFIX} (the prefix and
+ * its six random characters, nothing past them), so any other path is
+ * refused by name, never removed.
  *
  * @param {string} profile
  */
 export function removeProfile(profile) {
-  if (!new RegExp(`^${PROFILE_PREFIX}[A-Za-z0-9]{6}$`).test(basename(profile))) {
-    throw new Error(`refusing to remove ${JSON.stringify(profile)}: not a profile this harness made (${PROFILE_PREFIX}XXXXXX)`);
+  if (!MADE.has(profile) || !new RegExp(`^${PROFILE_PREFIX}[A-Za-z0-9]{6}$`).test(basename(profile))) {
+    throw new Error(`refusing to remove ${JSON.stringify(profile)}: not a profile this harness made in this process (${PROFILE_PREFIX}XXXXXX)`);
   }
   rmSync(profile, { recursive: true, force: true, maxRetries: 3 });
+  MADE.delete(profile);
 }
 
 /**
@@ -539,6 +563,7 @@ function tracked(child, profile) {
 export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = tmpdir()) {
   if (!chrome || !existsSync(chrome)) throw new Error(`no browser at ${JSON.stringify(chrome)}: pass --chrome or set BRUTEX_CHROME`);
   const profile = mkdtempSync(join(root, PROFILE_PREFIX));
+  MADE.add(profile);
   // `--no-sandbox` only when the operator asks (a browser run as root, in a
   // container, refuses to start without it): never chosen here on its own.
   const flags = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'];

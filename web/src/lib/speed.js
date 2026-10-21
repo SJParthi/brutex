@@ -269,27 +269,225 @@ export function speedTile(report) {
 }
 
 /**
- * What a page can say about its own load from the browser's performance
- * timeline: when its first content was painted, the bytes its navigation and
- * every resource it fetched carried on the wire, and its script heap where
- * the browser reports one. `null` for a figure the browser did not give —
- * never a zero. The longest pause is not here: a page cannot observe its own
- * long tasks after the fact in every browser, so the harness measures it.
- *
- * @param {{getEntriesByType: (type: string) => any[], memory?: {usedJSHeapSize?: number}} | null | undefined} perf
- * @returns {{firstContentMs: number | null, wireBytes: number | null, resources: number, heapBytes: number | null}}
+ * The entry types a page's own reading observes: its first content
+ * (`paint`), its document (`navigation`) and everything it fetched after
+ * (`resource`).
  */
-export function pageSelf(perf) {
-  if (!perf || typeof perf.getEntriesByType !== 'function') return { firstContentMs: null, wireBytes: null, resources: 0, heapBytes: null };
-  const paint = perf.getEntriesByType('paint').find((e) => e?.name === 'first-contentful-paint');
-  const loads = [...perf.getEntriesByType('navigation'), ...perf.getEntriesByType('resource')];
-  const sizes = loads.map((e) => e?.transferSize).filter((s) => typeof s === 'number' && Number.isFinite(s));
-  const heap = perf.memory?.usedJSHeapSize;
-  return {
-    firstContentMs: paint && Number.isFinite(paint.startTime) ? Math.round(paint.startTime) : null,
-    wireBytes: sizes.length > 0 ? sizes.reduce((a, b) => a + b, 0) : null,
-    resources: loads.length,
-    heapBytes: typeof heap === 'number' && Number.isFinite(heap) ? heap : null
+export const SELF_TYPES = Object.freeze(['paint', 'navigation', 'resource']);
+
+/**
+ * What a page can say about its own load, as the browser has reported it so
+ * far: its first content, the bytes its document and every later fetch
+ * carried on the wire, its script heap where the browser gives one, and when
+ * the reading was taken. A figure the browser cannot report is said to be
+ * unsupported; one it can report and has not yet is waiting — never a zero,
+ * and never "not reported by this browser" for a browser that reports it.
+ * The longest pause is not here: a page cannot observe its own long tasks
+ * after the fact in every browser, so the harness measures it.
+ *
+ * @typedef {{firstContentMs: number | null, paint: 'reported' | 'waiting' | 'unsupported',
+ *   wire: 'observed' | 'unsupported', wireBytes: number, fetches: number, unsized: number,
+ *   dropped: number, documentSeen: boolean, documentBytes: number | null, documentPath: string | null,
+ *   loaded: boolean, heapBytes: number | null, atMs: number | null}} SelfReading
+ */
+
+/** A finite number, or `null`. @param {unknown} v */
+const finiteOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** The path of a document URL, or `null` for one that is not a URL. @param {unknown} url */
+function pathOf(url) {
+  try {
+    return new URL(String(url)).pathname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A page's own reading before the browser has delivered anything. What the
+ * browser supports (`PerformanceObserver.supportedEntryTypes`) is waiting;
+ * what it does not is unsupported. Anything but an array — no observer at
+ * all — supports nothing. The wire needs both `navigation` and `resource`:
+ * with one alone the sum would be part of the load passed off as all of it.
+ *
+ * WHY A READING THAT GROWS, AND NOT ONE READ (the R3-15 re-check, 21 Oct):
+ * the Speed page read the timeline once, in a `setTimeout(0)` inside
+ * `onMount`, before the client-rendered page had painted and before its last
+ * fetches ended. On 10 of 10 loads in Chrome it said "first content not
+ * reported by this browser" while the same tab reported first content 60 to
+ * 104 ms in, and it read 257.5 KB over 27 fetches against the tab's own
+ * 409.3 KB over 35: a load over the 400 KB target read as under it.
+ *
+ * @param {unknown} supported
+ * @returns {SelfReading}
+ */
+export function selfStart(supported) {
+  const has = (/** @type {string} */ t) => Array.isArray(supported) && supported.includes(t);
+  return Object.freeze({
+    firstContentMs: null,
+    paint: has('paint') ? 'waiting' : 'unsupported',
+    wire: has('navigation') && has('resource') ? 'observed' : 'unsupported',
+    wireBytes: 0,
+    fetches: 0,
+    unsized: 0,
+    dropped: 0,
+    documentSeen: false,
+    documentBytes: null,
+    documentPath: null,
+    loaded: false,
+    heapBytes: null,
+    atMs: null
+  });
+}
+
+/**
+ * The reading with `entries` added: the entries a `PerformanceObserver`
+ * delivered since the last call, so each entry is read exactly once, O(1)
+ * per entry however long the tab stays open. (Reading the whole timeline
+ * again on each redraw would cost every entry so far, and the browser's
+ * resource buffer stops at 250 entries while an observer does not.)
+ *
+ * THE DOCUMENT IS ONE FETCH, HOWEVER OFTEN IT IS DELIVERED: Chrome hands a
+ * buffered observer the document's `navigation` entry twice (measured on
+ * 21 Oct: two deliveries of the same 877-byte entry, one entry in the
+ * timeline), so a later delivery replaces the earlier one's size and is not
+ * counted again.
+ *
+ * @param {SelfReading} reading
+ * @param {Iterable<any>} entries
+ * @param {{dropped?: unknown, atMs?: unknown, heapBytes?: unknown, loaded?: unknown}} [at]
+ *   `dropped` the observer's `droppedEntriesCount` (entries the browser's
+ *   buffer had already dropped before the observer read it), `atMs`
+ *   `performance.now()`, `heapBytes` `performance.memory.usedJSHeapSize`,
+ *   `loaded` whether the load event has fired
+ * @returns {SelfReading}
+ */
+export function selfAdd(reading, entries, at = {}) {
+  let { firstContentMs, paint, wireBytes, fetches, unsized, documentSeen, documentBytes, documentPath } = reading;
+  for (const e of entries) {
+    const type = e?.entryType;
+    if (type === 'paint') {
+      const start = finiteOrNull(e.startTime);
+      if (paint === 'waiting' && e.name === 'first-contentful-paint' && start !== null) {
+        firstContentMs = Math.round(start);
+        paint = 'reported';
+      }
+    } else if ((type === 'navigation' || type === 'resource') && reading.wire === 'observed') {
+      const size = finiteOrNull(e.transferSize);
+      if (type === 'navigation' && documentSeen) {
+        if (documentBytes === null) unsized -= 1;
+        else wireBytes -= documentBytes;
+      } else fetches += 1;
+      if (size === null) unsized += 1;
+      else wireBytes += size;
+      if (type === 'navigation') {
+        documentSeen = true;
+        documentBytes = size;
+        documentPath = pathOf(e.name);
+      }
+    }
+  }
+  const dropped = finiteOrNull(at.dropped);
+  return Object.freeze({
+    ...reading,
+    firstContentMs,
+    paint,
+    wireBytes,
+    fetches,
+    unsized,
+    documentSeen,
+    documentBytes,
+    documentPath,
+    dropped: reading.dropped + (dropped !== null && dropped > 0 ? dropped : 0),
+    loaded: reading.loaded || at.loaded === true,
+    heapBytes: finiteOrNull(at.heapBytes) ?? reading.heapBytes,
+    atMs: finiteOrNull(at.atMs) ?? reading.atMs
+  });
+}
+
+/**
+ * The sentence the Speed page draws for its own load, each figure against
+ * its target where one load can be: the wire and the heap are per load,
+ * and first content is said against the p99 target it feeds. Stamped with
+ * when it was read and whether the load had ended; it says so when the tab
+ * opened on another page and came here by a link inside the app, because
+ * the browser then has no load of this page alone.
+ *
+ * @param {SelfReading} r
+ * @param {string} here this page's own path, `/speed`
+ */
+export function selfText(r, here) {
+  const t = PAGE_TARGETS;
+  const first =
+    r.paint === 'unsupported'
+      ? 'first content not reported by this browser'
+      : r.firstContentMs === null
+        ? 'first content not reported yet'
+        : `first content ${r.firstContentMs} ms${r.firstContentMs >= t.firstContentP99Ms ? ` (not under the ${t.firstContentP99Ms} ms p99 target)` : ''}`;
+  const wire =
+    r.wire === 'unsupported'
+      ? 'bytes on the wire not reported by this browser'
+      : `${bytesText(r.wireBytes)} on the wire over ${r.fetches} fetches` +
+        (r.wireBytes >= t.wireBytes ? ` (not under the ${t.wireBytes / 1_000} KB target)` : '') +
+        (r.unsized > 0 ? `, ${r.unsized} of them with no size from this browser` : '') +
+        (r.dropped > 0 ? `, and ${r.dropped} more the browser dropped before this page could read them` : '');
+  const heap =
+    r.heapBytes === null
+      ? 'script heap not reported by this browser'
+      : `script heap ${bytesText(r.heapBytes)}${r.heapBytes >= t.heapBytes ? ` (not under the ${t.heapBytes / 1_000_000} MB target)` : ''}`;
+  const when =
+    r.atMs === null
+      ? ''
+      : ` Read ${microsText(Math.round(r.atMs * 1_000))} after the tab opened, ` +
+        (r.loaded ? 'after the load; a later fetch is added when it ends.' : 'with the load still going; redrawn as each entry arrives.');
+  const whose =
+    r.documentPath !== null && r.documentPath !== here
+      ? ` This tab opened on ${r.documentPath} and came here by a link inside the app, so these are the tab's figures since it opened, not this page's alone.`
+      : '';
+  return `This page's own load, from this browser: ${first} · ${wire} · ${heap}.${when}${whose}`;
+}
+
+/**
+ * Watches this page's own load: one `PerformanceObserver` over each of
+ * {@link SELF_TYPES} the browser supports, every one `buffered`, so what the
+ * browser reported before the page mounted is delivered too, once; the load
+ * event; and a reading handed to `onReading` at once and again after each
+ * delivery. Returns the stop. A browser with no observer gets one reading
+ * that says so, and nothing is watched.
+ *
+ * @param {any} win a `window`, or a test's stand-in with `PerformanceObserver`,
+ *   `performance`, `document`, `addEventListener` and `removeEventListener`
+ * @param {(reading: SelfReading) => void} onReading
+ * @returns {() => void}
+ */
+export function watchSelf(win, onReading) {
+  const Observer = win?.PerformanceObserver;
+  const perf = win?.performance;
+  const observable = typeof Observer === 'function';
+  let reading = selfStart(observable ? Observer.supportedEntryTypes : null);
+  /** @param {Iterable<any>} entries @param {unknown} dropped */
+  const emit = (entries, dropped) => {
+    reading = selfAdd(reading, entries, {
+      dropped,
+      atMs: typeof perf?.now === 'function' ? perf.now() : null,
+      heapBytes: perf?.memory?.usedJSHeapSize,
+      loaded: win?.document?.readyState === 'complete'
+    });
+    onReading(reading);
+  };
+  emit([], null);
+  if (!observable) return () => {};
+  const observer = new Observer((/** @type {any} */ list, /** @type {any} */ _self, /** @type {any} */ options) =>
+    emit(list.getEntries(), options?.droppedEntriesCount)
+  );
+  for (const type of SELF_TYPES) {
+    if (type === 'paint' ? reading.paint === 'waiting' : reading.wire === 'observed') observer.observe({ type, buffered: true });
+  }
+  const onLoad = () => emit([], null);
+  win.addEventListener?.('load', onLoad);
+  return () => {
+    observer.disconnect();
+    win.removeEventListener?.('load', onLoad);
   };
 }
 

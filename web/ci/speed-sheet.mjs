@@ -210,9 +210,10 @@ export function parseArgs(argv) {
   }
   const base = String(o.base ?? '');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('--base must be an origin such as http://127.0.0.1:8080 (no path)');
-  const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min) => {
+  const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min, max = Number.MAX_SAFE_INTEGER) => {
     const v = o[name] === undefined ? dflt : Number(o[name]);
     if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}`);
+    if (v > max) throw new Error(`--${name} must be at most ${max}`);
     return v;
   };
   const clients = String(o.clients ?? '1,10,60').split(',').map(Number);
@@ -223,7 +224,8 @@ export function parseArgs(argv) {
   if (month !== null && !/^\d{4}-\d{2}$/.test(month)) throw new Error('--month is YYYY-MM');
   return {
     base,
-    n: whole('n', 200, 1),
+    // The same ceiling as the harness's (MAX_N there): fifty times n = 200.
+    n: whole('n', 200, 1, 10_000),
     clients,
     writer: o.writer === undefined ? null : String(o.writer),
     restart: o.restart === undefined ? null : String(o.restart),
@@ -629,8 +631,16 @@ export function renderSheet(result, args) {
  * @param {string} text
  */
 export function writeWhole(path, text) {
+  // A writer killed by SIGKILL between this open and the rename runs no
+  // handler: it leaves this file, named by its pid and time, beside the
+  // target, and the target as it was — never half written (docs/06-limits.md).
   const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
-  let fd = openSync(tmp, 'wx', 0o644);
+  let fd;
+  try {
+    fd = openSync(tmp, 'wx', 0o644);
+  } catch (why) {
+    throw new Error(`could not write ${path} whole: ${/** @type {Error} */ (why).message}`);
+  }
   try {
     writeFileSync(fd, text);
     fsyncSync(fd);
