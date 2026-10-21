@@ -1842,7 +1842,11 @@ impl PartitionStamp {
                 Err(why) => return SegmentStamp::Faulted(why.kind()),
             };
             let measured = times(&listed).and_then(|dir_times| {
-                let epoch = match census::current_epoch(&dir)? {
+                // The writer's listing rule (R3-19, L-AG05-05): a name refused
+                // for what is at it stamps as a fault, never as no epoch.
+                let listed = census::current_epoch(&dir)
+                    .map_err(|refused| std::io::Error::new(refused.kind(), refused.to_string()))?;
+                let epoch = match listed {
                     None => None,
                     Some(epoch) => {
                         let file = std::fs::metadata(pull::manifest::epoch_path(
