@@ -2681,6 +2681,17 @@ const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range
      torn-one-month \
      type undated undated_master_name unknowns unread-day zero-minute zero-unread-day";
 
+// CAL-1 (repair round 1, 21 Oct 2026): the serial numbers of the five NSE
+// holiday circulars `pull::calendar::HOLIDAY_CIRCULARS` records, which gate 1d
+// splits out of each row's `number` (`NSE/CMTR/36475` and so on, the spelling
+// NSE prints and `docs/00-charter.md` records with its address): 2018's list
+// NSE/CMTR/36475, 2019's NSE/CMTR/39612 and its two additions NSE/CMTR/40536
+// and NSE/MSD/42319, and 2026's NSE/CMTR/71775. Each is a public exchange
+// circular's number, never an account, an environment, a vendor credential or
+// a field of a parameter path. A circular appended to the table brings its
+// serial here in the same change.
+const CAL1_CIRCULAR_SERIAL: &str = "36475 39612 40536 42319 71775";
+
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
 // (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
 // (the shared file doors: the tick store's day-name refusals), SC-1 (codec 1,
@@ -2811,7 +2822,7 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      writer_changed yes";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 71] = [
+const DECLARED: [&str; 72] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2883,6 +2894,7 @@ const DECLARED: [&str; 71] = [
     R3_35_LITERAL,
     R4_07_LITERAL,
     R4_17_LITERAL,
+    CAL1_CIRCULAR_SERIAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

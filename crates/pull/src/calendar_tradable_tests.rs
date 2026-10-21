@@ -206,10 +206,39 @@ fn every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one() 
             special.day
         );
     }
+    let unrecorded = notice_days_not_measured(&SESSION_CIRCULARS);
+    assert_eq!(unrecorded, [20_765], "only the untimed 2026 Muhurat");
+    let days = SESSION_CIRCULARS
+        .iter()
+        .filter(|notice| notice_in(&SESSION_CIRCULARS, notice.day) == Some(**notice))
+        .count();
+    assert_eq!(days, SPECIAL_SESSIONS.len() + unrecorded.len());
+    assert_eq!(session_circular(at(2024, 1, 19)), None);
+
+    // A LATER NOTICE FOR A DAY IS THE TABLE'S OWN SHAPE (D-5159), NOT A
+    // DEFECT. This test used to require one row a day, strictly ascending,
+    // and every unmeasured day untimed, so appending NSE's timing circular for
+    // the 2026-11-08 Muhurat (the invented `LATER_NOTICE` here) failed it
+    // while D-5159 says that row is exactly how the table grows.
+    assert_eq!(notice_days_not_measured(&EXTENDED_NOTICES), [20_765]);
+}
+
+/// The shape every notice table holds (D-5152, D-5159), checked on the table
+/// of record and on it with a later notice appended: sorted by day, a repeated
+/// day being a later notice that supersedes the earlier one without editing
+/// it; every row cites its number, date and address; every noticed day is a
+/// session; the newest notice of a measured special day states its measured
+/// kind and window. Returns the days whose newest notice has no measured
+/// session: each either untimed and saying UNVERIFIED, or timed by a later
+/// notice the measurements cannot confirm until the session has happened.
+fn notice_days_not_measured(rows: &[SessionCircular]) -> Vec<i64> {
     let mut previous = i64::MIN;
-    let mut unrecorded = Vec::new();
-    for notice in SESSION_CIRCULARS {
-        assert!(notice.day > previous, "sorted, one row a day");
+    let mut unmeasured = Vec::new();
+    for notice in rows {
+        assert!(
+            notice.day >= previous,
+            "sorted by day; a repeated day is a later notice (D-5159)"
+        );
         previous = notice.day;
         assert!(
             notice.source.contains(" https://") && notice.source.contains(" of "),
@@ -224,15 +253,23 @@ fn every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one() 
             "a noticed day is a session, day {}",
             notice.day
         );
-        if special_session(notice.day).is_none() {
-            assert_eq!(notice.notified, None);
-            assert!(notice.source.contains("UNVERIFIED"));
-            unrecorded.push(notice.day);
+        if notice_in(rows, notice.day) != Some(*notice) {
+            continue;
+        }
+        match special_session(notice.day) {
+            Some(special) => {
+                assert_eq!(notice.kind, special.kind, "day {}", notice.day);
+                assert_eq!(notice.notified, Some(special.session), "day {}", notice.day);
+            }
+            None => {
+                if notice.notified.is_none() {
+                    assert!(notice.source.contains("UNVERIFIED"), "{}", notice.source);
+                }
+                unmeasured.push(notice.day);
+            }
         }
     }
-    assert_eq!(unrecorded, [20_765], "only the untimed 2026 Muhurat");
-    assert_eq!(SESSION_CIRCULARS.len(), SPECIAL_SESSIONS.len() + 1);
-    assert_eq!(session_circular(at(2024, 1, 19)), None);
+    unmeasured
 }
 
 /// **EVERY SHAPE THE TABLES COULD ONE DAY HOLD HAS A NAMED ANSWER.** The
@@ -794,6 +831,75 @@ fn version_two_keeps_its_recorded_digest() {
     );
 }
 
+/// **VERSION 1'S DIGEST IS PINNED TOO** (verify-CAL-1 round 1). Every version
+/// reads `SPECIAL_SESSIONS`, `HALTS`, `SOURCED_HOLIDAYS`, `SOURCED_SPECIAL`,
+/// `IRREGULAR` and `LENGTH_UNMEASURED` whole, not a prefix of each
+/// (docs/06-limits.md L-CAL-11), so a row appended to one of them can change
+/// what an OLDER version answers. Pinning only version 2 left version 1's
+/// answers free to move unseen; with both pinned, such an append fails the
+/// build for every version it touches. Recorded 2026-10-21 by CAL-1 repair
+/// round 1 from this tree (first printed by this test, at commit 9b7050735);
+/// no recorded run names a `CalendarVersion` yet (L-CAL-7), so pinning it
+/// re-keys nothing. It differs from version 2's, as two extents must.
+#[test]
+fn version_one_keeps_its_recorded_digest() {
+    let hex = CalendarVersion::of(1)
+        .expect("version 1")
+        .digest()
+        .iter()
+        .fold(String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    assert_eq!(
+        hex,
+        "3b695fd9cd936f511f7c1ac78de26e7f7e401e75bcda628c06f588124e0d03a4"
+    );
+}
+
+/// A whole-year table with a gap: 2019 neither recorded nor wholly measured.
+static GAP_CIRCULARS: [HolidayCircular; 2] = [whole(2018), whole(2026)];
+
+/// **NO VERSION'S RECORD HAS A HOLE** (D-5155; verify-CAL-1 round 1).
+/// `record()` widens the sourced span by the measured window, so a span that
+/// stops at a gap year a year before the window starts would make a record
+/// holding days neither answers, and a bucket over them would count them as
+/// `Unmeasured` inside the record instead of refusing. The build refuses such
+/// a version (a const assertion over `MEASURED_VERSIONS`); this drives the
+/// check on an invented table and on both edges of "touching".
+#[test]
+fn a_record_with_a_hole_between_its_spans_is_refused() {
+    for row in MEASURED_VERSIONS {
+        assert!(CalendarVersion::on(row).record_is_unbroken(), "{row:?}");
+    }
+    assert!(records_are_unbroken(&MEASURED_VERSIONS));
+
+    let row = MeasuredVersion {
+        holiday_circulars: 2,
+        ..MEASURED_VERSIONS[1]
+    };
+    let holed = CalendarVersion::on_tables(row, &GAP_CIRCULARS, &SESSION_CIRCULARS);
+    assert_eq!(holed.sourced(), (at(2018, 1, 1), at(2018, 12, 31)));
+    assert_eq!(holed.record(), (at(2018, 1, 1), LAST_DAY));
+    assert!(!holed.record_is_unbroken());
+    // The day the assertion keeps out of every real record: inside
+    // `record()`, answered by neither span.
+    assert_eq!(holed.sourced_kind_of(at(2019, 6, 3)), DayKind::Unmeasured);
+    assert_eq!(
+        holed.tradable_day(at(2019, 6, 3)),
+        Err(NotTradable::Unmeasured)
+    );
+
+    // Touching is unbroken; one day apart is a hole, on either side.
+    let two = CalendarVersion::of(2).expect("version 2");
+    let with = |sourced: (i64, i64)| CalendarVersion { sourced, ..two };
+    assert!(with((at(2018, 1, 1), FIRST_DAY - 1)).record_is_unbroken());
+    assert!(!with((at(2018, 1, 1), FIRST_DAY - 2)).record_is_unbroken());
+    assert!(with((LAST_DAY + 1, at(2026, 12, 31))).record_is_unbroken());
+    assert!(!with((LAST_DAY + 2, at(2026, 12, 31))).record_is_unbroken());
+    assert!(with((FIRST_DAY, LAST_DAY)).record_is_unbroken());
+}
+
 /// **A RECORDED YEAR BRINGS ITS HOLIDAYS** (D-5159). `sourced_kind` calls
 /// every weekday open unless `SOURCED_HOLIDAYS` lists it, so a whole-year
 /// circular appended without its days would widen the span and call each of
@@ -1036,8 +1142,9 @@ fn concurrent_readers_share_one_build_and_get_one_answer() {
 /// **THE PER-DAY LOOKUP AND EVERY BUCKET ARE CONSTANT-COST, MEASURED.**
 /// p50, p99 and max of `tradable_day` over every day of the record and one
 /// past each edge (64 rounds, each sample the mean of 16 calls), of
-/// `excluded_between` over buckets of every length (n = 3,287) and of
-/// `year_exclusions` (n = 270), after the sums are built once. The bounds
+/// `excluded_between` over buckets of every length (n = 3,287), of
+/// `year_exclusions` (n = 270) and of `year_record` (n = 270), after the sums
+/// are built once. The bounds
 /// asserted are generous so a loaded host does not fail them; the figures
 /// are printed for the ledger (`--nocapture`).
 #[test]
@@ -1100,6 +1207,21 @@ fn tradable_day_and_every_bucket_are_bounded() {
         years.len()
     );
     assert!(years.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
+
+    let mut records = Vec::new();
+    for _ in 0..30 {
+        for year in 2018..=2026 {
+            let started = Instant::now();
+            black_box(year_record(black_box(year)));
+            records.push(started.elapsed().as_nanos());
+        }
+    }
+    let (p50, p99, max) = spread(&mut records);
+    eprintln!(
+        "year_record: p50 {p50} ns, p99 {p99} ns, max {max} ns, n = {}",
+        records.len()
+    );
+    assert!(records.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
 }
 
 fn spread(samples: &mut [u128]) -> (u128, u128, u128) {

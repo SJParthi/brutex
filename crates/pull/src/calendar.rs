@@ -324,6 +324,23 @@ const _: () = assert!(versions_read_the_tables(
     HOLIDAY_CIRCULARS.len(),
     SESSION_CIRCULARS.len()
 ));
+// NO VERSION'S RECORD HAS A HOLE (D-5155; verify-CAL-1 round 1): its sourced
+// span and its measured window overlap or touch, so a version whose circulars
+// stop a year before the window starts fails the build instead of counting
+// that year's days as `Unmeasured` inside its record.
+const _: () = assert!(records_are_unbroken(&MEASURED_VERSIONS));
+
+/// Whether every version's [`CalendarVersion::record_is_unbroken`].
+const fn records_are_unbroken(versions: &[MeasuredVersion]) -> bool {
+    let mut rest = versions;
+    while let [row, tail @ ..] = rest {
+        if !CalendarVersion::on(*row).record_is_unbroken() {
+            return false;
+        }
+        rest = tail;
+    }
+    true
+}
 const _: () = assert!(FIRST_DAY == 18_232 && LAST_DAY == 20_700);
 const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 2_469);
 const _: () = assert!(DAYS == 2_469);
@@ -638,11 +655,20 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
     measured_kind(LAST_DAY, epoch_day)
 }
 
+/// Whether `epoch_day` lies in the inclusive `span`, `(first, last)` days
+/// since the epoch: two comparisons. The calendar's spans are runtime pairs
+/// per version (a range pattern needs constants), and a range `contains` is
+/// the spelling gate 11 rule 7 cannot tell from a slice walk; this one is
+/// neither a walk nor ambiguous. An inverted span holds no day.
+const fn in_span(span: (i64, i64), epoch_day: i64) -> bool {
+    span.0 <= epoch_day && epoch_day <= span.1
+}
+
 /// [`kind_of`] for a measured version whose last day is `last_day`: the same
 /// bits, read only up to that version's own extent (D-5154). `kind_of` is
 /// this at the newest version, so it answers exactly what it always did.
 fn measured_kind(last_day: i64, epoch_day: i64) -> DayKind {
-    if !(FIRST_DAY..=last_day.min(LAST_DAY)).contains(&epoch_day) {
+    if !in_span((FIRST_DAY, last_day.min(LAST_DAY)), epoch_day) {
         return DayKind::Unmeasured;
     }
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a
@@ -3091,6 +3117,21 @@ impl CalendarVersion {
         (first, last)
     }
 
+    /// Whether [`Self::record`] is one unbroken run of answered days: the
+    /// sourced span and the measured window overlap or touch. [`Self::record`]
+    /// widens one by the other, so two spans with a gap between them (a year
+    /// neither recorded nor wholly measured, D-5155's "a missing year stops
+    /// the span") would make a record holding days that neither answers, and
+    /// a bucket over them would count `Unmeasured` days as if inside the
+    /// record instead of being refused. Every version of the table is held
+    /// to this by a const assertion ([`MEASURED_VERSIONS`]).
+    #[must_use]
+    pub const fn record_is_unbroken(self) -> bool {
+        let (measured_first, measured_last) = self.measured();
+        self.sourced.0 <= measured_last.saturating_add(1)
+            && measured_first <= self.sourced.1.saturating_add(1)
+    }
+
     /// [`kind_of`] at this version: the measured bits up to its extent.
     #[must_use]
     pub fn kind_of(self, epoch_day: i64) -> DayKind {
@@ -3100,11 +3141,11 @@ impl CalendarVersion {
     /// [`sourced_kind_of`] at this version.
     #[must_use]
     pub fn sourced_kind_of(self, epoch_day: i64) -> DayKind {
-        let (first, last) = self.measured();
-        if (first..=last).contains(&epoch_day) {
-            return measured_kind(last, epoch_day);
+        let measured = self.measured();
+        if in_span(measured, epoch_day) {
+            return measured_kind(measured.1, epoch_day);
         }
-        if (self.sourced.0..=self.sourced.1).contains(&epoch_day) {
+        if in_span(self.sourced, epoch_day) {
             return sourced_kind(epoch_day);
         }
         DayKind::Unmeasured
@@ -3418,7 +3459,10 @@ impl std::fmt::Display for SpanRefusal {
 /// Running sums of the tradable-day rule over one version's sourced span,
 /// indexed by day (operator, 16 Oct 2026, "NOTHING TYPED" item 7, D-5157):
 /// slot `i` holds the counts of the span's first `i` days, so any bucket is
-/// two lookups and a subtraction, O(1), whatever its length.
+/// two lookups and a subtraction, O(1), whatever its length. Exactness is
+/// `pull::calendar::tradable_tests::the_running_sums_answer_every_bucket_exactly`;
+/// the cost over buckets of every length is measured by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningSums {
     /// The version counted.
@@ -3514,7 +3558,9 @@ impl RunningSums {
 }
 
 /// The counts of `first..=last` at the newest version: O(1) after the first
-/// call builds [`RunningSums::newest`] (D-5157).
+/// call builds [`RunningSums::newest`] (D-5157), measured over buckets of
+/// every length by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
 ///
 /// # Errors
 ///
@@ -3575,7 +3621,9 @@ fn civil_text(day: i64) -> String {
 }
 
 /// The days of `year` counted by [`tradable_day`] (D-5153): one
-/// [`RunningSums::between`], O(1) after the sums are built.
+/// [`RunningSums::between`], O(1) after the sums are built, measured over
+/// every year of the record by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
 ///
 /// # Errors
 ///
@@ -3630,9 +3678,14 @@ impl YearRecord {
     }
 }
 
-/// The record of `year` at the newest version: walks of the version's two
-/// constant circular tables, O(1). A day with a later notice is counted once,
-/// by its newest notice (D-5159).
+/// The record of `year` at the newest version: one walk of the version's
+/// holiday circulars, and for each of its session notices one walk of the
+/// notices for the newest row naming that day, so at most the notice count
+/// squared plus the circular count of comparisons. Both lengths are the
+/// tables' array types, compile-time constants, so the bound does not grow
+/// with the store or the day: O(1), measured over every year of the record by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+/// A day with a later notice is counted once, by its newest notice (D-5159).
 #[must_use]
 pub fn year_record(year: u16) -> YearRecord {
     let version = CalendarVersion::newest();

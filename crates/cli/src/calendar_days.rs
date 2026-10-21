@@ -200,6 +200,11 @@ fn line(day: i64, reason: NotTradable) -> String {
     }
     if let Some(holiday) = record.holiday {
         let _ = write!(what, "; {}", holiday.name);
+    } else if reason == NotTradable::Holiday {
+        // Inside the measured window a holiday is a weekday the store's
+        // daily bars prove closed; no circular row names it (D-2805), so the
+        // line says so rather than ending as if a name were missing by error.
+        what.push_str("; measured closed from the store's daily bars, no name recorded");
     }
     if let Some(notice) = calendar::session_circular(day) {
         let _ = write!(what, "; source {}", notice.source);
@@ -212,7 +217,14 @@ fn line(day: i64, reason: NotTradable) -> String {
         } else {
             "sourced"
         };
-        let _ = write!(what, "; market-wide halt ({lane})");
+        // The reason's own label already says "market-wide halt" when the
+        // halt is the reason; a day excluded for something else first (the
+        // 2021-02-24 outage) names the halt as a second fact.
+        if reason == NotTradable::MarketHalt {
+            let _ = write!(what, " ({lane})");
+        } else {
+            let _ = write!(what, "; also a market-wide halt ({lane})");
+        }
     }
     format!(
         "{:<10}  {:<3}  {:<22}  {what}\n",
@@ -234,6 +246,15 @@ fn civil(day: i64) -> String {
 
 /// The two indices whose bar months are the per-day source of every feed.
 const DAY_SOURCES: [&str; 2] = ["NIFTY", "BANKNIFTY"];
+
+/// Whether `symbol` is one of the [`DAY_SOURCES`]: two string comparisons,
+/// the table destructured whole, so a third source is a compile error here
+/// rather than a symbol the year count silently never matches (gate 11
+/// rule 7: no slice membership test whose length the reader must look up).
+fn is_day_source(symbol: &str) -> bool {
+    let [first, second] = DAY_SOURCES;
+    symbol == first || symbol == second
+}
 
 /// The reference index that counts toward a year (CLAUDE.md §1: stored and
 /// stamped, never swept).
@@ -279,7 +300,9 @@ impl Feed {
 /// (D-5158). It was an ordered tree map, O(log d) a day; the span is now
 /// fixed before a single month is read, from the months the censuses say
 /// will be read, so it never grows during a read: one byte per calendar day
-/// of that span (4,291 bytes for 2015-01..2026-09).
+/// of that span (4,291 bytes for 2015-01..2026-09). Measured at a 31-day and
+/// a 36,525-day span by
+/// `cli::calendar_days::tests::a_day_costs_the_same_at_any_span_measured`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DayMasks {
     /// The day slot 0 stands for.
@@ -450,7 +473,8 @@ impl Findings {
 /// The three lists, a pure function of what the store holds and the tables:
 /// one `tradable_day` per held day and one per weekday between the first and
 /// the last held day, each O(1), and each day's mask one indexed read of the
-/// dense [`DayMasks`].
+/// dense [`DayMasks`]. Measured per held day over a whole record's days by
+/// `cli::calendar_days::tests::the_check_costs_constant_time_per_day_measured`.
 pub(crate) fn findings(held: &Holdings) -> Findings {
     let mut found = Findings::default();
     for (day, mask) in held.days.iter() {
@@ -984,7 +1008,7 @@ fn counts_toward_a_year(entry: &Entry, fno: &HashSet<&str>) -> bool {
     }
     let symbol = key.symbol.as_str();
     match key.segment {
-        Segment::Index => DAY_SOURCES.contains(&symbol) || symbol == REFERENCE_INDEX,
+        Segment::Index => is_day_source(symbol) || symbol == REFERENCE_INDEX,
         Segment::Cash => fno.contains(symbol),
         Segment::Fno => false,
     }
@@ -1026,7 +1050,9 @@ fn spot_censuses(root: &Path, vendor: Vendor) -> Result<Vec<Manifest>, String> {
 /// The IST days one index month holds a bar on: for each day of the month,
 /// two `first_at_or_after` lookups (the day's start and the next day's,
 /// shared with the next day), each at most one index entry and one bar read
-/// through the month's `.tix`, the bisection otherwise. O(1) per day.
+/// through the month's `.tix`, the bisection otherwise. O(1) per day,
+/// measured over n = 240 calls of 31 days by
+/// `cli::calendar_days::tests::the_check_costs_constant_time_per_day_measured`.
 fn month_days(
     root: &Path,
     vendor: Vendor,

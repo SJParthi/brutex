@@ -70,6 +70,16 @@ fn calendar_days_2024_lists_the_excluded_sessions_and_totals() {
             .any(|l| l.starts_with("2024-01-22  Mon  Holiday")),
         "{out}"
     );
+    // A holiday inside the measured window carries no circular name, and its
+    // line says why rather than ending bare (verify-CAL-1 r1).
+    let ram_mandir = out
+        .lines()
+        .find(|l| l.starts_with("2024-01-22"))
+        .unwrap_or_default();
+    assert!(
+        ram_mandir.contains("measured closed from the store's daily bars, no name recorded"),
+        "{ram_mandir}"
+    );
     assert!(!out.lines().any(|l| l.starts_with("2024-01-21")), "{out}");
     assert!(!out.lines().any(|l| l.starts_with("2024-01-19")), "{out}");
     assert!(out.contains("  excluded sessions          4"), "{out}");
@@ -107,6 +117,8 @@ fn calendar_days_2020_to_2022_name_halts_and_keep_short_days_tradable() {
             row.contains("MarketHalt") && row.contains("suspected"),
             "{row}"
         );
+        // Said once: the reason's label, then its lane (verify-CAL-1 r1).
+        assert_eq!(row.matches("market-wide halt").count(), 1, "{row}");
     }
     let budget = out
         .lines()
@@ -123,9 +135,10 @@ fn calendar_days_2020_to_2022_name_halts_and_keep_short_days_tradable() {
         .find(|l| l.starts_with("2021-02-24"))
         .unwrap_or_default();
     assert!(
-        outage.contains("SystemsOutage") && outage.contains("market-wide halt (sourced)"),
+        outage.contains("SystemsOutage") && outage.contains("; also a market-wide halt (sourced)"),
         "{outage}"
     );
+    assert_eq!(outage.matches("market-wide halt").count(), 1, "{outage}");
 }
 
 /// **THE UNTIMED 2026 MUHURAT IS EXCLUDED AND SAYS ITS WINDOW IS

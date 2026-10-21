@@ -73443,6 +73443,32 @@ row that answers only days past every version's record changes nothing.
 owed year (87 characters) ran into its notices column; each column is now
 held apart by two spaces (`the_check_reads_every_feed_and_prints_the_three_lists`).
 
+**Repair round 1 (2026-10-21, after `verify-CAL-1-r1.json`).** Four CI
+shell gates refused what the package added, and four follow-ups sat in its
+own files. (1) Gate 11 rule 7: the three new membership tests are gone —
+`calendar_days::is_day_source` destructures the two-entry `DAY_SOURCES`, and
+`calendar::in_span` (two comparisons) answers both of
+`CalendarVersion::sourced_kind_of`'s windows and `measured_kind`'s, so the
+file's allowance falls from 2 to 1. (2) Gate 12: each cost-claiming doc block
+(`DayMasks`, `findings`, `month_days`, `RunningSums`, `excluded_between`,
+`year_exclusions`, `year_record`) names its measuring test, and
+`tradable_day_and_every_bucket_are_bounded` now measures `year_record` too.
+(3) Gate 23: the two `#[cfg(test)]` files' `eprintln!` lines are declared with
+their counts. (4) Gate 1d: the five circular serials are declared in
+`.github/gates_tree.rs` (`CAL1_CIRCULAR_SERIAL`) as exchange circular
+numbers, never credential path segments. The follow-ups: version 1's digest
+is pinned as well (`3b695fd9cd936f511f7c1ac78de26e7f7e401e75bcda628c06f588124e0d03a4`,
+`version_one_keeps_its_recorded_digest`), so a row appended to a table that
+is not versioned (docs/06-limits.md L-CAL-11) fails the build for every
+version it moves; a version whose sourced span and measured window neither
+overlap nor touch fails the build (`records_are_unbroken`, a const
+assertion; `a_record_with_a_hole_between_its_spans_is_refused`), because
+`record()` would otherwise hold days neither answers; the notice-table test
+accepts a repeated day as a later notice, as this entry says the table grows,
+and is driven on the table with an invented later 2026-11-08 notice
+appended; a halt is named once on its line, and a holiday inside the measured
+window says it was measured closed with no recorded name.
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
