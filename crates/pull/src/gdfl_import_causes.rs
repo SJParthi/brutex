@@ -628,9 +628,16 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         // Settled against the calendar (D-3331), which can learn the day.
         NfoRefusal::ExpiryUnsettled { .. } => Cause::open(Stage::Calendar, "expiry_unsettled"),
         NfoRefusal::UnderlyingRefused { .. } => Cause::open(Stage::File, "underlying_refused"),
-        // Judged against the dated symbol-change table (D-3333), which can
-        // learn a row (WP-12e).
-        NfoRefusal::UnderlyingStale { .. } => Cause::open(Stage::File, "underlying_stale"),
+        // Judged against the dated symbol-change table (D-3333): the vendor
+        // names an underlying the exchange was not using that day, and the
+        // same reader refuses the same member the same way every run, exactly
+        // as the capital market's `symbol_not_in_use`. So it CLOSES the day
+        // done with refusals rather than leaving it incomplete and re-read
+        // every night (FM-112, R3-30); the refusal carries its symbol change,
+        // so a reused symbol is one item however many days meet it, and a
+        // day is read again only by a named re-read once an alias row lands
+        // in the store's `symbol_changes` table.
+        NfoRefusal::UnderlyingStale { .. } => Cause::vendor("underlying_stale"),
         NfoRefusal::ContractUnrenderable { .. } => {
             Cause::open(Stage::File, "contract_unrenderable")
         }

@@ -1842,6 +1842,52 @@ pub fn holiday_note(epoch_day: i64) -> Option<HolidayNote> {
     None
 }
 
+/// The circular that names each [`SOURCED_SPECIAL`] day, day for day: the
+/// charter's §3 Muhurat table records 2018-11-07 as NSE/CMTR/36475's date and
+/// 2019-10-27 as NSE/CMTR/39612's, and [`SOURCED_SPECIAL`]'s own note records
+/// 2026-11-08 as NSE/CMTR/71775's, each with its timings "to be notified".
+/// What an operator action item names for a session of unrecorded length
+/// (FM-106): the day and the circular whose window is still needed.
+pub const SOURCED_SPECIAL_NOTES: [HolidayNote; 3] = [
+    note(
+        17_842,
+        "Muhurat trading, timings to be notified",
+        CMTR_36475,
+    ),
+    note(
+        18_196,
+        "Muhurat trading, timings to be notified",
+        CMTR_39612,
+    ),
+    note(
+        20_765,
+        "Muhurat trading, timings to be notified",
+        CMTR_71775,
+    ),
+];
+
+// Day for day the same days as `SOURCED_SPECIAL`, checked at compile time.
+const _: () = {
+    let (mut notes, mut days) = (SOURCED_SPECIAL_NOTES.as_slice(), SOURCED_SPECIAL.as_slice());
+    while let (Some((note, rest_notes)), Some((day, rest_days))) =
+        (notes.split_first(), days.split_first())
+    {
+        assert!(note.day == *day);
+        notes = rest_notes;
+        days = rest_days;
+    }
+    assert!(notes.is_empty() && days.is_empty());
+};
+
+/// The [`SOURCED_SPECIAL_NOTES`] entry of `epoch_day`. A walk of three.
+#[must_use]
+pub fn special_note(epoch_day: i64) -> Option<HolidayNote> {
+    SOURCED_SPECIAL_NOTES
+        .iter()
+        .find(|special| special.day == epoch_day)
+        .copied()
+}
+
 /// Why a day cannot be the day a contract expires and settles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoSettlement {
@@ -2125,6 +2171,83 @@ pub fn record_of(epoch_day: i64) -> DayRecord {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// SC-CLOSE-23. The derivative venue's close on both sides of the
+    /// 2026-08-03 change, at the SECOND (a GDFL one-second bar) and at the
+    /// minute (`session::Window::verdict`): on 2026-08-03 a 15:39:59 bar is
+    /// kept and a 15:40:00 one is past the close; on the last session before
+    /// the change, by the calendar of record, a 15:29:59 bar is kept and a
+    /// 15:30:00 one is past the close. The finding named 2026-08-02, which is
+    /// a Sunday: the day is found from the calendar, never typed.
+    #[test]
+    fn the_derivative_close_moves_from_15_30_to_15_40_on_2026_08_03() {
+        use crate::session::{Cadence, DropReason, Window as Span};
+        use crate::vendor::Venue;
+        let change = i64::from(
+            crate::session::Day::new(2026, 8, 3)
+                .expect("a real day")
+                .days_from_epoch(),
+        );
+        assert!(
+            matches!(kind_of(change), DayKind::Open(_)),
+            "2026-08-03 traded"
+        );
+        let before = (1..=10)
+            .map(|back| change - back)
+            .find(|day| matches!(kind_of(*day), DayKind::Open(_)))
+            .expect("a session in the ten days before the change");
+        let sunday = change - 1;
+        assert!(
+            weekday_of(sunday).is_weekend(),
+            "2026-08-02 is not a session"
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed);
+        let at = |h: u32, m: u32, s: u32| h * 3_600 + m * 60 + s;
+        let continuous = |day: i64, second: u32| {
+            phase_at_second(Venue::NseDerivatives, day, second, CasEligibility::Unknown)
+        };
+        // 2026-08-03: the extended close.
+        assert_eq!(continuous(change, at(15, 39, 59)), Phase::Continuous);
+        assert_eq!(continuous(change, at(15, 30, 0)), Phase::Continuous);
+        assert_eq!(continuous(change, at(15, 40, 0)), Phase::PostClose);
+        // The session before: the 15:30 close.
+        assert_eq!(continuous(before, at(15, 29, 59)), Phase::Continuous);
+        assert_eq!(continuous(before, at(15, 30, 0)), Phase::PostClose);
+        assert_eq!(continuous(before, at(15, 39, 59)), Phase::PostClose);
+        // The index did not extend on either side (D-3320).
+        for day in [before, change] {
+            assert_eq!(
+                phase_at_second(Venue::NseIndex, day, at(15, 30, 0), CasEligibility::Unknown),
+                Phase::PostClose
+            );
+        }
+        // At the minute, through the session filter every lander uses.
+        let epoch = |day: i64, h: i64, m: i64| day * 86_400 + h * 3_600 + m * 60 - 19_800;
+        let verdict = |day: i64, h: i64, m: i64| {
+            let civil = crate::session::Day::from_days(u32::try_from(day).expect("a day"))
+                .expect("a civil day");
+            Span::new(civil, civil)
+                .expect("a one-day window")
+                .verdict(epoch(day, h, m), Cadence::Minute, Venue::NseDerivatives)
+                .expect("a real timestamp")
+        };
+        assert_eq!(verdict(change, 15, 39), None, "15:39 kept on 2026-08-03");
+        assert_eq!(
+            verdict(change, 15, 40),
+            Some(DropReason::AtOrAfterSessionClose),
+            "15:40 dropped on 2026-08-03"
+        );
+        assert_eq!(
+            verdict(before, 15, 29),
+            None,
+            "15:29 kept before the change"
+        );
+        assert_eq!(
+            verdict(before, 15, 30),
+            Some(DropReason::AtOrAfterSessionClose),
+            "15:30 dropped before the change"
+        );
+    }
 
     /// **THE TWO MEASURED SHORT DAYS ARE IN THE CALENDAR OF RECORD** (WP-62,
     /// repair 3; DB-G47): 2019-08-02 and 2022-03-07 were plain sessions with

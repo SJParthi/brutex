@@ -77637,6 +77637,124 @@ that lists the import's sources.
 
 Test: `an_unset_v3_ledger_is_named_never_defaulted`. Invariant IA3OPT-04.
 
+### D-6246 — R3-30: the reference tables are store data read through one loader; a rate carried over a documented RBI gap is labelled on the wire and bounded — 2026-10-20
+
+Number taken from the ledger head at commit (amendment A6); the landing
+renumbers it if another package lands D-6246 first.
+
+Findings DB-B44, DB-G76 (store side), SC-CLOSE-15 (partial), SC-CLOSE-23,
+SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
+`verify-R3-30-r1`.
+
+1. **Seven tables, one loader.** `calendar`, `index_identity`,
+   `symbol_changes`, `fno_list`, `expiry_moves`, `lot_sizes` and
+   `risk_free_rate` are files under `<store>/reference/v1/<table>/`
+   (`docs/02-store-format.md`, "Reference tables, format version 1").
+   `pull::reference_data::load` reads the newest generation of each, checks
+   its sha256, and serves it labelled `store`; a file that fails any check is
+   refused by name (table, file, generation, kind) and nothing of that table
+   is served, never the compiled copy in its place. A table with no
+   generation is served from the copy this build compiled, labelled
+   `compiled`; `risk_free_rate` has no compiled copy and answers a named
+   absence. Each load is one event per table; an absence of a table with no
+   compiled copy is told at `warn` (`table absent`), a refused file at
+   `error`.
+2. **Writes append.** A generation is staged under the writer's own name,
+   synced, hard-linked to `<generation:020>.ref` and the directory synced; no
+   generation is rewritten. Bytes identical to the newest generation land
+   nothing (`Written::landed` is `false`); generation `u64::MAX` refuses the
+   next write by name (`WriteError::Exhausted`), never as a race. Names in a
+   table directory that are not generations are never served and never
+   ignored in silence: `Reference::strays` keeps them and one `warn` event
+   per table names them.
+3. **A documented RBI gap carries the rate, labelled (DB-B44).** The T-bill
+   table may hold a gap row (`cut_off_price` `CANCELLED`, `NA` or
+   `NOT_HELD`, no yield, an RBI URL). It restarts the 14-day staleness clock
+   (`MAX_AGE_DAYS`, D-2810), and a day it covers is priced on the previous
+   result's rate with `rate_state` `rate_carried` and `rate_gap` (kind and
+   release day) on every `/greeks.json` cell; the `rate` header counts
+   `gaps` beside `auctions`, and `/db` tags the IV cell `C` and names the gap
+   in its title. A run of gaps carries a result at most
+   `MAX_CARRIED_AGE_DAYS` = 28 days (two staleness windows: the operator's
+   table holds at most two consecutive weeks without a 91-day cut-off);
+   past it every cell is refused `rate_carried_too_long`. A gap nobody
+   documented is refused `rate_stale` exactly as before.
+4. **Lot rows carry their standing (DB-G76, store side).** Every lot row has
+   its source, source sha256 and read day; only a row whose source is
+   recorded in `docs/00-charter.md` applies, others are listed `unverified`
+   and not applied, and an underlying or day with no applied row is a named
+   absence. `costs::lot::LotTable` is built from rows `pull` hands it, so
+   `costs` still names `core` alone. The compiled `costs::lot::lot_size`
+   path is unchanged, so until R3-10-OPT moves readers onto the table the two
+   answers differ on the spans whose revisions are unsourced; the table is
+   the authority for every new reader.
+5. **A reused symbol closes its day (FM-112).** `nfo_cause`'s
+   `UnderlyingStale` is a vendor cause that closes, like `cm_cause`'s
+   `SymbolNotInUse`: one action item per symbol change, never a nightly
+   incomplete; the day is read again only by a named re-read once an alias
+   row lands.
+6. **A calendar extension lists, never re-files (FM-109).**
+   `expiry_alias::rekey_plan(contracts, held, newer)` lists every contract
+   that settles `as_stated_unmeasured` under the calendar the store holds
+   now and that the newer calendar settles elsewhere or refuses; applying it
+   is the rekey writer's (R4-21).
+7. **Every expiry row says what it rests on.** Five NIFTY rows cite
+   NSE/FAOP/68747 (D-3358), five DB-B01 rows are inferred with their cause
+   UNVERIFIED, and the rest are census measurements.
+8. **A dated record that ends, or is not served, is an alert.**
+   `Reference::horizons` answers each table's refusal rather than `None`, and
+   `Reference::horizon_alerts` names every record within
+   `HORIZON_ALERT_DAYS` of its end, past it, or absent. The tile is R3-25's.
+9. **A loaded row keeps its own provenance.** The seed writes each
+   citation as `<url> read <day>` with ` sha256 <hex>` when the charter
+   records one, and the loader reads a source column in exactly that shape
+   back as the row's own citations (URL, read day, checksum); a source in
+   any other words cites the file that holds it, with the row's words as
+   what it says.
+
+### D-6247 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
+
+Number taken from the ledger head at commit (amendment A6; `feat/db-fix`'s
+head is D-6245 and D-6246 is R3-30's own); the landing renumbers it if
+another package lands D-6247 first. Amends D-6246 item 3; finding DB-B44,
+blocking issue of `verify-R3-30-r2`.
+
+1. **What was wrong.** D-6246 item 3 let a gap row restart the 14-day clock
+   whatever came before it. A gap row released MORE than `MAX_AGE_DAYS`
+   after the previous row therefore restarted a clock that had already run
+   out: a result refused `rate_stale` (an auction nobody explained is
+   missing) was priced again from the day after the gap, labelled
+   `rate_carried` as if the gap were the only reason. Reproduced by the
+   second agent on invented rows and on the wire (2024-09-26 `rate_stale`,
+   2024-09-30 priced on the same 2024-09-11 rate).
+2. **The rule.** A gap row documents ONE scheduled auction. It continues a
+   clock only when the row before it (a result, or a gap row that itself
+   continues one) is at most `MAX_AGE_DAYS` older: the clock still running
+   on the gap's release day. Otherwise the gap row carries nothing: the days
+   it owns are refused `LookupError::HoleBeforeGap`, naming it, served on
+   `/greeks.json` as `rate_stale` with that sentence as the detail, and a
+   gap row after it carries nothing either. A result always starts a clock.
+   `MAX_CARRIED_AGE_DAYS` still bounds every carried run.
+3. **Said, not silent.** `Series::unlinked_gaps` lists such rows; the
+   `/greeks.json` rate header counts them as `unlinked_gaps`; loading a
+   stored table that holds one emits one `warn` event (`rate gap rows after
+   an unexplained hole`). The table is still served: one hole refuses its
+   own days, not every day of the table.
+4. **Why not refuse the table.** A refusal at parse would withdraw every
+   rate in the table over one undocumented week, so every greek on every
+   other day would be refused for a fault that is not theirs. The days the
+   fault touches are refused by name instead. The operator's documented
+   gaps (2024-09-18, 2024-09-25, 2025-02-20, 2026-03-25, the week of
+   2026-03-30) each fall 6 to 14 days after the previous row and are
+   unaffected.
+5. **Followups taken.** `below_zero_carry_bound` and `iv_unsolved` computed
+   on a carried rate say so in their detail. A source part is read as a
+   row's own citation only when its read day is a real calendar day and its
+   location is an `http(s)` URL with a host or a path (what
+   `brutex_core::alias::Citation::url` says a location is); other words cite
+   the file. The five NSE/FAOP/68747 expiry rows carry the checksum the
+   charter records for the bytes read.
+
 ### D-6890 — An options day zip filed anywhere but its own place in its own year's zip is named where it lies, never "not held" (IA-3-OPT; FM-043) — 2026-10-20
 
 From the block D-6890..D-6899 recorded for IA-3-OPT in
