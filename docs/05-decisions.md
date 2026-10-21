@@ -77707,8 +77707,19 @@ of 8`); and `crates/store/src/file_write_door_tests.rs`
 shapes, raw and sealed, spot and option: `Held`, `Follows` and
 `Disagrees(c)` exactly where the raw writer answers `AlreadyPresent`,
 `Committed` and `OverlapDisagrees(c)`; garbage batches the raw door's own
-refusal; an empty month; nothing written). Invariants SC4-15, SC4-16; limit
-L-SC4-01.
+refusal; an empty month; nothing written); and, for the GDFL back-fill door
+(added in SC-4 repair round 2, after the second checker found this arm a
+surviving mutant), `crates/pull/src/gdfl_sealed_tests.rs`
+`a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor`
+(NIFTY's 1 s April made revision-served by a back-filled hole and by a
+sealed month's first late day, then the first 30 s of a new day and the
+whole day with the held 30 s byte-equal: each the month's next successor,
+generation 2 then 3, equal to a never-sealed store at every step, the
+original and revision 1 byte-identical, `repairing` with reason
+`revision_successor_` and `repair` journaled for each, the whole day again
+writing nothing), which fails when a `Follows::Revision` batch is routed to
+`lack_of` as before this decision (the whole day commits 0, refused as an
+overlap). Invariants SC4-15, SC4-16, SC4-17; limit L-SC4-01.
 
 ### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
 

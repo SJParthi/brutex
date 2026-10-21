@@ -221,3 +221,240 @@ fn a_day_a_sealed_month_holds_is_already_present_and_writes_nothing() {
         );
     }
 }
+
+// ── D-6247 at the GDFL door: a resumed late day at a revision-served month ─
+
+/// The NIFTY one-second month of April 2024.
+fn nifty_april() -> StorePath<'static> {
+    StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: d1().year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+}
+
+/// `count` invented NIFTY bars of `d`, one a second from 09:15:00 + `from`,
+/// at prices no real print of the index was ever made at.
+fn nifty_seconds(d: Day, from: u32, count: u32) -> Vec<Bar> {
+    (0..count)
+        .map(|s| {
+            let sod = NINE_FIFTEEN + from + s;
+            let secs = i64::from(d.days_from_epoch()) * 86_400 + i64::from(sod) - IST_OFFSET_SECS;
+            let price = 7_300_011 + i64::from(s % 89);
+            Bar {
+                ts_micros: secs * 1_000_000,
+                open: price,
+                high: price + 6,
+                low: price - 6,
+                close: price + 2,
+                volume: 0,
+                open_interest: OI_NULL,
+            }
+        })
+        .collect()
+}
+
+/// Offers `batch` to NIFTY's April through the back-fill door the import
+/// files every GDFL day through (`ingest::repair_rows`): how it was filed,
+/// the bars committed, and every failure's words.
+fn back_fill(store: &Path, batch: &[Bar]) -> (crate::ingest::Filed, usize, Vec<String>) {
+    let request = BarRequest {
+        instrument_id: String::new(),
+        listing: Listing::Index,
+        window: Window::new(d1(), day(2024, 5, 31)).unwrap(),
+        granularity: Granularity::Second1,
+    };
+    let (done, filed) = crate::ingest::repair_rows(
+        batch,
+        "NIFTY",
+        "sc4 revision door",
+        store,
+        plan(ImportKind::Indices, &request, None),
+        "sc4 revision door test",
+    );
+    let failures = done.failures.into_iter().map(|f| f.why).collect();
+    (filed, done.bars_committed, failures)
+}
+
+/// The repair journal's lines whose first word is `verb`.
+fn journal_lines(store: &Path, verb: &str) -> Vec<String> {
+    std::fs::read_to_string(store.join("audit").join("gdfl.repairs"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.split(' ').next() == Some(verb))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every file under `dir`, or nothing when it does not exist.
+fn files_or_none(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    if dir.exists() {
+        tree(dir)
+    } else {
+        BTreeMap::new()
+    }
+}
+
+/// **A RESUMED LATE DAY AT A MONTH SERVED FROM A REVISION** (SC4-17,
+/// D-6247; the second checker's blocking finding on 5448750f6). NIFTY's
+/// April is made revision-served two ways: a back-filled hole (2024-04-01
+/// and 04-03 held, then 04-02), and a sealed month's first late day
+/// (04-01..02 held and sealed, then 04-03). Each then takes the first 30 s
+/// of 2024-04-04, and then the whole 60 s, the held 30 s byte-equal: the raw
+/// month would append both, so the back-fill door files each as the month's
+/// NEXT successor (generation 2, then 3), never as a refusal of what
+/// `lack_of` sees as an overlap. After every batch the month serves exactly
+/// what a never-sealed store that took the same batches serves; the
+/// originals and every earlier revision stay byte-identical; each successor
+/// is journaled `repairing` (reason `revision successor`) before and
+/// `repair` after; and the whole day again writes nothing, journals nothing
+/// and spends no generation. Routing a `Follows::Revision` batch to the
+/// back-fill judgement instead (the code before D-6247) commits 0 of the
+/// whole day and fails here.
+#[test]
+fn a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor() {
+    use crate::ingest::Filed;
+    let april = nifty_april();
+    let generation = |store: &Path| store::generation::served(store, april).unwrap().ordinal();
+    for origin in ["hole", "sealed"] {
+        let root = scratch(&format!("sc4-revision-{origin}"));
+        let (served_from, never) = (root.join("revised"), root.join("never-sealed"));
+        for store in [&served_from, &never] {
+            std::fs::create_dir_all(store).unwrap();
+        }
+        let (first, second, third) = (
+            nifty_seconds(d1(), 0, 60),
+            nifty_seconds(d2(), 0, 60),
+            nifty_seconds(d3(), 0, 60),
+        );
+        // THE NEVER-SEALED STORE: three days in order, each an append.
+        for batch in [&first, &second, &third] {
+            assert_eq!(back_fill(&never, batch), (Filed::Appended, 60, vec![]));
+        }
+        // THE SAME THREE DAYS, ENDING SERVED FROM REVISION 1.
+        if origin == "hole" {
+            for batch in [&first, &third] {
+                assert_eq!(
+                    back_fill(&served_from, batch),
+                    (Filed::Appended, 60, vec![])
+                );
+            }
+            assert_eq!(
+                back_fill(&served_from, &second),
+                (Filed::NewGeneration, 60, vec![])
+            );
+        } else {
+            for batch in [&first, &second] {
+                assert_eq!(
+                    back_fill(&served_from, batch),
+                    (Filed::Appended, 60, vec![])
+                );
+            }
+            assert_eq!(seal_every_month(&served_from), vec![april]);
+            assert_eq!(
+                back_fill(&served_from, &third),
+                (Filed::NewGeneration, 60, vec![])
+            );
+        }
+        assert_eq!(
+            (generation(&served_from), generation(&never)),
+            (1, 0),
+            "{origin}"
+        );
+        assert_eq!(
+            served(&served_from, april, "NIFTY"),
+            served(&never, april, "NIFTY"),
+            "{origin}"
+        );
+        let originals = tree(&served_from.join("bars"));
+        let revisions = files_or_none(&served_from.join("bar-revisions-v1"));
+        assert!(!revisions.is_empty(), "{origin}: revision 1 is on disk");
+        let (intents, repairs) = (
+            journal_lines(&served_from, "repairing").len(),
+            journal_lines(&served_from, "repair").len(),
+        );
+
+        // THE RESUMED DAY: its first half, then the whole day.
+        let fourth = nifty_seconds(d4(), 0, 60);
+        for (step, batch, to) in [("half", &fourth[..30], 2_u32), ("whole", &fourth[..], 3)] {
+            assert_eq!(
+                back_fill(&never, batch),
+                (Filed::Appended, 30, vec![]),
+                "{origin} {step}: the raw month appends it"
+            );
+            assert_eq!(
+                back_fill(&served_from, batch),
+                (Filed::NewGeneration, 30, vec![]),
+                "{origin} {step}: the month's next successor"
+            );
+            assert_eq!(generation(&served_from), to, "{origin} {step}");
+            assert_eq!(
+                served(&served_from, april, "NIFTY"),
+                served(&never, april, "NIFTY"),
+                "{origin} {step}: what a never-sealed store serves"
+            );
+        }
+
+        // NOTHING EARLIER WAS REWRITTEN: the original month and revision 1
+        // byte for byte; only the two successors were added.
+        assert_eq!(tree(&served_from.join("bars")), originals, "{origin}");
+        let now = files_or_none(&served_from.join("bar-revisions-v1"));
+        for (path, bytes) in &revisions {
+            assert_eq!(now.get(path), Some(bytes), "{origin}: {}", path.display());
+        }
+        assert!(
+            now.len() > revisions.len(),
+            "{origin}: the successors exist"
+        );
+
+        // JOURNALED: each successor's intent before it, its repair after it.
+        let new_intents: Vec<String> = journal_lines(&served_from, "repairing").split_off(intents);
+        let new_repairs: Vec<String> = journal_lines(&served_from, "repair").split_off(repairs);
+        assert_eq!((new_intents.len(), new_repairs.len()), (2, 2), "{origin}");
+        for ((intent, repair), (from, offered)) in new_intents
+            .iter()
+            .zip(&new_repairs)
+            .zip([(1_u32, 30_usize), (2, 60)])
+        {
+            assert!(intent.contains("reason=revision_successor_"), "{intent}");
+            assert!(
+                intent.contains(&format!(" from_generation={from} ")),
+                "{intent}"
+            );
+            assert!(intent.contains(&format!(" offered={offered} ")), "{intent}");
+            assert!(
+                repair.contains(&format!(
+                    " from_generation={from} to_generation={} ",
+                    from + 1
+                )),
+                "{repair}"
+            );
+        }
+
+        // THE WHOLE DAY AGAIN: held, nothing written, nothing journaled.
+        let (bars_now, revisions_now) = (
+            tree(&served_from.join("bars")),
+            files_or_none(&served_from.join("bar-revisions-v1")),
+        );
+        let journal_now = journal_lines(&served_from, "repairing").len();
+        assert_eq!(
+            back_fill(&served_from, &fourth),
+            (Filed::Appended, 0, vec![])
+        );
+        assert_eq!(generation(&served_from), 3, "{origin}: no generation spent");
+        assert_eq!(tree(&served_from.join("bars")), bars_now, "{origin}");
+        assert_eq!(
+            files_or_none(&served_from.join("bar-revisions-v1")),
+            revisions_now,
+            "{origin}"
+        );
+        assert_eq!(journal_lines(&served_from, "repairing").len(), journal_now);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
