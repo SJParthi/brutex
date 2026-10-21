@@ -1804,6 +1804,300 @@ fn a_year_zip_is_indexed_once_and_each_day_is_one_lookup() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// FM-043 (DATA-007, D-4834's rule for options): an options day zip packed
+/// into another year's zip (2025-12-31 inside 2026.zip) is noted when that
+/// zip's directory is walked, and its day refuses `day_zip_misfiled` naming
+/// where the bytes are and where its name files them, never `day_not_held`;
+/// the other zip's own days still read. Asked before the other zip was ever
+/// walked, with no zip of the day's own year, and with one that holds other
+/// days only. A copy at its own place beside one elsewhere is two copies of
+/// one day, `archive_duplicate_day` (D-4818's one rule).
+#[test]
+fn a_day_zip_in_the_next_years_zip_is_named() {
+    let (eve, own, before) = (day(2025, 12, 31), day(2026, 1, 2), day(2025, 12, 30));
+    let ticker = "NIFTY29JAN2626000CE";
+    let file = |d: Day| csv(&[row(&format!("{ticker}.NFO"), d, 33_300, "10", 75, 300)]);
+    let day_zip = |d: Day| zip(&[(&entry(d, ticker), &file(d), Method::Deflated)]);
+    let (z_eve, z_own, z_before) = (day_zip(eve), day_zip(own), day_zip(before));
+    let found = "DEC_2025/GFDLNFO_TICK_31122025.zip";
+    let root = scratch("nfo-fm043");
+    let dir = root.join("zips");
+    put(
+        &dir,
+        "2026.zip",
+        &zip(&[
+            ("DEC_2025/", b"", Method::Stored),
+            (found, &z_eve, Method::Stored),
+            ("JAN_2026/GFDLNFO_TICK_02012026.zip", &z_own, Method::Stored),
+        ]),
+    );
+    let misfiled = CmRefusal::DayZipMisfiled {
+        found: format!("2026.zip:{found}"),
+        expected: format!("2025.zip:{found}"),
+    };
+    let words = misfiled.to_string();
+    assert!(
+        words.contains("2026.zip:") && words.contains("2025.zip:"),
+        "{words}"
+    );
+
+    // No 2025.zip at all, and 2026.zip never walked before the day is asked.
+    let zips = NfoZips::new(&dir);
+    assert_eq!(zips.day(eve).err(), Some(misfiled.clone()));
+    let listing = zips.day(own).unwrap().unwrap();
+    assert_eq!(listing.entries().len(), 1);
+    assert_eq!(zips.fetch(&listing.entries()[0]).unwrap(), file(own));
+
+    // A 2025.zip that holds another day of December, not this one.
+    let only_before = zip(&[(
+        "DEC_2025/GFDLNFO_TICK_30122025.zip",
+        &z_before,
+        Method::Stored,
+    )]);
+    put(&dir, "2025.zip", &only_before);
+    let zips = NfoZips::new(&dir);
+    assert_eq!(zips.day(eve).err(), Some(misfiled.clone()));
+    assert!(zips.day(before).unwrap().is_some());
+    assert!(zips.day(own).unwrap().is_some());
+
+    // The day at its own place as well: two copies of one day.
+    let both = zip(&[
+        (
+            "DEC_2025/GFDLNFO_TICK_30122025.zip",
+            &z_before,
+            Method::Stored,
+        ),
+        (found, &z_eve, Method::Stored),
+    ]);
+    put(&dir, "2025.zip", &both);
+    let zips = NfoZips::new(&dir);
+    assert_eq!(
+        zips.day(eve).err(),
+        Some(CmRefusal::ArchiveDuplicateDay { day: eve })
+    );
+    assert!(zips.day(before).unwrap().is_some());
+    assert!(zips.day(own).unwrap().is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// FM-043's extremes (IA-3-OPT, D-4818's one rule over the year zips): a day
+/// zip under another month folder, at the year zip's root, in a fiscal-year
+/// `2024-25.zip`, or with two copies elsewhere is named, never read as not
+/// held; names that are not a `*.zip` (a `.DS_Store`, `2024.zip.part`,
+/// `README.txt`) are never walked; a zip that cannot be read refuses its
+/// own days, and a day held nowhere readable answers the first unread zip's
+/// refusal until it reads; a directory that is a file refuses by name and
+/// one that is absent holds nothing; and threads sharing one source see one
+/// answer.
+#[test]
+fn a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held() {
+    let ticker = "NIFTY25APR2422000CE";
+    let file = |d: Day| csv(&[row(&format!("{ticker}.NFO"), d, 33_300, "10", 75, 300)]);
+    let day_zip = |d: Day| zip(&[(&entry(d, ticker), &file(d), Method::Deflated)]);
+    let (d1, d2, d3, d4, d5) = (
+        day(2024, 4, 1),
+        day(2024, 4, 2),
+        day(2024, 4, 3),
+        day(2024, 4, 4),
+        day(2024, 4, 5),
+    );
+    let (z1, z2, z3, z4) = (day_zip(d1), day_zip(d2), day_zip(d3), day_zip(d4));
+    let root = scratch("nfo-fm043-extremes");
+    let dir = root.join("zips");
+    put(
+        &dir,
+        "2024.zip",
+        &zip(&[
+            ("APR_2024/", b"", Method::Stored),
+            ("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored),
+            ("MAY_2024/GFDLNFO_TICK_02042024.zip", &z2, Method::Stored),
+            ("GFDLNFO_TICK_03042024.zip", &z3, Method::Stored),
+            ("MAY_2024/GFDLNFO_TICK_04042024.zip", &z4, Method::Stored),
+            ("APR_2024/GFDLNFO_TICK_31022024.zip", &z4, Method::Stored),
+            ("APR_2024/notes.txt", b"invented", Method::Stored),
+        ]),
+    );
+    put(
+        &dir,
+        "2023.zip",
+        &zip(&[("APR_2024/GFDLNFO_TICK_04042024.zip", &z4, Method::Stored)]),
+    );
+    // A fiscal-year zip holding a day, a zip of another name holding no day
+    // zip (walked, nothing noted), and names that are not a `*.zip` (never
+    // opened, so their bytes, which are no zip, refuse nothing).
+    put(
+        &dir,
+        "2024-25.zip",
+        &zip(&[(
+            "APR_2024/GFDLNFO_TICK_05042024.zip",
+            &day_zip(d5),
+            Method::Stored,
+        )]),
+    );
+    put(
+        &dir,
+        "20245.zip",
+        &zip(&[("README.txt", b"invented", Method::Stored)]),
+    );
+    for stray in [".DS_Store", "2024.zip.part", "README.txt"] {
+        put(&dir, stray, b"not a year zip");
+    }
+    let zips = NfoZips::new(&dir);
+    let got = zips.day(d1).unwrap().unwrap();
+    assert_eq!(zips.fetch(&got.entries()[0]).unwrap(), file(d1));
+    assert_eq!(
+        zips.day(d2).err(),
+        Some(CmRefusal::DayZipMisfiled {
+            found: "2024.zip:MAY_2024/GFDLNFO_TICK_02042024.zip".into(),
+            expected: "2024.zip:APR_2024/GFDLNFO_TICK_02042024.zip".into(),
+        })
+    );
+    assert_eq!(
+        zips.day(d3).err(),
+        Some(CmRefusal::DayZipMisfiled {
+            found: "2024.zip:GFDLNFO_TICK_03042024.zip".into(),
+            expected: "2024.zip:APR_2024/GFDLNFO_TICK_03042024.zip".into(),
+        })
+    );
+    assert_eq!(
+        zips.day(d4).err(),
+        Some(CmRefusal::ArchiveDuplicateDay { day: d4 })
+    );
+    assert_eq!(
+        zips.day(d5).err(),
+        Some(CmRefusal::DayZipMisfiled {
+            found: "2024-25.zip:APR_2024/GFDLNFO_TICK_05042024.zip".into(),
+            expected: "2024.zip:APR_2024/GFDLNFO_TICK_05042024.zip".into(),
+        })
+    );
+    let d8 = day(2024, 4, 8);
+    assert!(zips.day(d8).unwrap().is_none(), "held nowhere");
+    assert_eq!(
+        NfoZips::day_zip_name(day(2025, 12, 31)),
+        "DEC_2025/GFDLNFO_TICK_31122025.zip"
+    );
+
+    // Threads sharing one fresh source: one walk, one answer each day.
+    let shared = NfoZips::new(&dir);
+    let answers: Vec<Vec<String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let zips = shared.clone();
+                scope.spawn(move || {
+                    [d1, d2, d3, d4, d5, d8]
+                        .map(|d| match zips.day(d) {
+                            Ok(Some(listing)) => format!("held {}", listing.entries().len()),
+                            Ok(None) => "none".to_owned(),
+                            Err(why) => why.to_string(),
+                        })
+                        .to_vec()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for answer in &answers {
+        assert_eq!(answer, &answers[0]);
+    }
+    assert_eq!(answers[0][0], "held 1");
+    assert_eq!(answers[0][5], "none");
+
+    // A year zip that is not a zip: its own days refuse it, a day held
+    // nowhere readable answers it, a day held at its own place still reads,
+    // and once the zip reads, both read as they are.
+    let broken = root.join("broken");
+    put(
+        &broken,
+        "2024.zip",
+        &zip(&[("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored)]),
+    );
+    put(&broken, "2025.zip", b"not a zip at all, invented");
+    let zips = NfoZips::new(&broken);
+    assert!(zips.day(d1).unwrap().is_some());
+    let own = zips.day(day(2025, 4, 1)).expect_err("its own day refuses");
+    assert_eq!(zips.day(d2).err(), Some(own.clone()), "{own}");
+    let mended = day_zip(day(2025, 4, 1));
+    put(
+        &broken,
+        "2025.zip",
+        &zip(&[(
+            "APR_2025/GFDLNFO_TICK_01042025.zip",
+            &mended,
+            Method::Stored,
+        )]),
+    );
+    assert!(zips.day(day(2025, 4, 1)).unwrap().is_some());
+    assert!(zips.day(d2).unwrap().is_none(), "no unread zip is left");
+
+    // Any other zip that is not one is unread by its name, never skipped:
+    // a day held nowhere answers its refusal; a day held at its place reads.
+    let junk = root.join("junk");
+    put(
+        &junk,
+        "2024.zip",
+        &zip(&[("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored)]),
+    );
+    put(&junk, "junk.zip", b"not a zip at all, invented");
+    let zips = NfoZips::new(&junk);
+    assert!(zips.day(d1).unwrap().is_some());
+    assert_eq!(zips.day(d2).err(), Some(own));
+
+    // A zip whose name is not a lowercase `.zip` is unread by its name:
+    // never read as a year zip of another spelling, never passed over.
+    let upper = root.join("upper");
+    put(
+        &upper,
+        "2024.zip",
+        &zip(&[("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored)]),
+    );
+    put(&upper, "Extra.ZIP", b"invented");
+    let zips = NfoZips::new(&upper);
+    assert!(zips.day(d1).unwrap().is_some());
+    assert_eq!(
+        zips.day(d2).err(),
+        Some(CmRefusal::ArchiveMalformed {
+            what: "a zip name that is not UTF-8 ending in a lowercase .zip",
+        })
+    );
+
+    // A year zip that cannot be opened, where the platform refuses it.
+    let locked = root.join("locked");
+    let path = put(&locked, "2026.zip", b"invented");
+    put(
+        &locked,
+        "2024.zip",
+        &zip(&[("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored)]),
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&path).is_err() {
+            let zips = NfoZips::new(&locked);
+            let denied = Some(CmRefusal::ArchiveUnavailable {
+                kind: std::io::ErrorKind::PermissionDenied,
+            });
+            assert_eq!(zips.day(day(2026, 1, 2)).err(), denied);
+            assert_eq!(zips.day(d2).err(), denied);
+            assert!(zips.day(d1).unwrap().is_some());
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    // The directory is a file, or is absent.
+    let plain = put(&root, "plain", b"invented");
+    assert!(matches!(
+        NfoZips::new(&plain).day(d1),
+        Err(CmRefusal::ArchiveUnavailable { .. })
+    ));
+    assert!(
+        NfoZips::new(&root.join("absent"))
+            .day(d1)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// WP-12e (DB-B02, DB-B03, DB-B13) against the operator's REAL options zips,
 /// read-only: the unchanged-lot arm of the detector on ex-dates the audit
 /// measured, with the vendor day after each as the control, and on ordinary

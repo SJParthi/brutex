@@ -946,3 +946,262 @@ fn outer_central(bytes: &[u8]) -> usize {
     assert_eq!(bytes[at..at + 4], [0x50, 0x4b, 0x01, 0x02]);
     at
 }
+
+/// One invented options file of `ticker` on `d`: a row every 2,003 seconds
+/// of the session, at a price no NIFTY option printed.
+fn option_csv(ticker: &str, d: Day) -> Vec<u8> {
+    let stem = format!("{ticker}.NFO");
+    let rows: Vec<String> = (0..22_500)
+        .step_by(2_003)
+        .map(|s| {
+            row(
+                &stem,
+                d,
+                NINE_FIFTEEN + s,
+                "101.25",
+                u64::from(s % 3) * 25,
+                1_000,
+            )
+        })
+        .collect();
+    csv(&rows)
+}
+
+/// The options day zip of `d`: one NIFTY call, its member deflated as the
+/// vendor's are, under the day folder with the vendor's `\` separator.
+fn options_day_zip(d: Day) -> Vec<u8> {
+    let ticker = "NIFTY04APR2422000CE";
+    let name = format!(
+        "{}\\Options\\{ticker}.NFO.csv",
+        crate::gdfl_nfo::day_folder_name(d)
+    );
+    zip(&[(&name, &option_csv(ticker, d), Method::Deflated)])
+}
+
+/// The members of one invented zip: each a name, its bytes and how it is
+/// stored.
+type Members = Vec<(String, Vec<u8>, Method)>;
+
+/// The year zips `zips` (each a file name and its members) written under
+/// `root/<tag>`, whose directory is returned.
+fn year_zips(root: &Path, tag: &str, zips: &[(&str, Members)]) -> PathBuf {
+    let dir = root.join(tag);
+    for (name, members) in zips {
+        let refs: Vec<(&str, &[u8], Method)> = members
+            .iter()
+            .map(|(n, b, m)| (n.as_str(), b.as_slice(), *m))
+            .collect();
+        put(&dir, name, &zip(&refs));
+    }
+    dir
+}
+
+/// What one options container fault leaves, imported twice over `d1..d2`
+/// from `source` (IA-GR-27, the options half): `d1` is refused with `code`,
+/// named by `named`, and never closed, so the second run reads it again and
+/// fails it again; `d2` closes done with its one file.
+fn faulty_options_day_stays_open<S>(source: &S, store: &Path, code: &str, named: &str)
+where
+    S: crate::gdfl_nfo::NfoSource + Sync,
+    S::Locator: Sync,
+{
+    let run = Run {
+        kind: ImportKind::Options,
+        from: d1(),
+        to: d2(),
+        only: &[],
+        store_root: store,
+    };
+    for pass in 0..2 {
+        let report = run_nfo(source, &run).unwrap();
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "{code} pass {pass}: {:?}",
+            report.failures
+        );
+        assert!(
+            report.failures[0].why.contains(named),
+            "{code} pass {pass}: {:?}",
+            report.failures
+        );
+        let want_files = usize::from(pass == 0);
+        assert_eq!(report.files, want_files, "{code} pass {pass}");
+    }
+    let line = close_of(store, "options", d1());
+    assert!(
+        line.starts_with("refused options 2024-04-01 "),
+        "{code}: {line}"
+    );
+    assert!(line.contains(&format!("reason={code}")), "{code}: {line}");
+    assert!(!line.contains("day_not_held"), "{code}: {line}");
+    let done = close_of(store, "options", d2());
+    assert!(
+        done.starts_with("done options 2024-04-02 "),
+        "{code}: {done}"
+    );
+    let journal = Journal::load(journal_path(store)).unwrap();
+    assert!(!journal.done.contains("options 2024-04-01 *"), "{code}");
+    assert!(journal.done.contains("options 2024-04-02 *"), "{code}");
+}
+
+/// IA-GR-27, the options half (IA-3-OPT, FM-043): every container refusal an
+/// options source raises reaches its `cm_cause` arm through
+/// `NfoRefusal::Source`, unchanged, and none of them closes a day: imported
+/// twice, the faulty day is refused by its own code both times and the next
+/// day closes done. Proved from the sources themselves: a day zip in the
+/// next year's zip, two copies of one day across two year zips, a day zip
+/// the year zip compresses, an encrypted day zip, and a tick-store day file
+/// under another month's folder.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture per options container fault, each imported twice"
+)]
+fn every_options_source_refusal_reaches_its_cm_arm() {
+    use crate::gdfl_import::{cm_cause, nfo_cause};
+    use crate::gdfl_nfo::{NfoRefusal, NfoTickStore, NfoZips};
+    // The arms themselves, one value of each container and source refusal.
+    let arms = [
+        CmRefusal::ArchiveDuplicateDay { day: d1() },
+        CmRefusal::ArchiveMemberCompressed { member: "m".into() },
+        CmRefusal::ArchiveMethodUnknown {
+            member: "m".into(),
+            method: 12,
+        },
+        CmRefusal::ArchiveMemberEncrypted { member: "m".into() },
+        CmRefusal::ArchivePrefixed { bytes: 7 },
+        CmRefusal::DayZipMisfiled {
+            found: "f".into(),
+            expected: "e".into(),
+        },
+        CmRefusal::DayFileMisfiled {
+            found: "f".into(),
+            expected: "e".into(),
+        },
+        CmRefusal::ArchiveUnavailable {
+            kind: std::io::ErrorKind::PermissionDenied,
+        },
+        CmRefusal::ArchiveMalformed { what: "w" },
+        CmRefusal::SourceLengthMismatch { file: 1, member: 2 },
+        CmRefusal::SourceCrcMismatch { file: 1, member: 2 },
+        CmRefusal::ArchiveMemberCorrupt { member: "m".into() },
+        CmRefusal::TickStoreMalformed { what: "w" },
+        CmRefusal::TickStoreUnavailable {
+            kind: std::io::ErrorKind::PermissionDenied,
+        },
+    ];
+    for why in arms {
+        let cause = nfo_cause(&NfoRefusal::Source(why.clone()));
+        assert_eq!(cause, cm_cause(&why), "{why:?}");
+        assert!(!cause.closes, "{why:?} closes a day");
+    }
+
+    let root = scratch("ia3-opt-gr27");
+    let own = |d: Day, method: Method| {
+        (
+            format!("APR_2024/{}.zip", crate::gdfl_nfo::day_folder_name(d)),
+            options_day_zip(d),
+            method,
+        )
+    };
+    // A day zip in the next year's zip.
+    let misfiled = year_zips(
+        &root,
+        "misfiled",
+        &[
+            ("2024.zip", vec![own(d2(), Method::Stored)]),
+            ("2025.zip", vec![own(d1(), Method::Stored)]),
+        ],
+    );
+    faulty_options_day_stays_open(
+        &NfoZips::new(&misfiled),
+        &root.join("S-misfiled"),
+        "day_zip_misfiled",
+        "2025.zip:APR_2024/GFDLNFO_TICK_01042024.zip",
+    );
+    // Two copies of one day, one in each of two year zips.
+    let twice = year_zips(
+        &root,
+        "twice",
+        &[
+            (
+                "2024.zip",
+                vec![own(d1(), Method::Stored), own(d2(), Method::Stored)],
+            ),
+            ("2025.zip", vec![own(d1(), Method::Stored)]),
+        ],
+    );
+    faulty_options_day_stays_open(
+        &NfoZips::new(&twice),
+        &root.join("S-twice"),
+        "archive_duplicate_day",
+        "2024-04-01",
+    );
+    // A day zip the year zip compresses.
+    let packed = year_zips(
+        &root,
+        "packed",
+        &[(
+            "2024.zip",
+            vec![own(d1(), Method::Deflated), own(d2(), Method::Stored)],
+        )],
+    );
+    faulty_options_day_stays_open(
+        &NfoZips::new(&packed),
+        &root.join("S-packed"),
+        "archive_member_compressed",
+        "GFDLNFO_TICK_01042024.zip",
+    );
+    // An encrypted day zip: bit 0 of its flag in its local header and its
+    // central record.
+    let encrypted = year_zips(
+        &root,
+        "encrypted",
+        &[(
+            "2024.zip",
+            vec![own(d1(), Method::Stored), own(d2(), Method::Stored)],
+        )],
+    );
+    let path = encrypted.join("2024.zip");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6] |= 1;
+    let central = outer_central(&bytes);
+    bytes[central + 8] |= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    faulty_options_day_stays_open(
+        &NfoZips::new(&encrypted),
+        &root.join("S-encrypted"),
+        "archive_member_encrypted",
+        "GFDLNFO_TICK_01042024.zip",
+    );
+    // A tick-store day file under another month's folder.
+    let ts = root.join("ts");
+    let entry = |d: Day| {
+        format!(
+            "{}\\Options\\NIFTY04APR2422000CE.NFO.csv",
+            crate::gdfl_nfo::day_folder_name(d)
+        )
+    };
+    let (e1, e2) = (entry(d1()), entry(d2()));
+    let (f1, f2) = (
+        option_csv("NIFTY04APR2422000CE", d1()),
+        option_csv("NIFTY04APR2422000CE", d2()),
+    );
+    put(
+        &ts,
+        "options/2024/MAY_2024/GFDLNFO_TICK_01042024.bts",
+        &bts(&[(&e1, &f1)]),
+    );
+    put(
+        &ts,
+        "options/2024/APR_2024/GFDLNFO_TICK_02042024.bts",
+        &bts(&[(&e2, &f2)]),
+    );
+    faulty_options_day_stays_open(
+        &NfoTickStore::new(&ts),
+        &root.join("S-ts"),
+        "day_file_misfiled",
+        "MAY_2024",
+    );
+}

@@ -1117,19 +1117,70 @@ impl NfoSource for NfoTickStore {
 /// A year whose zip is absent is asked again each day, so a zip that appears
 /// mid-run is read; one that refuses is not kept, so each day names the
 /// refusal as before. Clones share the index.
+///
+/// # A day zip in another year's zip (FM-043, IA-3-OPT, D-6890, D-4818's rule)
+///
+/// A day was looked for only in `<its year>.zip`, so 2025-12-31 packed into
+/// `2026.zip`, or a day packed into a fiscal-year `2025-26.zip`, was never
+/// listed and its day read `day_not_held`. The first day asked now lists the
+/// directory ONCE (O(names in it)) and walks every `*.zip` in it once: each
+/// `<yyyy>.zip` as that year's index, noting each
+/// `GFDLNFO_TICK_<ddmmyyyy>.zip` filed anywhere but its own place, and any
+/// other zip as a container of copies that are all elsewhere, each noted as
+/// `<zip>:<entry>`. Every day after is one probe of its own year's index and
+/// one of those notes. The copies of a day are filed as the capital-market
+/// archive files them (`gdfl_archive::file_copy`): one at its own place is
+/// the day zip, one only elsewhere refuses [`CmRefusal::DayZipMisfiled`]
+/// naming where it was found and where its name files it, and a second copy
+/// anywhere refuses [`CmRefusal::ArchiveDuplicateDay`]. A zip that refuses
+/// while the directory is listed is unread: a year zip refuses its own days
+/// by name when they are asked, and a day held nowhere that could be read
+/// answers the first unread zip's refusal, never "not held", because that
+/// zip may hold it.
 #[derive(Debug, Clone)]
 pub struct NfoZips {
     dir: PathBuf,
-    years: Arc<std::sync::Mutex<HashMap<u16, Arc<YearIndex>>>>,
+    years: Arc<std::sync::Mutex<Years>>,
 }
 
-/// One year zip, open, and its day zips by exact entry name: the entry, or
-/// [`None`] where two records share the name, which every day of that name
+/// What one run has read of the directory of year zips.
+#[derive(Debug, Default)]
+struct Years {
+    /// Each year zip walked, by the year its name states.
+    zips: HashMap<u16, Arc<YearIndex>>,
+    /// Whether the directory has been listed and each zip in it walked.
+    listed: bool,
+    /// Each day zip found anywhere but its own place, by the day its name
+    /// states: `<zip>:<entry>` for each copy, in the order found.
+    away: HashMap<Day, Vec<String>>,
+    /// The zips that refused while the directory was listed, by name: a
+    /// `<yyyy>.zip` until it reads when a day of its year is asked again,
+    /// any other zip for the life of this source (one run), since nothing
+    /// asks it again.
+    unread: std::collections::BTreeMap<String, CmRefusal>,
+}
+
+/// One year zip, open, and its day zips at their own place by day: the
+/// entry, or [`None`] where two records file the day there, which that day
 /// refuses as [`CmRefusal::ArchiveDuplicateDay`].
 #[derive(Debug)]
 struct YearIndex {
     file: Arc<std::fs::File>,
-    days: HashMap<String, Option<ZipEntry>>,
+    days: HashMap<Day, Option<ZipEntry>>,
+}
+
+/// A failed open or measure of a zip, by its kind.
+fn year_zip_unavailable(why: &std::io::Error) -> CmRefusal {
+    CmRefusal::ArchiveUnavailable { kind: why.kind() }
+}
+
+/// The central directory of the zip `file`, read once: O(its entries).
+fn year_zip_directory(file: &std::fs::File) -> Result<Vec<ZipEntry>, CmRefusal> {
+    let len = file
+        .metadata()
+        .map_err(|why| year_zip_unavailable(&why))?
+        .len();
+    zip_entries(file, 0, len)
 }
 
 impl NfoZips {
@@ -1138,11 +1189,19 @@ impl NfoZips {
     pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
-            years: Arc::new(std::sync::Mutex::new(HashMap::with_capacity(16))),
+            years: Arc::new(std::sync::Mutex::new(Years::default())),
         }
     }
 
-    /// The index of `year`'s zip, built on first use and kept; [`None`] when
+    /// `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`: the name a year zip files
+    /// the day zip of `day` under, its own place inside `<yyyy>.zip`.
+    #[must_use]
+    pub fn day_zip_name(day: Day) -> String {
+        format!("{}/{}.zip", month_folder(day), day_folder_name(day))
+    }
+
+    /// The index of `year`'s zip, built on first use and kept, its day zips
+    /// filed elsewhere noted in `years.away` as it is walked; [`None`] when
     /// the zip is absent.
     ///
     /// # Errors
@@ -1150,28 +1209,28 @@ impl NfoZips {
     /// The zip refusals of [`zip_entries`], and
     /// [`CmRefusal::ArchiveUnavailable`] for a zip that cannot be opened or
     /// measured.
-    fn year(&self, year: u16) -> Result<Option<Arc<YearIndex>>, CmRefusal> {
-        let unavailable = |why: std::io::Error| CmRefusal::ArchiveUnavailable { kind: why.kind() };
-        // A poisoned index is still a correct one: every value in it was
-        // inserted whole, after its walk finished.
-        let mut years = self
-            .years
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = years.get(&year) {
+    fn year(&self, years: &mut Years, year: u16) -> Result<Option<Arc<YearIndex>>, CmRefusal> {
+        if let Some(index) = years.zips.get(&year) {
             return Ok(Some(Arc::clone(index)));
         }
-        let path = self.dir.join(format!("{year:04}.zip"));
-        let file = match std::fs::File::open(&path) {
+        let name = format!("{year:04}.zip");
+        let file = match std::fs::File::open(self.dir.join(&name)) {
             Ok(file) => file,
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(why) => return Err(unavailable(why)),
+            Err(why) => return Err(year_zip_unavailable(&why)),
         };
-        let len = file.metadata().map_err(unavailable)?.len();
-        let entries = zip_entries(&file, 0, len)?;
-        let mut days: HashMap<String, Option<ZipEntry>> = HashMap::with_capacity(entries.len());
+        let entries = year_zip_directory(&file)?;
+        let mut days: HashMap<Day, Option<ZipEntry>> = HashMap::with_capacity(entries.len());
+        let mut away: Vec<(Day, String)> = Vec::new();
         for entry in entries {
-            match days.entry(entry.name.clone()) {
+            let Some(day) = named_day_zip(&entry.name) else {
+                continue;
+            };
+            if day.year() != year || entry.name != Self::day_zip_name(day) {
+                away.push((day, format!("{name}:{}", entry.name)));
+                continue;
+            }
+            match days.entry(day) {
                 std::collections::hash_map::Entry::Occupied(mut twice) => {
                     twice.insert(None);
                 }
@@ -1180,13 +1239,109 @@ impl NfoZips {
                 }
             }
         }
+        // Filed whole, after the walk: a poisoned lock still holds a whole
+        // index and every note of it, or neither.
         let index = Arc::new(YearIndex {
             file: Arc::new(file),
             days,
         });
-        years.insert(year, Arc::clone(&index));
+        for (day, found) in away {
+            years.away.entry(day).or_default().push(found);
+        }
+        years.unread.remove(&name);
+        years.zips.insert(year, Arc::clone(&index));
         Ok(Some(index))
     }
+
+    /// Lists the directory once and walks each `*.zip` in it (FM-043):
+    /// O(names in the directory) plus O(entries) per zip, once per run. A
+    /// missing directory lists no zip, as an absent year zip is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`CmRefusal::ArchiveUnavailable`] for a directory that cannot be
+    /// listed.
+    fn list(&self, years: &mut Years) -> Result<(), CmRefusal> {
+        if years.listed {
+            return Ok(());
+        }
+        let names = match std::fs::read_dir(&self.dir) {
+            Ok(names) => names,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                years.listed = true;
+                return Ok(());
+            }
+            Err(why) => return Err(year_zip_unavailable(&why)),
+        };
+        for name in names {
+            let name = name.map_err(|why| year_zip_unavailable(&why))?.file_name();
+            let is_zip = Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+            if !is_zip {
+                continue;
+            }
+            // A zip whose name is not UTF-8 ending in a lowercase `.zip`
+            // (`2024.ZIP`) is never read as another name, and never passed
+            // over: it is unread, so a day held nowhere names it.
+            let Some(name) = name
+                .to_str()
+                .filter(|name| name.strip_suffix(".zip").is_some())
+            else {
+                years.unread.insert(
+                    name.to_string_lossy().into_owned(),
+                    CmRefusal::ArchiveMalformed {
+                        what: "a zip name that is not UTF-8 ending in a lowercase .zip",
+                    },
+                );
+                continue;
+            };
+            if let Some(year) = year_zip_year(name) {
+                if let Err(why) = self.year(years, year) {
+                    years.unread.insert(name.to_owned(), why);
+                }
+                continue;
+            }
+            // Any other zip (a fiscal-year `2025-26.zip`): every day zip in
+            // it is elsewhere than its own place.
+            match std::fs::File::open(self.dir.join(name))
+                .map_err(|why| year_zip_unavailable(&why))
+                .and_then(|file| year_zip_directory(&file))
+            {
+                Ok(entries) => {
+                    for entry in entries {
+                        if let Some(day) = named_day_zip(&entry.name) {
+                            let found = format!("{name}:{}", entry.name);
+                            years.away.entry(day).or_default().push(found);
+                        }
+                    }
+                }
+                Err(why) => {
+                    years.unread.insert(name.to_owned(), why);
+                }
+            }
+        }
+        years.listed = true;
+        Ok(())
+    }
+}
+
+/// The year `<yyyy>.zip` states, or `None` for any other name.
+fn year_zip_year(name: &str) -> Option<u16> {
+    let digits = name.strip_suffix(".zip")?;
+    if digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// The day an entry's last name states when it is a day zip's,
+/// `GFDLNFO_TICK_<ddmmyyyy>.zip` with a real date, wherever it lies.
+fn named_day_zip(entry: &str) -> Option<Day> {
+    let last = entry.rsplit(['/', '\\']).next().unwrap_or(entry);
+    let stem = last.strip_prefix(FOLDER_PREFIX)?.strip_suffix(".zip")?;
+    crate::gdfl_cm::ddmmyyyy(stem)
 }
 
 /// Where one member of an options day zip lies: the year zip, shared by
@@ -1220,15 +1375,39 @@ impl NfoSource for NfoZips {
     type Locator = ZipFileLocator;
 
     fn day(&self, day: Day) -> Result<Option<NfoDay<ZipFileLocator>>, CmRefusal> {
-        let Some(year) = self.year(day.year())? else {
-            return Ok(None);
+        // A poisoned index is still a correct one: every value in it was
+        // filed whole, after its walk finished.
+        let mut years = self
+            .years
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.list(&mut years)?;
+        let own = self.year(&mut years, day.year())?;
+        let away = years.away.get(&day).map_or(&[][..], Vec::as_slice);
+        let here = own
+            .as_ref()
+            .and_then(|index| index.days.get(&day).map(|slot| (index, slot)));
+        // D-4818's one rule, as `gdfl_archive::file_copy` files a copy.
+        let (file, inner) = match (here, away) {
+            (Some((index, Some(inner))), []) => (Arc::clone(&index.file), inner.clone()),
+            (None, [found]) => {
+                return Err(CmRefusal::DayZipMisfiled {
+                    found: found.clone(),
+                    expected: format!("{:04}.zip:{}", day.year(), Self::day_zip_name(day)),
+                });
+            }
+            (None, []) => {
+                // Held nowhere that could be read: an unread zip may hold it.
+                return years
+                    .unread
+                    .values()
+                    .next()
+                    .map_or(Ok(None), |why| Err(why.clone()));
+            }
+            _ => return Err(CmRefusal::ArchiveDuplicateDay { day }),
         };
-        let want = format!("{}/{}.zip", month_folder(day), day_folder_name(day));
-        match year.days.get(&want) {
-            None => Ok(None),
-            Some(None) => Err(CmRefusal::ArchiveDuplicateDay { day }),
-            Some(Some(inner)) => day_listing(&year.file, inner, day).map(Some),
-        }
+        drop(years);
+        day_listing(&file, &inner, day).map(Some)
     }
 
     fn fetch(&self, file: &ListedFile<ZipFileLocator>) -> Result<Vec<u8>, CmRefusal> {
@@ -1526,3 +1705,54 @@ mod tests;
 #[cfg(test)]
 #[path = "gdfl_nfo_attack_tests.rs"]
 mod attack_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod cloud_mutant_tests {
+    //! Mutant kills for the options decoder's private quote count (cloud
+    //! mutation round, 2026-10-16).
+
+    use super::{HEADER_OPEN_INTEREST, decode};
+    use crate::session::Day;
+
+    /// A row is quoted when its bid or its ask is not zero, and a zero is
+    /// every digit `0`, written with places or without. Six quote-only rows
+    /// (no traded quantity), four quoted: both sides `0`, both `0.00`, a zero
+    /// bid with a live ask, a live bid with a zero ask, prices with no `0`
+    /// digit at all, and prices holding zeros that are not zero. Invented.
+    #[test]
+    fn a_row_is_quoted_when_its_bid_or_its_ask_is_not_zero() {
+        let stem = "ZZOPT04APR2422000CE.NFO";
+        // Built, not written: a bare digit literal is gate 1d's shape.
+        let whole = 15.to_string();
+        let quotes = [
+            ("0", "0"),
+            ("0.00", "0.00"),
+            ("0", "12.50"),
+            ("12.05", "0"),
+            (whole.as_str(), whole.as_str()),
+            ("10.50", "10.50"),
+        ];
+        let body: String = core::iter::once(format!("{HEADER_OPEN_INTEREST}\n"))
+            .chain(quotes.iter().enumerate().map(|(second, (bid, ask))| {
+                format!("{stem},02/04/2024,09:15:{second:02},10.05,{bid},75,{ask},75,0,300\n")
+            }))
+            .collect();
+        let got = decode(body.as_bytes(), stem, Day::new(2024, 4, 2).unwrap()).unwrap();
+        assert_eq!((got.rows.len(), got.quoted_rows), (6, 4));
+    }
+
+    /// The monthly expiry walks back over a holiday (Thu 29 Mar 2018) to
+    /// the trading day before it, and answers inside ten seconds: a walk
+    /// that stops stepping back fails here instead of hanging the run.
+    #[test]
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    fn the_monthly_walk_back_over_a_holiday_answers_within_a_bound() {
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(super::monthly_expiry(2018, 3)));
+        let got = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("answered within ten seconds");
+        assert_eq!(got, Some(Day::new(2018, 3, 28).unwrap()));
+    }
+}
