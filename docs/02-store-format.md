@@ -4875,8 +4875,8 @@ the same name is unlinked first and its size returned in `Installed::Written`'s
 final name (which refuses if the name exists, so two writers can never
 overwrite each other), the temporary is unlinked whether the link succeeded or
 not and the directory flushed: a reader never sees a half-written file, and a
-refused install leaves no temporary (only a kill can, which is counted and
-never read). Any prefix of a build's installs is a servable, resumable
+refused install leaves no temporary (only a kill can, which is counted, named
+by every later build and by `show`, never read and left in place: PIT-33). Any prefix of a build's installs is a servable, resumable
 directory (D-5167). The reader serves
 the HIGHEST generation of each month and refuses the month when that file
 fails any check below; it never falls back to an older generation. A hidden
@@ -4960,7 +4960,7 @@ and one slice. `is_member(name, day)`: the dated symbol changes walked from
 record after `known_to` included), or one whose status is not 1, is refused as
 "membership unknown" with its reason. Flat at 1x, 10x and 100x the held days,
 known, refused and outside: C-PIT-01, `crates/pull/benches/ratio.rs`.
-Invariants PIT-01 to PIT-32 and C-PIT-01 in `docs/04-invariants.md`; limits
+Invariants PIT-01 to PIT-33 and C-PIT-01 in `docs/04-invariants.md`; limits
 L-PIT-1 to L-PIT-11 in `docs/06-limits.md`.
 
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any

@@ -453,6 +453,19 @@ fn build(
         }
     };
     summary(out, &held);
+    // A writer killed between its staging create and its unlink leaves a
+    // hidden temporary under its own process id, which no later install
+    // reuses: it is never read and never removed, and every build names it
+    // (PIT-33), so the daily run is not silent about it.
+    if held.temporaries() > 0 {
+        let _ = writeln!(
+            out,
+            "note: {} hidden file(s) in {} were not read: a killed writer's leftover temporary \
+             is never served and is left in place (PIT-33)",
+            held.temporaries(),
+            dir.display()
+        );
+    }
     month_millis.sort_unstable();
     let _ = writeln!(
         out,
@@ -470,6 +483,7 @@ fn build(
             .with("folded", built.folded)
             .with("months", month_millis.len())
             .with("digest", held.file_digest_hex().as_str())
+            .with("hidden", held.temporaries())
             .with(
                 "ms",
                 u64::try_from(run.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -328,6 +328,43 @@ fn a_resumed_build_extends_only_what_is_new_and_a_rerun_writes_nothing() {
 }
 
 #[test]
+fn a_killed_writers_leftover_temporary_is_named_by_the_next_build_and_left_in_place() {
+    // verify-PIT-1-r1 follow-up (PIT-33): a kill between an install's staging
+    // create and its unlink leaves `.<name>.tmp.<pid>.<n>` under the dead
+    // process's id, which no later install reuses. The reader never reads it;
+    // the next build used to say nothing of it, so a daily run kept quiet.
+    let ticks = ticks();
+    let out_dir = scratch("leftover");
+    let dir = out_dir.to_str().unwrap();
+    let (code, out) = run(
+        &["build", "2024-03-01", "2024-03-05", "--out", dir],
+        Some(&ticks),
+        Some("c0ffee"),
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(!out.contains("hidden file(s)"), "{out}");
+    let leftover = out_dir.join(".2024-03-g000002.fnm.tmp.4194303.0");
+    std::fs::write(&leftover, b"half a month").unwrap();
+    let (code, out) = run(&["build", "--out", dir], Some(&ticks), Some("c0ffee"));
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2024-03 written g000002"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "note: 1 hidden file(s) in {dir} were not read: a killed writer's leftover \
+             temporary is never served and is left in place (PIT-33)"
+        )),
+        "{out}"
+    );
+    assert_eq!(std::fs::read(&leftover).unwrap(), b"half a month");
+    let (code, shown) = run(&["show", "2024-03-05", "--out", dir], None, None);
+    assert_eq!(code, OK, "{shown}");
+    assert!(
+        shown.contains(&format!("note: 1 hidden file(s) in {dir} were not read")),
+        "{shown}"
+    );
+}
+
+#[test]
 fn a_typed_window_inside_the_operators_store_is_refused() {
     let ticks = ticks();
     let store = scratch("store");
