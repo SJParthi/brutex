@@ -20287,22 +20287,23 @@ the stack bench was built with plain `rustc` at the workspace bench profile's
 own settings (`-C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort -C
 overflow-checks=on -g`) and run three times on the operator's Mac on
 21 Oct 2026, load average 15–18 on 14 cores from other agents' builds
-(`state/fix/round2/chg1-logs-r11/rustc/bench1.log`, `rustc2/bench1.log`,
-`bench-rustc-run3.log`). The figures are per call, from 20,000 batches of 16
+(`state/fix/round2/chg1-logs-r11/rustc/bench1.log`, `bench-rustc-run3.log`,
+and `rustc2/bench1.log`, the last on the tree merged with `feat/db-fix`, whose
+`crates/costs` is the same). The figures are per call, from 20,000 batches of 16
 calls:
 
 - the first exercise: p50 2.6 ns, p99 2.6 ns;
 - the 1,000,001st: p50 2.6 ns, p99 5.1–5.2 ns;
 - ₹1,000 crore of intrinsic value: p50 2.6 ns, p99 2.6–5.2 ns;
 - a precise close of a day of 1 exercise: p50 106.7–109.3 ns, p99
-  117.1–135.3 ns;
+  117.1–132.8 ns;
 - a precise close of a day of 1,000,000 exercises: p50 106.7–109.3 ns, p99
-  117.1–132.8 ns.
+  117.1–135.3 ns.
 
 Each C-CHG-10 ratio was 1.000× in all three runs. One call per sample
-(n = 20,000), for the 1,000,001st exercise: p50 0, p99 42 ns, max 125–167 ns,
-which is the clock's own resolution. The max column of the batched rows
-reached 1.0 µs for one exercise and 7.2 µs for one close. That is the shared
+(n = 20,000), for the 1,000,001st exercise: p50 0, p99 42 ns, max 125–208 ns;
+the p50 and p99 are the clock's own resolution. The max column of the batched
+rows reached 2.7 µs for one exercise and 7.2 µs for one close. That is the shared
 machine's scheduler, as the rows above explain: the same runs show it on rows
 that hold no loop at all.
 
