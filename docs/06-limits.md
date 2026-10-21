@@ -19509,7 +19509,9 @@ always was.
 ## Feed reconcile: `cli feed-reconcile` — D-5172 to D-5177, measured 18 October 2026
 
 What is constant, what is bounded, and what was measured. Every figure below
-is wall clock of the format-2 verb (commit `dedcb99a`, release build) over the
+is wall clock of the format-2 verb (commit `dedcb99a`, which is in neither
+`main`'s history nor this section's branch: a work-in-progress commit squashed
+before the merge; release build) over the
 operator's store, READ-ONLY, `--workers 4`, 18 Oct 2026: the whole span
 2018-01 to 2026-09 (105 months, 35,385 share-months, every one with its
 "share-month reconciled" event), each month after the one before it. The host
