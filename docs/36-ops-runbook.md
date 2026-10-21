@@ -244,7 +244,11 @@ excludes both. Until a second drive is attached nothing below can be done, and
 
 `GET /disk.json` answers, measured at most every 30 seconds:
 
-- `filesystem` — total, used and free bytes under the store root (`df -Pk`);
+- `filesystem` — total, used and free bytes under the store root and its
+  mount point (one `statfs(2)` on macOS, one `statvfs(2)` elsewhere, in the
+  server process, D-5240, D-5241; a root that does not exist or is no
+  directory is refused by name; on APFS `used_bytes` is the container's, not
+  the volume's own Used that `df` prints, `docs/06-limits.md` L-RUST1-1);
 - `feeds[]` — per vendor: months, rows, `bar_bytes_lower_bound` (a header
   region per month plus 56 bytes per bar; sidecars and time indexes not
   counted), and every census file with its role;

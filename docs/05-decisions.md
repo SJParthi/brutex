@@ -76656,3 +76656,694 @@ field must be refused, so a checker that refuses nothing fails the build.
 Proof: `no_store_or_census_key_is_built_from_a_token`,
 `the_module_list_is_closed_over_every_definition_of_a_key`,
 `a_token_field_in_a_fixture_key_builder_is_refused`.
+
+### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
+
+**Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026
+found every tracked file conforming to `CLAUDE.md` §2, and two places in
+shipped code that start an outside program anyway:
+`crates/api/src/disk_route.rs:127` ran `/bin/df -Pk <store root>` for
+`/disk.json`'s free space, and `crates/api/src/server.rs:18999`
+(`open_unless_suppressed`) opens the operator's browser through the platform's
+URL handler when the server starts. Nothing refused a run-time spawn: gate 2
+reads build scripts only, and no test read shipped code for one.
+
+**Decision.**
+
+1. **`/disk.json` measures in this process.** One `statvfs(2)` gives the three
+   numbers, each a count of `f_frsize`-byte fragments: `total_bytes` is
+   `f_blocks`, `used_bytes` is `f_blocks − f_bfree`, `free_bytes` is
+   `f_bavail` — the same three fields `df -Pk` printed in 1024-byte blocks, so
+   on a filesystem whose fragment is a multiple of 1 KiB the bytes are the ones
+   it gave, and on any other they are exact where it rounded. `mount` is where
+   the filesystem is mounted: on macOS `statfs(2)`'s `f_mntonname`, the field
+   BSD `df` prints; elsewhere the highest directory above the canonical root
+   still on its device, as coreutils' `find_mount_point` finds it. The keys,
+   their order and their types are unchanged; `source` reads `statvfs` instead
+   of `df -Pk`. Two refusals are new and name the root: one that does not exist
+   (`df` refused it too, in its own words) and one that is no directory (`df`
+   measured the filesystem around a file). `parse_df` and its test are removed:
+   nothing prints `df` output for it to read.
+2. **A new dependency, `rustix` 1.1.4**, `default-features = false`, features
+   `std` and `fs`, with `linux-raw-sys` 0.12.1 behind it on Linux; every other
+   package it names (`bitflags`, `errno`, `libc`, `windows-sys`) was already
+   locked at the version it takes. The `libc` already in the lock does not fit:
+   `api` is `#![forbid(unsafe_code)]` and every call through `libc` is
+   `unsafe`. `nix` was read and refused: its `Statfs` exposes no mount point on
+   macOS. `docs/07-plan.md` had already audited `rustix` 1.1.4 as locally
+   auditable with no native source. The registry scan, run before the pin
+   moved: `rustix` ships 318 `.rs` files and `linux-raw-sys` 462, and neither
+   ships a `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.asm` or `.js` file. On Linux
+   `rustix` makes the system call itself through `core::arch::asm!`, ordinary
+   stable Rust as `graviola`'s is; on macOS it calls `libc`. `linux-raw-sys`
+   has no `build.rs`. `rustix`'s `build.rs` runs `rustc` (or a
+   `RUSTC_WRAPPER`) on feature probes and emits `cfg`s: the same probe the
+   thirteen packages of `docs/06-limits.md` §96 run, so §96 now lists fourteen.
+   The `vocab` lockfile pin moves from 192 packages to 194 and to the new
+   fingerprint, with this scan recorded beside it.
+3. **A gate refuses a run-time spawn outside an allowlist.**
+   `crates/vocab/tests/no_runtime_spawn.rs` walks every `.rs` file under
+   `crates/`, lexes it (comments, strings, raw strings, chars and lifetimes
+   recognised; a file it cannot lex is a failure) and fails on any naming, in
+   shipped code, of the type the `process` modules of `std` and `tokio` start a
+   child with — the path with any spacing or a raw identifier, an import group
+   holding it, a glob import of the module and a renamed module. The needle is
+   assembled with `concat!`. Its allowlist holds exactly one function,
+   `open_unless_suppressed` in `crates/api/src/server.rs`, once, because it
+   *opens the operator's own browser, front-end launch, never a build or data
+   step*; an entry that stops matching, or a second naming in the same
+   function, is a failure. Test code is what only the test harness compiles:
+   any file under `crates/<crate>/tests/`; an item, statement, field, arm or
+   argument behind `#[test]` or a `cfg` that holds only under `test`
+   (`any(test, X)` and `not(test)` are shipped); a module file a test-only
+   `mod` declaration or `include!` names, by `rustc`'s path rules, closed over
+   every module those files declare; and a file under `#![cfg(test)]`. A file
+   named `*_tests.rs` that no test-only declaration reaches is shipped, and the
+   gate fails on its name. Benches, examples, binaries and build scripts are
+   scanned whole. On the tree before this change it failed with exactly one
+   line, `crates/api/src/disk_route.rs:127 in fn measure`; after it, it passes,
+   with the browser opener matched and the test-code namings counted.
+
+**Measured on the 4-core cloud container on 16 Oct 2026**: the base commit
+and this change, each with the same timing harness, run in three
+interleaved rounds; n = 1,000 each after 50 warm-up calls, one test thread, an
+empty store in a temporary directory, nearest rank; ranges are across the
+rounds. The harness was removed before this entry's commit.
+
+| What | Before (`/bin/df -Pk` child) p50 / p99 / max | After (`statvfs(2)`) p50 / p99 / max |
+|---|---|---|
+| `measure`, the filesystem step alone | 1.49–1.53 ms / 2.18–3.00 ms / 4.60–5.85 ms | 3.0–4.5 µs / 7.1–11.2 µs / 36–85 µs |
+| `measured`, the whole uncached answer | 1.54 ms / 2.16–2.31 ms / 4.16–6.95 ms | 17.4–23.2 µs / 44–76 µs / 91–561 µs |
+| `GET /disk.json` handler, cache cleared before each call | 1.62–1.65 ms / 2.35–3.27 ms / 4.66–9.66 ms | 67–72 µs / 136–152 µs / 0.21–0.85 ms |
+| `GET /disk.json` handler, cache warm | 39–40 µs / 82–140 µs / 0.13–2.38 ms | 39–41 µs / 94–130 µs / 0.27–0.46 ms |
+
+The handler rows go through `run_ops_read`'s admission and blocking pool, as a
+request does; the HTTP framing around them is not timed. The route serves a
+cached answer for 30 s, so a page's poll still costs one `Mutex` read between
+measurements; what changed is the cost of the read that misses. The
+operator's-machine figure in `docs/06-limits.md` L-WP81-4 included the child
+and was not re-taken.
+
+**What this does not decide.** Whether §2's build-script sentence should reach
+dependencies stays the owner's open question (D-2328, D-0555, D-1602), and this
+dependency adds one more probe to that inventory rather than answering it. The
+browser opener stays a spawn: the operating system's URL handler is the only
+way to open the browser the operator chose, and the allowlist names it rather
+than pretend it is not there. A dependency that spawns at run time is not under
+`crates/` and is not read by the gate; `crates/vocab/tests/workspace_is_rust.rs`
+pins the dependency set so a new one is reviewed. Nor does it build the
+tick-store writer's free-space floor: D-4967's "pure Rust has no `statvfs`
+without `libc`" stops being true of this workspace with this change, but
+`pull` does not depend on `rustix`, so `docs/06-limits.md` L-TSW-7 stands and
+taking it there is that floor's owner's choice (FM-055, R4-08).
+
+### D-5241 — On macOS `/disk.json` reads `statfs(2)`, not `statvfs(2)`; counts no filesystem can have are refused by name (RUST-1, completed on the operator's machine) — 2026-10-16
+
+**Finding.** D-5240 was built and run in a Linux container. Read on the
+operator's machine, two of its choices do not hold there. First, Darwin
+declares `fsblkcnt_t` 32 bits wide (`sys/_types.h` line 70, recorded with its
+digest in `docs/00-charter.md`, "Filesystem counts for `/disk.json`"), so
+`statvfs(2)`'s `f_blocks`, `f_bfree` and `f_bavail` cannot hold a volume of
+2^32 fragments or more (16 TiB at 4 KiB), and how Darwin folds such a volume
+into them was not read (UNVERIFIED). `statfs(2)`'s 64-bit structure carries
+64-bit counts and `f_mntonname`, the mount point BSD `df` prints. Second, the
+walk upward for the mount point names `/` for a directory behind APFS's
+`/private` firmlink, where `df` names `/System/Volumes/Data`: `stat -f '%d'`
+gave `/`, `/private`, `/private/var/folders` and `/System/Volumes/Data` one
+device, 16777232, on the operator's machine on 17 Oct 2026, and
+`/Volumes/WD_BLACK` another. And on every
+platform the byte arithmetic was `saturating_`: a 0-byte fragment answered 0
+bytes, more free fragments than fragments clamped `used` to 0, and an overflow
+answered `u64::MAX` — a wrong number served as a measurement, the quiet
+fallback `CLAUDE.md` §4 bans.
+
+**Decision.**
+
+1. **On macOS one `statfs(2)`** (`rustix::fs::statfs`, whose libc-backend
+   `StatFs` is the SDK's own `struct statfs`): `total_bytes` is `f_blocks`,
+   `used_bytes` `f_blocks − f_bfree`, `free_bytes` `f_bavail`, each times
+   `f_bsize`; `mount` is `f_mntonname`, refused by name when it is not
+   absolute. Off macOS D-5240 stands: `statvfs(2)` in `f_frsize` fragments and
+   the walk upward. `filesystem.source` names the call made, `statfs` on macOS
+   and `statvfs` elsewhere. No page reads `source` (`web/src` has no reader of
+   it), so the change is the label only. **ON APFS `used_bytes` IS NOT `df`'s
+   USED.** `total_bytes`, `free_bytes` and `mount` are what `/bin/df -Pk`
+   printed, byte for byte; `used_bytes` is too off APFS. On APFS several
+   volumes share one container, `f_blocks` and `f_bfree` are the container's,
+   and `df` prints the volume's own allocation in its Used column, which no
+   field of `statfs(2)` carries (how `df` reads it was not read: UNVERIFIED).
+   There `used_bytes` is the container's allocation, at least `df`'s figure
+   and above it by what the container's other volumes and reserves hold: on
+   the operator's machine about 90.9 GB on the boot volume and 0.86 GB
+   (855,900,160 bytes, the same on every quiet round) on the external drive
+   holding the store, `docs/06-limits.md` L-RUST1-1. No page reads
+   `used_bytes` (`web/src/lib/disk.js` shows free of total); an API reader
+   tells which call measured it by `filesystem.source`.
+2. **An answer no filesystem can give is refused by name**, never turned into
+   a number: a fragment of 0 bytes, more free or more available fragments
+   than there are, and a byte count above 64 bits. The refusal is the
+   answer's `filesystem.error`, naming the root, the impossibility and the
+   counts.
+
+**Proof.** `the_filesystem_numbers_are_what_the_call_returns`,
+`counts_no_filesystem_can_have_are_refused_by_name` and, on macOS only,
+`on_macos_total_free_and_mount_are_what_bin_df_printed` in
+`crates/api/src/disk_route.rs` (RUST1-05, RUST1-08, RUST1-09). The last starts
+`/bin/df -Pk` from the test and, on the temporary directory (the boot volume
+behind the firmlink) and on the crate's own directory (the external drive),
+three quiet rounds each, holds `total_bytes`, `free_bytes` and `mount` equal
+to `df`'s byte for byte, and `used_bytes` equal to `df`'s Used off APFS and at
+least it on APFS; it prints each pair. A round whose counts moved between the
+reads around it, or whose total or free bytes still disagree, is retried, up
+to 200 (L-RUST1-4). *Proof and the APFS sentence of item 1 corrected on 19 Oct
+2026, before this entry landed: it named a test that does not exist and
+claimed `df`'s figures byte for byte with no APFS exception (D-5244, the
+re-check that found it).*
+
+### D-5242 — `rustix` stays as `/disk.json`'s one new dependency: no crate already in `Cargo.lock` gives a safe `statvfs`; its build script's `rustc` probes are measured and listed, not exempted (RUST-1 merge-back) — 2026-10-17
+
+**Question.** D-5240 took `rustix` 1.1.4, whose `build.rs` starts `rustc` on
+feature probes. `CLAUDE.md` §2 forbids "any `build.rs` that invokes an
+external process", and whether that sentence reaches a dependency's build
+script is the owner's open question (D-2328, D-0555, D-1602). The merge-back
+was asked to settle it the safe way: take `statvfs` through a crate ALREADY in
+`Cargo.lock` that adds no new build script, and only if none fits keep
+`rustix`, measured.
+
+**What was checked** (on `fix/db-CLOUD-RUST1` after merging `feat/db-fix` at
+`62396df0`, aarch64-apple-darwin, 17 Oct 2026):
+
+| Candidate | In `Cargo.lock`? | Evidence | Verdict |
+|---|---|---|---|
+| `libc` 0.2.189 | yes | `cargo tree --locked -e normal,build -i libc` reaches it through `tokio`, `mio`, `socket2`, `signal-hook-registry`, `getrandom`, `cpufeatures`, `errno` and others | **does not fit**: every `libc::statvfs` or `libc::statfs` call is `unsafe`, and gate 16 makes every crate root `#![forbid(unsafe_code)]` (all fifteen roots under `crates/` carry it); calling it would mean lifting that for a crate, which gate 16 refuses |
+| `nix` | **no** | `cargo tree --locked -i nix`: "did not match any packages" | **does not fit the rule** (not in the lock). Read anyway, 0.30.1 from the local registry: its `build.rs` starts no process (`cfg_aliases` only), but it brings two packages (`nix`, `cfg_aliases`) and its `Statfs` has no mount-point accessor (no `f_mntonname` in `src/sys/statfs.rs`), so the macOS mount would need the walk upward D-5241 refused |
+| `std` | — | no `statvfs` or `statfs` in `std::fs` or `std::os::unix` | does not fit |
+| `rustix` 1.1.4 | added by D-5240 | safe `statvfs` and, on macOS, safe `statfs` whose `StatFs` is the SDK's `struct statfs` with `f_mntonname` | **kept** |
+
+**Decision.** `rustix` stays. What it adds, measured rather than argued:
+
+1. **To the native graph on this host, one package.** `cargo tree --locked
+   -e normal,build -i rustix` names `api` alone; `-p rustix` names
+   `bitflags`, `errno` and `libc`, all already locked. `linux-raw-sys` 0.12.1
+   is in `Cargo.lock` for Linux targets only (`-i linux-raw-sys` on this
+   host prints nothing). The lock grows 195 → 197 `[[package]]` entries.
+2. **At build time, three `rustc` probes.** A cold `cargo build -p rustix
+   --locked --offline --timings` in a new target directory, every `rustc`
+   invocation logged through a `RUSTC_WRAPPER` that records its arguments:
+   `rustix`'s build script ran `rustc --crate-type=rlib --emit=metadata` on
+   standard input 3 times, and its run took 0.6 s (cargo's timing report);
+   `libc`'s, already in the graph, ran `rustc --version` once in 0.4 s. One
+   build, on a machine running other builds: a measurement of one, not a
+   distribution. No probe compiles or links anything into the binary: each
+   emits metadata to a file in `OUT_DIR` and its exit status picks a `cfg`.
+   `docs/06-limits.md` §96 lists `rustix` as the fourteenth such package.
+3. **At run time, no child process** (D-5240), and the cost is measured on
+   the operator's machine by RUST1-10 (`docs/06-limits.md` L-WP81-4).
+
+**What this settles and what it does not.** For this dependency the trade is
+recorded: a shipped run-time child process (`/bin/df`, which the new gate
+`no_runtime_spawn` refuses) for three build-time `rustc` metadata probes of
+the kind thirteen packages already run, with no crate in the lock able to do
+the job under gate 16. The general question — whether §2's build-script
+sentence binds dependencies — stays the owner's, as D-2328 left it; this entry
+neither widens §2 nor exempts `rustix` from a future answer to it. If the owner
+rules that it binds, `rustix` is one of fourteen packages to replace, and
+`/disk.json` would have no in-process measurement left (`libc` and `nix` each
+fail as above).
+
+### D-5243 — The spawn gate's allowlist takes the watchdog's notice opener as its second entry (RUST-1 met R3-32) — 2026-10-17
+
+**Finding.** RUST-1's gate (D-5240) and R3-32's watchdog (D-4996) were built
+on two branches. Merged with `feat/db-fix` at `50093fa3` on 17 Oct 2026,
+`no_shipped_code_starts_a_program_outside_the_allowlist` failed with exactly
+one line: `crates/cli/src/watchdog_command.rs:739 in fn notify names the
+process-spawning type`. That is `Opener::notify`, which hands the watchdog's
+notice page (the app is down, or back) to `open`, the platform's URL handler.
+D-4996 chose it over a Notification Center banner because a banner needs
+`osascript` (an interpreter, gate 0) or an Objective-C binding, both refused by
+§2.
+
+**Decision.** Both intents are kept. The start is the same kind as the one
+entry D-5240 allowed — a page shown in the operator's own browser, never a
+build or data step — so `ALLOWED` takes it as its second entry:
+`crates/cli/src/watchdog_command.rs`, `notify`, count 1, reason *opens the
+watchdog's notice page in the operator's own browser, never a build or data
+step (D-4996)*. The count binds every `fn notify` in that file together, so a
+second spawn in `RecordOnly::notify` or another fails the gate. The test that
+pinned one entry is now `the_allowlist_is_the_two_browser_openers_alone`,
+which pins both entries field for field and fails on a third. Nothing in
+`watchdog_command.rs` changes. What the gate does not decide: whether a
+notice should one day be delivered without a child process (no Rust-only way
+to show a page in the operator's browser is known here), which stays R3-32's.
+
+**Proof.** `no_shipped_code_starts_a_program_outside_the_allowlist` failed
+before the entry with the line above and passes after it;
+`the_allowlist_is_the_two_browser_openers_alone` (RUST1-01).
+
+*Entry narrowed on 19 Oct 2026, before it landed: the allowlist names a
+function by its whole path in its file, `<Notify for Opener>::notify`, so
+another `notify` (`RecordOnly`'s, or one in a nested module) no longer shares
+the count; a spawn in one fails as not allowed (D-5244).*
+
+### D-5244 — The spawn gate is a model of `rustc` and Cargo that claims only the spellings it lists and refuses what it cannot place: import groups, macro variables and repetitions, shebang lines, whitespace and escapes as `rustc` reads them, what shipped code reaches under `tests/`, every directory and manifest; an allowlist entry is a function's whole path (RUST-1, repair round 1) — 2026-10-19
+
+**Finding.** A re-check of `fix/db-CLOUD-RUST1` at `8929f991` (19 Oct 2026,
+`state/fix/round2/verify-CLOUD-RUST1-r1.json`) planted spawns in shipped code
+and found six the gate (D-5240) passed with nothing allowed, each compiling
+under `#![forbid(unsafe_code)]` with rustc 1.97.1: `use std::process::{self as
+q}` then `q::Command`; the same from `tokio`; `use std::process::{*}`; a macro
+body `std::process::$t::new(..)` called as `mk!(Command)`; a first line
+`#!/x "`, which `rustc` drops as a shebang and the gate lexed as a string
+opening that hid the rest of the file; and a shipped `#[path =
+"../tests/h.rs"] pub mod h;`, whose file the gate exempted for sitting under
+`tests/`. Its walk skipped every directory named `target` at any depth, so
+`crates/api/src/target/mod.rs` went unread, and its allowlist matched a file
+and a bare function name, so `mod sneaky { fn open_unless_suppressed() { .. }
+}` in `server.rs` took the entry over. Reproduced here with the checker's own
+probe before any change: the six MISSED and the spoof passed. The gate's
+header, RUST1-02, RUST1-03 and L-RUST1-2 claimed coverage it did not have. Two
+more were found while fixing: a `#[path]` on `pub mod name;` was dropped,
+because the visibility was read as the item's start and took the attributes
+with it; and an integration test that `#[path]`s the crate root in made the
+crate root, and every module it declares, test code.
+
+**A second pass on 20 Oct 2026, before landing** (repair round 1b), attacked
+the repaired gate the same way. A 30-case probe (26 spellings, 4 controls)
+found all 26 passed, and two placements besides; each compiled with rustc
+1.97.1 on the operator's APFS drive and started `/bin/echo`, the four
+manifest ones as a crate Cargo built (`scratch/fix-CLOUD-RUST1-r1b/compile/`,
+`manifest/`, `state/fix/round2/logs-CLOUD-RUST1/r1b-manifest-cargo-build.log`): a macro repetition
+joining the path (`$($s::)*Command`, `$(::$b)*::Command`, `$($p)*::Command`),
+the module before a variable or a repetition (`std::process $(::$t)*`,
+`std::process $b $a`), a macro body handing one half on beside a variable
+(`j!($($s)* Command)`, `j!(std process $t)`, `k!(Command, $($s)*)`); a
+left-to-right mark inside the path, whitespace to `rustc` and not to
+`char::is_whitespace` (a right-to-left one after `::` was refused by chance); `include!` in brackets or braces, under
+`r#include`, or imported under another name; `#[r#path]`; the first of two
+`#[path]`s (the gate kept the last); a path spelled with `\x2f` or `\u{2f}`,
+which the lexer did not decode; an inline module given a `#[path]` or an
+inner `#![path]`; an `include!` or a `#[path] mod` in a `macro_rules!` body
+called from another directory, which `rustc` resolves at the call; a
+`#[path]` inside an inline module of a `#[path]`-loaded file, read without
+its stem; and in a manifest, a quoted key, a `#` inside a value, a
+multi-line value and a `\u002F` escape. Found while fixing, planted in the
+gate's tests and not built: a nested package's manifest, which went unread,
+and a value spelling `["test"]` on its own line, read as a `[[test]]` header.
+The two placements: a
+name in another case, which the case-insensitive disk finds, and an
+`include!` of a `.md` file. The title this entry
+had, "reads what `rustc` reads", claimed what a lexer cannot claim.
+
+**Decision.** Each is closed at its cause in
+`crates/vocab/tests/no_runtime_spawn.rs`, the gate claims only what it lists
+and plants, and what is still not seen is said:
+
+1. **Spellings.** Refused, besides the path, a group holding the type,
+   `process::*` and `process as`: a `process::{..}` group holding at any
+   nesting a `*`, a `self as` or a macro variable; a path going on from
+   `process::` with anything but a plain name, and the module's name straight
+   before a macro variable or a repetition; the type after a `::` that
+   follows no identifier (a generated segment, a group, a repetition),
+   straight after a repetition, or straight after a macro variable
+   (`$m::Command`, or `$s Command` where `$s` is `::`); two variables joined
+   (`$m::$t`); a `use` built from a macro variable; a macro invocation handed
+   the bare module name and the type apart, or either beside a macro
+   variable; `mod $name;`; an `include!` of no plain string, and a `use`
+   naming `include`. `$crate`, `x::`, `<S as T>::` before the type are plain
+   paths. Attribute bodies are read for the same spellings.
+2. **Lexing.** A leading byte-order mark and then a shebang line are dropped
+   as `rustc_lexer::strip_shebang` drops one: `#!` whose next token, past
+   whitespace and plain comments, is not `[`. `#!` before `[` is an inner
+   attribute and is read. Checked against rustc 1.97.1 on 19 Oct 2026 with
+   `--emit=metadata` on six scratch files: `#!/x "` and then code compiles
+   (the line is dropped), with a byte-order mark before it or not;
+   `#! /* c */ [allow(unused)]`, and `#!` with `[allow(unused)]` on the next
+   line, compile as inner attributes; `#! /// doc` with `[allow(unused)]` on
+   the next line fails with "expected item, found `[`", the doc comment having
+   ended the search, as this lexer reads it. `\r\n` is `\n`; whitespace is
+   `rustc_lexer::is_whitespace`'s set; a string's escapes are decoded (`\x`,
+   `\u{..}`, a line continuation and the whitespace after it); a raw
+   identifier is the same name (`r#include`, `r#path`).
+3. **What ships.** A file is test code by RUST1-03's rules and shipped
+   whenever shipped code reaches it: a `mod` by its default paths, its first
+   `#[path]` and every later one, or a `cfg_attr` path; an `include!` in any
+   delimiters; a module beside a `#[path]`-loaded file, and what a
+   non-`mod.rs` file declares looked for both under its stem and as a
+   `mod.rs` names it; a manifest target other than a `[[test]]`, the manifest
+   read as TOML; and a crate root the build compiles (the library, a binary,
+   the build script, a bench or an example) whatever else names it, so an
+   integration test that `#[path]`s one in exempts nothing. Closed over what
+   each reached file declares, under `tests/` or not. Only `#![cfg(test)]`
+   keeps a declared file test code.
+4. **What it cannot place is refused by name** (RUST1-13): a shipped
+   declaration with no `.rs` file where the model looks; an inline module
+   given a `#[path]` and any inner `#![path]`; an `include!` or `mod name;` in
+   a `macro_rules!` body; a manifest target of another kind or naming no
+   source; a manifest value in a multi-line string; and a shipped declaration,
+   a manifest target, a path dependency, a `[patch]` or a workspace member
+   outside `crates/`. A model that cannot place a file now fails loudly
+   where it used to pass quietly, which is what made most of the second
+   pass's spellings possible.
+5. **The walk.** Nothing under `crates/` is skipped by name; every
+   `Cargo.toml` there at any depth and the workspace's are read; every other
+   file is listed unread; a link is refused by name rather than passed over.
+6. **The allowlist.** An entry is the function's whole path in its file:
+   inline modules, traits, `impl` headers with generics and `where` dropped,
+   enclosing functions. The watchdog's entry is `<Notify for Opener>::notify`
+   (D-5243's note); `the_allowlist_is_the_two_browser_openers_alone` also
+   checks the file still has `impl Notify for Opener {`.
+
+**Still not seen**, and said in the gate's header and L-RUST1-2: a spelling
+the header does not list (the list is the claim, not a proof that no other
+exists); a dependency's own code, its re-export of the type under another
+name, and a dependency's macro whose own body spells the type; what a
+procedural macro or a build script generates; a foreign call (gate 16 closes
+it); the `cfg` predicates the gate does not evaluate, which it reads as
+shipped, erring towards failing; a build that sets `test` outside the harness
+(`--cfg test` in `RUSTFLAGS` or a `.cargo/config.toml`, a build script's
+`cargo:rustc-cfg=test`); and a file Cargo reads unasked outside `crates/`,
+such as a `.cargo/config.toml` overriding a dependency's source.
+`Cargo.lock` holds no crate whose run-time API starts a program besides
+`std` and `tokio` among `open`, `duct`, `subprocess`, `xshell`, `which`,
+`async-process`, `cmd_lib`, `execute`, `run_script`, `command-group`,
+`opener`, `webbrowser` and `nix` (none is in it; `cc` is, as a build
+dependency of `ring`, L-RUST1-3), checked on 20 Oct 2026.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` (RUST1-02),
+`test_code_is_what_cfg_test_compiles_followed_through_module_files`
+(RUST1-03), `the_allowlist_is_exact_about_file_function_and_count`
+(RUST1-04), `what_shipped_code_reaches_is_shipped_even_under_tests`
+(RUST1-11), `the_walk_reads_everything_under_crates_and_names_each_link`
+(RUST1-12), `what_this_scan_cannot_place_is_refused_by_name` and
+`what_a_macro_body_pastes_is_refused_by_name` (RUST1-13). The
+checker's probe (`scratch/verify-CLOUD-RUST1-c7-probe/gate/probe.rs`: 27
+cases and the spoof) run against the final gate: every case AS-CLAIMED and
+the spoof refused (`state/fix/round2/logs-CLOUD-RUST1/r1b-c7-probe-on-new-gate.log`).
+Its planted tree (`scratch/verify-CLOUD-RUST1-c7-plant`) fails naming all
+five plants: `disk_route.rs:207`, `target/mod.rs:1`, `zz_selfas.rs:1`,
+`zz_shebang.rs:2`, `zz_tokio_selfas.rs:1` (`r1b-plant-c7.log`). The second
+pass's 30-case probe (26 spellings and 4 controls,
+`scratch/fix-CLOUD-RUST1-r1b/probe/cases2.rs`): before, 26 missed
+(`r1b-probe-on-old-gate.log`); after, all 30 as expected
+(`r1b-probe-on-new-gate.log`). The five tests this pass changed or added, run against the gate before this
+pass, fail (`r1b-new-tests-on-old-gate.log`); all nine pass after.
+A copy of the tree merged with `feat/db-fix` at `dad1a760` with four of the
+new spellings planted fails naming each (`r1b-plant-merged.log`); the tree
+itself is green with its two entries.
+
+### D-5245 — `/disk.json` misses that arrive together take one measurement (RUST-1, repair round 1c) — 2026-10-20
+
+**Finding.** The re-check of 19 Oct 2026 (`state/fix/round2/verify-CLOUD-RUST1-r1.json`,
+its follow-ups) noted that the answer cache WP-81 gave `/disk.json` had no
+single flight: `answer` looked in the cache and, on a miss, measured, so
+misses arriving together each measured, up to the operations pool's four at
+a time, while `docs/06-limits.md` L-WP81-4 said the route "is measured at most
+once in 30 s".
+
+**Decision.** One measurement at a time per process, behind a second lock:
+a caller that misses takes the measuring lock, looks in the cache again (the
+caller ahead of it may have just filled it), and measures only if it is still
+empty, stale or for another root. The cache lock is never held while the
+measuring lock is asked for, so the two cannot deadlock; a poisoned lock is
+taken as it stands, as the cache's own lock already was. The hit path is
+unchanged. `measured` and the answer's bytes are unchanged, so RUST1-07 holds.
+
+**Proof.** `misses_that_arrive_together_take_one_measurement` in
+`crates/api/src/disk_route.rs` (RUST1-14): eight callers released together
+on an empty cache with a 50 ms measurement measure once and serve one answer.
+The same test against the old shape fails with 8 measurements on 30 of 30
+runs and passes against the new one on 30 of 30
+(`scratch/fix-CLOUD-RUST1-r1c/singleflight/before-after-30.txt`).
+
+**Cost.** L-RUST1-5: a waiting caller waits the rest of one uncached
+measurement; a hung filesystem holds the waiters as it held each caller
+before.
+
+### D-5246 — The spawn gate places an attribute by where it stands, and a bare `#[test]` exempts only what the built-in one takes (RUST-1, repair round 2) — 2026-10-20
+
+**Finding.** The re-check of 20 Oct 2026
+(`state/fix/round2/verify-CLOUD-RUST1-r2.json`) found the gate of D-5244
+exempting shipped code in three shapes, each compiled by rustc 1.97.1
+without `--test` into a binary that started a program: (a) `#[cfg(test)]` on
+a generic parameter (a type, a const or a lifetime; on a fn, a struct, an
+`impl` or a trait) or on a closure's parameter, whose span ran on through the
+whole item body because `item_end` counted neither `<` `>` nor `|` as
+brackets; (b) `#[cfg(test)]` on a field, an argument, a struct expression's
+field or a variant named `union`, `auto` or `macro_rules`, which `is_item`
+read as an item, so a comma no longer ended it and it swallowed every later
+field or argument; (c) `#[test]` where an import re-points the name
+(`use tokio::main as test;`). Seventeen probe cases were missed. Reproduced
+here before any change: the round's own 33 planted shapes, run against the
+gate at `2efdfeed0`, are missed 30 times (`r2-probe-on-old-gate.log`).
+Searching for the same class found more that rustc 1.97.1 compiles with the
+program kept: a binding named `union` in a match arm followed by a comma, the
+`use` inside a function body, `use pm::{passthru as r#test}`, `use pm::test;`,
+`#[macro_use] extern crate` of a crate with a macro named `test`, a field
+marked `#[test]` under a derive whose helper is named `test`, a `#[test]` fn
+in an `impl` or in a macro body invoked beside such a `use`
+(`r2-rustc-proofs.log`, all in `state/fix/round2/logs-CLOUD-RUST1/`).
+
+**Decision.**
+
+1. **Where the attributes stand decides what they are on.** Only at the
+   start, or straight after `;`, `{`, `}` or the `]` closing another
+   attribute, can an attribute be on an item; after `<`, `,`, `(`, `|` or
+   `=` it is on a parameter, a field or an expression whatever keyword
+   follows (`<#[cfg(test)] const N: usize>`).
+2. **`union`, `auto` and `macro_rules` begin an item only in item syntax**:
+   `union Name {`, `union Name<` or `union Name where`; `auto trait`;
+   `macro_rules!`.
+3. **What is not an item also ends before a `>` that is not half of `->` or
+   `=>`, and before a `|`**, so a gated generic parameter ends at the `>`
+   closing its list and a closure's at the `|` closing its own. **An item
+   also ends at a `,` outside its generics and its `where` clause**, the only
+   places an item has one outside brackets, so an item a macro is handed in a
+   list does not run into the next. Ending early only reads more as shipped.
+4. **A bare `#[test]` exempts only a free `fn` written directly in a module**
+   (the file's or an inline one's), in a file holding no `use` or
+   `extern crate` that spells `test` anywhere and no `include!`. rustc
+   refuses the built-in `#[test]` on anything but a free function, so a
+   `#[test]` that compiles elsewhere is not the built-in one; a glob import
+   and a macro-expanded binding cannot re-point it (rustc 1.97.1 refuses both
+   as ambiguous with the prelude, E0659: `w5`, `p2`, `p4` in the proofs log);
+   `cfg` cannot be re-pointed at all ("name `cfg` is reserved in attribute
+   namespace", `w2`). `#![test]` no longer makes a file test code (rustc
+   refuses it at crate level and inside a module).
+5. **Refused by name**: a shipped `#[macro_use] extern crate`, which
+   re-points `#[test]` in every file of its crate, and a fn only a bare
+   `#[test]` exempts in a file an `include!` pastes into shipped code, where
+   `test` resolves in the file that pastes it.
+6. A naming in a fn's signature, before its body opens, is placed in that fn
+   (`crates/x/src/lib.rs:3 in fn run`), not in no function.
+
+The verifier's own suggestion for (c) was to stop exempting in a file whose
+import binds `test`; that is item 4's first half, and the rest (free fn,
+directly in a module, no `include!`, the two refusals) closes the doors its
+suggestion left open: the block `use`, `#[macro_use]`, a derive helper, a
+macro body and a pasted file.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants all
+33 shapes in shipped code and each is refused, with 14 exempt controls
+(RUST1-15); against the gate before this round the same 33 are missed 30
+times, the three caught being controls the old gate already held. The
+re-check's own probe (17 missed cases, 9 controls) built against this gate is
+26 of 26 as claimed, its file probe 8 of 8, and its tree with three planted
+shipped files fails naming `zz_r2b_field.rs:1`, `zz_r2b_generic.rs:1`,
+`zz_r2b_param.rs:1 in fn run` and the control. On the merged tree the gate
+passes with both allowlist entries at their counts (RUST1-01).
+
+**Cost.** One pass per file for `may_rebind_test`, and a backward bracket
+match for a `]` before an attribute run: test-time only, no shipped code.
+L-RUST1-6 says what stays a model rather than the resolver.
+
+### D-5247 — An empty store root is refused by name at `/disk.json`, and an unreadable workspace manifest fails the spawn gate's walk (RUST-1, repair round 2) — 2026-10-20
+
+**Finding.** The same re-check noted two quiet paths: `measure("")` gave
+`statfs("")`'s ENOENT sentence, which names nothing; and `sources_under`
+read the workspace `Cargo.toml` with `if let Ok`, so a manifest it could not
+read was skipped without a word.
+
+**Decision.** `measure` refuses an empty root first, with *the store root is
+empty: it names no directory, so no filesystem is measured for it*, on both
+platforms; the server already refuses an empty `BRUTEX_STORE` at start
+(`server::tests::an_empty_folder_or_a_relative_home_is_refused_not_resolved`,
+CE-33), so this is the door of any other caller. `sources_under` panics with
+the manifest's path and the error, as it already did for every other file it
+cannot read.
+
+**Proof.** `an_empty_root_is_refused_by_name` (the sentence, and the answer's
+`filesystem.error` with no `free_bytes`) and
+`the_walk_reads_everything_under_crates_and_names_each_link` (a tree with no
+workspace manifest panics, then with one is read) — RUST1-16.
+
+**Cost.** One emptiness check before the measurement's `statfs(2)`.
+
+### D-5248 — An attribute inside a macro call's input or a `macro_rules!` body exempts nothing from the spawn gate (RUST-1, repair round 2, self-check) — 2026-10-20
+
+**Finding.** Repair round 2's self-check, looking for the class the re-check
+of 20 Oct 2026 found (an attribute placed on more than it is on), found the
+gate of D-5246 honouring a `#[cfg(test)]` that stands inside a macro's
+tokens. Those tokens are not code yet. rustc 1.97.1, without `--test`,
+compiled each of these into a binary that ran the program
+(`state/fix/round2/logs-CLOUD-RUST1/r2r-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2r/rc/`): a1, a call
+`m! { #[cfg(test)] pub fn run() { .. } }` to a `macro_rules!` whose arm
+`(#[$a:meta] $($t:tt)*)` drops the attribute; a2, a `macro_rules!` body
+writing `#[cfg(test)] $(fn $n() {})* pub fn run() { .. }`, where the
+attribute lands on the first repeated fn and `run` ships; a6, the same with
+an item variable, `#[cfg(test)] $i pub fn run()`; a7, a comma list
+`#[cfg(test)] const A: bool = 1 < 2, const B: fn() = || { .. }` a matcher
+takes, whose `<` kept D-5246's item rule from ending `A` at its comma. The
+gate before this change missed all twelve shapes planted for it
+(`r2r-probe-on-old-gate.log`). Checked and refused by rustc, so no door:
+attributes in a `where` clause (a3, E0658), a `macro_rules!` used as an
+attribute named `test` (a4, E0658), and an `include!` of a file that opens
+with `#![cfg(test)]` (a5, "an inner attribute is not permitted in this
+context"). `cfg(r#test)` is `test` (b1), as the gate reads it.
+
+**Decision.** Inside a macro call's input (`name!(..)`, `name![..]`,
+`name! {..}`, through a path or a raw name) or a `macro_rules!` body, a
+`#[cfg(test)]` exempts nothing: what stands after it is read as shipped. The
+gate's pass keeps the depth each such bracket opened at, and an attribute
+read there does not gate. A `!` after a keyword (`if !{..}`,
+`return !(..)`) is a negation and opens no macro input. A `#[cfg(test)]` on
+the call itself or on the `macro_rules!` item is outside its tokens and
+still takes the whole of it; a bare `#[test]` was already held to a fn
+directly in a module (D-5246), which a macro's input is not. Erring towards
+failing costs a false refusal of a spawn some macro really does keep under
+test, never a pass; L-RUST1-7 says so and names the two places such test
+code can put the attribute instead.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants the
+twelve shapes, each refused, with six exempt controls (the gated call in
+two forms, three negations, and a gated fn and module after a call closes) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-17); `r2r-probe-on-new-gate.log`
+has none missed, and six hand mutants of the new code (never leaving a
+macro, a keyword before `!` opening one, the check dropped, any
+`ident ! ident {` taken for a `macro_rules!` body, `k > 3`, leaving at any
+closing bracket) each fail that test (`r2r-hand-mutants.log`). `no_shipped_code_starts_a_program_outside_the_allowlist`
+passes on this branch after its merge of `feat/db-fix` on 20 Oct 2026, with both
+allowlist entries at their counts.
+
+**Cost.** One look back of at most three tokens at each opening bracket the
+pass steps over, and a stack of open macro depths: test-time only, no
+shipped code.
+
+### D-5249 — What an attribute macro is handed exempts nothing from the spawn gate, and a bare `#[test]` beside one exempts nothing (RUST-1, repair round 2, resumed self-check) — 2026-10-20
+
+**Finding.** The resumed self-check of repair round 2, looking again for the
+class the re-check of 20 Oct 2026 found (an attribute honoured where `rustc`
+does not honour it), found the gate of D-5248 trusting attributes that an
+attribute macro is handed. An attribute macro receives the item it is on,
+the attributes after it on that item and every token inside the item, and
+returns whatever it likes. rustc 1.97.1 does not evaluate the `cfg`s inside
+that input first. With a proc-macro crate `pm2` written for the proof
+(`strip`, which drops the attributes after it, and `strip_all`, which drops
+every attribute in the item), rustc compiled each of these without `--test`
+into a binary that ran the program or kept the field
+(`state/fix/round2/logs-CLOUD-RUST1/r2s-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2s/rc/`): q1 `#[pm2::strip] #[test] pub fn
+launch()`; q2 the same through `#[cfg_attr(all(), pm2::strip)]`; and, under
+`#[pm2::strip_all]`, r1 a module holding a `#[test]` fn, r2 a fn holding a
+`#[cfg(test)]` statement, r3 a struct holding a `#[cfg(test)]` field, r4 a
+fn with a `#[cfg(test)]` parameter, r5 an `impl` holding a `#[cfg(test)]`
+fn, r6 a struct whose generics hold a brace (`<const N: usize = { 3 }>`), r7
+a `static` whose value holds a `#[cfg(test)]` fn in its second block, and r8
+an `impl Tr<{ 1 }>`. The gate before this change missed all fifteen shapes
+planted for it, and a copy of the real tree with two such files passed it
+(`r2s-d5249-probe-old-vs-new.log`, `r2s-plant-real-tree.log`).
+
+Which names an import can re-point was measured, not assumed:
+`use pm2::strip as <name>; #[<name>] #[test] pub fn launch()` kept the
+built-in and dropped `launch` for each of `allow`, `automatically_derived`,
+`cold`, `deny`, `deprecated`, `doc`, `expect`, `forbid`, `ignore`, `inline`,
+`macro_export`, `macro_use`, `must_use`, `non_exhaustive`, `path`, `repr`,
+`should_panic`, `track_caller`, `used` and `warn`, and ran the macro and
+shipped `launch` for `derive`, `default`, `global_allocator`, `test_case`,
+`cfg_eval` and `bench`. Checked and refused by rustc, so no door: an
+attribute macro on a statement (st1, E0658 "custom attributes cannot be
+applied to statements") and an inner attribute macro (i1, E0658 "inner macro
+attributes are unstable"). And `cfg` comes first: `#[pm2::strip]
+#[cfg(test)]` and `#[cfg(test)] #[pm2::strip]` both dropped the fn (q4, q7),
+as did `#[test] #[pm2::strip]` (q3) and `#[inline] #[test]` (q5).
+
+**Decision.** An attribute MAY BE A MACRO unless it is `cfg`, one of the
+twenty built-ins above, a `cfg_attr` all of whose attributes are not, or
+`test` or `derive` in a file where no `use`, `extern crate` or `include!`
+can re-point the name; a path (`tokio::main`, `rustfmt::skip`) and a raw
+name may be one. Where one stands on an item, from the item's start to its
+end no attribute exempts anything: the end is the item's `;`, or the brace
+closing its body, which is the first `{` outside its generics, and for a
+`const`, `static`, `type`, `use` or `extern crate` only its `;`, so the end
+errs late, never early. A bare `#[test]` with one beside it exempts nothing.
+A `#[cfg(test)]` beside one still takes the whole item. Erring wide costs a
+false refusal (`#[test] #[pm2::strip]`, which rustc drops, and a
+`#[cfg(test)]` inside a `#[serde(..)]` struct, are refused); L-RUST1-8 says
+so. The merged tree has no such case.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants
+the fifteen shapes, each refused, with seven exempt controls (`cfg` beside a
+macro, `#[inline] #[test]`, a `derive`, `#[must_use]`, the tree's own
+`cfg_attr(not(test), expect(..))` before `#[test]`, and a gated fn after a
+macro's item and after a bodiless `const`) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-18). Thirteen hand mutants of the
+new code (no attribute a macro, `derive` always built-in, no region kept,
+the body at the first brace, `#[test]` beside a macro exempting, `cfg_attr`
+never a macro, nothing bodiless, generics ignored, the region unread, `test`
+never a macro, a path built-in, an item's region ended as a non-item's, the
+region never taken) each fail that test (`r2s-hand-mutants.log`). The re-check's 26-case probe is 26 as
+claimed and its planted tree still fails naming all four files
+(`r2s-verifier-probe-on-new-gate.log`, `r2s-plant-trees-on-new-gate.log`);
+`no_shipped_code_starts_a_program_outside_the_allowlist` passes on this
+branch's tree with both allowlist entries at their counts.
+
+**Cost.** One look at each outer attribute's first tokens, a second
+file-wide look for `derive` beside the one for `test`, and one forward walk
+per item an attribute macro may be on: test-time only, no shipped code.
+
+**Addendum, 21 Oct 2026 (repair round 2, resumed again): a test-only
+attribute on a `where`-clause predicate is refused by name.** This block's
+numbers end here, so the last self-check of the round is recorded in the
+entry it extends rather than in a new one. Looking once more for the same
+class, a 42-case probe found four shapes the gate still exempted:
+`where #[cfg(test)] T: Copy { body }` on a fn, an `impl` and a struct, and
+`where T: Copy, #[cfg(test)] U: Copy { body }`. A predicate is not an item,
+so its exemption ran under `item_end`'s non-item rule, and with no `,`, `>`
+or `|` before the body it ran on through the body
+(`state/fix/round2/logs-CLOUD-RUST1/r2t-selfcheck-probe-on-old-gate.log`).
+rustc 1.97.1, the pinned toolchain, refuses all four (E0658, *attributes in
+`where` clause are unstable*; `r2t-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2t/rc/`), so none can ship today, but the gate's
+header promises that what it cannot place is refused by name, and a
+toolchain that stabilised the syntax would turn the miss into a real one.
+
+*Decision.* An attribute that would exempt (a test-only `cfg`), standing
+straight after `where` or after a `,` with a `where` before it in the same
+brackets and no `;` or `{` between, is refused by name as *puts a test-only
+attribute on a where-clause predicate, which rustc 1.97.1 refuses (E0658):
+this scan cannot place what it is on*, and exempts nothing, so the body
+after it is read as shipped. A gated parameter of a function-pointer type
+inside a predicate (`T: Into<fn(u8, #[cfg(test)] u8)>`) is inside brackets
+the `where` is not, so it is placed as before; rustc compiled that one
+without `--test` into a binary that ran the program (`fp1.rs`). Refusing
+rather than modelling the clause errs towards failing.
+
+*Proof.* `an_attribute_on_a_where_predicate_is_refused_by_name` plants five
+refused shapes (also after `F: Fn(u8) -> u8,` and beside another attribute),
+each failing by file, line and scope together with the naming in the body,
+and ten placed controls (a gated parameter before the clause, a gated field
+in the body, also after another field, a `where` closed inside brackets,
+test code, a fn after a clause's item, the function-pointer parameter, and
+generics after a `;`-ended item's clause or with nothing before them). It fails on the gate before this
+change and passes after; twelve hand mutants of the new code each fail it
+(`r2t-hand-mutants.log`; a thirteenth is equivalent, since an exempting
+attribute is never in test code). The probe is 42 of 42 on the new gate
+(`r2t-selfcheck-probe-on-new-gate.log`), the re-check's 26-case probe stays
+26 of 26, a copy of the real tree with two such files fails naming both, and
+the three earlier planted trees fail naming every file as before
+(`r2t-plant-trees-on-new-gate.log`). RUST1-19; L-RUST1-6 says the model is
+of the pinned toolchain.
+
+*Cost.* One look at the token before each exempting attribute and, after a
+`,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
+test-time only, no shipped code.
