@@ -886,6 +886,12 @@ fn replay_a_real_rate_table_under_the_gap_rule() {
             Ok(as_of) if as_of.carried.is_some() => carried.push(civil.to_string()),
             Ok(_) => {}
             Err(crate::riskfree::LookupError::Stale { .. }) => stale.push(civil.to_string()),
+            Err(crate::riskfree::LookupError::HoleBeforeGap { gap, .. }) => {
+                stale.push(format!(
+                    "{civil} (gap {} follows an unexplained hole)",
+                    gap.released
+                ));
+            }
             Err(why) => panic!("{why}"),
         }
     }
@@ -1086,7 +1092,7 @@ fn a_loaded_row_cites_its_own_source_and_checksum() {
     assert!(with_sha > 0, "checksums were compared, {compared} rows");
     // A URL holding `; ` and ` read ` parses whole; other words cite the file.
     let two = own_citations(
-        "a; b read x read 2026-10-07; https://e.invalid/p read 2026-10-08 sha256 \
+        "https://e.invalid/a; b read x read 2026-10-07; https://e.invalid/p read 2026-10-08 sha256 \
          0000000000000000000000000000000000000000000000000000000000000000",
     )
     .expect("two parts");
@@ -1095,7 +1101,7 @@ fn a_loaded_row_cites_its_own_source_and_checksum() {
             .map(|c| (c.url, c.read, c.sha256))
             .collect::<Vec<_>>(),
         [
-            ("a; b read x", "2026-10-07", None),
+            ("https://e.invalid/a; b read x", "2026-10-07", None),
             (
                 "https://e.invalid/p",
                 "2026-10-08",
@@ -1103,13 +1109,102 @@ fn a_loaded_row_cites_its_own_source_and_checksum() {
             ),
         ]
     );
+    // A measurement's path is a location too, as `Citation::url` says: the
+    // compiled charter and masters citations are paths.
+    let path = own_citations("docs/00-charter.md, Index aliases read 2026-10-07")
+        .expect("a path is a location");
+    assert_eq!(
+        path.iter().map(|c| (c.url, c.read)).collect::<Vec<_>>(),
+        [("docs/00-charter.md, Index aliases", "2026-10-07")]
+    );
     for words in [
         "",
         "an operator's own words",
         " read 2026-10-07",
         "u read 2026-1-07",
+        // verify-R3-30-r2 followup: a part is a citation only when its URL is
+        // an http(s) URL and its read day is a real calendar day.
+        "operator note read 2026-01-01",
+        "ftp://e.invalid/p read 2026-01-01",
+        "https:// read 2026-01-01",
+        "https://e.invalid/p read 2026-13-45",
+        "https://e.invalid/p read 2026-02-30",
+        "https://e.invalid/p read 2026-10-08; operator note read 2026-10-09",
     ] {
         assert!(own_citations(words).is_none(), "{words:?}");
+    }
+}
+
+/// A STORED rate table whose gap row follows an unexplained hole is served,
+/// the hole's days are refused naming the gap, and the load says so in one
+/// sentence (R3-30 repair 2); a table whose gap continues a running clock
+/// says nothing of the kind.
+#[test]
+fn a_stored_rate_gap_after_an_unexplained_hole_is_told_at_load() {
+    let store = seeded("ref-rates-hole");
+    let holed = [
+        crate::riskfree::HEADER.to_owned(),
+        format!("\t\t2020-01-01\t98.5000\t6.1081\t{RBI}\t\t"),
+        format!("\t\t2020-01-20\tNA\t\t{RBI}\t\t"),
+        format!("\t\t2020-02-05\t98.6000\t5.6951\t{RBI}\t\t"),
+    ]
+    .join("\n");
+    write(
+        &store,
+        &rate_draft(&holed, "invented", day(2026, 10, 21)).unwrap(),
+    )
+    .unwrap();
+    let loaded = load(&store);
+    assert_eq!(loaded.rates.origin(), "store");
+    let series = loaded.rates.table().unwrap();
+    assert!(matches!(
+        series.on(trade(2020, 1, 21)),
+        Err(crate::riskfree::LookupError::HoleBeforeGap { .. })
+    ));
+    let said = unlinked_gaps_said(series).expect("told");
+    assert!(
+        said.starts_with("1 documented gap row(s) carry nothing") && said.contains("2020-01-20"),
+        "{said}"
+    );
+    let linked = invented_rates(true);
+    write(
+        &store,
+        &rate_draft(&linked, "invented", day(2026, 10, 21)).unwrap(),
+    )
+    .unwrap();
+    let loaded = load(&store);
+    assert_eq!(unlinked_gaps_said(loaded.rates.table().unwrap()), None);
+}
+
+/// The five NIFTY rows that rest on NSE/FAOP/68747 carry the checksum the
+/// charter records for the bytes read (verify-R3-30-r2 followup), read from
+/// `docs/00-charter.md` itself rather than a second copy.
+#[test]
+fn the_sourced_expiry_rows_carry_the_charters_checksum() {
+    let charter = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/00-charter.md"),
+    )
+    .unwrap();
+    let row = charter
+        .lines()
+        .find(|line| line.starts_with("| `NSE/FAOP/68747` |"))
+        .expect("the charter's row for NSE/FAOP/68747");
+    let sha = row
+        .split('`')
+        .find(|cell| cell.len() == 64 && cell.bytes().all(|b| b.is_ascii_hexdigit()))
+        .expect("the charter records a sha256");
+    let store = seeded("ref-expiry-sha");
+    let loaded = load(&store);
+    let table = loaded.expiry.table().unwrap();
+    let sourced: Vec<&str> = table
+        .rows()
+        .iter()
+        .map(|row| row.source.as_str())
+        .filter(|source| source.starts_with("sourced: NSE/FAOP/68747"))
+        .collect();
+    assert_eq!(sourced.len(), 5, "{sourced:?}");
+    for source in sourced {
+        assert!(source.contains(&format!("sha256 {sha}")), "{source}");
     }
 }
 

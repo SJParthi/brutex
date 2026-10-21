@@ -254,7 +254,9 @@ impl Basis {
 
 /// The circular that sources five NIFTY half-yearly rows (module doc).
 const FAOP_68747: &str = "NSE/FAOP/68747 (25 Jun 2025), annexure, \
-     https://nsearchives.nseindia.com/content/circulars/FAOP68747.pdf, read 2026-10-10 (D-3358)";
+     https://nsearchives.nseindia.com/content/circulars/FAOP68747.pdf, read 2026-10-10 \
+     sha256 e1b56024a511135ffd5c6c3c097881dd0ac2c37b15b5f61e94fe84e51cf66762 \
+     (docs/00-charter.md; D-3358)";
 
 /// The row, resting on an NSE circular.
 const fn sourced(row: ExpiryAlias, cite: &'static str) -> ExpiryAlias {

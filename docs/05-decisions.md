@@ -77111,3 +77111,46 @@ SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
    back as the row's own citations (URL, read day, checksum); a source in
    any other words cites the file that holds it, with the row's words as
    what it says.
+
+### D-6247 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
+
+Number taken from the ledger head at commit (amendment A6; `feat/db-fix`'s
+head is D-6245 and D-6246 is R3-30's own); the landing renumbers it if
+another package lands D-6247 first. Amends D-6246 item 3; finding DB-B44,
+blocking issue of `verify-R3-30-r2`.
+
+1. **What was wrong.** D-6246 item 3 let a gap row restart the 14-day clock
+   whatever came before it. A gap row released MORE than `MAX_AGE_DAYS`
+   after the previous row therefore restarted a clock that had already run
+   out: a result refused `rate_stale` (an auction nobody explained is
+   missing) was priced again from the day after the gap, labelled
+   `rate_carried` as if the gap were the only reason. Reproduced by the
+   second agent on invented rows and on the wire (2024-09-26 `rate_stale`,
+   2024-09-30 priced on the same 2024-09-11 rate).
+2. **The rule.** A gap row documents ONE scheduled auction. It continues a
+   clock only when the row before it (a result, or a gap row that itself
+   continues one) is at most `MAX_AGE_DAYS` older: the clock still running
+   on the gap's release day. Otherwise the gap row carries nothing: the days
+   it owns are refused `LookupError::HoleBeforeGap`, naming it, served on
+   `/greeks.json` as `rate_stale` with that sentence as the detail, and a
+   gap row after it carries nothing either. A result always starts a clock.
+   `MAX_CARRIED_AGE_DAYS` still bounds every carried run.
+3. **Said, not silent.** `Series::unlinked_gaps` lists such rows; the
+   `/greeks.json` rate header counts them as `unlinked_gaps`; loading a
+   stored table that holds one emits one `warn` event (`rate gap rows after
+   an unexplained hole`). The table is still served: one hole refuses its
+   own days, not every day of the table.
+4. **Why not refuse the table.** A refusal at parse would withdraw every
+   rate in the table over one undocumented week, so every greek on every
+   other day would be refused for a fault that is not theirs. The days the
+   fault touches are refused by name instead. The operator's documented
+   gaps (2024-09-18, 2024-09-25, 2025-02-20, 2026-03-25, the week of
+   2026-03-30) each fall 6 to 14 days after the previous row and are
+   unaffected.
+5. **Followups taken.** `below_zero_carry_bound` and `iv_unsolved` computed
+   on a carried rate say so in their detail. A source part is read as a
+   row's own citation only when its read day is a real calendar day and its
+   location is an `http(s)` URL with a host or a path (what
+   `brutex_core::alias::Citation::url` says a location is); other words cite
+   the file. The five NSE/FAOP/68747 expiry rows carry the checksum the
+   charter records for the bytes read.

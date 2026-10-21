@@ -387,6 +387,80 @@ fn a_rate_carried_over_a_documented_gap_is_labelled_on_every_cell() {
     }
 }
 
+/// A HOLE BEFORE A GAP ROW ON THE WIRE (verify-R3-30-r2, blocking): the
+/// 8 and 15 Aug auctions are missing and nobody explained them, then a gap
+/// row is released on 17 Aug, 16 days after the 1 Aug result. Before repair 2
+/// that gap restarted the expired clock and every 20 Aug cell was priced on
+/// the 1 Aug rate, labelled `rate_carried`; it is `rate_stale`, the detail
+/// names the gap that carries nothing, and the header counts it.
+#[test]
+fn a_gap_row_after_an_unexplained_hole_prices_no_cell() {
+    let fixture = Fixture::new("greeks-hole-before-gap");
+    let times = [t0(), t0() + 60];
+    let holed = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 17)],
+    ));
+    let (status, body) = fixture.ask(ATM, &times, &holed);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rate"]["gaps"], 1);
+    assert_eq!(
+        body["rate"]["unlinked_gaps"], 1,
+        "the header counts the gap row that follows an unexplained hole"
+    );
+    let rows = body["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), times.len());
+    for row in rows {
+        assert_eq!(row["why"], "rate_stale", "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(detail.contains("2026-08-17"), "the gap is named: {detail}");
+        assert!(detail.contains("unexplained"), "{detail}");
+        assert!(row.get("iv").is_none(), "no figure: {row}");
+    }
+    // The same gap a week after the result is linked and carries.
+    let linked = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 8), (2026, 8, 15)],
+    ));
+    let (_, body) = fixture.ask(ATM, &times, &linked);
+    assert_eq!(body["rate"]["unlinked_gaps"], 0);
+    for row in body["rows"].as_array().expect("rows") {
+        assert_eq!(row["rate_state"], "rate_carried", "{row}");
+    }
+}
+
+/// A REFUSAL COMPUTED ON A CARRIED RATE SAYS SO (verify-R3-30-r2 followup):
+/// `below_zero_carry_bound` and `iv_unsolved` are reached only after the rate
+/// is applied, so when that rate was carried over a documented gap the
+/// detail names the gap and the result, as a priced cell's `rate_state`
+/// does; on a fresh rate it says nothing of the kind.
+#[test]
+fn a_refusal_computed_on_a_carried_rate_names_the_gap() {
+    let fixture = Fixture::new("greeks-carried-refusal");
+    let carried = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 12)],
+    ));
+    let fresh = RateTable::Loaded(table(&[12, 19]));
+    for (contract, word) in [(ITM, "below_zero_carry_bound"), (RICH, "iv_unsolved")] {
+        let (_, body) = fixture.ask(contract, &[t0()], &carried);
+        let row = &body["rows"][0];
+        assert_eq!(row["why"], word, "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(
+            detail.contains("rate_carried")
+                && detail.contains("2026-08-12")
+                && detail.contains("2026-08-01"),
+            "{word}: {detail}"
+        );
+        let (_, body) = fixture.ask(contract, &[t0()], &fresh);
+        let row = &body["rows"][0];
+        assert_eq!(row["why"], word, "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(!detail.contains("rate_carried"), "{word}: {detail}");
+    }
+}
+
 /// GK-05 — with no rate table named, or one that will not read, every cell is
 /// a named refusal and no rate is guessed; the bar's own close and spot are
 /// still shown, and so is the tenor, measured before the rate.

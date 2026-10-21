@@ -620,7 +620,13 @@ impl GreeksAsk {
             Err(why @ pull::riskfree::LookupError::BeforeSeries { .. }) => {
                 return refused("rate_before_series", why.to_string());
             }
-            Err(why @ pull::riskfree::LookupError::Stale { .. }) => {
+            // A gap row after an unexplained hole carries nothing (R3-30
+            // repair 2): the same word as any unexplained gap, and the
+            // detail names the gap row that does not explain it.
+            Err(
+                why @ (pull::riskfree::LookupError::Stale { .. }
+                | pull::riskfree::LookupError::HoleBeforeGap { .. }),
+            ) => {
                 return refused("rate_stale", why.to_string());
             }
             Err(why @ pull::riskfree::LookupError::CarriedTooLong { .. }) => {
@@ -634,6 +640,18 @@ impl GreeksAsk {
             tenor,
             side: self.side,
         };
+        // A refusal reached AFTER the rate is applied says when that rate was
+        // carried over a documented gap, as a priced cell's `rate_state` does
+        // (verify-R3-30-r2 followup).
+        let on_rate = as_of.carried.map_or_else(String::new, |gap| {
+            format!(
+                "; computed on a rate_carried rate: the result released {} carried over \
+                 the documented {} gap row of {} (DB-B44)",
+                as_of.auction.released,
+                gap.kind.word(),
+                gap.released,
+            )
+        });
         match pull::pricing::bar_greeks(bar, as_of.rate, YearBasis::Calendar365) {
             Ok(greeks) => Cell::Priced {
                 premium,
@@ -655,10 +673,10 @@ impl GreeksAsk {
                         "the premium {price} paisa is at or below {floor} paisa, the intrinsic value \
                          discounted at the rate with ZERO carry (D-2830: no dividend or carry is \
                          sourced), so no volatility reproduces it under this model's inputs; a limit \
-                         of the model's inputs, not a verdict on the print (D-3330)"
+                         of the model's inputs, not a verdict on the print (D-3330){on_rate}"
                     ),
                 ),
-                None => refused("iv_unsolved", why.to_string()),
+                None => refused("iv_unsolved", format!("{why}{on_rate}")),
             },
         }
     }
@@ -745,11 +763,12 @@ impl GreeksAsk {
         rows.push(']');
         let table = match rate {
             RateTable::Loaded(series) => format!(
-                r#"{{"variable":{},"state":"loaded","error":null,"sha256":{},"auctions":{},"gaps":{},"max_age_days":{},"max_carried_age_days":{},"first_release":{},"last_release":{},"cite":{}}}"#,
+                r#"{{"variable":{},"state":"loaded","error":null,"sha256":{},"auctions":{},"gaps":{},"unlinked_gaps":{},"max_age_days":{},"max_carried_age_days":{},"first_release":{},"last_release":{},"cite":{}}}"#,
                 render::json_string(RATE_ENV),
                 render::json_string(&crate::server::hex32(series.sha256())),
                 series.auction_count(),
                 series.gap_count(),
+                series.unlinked_gaps().len(),
                 pull::riskfree::MAX_AGE_DAYS,
                 pull::riskfree::MAX_CARRIED_AGE_DAYS,
                 render::json_string(&series.first_release().to_string()),

@@ -1347,21 +1347,35 @@ fn leak(text: &str) -> &'static str {
 /// part ends only where a dated `read` is followed by the end or by `; `.
 /// This is what keeps a seeded row's provenance through the store: its own
 /// URL, read day and checksum, not the file's (R3-30 repair 1).
+///
+/// A part is a citation only when its read day is a real calendar day
+/// ([`parse_day`]) and its location is what `brutex_core::alias::Citation`
+/// says a `url` is, "a URL, or the path of a measurement": an `http(s)` URL
+/// with something after the scheme, or a path (its first word holds a `/`)
+/// with no other scheme. Any other words -- an operator's own note that
+/// happens to end in ` read <day>` -- cite the file that holds them
+/// (verify-R3-30-r2 followup).
 fn own_citations(source: &str) -> Option<Vec<Citation>> {
-    fn day_shaped(day: &str) -> bool {
-        day.len() == 10
-            && day.bytes().enumerate().all(|(at, byte)| {
-                if at == 4 || at == 7 {
-                    byte == b'-'
-                } else {
-                    byte.is_ascii_digit()
-                }
-            })
+    fn located(url: &str) -> bool {
+        if let Some(rest) = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+        {
+            return rest
+                .chars()
+                .next()
+                .is_some_and(|first| !first.is_whitespace());
+        }
+        !url.contains("://")
+            && url
+                .split([' ', ','])
+                .next()
+                .is_some_and(|word| word.contains('/'))
     }
     // After ` read `: the day, the optional checksum, and what follows the
     // part (`Some("")` at the end), or `None` when this is not a part's end.
     fn dated(tail: &str) -> Option<(&str, Option<&str>, &str)> {
-        let read = tail.get(..10).filter(|day| day_shaped(day))?;
+        let read = tail.get(..10).filter(|day| parse_day(day).is_some())?;
         let mut after = tail.get(10..)?;
         let mut sha = None;
         if let Some(hex) = after
@@ -1389,7 +1403,7 @@ fn own_citations(source: &str) -> Option<Vec<Citation>> {
             }
             from = at + 1;
         };
-        if url.is_empty() {
+        if !located(url) {
             return None;
         }
         own.push(Citation {
@@ -2545,6 +2559,47 @@ fn told<T>(table: Table, slot: &Slot<T>) {
     let _dropped_when_filtered = telemetry::emit(&event);
 }
 
+/// The gap rows a loaded rate table holds that carry nothing, because each
+/// follows an unexplained hole (R3-30 repair 2, D-6247), in one sentence, or
+/// `None` when every gap row continues a running clock.
+fn unlinked_gaps_said(series: &crate::riskfree::Series) -> Option<String> {
+    let unlinked = series.unlinked_gaps();
+    let first = unlinked.first()?;
+    Some(format!(
+        "{} documented gap row(s) carry nothing: the row before each is more than {} days \
+         older or itself carries nothing, so the auctions between are unexplained; the first \
+         is released {} ({}), and the days they cover are refused rate_stale",
+        unlinked.len(),
+        crate::riskfree::MAX_AGE_DAYS,
+        first.released,
+        first.kind.word(),
+    ))
+}
+
+/// One `warn` event when the loaded rate table holds gap rows that carry
+/// nothing: the table is served, and this says at load what each refused
+/// cell says on its own.
+fn told_rate_holes(slot: &Slot<crate::riskfree::Series>) {
+    let Some((series, said)) = slot
+        .table()
+        .ok()
+        .and_then(|series| Some((series, unlinked_gaps_said(series)?)))
+    else {
+        return;
+    };
+    let event = telemetry::Event::warn(
+        "pull::reference_data",
+        "rate gap rows after an unexplained hole",
+    )
+    .with("table", Table::RiskFreeRate.word())
+    .with(
+        "unlinked",
+        u64::try_from(series.unlinked_gaps().len()).unwrap_or(u64::MAX),
+    )
+    .with("detail", said.as_str());
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
 /// THE ONE LOADER. Every table, from `store` (an empty path loads the
 /// compiled tables alone), each told as one event with its origin, source
 /// and checksum, or its refusal.
@@ -2558,6 +2613,7 @@ pub fn load(store: &Path) -> Reference {
     let expiry = kept(&mut strays, store, Table::ExpiryMoves, ExpiryTable::build);
     let lots = kept(&mut strays, store, Table::LotSizes, build_lots);
     let rates = kept(&mut strays, store, Table::RiskFreeRate, build_rates);
+    told_rate_holes(&rates);
     Reference {
         calendar,
         indices,
