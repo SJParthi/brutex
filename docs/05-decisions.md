@@ -77100,6 +77100,36 @@ the merged tree before this amendment (its recount items refused `run_busy`
 by the upkeep's own lock) and passes after it. Invariants UK-02 (restated),
 UK-16 to UK-18; limits L-R317-11 and L-R317-12.
 
+### D-6271 — `cargo deny` green on R3-17's branch: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 in `Cargo.lock`, and the dependency-set pin moved after the scan (R3-17, repair 1e) — 2026-10-21
+
+**Why.** `cargo deny check` on this branch at its merge of `feat/db-fix`
+`47013fe18`, with the lock's `rustls-webpki` 0.103.15 and `webpki-roots`
+1.0.9 (the versions `feat/db-fix` still pins at `02e2d5ec4`), failed
+`advisories` with RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 accepts the
+distrusted emSign intermediates) and RUSTSEC-2026-0381 (`webpki-roots` 1.0.9
+bundles the emSign ECC Root CA - G3), both reached through `hyper-rustls` and
+`reqwest` from `pull` (`state/fix/round2/logs-R3-17/repair1d/deny.out`,
+21 Oct 2026 03:51 IST); bans, licenses and sources were ok. A new
+advisory is a finding to fix, never a baseline, so the branch takes the two
+patch bumps in `Cargo.lock` alone: no manifest changes, the package count
+stays 197 and no `dependencies` list moves.
+
+**The scan before the pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
+`the_dependency_set_has_not_moved_without_review`): both registry sources
+declare `build = false`, ship no `build.rs` and no .c/.cc/.cpp/.h/.S/.s/.asm;
+`rustls-webpki` 0.103.16's only new files are eight `.spki.der` public keys
+under `src/data/distrusted/`, and `webpki-roots` 1.0.10's file set equals
+1.0.9's. The fingerprint moves `0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C`
+with that scan written beside it.
+
+**The same bump on other branches.** R3-15 (`a141d9c96`) and R3-24
+(`ec75148b4`) take the identical `Cargo.lock` hunk on their own branches,
+from older bases, so their pins differ from this one; whichever merges second
+re-pins after `api -> rustix` (D-5240) as this entry does. The repair-1d
+commit of this branch (`3bda62319`) took the lock hunk and left the pin, so
+`the_dependency_set_has_not_moved_without_review` failed on it; this entry is
+that repair.
+
 ### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
 
 **Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026
