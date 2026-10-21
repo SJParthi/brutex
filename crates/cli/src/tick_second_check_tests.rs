@@ -1233,6 +1233,198 @@ fn an_out_directory_inside_the_store_and_a_held_lock_are_refused_before_anything
         out.contains("--archive"),
         "an archive asked for by name is refused by name: {out}"
     );
+    // verify-DATA-2-r1: a `..` after a component that does not exist, written
+    // absolute and written relative to the current directory, for the store
+    // and for the tick store. Each one ran in full before, making its
+    // directory and lock inside the root it names.
+    let rel_root = relative_from_cwd(&root);
+    for (form, base) in [("absolute", root.clone()), ("relative", rel_root)] {
+        for (target, word) in [
+            (Path::new("store"), "never writes the store"),
+            (Path::new("ticks/cm"), "lies inside the tick store"),
+        ] {
+            let missing = base.join(format!("nope-{form}"));
+            let asked = missing.join("..").join(target).join(format!("dd-{form}"));
+            let mut out = String::new();
+            let code = command_with(
+                &["2025", "--out", asked.to_str().unwrap()],
+                &env,
+                &|| Ok(store.clone()),
+                &mut out,
+            );
+            assert_eq!(code, FAILED, "{form} {}: {out}", asked.display());
+            assert!(out.contains(word), "{form} {}: {out}", asked.display());
+            assert!(
+                !root.join(format!("nope-{form}")).exists(),
+                "{form}: the missing component was not made"
+            );
+            assert!(
+                !root.join(target).join(format!("dd-{form}")).exists(),
+                "{form}: nothing was made inside {}",
+                target.display()
+            );
+        }
+    }
+    assert!(!ticks.join("cm").exists(), "nothing inside the tick store");
+}
+
+/// `path` written relative to the current directory: `..` up to the root, then
+/// down. Both sides resolved, so a link above the current directory (macOS's
+/// `/var` -> `/private/var`) does not change where it leads.
+fn relative_from_cwd(path: &Path) -> PathBuf {
+    let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let there = std::fs::canonicalize(path).unwrap();
+    let shared = here
+        .components()
+        .zip(there.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = PathBuf::new();
+    for _ in shared..here.components().count() {
+        rel.push("..");
+    }
+    for part in there.components().skip(shared) {
+        rel.push(part);
+    }
+    assert!(rel.is_relative(), "{}", rel.display());
+    rel
+}
+
+/// verify-DATA-2-r1 (D-5187): the two forms [`inside`] compares. A relative
+/// path is made absolute against the current directory; `.` is dropped; a
+/// `..` after a missing component cancels it as `create_dir_all` would; a
+/// `..` after a link leaves where the link really leads; and an `--out`
+/// through one of the store's own links is inside the store by the written
+/// form even though the link leads elsewhere.
+#[test]
+fn both_forms_of_a_path_name_where_the_run_would_really_write() {
+    let root = std::fs::canonicalize(scratch("resolved")).unwrap();
+    let store = root.join("store");
+    let elsewhere = root.join("elsewhere").join("deep");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, store.join("link")).unwrap();
+    // A bare relative name is absolute in both forms.
+    let bare = resolved(Path::new("t2s-bare-name")).unwrap();
+    let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    assert!(bare.lexical.is_absolute(), "{bare:?}");
+    assert_eq!(bare.physical, cwd.join("t2s-bare-name"));
+    // `.` dropped, `..` after a missing component cancels it.
+    let missing = resolved(&root.join("nope").join(".").join("..").join("store")).unwrap();
+    assert_eq!(missing.lexical, store);
+    assert_eq!(missing.physical, store);
+    // `..` after a link: the written form steps back to the store, the host's
+    // form to where the link leads.
+    let through = resolved(&store.join("link").join("..").join("x")).unwrap();
+    assert_eq!(through.lexical, store.join("x"));
+    assert_eq!(through.physical, root.join("elsewhere").join("x"));
+    // An `--out` through the store's own link is inside the store.
+    assert!(inside(&store.join("link").join("reports"), &store).unwrap());
+    assert!(!inside(&elsewhere.join("reports"), &store).unwrap());
+    assert!(!inside(&root.join("store-sibling"), &store).unwrap());
+    // A component under a file: where it lies cannot be told, so refused.
+    std::fs::write(root.join("plain"), b"x").unwrap();
+    let why = resolved(&root.join("plain").join("under")).unwrap_err();
+    assert!(why.contains("cannot be told"), "{why}");
+    // An empty path cannot be made absolute: refused, never taken as here.
+    let why = resolved(Path::new("")).unwrap_err();
+    assert!(why.contains("cannot be made absolute"), "{why}");
+}
+
+/// The measurement behind `docs/06-limits.md` L-T2S-11: `inside` timed over
+/// n = 1,000 calls for each of four shapes of `--out` (inside through `..`,
+/// a bare relative name, a link, outside), each answer checked on every call.
+/// Once per run, not per row; run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: cargo test -p cli --lib -- --ignored --nocapture the_out_containment"]
+fn the_out_containment_check_is_timed_once_per_shape() {
+    let root = std::fs::canonicalize(scratch("inside-timed")).unwrap();
+    let store = root.join("a").join("b").join("store");
+    std::fs::create_dir_all(store.join("bars").join("gdfl")).unwrap();
+    std::os::unix::fs::symlink(&root, store.join("link")).unwrap();
+    let shapes: [(&str, PathBuf, bool); 4] = [
+        ("dotdot", root.join("nope/../a/b/store/bars/gdfl/x/y"), true),
+        ("bare", PathBuf::from("t2s-timed-bare"), false),
+        ("link", store.join("link").join("r"), true),
+        ("outside", root.join("elsewhere").join("r"), false),
+    ];
+    for (name, path, want) in &shapes {
+        let mut ns: Vec<u128> = Vec::with_capacity(1_000);
+        for _ in 0..1_000 {
+            let t = Instant::now();
+            let got = inside(path, &store).unwrap();
+            ns.push(t.elapsed().as_nanos());
+            assert_eq!(got, *want, "{name}");
+        }
+        ns.sort_unstable();
+        println!(
+            "inside {name}: n=1000 p50 {} ns p99 {} ns max {} ns",
+            ns[499], ns[989], ns[999]
+        );
+    }
+}
+
+/// verify-DATA-2-r1 follow-up: a filling the host refuses leaves no staging
+/// name behind, and says so; a filling that succeeds keeps it for the link.
+#[test]
+fn a_refused_staging_write_takes_its_staging_name_back_off() {
+    let dir = scratch("stage");
+    let why = stage_with(&dir, "x.csv", &mut |file| {
+        std::io::Write::write_all(file, b"half")?;
+        Err(std::io::Error::other("the disk is full"))
+    })
+    .unwrap_err();
+    assert!(why.contains("the disk is full"), "{why}");
+    assert!(why.contains("the staging name was removed"), "{why}");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "no .tmp is left in {}",
+        dir.display()
+    );
+    let kept = stage(&dir, "x.csv", b"whole").unwrap();
+    assert_eq!(std::fs::read(&kept).unwrap(), b"whole");
+}
+
+/// verify-DATA-2-r1 follow-up (D-5899 end to end): a month held ONLY as a
+/// sealed `.sbar` (its raw name gone, as after a retirement) is listed, read
+/// through the read door with its provenance, and checked row for row as its
+/// raw form was.
+#[test]
+fn a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was() {
+    let (root, store, _land) = imported_store("sealed-only");
+    let (_, out, dir) = check(&root, &store, &none, &[]);
+    let raw_rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let ym = YearMonth::new(2025, 3).unwrap();
+    let alpha = key("ZZALPHA");
+    let (at, id) = month_path((Vendor::Gdfl, Timeframe::SECOND_1), &alpha, ym).unwrap();
+    let raw = BarFile::open_existing(&store, at, id).unwrap();
+    let bars = raw.read_range(0, raw.records()).unwrap();
+    assert!(!bars.is_empty(), "{out}");
+    let prv = std::fs::read(at.with_file(FileKind::Provenance).to_path_buf(&store)).ok();
+    assert!(prv.is_some(), "the month's landing is recorded");
+    let built = store::sealed::build(at, &raw.header(), &bars, prv.as_deref(), None).unwrap();
+    drop(raw);
+    let bin = at.to_path_buf(&store);
+    let sbar = at.with_file(FileKind::SealedBars).to_path_buf(&store);
+    std::fs::write(sbar.with_extension("sbar-staged"), built.to_bytes()).unwrap();
+    std::fs::rename(sbar.with_extension("sbar-staged"), &sbar).unwrap();
+    std::fs::rename(&bin, bin.with_extension("bin-retired")).unwrap();
+    let again = root.join("again");
+    std::fs::create_dir_all(&again).unwrap();
+    let (_, out2, dir2) = check(&again, &store, &none, &[]);
+    let sealed_rows = rows_of(&read(&dir2, "tick-to-second-2025.v001.csv"));
+    assert_eq!(sealed_rows.len(), raw_rows.len(), "{out2}");
+    let march: Vec<_> = raw_rows
+        .keys()
+        .filter(|(s, on, _)| s == "ZZALPHA" && on.starts_with("2025-03"))
+        .collect();
+    assert!(march.len() >= 2, "{march:?}");
+    for k in march {
+        assert_eq!(sealed_rows[k], raw_rows[k], "{k:?}");
+        assert_eq!(sealed_rows[k]["source"], "archive_member", "{k:?}");
+    }
+    assert_eq!(out.lines().next(), out2.lines().next(), "{out}\n{out2}");
 }
 
 #[test]

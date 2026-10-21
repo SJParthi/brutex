@@ -2839,14 +2839,42 @@ pub(crate) fn segment_name(year: u16, seq: u64) -> String {
 ///
 /// The staging refusal or the host's, named.
 fn stage(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    stage_with(dir, name, &mut |file| {
+        file.write_all(bytes).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`stage`] with the filling passed in. A filling the host refuses (a full
+/// disk, a failed `fsync`) takes the staging name back off: the name carries
+/// this process's id, so no later run's [`store::staging::create`] would ever
+/// clear it, and a refused run left a `.tmp` beside its versions for good
+/// (verify-DATA-2-r1 follow-up). The removal is of the one name this call
+/// created, never of a version; when it is refused too, both refusals are
+/// named.
+///
+/// # Errors
+///
+/// The staging refusal, or the filling's, named with the removal's outcome.
+fn stage_with(
+    dir: &Path,
+    name: &str,
+    fill: &mut dyn FnMut(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<PathBuf, String> {
     let path = dir.join(format!(".{name}.{}.tmp", std::process::id()));
     let mut staged = store::staging::create(&path).map_err(|w| format!("{}: {w}", w.word()))?;
-    staged
-        .file
-        .write_all(bytes)
-        .and_then(|()| staged.file.sync_all())
-        .map_err(|w| format!("{}: {w}", path.display()))?;
-    Ok(path)
+    match fill(&mut staged.file) {
+        Ok(()) => Ok(path),
+        Err(why) => {
+            drop(staged);
+            Err(match std::fs::remove_file(&path) {
+                Ok(()) => format!("{}: {why} (the staging name was removed)", path.display()),
+                Err(left) => format!(
+                    "{}: {why}; the staging name could not be removed either: {left}",
+                    path.display()
+                ),
+            })
+        }
+    }
 }
 
 /// Publishes `bytes` at `dir/name`, which must not exist: staged, made
@@ -3192,27 +3220,88 @@ pub(crate) fn timings(m: &Measured, lookups: &Histogram, fold_ns: u64) -> String
 // The verb.
 // ---------------------------------------------------------------------------
 
-/// Whether `inner` lies inside `outer`, both resolved.
-fn inside(inner: &Path, outer: &Path) -> bool {
-    let resolve = |p: &Path| {
-        let mut p = p.to_path_buf();
-        let mut tail = Vec::new();
-        while !p.exists() {
-            match (p.file_name().map(ToOwned::to_owned), p.parent()) {
-                (Some(name), Some(parent)) => {
-                    tail.push(name);
-                    p = parent.to_path_buf();
+/// The two forms of a path that [`inside`] compares (D-5187).
+///
+/// Both start from the path made absolute against the current directory
+/// (`std::path::absolute`), the same base the host resolves a relative
+/// `--out` against when the run makes it.
+///
+/// - `lexical` drops each `.` and lets each `..` take off the component before
+///   it, as written: it catches an `--out` that names the store through one of
+///   the store's own links.
+/// - `physical` walks the same components, and after each one that exists
+///   takes the host's own answer for where it is (`canonicalize`: links
+///   followed, the case held on disk). A `..` after an existing component
+///   therefore leaves the place that component really is, and a `..` after a
+///   missing one cancels it, exactly as `create_dir_all` makes the missing
+///   component a real directory and then steps back out of it.
+///
+/// The form this replaces kept a relative name relative (the parent of a bare
+/// name is the empty path, which neither exists nor resolves) and stopped at a
+/// `..` after a missing component, so both compared raw text with the store's
+/// resolved path and the run made its directory, lock and files inside the
+/// store (verify-DATA-2-r1).
+#[derive(Debug, PartialEq, Eq)]
+struct Resolved {
+    lexical: PathBuf,
+    physical: PathBuf,
+}
+
+/// `path` in both forms.
+///
+/// # Errors
+///
+/// A path that cannot be made absolute (an empty one, or no current
+/// directory), or a component the host can neither resolve nor report missing
+/// (a refused permission, a component under a file): where the path lies is
+/// then unknown, and the run is refused rather than guessed (CLAUDE.md §4).
+fn resolved(path: &Path) -> Result<Resolved, String> {
+    use std::path::Component;
+    let absolute = std::path::absolute(path)
+        .map_err(|why| format!("{} cannot be made absolute: {why}", path.display()))?;
+    let mut lexical = PathBuf::new();
+    let mut physical = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => {
+                lexical.push(part);
+                physical.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+                physical.pop();
+            }
+            Component::Normal(name) => {
+                lexical.push(name);
+                physical.push(name);
+                match std::fs::canonicalize(&physical) {
+                    Ok(real) => physical = real,
+                    Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(why) => {
+                        return Err(format!(
+                            "{}: where {} lies cannot be told: {why}",
+                            physical.display(),
+                            path.display()
+                        ));
+                    }
                 }
-                _ => break,
             }
         }
-        let mut real = std::fs::canonicalize(&p).unwrap_or(p);
-        for name in tail.into_iter().rev() {
-            real.push(name);
-        }
-        real
-    };
-    resolve(inner).starts_with(resolve(outer))
+    }
+    Ok(Resolved { lexical, physical })
+}
+
+/// Whether `inner` lies inside `outer`: in either form of [`Resolved`], so a
+/// relative name, a `..`, a link or a case variant cannot carry an `--out`
+/// into a root the check never writes.
+///
+/// # Errors
+///
+/// Either path's [`resolved`] refusal.
+fn inside(inner: &Path, outer: &Path) -> Result<bool, String> {
+    let (inner, outer) = (resolved(inner)?, resolved(outer)?);
+    Ok(inner.physical.starts_with(&outer.physical) || inner.lexical.starts_with(&outer.lexical))
 }
 
 /// What a run did, for its report.
@@ -3328,7 +3417,7 @@ fn run(
     store: &dyn Fn() -> Result<PathBuf, String>,
 ) -> Result<Report, String> {
     let store = store()?;
-    if inside(&ask.out, &store) {
+    if inside(&ask.out, &store)? {
         return Err(format!(
             "--out {} lies inside the store {}; this check never writes the store",
             ask.out.display(),
@@ -3338,7 +3427,7 @@ fn run(
     let tick_root =
         crate::gdfl_import_command::root(crate::gdfl_import_command::TICKSTORE_VAR, env);
     if let Ok(ticks) = &tick_root
-        && inside(&ask.out, ticks)
+        && inside(&ask.out, ticks)?
     {
         return Err(format!(
             "--out {} lies inside the tick store {}; this check never writes a source it \

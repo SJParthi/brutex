@@ -74841,3 +74841,77 @@ entry here. Each says where its citation resolves.
   key's closes (the last `incomplete` line's `reason=`, the first close that
   wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
   citation of either resolves to D-5901 until its own entry is written.
+
+### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
+
+**What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store
+root or inside the tick store is refused before anything is read. The check
+that held it (`tick_second_check::inside`) walked up to the first existing
+ancestor of `--out`, resolved that and compared. Two forms went past it:
+
+- a **relative** `--out` whose first component does not exist: the parent of
+  a bare name is the empty path, which neither exists nor resolves, so the raw
+  text `reports` was compared with the store's resolved path;
+- a **`..` after a missing component** (`<x>/nope/../store/dd`): the walk
+  stopped at a name ending in `..` (it has no file name), so the raw text was
+  compared again.
+
+Reproduced on this branch's previous build (state/datacheck/rust-t2s-r7/bin/cli,
+the tree of e236c75fb) on a synthetic store and tick store under
+`scratch/data2-fix-r1/pre/`: standing in the store, `--out reports` exited 0
+and made `store/reports/tick-to-second.lock`; `--out <x>/nope/../store/dotdot1`
+made `nope/` and `store/dotdot1/tick-to-second.lock`; standing in the tick
+store's `cm`, `--out relt` made `ticks/cm/relt/tick-to-second.lock`. On a
+store with days the same run writes its day segments and version files there
+(the verifier's reproduction).
+
+**The decision.**
+
+1. Every path the containment check compares is first made absolute against
+   the current directory (`std::path::absolute`), the base the host itself
+   resolves a relative `--out` against when the run makes it.
+2. It is then walked one component at a time in two forms (`Resolved`):
+   - **physical**: after each component that exists, the host's own answer
+     for where it is (`canonicalize`: links followed, the case held on disk).
+     A `..` after an existing component leaves the place that component
+     really is; a `..` after a missing one cancels it, exactly as
+     `create_dir_all` makes the missing component a real directory and steps
+     back out of it.
+   - **lexical**: `.` dropped and each `..` taking off the component before
+     it, as written.
+3. `--out` is inside a root when it is inside in EITHER form. The physical
+   form catches every relative, `..`, link and case spelling of the store's
+   own place; the lexical form also refuses an `--out` written through one
+   of the store's own links (`<store>/link/reports`), whose physical place is
+   wherever the link leads.
+4. A component the host can neither resolve nor report missing (a refused
+   permission, a component under a file) refuses the run: where `--out`
+   lies is then unknown, and guessing would be the fallback CLAUDE.md §4
+   bans. An empty `--out` cannot be made absolute and is refused the same
+   way.
+5. The refusal still comes before `create_dir_all` and before the lock file:
+   nothing is made anywhere when `--out` is refused.
+
+**Two follow-ups taken with it.** A staged write the host refuses takes its
+staging name back off (`stage_with`): the name carries the process id, so no
+later run's `store::staging::create` would ever clear it, and a refused run
+left a `.tmp` beside its versions for good. A month held ONLY as a sealed
+`.sbar` (its raw name gone) is now checked end to end, row for row as its raw
+form was, not only listed (T2S-17 covered the listing).
+
+**What it does not do** (`docs/06-limits.md` L-T2S-11): it does not follow
+the store's links outward, so an `--out` written as the physical target of a
+link inside the store (`/data/bars/r` where `<store>/bars -> /data/bars`) is
+not refused; the real store holds no such link at its top (measured `ls -la`,
+21 Oct 2026). And it is a check before a create, so a link swapped in between
+the two is not seen.
+
+**Proof.** `tick_second_check::tests::an_out_directory_inside_the_store_and_a_held_lock_are_refused_before_anything_is_read`
+(the `..` form, absolute and relative to the current directory, for the store
+and the tick store), `tick_second_check::tests::both_forms_of_a_path_name_where_the_run_would_really_write`,
+`crates/cli/tests/tick_second_out.rs::a_bare_relative_out_standing_in_the_store_or_the_tick_store_is_refused_before_anything_is_made`
+(the binary, standing in each root),
+`tick_second_check::tests::a_refused_staging_write_takes_its_staging_name_back_off`,
+`tick_second_check::tests::a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was`.
+T2S-18 to T2S-20. Amends D-5185 item 5 by stating how it is held; the rule
+itself is unchanged.
