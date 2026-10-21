@@ -271,7 +271,10 @@ impl DayLedger {
     }
 
     /// Records an exercise of an option worth `intrinsic_value`, settled as
-    /// the caller names it: only [`Settlement::Cash`] is priced (D-5130).
+    /// the caller names it: only [`Settlement::Cash`] is priced (D-5130). The
+    /// exercise pays Dhan's ₹20 brokerage, and GST on it, as an executed
+    /// order does (sources row B-05, D-5132); it is not counted in
+    /// [`Self::orders`]. O(1): C-CHG-10.
     ///
     /// # Errors
     ///
@@ -451,6 +454,13 @@ impl DayLedger {
     /// base). Proved on a squared and a one-sided intraday, delivery and MTF
     /// day by
     /// `costs::ledger::tests::a_days_orders_sum_to_its_unrounded_lines_on_every_netting`.
+    ///
+    /// **An option exercise is not an order, so its lines belong to no
+    /// order**: on an options day with exercises the orders' brokerage sums
+    /// to the day's less Dhan's ₹20 per exercise
+    /// ([`DayCharges::exercises`], sources row B-05, D-5132), and STT on
+    /// exercise is in no order's lines. Proved by
+    /// `costs::ledger::tests::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does`.
     ///
     /// # Errors
     ///
@@ -1011,6 +1021,77 @@ mod tests {
             DayLedger::new(TradeKind::Commodity, Exchange::Nse, on()),
             Err(crate::schedule::COMMODITY_REFUSAL)
         );
+    }
+
+    #[test]
+    fn an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does() {
+        // The verifier's probe (round 2): sources row B-05 applies Dhan's ₹20
+        // per executed order to an option "expired, exercised, or assigned".
+        // An exercise-only day of ₹10,000 intrinsic value is the ₹15 of STT,
+        // ₹20 of brokerage and ₹3.60 of GST on it: ₹38.60, never ₹15 (D-5132).
+        let day = TradeDay::new(2026, 10, 27).expect("a real date");
+        let mut only = DayLedger::new(TradeKind::Options, Exchange::Nse, day).expect("priced");
+        only.exercise(rs(10_000_00), Settlement::Cash)
+            .expect("an option");
+        let alone = only.close(Mode::Precise, TODAY).expect("priced");
+        assert_eq!(
+            (
+                alone.orders(),
+                alone.exercises(),
+                alone.brokerage(),
+                alone.gst(),
+                alone.stt_exercise(),
+                alone.total()
+            ),
+            (0, 1, rs(20_00), rs(3_60), rs(15_00), rs(38_60))
+        );
+        // The unrounded brokerage is the ₹20 exactly, and GST is 18% of it.
+        let unrounded = units(&alone.unrounded_lines());
+        assert_eq!(
+            (unrounded[0], unrounded[6]),
+            (20 * 1_000_000_000, 3_600_000_000)
+        );
+        // A buy of 75 at ₹100 the same day: two of Dhan's ₹20, one for the
+        // order and one for the exercise, and GST on both. 18% of ₹40 +
+        // ₹2.66 exchange + ₹0.01 SEBI = ₹7.6806 -> ₹7.68; total ₹40 + ₹2.66
+        // + ₹0.01 + ₹7.68 + ₹15 = ₹65.35.
+        let mut both = DayLedger::new(TradeKind::Options, Exchange::Nse, day).expect("priced");
+        both.add(buy(75, 100_00)).expect("in range");
+        both.exercise(rs(10_000_00), Settlement::Cash)
+            .expect("an option");
+        let closed = both.close(Mode::Precise, TODAY).expect("priced");
+        assert_eq!(
+            (
+                closed.orders(),
+                closed.exercises(),
+                closed.brokerage(),
+                closed.exchange_charge(),
+                closed.gst(),
+                closed.total()
+            ),
+            (1, 1, rs(40_00), rs(2_66), rs(7_68), rs(65_35))
+        );
+        // The order's own lines carry one ₹20: an order is not an exercise.
+        let lines = both
+            .order_lines_unrounded(buy(75, 100_00), Mode::Precise, TODAY)
+            .expect("priced");
+        assert_eq!(lines[0].1.units(), 20 * 1_000_000_000);
+        // So the orders' brokerage is the day's less ₹20 per exercise, and
+        // STT on exercise is in no order's lines (the ledger's stated sum).
+        let day_lines = units(&closed.unrounded_lines());
+        assert_eq!(
+            day_lines[0],
+            lines[0].1.units() + i128::from(closed.exercises()) * 20 * 1_000_000_000
+        );
+        assert_eq!((lines[4].1.units(), day_lines[4]), (0, 15 * 1_000_000_000));
+        // The stack's own day prices the exercise the same way.
+        let mut csd =
+            ClientSecurityDay::open(TradeKind::Options, Exchange::Nse, day, TODAY).expect("priced");
+        csd.add(Order::new(OrderSide::Buy, 75, rs(100_00)).expect("in range"))
+            .expect("in range");
+        csd.exercise(rs(10_000_00), Settlement::Cash)
+            .expect("an option");
+        assert_eq!(csd.settle(), Ok(closed));
     }
 
     #[test]

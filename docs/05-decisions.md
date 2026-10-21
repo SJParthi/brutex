@@ -73706,6 +73706,80 @@ cloud base. That commit is the snapshot of `feat/db-fix` at `4756cce0`
 (D-5400), reachable from `origin/cloud/base-20261016` and not from
 `feat/db-fix`'s own history; D-5110 stands as written.
 
+### D-5132 — CLOUD-CHG1 repair 2: an option exercise pays Dhan's ₹20 brokerage and its GST (sources row B-05), the precise method moves to `precise/r2`, and an expiry or an assignment is listed NOT PRICED — 2026-10-21
+
+**Number** inside the cloud block D-5110..D-5139 (D-5132 was free on this
+branch and on `feat/db-fix` at `8c67456ac`).
+
+**What was observed** (second check of CLOUD-CHG1, round 2,
+`state/fix/round2/verify-CLOUD-CHG1-r2.json`, reproduced here first).
+`Totals::exercise` recorded only the intrinsic value. An NSE options day with
+nothing but an exercise of ₹10,000 closed at ₹15.00 (the exercise STT alone),
+and a buy plus an exercise paid one ₹20 of brokerage. Sources row B-05 (Dhan's
+pricing page, read 13 Oct 2026) applies the ₹20 per executed order *"also ...
+to Options Contracts that are expired, exercised, or assigned"*, and
+`schedule::DHAN_FNO_BROKERAGE`'s doc and the `docs/00-charter.md` CHG-1 row
+both said the stack charged it on an exercise. So a figure labelled precise and
+cited was ₹23.60 short per exercise, and a unit test pinned the short ₹15.00.
+
+**Decision.**
+
+1. `Totals::exercise` — the one path `ClientSecurityDay::exercise` and
+   `DayLedger::exercise` share — adds `DHAN_FNO_BROKERAGE` to the day's
+   brokerage, both rounded and unrounded. The 18% GST follows through the
+   day's GST base. The exercise is counted in a new `exercises()`, not in
+   `orders()`: it is not an order the client placed. The brokerage is the
+   constant B-05 names, never `dhan_brokerage(kind, intrinsic)`. That would
+   price the same ₹20, but through a branch that cannot fail, which leaves an
+   unreachable `?`. The move is all or nothing across its four totals.
+   An exercise-only day is now ₹15 + ₹20 + ₹3.60 = ₹38.60. The verifier's
+   buy of 75 at ₹100 plus the exercise is ₹40 of brokerage and ₹65.35 in all.
+   Proved by
+   `costs::ledger::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does`
+   and the re-pinned
+   `costs::stack::options_pay_tax_on_premium_and_the_exercise_rate_on_intrinsic_value`.
+   Both fail with the two brokerage lines removed: checked by building the old
+   rule into a scratch copy of `crates/costs/src` with `rustc`,
+   `state/fix/round2/chg1-logs-r10/before-old-rule.log`, and again as the
+   `no-brokerage` hand mutant, `state/fix/round2/chg1-logs-r11/hmut.out`.
+   CHG-38.
+2. `PRECISE_VERSION` moves from `precise/r1` to `precise/r2`. The method now
+   prices a day with an exercise differently, so a run identity recorded under
+   r1 must not name the new figures (`CLAUDE.md` §3 rule 3). A day without an
+   exercise prices exactly as before.
+3. An **expiry** and an **assignment**, which B-05 also names, are not inputs
+   of the stack: no day can record one. `NetTrade` refuses a bought option
+   that is never sold and a written option that is never bought, so a position
+   held to either is refused rather than netted short. The two are listed
+   by name as NOT PRICED in `docs/06-limits.md` §CHG-1. The
+   `schedule::DHAN_FNO_BROKERAGE` doc and the `docs/00-charter.md` row now say
+   exactly that, not "also on an option expired, exercised or assigned".
+4. Measured as C-CHG-10: the ledger exercise, now four checked additions,
+   costs the same for the 1,000,001st exercise as for the first and for
+   ₹1,000 crore as for ₹1. A day of 1,000,000 exercises closes at the cost of
+   one.
+5. Follow-up taken in the same files: `ChargeError::SquareOffNotApplicable`
+   says that an equity intraday, futures or options position is squared off
+   at the ceiling, never a delivery or MTF holding. It used to say "only an
+   intraday position", which contradicted `can_be_squared_off_by_broker`.
+6. An exercise is not an order, so its lines belong to no order. On a day
+   with exercises the orders' unrounded brokerage from
+   `DayLedger::order_lines_unrounded` sums to the day's less ₹20 per
+   exercise, and STT on exercise is in no order's lines. The method's own
+   statement of what the orders sum to, and rows CHG-29 and CHG-38, now say
+   so. The ledger test above asserts the difference is exactly ₹20 per
+   exercise.
+
+**Not chosen.** (a) Counting the exercise in `orders()`. That would make an
+exercise-only day report one executed order, which no order book shows.
+(b) Modelling expiry and assignment now. Netting a position held to
+either needs a closing leg that is not an order (premium lost, or intrinsic
+value paid), and `NetTrade` has no such leg. Inventing one inside a repair
+is the silent scope change §3 rule 2 forbids; it is listed as open work.
+(c) Pricing the exercise brokerage only in the ledger. The ledger and the
+stack share `Totals` so that they can never disagree
+(`costs::ledger::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles`).
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at

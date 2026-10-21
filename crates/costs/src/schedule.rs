@@ -438,8 +438,12 @@ pub const DHAN_EQUITY_BROKERAGE_RATE: Cited = Cited::named(
 /// The ₹20 cap on Dhan's equity intraday and MTF brokerage, per order.
 pub const DHAN_EQUITY_BROKERAGE_CAP: Paisa = Paisa::from_raw(2_000);
 
-/// Dhan F&O brokerage: ₹20 per executed order, whatever its size — also on
-/// an option expired, exercised or assigned (sources rows B-03, B-04, B-05).
+/// Dhan F&O brokerage: ₹20 per executed order, whatever its size (sources
+/// rows B-03, B-04). Row B-05 applies it also to an option *"expired,
+/// exercised, or assigned"*: the stack charges it on every executed order and
+/// on each exercise (D-5132). An assignment and an expiry are not inputs of
+/// the stack — no day can record one — so their ₹20 is NOT PRICED, and a
+/// position held to either cannot be netted (`docs/06-limits.md` §CHG-1).
 pub const DHAN_FNO_BROKERAGE: Paisa = Paisa::from_raw(2_000);
 
 /// Dhan DP charge: ₹12.50 per instruction per ISIN on a delivery or MTF sell
@@ -640,8 +644,13 @@ pub enum Mode {
 }
 
 /// The version of the precise method: a revision of its rounding and
-/// aggregation rules (D-5113, D-5121).
-pub const PRECISE_VERSION: &str = "precise/r1";
+/// aggregation rules (D-5113, D-5121), and of what it charges on.
+///
+/// r2 (D-5132): r1 charged an option exercise its STT alone; r2 also charges
+/// Dhan's ₹20 brokerage on each exercise, and GST on it (sources row B-05),
+/// so a day with an exercise prices ₹23.60 higher per exercise under r2.
+/// Every day without an exercise prices exactly as under r1.
+pub const PRECISE_VERSION: &str = "precise/r2";
 
 /// The version of the calculator replica: the day the page was read, and a
 /// revision of its constants (D-5112).
@@ -1673,7 +1682,7 @@ mod tests {
         );
         assert_eq!(
             [Mode::Precise.version(), Mode::DhanCalculator.version()],
-            ["precise/r1", "dhan-calculator/2026-10-16/r1"]
+            ["precise/r2", "dhan-calculator/2026-10-16/r1"]
         );
         assert_ne!(Status::Cited, Status::Unverified);
         assert_eq!(MAX_RATES_ON_A_CARD, 7);

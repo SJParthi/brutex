@@ -7,7 +7,7 @@
 //!
 //! | Line | On | Rounded |
 //! |---|---|---|
-//! | brokerage (Dhan) | each executed order | half-up to the paisa, per order |
+//! | brokerage (Dhan) | each executed order, and each option exercise (₹20, sources row B-05) | half-up to the paisa, per order |
 //! | exchange transaction charge, IPFT included | the day's turnover | half-up to the paisa, once |
 //! | SEBI turnover fee | the day's turnover | half-up to the paisa, once |
 //! | STT | the day's value the tax is levied on | half-up to the paisa per security, then the client's day total half-up to the rupee |
@@ -76,9 +76,9 @@ use crate::exact::{Exact, Quantum, Rupees, half_up, round_half_up, units_of};
 use crate::money::narrow;
 use crate::rate::OrderSide;
 use crate::schedule::{
-    Cited, DHAN_DP_CHARGE, DHAN_SQUARE_OFF_FEE, GST, Mode, PHYSICAL_DELIVERY_REFUSAL, Product,
-    RateBasis, RateCard, RateSelector, Segment, Settlement, Status, Taxes, TradeKind,
-    dhan_brokerage, dhan_brokerage_units,
+    Cited, DHAN_DP_CHARGE, DHAN_FNO_BROKERAGE, DHAN_SQUARE_OFF_FEE, GST, Mode,
+    PHYSICAL_DELIVERY_REFUSAL, Product, RateBasis, RateCard, RateSelector, Segment, Settlement,
+    Status, Taxes, TradeKind, dhan_brokerage, dhan_brokerage_units,
 };
 
 /// What every precise output says it is.
@@ -239,6 +239,7 @@ impl OrderCharges {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Totals {
     orders: i64,
+    exercises: i64,
     buy_quantity: i64,
     buy_value: Paisa,
     sell_quantity: i64,
@@ -253,6 +254,7 @@ impl Totals {
     /// A day with nothing in it.
     pub(crate) const EMPTY: Self = Self {
         orders: 0,
+        exercises: 0,
         buy_quantity: 0,
         buy_value: Paisa::ZERO,
         sell_quantity: 0,
@@ -339,14 +341,20 @@ impl Totals {
     }
 
     /// Records an exercise of an option worth `intrinsic_value` on a day of
-    /// `kind`, settled as `settlement` says.
+    /// `kind`, settled as `settlement` says, and the ₹20 brokerage Dhan
+    /// charges on it: its pricing page applies the per-order ₹20 to an
+    /// option *"expired, exercised, or assigned"* (sources row B-05), so an
+    /// exercise is billed as one more executed order would be, and its GST
+    /// follows through the day's GST base (D-5132). All or nothing: a
+    /// refused exercise leaves the totals exactly as they were.
     ///
     /// # Errors
     ///
     /// * [`ChargeError::ExerciseNotApplicable`] on a day that is not options.
     /// * [`PHYSICAL_DELIVERY_REFUSAL`] for [`Settlement::PhysicalDelivery`].
     /// * [`ChargeError::Cost`] carrying [`CostError::NotPositive`] for an
-    ///   intrinsic value that is not positive, or an overflow.
+    ///   intrinsic value that is not positive, or an overflow of the day's
+    ///   exercise count, exercised value or brokerage.
     pub(crate) fn exercise(
         &mut self,
         kind: TradeKind,
@@ -368,7 +376,20 @@ impl Totals {
             }
             .into());
         }
-        self.exercised = add(self.exercised, intrinsic_value, "the day's exercised value")?;
+        let mut next = *self;
+        next.exercises = self
+            .exercises
+            .checked_add(1)
+            .ok_or(overflow("the day's exercise count"))?;
+        next.exercised = add(self.exercised, intrinsic_value, "the day's exercised value")?;
+        // B-05 names an exercised option, so its brokerage is the F&O ₹20
+        // itself, never a function of the intrinsic value.
+        next.brokerage = add(self.brokerage, DHAN_FNO_BROKERAGE, "the day's brokerage")?;
+        next.brokerage_exact = Exact::sum(
+            &[self.brokerage_exact, Exact::of_paisa(DHAN_FNO_BROKERAGE)],
+            "the day's unrounded brokerage",
+        )?;
+        *self = next;
         Ok(())
     }
 }
@@ -482,8 +503,10 @@ impl ClientSecurityDay {
     }
 
     /// Records an exercise of an option worth `intrinsic_value`, on which
-    /// STT is levied at the exercise rate. The caller names the settlement:
-    /// only [`Settlement::Cash`] is priced (D-5130).
+    /// STT is levied at the exercise rate, and which pays Dhan's ₹20
+    /// brokerage, and GST on it, as an executed order does (sources row B-05,
+    /// D-5132). The caller names the settlement: only [`Settlement::Cash`] is
+    /// priced (D-5130).
     ///
     /// # Errors
     ///
@@ -617,6 +640,7 @@ pub(crate) fn settle_precise(card: &RateCard, t: &Totals) -> Result<DayCharges, 
         kind: card.kind(),
         exchange: card.exchange(),
         orders: t.orders,
+        exercises: t.exercises,
         buy_quantity: t.buy_quantity,
         buy_value: t.buy_value,
         sell_quantity: t.sell_quantity,
@@ -732,6 +756,7 @@ pub(crate) fn settle_dhan(
         kind,
         exchange,
         orders: t.orders,
+        exercises: 0,
         buy_quantity: t.buy_quantity,
         buy_value: t.buy_value,
         sell_quantity: t.sell_quantity,
@@ -963,6 +988,7 @@ pub struct DayCharges {
     kind: TradeKind,
     exchange: Exchange,
     orders: i64,
+    exercises: i64,
     buy_quantity: i64,
     buy_value: Paisa,
     sell_quantity: i64,
@@ -1017,6 +1043,13 @@ impl DayCharges {
     pub const fn orders(&self) -> i64 {
         self.orders
     }
+    /// How many option exercises: each pays the ₹20 brokerage of an
+    /// executed order (sources row B-05), counted in [`Self::brokerage`] and
+    /// not in [`Self::orders`].
+    #[must_use]
+    pub const fn exercises(&self) -> i64 {
+        self.exercises
+    }
     /// Units bought.
     #[must_use]
     pub const fn buy_quantity(&self) -> i64 {
@@ -1047,7 +1080,8 @@ impl DayCharges {
     pub const fn turnover(&self) -> Paisa {
         self.turnover
     }
-    /// Dhan's brokerage, summed over the orders.
+    /// Dhan's brokerage, summed over the orders and the exercises — ₹20 on
+    /// each exercise (sources row B-05, D-5132).
     #[must_use]
     pub const fn brokerage(&self) -> Paisa {
         self.brokerage
@@ -1639,7 +1673,7 @@ impl NetTrade {
     /// day.add(Order::new(OrderSide::Sell, 50, Paisa::from_raw(1_530_00))?)?;
     /// let trade = NetTrade::of_day(&day.settle()?)?;
     /// assert_eq!(trade.rate_set(), RateSelector::CurrentOnEveryDate);
-    /// assert_eq!(trade.versions(), ("todays-rates/2026-10-16/r1", "precise/r1"));
+    /// assert_eq!(trade.versions(), ("todays-rates/2026-10-16/r1", "precise/r2"));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[must_use]
@@ -1986,13 +2020,30 @@ mod tests {
         assert_eq!(charges.stt_exercise(), rs(15_00));
         assert_eq!(charges.exercised(), rs(9_750_00));
         assert_eq!(charges.rates_used()[5], Some(crate::schedule::STT_EXERCISE));
-        // An exercise alone is a day: no order, still a tax.
+        // The buy and the exercise each pay Dhan's ₹20 (sources rows B-04,
+        // B-05): ₹40 of brokerage on one executed order and one exercise,
+        // and GST on it: 18% of ₹40 + ₹2.31 + ₹0.01 = ₹7.6176 -> ₹7.62.
+        assert_eq!((charges.orders(), charges.exercises()), (1, 1));
+        // Brokerage, exchange, SEBI, trade STT, stamp, GST and the total:
+        // ₹40 + ₹2.31 + ₹0.01 + ₹7.62 + the exercise's ₹15 = ₹64.94.
+        assert_eq!(lines(&charges), [40_00, 2_31, 1, 0, 0, 7_62, 64_94]);
+        // An exercise alone is a day: no order, still a tax, and still
+        // Dhan's ₹20 and its GST — ₹15 + ₹20 + ₹3.60 (D-5132).
         let mut only = open(TradeKind::Options, Exchange::Nse);
         only.exercise(rs(9_750_00), Settlement::Cash)
             .expect("an option");
         let alone = only.settle().expect("an exercise is something to price");
-        assert_eq!(alone.total(), rs(15_00));
-        assert_eq!(alone.orders(), 0);
+        assert_eq!((alone.orders(), alone.exercises()), (0, 1));
+        assert_eq!(
+            (alone.brokerage(), alone.gst(), alone.stt_exercise()),
+            (rs(20_00), rs(3_60), rs(15_00))
+        );
+        assert_eq!(alone.total(), rs(38_60));
+        // Two exercises on one day are two of B-05's ₹20.
+        only.exercise(rs(1_00), Settlement::Cash)
+            .expect("an option");
+        let twice = only.settle().expect("settled");
+        assert_eq!((twice.exercises(), twice.brokerage()), (2, rs(40_00)));
     }
 
     #[test]
@@ -2161,6 +2212,10 @@ mod tests {
     /// A day already at one edge, the order that pushes it over, and the words.
     type AtTheEdge = (fn(&mut ClientSecurityDay), Order, &'static str);
 
+    /// An options day already at one edge, and the words its next exercise
+    /// must be refused with.
+    type ExerciseAtTheEdge = (fn(&mut ClientSecurityDay), &'static str);
+
     /// A client-day already at one of its edges, and the refusal it must name.
     type ClientEdge = (fn(&mut ClientDay), &'static str);
 
@@ -2232,12 +2287,35 @@ mod tests {
             assert_eq!(csd.add(order).err(), named(operation));
             assert_eq!(csd, before, "{operation}: a refused order changes nothing");
         }
-        let mut opt = open(TradeKind::Options, Exchange::Nse);
-        opt.totals.exercised = rs(i64::MAX);
-        assert_eq!(
-            opt.exercise(rs(1), Settlement::Cash).err(),
-            named("the day's exercised value")
-        );
+        // An exercise moves four totals, all or nothing (D-5132).
+        let exercise_cases: [ExerciseAtTheEdge; 4] = [
+            (
+                |d| d.totals.exercises = i64::MAX,
+                "the day's exercise count",
+            ),
+            (
+                |d| d.totals.exercised = rs(i64::MAX),
+                "the day's exercised value",
+            ),
+            (|d| d.totals.brokerage = rs(i64::MAX), "the day's brokerage"),
+            (
+                |d| d.totals.brokerage_exact = Exact(i128::MAX),
+                "the day's unrounded brokerage",
+            ),
+        ];
+        for (set, operation) in exercise_cases {
+            let mut opt = open(TradeKind::Options, Exchange::Nse);
+            set(&mut opt);
+            let before = opt;
+            assert_eq!(
+                opt.exercise(rs(1), Settlement::Cash).err(),
+                named(operation)
+            );
+            assert_eq!(
+                opt, before,
+                "{operation}: a refused exercise changes nothing"
+            );
+        }
 
         // Settlement: the turnover, the GST base and the total.
         let mut wide = open(TradeKind::Futures, Exchange::Nse);
@@ -2750,7 +2828,7 @@ mod tests {
         assert_eq!(NetTrade::of_days(&bought, &same), mismatched(NOT_IN_ORDER));
         let d1 = NetTrade::of_days(&bought, &sold).expect("in order");
         assert_eq!(d1.rate_set(), TODAY);
-        assert_eq!(d1.versions(), ("todays-rates/2026-10-16/r1", "precise/r1"));
+        assert_eq!(d1.versions(), ("todays-rates/2026-10-16/r1", "precise/r2"));
         // Options, the kind the dated set prices: one leg at the rates in
         // force, the other at today's, either way round, is refused.
         let (d14, d15) = (day(2026, 10, 14), day(2026, 10, 15));
@@ -2770,7 +2848,7 @@ mod tests {
         // One rate set, in order: netted, and the net names that set.
         let carried = NetTrade::of_days(&open_dated, &close_dated).expect("one rate set");
         assert_eq!(carried.rate_set(), dated);
-        assert_eq!(carried.versions(), ("dated-regime/r2", "precise/r1"));
+        assert_eq!(carried.versions(), ("dated-regime/r2", "precise/r2"));
         assert_eq!(
             carried.charges(),
             rs(open_dated.total().raw() + close_dated.total().raw())
@@ -2792,7 +2870,7 @@ mod tests {
             NetTrade::of_day(&intraday)
                 .expect("a round trip")
                 .versions(),
-            ("dated-regime/r2", "precise/r1")
+            ("dated-regime/r2", "precise/r2")
         );
     }
 

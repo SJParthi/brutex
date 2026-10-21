@@ -160,8 +160,9 @@ impl fmt::Display for ChargeError {
             ),
             Self::SquareOffNotApplicable { kind } => write!(
                 f,
-                "a broker square-off fee does not apply to {kind}: only an intraday position \
-                 is squared off at the ceiling"
+                "a broker square-off fee does not apply to {kind}: only an equity intraday, \
+                 futures or options position is squared off at the ceiling, never a delivery \
+                 or MTF holding"
             ),
             Self::ExerciseNotApplicable { kind } => write!(
                 f,
@@ -341,8 +342,9 @@ mod tests {
                 ChargeError::SquareOffNotApplicable {
                     kind: "equity delivery",
                 },
-                "a broker square-off fee does not apply to equity delivery: only an intraday \
-                 position is squared off at the ceiling",
+                "a broker square-off fee does not apply to equity delivery: only an equity \
+                 intraday, futures or options position is squared off at the ceiling, never a \
+                 delivery or MTF holding",
             ),
             (
                 ChargeError::ExerciseNotApplicable { kind: "futures" },

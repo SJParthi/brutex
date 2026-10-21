@@ -19781,7 +19781,7 @@ a figure.
 | L-IA-57 | Naming who holds a busy lock (IA-2 repair 1) | a census verb refused beside v4 runs reads the kind locks; a press refused its sink probes its claim lock | O(1): at most three kind-lock probes (shared, non-blocking, ≤ 1 KiB each) or one claim-lock probe. Measured (`ia2_repair_timings`): census verb refused beside 3 v4 runs n=2,000 p50 71.7 µs, p99 129.0 µs, max 267.9 µs; plan refused before its sink n=2,000 p50 19.7 µs, p99 41.5 µs, max 112.3 µs | IA-2 |
 | L-IA-58 | A run's end line in `/imports.json` (IA-2 repair 1) | each `run <id> ended=` line is folded into its run | O(1) per line: one id-index probe and the run's own fields. Measured (`end_line_fold_timing`, ignored test): 100,000 end lines folded beside 100,000 runs, each timed, p50 458 ns, p99 1.46 µs, max 72.3 µs. The route over the real store's journal (24 runs), n=200 sequential GETs on :8401: p50 9.24 ms, p99 10.10 ms, max 12.83 ms | IA-2 |
 
-## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5131
+## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5132
 
 `crates/costs` package CHG-1: `schedule`, `stack` (precise, the default) and
 `dhan_calc` (Dhan's calculator, comparison only). §27 above still describes
@@ -19951,7 +19951,14 @@ to expiry has no settlement entry at all: the stack prices executed orders
 only, and whether any charge falls on an expiry settlement is UNVERIFIED;
 BSE futures (no rate recorded: `ChargeError::NoRate`); BSE F&O in
 calculator mode (never read from the page: `ChargeError::NotOnPage`); exchange
-or stamp charges on an option exercise (only the exercise STT is levied); **the
+or stamp charges on an option exercise (only the exercise STT, and since D-5132
+Dhan's ₹20 brokerage with its GST, are levied); **Dhan's ₹20 brokerage, and
+its GST, on an option that expires or is assigned** (sources row B-05 applies
+the ₹20 to an option *"expired, exercised, or assigned"*: an exercise pays it,
+but an expiry and an assignment are not inputs of the stack — no day can
+record one — and `NetTrade` refuses a bought option that is never sold and a
+written option that is never bought, so a position held to either is refused
+rather than netted ₹23.60 short; modelling the two is open work); **the
 SEBI fee on the notional value of an exercised or assigned option** (`FA40632`,
 sources row F-02 — the stack levies the fee on premium only); call-and-trade
 fees (₹50 per desk order, row B-08); ETFs and commodities, refused by name
@@ -20106,6 +20113,54 @@ reached only when the card and `trip` disagree — kind 3, all test code.
 still not met, for the four kinds named here. `cargo mutants` on each of the
 six files of that tree: 446 mutants, 310 caught, 136 unviable, 0 missed, 0
 timeouts (`chg1-logs-r9/mut-*.out`).
+
+**Re-measured after the exercise brokerage (D-5132), by a method that is not
+the gate's.** The shared cargo queue gave no slot for over an hour on
+21 Oct 2026, so `crates/costs` was built with plain `rustc -C
+instrument-coverage` (opt-level 0, debug assertions and overflow checks on)
+and read with the toolchain's own `llvm-profdata` and `llvm-cov`, over the
+unit tests and both integration tests (`state/fix/round2/chg1-logs-r11/rcov/`):
+`charge_error` and `exact` 100% of lines, `stack` 99.81%, `dhan_calc` 99.79%,
+`schedule` 99.32%, `ledger` 99.10%. The unexecuted lines are the same four
+kinds as above (`stack` 589, 720, 907; `ledger` 757 and 765–768, the
+`NoDefault` witness, and 1334–1336, an `assert!` message; `schedule` 1202,
+1269, 1277, 1611, 1620); **none is in the D-5132 change**. `cargo mutants` on
+that change did not run for the same reason. Instead fourteen hand mutants of
+every production line it adds were each built with `rustc` and run against the
+unit tests, and all fourteen were caught
+(`state/fix/round2/chg1-logs-r11/hmut.out`). The mutants: the exercise count
+moved by 0 or 2; the ₹20 dropped, or replaced by the intrinsic value; the
+unrounded ₹20 dropped; no commit, a partial commit, or an early `Ok`;
+`exercises` settled or read as 0 or 1; the overflow message swapped;
+`precise/r1` restored; the old square-off message restored.
+
+### An option exercise on the ledger, measured (C-CHG-10, D-5132)
+
+An exercise is four checked additions: the count, the intrinsic value, and the
+₹20 of sources row B-05, rounded and unrounded. The close reads the totals.
+**Method, stated because it is not the gate's:** the cargo queue was full, so
+the stack bench was built with plain `rustc` at the workspace bench profile's
+own settings (`-C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort -C
+overflow-checks=on -g`) and run three times on the operator's Mac on
+21 Oct 2026, load average 15–18 on 14 cores from other agents' builds
+(`state/fix/round2/chg1-logs-r11/rustc/bench1.log`, `rustc2/bench1.log`,
+`bench-rustc-run3.log`). The figures are per call, from 20,000 batches of 16
+calls:
+
+- the first exercise: p50 2.6 ns, p99 2.6 ns;
+- the 1,000,001st: p50 2.6 ns, p99 5.1–5.2 ns;
+- ₹1,000 crore of intrinsic value: p50 2.6 ns, p99 2.6–5.2 ns;
+- a precise close of a day of 1 exercise: p50 106.7–109.3 ns, p99
+  117.1–135.3 ns;
+- a precise close of a day of 1,000,000 exercises: p50 106.7–109.3 ns, p99
+  117.1–132.8 ns.
+
+Each C-CHG-10 ratio was 1.000× in all three runs. One call per sample
+(n = 20,000), for the 1,000,001st exercise: p50 0, p99 42 ns, max 125–167 ns,
+which is the clock's own resolution. The max column of the batched rows
+reached 1.0 µs for one exercise and 7.2 µs for one close. That is the shared
+machine's scheduler, as the rows above explain: the same runs show it on rows
+that hold no loop at all.
 
 ### The backtest ledger: what it assumes (D-5127)
 

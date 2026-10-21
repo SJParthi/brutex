@@ -27,6 +27,10 @@
 //! * **One order's lines from a ledger of 2,000,000 orders cost what they
 //!   cost from a ledger of two, in each mode, and a delivery sell's share of
 //!   the day's DP costs the same among 2,000,000 sells as alone** (C-CHG-09).
+//! * **An option exercise on the ledger, which now carries the ₹20 brokerage
+//!   of sources row B-05, costs the same for the 1,000,001st as for the
+//!   first and for ₹1,000 crore as for ₹1, and a day of 1,000,000 exercises
+//!   closes at the cost of one** (C-CHG-10, D-5132).
 //!
 //! The ledger's steps are also timed ONE call per sample and printed beside
 //! a sample of two clock reads alone, so the per-call p99 and max are shown
@@ -51,7 +55,7 @@ use costs::day::TradeDay;
 use costs::dhan_calc::quote;
 use costs::ledger::{DayLedger, ExecutedOrder};
 use costs::rate::OrderSide;
-use costs::schedule::{Mode, Product, RateCard, RateSelector, TradeKind};
+use costs::schedule::{Mode, Product, RateCard, RateSelector, Settlement, TradeKind};
 use costs::stack::{ClientDay, ClientSecurityDay, Order};
 
 /// A ratio of medians above this is a failure. Thousandths: 3.0x, the
@@ -547,6 +551,71 @@ fn a_ledgers_order_lines_do_not_track_how_many_orders_it_holds(f: &Fixture) -> b
     ok
 }
 
+/// C-CHG-10 — recording an option exercise on the backtest ledger costs the
+/// same for the 1,000,001st exercise as for the first, and for ₹1,000 crore
+/// of intrinsic value as for ₹1, and closing a day of 1,000,000 exercises
+/// costs what closing a day of one does: an exercise is four checked
+/// additions — its count, its value, and the ₹20 brokerage of sources row
+/// B-05 rounded and unrounded — and the close reads the totals (D-5132).
+fn a_ledger_exercise_does_not_track_the_exercises_before_it_or_its_size(f: &Fixture) -> bool {
+    let Ok(fresh) = DayLedger::new(TradeKind::Options, Exchange::Nse, f.day) else {
+        println!("  BENCH SETUP FAILED: the options ledger");
+        return false;
+    };
+    let small = Paisa::from_raw(1_00);
+    let huge = Paisa::from_raw(1_000_000_000_000);
+    let (mut one, mut crowded) = (fresh, fresh);
+    let mut set_up = one.exercise(small, Settlement::Cash).is_ok();
+    for _ in 0..1_000_000 {
+        set_up &= crowded.exercise(small, Settlement::Cash).is_ok();
+    }
+    if !set_up {
+        println!("  BENCH SETUP FAILED: the exercises");
+        return false;
+    }
+    let exercise = |day: DayLedger, value: Paisa| {
+        spread(move || {
+            let mut d = black_box(day);
+            d.exercise(black_box(value), Settlement::Cash)
+        })
+    };
+    let first = exercise(fresh, small);
+    let later = exercise(crowded, small);
+    let large = exercise(fresh, huge);
+    report("ledger exercise: the first, ₹1 of intrinsic value", first);
+    report("ledger exercise: the 1,000,001st", later);
+    report("ledger exercise: ₹1,000 crore of intrinsic value", large);
+    // Reported, not gated, as the ledger's other unbatched steps are.
+    report(
+        "unbatched: ledger exercise, the 1,000,001st",
+        spread_unbatched(move || {
+            let mut d = black_box(crowded);
+            d.exercise(black_box(small), Settlement::Cash)
+        }),
+    );
+    let close = |day: DayLedger| {
+        spread(move || {
+            black_box(day).close(black_box(Mode::Precise), RateSelector::CurrentOnEveryDate)
+        })
+    };
+    let closed_one = close(one);
+    let closed_many = close(crowded);
+    report("ledger close (precise): 1 exercise", closed_one);
+    report("ledger close (precise): 1,000,000 exercises", closed_many);
+    let held = ratio(
+        "C-CHG-10 ledger exercise: the 1,000,001st vs the first",
+        first,
+        later,
+    );
+    let sized = ratio("C-CHG-10 ledger exercise: ₹1,000 crore vs ₹1", first, large);
+    ratio(
+        "C-CHG-10 ledger close (precise): 1,000,000 exercises vs 1",
+        closed_one,
+        closed_many,
+    ) && held
+        && sized
+}
+
 /// Reported, not gated: the ledger's three steps timed ONE call per sample,
 /// so the p99 and max are per call rather than per 16-call mean. Each figure
 /// carries the clock's own read (two `Instant::now()` per sample), so it is
@@ -618,6 +687,7 @@ fn main() {
     ok &= a_ledger_add_does_not_track_the_orders_before_it_or_its_size(&f);
     ok &= a_ledger_close_does_not_track_how_many_orders_it_holds(&f);
     ok &= a_ledgers_order_lines_do_not_track_how_many_orders_it_holds(&f);
+    ok &= a_ledger_exercise_does_not_track_the_exercises_before_it_or_its_size(&f);
     ok &= the_ledgers_steps_one_call_per_sample(&f);
     the_dated_selector_cost(&f);
     if !ok {

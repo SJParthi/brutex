@@ -150,9 +150,10 @@
 //! read exactly as [`trip::Rates::resolve`] reads it — the regime row in force
 //! plus the IPFT, on every day (D-5131). A backtest drives
 //! [`ledger::DayLedger`]: one per client, security and day, an O(1) add per
-//! executed order, one close in either mode, and each order's own lines priced
-//! against the day's netting — measured as C-CHG-07, C-CHG-08 and C-CHG-09 in
-//! `crates/costs/benches/stack.rs`. D-5110 to D-5131.
+//! executed order, an O(1) exercise that also pays Dhan's ₹20 brokerage
+//! (sources row B-05, D-5132), one close in either mode, and each order's own
+//! lines priced against the day's netting — measured as C-CHG-07, C-CHG-08,
+//! C-CHG-09 and C-CHG-10 in `crates/costs/benches/stack.rs`. D-5110 to D-5132.
 //!
 //! | Module | Owns |
 //! |---|---|
