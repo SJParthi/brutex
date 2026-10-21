@@ -12060,12 +12060,17 @@ would close this.
   that a later feature change made real on the host (for example a release of
   `rustls-webpki` turning `ring` on by default) would not be seen by this test.
   The fingerprint pin catches that change only when it moves a `dependencies`
-  list. The fingerprint hashes names and dependency strings, never versions,
-  so a version bump that leaves every `dependencies` list unchanged (the
+  list. **Corrected 21 Oct 2026 (D-7120):** this paragraph said the
+  fingerprint hashes names and dependency strings and never versions; since
+  D-1611 it hashes each package's version too, so a version-only bump (the
   `rustls-webpki` example: only its version and checksum lines move, its list
-  still reads `"ring"`) is invisible to both the walk and the fingerprint.
-  `cargo deny check` (gate 3, `ring` and `cc` banned) is the only check on
-  that case.
+  still reads `"ring"`) does move the pin and stops the build until the scan
+  is done. D-7120's `rustls-webpki` 0.103.15 → 0.103.16 did exactly that. What
+  stays unseen by the walk and the fingerprint alike is the feature flip
+  itself: the lock records no features, so a new version that turned `ring`
+  on by default would re-pin like any other version bump, and only the scan
+  of its manifest (D-7120 read it: the same features) or `cargo deny check`
+  (gate 3, `ring` and `cc` banned) catches it.
 - **Names only, as before.** A native crate under a name `DECLARED` does not
   list is caught by the fingerprint pin, not by the reachability walk.
 - **Cost.** One parse of the lock and one O(V + E) walk (about 195 packages),
@@ -20533,3 +20538,11 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-IA3OPT-01 | The `_v3` check of one options day (`V3Ledger::check`) | it reads the day's manifest and ok marker, takes one sha256 of the manifest, and makes one pass over its lines against the listing: O(entries of the day). A line that agrees allocates nothing; only the first difference is built | a manifest over `MANIFEST_MAX_BYTES` (64 MiB) or a marker over `MARKER_MAX_BYTES` (4 KiB) is `Unverified` and is never read whole. The largest day measured is 26,820 lines. Measured above: p99 52.7 ms per day with the files cold and 10.7 ms warm, mostly the drive's read | IA-3-OPT |
 | L-IA3OPT-02 | The options year-zip directory walk (`NfoZips::list`) | to name a day zip filed in another zip (FM-043), the first day asked lists the directory and walks every `*.zip`'s central directory once: O(names in the directory) plus O(entries) per zip, once per source object (one run). After that, each day is one hash probe of its year's index and one of the notes | the real directory holds 9 year zips of 84 to 265 entries each (2,103 in all, counted by `zipinfo -1`), walked in 12.4 to 16.1 ms. The source cache that would keep the walk across runs (D-4802) is NOT BUILT | IA-3-OPT |
 | L-IA3OPT-03 | A year zip that refuses is walked again on each day of its year | a zip that refuses is not kept, as before this change, so each of its days names the refusal anew and a zip mended mid-run is read: O(entries of that zip) per day of its year while it refuses | only while it refuses. A zip of any other name that refuses is not asked again for the life of the source, so every day held nowhere answers its refusal until the next run | IA-3-OPT |
+
+## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-BREDS-1 | Which hosts `pull` contacts chain through the distrusted emSign keys is not known | RUSTSEC-2026-0382 and RUSTSEC-2026-0381 are cleared by refusing, during certificate verification, a path through any of the eight emSign intermediate keys `rustls-webpki` 0.103.16 lists, or one that anchors only at `emSign ECC Root CA - G3`, which `webpki-roots` 1.0.10 removed. A host `pull` reaches through `reqwest` (the broker, the Dropbox fetch, AWS Parameter Store) that presents such a chain is now refused. No handshake was made from this package: no gate contacts a vendor host, and none was contacted to find out. **UNVERIFIED** | the refusal is the call site's existing TLS error, named and never retried on weaker verification; nothing falls back to the old roots. The added work is a comparison against a fixed list of eight keys per certificate in a path, once per handshake, never per bar or per request served; not measured | BASE-REDS-1021 |
+| L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
+| L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
