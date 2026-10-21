@@ -70,6 +70,9 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli fno-membership`: the point-in-time F&O membership month files
+/// (D-5160..D-5165).
+mod fno_membership_command;
 /// `cli gdfl-dayflags`: the GDFL day ledger of days already imported (D-3335).
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
@@ -496,6 +499,26 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and the refusal surface. Exits non-zero on any
                                    failure. Nothing is pulled, nothing is written
                                    to the bar store.
+       cli fno-membership build --out DIR [--workers N] [--store ROOT]
+                                   which shares had a live stock-option contract
+                                   on each day, from the GDFL tick store's options
+                                   listings (BRUTEX_GDFL_TICKSTORE, read-only):
+                                   resumes after the last sealed record in DIR
+                                   and seals each day to known_to, one month
+                                   file per month. A day with no source is
+                                   refused, never filled (D-5160..D-5165).
+                                   --store ROOT lists ROOT's GDFL option and
+                                   share folders as a dated cross-check.
+       cli fno-membership build FROM|resume TO --out DIR [--workers N]
+                                   a typed window, for synthetic stores and
+                                   scratch copies only (refused inside the store).
+       cli fno-membership show DAY --out DIR [--store ROOT]
+                                   that day's pool and members in series order,
+                                   and the names differing from FNO_UNDERLYINGS.
+                                   Exits non-zero when membership is unknown.
+       cli fno-membership bench --out DIR
+                                   members, pool_size and is_member timed once
+                                   per known day: n, p50, p99, max.
        cli fold-audit   VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M
                                    does each stored COARSE rung equal the fold of
                                    the stored minutes? The seven coarse rungs are
@@ -2909,6 +2932,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
+        ["fno-membership", arguments @ ..] if !arguments.is_empty() => {
+            fno_membership_command::command(arguments, out)
+        }
         ["gdfl-stop", arguments @ ..] if !arguments.is_empty() => {
             gdfl_stop_command::command(arguments, out)
         }
@@ -2980,7 +3006,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 53] = [
+const COMMANDS: [&str; 54] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3002,6 +3028,7 @@ const COMMANDS: [&str; 53] = [
     "expression-backtest-stored",
     "expression-search-stored",
     "expression-stored",
+    "fno-membership",
     "fold-audit",
     "gdfl-dayflags",
     "gdfl-import",

@@ -1320,6 +1320,47 @@ The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
 
+## F&O membership source — measured 2026-10-16 (D-5160 to D-5164)
+
+`pull::fno_membership` (PIT-1) derives, for each trading day, which shares had
+a listed NSE stock-option contract. Its one source is our own GDFL options
+archive, recorded above ("GDFL NSE options tick files"); no new vendor and no
+new exchange file is read.
+
+- **What is read.** The index of each day file
+  `options/<yyyy>/<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.bts` of the verified tick
+  store (every entry of every vendor day zip, byte for byte: its RESUME.md and
+  `verify-options-<year>.txt`), READ-ONLY. Only the entry names are decoded
+  (`pull::gdfl_nfo::decode_ticker`); no tick row is opened.
+- **Span, measured 16 Oct 2026** (`ls` of the tick store): the first day file
+  is `options/2018/SEP_2018/GFDLNFO_TICK_03092018.bts`, the last
+  `options/2026/SEP_2026/GFDLNFO_TICK_30092026.bts`. Every session before
+  2018-09-03 has no source and is refused as "membership unknown".
+- **What the source can establish.** That a file of a contract exists on a
+  day, and, from its name, the contract's underlying, settled expiry, strike
+  and side. A contract's life is taken to run from its first file to its
+  settled expiry (D-5161); the first file is an UPPER bound on the day NSE
+  listed it.
+- **What is NOT sourced, and so is labelled.** NSE's own historical list of
+  securities eligible for stock derivatives (no NSE file or circular naming
+  entries and exits was read): UNVERIFIED, which is why the membership is
+  labelled `inferred_gdfl_options` and never presented as NSE's list. NSE's
+  listing day of each contract: UNVERIFIED (upper bound only). The rule that a
+  security leaving F&O keeps its existing contracts to their expiry: no
+  circular was read, so nothing depends on it — a share is a member while a
+  contract our files saw is alive, whatever the cause. Early terminations
+  other than the one sourced row of `expiry_alias::EARLY_SETTLEMENTS`
+  (NSE/FAOP/73857, above): not sourced, so a cancelled contract keeps its
+  share a member to its printed expiry (`docs/06-limits.md` L-PIT-4). No
+  margin source is chartered, today's or historical, so no leverage figure is
+  shown: `pull::fno_membership::LEVERAGE` reads "leverage unknown", UNVERIFIED
+  (D-5160 item 2, which replaced a typed 5x).
+- **Renames.** The 18 sourced rows of `brutex_core::alias::SYMBOL_CHANGES`
+  (§ "Index aliases and symbol changes" above) make one series of each pair.
+  `TATAGLOBAL -> TATACONSUM` and `KPIT -> BSOFT` have no row (above), so no
+  alias is invented: a change is caught only as a MEASURED handover of
+  contract keys between two names, labelled `measured` (D-5161 item 4).
+
 ## NSE Masters Data v1.6 — read 17 Oct 2026 (R4-17: the listing rule)
 
 `CLAUDE.md` §3 rule 1 requires the listing rule `pull::listing` applies to

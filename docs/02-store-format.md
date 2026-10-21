@@ -4833,3 +4833,136 @@ start is refused `clock_implausible`.
 lock holds the claim above, not §41's `gdfl-lock v1` record; a lock file
 holding a v1 record an older build left is still read and named as a dead
 holder's (`pid=` and `run_started=`).
+
+## F&O membership month files, version 1 (PIT-1; D-5163)
+
+`pull::fno_membership` writes and reads them; `cli fno-membership build`,
+`show` and `bench` are the doors. One file per month and generation:
+`<dir>/<YYYY-MM>-g<GGGGGG>.fnm` (six-digit generation from 1). The real build
+writes `<store>/reference/fno-membership-v1/`. A file holds the SEALED DAY
+RECORDS of its month from its first record to its last: for every day in that
+range whether the day has a membership answer and why, and for a known day
+which series had a live stock-option contract (its members, in series order)
+and which of them listed at least one option file. It is derived from the GDFL
+tick store's options day-file indexes (`docs/00-charter.md`, "F&O membership
+source"), labelled `inferred_gdfl_options`, never an NSE circular.
+
+**The span.** The first record of the first month is the first known day
+(`known_from`, written into every month header) and the last KNOWN record is
+the last known day (`known_to`): both measured by the build, never typed
+(D-5162). Days before, after or between with no answer are refused as
+"membership unknown"; sessions inside without an answer are sealed with their
+status, except a day whose day file the source REFUSED, which is never sealed:
+the build installs every record before it and stops, and the next build
+resumes at it (D-5168). A month is installed with the closed days that end it
+when the next month's first known day is folded, so the last month of a
+directory a kill or a failed write interrupted between two installs may end on
+records after `known_to` (D-5167): they are sealed, held for the resume, and
+answered as after the span until a later known record seals past them.
+
+**Append-only.** A sealed record is never rewritten. A build resumes after the
+last sealed record; a month that gains records is written as its next
+generation, which must hold the current generation's records unchanged and
+more (refused otherwise, `WouldRewrite`); a month that gains none is not
+written. A generation is the whole month so far and the superseded one is kept,
+so a build run once per day writes about 12.7 times the bytes of one pass
+(measured over 2025: 3.38 MiB against 272 KiB, docs/06-limits.md L-PIT-2).
+Each generation is written to a hidden temporary
+(`.<name>.tmp.<pid>.<n>`, `n` a per-process count, created by `store::staging::create`, gate 28's one door,
+which never opens through a file already there: a dead writer's leftover under
+the same name is unlinked first and its size returned in `Installed::Written`'s
+`cleared`, which the build prints), flushed with `sync_all`, hard-linked to its
+final name (which refuses if the name exists, so two writers can never
+overwrite each other), the temporary is unlinked whether the link succeeded or
+not and the directory flushed: a reader never sees a half-written file, and a
+refused install leaves no temporary (only a kill can, which is counted and
+never read). Any prefix of a build's installs is a servable, resumable
+directory (D-5167). The reader serves
+the HIGHEST generation of each month and refuses the month when that file
+fails any check below; it never falls back to an older generation. A hidden
+name (leading `.`) is never read and is counted; any other name that is not a
+month file is refused by name.
+
+Little-endian. No time, host, commit or generation is written: the same
+records give the same bytes, so one pass and a day-by-day build agree byte for
+byte.
+
+**Header, 72 bytes.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRXFNM01` |
+| 8 | 2 | version, `1` |
+| 10 | 2 | header length, `72` |
+| 12 | 2 | year |
+| 14 | 1 | month, 1..=12 |
+| 15 | 1 | first held day of the month |
+| 16 | 1 | last held day of the month (`R` = last − first + 1 rows) |
+| 17 | 1 | reserved, zero |
+| 18 | 2 | `max_pool`: the largest pool of a known day this month |
+| 20 | 4 | `known_from`: the span's first known day (epoch day) |
+| 24 | 4 | spellings registered before this month |
+| 28 | 4 | spellings added this month (`A`) |
+| 32 | 4 | series registered before this month |
+| 36 | 4 | member entries (`E`) |
+| 40 | 4 | carry-in live series (`Li`) |
+| 44 | 4 | carry-in expiry starts (`Xi`) |
+| 48 | 4 | carry-out live series (`Lo`) |
+| 52 | 4 | carry-out expiry starts (`Xo`) |
+| 56 | 4 | handovers (`H`) |
+| 60 | 2 | carry-in year |
+| 62 | 2 | carry-in refused sessions of that year |
+| 64 | 2 | carry-out year |
+| 66 | 2 | carry-out refused sessions of that year |
+| 68 | 4 | reserved, zero |
+
+**Body**, in this order, then a 32-byte BLAKE3 of every byte before it.
+
+| Part | Size | Content |
+|---|---|---|
+| spellings | `A` × 40 | name (24 bytes, zero padded), series id `u32`, first stored day (epoch `u32`), its earliest settled expiry that day (epoch `u32`), the first day any share's contract of that expiry was stored (epoch `u32`); registry ids continue from the month before |
+| day rows | `R` × 52 | status `u8` (1 known, 2 not a session, 3 no source, 4 source refused: a code never sealed, refused by the checks, D-5168, 5 no calendar, 6 no share options, 7 a file on a closed day), a zero byte, pool `u16`, filed `u16`, refused sessions of the year through this day `u16`, option names listed `u32`, names the decoder refused `u32`, names of index underlyings `u32`, BLAKE3 of the evidence the fold consumed (32 bytes; zero for a day with no listing) |
+| member entries | `E` × 4 | day-major in row order, `pool` entries per row, ascending by series: spelling id `u16`, flags `u16` (bit 0: listed a file that day; no other bit) |
+| carry in | `Li` × 8 + `Xi` × 8 | each live SERIES (its id; a live series is filed under its newest spelling, D-5166) and the epoch day its life runs to, then each live expiry and the first epoch day any contract of it was stored, both strictly ascending: the fold's state before the first record |
+| carry out | `Lo` × 8 + `Xo` × 8 | the same after the last record |
+| handovers | `H` × 20 | old spelling `u32`, new spelling `u32`, the session the new one was first listed (epoch `u32`), keys shared `u32`, keys the old one listed the session before `u32`; labelled `measured` |
+
+**Checks** (each refused by name, `MembershipError::Corrupt`): the digest;
+the magic; the version (an unknown one is refused, never guessed); the header
+length; the first and last held days are days of the month, in order; both
+reserved fields zero; `known_from` not after the first record; the exact body
+length the header implies; every name a valid symbol with nothing after its
+padding; every status code known, none of them 4 (a refused source day is never
+sealed), and every reserved byte zero; no unknown
+entry flag; carry runs strictly ascending; each row's running sum equal to the
+fold's from the carry in; members only on known days, and every known day at
+least one; each row's filed count equal to its entries'; entries exactly
+consumed by the rows; the carry out's running sum equal to the last row's; the
+header's `max_pool` equal to its rows'; the file name's month equal to the
+header's.
+
+**The chain** (`Membership::open`, `MembershipError::Stale`): months follow
+each other with no gap; each month's carry in, spellings before and series
+before equal what the month before ends with; the first month starts the span
+from no carry on a known record (the last month may end on records that are not
+known, D-5167); a spelling either opens the next series or, named by a
+handover, joins an earlier one; every handover joins two spellings of one
+series on a known record of its month; each day's members are strictly ascending by series and all present (a
+day whose pool runs past the month's entries is refused, for a table served
+without a file as well as by the decoder); every month names one span start;
+a spelling is registered once. Each check is hit by its own damage in
+`every_chain_check_refuses_its_own_damage` (PIT-32).
+
+**Lookups.** `Membership::members(day)`, `pool_size(day)`,
+`refused_through(day)`: one subtraction into a fixed-stride index of day slots
+and one slice. `is_member(name, day)`: the dated symbol changes walked from
+`name`, one hash probe, the slot, one bit. A day outside the span (a sealed
+record after `known_to` included), or one whose status is not 1, is refused as
+"membership unknown" with its reason. Flat at 1x, 10x and 100x the held days,
+known, refused and outside: C-PIT-01, `crates/pull/benches/ratio.rs`.
+Invariants PIT-01 to PIT-32 and C-PIT-01 in `docs/04-invariants.md`; limits
+L-PIT-1 to L-PIT-11 in `docs/06-limits.md`.
+
+**Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
+line above is a `fno-membership-v2` directory beside this one, never a rewrite
+of `v1`.

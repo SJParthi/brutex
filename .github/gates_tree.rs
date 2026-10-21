@@ -2810,8 +2810,33 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
      writer_changed yes";
 
+// PIT-1 (D-5160 to D-5169): the point-in-time F&O membership's module
+// `pull::fno_membership`, its tests and its ratio bench
+// (`benches/ratio/fno_membership.rs`). Each was read before it was listed, in
+// three kinds. (1) The format's own words: `fnm`, the month file's extension;
+// `-g`, the separator before a month file's generation (`2024-03-g000001.fnm`);
+// `fno-membership-v1`, its directory name under a store's `reference/` (and
+// the domain tag of the file digest); `inferred_gdfl_options`, the source
+// label every row carries; `measured`, the label of a measured handover.
+// (2) The words of `DayStatus::word` and the
+// reasons a day or a handover candidate is refused (`known`, `not_a_session`,
+// `no_source`, `no_calendar`, `no_share_options`, `source_on_closed_day`,
+// `handover`, `minority`, `pool`, `running`, `span`). (3) Test labels: the
+// scratch folder names the tests make under the system temp directory
+// (`both-sides`, `day-by-day`, `decoder`, `digest-a`, `digest-b`, `digest-c`,
+// `fail-cut`, `fail-once`, `generations`, `kill-cut`, `kill-once`,
+// `no-calendar`, `one-pass`, `overlap`, `refused-once`, `sourced-rename`,
+// `stray-daily`, `untraded`, `carry`, `changed`, `damaged`, `expired`, `spans`,
+// `stray`, `two-once`). None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known not_a_session \
+     no_source no_calendar no_share_options source_on_closed_day handover minority pool \
+     running span both-sides day-by-day decoder digest-a digest-b digest-c fail-cut fail-once \
+     generations kill-cut kill-once no-calendar one-pass overlap refused-once sourced-rename \
+     stray-daily untraded -g measured carry changed damaged expired spans stray two-once";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 71] = [
+const DECLARED: [&str; 72] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2882,6 +2907,7 @@ const DECLARED: [&str; 71] = [
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
     R4_07_LITERAL,
+    PIT_1_LITERAL,
     R4_17_LITERAL,
 ];
 

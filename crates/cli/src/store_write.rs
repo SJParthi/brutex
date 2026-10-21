@@ -73,14 +73,23 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
 ///
+/// `fno-membership` (PIT-1, D-5163) is one in its `build` form: it writes
+/// month files of the F&O membership, a store reference table once run with
+/// `--out <store>/reference/fno-membership-v1`. `show` and `bench` read. Its
+/// rule is "the word `build` is given", one of the three arm shapes gate 30
+/// (`.github/gates_store_steps.rs`, `form_of`) reads: a `show` or `bench`
+/// whose `--out` is literally `build` is counted as a write, the conservative
+/// direction.
+///
 /// `series-identity` (R4-17) is one unless `--dry-run`: it writes no bar, but
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 14] = [
+pub(crate) const WRITERS: [&str; 15] = [
     "alerts",
     "census-migrate",
     "census-recount",
+    "fno-membership",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
@@ -108,6 +117,7 @@ pub(crate) const WRITERS: [&str; 14] = [
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
+        "fno-membership" => arguments.contains(&"build"),
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
             !arguments.contains(&"--dry-run")
         }
@@ -277,6 +287,18 @@ mod tests {
             ),
             ("census-migrate", &["gdfl"], true),
             ("census-migrate", &["gdfl", "--seal"], true),
+            ("fno-membership", &["build", "--out", "DIR"], true),
+            (
+                "fno-membership",
+                &["show", "2024-03-05", "--out", "DIR"],
+                false,
+            ),
+            ("fno-membership", &["bench", "--out", "DIR"], false),
+            (
+                "fno-membership",
+                &["show", "2024-03-05", "--out", "build"],
+                true,
+            ),
             ("census-recount", &["gdfl", "--from", "2019-11-14"], true),
             (
                 "gdfl-dayflags",
@@ -398,11 +420,15 @@ mod tests {
         // tick store under its own ROOT argument, and its own refusal of a
         // linked folder there is `pull::tickstore_write`'s `linked_folder`
         // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
-        // It is listed so the table stays every writer, once.
-        let writing: [(&str, &[&str]); 14] = [
+        // It is listed so the table stays every writer, once. `fno-membership`
+        // (PIT-1) does not ask for it either: it writes month files under its
+        // own `--out DIR` and refuses a typed window inside the operator's
+        // store (`a_typed_window_inside_the_operators_store_is_refused`).
+        let writing: [(&str, &[&str]); 15] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
+            ("fno-membership", &["build", "--out", "DIR"]),
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),

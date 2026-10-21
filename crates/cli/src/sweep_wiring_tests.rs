@@ -179,6 +179,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "watchdog"
                 // The tick-store writer (R4-08, D-4967): a store verb.
                 | "tickstore-write"
+                // The point-in-time F&O membership (PIT-1, D-5163): a reference
+                // table built from the tick store's listings, never a sweep.
+                | "fno-membership"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

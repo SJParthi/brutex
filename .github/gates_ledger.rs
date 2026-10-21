@@ -1633,6 +1633,14 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": one answer's cells, at most `CELLS_MOST` = 4,096.
     ("crates/api/src/census_rollup.rs", 1),
+    // PIT-1 (D-5164, docs/06-limits.md L-PIT-8): `cli fno-membership` sorts
+    // only its own report and bench samples, once per run, never a lookup:
+    // the build's per-month timings (at most the months it wrote), the
+    // listing-lag list and its days (at most the series, 338 on the real
+    // span) and the bench's timings (one per day it times), each for one
+    // p50/p99/max line. The membership's own fold sorts nothing: its live
+    // series are keyed in member order (D-5166).
+    ("crates/cli/src/fno_membership_command.rs", 4),
     // R4-17 repair 2, 18 Oct 2026: reason in docs/06-limits.md, "Gate 11 —
     // R4-17, declared at its merge": the master files of one directory, once
     // per load; one series' in-session jumps, once per scan.
@@ -1780,6 +1788,10 @@ const ALLOW_SCAN: Allow = &[
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
     // most `MAX_KIND_BYTES` = 64 bytes.
     ("crates/pull/src/rehearsal.rs", 1),
+    // PIT-1 (D-5163, docs/06-limits.md L-PIT-8): the membership file's name
+    // decoder finds the end of one zero-padded name inside its fixed
+    // `NAME_LEN` bytes, a compile-time width; never a search over the data.
+    ("crates/pull/src/fno_membership.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1893,7 +1905,11 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/logs.rs", 5),
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
-    ("crates/cli/src/store_write.rs", 4),
+    // 4 -> 5, PIT-1 (D-5163, docs/06-limits.md L-PIT-8): the
+    // `fno-membership` arm `arguments.contains(&"build")` is one of the three
+    // arm shapes gate 30's `form_of` reads, over the verb's own command line
+    // (a handful of words), never the data.
+    ("crates/cli/src/store_write.rs", 5),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),
