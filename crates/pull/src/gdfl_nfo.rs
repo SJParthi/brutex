@@ -996,6 +996,9 @@ pub trait NfoSource {
 #[derive(Debug, Clone)]
 pub struct NfoTickStore {
     root: PathBuf,
+    /// The `options` tree as one walk found it (D-4866), walked the first
+    /// time a day is asked and shared by every clone.
+    table: Arc<std::sync::OnceLock<crate::gdfl_tickstore::DayTable>>,
 }
 
 impl NfoTickStore {
@@ -1004,6 +1007,7 @@ impl NfoTickStore {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            table: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -1017,6 +1021,34 @@ impl NfoTickStore {
             day_folder_name(day)
         ))
     }
+
+    /// The `options` tree as one walk found it (D-4866): walked once, the
+    /// first time it is asked, O(entries) up to
+    /// [`crate::gdfl_tickstore::TICKSTORE_WALK_CAP`].
+    #[must_use]
+    pub fn table(&self) -> &crate::gdfl_tickstore::DayTable {
+        self.table.get_or_init(|| {
+            crate::gdfl_tickstore::DayTable::walk(&self.root, "options", &nfo_day_file)
+        })
+    }
+}
+
+/// The options tree's byte in a [`crate::gdfl_tickstore::DayTable`], after
+/// the capital-market trees' 0 and 1.
+const NFO_TREE: u8 = 2;
+
+/// What a file name is to the tick store's `options` tree: a day file's day
+/// and the path its name files it at, under the root.
+fn nfo_day_file(name: &str) -> Option<(u8, Day, String)> {
+    let stem = name.strip_suffix(".bts")?.strip_prefix(FOLDER_PREFIX)?;
+    let day = crate::gdfl_cm::ddmmyyyy(stem)?;
+    let expected = format!(
+        "options/{:04}/{}/{}.bts",
+        day.year(),
+        month_folder(day),
+        day_folder_name(day)
+    );
+    Some((NFO_TREE, day, expected))
 }
 
 /// Where one entry's block lies in a tick-store day file.
@@ -1030,10 +1062,19 @@ impl NfoSource for NfoTickStore {
     type Locator = StoreLocator;
 
     fn day(&self, day: Day) -> Result<Option<NfoDay<StoreLocator>>, CmRefusal> {
+        // A day file under another folder refuses its day by name (D-4866),
+        // as the capital-market tree's does: one hash probe of the walk.
+        let table = self.table();
+        if let Some((found, expected)) = table.misfiled(NFO_TREE, day) {
+            return Err(CmRefusal::DayFileMisfiled {
+                found: found.clone(),
+                expected: expected.clone(),
+            });
+        }
         // THE STORE'S ONE READING DOOR (R3-16, FM-046): a link, a pipe or a
         // device at a day's name is refused by name, never read as absent.
         let Some((file, len)) = crate::gdfl_tickstore::open_day(&self.day_path(day))? else {
-            return Ok(None);
+            return table.absent(NFO_TREE, day).map(|()| None);
         };
         let entries = read_index(&file, len)?;
         let file = Arc::new(file);
@@ -1154,6 +1195,25 @@ impl NfoZips {
 pub struct ZipFileLocator<B = std::fs::File> {
     file: Arc<B>,
     at: ZipLocator,
+}
+
+impl<B: ReadAt> ZipFileLocator<B> {
+    /// The member `at` of the zip `file`: a year zip's day zip, or a loose
+    /// day zip ([`crate::gdfl_dayzips`]).
+    #[must_use]
+    pub(crate) const fn new(file: Arc<B>, at: ZipLocator) -> Self {
+        Self { file, at }
+    }
+
+    /// The member's bytes, as [`member_bytes`] reads them, unverified:
+    /// [`read_file`] checks them.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`member_bytes`].
+    pub(crate) fn bytes(&self, entry: &str, len: u64) -> Result<Vec<u8>, CmRefusal> {
+        member_bytes(&*self.file, self.at, entry, len)
+    }
 }
 
 impl NfoSource for NfoZips {
@@ -1415,6 +1475,11 @@ pub struct NfoDayFile {
     pub name: String,
     /// Every row.
     pub file: NfoFile,
+    /// The verified member: the bytes the rows were decoded from, after
+    /// their length and CRC-32 were checked against the listing (design
+    /// §5.1 seam 4, VERIFY-04), so a second reader of the same file reads
+    /// these with no second fetch.
+    pub bytes: std::sync::Arc<[u8]>,
 }
 
 /// Reads `file`, one of `listing`'s option entries: the ticker decoded, the
@@ -1450,6 +1515,7 @@ pub fn read_file<S: NfoSource>(
         ticker,
         name: name.to_owned(),
         file: decoded,
+        bytes: std::sync::Arc::from(bytes),
     })
 }
 

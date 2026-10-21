@@ -158,6 +158,9 @@ pub mod gdfl_archive;
 /// a `CmSource` and checked before the one-second fold sees them. D-0808,
 /// D-2800.
 pub mod gdfl_cm;
+/// The vendor's loose day zips, the third GDFL source kind: walked once,
+/// each day one probe, read in place as the archives are. D-4815, D-4834.
+pub mod gdfl_dayzips;
 /// The GDFL Dropbox fetch inside the app: list, pick, download, verify and
 /// hand on, never overwriting, never deleting (E2E-01, R4-07).
 pub mod gdfl_dropbox;
@@ -193,6 +196,9 @@ pub mod http;
 pub mod ingest;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
+/// A CASH security's listing day and end of history, from the receipted NSE
+/// security master (R4-17).
+pub mod listing;
 pub mod manifest;
 /// Where an instrument master comes from, and what it takes to replace one.
 ///

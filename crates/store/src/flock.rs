@@ -75,14 +75,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// server answers "being written" with `Retry-After`, never "unreadable".
 pub const BEING_WRITTEN: &str = "being written, ask again";
 
-/// The longest any thread may be patient, in total, across every shared lock
-/// one [`with_patience`] call takes, whatever it asked for. A bound, so a
-/// patient reader can never be parked for longer than this by a writer that
-/// holds a month for minutes.
+/// THE ONE CEILING of every patient lock in this module, shared or exclusive,
+/// whatever it asked for: **1 s**. For a shared lock it is the most one
+/// [`with_patience`] call may wait in total, across every shared lock it
+/// takes; for an exclusive lock ([`Flock::try_lock_patiently`]) it cuts the
+/// bound that one call is given. A bound, so a patient reader can never be
+/// parked for longer than this by a writer that holds a month for minutes,
+/// and a garbage bound cannot park a writer for ever behind a stuck holder
+/// (AG-06 reuses it rather than keep a second ceiling).
 pub const MAX_PATIENCE: Duration = Duration::from_secs(1);
 
-/// The longest single pause between two attempts of a patient reader.
-const MAX_PAUSE: Duration = Duration::from_millis(16);
+/// The longest single pause between two attempts of any patient lock, shared
+/// or exclusive: **16 ms**. The pauses of the one wait loop ([`patiently`])
+/// go 1, 2, 4, 8, 16, 16 … ms, so a lock let go a moment after the first
+/// refusal is taken within a millisecond or two, and a long wait costs one
+/// `flock` call per 16 ms.
+pub const MAX_PAUSE: Duration = Duration::from_millis(16);
 
 thread_local! {
     /// How much waiting the shared locks taken by
@@ -140,24 +148,39 @@ pub const NOTE_MARK: &str = "brutex month lock held:";
 /// whole.
 pub const NOTE_MAX: usize = 512;
 
-/// The exclusive holder of a month lock in THIS process.
+/// The exclusive holder of a lock in THIS process.
 #[derive(Debug, Clone)]
 struct Holder {
     /// The thread that took it, by name, or its id when it has none.
     thread: String,
     /// When it was taken, in whole milliseconds after the Unix epoch.
     since_unix_ms: u128,
+    /// What the holder is doing, when its taker said
+    /// ([`Flock::try_lock_patiently`]: "a pull audit journal append", "the
+    /// journal index build"); `None` for a month's writer, whose lock path
+    /// already says what it writes.
+    doing: Option<&'static str>,
 }
 
-/// What THIS process holds on one month lock: its writer, if any, and how
-/// many readers.
+/// What THIS process holds on one lock path, and who waits for it: its
+/// writer, if any, how many readers, and the queue of patient exclusive
+/// lockers ([`Flock::try_lock_patiently`]) while one is outstanding. One
+/// registry for all three, so a holder and its waiters are one entry (AG-06).
 #[derive(Debug, Default)]
 struct Held {
     writer: Option<Holder>,
     readers: u32,
+    queue: Option<std::sync::Arc<Turns>>,
 }
 
-/// Which side of a month lock a guard registered, so the guard's end forgets
+impl Held {
+    /// Whether the entry records nothing any more and may be removed.
+    fn is_idle(&self) -> bool {
+        self.writer.is_none() && self.readers == 0 && self.queue.is_none()
+    }
+}
+
+/// Which side of a lock a guard registered, so the guard's end forgets
 /// exactly what its start recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -165,17 +188,39 @@ enum Side {
     Reader,
 }
 
-/// Every month lock this process holds through [`Flock::try_lock_noted`]
-/// (writers) or [`Flock::try_lock_shared_patiently`] (readers), keyed by a
-/// hash of the lock's path (no allocation per probe). One lock and one hash
-/// probe when a guard starts and one when it ends: O(1) expected per
-/// acquisition. Only those two constructors register, so the journals', the
-/// results files' and every other lock's path pays nothing. The registry's
-/// bookkeeping is proved by
-/// `crate::flock::tests::readers_in_this_process_are_counted_while_they_hold_the_month`;
-/// its cost is UNVERIFIED: no bench times an acquisition with it apart
-/// (`docs/06-limits.md` L-R308-02).
+/// Every lock this process holds through [`Flock::try_lock_noted`] (month
+/// writers), [`Flock::try_lock_shared_patiently`] (month readers) or
+/// [`Flock::try_lock_patiently`] (patient exclusive writers, the pull audit
+/// journal's appends among them), and every patient exclusive locker's queue,
+/// keyed by a hash of the lock's path (no allocation per probe). One lock and
+/// one hash probe when a guard starts and one when it ends: O(1) expected per
+/// acquisition. Only those three constructors register, so the results
+/// files' and every other lock's path pays nothing.
+///
+/// The registry and the kernel's lock move TOGETHER for every reader of this
+/// map: a guard's `flock(2)` grant and its record are one step under this
+/// lock ([`take_held`]), and so are its forgetting and its unlock
+/// ([`let_go`]). So while a guard of this process holds the lock, this map
+/// names it, at every instant a reader here can see — through every hand-off
+/// — and it never names one that has let go; and a holder's end can never
+/// erase its successor's entry (AG-06 repair 1: a registry kept beside the
+/// guard erased it; repair 2: the record followed the grant and preceded the
+/// unlock, and a reader in between read "another process"). Both `flock`
+/// calls made under this lock are non-blocking. The bookkeeping is proved by
+/// `crate::flock::tests::readers_in_this_process_are_counted_while_they_hold_the_month`,
+/// `crate::flock::patient_tests::a_successors_name_survives_its_predecessors_release`
+/// and `crate::flock::patient_tests::no_reader_here_ever_finds_the_lock_held_and_its_holder_unnamed`;
+/// its cost apart from the acquisition is measured by AG-06 within the
+/// journal append (`docs/06-limits.md` L-AG06-10) and by no bench alone
+/// (L-R308-02).
 static HOLDERS: Mutex<Option<HashMap<u64, Held>>> = Mutex::new(None);
+
+/// The registry, whoever panicked while holding it: every update is one
+/// statement on whole counters, so the poison says only that unrelated code
+/// panicked.
+fn registry() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Held>>> {
+    HOLDERS.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The registry key of a lock path.
 fn key_of(path: &Path) -> u64 {
@@ -199,29 +244,62 @@ fn now_unix_ms() -> u128 {
         .map_or(0, |since| since.as_millis())
 }
 
-/// Records that this thread now holds `path` on `side`.
-fn hold(path: &Path, side: Side) -> u64 {
-    let key = key_of(path);
-    let writer = (side == Side::Writer).then(|| Holder {
-        thread: this_thread(),
-        since_unix_ms: now_unix_ms(),
-    });
-    let mut held = HOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
+/// Asks for the lock ONCE through `attempt` (a non-blocking `flock(2)` call)
+/// and, when it is granted, records that this thread holds `key` on `side`,
+/// doing `doing` when it is a writer that said — AS ONE STEP: the registry's
+/// lock is held across the attempt and the record. So no reader of the
+/// registry in this process ([`holder_note`]) can find the lock granted to
+/// this process and its holder not yet named (AG-06 repair 2: the record used
+/// to follow the grant, and a refusal read in between said "another
+/// process"). The attempt never blocks, so the registry is held for one
+/// system call; a refused attempt records nothing.
+fn take_held(
+    key: u64,
+    side: Side,
+    doing: Option<&'static str>,
+    attempt: impl FnOnce() -> Result<(), TryLockError>,
+) -> Result<(), TryLockError> {
+    // The thread's name is read before the registry is locked, so the lock
+    // covers only the attempt and the record.
+    let thread = (side == Side::Writer).then(this_thread);
+    let mut held = registry();
+    attempt()?;
     let entry = held
         .get_or_insert_with(HashMap::new)
         .entry(key)
         .or_default();
-    match writer {
-        Some(holder) => entry.writer = Some(holder),
+    match thread {
+        Some(thread) => {
+            entry.writer = Some(Holder {
+                thread,
+                since_unix_ms: now_unix_ms(),
+                doing,
+            });
+        }
         None => entry.readers = entry.readers.saturating_add(1),
     }
-    key
+    drop(held);
+    Ok(())
 }
 
-/// Forgets what [`hold`] recorded under `key` for `side`; an entry that holds
-/// nothing more is removed, so the map is bounded by the locks held now.
-fn let_go(key: u64, side: Side) {
-    let mut held = HOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
+/// Forgets what [`take_held`] recorded under `key` for `side` and then lets
+/// the lock go through `unlock` — AS ONE STEP, under the registry's lock, so
+/// no reader of the registry in this process can find the lock still held by
+/// this process and its holder already forgotten (AG-06 repair 2). An entry
+/// that holds nothing more, and has no patient locker waiting, is removed, so
+/// the map is bounded by the locks held or awaited now. Answers the unlock's
+/// result; `unlock` never blocks, so the registry is held for one system
+/// call.
+fn let_go(key: u64, side: Side, unlock: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    let mut held = registry();
+    forget_in(&mut held, key, side);
+    let unlocked = unlock();
+    drop(held);
+    unlocked
+}
+
+/// The registry half of [`let_go`].
+fn forget_in(held: &mut Option<HashMap<u64, Held>>, key: u64, side: Side) {
     let Some(holders) = held.as_mut() else {
         return;
     };
@@ -230,7 +308,7 @@ fn let_go(key: u64, side: Side) {
             Side::Writer => entry.writer = None,
             Side::Reader => entry.readers = entry.readers.saturating_sub(1),
         }
-        entry.writer.is_none() && entry.readers == 0
+        entry.is_idle()
     });
     if empty {
         holders.remove(&key);
@@ -291,10 +369,11 @@ fn note_in(path: &Path) -> Result<Option<String>, String> {
         .map(|rest| rest.lines().next().unwrap_or("").trim().to_owned()))
 }
 
-/// Who holds the month lock at `path`, in words a page can show (R3-08;
-/// rules-audit RA-298):
+/// Who holds the lock at `path`, in words a page can show (R3-08;
+/// rules-audit RA-298; AG-06 for the patient exclusive locks):
 ///
-/// - a writer in THIS process: the pid, its thread and since when;
+/// - a writer in THIS process: the pid, its thread, what it is doing when its
+///   taker said so ([`Flock::try_lock_patiently`]), and since when;
 /// - readers in this process: how many;
 /// - a writer in ANOTHER process that left its note in the lock file
 ///   ([`Flock::try_lock_noted`]): the note — its pid, program and verb,
@@ -310,16 +389,17 @@ fn note_in(path: &Path) -> Result<Option<String>, String> {
 #[must_use]
 pub fn holder_note(path: &Path) -> String {
     let pid = std::process::id();
-    let (writer, readers) = HOLDERS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    let (writer, readers) = registry()
         .as_ref()
         .and_then(|holders| holders.get(&key_of(path)))
         .map_or((None, 0), |held| (held.writer.clone(), held.readers));
     if let Some(holder) = writer {
+        let doing = holder
+            .doing
+            .map_or_else(String::new, |doing| format!(", doing {doing}"));
         return format!(
-            "held by this process (pid {pid}, thread {}) since {} ms after the Unix epoch, \
-             lock {}",
+            "held by this process (pid {pid}, thread {}{doing}) since {} ms after the Unix \
+             epoch, lock {}",
             holder.thread,
             holder.since_unix_ms,
             path.display()
@@ -371,13 +451,14 @@ pub struct Flock<F: Borrow<File>, P: AsRef<Path> = PathBuf> {
     file: F,
     /// The path a refusal to release names.
     path: P,
-    /// Whether `Drop` still owes the unlock. Cleared by [`Flock::release`]
-    /// before it unlocks, so a refused release is reported once, by the
-    /// release, and never again by `Drop`.
+    /// Whether `Drop` still owes the unlock. Cleared as the guard ends
+    /// (`Flock::end`, which [`Flock::release`] calls first), before it
+    /// unlocks, so a refused release is reported once, by the release, and
+    /// never again by `Drop`.
     held: bool,
-    /// The holder registry's key and side while this guard holds a MONTH
-    /// lock taken by [`Flock::try_lock_noted`] or
-    /// [`Flock::try_lock_shared_patiently`], so a refused party can name it
+    /// The holder registry's key and side while this guard holds a lock
+    /// taken by [`Flock::try_lock_noted`], [`Flock::try_lock_shared_patiently`]
+    /// or [`Flock::try_lock_patiently`], so a refused party can name it
     /// ([`holder_note`]); `None` for every other lock, which is never
     /// registered.
     holding: Option<(u64, Side)>,
@@ -388,6 +469,12 @@ pub struct Flock<F: Borrow<File>, P: AsRef<Path> = PathBuf> {
     /// modification time — and a check that a refused or finished write
     /// touched nothing in the month still holds (R3-08).
     noted: Option<std::fs::FileTimes>,
+    /// This process's turn for the lock's path when the guard was taken by
+    /// [`Flock::try_lock_patiently`]: handed to the next patient locker only
+    /// AFTER the unlock, because a field drops after `Drop::drop` (and after
+    /// [`Flock::release`]'s unlock) has run (AG-06). `None` for every other
+    /// lock.
+    _turn: Option<Turn>,
 }
 
 impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
@@ -448,7 +535,8 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// As [`Self::try_lock`].
     pub fn try_lock_noted(file: F, path: P) -> Result<Self, TryLockError> {
         use std::os::unix::fs::FileExt as _;
-        file.borrow().try_lock()?;
+        let key = key_of(path.as_ref());
+        take_held(key, Side::Writer, None, || file.borrow().try_lock())?;
         // THE TIMES FROM BEFORE THE NOTE, to put back as it is cleared; a
         // file whose times do not read keeps whatever the clear leaves.
         let times = file.borrow().metadata().map_or_else(
@@ -472,13 +560,13 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
         if let Err(why) = &written {
             note_unnoted(path.as_ref(), why);
         }
-        let holding = Some((hold(path.as_ref(), Side::Writer), Side::Writer));
         Ok(Self {
             file,
             path,
             held: true,
-            holding,
+            holding: Some((key, Side::Writer)),
             noted: written.is_ok().then_some(times),
+            _turn: None,
         })
     }
 
@@ -506,7 +594,8 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// With no patience it is exactly [`Self::try_lock_shared`]: one attempt.
     /// The wait is bounded by [`MAX_PATIENCE`] whatever was asked, and it
     /// polls rather than blocks in `flock(2)`, because a blocking shared lock
-    /// cannot be given a deadline.
+    /// cannot be given a deadline. The polling is [`patiently`], the one wait
+    /// loop the exclusive [`Self::try_lock_patiently`] uses too (AG-06).
     ///
     /// # Errors
     ///
@@ -514,31 +603,22 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// patience runs out, or the host's refusal at once.
     pub fn try_lock_shared_patiently(file: F, path: P) -> Result<Self, TryLockError> {
         let started = Instant::now();
-        let deadline = started + patience();
-        let mut pause = Duration::from_millis(1);
-        let taken = loop {
-            match file.borrow().try_lock_shared() {
-                Ok(()) => break Ok(()),
-                Err(TryLockError::WouldBlock) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        break Err(TryLockError::WouldBlock);
-                    }
-                    std::thread::sleep(pause.min(left));
-                    pause = pause.saturating_mul(2).min(MAX_PAUSE);
-                }
-                Err(host) => break Err(host),
-            }
-        };
+        let key = key_of(path.as_ref());
+        let taken = patiently(patience(), Instant::now, std::thread::sleep, || {
+            take_held(key, Side::Reader, None, || file.borrow().try_lock_shared())
+        });
         spend_patience(started.elapsed());
-        taken?;
-        let holding = Some((hold(path.as_ref(), Side::Reader), Side::Reader));
+        taken.map_err(|refused| match refused {
+            Impatient::Held { .. } => TryLockError::WouldBlock,
+            Impatient::Host(why) => TryLockError::Error(why),
+        })?;
         Ok(Self {
             file,
             path,
             held: true,
-            holding,
+            holding: Some((key, Side::Reader)),
             noted: None,
+            _turn: None,
         })
     }
 
@@ -554,12 +634,13 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// [`Unreleased`], naming the lock's path and the host's refusal. The guard
     /// is consumed either way and `Drop` does not try again.
     pub fn release(mut self) -> Result<(), Unreleased> {
-        self.held = false;
-        self.forget();
-        unlock(self.file.borrow()).map_err(|why| Unreleased {
-            path: self.path.as_ref().to_path_buf(),
-            why,
-        })
+        match self.end() {
+            Some(Err(why)) => Err(Unreleased {
+                path: self.path.as_ref().to_path_buf(),
+                why,
+            }),
+            Some(Ok(())) | None => Ok(()),
+        }
     }
 
     /// The guard for a lock the caller has just taken, unregistered.
@@ -570,22 +651,31 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
             held: true,
             holding: None,
             noted: None,
+            _turn: None,
         }
     }
 
-    /// Clears the holder's note while the lock is still held, and forgets the
-    /// registration: what every way a guard ends owes before it unlocks. Each
-    /// part runs once, whichever end comes first.
-    fn forget(&mut self) {
+    /// Every way a guard ends: clears the holder's note while the lock is
+    /// still held, then forgets the registration AND unlocks as one step
+    /// under the registry's lock ([`let_go`]), so no reader of the registry
+    /// in this process finds the lock held here with its holder forgotten
+    /// (AG-06 repair 2). Runs once, whichever end comes first: answers the
+    /// unlock's result, or `None` when the guard has already ended.
+    fn end(&mut self) -> Option<io::Result<()>> {
         if let Some(times) = self.noted.take() {
             let file = self.file.borrow();
             if let Err(why) = file.set_len(0).and_then(|()| file.set_times(times)) {
                 note_unnoted(self.path.as_ref(), &why);
             }
         }
-        if let Some((key, side)) = self.holding.take() {
-            let_go(key, side);
+        if !std::mem::replace(&mut self.held, false) {
+            return None;
         }
+        let file = self.file.borrow();
+        Some(match self.holding.take() {
+            Some((key, side)) => let_go(key, side, || unlock(file)),
+            None => unlock(file),
+        })
     }
 }
 
@@ -609,10 +699,7 @@ impl<F: Borrow<File>, P: AsRef<Path>> Drop for Flock<F, P> {
     /// reason the module header gives, and a refusal is logged because a drop
     /// cannot return one.
     fn drop(&mut self) {
-        self.forget();
-        if self.held
-            && let Err(why) = unlock(self.file.borrow())
-        {
+        if let Some(Err(why)) = self.end() {
             note_unreleased(self.path.as_ref(), &why);
         }
     }
@@ -720,6 +807,340 @@ fn note_unreleased(path: &Path, why: &io::Error) {
             .with("why", telemetry::Value::Str(&why.to_string())),
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE PATIENT EXCLUSIVE LOCK (AG-06, code-5, FM-162; D-6244).
+//
+// A writer whose lock another writer holds for one short append used to be
+// refused at once (`try_lock`), and the record it carried was lost: the pull
+// audit journal's opening record of a run, so the restart scan later answered
+// "clean" for a run that ran and died. This waits a BOUNDED time instead and
+// refuses by name when the bound runs out. It is R3-08's patience made
+// exclusive, not a second mechanism: the one wait loop ([`patiently`], which
+// the patient shared lock calls too), the one pause ([`MAX_PAUSE`]), the one
+// ceiling ([`MAX_PATIENCE`]) and the one registry of this process's holders
+// and waiters ([`HOLDERS`], read by [`holder_note`]).
+// ---------------------------------------------------------------------------
+
+/// Why a patient lock was not taken.
+#[derive(Debug)]
+pub enum Impatient {
+    /// Another holder kept the lock for the whole wait.
+    Held {
+        /// The bound the wait was given, after [`MAX_PATIENCE`] cut it.
+        bound: Duration,
+        /// How long this call waited, by the monotonic clock or by its own
+        /// slept pauses, whichever is longer.
+        waited: Duration,
+        /// How many times the lock was asked for, the first included. Zero
+        /// when the bound ran out while patient lockers ahead of this one in
+        /// this process still held or awaited their turn.
+        attempts: u32,
+        /// How many patient lockers of the same path were ahead of this one
+        /// in this process when it asked.
+        ahead: u64,
+        /// Who held it as the bound ran out, in [`holder_note`]'s words, when
+        /// the refusal knows the lock's path ([`Flock::try_lock_patiently`]);
+        /// `None` from the bare loop ([`patiently`]), which knows no path.
+        holder: Option<String>,
+    },
+    /// The host refused the lock for a reason other than another holder, at
+    /// the first attempt that met it. Never waited on: it is not contention.
+    Host(io::Error),
+}
+
+impl fmt::Display for Impatient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Held {
+                bound,
+                waited,
+                attempts,
+                ahead,
+                holder,
+            } => {
+                write!(
+                    f,
+                    "still held after waiting {} ms of a {} ms bound ({attempts} attempt(s), \
+                     {ahead} ahead of it in this process, pausing 1 ms doubling to {} ms)",
+                    waited.as_millis(),
+                    bound.as_millis(),
+                    MAX_PAUSE.as_millis(),
+                )?;
+                match holder {
+                    Some(holder) => write!(f, "; {holder}"),
+                    None => Ok(()),
+                }
+            }
+            Self::Host(why) => write!(f, "the host refused the lock: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for Impatient {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Held { .. } => None,
+            Self::Host(why) => Some(why),
+        }
+    }
+}
+
+impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
+    /// Takes the exclusive lock at once when nobody holds it; when another
+    /// holder does, waits for up to `bound` (cut to [`MAX_PATIENCE`]), then
+    /// refuses naming the bound, the wait, the attempts, how many lockers of
+    /// this path were ahead of it in this process, and who holds it
+    /// ([`holder_note`]). While it holds the lock the holder is registered in
+    /// this process, `doing` what its caller said ("a pull audit journal
+    /// append"), so a locker it refuses names it.
+    ///
+    /// # Two waits, one bound
+    ///
+    /// **In this process, a queue.** Patient lockers of one path take turns
+    /// in the order they asked (a ticket each in the path's [`HOLDERS`]
+    /// entry, woken by a condition variable when the one ahead lets go). A
+    /// poller alone starves under sustained contention: the lock is free only
+    /// for the microseconds between one holder's release and the next one's
+    /// take, and a writer appending in a loop takes it again before a
+    /// sleeping poller wakes. Measured: 8 threads × 100 journal appends
+    /// refused 102 of 800 with a 1 s bound before the queue, none after it
+    /// (AG-06, `docs/06-limits.md`).
+    ///
+    /// **Against another process, a poll.** The one at the head of the queue
+    /// asks `flock(2)` without blocking through [`patiently`], the loop the
+    /// patient shared lock uses, because a blocking lock cannot be given a
+    /// deadline. A holder killed while it holds the lock is no hang: the
+    /// kernel frees a dead process's locks and the next attempt takes it.
+    ///
+    /// A zero bound is one attempt when nobody in this process is ahead, and
+    /// a refusal at once when someone is.
+    ///
+    /// # Cost
+    ///
+    /// Uncontended: one registry lock and hash probe for the ticket, one
+    /// `flock` call, one for the holder, and one each as it ends. Under
+    /// contention the time spent is at most the bound plus one attempt,
+    /// whatever the queue's length; a waiter is woken once per holder ahead
+    /// of it.
+    ///
+    /// # Errors
+    ///
+    /// [`Impatient::Held`] when the lock was still held, or this process's
+    /// queue still ahead, as the bound ran out; [`Impatient::Host`] at once
+    /// for any other refusal.
+    pub fn try_lock_patiently(
+        file: F,
+        path: P,
+        bound: Duration,
+        doing: &'static str,
+    ) -> Result<Self, Impatient> {
+        let bound = bound.min(MAX_PATIENCE);
+        let started = Instant::now();
+        let (turn, ahead) = Turn::wait(path.as_ref(), bound)?;
+        let left = bound.saturating_sub(started.elapsed());
+        let key = key_of(path.as_ref());
+        // GRANTED AND NAMED IN ONE STEP ([`take_held`]), and forgotten and
+        // unlocked in one step ([`let_go`]), so no reader of the registry in
+        // this process finds the lock held here and its holder unnamed — not
+        // even at the instant of a hand-off (AG-06 repair 2) — and a
+        // predecessor's end cannot erase this entry: it ended before this lock
+        // was granted.
+        patiently(left, Instant::now, std::thread::sleep, || {
+            take_held(key, Side::Writer, Some(doing), || file.borrow().try_lock())
+        })
+        .map_err(|refused| match refused {
+            Impatient::Held { attempts, .. } => Impatient::Held {
+                bound,
+                waited: started.elapsed(),
+                attempts,
+                ahead,
+                holder: Some(holder_note(path.as_ref())),
+            },
+            host @ Impatient::Host(_) => host,
+        })?;
+        Ok(Self {
+            file,
+            path,
+            held: true,
+            holding: Some((key, Side::Writer)),
+            noted: None,
+            _turn: Some(turn),
+        })
+    }
+}
+
+/// One lock path's queue of patient exclusive lockers in this process, kept
+/// in the path's [`HOLDERS`] entry while a ticket of it is outstanding.
+#[derive(Debug, Default)]
+struct Turns {
+    /// The tickets: the next to give out, the one now served, and those
+    /// whose waiters gave up before their turn.
+    state: Mutex<TurnState>,
+    /// Signalled whenever `serving` moves.
+    moved: std::sync::Condvar,
+}
+
+/// The ticket counters of one [`Turns`].
+#[derive(Debug, Default)]
+struct TurnState {
+    /// The ticket the next locker to ask is given.
+    next: u64,
+    /// The ticket whose holder may take the lock now.
+    serving: u64,
+    /// Tickets given up before they were served, skipped when reached.
+    gone: std::collections::BTreeSet<u64>,
+}
+
+/// A queue's counters, whoever panicked while holding them: every update is
+/// one statement, so the poison says only that some unrelated code panicked.
+fn whole<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One ticket of one path's queue, handed on when dropped.
+#[derive(Debug)]
+struct Turn {
+    /// The registry key of the path the queue is for.
+    key: u64,
+    /// The queue.
+    turns: std::sync::Arc<Turns>,
+    /// This locker's ticket.
+    ticket: u64,
+}
+
+impl Turn {
+    /// Takes a ticket for `path` and waits until it is served, for up to
+    /// `bound`; answers the turn and how many were ahead when it asked.
+    fn wait(path: &Path, bound: Duration) -> Result<(Self, u64), Impatient> {
+        let started = Instant::now();
+        let key = key_of(path);
+        let (turns, ticket, ahead) = {
+            let mut held = registry();
+            let entry = held
+                .get_or_insert_with(HashMap::new)
+                .entry(key)
+                .or_default();
+            let turns = std::sync::Arc::clone(entry.queue.get_or_insert_with(Default::default));
+            let mut state = whole(&turns.state);
+            let ticket = state.next;
+            state.next = state.next.saturating_add(1);
+            let ahead = ticket.saturating_sub(state.serving);
+            drop(state);
+            drop(held);
+            (turns, ticket, ahead)
+        };
+        let turn = Self { key, turns, ticket };
+        let state = whole(&turn.turns.state);
+        let (state, _timed_out) = turn
+            .turns
+            .moved
+            .wait_timeout_while(state, bound, |state| state.serving != ticket)
+            .unwrap_or_else(PoisonError::into_inner);
+        let served = state.serving == ticket;
+        drop(state);
+        if served {
+            return Ok((turn, ahead));
+        }
+        // Dropping `turn` gives the ticket up (or hands it on, if it was
+        // served in between).
+        drop(turn);
+        Err(Impatient::Held {
+            bound,
+            waited: started.elapsed(),
+            attempts: 0,
+            ahead,
+            holder: Some(holder_note(path)),
+        })
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut held = registry();
+        let mut state = whole(&self.turns.state);
+        if state.serving == self.ticket {
+            state.serving = state.serving.saturating_add(1);
+            loop {
+                let serving = state.serving;
+                if !state.gone.remove(&serving) {
+                    break;
+                }
+                state.serving = serving.saturating_add(1);
+            }
+            self.turns.moved.notify_all();
+        } else {
+            state.gone.insert(self.ticket);
+        }
+        let idle = state.serving == state.next;
+        drop(state);
+        // AN EMPTY QUEUE IS FORGOTTEN, and its entry with it once nothing
+        // else is recorded there. No ticket can be taken meanwhile: taking
+        // one needs the registry lock this holds.
+        if idle && let Some(holders) = held.as_mut() {
+            let empty = holders.get_mut(&self.key).is_some_and(|entry| {
+                entry.queue = None;
+                entry.is_idle()
+            });
+            if empty {
+                holders.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// THE ONE WAIT LOOP of every patient lock in this module, shared
+/// ([`Flock::try_lock_shared_patiently`]) and exclusive
+/// ([`Flock::try_lock_patiently`]). `attempt` asks for the lock once; `now`
+/// and `sleep` are the clock and the pause, passed in so a test can step the
+/// clock backwards or count the pauses without sleeping.
+///
+/// The bound is cut to [`MAX_PATIENCE`]. The pauses go 1 ms doubling to
+/// [`MAX_PAUSE`]. It stops when the wait reaches the bound, measured as the
+/// LONGER of the clock's elapsed time and the sum of the pauses it slept, so
+/// a clock that steps backwards (or stands still) cannot extend the wait:
+/// every pause adds to the sum, and the last pause is cut to what is left of
+/// the bound. A host refusal that is not contention returns at once.
+pub(crate) fn patiently(
+    bound: Duration,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+    mut attempt: impl FnMut() -> Result<(), TryLockError>,
+) -> Result<(), Impatient> {
+    let bound = bound.min(MAX_PATIENCE);
+    let started = now();
+    let mut slept = Duration::ZERO;
+    let mut pause = Duration::from_millis(1);
+    let mut attempts = 0_u32;
+    loop {
+        attempts = attempts.saturating_add(1);
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::Error(why)) => return Err(Impatient::Host(why)),
+            Err(TryLockError::WouldBlock) => {
+                let waited = now().saturating_duration_since(started).max(slept);
+                let left = bound.saturating_sub(waited);
+                if left.is_zero() {
+                    return Err(Impatient::Held {
+                        bound,
+                        waited,
+                        attempts,
+                        ahead: 0,
+                        holder: None,
+                    });
+                }
+                let step = pause.min(left);
+                sleep(step);
+                slept = slept.saturating_add(step);
+                pause = pause.saturating_mul(2).min(MAX_PAUSE);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "flock_patient_tests.rs"]
+mod patient_tests;
 
 #[cfg(test)]
 #[path = "flock_tests.rs"]

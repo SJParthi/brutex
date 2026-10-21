@@ -1320,11 +1320,27 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
             // A write or sync failure releases the lock through the guard's
             // explicit unlock, never by close (D-0693).
             let mut file = Flock::lock(file, path).map_err(io_error)?;
-            file.write_all(&header)
+            // WITHDRAWN, NOT LEFT (D-1915's rule, which this writer did not
+            // follow). A file this call created whose write or barrier failed
+            // stayed at its final, immutable name: a torn one wedged the
+            // identity ("already contains different bytes") and a whole one
+            // was accepted by the next run over bytes no barrier of this run
+            // reached (cloud-attack-law-20261016, lens 4).
+            let written = file
+                .write_all(&header)
                 .and_then(|()| file.write_all(payload))
                 .and_then(|()| file.write_all(&digest))
-                .and_then(|()| file.sync_all())
-                .map_err(io_error)?;
+                .and_then(|()| crate::fixed_tail::sync_all_hooked(&file, path));
+            if let Err(why) = written {
+                drop(file);
+                return Err(match std::fs::remove_file(path) {
+                    Ok(()) => format!("{}; the unacknowledged file was withdrawn", io_error(why)),
+                    Err(withdraw) => format!(
+                        "{}; withdrawing the unacknowledged file ALSO failed: {withdraw}",
+                        io_error(why)
+                    ),
+                });
+            }
             #[cfg(test)]
             DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
             file.release().map_err(|u| io_error(u.why))?;

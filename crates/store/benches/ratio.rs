@@ -30,6 +30,9 @@
 //! `store::bench::block_seal_is_flat`; and `C-08`,
 //! `store::bench::checksum_beats_the_bit_loop`.
 //!
+//! C-HA-01 times `store::header::slot_audit` at 1x, 10x and 100x the region,
+//! with a damaged newest slot, and prints its per-call p50, p99 and max (D-6240).
+//!
 //! C-28 and C-29 time the WARM record read, one inside the block verified
 //! last; C-BC-01 and C-BC-02 time the COLD one, which verifies its block, and
 //! C-BC-02 holds it to its own budget because it does not fit C-29's (D-0914).
@@ -74,7 +77,7 @@ use store::crc::crc32c;
 use store::file::BarFile;
 use store::format::Bar;
 use store::format::{BLOCK_LEN, FLAG_CHECKSUMS, HEADER_LEN, SLOT_LEN};
-use store::header::Header;
+use store::header::{Header, slot_audit};
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::provenance::Day;
@@ -587,6 +590,52 @@ fn header_read_is_flat() -> bool {
     let base = time(&one);
     let a = ratio("C-01 header read, 10x region", base, time(&ten));
     let b = ratio("C-01 header read, 100x region", base, time(&hundred));
+    a && b
+}
+
+/// C-HA-01 — auditing a header's slots costs the same whatever region it is
+/// handed, because [`slot_audit`] reads exactly the `MAX_SLOTS` positions
+/// [`Header::read_region`] reads (R4-09a, D-6240). The newest slot of each
+/// region is checksum-damaged, so the timed call takes the path that names a
+/// revert, not only the clean one. Beside the ratio, one call at a time at the
+/// 100x region: p50, p99 and max over n = 1,000, printed and never gated.
+fn slot_audit_is_flat() -> bool {
+    let file_len = HEADER_LEN;
+    let damaged = |slots: usize| {
+        let mut bytes = region(slots);
+        if let Ok(next) = Header::genesis(1, 60, FLAG_CHECKSUMS)
+            .advance(0, 0, 0)
+            .and_then(|next| next.commit())
+        {
+            for (dst, src) in bytes.iter_mut().skip(16_384).zip(next.bytes) {
+                *dst = src;
+            }
+        }
+        if let Some(byte) = bytes.get_mut(16_384 + 56) {
+            *byte ^= 0x01;
+        }
+        bytes
+    };
+    let (one, ten, hundred) = (damaged(512), damaged(5_120), damaged(51_200));
+    let time = |r: &[u8]| cost_ps(200, || slot_audit(black_box(r), file_len));
+    let base = time(&one);
+    let a = ratio("C-HA-01 slot audit, 10x region", base, time(&ten));
+    let b = ratio("C-HA-01 slot audit, 100x region", base, time(&hundred));
+    let mut ns: Vec<u128> = (0..1_000)
+        .map(|_| {
+            let start = Instant::now();
+            black_box(slot_audit(black_box(&hundred), file_len));
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    ns.sort_unstable();
+    let at = |rank: usize| ns.get(rank).copied().unwrap_or(0);
+    println!(
+        "  C-HA-01 slot audit, one call, 100x region, n = 1000: p50 {} ns, p99 {} ns, max {} ns",
+        at(499),
+        at(989),
+        at(999)
+    );
     a && b
 }
 
@@ -1471,6 +1520,7 @@ fn main() {
     println!("gate 8 — crates/store, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
     ok &= header_read_is_flat();
+    ok &= slot_audit_is_flat();
     ok &= block_seal_is_flat();
     ok &= checksum_beats_the_bit_loop();
     ok &= record_read_is_flat_in_the_file();

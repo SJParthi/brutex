@@ -80,14 +80,32 @@ fn contract() -> Contract {
     Contract::parse("2019-12-26-1200000-CE").expect("a contract")
 }
 
-/// Appends `batch` to one GDFL option month, through the store's writer.
-fn write_option(root: &Path, month: YearMonth, batch: &[Bar]) {
+/// Appends `batch` to one GDFL option month, through the store's writer, and
+/// returns the month file's path.
+fn write_option(root: &Path, month: YearMonth, batch: &[Bar]) -> PathBuf {
+    write_month(root, "FNO", Some(contract()), month, batch)
+}
+
+/// Appends `batch` to the GDFL NIFTY spot one-second month.
+fn write_index(root: &Path, month: YearMonth, batch: &[Bar]) -> PathBuf {
+    write_month(root, "INDEX", None, month, batch)
+}
+
+/// Appends `batch` to one GDFL NIFTY one-second month, through the store's
+/// writer, and returns the month file's path.
+fn write_month(
+    root: &Path,
+    segment: &str,
+    contract: Option<Contract>,
+    month: YearMonth,
+    batch: &[Bar],
+) -> PathBuf {
     let path = StorePath::new(PathParts {
         vendor: Vendor::Gdfl,
         exchange: "NSE",
-        segment: "FNO",
+        segment,
         symbol: "NIFTY",
-        contract: Some(contract()),
+        contract,
         timeframe: Timeframe::SECOND_1,
         month,
         file: FileKind::Bars,
@@ -96,7 +114,12 @@ fn write_option(root: &Path, month: YearMonth, batch: &[Bar]) {
     #[expect(clippy::cast_possible_truncation, reason = "the store's own id fold")]
     let id = brutex_core::universe::fnv1a("NIFTY") as u32;
     let mut file = store::file::BarFile::open_or_create(root, path, id).expect("open");
-    let _ = file.append(batch).expect("append");
+    // An empty batch leaves the month at its genesis commit: a file that
+    // holds no bar, which the recount counts and offers no row for.
+    if !batch.is_empty() {
+        let _ = file.append(batch).expect("append");
+    }
+    file.path().to_path_buf()
 }
 
 /// The census key of that month.
@@ -635,4 +658,290 @@ fn the_verbs_refuse_misuse_and_failure_with_different_codes() {
         FAILED
     );
     assert!(out.contains("not a journal line this build knows"), "{out}");
+}
+
+/// One flipped byte in the checksum of the slot holding `generation` 2 — the
+/// newest after two appends — of a month file: damage made by the test.
+fn damage_newest_slot(path: &Path) {
+    let mut bytes = std::fs::read(path).expect("the month");
+    bytes[56] ^= 0x01;
+    std::fs::write(path, bytes).expect("written back");
+}
+
+/// Invented spot bars: the option bars with no open interest.
+fn spot(month: YearMonth, day: i64, from: i64, count: i64) -> Vec<Bar> {
+    bars(month, day, from, count)
+        .into_iter()
+        .map(|bar| Bar {
+            open_interest: store::format::OI_NULL,
+            ..bar
+        })
+        .collect()
+}
+
+/// A MONTH WHOSE NEWEST HEADER SLOT IS DAMAGED IS NAMED, BY PATH AND REASON,
+/// AND THE RECOUNT FAILS (R4-09a, D-6242). Its header now reads the OLDER
+/// generation, so its row is not offered — recording it would write the lost
+/// commit into the census — and its month's days stay open. A clean month
+/// beside it is recorded and closes its day as before. NIFTY spot first, then
+/// a NIFTY option: the walk is the same for both.
+///
+/// On `feat/db-fix` at 371b1a506 this recount exited OK, recorded both
+/// December months at their older counts and closed 2019-12-26.
+#[test]
+fn a_month_whose_newest_header_slot_is_damaged_is_named_and_never_recorded() {
+    let scratch = Scratch::new("reverted");
+    let root = scratch.0.clone();
+    let (nov, dec) = (ym(2019, 11), ym(2019, 12));
+    let _ = write_option(&root, nov, &bars(nov, 28, 0, 6));
+    let _ = write_index(&root, dec, &spot(dec, 26, 0, 5));
+    let index = write_index(&root, dec, &spot(dec, 26, 5, 4));
+    let _ = write_option(&root, dec, &bars(dec, 26, 0, 5));
+    let option = write_option(&root, dec, &bars(dec, 26, 5, 4));
+    damage_newest_slot(&index);
+    damage_newest_slot(&option);
+    std::fs::create_dir_all(journal(&root).parent().expect("imports")).expect("imports");
+    std::fs::write(journal(&root), JOURNAL).expect("a journal");
+
+    let store = || Ok(root.clone());
+    let mut out = String::new();
+    let code = recount_with(&["gdfl", "--from", "2019-11-14"], &store, None, &mut out);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains(
+            "  header slot damage  2 month(s), 2 reverted to an older generation (not \
+             recorded, no day closed)\n"
+        ),
+        "{out}"
+    );
+    for path in [&index, &option] {
+        let line = format!(
+            "    {}: REVERTED: read generation 1; slot 0 (crc: ",
+            path.display()
+        );
+        assert!(out.contains(&line), "{line:?} missing from {out}");
+    }
+    assert!(
+        out.contains("its generation is unreadable, so a newer commit may be lost"),
+        "{out}"
+    );
+    assert!(out.contains("in range            3"), "{out}");
+    assert!(out.contains("days recounted      1"), "{out}");
+
+    let census = single(&root);
+    assert_eq!(
+        census.held(&key(nov)).map(|row| row.entry.rows),
+        Some(6),
+        "the clean month is recorded"
+    );
+    assert!(
+        census.held(&key(dec)).is_none(),
+        "the reverted option month offers no row"
+    );
+    let index_key = EntryKey {
+        contract: None,
+        segment: Segment::Index,
+        ..key(dec)
+    };
+    assert!(
+        census.held(&index_key).is_none(),
+        "the reverted spot month offers no row"
+    );
+    let text = std::fs::read_to_string(journal(&root)).expect("the journal");
+    let tail = text
+        .strip_prefix(JOURNAL)
+        .expect("appended, never rewritten");
+    assert!(tail.contains("recounted options 2019-11-28 "), "{tail}");
+    assert!(
+        !tail.contains("2019-12-26"),
+        "a reverted month's day is not closed: {tail}"
+    );
+}
+
+/// A CLEAN STORE SAYS SO: zero months of header slot damage, and the count line
+/// is there to be read rather than absent.
+#[test]
+fn a_clean_recount_says_no_header_slot_is_damaged() {
+    let scratch = Scratch::new("slots-clean");
+    let root = scratch.0.clone();
+    let dec = ym(2019, 12);
+    let _ = write_index(&root, dec, &spot(dec, 26, 0, 5));
+    let _ = write_index(&root, dec, &spot(dec, 26, 5, 4));
+    let store = || Ok(root.clone());
+    let mut out = String::new();
+    assert_eq!(
+        recount_with(&["gdfl", "--from", "2019-12-01"], &store, None, &mut out),
+        OK,
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "  header slot damage  0 month(s), 0 reverted to an older generation (not \
+             recorded, no day closed)\n"
+        ),
+        "{out}"
+    );
+}
+
+/// A MONTH THAT REVERTED TO AN EMPTY GENERATION IS NAMED, NEVER COUNTED AS A
+/// MONTH HOLDING NO BAR (R4-09a, D-6242). December is created empty (genesis,
+/// slot 0) and then given five bars (generation 1, slot 1); one checksum byte
+/// of slot 1 is flipped, so the read falls back to the genesis header, which
+/// counts no bar. That must read as a revert, not as an empty month: "holding
+/// no bar" would tell the operator nothing was ever there. November is a month
+/// that really is empty and clean, and it alone is counted as holding no bar.
+#[test]
+fn a_month_that_reverted_to_an_empty_generation_is_named_and_never_counted_empty() {
+    let scratch = Scratch::new("reverted-empty");
+    let root = scratch.0.clone();
+    let (nov, dec) = (ym(2019, 11), ym(2019, 12));
+    let _ = write_index(&root, nov, &[]);
+    let _ = write_index(&root, dec, &[]);
+    let reverted = write_index(&root, dec, &spot(dec, 26, 0, 5));
+    let mut bytes = std::fs::read(&reverted).expect("the month");
+    bytes[16_384 + 56] ^= 0x01;
+    std::fs::write(&reverted, bytes).expect("written back");
+
+    let store = || Ok(root.clone());
+    let mut out = String::new();
+    let code = recount_with(&["gdfl", "--from", "2019-11-01"], &store, None, &mut out);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("  in range            2\n"), "{out}");
+    assert!(
+        out.contains("  holding no bar      1\n"),
+        "only the month that is really empty: {out}"
+    );
+    assert!(
+        out.contains(
+            "  header slot damage  1 month(s), 1 reverted to an older generation (not \
+             recorded, no day closed)\n"
+        ),
+        "{out}"
+    );
+    let line = format!(
+        "    {}: REVERTED: read generation 0; slot 1 (crc: ",
+        reverted.display()
+    );
+    assert!(out.contains(&line), "{line:?} missing from {out}");
+    assert!(out.contains("  rows offered        0\n"), "{out}");
+}
+
+/// A MONTH READ IN ITS SEALED FORM HAS NO SLOTS TO NAME, AND IS RECORDED
+/// (R4-09a, D-6243). The door reads the `.sbar` first and its one head carries
+/// no slot pair, so the audit is `None`: nothing is named, the month is not
+/// held back as reverted, and its row is offered from the sealed head.
+#[test]
+fn a_month_read_in_its_sealed_form_names_no_slot_and_is_recorded() {
+    let scratch = Scratch::new("sealed");
+    let root = scratch.0.clone();
+    let dec = ym(2019, 12);
+    let batch = spot(dec, 26, 0, 5);
+    let _ = write_index(&root, dec, &batch);
+    let at = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: dec,
+        file: FileKind::Bars,
+    })
+    .expect("a store path");
+    #[expect(clippy::cast_possible_truncation, reason = "the store's own id fold")]
+    let id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let raw = store::file::BarFile::open_existing(&root, at, id).expect("the raw month");
+    let built = store::sealed::build(at, &raw.header(), &batch, None, None).expect("sealed");
+    drop(raw);
+    let sbar = at.with_file(FileKind::SealedBars).to_path_buf(&root);
+    let staged = sbar.with_extension("staged");
+    std::fs::write(&staged, built.to_bytes()).expect("staged");
+    std::fs::rename(&staged, &sbar).expect("published");
+    let read = store::file::BarFile::open_existing(&root, at, id).expect("the sealed month");
+    assert_eq!(read.form(), store::file::Form::Sealed);
+    assert_eq!(read.slot_audit(), None);
+    drop(read);
+
+    let store = || Ok(root.clone());
+    let mut out = String::new();
+    assert_eq!(
+        recount_with(&["gdfl", "--from", "2019-12-01"], &store, None, &mut out),
+        OK,
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "  header slot damage  0 month(s), 0 reverted to an older generation (not \
+             recorded, no day closed)\n"
+        ),
+        "{out}"
+    );
+    let index_key = EntryKey {
+        contract: None,
+        segment: Segment::Index,
+        ..key(dec)
+    };
+    assert_eq!(
+        single(&root).held(&index_key).map(|row| row.entry.rows),
+        Some(5),
+        "the sealed month's row is offered: {out}"
+    );
+}
+
+/// AN OLDER SLOT DAMAGED WITH ITS GENERATION VERIFIED is named `damaged`, its
+/// month's row — the newer generation, which lost nothing — is recorded, and
+/// the recount still fails so the damage is not passed over (D-6242). The
+/// older slot is re-committed with its timestamps reversed: whole, checksummed,
+/// and refused by `Header::validate`.
+#[test]
+fn an_older_damaged_slot_is_named_and_its_month_is_still_recorded() {
+    let scratch = Scratch::new("older-slot");
+    let root = scratch.0.clone();
+    let dec = ym(2019, 12);
+    let _ = write_index(&root, dec, &spot(dec, 26, 0, 5));
+    let path = write_index(&root, dec, &spot(dec, 26, 5, 4));
+    let mut bytes = std::fs::read(&path).expect("the month");
+    let older = store::header::Header::decode(&bytes[16_384..16_384 + 64]).expect("slot 1");
+    assert_eq!(older.generation, 1);
+    let reversed = store::header::Header {
+        last_ts_micros: older.first_ts_micros - 1,
+        ..older
+    }
+    .commit()
+    .expect("commits");
+    bytes[16_384..16_384 + 64].copy_from_slice(&reversed.bytes);
+    std::fs::write(&path, bytes).expect("written back");
+
+    let store = || Ok(root.clone());
+    let mut out = String::new();
+    assert_eq!(
+        recount_with(&["gdfl", "--from", "2019-12-01"], &store, None, &mut out),
+        FAILED,
+        "{out}"
+    );
+    assert!(
+        out.contains("  header slot damage  1 month(s), 0 reverted"),
+        "{out}"
+    );
+    let line = format!(
+        "    {}: damaged: slot 1 (timestamps_out_of_order: ",
+        path.display()
+    );
+    assert!(out.contains(&line), "{line:?} missing from {out}");
+    assert!(
+        out.contains(
+            "holds generation 1, older than generation 2 that was read; no commit was lost"
+        ),
+        "{out}"
+    );
+    let index_key = EntryKey {
+        contract: None,
+        segment: Segment::Index,
+        ..key(dec)
+    };
+    assert_eq!(
+        single(&root).held(&index_key).map(|row| row.entry.rows),
+        Some(9),
+        "the newer generation is recorded"
+    );
 }
