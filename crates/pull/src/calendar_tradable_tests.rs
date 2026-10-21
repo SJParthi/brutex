@@ -256,17 +256,14 @@ fn notice_days_not_measured(rows: &[SessionCircular]) -> Vec<i64> {
         if notice_in(rows, notice.day) != Some(*notice) {
             continue;
         }
-        match special_session(notice.day) {
-            Some(special) => {
-                assert_eq!(notice.kind, special.kind, "day {}", notice.day);
-                assert_eq!(notice.notified, Some(special.session), "day {}", notice.day);
+        if let Some(special) = special_session(notice.day) {
+            assert_eq!(notice.kind, special.kind, "day {}", notice.day);
+            assert_eq!(notice.notified, Some(special.session), "day {}", notice.day);
+        } else {
+            if notice.notified.is_none() {
+                assert!(notice.source.contains("UNVERIFIED"), "{}", notice.source);
             }
-            None => {
-                if notice.notified.is_none() {
-                    assert!(notice.source.contains("UNVERIFIED"), "{}", notice.source);
-                }
-                unmeasured.push(notice.day);
-            }
+            unmeasured.push(notice.day);
         }
     }
     unmeasured
@@ -838,7 +835,7 @@ fn version_two_keeps_its_recorded_digest() {
 /// what an OLDER version answers. Pinning only version 2 left version 1's
 /// answers free to move unseen; with both pinned, such an append fails the
 /// build for every version it touches. Recorded 2026-10-21 by CAL-1 repair
-/// round 1 from this tree (first printed by this test, at commit 9b7050735);
+/// round 1 from this tree (first printed by this test on that day);
 /// no recorded run names a `CalendarVersion` yet (L-CAL-7), so pinning it
 /// re-keys nothing. It differs from version 2's, as two extents must.
 #[test]
