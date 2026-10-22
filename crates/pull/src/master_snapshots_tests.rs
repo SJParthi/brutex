@@ -13,6 +13,7 @@
               test that cannot panic cannot fail."
 )]
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -74,7 +75,7 @@ fn dump(rows: &[String]) -> String {
 fn nse_file(rows: &[(&str, &str)]) -> String {
     let mut out = String::from(NSE_HEAD);
     for (symbol, isin) in rows {
-        out.push_str(&format!("\nZq {symbol} Ltd.,Testing,{symbol},EQ,{isin}"));
+        let _infallible = write!(out, "\nZq {symbol} Ltd.,Testing,{symbol},EQ,{isin}");
     }
     out.push('\n');
     out

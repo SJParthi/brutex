@@ -776,31 +776,10 @@ pub fn futures_plan(
             window: span,
         });
     }
-    let last = book.stamps().len().saturating_sub(1);
-    let near = book.with_snapshot(last, |snapshot| {
-        snapshot
-            .rows()
-            .filter(|listed| is_future_of(listed, route, underlying))
-            .filter(|listed| listed.expiry().is_some_and(|expiry| expiry >= today))
-            .min_by_key(|listed| (listed.expiry(), listed.token()))
-            .map(|listed| listed.token())
-    });
-    match near {
-        Ok(Some(token)) => {
-            if let Ok(span) = Window::new(window.from(), through) {
-                asks.push(FuturesAsk {
-                    token,
-                    series: FuturesSeries::Continuous,
-                    window: span,
-                });
-            }
-        }
-        Ok(None) => refused.push(format!(
-            "no_live_future: the newest snapshot {newest} lists no {} future of {underlying} \
-             expiring on or after {today}, so the continuous series has no token to ask through",
-            route.exchange
-        )),
-        Err(why) => refused.push(format!("snapshot_unreadable: {newest}: {why}")),
+    match continuous_ask(book, route, underlying, today, window.from(), through) {
+        Ok(Some(ask)) => asks.push(ask),
+        Ok(None) => {}
+        Err(why) => refused.push(why),
     }
     for why in &refused {
         let _ = telemetry::emit_if!(
@@ -817,6 +796,46 @@ pub fn futures_plan(
         asks,
         refused,
     })
+}
+
+/// The continuous series' request: through the newest snapshot's nearest
+/// future of `underlying` expiring on or after `today`, over `from..=through`.
+/// `Ok(None)` when that span is empty; a refusal, by name, when no live
+/// future is listed or the newest snapshot does not read.
+fn continuous_ask(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    today: Day,
+    from: Day,
+    through: Day,
+) -> Result<Option<FuturesAsk>, String> {
+    let Some(newest) = book.newest() else {
+        return Err("no_snapshot: no dated Kite master snapshot is held".to_owned());
+    };
+    let last = book.stamps().len().saturating_sub(1);
+    let near = book
+        .with_snapshot(last, |snapshot| {
+            snapshot
+                .rows()
+                .filter(|listed| is_future_of(listed, route, underlying))
+                .filter(|listed| listed.expiry().is_some_and(|expiry| expiry >= today))
+                .min_by_key(|listed| (listed.expiry(), listed.token()))
+                .map(|listed| listed.token())
+        })
+        .map_err(|why| format!("snapshot_unreadable: {newest}: {why}"))?;
+    let Some(token) = near else {
+        return Err(format!(
+            "no_live_future: the newest snapshot {newest} lists no {} future of {underlying} \
+             expiring on or after {today}, so the continuous series has no token to ask through",
+            route.exchange
+        ));
+    };
+    Ok(Window::new(from, through).ok().map(|span| FuturesAsk {
+        token,
+        series: FuturesSeries::Continuous,
+        window: span,
+    }))
 }
 
 /// What one futures pull did.

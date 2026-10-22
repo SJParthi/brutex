@@ -1453,6 +1453,12 @@ fn item(change: Change, listed: &Listed<'_>, old: String, new: String) -> Item {
 /// Every change from `old` to `new`, sorted. ISINs come from the NSE file of
 /// each snapshot's own date; `None` means that date has none.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the new rows with its three matching arms side by side, in the \
+              order they are tried; split apart, each arm would sit away from the reason it \
+              comes before the next"
+)]
 pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins: Option<&Isins>) -> Vec<Item> {
     let old_rows: Vec<Listed<'_>> = old.rows().collect();
     let new_rows: Vec<Listed<'_>> = new.rows().collect();
@@ -1648,7 +1654,7 @@ pub fn render_diff(previous: Stamp, current: Stamp, items: &[Item]) -> Result<St
 ///
 /// A file that is not whole fixed-length lines of this format, named.
 pub fn parse_diff(text: &str) -> Result<(String, String, Vec<Item>), String> {
-    if text.len() % RECORD_LEN != 0 {
+    if !text.len().is_multiple_of(RECORD_LEN) {
         return Err(format!("a diff is whole {RECORD_LEN}-byte lines; this one is torn"));
     }
     let mut lines = text.as_bytes().chunks(RECORD_LEN).map(|line| {
@@ -1895,9 +1901,7 @@ pub fn after_land(
         }
         (Landed::Written { .. } | Landed::Uncertain { .. }, Err(why)) => Err(format!(
             "the master landed and no snapshot was written: {why}"
-        )),| Landed::Uncertain { .. } => {
-            snapshot(&root, kind, day, source.url, body.as_bytes())
-        }
+        )),
         (Landed::Refused(why), _) => Err(format!(
             "the master did not land, so no snapshot was written and the newest one stands: {why}"
         )),

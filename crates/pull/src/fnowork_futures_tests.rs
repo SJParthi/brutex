@@ -145,6 +145,39 @@ fn january_reply(url: &str) -> Result<String, Refusal> {
     Ok(answer(&candles))
 }
 
+/// February, after the token was reused for April.
+fn february_reply(url: &str) -> Result<String, Refusal> {
+    let (token, continuous) = token_of(url);
+    let base = match (token, continuous) {
+        (8_000_001, false) => 4_000,
+        (8_000_002, false) => 5_000,
+        (8_000_002, true) => 6_000,
+        _ => return Err(Refusal::answered(400, "InputException".to_owned())),
+    };
+    let candles: Vec<String> = (2..=6)
+        .map(|d| candle(day(2026, 2, d), 130, base + u64::from(d)))
+        .collect();
+    Ok(answer(&candles))
+}
+
+/// A vendor that answers every request with no candle.
+#[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
+fn empty_reply(_url: &str) -> Result<String, Refusal> {
+    Ok(answer(&[]))
+}
+
+/// The continuous series across the 2026-01-26 holiday and the roll after it.
+#[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
+fn rolling_reply(url: &str) -> Result<String, Refusal> {
+    assert!(url.contains("continuous=1"), "{url}");
+    let days = [21, 22, 23, 27, 28, 29, 30];
+    let candles: Vec<String> = days
+        .iter()
+        .map(|d| candle(day(2026, 1, *d), if *d < 27 { 100 } else { 140 }, 7_000 + u64::from(*d)))
+        .collect();
+    Ok(answer(&candles))
+}
+
 fn bars_of(root: &Path, symbol: &str, contract: Option<Contract>, month: YearMonth) -> Vec<store::format::Bar> {
     let path = StorePath::new(PathParts {
         vendor: Vendor::Zerodha,
@@ -337,19 +370,6 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
     assert_eq!(second.asks[1].token, 8_000_001);
     assert_eq!(second.asks[1].window, window(day(2026, 2, 2), day(2026, 2, 6)));
     assert_eq!(second.asks[2].token, 8_000_002, "the near month on the day asked");
-    fn february_reply(url: &str) -> Result<String, Refusal> {
-        let (token, continuous) = token_of(url);
-        let base = match (token, continuous) {
-            (8_000_001, false) => 4_000,
-            (8_000_002, false) => 5_000,
-            (8_000_002, true) => 6_000,
-            _ => return Err(Refusal::answered(400, "InputException".to_owned())),
-        };
-        let candles: Vec<String> = (2..=6)
-            .map(|d| candle(day(2026, 2, d), 130, base + u64::from(d)))
-            .collect();
-        Ok(answer(&candles))
-    }
     let vendor = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: february_reply,
@@ -474,9 +494,6 @@ fn an_expired_token_the_vendor_no_longer_serves_ends_its_history_by_name() {
     assert!(landed.failed[0].contains("history_ends"), "{:?}", landed.failed);
     assert!(landed.failed[0].contains("2026-03-31-FUT"), "{:?}", landed.failed);
     assert_eq!(landed.bars_stored, 10);
-    fn empty_reply(_url: &str) -> Result<String, Refusal> {
-        Ok(answer(&[]))
-    }
     let quiet = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: empty_reply,
@@ -503,16 +520,6 @@ fn a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_spli
     )
     .unwrap();
     plan.asks.retain(|ask| ask.series == FuturesSeries::Continuous);
-    fn rolling_reply(url: &str) -> Result<String, Refusal> {
-        assert!(url.contains("continuous=1"));
-        // 2026-01-26 is a holiday; the vendor's series jumps across the roll.
-        let days = [21, 22, 23, 27, 28, 29, 30];
-        let candles: Vec<String> = days
-            .iter()
-            .map(|d| candle(day(2026, 1, *d), if *d < 27 { 100 } else { 140 }, 7_000 + u64::from(*d)))
-            .collect();
-        Ok(answer(&candles))
-    }
     let vendor = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: rolling_reply,
