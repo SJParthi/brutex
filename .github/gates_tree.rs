@@ -2681,6 +2681,17 @@ const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range
      torn-one-month \
      type undated undated_master_name unknowns unread-day zero-minute zero-unread-day";
 
+// CAL-1 (repair round 1, 21 Oct 2026): the serial numbers of the five NSE
+// holiday circulars `pull::calendar::HOLIDAY_CIRCULARS` records, which gate 1d
+// splits out of each row's `number` (`NSE/CMTR/36475` and so on, the spelling
+// NSE prints and `docs/00-charter.md` records with its address): 2018's list
+// NSE/CMTR/36475, 2019's NSE/CMTR/39612 and its two additions NSE/CMTR/40536
+// and NSE/MSD/42319, and 2026's NSE/CMTR/71775. Each is a public exchange
+// circular's number, never an account, an environment, a vendor credential or
+// a field of a parameter path. A circular appended to the table brings its
+// serial here in the same change.
+const CAL1_CIRCULAR_SERIAL: &str = "36475 39612 40536 42319 71775";
+
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
 // (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
 // (the shared file doors: the tick store's day-name refusals), SC-1 (codec 1,
@@ -2810,6 +2821,31 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
      writer_changed yes";
 
+// PIT-1 (D-5160 to D-5169): the point-in-time F&O membership's module
+// `pull::fno_membership`, its tests and its ratio bench
+// (`benches/ratio/fno_membership.rs`). Each was read before it was listed, in
+// three kinds. (1) The format's own words: `fnm`, the month file's extension;
+// `-g`, the separator before a month file's generation (`2024-03-g000001.fnm`);
+// `fno-membership-v1`, its directory name under a store's `reference/` (and
+// the domain tag of the file digest); `inferred_gdfl_options`, the source
+// label every row carries; `measured`, the label of a measured handover.
+// (2) The words of `DayStatus::word` and the
+// reasons a day or a handover candidate is refused (`known`, `not_a_session`,
+// `no_source`, `no_calendar`, `no_share_options`, `source_on_closed_day`,
+// `handover`, `minority`, `pool`, `running`, `span`). (3) Test labels: the
+// scratch folder names the tests make under the system temp directory
+// (`both-sides`, `day-by-day`, `decoder`, `digest-a`, `digest-b`, `digest-c`,
+// `fail-cut`, `fail-once`, `generations`, `kill-cut`, `kill-once`,
+// `no-calendar`, `one-pass`, `overlap`, `refused-once`, `sourced-rename`,
+// `stray-daily`, `untraded`, `carry`, `changed`, `damaged`, `expired`, `spans`,
+// `stray`, `two-once`). None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known not_a_session \
+     no_source no_calendar no_share_options source_on_closed_day handover minority pool \
+     running span both-sides day-by-day decoder digest-a digest-b digest-c fail-cut fail-once \
+     generations kill-cut kill-once no-calendar one-pass overlap refused-once sourced-rename \
+     stray-daily untraded -g measured carry changed damaged expired spans stray two-once";
+
 // The cloud mutation pass over `crates/pull` (reports/cloud-mut-pull-20261017.md):
 // `proc` and `self` are the two directories of the Linux path
 // `/proc/self/status`, which `cash_session_cache`'s `read_limited` test reads
@@ -2825,7 +2861,7 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
 const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 72] = [
+const DECLARED: [&str; 73] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2896,8 +2932,10 @@ const DECLARED: [&str; 72] = [
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
     R4_07_LITERAL,
+    PIT_1_LITERAL,
     CLOUD_MUT_PULL_LITERAL,
     R4_17_LITERAL,
+    CAL1_CIRCULAR_SERIAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

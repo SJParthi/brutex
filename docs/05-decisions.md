@@ -73678,6 +73678,938 @@ builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs 
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
 
+### D-5110 — Package CHG-1: a charge stack for one executed order and one client-security-day, precise by default, in new modules of `crates/costs` — 2026-10-16
+
+**Implemented by** `costs::exact`, `costs::charge_error`, `costs::schedule`,
+`costs::stack` and `costs::dhan_calc`, exported from `crates/costs/src/lib.rs`;
+tests in each module and in `crates/costs/tests/dhan_calculator.rs`; the bench
+`crates/costs/benches/stack.rs`. **Number block** D-5110 to D-5139 was assigned
+to CHG-1; D-5110 was free on the base `cloud/base-20261016` (`c9e3472`).
+
+**Decision.** `crates/costs` prices equity cash (intraday, delivery, MTF),
+futures and options under the contract-note method, plus Dhan's own fees.
+**Precise is the default mode**; a replica of Dhan's public calculator exists
+for comparison only (D-5112). Every money value is paisa `i64` at every
+boundary; every rate is an exact integer fraction (`exact::Ratio`, numerator
+over denominator, both fixed at compile time beside their source); no float
+appears on any path. Intermediate products are formed in `i128` and narrowed
+once, refused rather than saturated. The existing options API (`trip`,
+`regime`, `rate`, `venue`, `money`, `fill`, `lot`) is **unchanged**:
+`regime.rs`, `rate.rs` and `venue.rs` are not edited, because package CHG-0 is
+editing `regime.rs` in parallel.
+
+**Why new modules rather than widening `trip`.** `trip` prices one index-option
+round trip with deliberately adverse ceilings (`money`, D-0044 and §27 of
+`docs/06-limits.md`); a contract note rounds to the nearest unit and aggregates
+per client per security per day. Folding the second contract into the first
+would change every figure the existing tests pin.
+
+### D-5111 — The intraday transaction tax is levied on the non-delivery quantity at the day's VWAP of every trade; delivery is decided by the day's quantities — 2026-10-16
+
+The operator's five contract-note vectors were re-derived from the rules as
+written. All five agree (V1 ₹73.90, V2 ₹403.39, V3 ₹0.78, V4 ₹1,829.14, V5
+₹400.63) **only** when the equity intraday STT is 0.025% of the non-delivery
+quantity × the volume-weighted average price of all the client's trades in the
+security that day — buys and sells together, the NSE basis the brief cites as
+`NSE/CMTR/5588`. On the sell-value basis Dhan's calculator uses, V2, V4 and V5
+move by ₹1–₹7 (`costs::stack::the_sell_value_basis_disagrees_with_three_of_the_five_vectors`).
+For a squared-off day the VWAP value is half the turnover, so the tax is
+`0.025% × turnover / 2`, the halving folded into the rate's divisor so the
+tax is rounded once.
+
+Delivery versus non-delivery is decided by the day's **quantities**, as the
+exchange nets them, not by the product label: equal sides are non-delivery
+(STT 0.025% on the VWAP value, stamp 0.003% on the buy value); one side only is
+delivery (STT 0.1% of that side, stamp 0.015% of the buys, DP on a sell). The
+product decides only brokerage and DP. A one-sided **intraday** day is refused
+(`OpenIntradayPosition`) — its exit order is missing. A delivery or MTF day
+with both sides of unequal size is refused (`PartlySquaredDay`): stamp duty is
+on the FIFO buy value of the non-deliverable quantity (`NCL/CMPT/43115`), and
+day totals cannot give a FIFO split. Futures and options pay STT on every sell
+and stamp on every buy, with no netting. Option exercise pays STT on intrinsic
+value at the exercise rate, as its own line.
+
+### D-5112 — Dhan's calculator is reproduced line by line, labelled an estimate, and its last paisa is left UNVERIFIED with every miss pinned — 2026-10-16
+
+`costs::dhan_calc::quote` reproduces `https://dhan.co/calculators/brokerage-calculator/`
+as the operator measured it on 15 and 16 Oct 2026: brokerage Σ min(₹20, 0.0003
+× order value) per executed order (delivery ₹0, MTF as intraday, F&O ₹20 per
+order); exchange on turnover at the page's constants; SEBI at 0.000001; STT and
+stamp at the page's bases, shown half-up to the rupee; DP ₹14.75 on a delivery
+or MTF sell; GST 0.18 × (brokerage + exchange rounded to 4 decimals), the SEBI
+fee **not** in it; total = the exact sum of the lines with STT and stamp
+**unrounded**, rounded half-up to the paisa. Every unrounded line is an integer
+count of 10⁻⁷ paisa (10⁻⁹ rupee), so the page's floating-point sum is
+reproduced by its exact value. Every output carries `Dhan calculator
+(estimate)`; it is never a contract note.
+
+**Measured on the 48 readings the brief carries** (it says 49 were measured):
+every displayed line equals the page (336 lines), the 15 Oct readings'
+unrounded lines to the billionth of a rupee; the total is exact on 33 and one
+paisa off on 15 — 8 page-higher, 7 page-lower — pinned by name and direction in
+`costs::dhan_calculator::the_one_paisa_total_misses_are_listed_with_their_direction`
+so a rule that fits all of them can be proven later. Neither a floor nor a
+ceiling fits all 15. The page's last-paisa rule is UNVERIFIED.
+
+### D-5113 — The precise stack rounds half-up, each line at the level a contract note shows it; the half's direction and the aggregation level are UNVERIFIED — 2026-10-16
+
+Brokerage: per executed order, half-up to the paisa. Exchange transaction
+charge **with the IPFT folded in, as one line**, and the SEBI fee: on the
+client-security-day's turnover, half-up to the paisa, once. STT and stamp
+duty: per client per security per day, half-up to the rupee. GST: 18% of
+(brokerage + exchange + SEBI), half-up to the paisa, once; DP and the
+square-off fee carry their own 18% lines. Evidence for the levels: V1's SEBI
+fee is ₹0.15 on turnover where per-order rounding gives ₹0.16, and V4's
+exchange line is ₹308.54 as one line where FA73061's two parts rounded apart
+give ₹308.53. **No source recorded here states which way an exact half goes,
+nor whether a note totals these lines per security or per note**; half-up and
+per-security are choices, and `docs/06-limits.md` §CHG-1 records both.
+
+### D-5114 — The charge stack refuses by name wherever Dhan's page would print a zero or NaN, and never prints a zero in place of an answer — 2026-10-16
+
+`costs::charge_error::ChargeError` carries every refusal. Refused: an order or
+a quote with a quantity or a price that is not strictly positive
+(`CostError::NotPositive`, naming which); a quote with neither price
+(`NoOrder`); a client-security-day with nothing traded or exercised
+(`EmptyDay`); an open intraday day and a partly squared delivery day (D-5111);
+an exercise on anything but an option, or of a non-positive intrinsic value;
+the net P&L of a one-sided quote (`OneSided`); BSE futures and options in
+calculator mode (`NotOnPage` — never read from the page) and BSE futures under
+today's rates (`NoRate` — no figure recorded); every arithmetic site that
+could leave `i64` (`CostError::Overflow`, naming the operation). A breakeven
+"that cannot be computed" is the quantity-zero case, refused at `quote`; a
+refused order leaves the day exactly as it was. Buy-only and sell-only quotes
+are supported in calculator mode as one executed order.
+
+### D-5115 — Rates by date: today's rates on every trade date is the default, labelled; the dated regime stays exactly as it was, and the FA73061-dependent tests wait for package CHG-0 — 2026-10-16
+
+`schedule::RateSelector::CurrentOnEveryDate` (the `Default`) applies the table
+read on `schedule::CURRENT_AS_OF` (2026-10-16) to every trade date, back to 2018
+and beyond — the operator's choice for backtests. Every precise output carries
+`RateBasis`, rendered `today's rates applied to <date>`.
+`RateSelector::Dated` reads `crate::regime`, unchanged, and covers index
+options only: equity and futures under it are a `Refusal` on every date (no
+dated history of those rates is recorded), never today's rate applied
+backwards without a label. For a dated NSE options day the exchange line is the
+regime's row plus `rate::NSE_IPFT` before `FA73061`'s effective date
+(2026-03-01) and the regime row alone from it, because `FA73061` states the
+0.03553% with the IPFT folded in; BSE adds `rate::BSE_IPFT`'s UNVERIFIED zero.
+Today's table carries 0.03553% for NSE options itself, naming `FA73061`.
+Until package CHG-0's dated row lands, the regime answers 0.03503% for October
+2026, so
+`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+is `#[ignore = "needs CHG-0's FA73061 regime row"]`; it fails today by exactly
+the IPFT, and the local merge un-ignores it.
+
+### D-5116 — The intraday ceiling square-off fee is a separate line, applied only when the caller says the broker exited — 2026-10-16
+
+A position still open at the 15:10 intraday ceiling is squared off by Dhan's
+risk system at ₹20 + 18% GST per order. `stack::Order::squared_off_by_broker`
+marks such an exit; the order then carries `square_off_fee` ₹20 and
+`square_off_gst` ₹3.60 as their own lines, and nothing else on the day moves.
+The stack never infers it from a time. Refused on a delivery or MTF day, which
+is carried rather than squared off. Applied on futures and options when asked,
+and that F&O applicability (and its cut-off time) is UNVERIFIED.
+
+### D-5117 — Today's rate table records each figure's provenance, and four figures are priced while UNVERIFIED — 2026-10-16
+
+Each rate is a `schedule::Cited`: the exact ratio, the source string and a
+`Status`. `Cited` means the brief or the repository names a circular, notice,
+statute or page for it (`docs/00-charter.md`, "CHG-1 charge-stack rate
+sources"). Four are `Unverified` and are still priced because the brief orders
+them: BSE cash ₹375 per crore all-in; BSE options' IPFT zero; equity delivery
+STT 0.1%; futures STT 0.05%. A settled day lists the UNVERIFIED sources it
+actually used (`DayCharges::unverified_sources`) and prints them under its
+lines. The options STT and exercise rates equal the regime's rows on the as-of
+day, held together by a test. The session could not fetch any source itself
+(`nsearchives.nseindia.com` and `dhan.co` refused by the network policy), so
+no circular body was read and no digest is recorded.
+
+### D-5118 — The charge stack's cost is measured as p50, p99 and max per call, and gated by ratios of medians — 2026-10-16
+
+`crates/costs/benches/stack.rs`, `harness = false`, no framework: 20,000
+samples per measurement, each a batch of 16 calls timed by one pair of
+`Instant` reads, after 2,000 untimed; p50, p99 and max per call. Gated only by
+five ratios of medians under the shared 3.0× ceiling (C-CHG-01..05): a crore of
+shares against one, the 2,000,001st order against the first, a huge day against
+a small one, settling two million orders against two, a huge calculator quote
+against a small one. Absolute figures are printed and not gated. A sixth
+measurement, a day at the widest `i64` allows, is printed beside C-CHG-03 and
+not gated: its rate products pass 2^64, where `i128` division takes the
+compiler's software routine, measured at about 1.26× a normal day. That is a
+second constant, bounded by the 128-bit width, not a cost that grows; gating it
+at 3.0× would hold, but a ratio between two different constants is not the
+claim the gate exists to check. The bench refuses to time the widest day unless
+it settles, so a refusal can never stand in for it.
+
+### D-5119 — Invariant ids `CHG-nn` and bench ids `C-CHG-nn` — 2026-10-16
+
+CHG-1's rows in `docs/04-invariants.md` take a prefix no row uses, rather than
+`K-54` onward, because about twenty packages are adding rows in parallel and
+gates 10b and 27 refuse a reused id at merge.
+
+### D-5120 — The cost-row reconciliation reads every bench binary, not only `ratio.rs` — 2026-10-16
+
+`core::cost_invariants` read the printed ids only from each crate's
+`benches/ratio.rs`, so C-CHG-01..05 (D-5118), which
+`crates/costs/benches/stack.rs` prints, failed
+`every_declared_cost_invariant_reaches_a_bench` as unbenched. Yet gate 8's
+`cargo bench --workspace --locked` runs that bench in the same step as every
+`ratio.rs`.
+
+**Chosen:** the two reconciliation tests read every top-level
+`crates/<name>/benches/*.rs`, the root file of each bench binary.
+`every_crate_carries_a_ratio_bench` still walks `ratio.rs` alone, because one
+per crate is gate 8's premise. The wider walk asserts that it read every
+`ratio.rs` the narrower one did, so it cannot quietly read less.
+
+**Rejected:**
+- Citing a C-K id in each C-CHG row. That would pass the test, but the C-K
+  benches measure the options trip, not this stack, so the citation would be
+  false.
+- Moving the stack bench into `benches/ratio/` as a module. The test does not
+  read modules, so the five rows would still fail.
+- Merging it into `costs/benches/ratio.rs`. That would rewrite gate 8's
+  harness, which gate 14 counts point by point, for no gain.
+
+**Seen and not changed:** files under `benches/ratio/` are modules, and this
+walk still does not read them. `store/benches/ratio/safe_files.rs` prints
+C-SF-01..04, and no row in `docs/04-invariants.md` declares any of the four.
+RC-01's direction would refuse them if it could see them. That is a separate
+change to another crate's ledger; it is not widened into package CHG-1.
+
+Landed on `feat/db-fix` by the CLOUD-CHG1 merge-back (17 Oct 2026) with this number,
+which the cloud branch `cloud/chg1-20261016` gave it; the local merge's own entries
+that had used D-5120 to D-5125 for other choices are D-5121 to D-5126.
+
+### D-5121 — STT and stamp duty are rounded the way NSE/CMTR/5588 and NCL/CMPT/43115 state it: the VWAP and each security's figure to the paisa, the client's day total to the rupee; this supersedes D-5113's "per client per security per day, half-up to the rupee" — 2026-10-16
+
+**Found at the local merge of the cloud work (package CLOUD-CHG1).** D-5113
+rounded STT and stamp duty straight to the rupee on each client-security-day.
+The 15 Oct 2026 attack run read the two circulars
+(`state/charges-deep-check-20261015.json`, `rateVerdicts`): `NSE/CMTR/5588`
+(10 Nov 2004) takes the VWAP `(BVAL + SVAL) / (BQTY + SQTY)` "rounded off to
+two decimals", the non-delivery value as `min(BQTY, SQTY) x VWAP`, each
+security's STT to two decimals, and in section D the client's total to the
+nearest rupee (14.50 -> 15, 14.49 -> 14); `NCL/CMPT/43115` Annexure 1 rounds
+each security's duty to two decimals (item 1.2(b)(I)) and the client total to
+the nearest rupee (item 2). Three things followed, each proven by a test that
+failed on the cloud code:
+
+* the VWAP is rounded to the paisa before it values the quantity —
+  `costs::stack::the_intraday_tax_is_on_the_vwap_rounded_to_the_paisa_as_nse_cmtr_5588_states`
+  (100000 @ 50.01 -> 50.02: ₹1,251, where half the turnover gave ₹1,250);
+* each security's STT and stamp go to the paisa before the rupee —
+  `costs::stack::the_intraday_tax_and_stamp_round_to_the_paisa_before_the_rupee`
+  (STT 19.497 -> 19.50 -> ₹20, where the straight rounding gave ₹19; stamp
+  0.4995 -> 0.50 -> ₹1, where it gave ₹0);
+* `stack::ClientDay` sums every settled security of one client's day in one
+  segment of one exchange and rounds the STT and the stamp duty once
+  (`costs::stack::a_client_day_rounds_stt_and_stamp_once_across_its_securities`:
+  two securities of ₹0.30 STT each are ₹0 alone and ₹1 together). It refuses
+  a security of another day or rate set, exchange or segment
+  (`ChargeError::MixedClientDay`), all or nothing.
+
+A `DayCharges` settled alone still rounds as if its security were the client's
+only one that day, and equals a one-security `ClientDay` exactly; the
+exercise STT line is what the exercise adds to the day's STT rounded once.
+The VWAP's exact-half direction, and the same two steps for F&O (no F&O
+circular on the method was read), are UNVERIFIED (`docs/06-limits.md` §CHG-1).
+None of the five contract-note vectors, and none of the 49 golden readings'
+precise totals, moved.
+
+### D-5122 — The contract-note vectors are the operator's derivation under assumptions, not evidence of a rounding level; four assumptions are now named UNVERIFIED — 2026-10-16
+
+D-5113 offered V1's ₹0.15 SEBI fee and V4's ₹308.54 exchange line as
+"evidence for the levels". They are not: the vectors were built under those
+assumptions. The attack run (15 Oct) recomputed every vector under the
+alternatives and found each total moves: rounding NSE's ₹306.99 and IPFT's
+₹0.01 as separate lines (as Dhan's pricing page lists them) gives V2 ₹403.38
+and V4 ₹1,829.12; rounding the SEBI fee per leg gives V1 ₹73.91; rounding a
+CGST 9% + SGST 9% split separately gives V1 ₹73.89, V2 ₹403.38, V4 ₹1,829.13
+and V5 ₹400.64. The stack keeps the single-line, per-day, single-GST choices
+(they reproduce the operator's five figures) and records each as an
+UNVERIFIED assumption, beside a fourth: whether Dhan's ₹20 auto square-off
+fee replaces the square-off order's own brokerage or comes on top of it
+(priced on top; the pricing page does not say). Only a real contract note
+decides any of the four.
+
+### D-5123 — Every rate cites the primary source the 13 Oct and 15 Oct runs read; delivery and futures STT are Cited, F&O stamp duty cites NCL/CMPT/43116 — 2026-10-16
+
+The cloud session could fetch no source and wrote that no circular body had
+been read. Two local runs had read them: the 13 Oct sources run
+(`state/fno-winners-20261013/sources-charges.json`, 45 rows) and the 15 Oct
+attack run (13 of 15 rows confirmed). The rate table now cites what they read:
+`NSE/FA/73061` dated 2026-02-27, effective 2026-03-01 (rows E-01..E-04);
+`NSE/FATAX/73524` dated 2026-03-31 for every STT rate — so **equity delivery
+STT 0.1% (S-05) and futures STT 0.05% from 2026-04-01 (S-02) move from
+UNVERIFIED to Cited**; `NSE/CMTR/5588` for the non-delivery STT method;
+`NCL/CMPT/43115` (from 2020-07-01 per `NCL/CMPT/44032`) for cash non-delivery
+stamp duty; NSE's levies page for delivery stamp duty (T-04); **`NCL/CMPT/43116`
+for futures and options stamp duty (T-02, T-03), where the cloud code had
+cited 43115**; SEBI's 2019 notification annexed to `FA40632` for the SEBI fee.
+Proven by `costs::schedule::every_rate_names_the_primary_source_the_sourced_rows_read`,
+which failed on the cloud code. Only the two BSE rows stay UNVERIFIED. No
+digest of any circular is recorded; a citation here says what an agent read
+on a date.
+
+### D-5124 — A trade's result is its gross less the ENTIRE precise charge stack, and it is a win only if that net is above zero — 2026-10-16
+
+The operator's rule of 16 Oct 2026, 11:13 IST: every decision and every
+reported number is net of the entire precise Dhan charges of each trade, and
+a trade is a win only if its net P&L > 0; gross is a labelled extra column,
+never used to decide. `stack::NetTrade` is that figure: `of_day` for a round
+trip on one client-security-day (intraday, long or short), `of_days` for one
+opened and closed on two (delivery, MTF, a carried F&O position, long or
+short); `net = (sold - bought) - every charge of every day`, and `is_win` is
+`net > 0`, so break-even is not a win. Refused by name: a day that does not
+close itself, an exercise (the exercised quantity is not recorded), and two
+days that are not one buy side and one sell side of the same units, kind and
+exchange (`ChargeError::UnmatchedRoundTrip`). Proven on constructed trades
+(`costs::stack::a_trade_is_a_win_only_if_its_net_after_every_charge_is_above_zero`)
+and on every golden round trip
+(`costs::dhan_calculator::every_golden_round_trip_is_netted_of_its_entire_precise_charges`).
+Package CHG-2 wires it into the reports.
+
+### D-5125 — An ETF and a commodity are refused by name in both modes — 2026-10-16
+
+The CHG-1 specification: ETFs and commodities are priced in calculator mode
+only if a golden case exists, and refused by name in precise mode. No golden
+case exists for either, and no ETF charge row has been read; commodities trade
+on MCX, outside the engine's scope (`CLAUDE.md` §1, D-0017). `TradeKind::Etf`
+and `TradeKind::Commodity` exist so a caller can ask, and every entry point
+refuses: `RateCard::resolve` under either selector and `dhan_brokerage` with
+`ChargeError::OutOfScope` (`schedule::ETF_REFUSAL`,
+`schedule::COMMODITY_REFUSAL`), `dhan_calc::quote` with `NotOnPage`.
+Proven by `costs::schedule::an_etf_and_a_commodity_are_refused_by_name_in_every_entry_point`
+and `costs::dhan_calc::every_input_the_page_shows_as_zero_or_nan_is_refused_by_name`.
+
+### D-5126 — The golden file holds all 49 readings — 2026-10-16
+
+The cloud brief carried 48 of the operator's 49 readings; the missing one is
+the 15 Oct UI reading of V1's inputs (HDFC Bank, ₹74.28), which agrees with
+the endpoint reading line for line
+(`costs::dhan_calculator::the_endpoint_and_the_ui_readings_of_the_v1_inputs_agree_line_for_line`).
+With it the calculator replica is exact on 34 totals and one paisa off on 15,
+the count the capture itself recorded. The 33 readings of
+`state/charges/dhan-golden-20261016.json` were compared field by field with
+the test's table (quantity in units, both prices, all eight lines): all 33
+equal.
+
+### D-5127 — A backtest prices charges through one `DayLedger` per client-security-day, closed in a named mode under a named rate set; neither the ledger nor the rate set has a `Default`, and a part-filled order is one executed order — 2026-10-17
+
+The design judge's binding follow-up to the CHG-1 spec (16 Oct 2026): the Fib
+winner gate applies charges per trade at two sizes inside the lattice visitor,
+where STT and stamp duty round once per client per security per day across the
+mix's trades in one stock (`NSE/CMTR/5588` section D, `NCL/CMPT/43115`
+Annexure 1), and where a fill spilled over several one-second bars is one
+executed order. The spec priced "one executed order and one
+client-security-day" without saying how a caller accumulates a day, so FIB-11
+would have re-implemented the day rounding or guessed.
+
+**Chosen** (`crates/costs/src/ledger.rs`):
+
+- `DayLedger::new(kind, exchange, day)`; `add(ExecutedOrder { side, qty,
+  value_paisa, broker_square_off })` in O(1) — a fixed handful of checked
+  additions and one brokerage (C-CHG-07); `close(mode, rate_set)` in O(1) — one
+  card resolution and a fixed sequence of exact-rate products (C-CHG-08).
+- The close returns the same `DayCharges` the stack does, now carrying its
+  `Mode`, every line unrounded (`unrounded_lines`, units of 10⁻⁹ rupee) and
+  rounded (`lines`), the total, and `rounding_adjustment` = total − the exact
+  sum of the unrounded lines. Precise mode is `ClientSecurityDay::settle`'s own
+  code (`settle_precise`); calculator mode is the page's own arithmetic
+  (`dhan_calc::page_lines`, which `quote` now calls too). Both are proven on
+  every golden reading, so there is no third arithmetic.
+- `order_lines_unrounded(kind, exchange, day, order, mode, rate_set)` gives one
+  order's exact share of each line: linear lines sum over a day's orders to the
+  day's unrounded line; precise intraday STT is half the order's value at the
+  rate (the day's tax is on the squared quantity at the VWAP of buys and sells
+  together); GST is 18% of the order's own unrounded base, half-up to the unit;
+  DP is carried by a delivery or MTF sell order.
+- **One order filled in parts is ONE executed order**: `ExecutedOrder::with_part`
+  joins a part's units and value, and brokerage is charged once on the whole.
+  That this is how **Dhan** charges is **UNVERIFIED** until a Dhan contract
+  note shows a part-filled order (`docs/06-limits.md` §CHG-1).
+- `RateSelector` loses its `Default`: every caller names the set. Its
+  `version()` — `todays-rates/2026-10-16/r1` and `dated-regime/r1` — and
+  `Mode::version()` — `precise/r1` and `dhan-calculator/2026-10-16/r1` — are
+  what a run identity records. Each rate-set version is pinned beside a
+  fingerprint of the table it names
+  (`costs::schedule::the_rate_set_versions_are_pinned_to_the_tables_they_name`),
+  so a changed rate fails the build until its version moves. **Package CHG-0's
+  FA73061 regime row will move the dated fingerprint**: its merge must bump
+  `DATED_RATES_VERSION` to `r2` and re-pin, which is the point.
+- `Mode` keeps a `Default` (`Precise`), because the spec names precise the
+  default; the ledger's `close` still takes it explicitly.
+- A calculator-mode day is refused by `ClientDay::add` and `NetTrade` by name
+  (`ChargeError::NotPrecise`): a win or a loss is decided net of the precise
+  stack only (D-5124).
+
+**Rejected:**
+- A `RateSet` enum beside `RateSelector`. Two enums for one choice is the
+  drift this repository refuses; the existing selector lost its `Default`
+  instead, and every call site now names it.
+- A ledger method that merges a fill into "the last order". It would need the
+  ledger to guess which order a fill belongs to; the caller knows, and joins
+  the parts before the order is added.
+- Pricing each trade alone and summing. That rounds STT and stamp duty once
+  per trade, which no contract note does.
+
+### D-5128 — The winner-gate page's ₹82.65 and ₹224.43 are the Dhan calculator's figures; the precise stack gives ₹82.68 and ₹224.61, and the page is marked for correction — 2026-10-17
+
+The winner gate is judged at ₹1,00,000 and ₹5,00,000 trade sizes (confirmed
+16 Oct 11:12 IST), and `state/pages-20261016/winner-gate.html` shows round-trip
+charges of ₹82.65 and ₹224.43 for an equal-price NSE equity intraday round trip
+"from our formula". The judge's follow-up made those two numbers a test that
+must reproduce them in precise mode **or report the difference with both
+numbers — never tune the stack to match**.
+
+**Measured** (`costs::ledger::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks`,
+100 and 500 units at ₹1,000 bought and sold):
+
+| Size | Page | Calculator mode | Precise mode | Gap |
+|---|---|---|---|---|
+| ₹1,00,000 | ₹82.65 | ₹82.65 | ₹82.68 | ₹0.03 |
+| ₹5,00,000 | ₹224.43 | ₹224.43 | ₹224.61 | ₹0.18 |
+
+The whole gap is GST on the SEBI fee: the calculator's GST base leaves the
+SEBI fee out (D-5112) and the precise base includes it (Dhan's pricing page,
+row G-02, and `NSE/FATAX/52993`, row G-03). STT (₹25 and ₹125) and stamp duty
+(₹3 and ₹15) are whole rupees at these sizes, so the two modes' other
+difference does not show.
+
+**Chosen:** the stack is unchanged; the page is **marked for correction** — its
+"our formula" figures are the calculator replica's, and every win the gate
+decides is net of the precise figure (D-5124). The page lives outside the
+repository and its owner (the main session) corrects it; this entry and the
+test are the record.
+
+### D-5129 — The CLOUD-CHG1 merge-back: the cloud branch's D-5120 keeps its number, the local merge's own entries move up by one, and a shared target directory is rebuilt from this worktree's sources — 2026-10-17
+
+The cloud session pushed `cloud/chg1-20261016` with D-5110 to D-5120, its
+D-5120 being the cost-row reconciliation that reads every bench binary. The
+first local merge applied the branch before that last commit landed and gave
+D-5120 to D-5125 to its own choices. Two meanings for one number would make the
+ledger lie, so the cloud's D-5120 and its invariant CHG-19 land here under
+those numbers and the local entries are D-5121 to D-5126 and CHG-20 to CHG-25;
+every citation in `crates/costs`, `docs/00-charter.md`, `docs/04-invariants.md`
+and `docs/06-limits.md` moved with them.
+
+**Seen, and named for the operator:** the package's target directory
+(`tgt/pool-7`) is shared between worktrees, and Cargo hashes a workspace
+member by its path relative to the workspace, so another worktree's `costs`
+rlib — newer than this worktree's sources — was taken as fresh, and the
+integration tests failed to resolve `costs::charge_error`. Touching this
+worktree's sources forced the rebuild. Any package on a shared target directory
+can be tested against another worktree's crate this way; it is a property of
+the build queue, not of this repository, and is recorded in `docs/06-limits.md`
+§CHG-1.
+
+### D-5130 — An option exercise names its settlement, and a stock option settled by physical delivery is refused by name — 2026-10-19
+
+**Observed at the third local merge (19 Oct).** The CHG-1 specification lists
+"a stock option settled by physical delivery" among the option cases that need
+a test. The stack priced every exercise the same way — STT at the exercise rate
+on the intrinsic value (sources row `S-04`, which covers stock and index options
+alike) — and had no way to be told that a stock option held in the money to
+expiry settles by delivery. Such an exercise was therefore priced, silently,
+without the two charges delivery adds: Dhan's brokerage of 0.10% of the contract
+value (row `B-06`, read from Dhan's pricing page on 13 Oct 2026 with **no
+effective date**) and the delivery leg's STT (row `S-06`, **never read** from a
+source). The cloud report listed physical settlement as "not priced"; the code
+did not refuse it.
+
+**Chosen.** `ClientSecurityDay::exercise` and `DayLedger::exercise` take a
+`schedule::Settlement` the caller must name, with no `Default`:
+`Settlement::Cash` (an index option) is priced exactly as before;
+`Settlement::PhysicalDelivery` is refused by name with
+`schedule::PHYSICAL_DELIVERY_REFUSAL` (`ChargeError::OutOfScope`, naming
+`B-06` and `S-06`), at every intrinsic value and on both exchanges, and the day
+is left exactly as it was. A non-option is still refused as a non-option first.
+Proven by `costs::stack::a_stock_option_settled_by_physical_delivery_is_refused_by_name_and_changes_nothing`
+and the ledger's refusal test.
+
+**Not chosen.** Pricing B-06 now: its effective date was not read, and the
+delivery leg's STT has no source at all, so any figure would be the invention
+`CLAUDE.md` §3 rule 1 forbids. Inferring the settlement from the instrument:
+`TradeKind::Options` does not say whether the underlying is a stock or an
+index, and the caller does. The operator's backtests are intraday, so no
+backtest reaches an exercise; the refusal is for any caller that holds to
+expiry. `docs/06-limits.md` §CHG-1 records the gap; a read of B-06's effective
+date and S-06's rate closes it as a new rate row.
+
+### D-5131 — CLOUD-CHG1 repair 1: the dated options card adds the IPFT on every day as the trip stack does (`dated-regime/r2`); one order's lines are priced against its own day's netting; a net refuses two rate sets and out-of-order legs and names its versions — 2026-10-20
+
+**Number** inside the cloud block D-5110..D-5139 (D-5131 was free on this
+branch and on `feat/db-fix` at `453de6989`).
+
+**What was observed** (second check of CLOUD-CHG1,
+`state/fix/round2/verify-CLOUD-CHG1-r1.json`, all three reproduced here first,
+`state/fix/round2/chg1-logs-r8/probe-before.log`):
+
+1. `RateSelector::Dated` dropped the NSE options IPFT from FA73061's effective
+   date (2026-03-01), on the expectation that package CHG-0's FA73061 row
+   would be the regime row in force. That row is not in `crate::regime`, so
+   the row in force was FA64232's 0.03503% and every dated NSE options day
+   from 2026-03-01 was charged 0.03503% — the IPFT's 0.0005% short, ₹5.01
+   against ₹5.08 exchange charge (GST ₹8.10 against ₹8.12) on the NIFTY 25300
+   CE 65 × 100 → 120 reading — labelled "rates in force on" and cited. Today's
+   table, `trip::Rates::resolve` and source row `E-03` all give 0.03553%. The
+   test that showed it was `#[ignore]`d, so no gate could fail.
+2. `ledger::order_lines_unrounded` priced every delivery or MTF order as
+   delivery: 0.1% STT on its whole value, 0.015% stamp duty, DP on every sell.
+   The day nets by quantities, so a squared delivery or MTF day pays 0.025% STT
+   on the squared quantity at the VWAP, 0.003% stamp and no DP. On the
+   verifier's ₹15,000 / ₹14,800 day the orders summed to STT ₹29.80, stamp
+   ₹2.25 and DP ₹12.50 against the day's ₹3.725, ₹0.45 and nil.
+3. The CHG-1 block of `crates/costs/src/lib.rs` claimed O(1) and named no
+   proof gate 12 accepts — the one gate-12 refusal this package added.
+
+**Decision.**
+
+1. The dated options card's exchange charge is the regime row in force plus
+   the IPFT `crate::rate::ipft` gives — the same two figures, read the same
+   way, as `trip::Rates::resolve` — on every day, never dropped by date: on
+   and after 2026-03-01 that is 0.03553%, the total FA73061 states. The dated
+   rate set moves to `dated-regime/r2` with its fingerprint re-pinned. Proved
+   by `costs::schedule::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+   (every day 2018-2027, both venues),
+   `costs::schedule::the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day`,
+   and the un-ignored
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`,
+   which now checks 2026-03-01 on every line but STT (the dated 0.1% against
+   today's 0.15%, a real difference of rates, which the ignored version would
+   have failed on had it ever run). All three fail on the old card (checked
+   by building the old rule into a copy).
+2. **One netting rule, read by both.** `stack::equity_netting` is the rule
+   the day's taxes are levied by, and a new
+   `DayLedger::order_lines_unrounded(&self, order, mode, rate_set)` prices
+   one of the day's orders by the same rule: squared (any product) — the
+   non-delivery rates and no DP; one-sided delivery or MTF — the delivery
+   rates and, for a sell, its value-share of the day's one DP and its GST,
+   half-up to 10⁻⁹ rupee. The day-less `ledger::order_lines_unrounded`
+   refuses a delivery or MTF order by name (`ChargeError::NeedsItsDay`); the
+   ledger method refuses an order larger than its day's side
+   (`ChargeError::OrderNotInDay`) and, in precise mode, whatever the day's
+   close refuses. Proved by
+   `costs::ledger::a_days_orders_sum_to_its_unrounded_lines_on_every_netting`
+   (squared intraday, delivery and MTF days, one-sided days of two orders,
+   futures and options, both modes) and
+   `costs::ledger::a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name`.
+   Measured as C-CHG-09.
+3. The lib.rs block names `crates/costs/benches/stack.rs` and C-CHG-07..09.
+4. Follow-ups taken, in the same files: `NetTrade::of_days` refuses two legs
+   priced under different rate sets and a closing day on or before the
+   opening day (`ChargeError::MismatchedLegs`), and a `NetTrade` carries
+   `rate_set()` and `versions()` for a run identity
+   (`costs::stack::a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions`);
+   the stack bench prints the ledger's steps one call per sample beside two
+   clock reads alone, so the per-call p99 is shown undiluted (reported, not
+   gated).
+
+**Not chosen.** (a) Dropping the IPFT only when the row in force starts on
+or after 2026-03-01: it needs the regime row's start, which `crate::regime`
+does not expose, and CHG-0 replaces the flat IPFT with a dated one anyway —
+reading the IPFT where `trip` reads it is one rule that survives that merge.
+(b) Refusing a dated NSE options day from 2026-03-01: the total is sourced
+(`E-03`), so a refusal would withhold a cited figure. (c) An explicit
+`squared` / `one-sided` argument on the day-less function: a caller could
+pass the wrong one; the ledger knows. (d) Carrying a delivery sell's DP on
+each sell "as if the day's only sell": it charges a two-sell day twice.
+
+**What CHG-0's merge must do** is in `docs/06-limits.md` §CHG-1: read the
+IPFT in the dated card from the function `trip` then reads it from; the r2
+figures do not change at that merge.
+
+**A citation, explained rather than edited.** D-5110 names `c9e3472`, the
+cloud base. That commit is the snapshot of `feat/db-fix` at `4756cce0`
+(D-5400), reachable from `origin/cloud/base-20261016` and not from
+`feat/db-fix`'s own history; D-5110 stands as written.
+
+### D-5132 — CLOUD-CHG1 repair 2: an option exercise pays Dhan's ₹20 brokerage and its GST (sources row B-05), the precise method moves to `precise/r2`, and an expiry or an assignment is listed NOT PRICED — 2026-10-21
+
+**Number** inside the cloud block D-5110..D-5139 (D-5132 was free on this
+branch and on `feat/db-fix` at `8c67456ac`).
+
+**What was observed** (second check of CLOUD-CHG1, round 2,
+`state/fix/round2/verify-CLOUD-CHG1-r2.json`, reproduced here first).
+`Totals::exercise` recorded only the intrinsic value. An NSE options day with
+nothing but an exercise of ₹10,000 closed at ₹15.00 (the exercise STT alone),
+and a buy plus an exercise paid one ₹20 of brokerage. Sources row B-05 (Dhan's
+pricing page, read 13 Oct 2026) applies the ₹20 per executed order *"also ...
+to Options Contracts that are expired, exercised, or assigned"*, and
+`schedule::DHAN_FNO_BROKERAGE`'s doc and the `docs/00-charter.md` CHG-1 row
+both said the stack charged it on an exercise. So a figure labelled precise and
+cited was ₹23.60 short per exercise, and a unit test pinned the short ₹15.00.
+
+**Decision.**
+
+1. `Totals::exercise` — the one path `ClientSecurityDay::exercise` and
+   `DayLedger::exercise` share — adds `DHAN_FNO_BROKERAGE` to the day's
+   brokerage, both rounded and unrounded. The 18% GST follows through the
+   day's GST base. The exercise is counted in a new `exercises()`, not in
+   `orders()`: it is not an order the client placed. The brokerage is the
+   constant B-05 names, never `dhan_brokerage(kind, intrinsic)`. That would
+   price the same ₹20, but through a branch that cannot fail, which leaves an
+   unreachable `?`. The move is all or nothing across its four totals.
+   An exercise-only day is now ₹15 + ₹20 + ₹3.60 = ₹38.60. The verifier's
+   buy of 75 at ₹100 plus the exercise is ₹40 of brokerage and ₹65.35 in all.
+   Proved by
+   `costs::ledger::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does`
+   and the re-pinned
+   `costs::stack::options_pay_tax_on_premium_and_the_exercise_rate_on_intrinsic_value`.
+   Both fail with the two brokerage lines removed: checked by building the old
+   rule into a scratch copy of `crates/costs/src` with `rustc`,
+   `state/fix/round2/chg1-logs-r10/before-old-rule.log`, and again as the
+   `no-brokerage` hand mutant, `state/fix/round2/chg1-logs-r11/hmut.out`.
+   CHG-38.
+2. `PRECISE_VERSION` moves from `precise/r1` to `precise/r2`. The method now
+   prices a day with an exercise differently, so a run identity recorded under
+   r1 must not name the new figures (`CLAUDE.md` §3 rule 3). A day without an
+   exercise prices exactly as before.
+3. An **expiry** and an **assignment**, which B-05 also names, are not inputs
+   of the stack: no day can record one. `NetTrade` refuses a bought option
+   that is never sold and a written option that is never bought, so a position
+   held to either is refused rather than netted short. The two are listed
+   by name as NOT PRICED in `docs/06-limits.md` §CHG-1. The
+   `schedule::DHAN_FNO_BROKERAGE` doc and the `docs/00-charter.md` row now say
+   exactly that, not "also on an option expired, exercised or assigned".
+4. Measured as C-CHG-10: the ledger exercise, now four checked additions,
+   costs the same for the 1,000,001st exercise as for the first and for
+   ₹1,000 crore as for ₹1. A day of 1,000,000 exercises closes at the cost of
+   one.
+5. Follow-up taken in the same files: `ChargeError::SquareOffNotApplicable`
+   says that an equity intraday, futures or options position is squared off
+   at the ceiling, never a delivery or MTF holding. It used to say "only an
+   intraday position", which contradicted `can_be_squared_off_by_broker`.
+6. An exercise is not an order, so its lines belong to no order. On a day
+   with exercises the orders' unrounded brokerage from
+   `DayLedger::order_lines_unrounded` sums to the day's less ₹20 per
+   exercise, and STT on exercise is in no order's lines. The method's own
+   statement of what the orders sum to, and rows CHG-29 and CHG-38, now say
+   so. The ledger test above asserts the difference is exactly ₹20 per
+   exercise.
+
+**Not chosen.** (a) Counting the exercise in `orders()`. That would make an
+exercise-only day report one executed order, which no order book shows.
+(b) Modelling expiry and assignment now. Netting a position held to
+either needs a closing leg that is not an order (premium lost, or intrinsic
+value paid), and `NetTrade` has no such leg. Inventing one inside a repair
+is the silent scope change §3 rule 2 forbids; it is listed as open work.
+(c) Pricing the exercise brokerage only in the ledger. The ledger and the
+stack share `Totals` so that they can never disagree
+(`costs::ledger::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles`).
+
+### D-5150 — A backtest trades a day, and learns from it, only when the calendar of record calls it a regular weekday 09:15–15:29 session with no special session, no notice of one and no market-wide halt; the full-length Budget weekends and 2024-01-20 are excluded too — 2026-10-16
+
+**Context.** The operator (15 Oct 2026, NEXT-PROMPT.md "NO SPECIAL
+SESSIONS"): never trade a Muhurat, a half day or any other special or short
+session in any backtest; every day that is not a normal full session is
+excluded from trades AND from the own-past statistics that generate the
+values; the data stays stored and labelled; count and show the excluded days
+per year. The attack of the same evening (`state/charges-deep-check-20261015.json`,
+handover issue H5) showed that `pull::calendar::kind_of` cannot carry that
+rule: it answers `Open(Session::full())` for the three Budget weekends,
+2024-01-20 and both March 2020 halt days, and `OpenLengthUnmeasured` for five
+Muhurats. The design judge (16 Oct 2026) added that `kind_of` answers
+`Unmeasured` outside 2019-12-02..2026-09-04, so a rule written on it would
+silently drop every 2018 and 2019 day and the last weeks of 2026.
+
+**Decision.** `pull::calendar::tradable_day(day) -> Result<(), NotTradable>`
+is the one question. It is `Ok` only when `sourced_kind_of(day) ==
+DayKind::Open(Session::full())` (equal to `kind_of` inside the measured window
+and answered from the recorded NSE circulars from 2018-01-01 to 2026-12-31),
+the day is a weekday, and `special_session`, `session_circular` (D-5152) and
+`halt_on` are all `None`
+(`the_rule_is_the_specs_conditions_on_every_day_of_the_record` holds it on
+every day of the record and three past each edge). It never reads the store.
+
+The reason is named, one per day, the first that applies in this order:
+unmeasured, closed, special session or notice, unsized session, halt,
+anything else. `NotTradable`'s codes are explicit discriminants, append-only
+and never renumbered (`the_reason_codes_are_pinned_and_every_reason_has_its_own_name_and_label`):
+0 `Unmeasured`, 1 `Weekend`, 2 `Holiday`, 3 `Muhurat`, 4
+`DisasterRecoveryDrill`, 5 `SystemsOutage`, 6 `BudgetWeekend`, 7
+`WeekendFullSession`, 8 `OpenLengthUnmeasured`, 9 `MarketHalt`, 10 `Unknown`.
+A day outside the record is `Unmeasured`, its own reason and never `Unknown`:
+a year whose circular is owed is a known gap, not an unexplained day.
+
+**Excluding the full-length `BudgetWeekend` and `WeekendFullSession` days**
+(2020-02-01, 2025-02-01, 2026-02-01, 2024-01-20) is the operator's "any other
+special session": their hours were regular, and they are excluded because the
+rule excludes every special session, not because of anything measured about
+their trading. Whether a full-length special session behaves like a normal
+day is a question the data can answer later: each is excluded under its own
+code, so a run that re-admits exactly those two codes and compares is one
+argument away. The bars stay stored and labelled.
+
+**The measured short days stay tradable** (judge, 16 Oct 2026; operator, 16
+Oct 2026 17:15 IST item 5). `SHORT_DAYS` (2019-08-02, 2022-03-07) is evidence
+that minutes were absent in the vendors' answers, not a statement about the
+exchange's session: the exchange held its full session. A reader that needs
+those minutes asks the `verify/` day image, which says "not verified" at
+generation 0. `a_normal_day_stays_tradable_drills_do_not_and_short_days_do`.
+
+**What it does not change.** `kind_of`, `sourced_kind_of` and
+`exchange_kind_of` answer exactly what they did, so
+`cli::stored::calendar_policy_digest_v2` and every recorded run identity are
+unmoved. No consumer is rewired here: the backtest and own-past-statistic
+readers adopt `tradable_day` in their own packages (the Fib Flag priority run),
+each with its test (`docs/06-limits.md` L-CAL-4).
+
+### D-5151 — A session no row explains is refused as `Unknown`, one of unrecorded length as `OpenLengthUnmeasured`, and a year holding either is not counted — 2026-10-16
+
+**Decision.** An open day whose windows are not 09:15–15:29, or a full session
+on a weekend, with no special session, notice or halt to name it, is
+`NotTradable::Unknown`; a session of unrecorded length with no row is
+`OpenLengthUnmeasured`. Both are "unexplained" (`NotTradable::is_unexplained`).
+Neither occurs in today's tables
+(`the_yearly_counts_name_every_excluded_session_and_add_up` asserts zero
+unexplained days in every year 2018–2026); both are reachable through
+`classify` and tested there
+(`classify_names_every_shape_and_refuses_the_unknown_ones`), and `cli
+calendar-days` exits `FAILED` for a year that holds one, naming the count
+(`an_unexplained_day_is_marked_and_refuses_the_year`), so an unknown case
+becomes a sourced row and a test before it is counted. A closed day stays
+closed whatever a row claims about it, and a special kind wins over a halt.
+
+This replaces the first draft of this package, which excluded the short days
+as `ShortDay` and named the unknown case `IrregularSession`; neither name was
+ever merged.
+
+### D-5152 — The special sessions get their notices of record: `SESSION_CIRCULARS`, sixteen rows, each held equal to the measured window — 2026-10-16
+
+**Decision.** `pull::calendar::SESSION_CIRCULARS` records, for every special
+session 2018–2026, the NSE circular (or, for 2021-02-24, SEBI's order) that
+states it: number, date, address, and the normal-market windows it notifies
+(`None` for the untimed 2026-11-08 Muhurat). Read on 2026-10-16 from
+`nsearchives.nseindia.com`; recorded in `docs/00-charter.md` §3 ("The notices
+of record"). Append-only: a later notice (the 2026 Muhurat's timings) is a new
+row and an edit of no other. `SPECIAL_SESSIONS` and its evidence strings are
+untouched; the notice is a second lane beside the measurement, and
+`every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+fails the build if the two lanes disagree. They agree on all fifteen timed
+rows. 2024-01-20's notice (NSE/MSD/60340) sources the session's regular hours;
+WHY the exchange made it a full session stays UNVERIFIED. No NSE circular was
+found for either March 2020 halt, which stay `Suspected` (D-3320). No half-day
+session was found in any notice read.
+
+### D-5153 — `cli calendar-days YEAR`: the excluded days one line each and the year's totals, a pure function of the tables — 2026-10-16
+
+**Decision.** `pull::calendar::year_exclusions(year)` counts a year by the
+tradable-day rule through the running sums (D-5157): two indexed reads and a
+subtraction. It refuses a year not wholly inside the calendar of record
+(2018-01-01..2026-12-31) by name rather than counting it short
+(`a_year_outside_the_record_is_refused_by_name`). `cli calendar-days YEAR`
+prints the year's holiday record (circular, measured or owed), every
+non-tradable day except ordinary closed weekends (counted, not listed) with
+its weekday, its reason, its label and its source, then the totals by reason;
+it reads no store and writes nothing; one `cli.calendar_days` event records
+the year's counts. It is not a sweep verb. Per year, 2018–2026, the excluded
+sessions are 1, 1, 4, 2, 1, 1, 4, 2 and 2: eighteen in all (nine Muhurats,
+three Budget weekends, 2024-01-20, two drills, the outage and two suspected
+halts).
+
+**YEAR is four ASCII digits and nothing else** (CAL-1 self-check, 19 Oct
+2026). `u16::from_str` alone took `+2024` and printed 2024's page, and took
+`02024` and `7` as years; every word that is not four digits is now a misuse
+that names itself and prints the usage, and `0000` and `9999` are refused as
+years outside the record (`calendar_days_refuses_garbage_years_by_name`).
+
+### D-5154 — The measured window is versioned: each version is its own extent of the bitset, computed, with its own digest, and new runs take the newest — 2026-10-16 (the circular tables joined the version in D-5159)
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 4):
+the measured window `FIRST_DAY` 18,232 .. `LAST_DAY` 20,700 was typed beside
+the bits; it must be computed from the measured bitset's own extent, each
+newly stored day appended to a NEW calendar version with its own digest, each
+recorded run naming its version and re-verifying against it, so an extension
+re-keys nothing.
+
+**Decision.** `pull::calendar::MEASURED_VERSIONS` is an append-only table of
+`MeasuredVersion { version, days, source }`, numbered from 1, each answering
+more days of `TRADED` than the one before (a const assertion,
+`versions_ascend`). Version 1 is the original 2,455 days (2019-12-02 ..
+2026-08-21); version 2 adds 2026-08-22 .. 2026-09-04 (D-3346), 2,469 days.
+`FIRST_DAY`, `LAST_DAY` and `DAYS` are const fns of the newest row, pinned by
+const assertions to 18,232, 20,700 and 2,469, so a version appended without a
+decision fails the build; `padding_is_clear` holds that no bit is set past the
+newest extent. `CalendarVersion` answers `kind_of`, `sourced_kind_of` and
+`tradable_day` at any version, and `CalendarVersion::digest` is BLAKE3 of
+canonical bytes (a domain, the version, both spans, every holiday circular and
+session notice, and every day of the record with its kind and tradable code).
+`pull::calendar::calendar_digest()` is the newest version's, built once per
+process. `the_measured_versions_keep_their_extents_and_their_digests`.
+
+**Not wired.** No run identity hashes `calendar_digest` yet: adding it to a
+recorded run's identity is the run owner's change (`docs/06-limits.md`
+L-CAL-7). The measurement of a newly stored day is still the D-3346 method,
+run by hand and landed as a new row.
+
+### D-5155 — The sourced span is computed from an append-only table of NSE holiday circulars, and a missing year stops it — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 3):
+`SOURCED_FIRST_DAY` 17,532 .. `SOURCED_LAST_DAY` 20,818 was typed beside the
+rows.
+
+**Decision.** `pull::calendar::HOLIDAY_CIRCULARS` records each NSE
+capital-market holiday circular (year, number, issue date, address, and
+whether it is the year's whole list): NSE/CMTR/36475 (2018), NSE/CMTR/39612
+(2019) with the two additions NSE/CMTR/40536 and NSE/MSD/42319, and
+NSE/CMTR/71775 (2026), each already in `docs/00-charter.md` §9 (D-2805).
+`sourced_span` is a const fn: the first day is 1 January of the earliest year
+with a whole list; the last is 31 December of the latest year Y such that
+every year up to Y is recorded or wholly inside the measured window. A missing
+year stops the span, and a partial row does not make a year recorded. Today
+that gives 2018-01-01..2026-12-31, pinned by const assertions.
+`the_sourced_span_is_computed_from_the_circulars_and_a_gap_stops_it`: an
+appended synthetic 2027 moves the bound, a gap year stops it, and the day
+after the last day is `Unmeasured`. `year_record(year)` says, per year,
+whether its holidays are a recorded circular, measured, or owed.
+
+### D-5156 — The record's end is warned from 1 January of its last sourced year, not 30 typed days before — 2026-10-16
+
+**Decision.** `record_horizon(newest_day).ends_soon` is true from 1 January of
+`SOURCED_LAST_YEAR` (today 2026), because from then the next year's holiday
+circular is owed and nothing later will make the record longer on its own; the
+horizon names that year (`owed_year`, today 2027). It replaces
+`RECORD_ENDS_SOON_DAYS` = 30 (D-4964 point 6), which is removed from the code
+and from the figures `core/tests/decision_citations.rs` holds. The pull run's
+status document keeps its shape (`endsSoon` is true for any day of 2026).
+`the_record_horizon_warns_before_the_end_and_names_the_days_past_it`.
+
+### D-5157 — Per-reason excluded-day counts are running sums indexed by day, so any bucket costs O(1) — 2026-10-16
+
+**Decision.** `RunningSums::build(version)` makes one pass over the version's
+record (3,287 days today) and keeps, per day, the running count of every
+reason and of tradable days; `RunningSums::between(first, last)` is two
+indexed reads and a subtraction whatever the bucket's length, and refuses an
+inverted bucket or one not wholly inside the record by name (`SpanRefusal`).
+`excluded_between` uses the newest version's sums, built once per process.
+`the_running_sums_answer_every_bucket_exactly` compares every month of the
+record and odd buckets with a day-by-day count.
+
+### D-5158 — `cli calendar-days check`: the calendar held against every stored day of every feed, read-only — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" items 1 and
+2): the years to complete are every year holding a stored NSE day of a swept
+or reference instrument in any feed, read from `pull::manifest`; the
+cross-check covers every stored day in every feed and prints (a) held days
+the rule refuses, (b) held weekend or holiday days no row names, as new
+candidates UNVERIFIED until their circular is found, and (c) weekdays called
+open that no feed holds.
+
+**Decision.** `cli calendar-days check` reads `BRUTEX_STORE` and writes
+nothing. Years: every census entry of an NSE month of NIFTY, BANKNIFTY,
+INDIAVIX or an F&O cash equity, any feed (BSE, MCX, contracts and stocks
+outside the F&O list never count), each printed with its holiday record and
+its notices. Days: every NIFTY and BANKNIFTY bar month of each feed (its
+`1day` months where it holds them, else its finest), read through the month's
+own time index, two `first_at_or_after` lookups a day, and each day one
+indexed write into a dense day map whose span the censuses fix before any
+month is read (it was an ordered tree map, O(log d) a day, until the
+self-check of 19 Oct 2026), so a day costs O(1) per feed and no month is
+scanned. A census or month that cannot be read is named `NOT READ`; an
+unexplained refusal, a candidate inside the record, a missing session or an
+unreadable source makes the run exit `FAILED` with the count, and so does a
+store holding no NIFTY or BANKNIFTY day at all: a check of nothing is not a
+pass.
+Candidates in an owed year are listed apart. One `cli.calendar_check` event
+per run and one per instrument-month read.
+
+**Departures, said plainly.** The per-day source is the index bar months
+themselves rather than the GDFL `.prv` landing records and the `verify/` year
+index the operator named: the bars are what those two describe, and the
+`verify/` index answers "not verified" at generation 0. Every run re-reads
+every index month; re-checking only the months whose census entry changed
+needs a memo the read-only check does not write (`docs/06-limits.md`
+L-CAL-9).
+
+**The store, 18 Oct 2026 (read-only, the shadow `shadow/CAL-1`, whose bars
+are the real store's through a link, under the kernel write lock).** Two
+feeds: Zerodha `1day` (282 NIFTY and BANKNIFTY months, 2,911 days, 2015-01
+to 2026-09) and GDFL `1s` (194 months, 1,989 days, 2018-09 to 2026-09), read
+in 981 ms. (a) 17 held sessions refused, every one a row of the tables (the
+eighteen excluded sessions less 2026-11-08, not yet traded); 743 held days
+of 2015-2017 are `Unmeasured`. (b) No candidate inside the record; two in
+the owed years, 2015-02-28 (Sat) and 2016-10-30 (Sun). (c) No weekday called
+open that no feed holds. The years 2015, 2016 and 2017 hold Zerodha months
+and no circular: they are owed (`docs/06-limits.md` L-CAL-8). The check found
+no GDFL `1s` NIFTY or BANKNIFTY bar on any of the eight Muhurats traded so
+far, the two drills or the outage; Zerodha holds a `1day` bar on every one.
+
+### D-5159 — Each calendar version reads its own prefix of the circular tables; a later notice for a day supersedes the earlier one; a recorded year brings its holidays — 2026-10-18
+
+**Context.** D-5154 versioned the measured window and said an extension
+re-keys nothing, but every version read the WHOLE of `HOLIDAY_CIRCULARS` and
+`SESSION_CIRCULARS`. Appending NSE's 2027 holiday circular (owed now:
+`record_horizon` warns from 2026-01-01) would have moved version 2's sourced
+span to 2027-12-31, changed its canonical bytes and so its digest, and every
+run recorded under version 2 would have failed re-verification: the
+re-keying item 4 forbids. Two smaller holes sat beside it: the table is
+append-only and "a later notice is a new row", yet the lookup returned the
+FIRST row naming a day, so the 2026 Muhurat's timing notice, appended, would
+never have been read; and `sourced_kind` calls every weekday open unless
+`SOURCED_HOLIDAYS` lists it, so a circular row appended without its days
+would have called each of that year's holidays a session.
+
+**Decision.** `MeasuredVersion` carries `holiday_circulars` and
+`session_circulars`: how many rows of each table it reads, from the first.
+`CalendarVersion` holds those prefixes and answers, spans and hashes only
+them. Both versions read 5 and 16. `versions_ascend` now requires each
+version to read no fewer days or rows than the one before and to add
+something; a version may add only a circular or only a notice.
+`versions_read_the_tables` (a const assertion) holds that no version reads
+past a table and that the newest reads every row, so a row appended without
+its version fails the build. A day's notice is the LAST row naming it
+(`notice_in`), and `year_record` counts a day once, by its newest notice.
+`recorded_years_list_their_holidays` (a const assertion) refuses a
+whole-year circular, for a year not wholly measured, with no day of that
+year in `SOURCED_HOLIDAYS` outside the window. Version 2's digest is pinned
+to the value first printed on 2026-10-18,
+`de177094a06002658c4ce9d9f79e423c635f63d2762756bfdbd215f27b333bf0`; the move
+changed no byte. Proofs: `an_appended_row_is_a_new_version_and_re_keys_none_before_it`,
+`version_two_keeps_its_recorded_digest`,
+`a_recorded_year_without_its_holidays_is_refused`,
+`a_bad_version_table_or_padding_is_refused`.
+
+**What it does not version.** `TRADED`'s bits up to each version's extent
+are versioned (D-5154); the older tables (`SPECIAL_SESSIONS`, `HALTS`,
+`IRREGULAR`, `SOURCED_HOLIDAYS`, `SOURCED_SPECIAL`) are not, because they are
+not this package's. A change to one of them that changes how a day of a
+version's record is answered changes that version's digest, and the pinned
+digest fails the build: that is a re-keying, and it is meant to be loud. A
+row that answers only days past every version's record changes nothing.
+
+**`cli calendar-days check` columns.** The year table's holiday text of an
+owed year (87 characters) ran into its notices column; each column is now
+held apart by two spaces (`the_check_reads_every_feed_and_prints_the_three_lists`).
+
+**Repair round 1 (2026-10-21, after `verify-CAL-1-r1.json`).** Four CI
+shell gates refused what the package added, and four follow-ups sat in its
+own files. (1) Gate 11 rule 7: the three new membership tests are gone —
+`calendar_days::is_day_source` destructures the two-entry `DAY_SOURCES`, and
+`calendar::in_span` (two comparisons) answers both of
+`CalendarVersion::sourced_kind_of`'s windows and `measured_kind`'s, so the
+file's allowance falls from 2 to 1. (2) Gate 12: each cost-claiming doc block
+(`DayMasks`, `findings`, `month_days`, `RunningSums`, `excluded_between`,
+`year_exclusions`, `year_record`) names its measuring test, and
+`tradable_day_and_every_bucket_are_bounded` now measures `year_record` too.
+(3) Gate 23: the two `#[cfg(test)]` files' `eprintln!` lines are declared with
+their counts. (4) Gate 1d: the five circular serials are declared in
+`.github/gates_tree.rs` (`CAL1_CIRCULAR_SERIAL`) as exchange circular
+numbers, never credential path segments. The follow-ups: version 1's digest
+is pinned as well (`3b695fd9cd936f511f7c1ac78de26e7f7e401e75bcda628c06f588124e0d03a4`,
+`version_one_keeps_its_recorded_digest`), so a row appended to a table that
+is not versioned (docs/06-limits.md L-CAL-11) fails the build for every
+version it moves; a version whose sourced span and measured window neither
+overlap nor touch fails the build (`records_are_unbroken`, a const
+assertion; `a_record_with_a_hole_between_its_spans_is_refused`), because
+`record()` would otherwise hold days neither answers; the notice-table test
+accepts a repeated day as a later notice, as this entry says the table grows,
+and is driven on the table with an invented later 2026-11-08 notice
+appended; a halt is named once on its line, and a holiday inside the measured
+window says it was measured closed with no recorded name.
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
@@ -74987,6 +75919,352 @@ entry here. Each says where its citation resolves.
   wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
   citation of either resolves to D-5901 until its own entry is written.
 
+### D-5160 — The rank pool on day D is that day's F&O members only: a share outside F&O on D gets no rank and no intraday leverage; `FNO_UNDERLYINGS` stays the 2026-08-01 snapshot and is never edited for this — 2026-10-17
+
+**Implemented by** PIT-1 (`pull::fno_membership`: `Membership::members`,
+`is_member`, `pool_size`, `spans`; `cli fno-membership build|show|bench`;
+tests in `crates/pull/src/fno_membership_tests.rs` and
+`crates/cli/src/fno_membership_command_tests.rs`). **Why**: attack issue H6 of
+the 15 October deep check (`state/charges-deep-check-20261015.json`, key
+`handover`, location "MAIN STRATEGY (f)"): `core::universe::FNO_UNDERLYINGS`
+is one snapshot (2026-08-01, 213 names), so ranking 2018-2026 movers inside it
+is survivorship plus look-ahead, and renamed shares are dropped or mis-joined.
+
+1. **A share is in the rank pool on D only when it is one of
+   `Membership::members(D)`.** Ranks, top-N and every per-day statistic of the
+   pool are computed among that day's members, and the pool size of the day
+   (`pool_size(D)`) is shown beside every rank.
+2. **Outside F&O on D = no rank and no intraday leverage** (operator, 16 Oct
+   17:15 IST, "NOTHING TYPED" item 4, replacing the typed "5x"). A leverage
+   figure, where one is shown, comes from a dated, charter-sourced margin
+   source; none is in `docs/00-charter.md`, so it reads
+   `pull::fno_membership::LEVERAGE`, "leverage unknown", UNVERIFIED. It never
+   changes P&L at the report sizes.
+3. **A day without an answer is not ranked.** "membership unknown" (D-5162)
+   is never replaced by today's list or any other list.
+4. **Nothing in the swept surface changes.** `CLAUDE.md` §1 names
+   `FNO_UNDERLYINGS` as the swept equity list; this decision decides which of
+   those shares a DAY may rank, not what is swept. Wiring the membership into
+   `api::schedule`'s `DayUniverse`, the coverage board and the research
+   consumers is R4-26's: its COR-08 item names
+   `crates/pull/src/fno_membership.rs` and `cli fno-membership`, the module and
+   verb this package ships, and it adopts their API unchanged (`spans()` gives
+   its `(underlying, entry_day, exit_day, source)` rows with
+   `source = inferred_gdfl_options`; `is_member` is its O(1) probe).
+
+### D-5161 — A share is a member on D when one of its stock-option contracts' lives covers D; a life runs from the first IST day a record of the contract is stored to its settled expiry; a sourced rename is one spelling, an unsourced one a measured handover inside one series — 2026-10-17
+
+1. **The life of a contract** is `[the first IST day any record of it is
+   stored, its settled expiry]` (judge follow-up, 16 Oct). The first day is
+   the first options day file of the GDFL tick store holding a file of it.
+   NSE's listing day is not in the charter (UNVERIFIED), and a listing day
+   with no stored record is invisible, so membership may start LATE, never
+   early: each spelling records the days between the start of its first
+   contract's expiry series as stored (`Spelling::series_start`, the first day
+   any share's contract of that expiry was stored) and its own first record
+   (`Spelling::listing_lag_days`); `docs/06-limits.md` L-PIT-3 states the
+   measured bias, an UPPER bound. The build's report counts only the
+   spelling that opens a series: a spelling joined to an earlier series by a
+   measured handover (item 4) continues a series that was a member under its
+   earlier spelling, so it is named apart and never counted as a lag (PIT-23;
+   the first real report counted `BSOFT` and `TATACONSUM` as lags of 88 and
+   90 days). The settled expiry is `pull::gdfl_nfo::decode_ticker`'s,
+   which applies the measured re-datings and the sourced early settlements.
+2. **Member on D ⇔ the latest settled expiry among the share's contracts first
+   stored on or before D is on or after D.** One number per live spelling
+   carries from one day to the next (the fold's `State`), so a day computes
+   only itself; no listing after D decides D.
+3. **Listed but untraded counts**: a contract whose life covers D makes its
+   share a member on D whether or not a file of it exists on D;
+   `Member::filed` says whether the share listed any file that day ("listed a
+   file", not "traded": a file may hold quotes only). **An expired contract
+   does not count.**
+4. **A rename is one series.** The decoder files every ticker under the newest
+   symbol NSE's dated changes reach (`brutex_core::alias::LINEAGE`, 18 sourced
+   rows, the same key the cash store files under), so `ZOMATO` and `ETERNAL`
+   are one spelling. A rename the table does not hold (`TATAGLOBAL ->
+   TATACONSUM`, `KPIT -> BSOFT`; D-3354) is not invented as an alias: on a
+   session where a live spelling lists no file and a spelling never seen
+   before lists a STRICT MAJORITY of the contract keys (settled expiry, strike,
+   side) the first one listed on the previous session, the new spelling joins
+   the old one's series and the old spelling's life ends. A pair either side of
+   which matches a second candidate is ambiguous and is not joined (reported).
+   The record is in the month file, labelled `measured`. A majority is the
+   smallest share no second candidate can also hold, which is why it is the
+   threshold and not a tuned number.
+5. **Index underlyings are not shares** (`brutex_core::alias::option_underlying`
+   segment `INDEX`): counted per day, never members; asking for one is refused
+   (`NotAShare`).
+6. **The store's FNO bars are not the source.** Measured READ-ONLY on 18 Oct
+   2026 in the real store (`bars/gdfl/NSE/FNO`): it holds share-option folders
+   from the 2018-09-27 expiry on (`RELIANCE`, `TATAGLOBAL`; month file
+   `2018-09.bin`), but the import resumed on 2020-09-16 (OWED-01, batch O1)
+   filed share options under a 277-name filter that leaves out the 13 held
+   renames, IDFCFIRSTB, COFORGE, INDUSTOWER, ZYDUSLIFE, MOTHERSON, SHRIRAMFIN,
+   PVRINOX, ARE&M, LTF, UNITDSPR, SAMMAANCAP, GMRAIRPORT and TMPV
+   (`state/data-census-20261013/options-import-held-renames.txt`;
+   `IDFCFIRSTB`'s folders stop at the 2020-11 expiries).
+   Deriving membership from the store would drop those shares silently. The
+   tick store's day files hold every entry of every vendor day zip (verified
+   byte for byte, its RESUME.md), so every name is read, and only the index of
+   each day file is read, never a tick row.
+
+### D-5162 — The span is measured, never typed; every day outside it, and every session inside it without a share-option record, is refused as "membership unknown" and counted per year as a running sum; nothing is filled from today's list — 2026-10-17
+
+Operator, 16 Oct 17:15 IST, "NOTHING TYPED" items 1, 3 and 6, replacing the
+typed span (2018-09..2020-09-15 refused, data from 2020-09-16, end 2026-09-24).
+
+1. **`known_from` and `known_to` are the first and last IST day holding a
+   stored stock-derivative contract record**, measured by the build's own pass
+   over the source: `known_from` is written into every month header and
+   `known_to` is the last month's last sealed record (the span always ends on a
+   known record). Options now; futures, once a futures source lands, are a new
+   file version.
+2. **Outside the span** every day is refused (`UnknownWhy::BeforeSpan`,
+   `AfterSpan`), including 2018-01..2018-08, which the typed span omitted.
+3. **Inside the span** a day is known only when the IST calendar
+   (`pull::calendar::sourced_kind_of`) says it is a session AND the tick store
+   holds a valid options day file listing at least one share option. Otherwise
+   its sealed status says why: `not_a_session`, `no_source`, `source_refused`
+   (with the source's own words in the build's report), `no_calendar`,
+   `no_share_options`, `source_on_closed_day` (a file on a closed day is named
+   and not folded). `members`, `is_member` and `pool_size` refuse every such
+   day with "membership unknown" and its reason. A chartered historical source
+   found later becomes a new file version.
+4. **Per-year refused-session counts are running sums indexed by day**: each
+   sealed row carries the refused sessions of its year through that day
+   (`DayRow::refused_in_year`, `Membership::refused_through`, O(1));
+   `cli fno-membership build` prints each year's known, refused-inside and
+   outside-the-span session counts.
+5. **Census counts are dated cross-checks only.** The 13 Oct census figures
+   (277+ option underlyings imported, 337 share series, 347 option
+   underlyings, no futures files) are never constants or assertions here; the
+   build prints the series, spellings and handovers it read.
+
+### D-5163 — The membership is a new append-only file kind: `<dir>/<YYYY-MM>-g<GGGGGG>.fnm`, magic `BRXFNM01`, version 1, sealed day records per month; a build resumes after the last sealed record and runs to `known_to`; a typed window is for scratch only; one pass and day-by-day builds are byte-identical — 2026-10-17
+
+`docs/02-store-format.md`, "F&O membership month files, version 1", gives
+every byte. A month file holds the sealed records of its month from its first
+to its last record: per day a row (status, pool, filed count, the running sum
+of refused sessions, name counts, a BLAKE3 of the evidence the fold consumed),
+the day's member entries in series order, the spellings first seen that month,
+the carry it started from and ended with, its measured handovers, and a BLAKE3
+of its own bytes. No time, host, commit or generation is written, so the same
+records give the same bytes.
+
+1. **Resume, never retype** (operator item 2). `cli fno-membership build --out
+   DIR` resumes after the last sealed record (from the IST calendar's first day
+   when none is held), probes to the calendar's last day and seals records up
+   to the last known day; trailing days without a known record are not written
+   and are probed again next time. `build FROM|resume TO` is a typed window for
+   synthetic stores and scratch copies only and is refused when `DIR` lies in
+   the operator's store. A window that starts on or before a sealed record is
+   refused (`Overlap`: a sealed record is never rebuilt) and one that leaves a
+   gap after it is refused (`Gap`).
+2. **Append-only.** A month that gained records is written as its next
+   generation, which must extend the current one record for record
+   (`WouldRewrite` otherwise); an unchanged month is not written. Each
+   generation is an exclusive hidden temporary, flushed, hard-linked to its
+   final name (refused if the name exists), unlinked, and the directory
+   flushed: a reader never sees a half-written file. The reader serves each
+   month's highest generation, refuses it by name when it fails a check and
+   never falls back to an older one.
+3. **One pass and day-by-day builds are byte-identical** because the
+   generation is in the name only and a resumed build re-enters the open month
+   from its sealed records and carry. Before extending, the last sealed
+   session's listing is re-read and must hash to its sealed evidence, or the
+   build refuses (`SourceChanged`): the store is not extended from changed
+   evidence.
+4. **The chain is checked.** Each month records its carry in, spellings
+   before and series before; the reader refuses a month whose month before
+   does not end with exactly that (`Stale`), a gap between months, a span that
+   does not start on the first month's first record or end on a known record,
+   and spellings that name series out of order.
+5. **The real build is a store write** run by the main session after the
+   merge: `--out <store>/reference/fno-membership-v1` (PIT-1 report,
+   `store_writes_needed`). `fno-membership` is a store writer in its `build`
+   form (`cli::store_write::WRITERS`): an unstamped build refuses unless
+   `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`.
+
+### D-5164 — Membership lookups are O(1) and measured; the build reads each day's index once, months in order, the days of a month on up to four readers by default — 2026-10-17
+
+`members(D)`, `pool_size(D)` and `refused_through(D)`: one subtraction into a
+fixed-stride index of day slots (`Membership::slot`), one row, one slice of a
+contiguous member array. `is_member(name, D)`: the dated symbol changes walked
+from `name` (`LINEAGE.current`, bounded by its 18 rows), one hash probe for the
+series, the slot, one bit of a per-day bitset. Opening a directory reads every
+month once (O(records + entries)) and builds the index; `spans()` and
+`year_counts()` are reports, not request paths. The build is O(names listed)
+per day plus O(pool) to fold it; months are folded in order (the carry), the
+days of a month are read in parallel, `--workers` 1..=14 (default 4, the
+operator's ceiling for read-only evidence runs against the real stores).
+Measured figures (n, p50, p99, max, method) are in `docs/06-limits.md`,
+"Point-in-time F&O membership".
+
+### D-5165 — The membership's reader API is the one consumers adopt: `members(day) -> Result<&[Member], MembershipUnknown>` sorted by a series id stable across renames, each member's store-key spelling that day and its current-list flag; `max_pool` sizes a rank network; `file_digest()` names the membership in run identities — 2026-10-17
+
+Judge follow-up of 16 Oct (high) and operator "NOTHING TYPED" item 5.
+
+1. **`Member { series_id, symbol_on_day, in_current_list, filed }`.**
+   `series_id` is dense in first-appearance order and stable across renames
+   (every spelling of a series maps to it). `symbol_on_day` is the spelling the
+   series was filed under that day, which is the store key of its GDFL cash
+   series that day (measured 17 Oct in the real store: cash folders exist for
+   `ETERNAL`, `LTM`, `TMPV`, `TATAGLOBAL` and `TATACONSUM`, none for `ZOMATO`
+   or `LTI`, so a sourced rename files under its newest symbol and an
+   unsourced one under each spelling in turn). `in_current_list` is true when
+   the series' newest spelling is a share of `FNO_UNDERLYINGS` less
+   `FNO_INDEX_UNDERLYINGS` (`CLAUDE.md` §1's traded surface). Members are
+   sorted by `series_id`; `is_member` and `pool_size` are thin wrappers over
+   the same day slot.
+2. **Rank width is not a trial.** Every month header carries its `max_pool`
+   and `Membership::max_pool()` is the largest of any held day. A rank network
+   sizes itself at run start to the next power of two at or above the largest
+   pool it reads; ties go by `series_id`, so ranks are identical at any width
+   and the width is neither a trial nor a run-identity term. 256 is a test
+   fixture, never a constant.
+3. **`Membership::file_digest()`** is a BLAKE3 over each served month's year,
+   month and file digest, in month order (not the generation or the path), so
+   a run that reads the membership can record which one it read; one pass and
+   a day-by-day build give the same digest.
+
+### D-5166 — A measured handover needs a strict majority of BOTH sides and at least two shared keys; a series is live under one spelling, its newest, so a file under a spelling it moved on from is filed under the newest and named, never a second member and never a stop; the carry keys live series by series id — 2026-10-20
+
+verify-PIT-1-r1 (19 Oct 2026) blocking 4, reproduced here before the change
+(`a_handover_needs_a_majority_of_both_sides_and_two_shared_keys` and
+`a_file_under_a_spelling_its_series_moved_on_from_is_filed_under_the_newest`
+failed on the code of D-5161: the first joined `ZZILLIQ` to `ZZNEWBIE`, the
+second stopped with "one series would be live as ZZOLDCO and as ZZNEWCO").
+
+1. **Both sides.** D-5161 joined a never-seen spelling to a live spelling
+   that listed nothing when the keys they shared were a strict majority of
+   the OLD spelling's previous-session keys only. A one-key illiquid member
+   was therefore joined to any entrant listing that key among others: two
+   companies became one `series_id`, the pool fell by one and the old share
+   left it while its contract was live. The rule is now: shared keys a
+   strict majority of BOTH the series' previous-session keys and the new
+   spelling's keys, and at least `MIN_HANDOVER_KEYS` = 2. The 2 is a rule of
+   evidence, not a tuned value (operator rule 5 governs values learnt from
+   data; this decides what counts as evidence at all): one shared key is the
+   coincidence any two shares listing one round strike of one expiry make.
+   Every pair the old-side majority alone would have joined and these rules
+   do not is reported by name with why, as is every pair a side of which
+   matches a second candidate (unchanged). A pair not joined is two series:
+   the old one stays a member to its own expiry with no file, which is the
+   safe direction (a pool one too large for at most one expiry, named),
+   never a merge of two companies.
+2. **One live spelling per series.** D-5161 kept the old spelling's id and
+   refused a day on which both spellings of a series were live
+   (`SeriesTwiceLive`), so one stray old-name file after a handover stopped
+   every future build on that day. The fold now keys its live set by SERIES
+   and files every file of a series under its newest spelling (the registry
+   names it); a file under an older spelling is a STRAY: it keeps the series
+   live and `filed`, is reported per day by name in the month's report and
+   its `cli.fno_membership` event (`strays`), and changes nothing else. A
+   series cannot be live twice, so the refusal is gone with its cause.
+   Limit L-PIT-9: a different company relisted later under a retired
+   spelling while the series is live would be filed under that series;
+   every such day is named, none is silent.
+3. **The carry's live pairs are `(series id, live until)`** (was spelling
+   id). The member order is the live set's own key order, so no day's
+   members are sorted. Version 1 had not landed (no `.fnm` file was ever
+   written to the store: the store step of D-5163 was never run), so this is
+   a change to the unmerged v1, not a rewrite of a landed version; directories
+   built in scratch before 20 Oct 2026 (`scratch-PIT-1/r4/fnm-*`,
+   `scratch/verify-PIT-1-c*-out/real-*`, `shadow/PIT-1`) are not to be
+   resumed by this build.
+
+### D-5167 — Any prefix of a build's installs is a servable, resumable directory: the last month may end on the closed days after `known_to`; `known_to` is the last KNOWN record and `sealed_through` the last sealed one; a sealed record after `known_to` is answered as after the span — 2026-10-20
+
+verify-PIT-1-r1 blocking 1, reproduced here before the change
+(`a_kill_between_two_month_installs_leaves_a_servable_resumable_directory`
+failed: `open` refused "the span does not end on a known record").
+
+1. A month is installed with the closed days that end it (Sat 31 Aug 2024)
+   when the next month's first known day (Mon 2 Sep) is folded, BEFORE the
+   next month is installed; a kill, a crash, a full disk or a failed write
+   between the two installs left a directory whose last month ended on a
+   closed day. The chain refused that ("the span does not end on a known
+   record") and the build opens the directory first, so neither a reader nor
+   the resume could get past it; the only way out was deleting the last
+   month, which `CLAUDE.md` §3 rule 8 forbids. The verifier measured 4 of 10
+   real kills ending there.
+2. The chain no longer requires the last record to be known. `known_span()`
+   ends on the last KNOWN record (`known_to`); `sealed_through()` is the last
+   sealed record, where the resume continues. A day after `known_to` is
+   answered `AfterSpan` even when a closed day there is sealed, so a reader
+   sees what a build that ended on `known_to` would show, and the resumed
+   directory ends byte for byte where one pass ends (tested by a kill and by
+   a refused write between the installs).
+3. Two installs are not made atomic with a marker: a marker would be a third
+   file to keep consistent, and every prefix is already a true, sealed state.
+
+### D-5168 — A day whose day file the source refused is never sealed: the build installs every record before it, stops naming the day and the source's words, and the next build resumes at it; the fold refuses to seal one and the decoder refuses a file holding one — 2026-10-20
+
+verify-PIT-1-r1 follow-up ("a transient SourceRefused or reader panic followed
+by a known day is sealed as refused for ever"). A refusal can be transient (a
+read that failed, a reader thread that panicked); sealing it made one bad
+moment a permanent "membership unknown" in an append-only file. Status code 4
+stays in the format's code list and is refused by the decoder. A day file
+that is refused every time stops every build at that day, loudly, until the
+source is repaired or a new source version is chosen (L-PIT-10): an operator
+sees it on `/logs` (`membership build refused`) and in the exit code. The
+real tick store refused no day over the whole span (18 Oct 2026, read-only),
+so the real build is unaffected.
+
+### D-5169 — The verifier's remaining PIT-1 findings, each at its cause: the temporary through `store::staging::create`; a missing directory named; the typed-window guard widened; the lookups' flatness measured by C-PIT-01; gate 11 and 1d declarations with their reasons; the post-build open failure logged — 2026-10-20
+
+1. **Gate 28.** `install` created its own `.<name>.tmp.<pid>` with
+   `create_new`; it now asks `store::staging::create`, gate 28's one door,
+   and unlinks the temporary whether the link succeeded or not, so a refused
+   install (the lost link race included) leaves none. Only a kill can, and
+   that is counted by `generations` and never read. The door's answer is
+   kept, not dropped: a dead writer's leftover under the install's own
+   temporary name is cleared by `store::staging::create`, which says how
+   many bytes it held, and `install` returns that in `Installed::Written`'s
+   `cleared`, which `cli fno-membership build` prints on the month's line and
+   in its `membership month` event (`cleared_bytes`); the final name is
+   flushed into the directory before a failed unlink of the temporary's
+   second name is refused (PIT-31).
+2. **A missing directory is refused by name** by `open`, `show` and `bench`
+   ("no such membership directory"); `build` is the one caller that starts
+   from nothing and makes it.
+3. **The typed window** (scratch only, D-5163) is also refused inside the
+   `--store ROOT` named on the same line and at any directory laid out as
+   `reference/fno-membership-v1`, not only inside `$BRUTEX_STORE` or
+   `$HOME/.brutex/store`.
+4. **Gate 12.** Every O(1) claim of `pull::fno_membership` names
+   `pull::bench::fno_membership_lookup_is_flat` (C-PIT-01), a ratio bench at
+   1x, 10x and 100x the held days over `members` and `is_member` on known
+   days and `members` on refused and outside days, with p50/p99/max printed.
+5. **Gate 11.** The fold's per-day sort is gone (D-5166 item 3); the two
+   handover counters are pre-sized; the handover-day check reads the
+   month's own row instead of a range test. Three constructs are declared with
+   their bound in `.github/gates_ledger.rs`: the name decoder's search inside
+   its fixed `NAME_LEN` bytes (rule 6), `cli fno-membership`'s four sorts
+   of its own report and bench samples, once per run (rule 4), and the
+   `fno-membership` arm of `store_write::writes_the_store`,
+   `arguments.contains(&"build")`, the arm shape gate 30 reads, over the
+   verb's own arguments (rule 7, that file 4 -> 5); all three in
+   `docs/06-limits.md` L-PIT-8.
+6. **Gate 1d.** The module's, its tests' and its bench's segment-shaped
+   literals are declared as `PIT_1_LITERAL` in `.github/gates_tree.rs`, each
+   read first: the format's words, the status and refusal words, and the
+   tests' scratch labels; none is a credential path segment.
+7. **`/logs`.** A build whose directory does not serve afterwards emits
+   `membership built and does not serve` (error) with the reason, as the
+   refused build already did.
+8. **No table is served short.** The day index read a day's members as
+   `entries.get(at..end).unwrap_or_default()`: a table whose pool ran past
+   its entries would have served that day with no member and its pool
+   count, a fallback that hides a failure (`CLAUDE.md` §4). A file's
+   decoder already refused it; a table served without a file
+   (`Membership::of`) did not. The index now refuses it by name ("a day's
+   members run past the month's entries"), and every chain and index check
+   is hit by its own damaged table in
+   `every_chain_check_refuses_its_own_damage` (PIT-32; ten checks: nine no test reached before, by the line coverage
+   measured on 20 Oct 2026, and the tenth is new).
+
 ### D-5902 — The sealed codec's bounds say what the code does: an accepted frame grows the caller's buffer by `Vec`'s amortised rule, not by its rows, and a frame of `m` rows is at most `56m + 172` bytes; D-4939 #5 amended by addition (AH-05, g-sc1-codec-3, g-sc1-codec-4) — 2026-10-19
 
 **Findings** g-sc1-codec-3 and g-sc1-codec-4 (both low; the 14 October attack
@@ -75063,6 +76341,81 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5904 — The write door of a sealed month: a batch it holds is `AlreadyPresent`, any other is `StoreError::Sealed` naming what its raw form would have done, the probe is made under the writer's lock, and the pull and the GDFL import file a batch the raw form would append as the month's successor generation — 2026-10-20
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.5, §6, §9 row SC-4; its proposed D-4929, whose read half is D-5899)
+gives a closed month a second form, the sealed `.sbar` of D-4965, written once
+and never opened for writing again. D-5899 opened it to every reader and said
+the write door was SC-4's. Until this entry the writer door did not know the
+form existed: `BarFile::open_or_create` opened (or created) the raw `.bin`
+beside a `.sbar` and appended there, so the bars were committed where no
+reader looks, because the read door opens the `.sbar` first; and a month held
+only sealed (after a retirement, SC-9) was re-created empty as a `.bin` and
+filled from its first bar.
+
+**The writer door opens the sealed form, under the lock.** `open_or_create`
+probes `.sbar` with the read door's own `open_sealed_at` after it holds the
+month's exclusive lock and after the generation pointer is asked again, and
+before the `.bin` is opened or created. The sealer holds the lock shared from
+its first step to its last (design §4.6), so a writer either excluded it or
+sees its finished file; a probe made before the lock could miss a seal that
+finished in between. A damaged or misfiled `.sbar` is refused here exactly as
+a reader refuses it (`SealedRefused`), never passed over for the `.bin`. The
+sealed handle keeps the lock and writes nothing.
+
+**What `append` answers.** The batch's own refusals first, in their own words
+(empty, out of order, impossible, outside the month, off the rung's grid).
+Then the questions the raw door asks, through the same functions over the same
+records: a batch the month holds bit for bit is `Appended::AlreadyPresent` at
+the index it sits at, so a resumed import stays idempotent; any other batch is
+`StoreError::Sealed { path, n_valid, last_ts_micros, at, ts_micros, offer }`,
+where `offer` is `SealedOffer::Follows` when the raw month would have
+committed it (from `at` on it follows the last held bar and every offered bar
+before `at` is held byte for byte) and `SealedOffer::Disagrees(conflict)`
+when the raw month would have refused it as `OverlapDisagrees` with that
+conflict, at the same index and stamp. A counter at its end is the raw door's
+`Format` refusal. Nothing is written in any case. The store emits no line for
+it, like every other refusal of that door; the caller logs and routes it.
+
+**The form is never the content: callers answer `Sealed` as they answer the
+raw month.** `pull::ingest`'s append door (`append_or_successor`), used by the
+Zerodha pull for the minute month and for every derived rung month, and the
+GDFL import's back-fill door, file a `Follows` batch as the month's successor
+generation through the one repair authority (`store::repair::repair_month`,
+D-3350), which reads the sealed month through the read door and publishes
+every held bar plus the new ones as a raw month under `bar-revisions-v1/<n>/`;
+it is sealed again later like any other. A `repairing` line naming
+`sealed-month successor` is journaled before the repair and its `repair` or
+`refused` line after it. `Disagrees` stands as the raw month's refusal would.
+The GDFL worker's own append door files nothing as a generation (D-3353): it
+commits nothing, and the coordinator files the day again through the back-fill
+door, which routes it. The basis witness (D-3323) is not asked of a `Follows`
+batch: it guards bars inserted among held ones, and the append door commits a
+`Follows` batch to a raw month with no witness, so asking one would refuse at a
+sealed month what the raw month takes.
+
+**A revision ordinal holding a `.sbar` is stepped over.** `write_revision`
+refused an ordinal that already held a `.bin`, `.crc`, `.lock` or `.tix`, but
+not a `.sbar`; a raw revision written beside one would publish bars no reader
+opens. Now `Incomplete`, stepped over and named like the others.
+
+**FM-283 at this door: committed bars are never rewritten.** The failure
+matrix feared an append into an open compressed block. The design never has
+one: a month is sealed whole once closed, and a bar it lacks lands only as a
+whole successor generation. A kill at any step before that generation is
+promoted leaves the sealed month served bit for bit: a torn ordinal is kept as
+found and stepped over, a whole unpromoted one is found again
+(`Published::Reused`) and promoted (invariant SC4-14). The kill points of the
+sealer itself are SC-6's.
+
+**Not decided here.** The failure kinds of IA-16's typed repair door are
+IA-16's: `Sealed` must be one of them (not merged when this landed). A repair
+or promotion over a month whose `.lock` a retirement removed would be refused
+for want of the lock (`repair::publish`, `generation::promote` take it shared);
+retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
+teach those two that a sealed source needs none. Sealing itself is SC-6's.
 
 ### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
 
@@ -77556,6 +78909,95 @@ of the pinned toolchain.
 *Cost.* One look at the token before each exempting attribute and, after a
 `,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
 test-time only, no shipped code.
+
+### D-6247 — A month served from a repair revision answers every batch as its raw form would, and a batch that follows it is filed as its next successor generation: the second late day of a sealed month lands with no human step (SC-4 repair round 1) — 2026-10-20
+
+**What was wrong.** D-5904 filed a sealed month's late day as its successor
+generation, so after the first late day every sealed month was served from a
+repair revision (D-3350). The pull's append door answered a revision-served
+month with `ingest::already_served`, which took only a batch it held bar for
+bar and refused every other one, naming `POST /pull/repair` or `cli
+zerodha-repair`. So a SECOND late day, in its own pull, met that refusal: the
+second agent's probe (`state/fix/round2/verify-SC-4-r1.json`) landed
+2024-04-01..03 into two stores, sealed one, then landed 04-04 and 04-05 in two
+pulls: the never-sealed store committed 375 bars each time, the sealed store
+committed 375 and then 0, and all eight months (1 min and the seven derived
+rungs) differed, the sealed store serving 1,500 April minute bars against
+1,875. Invariant SC4-12 and `append_or_successor`'s own doc ("the outcome of
+every batch is the one the month's raw form gives it") were false from the
+second late day on, and the automated chain stopped at a manual step.
+
+**Decided.** The writer door still never appends to a revision (D-3350
+unchanged). Instead the served generation is ASKED, through the read door,
+what its raw form would do with the batch: `store::file::BarFile::offer`, a
+read-only method that asks the raw door's own questions in its order
+(`may_append`, `survey`, the month's admission, `Header::advance`, then
+`already_stored`, `suffix_that_follows`, `diagnose_overlap`), the same code
+the sealed writer door asks (`sealed_offer` and `offer` now share
+`raw_answer`), and writes nothing. Its answer is `store::file::Offered`:
+`Held` exactly when the raw door says `AlreadyPresent`; `Unheld` with
+`SealedOffer::Follows` exactly when it would commit; `Unheld` with
+`SealedOffer::Disagrees(c)` exactly when it would refuse as
+`OverlapDisagrees`. The pull's `already_served` answers `Held` as before
+(nothing written, the served census row) and hands a `Follows` batch back as
+`Unwritten { follows: Some(Follows::Revision) }`, which `append_or_successor`
+(the Zerodha pull, every derived rung) and the GDFL back-fill door file as
+the month's NEXT successor generation through the same repair door a sealed
+month's late day takes (`successor_of_served`, `repair_after`,
+`store::repair::repair_month`), journaled `repairing` before and `repair`
+after, with the reason `revision successor, bars after its last (D-6247)`.
+Every other batch is refused in the raw form's words (`... batch record N
+restates the record held at T (offer=restated)`), nothing written. One door
+for every month the writer door never appends to, whatever its form or
+generation.
+
+**Rejected.** Narrowing SC4-12 to the first late day (the checker's option
+b): it keeps a manual step (`POST /pull/repair`) inside the daily chain the
+operator wants to run with no human or Claude step, and it keeps two answers
+for one batch depending on how many late days came before it. Appending to a
+revision in place: D-3350 forbids it (an append to the original would never
+be served, and a revision is immutable once promoted).
+
+**What it changes for a month never sealed.** A month a DB-N20 repair
+promoted is revision-served too, and its later late days are now each its
+next successor instead of a refusal naming `POST /pull/repair`. That is the
+raw form's answer (the raw month appends them) and the same door; each costs
+a whole-month rewrite, bounded by `store::repair::MAX_REVISIONS` (1,024)
+generations a month, after which the repair refuses by name
+(`docs/06-limits.md` L-SC4-01). The GDFL back-fill door's own judgement
+(`lack_of`) is unchanged for every batch the raw form would NOT commit: a
+held day read differently, or with a second inside the held range, is still
+refused and never merged (DB-N26).
+
+**Proved by** `crates/pull/tests/sealed_month.rs`
+`two_late_days_in_two_pulls_after_sealing_serve_what_a_never_sealed_store_serves`
+(three pulls after sealing, the third a window re-reading the second late
+day and adding a third: every month equal to a never-sealed store, served
+generation 1, 2, 3, the originals and every earlier revision byte-identical,
+three `repairing`/`repair` pairs per month, the second and third naming
+`revision successor` and `from_generation=1 to_generation=2`,
+`from_generation=2 to_generation=3`; the same window again writes nothing and
+spends no generation; a restated minute of a held late day refused as the
+raw month refuses it), which failed on the code before this (the checker's
+probe `probe_two_late_days_in_two_pulls` on 9f440a858: `months that differ: 8
+of 8`); and `crates/store/src/file_write_door_tests.rs`
+`an_offer_through_a_read_only_handle_is_the_raw_doors_answer` (nine batch
+shapes, raw and sealed, spot and option: `Held`, `Follows` and
+`Disagrees(c)` exactly where the raw writer answers `AlreadyPresent`,
+`Committed` and `OverlapDisagrees(c)`; garbage batches the raw door's own
+refusal; an empty month; nothing written); and, for the GDFL back-fill door
+(added in SC-4 repair round 2, after the second checker found this arm a
+surviving mutant), `crates/pull/src/gdfl_sealed_tests.rs`
+`a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor`
+(NIFTY's 1 s April made revision-served by a back-filled hole and by a
+sealed month's first late day, then the first 30 s of a new day and the
+whole day with the held 30 s byte-equal: each the month's next successor,
+generation 2 then 3, equal to a never-sealed store at every step, the
+original and revision 1 byte-identical, `repairing` with reason
+`revision_successor_` and `repair` journaled for each, the whole day again
+writing nothing), which fails when a `Follows::Revision` batch is routed to
+`lack_of` as before this decision (the whole day commits 0, refused as an
+overlap). Invariants SC4-15, SC4-16, SC4-17; limit L-SC4-01.
 
 ### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
 

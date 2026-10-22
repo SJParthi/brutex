@@ -141,6 +141,10 @@ pub mod disk_projection;
 pub mod expiry_alias;
 pub mod fetch;
 pub mod fno;
+/// Point-in-time F&O membership: which shares had a listed stock derivative on
+/// each day, from our own GDFL options listings, as dated append-only month
+/// files. D-5160..D-5165.
+pub mod fno_membership;
 /// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
 /// contracts, so the expired-derivative backfill can drive itself the way the
 /// spot one already does.

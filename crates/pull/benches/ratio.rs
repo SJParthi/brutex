@@ -68,6 +68,12 @@ mod identity;
 #[path = "ratio/disk_projection.rs"]
 mod disk_projection;
 
+/// C-PIT-01: the point-in-time F&O membership's lookups on known, refused
+/// and outside days, flat at 1x, 10x and 100x the held days (PIT-1, D-5164),
+/// held to the ceiling by this harness, `crates/pull/benches/ratio.rs`.
+#[path = "ratio/fno_membership.rs"]
+mod fno_membership;
+
 #[path = "ratio/day_table.rs"]
 mod day_table;
 
@@ -1464,6 +1470,11 @@ fn main() {
     let _cleanup = std::fs::remove_dir_all(&keep_root);
     ok &= fold_is_flat_per_bar();
     ok &= nfo_read_is_flat_per_row();
+    // C-PIT-01's id is printed from this file because
+    // `crates/core/tests/cost_invariants.rs` reads the ids a bench prints from
+    // `benches/ratio.rs` alone; the module prints each ratio and spread.
+    println!("C-PIT-01 F&O membership lookups at 1x, 10x, 100x the held days (PIT-1, D-5164)");
+    ok &= fno_membership::fno_membership_lookup_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {
