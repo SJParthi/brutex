@@ -85,7 +85,7 @@ fn kept() -> &'static Mutex<HashMap<PathBuf, Kept>> {
 }
 
 fn key_of(root: &Path, tables: Option<&Tables>) -> [Stamp; 4] {
-    let file = |slot: Option<&Path>| slot.map_or(None, stamp);
+    let file = |slot: Option<&Path>| slot.and_then(stamp);
     [
         stamp(&Table::CorporateActions.dir(root)),
         stamp(&Table::BasisRuns.dir(root)),
@@ -282,39 +282,36 @@ pub(crate) fn answer(tables: &Tables, asked: &Asked) -> Value {
     let Some(object) = body.as_object_mut() else {
         return body;
     };
-    match asked.day {
-        Some(day) => {
-            let run = runs.map(|runs| runs.run_on(symbol, day));
-            let rows = actions.map(|table| table.labels(symbol, None, day));
-            object.insert(
-                "day".to_owned(),
-                json!({
-                    "day": day.to_string(),
-                    "run": run.as_ref().and_then(|run| run.as_ref().ok()).map(|run| run_json(run)),
-                    "factor": run.as_ref().and_then(|run| run.as_ref().ok()).map(|run| run.ratio.to_string()),
-                    "outside": match &run {
-                        Some(Err(why)) => Some(why.to_string()),
-                        Some(Ok(_)) => None,
-                        None => Some("the basis-run table is not served".to_owned()),
-                    },
-                    "actions": rows.map(|rows| rows.iter().map(action_json).collect::<Vec<_>>()),
-                }),
-            );
-        }
-        None => {
-            object.insert(
-                "runs".to_owned(),
-                runs.map_or(Value::Null, |runs| {
-                    Value::Array(runs.of(symbol).iter().map(run_json).collect())
-                }),
-            );
-            object.insert(
-                "actions".to_owned(),
-                actions.map_or(Value::Null, |table| {
-                    Value::Array(table.of(symbol).iter().map(action_json).collect())
-                }),
-            );
-        }
+    if let Some(day) = asked.day {
+        let run = runs.map(|runs| runs.run_on(symbol, day));
+        let rows = actions.map(|table| table.labels(symbol, None, day));
+        object.insert(
+            "day".to_owned(),
+            json!({
+                "day": day.to_string(),
+                "run": run.as_ref().and_then(|run| run.as_ref().ok()).map(|run| run_json(run)),
+                "factor": run.as_ref().and_then(|run| run.as_ref().ok()).map(|run| run.ratio.to_string()),
+                "outside": match &run {
+                    Some(Err(why)) => Some(why.to_string()),
+                    Some(Ok(_)) => None,
+                    None => Some("the basis-run table is not served".to_owned()),
+                },
+                "actions": rows.map(|rows| rows.iter().map(action_json).collect::<Vec<_>>()),
+            }),
+        );
+    } else {
+        object.insert(
+            "runs".to_owned(),
+            runs.map_or(Value::Null, |runs| {
+                Value::Array(runs.of(symbol).iter().map(run_json).collect())
+            }),
+        );
+        object.insert(
+            "actions".to_owned(),
+            actions.map_or(Value::Null, |table| {
+                Value::Array(table.of(symbol).iter().map(action_json).collect())
+            }),
+        );
     }
     body
 }
