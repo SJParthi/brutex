@@ -76472,7 +76472,7 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     processes there.
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-22);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-18.
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-19.
 
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
