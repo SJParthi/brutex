@@ -90,7 +90,7 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 16] = [
+pub(crate) const WRITERS: [&str; 17] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -105,6 +105,7 @@ pub(crate) const WRITERS: [&str; 16] = [
     "srt-build",
     "tickstore-write",
     "tix-rebuild",
+    "upkeep",
     "zerodha-gaps",
     "zerodha-repair",
 ];
@@ -120,7 +121,10 @@ pub(crate) const WRITERS: [&str; 16] = [
 /// state in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it; `series-identity ... --dry-run`
-/// names the plan it would write and writes none.
+/// names the plan it would write and writes none. `upkeep` writes only as
+/// `upkeep run` and `upkeep resume` (R3-17): `plan` and `status` read, and
+/// `stop` writes a request naming a run, which carries no store data a commit
+/// answers for.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
@@ -129,6 +133,7 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
             !arguments.contains(&"--dry-run")
         }
+        "upkeep" => matches!(arguments.first(), Some(&("run" | "resume"))),
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
@@ -441,7 +446,7 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 16] = [
+        let writing: [(&str, &[&str]); 17] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -456,6 +461,7 @@ mod tests {
             ("srt-build", &[]),
             ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
+            ("upkeep", &["run"]),
             ("zerodha-gaps", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),
         ];

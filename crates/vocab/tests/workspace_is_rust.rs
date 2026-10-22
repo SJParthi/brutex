@@ -633,6 +633,8 @@ fn the_dependency_set_has_not_moved_without_review() {
     // `rustls-webpki`'s `rust-version`, 1.70 -> 1.71): same features, so
     // `ring` stays off by default and the skipped `rustls-webpki -> ring` edge
     // above is still a weak one. DECLARED is unchanged.
+    // R3-17 (D-6271) made the same two bumps on its own branch, to the same
+    // `Cargo.lock` bytes and the same pin, with the same scan result.
     assert_eq!(
         h, 0x57F8_69FF_1E0D_4A5C,
         "the dependency SET or GRAPH changed — a package was added, removed, \

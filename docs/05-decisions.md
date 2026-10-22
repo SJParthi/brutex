@@ -78219,6 +78219,270 @@ Proof: `no_store_or_census_key_is_built_from_a_token`,
 `the_module_list_is_closed_over_every_definition_of_a_key`,
 `a_token_field_in_a_fixture_key_builder_is_refused`.
 
+### D-6270 — One upkeep runner: the store's catch-up builders run as tracked runs on workers, with a run id, a journal, Stop and resume, under the import's own run locks — 2026-10-17 (item 4 replaced by amendment 1, 2026-10-20: beside no live GDFL run, each item under its own verb's locks)
+
+**Implemented by** R3-17: `pull::upkeep` (`crates/pull/src/upkeep.rs`: `run`,
+`status`, `request_stop`, `months`, `parse`) and `cli upkeep`
+(`crates/cli/src/upkeep_command.rs`), which builds each item with the step the
+verb that owns it takes — `srt_builder::upkeep_month`,
+`tix_rebuilder::upkeep_month`, `msum_builder::upkeep_month`,
+`census_recount::upkeep_span` and `gdfl_rekey::upkeep_underlying` — under the
+import guard's `RunLock`, re-exported from `gdfl_import_command`.
+**Closes** the store half of DB-N14 (no step could give a whole feed its sort
+index; it is now one run) and the store half of DB-027 (the three impossible
+NIFTY `25JUN20` strikes leave the census through the re-key, run as an upkeep
+step; their refusal at decode is D-3331's `StrikeImplausible`, already in
+`pull::gdfl_nfo`). **Number**: the ledger's head was D-4996 on 17 October 2026
+and D-4990 to D-4995 are taken on an open branch (R4-17); the merge renumbers
+this if another lands first (amendment A6). Renumbered four times under A6:
+from D-4997 to D-5831 (AG-04 took D-4997 first), at the merge of 18 October
+2026 from D-5831 to D-5836 (IA-1 repair 1 took D-5831 first; the head of
+feat/db-fix was D-5834, and D-5832 and D-5835 are taken on open branches),
+at the second merge of 18 October 2026 from D-5836 to D-5839 (AH-03 landed
+D-5835 to D-5838 first; the head of feat/db-fix was D-5838 at `371b1a506`),
+and at the merge of 21 October 2026 from D-5839 to D-6270: R4-17 took D-5839
+at its own repair-3 merge and landed it first (`47013fe18`), so the merged
+ledger headed D-5839 twice. The merged head is D-6245; D-6246 and D-6247 are
+headed on open branches, D-6248 to D-6269 lie in blocks the run registers
+(R4-09a, NEW-34q, IA-10c), and D-6270 is the lowest number above the head that
+no local or `origin/` branch cites and no registered block holds. R4-17's
+D-5839 and its citations are unchanged; every R3-17 citation (code, §43,
+UK-*, L-R317-*, S-50) now names D-6270. Former numbers of this entry: D-4997,
+D-5831, D-5836 and D-5839.
+**Bytes**: `docs/02-store-format.md` §43.
+
+**Decision.**
+
+1. **One runner, the builders unchanged.** An item is built by the very
+   function its verb runs for it, and the receipt line that verb prints is the
+   item's reason: there is one way to build a `.tix`, a `.srt`, a `.sum`, a
+   recount and a re-key, and the runner adds none. What the runner owns is the
+   run: the plan, the journal, the workers, Stop, resume and the locks.
+2. **One journal per vendor and kind**, `audit/upkeep.<vendor>.<kind>.log`,
+   append-only, three line shapes (`run`, `item`, `end`, §43). **Every `item`
+   line carries the run's running totals** (`n`, `ok`, `of`, `t`), so where
+   the newest run stands is the journal's last whole line: one bounded tail
+   read, whatever the run has written (`status`). A tail a kill or a full disk
+   left is ended as a void line before anything is appended, exactly as
+   `cli scrub-blocks` ends its own. Per kind, not one file for all, because
+   each kind is its own history with its own resume chain, a page reads one
+   kind's tail, and kinds that share no lock (Zerodha's) run side by side; a
+   GDFL run holds the import's locks of every kind (item 4; since amendment
+   1 it holds none, and item (e) there keeps this), so two GDFL
+   kinds run one after the other.
+3. **The run id** is the clock's UNIX seconds, or one more than the newest id
+   the journal's tail holds when that is not earlier, so no two runs of one
+   journal share an id whatever the clock says.
+4. **Locks: the import's own, and one run of a kind.** *Every lock of an
+   import below is replaced by amendment 1 (IA-2); the journal's own `flock`
+   stands.* The run holds its
+   journal's `flock` for its whole life: a second run of the same vendor and
+   kind is refused by name. A GDFL run first takes the import's run lock of
+   EVERY kind (`imports/gdfl.<kind>.lock` on the version-4 census, the one
+   `imports/gdfl.lock` on version 3; `RunLock::take`, no waiting), its holder
+   record naming the upkeep verb: an import of any kind refuses it `run_busy`
+   and it refuses every import. Every kind, because a recount writes every
+   segment's census and the import journal, a capital-market import files
+   more than one segment, and an import that met a recount's census lock
+   stopped its whole run (`census_refused`). Under them each month is opened
+   under its own exclusive store lock, which the builders already take: a
+   month an import's writer holds is refused by name and left for a resume.
+   Zerodha has no import run lock; its upkeep meets a pull on month locks
+   alone.
+5. **Stop between items, never inside one**: the caller's flag (an app that
+   runs the library itself) or a request file, `audit/upkeep.<vendor>.<kind>.stop`,
+   that NAMES the run (`stop <id>`), written whole and renamed into place. A
+   request for another id is not this run's, so a stale request never stops a
+   later run and nothing ever removes the file. Each worker finishes the item
+   it holds and takes no other; the run ends `stopped` with the count left.
+6. **Resume along a chain.** A resume is a new run whose `run` line names the
+   run it resumes; every key a run of that chain (the run named, the one it
+   resumed, and so on) closed CLEAN is skipped, and every other key of the
+   plan the resume makes NOW is built: what a Stop or a kill left, what was
+   refused (a held month, a name held by a directory), and what the store
+   gained since. A failure is never remembered as done.
+7. **Workers.** The three indexes take up to 64 (`MAX_WORKERS`), each item one
+   month file and nothing else; the recount and the re-key take ONE, because
+   they write one census, one import journal and one lineage ledger a second
+   worker would race. Workers take the next item from one counter, so no item
+   is built twice; the outcomes come back in plan order, and what a builder
+   writes for one month is that month's alone, so the store's bytes do not
+   depend on the count. `cli upkeep` starts one unless `--workers N` is given.
+8. **The items.** For an index, the month files in the scope whose sidecar of
+   that kind is ABSENT beside the generation a reader opens (one `lstat`,
+   no read), or with `--all` every month in scope (a done month is kept after
+   its checks). A month under 1,024 bars is listed and the run says `small`
+   for it (D-4933). Beside a month, a name ending in a store sibling's
+   extension is that sibling, and so is a month's closing-auction sidecar
+   `<YYYY-MM>.auc` (`pull::gdfl_cm::auction::EXTENSION`), which is not a
+   `FileKind`: anything else in a rung directory is a stray, counted and
+   named, never walked. (The first walk named every `.auc` a stray: 227 of
+   them on the operator's store, 18 October 2026, the Mac's check.) For the recount, one calendar month of the days asked an
+   item, both ends required (the span decides which import days are closed,
+   D-3317). For the re-key, one option underlying an item, GDFL's alone, and
+   **stricter than `gdfl-rekey --apply` on one point**: nothing is written for
+   an underlying whose survey left a file unread or whose plan left a key
+   unresolved — the rule the one-press chain applies (R4-11) — so an
+   unattended run never moves half of a ladder it could not read whole.
+   **AG-02's rules, merged into feat/db-fix on 19 October 2026, hold at this
+   door as at the verb** (added at that merge): what the lineage ledger
+   already records is done, so an item's plan moves and retires only what
+   is not recorded, its line says how many moves and retirements are
+   recorded and what is pending, and a second run stops at `nothing to
+   change` before any apply (the `already applied` outcome this item had
+   before is gone: no apply is reached that would write nothing); an
+   underlying whose walk read no option key with a bar is refused by name,
+   never read as nothing pending; and a census step that is not known
+   (`census: not read` or `could not be read`) is a third case of the strict
+   rule — nothing is written. An applied item names the keys it retired and
+   whether it installed an FNO census epoch.
+9. **The unstamped-build rule** (DB-B71): `upkeep run` and `upkeep resume` are
+   store writers in `store_write::WRITERS`; `plan` and `status` read; `stop`
+   writes a request naming a run, which carries no store data a commit would
+   answer for, and is not refused.
+10. **It never starts by itself.** No timer, autopilot or route starts a run;
+    each kind is run on the operator's yes, from the store-step list. Its
+    step is in `config/store-steps.toml` as S-50 (the sort index of every
+    GDFL and Zerodha month that lacks one, closing DB-N14; the Zerodha run,
+    added on 19 Oct after a whole-history NIFTY 1min sort was measured
+    reading all 796,027 of its rows, is run with no Zerodha pull beside it,
+    item 4), pending and waiting for this
+    package's merge: gate 30 refuses rehearsal figures beside an unmerged
+    prerequisite, so the figures the Mac took on a private copy are in the
+    step's note, to be moved into `rehearsed_*` when the merge sets
+    `merged = true` (R3-36).
+
+**Refused.** A stop asked by a line another process appends to the journal
+(two writers' bytes join lines; the journal has one writer, the run). Removing
+the stop file at the end of a run (nothing here deletes; a request names its
+run instead). `rayon` in `pull` (`pull` has no `rayon`; `std::thread::scope`
+over one counter, as `gdfl_import_filing::on_workers` does). Inferring that a
+present sidecar is current from its name alone in the run (`--all` re-checks
+it, and the plan says it reads names, not bodies).
+
+**Proof.** `crates/pull/src/upkeep_tests.rs` (30 tests) and
+`crates/cli/src/upkeep_command_tests.rs`: `an_upkeep_run_stops_and_resumes_where_it_stopped`,
+`upkeep_and_an_import_exclude_each_other_on_a_month`,
+`the_sort_index_is_the_same_bytes_at_1_and_8_workers`,
+`a_failed_index_open_is_retried`,
+`the_three_impossible_strikes_are_retired_by_an_upkeep_rekey_run`,
+`a_whole_feed_gets_its_sort_index_in_one_run`,
+`a_recount_runs_one_month_of_days_an_item_and_resumes`. Invariants UK-01 to
+UK-15 in `docs/04-invariants.md` (UK-15 at the merge of AG-02); limits L-R317-01 to L-R317-10 in
+`docs/06-limits.md` (L-R317-10, Zerodha's sort index, added on 19 October 2026
+with item 10's Zerodha run).
+
+**Amendment 1 — 2026-10-20 (R3-17 repair 1): the locks under IA-2.** IA-2,
+merged into feat/db-fix after this entry was written, changed what an
+import's run lock is and what a recount takes, and item 4 as first written
+no longer holds. Found by the round-2 check of `fix/db-R3-17`
+(`state/fix/round2/verify-R3-17-r1.json`, blocking item 1).
+
+- (a) **An upkeep run takes no lock of an import, no id in the runs ledger,
+  and writes no claim.** `RunLock::take` now CLAIMS an import run: it
+  allocates an id in the runs ledger (`audit/runs.ledger`, mode `import`) and
+  writes the claim into the kind lock (`pull::gdfl_run::claim_with`), so one
+  GDFL upkeep run would have registered as three import runs that imported
+  nothing (one a kind on version 4), and an import refused beside it would
+  have been told that an options run held the store. The ledger's mode words
+  (`pull::gdfl_run::ledger::MODES`, and a claim's, `locks::MODES`) hold no
+  upkeep word, and a record whose mode a reader does not know is not one
+  (`Entry::parse`): adding one would change the ledger for every reader
+  and every older build. The upkeep journal (§43) is the run's record, and
+  its run id is that journal's (item 3).
+- (b) **It never holds the GDFL store lock.** `census_store::recount` takes
+  it EXCLUSIVE itself (`claim_census`, mode `census-recount`, its own ledger
+  id; IA-GR-14), so an upkeep run that held it — shared on version 4 under
+  the kind locks, exclusive on version 3 — refused its own recount items
+  `run_busy`. Each recount item takes the census hold for itself, with one
+  `census-recount` id an item, which is what it is: `cli census-recount`
+  takes one a call.
+- (c) **What keeps an upkeep from a live GDFL run now is a look, not a
+  hold.** `cli upkeep` probes the GDFL lock files (`live_run`, through
+  `pull::gdfl_run::locks::lock_state`: each existing file shared and
+  non-blocking, never created, at most 1 KiB read and released at once; a
+  probe never makes an import's press busy, D-4849) before its walk, and
+  hands the same probe to `pull::upkeep::run` as the run's look
+  (`Ask::busy`), which every worker asks before every item. A held lock — an
+  import of any kind, a census verb — refuses the run `run_busy` naming the
+  holder's claim before anything is written, or makes it take no further
+  item and end `stopped` with those words, for a resume once it is free; a
+  lock file that cannot be probed refuses the same way (an upkeep run never
+  starts beside a run it cannot see). A claim its holder left when it died is
+  not a live run. Under it, the month's exclusive store lock still keeps an
+  upkeep and an import from one month at once.
+- (d) **What is no longer excluded, named.** An import that starts while an
+  item is being built is not refused at its door (nothing of its is held);
+  it may meet that one month's exclusive lock and is refused that month by
+  name by the store, and the upkeep stops at its next look. One item wide:
+  `docs/06-limits.md` L-R317-12, with the look's measured cost.
+- (e) **Two GDFL upkeep kinds still run one after the other** (item 2): a
+  GDFL run is refused while a run of another kind holds its GDFL upkeep
+  journal (`pull::upkeep::status` reads it `RUNNING`), named. Two starts in
+  the same instant can both pass that check; they then meet only on month
+  locks, each refused by name.
+- (f) Zerodha is unchanged: no import run lock, month locks alone.
+
+**Also in repair 1** — no new choice, the refusals `CLAUDE.md` §4 asks for,
+each found by the same check: a scope whose segments name no directory under
+`bars/<vendor>/` (`NSE/INDX`, `BSE`), or whose walk finds no month file in
+the rung and months asked, refuses the run and the plan by name before any
+line is written, so a mistyped S-50 command can no longer end `done` (a scope
+whose months all have the file is still a clean run of no item); `stop`
+writes a request only for the running run, so no request waits for a later
+run the clock gives its id; a resume of a journal that does not exist
+creates none; a run whose every item was taken but not every one ended
+clean ends `done` with words that say how many did not, never "every item
+of the run was built"; a status gives no ETA before one whole second; and
+the DB-027 test's bars carry invented values, not the vendor row's.
+
+**Proof (amendment 1).** `upkeep_and_an_import_exclude_each_other_on_a_month`
+(rewritten: a live import refuses the run before its walk; an import claimed
+between items stops it, and the resume builds the rest; every kind's lock on
+version 4 is seen), `an_upkeep_run_holds_no_import_lock_and_takes_no_run_id`,
+`every_live_run_a_probe_can_see_is_named`, `an_empty_span_is_said_as_it_was_asked`,
+`a_second_gdfl_upkeep_kind_waits_for_the_first`,
+`a_scope_that_names_nothing_is_refused_before_any_line`,
+`status_and_stop_read_and_ask_the_newest_run` (`crates/cli/src/upkeep_command_tests.rs`);
+`a_run_takes_no_item_beside_a_run_its_look_names`,
+`a_run_whose_items_were_refused_is_not_said_built`,
+`a_run_under_a_second_old_has_no_eta`, `a_resume_with_no_journal_writes_nothing`,
+`the_walk_lists_every_month_and_what_it_lacks` (`crates/pull/src/upkeep_tests.rs`).
+`a_recount_runs_one_month_of_days_an_item_and_resumes`, unchanged, failed on
+the merged tree before this amendment (its recount items refused `run_busy`
+by the upkeep's own lock) and passes after it. Invariants UK-02 (restated),
+UK-16 to UK-18; limits L-R317-11 and L-R317-12.
+
+### D-6271 — `cargo deny` green on R3-17's branch: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 in `Cargo.lock`, and the dependency-set pin moved after the scan (R3-17, repair 1e) — 2026-10-21
+
+**Why.** `cargo deny check` on this branch at its merge of `feat/db-fix`
+`47013fe18`, with the lock's `rustls-webpki` 0.103.15 and `webpki-roots`
+1.0.9 (the versions `feat/db-fix` still pins at `02e2d5ec4`), failed
+`advisories` with RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 accepts the
+distrusted emSign intermediates) and RUSTSEC-2026-0381 (`webpki-roots` 1.0.9
+bundles the emSign ECC Root CA - G3), both reached through `hyper-rustls` and
+`reqwest` from `pull` (`state/fix/round2/logs-R3-17/repair1d/deny.out`,
+21 Oct 2026 03:51 IST); bans, licenses and sources were ok. A new
+advisory is a finding to fix, never a baseline, so the branch takes the two
+patch bumps in `Cargo.lock` alone: no manifest changes, the package count
+stays 197 and no `dependencies` list moves.
+
+**The scan before the pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
+`the_dependency_set_has_not_moved_without_review`): both registry sources
+declare `build = false`, ship no `build.rs` and no .c/.cc/.cpp/.h/.S/.s/.asm;
+`rustls-webpki` 0.103.16's only new files are eight `.spki.der` public keys
+under `src/data/distrusted/`, and `webpki-roots` 1.0.10's file set equals
+1.0.9's. The fingerprint moves `0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C`
+with that scan written beside it.
+
+**The same bump on other branches.** R3-15 (`a141d9c96`) and R3-24
+(`ec75148b4`) take the identical `Cargo.lock` hunk on their own branches,
+from older bases, so their pins differ from this one; whichever merges second
+re-pins after `api -> rustix` (D-5240) as this entry does. The repair-1d
+commit of this branch (`3bda62319`) took the lock hunk and left the pin, so
+`the_dependency_set_has_not_moved_without_review` failed on it; this entry is
+that repair.
+
 ### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
 
 **Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026

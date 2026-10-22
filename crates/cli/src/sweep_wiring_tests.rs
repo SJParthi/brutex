@@ -186,6 +186,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "fno-membership"
                 // The tradable-day page (D-5153): reads tables, never a sweep.
                 | "calendar-days"
+                // The upkeep runner (R3-17, D-6270): a store verb.
+                | "upkeep"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

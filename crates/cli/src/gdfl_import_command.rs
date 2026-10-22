@@ -93,6 +93,10 @@ use crate::{FAILED, MISUSED, OK};
 /// The door around the importer (AF-01).
 #[path = "gdfl_import_guard.rs"]
 mod guard;
+/// The import's run lock, which `cli upkeep`'s tests take to stand for a
+/// live import (R3-17, D-6270 amendment 1: the upkeep itself takes none).
+#[cfg(test)]
+pub(crate) use guard::{Holder, RunLock};
 
 pub(crate) use pull::gdfl_run::{CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR, TICKSTORE_VAR};
 /// The flag that reads again the days closed done with refusals (D-3317).

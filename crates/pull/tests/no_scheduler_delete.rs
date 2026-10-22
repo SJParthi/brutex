@@ -56,10 +56,14 @@ const DECLARED: [&str; 12] = [
 ];
 
 /// The declared members that exist at this head, read at compile time.
-const LISTED: [(&str, &str); 3] = [
+const LISTED: [(&str, &str); 4] = [
     (
         "crates/api/src/autopilot.rs",
         include_str!("../../api/src/autopilot.rs"),
+    ),
+    (
+        "crates/pull/src/upkeep.rs",
+        include_str!("../src/upkeep.rs"),
     ),
     (
         "crates/pull/src/gdfl_dropbox.rs",
@@ -77,7 +81,7 @@ const LISTED: [(&str, &str); 3] = [
 /// The probe's `File::create` row is gone (PREC-1, D-5408): the probe opens
 /// its dot-file with `create_new`, which empties nothing and refuses a name
 /// already held, so that line is no longer a site.
-const ALLOWED: [(&str, &str, usize, &str); 3] = [
+const ALLOWED: [(&str, &str, usize, &str); 4] = [
     (
         "crates/api/src/autopilot.rs",
         "std::fs::remove_file(path)",
@@ -92,6 +96,14 @@ const ALLOWED: [(&str, &str, usize, &str); 3] = [
         1,
         "publish renames the verified temporary to the day's final name in the \
          same folder, then fsyncs that folder",
+    ),
+    (
+        "crates/pull/src/upkeep.rs",
+        "io(&path, fs::rename(&staging, &path))?;",
+        1,
+        "request_stop renames its synced request (`<name>.stop.new`) to its sibling \
+         final name in the same audit folder; a request it replaces names an earlier \
+         run and stops nothing (R3-17, D-6270)",
     ),
     (
         "crates/pull/src/gdfl_dropbox.rs",
