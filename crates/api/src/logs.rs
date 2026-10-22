@@ -434,8 +434,23 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
     let to = (!to_word.is_empty()).then(|| instant_of(&to_word, true));
     match (from, to) {
         (None, None) => {}
-        (Some(None), _) => ignored.push(("from", from_word)),
-        (_, Some(None)) => ignored.push(("to", to_word)),
+        // AN END THAT DOES NOT READ takes the span with it, and EVERY end
+        // given is named (R3-24 repair round 3, the fourth check's
+        // follow-up): a bad `from` used to drop a good `to`, and a bad `to`
+        // beside a bad `from`, without a word.
+        (from, to) if from == Some(None) || to == Some(None) => {
+            for (name, read, word, other) in
+                [("from", from, from_word, "to"), ("to", to, to_word, "from")]
+            {
+                match read {
+                    None => {}
+                    Some(None) => ignored.push((name, word)),
+                    Some(Some(_)) => {
+                        ignored.push((name, format!("{word} (not applied: {other}= did not read)")))
+                    }
+                }
+            }
+        }
         (from, to) => {
             let (from, to) = (
                 from.flatten().unwrap_or(i64::MIN),
@@ -9956,12 +9971,40 @@ mod r3_24_tests {
             None,
         ))
         .expect("JSON");
-        assert_eq!(ignored(&bad), ["month", "reason", "kind", "from"]);
+        // BOTH bad ends are named (R3-24 repair round 3): `to=x` was dropped
+        // without a word beside a bad `from`.
+        assert_eq!(ignored(&bad), ["month", "reason", "kind", "from", "to"]);
         let reversed = asked("from=2026-10-17&to=2026-10-16");
         assert!(reversed.keys.span.is_none());
         assert_eq!(reversed.ignored[0].0, "from");
         let only_to = asked("to=junk");
-        assert_eq!(only_to.ignored[0].0, "to");
+        assert_eq!(only_to.ignored, [("to", "junk".to_owned())]);
+        // A GOOD END BESIDE A BAD ONE is named as not applied, never dropped
+        // in silence (the fourth check's follow-up), either way round.
+        for (query, bad, good, said) in [
+            (
+                "from=junk&to=2026-10-16",
+                ("from", "junk"),
+                "to",
+                "2026-10-16 (not applied: from= did not read)",
+            ),
+            (
+                "from=2026-10-16&to=junk",
+                ("to", "junk"),
+                "from",
+                "2026-10-16 (not applied: to= did not read)",
+            ),
+        ] {
+            let got = asked(query);
+            assert!(got.keys.span.is_none(), "{query}");
+            assert_eq!(got.ignored.len(), 2, "{query}: {:?}", got.ignored);
+            assert!(
+                got.ignored.contains(&(bad.0, bad.1.to_owned()))
+                    && got.ignored.contains(&(good, said.to_owned())),
+                "{query}: {:?}",
+                got.ignored
+            );
+        }
         drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }

@@ -75828,6 +75828,10 @@ each now with a test that failed on that head:
   did). The
   count stays 194. No `dependencies` list moved: the lock's diff against
   `feat/db-fix` is the two versions and their checksums.
+- *Taken from the check's follow-ups, in this package's files:* a time span
+  with an end that does not read names every end given (R324-31). A good
+  end beside a bad one is named as not applied; before, it was dropped
+  without a word.
 
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
