@@ -674,12 +674,10 @@ impl CorporateActions {
     /// (`a_measured_row_never_suppresses_a_refusal_or_decides_a_class`).
     #[must_use]
     pub fn excuse(&self, symbol: &str, after: Option<Day>, through: Day) -> Option<&Action> {
-        for row in self.labels(symbol, after, through) {
-            if row.excuses() {
-                return Some(row);
-            }
-        }
-        None
+        // At most MAX_ACTIONS_PER_SYMBOL rows: the build refuses more.
+        self.labels(symbol, after, through)
+            .iter()
+            .find_map(|row| row.excuses().then_some(row))
     }
 
     /// The class an `nse` row in `(after, through]` decides; `None` when only
@@ -1027,15 +1025,15 @@ impl BasisRuns {
     /// [`Outside`], by name: no run for the share, or the day outside every
     /// run (before the first, in a gap between two, or after the last).
     pub fn run_on(&self, symbol: &str, day: Day) -> Result<&Run, Outside> {
-        let Some(shelf) = self
+        let Some(held) = self
             .by_symbol
             .get(symbol)
-            .filter(|shelf| !shelf.runs.is_empty())
+            .filter(|held| !held.runs.is_empty())
         else {
             return Err(Outside::NoRuns);
         };
-        let runs = shelf.runs.as_slice();
-        let at = shelf.upto(day);
+        let runs = held.runs.as_slice();
+        let at = held.upto(day);
         let before = at.checked_sub(1).and_then(|i| runs.get(i));
         match before {
             Some(run) if run.holds(day) => Ok(run),

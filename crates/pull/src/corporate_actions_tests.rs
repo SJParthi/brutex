@@ -333,7 +333,7 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     assert_eq!(check(&loaded, &ledger), [], "every step has its row");
     let factors: Vec<(String, Day, Ratio)> = ledger
         .symbols()
-        .into_iter()
+        .iter()
         .flat_map(|s| {
             ledger
                 .of(s)
