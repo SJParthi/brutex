@@ -438,7 +438,9 @@ pub(crate) fn covering(held: &[Bar], width_secs: u32, minutes: &[i64]) -> Vec<i6
 
 /// What one month came to.
 enum Outcome {
-    Planned(usize),
+    /// What `--plan` found: the bars named, and what the quarantine already
+    /// says of the month (one probe), so a plan read after an apply says so.
+    Planned(usize, Option<String>),
     Done(Applied),
     Refused(String),
 }
@@ -461,7 +463,10 @@ fn day_groups(stamps: &[i64]) -> String {
 
 fn outcome_text(outcome: &Outcome) -> String {
     match outcome {
-        Outcome::Planned(count) => format!("plan: {count} bar(s) would be set aside"),
+        Outcome::Planned(count, None) => format!("plan: {count} bar(s) would be set aside"),
+        Outcome::Planned(count, Some(already)) => {
+            format!("plan: {count} bar(s) named; the month is already quarantined ({already})")
+        }
         Outcome::Done(Applied::Nothing { why }) => format!("nothing written ({why})"),
         Outcome::Done(Applied::WholeMonth { bars, ledger_at }) => {
             format!(
@@ -520,13 +525,23 @@ fn act(
     month: YearMonth,
     stamps: &[i64],
 ) -> Outcome {
-    if !ask.apply {
-        return Outcome::Planned(stamps.len());
-    }
     let path = match path_of(ask.segment, symbol, rung, month) {
         Ok(path) => path,
         Err(why) => return Outcome::Refused(why),
     };
+    if !ask.apply {
+        let already = match store::quarantine::probe(root, path) {
+            Ok(store::quarantine::Probe::Quarantined(entry)) => Some(format!(
+                "{} {}, {} bar(s)",
+                entry.scope.code(),
+                entry.cause.code(),
+                entry.bars
+            )),
+            Ok(store::quarantine::Probe::Clear) => None,
+            Err(why) => Some(format!("not known: {why}")),
+        };
+        return Outcome::Planned(stamps.len(), already);
+    }
     let reason = if rung == Timeframe::MINUTE_1 || rung == Timeframe::DAY_1 {
         ask.reason.clone()
     } else {

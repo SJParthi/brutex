@@ -314,6 +314,14 @@ fn plan_writes_nothing_and_apply_drops_the_named_minutes_and_their_buckets_once(
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("nothing written (already_dropped)"), "{out}");
     assert_eq!(files_under(&root.0), after, "a second apply wrote nothing");
+    // A PLAN READ AFTER THE APPLY SAYS THE MONTH IS ALREADY SET ASIDE.
+    let (code, out) = run(&root.0, &base);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("already quarantined (dropped foreign_level, 2 bar(s))"),
+        "{out}"
+    );
+    assert_eq!(files_under(&root.0), after, "a plan wrote nothing");
 }
 
 #[test]
