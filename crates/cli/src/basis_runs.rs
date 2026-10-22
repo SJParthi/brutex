@@ -222,7 +222,7 @@ pub(crate) struct Folded {
     /// Stock-days not folded, by reason.
     pub(crate) skipped: BTreeMap<&'static str, u64>,
     /// Stock-days folded.
-    pub(crate) days_folded: u64,
+    pub(crate) stock_days: u64,
 }
 
 /// One share's days of `month` from `index`, pushed onto its `folder`;
@@ -355,7 +355,7 @@ pub(crate) fn fold(ask: &Ask) -> Result<Folded, String> {
         no_run,
         refused: refused.into_iter().collect(),
         skipped,
-        days_folded,
+        stock_days: days_folded,
     })
 }
 
@@ -502,7 +502,7 @@ pub(crate) fn command_with(
         out,
         "stock-days folded {}, not folded {} ({}); shares with runs {shares}, runs {} (step {}, \
          drift {}, open {})",
-        folded.days_folded,
+        folded.stock_days,
         folded.skipped.values().sum::<u64>(),
         folded
             .skipped
