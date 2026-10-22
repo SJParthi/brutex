@@ -79023,3 +79023,82 @@ docs/04-invariants.md R319-01..R319-12), the updated
 and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
+
+### D-6892 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
+
+Findings ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6, DLY-08 (the policy;
+the classifier is R4-23's).
+
+**D-3350 restated.** The code cited D-3350 — "a repair adds bars and never
+drops one" — and its rule stands for every repair: `store::repair::repair_month`
+keeps every held bar and refuses a held bar that would change
+(`HeldBarDiffers`). It is AMENDED by one door and only one:
+
+1. **`store::repair::publish_without`** publishes a new revision of a month
+   WITHOUT exactly the bars at the named stamps, every other bar byte for
+   byte as held, through the same reservation, write, read-back, receipt and
+   syncs as `publish`. A drop list that is empty, unsorted or repeated is
+   `NothingNamed`; a stamp the month does not hold is `UnheldStamp` — both
+   before anything is reserved. A list naming every held bar is `WholeMonth`:
+   no empty generation is ever published. `drop_month` takes the next free
+   ordinal (stepped-over ordinals named, `RevisionLimit` at 1,024) and
+   promotes; the old generation stays byte-identical.
+2. **The quarantine (`store::quarantine`).** `<store>/audit/<feed>.quarantine.ledger`
+   is the truth: one text line per act (`dropping` before the door,
+   `dropped` after the promotion, `whole_month`), with the series key, month,
+   cause, bars, revision, the BLAKE3 of the named bars as held, who, the
+   reason (1 to 200 bytes, one line) and every stamp, each line CRC-32C'd. A
+   torn last line is never read as a line and the next append ends it with a
+   newline first: no byte of the ledger is changed. `<store>/audit/<feed>.quarantine`
+   is derived: a 64-byte header and 8,199 fixed 64-byte slots open-addressed
+   by the BLAKE3 of (series key, month), a bucket of 8 that never wraps, so a
+   probe is ONE 512-byte positional read; published whole by staging file,
+   sync and rename. An index of the wrong length or a slot that fails its CRC
+   answers `quarantine_index_torn` / `quarantine_slot_damaged`, never "clear",
+   and is rebuilt from the ledger by the next record or `rebuild`. One writer
+   at a time under `<feed>.quarantine.lock`; a second waits 10 s, then is
+   refused naming the holder.
+3. **`apply_month`** ledgers first, then publishes, then indexes; a second
+   apply writes nothing; a run killed between the promotion and its
+   `dropped` line is finished from its intent (`Resumed`).
+4. **The restate policy (DLY-08)**: `store::repair::restate_month` with
+   `Restate { open_interest_applies }` keeps every held stamp, takes an
+   offered bar's values at a held stamp (a correction, named), adds offered
+   bars at stamps the month lacks, reads the revision back whole and only
+   then promotes. `repair_month`'s rule is untouched; R4-23's classifier
+   decides which months are restated.
+5. **Readers by name.** `cli`'s stored sweep refuses a quarantined month
+   (either scope) naming scope, cause and ledger line; `/bars.json` answers a
+   month quarantined whole 409 `month_quarantined` with the quarantine and no
+   bars; `/bars/window.json` names it among its faults and serves its other
+   months; `/store.json` (expanded form) rows of a feed with any quarantine
+   carry `"quarantine"` (null or the month's), and `/instruments.json` rows
+   carry `"quarantine"` (null, `{months, whole_months, bars, causes}`, or
+   `{unknown: <code>}`), each read once per cached body.
+6. **`cli zerodha-quarantine SYMBOL|ALL FROM TO --cause C --reason R
+   [--plan|--apply]`** acts on R4-17's newest series-identity plan (or
+   `--plan-file`): its `quarantine` rows of the cause asked, in the window;
+   `before_listing` stamps are checked against the share's listing day once
+   more (a master is required). A minute month's derived rungs set aside
+   every bucket whose span holds a named minute, with the same cause.
+   `GET /pull/quarantine.json` and `POST /pull/quarantine` run this one verb
+   (plan on the store-read pool, the press on the operations pool, one press
+   at a time per server, 409 `quarantine_running`), and `/ingest`'s
+   Quarantine panel sends one request per press.
+
+**Not done, said here.** A derived bucket mixing a named minute and a kept
+one is set aside whole, not folded again from its kept minutes: the fold of
+a repair (`pull::ingest`'s derive path) refuses a changed held bar and is not
+reachable from `cli`. For `before_listing` and `zero_price` every such
+bucket is wholly named; for PIIND's `foreign_level` a mixed bucket loses its
+kept minutes' share until a refold door exists. The census is not rewritten
+by the verb: `cli census-recount` follows an apply. `/store.json`'s compact
+wire (`census-tuples-v1`) does not yet carry the field (R4-03 carries it
+over when it restructures the route).
+
+Proof: `store::quarantine::tests::*` (twelve tests), `store::repair::tests::{a_drop_naming_an_unheld_stamp_is_refused,
+a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source,
+a_drop_past_the_last_ordinal_is_the_revision_limit,
+the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation}`,
+`cli::zerodha_quarantine::tests::*`, `cli::stored::tests::a_stored_sweep_refuses_a_quarantined_month`,
+`api::server::quarantine_route::tests::*`, and `web/tests/quarantine.test.js`.
