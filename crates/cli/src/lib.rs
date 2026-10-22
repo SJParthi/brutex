@@ -3043,7 +3043,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 55] = [
+const COMMANDS: [&str; 56] = [
     "alerts",
     "audit",
     "audit-audited-range",
