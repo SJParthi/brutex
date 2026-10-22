@@ -12060,12 +12060,17 @@ would close this.
   that a later feature change made real on the host (for example a release of
   `rustls-webpki` turning `ring` on by default) would not be seen by this test.
   The fingerprint pin catches that change only when it moves a `dependencies`
-  list. The fingerprint hashes names and dependency strings, never versions,
-  so a version bump that leaves every `dependencies` list unchanged (the
+  list. **Corrected 21 Oct 2026 (D-7120):** this paragraph said the
+  fingerprint hashes names and dependency strings and never versions; since
+  D-1611 it hashes each package's version too, so a version-only bump (the
   `rustls-webpki` example: only its version and checksum lines move, its list
-  still reads `"ring"`) is invisible to both the walk and the fingerprint.
-  `cargo deny check` (gate 3, `ring` and `cc` banned) is the only check on
-  that case.
+  still reads `"ring"`) does move the pin and stops the build until the scan
+  is done. D-7120's `rustls-webpki` 0.103.15 → 0.103.16 did exactly that. What
+  stays unseen by the walk and the fingerprint alike is the feature flip
+  itself: the lock records no features, so a new version that turned `ring`
+  on by default would re-pin like any other version bump, and only the scan
+  of its manifest (D-7120 read it: the same features) or `cargo deny check`
+  (gate 3, `ring` and `cc` banned) catches it.
 - **Names only, as before.** A native crate under a name `DECLARED` does not
   list is caught by the fingerprint pin, not by the reachability walk.
 - **Cost.** One parse of the lock and one O(V + E) walk (about 195 packages),
@@ -21101,3 +21106,11 @@ nothing.
 | L-R428-06 | Contracts that expired before the first snapshot have no per-contract series | no token of theirs was ever cached; the vendor reaches them only through `continuous=1` | their days are in `<UNDERLYING>-FUT-C1` only, labelled | R4-28 |
 | L-R428-07 | A futures plan still parses the NEWEST snapshot once per request (D-6894) | `token_reused` and the continuous series are checked against the newest dump, which is opened per request; every older snapshot is read from the first-listed index instead, and the absorbed log and the directory listing are one short record per snapshot | flat in the snapshots held, O(rows of the newest dump) per underlying per run. Measured on a copy of the real 108,915-row dump, dev profile, the book opened and NIFTY planned, n=50 single calls a size: 1 snapshot p50 119.1 ms, p99 122.6 ms, max 146.0 ms; 10 snapshots p50 119.4 ms, p99 125.2 ms, max 126.3 ms; 100 snapshots p50 116.8 ms, p99 120.1 ms, max 149.7 ms (`fnowork::futures_tests::a_real_size_plan_does_not_grow_with_the_snapshots_held`, opt-in). Before the index: 240 ms at 1, 1,331 ms at 10, 5,008 ms at 40. C-MS-02 holds it flat at 1, 10 and 100 synthetic snapshots | R4-28 |
 | L-R428-08 | Writing a Kite snapshot now also takes its futures into the first-listed index | one parse of the snapshot, and one append and sync per underlying with a contract no earlier snapshot listed (a new month lists one per underlying); the absorbed line is synced last | once per attended refresh. Measured on the same copy, 100 snapshots written: p50 337 ms, p99 851 ms, max 7,076 ms; the max is the first snapshot, which creates and syncs 219 index files (one per NFO future name). Disk: one 82-byte line per contract ever listed, one 60-byte absorbed line per snapshot; after those 100 snapshots, 219 files and 884 KB on disk (4 KB blocks) | R4-28 |
+
+## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-BREDS-1 | Which hosts `pull` contacts chain through the distrusted emSign keys is not known | RUSTSEC-2026-0382 and RUSTSEC-2026-0381 are cleared by refusing, during certificate verification, a path through any of the eight emSign intermediate keys `rustls-webpki` 0.103.16 lists, or one that anchors only at `emSign ECC Root CA - G3`, which `webpki-roots` 1.0.10 removed. A host `pull` reaches through `reqwest` (the broker, the Dropbox fetch, AWS Parameter Store) that presents such a chain is now refused. No handshake was made from this package: no gate contacts a vendor host, and none was contacted to find out. **UNVERIFIED** | the refusal is the call site's existing TLS error, named and never retried on weaker verification; nothing falls back to the old roots. The added work is a comparison against a fixed list of eight keys per certificate in a path, once per handshake, never per bar or per request served; not measured | BASE-REDS-1021 |
+| L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
+| L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
