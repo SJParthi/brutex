@@ -72,7 +72,9 @@ mod disk_projection;
 mod day_table;
 
 /// C-MS-01: `master_snapshots::Book::token_on` flat at 1, 10 and 100 dated
-/// snapshots (R4-28, DLY-09), held to the ceiling by this harness.
+/// snapshots (R4-28, DLY-09), held to the ceiling by this harness. C-MS-02:
+/// `fnowork::futures_plan` flat at 1, 10 and 100 snapshots on disk (R4-28
+/// repair 1).
 #[path = "ratio/master_snapshots.rs"]
 mod master_snapshots;
 
@@ -1454,6 +1456,7 @@ fn main() {
     ok &= identity::identity_is_flat();
     ok &= disk_projection::disk_projection_is_flat();
     ok &= master_snapshots::token_on_is_flat();
+    ok &= master_snapshots::futures_plan_is_flat();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
     let (keep_root, keep_stores) = keep_stores();
     ok &= keep_lookup_is_flat(&keep_stores);

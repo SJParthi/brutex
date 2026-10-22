@@ -1056,3 +1056,107 @@ fn the_columns_read_are_the_vendors_own_and_none_is_an_isin() {
     );
     assert!(crate::vendor::KITE_TOKENS_ARE_REUSED.contains("flushed"));
 }
+
+/// R4-28 repair 1: between two snapshot days the next later snapshot is that
+/// day's NEWEST ordinal (the day's snapshot), never its first. Before the
+/// repair a later refresh the same day that corrected the first was ignored,
+/// and a token both days' snapshots agree on read as ambiguous.
+#[test]
+fn the_next_later_snapshot_is_that_days_newest_ordinal_not_its_first() {
+    let root = scratch("next-ordinal");
+    let (d1, d2) = (day(2026, 1, 5), day(2026, 1, 12));
+    let jan = dump(&[fut(9_000_001, "ZQIDX26JANFUT", "2026-01-29", 75)]);
+    let apr = dump(&[fut(9_000_001, "ZQIDX26APRFUT", "2026-04-28", 75)]);
+    for (on, body) in [(d1, &jan), (d2, &apr), (d2, &jan)] {
+        snapshot(&root, Kind::Kite, on, URL, body.as_bytes()).unwrap();
+    }
+    let book = Book::open(&root).unwrap();
+    assert_eq!(book.stamps(), &[stamp(d1, 1), stamp(d2, 1), stamp(d2, 2)]);
+    let between = day(2026, 1, 8);
+    let TokenOn::Resolved {
+        snapshot: held,
+        listed,
+    } = book.token_on(between, "NFO", 9_000_001)
+    else {
+        panic!("the day's newest snapshot agrees, so the older one is believed");
+    };
+    assert_eq!(
+        (held, listed.tradingsymbol()),
+        (stamp(d1, 1), "ZQIDX26JANFUT")
+    );
+    // AND THE OTHER WAY: the day's first agrees, its newest does not.
+    let other = scratch("next-ordinal-other");
+    for (on, body) in [(d1, &jan), (d2, &jan), (d2, &apr)] {
+        snapshot(&other, Kind::Kite, on, URL, body.as_bytes()).unwrap();
+    }
+    match Book::open(&other)
+        .unwrap()
+        .token_on(between, "NFO", 9_000_001)
+    {
+        TokenOn::Ambiguous { older, newer } => {
+            assert_eq!((older, newer), (stamp(d1, 1), stamp(d2, 2)));
+        }
+        answer => panic!("the day's newest disagrees, so ambiguous; got {answer:?}"),
+    }
+}
+
+/// R4-28 repair 1: a receipt is renamed into place whole, so a kill
+/// mid-receipt leaves a `.partial` file the catalog names, and the body
+/// stays incomplete and unread; the next refresh is the day's snapshot.
+#[test]
+fn a_receipt_cut_before_its_rename_is_named_and_its_body_never_read() {
+    let source = scratch("partial-source");
+    let on = day(2026, 1, 5);
+    let body = dump(&[fut(9_000_001, "ZQIDX26JANFUT", "2026-01-29", 75)]);
+    snapshot(&source, Kind::Kite, on, URL, body.as_bytes()).unwrap();
+    let root = scratch("partial");
+    let first = stamp(on, 1);
+    fs::copy(
+        source.join(file_name(Kind::Kite, first)),
+        root.join(file_name(Kind::Kite, first)),
+    )
+    .unwrap();
+    let receipt = fs::read(source.join(receipt_name(Kind::Kite, first))).unwrap();
+    let partial = format!("{}{PARTIAL}", receipt_name(Kind::Kite, first));
+    fs::write(root.join(&partial), &receipt[..receipt.len() / 2]).unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert!(catalog.receipted(Kind::Kite).is_empty());
+    assert_eq!(catalog.incomplete().len(), 2, "{:?}", catalog.incomplete());
+    assert!(
+        catalog
+            .incomplete()
+            .iter()
+            .any(|one| one.starts_with(&partial) && one.contains("before its rename")),
+        "{:?}",
+        catalog.incomplete()
+    );
+    assert!(Book::open(&root).unwrap().stamps().is_empty());
+    assert_eq!(
+        snapshot(&root, Kind::Kite, on, URL, body.as_bytes()),
+        Ok(Wrote::New(stamp(on, 2)))
+    );
+    assert!(
+        !root
+            .join(format!(
+                "{}{PARTIAL}",
+                receipt_name(Kind::Kite, stamp(on, 2))
+            ))
+            .exists(),
+        "a committed receipt leaves no partial name"
+    );
+    assert_eq!(newest_snapshot_day(&root), Ok(Some(on)));
+}
+
+/// A receipt already at the name is refused, never overwritten.
+#[test]
+fn a_receipt_already_at_its_name_is_refused_and_left_as_it_is() {
+    let root = scratch("receipt-held");
+    let held = stamp(day(2026, 1, 5), 1);
+    fs::write(root.join(receipt_name(Kind::Kite, held)), b"held").unwrap();
+    let why = commit_receipt(&root, Kind::Kite, held, b"new").unwrap_err();
+    assert!(why.contains("already exists and is left as it is"), "{why}");
+    assert_eq!(
+        fs::read(root.join(receipt_name(Kind::Kite, held))).unwrap(),
+        b"held"
+    );
+}

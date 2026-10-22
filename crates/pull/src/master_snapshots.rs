@@ -23,7 +23,10 @@
 //!
 //! **The receipt is the commit marker.** The body is written and synced first
 //! and the receipt last, so a kill between the two leaves a body with no
-//! receipt: [`Catalog`] names it incomplete and nothing here reads it. A later
+//! receipt: [`Catalog`] names it incomplete and nothing here reads it. The
+//! receipt itself is written whole under a `.partial` name and renamed into
+//! place (R4-28 repair 1), so a kill mid-receipt leaves a partial file
+//! [`Catalog`] names, never a torn receipt listed as receipted. A later
 //! refresh the same day takes the next ordinal (`_2`, `_3`, ...), and the
 //! newest receipted ordinal of a day is that day's snapshot. A refresh whose
 //! body equals the day's snapshot is "already held" and writes nothing.
@@ -284,11 +287,21 @@ impl Catalog {
             Err(why) => return Err(format!("{} could not be listed: {why}", root.display())),
         };
         let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::new();
+        let mut partials = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
+            if name
+                .strip_suffix(PARTIAL)
+                .is_some_and(|cut| matches!(parse_name(cut), Some((_, _, true))))
+            {
+                partials.push(format!(
+                    "{name}: incomplete — a receipt cut before its rename committed it; never read"
+                ));
+                continue;
+            }
             let Some((kind, stamp, receipt)) = parse_name(name) else {
                 continue;
             };
@@ -318,6 +331,7 @@ impl Catalog {
         for stamps in catalog.receipted.values_mut() {
             stamps.sort_unstable();
         }
+        catalog.incomplete.extend(partials);
         catalog.incomplete.sort_unstable();
         Ok(catalog)
     }
@@ -538,6 +552,33 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|why| format!("{} is incomplete and retained: {why}", path.display()))
 }
 
+/// The suffix a receipt carries while it is written, before its rename commits
+/// it (R4-28 repair 1).
+const PARTIAL: &str = ".partial";
+
+/// Writes a receipt whole under its partial name, synced, and renames it into
+/// place, so a receipt exists complete or not at all: a kill mid-write leaves
+/// the body with no receipt (incomplete, never read) and a partial file
+/// [`Catalog`] names, never a torn receipt listed as receipted. A receipt
+/// already at the name is refused and left as it is.
+fn commit_receipt(root: &Path, kind: Kind, stamp: Stamp, bytes: &[u8]) -> Result<(), String> {
+    let path = root.join(receipt_name(kind, stamp));
+    let partial = root.join(format!("{}{PARTIAL}", receipt_name(kind, stamp)));
+    write_new(&partial, bytes)?;
+    if path.exists() {
+        return Err(format!(
+            "{} already exists and is left as it is; the receipt stays partial and the body is never read",
+            path.display()
+        ));
+    }
+    fs::rename(&partial, &path).map_err(|why| {
+        format!(
+            "{} could not be committed: {why}; the body stays incomplete and is never read",
+            path.display()
+        )
+    })
+}
+
 /// Syncs the directory entry of everything just created in `root`.
 fn sync_dir(root: &Path) -> Result<(), String> {
     File::open(root).and_then(|dir| dir.sync_all()).map_err(|why| {
@@ -653,8 +694,10 @@ pub fn snapshot(
     // BODY FIRST, RECEIPT LAST: a kill between them leaves an incomplete entry
     // that no reader opens, and the next refresh takes the next ordinal.
     write_new(&root.join(file_name(kind, stamp)), &compressed)?;
-    write_new(
-        &root.join(receipt_name(kind, stamp)),
+    commit_receipt(
+        root,
+        kind,
+        stamp,
         render_receipt(kind, stamp, &receipt).as_bytes(),
     )?;
     sync_dir(root)?;
@@ -1331,13 +1374,17 @@ impl Book {
                 listed,
             };
         }
-        let Some(&newer) = self.stamps.get(at + 1) else {
+        let Some(next_day) = self.stamps.get(at + 1).map(|next| next.day) else {
             return TokenOn::Resolved {
                 snapshot: stamp,
                 listed,
             };
         };
-        let later = match self.snapshot(at + 1) {
+        // THE NEXT LATER DAY'S SNAPSHOT IS ITS NEWEST ORDINAL, as on every
+        // other day, never its first: one day-table index (R4-28 repair 1).
+        let later_at = self.governing(next_day).unwrap_or(at + 1);
+        let newer = self.stamps.get(later_at).copied().unwrap_or(stamp);
+        let later = match self.snapshot(later_at) {
             Ok(snapshot) => snapshot,
             Err(why) => {
                 return TokenOn::Unreadable {

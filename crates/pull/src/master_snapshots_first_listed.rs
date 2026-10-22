@@ -120,13 +120,13 @@ fn path_of(dir: &Path, exchange: &str, name: &str) -> Option<PathBuf> {
 
 /// The check a line ends in: the first eight bytes of its text's SHA-256.
 fn check(text: &str) -> String {
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .take(8)
-        .fold(String::with_capacity(16), |mut out, byte| {
+    Sha256::digest(text.as_bytes()).iter().take(8).fold(
+        String::with_capacity(16),
+        |mut out, byte| {
             let _infallible = write!(out, "{byte:02x}");
             out
-        })
+        },
+    )
 }
 
 /// `text` sealed as one line.
@@ -272,8 +272,17 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, String> {
     };
     for line in &lines {
         let fields: Vec<&str> = line.split('|').collect();
-        let [tag, "absorbed", stamp, exchange, kind, status, _lines, _skipped, detail] =
-            fields.as_slice()
+        let [
+            tag,
+            "absorbed",
+            stamp,
+            exchange,
+            kind,
+            status,
+            _lines,
+            _skipped,
+            detail,
+        ] = fields.as_slice()
         else {
             log.torn = log.torn.saturating_add(1);
             continue;
@@ -304,7 +313,13 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, String> {
 type Firsts = BTreeMap<(Day, u64), Day>;
 
 /// One future's line.
-fn future_line(route: ContinuousSpec, name: &str, contract: (Day, u64), first: Day, stamp: Stamp) -> String {
+fn future_line(
+    route: ContinuousSpec,
+    name: &str,
+    contract: (Day, u64),
+    first: Day,
+    stamp: Stamp,
+) -> String {
     sealed(&format!(
         "{TAG}|future|{}|{}|{name}|{}|{}|{first}|{}",
         route.exchange,
@@ -317,12 +332,26 @@ fn future_line(route: ContinuousSpec, name: &str, contract: (Day, u64), first: D
 
 /// One underlying's futures as its file holds them, and how many lines did not
 /// check.
-fn read_underlying(path: &Path, route: ContinuousSpec, name: &str) -> Result<(Firsts, u64), String> {
+fn read_underlying(
+    path: &Path,
+    route: ContinuousSpec,
+    name: &str,
+) -> Result<(Firsts, u64), String> {
     let (lines, mut torn) = read_lines(path)?;
     let mut firsts = Firsts::new();
     for line in &lines {
         let fields: Vec<&str> = line.split('|').collect();
-        let [tag, "future", exchange, kind, held, expiry, token, first, stamp] = fields.as_slice()
+        let [
+            tag,
+            "future",
+            exchange,
+            kind,
+            held,
+            expiry,
+            token,
+            first,
+            stamp,
+        ] = fields.as_slice()
         else {
             torn = torn.saturating_add(1);
             continue;
@@ -368,9 +397,11 @@ fn take_in(
         .filter(|listed| listed.instrument_type() == route.future_type);
     for listed in rows {
         let name = listed.name();
-        let (Some(expiry), true, Some(path)) =
-            (listed.expiry(), carried(name), path_of(dir, route.exchange, name))
-        else {
+        let (Some(expiry), true, Some(path)) = (
+            listed.expiry(),
+            carried(name),
+            path_of(dir, route.exchange, name),
+        ) else {
             skipped = skipped.saturating_add(1);
             continue;
         };
@@ -458,7 +489,11 @@ pub(super) fn absorb_held(root: &Path, route: ContinuousSpec) -> Result<Absorbed
             Ok(snapshot) => (Taken::Indexed, take_in(&dir, &snapshot, route, &mut cache)?),
             Err(why) => (Taken::Unparseable(why), (0, 0)),
         };
-        append(&dir, &dir.join(ABSORBED), &absorbed_line(stamp, route, &taken, counts))?;
+        append(
+            &dir,
+            &dir.join(ABSORBED),
+            &absorbed_line(stamp, route, &taken, counts),
+        )?;
         match taken {
             Taken::Indexed => out.indexed.push(stamp),
             Taken::Unparseable(why) => out.unparseable.push((stamp, why)),

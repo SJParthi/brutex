@@ -78010,3 +78010,49 @@ The number is the ledger head + 1 (amendment A6).
    series=futures` per F&O underlying. Before the first snapshot nothing is
    planned (`no_snapshot`). History before the first snapshot reaches the
    store only as the continuous series.
+
+### D-6894 — R4-28 repair 1: a futures plan reads an append-only first-listed index, never every snapshot; its cost does not grow with the snapshots held — 2026-10-22
+
+The number is the ledger head + 1 (amendment A6).
+
+1. **The defect.** `fnowork::futures_plan` found the first snapshot that
+   lists each future by opening, unpacking and parsing every receipted
+   snapshot on or before the window's end, on every `POST /pull/fno
+   series=futures` run and for every underlying, keeping nothing between
+   runs. A second agent measured it on copies of the real 108,915-row dump
+   (dev profile, NIFTY): 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at
+   40 — linear, unbounded, and against the operator's rule that no work is
+   redone that an index can remember. `docs/06-limits.md` L-R428-04 named
+   the cost and bounded nothing.
+2. **The rule.** The day a receipted snapshot first listed a contract never
+   changes, so it is written down once. `master_snapshots::first_listed`
+   keeps, under the snapshots directory in `futures-first-listed/`, one
+   append-only file per (exchange, underlying name) — a line per (type,
+   expiry, token) the first time a snapshot lists it, and again only when an
+   older snapshot taken in later lists it earlier; the reader takes the
+   earliest day — and `absorbed.idx`, a line per snapshot taken in, written
+   after every line it added is synced. That line is the commit marker, as a
+   receipt is a snapshot's. Every Kite snapshot write takes its futures in
+   under the writers' lock it already holds; a plan reads the index and
+   parses the newest snapshot alone (for `token_reused` and the continuous
+   series). A snapshot on or before the window's end that the index does
+   not hold (one held before the index existed, or a kill before its commit
+   line) is taken in by the next plan, once, under the same lock.
+3. **Nothing is dropped silently.** Every line ends in a check over its own
+   bytes: a line cut by a kill is skipped and counted (`pull.futures` event),
+   and the next append starts a new line; no line is rewritten. A snapshot
+   whose checked body does not parse is recorded unparseable once and named
+   by every plan that needs it, exactly as before (`snapshot_unreadable`); a
+   snapshot whose receipt or body does not check is not recorded, is named,
+   and is retried. A future row with a field a line cannot carry is counted
+   on its commit line and in the `pull.masters.snapshot` event. A book built
+   in memory has no index and is refused `futures_index` by name.
+4. **Scope.** Only the route's own exchange and future type are taken in
+   (`ZERODHA_CONTINUOUS`: NFO, FUT), so a refresh touches only the files of
+   underlyings with a new contract — about one line per underlying when a
+   new month is listed, none on other days. Another route's (exchange,
+   type) is its own index, taken in on its first plan.
+5. **Proof.** C-MS-02 holds `futures_plan` flat at 1, 10 and 100 snapshots
+   on disk; `docs/04-invariants.md` R428-09..11 name the tests;
+   `docs/06-limits.md` L-R428-04 is closed and L-R428-07/08 state what
+   remains.

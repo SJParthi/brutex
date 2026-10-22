@@ -722,7 +722,10 @@ fn a_futures_plan_opens_no_snapshot_the_index_already_holds() {
     snapshot_on(&masters, day(2026, 1, 12), &[jan, feb]);
     // ROT ON DISK: neither older body matches its receipt any more.
     for on in [day(2026, 1, 2), day(2026, 1, 5)] {
-        let stamp = master_snapshots::Stamp { day: on, ordinal: 1 };
+        let stamp = master_snapshots::Stamp {
+            day: on,
+            ordinal: 1,
+        };
         std::fs::write(
             masters.join(master_snapshots::file_name(Master::Kite, stamp)),
             b"rotted",
@@ -740,7 +743,11 @@ fn a_futures_plan_opens_no_snapshot_the_index_already_holds() {
     )
     .unwrap();
     assert!(plan.refused.is_empty(), "{:?}", plan.refused);
-    let spans: Vec<(u64, Window)> = plan.asks.iter().map(|ask| (ask.token, ask.window)).collect();
+    let spans: Vec<(u64, Window)> = plan
+        .asks
+        .iter()
+        .map(|ask| (ask.token, ask.window))
+        .collect();
     assert_eq!(
         spans,
         vec![
@@ -818,7 +825,10 @@ fn a_futures_plan_over_a_book_with_no_directory_is_refused_by_name() {
         day: day(2026, 1, 2),
         ordinal: 1,
     };
-    let book = Book::of(vec![master_snapshots::Snapshot::parse(stamp, &csv).unwrap()]).unwrap();
+    let book = Book::of(vec![
+        master_snapshots::Snapshot::parse(stamp, &csv).unwrap(),
+    ])
+    .unwrap();
     let why = futures_plan(
         &book,
         route(),
