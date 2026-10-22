@@ -373,10 +373,10 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     let sourced = actions_draft(
         Standing::Sourced,
         &[
-            nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2"),
             nse("BONUSCO", day(2019, 2, 1), Kind::Bonus, "2"),
             nse("BONUSCO", day(2019, 9, 20), Kind::Split, "5"),
             nse("RIGHTSCO", day(2021, 5, 31), Kind::Rights, "10481/10000"),
+            nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2"),
         ],
     );
     let other = scratch("cor-every-run-nse");
