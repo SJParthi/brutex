@@ -19930,6 +19930,466 @@ a figure.
 | L-IA-57 | Naming who holds a busy lock (IA-2 repair 1) | a census verb refused beside v4 runs reads the kind locks; a press refused its sink probes its claim lock | O(1): at most three kind-lock probes (shared, non-blocking, ≤ 1 KiB each) or one claim-lock probe. Measured (`ia2_repair_timings`): census verb refused beside 3 v4 runs n=2,000 p50 71.7 µs, p99 129.0 µs, max 267.9 µs; plan refused before its sink n=2,000 p50 19.7 µs, p99 41.5 µs, max 112.3 µs | IA-2 |
 | L-IA-58 | A run's end line in `/imports.json` (IA-2 repair 1) | each `run <id> ended=` line is folded into its run | O(1) per line: one id-index probe and the run's own fields. Measured (`end_line_fold_timing`, ignored test): 100,000 end lines folded beside 100,000 runs, each timed, p50 458 ns, p99 1.46 µs, max 72.3 µs. The route over the real store's journal (24 runs), n=200 sequential GETs on :8401: p50 9.24 ms, p99 10.10 ms, max 12.83 ms | IA-2 |
 
+## CHG-1. What the contract-note charge stack does not know, and what it cannot yet prove — D-5110 to D-5132
+
+`crates/costs` package CHG-1: `schedule`, `stack` (precise, the default) and
+`dhan_calc` (Dhan's calculator, comparison only). §27 above still describes
+the index-options round trip, which this package leaves unchanged. Every gap
+below is UNVERIFIED in the sense `CLAUDE.md` §3 rule 1 uses the word.
+
+### Nothing here has been checked against a real contract note
+
+The precise mode reproduces **the operator's five contract-note vectors**
+(V1 ₹73.90, V2 ₹403.39, V3 ₹0.78, V4 ₹1,829.14, V5 ₹400.63) exactly, each
+re-derived from the rules rather than copied
+(`costs::stack::the_five_contract_note_vectors_rederive_from_the_rules`). Those
+vectors are the operator's own derivation, not a broker's document. **Full
+precision needs the operator's real Dhan contract notes**: until one is
+compared line by line, "the rule as written" and "what Dhan bills" are two
+claims and only the first is proven.
+
+### The direction of an exact half is a choice
+
+Every precise line rounds **half-up** (`exact::round_half_up`,
+`exact::Ratio::apply`): brokerage per order and the exchange charge, the SEBI
+fee and the GST per day to the paisa; STT and stamp duty to the paisa per
+security and then on the client's day total to the rupee (D-5121). The rupee
+step's direction **is** stated — `NSE/CMTR/5588` section D and
+`NCL/CMPT/43115` item 2 both send 50 paise up — so ₹76.50 of STT is ₹77 on
+the circulars' own words (the D1 sell day). Which way an exact half **paisa**
+goes — in the VWAP, in each security's figure, in every other line — no
+source read states; half-up is a choice. Of the five vectors only V4's
+exchange line (308.535) lands on such a half, and it is an operator figure,
+not a broker's. UNVERIFIED (D-5113).
+
+### The aggregation level of three lines is assumed
+
+The exchange charge (IPFT folded in, one line), the SEBI fee and the GST are
+computed on the **client-security-day's** turnover and rounded once. A contract
+note may instead total them across every security on the note, or per order,
+before rounding. **The vectors cannot decide it: they were built under these
+assumptions** (D-5122, correcting D-5113's "evidence for the levels"). The 15
+Oct attack run recomputed them under the alternatives: NSE's ₹306.99 and the
+IPFT's ₹0.01 rounded as two lines, as Dhan's pricing page lists them, give V2
+₹403.38 and V4 ₹1,829.12; the SEBI fee rounded per leg gives V1 ₹73.91; a
+CGST 9% + SGST 9% split rounded line by line gives V1 ₹73.89, V2 ₹403.38, V4
+₹1,829.13, V5 ₹400.64. The stack keeps the choices that reproduce the
+operator's five figures, and every one of those choices is UNVERIFIED.
+
+### GST basis nuances
+
+GST is 18% of brokerage + exchange charge (IPFT included) + SEBI fee, rounded
+once. The DP charge and the broker square-off fee carry their own 18% as
+separate lines. Whether a contract note puts the SEBI fee inside the GST base
+is how the precise mode and Dhan's calculator differ (the calculator leaves it
+out); the precise mode follows the brief. Whether stamp duty or STT ever enters
+the base (they do not here) is not stated by any source recorded. UNVERIFIED.
+
+### Effective dates were not seen
+
+The cloud session that wrote the code could read no source
+(`nsearchives.nseindia.com` and `dhan.co` were refused by its network policy).
+The local merge cites what the 13 Oct and 15 Oct runs read instead (D-5123):
+`NSE/FA/73061` dated 2026-02-27, effective 2026-03-01; `NSE/FATAX/73524` dated
+2026-03-31, under which futures STT became 0.05% and options STT and exercise
+STT 0.15% from 2026-04-01; `NCL/CMPT/43115` and `43116` from trade date
+2020-07-01. **What was not read is every superseded rate before those
+dates**, so `RateSelector::Dated` still **refuses** equity and futures on
+every date rather than guess one; only today's table prices them, labelled
+"today's rates applied to <date>" (D-5115). No digest of any circular body is
+recorded in this repository.
+
+### Today's rates on a 2018 trade are today's rates
+
+The default selector applies the 16 Oct 2026 table to every trade date. For
+2018-2024 that over- or under-states every rate that has moved since — the
+options STT tripled between 2018 and 2026 — and the label says so on every
+output. It is the operator's choice for backtests, not an accuracy claim
+(D-5115).
+
+### The dated options exchange charge is the trip stack's, and how CHG-0 must merge (D-5131)
+
+Under `RateSelector::Dated`, an NSE options day is priced at the regime row in
+force **plus the IPFT**, read exactly where `costs::trip::Rates::resolve` reads
+them, on every day: FA64232's 0.03503% plus the 0.0005% IPFT = 0.03553%, which
+on and after 2026-03-01 is the total `FA73061` states (₹3,552.99 + ₹0.01 per
+crore, sources row `E-03`). Until D-5131 the card dropped the IPFT by date from
+2026-03-01, expecting CHG-0's FA73061 row; that row is not in `regime.rs`, so
+every dated NSE options day from 2026-03-01 was priced at 0.03503% — ₹5.01
+against ₹5.08 on the NIFTY 25300 CE reading — labelled as cited, and the test
+that showed it was `#[ignore]`d. It now runs in the gate
+(`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`),
+and `costs::schedule::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+holds the card to `trip` on every day from 2018 to 2027 at both venues.
+
+**What CHG-0's merge must do.** CHG-0 (branch `fix/db-CHG-0`, not merged when
+this was written) adds a 0.03553% NSE row from 2026-03-01 and a dated NSE IPFT
+that is zero from the same day, and reads the IPFT through
+`regime::ipft_rate(exchange, day)` in `trip`. The dated card must then read
+the IPFT from the same function: if it kept `rate::ipft` beside CHG-0's row it
+would charge 0.03603% from 2026-03-01, and the trip-agreement test, the
+October golden test and the r2 fingerprint each fail on that merge. Read where
+`trip` reads it, the card's figures — and the `dated-regime/r2` fingerprint —
+do not change at that merge, because CHG-0 re-splits the same total.
+
+**The IPFT figure before 2026-03-01 is the one `trip` has always carried.**
+`rate::NSE_IPFT` (₹50 per crore) comes from `COSTS_VERIFIED` §5 and its circular
+citation is UNVERIFIED (D-1779); the dated card labels the NSE exchange line
+cited, as it did before this repair, on the strength of FA64232's row and that
+figure. CHG-0's branch reads `FA56129` for it; until that merges, the
+pre-2026-03-01 IPFT part is the predecessor's figure, not a circular read here.
+
+### Dhan's calculator total: the page's last paisa is not reproduced
+
+Every **line** of all 49 readings is reproduced exactly (343 lines). The
+**total**, computed as the exact sum of the unrounded lines rounded half-up to
+the paisa, equals the page on 34 readings and misses by exactly one paisa on
+15: eight where the page shows a paisa more and seven where it shows a paisa
+less (`costs::dhan_calculator::the_one_paisa_total_misses_are_listed_with_their_direction`).
+Neither truncation nor ceiling fits all 15 (the Yes Bank delivery reading
+needs a floor, the NIFTY 25300 CE reading a ceiling). The page's own rule is
+UNVERIFIED. All 49 readings are held: the cloud brief carried 48, and the
+49th — the UI reading of the V1 inputs — was added at the local merge (D-5126).
+
+**A search for a rule that fits all 48 found none** (the 49th equals V1, so the
+result carries to 49). This search is the cloud session's report and was NOT
+reproduced at the local merge: its test was thrown away. On 16 Oct 2026 a
+throwaway test (not committed) tried every combination of:
+
+- each line exact, or rounded to the paisa half-up, down or up;
+- the exchange line rounded to 10⁻⁴ rupee;
+- brokerage rounded per order;
+- three GST bases;
+- four final roundings.
+
+That is 262,500 rules over the whole-trade lines. A second pass of 941,192
+rules rounded each line per side (buy and sell priced apart, GST per side).
+
+- The best rule fits **41 of 48**: the SEBI fee and stamp rounded half-up to
+  the paisa before the sum, everything else exact.
+- No per-side rule fits 44.
+- The 41-of-48 rule still misses seven readings, and they pull in opposite
+  directions: D1 needs the SEBI fee unrounded where V3 needs it rounded.
+
+Floating-point accumulation cannot explain the misses either: the D1 total sits
+0.0055 rupee from the page's figure, orders of magnitude beyond a double's
+error at these sizes. The replica keeps the brief's stated rule (33 exact)
+rather than adopting a 41-of-48 fit no source supports; the pinned miss list is
+what a future rule must reproduce.
+
+### Partly squared delivery days and open intraday days are refused
+
+A delivery or MTF day with buys and sells of unequal size needs the FIFO order
+sequence to split non-delivery from delivery quantity (`NCL/CMPT/43115`), and a
+day's running totals do not carry it: refused by name
+(`ChargeError::PartlySquaredDay`), not guessed. An intraday day that does not
+square off is refused too (`ChargeError::OpenIntradayPosition`) — the page's
+two buy-only intraday readings are therefore refused in precise mode. A same-day
+round trip under the delivery product is priced as non-delivery (the exchange
+nets it); Dhan's own brokerage on such a day (nil here, as for delivery) is
+UNVERIFIED.
+
+### What is not priced at all
+
+MTF interest; physical settlement of stock F&O (Dhan's 0.10% of contract value,
+sources row B-06, and the delivery-leg STT, row S-06, which is itself
+UNVERIFIED) — an option exercise names its settlement and
+`Settlement::PhysicalDelivery` is refused by name
+(`schedule::PHYSICAL_DELIVERY_REFUSAL`, D-5130), while a stock **future** held
+to expiry has no settlement entry at all: the stack prices executed orders
+only, and whether any charge falls on an expiry settlement is UNVERIFIED;
+BSE futures (no rate recorded: `ChargeError::NoRate`); BSE F&O in
+calculator mode (never read from the page: `ChargeError::NotOnPage`); exchange
+or stamp charges on an option exercise (only the exercise STT, and since D-5132
+Dhan's ₹20 brokerage with its GST, are levied); **Dhan's ₹20 brokerage, and
+its GST, on an option that expires or is assigned** (sources row B-05 applies
+the ₹20 to an option *"expired, exercised, or assigned"*: an exercise pays it,
+but an expiry and an assignment are not inputs of the stack — no day can
+record one — and `NetTrade` refuses a bought option that is never sold and a
+written option that is never bought, so a position held to either is refused
+rather than netted ₹23.60 short; modelling the two is open work); **the
+SEBI fee on the notional value of an exercised or assigned option** (`FA40632`,
+sources row F-02 — the stack levies the fee on premium only); call-and-trade
+fees (₹50 per desk order, row B-08); ETFs and commodities, refused by name
+(`ChargeError::OutOfScope`, D-5125); the auto square-off fee on F&O is applied
+when the caller asks but its F&O applicability and cut-off time are UNVERIFIED
+(the brief names the 15:10 equity ceiling).
+
+### The broker square-off fee is priced on top of the order's brokerage
+
+Dhan's pricing page states ₹20 per order + GST "for intraday order
+automatically squared by our team", and does not say whether that replaces the
+square-off order's own brokerage (the lower of ₹20 and 0.03%) or comes on top
+of it. The stack prices it **on top**, the costlier reading. UNVERIFIED
+(D-5122); a contract note with a broker square-off on it decides it.
+
+### Client-day rounding, F&O, and a trade's share of it
+
+`ClientDay` rounds STT and stamp duty once across one client's day in one
+segment of one exchange, as the two cash-market circulars state (D-5121). Three
+limits follow.
+
+- **F&O.** No circular on the F&O method was read; the same two steps
+  (per contract to the paisa, the client's day to the rupee) are applied to
+  futures and options and are UNVERIFIED there.
+- **A trade's own charges are priced alone.** `NetTrade` nets each trade of
+  its days priced as if its security were the client's only one that day.
+  When a client trades several securities on one day, the client-day's STT
+  and stamp duty differ from the sum of the per-trade figures by at most half
+  a rupee per security for each of the two taxes (each rounding moves a figure
+  by at most ₹0.50); the client-day figure is exact for the day and the
+  per-trade figure is the per-trade attribution. Which of the two a backtest
+  reports per trade is CHG-2's to label.
+- **The VWAP's half paisa.** `NSE/CMTR/5588` rounds the VWAP "off to two
+  decimals" without saying where an exact half paisa goes; half-up is a choice.
+
+### Measured cost, and what the figures are not
+
+`crates/costs/benches/stack.rs`, two final runs on the 4-core cloud container of
+16 Oct 2026, 20,000 batches of 16 calls each: one executed order p50 26.8–27.3
+ns, p99 28.5–40.7 ns; one client-security-day (open, two orders, settle) p50
+201.9–202.6 ns, p99 337.8–415.6 ns; one calculator quote p50 47.8–48.3 ns. The
+**max** column (up to half a millisecond for a batch) is the container's
+scheduler, not the stack: the code holds no loop over orders, no allocation and
+no lock. The absolute figures belong to that machine; only the ratios
+(C-CHG-01..05) are gated, and one run of seven before the final two put
+C-CHG-03 at 1.651× without reproducing.
+
+**The widest day is a different constant.** A day at the widest `i64` allows
+(10^9 units at ₹4 crore a side) costs p50 254–255 ns, 1.26× a normal day, in
+both final runs: its rate products pass 2^64, where `i128` division leaves the
+64-bit fast path for the compiler's software routine. That routine is bounded
+by the 128-bit width, not by the magnitude, so the cost is still constant — a
+second constant, printed and not gated (D-5118).
+
+**Reproduced on the operator's Mac (19 Oct 2026, the third local merge),
+three runs of the same bench binary, 20,000 batches of 16 calls, the machine
+shared with other agents' builds (load average 8–11 on 14 cores):** one
+executed order `add` p50 10.3–10.4 ns, p99 13.0 ns; the backtest ledger's `add`
+p50 5.1–5.2 ns, p99 7.8–13.0 ns, max 252.5 ns; a whole client-security-day
+p50 122.3–125.0 ns, p99 135.4–153.6 ns; a ledger close of 2,000,000 orders
+p50 109.3–114.5 ns, p99 125.0–140.6 ns, in precise mode, and p50 67.7 ns, p99
+75.5 ns in calculator mode; a calculator quote p50 15.6–18.1 ns. Every gated
+ratio C-CHG-01 to C-CHG-08 was between 0.86× and 1.07×. **One p99 did not
+hold in one run:** "settle: a day of 2,000,000 orders" reached p99 304.6 ns
+beside 114.5 ns for a day of 2 in the first run, and 127.6 ns and 130.1 ns
+(beside 125.0 ns) in the next two; the same settle reached through the
+ledger's close stayed at 1.02–1.05× in all three. It is read as the shared
+machine, not the stack — `settle` holds no loop over orders — and it is
+recorded rather than dropped. Logs:
+`state/fix/round2/chg1-logs-r6/bench.log`, `bench-run2.log`, `bench-run3.log`.
+
+### One order's lines, measured, and what a 16-call batch mean hides (D-5131)
+
+C-CHG-09 times `DayLedger::order_lines_unrounded` on a day of 2 orders and of
+2,000,000, in each mode, and a delivery sell's DP share alone and among
+2,000,000 sells. **Method, stated because it is not the gate's:** the bench
+binary was built with plain `rustc --edition 2024 -C opt-level=3 -C
+overflow-checks=on` (no `lto = "fat"`, no `codegen-units = 1`), because the
+shared cargo queue had no free slot, and run twice on the operator's Mac
+(20 Oct 2026, load average 10–24 on 14 cores from other agents' builds),
+20,000 batches of 16 calls: precise order lines p50 65.1 ns, p99 75.5–80.7 ns
+at both day sizes and for the DP share; calculator order lines p50 28.6 ns,
+p99 33.8 ns; every C-CHG-07..09 ratio 0.93–1.04×. Logs:
+`state/fix/round2/chg1-logs-r8/bench-rustc-run1.log`, `bench-rustc-run2.log`.
+
+**One call per sample.** The same run times the ledger's add, its precise
+close and its precise order lines ONE call per sample (20,000 samples), beside
+a sample of two clock reads and nothing else, so the p99 and max are per call
+and not a 16-call mean. The Mac's clock moves in 41.67 ns ticks, so a figure
+is a whole number of ticks: two clock reads alone p50 0, p99 42 ns; the add
+p50 0, p99 42 ns, max 125 ns — indistinguishable from the clock; the close p50
+125 ns, p99 167 ns; order lines p50 83 ns, p99 125 ns. The max column of
+both (up to 8.5 µs, and 12.9 µs for two clock reads alone) is the shared
+machine's scheduler, not the call: the clock-reads-only sample shows it too.
+These figures carry the clock's own read and are reported, not gated.
+
+**The same bench by the gate's own method.** Once a cargo slot was free, `cargo
+bench -p costs --bench stack` (the workspace bench profile) ran twice on the
+repaired tree, 20 Oct 2026 15:00 IST, load average 8–15 on 14 cores
+(`state/fix/round2/chg1-logs-r8/bench1.log`, `bench2.log`). C-CHG-09, 20,000
+batches of 16 calls: precise order lines p50 41.6 ns, p99 46.8–49.5 ns at both
+day sizes; calculator order lines p50 20.8 ns, p99 23.4–26.0 ns; the DP share
+p50 41.6 ns, p99 49.4–52.1 ns, **except one run's p99 of 119.7 ns for 1 of
+2,000,000 sells** (52.1 ns for the day's only sell in the same run, 49.4 ns
+for both in the other) — recorded, not dropped, and read as the shared machine
+because the call holds no loop over the day's sells; every C-CHG-01..09 ratio
+0.93–1.09×. One call per sample, n = 20,000: the add p50 0, p99 42 ns, max
+125 ns; the precise close p50 125 ns, p99 166 ns, max 1.6 µs and 14.5 µs;
+order lines p50 42 ns, p99 84 ns, **max 39.0 µs and 6.5 µs** — the largest
+max either method recorded, beside 125–167 ns for two clock reads alone in
+the same runs. A single call's max on this shared machine is therefore not a
+bound this document can state; the p99 is.
+
+### Line coverage of the CHG-1 modules is not 100%, and why
+
+`cargo llvm-cov -p costs --locked` at the third local merge (19 Oct 2026,
+`state/fix/round2/chg1-logs-r6/cov.log`): `charge_error` and `exact` 100% of
+lines; `stack` 99.73%, `schedule` 99.43%, `dhan_calc` 99.36%, `ledger`
+99.14%. What is left unexecuted, by kind: (1) the error arm of a `?` that
+closes a multi-line call, in three `stack.rs` lines: the paisa sum of a day's
+trade STT and exercise STT (each at most 0.15% of an `i64` value, so the sum
+stays inside `i64`, as `every_new_overflow_site_is_refused_by_name` shows at
+the widest exercise), the `i128` sum of the calculator total and the square-off
+fee with its GST (values of `i64` scale cannot overflow `i128`), and the
+narrowing of a charge rounded to the rupee (the largest is `...800`, inside
+`i64`, pinned by the same test) — each arm is unreachable and is kept because
+the alternative is an `expect`, which the workspace lints refuse; (2) the
+compile-time `NoDefault`
+witness in `ledger.rs` (five lines), which proves at build time that neither
+`DayLedger` nor `RateSelector` has a `Default` and never runs; (3) the
+message arguments of three `assert!`s in `schedule.rs`'s tests, evaluated
+only when the assertion fails; (4) three `dhan_calc.rs` lines that the
+report counts but does not itemise (it warned of 11 functions with
+mismatched profile data on the shared target directory). Two lines were real
+gaps and are now tested: `schedule::dhan_brokerage_units` refusing a
+commodity, reached by `ledger::order_lines_unrounded` before any rate card is
+read, and the overflow guard on the calculator day's fees, reached with
+square-off fees near `i64::MAX` set directly on the running totals.
+
+**Re-measured on the repaired tree (D-5131).** `cargo llvm-cov -p costs
+--locked` on 20 Oct 2026 in its own target directory
+(`state/fix/round2/chg1-logs-r9/cov.log`, `cov-missing.log`): `charge_error`
+and `exact` 100% of lines; `stack` 99.81% (the same three `?` arms, kind 1),
+`dhan_calc` 99.79% (one line, kind 4), `schedule` 99.32%, `ledger` 99.04%.
+`ledger`'s eight lines are the five `NoDefault` lines (kind 2) and the three
+message arguments of the DP-share `assert!` in
+`a_days_orders_sum_to_its_unrounded_lines_on_every_netting`; `schedule`'s
+five are the three `assert!` messages above and the two `panic!` arms of
+`the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`,
+reached only when the card and `trip` disagree — kind 3, all test code.
+**No line of the repair's production code is unexecuted**, and §9's 100% is
+still not met, for the four kinds named here. `cargo mutants` on each of the
+six files of that tree: 446 mutants, 310 caught, 136 unviable, 0 missed, 0
+timeouts (`chg1-logs-r9/mut-*.out`).
+
+**Re-measured after the exercise brokerage (D-5132), by a method that is not
+the gate's.** The shared cargo queue gave no slot for over an hour on
+21 Oct 2026, so `crates/costs` was built with plain `rustc -C
+instrument-coverage` (opt-level 0, debug assertions and overflow checks on)
+and read with the toolchain's own `llvm-profdata` and `llvm-cov`, over the
+unit tests and both integration tests (`state/fix/round2/chg1-logs-r11/rcov/`):
+`charge_error` and `exact` 100% of lines, `stack` 99.81%, `dhan_calc` 99.79%,
+`schedule` 99.32%, `ledger` 99.10%. The unexecuted lines are the same four
+kinds as above (`stack` 589, 720, 907; `ledger` 757 and 765–768, the
+`NoDefault` witness, and 1334–1336, an `assert!` message; `schedule` 1202,
+1269, 1277, 1611, 1620); **none is in the D-5132 change**. `cargo mutants` on
+that change did not run for the same reason. Instead fourteen hand mutants of
+every production line it adds were each built with `rustc` and run against the
+unit tests, and all fourteen were caught
+(`state/fix/round2/chg1-logs-r11/hmut.out`). The mutants: the exercise count
+moved by 0 or 2; the ₹20 dropped, or replaced by the intrinsic value; the
+unrounded ₹20 dropped; no commit, a partial commit, or an early `Ok`;
+`exercises` settled or read as 0 or 1; the overflow message swapped;
+`precise/r1` restored; the old square-off message restored.
+
+### An option exercise on the ledger, measured (C-CHG-10, D-5132)
+
+An exercise is four checked additions: the count, the intrinsic value, and the
+₹20 of sources row B-05, rounded and unrounded. The close reads the totals.
+**Method, stated because it is not the gate's:** the cargo queue was full, so
+the stack bench was built with plain `rustc` at the workspace bench profile's
+own settings (`-C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort -C
+overflow-checks=on -g`) and run three times on the operator's Mac on
+21 Oct 2026, load average 15–18 on 14 cores from other agents' builds
+(`state/fix/round2/chg1-logs-r11/rustc/bench1.log`, `bench-rustc-run3.log`,
+and `rustc2/bench1.log`, the last on the tree merged with `feat/db-fix`, whose
+`crates/costs` is the same). The figures are per call, from 20,000 batches of 16
+calls:
+
+- the first exercise: p50 2.6 ns, p99 2.6 ns;
+- the 1,000,001st: p50 2.6 ns, p99 5.1–5.2 ns;
+- ₹1,000 crore of intrinsic value: p50 2.6 ns, p99 2.6–5.2 ns;
+- a precise close of a day of 1 exercise: p50 106.7–109.3 ns, p99
+  117.1–132.8 ns;
+- a precise close of a day of 1,000,000 exercises: p50 106.7–109.3 ns, p99
+  117.1–135.3 ns.
+
+Each C-CHG-10 ratio was 1.000× in all three runs. One call per sample
+(n = 20,000), for the 1,000,001st exercise: p50 0, p99 42 ns, max 125–208 ns;
+the p50 and p99 are the clock's own resolution. The max column of the batched
+rows reached 2.7 µs for one exercise and 7.2 µs for one close. That is the shared
+machine's scheduler, as the rows above explain: the same runs show it on rows
+that hold no loop at all.
+
+### The backtest ledger: what it assumes (D-5127)
+
+`costs::ledger::DayLedger` is the stack's own arithmetic behind the API a
+backtest drives, so every limit above applies to it unchanged. What it adds:
+
+- **A part-filled order is one executed order, and that is UNVERIFIED for
+  Dhan.** `ExecutedOrder::with_part` joins the parts and the brokerage is
+  charged once on the whole order. Dhan's pricing page says "per executed
+  order" and does not say how a part-filled order counts; a Dhan contract note
+  showing one decides it. Until then a backtest that splits one order across
+  several one-second fills is priced as one order, which is the cheaper
+  reading.
+- **The caller decides which fills are one order.** The ledger cannot see
+  order ids and never guesses: a fill is joined to its order before the order
+  is added. A caller that adds each fill as its own order is charged brokerage
+  per fill.
+- **One order's unrounded lines are shares, not a contract note.**
+  `order_lines_unrounded` gives each order its exact share of the linear lines,
+  which sum to the day's; three lines do not sum exactly. GST is 18% of the
+  order's own unrounded base (half-up to 10⁻⁹ rupee), where the day's GST is
+  on the billed, rounded base and, on the calculator page, on the exchange line
+  rounded to 10⁻⁴ rupee first. Precise intraday STT is half the order's value
+  at the rate, where the day's is on the squared quantity at the VWAP rounded
+  to the paisa — equal when the VWAP is exact. A delivery or MTF order is
+  priced only against its day (`DayLedger::order_lines_unrounded`, D-5131):
+  a squared day pays the non-delivery rates and no DP, a one-sided day the
+  delivery rates, and each sell carries its value-share of the day's one DP,
+  half-up to 10⁻⁹ rupee — so the sells' DP lines sum to the day's within half
+  a unit per sell, exactly when the day has one sell. The day-less
+  `order_lines_unrounded` refuses a delivery or MTF order by name
+  (`NeedsItsDay`); until D-5131 it priced every such order as delivery, which
+  over-charged a squared day's orders about 8× on STT and 5× on stamp duty and
+  added a DP the day never pays. The ledger can refuse an order larger than
+  its day's side (`OrderNotInDay`) but cannot tell a smaller order of another
+  day from one of its own: keeping days apart is the caller's.
+- **A ledger rounds STT and stamp duty for its own security.** A client's day
+  across several securities still goes through `stack::ClientDay`, which
+  rounds them once across all of them; a ledger closed alone is the
+  one-security case.
+- **The calculator mode carries the broker square-off fee, which the page
+  has no input for**, as two extra lines on top of the page's own, so the two
+  modes stay comparable on a day the broker exited. It refuses an exercise and
+  the dated rate set by name: the page has neither.
+- **Rate-set versions are bumped by hand and caught by a fingerprint.**
+  `RateSelector::version` is a string; the test that pins it beside a
+  fingerprint of the table makes a changed rate fail until the string moves.
+  D-5131 moved the dated set to `dated-regime/r2` (r1 dropped the NSE options
+  IPFT from 2026-03-01). Package CHG-0's FA73061 row re-splits that same total,
+  so, merged as the section above says, it leaves the r2 figures and
+  fingerprint unchanged; a merge that changes any dated figure fails the
+  fingerprint test until the version moves.
+- **A net names its rate set, and refuses two.** `NetTrade::of_days` refuses
+  two legs priced under different rate sets and a closing day on or before
+  the opening day (`MismatchedLegs`, D-5131), and a net carries
+  `rate_set()` and `versions()` for a run identity. It cannot tell two legs of
+  two different trades that happen to match in kind, venue and units.
+
+### The winner-gate page's charges (D-5128)
+
+`state/pages-20261016/winner-gate.html` shows ₹82.65 and ₹224.43 for an
+equal-price NSE equity intraday round trip at ₹1,00,000 and ₹5,00,000. Those
+are the calculator replica's figures. The precise stack gives ₹82.68 and
+₹224.61: ₹0.03 and ₹0.18 more, all of it GST on the SEBI fee
+(`costs::ledger::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks`).
+The page is marked for correction; the stack was not tuned to it.
+
+### A shared target directory can test another worktree's crate (D-5129)
+
+Cargo identifies a workspace member by its path relative to the workspace, so
+two worktrees building into one target directory produce the same artifact
+names. An artifact the other worktree built later than this worktree's
+sources were last touched is taken as fresh. At this package's merge the
+integration tests were compiled against another worktree's `costs`, which
+had no `charge_error` module, and failed to resolve it. Touching the
+worktree's sources forced the rebuild. Every gate result this package reports
+was taken after that rebuild. Other packages on shared target directories are
+exposed to the same thing.
+
 ## Read pools and the being-written answer: what R3-08 leaves bounded or unmeasured (R3-08; decision numbers at landing, A6)
 
 Every store read runs in a named pool (`api::detail::Named`), waits at most
@@ -20027,6 +20487,32 @@ Scripts and raw figures are in the AH-04 report
 |---|---|---|---|---|
 | L-AH04-01 | `committed_at` of a migrated vendor is three `metadata` calls, not one | a version-4 census is one current epoch per segment, and the newest of them is the last commit; the census's own parts name the files, so no directory is listed | at most three stats a request, none per row. `/audit.json?feed=gdfl` before p50 0.804 / p99 1.365 / max 1.485 ms, after 0.751 / 1.396 / 1.401 ms; `?feed=zerodha` (one file, unchanged) before 1.723 / 2.490 / 2.826 ms, after 1.660 / 2.567 / 2.635 ms. The stamp is the mtime the file system keeps: a file written in place without its mtime moving (no writer here does) would not move it | AH-04 |
 | L-AH04-02 | Layout has no unit test; the board's share of the window is a measurement | CSS media queries are not run by `node --test` | `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`, board [top, height] px and share of the viewport after scrolling `main` to its end, before → after: 375x812 [595, 218] 27% → [181, 631] 78%; 375x667 [595, 73] 11% → [181, 486] 73%; 375x568 [595, 24] 0%, 0 of 140 board controls reachable → [181, 387] 68%, 140 of 140; 320x568 [673, 24] 0%, 0 of 140 → 68%, 140 of 140; 812x375 [318, 57] 15% → [106, 269] 72%; 1024x600 [298, 302] 50% → [134, 466] 78%; 1280x800 [260, 541] 68% → unchanged, `main` still `overflow: hidden`. Repeated at 375x667 on BANKNIFTY options (35% → 73%), NIFTY options (35% → 73%) and RELIANCE spot (8% → 73%). The connection banner of an unstamped build is taller (235 px at 375 wide), and it scrolls away with the rest; a page other than `/db` keeps its own scroll regions at main's height, measured on `/db` only | AH-04 |
+
+## Point-in-time F&O membership (PIT-1, D-5160 to D-5169)
+
+`pull::fno_membership` answers, for a day, which shares had a live stock-option
+contract on it, from the GDFL tick store's options day-file indexes
+(`docs/00-charter.md`, "F&O membership source"), and refuses every day it
+cannot answer as "membership unknown". The rows below are what it leaves
+bounded, unmeasured or open. Every figure here was measured on 18 Oct 2026 by
+the release `cli` built from the PIT-1 branch, READ-ONLY over
+`/Volumes/WD_BLACK/brutex/tickstore-data` (index of each options day file, no
+tick row), writing only into a scratch folder of its own
+(`work-20260925/scratch-PIT-1/r4/run2/`), never the store.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-PIT-1 | Opening a membership directory is O(months + records + member entries), not O(1); `spans()`, `year_counts()` and the `--store` cross-check are reports, O(days × pool) and O(folders) | the reader decodes every month's newest generation once, checks the chain and builds its fixed-stride day index and per-day series bitset; after that `members`, `pool_size`, `refused_through` are one subtraction and one slice and `is_member` adds a bounded `LINEAGE` walk (18 rows), one hash probe and one bit | measured over the full real build (97 months, 2,950 records, 338 series), two binaries, 3 runs each: open 8 to 10 ms; then every known day once per run (n 2,001, sequential, `Instant` per call, `cli fno-membership bench`): `members(day)` p50 0 ns, p99 42 ns, max 125 ns; `pool_size(day)` p50 0 ns, p99 42 ns, max 84 ns; `is_member(name, day)` p50 42 ns, p99 84 ns, max 6,875 ns (the first, cold call). Format bounds, refused by name past them, never truncated: 4,096 spellings (340 measured), a `u16` pool (largest measured 227) | PIT-1 |
+| L-PIT-2 | Building is O(option names listed) per day plus O(pool) to fold, not O(1) per day | a day's membership needs the names of its listed contracts, so each day file's index is decoded; months are folded in order because each carries the next, the days of a month are read on `--workers` readers (default 4) | measured, three one-pass builds over the whole span (2,950 days folded, 97 months written each, 4 readers): 6,711, 7,673 and 7,782 ms (wall 7.17 to 7.81 s; user 19.19 s on the one timed with `time -l`); per month written n 97, p50 70 to 80 ms, p99 110 to 134 ms, max 134 ms; a resume with nothing new: 24 ms; the three days shown listed 7,848 (2021-06-15), 12,685 (2024-03-15) and 12,741 (2026-09-15) option names. A daily resume reads only the days after the last sealed record. Disk: 2,080 KiB for the 97 month files (about 21 KiB a month). Re-measured 20 Oct 2026 with the repaired build (D-5166 to D-5169; `scratch/PIT-1-r1`, READ-ONLY on the tick store): two one-pass builds 8,732 and 7,948 ms (wall 8.75 and 7.96 s), byte-identical (97 of 97 files), per month written n 97, p50 89 and 82 ms, p99 141 and 139 ms, max 141 and 139 ms; a rerun with nothing new 29 ms. **The daily path costs about 12.7 times the disk of one pass**, because each run that extends a month writes the month so far as its next generation and the superseded generations are kept (append-only, never read: the reader serves the highest): one pass to 2024-12-31, then one build per calendar day of 2025 (365 runs, 0 failed; per run p50 47 ms, p99 85 ms, max 100 ms as the build reports it) wrote 253 files for 2025, 3,548,432 bytes (3.38 MiB), against 278,772 bytes for 2025's 12 one-pass files, and the newest generation of each 2025 month is byte-identical to its one-pass file (12 of 12). Projection: about 3.4 MiB a year of daily running (the verifier's 2.8 MiB of 19 Oct 2026 was a shorter sample; the 0.25 MiB of PIT-1's first report counted one generation a month and was wrong) | PIT-1 |
+| L-PIT-3 | Membership may start LATE: a contract is visible only from its first stored record, and NSE's listing day of a contract is UNVERIFIED (no circular read) | the tick store holds the days a contract had a file, not the day NSE listed it; a listing day with no stored record is invisible | the build reports, per series first stored after `known_from`, the days between the first day any share's contract of its earliest first-day expiry was stored and its own first record. Measured on the real span with the final binary: 133 series first stored after 2018-09-03, all 133 with a bound above zero: p50 63 days, p99 66 days, max 67 days (`GODREJPROP`), every one named in the build report; `BSOFT` and `TATACONSUM` are named apart as handover spellings. This is an UPPER BOUND, not a measured lateness: a share entering F&O lists its near month, whose series other shares have held for about two months, so the bound sits near 63 days for almost every entrant and cannot separate a late record from a new entry. Spellings joined by a measured handover are named apart, never counted (PIT-23) | PIT-1 |
+| L-PIT-4 | Membership may end LATE: a contract cancelled before its printed expiry keeps its share a member to that expiry | early settlements are sourced for one row only (`expiry_alias::EARLY_SETTLEMENTS`, NSE/FAOP/73857); no other termination circular was read, and whether a share leaving F&O keeps its existing contracts to expiry is not sourced either (UNVERIFIED) | at most the remaining life of the share's latest stored contract on the day it stopped listing files; not measured. `Member::filed` shows the days a member listed no file | PIT-1 |
+| L-PIT-5 | An unsourced rename is one series only when its contract keys move on one session | the 18 sourced `LINEAGE` rows file both stems under the newest symbol; a rename with no row is joined only by a measured handover (shared keys a strict majority of BOTH the old series' previous-session keys and the new spelling's keys, at least `MIN_HANDOVER_KEYS` = 2 of them, the old series listing nothing that session, neither side matching a second candidate: D-5166; until 20 Oct 2026 only the old side's majority was asked, L-PIT-11) | measured on the real span: 2 handovers, 0 ambiguous: `KPIT -> BSOFT` on 2019-02-26 (16 of 22 keys) and `TATAGLOBAL -> TATACONSUM` on 2020-02-27 (58 of 67 keys); each of the 13 held renames of `state/data-census-20261013/options-import-held-renames.txt` is the new symbol of a `SYMBOL_CHANGES` row (read 18 Oct 2026), so each is one spelling. A rename with no row whose old spelling keeps listing files on the new one's first session is not detected: it stays two series, both members while both are live (UNVERIFIED whether one exists) | PIT-1 |
+| L-PIT-6 | Membership is inferred from stock OPTIONS only; no futures file, no NSE eligibility list and no margin source is read | no futures files are on the drive and no NSE historical F&O list or margin file is in the charter (UNVERIFIED) | every row is labelled `inferred_gdfl_options`; a share with stock futures and no stock option on a day would be missed (UNVERIFIED whether such a day exists); leverage reads "leverage unknown", UNVERIFIED (D-5160 item 2). A chartered source found later is a new file version | PIT-1 |
+| L-PIT-7 | Nothing in the app reads the membership yet, and the store's copy is not built | the real build is a store write the main session runs after the merge (`store_writes_needed` of PIT-1); wiring `api::schedule`'s `DayUniverse`, the coverage board and the research consumers is R4-26's (COR-08), and the Fib mover rank is FIB-1's | until then every consumer still reads the 2026-08-01 snapshot `FNO_UNDERLYINGS`, which stays the swept surface; days outside the measured span (2018-01-01..2018-09-02: 167 sessions; after 2026-09-30: 62 calendar sessions to the end of 2026) are refused as "membership unknown", and a daily resume extends `known_to` as new day files land. **NOT DONE** here | R4-26, FIB-1 |
+| L-PIT-8 | Three constructs gate 11 matches are kept, each declared in `.github/gates_ledger.rs` with its bound (D-5169) | rule 6: the month file's name decoder finds the end of one zero-padded name with `position` inside its fixed `NAME_LEN` (24) bytes; rule 4: `cli fno-membership` sorts its own report and bench samples (the build's per-month timings, the listing-lag list and its days, the bench's timings) to print p50/p99/max; rule 7: `store_write::writes_the_store`'s `fno-membership` arm `arguments.contains(&"build")` (4 -> 5 for that file), the arm shape gate 30's `form_of` reads, over the verb's own command line | the decoder's search is bounded by the compile-time `NAME_LEN`, never by the data; each sort runs once per verb run over at most the months written, the series (338 on the real span) or the days timed, never on a lookup; the write rule's probe reads the verb's own arguments once per process. The fold itself sorts nothing (its live series are keyed in member order, D-5166) | PIT-1 |
+| L-PIT-9 | A file listed under a spelling its series has moved on from (a stray) is filed under the series' newest spelling | after a measured handover the old spelling is retired; a later file under it is most likely the vendor's late or duplicate filing of the same contracts, but a DIFFERENT company relisted under the retired symbol while the series is live would be filed under that series too (D-5166). NSE's reuse of a retired symbol is UNVERIFIED (no circular read) | every such day is named in the month's report and its `cli.fno_membership` event (`strays`), with the spelling, the series' newest spelling and the keys listed: never silent, never a second member, never a stop. Real span: measured in L-PIT-11 | PIT-1 |
+| L-PIT-10 | A day file the source refuses EVERY time stops every build at that day | a refusal may be transient, so it is never sealed (D-5168): the build installs every record before it, exits non-zero naming the day and the source's words (`membership build refused` on `/logs`), and the next build resumes at it | the membership's `known_to` stays at the last known day before the refused one until the source is repaired or a new source version is chosen (a new file version, D-5163). The real tick store refused no day over the whole span (18 Oct 2026, read-only) | PIT-1 |
+| L-PIT-11 | The measured-handover rule and the one-live-spelling rule changed on 20 Oct 2026 (D-5166), before version 1 landed; their effect on the real span is measured, not argued | D-5161 joined a pair on the old side's majority alone and refused a day on which one series was live under two spellings; D-5166 asks both sides' majority and at least 2 shared keys, and files a later file under a retired spelling (a stray) under the series' newest spelling | measured 20 Oct 2026 with the repaired release build, READ-ONLY on the tick store (`scratch/PIT-1-r1/real/build1.log`): the same 2 handovers (`KPIT -> BSOFT` 2019-02-26, 16 of 22 old keys; `TATAGLOBAL -> TATACONSUM` 2020-02-27, 58 of 67), 0 candidates not joined and 0 stray files in all 97 months, 338 series, 340 spellings, max_pool 227. Every day of the span (2,950) answers the same pool, members, spellings and unfiled members as the pre-repair build of 19 Oct 2026 (`cli fno-membership show` per day, old binary over its own directory against the new one: 2,950 identical, 0 differing; `scratch/PIT-1-r1/compare`). The file digest changed (`1cbab4f4eec7cc72709aa42c5b68b792977847edb003b97fcd7cb2c3c3facc85` to `d478099e1a7b125698bf7d4882c60a9f193ce4dd4806440118b7e96645204b2e`) because the carry's live pairs are keyed by series id, not spelling id (D-5166 item 3), not because an answer changed. Directories built before 20 Oct 2026 are not resumed by this build (D-5166 item 3) | PIT-1 |
 
 ## Damaged header slots named (R4-09a, D-6240 to D-6242)
 
