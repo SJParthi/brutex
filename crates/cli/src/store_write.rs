@@ -121,6 +121,7 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
         }
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "feed-reconcile" => arguments.contains(&"--out"),
+        "basis-runs" => arguments.contains(&"--write"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
     }

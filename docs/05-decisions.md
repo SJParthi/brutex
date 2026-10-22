@@ -77891,3 +77891,55 @@ docs/04-invariants.md R319-01..R319-12), the updated
 and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
+
+### D-6892 — R4-26: the share corporate-action table and the measured basis runs are reference tables; a measured row labels and never excuses — 2026-10-22
+
+**Context.** Zerodha back-adjusts a share's prices for splits and bonuses and
+GDFL does not, so the ratio of the two feeds' closes is one constant between
+two actions and steps at each ex-date (Z8). The engine disclosed "corporate
+actions unchecked" (D-0694) while the evidence sat in DATA-1's per stock-day
+factor, and no stage kept an ex-date ledger (FM-260, COR-06). The NSE
+corporate-actions endpoint is cookie-gated and UNVERIFIED as fetchable
+unattended.
+
+**Decision.**
+
+1. **Two more reference tables, through R3-30's one loader.** `basis_runs`
+   and `corporate_actions` are generations under `<store>/reference/v1/`
+   in D-6246's format (docs/02 §"Corporate actions and basis runs"), with a
+   receipt, a checksum and a refusal by name. Neither has a compiled copy:
+   absent is `absent`, never an empty table. They are not in `Reference`'s
+   import-time slots; a consumer reads each with `reference_data::load_one`.
+2. **One owner of the factor.** `cli basis-runs` folds DATA-1's own day
+   intervals (`FactorPair::basis`, D-5179) and measures no price. A run
+   grows while the intersection of its days' intervals is not empty; it ends
+   `step` where the next day's interval is disjoint from the last day's
+   (DATA-1's ex-date rule) and `drift` where the ratio walked. A run's ratio
+   is the simplest fraction inside its intersection; a step's factor the
+   simplest inside `[new.low / old.high, new.high / old.low]`. The tolerance
+   is the measurement's own interval, exact, no float.
+3. **The law (`CLAUDE.md` §3 rule 1).** A `measured` row (one step between
+   two runs, always `unclassed`) LABELS a day and never suppresses a refusal
+   or decides a class; only an `nse` row in a `sourced` file does. The loader
+   refuses an `nse` row in a measured file and a measured row that names a
+   kind. The measured ledger never replaces a sourced table.
+4. **The checker** flags a step with no row in its window (`no_row`), rows
+   whose factors' product lies outside the step's interval
+   (`factor_differs`), and a price-moving row inside one run
+   (`row_without_step`). An ex-date on a day with no session applies at the
+   next session; two rows on one day multiply.
+5. **Readers.** `/basis.json` (new), `/dayflags.json` (a `corporate_action`
+   note in the day's `notes`, created when absent, and the table's
+   `corporate_actions` receipt or refusal), `/sources/day.json`
+   (`measured_run` per share day: the factor only inside its run, else
+   `null` with the reason; `measured_basis` per answer). The tables are kept
+   per store root and read again when a directory or served file changes.
+6. **The day universe** (`pull::day_universe`) is a pure function: the
+   members on the day (read by the caller from PIT-1), the frozen surface and
+   every series with its own past, entrants and leavers named. Nothing
+   registers it with a scheduler (the one-command cut, D-6900 in the run
+   state); R4-26 builds no membership module of its own.
+
+**Not done here.** The NSE file itself (an operator download, then a charter
+row); the refusal on `/health` and `/ingest` (L-R426-07); `restatement.rs`'s
+label seam, which R4-23 takes from `CorporateActions::labels` when it lands.

@@ -65,6 +65,8 @@ const ROUTES: &[&str] = &[
     "/imports.json",
 ];
 
+#[path = "ratio/basis.rs"]
+mod basis;
 #[path = "ratio/calendar.rs"]
 mod calendar;
 #[path = "ratio/census.rs"]
@@ -722,6 +724,7 @@ fn served_routes_are_flat() -> bool {
     ok &= settings::settings_are_flat(&mut stores);
     ok &= rollup::rollups_are_flat(&mut stores);
     ok &= export::exports_are_flat(&mut stores);
+    ok &= basis::lookups_are_flat(&mut stores);
     for store in &stores {
         let _ignored = std::fs::remove_dir_all(&store.root);
     }
@@ -788,6 +791,7 @@ fn main() {
         settings::ROUTES,
         rollup::ROUTES,
         export::ROUTES,
+        basis::ROUTES,
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));

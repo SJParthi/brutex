@@ -541,6 +541,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// The SHA-256 of `bytes`, lower-case hex: what a receipt's `source_sha256`
+/// holds, for a writer outside this crate that hashes its own source bytes
+/// (R4-26's `cli basis-runs` hashes the list of feed-reconcile files it read).
+#[must_use]
+pub fn sha256_of(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
 fn is_hex64(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }

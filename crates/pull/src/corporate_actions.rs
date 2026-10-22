@@ -973,15 +973,45 @@ pub fn fold_runs(
     symbol: &str,
     days: impl IntoIterator<Item = BasisDay>,
 ) -> Result<Vec<Run>, FoldError> {
-    let mut runs = Vec::new();
-    let mut open: Option<Open> = None;
+    let mut folder = Folder::new(symbol);
     for day in days {
+        folder.push(day)?;
+    }
+    Ok(folder.finish())
+}
+
+/// [`fold_runs`] one day at a time, for a caller that reads its days a
+/// month at a time and keeps one folder per share between months.
+#[derive(Debug, Clone)]
+pub struct Folder {
+    symbol: String,
+    runs: Vec<Run>,
+    open: Option<Open>,
+}
+
+impl Folder {
+    /// A folder for `symbol` that has seen no day.
+    #[must_use]
+    pub fn new(symbol: &str) -> Self {
+        Self {
+            symbol: symbol.to_owned(),
+            runs: Vec::new(),
+            open: None,
+        }
+    }
+
+    /// Folds one more day in: O(1).
+    ///
+    /// # Errors
+    ///
+    /// [`FoldError`], by name; the folder is unchanged by a refused day.
+    pub fn push(&mut self, day: BasisDay) -> Result<(), FoldError> {
         if day.low > day.high {
             return Err(FoldError::Backwards(day.day));
         }
-        let Some(mut run) = open else {
-            open = Some(Open::start(&day));
-            continue;
+        let Some(mut run) = self.open else {
+            self.open = Some(Open::start(&day));
+            return Ok(());
         };
         if day.day <= run.last {
             return Err(FoldError::OutOfOrder {
@@ -998,21 +1028,27 @@ pub fn fold_runs(
             run.days = run.days.saturating_add(1);
             run.last_low = day.low;
             run.last_high = day.high;
-            open = Some(run);
-            continue;
+            self.open = Some(run);
+            return Ok(());
+        }
+        if self.runs.len() >= MAX_RUNS_PER_SYMBOL.saturating_sub(1) {
+            return Err(FoldError::TooMany);
         }
         let disjoint = day.high < run.last_low || run.last_high < day.low;
         let end = if disjoint { RunEnd::Step } else { RunEnd::Drift };
-        if runs.len() >= MAX_RUNS_PER_SYMBOL.saturating_sub(1) {
-            return Err(FoldError::TooMany);
+        self.runs.push(run.close(&self.symbol, end));
+        self.open = Some(Open::start(&day));
+        Ok(())
+    }
+
+    /// The runs, the last one `open`; none when no day was folded.
+    #[must_use]
+    pub fn finish(mut self) -> Vec<Run> {
+        if let Some(run) = self.open.take() {
+            self.runs.push(run.close(&self.symbol, RunEnd::Open));
         }
-        runs.push(run.close(symbol, end));
-        open = Some(Open::start(&day));
+        self.runs
     }
-    if let Some(run) = open {
-        runs.push(run.close(symbol, RunEnd::Open));
-    }
-    Ok(runs)
 }
 
 // ─────────────────────────────── steps, ledger, checker ───────────────────────────────

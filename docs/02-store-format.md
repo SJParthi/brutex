@@ -4870,3 +4870,38 @@ gap rows included (D-6246 item 3). A file that fails any line of this is
 refused by name with its kind (`read`, `too_large`, `not_text`, `magic`,
 `version`, `wrong_table`, `generation`, `header`, `columns`, `row`,
 `duplicate`, `row_count`, `checksum`, `too_many`, `absent`).
+
+## Corporate actions and basis runs, two more reference tables (R4-26, D-6892)
+
+Both are reference tables in the format above, in their own directories,
+written and read by the same writer and loader (`pull::reference_data::write`
+and `load_one`), and neither has a compiled copy: a store with no generation
+of one serves nothing from it and says `absent`, never an empty table.
+
+`<store>/reference/v1/basis_runs/<generation:020>.ref` — status always
+`measured` (a `sourced` or `unverified` file is refused by name). Columns
+`symbol|first|last|ratio|low|high|days|end`: one maximal run of one
+Zerodha/GDFL close ratio of a share, folded by `cli basis-runs` from DATA-1's
+per stock-day factor intervals (`cli::feed_reconcile::FactorPair::basis`).
+`first` and `last` are the run's first and last days with a basis; `low` and
+`high` the intersection of those days' allowance intervals and `ratio` the
+simplest fraction inside it, each `num/den` reduced (terms at most 10^18);
+`days` the days with a basis it holds; `end` is `step` (the next day's
+interval is disjoint from the last day's: DATA-1's ex-date), `drift` (the
+ratio walked) or `open` (the last run read). Two runs of one share never
+overlap; at most 4,096 runs a share. The receipt's `source` names the
+feed-reconcile directory and months read (and how many were missing), and
+`source_sha256` is the SHA-256 of the list `<month> <file> <blake3>\n` of
+every file read.
+
+`<store>/reference/v1/corporate_actions/<generation:020>.ref` — columns
+`symbol|isin|ex_date|kind|num|den|tag|after|evidence`. `kind` is `split`,
+`bonus`, `rights`, `demerger`, `merger`, `dividend` or `unclassed`; `num/den`
+the price factor (one old share becomes `num/den` new ones); `tag` is `nse`
+or `measured`; `after` (`-` for an `nse` row) is the last day seen on the old
+basis, so a measured ex-date lies in `(after, ex_date]`; `evidence` the
+circular or basis-run step the row rests on. An `nse` row needs a file whose
+status is `sourced` and must name its kind; a `measured` row is always
+`unclassed`. Two rows of one (symbol, ex-date, kind) are refused as
+`duplicate`; at most 64 rows a share. An ex-date on a day with no session
+applies at the next session: a reader asks for `(previous session, session]`.

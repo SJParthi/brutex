@@ -20543,3 +20543,15 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
 | L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
 | L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |
+
+## Corporate actions, basis runs and the day universe (R4-26, D-6892)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R426-01 | A corporate-action or basis-run lookup is a hash and a binary search, not one probe | a share holds few actions and runs, sorted; a table with more is refused at load | one hash and at most 7 (`MAX_ACTIONS_PER_SYMBOL` 64) or 12 (`MAX_RUNS_PER_SYMBOL` 4,096) comparisons; measured flat at 10, 100 and 1,000 shares (`pull::corporate_actions::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured`, `api::basis_route::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_runs_measured`) | R4-26 |
+| L-R426-02 | `cli basis-runs` reads every month's feed-reconcile file whole | it is an operator-time fold over the history, run after a reconcile, never per request | O(shares x days) once, one month's index in memory at a time, one O(1) fold step a stock-day | R4-26 |
+| L-R426-03 | `/basis.json`, `/dayflags.json` and `/sources/day.json` keep the two tables per store root and read them again when a table directory or served file changes | a kept answer costs four `stat`s; a new generation is read once, O(rows), on the next request | O(1) kept; O(rows) once per generation | R4-26 |
+| L-R426-04 | `/basis.json` without `day` lists the share's runs and actions | the list is the answer | at most 4,096 runs and 64 actions | R4-26 |
+| L-R426-05 | `day_universe` is linear in its inputs | it unions three lists the caller read | O(members + frozen + series) per day, one hash insert a name, the order given (no sort); measured flat per name at 1x, 10x and 100x (`pull::day_universe::tests::the_universe_costs_one_insert_per_name_measured`) | R4-26 |
+| L-R426-06 | Every corporate-action row a store holds today is `measured`: it labels and never excuses or classes | NSE's corporate-actions endpoint is cookie-gated and UNVERIFIED as fetchable unattended; an `nse` file needs a source recorded in `docs/00-charter.md` (an operator download) | none until that file lands | R4-26 |
+| L-R426-07 | A refused corporate-action or basis-run table is named on `/basis.json`, `/dayflags.json` (`corporate_actions`) and `/sources/day.json` (`measured_basis`), not yet on `/health` or `/ingest` | those pages are other packages' files | named where it is read | R4-26 |
