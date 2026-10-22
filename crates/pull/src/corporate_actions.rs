@@ -53,13 +53,20 @@
 //!
 //! # Cost
 //!
-//! A load is one read of the newest generation and one build, O(rows). Every
-//! lookup after it is one hash of the symbol to that symbol's sorted slice
-//! and one binary search of it: at most [`MAX_ACTIONS_PER_SYMBOL`] rows
-//! (seven comparisons) or [`MAX_RUNS_PER_SYMBOL`] runs (twelve), a table
-//! holding more for one symbol is refused by name at load. The fold
-//! ([`fold_runs`]) is O(days) per share, one constant step a day; the
-//! checker ([`check`]) is O(runs + rows). Named for `docs/06-limits.md`.
+//! A load is one read of the newest generation and one build, O(rows). Both
+//! files are CANONICAL: rows ascend by symbol, then by ex-date and kind (or
+//! by first day), and a row out of that order is refused by name, so the
+//! build sorts nothing and a duplicate is one compare with the row before.
+//! A run lookup ([`BasisRuns::run_on`]) is one hash of the symbol and one
+//! index into that share's day table (how many runs start on or before each
+//! day of its span): O(1), no search. An action lookup
+//! ([`CorporateActions::labels`]) is one hash and one walk of that share's
+//! rows, at most [`MAX_ACTIONS_PER_SYMBOL`] (a table holding more for one
+//! share is refused by name at load): bounded by a compile-time constant.
+//! The day tables hold at most [`MAX_INDEXED_DAYS`] share-days in all (8
+//! MiB). The fold ([`fold_runs`]) is O(days) per share, one constant step a
+//! day; the checker ([`check`]) is O(runs + rows). Named for
+//! `docs/06-limits.md`.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -69,13 +76,20 @@ use std::path::Path;
 use crate::reference_data::{Draft, Parsed, Refusal, RefusalKind, Standing, Table, parse_day};
 use crate::session::Day;
 
-/// The most actions one symbol may hold, so a lookup is one hash and at most
-/// seven comparisons. A table holding more is refused by name.
+/// The most actions one symbol may hold, so a lookup is one hash and a walk
+/// of at most this many rows. A table holding more is refused by name.
 pub const MAX_ACTIONS_PER_SYMBOL: usize = 64;
 
-/// The most basis runs one symbol may hold, so a lookup is one hash and at
-/// most twelve comparisons. A table holding more is refused by name.
+/// The most basis runs one symbol may hold, so a run's place in its share's
+/// day table fits a `u16`. A table holding more is refused by name.
 pub const MAX_RUNS_PER_SYMBOL: usize = 4_096;
+
+/// The most share-days the basis-run day tables cover in all, first run's
+/// first day to last run's last day per share, summed: 2^22, eight MiB of
+/// `u16`. The measured table covers about 220 shares x 3,300 days (0.7
+/// million); a file whose runs would index more is refused by name, so a
+/// run spanning centuries cannot make the load allocate without bound.
+pub const MAX_INDEXED_DAYS: usize = 4_194_304;
 
 /// The largest numerator or denominator a [`Ratio`] holds: two of them
 /// multiply inside a `u128` with room to spare (`10^36 < 3.4 x 10^38`).
@@ -136,7 +150,10 @@ impl Ratio {
     pub fn of_signed(num: i128, den: i128) -> Option<Self> {
         let (num, den) = match (u128::try_from(num), u128::try_from(den)) {
             (Ok(num), Ok(den)) => (num, den),
-            _ => (u128::try_from(num.checked_neg()?).ok()?, u128::try_from(den.checked_neg()?).ok()?),
+            _ => (
+                u128::try_from(num.checked_neg()?).ok()?,
+                u128::try_from(den.checked_neg()?).ok()?,
+            ),
         };
         Self::new(num, den)
     }
@@ -213,12 +230,7 @@ impl Ratio {
 
 /// The simplest fraction in `[low_num / low_den, high_num / high_den]`, the
 /// low end at most the high, all positive.
-fn simplest(
-    low_num: u128,
-    low_den: u128,
-    high_num: u128,
-    high_den: u128,
-) -> Option<(u128, u128)> {
+fn simplest(low_num: u128, low_den: u128, high_num: u128, high_den: u128) -> Option<(u128, u128)> {
     let whole = low_num.checked_div(low_den)?;
     let rest = low_num.checked_rem(low_den)?;
     if rest == 0 {
@@ -390,19 +402,33 @@ impl Action {
             self.ratio.num().to_string(),
             self.ratio.den().to_string(),
             self.tag.word().to_owned(),
-            self.after.map_or_else(|| "-".to_owned(), |day| day.to_string()),
+            self.after
+                .map_or_else(|| "-".to_owned(), |day| day.to_string()),
             self.evidence.clone(),
         ]
     }
 }
 
-/// The corporate-action table, loaded: per symbol its rows sorted by
-/// ex-date, behind one hash.
+/// The corporate-action table, loaded: per symbol its rows in ex-date
+/// order, behind one hash, and the symbols in file order (ascending).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorporateActions {
     standing: Standing,
     rows: usize,
+    order: Vec<String>,
     by_symbol: HashMap<String, Vec<Action>>,
+}
+
+/// Where `symbol` falls against the symbol of the row before: the same
+/// share (`Ok(false)`), a new one after it (`Ok(true)`), or out of order.
+fn next_symbol(order: &[String], symbol: &str) -> Result<bool, String> {
+    match order.last() {
+        Some(last) if last.as_str() == symbol => Ok(false),
+        Some(last) if last.as_str() > symbol => Err(format!(
+            "{symbol:?} after {last:?}: rows must ascend by symbol, each share's rows together"
+        )),
+        _ => Ok(true),
+    }
 }
 
 /// A refusal of a row of `table` at `line` in the file at `path`; line 0
@@ -453,9 +479,10 @@ impl CorporateActions {
     /// # Errors
     ///
     /// A malformed row, an `nse` row in a file that is not `sourced`, a
-    /// measured row that names a kind, an `nse` row that does not, two rows
-    /// of one (symbol, ex-date, kind), or more than
-    /// [`MAX_ACTIONS_PER_SYMBOL`] rows for one symbol; each by name.
+    /// measured row that names a kind, an `nse` row that does not, a row out
+    /// of (symbol, ex-date, kind) order, two rows of one (symbol, ex-date,
+    /// kind), or more than [`MAX_ACTIONS_PER_SYMBOL`] rows for one symbol;
+    /// each by name.
     #[expect(
         clippy::too_many_lines,
         reason = "one row read field by field and judged against the law in the order the \
@@ -464,7 +491,8 @@ impl CorporateActions {
     pub fn build(parsed: &Parsed, path: &Path) -> Result<Self, Refusal> {
         let table = Table::CorporateActions;
         let standing = parsed.receipt.standing;
-        let mut by_symbol: HashMap<String, Vec<Action>> = HashMap::new();
+        let mut by_symbol: HashMap<String, Vec<Action>> = HashMap::with_capacity(parsed.rows.len());
+        let mut order: Vec<String> = Vec::with_capacity(parsed.rows.len());
         for (line, row) in &parsed.rows {
             let bad = |kind, detail: String| refusal(table, parsed, path, kind, *line, detail);
             let [symbol, isin, ex_date, kind, num, den, tag, after, evidence] = row.as_slice()
@@ -499,8 +527,12 @@ impl CorporateActions {
                             format!("{num}/{den} is not a positive ratio of terms up to 10^18"),
                         )
                     })?,
-                tag: Tag::parse(tag)
-                    .ok_or_else(|| bad(RefusalKind::Row, format!("{tag:?} is neither nse nor measured")))?,
+                tag: Tag::parse(tag).ok_or_else(|| {
+                    bad(
+                        RefusalKind::Row,
+                        format!("{tag:?} is neither nse nor measured"),
+                    )
+                })?,
                 after: day_or_dash(after).map_err(|why| bad(RefusalKind::Row, why))?,
                 evidence: evidence.clone(),
             };
@@ -534,22 +566,44 @@ impl CorporateActions {
             if action.after.is_some_and(|after| after >= action.ex_date) {
                 return Err(bad(
                     RefusalKind::Row,
-                    format!("after {after:?} is not before the ex-date", after = action.after),
-                ));
-            }
-            let held = by_symbol.entry(symbol.clone()).or_default();
-            if held
-                .iter()
-                .any(|other| other.ex_date == action.ex_date && other.kind == action.kind)
-            {
-                return Err(bad(
-                    RefusalKind::Duplicate,
                     format!(
-                        "{symbol:?} has two {} rows on {}",
-                        action.kind.word(),
-                        action.ex_date
+                        "after {after:?} is not before the ex-date",
+                        after = action.after
                     ),
                 ));
+            }
+            if next_symbol(&order, symbol).map_err(|why| bad(RefusalKind::Row, why))? {
+                order.push(symbol.clone());
+            }
+            let held = by_symbol.entry(symbol.clone()).or_default();
+            // CANONICAL ORDER: one compare with the row before finds both a
+            // duplicate and a row out of order (the build sorts nothing).
+            match held
+                .last()
+                .map(|prev| (prev.ex_date, prev.kind).cmp(&(action.ex_date, action.kind)))
+            {
+                Some(Ordering::Equal) => {
+                    return Err(bad(
+                        RefusalKind::Duplicate,
+                        format!(
+                            "{symbol:?} has two {} rows on {}",
+                            action.kind.word(),
+                            action.ex_date
+                        ),
+                    ));
+                }
+                Some(Ordering::Greater) => {
+                    return Err(bad(
+                        RefusalKind::Row,
+                        format!(
+                            "{symbol:?} {} {} comes after a later row: a share's rows must \
+                             ascend by ex-date, then kind",
+                            action.ex_date,
+                            action.kind.word()
+                        ),
+                    ));
+                }
+                Some(Ordering::Less) | None => {}
             }
             if held.len() >= MAX_ACTIONS_PER_SYMBOL {
                 return Err(bad(
@@ -559,12 +613,10 @@ impl CorporateActions {
             }
             held.push(action);
         }
-        for rows in by_symbol.values_mut() {
-            rows.sort_by(|a, b| a.ex_date.cmp(&b.ex_date).then(a.kind.cmp(&b.kind)));
-        }
         Ok(Self {
             standing,
             rows: parsed.rows.len(),
+            order,
             by_symbol,
         })
     }
@@ -587,26 +639,33 @@ impl CorporateActions {
         self.by_symbol.get(symbol).map_or(&[], Vec::as_slice)
     }
 
-    /// Every symbol the table holds rows for, sorted.
+    /// Every symbol the table holds rows for, ascending (the file's order,
+    /// which the build enforced).
     #[must_use]
-    pub fn symbols(&self) -> Vec<&str> {
-        let mut symbols: Vec<&str> = self.by_symbol.keys().map(String::as_str).collect();
-        symbols.sort_unstable();
-        symbols
+    pub fn symbols(&self) -> &[String] {
+        &self.order
     }
 
     /// Every row of `symbol` whose ex-date lies in `(after, through]`, of
     /// either tag: what a page may LABEL. Pass the previous session as
     /// `after` and the session as `through`, so an ex-date on a holiday
-    /// applies at the next session. One hash and two binary searches.
+    /// applies at the next session; `None` asks for `through` alone. One
+    /// hash and one walk of the share's rows, at most
+    /// [`MAX_ACTIONS_PER_SYMBOL`], stopping at the first row past `through`.
     #[must_use]
     pub fn labels(&self, symbol: &str, after: Option<Day>, through: Day) -> &[Action] {
         let rows = self.of(symbol);
-        let start = after.map_or_else(
-            || rows.partition_point(|row| row.ex_date < through),
-            |after| rows.partition_point(|row| row.ex_date <= after),
-        );
-        let end = rows.partition_point(|row| row.ex_date <= through);
+        let (mut start, mut end) = (0_usize, 0_usize);
+        // At most MAX_ACTIONS_PER_SYMBOL rows: the build refuses more.
+        for row in rows {
+            if row.ex_date > through {
+                break;
+            }
+            end += 1;
+            if after.map_or(row.ex_date < through, |after| row.ex_date <= after) {
+                start += 1;
+            }
+        }
         rows.get(start..end).unwrap_or(&[])
     }
 
@@ -615,9 +674,12 @@ impl CorporateActions {
     /// (`a_measured_row_never_suppresses_a_refusal_or_decides_a_class`).
     #[must_use]
     pub fn excuse(&self, symbol: &str, after: Option<Day>, through: Day) -> Option<&Action> {
-        self.labels(symbol, after, through)
-            .iter()
-            .find(|row| row.excuses())
+        for row in self.labels(symbol, after, through) {
+            if row.excuses() {
+                return Some(row);
+            }
+        }
+        None
     }
 
     /// The class an `nse` row in `(after, through]` decides; `None` when only
@@ -740,12 +802,74 @@ impl fmt::Display for Outside {
     }
 }
 
-/// The basis-run table, loaded: per symbol its runs sorted by first day,
-/// behind one hash.
+/// The basis-run table, loaded: per symbol its runs by first day and its
+/// day table, behind one hash, and the symbols in file order (ascending).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasisRuns {
     rows: usize,
-    by_symbol: HashMap<String, Vec<Run>>,
+    order: Vec<String>,
+    by_symbol: HashMap<String, Shelf>,
+}
+
+/// One share's runs and its day table: `upto[d - base]` is how many of its
+/// runs start on or before day `d` (days from the epoch), for every day
+/// from its first run's first day to its last run's last day.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Shelf {
+    runs: Vec<Run>,
+    base: u32,
+    upto: Vec<u16>,
+}
+
+impl Shelf {
+    /// How many of the share's runs start on or before `day`: one index.
+    fn upto(&self, day: Day) -> usize {
+        let Some(offset) = day.days_from_epoch().checked_sub(self.base) else {
+            return 0;
+        };
+        usize::try_from(offset)
+            .ok()
+            .and_then(|at| self.upto.get(at))
+            .map_or(self.runs.len(), |count| usize::from(*count))
+    }
+
+    /// Fills the day table from the runs, which ascend and never overlap.
+    /// O(span) for the share; `budget` is what is left of
+    /// [`MAX_INDEXED_DAYS`], and a span over it is refused (`Err` names it).
+    fn index(&mut self, budget: &mut usize) -> Result<(), String> {
+        let (Some(first), Some(last)) = (self.runs.first(), self.runs.last()) else {
+            return Ok(());
+        };
+        let (base, end) = (first.first.days_from_epoch(), last.last.days_from_epoch());
+        let span = usize::try_from(end.saturating_sub(base))
+            .ok()
+            .and_then(|span| span.checked_add(1))
+            .filter(|span| span <= budget)
+            .ok_or_else(|| {
+                format!(
+                    "the runs of {:?} span {}..{}: more than the {MAX_INDEXED_DAYS} share-days \
+                     the day tables may cover in all",
+                    first.symbol, first.first, last.last
+                )
+            })?;
+        *budget -= span;
+        let mut upto = Vec::with_capacity(span);
+        let mut started = 0_u16;
+        let mut next = self
+            .runs
+            .iter()
+            .map(|run| run.first.days_from_epoch())
+            .peekable();
+        for day in base..=end {
+            while next.next_if(|first| *first <= day).is_some() {
+                started = started.saturating_add(1);
+            }
+            upto.push(started);
+        }
+        self.base = base;
+        self.upto = upto;
+        Ok(())
+    }
 }
 
 impl BasisRuns {
@@ -755,9 +879,15 @@ impl BasisRuns {
     /// # Errors
     ///
     /// A file whose standing is not `measured` (a basis run is never
-    /// sourced), a malformed row, a ratio outside its own interval, two runs
-    /// of one share that overlap, or more than [`MAX_RUNS_PER_SYMBOL`] runs
-    /// for one share; each by name.
+    /// sourced), a malformed row, a ratio outside its own interval, a row
+    /// out of (symbol, first day) order, two runs of one share that overlap,
+    /// more than [`MAX_RUNS_PER_SYMBOL`] runs for one share, or runs whose
+    /// day tables would cover more than [`MAX_INDEXED_DAYS`]; each by name.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row read field by field and judged against the law in the order the \
+                  columns run; split, the law would sit away from the fields it reads"
+    )]
     pub fn build(parsed: &Parsed, path: &Path) -> Result<Self, Refusal> {
         let table = Table::BasisRuns;
         if parsed.receipt.standing != Standing::Measured {
@@ -773,7 +903,8 @@ impl BasisRuns {
                 ),
             ));
         }
-        let mut by_symbol: HashMap<String, Vec<Run>> = HashMap::new();
+        let mut by_symbol: HashMap<String, Shelf> = HashMap::with_capacity(parsed.rows.len());
+        let mut order: Vec<String> = Vec::with_capacity(parsed.rows.len());
         for (line, row) in &parsed.rows {
             let bad = |kind, detail: String| refusal(table, parsed, path, kind, *line, detail);
             let [symbol, first, last, ratio, low, high, days, end] = row.as_slice() else {
@@ -817,7 +948,31 @@ impl BasisRuns {
                     ),
                 ));
             }
-            let held = by_symbol.entry(symbol.clone()).or_default();
+            if next_symbol(&order, symbol).map_err(|why| bad(RefusalKind::Row, why))? {
+                order.push(symbol.clone());
+            }
+            let held = &mut by_symbol.entry(symbol.clone()).or_default().runs;
+            // CANONICAL ORDER: one compare with the run before finds both an
+            // overlap and a run out of order (the build sorts nothing).
+            if let Some(prev) = held.last()
+                && prev.last >= run.first
+            {
+                let (kind, why) = if prev.first <= run.first {
+                    (RefusalKind::Duplicate, "two runs that overlap")
+                } else {
+                    (
+                        RefusalKind::Row,
+                        "a run before the run above it: a share's runs must ascend by first day",
+                    )
+                };
+                return Err(bad(
+                    kind,
+                    format!(
+                        "{symbol:?} has {why}: {}..{} and {}..{}",
+                        prev.first, prev.last, run.first, run.last
+                    ),
+                ));
+            }
             if held.len() >= MAX_RUNS_PER_SYMBOL {
                 return Err(bad(
                     RefusalKind::TooMany,
@@ -826,28 +981,18 @@ impl BasisRuns {
             }
             held.push(run);
         }
-        for (symbol, runs) in &mut by_symbol {
-            runs.sort_by_key(|run| run.first);
-            if let Some(pair) = runs.windows(2).find(|pair| match pair {
-                [a, b] => a.last >= b.first,
-                _ => false,
-            }) && let [a, b] = pair
-            {
-                return Err(refusal(
-                    table,
-                    parsed,
-                    path,
-                    RefusalKind::Duplicate,
-                    0,
-                    format!(
-                        "{symbol:?} has two runs that overlap: {}..{} and {}..{}",
-                        a.first, a.last, b.first, b.last
-                    ),
-                ));
+        // IN FILE ORDER, so the share a refusal names is the same every load.
+        let mut budget = MAX_INDEXED_DAYS;
+        for symbol in &order {
+            if let Some(shelf) = by_symbol.get_mut(symbol) {
+                shelf
+                    .index(&mut budget)
+                    .map_err(|why| refusal(table, parsed, path, RefusalKind::TooMany, 0, why))?;
             }
         }
         Ok(Self {
             rows: parsed.rows.len(),
+            order,
             by_symbol,
         })
     }
@@ -861,30 +1006,36 @@ impl BasisRuns {
     /// Every run of `symbol`, by first day: one hash.
     #[must_use]
     pub fn of(&self, symbol: &str) -> &[Run] {
-        self.by_symbol.get(symbol).map_or(&[], Vec::as_slice)
+        self.by_symbol
+            .get(symbol)
+            .map_or(&[], |shelf| shelf.runs.as_slice())
     }
 
-    /// Every symbol the table holds runs for, sorted.
+    /// Every symbol the table holds runs for, ascending (the file's order,
+    /// which the build enforced).
     #[must_use]
-    pub fn symbols(&self) -> Vec<&str> {
-        let mut symbols: Vec<&str> = self.by_symbol.keys().map(String::as_str).collect();
-        symbols.sort_unstable();
-        symbols
+    pub fn symbols(&self) -> &[String] {
+        &self.order
     }
 
     /// The run of `symbol` that holds `day`, or where the day lies between
-    /// runs. One hash and one binary search (at most twelve comparisons).
+    /// runs. One hash and one index into the share's day table: O(1), no
+    /// search.
     ///
     /// # Errors
     ///
     /// [`Outside`], by name: no run for the share, or the day outside every
     /// run (before the first, in a gap between two, or after the last).
     pub fn run_on(&self, symbol: &str, day: Day) -> Result<&Run, Outside> {
-        let runs = self.of(symbol);
-        if runs.is_empty() {
+        let Some(shelf) = self
+            .by_symbol
+            .get(symbol)
+            .filter(|shelf| !shelf.runs.is_empty())
+        else {
             return Err(Outside::NoRuns);
-        }
-        let at = runs.partition_point(|run| run.first <= day);
+        };
+        let runs = shelf.runs.as_slice();
+        let at = shelf.upto(day);
         let before = at.checked_sub(1).and_then(|i| runs.get(i));
         match before {
             Some(run) if run.holds(day) => Ok(run),
@@ -944,7 +1095,10 @@ impl fmt::Display for FoldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutOfOrder { before, then } => {
-                write!(f, "day {then} follows {before}: days must ascend, once each")
+                write!(
+                    f,
+                    "day {then} follows {before}: days must ascend, once each"
+                )
             }
             Self::Backwards(day) => write!(f, "day {day}: its interval runs backwards"),
             Self::TooMany => write!(f, "more than {MAX_RUNS_PER_SYMBOL} runs"),
@@ -1247,7 +1401,13 @@ impl fmt::Display for Finding {
                 f,
                 "no_row {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}], and no corporate-action \
                  row lies there",
-                step.symbol, step.after, step.ex_date, step.from, step.to, step.factor, step.low,
+                step.symbol,
+                step.after,
+                step.ex_date,
+                step.from,
+                step.to,
+                step.factor,
+                step.low,
                 step.high
             ),
             Self::FactorDiffers { step, product } => write!(
@@ -1297,7 +1457,7 @@ pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
             if row.ratio == Ratio::ONE {
                 continue;
             }
-            // One binary search a row: the run holding the ex-date, if any,
+            // One index a row: the run holding the ex-date, if any,
             // and whether the day before it lies in the same run.
             if runs
                 .run_on(symbol, row.ex_date)

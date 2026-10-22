@@ -86,10 +86,13 @@ fn bar(ts_micros: i64, open: i64, high: i64, low: i64, close: i64, volume: i64) 
     }
 }
 
+/// One bar file of the fixture: (symbol, vendor, rung seconds, (year, month)).
+type FileKey = (String, Vendor, u32, (u16, u8));
+
 /// Bars per (symbol, vendor, rung seconds, month), kept in stamp order.
 #[derive(Default)]
 struct Fixture {
-    files: BTreeMap<(String, Vendor, u32, (u16, u8)), Vec<Bar>>,
+    files: BTreeMap<FileKey, Vec<Bar>>,
 }
 
 impl Fixture {
@@ -105,7 +108,14 @@ impl Fixture {
             seconds.push(bar(at(on, minute, 0), p, p + 4, p - 2, p + 2, 10));
             seconds.push(bar(at(on, minute, 30), p + 2, p + 6, p, p + 4, 10));
             let k = |x: i64| x * num / den;
-            minutes.push(bar(at(on, minute, 0), k(p), k(p + 6), k(p - 2), k(p + 4), 20));
+            minutes.push(bar(
+                at(on, minute, 0),
+                k(p),
+                k(p + 6),
+                k(p - 2),
+                k(p + 4),
+                20,
+            ));
         }
         let key = |vendor, rung: Timeframe| (symbol.to_owned(), vendor, rung.secs(), month);
         self.files
@@ -196,16 +206,28 @@ fn every_misuse_is_refused_by_name_with_the_usage() {
         (&["--dir"][..], "--dir needs a value"),
         (&["--dir", "a", "--dir", "b"][..], "given twice"),
         (&["--dir", "a", "--from", "2025-13"][..], "2025-13"),
-        (&["--dir", "a", "--from", "2025-04", "--to", "2025-03"][..], "is after --to"),
-        (&["--dir", "a", "--ledger"][..], "needs --write"),
-        (&["--dir", "a", "--shout"][..], "not an argument of basis-runs"),
+        (
+            &["--dir", "a", "--from", "2025-04", "--to", "2025-03"][..],
+            "is after --to",
+        ),
+        (&["--dir", "a", "--ledger"][..], "needs --apply"),
+        (
+            &["--dir", "a", "--shout"][..],
+            "not an argument of basis-runs",
+        ),
     ] {
         let (code, text) = basis_runs(Path::new("/nonexistent"), arguments);
         assert_eq!(code, MISUSED, "{arguments:?}: {text}");
-        assert!(text.contains(said) && text.contains(USAGE), "{arguments:?}: {text}");
+        assert!(
+            text.contains(said) && text.contains(USAGE),
+            "{arguments:?}: {text}"
+        );
     }
     assert_eq!(
-        ask(&["--dir", "d", "--from", "2025-01", "--to", "2025-02", "--write", "--ledger"]).unwrap(),
+        ask(&[
+            "--dir", "d", "--from", "2025-01", "--to", "2025-02", "--apply", "--ledger"
+        ])
+        .unwrap(),
         Ask {
             dir: PathBuf::from("d"),
             from: Some(YearMonth::new(2025, 1).unwrap()),
@@ -223,7 +245,7 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
     let (store, out) = (Dir::new("store"), Dir::new("out"));
     split_store(&store.0);
     reconcile(&store.0, &out.0, "2025-03");
-    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--write", "--ledger"]);
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
     assert_eq!(code, OK, "{text}");
     // ONE STEP, factor 2, from the vendor ratio 1/2 to 1/1.
     assert!(text.contains("steps 1\n"), "{text}");
@@ -243,12 +265,21 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
     let rows = table.of("SPLITCO");
     assert_eq!(rows.len(), 1, "{rows:#?}");
     assert_eq!(rows[0].ratio.to_string(), "2/1");
-    assert_eq!((rows[0].tag, rows[0].kind), (Tag::Measured, Kind::Unclassed));
+    assert_eq!(
+        (rows[0].tag, rows[0].kind),
+        (Tag::Measured, Kind::Unclassed)
+    );
     assert_eq!(rows[0].ex_date, day(2025, 3, 6));
     assert!(!rows[0].excuses() && rows[0].class().is_none());
-    assert_eq!(table.excuse("SPLITCO", Some(day(2025, 3, 5)), day(2025, 3, 6)), None);
+    assert_eq!(
+        table.excuse("SPLITCO", Some(day(2025, 3, 5)), day(2025, 3, 6)),
+        None
+    );
     // Every measured step now has its row.
-    assert!(text.contains("check against corporate_actions (measured, 1 rows): 0 finding(s)"), "{text}");
+    assert!(
+        text.contains("check against corporate_actions (measured, 1 rows): 0 finding(s)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -256,31 +287,55 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
     let (store, out) = (Dir::new("store"), Dir::new("out"));
     split_store(&store.0);
     reconcile(&store.0, &out.0, "2025-03");
-    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--write"]);
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply"]);
     assert_eq!(code, OK, "{text}");
-    let runs = load_one(&store.0, Table::BasisRuns, pull::corporate_actions::BasisRuns::build);
+    let runs = load_one(
+        &store.0,
+        Table::BasisRuns,
+        pull::corporate_actions::BasisRuns::build,
+    );
     let runs = runs.table().unwrap();
     let share = runs.of("SPLITCO");
     assert_eq!(share.len(), 2, "{share:#?}");
     assert_eq!(share[0].ratio.to_string(), "1/2");
     assert_eq!(share[0].end.word(), "step");
-    assert_eq!(share[1].first, day(2025, 3, 6), "the new run starts on the ex-date");
-    assert_eq!(share[0].last, day(2025, 3, 5), "the old one ends the session before");
+    assert_eq!(
+        share[1].first,
+        day(2025, 3, 6),
+        "the new run starts on the ex-date"
+    );
+    assert_eq!(
+        share[0].last,
+        day(2025, 3, 5),
+        "the old one ends the session before"
+    );
     assert_eq!(share[1].ratio.to_string(), "1/1");
     // The receipt names its source as measured and hashes the files read.
-    let Slot::Store { receipt, .. } =
-        load_one(&store.0, Table::BasisRuns, pull::corporate_actions::BasisRuns::build)
-    else {
+    let Slot::Store { receipt, .. } = load_one(
+        &store.0,
+        Table::BasisRuns,
+        pull::corporate_actions::BasisRuns::build,
+    ) else {
         panic!("stored");
     };
-    assert!(receipt.source.starts_with("measured, not sourced"), "{}", receipt.source);
+    assert!(
+        receipt.source.starts_with("measured, not sourced"),
+        "{}",
+        receipt.source
+    );
     assert!(receipt.source_sha256.is_some());
     // No ledger without --ledger: the checker names the step with no row.
-    assert!(text.contains("not served") || text.contains("no_row SPLITCO"), "{text}");
+    assert!(
+        text.contains("not served") || text.contains("no_row SPLITCO"),
+        "{text}"
+    );
     // A second run over the same files lands nothing new (append-only, idempotent).
-    let (code, again) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--write"]);
+    let (code, again) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply"]);
     assert_eq!(code, OK, "{again}");
-    assert!(again.contains("generation 1 already held these bytes"), "{again}");
+    assert!(
+        again.contains("generation 1 already held these bytes"),
+        "{again}"
+    );
 }
 
 #[test]
@@ -311,16 +366,29 @@ fn a_dry_run_writes_nothing_and_checks_against_the_stores_table() {
     write(&store.0, &draft).unwrap();
     let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out)]);
     assert_eq!(code, OK, "{text}");
-    assert!(text.contains("check against corporate_actions (sourced, 1 rows): 1 finding(s)"), "{text}");
-    assert!(text.contains("no_row SPLITCO (2025-03-05, 2025-03-06]"), "{text}");
+    assert!(
+        text.contains("check against corporate_actions (sourced, 1 rows): 1 finding(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no_row SPLITCO (2025-03-05, 2025-03-06]"),
+        "{text}"
+    );
     assert!(text.contains("dry run: nothing written"), "{text}");
     assert!(!Table::BasisRuns.dir(&store.0).exists(), "nothing written");
     // The measured ledger never replaces the NSE file.
-    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--write", "--ledger"]);
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
     assert_eq!(code, FAILED, "{text}");
-    assert!(text.contains("LEDGER REFUSED") && text.contains("is sourced"), "{text}");
+    assert!(
+        text.contains("LEDGER REFUSED") && text.contains("is sourced"),
+        "{text}"
+    );
     let table = load_one(&store.0, Table::CorporateActions, CorporateActions::build);
-    assert_eq!(table.receipt().unwrap().generation, 1, "still the NSE generation");
+    assert_eq!(
+        table.receipt().unwrap().generation,
+        1,
+        "still the NSE generation"
+    );
 }
 
 #[test]
@@ -338,11 +406,17 @@ fn a_missing_month_is_named_and_a_damaged_file_refuses_the_run() {
     reconcile(&store.0, &out.0, "2025-05");
     assert_eq!(
         months_in(&out.0).unwrap(),
-        [YearMonth::new(2025, 3).unwrap(), YearMonth::new(2025, 5).unwrap()]
+        [
+            YearMonth::new(2025, 3).unwrap(),
+            YearMonth::new(2025, 5).unwrap()
+        ]
     );
     let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out)]);
     assert_eq!(code, OK, "{text}");
-    assert!(text.contains("months read 2 (2025-03..2025-05), missing 1: 2025-04"), "{text}");
+    assert!(
+        text.contains("months read 2 (2025-03..2025-05), missing 1: 2025-04"),
+        "{text}"
+    );
     // A range with no file in it is refused by name.
     let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--from", "2025-06"]);
     assert_eq!(code, FAILED, "{text}");
@@ -351,12 +425,21 @@ fn a_missing_month_is_named_and_a_damaged_file_refuses_the_run() {
     let file = out.0.join("feed-reconcile-2025-05.v1.csv");
     let whole = fs::read(&file).unwrap();
     fs::write(&file, &whole[..whole.len() / 2]).unwrap();
-    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--write"]);
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply"]);
     assert_eq!(code, FAILED, "{text}");
-    assert!(text.contains("BASIS RUNS REFUSED") && text.contains("Nothing was written"), "{text}");
+    assert!(
+        text.contains("BASIS RUNS REFUSED") && text.contains("Nothing was written"),
+        "{text}"
+    );
     assert!(!Table::BasisRuns.dir(&store.0).exists());
     // An empty directory is refused, and a missing one.
     let empty = Dir::new("empty");
-    assert_eq!(basis_runs(&store.0, &["--dir", &dir_text(&empty)]).0, FAILED);
-    assert_eq!(basis_runs(&store.0, &["--dir", "/nonexistent/brutex-basis"]).0, FAILED);
+    assert_eq!(
+        basis_runs(&store.0, &["--dir", &dir_text(&empty)]).0,
+        FAILED
+    );
+    assert_eq!(
+        basis_runs(&store.0, &["--dir", "/nonexistent/brutex-basis"]).0,
+        FAILED
+    );
 }

@@ -2,7 +2,8 @@
 //! whole list of runs and actions, cost the same whatever the basis-run and
 //! corporate-action tables hold. Each served store gets 1x, 10x and 100x
 //! shares (20, 200 and 2,000, eight runs and four actions each); the kept
-//! answer is one hash and one bounded binary search, the first request of
+//! answer is one hash and one index into the share's day table (and a
+//! walk of at most 64 action rows), the first request of
 //! a store reads the tables once (the `cold` figure the family prints).
 
 use pull::corporate_actions::{Action, Kind, Ratio, Run, RunEnd, Tag};

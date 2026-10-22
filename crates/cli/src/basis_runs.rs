@@ -5,7 +5,7 @@
 //! # Usage
 //!
 //! ```text
-//! cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--write] [--ledger]
+//! cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--apply] [--ledger]
 //! ```
 //!
 //! # One owner of the factor
@@ -31,9 +31,9 @@
 //!
 //! # What it writes
 //!
-//! Nothing, without `--write`: it prints the runs' summary, every step and
+//! Nothing, without `--apply`: it prints the runs' summary, every step and
 //! the checker's findings against the store's corporate-action table. With
-//! `--write`, generation `n + 1` of `<store>/reference/v1/basis_runs`
+//! `--apply`, generation `n + 1` of `<store>/reference/v1/basis_runs`
 //! through R3-30's writer (append-only: a hard link that refuses an existing
 //! name; the same bytes again land nothing), its receipt naming the files
 //! read and the SHA-256 of their list (each file's BLAKE3 in it). With
@@ -66,7 +66,7 @@ use crate::{FAILED, MISUSED, OK};
 
 /// The verb's shape, printed with every misuse.
 pub(crate) const USAGE: &str =
-    "cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--write] [--ledger]";
+    "cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--apply] [--ledger]";
 
 /// The first line of every report.
 pub const FORMAT: &str = "# brutex basis-runs 1";
@@ -99,7 +99,7 @@ fn month(text: &str) -> Result<YearMonth, String> {
 ///
 /// A missing `--dir`, an unknown or repeated flag, a flag without its value,
 /// a month that is not `YYYY-MM`, `--from` after `--to`, or `--ledger`
-/// without `--write`; each by name.
+/// without `--apply`; each by name.
 pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let mut dir = None;
     let (mut from, mut to) = (None, None);
@@ -115,9 +115,9 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
             "--dir" if dir.is_none() => dir = Some(PathBuf::from(value("--dir")?)),
             "--from" if from.is_none() => from = Some(month(value("--from")?)?),
             "--to" if to.is_none() => to = Some(month(value("--to")?)?),
-            "--write" if !write => write = true,
+            "--apply" if !write => write = true,
             "--ledger" if !ledger => ledger = true,
-            "--dir" | "--from" | "--to" | "--write" | "--ledger" => {
+            "--dir" | "--from" | "--to" | "--apply" | "--ledger" => {
                 return Err(format!("{flag} is given twice"));
             }
             other => return Err(format!("{other:?} is not an argument of basis-runs")),
@@ -130,7 +130,7 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
         return Err(format!("--from {from} is after --to {to}"));
     }
     if ledger && !write {
-        return Err("--ledger writes the measured ledger and needs --write".to_owned());
+        return Err("--ledger writes the measured ledger and needs --apply".to_owned());
     }
     Ok(Ask {
         dir,
@@ -161,14 +161,24 @@ pub(crate) fn months_in(dir: &Path) -> Result<Vec<YearMonth>, String> {
         let (Some(stamp), Some(tail)) = (rest.get(..7), rest.get(7..)) else {
             continue;
         };
-        if !tail.starts_with(".v") || !tail.ends_with(".csv") {
+        // ONLY A NAME DATA-1 WRITES (`feed_reconcile::newest_of`'s rule):
+        // `.v<N>.csv` with a number that round-trips; a `.symbols.v` file
+        // or a `.v007.csv` is not a month's full file.
+        let full = tail
+            .strip_prefix(".v")
+            .and_then(|rest| rest.strip_suffix(".csv"))
+            .and_then(|n| n.parse::<u32>().ok().filter(|v| v.to_string() == n));
+        if full.is_none() {
             continue;
         }
         if let Ok(month) = month(stamp) {
             months.insert(month);
         }
         if months.len() > MAX_MONTHS {
-            return Err(format!("`{}` holds more than {MAX_MONTHS} months", dir.display()));
+            return Err(format!(
+                "`{}` holds more than {MAX_MONTHS} months",
+                dir.display()
+            ));
         }
     }
     Ok(months.into_iter().collect())
@@ -212,7 +222,51 @@ pub(crate) struct Folded {
     /// Stock-days not folded, by reason.
     pub(crate) skipped: BTreeMap<&'static str, u64>,
     /// Stock-days folded.
-    pub(crate) folded: u64,
+    pub(crate) days_folded: u64,
+}
+
+/// One share's days of `month` from `index`, pushed onto its `folder`;
+/// a day with no basis is counted in `skipped` by its reason. Returns the
+/// days folded, or why the folder refused one (the share is then refused).
+fn fold_month(
+    index: &FactorIndex,
+    month: YearMonth,
+    symbol: &str,
+    folder: &mut Folder,
+    skipped: &mut BTreeMap<&'static str, u64>,
+) -> Result<u64, String> {
+    let mut days = 0_u64;
+    for d in 1..=31_u8 {
+        let Ok(day) = Day::new(month.year(), month.month(), d) else {
+            break;
+        };
+        let pair = match index.factor_of(symbol, day) {
+            Ok(pair) => pair,
+            Err(FactorRefusal::FactorNotConstant { pair, .. }) => *pair,
+            Err(why) => {
+                *skipped.entry(refusal_word(&why)).or_default() += 1;
+                continue;
+            }
+        };
+        let Some(((low, high), _)) = pair.basis() else {
+            *skipped.entry("no_basis").or_default() += 1;
+            continue;
+        };
+        let (Some(low), Some(high)) = (
+            Ratio::of_signed(low.num, low.den),
+            Ratio::of_signed(high.num, high.den),
+        ) else {
+            *skipped
+                .entry("interval_not_positive_or_too_large")
+                .or_default() += 1;
+            continue;
+        };
+        folder
+            .push(BasisDay { day, low, high })
+            .map_err(|why| why.to_string())?;
+        days += 1;
+    }
+    Ok(days)
 }
 
 /// Folds every month of `ask` in `ask.dir`.
@@ -247,60 +301,37 @@ pub(crate) fn fold(ask: &Ask) -> Result<Folded, String> {
     let mut seen_days: BTreeMap<String, u64> = BTreeMap::new();
     let mut refused: BTreeMap<String, String> = BTreeMap::new();
     let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
-    let mut folded = 0_u64;
+    let mut days_folded = 0_u64;
     let mut read = Vec::new();
     let mut missing = Vec::new();
+    // The months held, walked beside the calendar: one compare a month.
+    let mut held_months = in_range.iter().copied().peekable();
     let mut at = Some(first);
     while let Some(month) = at.filter(|m| *m <= last) {
         at = next_month(month);
-        if !in_range.contains(&month) {
+        if held_months.next_if_eq(&month).is_none() {
             missing.push(month);
             continue;
         }
         let index = FactorIndex::load(&ask.dir, month)?;
         read.push((month, index.file.clone(), index.digest));
-        let mut symbols: Vec<&str> = index.symbols().collect();
-        symbols.sort_unstable();
-        for symbol in symbols {
-            seen_days.entry(symbol.to_owned()).or_insert(0);
+        // IN THE FILE'S OWN ORDER: each share folds alone into its own
+        // folder, so the order changes nothing the report or the file says.
+        for symbol in index.symbols() {
+            let seen = seen_days.entry(symbol.to_owned()).or_insert(0);
             if refused.contains_key(symbol) {
                 continue;
             }
-            let folder = folders
+            let share = folders
                 .entry(symbol.to_owned())
                 .or_insert_with(|| Folder::new(symbol));
-            for d in 1..=31_u8 {
-                let Ok(day) = Day::new(month.year(), month.month(), d) else {
-                    break;
-                };
-                let pair = match index.factor_of(symbol, day) {
-                    Ok(pair) => pair,
-                    Err(FactorRefusal::FactorNotConstant { pair, .. }) => *pair,
-                    Err(why) => {
-                        *skipped.entry(refusal_word(&why)).or_default() += 1;
-                        continue;
-                    }
-                };
-                let Some(((low, high), _)) = pair.basis() else {
-                    *skipped.entry("no_basis").or_default() += 1;
-                    continue;
-                };
-                let (Some(low), Some(high)) = (
-                    Ratio::of_signed(low.num, low.den),
-                    Ratio::of_signed(high.num, high.den),
-                ) else {
-                    *skipped.entry("interval_not_positive_or_too_large").or_default() += 1;
-                    continue;
-                };
-                match folder.push(BasisDay { day, low, high }) {
-                    Ok(()) => {
-                        folded += 1;
-                        *seen_days.entry(symbol.to_owned()).or_default() += 1;
-                    }
-                    Err(why) => {
-                        refused.insert(symbol.to_owned(), why.to_string());
-                        break;
-                    }
+            match fold_month(&index, month, symbol, share, &mut skipped) {
+                Ok(days) => {
+                    days_folded += days;
+                    *seen += days;
+                }
+                Err(why) => {
+                    refused.insert(symbol.to_owned(), why);
                 }
             }
         }
@@ -324,7 +355,7 @@ pub(crate) fn fold(ask: &Ask) -> Result<Folded, String> {
         no_run,
         refused: refused.into_iter().collect(),
         skipped,
-        folded,
+        days_folded,
     })
 }
 
@@ -352,8 +383,16 @@ fn manifest(folded: &Folded) -> String {
 /// The basis-run table `folded` makes, as a draft.
 pub(crate) fn runs_draft(ask: &Ask, folded: &Folded, fetched: Day) -> Draft {
     let (first, last) = (
-        folded.read.first().map(|(m, ..)| m.to_string()).unwrap_or_default(),
-        folded.read.last().map(|(m, ..)| m.to_string()).unwrap_or_default(),
+        folded
+            .read
+            .first()
+            .map(|(m, ..)| m.to_string())
+            .unwrap_or_default(),
+        folded
+            .read
+            .last()
+            .map(|(m, ..)| m.to_string())
+            .unwrap_or_default(),
     );
     let mut source = format!(
         "measured, not sourced: cli basis-runs over DATA-1's feed-reconcile files in {} ({} months \
@@ -431,8 +470,16 @@ pub(crate) fn command_with(
         out,
         "months read {} ({}..{}), missing {}{}",
         folded.read.len(),
-        folded.read.first().map(|(m, ..)| m.to_string()).unwrap_or_default(),
-        folded.read.last().map(|(m, ..)| m.to_string()).unwrap_or_default(),
+        folded
+            .read
+            .first()
+            .map(|(m, ..)| m.to_string())
+            .unwrap_or_default(),
+        folded
+            .read
+            .last()
+            .map(|(m, ..)| m.to_string())
+            .unwrap_or_default(),
         folded.missing.len(),
         if folded.missing.is_empty() {
             String::new()
@@ -449,17 +496,13 @@ pub(crate) fn command_with(
         }
     );
     let count = |end: RunEnd| folded.runs.iter().filter(|run| run.end == end).count();
-    let shares = folded
-        .runs
-        .iter()
-        .map(|run| run.symbol.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    // The runs come share by share (the folders are keyed by symbol).
+    let shares = folded.runs.chunk_by(|a, b| a.symbol == b.symbol).count();
     let _ = writeln!(
         out,
         "stock-days folded {}, not folded {} ({}); shares with runs {shares}, runs {} (step {}, \
          drift {}, open {})",
-        folded.folded,
+        folded.days_folded,
         folded.skipped.values().sum::<u64>(),
         folded
             .skipped
@@ -481,25 +524,30 @@ pub(crate) fn command_with(
     for (symbol, why) in &folded.refused {
         let _ = writeln!(out, "refused {symbol}: {why}");
     }
-    let mut by_share: BTreeMap<&str, Vec<Run>> = BTreeMap::new();
-    for run in &folded.runs {
-        by_share.entry(run.symbol.as_str()).or_default().push(run.clone());
-    }
     let mut steps = 0_usize;
-    for runs in by_share.values() {
+    for runs in folded.runs.chunk_by(|a, b| a.symbol == b.symbol) {
         for step in corporate_actions::steps_of(runs) {
             steps += 1;
             let _ = writeln!(
                 out,
                 "step {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]",
-                step.symbol, step.after, step.ex_date, step.from, step.to, step.factor, step.low,
+                step.symbol,
+                step.after,
+                step.ex_date,
+                step.from,
+                step.to,
+                step.factor,
+                step.low,
                 step.high
             );
         }
     }
     let _ = writeln!(out, "steps {steps}");
     let Some(fetched) = today else {
-        let _ = writeln!(out, "BASIS RUNS FAILED: the clock gives no IST day. Nothing was written.");
+        let _ = writeln!(
+            out,
+            "BASIS RUNS FAILED: the clock gives no IST day. Nothing was written."
+        );
         return FAILED;
     };
     let draft = runs_draft(&ask, &folded, fetched);
@@ -516,7 +564,7 @@ pub(crate) fn command_with(
     let actions = reference_data::load_one(&root, Table::CorporateActions, CorporateActions::build);
     if !ask.write {
         report_check(out, &draft, &actions);
-        let _ = writeln!(out, "dry run: nothing written (add --write)");
+        let _ = writeln!(out, "dry run: nothing written (add --apply)");
         return OK;
     }
     let written = match reference_data::write(&root, &draft) {
@@ -530,7 +578,11 @@ pub(crate) fn command_with(
         out,
         "basis_runs generation {} {} sha256 {} at {}",
         written.generation,
-        if written.landed { "landed" } else { "already held these bytes" },
+        if written.landed {
+            "landed"
+        } else {
+            "already held these bytes"
+        },
         written.sha256,
         written.path.display()
     );
@@ -575,14 +627,19 @@ pub(crate) fn command_with(
             return FAILED;
         }
     };
-    let ledger = corporate_actions::measured_draft(&runs, written.generation, &written.sha256, fetched);
+    let ledger =
+        corporate_actions::measured_draft(&runs, written.generation, &written.sha256, fetched);
     match reference_data::write(&root, &ledger) {
         Ok(landed) => {
             let _ = writeln!(
                 out,
                 "corporate_actions generation {} {} ({} measured rows) sha256 {}",
                 landed.generation,
-                if landed.landed { "landed" } else { "already held these bytes" },
+                if landed.landed {
+                    "landed"
+                } else {
+                    "already held these bytes"
+                },
                 ledger.rows.len(),
                 landed.sha256
             );
@@ -598,7 +655,8 @@ pub(crate) fn command_with(
             return FAILED;
         }
     }
-    let reloaded = reference_data::load_one(&root, Table::CorporateActions, CorporateActions::build);
+    let reloaded =
+        reference_data::load_one(&root, Table::CorporateActions, CorporateActions::build);
     report_check(out, &draft, &reloaded);
     OK
 }
@@ -609,9 +667,9 @@ fn report_check(out: &mut String, draft: &Draft, actions: &Slot<CorporateActions
         reference_data::parse(Table::BasisRuns, Some(0), Path::new("."), text.as_bytes())
             .map_err(|why| why.to_string())
     });
-    let runs = match parsed.and_then(|parsed| {
-        BasisRuns::build(&parsed, Path::new(".")).map_err(|why| why.to_string())
-    }) {
+    let runs = match parsed
+        .and_then(|parsed| BasisRuns::build(&parsed, Path::new(".")).map_err(|why| why.to_string()))
+    {
         Ok(runs) => runs,
         Err(why) => {
             let _ = writeln!(out, "check: the runs do not build as a table: {why}");
@@ -621,7 +679,10 @@ fn report_check(out: &mut String, draft: &Draft, actions: &Slot<CorporateActions
     let table = match actions.table() {
         Ok(table) => table,
         Err(why) => {
-            let _ = writeln!(out, "check: not run, the corporate-action table is not served: {why}");
+            let _ = writeln!(
+                out,
+                "check: not run, the corporate-action table is not served: {why}"
+            );
             return;
         }
     };

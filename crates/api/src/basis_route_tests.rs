@@ -133,7 +133,11 @@ fn db_shows_the_action_on_its_day() {
                 }
             }
         }
-        assert_eq!(noted.len(), 1, "{order}: ONE note, on the ex-date: {noted:#?}");
+        assert_eq!(
+            noted.len(),
+            1,
+            "{order}: ONE note, on the ex-date: {noted:#?}"
+        );
         let (on, note) = &noted[0];
         assert_eq!(on, "2025-03-06");
         assert_eq!(note["ratio"], "2/1");
@@ -144,7 +148,11 @@ fn db_shows_the_action_on_its_day() {
         assert_eq!(note["decides_class"], false);
         assert_eq!(note["label_only"], true);
         assert_eq!(note["applies"], "at this session");
-        assert_eq!(body["corporate_actions"]["served"], true, "{:#}", body["corporate_actions"]);
+        assert_eq!(
+            body["corporate_actions"]["served"], true,
+            "{:#}",
+            body["corporate_actions"]
+        );
         assert_eq!(body["corporate_actions"]["receipt"]["status"], "measured");
     }
     // An index page carries no share action and no table.
@@ -171,8 +179,17 @@ fn a_holiday_ex_date_is_noted_on_its_day_as_applying_at_the_next_session() {
     .unwrap();
     let body = super::super::dayflags::answer(&store, &ask);
     let notes = notes_of(&body["days"][0]);
-    let note = notes.iter().find(|n| n["note"] == "corporate_action").unwrap();
-    assert!(note["applies"].as_str().unwrap().starts_with("at the next session"), "{note:#}");
+    let note = notes
+        .iter()
+        .find(|n| n["note"] == "corporate_action")
+        .unwrap();
+    assert!(
+        note["applies"]
+            .as_str()
+            .unwrap()
+            .starts_with("at the next session"),
+        "{note:#}"
+    );
 }
 
 #[test]
@@ -188,16 +205,24 @@ fn an_absent_or_refused_table_is_named_on_the_page_never_an_empty_one() {
     // A table whose bytes are not the bytes written: refused by name.
     install(&store, &[measured_split()]);
     let path = Table::CorporateActions.path(&store, 1);
-    let text = std::fs::read_to_string(&path).unwrap().replace("|2|1|", "|3|1|");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("|2|1|", "|3|1|");
     std::fs::write(&path, text).unwrap();
     let body = super::super::dayflags::answer(&store, &ask);
-    assert_eq!(body["corporate_actions"]["refusal"]["kind"], "checksum", "{:#}", body["corporate_actions"]);
+    assert_eq!(
+        body["corporate_actions"]["refusal"]["kind"], "checksum",
+        "{:#}",
+        body["corporate_actions"]
+    );
     assert!(
         body["days"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|record| notes_of(record).iter().all(|n| n["note"] != "corporate_action")),
+            .all(|record| notes_of(record)
+                .iter()
+                .all(|n| n["note"] != "corporate_action")),
         "nothing is drawn from a refused table"
     );
 }
@@ -219,16 +244,29 @@ fn basis_json_answers_the_run_holding_a_day_and_names_every_outside() {
     assert_eq!(on["day"]["actions"][0]["excuses"], false);
     let after = answer(&kept, &asked("symbol=SPLITCO&day=2025-03-11").unwrap());
     assert!(after["day"]["factor"].is_null());
-    assert!(after["day"]["outside"].as_str().unwrap().starts_with("outside_every_run"));
+    assert!(
+        after["day"]["outside"]
+            .as_str()
+            .unwrap()
+            .starts_with("outside_every_run")
+    );
     let none = answer(&kept, &asked("symbol=NOSUCHCO&day=2025-03-04").unwrap());
-    assert!(none["day"]["outside"].as_str().unwrap().starts_with("no_basis_run"));
+    assert!(
+        none["day"]["outside"]
+            .as_str()
+            .unwrap()
+            .starts_with("no_basis_run")
+    );
     let all = answer(&kept, &asked("symbol=SPLITCO").unwrap());
     assert_eq!(all["runs"].as_array().unwrap().len(), 2);
     assert_eq!(all["actions"].as_array().unwrap().len(), 1);
     assert_eq!(all["tables"]["basis_runs"]["receipt"]["status"], "measured");
     assert!(all["law"].as_str().unwrap().contains("never excuses"));
     // Absent tables are named, never served empty.
-    let empty = answer(&tables(&root("basis-empty")), &asked("symbol=SPLITCO&day=2025-03-04").unwrap());
+    let empty = answer(
+        &tables(&root("basis-empty")),
+        &asked("symbol=SPLITCO&day=2025-03-04").unwrap(),
+    );
     assert_eq!(empty["tables"]["basis_runs"]["refusal"]["kind"], "absent");
     assert_eq!(empty["day"]["outside"], "the basis-run table is not served");
     assert!(empty["day"]["actions"].is_null());
@@ -241,7 +279,10 @@ fn garbage_parameters_are_refused_by_name() {
         ("symbol=", "symbol is required"),
         ("symbol=splitco", "not a stored share name"),
         ("symbol=A%20B", "not a stored share name"),
-        (&*format!("symbol={}", "A".repeat(65)), "not a stored share name"),
+        (
+            &*format!("symbol={}", "A".repeat(65)),
+            "not a stored share name",
+        ),
         ("symbol=SPLITCO&day=2025-02-30", "not YYYY-MM-DD"),
         ("symbol=SPLITCO&day=yesterday", "not YYYY-MM-DD"),
         ("symbol=SPLITCO&symbol=OTHERCO", "given twice"),
@@ -250,7 +291,10 @@ fn garbage_parameters_are_refused_by_name() {
         let why = asked(query).unwrap_err();
         assert!(why.contains(said), "{query:?}: {why}");
     }
-    assert!(asked("symbol=M%26M&day=2025-03-04").is_ok(), "an ampersand name is a share");
+    assert!(
+        asked("symbol=M%26M&day=2025-03-04").is_ok(),
+        "an ampersand name is a share"
+    );
 }
 
 #[test]
@@ -259,7 +303,10 @@ fn the_tables_are_read_again_only_when_a_generation_lands() {
     install(&store, &[measured_split()]);
     let first = tables(&store);
     let again = tables(&store);
-    assert!(Arc::ptr_eq(&first.runs, &again.runs), "kept: no second read");
+    assert!(
+        Arc::ptr_eq(&first.runs, &again.runs),
+        "kept: no second read"
+    );
     assert!(Arc::ptr_eq(&first.actions, &again.actions));
     // A new generation lands: the next request reads it.
     let mut second = measured_split();
@@ -334,7 +381,9 @@ fn a_lookup_costs_the_same_at_1x_10x_and_100x_runs_measured() {
             .collect();
         took.sort_unstable();
         let (p50, p99, max) = (took[200], took[396], took[399]);
-        println!("basis lookup at {shares} shares x 8 runs: p50 {p50} ns, p99 {p99} ns, max {max} ns, n 400");
+        println!(
+            "basis lookup at {shares} shares x 8 runs: p50 {p50} ns, p99 {p99} ns, max {max} ns, n 400"
+        );
         medians.push(p50);
     }
     assert!(
@@ -362,9 +411,19 @@ fn a_compare_inside_a_run_applies_its_factor() {
         let run = &body["days"][0]["basis"]["measured_run"];
         // GDFL ÷ Zerodha, D-3339's direction: 2/1 inside the 1/2 run.
         assert_eq!(run["factor"].as_str(), factor, "{on}: {run:#}");
-        assert_eq!(run["corporate_actions"].as_array().unwrap().len(), actions, "{on}");
+        assert_eq!(
+            run["corporate_actions"].as_array().unwrap().len(),
+            actions,
+            "{on}"
+        );
         if factor.is_none() {
-            assert!(run["outside"].as_str().unwrap().starts_with("outside_every_run"), "{run:#}");
+            assert!(
+                run["outside"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("outside_every_run"),
+                "{run:#}"
+            );
         } else {
             assert_eq!(run["standing"], "measured");
         }

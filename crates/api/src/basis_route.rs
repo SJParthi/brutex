@@ -23,8 +23,8 @@
 //!
 //! The tables are kept per store root, keyed by one `stat` of each table's
 //! directory and one of the file served: a request costs those `stat`s,
-//! one hash of the symbol and one binary search (at most twelve
-//! comparisons), O(1). A new generation (a new name in the directory) or a
+//! one hash of the symbol and one index into that share's day table (or a
+//! walk of at most 64 action rows), O(1). A new generation (a new name in the directory) or a
 //! served file changed in place is read again, once, O(rows), and told as
 //! the loader's event. Without `day` the answer lists the share's runs and
 //! actions, at most `MAX_RUNS_PER_SYMBOL` and `MAX_ACTIONS_PER_SYMBOL`.
@@ -80,7 +80,8 @@ struct Kept {
 
 fn kept() -> &'static Mutex<HashMap<PathBuf, Kept>> {
     static KEPT: OnceLock<Mutex<HashMap<PathBuf, Kept>>> = OnceLock::new();
-    KEPT.get_or_init(|| Mutex::new(HashMap::new()))
+    // One entry per store root a process serves: one for the server.
+    KEPT.get_or_init(|| Mutex::new(HashMap::with_capacity(1)))
 }
 
 fn key_of(root: &Path, tables: Option<&Tables>) -> [Stamp; 4] {
@@ -161,7 +162,12 @@ pub(crate) fn slot_json<T>(slot: &Slot<T>) -> Value {
             "origin": slot.origin(),
             "refusal": refusal_json(why),
         }),
-        Slot::Store { receipt, path, .. } | Slot::Compiled { receipt, looked_in: path, .. } => {
+        Slot::Store { receipt, path, .. }
+        | Slot::Compiled {
+            receipt,
+            looked_in: path,
+            ..
+        } => {
             json!({
                 "served": true,
                 "origin": slot.origin(),
@@ -241,9 +247,9 @@ pub(crate) fn asked(query: &str) -> Result<Asked, String> {
     // `&` arrives as %26 (M&M): the one escape a stored share name needs.
     let symbol = symbol.replace("%26", "&");
     if symbol.len() > MAX_SYMBOL_BYTES
-        || !symbol
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'&' | b'-' | b'_'))
+        || !symbol.bytes().all(|b| {
+            b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'&' | b'-' | b'_')
+        })
     {
         return Err(format!(
             "symbol {symbol:?} is not a stored share name (A-Z, 0-9, & - _, at most {MAX_SYMBOL_BYTES} bytes)"

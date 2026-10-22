@@ -88,8 +88,20 @@ where
     P: IntoIterator,
     P::Item: AsRef<str>,
 {
-    let mut at: HashMap<String, usize> = HashMap::new();
-    let mut series: Vec<(String, Why)> = Vec::new();
+    let (members, frozen, past) = (
+        members_on_day.into_iter(),
+        frozen_surface.into_iter(),
+        series_with_own_past.into_iter(),
+    );
+    // PRE-SIZED from what the caller's iterators say they hold (a slice or
+    // a Vec says exactly), so the inserts below never rehash for them.
+    let hint = members
+        .size_hint()
+        .0
+        .saturating_add(frozen.size_hint().0)
+        .saturating_add(past.size_hint().0);
+    let mut at: HashMap<String, usize> = HashMap::with_capacity(hint);
+    let mut series: Vec<(String, Why)> = Vec::with_capacity(hint);
     let mut mark = |name: &str, set: fn(&mut Why)| {
         let slot = *at.entry(name.to_owned()).or_insert_with(|| {
             series.push((name.to_owned(), Why::default()));
@@ -99,13 +111,13 @@ where
             set(why);
         }
     };
-    for name in members_on_day {
+    for name in members {
         mark(name.as_ref(), |why| why.member = true);
     }
-    for name in frozen_surface {
+    for name in frozen {
         mark(name.as_ref(), |why| why.frozen = true);
     }
-    for name in series_with_own_past {
+    for name in past {
         mark(name.as_ref(), |why| why.own_past = true);
     }
     let entrants = series
@@ -153,10 +165,7 @@ mod tests {
         );
         assert_eq!(got.day, on);
         // THE WHOLE UNION, in the order given, each name once.
-        assert_eq!(
-            got.names(),
-            ["STAYCO", "ENTRANTCO", "FROZENCO", "LEAVERCO"]
-        );
+        assert_eq!(got.names(), ["STAYCO", "ENTRANTCO", "FROZENCO", "LEAVERCO"]);
         // The entrant is named: a member the store holds no past of.
         assert_eq!(got.entrants, ["ENTRANTCO"]);
         // The leaver is named AND kept: its own past keeps accruing.

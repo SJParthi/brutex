@@ -113,7 +113,19 @@ fn split_days() -> Vec<BasisDay> {
 fn a_ratio_is_exact_reduced_and_refuses_garbage() {
     assert_eq!(r("4/8"), r("1/2"));
     assert_eq!(r("3").to_string(), "3/1");
-    for garbage in ["", "0", "1/0", "0/5", "-1/2", "1/-2", "1.5", "a/b", "1/2/3", " 1/2", "10000000000000000000/1"] {
+    for garbage in [
+        "",
+        "0",
+        "1/0",
+        "0/5",
+        "-1/2",
+        "1/-2",
+        "1.5",
+        "a/b",
+        "1/2/3",
+        " 1/2",
+        "10000000000000000000/1",
+    ] {
         assert_eq!(Ratio::parse(garbage), None, "{garbage:?}");
     }
     assert!(r("1/3") < r("1/2"));
@@ -134,7 +146,11 @@ fn the_simplest_fraction_is_the_one_inside_the_interval_with_the_smallest_terms(
     assert_eq!(simplest("3/10", "3/10"), Some(r("3/10")));
     assert_eq!(simplest("31/100", "33/100"), Some(r("1/3")));
     assert_eq!(simplest("2/1", "5/2"), Some(r("2")));
-    assert_eq!(simplest("1/2", "1/3"), None, "an interval that runs backwards");
+    assert_eq!(
+        simplest("1/2", "1/3"),
+        None,
+        "an interval that runs backwards"
+    );
     // A demerger's factor need not be an integer: 0.4766 give or take 1e-4.
     let factor = simplest("4765/10000", "4767/10000").unwrap();
     assert!(r("4765/10000") <= factor && factor <= r("4767/10000"));
@@ -165,8 +181,14 @@ fn a_ratio_that_walks_ends_its_run_as_drift_not_as_a_step() {
     // Eight days, each 0.1% above the last (under the 0.2% step), so no day
     // steps; the band (each day widened by 0.2%) empties on the seventh.
     let walk = [
-        "1000/1000", "1001/1000", "1002/1000", "1003/1000", "1004/1000", "1005/1000",
-        "1006/1000", "1007/1000",
+        "1000/1000",
+        "1001/1000",
+        "1002/1000",
+        "1003/1000",
+        "1004/1000",
+        "1005/1000",
+        "1006/1000",
+        "1007/1000",
     ];
     let days = walk
         .iter()
@@ -196,7 +218,12 @@ fn a_share_with_no_common_minutes_has_no_run_and_days_must_ascend() {
     ));
     let late = [around(day(2020, 1, 3), "1"), around(day(2020, 1, 2), "1")];
     let refused = fold_runs("LATECO", late).unwrap_err();
-    assert!(refused.to_string().contains("2020-01-02 follows 2020-01-03"), "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("2020-01-02 follows 2020-01-03"),
+        "{refused}"
+    );
     let backwards = BasisDay {
         day: day(2020, 1, 2),
         low: r("2"),
@@ -238,22 +265,41 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
     assert_eq!(rows.len(), 1, "ONE row: {rows:#?}");
     let row = &rows[0];
     assert_eq!(row.ratio, r("2"), "factor 2");
-    assert_eq!((row.ex_date, row.after), (day(2023, 7, 3), Some(day(2023, 6, 30))));
+    assert_eq!(
+        (row.ex_date, row.after),
+        (day(2023, 7, 3), Some(day(2023, 6, 30)))
+    );
     assert_eq!((row.tag, row.kind), (Tag::Measured, Kind::Unclassed));
     // TAGGED MEASURED, SO IT LABELS AND NEVER EXCUSES.
     assert!(!row.excuses());
     assert_eq!(row.class(), None);
     // The ledger lands as a generation through the same writer and loader.
-    let draft = measured_draft(&loaded, landed.generation, &landed.sha256, day(2026, 10, 22));
+    let draft = measured_draft(
+        &loaded,
+        landed.generation,
+        &landed.sha256,
+        day(2026, 10, 22),
+    );
     write(&store, &draft).unwrap();
-    let Slot::Store { table: ledger, receipt, .. } = load_actions(&store) else {
+    let Slot::Store {
+        table: ledger,
+        receipt,
+        ..
+    } = load_actions(&store)
+    else {
         panic!("the ledger loads from the store");
     };
     assert_eq!(receipt.standing, Standing::Measured);
-    assert_eq!(receipt.source_sha256.as_deref(), Some(landed.sha256.as_str()));
+    assert_eq!(
+        receipt.source_sha256.as_deref(),
+        Some(landed.sha256.as_str())
+    );
     let labelled = ledger.labels("SPLITCO", Some(day(2023, 6, 30)), day(2023, 7, 3));
     assert_eq!(labelled.len(), 1);
-    assert_eq!(ledger.excuse("SPLITCO", Some(day(2023, 6, 30)), day(2023, 7, 3)), None);
+    assert_eq!(
+        ledger.excuse("SPLITCO", Some(day(2023, 6, 30)), day(2023, 7, 3)),
+        None
+    );
 }
 
 #[test]
@@ -274,7 +320,12 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     // The measured ledger matches every step it was drawn from.
     write(
         &store,
-        &measured_draft(&loaded, landed.generation, &landed.sha256, day(2026, 10, 22)),
+        &measured_draft(
+            &loaded,
+            landed.generation,
+            &landed.sha256,
+            day(2026, 10, 22),
+        ),
     )
     .unwrap();
     let ledger = load_actions(&store).table().unwrap().clone();
@@ -283,7 +334,12 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     let factors: Vec<(String, Day, Ratio)> = ledger
         .symbols()
         .into_iter()
-        .flat_map(|s| ledger.of(s).iter().map(|a| (a.symbol.clone(), a.ex_date, a.ratio)))
+        .flat_map(|s| {
+            ledger
+                .of(s)
+                .iter()
+                .map(|a| (a.symbol.clone(), a.ex_date, a.ratio))
+        })
         .collect();
     assert_eq!(
         factors
@@ -302,7 +358,11 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     // the exact NSE factor below lies in the same interval.
     let rights = ledger.of("RIGHTSCO");
     assert_eq!((rights.len(), rights[0].ex_date), (1, day(2021, 5, 31)));
-    assert!(r("104/100") < rights[0].ratio && rights[0].ratio < r("106/100"), "{}", rights[0].ratio);
+    assert!(
+        r("104/100") < rights[0].ratio && rights[0].ratio < r("106/100"),
+        "{}",
+        rights[0].ratio
+    );
     assert!(rights[0].ratio.den() < 10_000, "{}", rights[0].ratio);
     // An NSE table with the same actions matches too: each factor lies in its
     // step's interval on its own ex-date.
@@ -342,23 +402,42 @@ fn a_share_with_an_action_and_no_row_is_flagged() {
     assert_eq!(found[0].word(), "no_row");
     let said = found[0].to_string();
     assert!(
-        said.contains("SPLITCO") && said.contains("(2023-06-30, 2023-07-03]") && said.contains("factor 2/1"),
+        said.contains("SPLITCO")
+            && said.contains("(2023-06-30, 2023-07-03]")
+            && said.contains("factor 2/1"),
         "{said}"
     );
     // A row of the wrong factor in the window is flagged too, by its product.
     let wrong = scratch("cor-wrong-factor");
-    write(&wrong, &actions_draft(Standing::Sourced, &[nse("SPLITCO", day(2023, 7, 3), Kind::Split, "5")])).unwrap();
+    write(
+        &wrong,
+        &actions_draft(
+            Standing::Sourced,
+            &[nse("SPLITCO", day(2023, 7, 3), Kind::Split, "5")],
+        ),
+    )
+    .unwrap();
     let found = check(&loaded, load_actions(&wrong).table().unwrap());
     assert_eq!(found.len(), 1);
     assert!(matches!(&found[0], Finding::FactorDiffers { product, .. } if *product == r("5")));
     // A price-moving row inside one run (the basis never moved) is flagged.
     let inside = scratch("cor-inside");
-    write(&inside, &actions_draft(Standing::Sourced, &[
-        nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2"),
-        nse("SPLITCO", day(2023, 7, 17), Kind::Bonus, "2"),
-    ])).unwrap();
+    write(
+        &inside,
+        &actions_draft(
+            Standing::Sourced,
+            &[
+                nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2"),
+                nse("SPLITCO", day(2023, 7, 17), Kind::Bonus, "2"),
+            ],
+        ),
+    )
+    .unwrap();
     let found = check(&loaded, load_actions(&inside).table().unwrap());
-    assert_eq!(found.iter().map(Finding::word).collect::<Vec<_>>(), ["row_without_step"]);
+    assert_eq!(
+        found.iter().map(Finding::word).collect::<Vec<_>>(),
+        ["row_without_step"]
+    );
 }
 
 #[test]
@@ -373,17 +452,31 @@ fn an_ex_date_on_a_holiday_applies_at_the_next_session_and_two_actions_on_one_da
     let loaded = load_runs(&store).table().unwrap().clone();
     let saturday = day(2020, 11, 14);
     assert_eq!(saturday.days_from_epoch() % 7, 2, "a Saturday");
-    write(&store, &actions_draft(Standing::Sourced, &[
-        nse("HOLIDAYCO", saturday, Kind::Split, "2"),
-        nse("HOLIDAYCO", saturday, Kind::Bonus, "3"),
-    ])).unwrap();
+    write(
+        &store,
+        &actions_draft(
+            Standing::Sourced,
+            &[
+                nse("HOLIDAYCO", saturday, Kind::Split, "2"),
+                nse("HOLIDAYCO", saturday, Kind::Bonus, "3"),
+            ],
+        ),
+    )
+    .unwrap();
     let table = load_actions(&store).table().unwrap().clone();
-    assert_eq!(check(&loaded, &table), [], "the two rows multiply to the step");
+    assert_eq!(
+        check(&loaded, &table),
+        [],
+        "the two rows multiply to the step"
+    );
     // Monday's session, asked as (Friday, Monday], carries both rows.
     let monday = day(2020, 11, 16);
     let friday = day(2020, 11, 13);
     assert_eq!(table.labels("HOLIDAYCO", Some(friday), monday).len(), 2);
-    assert_eq!(table.labels("HOLIDAYCO", Some(day(2020, 11, 12)), friday), []);
+    assert_eq!(
+        table.labels("HOLIDAYCO", Some(day(2020, 11, 12)), friday),
+        []
+    );
     // Asked for the day alone, only the ex-date's own day holds them.
     assert_eq!(table.labels("HOLIDAYCO", None, saturday).len(), 2);
     assert_eq!(table.labels("HOLIDAYCO", None, monday), []);
@@ -405,7 +498,11 @@ fn a_measured_row_never_suppresses_a_refusal_or_decides_a_class() {
         evidence: "basis_runs generation 1".to_owned(),
     };
     let store = scratch("cor-law");
-    write(&store, &actions_draft(Standing::Measured, std::slice::from_ref(&measured))).unwrap();
+    write(
+        &store,
+        &actions_draft(Standing::Measured, std::slice::from_ref(&measured)),
+    )
+    .unwrap();
     let table = load_actions(&store).table().unwrap().clone();
     // IT LABELS ...
     assert_eq!(
@@ -419,26 +516,45 @@ fn a_measured_row_never_suppresses_a_refusal_or_decides_a_class() {
     // An NSE row in a sourced file does both.
     let sourced = scratch("cor-law-nse");
     let row = nse("SPLITCO", on, Kind::Split, "2");
-    write(&sourced, &actions_draft(Standing::Sourced, &[row.clone(), measured.clone()])).unwrap();
+    write(
+        &sourced,
+        &actions_draft(Standing::Sourced, &[row.clone(), measured.clone()]),
+    )
+    .unwrap();
     let table = load_actions(&sourced).table().unwrap().clone();
     assert_eq!(table.excuse("SPLITCO", None, on), Some(&row));
     assert_eq!(table.class_of("SPLITCO", None, on), Some(Kind::Split));
     // A measured file cannot carry an nse row: refused at the write, by name.
-    let refused = write(&scratch("cor-law-refuse"), &actions_draft(Standing::Measured, &[row]))
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("an nse row in a measured file"), "{refused}");
+    let refused = write(
+        &scratch("cor-law-refuse"),
+        &actions_draft(Standing::Measured, &[row]),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refused.contains("an nse row in a measured file"),
+        "{refused}"
+    );
     // A measured row cannot name a kind: it would decide a class.
     let mut classed = measured.clone();
     classed.kind = Kind::Split;
-    let refused = write(&scratch("cor-law-class"), &actions_draft(Standing::Measured, &[classed]))
-        .unwrap_err()
-        .to_string();
+    let refused = write(
+        &scratch("cor-law-class"),
+        &actions_draft(Standing::Measured, &[classed]),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(refused.contains("never decides a class"), "{refused}");
     // An nse row must name its kind.
     let mut unclassed = nse("SPLITCO", on, Kind::Split, "2");
     unclassed.kind = Kind::Unclassed;
-    assert!(write(&scratch("cor-law-unclassed"), &actions_draft(Standing::Sourced, &[unclassed])).is_err());
+    assert!(
+        write(
+            &scratch("cor-law-unclassed"),
+            &actions_draft(Standing::Sourced, &[unclassed])
+        )
+        .is_err()
+    );
 }
 
 // ─────────────────────────────── refusals by name ───────────────────────────────
@@ -448,19 +564,30 @@ fn a_corporate_action_table_with_a_wrong_checksum_is_refused() {
     let store = scratch("cor-checksum");
     let landed = write(
         &store,
-        &actions_draft(Standing::Sourced, &[nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2")]),
+        &actions_draft(
+            Standing::Sourced,
+            &[nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2")],
+        ),
     )
     .unwrap();
     // One byte of one row changed after the write: 2/1 becomes 3/1.
     let bytes = std::fs::read(&landed.path).unwrap();
-    let text = String::from_utf8(bytes).unwrap().replace("|split|2|1|", "|split|3|1|");
+    let text = String::from_utf8(bytes)
+        .unwrap()
+        .replace("|split|2|1|", "|split|3|1|");
     std::fs::write(&landed.path, text).unwrap();
     let Slot::Refused(why) = load_actions(&store) else {
         panic!("a swapped table is never served");
     };
-    assert_eq!((why.table, why.kind, why.generation), (Table::CorporateActions, RefusalKind::Checksum, Some(1)));
+    assert_eq!(
+        (why.table, why.kind, why.generation),
+        (Table::CorporateActions, RefusalKind::Checksum, Some(1))
+    );
     let said = why.to_string();
-    assert!(said.contains("corporate_actions") && said.contains("checksum"), "{said}");
+    assert!(
+        said.contains("corporate_actions") && said.contains("checksum"),
+        "{said}"
+    );
     // A generation of ANOTHER table filed under this table's name is refused
     // as the wrong table, not read as actions.
     let runs = fold_runs("SPLITCO", split_days()).unwrap();
@@ -468,31 +595,50 @@ fn a_corporate_action_table_with_a_wrong_checksum_is_refused() {
     let written = write(&other, &runs_draft(&runs)).unwrap();
     std::fs::create_dir_all(Table::CorporateActions.dir(&other)).unwrap();
     std::fs::copy(&written.path, Table::CorporateActions.path(&other, 1)).unwrap();
-    assert_eq!(load_actions(&other).table().unwrap_err().kind, RefusalKind::WrongTable);
+    assert_eq!(
+        load_actions(&other).table().unwrap_err().kind,
+        RefusalKind::WrongTable
+    );
     // A torn generation (cut mid-write) is refused, never read short.
     let torn = scratch("cor-torn");
     let written = write(&torn, &runs_draft(&runs)).unwrap();
     let whole = std::fs::read(&written.path).unwrap();
     std::fs::write(&written.path, &whole[..whole.len() / 2]).unwrap();
-    assert_eq!(load_runs(&torn).table().unwrap_err().kind, RefusalKind::Checksum);
+    assert_eq!(
+        load_runs(&torn).table().unwrap_err().kind,
+        RefusalKind::Checksum
+    );
     // A zero-length generation likewise.
     std::fs::write(&written.path, b"").unwrap();
-    assert_eq!(load_runs(&torn).table().unwrap_err().kind, RefusalKind::Checksum);
+    assert_eq!(
+        load_runs(&torn).table().unwrap_err().kind,
+        RefusalKind::Checksum
+    );
 }
 
 #[test]
 fn an_absent_table_is_refused_absent_by_name_and_never_served_empty() {
     let store = scratch("cor-absent");
     for (slot, word) in [
-        (load_actions(&store).table().map(drop).unwrap_err().clone(), "corporate-action"),
-        (load_runs(&store).table().map(drop).unwrap_err().clone(), "basis-run"),
+        (
+            load_actions(&store).table().map(drop).unwrap_err().clone(),
+            "corporate-action",
+        ),
+        (
+            load_runs(&store).table().map(drop).unwrap_err().clone(),
+            "basis-run",
+        ),
     ] {
         assert_eq!(slot.kind, RefusalKind::Absent);
         assert!(slot.detail.contains(word), "{}", slot.detail);
     }
     // seed() installs no generation of either: they are not compiled.
     let seeded = crate::reference_data::seed(&store).unwrap();
-    assert!(seeded.iter().all(|w| !matches!(w.table, Table::CorporateActions | Table::BasisRuns)));
+    assert!(
+        seeded
+            .iter()
+            .all(|w| !matches!(w.table, Table::CorporateActions | Table::BasisRuns))
+    );
 }
 
 #[test]
@@ -500,8 +646,18 @@ fn malformed_duplicate_overlapping_and_oversized_tables_are_refused_by_name() {
     let on = day(2023, 7, 3);
     let refused = |draft: &Draft| write(&scratch("cor-bad"), draft).unwrap_err().to_string();
     // Two rows of one (symbol, ex-date, kind).
-    let twice = actions_draft(Standing::Sourced, &[nse("ACO", on, Kind::Split, "2"), nse("ACO", on, Kind::Split, "2")]);
-    assert!(refused(&twice).contains("two split rows"), "{}", refused(&twice));
+    let twice = actions_draft(
+        Standing::Sourced,
+        &[
+            nse("ACO", on, Kind::Split, "2"),
+            nse("ACO", on, Kind::Split, "2"),
+        ],
+    );
+    assert!(
+        refused(&twice).contains("two split rows"),
+        "{}",
+        refused(&twice)
+    );
     // A bad ISIN, a zero ratio, an `after` that is not before the ex-date.
     let mut bad = nse("ACO", on, Kind::Split, "2");
     bad.isin = Some("NOTANISIN".to_owned());
@@ -518,7 +674,8 @@ fn malformed_duplicate_overlapping_and_oversized_tables_are_refused_by_name() {
     // More than MAX_ACTIONS_PER_SYMBOL rows for one share.
     let many: Vec<Action> = (0..=MAX_ACTIONS_PER_SYMBOL)
         .map(|i| {
-            let at = Day::from_days(day(2000, 1, 1).days_from_epoch() + u32::try_from(i).unwrap()).unwrap();
+            let at = Day::from_days(day(2000, 1, 1).days_from_epoch() + u32::try_from(i).unwrap())
+                .unwrap();
             nse("MANYCO", at, Kind::Dividend, "1")
         })
         .collect();
@@ -527,7 +684,11 @@ fn malformed_duplicate_overlapping_and_oversized_tables_are_refused_by_name() {
     let runs = fold_runs("SPLITCO", split_days()).unwrap();
     let mut overlap = runs_draft(&runs);
     overlap.rows[1][1] = "2023-06-30".to_owned();
-    assert!(refused(&overlap).contains("two runs that overlap"), "{}", refused(&overlap));
+    assert!(
+        refused(&overlap).contains("two runs that overlap"),
+        "{}",
+        refused(&overlap)
+    );
     let mut outside = runs_draft(&runs);
     outside.rows[0][3] = "1/3".to_owned();
     assert!(refused(&outside).contains("outside its own interval"));
@@ -580,13 +741,22 @@ fn a_compare_inside_a_run_applies_its_factor() {
     );
     assert_eq!(
         table.factor_on("SPLITCO", day(2023, 5, 31)),
-        Err(Outside::Between { before: None, after: Some(day(2023, 6, 1)) })
+        Err(Outside::Between {
+            before: None,
+            after: Some(day(2023, 6, 1))
+        })
     );
     assert_eq!(
         table.factor_on("SPLITCO", day(2023, 8, 1)),
-        Err(Outside::Between { before: Some(day(2023, 7, 31)), after: None })
+        Err(Outside::Between {
+            before: Some(day(2023, 7, 31)),
+            after: None
+        })
     );
-    assert_eq!(table.factor_on("NOSUCHCO", day(2023, 6, 15)), Err(Outside::NoRuns));
+    assert_eq!(
+        table.factor_on("NOSUCHCO", day(2023, 6, 15)),
+        Err(Outside::NoRuns)
+    );
     assert!(Outside::NoRuns.to_string().starts_with("no_basis_run"));
 }
 
@@ -654,4 +824,178 @@ fn a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured() {
         medians[2] <= medians[0].max(200) * 4,
         "a lookup's median at 1x, 10x, 100x shares: {medians:?} ns"
     );
+}
+
+// ─────────────────────────────── canonical order and the day table ───────────────────────────────
+
+fn run(symbol: &str, first: Day, last: Day, ratio: &str) -> Run {
+    Run {
+        symbol: symbol.to_owned(),
+        first,
+        last,
+        ratio: r(ratio),
+        low: r(ratio),
+        high: r(ratio),
+        days: 1,
+        end: RunEnd::Drift,
+    }
+}
+
+#[test]
+fn a_table_out_of_canonical_order_is_refused_by_name_and_never_sorted() {
+    let refused = |draft: &Draft| write(&scratch("cor-order"), draft).unwrap_err().to_string();
+    let (a, b) = (day(2021, 3, 1), day(2022, 3, 1));
+    // A share's actions descending.
+    let backwards = actions_draft(
+        Standing::Sourced,
+        &[
+            nse("ACO", b, Kind::Split, "2"),
+            nse("ACO", a, Kind::Split, "2"),
+        ],
+    );
+    assert!(
+        refused(&backwards).contains("must ascend by ex-date"),
+        "{}",
+        refused(&backwards)
+    );
+    // One day, kinds out of order (bonus sorts after split).
+    let kinds = actions_draft(
+        Standing::Sourced,
+        &[
+            nse("ACO", a, Kind::Bonus, "2"),
+            nse("ACO", a, Kind::Split, "2"),
+        ],
+    );
+    assert!(
+        refused(&kinds).contains("must ascend by ex-date, then kind"),
+        "{}",
+        refused(&kinds)
+    );
+    // Symbols descending, and a share split around another.
+    let symbols = actions_draft(
+        Standing::Sourced,
+        &[
+            nse("BCO", a, Kind::Split, "2"),
+            nse("ACO", a, Kind::Split, "2"),
+        ],
+    );
+    assert!(
+        refused(&symbols).contains("rows must ascend by symbol"),
+        "{}",
+        refused(&symbols)
+    );
+    let split_up = actions_draft(
+        Standing::Sourced,
+        &[
+            nse("ACO", a, Kind::Split, "2"),
+            nse("BCO", a, Kind::Split, "2"),
+            nse("ACO", b, Kind::Split, "2"),
+        ],
+    );
+    assert!(
+        refused(&split_up).contains("\"ACO\" after \"BCO\""),
+        "{}",
+        refused(&split_up)
+    );
+    // Runs: a run before the one above it, and symbols descending.
+    let late = run("ACO", day(2021, 6, 1), day(2021, 6, 30), "1");
+    let early = run("ACO", day(2021, 1, 4), day(2021, 1, 29), "1/2");
+    let runs_back = runs_draft(&[late.clone(), early.clone()]);
+    assert!(
+        refused(&runs_back).contains("must ascend by first day"),
+        "{}",
+        refused(&runs_back)
+    );
+    let mut other = early;
+    other.symbol = "BCO".to_owned();
+    let runs_symbols = runs_draft(&[other, late]);
+    assert!(refused(&runs_symbols).contains("rows must ascend by symbol"));
+}
+
+#[test]
+fn a_run_lookup_answers_every_edge_of_the_day_table() {
+    // Three runs with a gap, and a one-day run; every edge day asked.
+    let runs = [
+        run("EDGECO", day(2024, 1, 1), day(2024, 1, 31), "1/2"),
+        run("EDGECO", day(2024, 2, 10), day(2024, 2, 10), "1"),
+        run("EDGECO", day(2024, 2, 11), day(2024, 3, 31), "2"),
+        run("ZEDCO", day(2019, 5, 6), day(2019, 5, 6), "3"),
+    ];
+    let store = scratch("cor-edges");
+    write(&store, &runs_draft(&runs)).unwrap();
+    let table = load_runs(&store).table().unwrap().clone();
+    assert_eq!(table.symbols(), ["EDGECO".to_owned(), "ZEDCO".to_owned()]);
+    let ratio = |on: Day| table.run_on("EDGECO", on).map(|run| run.ratio.to_string());
+    // Inside: first day, last day, the one-day run, the run right after it.
+    assert_eq!(ratio(day(2024, 1, 1)), Ok("1/2".to_owned()));
+    assert_eq!(ratio(day(2024, 1, 31)), Ok("1/2".to_owned()));
+    assert_eq!(ratio(day(2024, 2, 10)), Ok("1".to_owned()));
+    assert_eq!(ratio(day(2024, 2, 11)), Ok("2".to_owned()));
+    assert_eq!(ratio(day(2024, 3, 31)), Ok("2".to_owned()));
+    // Before the first run, in the gap, after the last: named, never borrowed.
+    assert_eq!(
+        table.run_on("EDGECO", day(2023, 12, 31)),
+        Err(Outside::Between {
+            before: None,
+            after: Some(day(2024, 1, 1))
+        })
+    );
+    assert_eq!(
+        table.run_on("EDGECO", day(2024, 2, 1)),
+        Err(Outside::Between {
+            before: Some(day(2024, 1, 31)),
+            after: Some(day(2024, 2, 10))
+        })
+    );
+    assert_eq!(
+        table.run_on("EDGECO", day(2024, 4, 1)),
+        Err(Outside::Between {
+            before: Some(day(2024, 3, 31)),
+            after: None
+        })
+    );
+    // The far ends of the calendar the Day type holds.
+    assert_eq!(
+        table.run_on("EDGECO", day(1970, 1, 1)),
+        Err(Outside::Between {
+            before: None,
+            after: Some(day(2024, 1, 1))
+        })
+    );
+    assert_eq!(
+        table.run_on("EDGECO", day(9999, 12, 31)),
+        Err(Outside::Between {
+            before: Some(day(2024, 3, 31)),
+            after: None
+        })
+    );
+    // A one-run share, and a share with none.
+    assert_eq!(table.factor_on("ZEDCO", day(2019, 5, 6)), Ok(r("3")));
+    assert_eq!(table.run_on("NOCO", day(2019, 5, 6)), Err(Outside::NoRuns));
+    assert_eq!(table.factor_on("", day(2019, 5, 6)), Err(Outside::NoRuns));
+}
+
+#[test]
+fn runs_whose_day_tables_would_pass_the_bound_are_refused_by_name() {
+    // Two runs each spanning the whole calendar the Day type holds (1970 to
+    // 9999, about 2.9 million days each) pass MAX_INDEXED_DAYS together: the
+    // load refuses by name instead of allocating without bound.
+    let whole = |symbol: &str| run(symbol, day(1970, 1, 1), day(9999, 12, 31), "1");
+    let one = scratch("cor-span-one");
+    write(&one, &runs_draft(&[whole("ACO")])).unwrap();
+    assert_eq!(
+        load_runs(&one)
+            .table()
+            .unwrap()
+            .factor_on("ACO", day(5000, 6, 1)),
+        Ok(r("1"))
+    );
+    let two = write(
+        &scratch("cor-span-two"),
+        &runs_draft(&[whole("ACO"), whole("BCO")]),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(two.contains("share-days"), "{two}");
+    assert!(two.contains("\"BCO\""), "{two}");
 }

@@ -1621,15 +1621,15 @@ pub mod sources;
 mod bars_export;
 #[path = "bars_route.rs"]
 mod bars_route;
-#[path = "calendar_route.rs"]
-mod calendar_route;
-#[path = "census_cache.rs"]
-mod census_cache;
 /// `/basis.json`: a share's measured Zerodha/GDFL basis runs and its
 /// corporate actions, and the two tables kept for `/dayflags.json` and
 /// `/sources/day.json` (R4-26).
 #[path = "basis_route.rs"]
 mod basis_route;
+#[path = "calendar_route.rs"]
+mod calendar_route;
+#[path = "census_cache.rs"]
+mod census_cache;
 /// `/disk.json`: free space, store size, census retention and the backup
 /// receipt (DB-B73, DB-B59; WP-81).
 #[path = "disk_route.rs"]
@@ -16125,7 +16125,10 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // RECORDED: nothing said any of it while one drive held everything
         // (DB-B73, DB-B59; WP-81).
         // A SHARE'S MEASURED BASIS RUNS AND ITS CORPORATE ACTIONS (R4-26).
-        .route(basis_route::ROUTE, axum::routing::get(basis_route::basis_json))
+        .route(
+            basis_route::ROUTE,
+            axum::routing::get(basis_route::basis_json),
+        )
         .route("/disk.json", axum::routing::get(disk_route::disk_json))
         // WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES A PAGE SHOWS (DB-B74).
         .route("/scrub.json", axum::routing::get(scrub_route::scrub_json))

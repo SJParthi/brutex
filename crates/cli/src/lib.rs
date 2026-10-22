@@ -61,12 +61,12 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
-/// The cooperative stop a stopping server asks engine work to honour (D-1551).
-pub mod cancel;
 /// `cli basis-runs`: the measured Zerodha/GDFL basis runs per share, folded
 /// from DATA-1's factor, and the measured corporate-action ledger their
 /// steps make (R4-26: Z8, COR-06, FM-260).
 pub mod basis_runs;
+/// The cooperative stop a stopping server asks engine work to honour (D-1551).
+pub mod cancel;
 /// `cli census-migrate` and `cli census-recount`: the census verbs (D-3316).
 mod census_recount;
 /// Independent full-file checksum audit and retained historical admission receipts.
@@ -579,11 +579,11 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the span's census-refused gdfl import days
                                    with a `recounted` journal line each. DAY is
                                    YYYY-MM-DD (D-3316, D-3317).
-       cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--write] [--ledger]
+       cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--apply] [--ledger]
                                    per share, the maximal runs of one Zerodha/GDFL
                                    ratio folded from DATA-1's feed-reconcile
                                    files in DIR, every step and the checker's
-                                   findings; --write lands a new basis_runs
+                                   findings; --apply lands a new basis_runs
                                    generation, --ledger the measured
                                    corporate_actions one (R4-26).
        cli feed-reconcile YYYY-MM --out DIR [--symbols A,B] [--workers N]
@@ -3038,7 +3038,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 55] = [
+const COMMANDS: [&str; 56] = [
     "alerts",
     "audit",
     "audit-audited-range",
