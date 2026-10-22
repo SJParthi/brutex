@@ -74,13 +74,13 @@ fn minute(index: i64, level: i64) -> Bar {
 }
 
 fn write(root: &Path, rung: Timeframe, rows: &[Bar]) {
-    let id = pull::repair_plan::symbol_id(SYMBOL);
+    let id = pull::ingest::repair_plan::symbol_id(SYMBOL);
     let mut writer = BarFile::open_or_create(root, path(rung, dec()), id).expect("opens");
     writer.append(rows).expect("commits");
 }
 
 fn served(root: &Path, rung: Timeframe) -> Vec<Bar> {
-    let file = BarFile::open_existing(root, path(rung, dec()), pull::repair_plan::symbol_id(SYMBOL))
+    let file = BarFile::open_existing(root, path(rung, dec()), pull::ingest::repair_plan::symbol_id(SYMBOL))
         .expect("served");
     (0..file.header().n_valid).map(|i| file.read_record(i).expect("a record")).collect()
 }
@@ -244,9 +244,9 @@ fn a_whole_zero_price_month_is_recorded_not_published() {
     let root = Root::new("zero");
     let zero = Bar { ts_micros: minute(0, 0).ts_micros - 33_300_000_000, open: 0, high: 0, low: 0, close: 0, volume: 7, open_interest: OI_NULL };
     let day = YearMonth::new(2018, 12).expect("month");
-    let id = pull::repair_plan::symbol_id(SYMBOL);
+    let id = pull::ingest::repair_plan::symbol_id(SYMBOL);
     let day_path = path(Timeframe::DAY_1, day);
-    match BarFile::open_or_create(&root.0, day_path, id).and_then(|mut writer| writer.append(&[zero])) {
+    match BarFile::open_or_create(&root.0, day_path, id).and_then(|mut writer| writer.append(&[zero]).map(|_| ())) {
         // A WRITE DOOR THAT REFUSES A ZERO BAR (PREC-16) leaves nothing to
         // quarantine: the run then answers that the plan names a month the
         // store does not hold, by name.

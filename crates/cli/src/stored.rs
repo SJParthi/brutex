@@ -3959,9 +3959,10 @@ mod tests {
             },
         )
         .expect("recorded");
-        let refused = load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8);
-        let Err(LoadFailure::Refused(why)) = refused else {
-            panic!("a quarantined month must be refused, got {:?}", refused.map(|l| l.bars.len()));
+        let why = match load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8) {
+            Err(LoadFailure::Refused(why)) => why,
+            Err(LoadFailure::Missing(why)) => panic!("refused as missing: {why}"),
+            Ok(loaded) => panic!("a quarantined month loaded {} bars", loaded.bars.len()),
         };
         assert!(why.contains("QUARANTINED (whole_month foreign_level, 4 bar(s)"), "{why}");
         assert!(why.contains("zerodha.quarantine.ledger"), "{why}");

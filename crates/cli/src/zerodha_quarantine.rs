@@ -315,7 +315,7 @@ fn path_of<'a>(segment: &'a str, symbol: &'a str, rung: Timeframe, month: YearMo
 
 /// Every bar the served month holds; `Ok(None)` for a month not held.
 fn held_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Option<Vec<Bar>>, String> {
-    match store::file::BarFile::open_existing(root, path, pull::repair_plan::symbol_id(symbol)) {
+    match store::file::BarFile::open_existing(root, path, pull::ingest::repair_plan::symbol_id(symbol)) {
         Err(store::file::StoreError::Missing { .. }) => Ok(None),
         Err(why) => Err(why.to_string()),
         Ok(file) => (0..file.header().n_valid)
@@ -327,7 +327,7 @@ fn held_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Option<Ve
 
 /// Every bar the served month holds.
 fn served_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Vec<Bar>, String> {
-    let id = pull::repair_plan::symbol_id(symbol);
+    let id = pull::ingest::repair_plan::symbol_id(symbol);
     let file = store::file::BarFile::open_existing(root, path, id).map_err(|why| why.to_string())?;
     (0..file.header().n_valid)
         .map(|index| file.read_record(index).map_err(|why| why.to_string()))
@@ -498,7 +498,7 @@ fn act(root: &Path, ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, 
         who: "cli zerodha-quarantine",
         reason: &reason,
     };
-    match store::quarantine::apply_month(root, path, pull::repair_plan::symbol_id(symbol), stamps, why) {
+    match store::quarantine::apply_month(root, path, pull::ingest::repair_plan::symbol_id(symbol), stamps, why) {
         Ok(applied) => Outcome::Done(applied),
         Err(why) => Outcome::Refused(why.to_string()),
     }

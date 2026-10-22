@@ -35,9 +35,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::{Loaded, param};
 use crate::render;
 
-/// The longest reason a press carries, in bytes.
-pub(crate) const MAX_REASON: usize = store::quarantine::MAX_REASON;
-
 /// Whether a press is running in this process.
 static PRESSING: AtomicBool = AtomicBool::new(false);
 

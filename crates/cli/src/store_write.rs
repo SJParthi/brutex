@@ -115,7 +115,8 @@ pub(crate) const WRITERS: [&str; 17] = [
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
 /// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
 /// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, `zerodha-gaps`
-/// without `--apply`, `zerodha-repair` without `--from-store`, and
+/// without `--apply`, `zerodha-quarantine` without `--apply` (R4-18),
+/// `zerodha-repair` without `--from-store`, and
 /// `feed-reconcile` without `--out` (its `factor` and `months` forms, which
 /// take no `--out`: one reads a version file, the other the census) each
 /// state in their own module that they write nothing; `alerts` writes only as
@@ -438,7 +439,7 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 16] = [
+        let writing: [(&str, &[&str]); 17] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -454,6 +455,7 @@ mod tests {
             ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
             ("zerodha-gaps", &["--apply"]),
+            ("zerodha-quarantine", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),
         ];
         assert_eq!(writing.map(|(verb, _)| verb), WRITERS, "every writer, once");
@@ -482,6 +484,7 @@ mod tests {
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-gaps", &[][..]),
+            ("zerodha-quarantine", &["--plan"][..]),
             ("zerodha-repair", &[][..]),
             ("top", &[][..]),
         ] {

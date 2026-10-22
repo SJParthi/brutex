@@ -554,6 +554,7 @@ fn write_change(out: &mut String, key: &str, change: Result<i64, Unknown>) {
 /// What is **not** constant is the caller: `census_now` re-reads and re-walks
 /// every manifest per request, which is O(entries) and was before this existed.
 /// `docs/06-limits.md` §41 records it rather than this comment hiding it.
+#[cfg(test)]
 pub(super) fn store_body(
     censuses: &[census::VendorCensus],
     entries: &[(census::Series, store::path::YearMonth)],

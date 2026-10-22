@@ -38,7 +38,7 @@ impl Fixture {
         let mut file = store::file::BarFile::open_or_create(
             &self.root,
             path(month),
-            pull::repair_plan::symbol_id(SYMBOL),
+            pull::ingest::repair_plan::symbol_id(SYMBOL),
         )
         .expect("a month");
         file.append(&rows).expect("rows");
@@ -189,7 +189,7 @@ fn instruments_json_flags_a_quarantined_series() {
     let fixture = Fixture::new("r418-instruments");
     fixture.month(ym(2018, 3), 99_500, 3);
     fixture.quarantine_whole(ym(2018, 3), 3);
-    let key = brutex_core::instrument::InstrumentKey::equity(brutex_core::instrument::Exchange::Nse, SYMBOL)
+    let key = brutex_core::instrument::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, SYMBOL)
         .expect("a share");
     let summary = store::quarantine::Summary::load(&fixture.root, Vendor::Zerodha);
     let flag = super::super::instruments_route::quarantine_of(&summary, &key);
@@ -198,7 +198,7 @@ fn instruments_json_flags_a_quarantined_series() {
     assert_eq!(value["whole_months"], 1);
     assert_eq!(value["bars"], 3);
     assert_eq!(value["causes"], serde_json::json!(["before_listing"]));
-    let other = brutex_core::instrument::InstrumentKey::equity(brutex_core::instrument::Exchange::Nse, "QFIXR")
+    let other = brutex_core::instrument::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "QFIXR")
         .expect("a share");
     assert_eq!(super::super::instruments_route::quarantine_of(&summary, &other), "null");
     let unreadable = Err(store::quarantine::QuarantineError::Reason("x".to_owned()));
