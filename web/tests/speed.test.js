@@ -1670,7 +1670,9 @@ test('the ration never holds reports back for a clock that went back, and its ow
 
 test('the harness removes only a profile it made in this process, refuses a run past its ceiling, and a page named twice', () => {
   // Before: the name alone was checked, so a directory that merely looked like a profile was removed.
-  const lookalike = mkdtempSync(join(tmpdir(), harness.PROFILE_PREFIX));
+  // Made in a directory of this test's own, so a run never adds a look-alike to the temporary
+  // directory, where the harness's own profiles are counted (L-R315-14).
+  const lookalike = mkdtempSync(join(mkdtempSync(join(tmpdir(), 'r315-lookalike-')), harness.PROFILE_PREFIX));
   writeFileSync(join(lookalike, 'kept'), 'kept');
   assert.throws(() => harness.removeProfile(lookalike), /refusing to remove .*: not a profile this harness made in this process/);
   assert.equal(readFileSync(join(lookalike, 'kept'), 'utf8'), 'kept', 'a look-alike is untouched');
