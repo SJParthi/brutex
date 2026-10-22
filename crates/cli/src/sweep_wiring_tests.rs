@@ -184,6 +184,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 // The point-in-time F&O membership (PIT-1, D-5163): a reference
                 // table built from the tick store's listings, never a sweep.
                 | "fno-membership"
+                // The tradable-day page (D-5153): reads tables, never a sweep.
+                | "calendar-days"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

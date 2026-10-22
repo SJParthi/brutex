@@ -61,6 +61,9 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// `cli calendar-days`: the days the tradable-day rule excludes, per year, and
+/// the calendar held against the store (D-5153, D-5158).
+mod calendar_days;
 /// The cooperative stop a stopping server asks engine work to honour (D-1551).
 pub mod cancel;
 /// `cli census-migrate` and `cli census-recount`: the census verbs (D-3316).
@@ -796,6 +799,20 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    machine can finish. Nothing is typed, and
                                    section 6's argument against a depth parameter
                                    is the same argument against this one.
+       cli calendar-days YEAR      every day of YEAR the tradable-day rule excludes
+                                   from trades and from own-past statistics, one
+                                   line each with its reason and source, then the
+                                   year's totals by reason. A year outside the
+                                   calendar of record is refused by name. Reads
+                                   no store (D-5150, D-5153).
+       cli calendar-days check     the calendar against the store, read-only: the
+                                   years holding a stored NSE month and whether
+                                   their circulars are recorded; then every day
+                                   NIFTY or BANKNIFTY holds in every feed, through
+                                   each month's time index: (a) held days the rule
+                                   refuses, (b) held weekends or holidays no row
+                                   names (UNVERIFIED candidates), (c) open weekdays
+                                   no feed holds (D-5158).
        cli research-plan VENDOR    read-only cash-stock inventory for 2020-01-01
                                    through yesterday IST, resolved once per call.
                                    All eight intraday rungs plus daily reference.
@@ -2862,6 +2879,8 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
             elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n), Some(lens))
         }
         ["research-plan", v] => research::command(v, out),
+        ["calendar-days", "check"] => calendar_days::check_command(out),
+        ["calendar-days", year] => calendar_days::command(year, out),
         ["pool", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),
         [
             "pool-oos",
@@ -3061,6 +3080,7 @@ const COMMANDS: [&str; 56] = [
     "boolean-oos-stored",
     "boolean-qualified-campaign-stored",
     "boolean-qualified-search-stored",
+    "calendar-days",
     "census-migrate",
     "census-recount",
     "checksum-audit-stored",

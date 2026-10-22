@@ -1909,6 +1909,19 @@ jobs:
           #     day's two close lines read from two sources (NIFTY first).
           declared="$declared pull/src/gdfl_archive.rs:println!:4
           pull/src/gdfl_ia3_tests.rs:println!:17"
+          # TWO MORE FILES, the same kind, from CAL-1 (declared at its repair
+          # round 1, 21 Oct 2026). Both are mounted only under `#[cfg(test)]`
+          # (`#[path]` test modules of `pull::calendar` and
+          # `cli::calendar_days`), so no production path reaches either:
+          #   cli/src/calendar_days_tests.rs eprintln! 3: the per-day p50, p99
+          #     and max of `month_days`, of the findings per held day, and of
+          #     the dense day map at a 31-day and a 36,525-day span (CAL-20).
+          #   pull/src/calendar_tradable_tests.rs eprintln! 5: the one-off
+          #     build times of the running sums and the digest, and the p50,
+          #     p99 and max of `tradable_day`, `excluded_between`,
+          #     `year_exclusions` and `year_record` (CAL-12).
+          declared="$declared cli/src/calendar_days_tests.rs:eprintln!:3
+          pull/src/calendar_tradable_tests.rs:eprintln!:5"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
