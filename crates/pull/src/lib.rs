@@ -225,6 +225,13 @@ pub mod rate;
 /// expiries, lot sizes and the risk-free rate, each with source, checksum
 /// and date, refused by name when it fails its checksum.
 pub mod reference_data;
+/// The share corporate-action table and the measured Zerodha/GDFL basis
+/// runs (R4-26: COR-06, Z8), both read through the one reference loader; a
+/// measured row labels and never excuses.
+pub mod corporate_actions;
+/// The universe a day's pull plans over: the members on that day, the
+/// frozen surface and every series with its own past (R4-26, FIB-15 RQ-13).
+pub mod day_universe;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
 /// which no retry decision in this workspace read before this module.
 ///

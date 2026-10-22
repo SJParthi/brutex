@@ -126,6 +126,17 @@ pub const NO_COMPILED_RATES: &str = "the store holds no generation of the risk-f
      (docs/00-charter.md section 4h) and lands as a generation from rate_draft; until then every \
      greek refuses by this name, and no rate is invented";
 
+/// Why a store with no `corporate_actions` generation serves no action row.
+pub const NO_CORPORATE_ACTIONS: &str = "the store holds no generation of the corporate-action \
+     table and this build compiles none: its rows are measured by `cli basis-runs` (or read \
+     from an NSE file the charter records) and land as a generation; until then no day is \
+     labelled with an action, and nothing says there was none";
+
+/// Why a store with no `basis_runs` generation serves no run.
+pub const NO_BASIS_RUNS: &str = "the store holds no generation of the basis-run table and \
+     this build compiles none: `cli basis-runs` folds it from the feed-reconcile files; until \
+     then no cross-vendor factor is applied";
+
 /// The directory under the store root.
 pub const DIR: &str = "reference";
 
@@ -178,11 +189,20 @@ pub enum Table {
     /// The RBI 91-day T-bill series greeks discount at, with its documented
     /// gaps ([`crate::riskfree::Series`]; DB-B44).
     RiskFreeRate,
+    /// The share corporate actions: ex-date, kind and ratio per share, each
+    /// row tagged `nse` or `measured` ([`crate::corporate_actions`]; R4-26,
+    /// COR-06). Not one of [`Reference`]'s import-time slots: read with
+    /// [`load_one`] by the consumer that needs it.
+    CorporateActions,
+    /// The measured runs of one Zerodha/GDFL ratio per share
+    /// ([`crate::corporate_actions::BasisRuns`]; R4-26, Z8), read with
+    /// [`load_one`].
+    BasisRuns,
 }
 
 impl Table {
     /// Every table, in load order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Calendar,
         Self::IndexIdentity,
         Self::SymbolChanges,
@@ -190,6 +210,8 @@ impl Table {
         Self::ExpiryMoves,
         Self::LotSizes,
         Self::RiskFreeRate,
+        Self::CorporateActions,
+        Self::BasisRuns,
     ];
 
     /// The table's name on disk and on the wire.
@@ -203,17 +225,35 @@ impl Table {
             Self::ExpiryMoves => "expiry_moves",
             Self::LotSizes => "lot_sizes",
             Self::RiskFreeRate => "risk_free_rate",
+            Self::CorporateActions => "corporate_actions",
+            Self::BasisRuns => "basis_runs",
         }
     }
 
     /// Whether this build compiles a copy of the table that a store with no
-    /// generation of it is served from, LABELLED [`Slot::Compiled`]. Only the
+    /// generation of it is served from, LABELLED [`Slot::Compiled`]. The
     /// risk-free rate has none: its series is the operator's
     /// (`docs/00-charter.md` §4h), so it is [`RefusalKind::Absent`] by name
-    /// until a generation lands.
+    /// until a generation lands. Nor have the corporate actions or the basis
+    /// runs (R4-26): a compiled empty table would say "no action" where
+    /// nothing was read, which is a fallback that hides a failure.
     #[must_use]
     pub const fn compiled(self) -> bool {
-        !matches!(self, Self::RiskFreeRate)
+        !matches!(
+            self,
+            Self::RiskFreeRate | Self::CorporateActions | Self::BasisRuns
+        )
+    }
+
+    /// Why a store with no generation of a table this build compiles no copy
+    /// of serves nothing: the [`RefusalKind::Absent`] detail, by table.
+    #[must_use]
+    pub const fn absent_detail(self) -> &'static str {
+        match self {
+            Self::CorporateActions => NO_CORPORATE_ACTIONS,
+            Self::BasisRuns => NO_BASIS_RUNS,
+            _ => NO_COMPILED_RATES,
+        }
     }
 
     /// The table a word names; `None` for any other text.
@@ -273,6 +313,12 @@ impl Table {
                 "source_url",
                 "full_result_url",
                 "announcement_url",
+            ],
+            Self::CorporateActions => &[
+                "symbol", "isin", "ex_date", "kind", "num", "den", "tag", "after", "evidence",
+            ],
+            Self::BasisRuns => &[
+                "symbol", "first", "last", "ratio", "low", "high", "days", "end",
             ],
         }
     }
@@ -2438,7 +2484,7 @@ fn slot<T>(
                 path: dir,
                 generation: None,
                 kind: RefusalKind::Absent,
-                detail: NO_COMPILED_RATES.to_owned(),
+                detail: table.absent_detail().to_owned(),
             });
         }
         let draft = seed_draft(table).map_err(|why| Refusal {
@@ -2626,6 +2672,25 @@ pub fn load(store: &Path) -> Reference {
     }
 }
 
+/// ONE table through THE ONE LOADER's own body ([`slot`]): the store's
+/// newest generation, checksum verified, else the compiled copy labelled,
+/// else [`RefusalKind::Absent`] by name; told as one event with its origin,
+/// source and checksum (or its refusal), and its strays told. For a table a
+/// consumer reads on its own rather than at every import: the corporate
+/// actions and the basis runs (R4-26). `build` is the table's own, e.g.
+/// [`crate::corporate_actions::CorporateActions::build`]. O(generations)
+/// for the listing, one read and one build, O(rows).
+pub fn load_one<T>(
+    store: &Path,
+    table: Table,
+    build: impl Fn(&Parsed, &Path) -> Result<T, Refusal>,
+) -> Slot<T> {
+    let (loaded, found) = slot(store, table, build);
+    told(table, &loaded);
+    told_strays(store, table, &found);
+    loaded
+}
+
 /// One table through [`slot`], told as its event, its strays told and kept.
 fn kept<T>(
     strays: &mut Vec<(Table, Strays)>,
@@ -2754,6 +2819,10 @@ pub fn write(store: &Path, draft: &Draft) -> Result<Written, WriteError> {
         Table::ExpiryMoves => ExpiryTable::build(&parsed, &path).map(drop),
         Table::LotSizes => build_lots(&parsed, &path).map(drop),
         Table::RiskFreeRate => build_rates(&parsed, &path).map(drop),
+        Table::CorporateActions => {
+            crate::corporate_actions::CorporateActions::build(&parsed, &path).map(drop)
+        }
+        Table::BasisRuns => crate::corporate_actions::BasisRuns::build(&parsed, &path).map(drop),
     };
     probe.map_err(WriteError::Refused)?;
     // The staging name is this WRITER's own: the process and a per-process
@@ -2958,7 +3027,9 @@ pub fn seed_draft(table: Table) -> Result<Draft, String> {
                 .collect(),
         }),
         Table::LotSizes => lot_seed(),
-        Table::RiskFreeRate => Err(NO_COMPILED_RATES.to_owned()),
+        Table::RiskFreeRate | Table::CorporateActions | Table::BasisRuns => {
+            Err(table.absent_detail().to_owned())
+        }
         Table::ExpiryMoves => Ok(Draft {
             table,
             source: "measured from the GDFL options name census, 2026-10-07, re-measured \
