@@ -1071,7 +1071,11 @@ fn streams_note(
     let mut out = format!(
         "<p class=\"{}\">Audit stream: file {} at {} byte(s), {} roll(s); {} index \
          generation(s) wait to be deleted, {} deleted, {} delete(s) failed{}.",
-        if audit.is_loud() { "halt" } else { "lead" },
+        if audit.is_loud() || state.is_some_and(|state| state.span_damage.is_some()) {
+            "halt"
+        } else {
+            "lead"
+        },
         audit.serial,
         audit.current_bytes,
         audit.rotations,
@@ -1099,6 +1103,17 @@ fn streams_note(
     }
     if let Some(why) = audit.last_error.as_deref() {
         let _ = write!(out, " Most recent failure: {}.", render::escape(why));
+    }
+    // A SPAN END THE REOPEN COULD NOT READ, of either stream (R3-24 repair
+    // round 3): named, and the paragraph is loud.
+    for (stream, health) in [("Audit", Some(audit)), ("State", state)] {
+        if let Some(why) = health.and_then(|h| h.span_damage.as_deref()) {
+            let _ = write!(
+                out,
+                " {stream} stream damage met on reopening: {}.",
+                render::escape(why)
+            );
+        }
     }
     out.push_str("</p>");
     out
@@ -3939,8 +3954,10 @@ struct Fetched {
 ///
 /// # Cost
 ///
-/// Per kept generation, newest first: one [`telemetry::run_dirs::audit_span`]
-/// probe (a file whose span misses `from..=to` is never opened), one binary
+/// Per kept generation, newest first: one `metadata` call and one
+/// [`telemetry::run_dirs::audit_span`] probe (a file whose span misses
+/// `from..=to` is never opened; one whose span is unknown at an end is read
+/// and named in `damage`, R3-24 repair round 3), one binary
 /// search ([`end_of_span`]) and backward reads of at most
 /// [`SPAN_SLICE_BYTES`] in all. The walk stops at the first line older than
 /// `from`: every older line is older still.
@@ -3969,12 +3986,29 @@ fn span_page(
         if before.is_some_and(|at| serial > at.serial) {
             continue;
         }
-        let (Some(path), Some(span)) = (
-            telemetry::audit_path_for(dir, current, serial),
-            telemetry::run_dirs::audit_span(dir, current, serial),
-        ) else {
+        let Some(path) = telemetry::audit_path_for(dir, current, serial) else {
             continue;
         };
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        if len == 0 {
+            continue;
+        }
+        // A KEPT FILE THAT HOLDS BYTES IS NEVER PASSED OVER UNNAMED (R3-24
+        // repair round 3, B3): on repair round 2's head a file whose first
+        // line would not decode answered no span and was skipped here, its
+        // lines lost and the page still called complete. Its span is now
+        // unknown at that end, and a span that cannot be had at all is
+        // unknown at both.
+        let span = telemetry::run_dirs::audit_span(dir, current, serial).unwrap_or(
+            telemetry::run_dirs::AuditSpan {
+                first_ms: None,
+                last_ms: None,
+            },
+        );
         if span.last_ms.is_some_and(|last| last < from) {
             // EVERY OLDER FILE IS OLDER STILL.
             return Ok(out);
@@ -3982,11 +4016,12 @@ fn span_page(
         if !span.overlaps(from, to) {
             continue;
         }
-        let len = match std::fs::metadata(&path) {
-            Ok(meta) => meta.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
+        if let Some(why) = unknown_span_words(&span, serial == current) {
+            out.damage.push(format!(
+                "{} (audit file {serial}): {why}, so it is read whatever the span asked",
+                path.display()
+            ));
+        }
         let end = before
             .filter(|at| at.serial == serial)
             .map_or(len, |at| at.index.min(len));
@@ -4016,6 +4051,21 @@ fn span_page(
         }
     }
     Ok(out)
+}
+
+/// What a span search cannot know of one audit file's span, in words: an
+/// unknown first time, or, for a file that is no longer `open`, an unknown
+/// last one (R3-24 repair round 3). `None` when both ends are known, or the
+/// last is open only because the file is still being appended to.
+fn unknown_span_words(span: &telemetry::run_dirs::AuditSpan, open: bool) -> Option<String> {
+    let mut unknown = Vec::new();
+    if span.first_ms.is_none() {
+        unknown.push("its first line's time cannot be read");
+    }
+    if !open && span.last_ms.is_none() {
+        unknown.push("its last line's time cannot be read");
+    }
+    (!unknown.is_empty()).then(|| unknown.join(" and "))
 }
 
 /// How a backward walk of one audit file ended.
@@ -4366,7 +4416,7 @@ impl Stream<'_> {
     fn after_span(&mut self, index: usize, to: i64, budget: &mut usize) -> Option<bool> {
         let &(_, pointer) = self.page.pointers.get(index)?;
         match self.span_of(pointer.serial) {
-            Some(span) if span.first_ms > to => return Some(true),
+            Some(span) if span.first_ms.is_some_and(|first| first > to) => return Some(true),
             Some(span) if span.last_ms.is_some_and(|last| last <= to) => return Some(false),
             _ => {}
         }
@@ -5228,7 +5278,7 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         return "null".to_owned();
     };
     format!(
-        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{},"never_rolls":{},"loud_bytes":{}}}"#,
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{},"never_rolls":{},"loud_bytes":{},"span_damage":{}}}"#,
         render::json_string(&h.path.display().to_string()),
         h.serial,
         h.current_bytes,
@@ -5272,6 +5322,11 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         } else {
             "null".to_owned()
         },
+        // WHAT THE REOPEN COULD NOT READ of the generation it resumed (R3-24
+        // repair round 3): that end of its span is unknown, and loud.
+        h.span_damage
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
     )
 }
 
@@ -12319,5 +12374,123 @@ mod r3_24_torn_tests {
         assert_eq!(rows[0]["message"], "listening");
         assert_eq!(got["passed_over"], 1, "{got:#}");
         let _ignored = std::fs::remove_dir_all(&served);
+    }
+
+    /// The text of `times` as audit lines, `seq` from `first_seq`, behind a
+    /// first line of `damaged` NULs and its newline: a first line that does
+    /// not decode.
+    fn behind_a_damaged_head(damaged: usize, first_seq: u64, times: &[i64]) -> Vec<u8> {
+        let mut text = vec![0u8; damaged];
+        text.push(b'\n');
+        for (n, &ms) in (first_seq..).zip(times) {
+            text.extend_from_slice(line(n, ms).as_bytes());
+        }
+        text
+    }
+
+    /// **A KEPT FILE WHOSE FIRST TIME IS UNKNOWN IS READ AND NAMED, NEVER
+    /// PASSED OVER** (R3-24 repair round 3, B3). Two generations as a build
+    /// before R3-24 left them, no span file, each first line zeroed: the
+    /// closed one and the one being appended to. On repair round 2's head
+    /// `audit_span` answered neither a span and `span_page` passed both over
+    /// by its `let`-`else`, so a span inside either answered nothing, no
+    /// damage, every page complete. Now each is read, its lines answered once
+    /// and newest first, and each named in `damage`.
+    #[test]
+    fn a_kept_file_whose_first_time_is_unknown_is_read_and_named() {
+        let stream = scratch("unknown-first");
+        std::fs::create_dir_all(stream.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(&stream), 1u64.to_le_bytes()).expect("serial");
+        let older = [1000, 1002, 1004, 1006];
+        let newer = [2000, 2002, 2004];
+        std::fs::write(
+            telemetry::audit_path_for(&stream, 1, 0).expect("kept"),
+            behind_a_damaged_head(546, 1, &older),
+        )
+        .expect("the closed file");
+        std::fs::write(
+            telemetry::audit_path_for(&stream, 1, 1).expect("kept"),
+            behind_a_damaged_head(300, 5, &newer),
+        )
+        .expect("the current file");
+        for (serial, open) in [(0u64, false), (1, true)] {
+            let span = telemetry::run_dirs::audit_span(&stream, 1, serial).expect("a span");
+            assert_eq!(span.first_ms, None, "file {serial}");
+            assert!(super::unknown_span_words(&span, open).is_some(), "file {serial}");
+        }
+        for (span, wanted, named) in [
+            ((1002, 1004), vec![3u64, 2], 1usize),
+            ((2002, 2004), vec![7, 6], 1),
+            ((1000, 2004), vec![7, 6, 5, 4, 3, 2, 1], 2),
+        ] {
+            for take in [1, 1000] {
+                let (seqs, damage) =
+                    every_span_page(&stream, span, take).expect("the pages end");
+                assert_eq!(seqs, wanted, "span {span:?} take {take}");
+                let unknown = damage
+                    .iter()
+                    .filter(|why| why.contains("first line's time cannot be read"))
+                    .count();
+                assert!(unknown >= named, "span {span:?} take {take}: {damage:?}");
+            }
+        }
+        let _ignored = std::fs::remove_dir_all(&stream);
+    }
+
+    /// **WHAT A REAL SINK WRITES OVER A DAMAGED FIRST LINE IS FOUND** (R3-24
+    /// repair round 3, B3 end to end): lines written, the span file gone (as
+    /// an earlier build left the stream), the first line zeroed in place, a
+    /// reopen and one more line. On repair round 2's head the reopened sink
+    /// recorded that line's time as the generation's first, and a span over
+    /// the older lines answered none of them, complete.
+    #[test]
+    fn a_span_over_lines_before_a_reopen_over_a_damaged_head_finds_them() {
+        let stream = scratch("unknown-first-sink");
+        let emit = |sink: &telemetry::Sink, n: u32| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert!(
+                sink.emit(&telemetry::Event::error("span.test", &format!("line {n}")))
+                    .is_written()
+            );
+        };
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&stream)).expect("a sink");
+        for n in 0..3 {
+            emit(&sink, n);
+        }
+        drop(sink);
+        std::fs::remove_file(
+            telemetry::audit_generation_path(&stream, 0).join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+        )
+        .expect("as an earlier build left it");
+        let current = telemetry::audit_current_path(&stream);
+        let mut bytes = std::fs::read(&current).expect("the file");
+        let newline = bytes.iter().position(|&b| b == b'\n').expect("a line");
+        bytes[..newline].fill(0);
+        std::fs::write(&current, &bytes).expect("its first line zeroed");
+        let again = telemetry::Sink::open(&telemetry::Config::new(&stream)).expect("reopens");
+        emit(&again, 3);
+        drop(again);
+        let lines: Vec<telemetry::Record> = std::fs::read(&current)
+            .expect("the file")
+            .split(|&b| b == b'\n')
+            .filter_map(|line| telemetry::Record::decode(line).ok())
+            .collect();
+        assert_eq!(lines.len(), 3, "premise: the zeroed line does not decode");
+        let (second, last) = (&lines[0], &lines[2]);
+        assert!(second.at_unix_millis < last.at_unix_millis, "premise");
+        let (seqs, damage) = every_span_page(
+            &stream,
+            (second.at_unix_millis, last.at_unix_millis - 1),
+            1000,
+        )
+        .expect("the pages end");
+        assert_eq!(seqs, vec![lines[1].seq, second.seq], "{damage:?}");
+        assert!(
+            damage
+                .iter()
+                .any(|why| why.contains("first line's time cannot be read")),
+            "{damage:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&stream);
     }
 }

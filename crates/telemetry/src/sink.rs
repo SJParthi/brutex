@@ -2149,15 +2149,18 @@ struct Resumed {
     max_run: u64,
 }
 
+/// The block [`last_records`] reads at a file's end. 64 KiB holds ~250 lines
+/// at the typical width, so the last complete line is inside it unless one
+/// line is larger than the block, which the ceilings in `crate::event` make
+/// impossible: the widest legal line is just over 41 KB
+/// (`tail::MAX_LINE_BYTES`). A block holding no line that decodes is damage,
+/// and what it hides is unknown (R3-24 repair round 3).
+const LAST_RECORDS_BLOCK: u64 = 64 * 1024;
+
 /// The last line of one file that decodes, and the largest run in the block,
 /// read from one block at its end.
 fn last_records(path: &Path, len: u64) -> Option<Resumed> {
-    /// One block at the end. 64 KiB holds ~250 lines at the typical width, so
-    /// the last complete line is inside it unless one line is larger than the
-    /// block, which the ceilings in `crate::event` make impossible: the widest
-    /// legal line is just over 41 KB (`tail::MAX_LINE_BYTES`).
-    const BLOCK: u64 = 64 * 1024;
-    let from = len.saturating_sub(BLOCK);
+    let from = len.saturating_sub(LAST_RECORDS_BLOCK);
     let bytes = crate::tail::read_at(path, from, len.saturating_sub(from)).ok()?;
     let mut decoded = bytes
         .split(|&b| b == b'\n')
@@ -2524,20 +2527,32 @@ pub const STATE_LOUD_BYTES: u64 = 256 * 1024 * 1024;
 /// The first and last event time of one audit file, as its index generation
 /// records them ([`AUDIT_SPAN_FILE`]) or, for a generation an earlier build
 /// wrote, as its first and last lines say.
+///
+/// **A TIME THAT CANNOT BE READ IS UNKNOWN, NEVER GUESSED** (R3-24 repair
+/// round 3): `None` at either end overlaps every span, so the file is read
+/// whatever is asked. On repair round 2's head a reopen over a file whose
+/// first line would not decode recorded the next appended line's time as the
+/// generation's first, and one over a file whose last 64 KiB held no line
+/// recorded its first line's time as its last; a span search believed both
+/// and passed the file's older lines over, calling the page complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditSpan {
-    /// The `ms` of its first line.
-    pub first_ms: i64,
+    /// The `ms` of its first line, or `None` when the file holds bytes and
+    /// its first line does not decode: unknown, so no span starts after it.
+    pub first_ms: Option<i64>,
     /// The `ms` of its last line, or `None` while it is the file being
-    /// appended to: a line may land after any answer.
+    /// appended to (a line may land after any answer), or for a closed file
+    /// whose last line could not be read: unknown, so no span ends before it.
     pub last_ms: Option<i64>,
 }
 
 impl AuditSpan {
-    /// Whether any line of the file can fall in `from..=to`, both `ms`.
+    /// Whether any line of the file can fall in `from..=to`, both `ms`. An
+    /// unknown end overlaps every span.
     #[must_use]
     pub fn overlaps(&self, from: i64, to: i64) -> bool {
-        self.first_ms <= to && self.last_ms.is_none_or(|last| last >= from)
+        self.first_ms.is_none_or(|first| first <= to)
+            && self.last_ms.is_none_or(|last| last >= from)
     }
 }
 
@@ -2588,7 +2603,10 @@ fn head_ms(path: &Path) -> Option<i64> {
 /// The span of the audit file of `serial`, in a stream whose current serial is
 /// `current_serial`: its [`AUDIT_SPAN_FILE`] when that holds one, else its
 /// first and last lines (one read at each end). `None` once the file has
-/// rolled out of the kept set, or when it holds no line.
+/// rolled out of the kept set, or when it is not there or holds no byte. A
+/// file that holds bytes always answers a span: an end whose line does not
+/// decode is unknown ([`AuditSpan`]), never a reason to pass the file over
+/// (R3-24 repair round 3).
 #[must_use]
 pub fn audit_span(dir: &Path, current_serial: u64, serial: u64) -> Option<AuditSpan> {
     let path = audit_path_for(dir, current_serial, serial)?;
@@ -2610,16 +2628,19 @@ pub fn audit_span(dir: &Path, current_serial: u64, serial: u64) -> Option<AuditS
         // generation with no span file: slower, and never wrong.
         if first_ms > 0 && last >= first_ms {
             return Some(AuditSpan {
-                first_ms,
+                first_ms: Some(first_ms),
                 last_ms: (!open && last != i64::MAX).then_some(last),
             });
         }
     }
-    let first_ms = head_ms(&path)?;
+    let len = std::fs::metadata(&path).ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let first_ms = head_ms(&path);
     let last_ms = if open {
         None
     } else {
-        let len = std::fs::metadata(&path).ok()?.len();
         last_records(&path, len).map(|last| last.last_at)
     };
     Some(AuditSpan { first_ms, last_ms })
@@ -2628,8 +2649,11 @@ pub fn audit_span(dir: &Path, current_serial: u64, serial: u64) -> Option<AuditS
 /// How far back the streams of the log directory `dir` reach. One `open` per
 /// ring file until the oldest present one is found and one line read from it;
 /// the audit serial and at most [`AUDIT_KEEP_FILES`] span probes, each one
-/// small read, stopping at the oldest kept generation that has a line; one
-/// span probe of the state stream. Nothing scales with what the files hold.
+/// small read, stopping at the oldest kept generation whose first time
+/// reads; one span probe of the state stream. Nothing scales with what the
+/// files hold. A generation whose first time is unknown ([`AuditSpan`]) is
+/// passed for the next one's: history reaches back at least that far, which
+/// is true, where a guess would not be.
 #[must_use]
 pub fn reach_of(dir: &Path, ring_keep: u8) -> Reach {
     let ring_from = paths_newest_first(dir, ring_keep)
@@ -2640,7 +2664,7 @@ pub fn reach_of(dir: &Path, ring_keep: u8) -> Reach {
         let current = audit_serial(stream).ok()?;
         let oldest = current.saturating_sub(u64::from(AUDIT_KEEP_FILES.saturating_sub(1)));
         (oldest..=current)
-            .find_map(|serial| audit_span(stream, current, serial).map(|s| s.first_ms))
+            .find_map(|serial| audit_span(stream, current, serial).and_then(|s| s.first_ms))
     };
     Reach {
         ring_from,
@@ -2909,6 +2933,12 @@ pub struct AuditHealth {
     /// line for ever, so its size is what an operator watches, and past
     /// [`STATE_LOUD_BYTES`] it is loud.
     pub never_rolls: bool,
+    /// What the reopen could not read of the generation it resumed: a first
+    /// line that does not decode, or a last block holding no line that does
+    /// (R3-24 repair round 3). That end of the generation's span is unknown,
+    /// every span search reads the file, and the stream is loud for the life
+    /// of the process. `None` when both ends read.
+    pub span_damage: Option<String>,
 }
 
 impl AuditHealth {
@@ -2921,6 +2951,7 @@ impl AuditHealth {
             || self.reap_failures > 0
             || self.reaper_behind()
             || self.grown_past_loud()
+            || self.span_damage.is_some()
     }
 
     /// Whether the never-rolling state stream has grown past
@@ -3383,10 +3414,27 @@ struct Audit {
     /// (`crate::run_dirs::STATE_STREAM_DIR`, R3-24) never does, so it starts
     /// no reaper and retires nothing.
     rolls: bool,
-    /// The current generation's first line's `ms`, once it has one.
-    span_first: Option<i64>,
-    /// Its last line's `ms`, written into [`AUDIT_SPAN_FILE`] when it rolls.
+    /// Where the current generation's span starts.
+    span_first: SpanStart,
+    /// Its last line's `ms`, written into [`AUDIT_SPAN_FILE`] when it rolls;
+    /// [`i64::MAX`] when the reopen could not read it (unknown, R3-24 repair
+    /// round 3), which no later line lowers.
     span_last: i64,
+}
+
+/// Where the current audit generation's span starts (R3-24 repair round 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanStart {
+    /// The generation holds no byte: its first append records its time.
+    Empty,
+    /// Its first line's `ms`.
+    At(i64),
+    /// It holds bytes and its first line does not decode: unknown. No span
+    /// file is written for it (a reader reads the file's own first line and
+    /// answers unknown too), and no later line's time is ever recorded as its
+    /// first: on repair round 2's head one was, and a span search passed the
+    /// older lines over (B3).
+    Unknown,
 }
 
 /// One retired index generation handed to the reaper: its path, and the
@@ -3790,7 +3838,7 @@ impl Audit {
             reap: std::sync::Arc::new(Reap::default()),
             reaper: None,
             rolls,
-            span_first: None,
+            span_first: SpanStart::Empty,
             span_last: 0,
         }
     }
@@ -3845,19 +3893,48 @@ impl Audit {
     /// file's first line for a generation an earlier build wrote (and then
     /// records it), and its last line's time from the file's end. One small
     /// read at each end, once per open.
+    ///
+    /// **AN END IT CANNOT READ IS UNKNOWN, AND NAMED** (R3-24 repair round 3):
+    /// a first line that does not decode leaves the start [`SpanStart::Unknown`]
+    /// (B3: the next appended line's time was recorded as the first), and a
+    /// last 64 KiB holding no line that decodes leaves the last [`i64::MAX`]
+    /// (B9: the first line's time was, and a roll closed the file as
+    /// `[first, first]`). Either is named in the stream's health
+    /// ([`AuditHealth::span_damage`]), loud, and every span search reads the
+    /// file.
     fn resume_span(&mut self) {
         if self.bytes == 0 {
             return;
         }
         let current = audit_current_path(&self.dir);
-        let recorded = audit_span(&self.dir, self.serial, self.serial).map(|span| span.first_ms);
-        let first = recorded.or_else(|| head_ms(&current));
-        self.span_last = last_records(&current, self.bytes).map_or(0, |last| last.last_at);
-        if let Some(first) = first {
-            self.span_first = Some(first);
-            self.span_last = self.span_last.max(first);
-            self.write_span(false);
+        let first = audit_span(&self.dir, self.serial, self.serial).and_then(|span| span.first_ms);
+        let last = last_records(&current, self.bytes).map(|last| last.last_at);
+        let mut unknown = Vec::new();
+        if first.is_none() {
+            unknown.push(format!(
+                "its first line does not decode, so the generation's first time is unknown \
+                 and no later line's time is recorded as it ({} byte(s) held)",
+                self.bytes
+            ));
         }
+        if last.is_none() {
+            unknown.push(format!(
+                "its last {} KiB hold no line that decodes, so the generation's last time is \
+                 unknown and is recorded as unknown when it rolls",
+                LAST_RECORDS_BLOCK / 1024
+            ));
+        }
+        self.span_last = last.map_or(i64::MAX, |last| first.map_or(last, |first| last.max(first)));
+        if !unknown.is_empty() {
+            self.health.span_damage = Some(format!(
+                "{} (audit file {}): {}; every span search reads this file",
+                current.display(),
+                self.serial,
+                unknown.join("; ")
+            ));
+        }
+        self.span_first = first.map_or(SpanStart::Unknown, SpanStart::At);
+        self.write_span(false);
     }
 
     /// Writes the current generation's [`AUDIT_SPAN_FILE`]: its first line's
@@ -3875,7 +3952,7 @@ impl Audit {
     /// the first time never changes within a generation, so a half of an old
     /// image beside a half of a new one is still a true span (L-R324-18).
     fn write_span(&mut self, closed: bool) {
-        let Some(first) = self.span_first else {
+        let SpanStart::At(first) = self.span_first else {
             return;
         };
         let last = if closed { self.span_last } else { i64::MAX };
@@ -4314,8 +4391,11 @@ impl Audit {
         // THE GENERATION'S SPAN (R3-24): its first line's time recorded once,
         // its last kept here and recorded when it rolls.
         self.span_last = self.span_last.max(at);
-        if self.span_first.is_none() {
-            self.span_first = Some(at);
+        // ONLY A GENERATION THAT HELD NO BYTE takes this line's time as its
+        // first: one that held bytes it could not read keeps an unknown first
+        // (B3, R3-24 repair round 3).
+        if self.span_first == SpanStart::Empty {
+            self.span_first = SpanStart::At(at);
             self.span_last = at;
             self.write_span(false);
         }
@@ -4410,7 +4490,8 @@ impl Audit {
                 .map_err(|e| named(&current, "cannot open the next audit file", &e))?,
         );
         self.bytes = 0;
-        self.span_first = None;
+        self.span_first = SpanStart::Empty;
+        self.span_last = 0;
         self.health.rotations = self.health.rotations.saturating_add(1);
         // A NEW GENERATION IS COVERED BY EVERY DIMENSION FROM ITS FIRST LINE.
         // A coverage file that cannot be written does not stop the roll: the
@@ -9280,14 +9361,14 @@ mod state_tests {
         assert_eq!(
             first,
             AuditSpan {
-                first_ms: aaa[0],
+                first_ms: Some(aaa[0]),
                 last_ms: Some(aaa[0])
             }
         );
         assert_eq!(
             audit_span(&dir, 2, 2),
             Some(AuditSpan {
-                first_ms: bbb[0],
+                first_ms: Some(bbb[0]),
                 last_ms: None
             }),
             "the file being appended to is open-ended"
@@ -9309,7 +9390,7 @@ mod state_tests {
         assert_eq!(
             audit_span(&dir, 2, 1),
             Some(AuditSpan {
-                first_ms: aaa[1],
+                first_ms: Some(aaa[1]),
                 last_ms: Some(aaa[1])
             })
         );
@@ -9324,7 +9405,7 @@ mod state_tests {
         assert_eq!(
             audit_span(&dir, 2, 0),
             Some(AuditSpan {
-                first_ms: aaa[0],
+                first_ms: Some(aaa[0]),
                 last_ms: None
             })
         );
@@ -9343,7 +9424,7 @@ mod state_tests {
             "resumed and recorded"
         );
         assert_eq!(
-            audit_span(&dir, 2, 2).map(|span| span.first_ms),
+            audit_span(&dir, 2, 2).and_then(|span| span.first_ms),
             Some(bbb[0])
         );
         let reach = reach_of(&dir, DEFAULT_KEEP_FILES);
@@ -9821,7 +9902,10 @@ mod state_tests {
 
     /// **A FILE WHOSE FIRST LINE WILL NOT DECODE HAS NO SPAN TO RECORD**: a
     /// stream reopened over one rolls it without a span file, and a reader
-    /// then says it has none rather than inventing a time.
+    /// then says its span is unknown at both ends rather than inventing a
+    /// time. Until R3-24 repair round 3 the reader answered no span at all,
+    /// and a span search passed such a kept file over unnamed (B3); unknown
+    /// overlaps every span, so the file is read.
     #[test]
     fn a_file_with_no_first_time_rolls_without_a_span() {
         let dir = scratch("span-garbage");
@@ -9842,12 +9926,186 @@ mod state_tests {
                 .join(AUDIT_SPAN_FILE)
                 .exists()
         );
-        assert_eq!(super::audit_span(&dir, 1, 0), None, "no time is invented");
+        let unknown = AuditSpan {
+            first_ms: None,
+            last_ms: None,
+        };
+        assert_eq!(
+            super::audit_span(&dir, 1, 0),
+            Some(unknown),
+            "no time is invented"
+        );
+        assert!(unknown.overlaps(i64::MIN, i64::MIN) && unknown.overlaps(i64::MAX, i64::MAX));
         assert!(
-            super::audit_span(&dir, 1, 1).is_some(),
+            super::audit_span(&dir, 1, 1).is_some_and(|span| span.first_ms.is_some()),
             "the new file has one"
         );
+        let health = sink.audit_health().expect("a stream");
+        assert!(
+            health
+                .span_damage
+                .as_deref()
+                .is_some_and(|why| why.contains("first line does not decode")
+                    && why.contains("last 64 KiB hold no line")),
+            "{health:?}"
+        );
+        assert!(health.is_loud(), "damage met on reopening is loud");
         drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `ms` of the audited line of `instrument`, emitted alone and 2 ms
+    /// after the one before, so no two lines of a test share a time.
+    fn stamped(sink: &Sink, dir: &Path, instrument: &str) -> i64 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(
+            sink.emit(&Event::error("x", "refused").with("instrument", instrument))
+                .is_written()
+        );
+        every_line(dir, "instrument", instrument)[0].at_unix_millis
+    }
+
+    /// **A REOPEN OVER A DAMAGED END RECORDS AN UNKNOWN LAST, NEVER THE FIRST
+    /// LINE'S TIME** (R3-24 repair round 3, B9). Three lines, then more than
+    /// the 64 KiB `last_records` reads of NULs at the file's end (the second
+    /// check appended 64 MiB + 64 KiB to a live clone), a reopen and a roll.
+    /// On repair round 2's head the reopen took the last time as the first
+    /// line's and the roll closed the file as `[first, first]`: a span at the
+    /// third line's time passed the file over and a span search stopped there
+    /// ("every older file is older still"), every answer complete. Now the
+    /// last is unknown ([`i64::MAX`] in the image), the file overlaps every
+    /// span after its first, and the damage is named in the health and loud.
+    #[test]
+    fn a_reopen_over_a_damaged_end_records_an_unknown_last() {
+        use std::io::Write as _;
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("span-damaged-end");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let times: Vec<i64> = ["A0", "A1", "A2"]
+            .into_iter()
+            .map(|instrument| stamped(&sink, &dir, instrument))
+            .collect();
+        assert!(times[0] < times[2], "premise: {times:?}");
+        drop(sink);
+        let current = audit_current_path(&dir);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&current)
+            .expect("the file");
+        let run = usize::try_from(super::LAST_RECORDS_BLOCK).unwrap() + 1;
+        file.write_all(&vec![0u8; run]).expect("a damaged end");
+        drop(file);
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        let health = again.audit_health().expect("a stream");
+        assert!(
+            health.span_damage.as_deref().is_some_and(|why| {
+                why.contains("last 64 KiB hold no line") && !why.contains("first line")
+            }),
+            "{health:?}"
+        );
+        assert!(health.is_loud(), "{health:?}");
+        again
+            .inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("an audit stream")
+            .max_file_bytes = 1;
+        let _ = stamped(&again, &dir, "B0");
+        assert_eq!(audit_serial(&dir).expect("a serial"), 1, "it rolled");
+        assert_eq!(
+            std::fs::read(audit_generation_path(&dir, 0).join(AUDIT_SPAN_FILE))
+                .expect("a span file"),
+            [times[0].to_le_bytes(), i64::MAX.to_le_bytes()].concat(),
+            "closed with its last unknown, never [first, first]"
+        );
+        let closed = audit_span(&dir, 1, 0).expect("a span");
+        assert_eq!(
+            closed,
+            AuditSpan {
+                first_ms: Some(times[0]),
+                last_ms: None,
+            }
+        );
+        assert!(closed.overlaps(times[2], times[2]), "the third line is found");
+        drop(again);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A REOPEN OVER A DAMAGED FIRST LINE NEVER RECORDS A LATER LINE'S TIME
+    /// AS THE GENERATION'S FIRST** (R3-24 repair round 3, B3). A generation
+    /// with no span file (as every generation a build before R3-24 wrote,
+    /// the whole live stream at deploy) whose first line is zeroed in place:
+    /// on repair round 2's head the first line the reopened sink appended
+    /// recorded its own time as the first, and a span ending before it passed
+    /// the older lines over, open and closed. Now no first is recorded, the
+    /// span is unknown at its start, the older lines' times overlap it, and
+    /// the damage is named.
+    #[test]
+    fn a_reopen_over_a_damaged_first_line_never_records_a_later_first() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("span-damaged-head");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let a0 = stamped(&sink, &dir, "A0");
+        let a1 = stamped(&sink, &dir, "A1");
+        drop(sink);
+        let span_file = audit_generation_path(&dir, 0).join(AUDIT_SPAN_FILE);
+        std::fs::remove_file(&span_file).expect("as an earlier build left it");
+        let current = audit_current_path(&dir);
+        let mut bytes = std::fs::read(&current).expect("the file");
+        let newline = bytes.iter().position(|&b| b == b'\n').expect("a line");
+        bytes[..newline].fill(0);
+        std::fs::write(&current, &bytes).expect("its first line zeroed");
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        let health = again.audit_health().expect("a stream");
+        assert!(
+            health.span_damage.as_deref().is_some_and(|why| {
+                why.contains("first line does not decode") && !why.contains("last 64 KiB")
+            }),
+            "{health:?}"
+        );
+        let a2 = stamped(&again, &dir, "A2");
+        assert!(a0 < a1 && a1 < a2, "premise");
+        assert!(!span_file.exists(), "no first is recorded: {span_file:?}");
+        let open = audit_span(&dir, 0, 0).expect("a span");
+        assert_eq!(
+            open,
+            AuditSpan {
+                first_ms: None,
+                last_ms: None,
+            }
+        );
+        assert!(open.overlaps(a1, a1), "the older line is found");
+        // CLOSED, it is still unknown at its start and known at its end.
+        again
+            .inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("an audit stream")
+            .max_file_bytes = 1;
+        let a3 = stamped(&again, &dir, "A3");
+        assert_eq!(audit_serial(&dir).expect("a serial"), 1, "it rolled");
+        assert!(!span_file.exists(), "still none: {span_file:?}");
+        let closed = audit_span(&dir, 1, 0).expect("a span");
+        assert_eq!(
+            closed,
+            AuditSpan {
+                first_ms: None,
+                last_ms: Some(a2),
+            }
+        );
+        assert!(closed.overlaps(a1, a1) && !closed.overlaps(a3, a3));
+        assert_eq!(
+            audit_span(&dir, 1, 1).and_then(|span| span.first_ms),
+            Some(a3),
+            "the next generation records its own first"
+        );
+        drop(again);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -9899,7 +10157,7 @@ mod state_tests {
         let aaa = every_line(&dir, "instrument", "AAA")[0].at_unix_millis;
         let bbb = every_line(&dir, "instrument", "BBB")[0].at_unix_millis;
         let whole = AuditSpan {
-            first_ms: aaa,
+            first_ms: Some(aaa),
             last_ms: Some(aaa),
         };
         assert_eq!(audit_span(&dir, 1, 0), Some(whole), "premise");
@@ -9926,7 +10184,7 @@ mod state_tests {
         assert_eq!(
             audit_span(&dir, 1, 1),
             Some(AuditSpan {
-                first_ms: bbb,
+                first_ms: Some(bbb),
                 last_ms: None
             }),
             "read from its own first line, open-ended"
