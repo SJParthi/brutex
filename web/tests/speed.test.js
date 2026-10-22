@@ -1732,6 +1732,114 @@ test('a browser that ignores SIGTERM is killed after the wait, and a profile tha
   assert.equal(running(started.pid), false, 'the browser was killed even though its profile could not be removed');
 });
 
+test('a browser\'s helpers end with it: nothing writes into its profile after the harness removed it, on a stop, an exit or a signal', { timeout: 120_000 }, async () => {
+  // Before (the R3-15 repair 2 run, 22 Oct, at a load average near 140): a
+  // harness sent SIGTERM killed the browser alone and removed its profile at
+  // once, and Chrome's network service, still running, wrote
+  // `Default/Reporting and NEL` into it again, so the profile was left. This
+  // browser's helper does the same on purpose: it ignores SIGTERM, outlives
+  // the browser, and writes into the profile every 20 ms until it is killed.
+  const fake = mkdtempSync(join(tmpdir(), 'r315-helper-'));
+  /** @param {string} ws the DevTools address it prints @param {string} pidFile where the helper writes its pid */
+  const browserWithHelper = (ws, pidFile) => {
+    const path = join(fake, `browser-${readdirSync(fake).length}`);
+    writeFileSync(path, [
+      '#!/bin/sh',
+      'for a in "$@"; do case "$a" in --user-data-dir=*) P="${a#--user-data-dir=}";; esac; done',
+      `sh -c 'trap "" TERM; echo $$ > "$1"; while :; do mkdir -p "$2/Default" && : > "$2/Default/Reporting and NEL"; sleep 0.02; done' helper ${JSON.stringify(pidFile)} "$P" &`,
+      // Listening only once the helper ignores SIGTERM: its pid is written after its trap.
+      `while [ ! -s ${JSON.stringify(pidFile)} ]; do sleep 0.01; done`,
+      `echo "DevTools listening on ${ws}" >&2`,
+      'exec sleep 60'
+    ].join('\n') + '\n', { mode: 0o755 });
+    return path;
+  };
+  /** @param {number} pid */
+  const running = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** @param {string} pidFile */
+  const helperOf = async (pidFile) => {
+    const end = Date.now() + 10_000;
+    while (!existsSync(pidFile) || readFileSync(pidFile, 'utf8').trim() === '') {
+      assert.ok(Date.now() < end, 'the helper started');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return Number(readFileSync(pidFile, 'utf8'));
+  };
+  /** @param {number} helper @param {string} root @param {string} how */
+  const nothingLeft = async (helper, root, how) => {
+    try {
+      const end = Date.now() + 5_000;
+      while (running(helper) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(running(helper), false, `${how}: the helper that ignored SIGTERM was ended with the browser's group`);
+      // Ten of the helper's 20 ms writes: a helper still running would have written the profile again by now.
+      await new Promise((r) => setTimeout(r, 200));
+      assert.deepEqual(readdirSync(root), [], `${how}: nothing wrote the profile again after it was removed`);
+    } finally {
+      if (running(helper)) process.kill(helper, 'SIGKILL');
+    }
+  };
+  // A stop: the launch fails (nothing listens on port 1), so the harness stops what it started.
+  const stopRoot = mkdtempSync(join(tmpdir(), 'r315-helper-root-'));
+  const stopPid = join(fake, 'helper-stop.pid');
+  const t = Date.now();
+  await assert.rejects(harness.launch(browserWithHelper('ws://127.0.0.1:1/devtools/browser/x', stopPid), false, 30_000, stopRoot), /could not connect to ws:\/\/127\.0\.0\.1:1/);
+  const took = Date.now() - t;
+  // First, so a helper left running is killed (its finally) before anything else can fail.
+  await nothingLeft(await helperOf(stopPid), stopRoot, 'stop');
+  assert.ok(took >= harness.STOP_WAIT_MS - 50, `a helper that outlived the browser was given the same wait before it was killed (took ${took} ms)`);
+  // An exit and a signal: a harness that launched, against a DevTools address that answers the handshake.
+  const script = join(fake, 'ends.mjs');
+  writeFileSync(script, [
+    `import * as h from ${JSON.stringify(new URL('ci/browser-harness.mjs', web).href)};`,
+    'import http from "node:http";',
+    'import { createHash } from "node:crypto";',
+    'const server = http.createServer();',
+    'server.on("upgrade", (req, socket) => {',
+    '  const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");',
+    '  socket.write(`HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ${accept}\\r\\n\\r\\n`);',
+    '});',
+    'await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));',
+    'process.env.R315_WS = `ws://127.0.0.1:${server.address().port}/devtools/browser/x`;',
+    'const b = await h.launch(process.argv[2], false, 30000, process.argv[3]);',
+    'process.stdout.write(JSON.stringify({ pid: b.pid, profile: b.profile }) + "\\n");',
+    'if (process.argv[4] === "exit") setTimeout(() => process.exit(0), 100);'
+  ].join('\n'));
+  const { spawn: run } = await import('node:child_process');
+  for (const how of ['exit', 'SIGTERM']) {
+    const root = mkdtempSync(join(tmpdir(), `r315-helper-${how}-`));
+    const pidFile = join(fake, `helper-${how}.pid`);
+    const child = run(process.execPath, [script, browserWithHelper('$R315_WS', pidFile), root, how], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (c) => (err += c));
+    const line = await new Promise((resolve, reject) => {
+      let text = '';
+      child.stdout.on('data', (c) => {
+        text += c;
+        if (text.includes('\n')) resolve(text.split('\n')[0]);
+      });
+      child.on('exit', (code) => reject(new Error(`${how}: the harness left (${code}) before it launched: ${err}`)));
+    });
+    const started = JSON.parse(String(line));
+    const helper = await helperOf(pidFile);
+    const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    if (how === 'SIGTERM') child.kill('SIGTERM');
+    const { code, signal } = /** @type {{code: number | null, signal: string | null}} */ (await ended);
+    assert.deepEqual([code, signal], how === 'exit' ? [0, null] : [null, 'SIGTERM'], `${how} keeps its meaning: ${err}`);
+    assert.equal(err, '', `${how}: the guard said nothing went wrong`);
+    const end = Date.now() + 5_000;
+    while (running(started.pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(running(started.pid), false, `${how}: the browser was killed`);
+    await nothingLeft(helper, root, how);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

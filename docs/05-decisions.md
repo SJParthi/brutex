@@ -76427,8 +76427,42 @@ Repair round 1 (20 Oct, after the re-check of the committed work):
     names another (R315-17): neither is typed in the harness or skipped in
     silence.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-18);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-16.
+Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
+
+15. **The Speed page's own line is watched, not read once** (R315-19). A
+    page is not told when its own load has ended, and the one read the line
+    took, in a `setTimeout(0)` at mount, came before the client-rendered page
+    had painted and before its last fetches ended: it called a figure Chrome
+    reports unreported, and drew a load over the 400 KB target as under it.
+    A buffered `PerformanceObserver` hands over what the browser reported
+    before the page mounted and every entry after, once each, at O(1) per
+    entry (the browser's own resource buffer stops at 250 entries; an
+    observer does not). The line says when it was read and whether the load
+    had ended, so no reading is passed off as the final one, and it says
+    "not reported by this browser" only for an entry type the browser does
+    not support.
+16. **The reporter cuts a failure's text before it cleans, keys or sends
+    it** (R315-20): one code point past the largest report that can be sent,
+    so what can never be sent is never walked and a report's cost does not
+    grow with the text.
+17. **The reporter's ration runs on a clock that only moves forward**
+    (R315-21): `performance.now()`, not `Date.now()`; a clock a caller
+    injects that goes back starts a new window rather than holding every
+    report back until it catches up.
+18. **`--n` stops at 10,000 in the harness and the sheet, and a page is
+    measured once a run** (R315-22). Fifty times the n = 200 the targets
+    are measured at: the ceiling bounds an argument and does not choose a
+    sample size (n = 200 stays the default). A run past it would take days
+    (an extrapolation from the pace of the n = 200 runs, not a
+    measurement), so a typo such as `--n 2000000` is refused by name rather
+    than started; a page named twice would be timed twice, as two rows for
+    one page, and its requests captured twice.
+19. **Only a profile the harness made in this process is removed** (R315-13,
+    amended): a path that merely carries the profile prefix is refused and
+    left as it was, so the guard is exactly what item 12 states.
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-22);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-18.
 
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 

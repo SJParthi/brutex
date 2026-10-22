@@ -495,10 +495,64 @@ function guardProcess() {
   }
 }
 
+/** How often a stop looks again for a helper of the browser still running, ms. */
+export const GROUP_POLL_MS = 25;
+
 /**
- * A started browser's stop: SIGTERM, then SIGKILL after {@link STOP_WAIT_MS};
- * its profile removed once it has left. Registered in {@link LIVE} until it
- * has stopped.
+ * Whether any process of the browser's process group is still running, asked
+ * with signal 0, which signals nothing. The browser is started detached, so
+ * it leads a process group of its own, and every helper it starts is in that
+ * group: all ten processes of a headless Chrome on this Mac on 22 Oct (each
+ * renderer, the GPU and network services, the rest), none in another group.
+ * A group whose id is now someone else's cannot be signalled (EPERM) and is
+ * not ours: it reads as gone.
+ *
+ * @param {number | undefined} pid the browser's pid, which is its group's id
+ */
+export function groupRunning(pid) {
+  if (pid === undefined) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends `signal` to the browser and every helper in its process group, or to
+ * the browser alone where there is no group to signal. Sent only while the
+ * group is known to be the browser's — the browser not yet reaped (its pid,
+ * so its group's id, cannot have passed to another process), or
+ * {@link groupRunning} having just found the group's processes still there
+ * (an id in use by a group is given to no new one). Never throws.
+ *
+ * WHY THE GROUP, AND NOT THE BROWSER ALONE (the R3-15 repair 2 run, 22 Oct,
+ * at a load average near 140): a harness sent SIGTERM killed the browser,
+ * removed its profile at once, and Chrome's network service, still running,
+ * wrote `Default/Reporting and NEL` into the profile again, so the profile
+ * was left. Probed the same day: after a SIGTERM to the browser alone, the
+ * browser left in 35 ms with a renderer still running; to its group, every
+ * process was gone within 300 ms.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {NodeJS.Signals} signal
+ */
+function signalGroup(child, signal) {
+  try {
+    process.kill(-(/** @type {number} */ (child.pid)), signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+/**
+ * A started browser's stop: SIGTERM to its process group, then SIGKILL to
+ * the group after {@link STOP_WAIT_MS}; then the same wait for any helper
+ * that outlived the browser, which is killed past it; its profile removed
+ * only once nothing of the browser is left to write into it, and said by
+ * name if it was written again all the same. Registered in {@link LIVE}
+ * until it has stopped.
  *
  * @param {import('node:child_process').ChildProcess} child
  * @param {string} profile
@@ -514,14 +568,29 @@ function tracked(child, profile) {
     child.once('error', done);
   });
   const alive = () => !gone && child.exitCode === null && child.signalCode === null && child.pid !== undefined;
+  /** Waits, at most `ms`, for every process of the group to leave; whether they did. @param {number} ms */
+  const groupLeft = async (ms) => {
+    const until = Date.now() + ms;
+    while (groupRunning(child.pid)) {
+      if (Date.now() >= until) return false;
+      await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+    }
+    return true;
+  };
+  const remove = () => {
+    removeProfile(profile);
+    if (existsSync(profile)) throw new Error(`${profile} was written again after it was removed`);
+  };
   const entry = {
-    // Runs inside an exit or signal handler, so it never throws: what it
-    // could not do is said on stderr, by name.
+    // Runs inside an exit or signal handler, so it never throws and never
+    // waits: what it could not do is said on stderr, by name. A process sent
+    // SIGKILL runs nothing more, so the group is killed before the profile
+    // goes.
     killNow() {
       LIVE.delete(entry);
       try {
-        if (alive()) child.kill('SIGKILL');
-        removeProfile(profile);
+        if (alive() || groupRunning(child.pid)) signalGroup(child, 'SIGKILL');
+        remove();
       } catch (why) {
         process.stderr.write(`browser-harness: could not stop the browser ${child.pid} or remove ${profile}: ${/** @type {Error} */ (why).message}\n`);
       }
@@ -533,18 +602,24 @@ function tracked(child, profile) {
     alive,
     async stop() {
       if (alive()) {
-        child.kill('SIGTERM');
+        signalGroup(child, 'SIGTERM');
         /** @type {ReturnType<typeof setTimeout> | undefined} */
         let timer;
         await Promise.race([exited, new Promise((resolve) => (timer = setTimeout(resolve, STOP_WAIT_MS)))]);
         clearTimeout(timer);
         if (alive()) {
-          child.kill('SIGKILL');
+          signalGroup(child, 'SIGKILL');
           await exited;
         }
       }
-      removeProfile(profile);
+      if (!(await groupLeft(STOP_WAIT_MS))) {
+        signalGroup(child, 'SIGKILL');
+        await groupLeft(STOP_WAIT_MS);
+      }
+      // Out of LIVE before the removal, not after: a removal that fails is
+      // this stop's error, never a second one from the exit guard.
       LIVE.delete(entry);
+      remove();
     }
   };
 }
@@ -567,7 +642,11 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = 
   // `--no-sandbox` only when the operator asks (a browser run as root, in a
   // container, refuses to start without it): never chosen here on its own.
   const flags = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'];
-  const child = spawn(chrome, flags, { stdio: ['ignore', 'ignore', 'pipe'] });
+  // DETACHED, so the browser leads a process group of its own and a stop
+  // reaches every helper it starts (signalGroup); nothing else about the
+  // browser changes, and the exit and signal guards still end it with this
+  // process.
+  const child = spawn(chrome, flags, { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
   const browser = tracked(child, profile);
   /** @type {WebSocket} */
   let ws;
