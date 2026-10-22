@@ -234,6 +234,10 @@ mod tests {
             "boolean-oos-stored",
             "boolean-qualified-campaign-stored",
             "boolean-qualified-search-stored",
+            // CAL-1 (D-5153, D-5158): `calendar-days YEAR` reads compile-time
+            // tables and no store; `calendar-days check` opens censuses and
+            // NIFTY/BANKNIFTY bar months read-only and writes only its events.
+            "calendar-days",
             "checksum-audit-stored",
             "descend",
             "elite",
