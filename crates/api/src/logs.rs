@@ -446,7 +446,8 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
                     None => {}
                     Some(None) => ignored.push((name, word)),
                     Some(Some(_)) => {
-                        ignored.push((name, format!("{word} (not applied: {other}= did not read)")));
+                        ignored
+                            .push((name, format!("{word} (not applied: {other}= did not read)")));
                     }
                 }
             }
