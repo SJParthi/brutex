@@ -674,10 +674,16 @@ impl CorporateActions {
     /// (`a_measured_row_never_suppresses_a_refusal_or_decides_a_class`).
     #[must_use]
     pub fn excuse(&self, symbol: &str, after: Option<Day>, through: Day) -> Option<&Action> {
-        // At most MAX_ACTIONS_PER_SYMBOL rows: the build refuses more.
-        self.labels(symbol, after, through)
-            .iter()
-            .find_map(|row| row.excuses().then_some(row))
+        // A walk of at most MAX_ACTIONS_PER_SYMBOL rows: the build refuses
+        // more, so the bound is the compile-time constant, not the data.
+        let mut excusing = None;
+        for row in self.labels(symbol, after, through) {
+            if row.excuses() {
+                excusing = Some(row);
+                break;
+            }
+        }
+        excusing
     }
 
     /// The class an `nse` row in `(after, through]` decides; `None` when only
