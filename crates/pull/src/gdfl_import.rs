@@ -1999,7 +1999,9 @@ where
     // Its sum (DB-A49) is kept with it, taken once per day.
     let mut cached: Option<CachedDay<S::Locator>> = None;
     let scoped = Some((&record, &swept));
-    drive_core(run, options, (&mut StoreCensus, scoped), |day, filer| {
+    // The run's census memory, kept across its days (R3-19).
+    let mut census = StoreCensus::default();
+    drive_core(run, options, (&mut census, scoped), |day, filer| {
         if cached.as_ref().is_none_or(|(held, _, _)| *held != day) {
             cached = None;
             let (listed, listing) = cm_list(source, (tree, day));
@@ -2474,7 +2476,9 @@ where
     }
     let mut lineage = lineage::LineageRun::load(run.store_root, run.from)
         .map_err(|why| ImportRefusal::Lineage { why })?;
-    drive_core(run, options, (&mut StoreCensus, None), |day, filer| {
+    // The run's census memory, kept across its days (R3-19).
+    let mut census = StoreCensus::default();
+    drive_core(run, options, (&mut census, None), |day, filer| {
         let mut early = DayExtras::default();
         let workers = options.workers.get();
         warm_up(

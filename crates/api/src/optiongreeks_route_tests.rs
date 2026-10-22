@@ -245,6 +245,7 @@ fn a_priced_cell_is_bar_greeks_on_the_bars_own_inputs() {
     assert_eq!(body["rate"]["state"], "loaded");
     assert_eq!(body["rate"]["variable"], RATE_ENV);
     assert_eq!(body["rate"]["auctions"], 2);
+    assert_eq!(body["rate"]["gaps"], 0);
     assert_eq!(body["rate"]["sha256"].as_str().expect("digest").len(), 64);
     assert_eq!(body["rate_sha256"], body["rate"]["sha256"]);
 
@@ -287,6 +288,8 @@ fn a_priced_cell_is_bar_greeks_on_the_bars_own_inputs() {
         close_to(&row["tenor_y"], tenor.years(YearBasis::Calendar365));
         assert_eq!(row["above_rate_tenor"], false);
         assert_eq!(row["auction"], "2026-08-19");
+        assert_eq!(row["rate_state"], "rate_fresh", "a fresh result says so");
+        assert!(row["rate_gap"].is_null());
         assert!(row["why"].is_null());
         assert_eq!(row["below_band"], true);
         close_to(&row["rate"], as_of.rate.annual());
@@ -299,6 +302,162 @@ fn a_priced_cell_is_bar_greeks_on_the_bars_own_inputs() {
         assert_eq!(row["iterations"], want.iterations);
         let iv = row["iv"].as_f64().expect("iv");
         assert!(iv > 0.0 && iv < 1.0, "{iv}");
+    }
+}
+
+/// An invented table: a result released on each of `results` and a
+/// documented `CANCELLED` gap row on each of `gaps`, in release order.
+fn holed_table(results: &[(u16, u8, u8)], gaps: &[(u16, u8, u8)]) -> Series {
+    let mut rows: Vec<((u16, u8, u8), bool)> = results
+        .iter()
+        .map(|day| (*day, false))
+        .chain(gaps.iter().map(|day| (*day, true)))
+        .collect();
+    rows.sort_unstable();
+    let mut text = String::from(pull::riskfree::HEADER);
+    for ((y, m, d), gap) in rows {
+        let (price, yield_pct) = if gap {
+            ("CANCELLED", "")
+        } else {
+            ("98.5000", "6.1081")
+        };
+        let _ = write!(
+            text,
+            "\n\t\t{y:04}-{m:02}-{d:02}\t{price}\t{yield_pct}\thttps://www.rbi.org.in/invented\t\t"
+        );
+    }
+    Series::parse(&text).expect("the invented holed table parses")
+}
+
+/// DB-B44 ON THE WIRE (R3-30 repair 1): a rate carried over a documented gap
+/// is served LABELLED on every cell it prices -- `rate_state` `rate_carried`
+/// and the gap's kind and release day -- and the header counts the gap rows.
+/// Before this, the same cells were served exactly like fresh ones. A run of
+/// gaps carries no further than `MAX_CARRIED_AGE_DAYS`, and past it every
+/// cell is refused by name.
+#[test]
+fn a_rate_carried_over_a_documented_gap_is_labelled_on_every_cell() {
+    let fixture = Fixture::new("greeks-carried");
+    let times = [t0(), t0() + 60];
+    // The bars are on 2026-08-20. The latest result is 1 Aug, 19 days before:
+    // with no gap row that is `rate_stale`.
+    let bare = RateTable::Loaded(holed_table(&[(2026, 7, 25), (2026, 8, 1)], &[]));
+    let (_, body) = fixture.ask(ATM, &times, &bare);
+    for row in body["rows"].as_array().expect("rows") {
+        assert_eq!(row["why"], "rate_stale", "{body}");
+    }
+    // The 12 Aug auction documented as cancelled: the 1 Aug rate is carried,
+    // and every priced cell says so.
+    let holed = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 12)],
+    ));
+    let (status, body) = fixture.ask(ATM, &times, &holed);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rate"]["auctions"], 2);
+    assert_eq!(body["rate"]["gaps"], 1, "the header counts the gap rows");
+    assert_eq!(
+        body["rate"]["max_carried_age_days"],
+        pull::riskfree::MAX_CARRIED_AGE_DAYS
+    );
+    let rows = body["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), times.len());
+    for row in rows {
+        assert!(row["why"].is_null(), "priced over the gap: {row}");
+        assert_eq!(row["auction"], "2026-08-01", "the carried result");
+        assert_eq!(row["rate_state"], "rate_carried", "{row}");
+        assert_eq!(row["rate_gap"]["kind"], "cancelled", "{row}");
+        assert_eq!(row["rate_gap"]["released"], "2026-08-12", "{row}");
+    }
+    // Four weekly gaps after a 20 Jul result: 31 days by 20 Aug, past the
+    // carried bound, so no cell is priced on it.
+    let chained = RateTable::Loaded(holed_table(
+        &[(2026, 7, 20)],
+        &[(2026, 7, 27), (2026, 8, 3), (2026, 8, 10), (2026, 8, 17)],
+    ));
+    let (_, body) = fixture.ask(ATM, &times, &chained);
+    for row in body["rows"].as_array().expect("rows") {
+        assert_eq!(row["why"], "rate_carried_too_long", "{body}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(detail.contains("2026-07-20"), "{detail}");
+        assert!(
+            row.get("iv").is_none(),
+            "a refused cell carries no figure: {row}"
+        );
+    }
+}
+
+/// A HOLE BEFORE A GAP ROW ON THE WIRE (verify-R3-30-r2, blocking): the
+/// 8 and 15 Aug auctions are missing and nobody explained them, then a gap
+/// row is released on 17 Aug, 16 days after the 1 Aug result. Before repair 2
+/// that gap restarted the expired clock and every 20 Aug cell was priced on
+/// the 1 Aug rate, labelled `rate_carried`; it is `rate_stale`, the detail
+/// names the gap that carries nothing, and the header counts it.
+#[test]
+fn a_gap_row_after_an_unexplained_hole_prices_no_cell() {
+    let fixture = Fixture::new("greeks-hole-before-gap");
+    let times = [t0(), t0() + 60];
+    let holed = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 17)],
+    ));
+    let (status, body) = fixture.ask(ATM, &times, &holed);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rate"]["gaps"], 1);
+    assert_eq!(
+        body["rate"]["unlinked_gaps"], 1,
+        "the header counts the gap row that follows an unexplained hole"
+    );
+    let rows = body["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), times.len());
+    for row in rows {
+        assert_eq!(row["why"], "rate_stale", "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(detail.contains("2026-08-17"), "the gap is named: {detail}");
+        assert!(detail.contains("unexplained"), "{detail}");
+        assert!(row.get("iv").is_none(), "no figure: {row}");
+    }
+    // The same gap a week after the result is linked and carries.
+    let linked = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 8), (2026, 8, 15)],
+    ));
+    let (_, body) = fixture.ask(ATM, &times, &linked);
+    assert_eq!(body["rate"]["unlinked_gaps"], 0);
+    for row in body["rows"].as_array().expect("rows") {
+        assert_eq!(row["rate_state"], "rate_carried", "{row}");
+    }
+}
+
+/// A REFUSAL COMPUTED ON A CARRIED RATE SAYS SO (verify-R3-30-r2 followup):
+/// `below_zero_carry_bound` and `iv_unsolved` are reached only after the rate
+/// is applied, so when that rate was carried over a documented gap the
+/// detail names the gap and the result, as a priced cell's `rate_state`
+/// does; on a fresh rate it says nothing of the kind.
+#[test]
+fn a_refusal_computed_on_a_carried_rate_names_the_gap() {
+    let fixture = Fixture::new("greeks-carried-refusal");
+    let carried = RateTable::Loaded(holed_table(
+        &[(2026, 7, 25), (2026, 8, 1)],
+        &[(2026, 8, 12)],
+    ));
+    let fresh = RateTable::Loaded(table(&[12, 19]));
+    for (contract, word) in [(ITM, "below_zero_carry_bound"), (RICH, "iv_unsolved")] {
+        let (_, body) = fixture.ask(contract, &[t0()], &carried);
+        let row = &body["rows"][0];
+        assert_eq!(row["why"], word, "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(
+            detail.contains("rate_carried")
+                && detail.contains("2026-08-12")
+                && detail.contains("2026-08-01"),
+            "{word}: {detail}"
+        );
+        let (_, body) = fixture.ask(contract, &[t0()], &fresh);
+        let row = &body["rows"][0];
+        assert_eq!(row["why"], word, "{row}");
+        let detail = row["detail"].as_str().expect("said");
+        assert!(!detail.contains("rate_carried"), "{word}: {detail}");
     }
 }
 
