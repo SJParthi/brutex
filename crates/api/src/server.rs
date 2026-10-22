@@ -1637,6 +1637,9 @@ mod gaps_route;
 mod instruments_route;
 #[path = "month_change.rs"]
 mod month_change;
+/// `GET /pull/quarantine.json` and `POST /pull/quarantine` (R4-18).
+#[path = "quarantine_route.rs"]
+mod quarantine_route;
 /// `/scrub.json`: what the full-block scrub found in the series a page shows
 /// (DB-B74, DB-B65; WP-81).
 #[path = "scrub_route.rs"]
@@ -1645,9 +1648,6 @@ mod scrub_route;
 /// request ceilings and the closed lists, from the store (R3-05).
 #[path = "settings_route.rs"]
 pub mod settings_route;
-/// `GET /pull/quarantine.json` and `POST /pull/quarantine` (R4-18).
-#[path = "quarantine_route.rs"]
-mod quarantine_route;
 // `/pull/repair.json` and the plan behind `POST /pull/repair` (D-3350, WP-13c).
 #[path = "repair_route.rs"]
 mod repair_route;
