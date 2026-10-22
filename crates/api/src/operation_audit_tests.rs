@@ -88,6 +88,10 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     // route, journaled in `audit/pull.journal` and `audit/<feed>.repairs`.
     ("/pull/repair", DATA),
     ("/pull/repair.json", DATA),
+    // THE QUARANTINE (R4-18): its own ledger, audit/<feed>.quarantine.ledger,
+    // is the record of every act (who, reason, months, bars, digest).
+    ("/pull/quarantine", DATA),
+    ("/pull/quarantine.json", DATA),
     ("/pull/run", DATA),
     ("/pull/recovery", DATA),
     ("/pull/recovery.json", DATA),

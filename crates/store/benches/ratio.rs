@@ -1541,6 +1541,7 @@ fn main() {
     ok &= safe_files::run();
     ok &= months::run();
     ok &= quarantine::run();
+    quarantine::drop_is_linear();
     if ok {
         println!("all ratios within the ceiling");
     } else {

@@ -124,3 +124,69 @@ pub(super) fn run() -> bool {
     }
     ok
 }
+
+/// C-QU-03: `repair::drop_month` at 183, 7,875 and 472,445 bars (a day
+/// month, a minute month, a one-second month), one bar named each time: the
+/// door reads and writes the whole month, O(month), and says so with its
+/// three sizes rather than a ratio.
+pub(super) fn drop_is_linear() {
+    use store::file::BarFile;
+    use store::format::Bar;
+    for (rung, bars) in [
+        (Timeframe::DAY_1, 183_i64),
+        (Timeframe::MINUTE_1, 7_875),
+        (Timeframe::SECOND_1, 472_445),
+    ] {
+        let mut ns = Vec::new();
+        for trial in 0..5 {
+            let root = root(&format!("drop-{bars}-{trial}"));
+            let month = YearMonth::new(2025, 3).unwrap_or_else(|e| refuse(&format!("{e}")));
+            let path = StorePath::new(PathParts {
+                vendor: Vendor::Zerodha,
+                exchange: "NSE",
+                segment: "CASH",
+                symbol: "QBA",
+                contract: None,
+                timeframe: rung,
+                month,
+                file: FileKind::Bars,
+            })
+            .unwrap_or_else(|e| refuse(&format!("{e}")));
+            let (first, _) = month.ist_bounds_micros();
+            let step = i64::from(rung.secs()) * 1_000_000;
+            let rows: Vec<Bar> = (0..bars)
+                .map(|i| Bar {
+                    ts_micros: first + i * step,
+                    open: 1_000,
+                    high: 1_010,
+                    low: 990,
+                    close: 1_005,
+                    volume: 1,
+                    open_interest: store::format::OI_NULL,
+                })
+                .collect();
+            let mut writer = BarFile::open_or_create(&root, path, 7)
+                .unwrap_or_else(|e| refuse(&format!("the bench month: {e}")));
+            for batch in rows.chunks(65_536) {
+                if let Err(e) = writer.append(batch) {
+                    refuse(&format!("the bench rows: {e}"));
+                }
+            }
+            drop(writer);
+            let named = [rows.get(rows.len() / 2).map_or(first, |bar| bar.ts_micros)];
+            let started = std::time::Instant::now();
+            if let Err(e) = store::repair::drop_month(&root, path, 7, &named, "C-QU-03") {
+                refuse(&format!("drop_month: {e}"));
+            }
+            ns.push(started.elapsed().as_nanos());
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+        ns.sort_unstable();
+        println!(
+            "  C-QU-03 drop_month, {bars:>7} bars ({:<4})            p50 {:>11} ns  max {:>11} ns  n=5 (O(month), not ratioed)",
+            rung.as_str(),
+            ns.get(2).copied().unwrap_or(0),
+            ns.last().copied().unwrap_or(0)
+        );
+    }
+}
