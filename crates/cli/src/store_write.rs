@@ -90,7 +90,7 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 16] = [
+pub(crate) const WRITERS: [&str; 17] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -106,6 +106,7 @@ pub(crate) const WRITERS: [&str; 16] = [
     "tickstore-write",
     "tix-rebuild",
     "zerodha-gaps",
+    "zerodha-quarantine",
     "zerodha-repair",
 ];
 
@@ -129,7 +130,7 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
             !arguments.contains(&"--dry-run")
         }
-        "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
+        "gdfl-rekey" | "zerodha-gaps" | "zerodha-quarantine" => arguments.contains(&"--apply"),
         "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),

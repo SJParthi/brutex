@@ -352,6 +352,15 @@ fn month_answer(
     // month's file is damaged", and keeps its warning line. Every other
     // refusal is the sentence it was, so a retired contract stays 410 and a
     // writer's hold stays 503 with `Retry-After`.
+    // A MONTH QUARANTINED WHOLE IS ANSWERED BY NAME, NEVER ITS BARS (R4-18;
+    // ING-01 b, Z5): 409 `month_quarantined` with the cause, the bars named
+    // and the ledger line. One probe, one positional read, before the month
+    // is opened. A month served as a generation without its named bars is
+    // served as it is: what it holds is the instrument's own. An index that
+    // cannot be trusted answers 500 by name, never the bars.
+    if let Some(answer) = quarantine_answer(site, asked) {
+        return Ok(answer);
+    }
     let file = match crate::bars::open_classified(
         &site.store_root,
         store::path::PathParts {
@@ -539,6 +548,76 @@ fn refused_month(
         );
     }
     Err(refusal.message)
+}
+
+/// The code `/bars.json` answers a month quarantined whole with (R4-18).
+pub(super) const MONTH_QUARANTINED: &str = "month_quarantined";
+
+/// `/bars.json`'s answer for a month the quarantine names whole, or for an
+/// index it cannot read; `None` for every other month (R4-18).
+fn quarantine_answer(
+    site: &Loaded,
+    asked: &Addressed,
+) -> Option<(axum::http::StatusCode, String)> {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: asked.vendor,
+        exchange: &asked.exchange,
+        segment: &asked.segment,
+        symbol: &asked.symbol,
+        contract: asked.contract,
+        timeframe: asked.timeframe,
+        month: asked.month,
+        file: store::path::FileKind::Bars,
+    })
+    .ok()?;
+    match store::quarantine::probe(&site.store_root, path) {
+        Ok(store::quarantine::Probe::Quarantined(entry))
+            if entry.scope == store::quarantine::Scope::WholeMonth =>
+        {
+            let why = format!(
+                "this month is quarantined: all {} of its bars are {} ({}), recorded in audit/{}.quarantine.ledger at byte {}; they are not served",
+                entry.bars,
+                entry.cause.code(),
+                store::quarantine::series_key(path),
+                asked.vendor.as_str(),
+                entry.ledger_at
+            );
+            Some((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    r#"{{"error":{},"code":{},"quarantine":{}}}"#,
+                    render::json_string(&why),
+                    render::json_string(MONTH_QUARANTINED),
+                    quarantine_json(&entry, asked.vendor)
+                ),
+            ))
+        }
+        Ok(_) => None,
+        Err(why) => Some((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                r#"{{"error":{},"code":{}}}"#,
+                render::json_string(&format!(
+                    "whether this month is quarantined is not known: {why}"
+                )),
+                render::json_string(why.code())
+            ),
+        )),
+    }
+}
+
+/// One month's quarantine as every JSON answer spells it (R4-18).
+pub(crate) fn quarantine_json(entry: &store::quarantine::Entry, feed: brutex_core::vendor::Vendor) -> String {
+    format!(
+        r#"{{"scope":{},"cause":{},"bars":{},"revision":{},"ledger":{},"ledger_at":{},"written_at_micros":{}}}"#,
+        render::json_string(entry.scope.code()),
+        render::json_string(entry.cause.code()),
+        entry.bars,
+        entry.revision,
+        render::json_string(&format!("audit/{}.quarantine.ledger", feed.as_str())),
+        entry.ledger_at,
+        entry.written_at
+    )
 }
 
 /// The code `/bars.json` answers an absent month with (R3-07).

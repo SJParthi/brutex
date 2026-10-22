@@ -1318,6 +1318,108 @@ pub fn rebuild(root: &Path, feed: Vendor) -> Result<Rebuilt, QuarantineError> {
     done
 }
 
+/// One instrument's quarantine over every rung and month, as a listing row
+/// carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Instrument {
+    /// Distinct (rung, month) pairs set aside, whole or by bars.
+    pub months: u64,
+    /// Of them, months recorded whole.
+    pub whole_months: u64,
+    /// Bars named over all of them.
+    pub bars: u64,
+    /// Every cause, in code order.
+    pub causes: Vec<Cause>,
+}
+
+/// The feed's quarantine by instrument and by (series, month), read from the
+/// ledger ONCE per cached body (`/store.json`, `/instruments.json`); each
+/// lookup after it is one hash probe. O(ledger) to build.
+#[derive(Debug, Clone, Default)]
+pub struct Summary {
+    instruments: HashMap<String, Instrument>,
+    months: HashMap<(String, String), Entry>,
+}
+
+impl Summary {
+    /// Builds the summary from the feed's ledger: every `dropped` and
+    /// `whole_month` line, the newest per (series, month) deciding its scope.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_ledger`].
+    pub fn load(root: &Path, feed: Vendor) -> Result<Self, QuarantineError> {
+        let ledger = read_ledger(root, feed)?;
+        let mut months: HashMap<(String, String), Entry> = HashMap::new();
+        for line in &ledger.lines {
+            if line.scope == Scope::Dropping {
+                continue;
+            }
+            let entry = Entry {
+                scope: line.scope,
+                cause: line.cause,
+                bars: line.bars,
+                ledger_at: line.at,
+                revision: line.revision,
+                written_at: line.written_at,
+            };
+            months
+                .entry((line.key.clone(), line.month.clone()))
+                .and_modify(|held| {
+                    let bars = if held.scope == Scope::Dropped && entry.scope == Scope::Dropped {
+                        held.bars.saturating_add(entry.bars)
+                    } else {
+                        entry.bars
+                    };
+                    *held = Entry { bars, ..entry };
+                })
+                .or_insert(entry);
+        }
+        let mut instruments: HashMap<String, Instrument> = HashMap::new();
+        for ((key, _), entry) in &months {
+            let instrument = key.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
+            let row = instruments.entry(instrument).or_default();
+            row.months += 1;
+            row.whole_months += u64::from(entry.scope == Scope::WholeMonth);
+            row.bars = row.bars.saturating_add(entry.bars);
+            if !row.causes.contains(&entry.cause) {
+                row.causes.push(entry.cause);
+                row.causes.sort_unstable();
+            }
+        }
+        Ok(Self {
+            instruments,
+            months,
+        })
+    }
+
+    /// The instrument's quarantine: `exchange/segment/symbol`.
+    #[must_use]
+    pub fn instrument(&self, exchange: &str, segment: &str, symbol: &str) -> Option<&Instrument> {
+        if self.instruments.is_empty() {
+            return None;
+        }
+        self.instruments.get(&format!("{exchange}/{segment}/{symbol}"))
+    }
+
+    /// The month's quarantine.
+    #[must_use]
+    pub fn month(&self, path: StorePath<'_>) -> Option<Entry> {
+        if self.months.is_empty() {
+            return None;
+        }
+        self.months
+            .get(&(series_key(path), path.month().to_string()))
+            .copied()
+    }
+
+    /// Whether the feed has no quarantine at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.months.is_empty()
+    }
+}
+
 /// What [`apply_month`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Applied {
