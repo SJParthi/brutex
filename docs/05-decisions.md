@@ -76032,6 +76032,81 @@ counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
 
+### D-5904 — The write door of a sealed month: a batch it holds is `AlreadyPresent`, any other is `StoreError::Sealed` naming what its raw form would have done, the probe is made under the writer's lock, and the pull and the GDFL import file a batch the raw form would append as the month's successor generation — 2026-10-20
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.5, §6, §9 row SC-4; its proposed D-4929, whose read half is D-5899)
+gives a closed month a second form, the sealed `.sbar` of D-4965, written once
+and never opened for writing again. D-5899 opened it to every reader and said
+the write door was SC-4's. Until this entry the writer door did not know the
+form existed: `BarFile::open_or_create` opened (or created) the raw `.bin`
+beside a `.sbar` and appended there, so the bars were committed where no
+reader looks, because the read door opens the `.sbar` first; and a month held
+only sealed (after a retirement, SC-9) was re-created empty as a `.bin` and
+filled from its first bar.
+
+**The writer door opens the sealed form, under the lock.** `open_or_create`
+probes `.sbar` with the read door's own `open_sealed_at` after it holds the
+month's exclusive lock and after the generation pointer is asked again, and
+before the `.bin` is opened or created. The sealer holds the lock shared from
+its first step to its last (design §4.6), so a writer either excluded it or
+sees its finished file; a probe made before the lock could miss a seal that
+finished in between. A damaged or misfiled `.sbar` is refused here exactly as
+a reader refuses it (`SealedRefused`), never passed over for the `.bin`. The
+sealed handle keeps the lock and writes nothing.
+
+**What `append` answers.** The batch's own refusals first, in their own words
+(empty, out of order, impossible, outside the month, off the rung's grid).
+Then the questions the raw door asks, through the same functions over the same
+records: a batch the month holds bit for bit is `Appended::AlreadyPresent` at
+the index it sits at, so a resumed import stays idempotent; any other batch is
+`StoreError::Sealed { path, n_valid, last_ts_micros, at, ts_micros, offer }`,
+where `offer` is `SealedOffer::Follows` when the raw month would have
+committed it (from `at` on it follows the last held bar and every offered bar
+before `at` is held byte for byte) and `SealedOffer::Disagrees(conflict)`
+when the raw month would have refused it as `OverlapDisagrees` with that
+conflict, at the same index and stamp. A counter at its end is the raw door's
+`Format` refusal. Nothing is written in any case. The store emits no line for
+it, like every other refusal of that door; the caller logs and routes it.
+
+**The form is never the content: callers answer `Sealed` as they answer the
+raw month.** `pull::ingest`'s append door (`append_or_successor`), used by the
+Zerodha pull for the minute month and for every derived rung month, and the
+GDFL import's back-fill door, file a `Follows` batch as the month's successor
+generation through the one repair authority (`store::repair::repair_month`,
+D-3350), which reads the sealed month through the read door and publishes
+every held bar plus the new ones as a raw month under `bar-revisions-v1/<n>/`;
+it is sealed again later like any other. A `repairing` line naming
+`sealed-month successor` is journaled before the repair and its `repair` or
+`refused` line after it. `Disagrees` stands as the raw month's refusal would.
+The GDFL worker's own append door files nothing as a generation (D-3353): it
+commits nothing, and the coordinator files the day again through the back-fill
+door, which routes it. The basis witness (D-3323) is not asked of a `Follows`
+batch: it guards bars inserted among held ones, and the append door commits a
+`Follows` batch to a raw month with no witness, so asking one would refuse at a
+sealed month what the raw month takes.
+
+**A revision ordinal holding a `.sbar` is stepped over.** `write_revision`
+refused an ordinal that already held a `.bin`, `.crc`, `.lock` or `.tix`, but
+not a `.sbar`; a raw revision written beside one would publish bars no reader
+opens. Now `Incomplete`, stepped over and named like the others.
+
+**FM-283 at this door: committed bars are never rewritten.** The failure
+matrix feared an append into an open compressed block. The design never has
+one: a month is sealed whole once closed, and a bar it lacks lands only as a
+whole successor generation. A kill at any step before that generation is
+promoted leaves the sealed month served bit for bit: a torn ordinal is kept as
+found and stepped over, a whole unpromoted one is found again
+(`Published::Reused`) and promoted (invariant SC4-14). The kill points of the
+sealer itself are SC-6's.
+
+**Not decided here.** The failure kinds of IA-16's typed repair door are
+IA-16's: `Sealed` must be one of them (not merged when this landed). A repair
+or promotion over a month whose `.lock` a retirement removed would be refused
+for want of the lock (`repair::publish`, `generation::promote` take it shared);
+retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
+teach those two that a sealed source needs none. Sealing itself is SC-6's.
+
 ### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
 
 **What was observed.** `Header::read_region` decodes each of the `MAX_SLOTS`
@@ -78524,6 +78599,95 @@ of the pinned toolchain.
 *Cost.* One look at the token before each exempting attribute and, after a
 `,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
 test-time only, no shipped code.
+
+### D-6247 — A month served from a repair revision answers every batch as its raw form would, and a batch that follows it is filed as its next successor generation: the second late day of a sealed month lands with no human step (SC-4 repair round 1) — 2026-10-20
+
+**What was wrong.** D-5904 filed a sealed month's late day as its successor
+generation, so after the first late day every sealed month was served from a
+repair revision (D-3350). The pull's append door answered a revision-served
+month with `ingest::already_served`, which took only a batch it held bar for
+bar and refused every other one, naming `POST /pull/repair` or `cli
+zerodha-repair`. So a SECOND late day, in its own pull, met that refusal: the
+second agent's probe (`state/fix/round2/verify-SC-4-r1.json`) landed
+2024-04-01..03 into two stores, sealed one, then landed 04-04 and 04-05 in two
+pulls: the never-sealed store committed 375 bars each time, the sealed store
+committed 375 and then 0, and all eight months (1 min and the seven derived
+rungs) differed, the sealed store serving 1,500 April minute bars against
+1,875. Invariant SC4-12 and `append_or_successor`'s own doc ("the outcome of
+every batch is the one the month's raw form gives it") were false from the
+second late day on, and the automated chain stopped at a manual step.
+
+**Decided.** The writer door still never appends to a revision (D-3350
+unchanged). Instead the served generation is ASKED, through the read door,
+what its raw form would do with the batch: `store::file::BarFile::offer`, a
+read-only method that asks the raw door's own questions in its order
+(`may_append`, `survey`, the month's admission, `Header::advance`, then
+`already_stored`, `suffix_that_follows`, `diagnose_overlap`), the same code
+the sealed writer door asks (`sealed_offer` and `offer` now share
+`raw_answer`), and writes nothing. Its answer is `store::file::Offered`:
+`Held` exactly when the raw door says `AlreadyPresent`; `Unheld` with
+`SealedOffer::Follows` exactly when it would commit; `Unheld` with
+`SealedOffer::Disagrees(c)` exactly when it would refuse as
+`OverlapDisagrees`. The pull's `already_served` answers `Held` as before
+(nothing written, the served census row) and hands a `Follows` batch back as
+`Unwritten { follows: Some(Follows::Revision) }`, which `append_or_successor`
+(the Zerodha pull, every derived rung) and the GDFL back-fill door file as
+the month's NEXT successor generation through the same repair door a sealed
+month's late day takes (`successor_of_served`, `repair_after`,
+`store::repair::repair_month`), journaled `repairing` before and `repair`
+after, with the reason `revision successor, bars after its last (D-6247)`.
+Every other batch is refused in the raw form's words (`... batch record N
+restates the record held at T (offer=restated)`), nothing written. One door
+for every month the writer door never appends to, whatever its form or
+generation.
+
+**Rejected.** Narrowing SC4-12 to the first late day (the checker's option
+b): it keeps a manual step (`POST /pull/repair`) inside the daily chain the
+operator wants to run with no human or Claude step, and it keeps two answers
+for one batch depending on how many late days came before it. Appending to a
+revision in place: D-3350 forbids it (an append to the original would never
+be served, and a revision is immutable once promoted).
+
+**What it changes for a month never sealed.** A month a DB-N20 repair
+promoted is revision-served too, and its later late days are now each its
+next successor instead of a refusal naming `POST /pull/repair`. That is the
+raw form's answer (the raw month appends them) and the same door; each costs
+a whole-month rewrite, bounded by `store::repair::MAX_REVISIONS` (1,024)
+generations a month, after which the repair refuses by name
+(`docs/06-limits.md` L-SC4-01). The GDFL back-fill door's own judgement
+(`lack_of`) is unchanged for every batch the raw form would NOT commit: a
+held day read differently, or with a second inside the held range, is still
+refused and never merged (DB-N26).
+
+**Proved by** `crates/pull/tests/sealed_month.rs`
+`two_late_days_in_two_pulls_after_sealing_serve_what_a_never_sealed_store_serves`
+(three pulls after sealing, the third a window re-reading the second late
+day and adding a third: every month equal to a never-sealed store, served
+generation 1, 2, 3, the originals and every earlier revision byte-identical,
+three `repairing`/`repair` pairs per month, the second and third naming
+`revision successor` and `from_generation=1 to_generation=2`,
+`from_generation=2 to_generation=3`; the same window again writes nothing and
+spends no generation; a restated minute of a held late day refused as the
+raw month refuses it), which failed on the code before this (the checker's
+probe `probe_two_late_days_in_two_pulls` on 9f440a858: `months that differ: 8
+of 8`); and `crates/store/src/file_write_door_tests.rs`
+`an_offer_through_a_read_only_handle_is_the_raw_doors_answer` (nine batch
+shapes, raw and sealed, spot and option: `Held`, `Follows` and
+`Disagrees(c)` exactly where the raw writer answers `AlreadyPresent`,
+`Committed` and `OverlapDisagrees(c)`; garbage batches the raw door's own
+refusal; an empty month; nothing written); and, for the GDFL back-fill door
+(added in SC-4 repair round 2, after the second checker found this arm a
+surviving mutant), `crates/pull/src/gdfl_sealed_tests.rs`
+`a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor`
+(NIFTY's 1 s April made revision-served by a back-filled hole and by a
+sealed month's first late day, then the first 30 s of a new day and the
+whole day with the held 30 s byte-equal: each the month's next successor,
+generation 2 then 3, equal to a never-sealed store at every step, the
+original and revision 1 byte-identical, `repairing` with reason
+`revision_successor_` and `repair` journaled for each, the whole day again
+writing nothing), which fails when a `Follows::Revision` batch is routed to
+`lack_of` as before this decision (the whole day commits 0, refused as an
+overlap). Invariants SC4-15, SC4-16, SC4-17; limit L-SC4-01.
 
 ### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
 
