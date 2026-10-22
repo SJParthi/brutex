@@ -76460,6 +76460,16 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
 19. **Only a profile the harness made in this process is removed** (R315-13,
     amended): a path that merely carries the profile prefix is refused and
     left as it was, so the guard is exactly what item 12 states.
+20. **The browser is started detached and stopped as a whole process group**
+    (R315-13, amended; L-R315-18). Killing the browser alone left its
+    helpers to end on their own schedule, and one wrote into the profile
+    after it was removed (22 Oct, at a load average near 140). A group of
+    its own is the only handle on every helper that needs no outside
+    program to list them: SIGTERM and SIGKILL go to the group, and a stop
+    waits, bounded, for helpers that outlived the browser. A real signal
+    is sent to the group only while it is known to be the browser's: the
+    browser not yet reaped, or signal 0 having just found the group's
+    processes there.
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-22);
 measurements in `docs/06-limits.md` L-R315-01 to L-R315-18.

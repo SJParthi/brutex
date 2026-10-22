@@ -520,12 +520,14 @@ export function groupRunning(pid) {
 }
 
 /**
- * Sends `signal` to the browser and every helper in its process group, or to
- * the browser alone where there is no group to signal. Sent only while the
- * group is known to be the browser's — the browser not yet reaped (its pid,
- * so its group's id, cannot have passed to another process), or
- * {@link groupRunning} having just found the group's processes still there
- * (an id in use by a group is given to no new one). Never throws.
+ * Sends `signal` to the browser and every helper in its process group. Sent
+ * only while the group is known to be the browser's — the browser not yet
+ * reaped (its pid, so its group's id, cannot have passed to another
+ * process), or {@link groupRunning} having just found the group's processes
+ * still there (an id in use by a group is given to no new one). Never
+ * throws: where the group cannot be signalled the browser alone is, through
+ * its own process handle, which reaches nothing once the browser has been
+ * reaped — so a stop never waits on a browser no signal reached.
  *
  * WHY THE GROUP, AND NOT THE BROWSER ALONE (the R3-15 repair 2 run, 22 Oct,
  * at a load average near 140): a harness sent SIGTERM killed the browser,
@@ -535,10 +537,10 @@ export function groupRunning(pid) {
  * browser left in 35 ms with a renderer still running; to its group, every
  * process was gone within 300 ms.
  *
- * @param {import('node:child_process').ChildProcess} child
- * @param {NodeJS.Signals} signal
+ * @param {{pid?: number, kill: (signal: NodeJS.Signals | 0) => boolean}} child the browser's process
+ * @param {NodeJS.Signals | 0} signal
  */
-function signalGroup(child, signal) {
+export function signalGroup(child, signal) {
   try {
     process.kill(-(/** @type {number} */ (child.pid)), signal);
   } catch {

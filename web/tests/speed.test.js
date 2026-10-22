@@ -1840,6 +1840,32 @@ test('a browser\'s helpers end with it: nothing writes into its profile after th
   }
 });
 
+test('a stop signals a group only while it is the browser\'s: a group that has gone reads as gone, and then only the browser\'s own handle is signalled', async () => {
+  const { spawn } = await import('node:child_process');
+  assert.equal(harness.groupRunning(undefined), false, 'a browser that never started has no group');
+  const gone = spawn(process.execPath, ['-e', ''], { detached: true });
+  await new Promise((resolve) => gone.on('exit', resolve));
+  assert.equal(harness.groupRunning(gone.pid), false, 'a group whose every process has left is not running');
+  /** @type {(string | number)[]} */
+  const sent = [];
+  /** @param {string | number} s */
+  const handle = (s) => (sent.push(s), false);
+  // Signal 0, which signals nothing: an id freed a moment ago is never sent a real signal by this test.
+  harness.signalGroup({ pid: gone.pid, kill: handle }, 0);
+  assert.deepEqual(sent, [0], 'a group that cannot be signalled falls to the browser\'s own handle, and nothing is thrown');
+  const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true });
+  try {
+    assert.equal(harness.groupRunning(live.pid), true, 'a detached child leads a group of its own');
+    harness.signalGroup({ pid: live.pid, kill: handle }, 'SIGKILL');
+    const end = Date.now() + 5_000;
+    while (harness.groupRunning(live.pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(harness.groupRunning(live.pid), false, 'SIGKILL to the group ended it');
+    assert.deepEqual(sent, [0], 'through the group, never the handle');
+  } finally {
+    live.kill('SIGKILL');
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
